@@ -110,6 +110,7 @@ import {
 import {
   handleSourceOriginalObservation, SOURCE_ORIGINAL_OBSERVATION_PATH,
 } from "./lib/source-original-observation.js";
+import { localCleanupProof } from "./lib/local-cleanup-proof.js";
 import {
   handleOwnerFinancialMap, OWNER_FINANCIAL_MAP_PATH_PREFIX, OWNER_FINANCIAL_MAP_APP_PATH_PREFIX,
   readOwnerFinancialMapState,
@@ -2509,6 +2510,23 @@ async function handleSourceFamilies(env, request) {
   }
 }
 
+async function handleLocalCleanupProof(env, request) {
+  const respond = (body, status = 200) => privateNoStore(jsonResponse(body, status));
+  if (backendOf(env) !== D1) return respond({ error: "local cleanup proof applies to the d1 backend only" }, 400);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return respond({ error: "local cleanup proof needs a JSON body" }, 400);
+  }
+  try {
+    return respond(await localCleanupProof(env, body));
+  } catch (error) {
+    if (error instanceof TypeError) return respond({ error: error.message }, 400);
+    throw error;
+  }
+}
+
 async function handleDocuments(env) {
   const { rows } = await storeFor(env).stats(env);
   // Keep the writer mode on the same authenticated response as readiness.
@@ -3111,6 +3129,9 @@ export default {
       if (path === "/api/admin/brain/source-families" && request.method === "POST") {
         return await handleSourceFamilies(env, request);
       }
+      if (path === "/api/admin/brain/local-cleanup-proof" && request.method === "POST") {
+        return await handleLocalCleanupProof(env, request);
+      }
       if (path === "/api/admin/brain/source-families" && request.method === "GET") {
         return privateNoStore(jsonResponse({
           error: "source-family inventory must use a JSON POST body so private cursors never enter URLs",
@@ -3349,6 +3370,7 @@ export default {
     } catch (e) {
       const response = jsonResponse({ error: e.message }, 500);
       if (path === "/api/admin/brain/source-families" ||
+          path === "/api/admin/brain/local-cleanup-proof" ||
           path === "/api/admin/brain/documents") {
         return privateNoStore(response);
       }

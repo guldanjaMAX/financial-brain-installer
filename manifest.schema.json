@@ -468,6 +468,34 @@
             }
           }
         },
+        "upload": {
+          "type": "object",
+          "description": "Owner-selected local folders. Each folder declares whether it is an ongoing mirror or a staging import whose confirmed local copies may be cleaned up.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "folders": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  { "type": "string", "minLength": 1 },
+                  {
+                    "type": "object",
+                    "required": ["path", "source"],
+                    "properties": {
+                      "path": { "type": "string", "minLength": 1 },
+                      "source": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$", "maxLength": 64 },
+                      "role": { "enum": ["ongoing", "staging", "one-time-import"], "default": "ongoing" },
+                      "retention_days": { "type": "integer", "minimum": 1 },
+                      "only_copy_action": { "enum": ["keep", "archive", "remove"], "default": "keep" },
+                      "retired": { "type": "boolean", "default": false },
+                      "retired_at": { "type": "string", "format": "date-time" }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
         "local_folder": {
           "type": "object",
           "description": "A local folder that reloads itself on a schedule, enforced by brain schedule <manifest> --install --folder and run by brain ingest <manifest> --path. This is what makes \"drop it in a folder you already ingest\" true for a folder that is not inside Google Drive. Each tick reuses the local ingest's content-hash resume state, so a new file is added, a changed file is re-sent, an unchanged file costs one read, and a file that is gone is removed through the same aggregate removal plan every other source uses. The schedule knob is operations.folder_ingest_cron (default: hourly). macOS only today: it installs as a per-user LaunchAgent.",
@@ -489,6 +517,21 @@
               "maxLength": 64,
               "default": "documents",
               "description": "The named source this folder loads under, which is also the undo: brain forget <manifest> --source <name> removes exactly what it loaded."
+            },
+            "role": {
+              "enum": ["ongoing", "staging"],
+              "default": "ongoing",
+              "description": "ongoing mirrors local deletion into the Brain. staging keeps confirmed Brain documents when consumed local copies are removed. One-time imports belong in corpora.upload so they can be retired after completion."
+            },
+            "retention_days": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "For a recurring staging feed, automatically tidy confirmed files older than this many days."
+            },
+            "only_copy_action": {
+              "enum": ["keep", "archive", "remove"],
+              "default": "keep",
+              "description": "Required policy for confirmed files whose external original cannot be proved. archive also requires an owner-selected encrypted archive destination at execution time."
             }
           }
         },

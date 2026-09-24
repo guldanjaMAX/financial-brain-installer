@@ -240,6 +240,24 @@ customer action.
 
 ## Ingest lifecycle
 
+Local folder declarations have an explicit lifecycle role. `ongoing` is the
+default and preserves mirror semantics: a complete walk may produce a guarded
+Brain removal plan for a missing file. `staging` and `one-time-import` are
+temporary-byte lifecycles. A local file becomes consumed only after its exact
+raw-byte result binding still matches the current complete-provenance document,
+none of that document's chunks is pending in the outbox, and exact Vectorize
+`getByIds` readback returns every current vector. A CLI checkpoint, successful
+batch response, empty outbox by itself, or matching filename is insufficient.
+
+`brain cleanup-local` re-observes the exact bytes, asks the authenticated Worker
+for that current proof in a private POST body, and builds a state-bound preview.
+Execution requires the preview fingerprint, rechecks filesystem identity, marks
+the staging key consumed, and moves the file through the platform Trash API.
+Consumed staging absences are excluded from local removal planning. Ongoing
+absences are not. The local receipt contains aggregate counts only. Original
+bytes are not stored in D1 or Vectorize, and the declared R2 bucket remains
+unwired, so re-extraction or re-OCR still requires an external original.
+
 All producers converge on the same document envelope and batch write path:
 
 ```text

@@ -774,6 +774,9 @@ const expected = [
   // entity/year inference, and package identity disclosure before allowlisting.
   "worker/src/lib/source-inventory-api.js",
   "worker/src/lib/source-original-observation.js",
+  // Admin-only read proof. Private locators travel in a no-store POST and the
+  // response carries no source text, title, path label, or credential.
+  "worker/src/lib/local-cleanup-proof.js",
   // Sealed owner map with opaque row references and passkey-only activation.
   "worker/src/lib/owner-financial-map.js",
   // Deterministic offline intent detector plus the reviewed guidance wording
@@ -796,6 +799,9 @@ const expected = [
   "operations/drive-removal-plan.mjs",
   "operations/drive-scheduler.mjs",
   "operations/folder-scheduler.mjs",
+  // Local staging cleanup contains only aggregate receipts and injected file
+  // operations. Private paths stay in owner-local state, never package fixtures.
+  "operations/local-staging-cleanup.mjs",
   "operations/imessage-scheduler.mjs",
   "operations/whatsapp-daemon.mjs",
   "operations/whatsapp-drain-scheduler.mjs",

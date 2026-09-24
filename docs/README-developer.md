@@ -940,7 +940,8 @@ node brain.mjs schedule ./acme.manifest.json --folder
 node brain.mjs schedule ./acme.manifest.json --remove --folder
 ```
 
-It reads `corpora.local_folder` (`enabled`, `path`, `source`) and
+It reads `corpora.local_folder` (`enabled`, `path`, `source`, `role`, and the
+optional `retention_days`) and
 `operations.folder_ingest_cron`, hourly by default. The tick runs
 `brain ingest <manifest> --path <folder> --source <name>` — the ORDINARY local
 ingest, not a new code path — so it inherits that command's content-hash resume
@@ -954,6 +955,17 @@ client's shell), a folder that does not currently exist (a schedule pointing at
 nothing loads nothing and reports success forever), and a source name outside
 `^[a-z0-9][a-z0-9_-]*$` (the name is the deletion scope). Status and remove stay
 reachable when the folder is later deleted, so a loaded agent is never stranded.
+
+The default role is `ongoing`, which keeps the existing missing-file and
+aggregate removal-plan behavior. A `staging` or `one-time-import` folder may be
+cleaned only through `brain cleanup-local`. The Worker proof route joins the
+exact source-original binding to the current complete-provenance document,
+requires no pending chunk operation, and reads every current vector back by id;
+it never treats a local resume hash, source receipt, or queue depth alone as
+consumed proof. Automatic retention runs only after a successful ingest and uses the
+same proof and Trash executor. It keeps possible only-copy files unless the
+manifest records a stronger owner choice. A retired one-time source is omitted
+from future `brain load` walks while its Brain documents remain.
 
 **Deletions.** The local ingest lane now reconciles files that are gone, through
 the same `buildDriveRemovalPlan` / `assertDriveRemovalPlanSafe` aggregate guard

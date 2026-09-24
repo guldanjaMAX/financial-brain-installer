@@ -508,6 +508,51 @@ This route admits evidence only for that exact original. The legacy
 `provenance-repair --apply` path remains disabled, and schema 45 does not run
 OCR, reingest, delete data, deploy anything, or authorize customer execution.
 
+### Tidy temporary import folders
+
+An ordinary folder source has role `ongoing`: when a file disappears, the
+Brain's guarded removal plan still treats that as a possible source deletion.
+Exports and temporary copies can instead be declared with role `staging`, or
+`one-time-import` when the folder will be retired after the load.
+
+```json
+"upload": {
+  "enabled": true,
+  "folders": [{
+    "path": "/absolute/path/to/import",
+    "source": "historical_import",
+    "role": "one-time-import"
+  }]
+}
+```
+
+Preview before changing the computer:
+
+```bash
+brain cleanup-local ./brain.manifest.json
+```
+
+The preview includes only unchanged originals whose exact bytes are tied to a
+current stored document family, complete provenance, and confirmed vector
+resolution. D1 keeps extracted text, chunks, and hashes. It does not keep the
+original file bytes, and the manifest's R2 bucket is not wired for originals.
+That is why a file with no other proved external copy needs an explicit `keep`
+`archive`, or `remove` choice. Archive requires an existing owner-held encrypted
+folder plus `--archive-to <folder> --archive-encrypted`; the copy is hash-read
+back before the original moves. The approved command moves files to the operating system's
+recoverable Trash and never runs `rm`:
+
+```bash
+brain cleanup-local ./brain.manifest.json --apply \
+  --approve <preview-fingerprint> --only-copy keep
+```
+
+Set `retention_days` on a recurring staging folder to apply the same current
+proof after successful scheduled ingests. A `one-time-import` can be previewed
+and retired with `--retire <source>`; retirement stops future walks and keeps
+the source's documents in the Brain. Ongoing sources are never cleanup-local
+candidates, and their missing-file gate remains unchanged.
+
 ### Inventory the financial picture
 
 Optimize can read the structured financial evidence without searching prose or

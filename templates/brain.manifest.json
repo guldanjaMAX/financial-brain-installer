@@ -240,8 +240,9 @@
       ]
     },
     "upload": {
-      "_comment": "Manual drop zone. Setup enables and records it after a folder is chosen; until then there is no folder to load.",
-      "enabled": false
+      "_comment": "Manual folders default to ongoing. Mark exports or temporary copies staging, or one-time-import when the source should be retired after its confirmed import. cleanup-local previews before moving anything to Trash.",
+      "enabled": false,
+      "folders": []
     },
     "local_folder": {
       "_comment": [
@@ -260,7 +261,8 @@
       ],
       "enabled": false,
       "path": null,
-      "source": "watched_documents"
+      "source": "watched_documents",
+      "role": "ongoing"
     },
     "bank_feed": {
       "_comment": [

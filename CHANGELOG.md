@@ -10,6 +10,19 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Temporary import folders can now be tidied without deleting their Brain
+  documents.** Mark a local folder `staging` or `one-time-import`, then run
+  `brain cleanup-local <manifest>` for a read-only preview. Only files whose
+  exact raw bytes have a current accepted provenance and vector-resolution
+  proof are eligible. The approved command moves unchanged files to the system
+  Trash, never permanently deletes them. Files that may be the only external
+  copy require an explicit keep, encrypted archive, or remove choice; ongoing folders keep their
+  existing missing-file deletion guard. A recurring staging folder can set a
+  retention window, and a completed one-time import can be retired while its
+  Brain documents remain. To check: preview first, confirm the copy/only-copy
+  counts, then verify the approved files are recoverable in Trash and the
+  source remains searchable.
+
 - **Re-sending unchanged files no longer rebuilds their meaning-based search.**
   When a newer kit re-sends a file whose text has not changed, for example to
   add the exact-byte provenance an older kit never recorded, the Brain still

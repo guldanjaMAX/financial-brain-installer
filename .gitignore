@@ -36,6 +36,7 @@ eval/eval.config.local.json
 # machine-local operational state and must never become a tracked artifact.
 .brain-ingest-*.json
 .brain-ingest-*.json.tmp-*
+.brain-cleanup-receipts.jsonl
 
 # Exact curated inventories, target locators and coverage receipts are private
 # instance state. Only the generic operation that reads them is product source.

@@ -30,7 +30,7 @@
  * read it. Ordinary owner setup creates and reveals no API token.
  */
 
-import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants as fsConstants, copyFileSync, createReadStream, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, isAbsolute, join, dirname, relative, resolve, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,6 +61,15 @@ import {
 } from "./worker/src/lib/store-d1.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
 import { ensureBankFeedWorkerSecrets } from "./operations/bank-feed-owner-secrets.mjs";
+import {
+  buildLocalCleanupPlan,
+  executeLocalCleanup,
+  markConsumed,
+  missingOngoingKeys,
+  retentionEligible,
+  retireStagingSource,
+  sourceRole,
+} from "./operations/local-staging-cleanup.mjs";
 import {
   financialPictureRequestFromFlags,
   parseFinancialPictureArgv,
@@ -7593,6 +7602,7 @@ export function recordAcceptedDocumentState(state, {
   if (!state.done || typeof state.done !== "object") state.done = {};
   if (!state.skipped || typeof state.skipped !== "object") state.skipped = {};
   state.done[key] = hash;
+  if (state.consumed && typeof state.consumed === "object") delete state.consumed[key];
   const exactSkipKeys = [key, ...(skipKeys || [])]
     .filter((skipKey) => skipKey !== null && skipKey !== undefined && String(skipKey) !== "")
     .map(String);
@@ -10794,6 +10804,248 @@ async function cmdIngest(manifestPath) {
   return cmdIngestLocal(m, manifestPath, flags);
 }
 
+function localCleanupDeclarations(manifest) {
+  const declared = [];
+  if (manifest?.corpora?.upload?.enabled === true) {
+    for (const folder of uploadFoldersOf(manifest.corpora.upload)) {
+      if (folder.path && folder.source) declared.push(folder);
+    }
+  }
+  const watched = manifest?.corpora?.local_folder;
+  if (watched?.enabled === true && watched.path && watched.source) {
+    declared.push({ ...watched, path: watched.path, source: watched.source });
+  }
+  const unique = new Map();
+  for (const item of declared) unique.set(`${resolve(item.path)}\0${item.source}`, item);
+  return [...unique.values()];
+}
+
+async function requestLocalCleanupProof(base, adminKey, body, fetchImpl = fetch) {
+  const response = await fetchImpl(`${base}/api/admin/brain/local-cleanup-proof`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Admin-Key": adminKey },
+    body: JSON.stringify(body),
+  });
+  const raw = await response.text();
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { parsed = null; }
+  if (!response.ok || !parsed || !Array.isArray(parsed.confirmations)) {
+    throw new Error(`the Brain could not prove local cleanup eligibility (${response.status})`);
+  }
+  return parsed;
+}
+
+/** Owner-approved local copy cleanup. Preview is the default and writes nothing. */
+export async function cmdCleanupLocal(manifestPath, options = {}) {
+  const { m } = loadManifest(manifestPath);
+  const flags = options.flags || parseFlags(process.argv.slice(4));
+  const declarations = localCleanupDeclarations(m);
+  const sourceFilter = flags.source && flags.source !== true ? String(flags.source) : null;
+  const staging = declarations.filter((item) =>
+    sourceRole(item) === "staging" && item.retired !== true &&
+    (!sourceFilter || item.source === sourceFilter));
+  if (!staging.length) {
+    die(sourceFilter
+      ? `no active staging folder is declared for source "${sourceFilter}".`
+      : "no active staging folder is declared. Mark an export folder role staging or one-time-import first.");
+  }
+  const library = await (options.ingestLib ?? ingestLib)();
+  const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const base = await resolveBase(m, m.brain?.domain ? null : await (options.resolveAccount ?? resolveAccount)(m));
+  const adminKey = resolveKey(manifestPath);
+  if (!adminKey) die("no durable admin key was found. Re-run brain setup for this manifest.");
+
+  // Only a second local original observed right now is classified as another
+  // copy. A matching Brain source or stale provider receipt is not proof that
+  // bytes still exist outside the Brain, so those stay in the only-copy group.
+  const ongoingHashes = new Set();
+  for (const declaration of declarations.filter((item) => sourceRole(item) === "ongoing" && item.retired !== true)) {
+    const walked = library.walk(declaration.path, { privatePrefixes: m.safety?.private_path_prefixes || [] });
+    if (!walked.complete) continue;
+    for (const file of walked.files) {
+      const observed = await library.observeLocalOriginal(file);
+      if (observed?.original_content_sha256) {
+        ongoingHashes.add(`${observed.original_content_sha256}:${observed.original_byte_count}`);
+      }
+    }
+  }
+
+  const allFiles = [];
+  const confirmations = {};
+  const traversalGaps = new Map();
+  for (const declaration of staging) {
+    const walked = library.walk(declaration.path, { privatePrefixes: m.safety?.private_path_prefixes || [] });
+    if (!walked.complete) {
+      die(`the staging folder for source "${declaration.source}" could not be read completely. Nothing was moved.`);
+    }
+    traversalGaps.set(declaration.source, walked.skipped.length);
+    const candidates = [];
+    for (const file of walked.files) {
+      const observed = await library.observeLocalOriginal(file);
+      if (!observed?.original_content_sha256 || !Number.isSafeInteger(observed.original_byte_count)) continue;
+      if (flags.automatic && declaration.retention_days && !retentionEligible(
+        { mtime_ms: lstatSync(file.full).mtimeMs },
+        { retention_days: declaration.retention_days },
+      )) continue;
+      const key = String(file.rel).split(sep).join("/");
+      const stat = lstatSync(file.full);
+      allFiles.push({
+        source: declaration.source,
+        key,
+        path: file.full,
+        bytes: observed.original_byte_count,
+        mtime_ms: stat.mtimeMs,
+      });
+      candidates.push({
+        source_id: key,
+        original_content_sha256: observed.original_content_sha256,
+        original_byte_count: observed.original_byte_count,
+      });
+    }
+    for (let offset = 0; offset < candidates.length; offset += 500) {
+      const page = candidates.slice(offset, offset + 500);
+      const proof = await (options.requestProof ?? requestLocalCleanupProof)(
+        base, adminKey, { source: declaration.source, candidates: page }, options.fetchImpl,
+      );
+      for (let index = 0; index < page.length; index++) {
+        const candidate = page[index];
+        const confirmation = proof.confirmations[index];
+        if (!confirmation || confirmation.source_id !== candidate.source_id) {
+          throw new Error("the Brain returned a cleanup proof for a different file");
+        }
+        confirmations[`${declaration.source}:${candidate.source_id}`] = {
+          ...confirmation,
+          external_original: ongoingHashes.has(
+            `${candidate.original_content_sha256}:${candidate.original_byte_count}`,
+          ) ? "another_local_folder" : null,
+        };
+      }
+    }
+  }
+
+  const sources = Object.fromEntries(staging.map((item) => [item.source, item]));
+  const plan = buildLocalCleanupPlan({ files: allFiles, sources, confirmations });
+  if (flags.retire) {
+    const retireSource = flags.retire === true ? sourceFilter : String(flags.retire);
+    const declaration = staging.find((item) => item.source === retireSource);
+    if (!declaration || declaration.role !== "one-time-import") {
+      die("--retire needs one active source declared with role one-time-import.");
+    }
+    const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName: retireSource });
+    const state = library.loadState(statePath);
+    const confirmed = new Set(plan.items.filter((item) => item.source === retireSource).map((item) => item.key));
+    const unresolved = Object.keys(state.done || {}).filter((key) => !confirmed.has(key) && !state.consumed?.[key]);
+    const unconfirmedCurrent = allFiles.filter(
+      (item) => item.source === retireSource && !confirmed.has(item.key),
+    ).length;
+    const skipped = Math.max(
+      Object.keys(state.skipped || {}).length,
+      traversalGaps.get(retireSource) || 0,
+    );
+    if (unresolved.length || unconfirmedCurrent || skipped) {
+      die(`the one-time source is not ready to retire: ${unresolved.length} loaded file(s) lack current consumed proof, ${unconfirmedCurrent} current file(s) are not confirmed in the Brain, and ${skipped} file(s) remain skipped.`);
+    }
+    const retirementId = createHash("sha256").update(JSON.stringify({
+      operation: "retire-local-source",
+      source: retireSource,
+      confirmed: confirmed.size,
+      consumed: Object.keys(state.consumed || {}).length,
+    })).digest("hex");
+    if (!flags.apply) {
+      const preview = { operation: "retire-local-source", source: retireSource, preview: true, plan_id: retirementId, documents_preserved: true };
+      if (flags.json) console.log(JSON.stringify(preview));
+      else info(`retirement preview: future walks stop, Brain documents stay. Nothing changed. Fingerprint: ${retirementId}`);
+      return preview;
+    }
+    if (flags.approve !== retirementId) die("source retirement needs the exact preview fingerprint from this current state.");
+    const receipt = retireStagingSource(m, retireSource);
+    saveManifest(manifestPath, m);
+    if (flags.json) console.log(JSON.stringify(receipt));
+    else ok(`source "${retireSource}" retired. Future folder walks stop; its documents remain in the Brain.`);
+    return receipt;
+  }
+  const summary = {
+    operation: "cleanup-local",
+    preview: !flags.apply,
+    plan_id: plan.plan_id,
+    copies: plan.copies.length,
+    only_copies: plan.only_copies.length,
+    total_files: plan.total_files,
+    total_bytes: plan.total_bytes,
+  };
+  if (!flags.apply) {
+    if (flags.json) console.log(JSON.stringify(summary));
+    else {
+      console.log("Your files are safely in your Brain. Want me to tidy up the copies on this computer? Originals in your Documents and Drive are untouched.");
+      info(`${plan.copies.length} confirmed copy file(s) can move to Trash; ${plan.only_copies.length} file(s) need an explicit keep, archive, or remove choice.`);
+      info(`preview fingerprint: ${plan.plan_id}`);
+      info(`nothing was moved. Re-run with --apply --approve ${plan.plan_id}`);
+    }
+    return summary;
+  }
+
+  const choice = flags["only-copy"] === true ? null : flags["only-copy"];
+  let archiveFile = null;
+  if (choice === "archive") {
+    const archiveTo = flags["archive-to"] === true ? null : flags["archive-to"];
+    if (!archiveTo || !flags["archive-encrypted"]) {
+      die("archive cleanup needs --archive-to <existing encrypted folder> and --archive-encrypted to confirm owner-held encryption.");
+    }
+    const archiveRoot = resolve(String(archiveTo));
+    const archiveStat = lstatSync(archiveRoot);
+    if (!archiveStat.isDirectory() || archiveStat.isSymbolicLink()) {
+      die("--archive-to must be one existing ordinary directory.");
+    }
+    const sha256File = async (path) => {
+      const hash = createHash("sha256");
+      for await (const chunk of createReadStream(path)) hash.update(chunk);
+      return hash.digest("hex");
+    };
+    archiveFile = async (sourcePath) => {
+      const destination = join(archiveRoot, basename(sourcePath));
+      copyFileSync(sourcePath, destination, fsConstants.COPYFILE_EXCL);
+      const before = await sha256File(sourcePath);
+      const after = await sha256File(destination);
+      if (before !== after) throw new Error("encrypted archive copy did not verify; the original was left in place");
+    };
+  }
+  const approvedPlan = options.approveCurrentPlan ? plan.plan_id : (flags.approve === true ? null : flags.approve);
+  if (approvedPlan !== plan.plan_id) die("cleanup requires the exact preview fingerprint from this current state.");
+  if (plan.only_copies.length && !["keep", "remove", "archive"].includes(choice)) {
+    die("files that may be the only external copy need --only-copy keep, archive, or remove.");
+  }
+  const selected = [
+    ...plan.copies,
+    ...(["remove", "archive"].includes(choice) ? plan.only_copies : []),
+  ];
+  const states = new Map();
+  for (const item of selected) {
+    const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName: item.source });
+    const state = states.get(statePath) || library.loadState(statePath);
+    markConsumed(state, {
+      source: item.source,
+      key: item.key,
+      proof: item.proof,
+      consumed_at: Date.now(),
+    });
+    library.saveState(statePath, state);
+    states.set(statePath, state);
+  }
+  const receipt = await executeLocalCleanup(plan, {
+    approve: approvedPlan,
+    onlyCopyChoice: choice || (plan.only_copies.length ? null : "keep"),
+    trash: options.trash,
+    archive: archiveFile,
+    now: options.now,
+  });
+  const receiptPath = join(dirname(resolve(manifestPath)), ".brain-cleanup-receipts.jsonl");
+  appendFileSync(receiptPath, `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+  if (flags.json) console.log(JSON.stringify(receipt));
+  else ok(`${receipt.moved_to_trash} file(s) moved to the system Trash; ${receipt.kept} only-copy file(s) kept`);
+  return receipt;
+}
+
 /**
  * The local-folder half of `brain ingest`, lifted out of cmdIngest unchanged.
  *
@@ -10898,7 +11150,8 @@ function localIngestContext(m, manifestPath, flags) {
   // contradicts it stops rather than guessing, because someone doing that on
   // purpose can say so and someone doing it by accident is about to duplicate a
   // corpus.
-  const declaredSource = declaredUploadSourceFor(m, root);
+  const sourceDeclaration = declaredLocalSourceFor(m, root);
+  const declaredSource = sourceDeclaration?.source || null;
   if (sourceExplicit && declaredSource && flags.source.trim() !== declaredSource) {
     die(
       `this manifest files "${root}" under source "${declaredSource}", but --source says ` +
@@ -10917,6 +11170,8 @@ function localIngestContext(m, manifestPath, flags) {
     sourceExplicit,
     declaredSource,
     sourceName,
+    sourceDeclaration,
+    role: sourceRole(sourceDeclaration || {}),
     dry: !!flags["dry-run"],
     statePath: canonicalSourceIngestStatePath({ manifestPath, sourceName }),
   };
@@ -10949,6 +11204,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     sourceName,
     dry,
     statePath,
+    role,
   } = context;
   const {
     walk,
@@ -11000,7 +11256,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   };
   const savedState = loadState(statePath);
   const state = flags.reset
-    ? { version: 1, done: {}, skipped: {}, ...(savedState.removed ? { removed: savedState.removed } : {}) }
+    ? { version: 1, done: {}, skipped: {}, ...(savedState.removed ? { removed: savedState.removed } : {}), ...(savedState.consumed ? { consumed: savedState.consumed } : {}) }
     : savedState;
   const previouslyKnownKeys = new Set(Object.keys(savedState.done || {}));
   const scannerOn = m.safety?.credential_scanner?.enabled !== false;
@@ -11080,9 +11336,12 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   const intentionalRemovalKeys = new Set(adjudicatedRemovals.intentional);
   const adjudicatedRemovalSet = new Set([...privateRemovalKeys, ...intentionalRemovalKeys]);
   const candidateLocalKeys = new Set(files.map((file) => String(file.rel).split(sep).join("/")));
-  const missingScannerKeys = [...previouslyKnownKeys].filter(
-    (key) => !candidateLocalKeys.has(key) && !adjudicatedRemovalSet.has(key)
-  );
+  const missingScannerKeys = missingOngoingKeys({
+    knownKeys: [...previouslyKnownKeys].filter((key) => !adjudicatedRemovalSet.has(key)),
+    presentKeys: candidateLocalKeys,
+    role,
+    consumed: state.consumed,
+  });
   if (scannerPolicyChanged && missingScannerKeys.length) {
     // A dry run previews rather than acts, but it must preview the actual
     // outcome. This gate used to be skipped outright under --dry-run, so the
@@ -11151,7 +11410,12 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // otherwise read as "the client deleted everything".
   const vanishedRemovalKeys = flags.limit
     ? []
-    : removedSinceLastRun(previouslyKnownKeys, protectedLocalSkipKeys)
+    : missingOngoingKeys({
+        knownKeys: previouslyKnownKeys,
+        presentKeys: protectedLocalSkipKeys,
+        role,
+        consumed: state.consumed,
+      })
       .filter((key) => !adjudicatedRemovalSet.has(key));
   const scannerRescanSkips = [];
   let unchanged = 0;
@@ -11590,6 +11854,21 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
   assertNoIngestFailures(tally);
   await reportBacklog(manifestPath);
+  if (role === "staging" && Number.isSafeInteger(sourceDeclaration?.retention_days)) {
+    try {
+      await cmdCleanupLocal(manifestPath, {
+        flags: {
+          automatic: true,
+          apply: true,
+          source: sourceName,
+          "only-copy": sourceDeclaration.only_copy_action || "keep",
+        },
+        approveCurrentPlan: true,
+      });
+    } catch (error) {
+      warn(`automatic staging cleanup did not run: ${String(error?.message || error).slice(0, 180)}`);
+    }
+  }
   // Returned only so a caller that ran this as one leg of a wider sweep can
   // report a real count instead of "unknown". Reached only after
   // assertNoIngestFailures, so these numbers describe a completed load.
@@ -13487,6 +13766,10 @@ const PROVIDER_LOAD_PROOF_NOTE =
  * manifest filed one folder under two names.
  */
 export function declaredUploadSourceFor(manifest, folderPath) {
+  return declaredLocalSourceFor(manifest, folderPath)?.source || null;
+}
+
+export function declaredLocalSourceFor(manifest, folderPath) {
   const target = String(folderPath || "").trim();
   if (!target) return null;
   let folders;
@@ -13505,7 +13788,11 @@ export function declaredUploadSourceFor(manifest, folderPath) {
       : left === right;
   };
   for (const folder of folders) {
-    if (folder?.source && same(folder.path, target)) return String(folder.source);
+    if (folder?.source && same(folder.path, target)) return folder;
+  }
+  const watched = manifest?.corpora?.local_folder;
+  if (watched?.enabled === true && watched?.source && same(watched.path, target)) {
+    return { ...watched, path: target };
   }
   return null;
 }
@@ -13516,7 +13803,9 @@ export function uploadFoldersOf(corpus) {
     throw new Error("corpora.upload.folders must be an array of folder paths");
   }
   return declared.map((entry) => (
-    typeof entry === "string" ? { path: entry, source: null } : { path: entry?.path, source: entry?.source || null }
+    typeof entry === "string"
+      ? { path: entry, source: null }
+      : { ...entry, path: entry?.path, source: entry?.source || null }
   ));
 }
 
@@ -13736,17 +14025,26 @@ export function loadSourceRegistry(commands = {}) {
             },
           };
         }
-        const unnamed = folders.filter((folder) => !folder.source);
-        if (folders.length > 1 && unnamed.length > 1) {
+        const activeFolders = folders.filter((folder) => folder.retired !== true);
+        if (!activeFolders.length) {
           return {
             unavailable: {
-              reason: `${folders.length} folders are declared and ${unnamed.length} of them have no source name`,
+              reason: "all declared one-time folder sources are retired; their documents remain in the Brain",
+              fix: "none; the source will not be walked again unless its manifest declaration is deliberately reactivated",
+            },
+          };
+        }
+        const unnamed = activeFolders.filter((folder) => !folder.source);
+        if (activeFolders.length > 1 && unnamed.length > 1) {
+          return {
+            unavailable: {
+              reason: `${activeFolders.length} folders are active and ${unnamed.length} of them have no source name`,
               fix: 'give each folder its own name so a load stays separately reversible: '
                 + '"folders": [{"path": "...", "source": "contracts"}, {"path": "...", "source": "transcripts"}]',
             },
           };
         }
-        return folders.map((folder) => ({
+        return activeFolders.map((folder) => ({
           source: folder.source || "upload",
           detail: folder.path,
           run: () => ingestLocal(m, manifestPath, {
@@ -26926,6 +27224,7 @@ const commands = {
   migrate: (path) => withManifestCloudflareControl(path, () => cmdMigrate(path)),
   "ocr-preflight": cmdOcrPreflightInteractive,
   ingest: cmdIngest,
+  "cleanup-local": cmdCleanupLocal,
   "ingest-file": (_path) => cmdFirstSourceFile(process.argv.slice(3), {
     boundaryCommand: cliBoundaryCommand,
   }),
@@ -26980,6 +27279,7 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "ingest-file-apply",
   "assistant-repair",
   "ocr-preflight",
+  "cleanup-local",
 ]);
 
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
@@ -27075,6 +27375,12 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            shared-budget and local file-provider unknowns; no OCR,
                                            app HTTP/key-store, Brain, or local-state write
     brain ingest     <manifest> --path <dir>  load a folder into the brain
+    brain cleanup-local <manifest>           preview confirmed staging copies that can move to Trash;
+                                           --source narrows it; --json returns aggregate-only output
+    brain cleanup-local <manifest> --apply --approve <fingerprint> --only-copy <keep|archive|remove>
+                                           move the approved unchanged files to system Trash;
+                                           archive also needs --archive-to <encrypted-folder>
+                                           --archive-encrypted; ongoing sources are never eligible
     brain ingest-file <manifest> --source <id> --file <direct-name> --expect-runtime-sha256 <64hex> --json
                                            read-only Windows x64 preview of exactly one direct
                                            native-text file in its dedicated manifest source root
