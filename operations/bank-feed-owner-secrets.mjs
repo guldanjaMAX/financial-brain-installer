@@ -227,6 +227,10 @@ export async function ensureBankFeedWorkerSecrets({
   }
   if (needsWrappingKey) writes.push([BANK_ACCESS_WRAPPING_KEY_SECRET, generateWrappingKey()]);
 
+  // The writes are sequential PUTs with no rollback. A failure between the client_id and the
+  // secret leaves a new client_id paired with the old secret. That fails loudly: the next
+  // connection is refused as INVALID_API_KEYS, and its message names --replace-keys, which
+  // rewrites both keys.
   for (const [name, text] of writes) {
     try {
       await putSecret(name, text);
