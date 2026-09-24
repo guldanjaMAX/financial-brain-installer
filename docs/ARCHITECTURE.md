@@ -402,6 +402,16 @@ without exposing source identifiers.
 | Plaid | Native owner connection, incremental read, signed webhook, scheduled reconciliation, retry, repair, and disconnect paths are built, but general bank invitations are held. The owner enters Plaid application credentials only through `brain connect bank`, at a hidden prompt, when the Worker lacks them or with `--replace-keys` to correct them; the pair is checked with one harmless Plaid read in the manifest's environment before anything is written, and the command generates a missing wrapping key and verifies the names before Link. Generic setup preserves a complete Worker binding set and refuses a missing or partial set before mutation. Customer invitations wait for the full release-gate journey and a production pilot |
 | Box and Airtable | No native API connector. Box can use a reviewed export or locally synced watched folder. Airtable requires an approved export until a native connector is built. |
 
+Plaid disconnect removes the Item's unpromoted staging rows and sync window in
+the same D1 batch that makes the connection inactive. Promoted ledger history
+is retained. A later Link exchange still refuses any match against a live Item.
+When one removed Item has a complete, unambiguous same-institution account
+match, the exchange batch reuses those ledger account rows, carries forward the
+owner assignments, moves their ledger history to the new feed scope, marks the
+removed Item as superseded, and starts the new Item with its own cursor. The
+batch contains a transaction-local exact guard, so a partial reattach rolls
+back instead of creating a second money path.
+
 The macOS Drive scheduler installs a per-user LaunchAgent. Its definition has no
 credentials. It resolves the declared durable admin key at runtime, uses Google
 OAuth from its chosen store, takes an owner-only lock, and rotates owner-only

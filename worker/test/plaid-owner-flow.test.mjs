@@ -313,6 +313,9 @@ test("the connect page says where disconnecting actually happens", async () => {
     const html = await pageHtml(fixture);
     assert.doesNotMatch(html, /You can disconnect at any time/);
     assert.match(html, /To disconnect a bank later, open your Brain and go to Access &gt; Banks &gt; Disconnect\./);
+    assert.match(html, /Disconnecting removes the bank connection and any bank data still waiting for an owner choice\./);
+    assert.match(html, /Ledger history already saved stays\./);
+    assert.match(html, /matching saved accounts resume in place instead of being added again\./);
   } finally { fixture.close(); }
 });
 

@@ -36,6 +36,17 @@ asset publication.
   the Plaid dashboard's Allowed redirect URIs list, it names the exact address
   to add. The reference code stays in the message.
 
+- **Bank disconnect and reconnect now finish cleanly.** A refused connection
+  attempt starts a new Link operation on the next click, and a safe failure
+  without a provider code now keeps its redacted reason and a stable reference
+  code. Disconnect removes staged account and transaction details that never
+  reached the ledger while preserving saved ledger history. Reconnecting the
+  same removed bank reuses its existing ledger accounts, owner assignments,
+  balances, and transactions under a new cursor instead of counting another
+  copy. A match against a live connection is still refused for review. To
+  check: disconnect a test bank after history is saved, reconnect it, and
+  confirm the account and prior transaction counts do not increase.
+
 - **The first bank connection no longer dead-ends.** On a Brain with no person,
   household, or business yet, the connect page opens "Add a person,
   household, or business" by itself and tells you to add an owner first

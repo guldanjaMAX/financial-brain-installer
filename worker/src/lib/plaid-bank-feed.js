@@ -375,6 +375,88 @@ function refuseRejectedHandoff(row) {
   }
 }
 
+async function plaidReconnectStatements(env, {
+  tenantId,
+  newItemRef,
+  review,
+  stamp,
+}) {
+  if (review?.action !== "reattach") return [];
+  if (review.priorItemRef === newItemRef) {
+    throw Object.assign(new Error("Plaid returned the disconnected Item identity for a new connection"), {
+      code: "PLAID_RECONNECT_IDENTITY_CONFLICT",
+    });
+  }
+  const mappings = await Promise.all(review.accounts.map(async (row) => ({
+    ...row,
+    accountRef: await plaidPublicAccountRef(tenantId, newItemRef, row.providerAccountId),
+  })));
+  const mappingJson = JSON.stringify(mappings);
+  const oldFeed = feedScopeKey(review.priorItemRef);
+  const newFeed = feedScopeKey(newItemRef);
+  const mappedSlugs = "SELECT json_extract(value,'$.accountSlug') FROM json_each(?)";
+  const mappedSlugsFirst = "SELECT json_extract(value,'$.accountSlug') FROM json_each(?1)";
+  return [
+    env.DB.prepare(
+      `UPDATE fin_accounts AS f
+          SET source_feed=?1,
+              external_ref=(SELECT json_extract(value,'$.providerAccountId') FROM json_each(?2)
+                WHERE json_extract(value,'$.accountSlug')=f.account_slug)
+        WHERE f.tenant_id=?3 AND f.source_feed=?4 AND f.superseded_by_id IS NULL
+          AND f.account_slug IN (${mappedSlugs})`,
+    ).bind(newFeed, mappingJson, tenantId, oldFeed, mappingJson),
+    env.DB.prepare(
+      `UPDATE fin_transactions SET source_feed=?
+        WHERE tenant_id=? AND source_feed=? AND account_slug IN (${mappedSlugs})`,
+    ).bind(newFeed, tenantId, oldFeed, mappingJson),
+    env.DB.prepare(
+      `UPDATE fin_balance_snapshots SET source_feed=?
+        WHERE tenant_id=? AND source_feed=? AND account_slug IN (${mappedSlugs})`,
+    ).bind(newFeed, tenantId, oldFeed, mappingJson),
+    env.DB.prepare(
+      `UPDATE fin_account_coverage SET source_feed=?
+        WHERE tenant_id=? AND source_feed=? AND account_slug IN (${mappedSlugs})`,
+    ).bind(newFeed, tenantId, oldFeed, mappingJson),
+    env.DB.prepare(
+      `INSERT INTO plaid_account_entity_assignments
+         (tenant_id,item_ref,provider_account_id,account_ref,entity_slug,
+          discovered_at,last_seen_at,assigned_at,updated_at)
+       SELECT ?,?,json_extract(value,'$.providerAccountId'),json_extract(value,'$.accountRef'),
+              json_extract(value,'$.entitySlug'),?,?,?,?
+         FROM json_each(?)`,
+    ).bind(tenantId, newItemRef, stamp, stamp, stamp, stamp, mappingJson),
+    env.DB.prepare(
+      `UPDATE bank_feed_items
+          SET status='removed',
+              status_detail='This disconnected bank was superseded by a reconnect. Its saved ledger accounts continue under the newer connection.'
+        WHERE tenant_id=? AND item_ref=? AND removed_at IS NOT NULL`,
+    ).bind(tenantId, review.priorItemRef),
+    // This guard executes inside the same D1 batch as the rebind. Any missing,
+    // ambiguous, or partially moved account aborts the whole transaction.
+    env.DB.prepare(
+      `SELECT CASE WHEN
+          (SELECT COUNT(*) FROM fin_accounts f JOIN json_each(?1) m
+             ON f.account_slug=json_extract(m.value,'$.accountSlug')
+            WHERE f.tenant_id=?2 AND f.source_feed=?3 AND f.external_ref=json_extract(m.value,'$.providerAccountId')
+              AND f.entity_slug=json_extract(m.value,'$.entitySlug') AND f.superseded_by_id IS NULL)=json_array_length(?1)
+          AND (SELECT COUNT(*) FROM plaid_account_entity_assignments a JOIN json_each(?1) m
+             ON a.provider_account_id=json_extract(m.value,'$.providerAccountId')
+            WHERE a.tenant_id=?2 AND a.item_ref=?4 AND a.account_ref=json_extract(m.value,'$.accountRef')
+              AND a.entity_slug=json_extract(m.value,'$.entitySlug'))=json_array_length(?1)
+          AND NOT EXISTS (SELECT 1 FROM fin_transactions
+            WHERE tenant_id=?2 AND source_feed=?5 AND account_slug IN (${mappedSlugsFirst}))
+          AND NOT EXISTS (SELECT 1 FROM fin_balance_snapshots
+            WHERE tenant_id=?2 AND source_feed=?5 AND account_slug IN (${mappedSlugsFirst}))
+          AND NOT EXISTS (SELECT 1 FROM fin_account_coverage
+            WHERE tenant_id=?2 AND source_feed=?5 AND account_slug IN (${mappedSlugsFirst}))
+          AND EXISTS (SELECT 1 FROM bank_feed_items
+            WHERE tenant_id=?2 AND item_ref=?6 AND removed_at IS NOT NULL AND status='removed'
+              AND status_detail LIKE '%superseded by a reconnect%')
+        THEN 1 ELSE json_extract('plaid reconnect readback failed','$') END AS reconnect_guard`,
+    ).bind(mappingJson, tenantId, newFeed, newItemRef, oldFeed, review.priorItemRef),
+  ];
+}
+
 export async function createPlaidLinkToken(env, {
   url,
   mode = "connect",
@@ -593,8 +675,9 @@ export async function completePlaidLink(env, {
   // Review under the atomic exchange claim. A review refusal has made no
   // provider call, so this one session may return to its safe pre-exchange state.
   // Unknown provider outcomes below deliberately keep the claim held.
+  let connectionReview;
   try {
-    await assertPlaidConnectionDistinct(env, { tenantId, institutionRef, accounts });
+    connectionReview = await assertPlaidConnectionDistinct(env, { tenantId, institutionRef, accounts });
   } catch (error) {
     await env.DB.prepare(
       `UPDATE plaid_link_operations SET state='link_ready',updated_at=?
@@ -631,10 +714,20 @@ export async function completePlaidLink(env, {
   }
   if (!exchanged.item_id || !exchanged.access_token) throw new Error("Plaid returned no usable Item");
   const sealed = await encryptAccessReference(env, exchanged.access_token);
+  const reconnectStatements = await plaidReconnectStatements(env, {
+    tenantId,
+    newItemRef: exchanged.item_id,
+    review: connectionReview,
+    stamp,
+  });
   const receipt = {
     item_ref: exchanged.item_id,
     institution_label: institutionLabel,
     environment: config.environment,
+    ...(connectionReview?.action === "reattach" ? {
+      reconnected: true,
+      ledger_accounts_reattached: connectionReview.accounts.length,
+    } : {}),
     history: {
       state: "queued",
       provider_history_state: PLAID_HISTORY_STATE.UNKNOWN,
@@ -655,6 +748,7 @@ export async function completePlaidLink(env, {
          key_version=excluded.key_version,status='connected',status_detail=NULL,removed_at=NULL`,
     ).bind(tenantId, exchanged.item_id, institutionRef, institutionLabel, sealed.ciphertext,
       sealed.iv, sealed.keyVersion, config.environment, stamp),
+    ...reconnectStatements,
     env.DB.prepare(
       `INSERT INTO bank_feed_backfill (tenant_id,item_ref,requested_days,state,queued_at)
        VALUES (?,?,?,'queued',?)
