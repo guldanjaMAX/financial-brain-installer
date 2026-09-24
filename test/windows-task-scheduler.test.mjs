@@ -8,10 +8,34 @@ import {
   runWindowsScheduledIngest,
   statusWindowsScheduler,
 } from "../operations/windows-task-scheduler.mjs";
+import { collectHandoffCheck } from "../operations/handoff-check.mjs";
 
 const localAppData = String.raw`C:\Users\Fixture User\AppData\Local`;
 const manifestPath = String.raw`C:\Users\Fixture User\Financial Brain\brain.manifest.json`;
 const brainPath = String.raw`C:\Users\Fixture User\AppData\Local\FinancialBrain\brain.cmd`;
+
+function xml(value) {
+  return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function providerTaskXml(plan, { enabled = true, runCommand = plan.runCommand } = {}) {
+  const [command, ...argumentParts] = runCommand.split(" ");
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><URI>\\${plan.taskName}</URI></RegistrationInfo>
+  <Triggers><CalendarTrigger>
+    <StartBoundary>2026-09-24T00:45:00</StartBoundary>
+    <Enabled>${enabled}</Enabled>
+    <Repetition><Interval>PT2H</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+    <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>
+  </CalendarTrigger></Triggers>
+  <Principals><Principal id="Author"><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings><Enabled>${enabled}</Enabled></Settings>
+  <Actions Context="Author"><Exec>
+    <Command>${xml(command)}</Command><Arguments>${xml(argumentParts.join(" "))}</Arguments>
+  </Exec></Actions>
+</Task>`;
+}
 
 const baseManifest = {
   manifest_version: 1,
@@ -203,13 +227,78 @@ const present = statusWindowsScheduler(manifestPath, options({
   provider: "slack",
   processRunner(command, args) {
     statusCalls.push([command, args]);
-    return { status: 0, stdout: "TaskName: fixture", stderr: "" };
+    return { status: 0, stdout: providerTaskXml(providerPlan), stderr: "" };
   },
 }));
 assert.equal(present.installed, true);
+assert.equal(present.definitionMatches, true);
 assert.deepEqual(statusCalls, [["schtasks.exe", [
-  "/Query", "/TN", "com.brain-installer.fixture-brain.slack-ingest", "/FO", "LIST", "/V",
+  "/Query", "/TN", "com.brain-installer.fixture-brain.slack-ingest", "/XML",
 ]]]);
+
+let disabledQueryCalls = 0;
+const disabledTask = statusWindowsScheduler(manifestPath, options({
+  provider: "slack",
+  processRunner() {
+    disabledQueryCalls++;
+    return { status: 0, stdout: providerTaskXml(providerPlan, { enabled: false }), stderr: "" };
+  },
+}));
+assert.equal(disabledQueryCalls, 1, "the disabled-task refusal reached schtasks /Query");
+assert.equal(disabledTask.installed, false);
+assert.equal(disabledTask.errorCode, "WINDOWS_SCHEDULE_DISABLED");
+
+const driftedDefinitions = [
+  ["task identity", (value) => value.replace(`\\${providerPlan.taskName}`, "\\other-task")],
+  ["action", (value) => value.replace("<Command>cmd.exe</Command>", "<Command>other.exe</Command>")],
+  ["manifest binding", (value) => value.replace(xml(manifestPath), xml(String.raw`C:\Other\brain.manifest.json`))],
+  ["cadence", (value) => value.replace("<Interval>PT2H</Interval>", "<Interval>PT3H</Interval>")],
+  ["cadence duration", (value) => value.replace("<Duration>P1D</Duration>", "<Duration>PT4H</Duration>")],
+  ["run level", (value) => value.replace("<RunLevel>LeastPrivilege</RunLevel>", "<RunLevel>HighestAvailable</RunLevel>")],
+];
+for (const [field, mutate] of driftedDefinitions) {
+  let driftQueryCalls = 0;
+  const drifted = statusWindowsScheduler(manifestPath, options({
+    provider: "slack",
+    processRunner() {
+      driftQueryCalls++;
+      return { status: 0, stdout: mutate(providerTaskXml(providerPlan)), stderr: "" };
+    },
+  }));
+  assert.equal(driftQueryCalls, 1, `${field} drift reached schtasks /Query`);
+  assert.equal(drifted.installed, false, `${field} drift is not installed`);
+  assert.equal(drifted.errorCode, "WINDOWS_SCHEDULE_DRIFT", `${field} drift is typed`);
+}
+
+let handoffQueryCalls = 0;
+const handoffManifest = {
+  ...baseManifest,
+  corpora: { slack: baseManifest.corpora.slack },
+};
+const disabledHandoff = await collectHandoffCheck(manifestPath, {
+  manifest: handoffManifest,
+  platform: "win32",
+  windowsScheduler: { statusWindowsScheduler },
+  schedulerOptions: options({
+    manifest: handoffManifest,
+    processRunner() {
+      handoffQueryCalls++;
+      return { status: 0, stdout: providerTaskXml(providerPlan, { enabled: false }), stderr: "" };
+    },
+  }),
+  readFreshness: async () => ({ sources: [{
+    name: "team-chat", kind: "slack", source_status: "ready", state: "ok", reason: null,
+    schedule: {
+      state: "proven", installed: true, first_run_at: "2026-09-24T16:00:00.000Z",
+      second_run_observed: true, next_run_at: "2026-09-24T20:45:00.000Z",
+    },
+  }] }),
+});
+assert.equal(handoffQueryCalls, 1, "handoff reached the successful disabled-task query decision");
+assert.equal(disabledHandoff.complete, false);
+assert.equal(disabledHandoff.sources[0].green, false);
+assert.equal(disabledHandoff.sources[0].schedule_installed, false);
+assert.match(disabledHandoff.sources[0].last_error, /disabled/i);
 
 let absentStatusCalls = 0;
 const missingStatus = statusWindowsScheduler(manifestPath, options({

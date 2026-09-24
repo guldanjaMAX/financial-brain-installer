@@ -1075,6 +1075,74 @@ function parseLaunchctlStatus(output) {
   };
 }
 
+function launchctlValue(value) {
+  const text = String(value || "").trim();
+  if (!text.startsWith("\"")) return text;
+  try { return JSON.parse(text); } catch { return text.slice(1, -1); }
+}
+
+function launchctlScalar(output, key) {
+  const escaped = String(key).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const value = new RegExp(`^\\s*${escaped}\\s*=\\s*(.+?)\\s*$`, "mi").exec(String(output || ""))?.[1];
+  return value === undefined ? null : launchctlValue(value);
+}
+
+function launchctlList(output, key) {
+  const lines = String(output || "").split(/\r?\n/);
+  const escaped = String(key).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const start = lines.findIndex((line) => new RegExp(`^\\s*${escaped}\\s*=\\s*\\{\\s*$`, "i").test(line));
+  if (start < 0) return null;
+  const values = [];
+  let depth = 1;
+  for (let index = start + 1; index < lines.length; index++) {
+    const line = lines[index];
+    depth += (line.match(/\{/g) || []).length;
+    depth -= (line.match(/\}/g) || []).length;
+    if (depth === 0) return values;
+    if (depth === 1 && line.trim()) values.push(launchctlValue(line));
+  }
+  return null;
+}
+
+function canonicalInterval(interval) {
+  return JSON.stringify(Object.fromEntries(Object.entries(interval).sort(([a], [b]) => a.localeCompare(b))));
+}
+
+function launchctlIntervals(output) {
+  const intervals = [];
+  const pattern = /descriptor\s*=\s*\{([^{}]*)\}/gi;
+  let match;
+  while ((match = pattern.exec(String(output || "")))) {
+    const interval = {};
+    for (const field of match[1].matchAll(/"(Minute|Hour|Day|Month|Weekday)"\s*=>\s*(-?\d+)/g)) {
+      interval[field[1]] = Number(field[2]);
+    }
+    intervals.push(interval);
+  }
+  return intervals;
+}
+
+function loadedLaunchAgentMatches(output, plan) {
+  const text = String(output || "");
+  const identity = text.trimStart().startsWith(`${plan.service} = {`);
+  const args = launchctlList(text, "arguments");
+  const actualIntervals = launchctlIntervals(text).map(canonicalInterval).sort();
+  const expectedIntervals = plan.intervals.map(canonicalInterval).sort();
+  return identity && launchctlScalar(text, "program") === plan.nodePath &&
+    JSON.stringify(args) === JSON.stringify(plan.programArguments) &&
+    launchctlScalar(text, "working directory") === dirname(plan.path) &&
+    launchctlScalar(text, "stdout path") === plan.stdoutPath &&
+    launchctlScalar(text, "stderr path") === plan.stderrPath &&
+    JSON.stringify(actualIntervals) === JSON.stringify(expectedIntervals);
+}
+
+function launchAgentEnabled(output, label) {
+  const escaped = String(label).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`(?:"${escaped}"|${escaped})\\s*=>\\s*(true|false)`, "i")
+    .exec(String(output || ""));
+  return match ? match[1].toLowerCase() !== "true" : true;
+}
+
 export function statusScheduler(manifestPath, options = {}) {
   const reference = buildSchedulerReference(manifestPath, options);
   const launchctl = options.launchctl || defaultLaunchctl;
@@ -1087,6 +1155,35 @@ export function statusScheduler(manifestPath, options = {}) {
   let definitionMatches = false;
   if (installed && !scheduleError) {
     try { definitionMatches = readFileSync(plan.plistPath, "utf-8") === renderLaunchAgentPlist(plan); } catch {}
+  }
+  const loadedDefinitionMatches = loaded && !scheduleError
+    ? loadedLaunchAgentMatches(result.stdout, plan)
+    : false;
+  const enabledResult = loaded ? launchctl(["print-disabled", plan.domain]) : null;
+  const enabledKnown = !loaded || enabledResult?.status === 0;
+  const enabled = loaded && enabledKnown ? launchAgentEnabled(enabledResult.stdout, plan.label) : false;
+  let errorCode = null;
+  let currentScheduleError = scheduleError;
+  if (currentScheduleError) {
+    errorCode = "MAC_SCHEDULE_DRIFT";
+  } else if (!installed && loaded) {
+    errorCode = "MAC_SCHEDULE_DRIFT";
+    currentScheduleError = "the loaded LaunchAgent has no current installed plist";
+  } else if (installed && !loaded) {
+    errorCode = "MAC_SCHEDULE_UNLOADED";
+    currentScheduleError = "the current LaunchAgent is not loaded";
+  } else if (!currentScheduleError && loaded && !enabledKnown) {
+    errorCode = "MAC_SCHEDULE_STATE_UNAVAILABLE";
+    currentScheduleError = "the current LaunchAgent enabled state could not be inspected";
+  } else if (!currentScheduleError && loaded && !enabled) {
+    errorCode = "MAC_SCHEDULE_DISABLED";
+    currentScheduleError = "the current LaunchAgent is disabled";
+  } else if (!currentScheduleError && installed && !definitionMatches) {
+    errorCode = "MAC_SCHEDULE_DRIFT";
+    currentScheduleError = "the installed LaunchAgent plist does not match this manifest and schedule";
+  } else if (!currentScheduleError && loaded && !loadedDefinitionMatches) {
+    errorCode = "MAC_SCHEDULE_DRIFT";
+    currentScheduleError = "the loaded LaunchAgent definition does not match this manifest and schedule";
   }
   // A LaunchAgent whose interpreter has been upgraded away is loaded, matches
   // the manifest, and cannot run. Nothing else in this report would say so.
@@ -1107,9 +1204,14 @@ export function statusScheduler(manifestPath, options = {}) {
     interpreterVersionPinned: isVersionPinnedInterpreter(plan.nodePath),
     installed,
     loaded,
-    scheduleError,
+    enabled,
+    enabledStateKnown: enabledKnown,
+    errorCode,
+    scheduleError: currentScheduleError,
     definitionMatches,
     definitionDrift: installed && !definitionMatches,
+    loadedDefinitionMatches,
+    loadedDefinitionDrift: loaded && !loadedDefinitionMatches,
     ...(loaded ? parseLaunchctlStatus(result.stdout) : {
       state: null, pid: null, running: false, runs: null, lastExitCode: null, lastRunSucceeded: null,
     }),

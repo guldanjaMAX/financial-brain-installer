@@ -92,6 +92,21 @@ function fixture(rows) {
 }
 
 {
+  const reinstalled = fixture([{
+    name: "mail", kind: "gmail", status: "ready", stale_reason: null,
+    expected_refresh_seconds: 3_600,
+    schedule_installed_at: "2026-09-24T17:30:00.000Z",
+    last_successful_run_at: "2026-09-20T12:00:00.000Z",
+  }]);
+  const result = await markMissedSourceRuns(reinstalled.env, { now: NOW });
+  check("a pre-reinstall success cannot make a recent reinstall immediately missed",
+    reinstalled.seen.reads === 1 && result.checked === 1 && result.overdue === 0 &&
+      result.newly_missed === 0 && reinstalled.seen.batches === 0 &&
+      /schedule_run'[\s\S]*e\.at\s*>=\s*\(SELECT MAX\(i\.at\)[\s\S]*schedule_install'/.test(reinstalled.seen.sql[0]),
+    JSON.stringify({ result, sql: reinstalled.seen.sql }));
+}
+
+{
   let fetches = 0;
   const quiet = await notifyMissedSources({}, { newly_missed: 2 }, {
     fetchImpl: async () => { fetches++; },

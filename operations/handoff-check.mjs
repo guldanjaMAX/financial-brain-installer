@@ -66,6 +66,7 @@ export function configuredHandoffSources(manifest) {
 function macScheduleHealthy(status) {
   return status?.installed === true && status?.loaded === true &&
     status?.definitionDrift !== true && status?.definitionMatches !== false &&
+    status?.loadedDefinitionMatches === true && status?.enabled === true &&
     status?.interpreterPresent !== false && !status?.scheduleError;
 }
 
@@ -83,7 +84,10 @@ export async function inspectHandoffSchedule(manifestPath, source, options = {})
         provider: source.lane === "provider" ? source.kind : null,
         source: source.lane === "source" ? source.kind : null,
       });
-      return { installed: status?.installed === true, last_error: null };
+      return {
+        installed: status?.installed === true,
+        last_error: status?.scheduleError || null,
+      };
     }
     if (platform !== "darwin") {
       return { installed: false, last_error: "this source has no packaged schedule on this operating system" };
@@ -109,9 +113,14 @@ export async function inspectHandoffSchedule(manifestPath, source, options = {})
       const drain = options.whatsappDrainScheduler ?? await import("./whatsapp-drain-scheduler.mjs");
       const daemonStatus = daemon.statusWhatsappDaemon(manifestPath, schedulerOptions);
       const drainStatus = drain.statusWhatsappDrainScheduler(manifestPath, schedulerOptions);
+      const daemonHealthy = daemonStatus?.installed === true && daemonStatus?.loaded === true &&
+        daemonStatus?.definitionDrift !== true && daemonStatus?.definitionMatches !== false &&
+        !daemonStatus?.planError;
       return {
-        installed: daemonStatus?.installed === true && macScheduleHealthy(drainStatus),
-        last_error: drainStatus?.scheduleError ||
+        installed: daemonHealthy && macScheduleHealthy(drainStatus),
+        last_error: daemonStatus?.planError ||
+          (!daemonHealthy ? "the WhatsApp capture daemon is unloaded or its definition has changed" : null) ||
+          drainStatus?.scheduleError ||
           (drainStatus?.lastRunSucceeded === false ? `last scheduled run failed with exit code ${drainStatus.lastExitCode}` : null),
       };
     } else {

@@ -26,7 +26,9 @@ export async function markMissedSourceRuns(env, { now = Date.now() } = {}) {
             (SELECT MAX(e.at) FROM source_events e
               WHERE e.source_name=s.name AND e.event='schedule_install') AS schedule_installed_at,
             (SELECT MAX(e.at) FROM source_events e
-              WHERE e.source_name=s.name AND e.event='schedule_run') AS last_successful_run_at
+              WHERE e.source_name=s.name AND e.event='schedule_run'
+                AND e.at >= (SELECT MAX(i.at) FROM source_events i
+                              WHERE i.source_name=s.name AND i.event='schedule_install')) AS last_successful_run_at
        FROM sources s
       WHERE s.expected_refresh_seconds IS NOT NULL
       ORDER BY s.name`;
@@ -40,7 +42,7 @@ export async function markMissedSourceRuns(env, { now = Date.now() } = {}) {
     if (!Number.isFinite(expected) || expected < 60) continue;
     const installed = timestamp(source.schedule_installed_at);
     const successful = timestamp(source.last_successful_run_at);
-    const reference = Number.isFinite(successful) ? successful : installed;
+    const reference = Number.isFinite(successful) && successful >= installed ? successful : installed;
     // A legacy expectation with no install event has no trustworthy start for
     // its first-run clock. It remains waiting, never falsely missed.
     if (!Number.isFinite(reference)) continue;

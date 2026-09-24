@@ -83,6 +83,29 @@ function opts(extra = {}) {
   };
 }
 
+function launchctlDefinition(plan, { arguments: programArguments = plan.programArguments, intervals = plan.intervals } = {}) {
+  const descriptors = intervals.map((interval, index) => `
+    trigger-${index} = {
+      descriptor = {
+${Object.entries(interval).map(([key, value]) => `        "${key}" => ${value}`).join("\n")}
+      }
+    }`).join("");
+  return `${plan.service} = {
+  state = waiting
+  program = ${plan.nodePath}
+  arguments = {
+${programArguments.map((argument) => `    ${JSON.stringify(argument)}`).join("\n")}
+  }
+  working directory = ${JSON.stringify(dirname(plan.path))}
+  stdout path = ${JSON.stringify(plan.stdoutPath)}
+  stderr path = ${JSON.stringify(plan.stderrPath)}
+  event triggers = {${descriptors}
+  }
+  runs = 7
+  last exit code = 0
+}`;
+}
+
 try {
   writeManifest();
 
@@ -669,15 +692,47 @@ try {
       check("the generated definition passes macOS's native plist parser", lint.status === 0, lint.stderr || lint.stdout);
     }
 
+    const loadedDefinition = launchctlDefinition(installed)
+      .replace("state = waiting", "state = running\n  pid = 2468")
+      .replace("last exit code = 0", "last exit code = 1");
     const status = statusDriveScheduler(manifestPath, opts({
-      launchctl: () => ({ status: 0, stdout: "state = running\npid = 2468\nruns = 7\nlast exit code = 1\n", stderr: "" }),
+      launchctl: (args) => args[0] === "print-disabled"
+        ? { status: 0, stdout: "disabled services = {}", stderr: "" }
+        : { status: 0, stdout: loadedDefinition, stderr: "" },
     }));
     check("status reports installed, loaded and currently running separately",
       status.installed && status.loaded && status.running && status.pid === 2468, JSON.stringify(status));
     check("status surfaces the last scheduled failure instead of calling waiting healthy",
       status.runs === 7 && status.lastExitCode === 1 && status.lastRunSucceeded === false, JSON.stringify(status));
-    check("status proves the loaded definition still matches the current manifest",
-      status.definitionMatches && !status.definitionDrift, JSON.stringify(status));
+    check("status proves both the plist and loaded definition still match the current manifest",
+      status.definitionMatches && status.loadedDefinitionMatches && status.enabled && !status.definitionDrift,
+      JSON.stringify(status));
+
+    const driftedLoaded = statusDriveScheduler(manifestPath, opts({
+      launchctl: (args) => args[0] === "print-disabled"
+        ? { status: 0, stdout: "disabled services = {}", stderr: "" }
+        : {
+            status: 0,
+            stdout: launchctlDefinition(installed, {
+              arguments: installed.programArguments.map((value, index) => index === 3 ? "/tmp/other.manifest.json" : value),
+            }),
+            stderr: "",
+          },
+    }));
+    check("status rejects a loaded LaunchAgent bound to a different manifest",
+      driftedLoaded.loaded && !driftedLoaded.loadedDefinitionMatches &&
+        driftedLoaded.errorCode === "MAC_SCHEDULE_DRIFT",
+      JSON.stringify(driftedLoaded));
+
+    const disabledLoaded = statusDriveScheduler(manifestPath, opts({
+      launchctl: (args) => args[0] === "print-disabled"
+        ? { status: 0, stdout: `disabled services = { "${installed.label}" => true }`, stderr: "" }
+        : { status: 0, stdout: launchctlDefinition(installed), stderr: "" },
+    }));
+    check("status rejects a loaded but disabled LaunchAgent after both decisions are read",
+      disabledLoaded.loaded && disabledLoaded.enabled === false &&
+        disabledLoaded.errorCode === "MAC_SCHEDULE_DISABLED",
+      JSON.stringify(disabledLoaded));
 
     const beforeRunningReplace = readFileSync(installed.plistPath, "utf-8");
     const replacementCalls = [];

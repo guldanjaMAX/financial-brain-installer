@@ -151,51 +151,53 @@ export function buildWindowsSchedulerPlan(manifestPath, options = {}) {
   const spec = schedulerSpec(options);
   const action = options.action || "install";
   const installing = action === "install";
+  const defining = installing || action === "status";
   const slug = String(manifest?.client?.slug || "");
   if (!/^[a-z0-9][a-z0-9-]{1,40}$/.test(slug)) {
     throw new Error("the manifest needs a valid client.slug before a Windows task can be installed");
   }
-  if (installing) spec.requireEnabled(manifest);
+  if (defining) spec.requireEnabled(manifest);
   const cron = spec.cronOf(manifest);
-  if (installing && (typeof cron !== "string" || !cron.trim())) throw new Error(spec.cronMissingError);
+  if (defining && (typeof cron !== "string" || !cron.trim())) throw new Error(spec.cronMissingError);
   const reference = {
     manifest,
-    path: installing
+    path: defining
       ? windowsAbsolute(options.windowsManifestPath || manifestPath, options)
       : String(options.windowsManifestPath || manifestPath),
     slug,
     cron,
     ...(spec.referenceExtrasOf ? spec.referenceExtrasOf(manifest) : {}),
   };
-  if (installing && options.validateExtras !== false && spec.validateExtras) spec.validateExtras(reference);
-  const scheduleArgs = installing ? cronToSchtasks(cron, spec.cronLabels) : [];
-  const localAppData = installing
+  if (defining && options.validateExtras !== false && spec.validateExtras) spec.validateExtras(reference);
+  const scheduleArgs = defining ? cronToSchtasks(cron, spec.cronLabels) : [];
+  const localAppData = defining
     ? windowsAbsolute(options.localAppData || options.environment?.LOCALAPPDATA, options)
     : null;
-  const brainPath = installing ? win32.join(localAppData, "FinancialBrain", "brain.cmd") : null;
+  const brainPath = defining ? win32.join(localAppData, "FinancialBrain", "brain.cmd") : null;
   const localTimeZone = options.localTimeZone || Intl.DateTimeFormat().resolvedOptions().timeZone || null;
   const taskName = `com.brain-installer.${slug}.${spec.kind}`;
-  const childArguments = installing ? spec.childArgumentsOf(reference).map((argument, index, args) =>
+  const childArguments = defining ? spec.childArgumentsOf(reference).map((argument, index, args) =>
     index === 1 || args[index - 1] === "--path" ? windowsAbsolute(argument, options) : String(argument)
   ) : [];
-  const runCommand = installing ? taskCommand(brainPath, childArguments) : null;
+  const runCommand = defining ? taskCommand(brainPath, childArguments) : null;
   const createArgs = installing && scheduleArgs
     ? ["/Create", "/F", ...scheduleArgs, "/RL", "LIMITED", "/TN", taskName, "/TR", runCommand]
     : [];
   const plan = {
     cron,
-    expectedRefreshSeconds: installing ? expectedRefreshSecondsForCron(cron, spec.cronLabels) : null,
+    expectedRefreshSeconds: defining ? expectedRefreshSecondsForCron(cron, spec.cronLabels) : null,
     localTimeZone,
     manifestPath: reference.path,
     brainPath,
     taskName,
     childArguments,
     runCommand,
+    scheduleArgs,
     createArgs,
-    queryArgs: ["/Query", "/TN", taskName, "/FO", "LIST", "/V"],
+    queryArgs: ["/Query", "/TN", taskName, "/XML"],
     deleteArgs: ["/Delete", "/TN", taskName, "/F"],
   };
-  if (installing && !scheduleArgs) {
+  if (defining && !scheduleArgs) {
     const supported = "hourly at minute M, every N hours when N divides 24, daily at HH:MM, or weekly on named day(s) at HH:MM";
     const error = new Error(
       `nothing was scheduled. Windows cannot represent the cron "${cron}" exactly with one task. ` +
@@ -248,7 +250,7 @@ function runSchtasks(args, options) {
     if (sourceEnvironment[name] !== undefined) environment[name] = sourceEnvironment[name];
   }
   return run(options.schtasksPath || "schtasks.exe", args, {
-    encoding: "utf8",
+    encoding: options.processEncoding === undefined ? "utf8" : options.processEncoding,
     windowsHide: true,
     shell: false,
     env: environment,
@@ -257,6 +259,106 @@ function runSchtasks(args, options) {
 
 function failureText(result) {
   return [result?.error?.message, result?.stdout, result?.stderr].filter(Boolean).join(" ").trim();
+}
+
+function taskXmlText(value) {
+  if (!Buffer.isBuffer(value)) return String(value || "").replaceAll("\u0000", "").replace(/^\uFEFF/, "");
+  if (value[0] === 0xff && value[1] === 0xfe) return value.toString("utf16le").replace(/^\uFEFF/, "");
+  if (value[0] === 0xfe && value[1] === 0xff) {
+    const swapped = Buffer.from(value);
+    for (let index = 0; index + 1 < swapped.length; index += 2) {
+      [swapped[index], swapped[index + 1]] = [swapped[index + 1], swapped[index]];
+    }
+    return swapped.toString("utf16le").replace(/^\uFEFF/, "");
+  }
+  return value.toString("utf8").replace(/^\uFEFF/, "");
+}
+
+function decodeXml(value) {
+  return String(value || "")
+    .replaceAll("&quot;", "\"")
+    .replaceAll("&apos;", "'")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
+}
+
+function xmlBlock(document, tag) {
+  return new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, "i").exec(document)?.[1] ?? null;
+}
+
+function xmlText(document, tag) {
+  const value = xmlBlock(document, tag);
+  return value === null ? null : decodeXml(value.trim());
+}
+
+function scheduleValue(args, name) {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : null;
+}
+
+function windowsTriggerMatches(xmlDocument, plan) {
+  const trigger = xmlBlock(xmlDocument, "CalendarTrigger");
+  if (!trigger || xmlText(trigger, "Enabled") !== "true") return false;
+  const start = xmlText(trigger, "StartBoundary");
+  const startTime = /T(\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?(?:[+-]\d{2}:\d{2}|Z)?$/i.exec(start || "")?.[1] || null;
+  if (startTime !== scheduleValue(plan.scheduleArgs, "/ST")) return false;
+
+  const cadence = scheduleValue(plan.scheduleArgs, "/SC");
+  const interval = scheduleValue(plan.scheduleArgs, "/MO") || "1";
+  if (cadence === "HOURLY") {
+    const repetition = xmlBlock(trigger, "Repetition") || "";
+    return xmlText(repetition, "Interval") === `PT${interval}H` &&
+      xmlText(repetition, "Duration") === "P1D" &&
+      xmlText(repetition, "StopAtDurationEnd") === "false" &&
+      xmlText(xmlBlock(trigger, "ScheduleByDay") || "", "DaysInterval") === "1";
+  }
+  if (cadence === "DAILY") {
+    return xmlBlock(trigger, "Repetition") === null &&
+      xmlText(xmlBlock(trigger, "ScheduleByDay") || "", "DaysInterval") === "1";
+  }
+  if (cadence === "WEEKLY") {
+    const weekly = xmlBlock(trigger, "ScheduleByWeek") || "";
+    const expectedDays = new Set(String(scheduleValue(plan.scheduleArgs, "/D") || "").split(","));
+    const xmlDayNames = Object.freeze({
+      SUN: "Sunday", MON: "Monday", TUE: "Tuesday", WED: "Wednesday",
+      THU: "Thursday", FRI: "Friday", SAT: "Saturday",
+    });
+    return xmlText(weekly, "WeeksInterval") === "1" &&
+      [...expectedDays].every((day) => new RegExp(`<${xmlDayNames[day]}\\s*/>`, "i").test(weekly)) &&
+      Object.entries(xmlDayNames).every(([day, tag]) => expectedDays.has(day) || !new RegExp(`<${tag}\\s*/>`, "i").test(weekly));
+  }
+  return false;
+}
+
+function inspectWindowsTaskDefinition(document, plan) {
+  const task = String(document || "");
+  const settings = xmlBlock(task, "Settings") || "";
+  const trigger = xmlBlock(task, "CalendarTrigger") || "";
+  const enabled = xmlText(settings, "Enabled") === "true" && xmlText(trigger, "Enabled") === "true";
+  const uri = String(xmlText(xmlBlock(task, "RegistrationInfo") || "", "URI") || "").replace(/^\\+/, "");
+  const exec = xmlBlock(task, "Exec") || "";
+  const command = xmlText(exec, "Command");
+  const argumentsText = xmlText(exec, "Arguments");
+  const action = [command, argumentsText].filter((value) => value !== null && value !== "").join(" ");
+  const definitionMatches = enabled && uri === plan.taskName &&
+    xmlText(xmlBlock(task, "Principal") || "", "RunLevel") === "LeastPrivilege" &&
+    action === plan.runCommand && windowsTriggerMatches(task, plan);
+  return { enabled, definitionMatches };
+}
+
+function unhealthyWindowsStatus(plan, output, errorCode, scheduleError, state) {
+  return {
+    ...plan,
+    installed: false,
+    enabled: state !== "disabled",
+    definitionMatches: false,
+    definitionDrift: state === "drift",
+    errorCode,
+    scheduleError,
+    state,
+    output,
+  };
 }
 
 export function installWindowsScheduler(manifestPath, options = {}) {
@@ -276,9 +378,34 @@ export function installWindowsScheduler(manifestPath, options = {}) {
 
 export function statusWindowsScheduler(manifestPath, options = {}) {
   const plan = options.plan || buildWindowsSchedulerPlan(manifestPath, { ...options, action: "status" });
-  const result = runSchtasks(plan.queryArgs, options);
+  // /XML is UTF-16 on Windows. Keep bytes until the BOM has selected the
+  // decoder; paths outside the active code page are part of the task identity.
+  const result = runSchtasks(plan.queryArgs, { ...options, processEncoding: options.processEncoding ?? null });
   if (!result?.error && result?.status === 0) {
-    return { ...plan, installed: true, output: String(result.stdout || "").trim() };
+    const output = taskXmlText(result.stdout).trim();
+    const observed = inspectWindowsTaskDefinition(output, plan);
+    if (!observed.enabled) {
+      return unhealthyWindowsStatus(
+        plan, output, "WINDOWS_SCHEDULE_DISABLED", "the current Windows task is disabled", "disabled",
+      );
+    }
+    if (!observed.definitionMatches) {
+      return unhealthyWindowsStatus(
+        plan, output, "WINDOWS_SCHEDULE_DRIFT",
+        "the current Windows task definition does not match this manifest and schedule", "drift",
+      );
+    }
+    return {
+      ...plan,
+      installed: true,
+      enabled: true,
+      definitionMatches: true,
+      definitionDrift: false,
+      errorCode: null,
+      scheduleError: null,
+      state: "ready",
+      output,
+    };
   }
   const detail = failureText(result);
   if (ABSENT_TASK.test(detail)) return { ...plan, installed: false, output: detail };

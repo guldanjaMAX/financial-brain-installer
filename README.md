@@ -1035,12 +1035,15 @@ the CLI refuses before authorizing document deletion.
   <gmail|calendar|imap>`. The same install, status, and remove flow works with a
   per-user LaunchAgent on macOS and a current-user Task Scheduler entry on
   Windows. Linux still needs a separately configured scheduler.
-- **Installed is not the same as proven.** Schedule status stays yellow after
+- **Installed is not the same as proven.** A schedule is installed only while
+  its current enabled Task Scheduler or loaded LaunchAgent definition still
+  matches the manifest, action, identity, and cadence. Status stays yellow after
   installation, stays yellow after the first unattended success, and turns
   green only after the Brain has stored a second distinct successful run. The
-  proof is server-side, so a local task definition alone cannot claim that the
-  source is actually refreshing. The reported next run comes from the declared
-  cron in the scheduler machine's timezone, not from the freshness grace period.
+  proof is server-side, so a healthy local task definition alone cannot claim
+  that the source is actually refreshing. The reported next run comes from the
+  declared cron in the scheduler machine's timezone, not from the freshness
+  grace period.
 - **The Brain notices a missed refresh.** Its Worker cron checks only the small
   source registry and indexed schedule events. When a source goes more than one
   expected cadence plus grace without a successful unattended run, status and

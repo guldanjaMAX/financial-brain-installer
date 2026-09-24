@@ -2360,7 +2360,11 @@ async function handleSourceExpectation(env, request) {
       `INSERT INTO sources (name,kind,status,created_at,expected_refresh_seconds)
        VALUES (?1,?2,'pending',?3,?4)
        ON CONFLICT(name) DO UPDATE SET
-         expected_refresh_seconds=excluded.expected_refresh_seconds
+         expected_refresh_seconds=excluded.expected_refresh_seconds,
+         stale_reason=CASE
+           WHEN sources.stale_reason='SCHEDULE_MISSED' THEN NULL
+           ELSE sources.stale_reason
+         END
        WHERE lower(trim(sources.kind))=excluded.kind`
     ).bind(source, kind, at, expected),
     env.DB.prepare(

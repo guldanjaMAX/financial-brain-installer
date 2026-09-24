@@ -29,7 +29,8 @@ function sourceReceiptSqliteEnv() {
     CREATE TABLE sources (
       name TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
       created_at TEXT NOT NULL, last_ingest_at TEXT, document_count INTEGER NOT NULL DEFAULT 0,
-      last_complete_sweep_at TEXT, stale_reason TEXT
+      last_complete_sweep_at TEXT, stale_reason TEXT, expected_refresh_seconds INTEGER,
+      zone TEXT
     );
     CREATE TABLE source_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT NOT NULL,
@@ -47,6 +48,9 @@ function sourceReceiptSqliteEnv() {
       metrics_version INTEGER NOT NULL DEFAULT 0, proposed_deletes INTEGER NOT NULL DEFAULT 0,
       delete_action TEXT, refusal_reason TEXT, confirmed_from TEXT, confirmed_through TEXT,
       target_from TEXT, target_through TEXT, error TEXT, failure_evidence TEXT
+    );
+    CREATE TABLE document_source_inventory (
+      source TEXT PRIMARY KEY
     );
   `);
   const prepare = (sql) => {
@@ -1797,6 +1801,72 @@ const zeroChunkExpectedReturn = {
     body: JSON.stringify({ source: "Drive %" }),
   }), env, {});
   check("an unsafe source receipt name is refused", bad.status === 400, String(bad.status));
+}
+{
+  const cases = [
+    { expected: null, wanted: "not_installed" },
+    { expected: 3_600, wanted: "waiting_first" },
+  ];
+  for (const scenario of cases) {
+    const { database, env } = sourceReceiptSqliteEnv();
+    try {
+      database.prepare(
+        `INSERT INTO sources
+          (name,kind,status,created_at,last_ingest_at,document_count,stale_reason,expected_refresh_seconds)
+         VALUES ('gmail','gmail','ready','2026-09-20T00:00:00.000Z','2026-09-24T17:00:00.000Z',1,'SCHEDULE_MISSED',3600)`
+      ).run();
+      const payload = scenario.expected === null
+        ? { source: "gmail", expected_refresh_seconds: null }
+        : {
+            source: "gmail", expected_refresh_seconds: scenario.expected,
+            schedule_cron: "5 * * * *", schedule_timezone: "UTC",
+          };
+      const expectation = await worker.fetch(new Request("https://b.example/api/admin/brain/source-expectation", {
+        method: "POST",
+        headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      }), env, {});
+      const freshness = await worker.fetch(new Request("https://b.example/api/admin/brain/freshness", {
+        headers: { "X-Admin-Key": "k" },
+      }), env, {});
+      const body = await freshness.json();
+      const source = database.prepare(
+        "SELECT stale_reason,expected_refresh_seconds FROM sources WHERE name='gmail'"
+      ).get();
+      const event = database.prepare(
+        "SELECT event FROM source_events WHERE source_name='gmail' ORDER BY id DESC LIMIT 1"
+      ).get();
+      check(`a schedule ${scenario.expected === null ? "removal" : "reinstall"} clears only scheduler-owned missed state`,
+        expectation.status === 200 && freshness.status === 200 && source?.stale_reason === null &&
+          (source?.expected_refresh_seconds ?? null) === scenario.expected &&
+          event?.event === (scenario.expected === null ? "schedule_remove" : "schedule_install") &&
+          body.sources?.[0]?.state !== "missed" && body.sources?.[0]?.schedule?.state === scenario.wanted,
+        JSON.stringify({ source, event, body }));
+    } finally {
+      database.close();
+    }
+  }
+}
+{
+  const { database, env } = sourceReceiptSqliteEnv();
+  try {
+    for (const [name, reason] of [["imap-auth", "AUTH_EXPIRED"], ["imap-review", "SAFETY_REVIEW_REQUIRED"]]) {
+      database.prepare(
+        `INSERT INTO sources
+          (name,kind,status,created_at,document_count,stale_reason,expected_refresh_seconds)
+         VALUES (?, 'imap', 'error', '2026-09-20T00:00:00.000Z', 0, ?, 3600)`
+      ).run(name, reason);
+      const response = await worker.fetch(new Request("https://b.example/api/admin/brain/source-expectation", {
+        method: "POST",
+        headers: { "X-Admin-Key": "k", "content-type": "application/json" },
+        body: JSON.stringify({ source: name, expected_refresh_seconds: null }),
+      }), env, {});
+      check(`schedule changes preserve ${reason} connector state`,
+        response.status === 200 && database.prepare("SELECT stale_reason FROM sources WHERE name=?").get(name)?.stale_reason === reason);
+    }
+  } finally {
+    database.close();
+  }
 }
 
 /* ---- unattended completions create idempotent server-side schedule proof ---- */

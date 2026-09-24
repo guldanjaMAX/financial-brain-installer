@@ -129,4 +129,41 @@ const manifest = {
     result.complete === true && result.sources.every((source) => source.green), JSON.stringify(result));
 }
 
+{
+  const whatsappManifest = { corpora: { whatsapp: { enabled: true, source: "whatsapp" } } };
+  let daemonReads = 0;
+  let drainReads = 0;
+  const result = await collectHandoffCheck("/fixture/brain.manifest.json", {
+    manifest: whatsappManifest,
+    platform: "darwin",
+    readFreshness: async () => ({ sources: [{
+      name: "whatsapp", kind: "whatsapp", source_status: "ready", state: "ok", reason: null,
+      schedule: {
+        state: "proven", installed: true, first_run_at: "2026-09-24T16:00:00.000Z",
+        second_run_observed: true, next_run_at: "2026-09-24T18:01:00.000Z",
+      },
+    }] }),
+    whatsappDaemon: {
+      statusWhatsappDaemon() {
+        daemonReads++;
+        return { installed: true, loaded: false, definitionMatches: true, definitionDrift: false, planError: null };
+      },
+    },
+    whatsappDrainScheduler: {
+      statusWhatsappDrainScheduler() {
+        drainReads++;
+        return {
+          installed: true, loaded: true, enabled: true, definitionMatches: true,
+          definitionDrift: false, loadedDefinitionMatches: true, interpreterPresent: true,
+          scheduleError: null, lastRunSucceeded: true,
+        };
+      },
+    },
+  });
+  check("an unloaded capture daemon reaches both local decisions and keeps WhatsApp handoff red",
+    daemonReads === 1 && drainReads === 1 && result.complete === false &&
+      result.sources[0]?.schedule_installed === false && result.sources[0]?.green === false,
+    JSON.stringify(result));
+}
+
 console.log(`\nhandoff check: all ${ran} checks passed`);

@@ -36,7 +36,9 @@ asset publication.
   shows connection, schedule installation, first and second unattended runs,
   next run, and last error for every enabled source. It stays nonzero until all
   in-scope sources are green or the owner explicitly records an exclusion in
-  the manifest.
+  the manifest. A local schedule now counts as installed only when the current
+  Windows task XML or loaded macOS LaunchAgent is enabled and exactly matches
+  its manifest-bound identity, action, and cadence.
 
 - **Windows can now keep Drive, watched folders, and supported providers up to
   date without an open terminal.** `brain schedule` creates one stable

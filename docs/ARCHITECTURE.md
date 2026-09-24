@@ -438,11 +438,14 @@ Local scheduler state never supplies that proof by itself.
 
 The Worker cron runs `runMissedSourceWatchdog` alongside existing bounded
 maintenance. It performs one source-registry read ordered by the source primary
-key. Correlated latest-install and latest-success lookups use the existing
-`source_events(source_name, at)` index. It never counts corpus rows. A schedule
-is missed only after its expected cadence plus a bounded grace window. The cron
-sets the closed `SCHEDULE_MISSED` reason without overwriting an existing
-connector error or safety review; the next successful source receipt clears it.
+key. The latest-success lookup is bounded to events at or after the latest
+install, so an old run cannot make a recent reinstall immediately missed.
+Those correlated lookups use the existing `source_events(source_name, at)`
+index. The watchdog never counts corpus rows. A schedule is missed only after
+its expected cadence plus a bounded grace window. The cron sets the closed
+`SCHEDULE_MISSED` reason without overwriting an existing connector error or
+safety review. A schedule removal, reinstall, or next successful source receipt
+clears only that scheduler-owned reason.
 Freshness, owner status, reliability alerts, and think coverage gaps all expose
 the missed state with a plain recovery action.
 
@@ -457,10 +460,12 @@ machine-local scheduler status. It is read-only and never installs, repairs,
 runs, or removes a task. The manifest defines scope: every enabled corpus is in
 scope unless its exact source name appears in
 `operations.handoff_out_of_scope_sources`. A row is green only when the source
-has a non-pending server receipt, the local schedule is present, the first and
-second unattended runs are stored, the schedule proof is current, and no local
-or server-side error remains. Unknown or unsupported enabled sources fail the
-gate rather than disappearing.
+has a non-pending server receipt, the current local schedule definition is
+enabled and exactly manifest-bound, the first and second unattended runs are
+stored, the schedule proof is current, and no local or server-side error
+remains. Windows uses the queried task XML. macOS checks the installed plist and
+the loaded LaunchAgent definition. Unknown or unsupported enabled sources fail
+the gate rather than disappearing.
 
 ## D1, FTS5, Vectorize, and the outbox
 

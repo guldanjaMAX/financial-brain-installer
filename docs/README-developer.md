@@ -915,10 +915,13 @@ desktop credentials and all Cloudflare deployment credentials are absent.
 `google_token_store` persists the connection's storage choice because launchd
 does not inherit `BRAIN_GOOGLE_TOKEN_STORE=file` from the Terminal that ran
 OAuth. Use `auto` for the normal macOS Keychain default, or `file` only when that
-fallback was chosen deliberately. Status compares the installed plist with the
-current manifest and code paths, reports definition drift, and surfaces
-launchd's run count and last exit code. Windows `--status` reads the verbose
-Task Scheduler definition, and `--remove` deletes the same stable task name.
+fallback was chosen deliberately. Status compares both the installed plist and
+the loaded LaunchAgent with the current manifest, action, code paths, and
+cadence. An unloaded, disabled, or drifted job is not healthy. Status also
+surfaces launchd's run count and last exit code. Windows `--status` reads the
+exact Task Scheduler XML and requires the enabled state, task identity, action,
+manifest binding, cadence, and limited run level to match. `--remove` deletes
+the same stable task name.
 Windows accepts an exact one-entry translation for hourly schedules at minute
 M, every N hours when N divides 24, daily schedules, and weekly schedules on
 one or more numeric weekdays. Any other valid five-field cron is refused before
@@ -971,8 +974,11 @@ read-only: it reads `/api/admin/brain/freshness` once and inspects machine-local
 schedule definitions. Each in-scope row reports `connected`,
 `schedule_installed`, `first_run`, `second_run_observed`, `next_run`, and
 `last_error`. Exit code 0 means every row is green; exit code 2 means handoff is
-not ready. A new scheduler install records its five-field cron and the scheduler
-machine's IANA timezone in the server-side schedule event. `next_run` is the next
+not ready. `schedule_installed` means the current Windows XML or loaded macOS
+definition is enabled and exactly matches the manifest-bound schedule, not only
+that a same-named local file or task exists. A new scheduler install records its
+five-field cron and the scheduler machine's IANA timezone in the server-side
+schedule event. `next_run` is the next
 actual cron firing after the read time, including weekday gaps. Older or manual
 expectations without that metadata report an unknown next run instead of adding
 the watchdog's longest allowed gap to the previous run.
