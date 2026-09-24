@@ -539,8 +539,11 @@ original file bytes, and the manifest's R2 bucket is not wired for originals.
 That is why a file with no other proved external copy needs an explicit `keep`
 `archive`, or `remove` choice. Archive requires an existing owner-held encrypted
 folder plus `--archive-to <folder> --archive-encrypted`; the copy is hash-read
-back before the original moves. The approved command moves files to the operating system's
-recoverable Trash and never runs `rm`:
+back before the original moves. An outside copy counts only when it is a
+distinct physical file outside any overlapping declared root and still has the
+same bytes immediately before the move. The approved command holds the source
+lease, re-hashes the candidate, moves it to the operating system's recoverable
+Trash, and records it consumed only after that move. It never runs `rm`:
 
 ```bash
 brain cleanup-local ./brain.manifest.json --apply \

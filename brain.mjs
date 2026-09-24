@@ -64,10 +64,13 @@ import { ensureBankFeedWorkerSecrets } from "./operations/bank-feed-owner-secret
 import {
   buildLocalCleanupPlan,
   executeLocalCleanup,
+  inspectCleanupFile,
   markConsumed,
   missingOngoingKeys,
+  reconcilePendingCleanupMove,
   retentionEligible,
   retireStagingSource,
+  sameFilesystemIdentity,
   sourceRole,
 } from "./operations/local-staging-cleanup.mjs";
 import {
@@ -10820,6 +10823,36 @@ function localCleanupDeclarations(manifest) {
   return [...unique.values()];
 }
 
+function localCleanupRootsOverlap(left, right) {
+  const fromLeft = relative(left, right);
+  const fromRight = relative(right, left);
+  const within = (value) => value === "" || (!isAbsolute(value) && value !== ".." && !value.startsWith(`..${sep}`));
+  return within(fromLeft) || within(fromRight);
+}
+
+async function withLocalCleanupSourceLocks({ manifestPath, staging, options }, task, index = 0, guards = []) {
+  if (index >= staging.length) {
+    return task(() => {
+      for (const guard of guards) guard();
+    });
+  }
+  const declaration = staging[index];
+  const lockTask = options.withSourceIngestLock ?? withSourceIngestLock;
+  const runtimeOptions = sourceIngestLockRuntimeOptions(options);
+  const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName: declaration.source });
+  return lockTask({
+    manifestPath,
+    sourceName: declaration.source,
+    statePath,
+    ...runtimeOptions,
+  }, ({ assertOwned }) => withLocalCleanupSourceLocks(
+    { manifestPath, staging, options },
+    task,
+    index + 1,
+    [...guards, assertOwned],
+  ));
+}
+
 async function requestLocalCleanupProof(base, adminKey, body, fetchImpl = fetch) {
   const response = await fetchImpl(`${base}/api/admin/brain/local-cleanup-proof`, {
     method: "POST",
@@ -10849,7 +10882,58 @@ export async function cmdCleanupLocal(manifestPath, options = {}) {
       ? `no active staging folder is declared for source "${sourceFilter}".`
       : "no active staging folder is declared. Mark an export folder role staging or one-time-import first.");
   }
+  if (flags.apply && options.cleanupLocksHeld !== true) {
+    const orderedStaging = [...new Map(staging.map((item) => [item.source, item])).values()]
+      .sort((left, right) => left.source.localeCompare(right.source));
+    try {
+      return await withLocalCleanupSourceLocks(
+        { manifestPath, staging: orderedStaging, options },
+        (assertOwned) => cmdCleanupLocal(manifestPath, {
+          ...options,
+          flags,
+          cleanupLocksHeld: true,
+          cleanupAssertOwned: assertOwned,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SourceIngestLockError) die(error.message);
+      throw error;
+    }
+  }
   const library = await (options.ingestLib ?? ingestLib)();
+  if (flags.apply) {
+    for (const declaration of staging) {
+      const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName: declaration.source });
+      const state = library.loadState(statePath);
+      const pending = state.cleanup_pending && typeof state.cleanup_pending === "object"
+        ? state.cleanup_pending
+        : {};
+      let changed = false;
+      for (const [key, record] of Object.entries(pending)) {
+        if (!record || typeof record !== "object" || typeof record.path !== "string" ||
+            typeof record.proof !== "string" || !record.proof) {
+          throw new TypeError("a pending cleanup move is malformed; no cleanup state was changed");
+        }
+        const reconciled = await reconcilePendingCleanupMove(record, {
+          ...(options.trash ? { trash: options.trash } : {}),
+        });
+        if (reconciled === "moved") {
+          markConsumed(state, {
+            source: declaration.source,
+            key,
+            proof: record.proof,
+            consumed_at: Number(record.move_started_at) || Date.now(),
+          });
+        }
+        delete pending[key];
+        changed = true;
+      }
+      if (changed) {
+        options.cleanupAssertOwned?.();
+        library.saveState(statePath, state);
+      }
+    }
+  }
   const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
   const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
   const base = await resolveBase(m, m.brain?.domain ? null : await (options.resolveAccount ?? resolveAccount)(m));
@@ -10859,15 +10943,22 @@ export async function cmdCleanupLocal(manifestPath, options = {}) {
   // Only a second local original observed right now is classified as another
   // copy. A matching Brain source or stale provider receipt is not proof that
   // bytes still exist outside the Brain, so those stay in the only-copy group.
-  const ongoingHashes = new Set();
-  for (const declaration of declarations.filter((item) => sourceRole(item) === "ongoing" && item.retired !== true)) {
+  const stagingRoots = staging.map((item) => realpathSync(resolve(item.path)));
+  const ongoingOriginals = new Map();
+  for (const declaration of declarations.filter((item) => {
+    if (sourceRole(item) !== "ongoing" || item.retired === true) return false;
+    const ongoingRoot = realpathSync(resolve(item.path));
+    return !stagingRoots.some((stagingRoot) => localCleanupRootsOverlap(ongoingRoot, stagingRoot));
+  })) {
     const walked = library.walk(declaration.path, { privatePrefixes: m.safety?.private_path_prefixes || [] });
     if (!walked.complete) continue;
     for (const file of walked.files) {
-      const observed = await library.observeLocalOriginal(file);
-      if (observed?.original_content_sha256) {
-        ongoingHashes.add(`${observed.original_content_sha256}:${observed.original_byte_count}`);
-      }
+      let observed;
+      try { observed = inspectCleanupFile(file.full); } catch { continue; }
+      const digest = `${observed.original_content_sha256}:${observed.bytes}`;
+      const matches = ongoingOriginals.get(digest) || [];
+      matches.push(observed);
+      ongoingOriginals.set(digest, matches);
     }
   }
 
@@ -10882,25 +10973,22 @@ export async function cmdCleanupLocal(manifestPath, options = {}) {
     traversalGaps.set(declaration.source, walked.skipped.length);
     const candidates = [];
     for (const file of walked.files) {
-      const observed = await library.observeLocalOriginal(file);
-      if (!observed?.original_content_sha256 || !Number.isSafeInteger(observed.original_byte_count)) continue;
+      let observed;
+      try { observed = inspectCleanupFile(file.full); } catch { continue; }
       if (flags.automatic && declaration.retention_days && !retentionEligible(
-        { mtime_ms: lstatSync(file.full).mtimeMs },
+        { mtime_ms: observed.mtime_ms },
         { retention_days: declaration.retention_days },
       )) continue;
       const key = String(file.rel).split(sep).join("/");
-      const stat = lstatSync(file.full);
       allFiles.push({
         source: declaration.source,
         key,
-        path: file.full,
-        bytes: observed.original_byte_count,
-        mtime_ms: stat.mtimeMs,
+        ...observed,
       });
       candidates.push({
         source_id: key,
         original_content_sha256: observed.original_content_sha256,
-        original_byte_count: observed.original_byte_count,
+        original_byte_count: observed.bytes,
       });
     }
     for (let offset = 0; offset < candidates.length; offset += 500) {
@@ -10916,9 +11004,14 @@ export async function cmdCleanupLocal(manifestPath, options = {}) {
         }
         confirmations[`${declaration.source}:${candidate.source_id}`] = {
           ...confirmation,
-          external_original: ongoingHashes.has(
+          external_original: (ongoingOriginals.get(
             `${candidate.original_content_sha256}:${candidate.original_byte_count}`,
-          ) ? "another_local_folder" : null,
+          ) || []).find((external) => {
+            const stagingFile = allFiles.find((item) =>
+              item.source === declaration.source && item.key === candidate.source_id);
+            return stagingFile && external.canonical_path !== stagingFile.canonical_path &&
+              !sameFilesystemIdentity(external.filesystem_identity, stagingFile.filesystem_identity);
+          }) || null,
         };
       }
     }
@@ -11015,29 +11108,74 @@ export async function cmdCleanupLocal(manifestPath, options = {}) {
   if (plan.only_copies.length && !["keep", "remove", "archive"].includes(choice)) {
     die("files that may be the only external copy need --only-copy keep, archive, or remove.");
   }
-  const selected = [
-    ...plan.copies,
-    ...(["remove", "archive"].includes(choice) ? plan.only_copies : []),
-  ];
   const states = new Map();
-  for (const item of selected) {
+  const stateFor = (item) => {
     const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName: item.source });
-    const state = states.get(statePath) || library.loadState(statePath);
-    markConsumed(state, {
-      source: item.source,
-      key: item.key,
-      proof: item.proof,
-      consumed_at: Date.now(),
-    });
+    if (!states.has(statePath)) states.set(statePath, library.loadState(statePath));
+    return { statePath, state: states.get(statePath) };
+  };
+  const persist = (statePath, state) => {
+    options.cleanupAssertOwned?.();
     library.saveState(statePath, state);
-    states.set(statePath, state);
-  }
+  };
   const receipt = await executeLocalCleanup(plan, {
     approve: approvedPlan,
     onlyCopyChoice: choice || (plan.only_copies.length ? null : "keep"),
     trash: options.trash,
     archive: archiveFile,
     now: options.now,
+    beforeMove: async (item, moveContext) => {
+      const { statePath, state } = stateFor(item);
+      if (!state.cleanup_pending || typeof state.cleanup_pending !== "object") state.cleanup_pending = {};
+      state.cleanup_pending[item.key] = {
+        source: item.source,
+        proof: item.proof,
+        path: item.path,
+        canonical_path: item.canonical_path,
+        bytes: item.bytes,
+        original_content_sha256: item.original_content_sha256,
+        filesystem_identity: item.filesystem_identity,
+        ...(moveContext ? { quarantine_path: moveContext.quarantine_path } : {}),
+        phase: "intent",
+        move_started_at: Date.now(),
+      };
+      persist(statePath, state);
+    },
+    afterIsolate: async (item) => {
+      const { statePath, state } = stateFor(item);
+      const pending = state.cleanup_pending?.[item.key];
+      if (!pending) throw new Error("cleanup move intent disappeared before Trash");
+      pending.phase = "isolated";
+      persist(statePath, state);
+    },
+    afterMove: async (item) => {
+      const { statePath, state } = stateFor(item);
+      markConsumed(state, {
+        source: item.source,
+        key: item.key,
+        proof: item.proof,
+        consumed_at: Date.now(),
+      });
+      if (state.cleanup_pending) delete state.cleanup_pending[item.key];
+      persist(statePath, state);
+    },
+    onMoveError: async (item) => {
+      const { statePath, state } = stateFor(item);
+      const pending = state.cleanup_pending?.[item.key];
+      if (existsSync(item.path) && (!pending?.quarantine_path || !existsSync(pending.quarantine_path))) {
+        if (state.cleanup_pending) delete state.cleanup_pending[item.key];
+      } else if (pending?.phase === "isolated" &&
+          (!pending.quarantine_path || !existsSync(pending.quarantine_path))) {
+        markConsumed(state, {
+          source: item.source,
+          key: item.key,
+          proof: item.proof,
+          consumed_at: Date.now(),
+        });
+        if (state.cleanup_pending) delete state.cleanup_pending[item.key];
+      }
+      persist(statePath, state);
+    },
   });
   const receiptPath = join(dirname(resolve(manifestPath)), ".brain-cleanup-receipts.jsonl");
   appendFileSync(receiptPath, `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
@@ -11341,6 +11479,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     presentKeys: candidateLocalKeys,
     role,
     consumed: state.consumed,
+    cleanupPending: state.cleanup_pending,
   });
   if (scannerPolicyChanged && missingScannerKeys.length) {
     // A dry run previews rather than acts, but it must preview the actual
@@ -11415,6 +11554,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
         presentKeys: protectedLocalSkipKeys,
         role,
         consumed: state.consumed,
+        cleanupPending: state.cleanup_pending,
       })
       .filter((key) => !adjudicatedRemovalSet.has(key));
   const scannerRescanSkips = [];
@@ -14028,9 +14168,9 @@ export function loadSourceRegistry(commands = {}) {
         const activeFolders = folders.filter((folder) => folder.retired !== true);
         if (!activeFolders.length) {
           return {
-            unavailable: {
+            skipped: {
               reason: "all declared one-time folder sources are retired; their documents remain in the Brain",
-              fix: "none; the source will not be walked again unless its manifest declaration is deliberately reactivated",
+              lifecycle_state: "retired_complete",
             },
           };
         }
@@ -14198,7 +14338,11 @@ export async function planLoad({ m, manifestPath, flags = {}, registry, probes, 
             },
           };
         }
-        if (legs?.unavailable) {
+        if (legs?.skipped) {
+          entry.status = "skipped";
+          entry.reason = legs.skipped.reason;
+          entry.lifecycle_state = legs.skipped.lifecycle_state || "intentional_skip";
+        } else if (legs?.unavailable) {
           entry.status = "unavailable";
           entry.reason = legs.unavailable.reason;
           entry.fix = legs.unavailable.fix || null;

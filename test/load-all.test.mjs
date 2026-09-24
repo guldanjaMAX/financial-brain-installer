@@ -230,6 +230,28 @@ try {
       ]), JSON.stringify(order));
   }
 
+  /* -------- retired one-time folders are complete lifecycle skips, not errors */
+  {
+    const dir = mkdtempSync(join(sandbox, "retired-"));
+    const manifestPath = writeManifest(dir, {
+      upload: { enabled: true, folders: [
+        { path: join(dir, "retired-source"), source: "snapshot", role: "one-time-import", retired: true },
+      ] },
+    });
+    let walks = 0;
+    const result = await runLoad(manifestPath, {
+      flags: {},
+      commands: { ingestLocal: async () => { walks++; throw new Error("retired source walked"); } },
+    });
+    check("all-retired one-time folders do not walk and the overall load succeeds",
+      walks === 0 && !result.error && result.result?.skipped === 1,
+      `walks=${walks} error=${result.error?.message || "none"}`);
+    check("the retired lifecycle remains visible as an intentional completed skip",
+      /Folders on this machine.*all declared one-time folder sources are retired/.test(result.text) &&
+      result.result?.entries[0]?.lifecycle_state === "retired_complete",
+      result.text);
+  }
+
   /* -------- provider sources route when connected and keep their proof boundary */
   {
     const dir = mkdtempSync(join(sandbox, "providers-"));

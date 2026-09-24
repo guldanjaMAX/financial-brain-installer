@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, renameSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,19 +8,36 @@ import test from "node:test";
 import {
   buildLocalCleanupPlan,
   executeLocalCleanup,
+  inspectCleanupFile,
   markConsumed,
   missingOngoingKeys,
   moveFileToSystemTrash,
+  reconcilePendingCleanupMove,
   retentionEligible,
   retireStagingSource,
   sourceRole,
 } from "../operations/local-staging-cleanup.mjs";
 
 const files = [
-  { source: "drop", key: "copy.txt", path: "/stage/copy.txt", bytes: 12, mtime_ms: 1 },
-  { source: "drop", key: "only.txt", path: "/stage/only.txt", bytes: 34, mtime_ms: 2 },
-  { source: "work", key: "live.txt", path: "/work/live.txt", bytes: 56, mtime_ms: 3 },
+  { source: "drop", key: "copy.txt", path: "/stage/copy.txt", canonical_path: "/stage/copy.txt", bytes: 12, mtime_ms: 1, original_content_sha256: "1".repeat(64), filesystem_identity: { dev: "1", ino: "1" } },
+  { source: "drop", key: "only.txt", path: "/stage/only.txt", canonical_path: "/stage/only.txt", bytes: 34, mtime_ms: 2, original_content_sha256: "2".repeat(64), filesystem_identity: { dev: "1", ino: "2" } },
+  { source: "work", key: "live.txt", path: "/work/live.txt", canonical_path: "/work/live.txt", bytes: 56, mtime_ms: 3, original_content_sha256: "3".repeat(64), filesystem_identity: { dev: "1", ino: "3" } },
 ];
+
+const external = (label) => ({
+  path: `/${label}/copy.txt`,
+  canonical_path: `/${label}/copy.txt`,
+  bytes: 12,
+  original_content_sha256: "1".repeat(64),
+  filesystem_identity: { dev: "2", ino: label === "documents" ? "1" : "2" },
+});
+
+const identityOf = (path) => {
+  const stat = statSync(path);
+  return { dev: String(stat.dev), ino: String(stat.ino) };
+};
+
+const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 test("source roles default to ongoing and accept the two staging spellings", () => {
   assert.equal(sourceRole({}), "ongoing");
@@ -37,9 +55,9 @@ test("cleanup preview reaches confirmed staging files and never ongoing files", 
       work: { role: "ongoing" },
     },
     confirmations: {
-      "drop:copy.txt": { accepted_resolution_current: true, external_original: "documents" },
+      "drop:copy.txt": { accepted_resolution_current: true, external_original: external("documents") },
       "drop:only.txt": { accepted_resolution_current: true, external_original: null },
-      "work:live.txt": { accepted_resolution_current: true, external_original: "drive" },
+      "work:live.txt": { accepted_resolution_current: true, external_original: external("drive") },
     },
   });
   assert.deepEqual(plan.copies.map((item) => item.key), ["copy.txt"]);
@@ -69,7 +87,7 @@ test("approved cleanup uses the injected system Trash operation, never a delete 
     files: [files[0], files[1]],
     sources: { drop: { role: "staging" } },
     confirmations: {
-      "drop:copy.txt": { accepted_resolution_current: true, external_original: "drive" },
+      "drop:copy.txt": { accepted_resolution_current: true, external_original: external("drive") },
       "drop:only.txt": { accepted_resolution_current: true, external_original: null },
     },
   });
@@ -79,6 +97,7 @@ test("approved cleanup uses the injected system Trash operation, never a delete 
     approve: plan.plan_id,
     onlyCopyChoice: "remove",
     assertCurrent: async () => {},
+    assertExternalOriginal: async () => {},
     trash: async (path) => trashed.push(path),
     remove: async (path) => removed.push(path),
     now: () => "2026-09-24T12:00:00.000Z",
@@ -87,6 +106,60 @@ test("approved cleanup uses the injected system Trash operation, never a delete 
   assert.deepEqual(removed, []);
   assert.equal(receipt.moved_to_trash, 2);
   assert.equal(receipt.recoverable, true);
+});
+
+test("the plan fingerprint binds the proved bytes and stable filesystem identity", () => {
+  const common = {
+    ...files[0],
+    original_content_sha256: "a".repeat(64),
+    filesystem_identity: { dev: "1", ino: "2" },
+  };
+  const make = (file) => buildLocalCleanupPlan({
+    files: [file],
+    sources: { drop: { role: "staging" } },
+    confirmations: { "drop:copy.txt": { accepted_resolution_current: true, external_original: null } },
+  });
+  const baseline = make(common);
+  const changedBytes = make({ ...common, original_content_sha256: "b".repeat(64) });
+  const changedIdentity = make({ ...common, filesystem_identity: { dev: "1", ino: "3" } });
+  assert.notEqual(baseline.plan_id, changedBytes.plan_id);
+  assert.notEqual(baseline.plan_id, changedIdentity.plan_id);
+});
+
+test("same-size same-mtime byte replacement reaches validation but never calls Trash", async () => {
+  const root = mkdtempSync(join(tmpdir(), "brain-cleanup-byte-swap-"));
+  const path = join(root, "candidate.txt");
+  writeFileSync(path, "AAAA");
+  const before = statSync(path);
+  const originalIdentity = identityOf(path);
+  writeFileSync(path, "BBBB");
+  utimesSync(path, before.atimeMs / 1000, before.mtimeMs / 1000);
+  const replaced = statSync(path);
+  const plan = buildLocalCleanupPlan({
+    files: [{
+      source: "drop",
+      key: "candidate.txt",
+      path,
+      bytes: before.size,
+      mtime_ms: replaced.mtimeMs,
+      canonical_path: path,
+      original_content_sha256: sha256("AAAA"),
+      filesystem_identity: originalIdentity,
+    }],
+    sources: { drop: { role: "staging" } },
+    confirmations: { "drop:candidate.txt": { accepted_resolution_current: true, external_original: null } },
+  });
+  let trashCalls = 0;
+  await assert.rejects(
+    executeLocalCleanup(plan, {
+      approve: plan.plan_id,
+      onlyCopyChoice: "remove",
+      trash: async () => { trashCalls++; },
+    }),
+    /changed after preview/i,
+  );
+  assert.equal(plan.decision_points, 1, "the cleanup decision point was reached");
+  assert.equal(trashCalls, 0, "unproved replacement bytes never reach Trash");
 });
 
 test("the Linux adapter invokes the system Trash provider, never rm", async () => {
@@ -104,6 +177,33 @@ test("the Linux adapter invokes the system Trash provider, never rm", async () =
   });
   assert.deepEqual(calls, [{ command: "gio", args: ["trash", "--", file] }]);
   assert.equal(calls.length, 1, "the Trash decision point was reached exactly once");
+});
+
+test("an interrupted private quarantine is re-verified and resumed from pending state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "brain-cleanup-resume-"));
+  const source = join(root, "candidate.txt");
+  writeFileSync(source, "fixture bytes");
+  const observed = inspectCleanupFile(source);
+  const quarantineRoot = join(root, ".brain-cleanup-trash-fixture");
+  const quarantinePath = join(quarantineRoot, "candidate.txt");
+  mkdirSync(quarantineRoot, { mode: 0o700 });
+  renameSync(source, quarantinePath);
+  let trashCalls = 0;
+  const outcome = await reconcilePendingCleanupMove({
+    ...observed,
+    proof: "p".repeat(64),
+    quarantine_path: quarantinePath,
+    phase: "isolated",
+  }, {
+    trash: async (path) => {
+      trashCalls++;
+      rmSync(path);
+    },
+  });
+  assert.equal(outcome, "moved");
+  assert.equal(trashCalls, 1, "recovery reached the exact pending Trash decision once");
+  assert.equal(existsSync(source), false);
+  assert.equal(existsSync(quarantineRoot), false);
 });
 
 test("archive choice verifies the owner archive copy before moving the original to Trash", async () => {
@@ -140,6 +240,18 @@ test("consumed staging keys never become removals while ongoing keys retain the 
     role: "ongoing",
     consumed: { "live.txt": { proof: "proof-2" } },
   }), ["live.txt"]);
+  assert.deepEqual(missingOngoingKeys({
+    knownKeys: ["moving.txt"],
+    presentKeys: [],
+    role: "staging",
+    cleanupPending: { "moving.txt": { proof: "proof-3" } },
+  }), [], "an interrupted move intent cannot become a Brain deletion candidate");
+  assert.deepEqual(missingOngoingKeys({
+    knownKeys: ["moving.txt"],
+    presentKeys: [],
+    role: "ongoing",
+    cleanupPending: { "moving.txt": { proof: "proof-3" } },
+  }), ["moving.txt"], "ongoing source semantics ignore cleanup-only state");
 });
 
 test("recurring cleanup obeys retention and writes a bounded receipt", () => {
