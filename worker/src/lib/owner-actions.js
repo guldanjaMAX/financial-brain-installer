@@ -6,6 +6,11 @@
  * scoped session is therefore refused even when it can read the same screen.
  * Every mutation is request-idempotent and every owner-facing history row is
  * appended only after the underlying state change succeeds.
+ *
+ * A document's corpus_doc_uid binding is checked against the corpus at write
+ * time, but that binding can still dangle later if the corpus document is
+ * forgotten, so readers must treat a missing corpus row as a broken binding,
+ * not as absence.
  */
 
 import { jsonResponse, privateNoStore } from "./core.js";
@@ -50,6 +55,30 @@ const ENTITY_CREATE_FIELDS = new Set([
   "request_id", "entity_slug", "legal_name", "display_label", "kind",
   "parent_entity_slug", "ownership_bp",
 ]);
+
+// The financial document register. Phase one is the OWNER's register: every row
+// is owner_stated/confirmed, nothing is inferred, so a row can be incomplete but
+// never quietly wrong. The table's own provenance and basis_state enums leave
+// room for a later extracted/proposed path; this module deliberately does not
+// write one, because a proposal nobody has reviewed is worse than an absence.
+const DOC_KINDS = new Set([
+  "statement", "merchant_statement", "tax_return", "k1", "tax_transcript",
+  "tax_notice", "estimated_payment_receipt", "profit_and_loss", "balance_sheet",
+  "general_ledger", "trial_balance", "chart_of_accounts", "invoice", "receipt",
+  "check_image", "deposit_slip", "lease", "loan_agreement", "promissory_note",
+  "personal_guarantee", "merchant_agreement", "insurance_policy",
+  "formation_document", "ein_letter", "operating_agreement", "buy_sell_agreement",
+  "franchise_agreement", "credit_report", "will", "trust", "beneficiary_designation",
+  "investment_statement", "other",
+]);
+const DOC_CUSTODY_CLASSES = new Set(["reference", "reconcilable"]);
+const DOC_AVAILABILITY = new Set(["have_it", "can_get_it", "do_not_have_it"]);
+const DOCUMENT_CREATE_FIELDS = new Set([
+  "request_id", "fin_doc_uid", "entity_slug", "account_slug", "doc_kind", "title",
+  "tax_year", "period_start", "period_end", "custody_class", "availability",
+  "available_from", "available_within_days", "filed_at", "reconciled_through",
+  "received_from", "received_at", "corpus_doc_uid", "restricted",
+]);
 const ACTIVITY_TYPES = new Set([
   "upload_completed", "approval_recorded", "period_close_accepted",
   "period_close_reopened", "target_set", "target_archived", "preference_set",
@@ -58,7 +87,7 @@ const ACTIVITY_TYPES = new Set([
   "document_grant_revoked", "passkey_added",
   "passkey_renamed", "passkey_revoked", "sessions_revoked",
   "support_access_created", "support_access_activated", "support_access_revoked",
-  "bank_import_completed", "entity_created",
+  "bank_import_completed", "entity_created", "document_registered",
 ]);
 const MEDIA_TYPE_EXTENSIONS = Object.freeze({
   "text/plain": Object.freeze([".txt"]),
@@ -350,6 +379,224 @@ async function validateEntityCreateParent(env, entitySlug, parentEntitySlug) {
     return { ok: false, response: invalid("entity_parent_chain_incomplete", "parent_entity_slug") };
   }
   return { ok: true };
+}
+
+/**
+ * Register a financial document.
+ *
+ * The register answers a question the corpus cannot: not "what text do we hold"
+ * but "which records exist, which are filed, and which are MISSING". The third
+ * is why a row may carry no document at all — `do_not_have_it` with no
+ * corpus_doc_uid is the row that lets a screen say "your 2025 K-1 is not here"
+ * instead of staying silent, and it is the most useful row in the table.
+ *
+ * Every paired requirement below is also a CHECK constraint in 0017. They are
+ * repeated here on purpose: a SQLite constraint failure reaches the owner as an
+ * opaque 503, and "have_it needs a filed date" is a sentence they can act on.
+ */
+async function documentCreate(env, body) {
+  const unsupported = Object.keys(body).find((key) => !DOCUMENT_CREATE_FIELDS.has(key));
+  if (unsupported) return invalid("unsupported_document_field", unsupported.slice(0, 80));
+  const requestId = requestIdOf(body);
+  if (!requestId) return invalid("invalid_request_id", "request_id");
+
+  const finDocUid = typeof body.fin_doc_uid === "string" ? body.fin_doc_uid : "";
+  if (!LOGICAL_ID.test(finDocUid)) return invalid("invalid_fin_doc_uid", "fin_doc_uid");
+
+  const docKind = typeof body.doc_kind === "string" ? body.doc_kind : "";
+  if (!DOC_KINDS.has(docKind)) return invalid("invalid_doc_kind", "doc_kind");
+
+  const title = boundedText(body.title, 240, { required: true });
+  if (!title) return invalid("invalid_document_title", "title");
+
+  const custodyClass = typeof body.custody_class === "string" ? body.custody_class : "";
+  if (!DOC_CUSTODY_CLASSES.has(custodyClass)) {
+    return invalid("invalid_custody_class", "custody_class");
+  }
+  const availability = typeof body.availability === "string" ? body.availability : "";
+  if (!DOC_AVAILABILITY.has(availability)) {
+    return invalid("invalid_availability", "availability");
+  }
+
+  const optionalSlug = (value, code, field) => {
+    if (value === undefined || value === null || value === "") return { value: null };
+    if (typeof value !== "string" || !SLUG.test(value)) return { error: invalid(code, field) };
+    return { value };
+  };
+  const entity = optionalSlug(body.entity_slug, "invalid_entity_slug", "entity_slug");
+  if (entity.error) return entity.error;
+  const account = optionalSlug(body.account_slug, "invalid_account_slug", "account_slug");
+  if (account.error) return account.error;
+
+  const optionalDate = (value, code, field) => {
+    if (value === undefined || value === null || value === "") return { value: null };
+    if (typeof value !== "string" || !ISO_DATE.test(value)) return { error: invalid(code, field) };
+    return { value };
+  };
+  const periodStart = optionalDate(body.period_start, "invalid_period_start", "period_start");
+  if (periodStart.error) return periodStart.error;
+  const periodEnd = optionalDate(body.period_end, "invalid_period_end", "period_end");
+  if (periodEnd.error) return periodEnd.error;
+  if (periodStart.value && periodEnd.value && periodEnd.value < periodStart.value) {
+    return invalid("period_end_before_start", "period_end");
+  }
+  const filedAt = optionalDate(body.filed_at, "invalid_filed_at", "filed_at");
+  if (filedAt.error) return filedAt.error;
+  const reconciledThrough = optionalDate(
+    body.reconciled_through, "invalid_reconciled_through", "reconciled_through");
+  if (reconciledThrough.error) return reconciledThrough.error;
+  const receivedAt = optionalDate(body.received_at, "invalid_received_at", "received_at");
+  if (receivedAt.error) return receivedAt.error;
+
+  const taxYear = body.tax_year === undefined || body.tax_year === null ? null : body.tax_year;
+  if (taxYear !== null &&
+      (!Number.isSafeInteger(taxYear) || taxYear < 1900 || taxYear > 2200)) {
+    return invalid("invalid_tax_year", "tax_year");
+  }
+  const withinDays = body.available_within_days === undefined ||
+      body.available_within_days === null ? null : body.available_within_days;
+  if (withinDays !== null &&
+      (!Number.isSafeInteger(withinDays) || withinDays < 0 || withinDays > 3650)) {
+    return invalid("invalid_available_within_days", "available_within_days");
+  }
+  const availableFrom = boundedText(body.available_from, 160);
+  if (body.available_from !== undefined && availableFrom === undefined) {
+    return invalid("invalid_available_from", "available_from");
+  }
+  const receivedFrom = boundedText(body.received_from, 160);
+  if (body.received_from !== undefined && receivedFrom === undefined) {
+    return invalid("invalid_received_from", "received_from");
+  }
+  const corpusDocUid = body.corpus_doc_uid === undefined ||
+      body.corpus_doc_uid === null || body.corpus_doc_uid === ""
+    ? null
+    : body.corpus_doc_uid;
+  if (corpusDocUid !== null && typeof corpusDocUid !== "string") {
+    return invalid("invalid_corpus_doc_uid", "corpus_doc_uid");
+  }
+  const restricted = body.restricted === undefined ? 0 : body.restricted;
+  if (restricted !== 0 && restricted !== 1 && restricted !== false && restricted !== true) {
+    return invalid("invalid_restricted", "restricted");
+  }
+
+  // The paired requirements, each mirroring a CHECK in 0017.
+  if (availability === "have_it" && !filedAt.value) {
+    return invalid("have_it_requires_filed_at", "filed_at");
+  }
+  if (availability === "can_get_it" && !availableFrom) {
+    return invalid("can_get_it_requires_available_from", "available_from");
+  }
+  if (availability !== "have_it" && corpusDocUid !== null) {
+    return invalid("corpus_document_requires_have_it", "corpus_doc_uid");
+  }
+  if (custodyClass !== "reconcilable" && reconciledThrough.value) {
+    return invalid("reconciled_requires_reconcilable", "reconciled_through");
+  }
+
+  const normalized = {
+    request_id: requestId, fin_doc_uid: finDocUid, entity_slug: entity.value,
+    account_slug: account.value, doc_kind: docKind, title,
+    tax_year: taxYear, period_start: periodStart.value, period_end: periodEnd.value,
+    custody_class: custodyClass, availability, available_from: availableFrom ?? null,
+    available_within_days: withinDays, filed_at: filedAt.value,
+    reconciled_through: reconciledThrough.value, received_from: receivedFrom ?? null,
+    received_at: receivedAt.value, corpus_doc_uid: corpusDocUid,
+    restricted: restricted ? 1 : 0,
+  };
+  const requestHash = await sha256(normalized);
+  let replay;
+  let existing;
+  try {
+    replay = await replayFor(env, {
+      requestId, actionType: "document_create", requestHash,
+    });
+    if (replay) return replay;
+    existing = await env.DB.prepare(
+      `SELECT id FROM fin_documents
+        WHERE tenant_id=?1 AND fin_doc_uid=?2 AND superseded_by_id IS NULL LIMIT 1`,
+    ).bind(OWNER_TENANT, finDocUid).first();
+  } catch {
+    return unavailable("document_create_unavailable");
+  }
+  if (existing) return conflict("document_already_exists");
+  if (entity.value) {
+    const scope = await validateOwnedEntityScope(env, entity.value);
+    if (!scope.ok) return scope.response;
+  }
+  if (corpusDocUid !== null) {
+    // documents has no tenant column (one brain per client; see 0004_corpus.sql),
+    // so this mirrors the readers' own join exactly: financial-picture.js's
+    // document_corpus_reference_missing metric and tax-qbo-reconciliation.js's
+    // storedFinancialDocument() both resolve corpus_doc_uid as documents.doc_uid,
+    // a live row being doc_uid match AND deleted_at IS NULL.
+    let corpusRow;
+    try {
+      corpusRow = await env.DB.prepare(
+        `SELECT 1 FROM documents WHERE doc_uid=?1 AND deleted_at IS NULL LIMIT 1`,
+      ).bind(corpusDocUid).first();
+    } catch {
+      return unavailable("document_create_unavailable");
+    }
+    if (!corpusRow) return invalid("corpus_document_not_found", "corpus_doc_uid");
+  }
+
+  const at = new Date().toISOString();
+  const eventId = activityId(requestId, "document_registered");
+  const document = { ...normalized, provenance: "owner_stated", basis_state: "confirmed" };
+  const response = { document };
+  const insert = env.DB.prepare(
+    `INSERT INTO fin_documents
+       (tenant_id, fin_doc_uid, entity_slug, account_slug, doc_kind, title, tax_year,
+        period_start, period_end, custody_class, availability, available_from,
+        available_within_days, filed_at, reconciled_through, received_from, received_at,
+        corpus_doc_uid, readable, restricted, provenance, basis_state, recorded_at)
+     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,1,?19,
+             'owner_stated','confirmed',?20)`,
+  ).bind(
+    OWNER_TENANT, finDocUid, entity.value, account.value, docKind, title, taxYear,
+    periodStart.value, periodEnd.value, custodyClass, availability,
+    availableFrom ?? null, withinDays, filedAt.value, reconciledThrough.value,
+    receivedFrom ?? null, receivedAt.value, corpusDocUid, restricted ? 1 : 0, at,
+  );
+  try {
+    await env.DB.batch([
+      insert,
+      activityStatement(env, {
+        eventId,
+        eventType: "document_registered",
+        entitySlug: entity.value,
+        subjectKind: "document",
+        subjectId: finDocUid,
+        displayLabel: title,
+        occurredAt: at,
+        requestId,
+      }),
+      actionReceiptStatement(env, {
+        requestId,
+        actionType: "document_create",
+        requestHash,
+        response,
+        status: 201,
+        at,
+      }),
+    ]);
+  } catch {
+    // Resolve an ambiguous concurrent finish without guessing. An exact same
+    // request replays; another request winning the fin_doc_uid returns a conflict.
+    try {
+      const concurrentReplay = await replayFor(env, {
+        requestId, actionType: "document_create", requestHash,
+      });
+      if (concurrentReplay) return concurrentReplay;
+      const concurrentDocument = await env.DB.prepare(
+        `SELECT id FROM fin_documents
+          WHERE tenant_id=?1 AND fin_doc_uid=?2 AND superseded_by_id IS NULL LIMIT 1`,
+      ).bind(OWNER_TENANT, finDocUid).first();
+      if (concurrentDocument) return conflict("document_already_exists");
+    } catch { /* return the bounded failure below */ }
+    return unavailable("document_create_unavailable");
+  }
+  return respond(response, 201);
 }
 
 async function entityCreate(env, body, { beforeCommit = null } = {}) {
@@ -1649,6 +1896,7 @@ export async function handleOwnerActions(env, request, path, {
       return await entityCreate(env, body, { beforeCommit: beforeEntityCreateCommit });
     }
     if (path === "/api/owner/uploads") return await upload(env, body, ingestEnvelope, afterIngest, extractUpload);
+    if (path === "/api/owner/documents/create") return await documentCreate(env, body);
     if (path === "/api/owner/approvals") return await approval(env, body);
     if (path === "/api/owner/period-closes/read") return await periodRead(env, body);
     if (path === "/api/owner/period-closes/accept") return await periodWrite(env, body, "accept");
