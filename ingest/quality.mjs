@@ -120,6 +120,8 @@ function nonsenseMetrics(text) {
   let tokenLetters = 0;
   let tokenDigits = 0;
   let tokenVowels = 0;
+  let tokenStart = -1;
+  const tokenShapes = new Set();
   const finishToken = () => {
     if (tokenLetters + tokenDigits < 2) return;
     tokenCount++;
@@ -127,6 +129,11 @@ function nonsenseMetrics(text) {
     // fragments need one vowel to look like a word. This is deliberately a
     // word-shape check, not an English dictionary.
     if ((tokenDigits > 0 && tokenLetters === 0) || tokenVowels > 0) wordLike++;
+    if (tokenShapes.size < 20_000 && tokenStart >= 0) {
+      tokenShapes.add(text.slice(tokenStart, tokenStart + tokenLetters + tokenDigits)
+        .toLowerCase()
+        .replace(/\d+/g, "#"));
+    }
   };
   for (let index = 0; index <= text.length; index++) {
     const code = index < text.length ? text.charCodeAt(index) : 32;
@@ -137,6 +144,7 @@ function nonsenseMetrics(text) {
       if (!alphaNumeric) symbols++;
     }
     if (alphaNumeric) {
+      if (tokenStart < 0) tokenStart = index;
       if (isAsciiDigit(code)) tokenDigits++;
       else {
         tokenLetters++;
@@ -148,8 +156,34 @@ function nonsenseMetrics(text) {
     tokenLetters = 0;
     tokenDigits = 0;
     tokenVowels = 0;
+    tokenStart = -1;
   }
-  return { controls, visible, symbols, tokenCount, wordLike };
+  return { controls, visible, symbols, tokenCount, wordLike, tokenShapes: tokenShapes.size };
+}
+
+const STRUCTURED_FORMATS = new Set(["csv", "tsv", "xls", "xlsx", "xlsm", "ods", "numbers"]);
+const STRUCTURED_SOURCE_KINDS = new Set(["bank", "ledger", "inventory", "quickbooks"]);
+
+/**
+ * Tables are useful evidence even when most cells are empty, numeric, or coded.
+ * Explicit spreadsheet formats win; delimiter evidence covers extracted sheets
+ * and bookkeeping reports whose original container name is unavailable.
+ */
+function structuredTextEvidence(text, { format = "", sourceKind = "" } = {}) {
+  const normalizedFormat = String(format).toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ||
+    String(format).toLowerCase().replace(/^\./, "");
+  if (STRUCTURED_FORMATS.has(normalizedFormat)) return true;
+  if (STRUCTURED_SOURCE_KINDS.has(String(sourceKind).toLowerCase())) return true;
+  const lines = String(text).split(/\r?\n/, 201).filter((line) => line.trim());
+  if (lines.length < 8) return false;
+  let delimited = 0;
+  for (const line of lines) {
+    const commas = (line.match(/,/g) || []).length;
+    const tabs = (line.match(/\t/g) || []).length;
+    const pipes = (line.match(/\|/g) || []).length;
+    if (commas >= 3 || tabs >= 2 || pipes >= 2) delimited++;
+  }
+  return delimited / lines.length >= 0.7;
 }
 
 /** Detect one line consuming most of a long extraction without unbounded regexes. */
@@ -251,7 +285,7 @@ export function isLikelyBinary(buf) {
  * Returns { ok, reason, metrics }. `reason` is written to be shown to a client
  * verbatim, so it says what happened rather than naming a rule.
  */
-export function textQuality(text, { sourceKind = "", policy = {} } = {}) {
+export function textQuality(text, { sourceKind = "", format = "", policy = {} } = {}) {
   const s = typeof text === "string" ? text : "";
   const len = s.length;
   const metrics = { chars: len };
@@ -285,20 +319,28 @@ export function textQuality(text, { sourceKind = "", policy = {} } = {}) {
   }
 
   const nonsense = nonsenseMetrics(s);
+  const structured = structuredTextEvidence(s, { format, sourceKind });
+  metrics.structured_text = structured;
   metrics.control_ratio = +(nonsense.controls / len).toFixed(3);
   if (metrics.control_ratio > threshold(policy, "binary_control_ratio_max")) {
     return { ok: false, reason: "the extraction contains binary data decoded as text, not a readable document", metrics };
   }
 
   metrics.symbol_ratio = +(nonsense.symbols / Math.max(1, nonsense.visible)).toFixed(3);
+  metrics.token_shape_ratio = +(nonsense.tokenShapes / Math.max(1, nonsense.tokenCount)).toFixed(3);
   if (len >= threshold(policy, "symbol_min_chars") &&
-      metrics.symbol_ratio > threshold(policy, "symbol_ratio_max")) {
+      !structured &&
+      metrics.symbol_ratio > threshold(policy, "symbol_ratio_max") &&
+      nonsense.tokenCount >= 20 &&
+      metrics.token_shape_ratio <= 0.05) {
     return { ok: false, reason: "the extraction is mostly symbols with too little readable text", metrics };
   }
 
   if (nonsense.tokenCount >= threshold(policy, "word_shape_min_tokens")) {
     metrics.word_like_ratio = +(nonsense.wordLike / nonsense.tokenCount).toFixed(3);
-    if (metrics.word_like_ratio < threshold(policy, "min_word_like_ratio")) {
+    if (!structured &&
+        metrics.word_like_ratio < threshold(policy, "min_word_like_ratio") &&
+        metrics.token_shape_ratio <= 0.05) {
       return { ok: false, reason: "the extraction has OCR-like unreadable word shapes rather than usable text", metrics };
     }
   }

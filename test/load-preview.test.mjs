@@ -5,7 +5,6 @@ import { join } from "node:path";
 import {
   createLoadPreview,
   renderLoadPreviewSummary,
-  writeLoadPreviewDetail,
 } from "../ingest/load-preview.mjs";
 import { cmdIngestLocal } from "../brain.mjs";
 
@@ -45,6 +44,19 @@ assert.ok(report.summary.likely_junk.by_class.log_file >= 1);
 assert.ok(report.summary.likely_junk.by_class.huge_structured_dump >= 1);
 assert.ok(report.summary.likely_junk.by_class.build_or_cache_folder >= 1);
 assert.equal(report.summary.already_in_brain.observable, false);
+assert.equal(report.detail, undefined, "aggregate preview retained unrequested file-level detail");
+assert.doesNotMatch(JSON.stringify(report), /records\/current|system-export|service\.log/);
+
+const samePathPreview = createLoadPreview({ source: "drive" });
+const samePathA = { id: "opaque-a", rel: "folder/statement.pdf", size: 1000, type: "application/pdf" };
+const samePathB = { id: "opaque-b", rel: "folder/statement.pdf", size: 1000, type: "application/pdf" };
+samePathPreview.observeCandidate(samePathA);
+samePathPreview.observeCandidate(samePathB);
+samePathPreview.observePrepared(samePathA, { envelope: { content: useful } });
+samePathPreview.observePrepared(samePathB, { envelope: { content: useful } });
+const samePathReport = samePathPreview.finish();
+assert.equal(samePathReport.summary.exact_duplicates.groups, 1);
+assert.equal(samePathReport.summary.exact_duplicates.extra_locations, 1);
 
 const rendered = renderLoadPreviewSummary(report.summary);
 assert.match(rendered, /LOAD PREVIEW/);
@@ -58,13 +70,25 @@ assert.doesNotMatch(rendered, /records\/current|system-export|service\.log/);
 const sandbox = mkdtempSync(join(tmpdir(), "brain-load-preview-"));
 try {
   const output = join(sandbox, "preview.json");
-  writeLoadPreviewDetail(output, report);
+  const detailedPreview = createLoadPreview({
+    source: "upload",
+    vectorsPerMinute: 60,
+    detailPath: output,
+  });
+  for (const file of candidates) detailedPreview.observeCandidate(file);
+  detailedPreview.observePrepared(candidates[0], { envelope: { content: useful } });
+  detailedPreview.observePrepared(candidates[1], { envelope: { content: useful } });
+  detailedPreview.observePrepared(candidates[2], { envelope: { content: "field,value\n".repeat(40_000) } });
+  detailedPreview.observePrepared(candidates[3], {
+    skip: { reason: "the extraction is mostly symbols with too little readable text", metrics: { symbol_ratio: 0.91 } },
+  });
+  detailedPreview.finish();
   const saved = JSON.parse(readFileSync(output, "utf8"));
   assert.equal(saved.contract_version, 1);
   assert.equal(saved.detail.files.length, 4);
-  assert.ok(saved.detail.duplicate_groups[0].locations.includes("records/current/report.txt"));
+  assert.ok(saved.detail.content_occurrences.some((entry) => entry.path === "records/current/report.txt"));
   assert.equal(statSync(output).mode & 0o777, 0o600);
-  assert.throws(() => writeLoadPreviewDetail(output, report), /already exists/);
+  assert.throws(() => createLoadPreview({ source: "upload", detailPath: output }), /already exists/);
 } finally {
   rmSync(sandbox, { recursive: true, force: true });
 }
@@ -85,7 +109,7 @@ try {
   writeFileSync(manifestPath, JSON.stringify(manifest));
   writeFileSync(join(root, "first-record.txt"), useful);
   writeFileSync(join(root, "second-record.txt"), useful);
-  writeFileSync(join(root, "symbol-input.txt"), Array.from({ length: 240 }, (_, i) => `${i % 10} @@@ ### %%% ||| <>`).join(" "));
+  writeFileSync(join(root, "symbol-input.txt"), Array.from({ length: 240 }, (_, i) => `xq${i % 10} @@@ ### %%% ||| <>`).join(" "));
 
   const lines = [];
   const originalLog = console.log;
@@ -108,8 +132,28 @@ try {
   assert.doesNotMatch(lines.join("\n"), /first-record|second-record|symbol-input/);
   const cliDetail = JSON.parse(readFileSync(detailPath, "utf8"));
   assert.equal(cliDetail.detail.files.length, 3);
+
+  const overrideRoot = join(cliSandbox, "override-source");
+  mkdirSync(overrideRoot, { recursive: true });
+  const ocrShaped = Array.from({ length: 260 }, (_, i) => `xqz${i} brt${i} nvm${i} :::`).join(" ");
+  writeFileSync(join(overrideRoot, "ocr-shaped.txt"), ocrShaped);
+  const defaultResult = await cmdIngestLocal({
+    client: { slug: "fixture-client" },
+    brain: { domain: "fixture.invalid" },
+  }, manifestPath, { path: overrideRoot, "dry-run": true, source: "upload" });
+  assert.equal(defaultResult.load_preview.quality_refusals.total, 1,
+    "the default CLI path did not reach the quality-refusal decision");
+  assert.equal(defaultResult.would_send, 0);
+  const overrideResult = await cmdIngestLocal({
+    client: { slug: "fixture-client" },
+    brain: { domain: "fixture.invalid" },
+    safety: { text_quality: { sources: { upload: { min_word_like_ratio: 0 } } } },
+  }, manifestPath, { path: overrideRoot, "dry-run": true, source: "upload" });
+  assert.equal(overrideResult.load_preview.quality_refusals.total, 0);
+  assert.equal(overrideResult.would_send, 1,
+    "the per-source override did not reach the prepared/send decision");
 } finally {
   rmSync(cliSandbox, { recursive: true, force: true });
 }
 
-console.log("load-preview: all 34 assertions passed");
+console.log("load-preview: all 38 assertions passed");

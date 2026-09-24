@@ -889,7 +889,7 @@ export async function toEnvelope(getAccessToken, file, {
       },
     };
   }
-  const q = textQuality(got.text, { sourceKind: "drive", policy: qualityPolicy });
+  const q = textQuality(got.text, { sourceKind: "drive", format: name, policy: qualityPolicy });
   if (!q.ok) {
     return {
       skip: { path: file.name, id: file.id, reason: q.reason, metrics: q.metrics, code: "quality_refused" },

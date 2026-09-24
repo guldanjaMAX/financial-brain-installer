@@ -482,9 +482,13 @@ stranded. Gmail has no folder path and does not use these rules.
 pre-embedding checks globally under `default` or for one manifest source under
 `sources.<source>`. The checks name binary-as-text, symbol-heavy extraction,
 OCR-like word shapes, repeated-line boilerplate, and near-empty mail templates
-as separate refusal reasons. Omission keeps the reviewed defaults. A source
-override changes only the listed threshold; it cannot bypass extraction size,
-credential, private-path, or removal gates.
+as separate refusal reasons. Spreadsheet formats and delimiter-shaped ledgers,
+inventory exports, and code tables are treated as structured evidence. Symbol
+density or vowel shape alone never refuses text; either check needs a second,
+strong repetition signal, while binary bytes, decode failure, encoded blobs,
+and extreme repeated content remain direct refusal evidence. Omission keeps the
+reviewed defaults. A source override changes only the listed threshold; it
+cannot bypass extraction size, credential, private-path, or removal gates.
 
 Flags: `--dry-run`, `--source <name>`, `--limit <n>`, `--reset`, Drive-only
 `--dry-run --json` for a bounded aggregate assistant preview, and the
@@ -496,17 +500,22 @@ type or MIME/category, size and top-folder weight, named quality refusals,
 same-source normalized-text duplicates, likely junk classes, and estimated
 chunks/vectors and time. `--vectors-per-minute <n>` supplies a measured rate
 for that Brain. `--preview-report <file>` is the only file-level output; it is
-created owner-only and never overwrites an existing file. Dry-run does not
+streamed through owner-only local spill files and atomically finalized without
+holding the corpus detail in memory. The default preview retains bounded
+aggregate buckets, content-hash counts, and no file-level paths. The report
+never overwrites an existing file. Dry-run does not
 contact the Brain, so already-loaded and cross-source hash matches remain
 explicitly unobservable until the read-only inventory contract gains that
 aggregate comparison.
 
 After a load, `brain load-report <manifest>` combines authenticated latest-run
-source counters, the indexed exact-document duplicate diagnostic, and local
+source counters, a dedicated aggregate-only Worker read for indexed exact-text
+duplicates and per-document chunk totals, and local
 checkpoint refusal reasons without emitting paths or message identifiers.
 `--json` returns the same aggregate contract. A legacy run without measured
-refused/failed counters stays unknown, and large-corpus chunk outliers remain
-unobservable when the bounded diagnostic declines that scan.
+refused/failed counters stays unknown. An open run or incomplete walk makes all
+of that run's counters unknown and the report incomplete. The command never
+invokes or renders the sample-bearing whole-corpus diagnostic.
 
 ---
 

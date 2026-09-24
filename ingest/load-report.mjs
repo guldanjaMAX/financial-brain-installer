@@ -1,32 +1,43 @@
 /** Privacy-safe aggregation for the read-only after-load quality command. */
 
 import { refusalReasonCategory } from "./refusal-reasons.mjs";
+import { sourceCoverageFromEvidence } from "../worker/src/lib/source-coverage.js";
 
 const countIn = (object, key, amount = 1) => {
   object[key] = (object[key] || 0) + amount;
 };
 
-const count = (value) => Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : null;
+const count = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
+};
 
-export function buildLoadQualityReport({ inventory, diagnosis, checkpointSkips = {} } = {}) {
+export function buildLoadQualityReport({ inventory, quality, checkpointSkips = {} } = {}) {
   const sources = (inventory?.sources || []).map((source) => {
     const run = source?.receipt?.latest_run || null;
-    const added = count(run?.docs_added);
-    const updated = count(run?.docs_updated);
-    const unchanged = count(run?.docs_unchanged);
-    const accepted = [added, updated, unchanged].every((value) => value !== null)
-      ? added + updated + unchanged
-      : null;
+    const runOutcome = String(run?.outcome || "").toLowerCase();
+    const runClosed = run?.finished_at !== null && run?.finished_at !== undefined &&
+      run?.finished_at !== "" && !["in_progress", "indexing"].includes(runOutcome);
+    const measured = sourceCoverageFromEvidence({
+      kind: source?.kind,
+      state: source?.freshness?.state,
+      documents: source?.storage?.logical_documents,
+      last_complete_sweep_at: source?.receipt?.last_complete_sweep_at,
+    }, { latestRun: runClosed ? run : null }).counts;
+    const added = measured.accepted === null ? null : count(run?.docs_added);
+    const updated = measured.accepted === null ? null : count(run?.docs_updated);
+    const unchanged = measured.accepted === null ? null : count(run?.docs_unchanged);
     return {
       source: String(source?.name || source?.source_id || "unknown"),
       outcome: run?.outcome || "unavailable",
-      files_seen: count(run?.files_seen),
-      accepted,
+      files_seen: measured.seen,
+      accepted: measured.accepted,
       added,
       updated,
       unchanged,
-      refused: run?.metrics_version === 1 ? count(run.docs_refused) : null,
-      failed: run?.metrics_version === 1 ? count(run.docs_failed) : null,
+      refused: measured.refused,
+      failed: measured.failed,
     };
   });
 
@@ -40,30 +51,30 @@ export function buildLoadQualityReport({ inventory, diagnosis, checkpointSkips =
     }
   }
 
-  const findings = Array.isArray(diagnosis?.findings) ? diagnosis.findings : [];
-  const duplicateFinding = findings.find((finding) => finding?.id === "duplicate_documents") || null;
-  const chunkOutliers = findings.find((finding) => finding?.id === "chunk_outliers") || null;
+  const duplicateAggregate = quality?.duplicates || {};
+  const outlierAggregate = quality?.chunk_outliers || {};
+  const sourcesMeasured = sources.every((source) =>
+    [source.files_seen, source.accepted, source.refused, source.failed]
+      .every((value) => value !== null));
   return {
     contract_version: 1,
     kind: "after_load_quality_report",
     as_of: inventory?.as_of || null,
-    complete: inventory?.complete === true && diagnosis?.complete === true,
+    complete: inventory?.complete === true && quality?.complete === true && sourcesMeasured,
     sources,
     refusal_reasons: refusalReasons,
     refusal_reason_basis: "current local source checkpoints; reasons are not yet bound to one durable remote run",
     too_large: tooLarge,
     duplicates: {
-      observable: diagnosis?.complete === true,
-      extra_documents: duplicateFinding ? count(duplicateFinding.count) : 0,
-      detail: duplicateFinding?.detail || null,
+      observable: quality?.complete === true && duplicateAggregate.observable === true,
+      groups: count(duplicateAggregate.groups),
+      extra_documents: count(duplicateAggregate.extra_documents),
     },
-    chunk_outliers: chunkOutliers
-      ? {
-          observable: chunkOutliers.observable !== false,
-          count: count(chunkOutliers.count),
-          detail: chunkOutliers.detail || null,
-        }
-      : { observable: diagnosis?.complete === true, count: 0, detail: null },
+    chunk_outliers: {
+      observable: quality?.complete === true && outlierAggregate.observable === true,
+      largest_document_chunks: count(outlierAggregate.largest_document_chunks),
+      total_chunks: count(outlierAggregate.total_chunks),
+    },
   };
 }
 
@@ -76,12 +87,12 @@ export function renderLoadQualityReport(report) {
     lines.push(`  ${source.source}: ${accepted}, ${refused}, ${failed}; outcome ${source.outcome}`);
   }
   lines.push(report.duplicates.observable
-    ? `  ${report.duplicates.extra_documents || 0} duplicate document(s) beyond one copy`
-    : "  Duplicate document count is not observable from this diagnostic receipt");
+    ? `  ${report.duplicates.extra_documents ?? 0} duplicate document(s) beyond one copy`
+    : "  Duplicate document count is not observable from this aggregate receipt");
   lines.push(`  ${report.too_large} too large in current local checkpoints`);
   lines.push(report.chunk_outliers.observable
-    ? `  Oversized document outliers: ${report.chunk_outliers.count || 0}`
-    : "  Oversized document outliers are not observable at this corpus size");
+    ? `  Largest document: ${report.chunk_outliers.largest_document_chunks ?? 0} chunk(s) of ${report.chunk_outliers.total_chunks ?? 0} total`
+    : "  Largest-document chunk count is not observable from this aggregate receipt");
   const reasons = Object.entries(report.refusal_reasons)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   lines.push("  Refusal reasons from current local checkpoints:");

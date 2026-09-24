@@ -10,6 +10,7 @@
  *   POST /api/admin/brain/ocr           one scanned page, read in this account
  *   POST /api/admin/brain/sources       owner-only read-only source inventory
  *   POST /api/admin/brain/source-families read-only private inventory paging
+ *   GET  /api/admin/brain/load-quality  aggregate-only load quality counters
  *   POST /api/admin/brain/financial-map owner map read and compact preview
  *   POST /api/owner/financial-map       private owner-app review and ceremony
  *   GET  /api/admin/brain/documents     per-source counts and freshness
@@ -54,7 +55,7 @@ import {
 import {
   storeFor, backendOf, D1, expectedD1ContentHash, ProvenanceTransitionError,
 } from "./lib/store.js";
-import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, SOURCE_FAMILY_CURSOR_MAX_BYTES, SOURCE_FAMILY_UID_FILTER_MAX, sourceFamilyCounts, reindex, coverageGapReport, freshnessReport, diagnose } from "./lib/store-d1.js";
+import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, SOURCE_FAMILY_CURSOR_MAX_BYTES, SOURCE_FAMILY_UID_FILTER_MAX, sourceFamilyCounts, reindex, coverageGapReport, freshnessReport, diagnose, loadQualityAggregate } from "./lib/store-d1.js";
 import { embedText, embedTexts } from "./lib/supabase.js";
 import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, newestCurrentEvidence,
@@ -3155,6 +3156,14 @@ export default {
         }
         const report = await diagnose(env);
         return jsonResponse(report, report.complete === true ? 200 : 503);
+      }
+      if (path === "/api/admin/brain/load-quality" && request.method === "GET") {
+        if (backendOf(env) !== D1) return jsonResponse({ error: "load quality applies to the d1 backend only" }, 400);
+        if (!scopeIsUnrestricted(scope)) {
+          return jsonResponse({ error: "load quality reports whole-corpus aggregates. Ask the owner to run it." }, 403);
+        }
+        const report = await loadQualityAggregate(env);
+        return privateNoStore(jsonResponse(report, report.complete === true ? 200 : 503));
       }
       if (path === "/api/admin/brain/freshness" && request.method === "GET") {
         if (backendOf(env) !== D1) return jsonResponse({ error: "freshness applies to the d1 backend only" }, 400);

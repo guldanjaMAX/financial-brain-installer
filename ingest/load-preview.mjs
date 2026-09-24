@@ -1,16 +1,27 @@
 /** Aggregate-only load planning. Private paths live only in the optional local detail file. */
 
-import { createHash } from "node:crypto";
-import { chmodSync, writeFileSync } from "node:fs";
-import { basename, dirname, extname } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  chmodSync, closeSync, constants as fsConstants, existsSync, fsyncSync,
+  linkSync, lstatSync, openSync, readSync, unlinkSync, writeFileSync, writeSync,
+} from "node:fs";
+import { basename, dirname, extname, join } from "node:path";
 import { refusalReasonCategory } from "./refusal-reasons.mjs";
 
 const CHUNK_SIZE = 1500;
 const CHUNK_OVERLAP = 300;
 const DEFAULT_MEASURED_VECTORS_PER_MINUTE = 60;
+const MAX_AGGREGATE_BUCKETS = 128;
 
 const countIn = (object, key, amount = 1) => {
   object[key] = (object[key] || 0) + amount;
+};
+
+const boundedBucket = (object, key, create) => {
+  if (Object.hasOwn(object, key)) return object[key];
+  const names = Object.keys(object).filter((name) => name !== "(other)");
+  const bucket = names.length < MAX_AGGREGATE_BUCKETS ? key : "(other)";
+  return object[bucket] ||= create();
 };
 
 const typeOf = (file) => String(file?.type || "").trim() ||
@@ -74,18 +85,22 @@ export function createLoadPreview({
   source,
   vectorsPerMinute = DEFAULT_MEASURED_VECTORS_PER_MINUTE,
   existingContentHashes = null,
+  detailPath = null,
 } = {}) {
-  const files = [];
-  const filesByPath = new Map();
-  const refusals = [];
-  const junk = [];
+  const detail = detailPath ? createDetailSpool(detailPath) : null;
   const hashes = new Map();
-  const byType = {};
-  const bySize = {};
-  const byFolder = {};
+  const byType = Object.create(null);
+  const bySize = Object.create(null);
+  const byFolder = Object.create(null);
+  const refusalReasons = Object.create(null);
+  const junkCounts = Object.create(null);
+  let files = 0;
+  let refusalCount = 0;
+  let junkCount = 0;
   let bytes = 0;
   let chunks = 0;
   let alreadyLoaded = 0;
+  let occurrence = 0;
 
   const observeCandidate = (file) => {
     const entry = {
@@ -96,30 +111,31 @@ export function createLoadPreview({
       estimated_chunks: 0,
       likely_junk: [],
     };
-    files.push(entry);
-    const entries = filesByPath.get(entry.path) || [];
-    entries.push(entry);
-    filesByPath.set(entry.path, entries);
+    files++;
     bytes += entry.bytes;
-    const typed = byType[entry.type] ||= { count: 0, bytes: 0, estimated_chunks: 0 };
+    const typed = boundedBucket(byType, entry.type, () => ({ count: 0, bytes: 0, estimated_chunks: 0 }));
     typed.count++;
     typed.bytes += entry.bytes;
     countIn(bySize, sizeBand(entry.bytes));
-    const folder = byFolder[entry.folder] ||= { files: 0, bytes: 0, estimated_chunks: 0 };
+    const folder = boundedBucket(byFolder, entry.folder, () => ({ files: 0, bytes: 0, estimated_chunks: 0 }));
     folder.files++;
     folder.bytes += entry.bytes;
     entry.likely_junk = junkClasses(file);
-    for (const classification of entry.likely_junk) junk.push({ path: entry.path, class: classification });
+    detail?.write("files", entry);
+    for (const classification of entry.likely_junk) {
+      junkCount++;
+      countIn(junkCounts, classification);
+      detail?.write("likely_junk", { path: entry.path, class: classification });
+    }
   };
 
   const observePrepared = (file, prepared) => {
     const path = String(file?.rel || file?.path || "");
-    // A provider can expose the same display path more than once. Consume its
-    // candidate entries in observation order without rescanning the corpus.
-    const pathEntries = filesByPath.get(path) || [];
-    const entry = pathEntries.shift() || null;
     if (prepared?.skip) {
-      refusals.push({ path, reason: String(prepared.skip.reason || "refused"), metrics: prepared.skip.metrics || null });
+      const refusal = { path, reason: String(prepared.skip.reason || "refused"), metrics: prepared.skip.metrics || null };
+      refusalCount++;
+      countIn(refusalReasons, refusalReasonCategory(refusal.reason));
+      detail?.write("quality_refusals", refusal);
       return;
     }
     const envelopes = prepared?.envelopes || (prepared?.envelope ? [prepared.envelope] : []);
@@ -129,19 +145,21 @@ export function createLoadPreview({
       const estimated = estimatedChunkCount(content);
       fileChunks += estimated;
       const hash = normalizedTextHash(content);
-      const locations = hashes.get(hash) || [];
-      locations.push(path);
-      hashes.set(hash, locations);
+      hashes.set(hash, (hashes.get(hash) || 0) + 1);
+      detail?.write("content_occurrences", { occurrence: ++occurrence, hash, path });
       if (existingContentHashes instanceof Set && existingContentHashes.has(hash)) alreadyLoaded++;
     }
     chunks += fileChunks;
-    if (entry) {
-      entry.estimated_chunks = fileChunks;
-      byType[entry.type].estimated_chunks += fileChunks;
-      byFolder[entry.folder].estimated_chunks += fileChunks;
-      const addedJunk = junkClasses(file, fileChunks).filter((classification) => !entry.likely_junk.includes(classification));
-      entry.likely_junk.push(...addedJunk);
-      for (const classification of addedJunk) junk.push({ path: entry.path, class: classification });
+    const type = typeOf(file);
+    const folder = folderOf(file);
+    boundedBucket(byType, type, () => ({ count: 0, bytes: 0, estimated_chunks: 0 })).estimated_chunks += fileChunks;
+    boundedBucket(byFolder, folder, () => ({ files: 0, bytes: 0, estimated_chunks: 0 })).estimated_chunks += fileChunks;
+    const initialJunk = new Set(junkClasses(file));
+    for (const classification of junkClasses(file, fileChunks)) {
+      if (initialJunk.has(classification)) continue;
+      junkCount++;
+      countIn(junkCounts, classification);
+      detail?.write("likely_junk", { path, class: classification });
     }
   };
 
@@ -150,34 +168,37 @@ export function createLoadPreview({
       ? String(skip.reason_code).slice("likely_junk_".length)
       : null;
     if (classification === "build_or_cache") classification = "build_or_cache_folder";
-    if (classification) junk.push({ path: String(skip?.path || ""), class: classification });
+    if (classification) {
+      junkCount++;
+      countIn(junkCounts, classification);
+      detail?.write("likely_junk", { path: String(skip?.path || ""), class: classification });
+    }
   };
 
   const finish = () => {
-    const duplicateGroups = [...hashes]
-      .filter(([, locations]) => new Set(locations).size > 1)
-      .map(([hash, locations]) => ({ hash, locations: [...new Set(locations)].sort() }))
-      .sort((left, right) => right.locations.length - left.locations.length || left.hash.localeCompare(right.hash));
-    const refusalReasons = {};
-    for (const refusal of refusals) countIn(refusalReasons, refusalReasonCategory(refusal.reason));
-    const junkCounts = {};
-    for (const item of junk) countIn(junkCounts, item.class);
+    let duplicateGroups = 0;
+    let duplicateExtras = 0;
+    for (const count of hashes.values()) {
+      if (count < 2) continue;
+      duplicateGroups++;
+      duplicateExtras += count - 1;
+    }
     const rate = Number(vectorsPerMinute);
     const measuredRate = Number.isFinite(rate) && rate > 0 ? rate : DEFAULT_MEASURED_VECTORS_PER_MINUTE;
     const topFolders = Object.entries(byFolder)
       .map(([folder, values]) => ({ folder, ...values }))
       .sort((a, b) => b.estimated_chunks - a.estimated_chunks || b.bytes - a.bytes || a.folder.localeCompare(b.folder))
       .slice(0, 10);
-    return {
+    const report = {
       contract_version: 1,
       kind: "load_preview",
       source: String(source || "unknown"),
       summary: {
-        files: { total: files.length, bytes, by_type: byType, by_size: bySize },
-        quality_refusals: { total: refusals.length, by_reason: refusalReasons },
+        files: { total: files, bytes, by_type: byType, by_size: bySize },
+        quality_refusals: { total: refusalCount, by_reason: refusalReasons },
         exact_duplicates: {
-          groups: duplicateGroups.length,
-          extra_locations: duplicateGroups.reduce((sum, group) => sum + group.locations.length - 1, 0),
+          groups: duplicateGroups,
+          extra_locations: duplicateExtras,
         },
         already_in_brain: existingContentHashes instanceof Set
           ? { observable: true, matches: alreadyLoaded }
@@ -186,7 +207,7 @@ export function createLoadPreview({
           observable: false,
           reason: "cross-source content hashes are not exposed by the current read-only inventory contract",
         },
-        likely_junk: { total: junk.length, by_class: junkCounts },
+        likely_junk: { total: junkCount, by_class: junkCounts },
         estimate: {
           chunks,
           vectors: chunks,
@@ -196,16 +217,112 @@ export function createLoadPreview({
         },
         top_heaviest_folders: topFolders,
       },
-      detail: {
-        files: files.map((entry) => ({ ...entry, likely_junk: [...entry.likely_junk].sort() })),
-        quality_refusals: refusals,
-        duplicate_groups: duplicateGroups,
-        likely_junk: junk,
-      },
     };
+    detail?.finish(report);
+    return report;
   };
 
   return { observeCandidate, observePrepared, observeWalkSkip, finish };
+}
+
+const DETAIL_SECTIONS = ["files", "quality_refusals", "content_occurrences", "likely_junk"];
+
+function createDetailSpool(destination) {
+  const path = String(destination || "");
+  const parent = dirname(path);
+  const parentIdentity = lstatSync(parent);
+  if (!parentIdentity.isDirectory() || parentIdentity.isSymbolicLink()) {
+    throw new Error("the preview detail directory must be a real directory, not a link");
+  }
+  if (existsSync(path)) throw new Error(`the preview detail file already exists: ${path}`);
+  const nonce = randomBytes(12).toString("hex");
+  const spools = new Map();
+  let finished = false;
+  for (const section of DETAIL_SECTIONS) {
+    const spoolPath = join(parent, `.${basename(path)}.${nonce}.${section}.tmp`);
+    const fd = openSync(spoolPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW || 0),
+      0o600);
+    spools.set(section, { path: spoolPath, fd, entries: 0 });
+  }
+
+  const cleanup = () => {
+    for (const spool of spools.values()) {
+      if (spool.fd !== null) {
+        try { closeSync(spool.fd); } catch { /* cleanup continues */ }
+        spool.fd = null;
+      }
+      try { unlinkSync(spool.path); } catch { /* cleanup continues */ }
+    }
+  };
+  const appendFile = (targetFd, sourcePath) => {
+    const sourceFd = openSync(sourcePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    try {
+      for (;;) {
+        const bytes = readSync(sourceFd, buffer, 0, buffer.length, null);
+        if (!bytes) break;
+        writeSync(targetFd, buffer, 0, bytes);
+      }
+    } finally {
+      closeSync(sourceFd);
+    }
+  };
+
+  return {
+    write(section, value) {
+      if (finished) throw new Error("the preview detail stream is already finalized");
+      const spool = spools.get(section);
+      if (!spool) throw new Error("unknown preview detail section");
+      writeSync(spool.fd, `${spool.entries++ ? "," : ""}${JSON.stringify(value)}`);
+    },
+    finish(report) {
+      if (finished) throw new Error("the preview detail stream is already finalized");
+      finished = true;
+      for (const spool of spools.values()) {
+        fsyncSync(spool.fd);
+        closeSync(spool.fd);
+        spool.fd = null;
+      }
+      const finalTemp = join(parent, `.${basename(path)}.${nonce}.final.tmp`);
+      let finalFd = null;
+      try {
+        finalFd = openSync(finalTemp,
+          fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW || 0),
+          0o600);
+        const header = {
+          contract_version: report.contract_version,
+          kind: report.kind,
+          source: report.source,
+          summary: report.summary,
+        };
+        writeSync(finalFd, `${JSON.stringify(header).slice(0, -1)},"detail":{`);
+        DETAIL_SECTIONS.forEach((section, index) => {
+          writeSync(finalFd, `${index ? "," : ""}${JSON.stringify(section)}:[`);
+          appendFile(finalFd, spools.get(section).path);
+          writeSync(finalFd, "]");
+        });
+        writeSync(finalFd, "}}\n");
+        fsyncSync(finalFd);
+        closeSync(finalFd);
+        finalFd = null;
+        chmodSync(finalTemp, 0o600);
+        try {
+          linkSync(finalTemp, path);
+        } catch (error) {
+          if (error?.code === "EEXIST") throw new Error(`the preview detail file already exists: ${path}`);
+          throw error;
+        }
+      } finally {
+        if (finalFd !== null) {
+          try { closeSync(finalFd); } catch { /* cleanup continues */ }
+        }
+        try { unlinkSync(finalTemp); } catch { /* cleanup continues */ }
+        cleanup();
+      }
+      return path;
+    },
+  };
 }
 
 export function renderLoadPreviewSummary(summary) {
@@ -243,6 +360,9 @@ export function renderLoadPreviewSummary(summary) {
 }
 
 export function writeLoadPreviewDetail(path, report) {
+  if (!report?.detail) {
+    throw new Error("preview detail must be requested before scanning so file-level data can be streamed safely");
+  }
   try {
     writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
     chmodSync(path, 0o600);

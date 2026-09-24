@@ -1783,6 +1783,7 @@ export async function prepare(file, { sourceName, ocr = null, qualityPolicy = {}
 
   const q = textQuality(got.text, {
     sourceKind: [".eml", ".mbox"].includes(ext) ? "mail" : sourceName,
+    format: ext,
     policy: qualityPolicy,
   });
   if (!q.ok) {

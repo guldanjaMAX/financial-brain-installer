@@ -639,6 +639,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     if (process.env[name] !== undefined) environment[name] = process.env[name];
   }
   Object.assign(environment, {
+    HOME: userRoot,
+    BRAIN_NO_WRANGLER_LOGIN: "1",
     NO_COLOR: "1",
     BRAIN_GOOGLE_TOKEN_STORE: "file",
     BRAIN_DRIVE_SKIP_USER_ROOT: userRoot,
@@ -730,6 +732,32 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       issue_code: null,
       detail: "drive sweep sync completed; skipped=1; policy_skipped=0; coverage_gaps=0; source_resolved=0; adjudicated_skips=1",
     }, `an adjudicated Drive skip blocked a zero-refusal completed walk:\n${adjudicatedAccepted.output.slice(-1_200)}`);
+
+    environment.BRAIN_DRIVE_SKIP_MODE = "quality-review";
+    writeFileSync(statePath, JSON.stringify({
+      version: 1,
+      done: { "drive:active-quality": "prior-quality-version" },
+      skipped: {},
+      sync_token: "fixture-prior-cursor",
+      drive_policy_fingerprint: policyFingerprint,
+      credential_scanner_fingerprint: scannerFingerprint,
+      drive_last_full_sweep_at: "2000-01-01T00:00:00.000Z",
+    }), { mode: 0o600 });
+    rmSync(evidencePath, { force: true });
+    const qualityReview = run();
+    assert.equal(qualityReview.code, 0, qualityReview.output.slice(-1_200));
+    assert.match(qualityReview.output, /already-stored remote item.*retained for review/is);
+    assert.doesNotMatch(qualityReview.output, /--approve-removals/);
+    const qualityEvidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+    assert.equal(qualityEvidence.forgetRequests, 0,
+      "a heuristic refusal reached the remote removal decision");
+    assert.equal(qualityEvidence.retainedFamilyReachedForget, false);
+    const qualityState = JSON.parse(readFileSync(statePath, "utf8"));
+    assert.deepEqual(qualityState.retained_quality_review, {
+      version: 1,
+      count: 1,
+      uids: ["drive:active-quality"],
+    });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

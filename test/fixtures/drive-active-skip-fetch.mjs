@@ -9,7 +9,7 @@ const evidencePath = String(process.env.BRAIN_DRIVE_SKIP_EVIDENCE || "");
 const fixtureMode = String(process.env.BRAIN_DRIVE_SKIP_MODE || "mixed");
 if (!userRoot) throw new Error("BRAIN_DRIVE_SKIP_USER_ROOT is required");
 if (!evidencePath) throw new Error("BRAIN_DRIVE_SKIP_EVIDENCE is required");
-if (!["mixed", "adjudicated-only"].includes(fixtureMode)) throw new Error("invalid Drive active-skip fixture mode");
+if (!["mixed", "adjudicated-only", "quality-review"].includes(fixtureMode)) throw new Error("invalid Drive active-skip fixture mode");
 
 os.homedir = () => userRoot;
 syncBuiltinESMExports();
@@ -18,6 +18,7 @@ const MIGRATED = "drive:active-migrated";
 const STALE = "drive:active-stale";
 const SENSITIVE = "drive:active-sensitive";
 const MISSING = "drive:source-missing";
+const QUALITY = "drive:active-quality";
 const ALLOWED_REMOVALS = new Set([STALE, SENSITIVE, MISSING]);
 
 const initialEvidence = () => ({
@@ -78,6 +79,13 @@ function files() {
       createdTime: "2025-01-01T00:00:00Z", modifiedTime: "2026-08-22T00:00:00Z", md5Checksum: "sensitive-current", parents: ["fixture-root"],
     },
   ];
+  if (fixtureMode === "quality-review") {
+    return [{
+      id: "active-quality", name: "changed-text.txt", mimeType: "text/plain", size: "8000",
+      createdTime: "2025-01-01T00:00:00Z", modifiedTime: "2026-08-23T00:00:00Z",
+      md5Checksum: "quality-current", parents: ["fixture-root"],
+    }];
+  }
   return fixtureMode === "adjudicated-only" ? [all[0]] : all;
 }
 
@@ -110,13 +118,18 @@ globalThis.fetch = async (input, options = {}) => {
     // evidence file or returns it from the connector.
     return raw(`Operations note with enough ordinary prose to pass quality. Temporary access key: AKIA${"Z".repeat(16)}.`);
   }
+  if (url.hostname === "www.googleapis.com" && url.pathname === "/drive/v3/files/active-quality") {
+    return raw(Array.from({ length: 260 }, (_, i) => `xqz${i} brt${i} nvm${i} :::`).join(" "));
+  }
 
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/source-families") {
     const request = parseBody(options);
     const evidence = readEvidence();
     evidence.inventoryReads++;
     saveEvidence(evidence);
-    const families = fixtureMode === "adjudicated-only"
+    const families = fixtureMode === "quality-review"
+      ? [QUALITY]
+      : fixtureMode === "adjudicated-only"
       ? (evidence.removedFamilies >= 4 ? [] : [MIGRATED])
       : evidence.removedFamilies
         ? [MIGRATED]
@@ -136,7 +149,9 @@ globalThis.fetch = async (input, options = {}) => {
     const families = (request.families || []).map((family) => String(family?.base_doc_uid || ""));
     const evidence = readEvidence();
     evidence.forgetRequests++;
-    if (families.includes(MIGRATED) && fixtureMode !== "adjudicated-only") evidence.retainedFamilyReachedForget = true;
+    if ((families.includes(MIGRATED) && fixtureMode !== "adjudicated-only") || families.includes(QUALITY)) {
+      evidence.retainedFamilyReachedForget = true;
+    }
     const allowed = new Set([
       ...ALLOWED_REMOVALS,
       ...(fixtureMode === "adjudicated-only" ? [MIGRATED] : []),

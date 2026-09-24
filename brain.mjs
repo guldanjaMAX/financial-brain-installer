@@ -11115,10 +11115,13 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   const skips = [...walkSkips];
   let loadPreview = null;
   let renderLoadPreviewSummary = null;
-  let writeLoadPreviewDetail = null;
   if (dry) {
-    ({ createLoadPreview: loadPreview, renderLoadPreviewSummary, writeLoadPreviewDetail } = await loadPreviewLib());
-    loadPreview = loadPreview({ source: sourceName, vectorsPerMinute: requestedVectorRate });
+    ({ createLoadPreview: loadPreview, renderLoadPreviewSummary } = await loadPreviewLib());
+    loadPreview = loadPreview({
+      source: sourceName,
+      vectorsPerMinute: requestedVectorRate,
+      detailPath: flags["preview-report"] ? resolve(String(flags["preview-report"])) : null,
+    });
     for (const file of limited) loadPreview.observeCandidate(file);
     for (const skip of walkSkips) loadPreview.observeWalkSkip(skip);
   }
@@ -11349,7 +11352,6 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     console.log(`\n${renderLoadPreviewSummary(loadReport.summary)}`);
     if (flags["preview-report"]) {
       const detailPath = resolve(String(flags["preview-report"]));
-      writeLoadPreviewDetail(detailPath, loadReport);
       info(`private file-level preview written to ${detailPath}`);
     }
     // dry_run is stated on the returned shape rather than left to be inferred
@@ -15086,10 +15088,32 @@ const cmdIngestRemoteRun = async (
   const acceptedFamilyParts = new Map();
   const rejectedFamilyParts = new Map();
   const intentionalRemovalUids = [];
+  const retainedQualityReviewUids = new Set(
+    Array.isArray(state?.retained_quality_review?.uids)
+      ? state.retained_quality_review.uids.filter((uid) =>
+          typeof uid === "string" && uid.startsWith(`${sourceName}:`))
+      : [],
+  );
+  const retainedQualityReviewsThisRun = new Set();
+  const markRetainedQualityReview = (uid) => {
+    retainedQualityReviewUids.add(uid);
+    retainedQualityReviewsThisRun.add(uid);
+  };
+  const clearRetainedQualityReview = (uid) => retainedQualityReviewUids.delete(uid);
+  const updateRetainedQualityReviewState = () => {
+    if (retainedQualityReviewUids.size) {
+      state.retained_quality_review = {
+        version: 1,
+        count: retainedQualityReviewUids.size,
+        uids: [...retainedQualityReviewUids].sort(),
+      };
+    } else {
+      delete state.retained_quality_review;
+    }
+  };
   const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
   let remoteLoadPreview = null;
   let renderRemoteLoadPreviewSummary = null;
-  let writeRemoteLoadPreviewDetail = null;
   if (flags["preview-report"] && !dry) {
     die("--preview-report is read-only output and requires --dry-run. Nothing was sent or written.");
   }
@@ -15104,9 +15128,9 @@ const cmdIngestRemoteRun = async (
     remoteLoadPreview = previewModule.createLoadPreview({
       source: sourceName,
       vectorsPerMinute: requestedVectorRate,
+      detailPath: flags["preview-report"] ? resolve(String(flags["preview-report"])) : null,
     });
     renderRemoteLoadPreviewSummary = previewModule.renderLoadPreviewSummary;
-    writeRemoteLoadPreviewDetail = previewModule.writeLoadPreviewDetail;
   }
 
   const addTally = (part) => {
@@ -15523,6 +15547,7 @@ const cmdIngestRemoteRun = async (
         driveStoredBeforeProcessing.has(key);
       if (storedFamilyConfirmed &&
           (!scannerPolicyChanged || scannerResumeAccepted) && state.done[key] === listedVersion) {
+        clearRetainedQualityReview(key);
         recordAcceptedDocumentState(state, {
           stateKey: key, hash: listedVersion, skipKeys: [f.id], legacyPartRoot: f.id,
         });
@@ -15535,8 +15560,16 @@ const cmdIngestRemoteRun = async (
       });
       if (!r) return null;
       if (r.skip) {
+        const previouslyAccepted = driveStoredBeforeProcessing?.has(key) === true ||
+          Object.hasOwn(state.done || {}, key);
         state.skipped[key] = r.skip.reason;
-        intentionalRemovalUids.push(key);
+        if (r.skip.code === "quality_refused" && previouslyAccepted) {
+          localRefused++;
+          markRetainedQualityReview(key);
+        } else {
+          clearRetainedQualityReview(key);
+          intentionalRemovalUids.push(key);
+        }
         if (r.skip.code === "source_deleted") sourceResolvedSkipped++;
         else if (["shortcut_not_followed", "non_text_media"].includes(r.skip.code)) adjudicatedSkipped++;
         return { skip: r.skip };
@@ -15547,10 +15580,12 @@ const cmdIngestRemoteRun = async (
         const skip = { path: safeIngestDisplay(envelope.title, f.name, f.id), id: f.id, reason: refusal.reason };
         state.skipped[key] = refusal.reason;
         localRefused++;
+        clearRetainedQualityReview(key);
         intentionalRemovalUids.push(key);
         return { skip };
       }
       const envelopes = splitOversized(envelope);
+      clearRetainedQualityReview(key);
       const familyPlan = {
         stateKey: key,
         hash: r.version,
@@ -15921,6 +15956,11 @@ const cmdIngestRemoteRun = async (
           ? storedBeforeSweep.has(key)
           : Object.prototype.hasOwnProperty.call(state.done || {}, key);
         state.skipped[key] = r.skip.reason;
+        if (r.skip.code === "quality_refused" && previouslyAccepted) {
+          markRetainedQualityReview(key);
+        } else {
+          clearRetainedQualityReview(key);
+        }
         if (r.policy_skip === true) {
           policySkipped++;
           gmailPolicyUids.push(key);
@@ -15947,6 +15987,7 @@ const cmdIngestRemoteRun = async (
       const storedFamilyConfirmed = storedBeforeSweep == null || storedBeforeSweep.has(key);
       if (storedFamilyConfirmed &&
           (!scannerPolicyChanged || scannerResumeAccepted) && state.done[key] === r.version) {
+        clearRetainedQualityReview(key);
         recordAcceptedDocumentState(state, {
           stateKey: key, hash: r.version, skipKeys: [id], legacyPartRoot: id,
         });
@@ -15960,10 +16001,12 @@ const cmdIngestRemoteRun = async (
         const skip = { path: safeIngestDisplay(envelope.title, id), id, reason: refusal.reason };
         state.skipped[key] = refusal.reason;
         localRefused++;
+        clearRetainedQualityReview(key);
         gmailIntentionalUids.push(key);
         return { skip };
       }
       const envelopes = splitOversized(envelope);
+      clearRetainedQualityReview(key);
       return {
         hash: r.version, envelopes, rel: id, stateKey: key, deferState: true,
         familyPlan: {
@@ -16292,6 +16335,13 @@ const cmdIngestRemoteRun = async (
               }
             }
             state.skipped[key] = r.skip.reason;
+            const previouslyAccepted = imapStoredBeforeSweep?.has(key) === true ||
+              Object.hasOwn(state.done || {}, key);
+            if (r.skip.code === "quality_refused" && previouslyAccepted) {
+              markRetainedQualityReview(key);
+            } else {
+              clearRetainedQualityReview(key);
+            }
             if (r.source_deleted === true) sourceResolvedSkipped++;
             if (r.policy_skip === true || /^bulk mail:/i.test(r.skip.reason || "")) {
               policySkipped++;
@@ -16309,6 +16359,7 @@ const cmdIngestRemoteRun = async (
           const storedFamilyConfirmed = imapStoredBeforeSweep == null || imapStoredBeforeSweep.has(key);
           if (storedFamilyConfirmed &&
               (!scannerPolicyChanged || scannerResumeAccepted) && state.done[key] === r.version) {
+            clearRetainedQualityReview(key);
             recordAcceptedDocumentState(state, {
               stateKey: key, hash: r.version, skipKeys: [r.envelope.source_id], legacyPartRoot: r.envelope.source_id,
             });
@@ -16324,10 +16375,12 @@ const cmdIngestRemoteRun = async (
             const skip = { path: safeIngestDisplay(envelope.title, key), id: key, reason: refusal.reason };
             state.skipped[key] = refusal.reason;
             localRefused++;
+            clearRetainedQualityReview(key);
             intentionalRemovalUids.push(key);
             return { skip };
           }
           const envelopes = splitOversized(envelope);
+          clearRetainedQualityReview(key);
           if (scanned % 200 === 0) process.stdout.write(`\r  fetched ${scanned}...   `);
           return {
             hash: r.version, envelopes, rel: key, stateKey: key, deferState: true,
@@ -16527,6 +16580,15 @@ const cmdIngestRemoteRun = async (
   }
   process.stdout.write("\r");
 
+  updateRetainedQualityReviewState();
+  if (!dry) saveState(statePath, state);
+  if (retainedQualityReviewsThisRun.size) {
+    warn(
+      `${retainedQualityReviewsThisRun.size} already-stored remote item(s) failed a heuristic text-quality check and were retained for review.\n` +
+        "      They did not enter any automatic removal plan."
+    );
+  }
+
   info(`${scanned} scanned; ${prepared} document(s) prepared in ${batchNo} batch(es); ${unchanged} unchanged; ${skips.length} skipped`);
 
   const coverageGaps = Math.max(0, skips.length - policySkipped - sourceResolvedSkipped - adjudicatedSkipped) +
@@ -16539,7 +16601,6 @@ const cmdIngestRemoteRun = async (
       console.log(`\n${renderRemoteLoadPreviewSummary(loadReport.summary)}`);
       if (flags["preview-report"]) {
         const detailPath = resolve(String(flags["preview-report"]));
-        writeRemoteLoadPreviewDetail(detailPath, loadReport);
         info(`private file-level preview written to ${detailPath}`);
       }
     } else {
@@ -16630,7 +16691,7 @@ const cmdIngestRemoteRun = async (
   const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged`;
   if (tally.failed) info(summary);
   else ok(summary);
-  if (totalRefused) warn(`${totalRefused} document(s) refused for carrying live credentials.`);
+  if (totalRefused) warn(`${totalRefused} document(s) refused by content safety or text-quality checks.`);
   await reportSkips(skips);
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
   assertNoIngestFailures(tally);
@@ -22012,8 +22073,24 @@ async function cmdEval(manifestPath) {
   return assertEvalSucceeded(r);
 }
 
-async function readDiagnosis(manifestPath, options = {}) {
-  if (options.diagnosis) return options.diagnosis;
+function incompleteDiagnosisResult(reason) {
+  return Object.freeze({
+    kind: "diagnosis_incomplete",
+    complete: false,
+    reason: String(reason || "one or more diagnostic checks could not run"),
+  });
+}
+
+export async function readDiagnosis(manifestPath, options = {}) {
+  if (options.diagnosis) {
+    const receipt = diagnosisReceiptVerdict(options.diagnosis);
+    if (receipt.ok) return options.diagnosis;
+    if (options.renderIncomplete !== false && options.diagnosis?.verdict === "incomplete") {
+      renderDiagnosis(options.diagnosis);
+    }
+    if (options.returnIncomplete === true) return incompleteDiagnosisResult(receipt.reason);
+    die(`diagnose could not establish a trustworthy result: ${receipt.reason}.`);
+  }
   const { m } = loadManifest(manifestPath);
   // Cloudflare is OPTIONAL here, deliberately. This command talks to the worker
   // over plain HTTPS with the admin key, so it must keep working after our token
@@ -22034,14 +22111,64 @@ async function readDiagnosis(manifestPath, options = {}) {
   let r = null;
   try { r = JSON.parse(raw); } catch { /* handled below */ }
   const receipt = diagnosisReceiptVerdict(r);
-  if (!receipt.ok && r?.verdict === "incomplete") {
-    renderDiagnosis(r);
-    die(`diagnose could not establish a trustworthy result: ${receipt.reason}.`);
+  if (!receipt.ok) {
+    if (options.renderIncomplete !== false && r?.verdict === "incomplete") renderDiagnosis(r);
+    if (options.returnIncomplete === true) return incompleteDiagnosisResult(receipt.reason);
+    if (r?.verdict === "incomplete") {
+      die(`diagnose could not establish a trustworthy result: ${receipt.reason}.`);
+    }
   }
   if (!res.ok) die(`diagnose failed (${res.status}): ${raw.slice(0, 200)}`);
   if (!receipt.ok) die(`diagnose returned HTTP success without a trustworthy receipt: ${receipt.reason}.`);
 
   return r;
+}
+
+function loadQualityAggregateVerdict(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      value.contract_version !== 1 || value.kind !== "load_quality_aggregate" ||
+      typeof value.complete !== "boolean" || !value.duplicates || !value.chunk_outliers ||
+      !Array.isArray(value.unavailable_categories || [])) {
+    return { ok: false, reason: "the load-quality response has an unsupported contract" };
+  }
+  const exact = (count) => Number.isSafeInteger(count) && count >= 0;
+  if (value.complete === true &&
+      (!exact(value.duplicates.groups) || !exact(value.duplicates.extra_documents) ||
+       !exact(value.chunk_outliers.largest_document_chunks) || !exact(value.chunk_outliers.total_chunks) ||
+       value.duplicates.observable !== true || value.chunk_outliers.observable !== true)) {
+    return { ok: false, reason: "the load-quality response is missing measured aggregate counts" };
+  }
+  if (value.complete === false &&
+      (value.duplicates.observable !== false || value.chunk_outliers.observable !== false)) {
+    return { ok: false, reason: "the incomplete load-quality response claims measured aggregates" };
+  }
+  return { ok: true, reason: null };
+}
+
+async function readLoadQualityAggregate(manifestPath, options = {}) {
+  if (options.aggregate) {
+    const receipt = loadQualityAggregateVerdict(options.aggregate);
+    if (!receipt.ok) die(`load-report could not verify its aggregate receipt: ${receipt.reason}.`);
+    return options.aggregate;
+  }
+  const { m } = loadManifest(manifestPath);
+  const resolveAcct = options.resolveAccount ?? resolveAccount;
+  const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const request = options.http ?? http;
+  const acct = m.brain?.domain ? null : await resolveAcct(m);
+  const base = await resolveBase(m, acct);
+  const adminKey = resolveKey(manifestPath);
+  if (!adminKey) die("no durable admin key was found. Repair it with `brain setup <manifest>` or `brain secrets <manifest>`.");
+  const res = await request(`${base}/api/admin/brain/load-quality`, {
+    headers: { "X-Admin-Key": adminKey },
+  }, { timeoutMs: 30_000, what: "the aggregate load-quality report" });
+  const raw = await res.text();
+  let aggregate = null;
+  try { aggregate = JSON.parse(raw); } catch { /* fixed error below */ }
+  const receipt = loadQualityAggregateVerdict(aggregate);
+  if (!receipt.ok) die(`load-report could not verify its aggregate receipt: ${receipt.reason}.`);
+  return aggregate;
 }
 
 export async function cmdDiagnose(manifestPath, options = {}) {
@@ -22078,10 +22205,10 @@ export async function cmdLoadReport(manifestPath, options = {}) {
     flags: { json: true },
     silent: true,
   });
-  const diagnosis = await readDiagnosis(manifestPath, options.diagnosisOptions || options);
+  const quality = await readLoadQualityAggregate(manifestPath, options.aggregateOptions || options);
   const checkpointSkips = options.checkpointSkips ?? localCheckpointSkips(manifestPath, inventory.sources);
   const { buildLoadQualityReport, renderLoadQualityReport } = await import("./ingest/load-report.mjs");
-  const report = buildLoadQualityReport({ inventory, diagnosis, checkpointSkips });
+  const report = buildLoadQualityReport({ inventory, quality, checkpointSkips });
   console.log(flags.json ? JSON.stringify(report, null, 2) : renderLoadQualityReport(report));
   return report;
 }

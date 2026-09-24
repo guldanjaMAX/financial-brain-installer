@@ -399,10 +399,10 @@ export async function toEnvelope(
       cursor_blocking: false,
     };
   }
-  const q = textQuality(got.text, { sourceKind: "gmail", policy: qualityPolicy });
+  const q = textQuality(got.text, { sourceKind: "gmail", format: ".eml", policy: qualityPolicy });
   if (!q.ok) {
     return {
-      skip: { path: id, id, reason: q.reason, metrics: q.metrics },
+      skip: { path: id, id, reason: q.reason, metrics: q.metrics, code: "quality_refused" },
       retain_existing: true,
       cursor_blocking: false,
     };

@@ -20,6 +20,50 @@ check("prose that MENTIONS a token is not junk",
 check("a table of numbers is still text", textQuality(
   ["Account,Balance", "Checking,15234.11", "Savings,80100.00", "Loan,-42311.87"].join("\n") + "\n" + PROSE).ok);
 
+const sparseNumericCsv = [
+  "period,account,,,,debit,credit,balance",
+  ...Array.from({ length: 180 }, (_, i) =>
+    `,,,${i % 3 ? "" : `${i}.25`},,,,${i % 3 ? `${i}.75` : ""},,,${9000 - i}.00,,,,`
+  ),
+].join("\n");
+check("a sparse numeric CSV with empty columns is not refused",
+  textQuality(sparseNumericCsv, { format: ".csv" }).ok,
+  JSON.stringify(textQuality(sparseNumericCsv, { format: ".csv" })));
+
+const codedInventory = [
+  "SKU\tBIN\tCUSTOMER\tQTY\tSTATUS",
+  ...Array.from({ length: 220 }, (_, i) =>
+    `ZXQ${String(i).padStart(6, "0")}\tBRK${String(i % 48).padStart(3, "0")}\tCST${String(80000 + i)}\tQT${i % 17}\tHLD`
+  ),
+].join("\n");
+check("a coded inventory export is not refused",
+  textQuality(codedInventory, { format: ".tsv" }).ok,
+  JSON.stringify(textQuality(codedInventory, { format: ".tsv" })));
+
+const bankTransactions = [
+  "Date,Description,Reference,Debit,Credit,Balance",
+  ...Array.from({ length: 160 }, (_, i) =>
+    `2026-09-${String((i % 28) + 1).padStart(2, "0")},ACH ${i % 2 ? "PAYMENT" : "DEPOSIT"},TRX${String(i).padStart(8, "0")},${i % 2 ? `${i}.19` : ""},${i % 2 ? "" : `${i}.41`},${12000 - i}.82`
+  ),
+].join("\n");
+check("a bank transaction export is not refused",
+  textQuality(bankTransactions, { format: ".csv", sourceKind: "bank" }).ok,
+  JSON.stringify(textQuality(bankTransactions, { format: ".csv", sourceKind: "bank" })));
+
+const profitAndLoss = [
+  "Profit and Loss\tCurrent Month\tYear to Date",
+  "Income\t\t",
+  ...Array.from({ length: 90 }, (_, i) =>
+    `  ${i % 3 ? "Service" : "Product"} income ${1000 + i}\t${(i * 73).toFixed(2)}\t${(i * 811).toFixed(2)}`
+  ),
+  "Gross Profit\t65700.00\t729900.00",
+  "Expenses\t\t",
+  "Net Income\t31400.00\t348500.00",
+].join("\n");
+check("a bookkeeping profit-and-loss export is not refused",
+  textQuality(profitAndLoss, { format: ".xlsx" }).ok,
+  JSON.stringify(textQuality(profitAndLoss, { format: ".xlsx" })));
+
 /* ---- the case this was built for ---- */
 {
   const b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk" .repeat(60);
@@ -83,9 +127,16 @@ check("a bad decode is rejected", !textQuality("�".repeat(100) + " some text h
   check("binary decoded as text is rejected", !r.ok && /binary data decoded as text/.test(r.reason || ""), JSON.stringify(r));
 }
 {
-  const soup = Array.from({ length: 240 }, (_, i) => `${i % 10} @@@ ### %%% ||| <>`).join(" ");
+  const soup = Array.from({ length: 240 }, (_, i) => `xq${i % 10} @@@ ### %%% ||| <>`).join(" ");
   const r = textQuality(soup);
   check("symbol soup is rejected", !r.ok && /symbols with too little readable text/.test(r.reason || ""), JSON.stringify(r));
+}
+{
+  const punctuation = Array.from({ length: 180 }, (_, i) =>
+    `${"!@#$%^&*()_+-=[]{};':\",./<>?".slice(i % 12)} ${"~|`".repeat((i % 4) + 1)}`
+  ).join("\n");
+  const r = textQuality(punctuation);
+  check("punctuation density alone does not refuse text", r.ok, JSON.stringify(r));
 }
 {
   const garbage = Array.from({ length: 260 }, (_, i) => `xqz${i} brt${i} nvm${i} :::`).join(" ");
@@ -108,7 +159,9 @@ check("a bad decode is rejected", !textQuality("�".repeat(100) + " some text h
   const taxForm = Array.from({ length: 90 }, (_, i) =>
     `Line ${i + 1} W-2 1099-R EIN 00-0000000 wages ${1200 + i}.00 withholding ${120 + i}.00`
   ).join("\n");
-  check("tax-form text is not refused", textQuality(taxForm).ok, JSON.stringify(textQuality(taxForm)));
+  check("a tax-form transcription is not refused",
+    textQuality(taxForm, { format: ".txt" }).ok,
+    JSON.stringify(textQuality(taxForm, { format: ".txt" })));
 }
 {
   const sheet = Array.from({ length: 240 }, (_, i) =>

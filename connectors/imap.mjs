@@ -1122,10 +1122,10 @@ export async function toEnvelope(message, {
     text: got.text,
   });
 
-  const q = textQuality(got.text, { sourceKind: "imap", policy: qualityPolicy });
+  const q = textQuality(got.text, { sourceKind: "imap", format: ".eml", policy: qualityPolicy });
   if (!q.ok) {
     return {
-      skip: { path: where, id: where, reason: q.reason, metrics: q.metrics },
+      skip: { path: where, id: where, reason: q.reason, metrics: q.metrics, code: "quality_refused" },
       source_id: identity.id,
       retain_existing: true,
     };
