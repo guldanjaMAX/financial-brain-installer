@@ -10,6 +10,20 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Windows can now keep Drive, watched folders, and supported providers up to
+  date without an open terminal.** `brain schedule` creates one stable
+  current-user Task Scheduler entry per Brain and source lane, using the
+  absolute installed `brain.cmd` and manifest paths with limited privileges.
+  Install is safe to repeat, while status and remove use the same task name.
+  The task follows the manifest's effective five-field cron when one Windows
+  entry can express it exactly: hourly at a chosen minute, every N hours when N
+  divides 24, daily, or weekly on chosen days. Other valid cron shapes stop
+  before creating anything and print the filled one-time `brain.cmd` invocation
+  plus a note that this cadence needs a separate manual trigger setup. To check:
+  read the printed task's XML back with `schtasks /Query /XML`, verify the exact
+  action and trigger, run it once, confirm the source receipt advanced, then
+  remove it with `brain schedule`.
+
 - **Re-sending unchanged files no longer rebuilds their meaning-based search.**
   When a newer kit re-sends a file whose text has not changed, for example to
   add the exact-byte provenance an older kit never recorded, the Brain still

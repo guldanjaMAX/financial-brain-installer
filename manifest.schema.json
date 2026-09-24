@@ -470,7 +470,7 @@
         },
         "local_folder": {
           "type": "object",
-          "description": "A local folder that reloads itself on a schedule, enforced by brain schedule <manifest> --install --folder and run by brain ingest <manifest> --path. This is what makes \"drop it in a folder you already ingest\" true for a folder that is not inside Google Drive. Each tick reuses the local ingest's content-hash resume state, so a new file is added, a changed file is re-sent, an unchanged file costs one read, and a file that is gone is removed through the same aggregate removal plan every other source uses. The schedule knob is operations.folder_ingest_cron (default: hourly). macOS only today: it installs as a per-user LaunchAgent.",
+          "description": "A local folder that reloads itself on a schedule, enforced by brain schedule <manifest> --install --folder and run by brain ingest <manifest> --path. This is what makes \"drop it in a folder you already ingest\" true for a folder that is not inside Google Drive. Each tick reuses the local ingest's content-hash resume state, so a new file is added, a changed file is re-sent, an unchanged file costs one read, and a file that is gone is removed through the same aggregate removal plan every other source uses. The schedule knob is operations.folder_ingest_cron (default: hourly). macOS installs a per-user LaunchAgent; Windows installs a current-user, least-privilege Task Scheduler entry when one task can represent the cron exactly.",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -481,7 +481,7 @@
                 "string",
                 "null"
               ],
-              "description": "Absolute path to the folder to watch, or null until one is chosen. A relative path is refused: a LaunchAgent's working directory is not the client's shell, so it would resolve somewhere neither party intended."
+              "description": "Absolute path to the folder to watch, or null until one is chosen. A relative path is refused: a scheduled process's working directory is not the client's shell, so it would resolve somewhere neither party intended."
             },
             "source": {
               "type": "string",
@@ -724,12 +724,12 @@
     },
     "operations": {
       "type": "object",
-      "description": "Machine-local unattended operations. ingest_cron is wired through the macOS Drive LaunchAgent scheduler. Health reports and webhooks remain descriptive until their commands are implemented.",
+      "description": "Machine-local unattended operations. Drive, watched-folder, and supported provider schedules use per-user LaunchAgents on macOS or current-user Task Scheduler entries on Windows. Health reports and webhooks remain descriptive until their commands are implemented.",
       "properties": {
         "ingest_cron": {
           "type": "string",
           "minLength": 9,
-          "description": "Numeric five-field cron schedule for unattended Google Drive ingest. Installed as a per-user macOS LaunchAgent; calendar times use the Mac's local timezone. brain.domain must also be set so refresh needs no Cloudflare deployment credential."
+          "description": "Numeric five-field cron schedule for unattended Google Drive ingest. Installed as a per-user LaunchAgent on macOS or a current-user, least-privilege Task Scheduler entry on Windows when one task can represent it exactly. Calendar times use the computer's local timezone. brain.domain must also be set so refresh needs no Cloudflare deployment credential."
         },
         "admin_key_secret": {
           "type": [
@@ -804,7 +804,7 @@
         },
         "provider_crons": {
           "type": "object",
-          "description": "Five-field cron schedules for locally stored OAuth provider connectors. Incremental Microsoft and Dropbox lanes default to hourly; full-snapshot lanes default to daily. Each installs as its own per-user macOS LaunchAgent.",
+          "description": "Five-field cron schedules for locally stored OAuth provider connectors. Incremental Microsoft and Dropbox lanes default to hourly; full-snapshot lanes default to daily. Each installs as its own per-user LaunchAgent on macOS or current-user, least-privilege Task Scheduler entry on Windows when one task can represent it exactly.",
           "properties": {
             "quickbooks": {
               "type": "string",
@@ -919,7 +919,7 @@
         "folder_ingest_cron": {
           "type": "string",
           "minLength": 9,
-          "description": "Numeric five-field cron schedule for the watched local folder in corpora.local_folder. Installed as a per-user macOS LaunchAgent; calendar times use the Mac's local timezone. Defaults to hourly when absent. brain.domain must also be set so refresh needs no Cloudflare deployment credential."
+          "description": "Numeric five-field cron schedule for the watched local folder in corpora.local_folder. Installed as a per-user LaunchAgent on macOS or a current-user, least-privilege Task Scheduler entry on Windows when one task can represent it exactly. Calendar times use the computer's local timezone. Defaults to hourly when absent. brain.domain must also be set so refresh needs no Cloudflare deployment credential."
         }
       }
     },

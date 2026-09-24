@@ -3,6 +3,11 @@ import { isAbsolute, basename, dirname, relative, resolve, sep, posix, win32 } f
 
 const isPortableAbsolute = (path) => isAbsolute(path) || win32.isAbsolute(path);
 
+/** Values that enter cmd.exe must not carry its expansion or control syntax. */
+export function isWindowsBatchValueSafe(value) {
+  return typeof value === "string" && value.length > 0 && !/["%\^!&|<>\u0000-\u001f]/u.test(value);
+}
+
 /**
  * Resolve a proposed npm JavaScript entry only when it is the regular
  * npm-cli.js file inside a package that identifies itself as npm.
@@ -491,8 +496,8 @@ export function buildWindowsBatchInvocation(comspec, wrapper, args = []) {
       win32.basename(comspec).toLowerCase() !== "cmd.exe" || /["\r\n]/.test(comspec)) {
     throw new Error("windows_command_processor_refused");
   }
-  if (typeof wrapper !== "string" || !isPortableAbsolute(wrapper) ||
-      win32.extname(wrapper).toLowerCase() !== ".cmd" || /["%\^!&|<>\r\n]/.test(wrapper)) {
+  if (!isWindowsBatchValueSafe(wrapper) || !isPortableAbsolute(wrapper) ||
+      win32.extname(wrapper).toLowerCase() !== ".cmd") {
     throw new Error("windows_wrapper_path_refused");
   }
   if (!Array.isArray(args) || args.some((arg) =>

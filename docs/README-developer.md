@@ -834,7 +834,7 @@ permission change rewrites it, and storing it once made 80% of a corpus look
 like it was written this year, silently disabling staleness reporting. Drive's
 `createdTime` is the fallback, and a date in the filename beats both.
 
-### Unattended Drive refresh on macOS
+### Unattended refresh on macOS and Windows
 
 `operations.ingest_cron` is the standard source of truth for the Drive refresh
 schedule. Use the public `brain schedule` command for install, status and
@@ -846,12 +846,15 @@ node brain.mjs schedule ./acme.manifest.json --status
 node brain.mjs schedule ./acme.manifest.json --remove
 ```
 
-The public install command writes a per-user LaunchAgent under
-`~/Library/LaunchAgents` and sets the matching Drive freshness expectation on
-the Worker. Calling `operations/drive-scheduler.mjs` directly is an internal
+On macOS, the public install command writes a per-user LaunchAgent under
+`~/Library/LaunchAgents`. On Windows it creates a stable per-Brain Task
+Scheduler entry that runs the absolute installed `brain.cmd` against the
+absolute manifest path as the current user with limited privileges. Both set
+the matching Drive freshness expectation on the Worker. Calling
+`operations/drive-scheduler.mjs` directly is an internal
 operation and neither sets nor clears that remote expectation. A failed remote
-expectation write can leave the local LaunchAgent installed; re-running the
-public install safely completes both halves. The LaunchAgent runs
+expectation write can leave the local schedule installed; re-running the
+public install safely completes both halves. On macOS the LaunchAgent runs
 `brain ingest <manifest> --from drive`, uses macOS's native per-client advisory
 lock to prevent two scheduler-launched syncs from overlapping, and writes
 separate stdout and stderr logs under `~/.brain/logs`. Manual `brain ingest`
@@ -914,9 +917,15 @@ does not inherit `BRAIN_GOOGLE_TOKEN_STORE=file` from the Terminal that ran
 OAuth. Use `auto` for the normal macOS Keychain default, or `file` only when that
 fallback was chosen deliberately. Status compares the installed plist with the
 current manifest and code paths, reports definition drift, and surfaces
-launchd's run count and last exit code. Windows and Linux schedulers are not
-built yet and fail with a platform-specific explanation rather than pretending
-the manifest schedule took effect.
+launchd's run count and last exit code. Windows `--status` reads the verbose
+Task Scheduler definition, and `--remove` deletes the same stable task name.
+Windows accepts an exact one-entry translation for hourly schedules at minute
+M, every N hours when N divides 24, daily schedules, and weekly schedules on
+one or more numeric weekdays. Any other valid five-field cron is refused before
+`schtasks /Create`; the CLI says that nothing was scheduled and prints a
+filled-in one-time `brain.cmd` invocation plus a note that the cadence needs a
+separate manual trigger setup. Linux still fails with a platform-specific
+explanation rather than pretending the manifest schedule took effect.
 
 Scheduler stdout and stderr remain private mode `0600`. At install, after each
 lock-owning ingest child exits, and at removal, each stream is cut back to a
@@ -926,7 +935,7 @@ exceed that cap until it exits, so stale-run monitoring still matters. Rotation
 refuses links, hard links, foreign-owned files, and paths outside the per-user
 `.brain` runtime.
 
-### Unattended watched-folder refresh on macOS
+### Unattended watched-folder refresh on macOS and Windows
 
 The third consumer of the same generalized scheduler, after Drive and iMessage.
 `operations/folder-scheduler.mjs` supplies only a `SCHEDULER_SPEC`; every piece
@@ -949,7 +958,7 @@ read, interrupted run resumes. The folder and source name are bound into the
 config hash, so an installed agent cannot be repointed at another tree by
 editing the manifest afterwards.
 
-`validateExtras` refuses a relative path (launchd's working directory is not the
+`validateExtras` refuses a relative path (a scheduled process's working directory is not the
 client's shell), a folder that does not currently exist (a schedule pointing at
 nothing loads nothing and reports success forever), and a source name outside
 `^[a-z0-9][a-z0-9_-]*$` (the name is the deletion scope). Status and remove stay
