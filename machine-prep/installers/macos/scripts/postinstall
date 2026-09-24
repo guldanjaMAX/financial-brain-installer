@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Installer runs this as root. The reviewed prep must run as the signed-in
+# console user because its files, PATH entries, and tools are user-owned.
+set -eu
+
+RUNNER="/Library/Application Support/FinancialBrainMachinePrep/run-machine-prep-mac.sh"
+console_user=$(/usr/bin/stat -f '%Su' /dev/console)
+case "$console_user" in ""|root|loginwindow) printf 'REFUSED no signed-in console user found\n' >&2; exit 2 ;; esac
+console_uid=$(/usr/bin/id -u "$console_user")
+user_home=$(/usr/bin/dscl . -read "/Users/$console_user" NFSHomeDirectory | /usr/bin/awk '{ print $2 }')
+[ -n "$user_home" ] || { printf 'REFUSED unable to resolve console user home\n' >&2; exit 2; }
+[ -x "$RUNNER" ] || { printf 'REFUSED installed machine-prep runner is missing\n' >&2; exit 2; }
+
+printf 'CONSOLE_USER_DECISION_REACHED=1 uid=%s\n' "$console_uid"
+/bin/launchctl asuser "$console_uid" \
+  /usr/bin/sudo -u "$console_user" \
+  /usr/bin/env HOME="$user_home" USER="$console_user" LOGNAME="$console_user" \
+  "$RUNNER"

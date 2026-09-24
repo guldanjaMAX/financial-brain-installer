@@ -1,0 +1,29 @@
+Machine Prep for macOS
+MODE dry-run (no changes)
+
+READINESS
+WRONG_VERSION  Node.js                 v20.11.1; supported majors are 22 and 24; fix: run --real
+READY          npm                     10.2.4
+MISSING        Git                     install Apple's Command Line Tools; fix: run --real and approve the OS dialog
+MISSING        Claude Code             install pinned 2.1.261; fix: run --real
+WRONG_VERSION  Codex CLI               codex-cli 0.154.0; expected 0.155.0-alpha.16; fix: run --real
+SHADOWED       Financial Brain CLI     2 PATH matches; fix: remove the earlier PATH entry and reopen the shell
+READY          Wrangler                package pin 4.131.1; no global install needed
+READY          Python 3                not required by standard machine prep
+MISSING        Xcode Command Line Tools required only to supply Git; fix: run --real and approve the OS dialog
+READY          macOS session           normal current-user shell
+CHECKS_REACHED=10
+READINESS RED
+
+PLAN
+1. CLIENT CLICK: approve Apple's Command Line Tools dialog once, only because Git/Xcode readiness is incomplete.
+2. DOWNLOAD: Node.js v24.13.1 from nodejs.org into the per-user tool directory.
+3. VERIFY: match the Node archive against the pinned release's official SHASUMS256.txt before extraction.
+4. INSTALL: Anthropic Claude Code 2.1.261 from a saved official installer file; never pipe a download into a shell.
+5. INSTALL: OpenAI Codex CLI 0.155.0-alpha.16 from the exact official npm package into the per-user prefix.
+6. PATH: add one managed per-user bin directory without replacing existing PATH entries.
+7. SKIP: do not install global Wrangler; Financial Brain owns wrangler@4.131.1.
+8. HOLD: do not install Financial Brain until the published stable contract provides immutable bytes and a SHA-256 receipt.
+9. VERIFY: rerun --check and show the operator the green/red list.
+
+No command was executed, no directory was created, and no log was written.
