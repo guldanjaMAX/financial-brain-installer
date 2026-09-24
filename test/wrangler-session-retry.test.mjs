@@ -52,7 +52,7 @@ function oauthEnvelope(result, extra = {}) {
   return { success: true, errors: [], messages: [], result, ...extra };
 }
 
-function namedProfileHarness({ renewal = B } = {}) {
+function namedProfileHarness({ renewal = B, rejectRenewed = false } = {}) {
   let tokenReads = 0;
   let mutationCalls = 0;
   let created = 0;
@@ -92,7 +92,7 @@ function namedProfileHarness({ renewal = B } = {}) {
     }
     if (path.endsWith("/workers/scripts/renewal-probe") && init.method === "POST") {
       mutationCalls += 1;
-      if (init.headers?.Authorization === `Bearer ${B}`) {
+      if (!rejectRenewed && init.headers?.Authorization === `Bearer ${B}`) {
         created += 1;
         return new Response(JSON.stringify(oauthEnvelope({ id: "created" })), {
           status: 200,
@@ -233,6 +233,8 @@ try {
       )),
       (error) => {
         assert.match(error.message, /authorize.*browser|browser.*authorize/i);
+        assert.match(error.message, /rejected operation was not repeated/i);
+        assert.doesNotMatch(error.message, /tried once more/i);
         assert.doesNotMatch(error.message, /403|9109|Invalid access token/i);
         return true;
       },
@@ -241,14 +243,38 @@ try {
       "failed renewal reaches the write decision once, retries nothing, and creates nothing");
   }
 
+  // A changed named-profile token authorizes exactly one retry. If Cloudflare
+  // rejects that retry too, report both attempts instead of claiming that the
+  // rejected operation was never repeated.
+  {
+    const harness = namedProfileHarness({ rejectRenewed: true });
+    globalThis.fetch = harness.fetchImpl;
+    await assert.rejects(
+      harness.run(() => cloudflareApiRequest(
+        `/accounts/${ACCOUNT_ID}/workers/scripts/renewal-probe`,
+        { method: "POST", body: { probe: true } },
+      )),
+      (error) => {
+        assert.match(error.message, /both attempts were rejected/i);
+        assert.match(error.message, /tried once more after the credential changed, then stopped/i);
+        assert.match(error.message, /no further retry was made/i);
+        assert.doesNotMatch(error.message, /rejected operation was not repeated/i);
+        assert.doesNotMatch(error.message, /403|9109|Invalid access token/i);
+        return true;
+      },
+    );
+    assert.deepEqual(harness.counts(), { tokenReads: 2, mutationCalls: 2, created: 0 },
+      "a changed token permits one retry, then a second rejection stops without creating anything");
+  }
+
   // Product-owned Wrangler subprocesses must share the same named-profile
   // recovery. The first rejected command reaches its mutation decision; only
   // a proven renewed profile may run it a second time.
   {
+    const harness = namedProfileHarness();
     let commandCalls = 0;
-    let renewalCalls = 0;
     let created = 0;
-    const result = runCloudflareWranglerCommand(
+    const result = await harness.run(() => runCloudflareWranglerCommand(
       ["vectorize", "create", "fixture-index", "--dimensions=768", "--metric=cosine"],
       {
         accountId: ACCOUNT_ID,
@@ -260,20 +286,20 @@ try {
           created += 1;
           return { ok: true, out: "created" };
         },
-        renewSessionToken: () => { renewalCalls += 1; return true; },
       },
-    );
+    ));
     assert.equal(result.ok, true);
-    assert.deepEqual({ commandCalls, renewalCalls, created }, { commandCalls: 2, renewalCalls: 1, created: 1 });
+    assert.equal(result.out, "created");
+    assert.equal(harness.counts().tokenReads, 2, "the real holder re-reads the named profile once");
+    assert.deepEqual({ commandCalls, created }, { commandCalls: 2, created: 1 });
   }
 
   // A subprocess renewal failure returns only the reauthorization action. It
   // neither leaks the raw provider refusal nor repeats the mutation command.
   {
+    const harness = namedProfileHarness({ renewal: null });
     let commandCalls = 0;
-    let renewalCalls = 0;
-    let created = 0;
-    const result = runCloudflareWranglerCommand(
+    const result = await harness.run(() => runCloudflareWranglerCommand(
       ["vectorize", "create", "fixture-index", "--dimensions=768", "--metric=cosine"],
       {
         accountId: ACCOUNT_ID,
@@ -283,13 +309,42 @@ try {
           commandCalls += 1;
           return { ok: false, out: "Authentication error [code: 10000]" };
         },
-        renewSessionToken: () => { renewalCalls += 1; return false; },
       },
-    );
+    ));
     assert.equal(result.ok, false);
     assert.match(result.out, /authorize.*browser|browser.*authorize/i);
+    assert.match(result.out, /rejected operation was not repeated/i);
+    assert.doesNotMatch(result.out, /tried once more/i);
     assert.doesNotMatch(result.out, /10000|Authentication error/i);
-    assert.deepEqual({ commandCalls, renewalCalls, created }, { commandCalls: 1, renewalCalls: 1, created: 0 });
+    assert.equal(harness.counts().tokenReads, 2, "the real holder attempts one profile re-read");
+    assert.equal(commandCalls, 1, "failed renewal reaches the command decision once and never retries");
+  }
+
+  // A subprocess also reports the one bounded retry accurately when the
+  // refreshed credential is rejected a second time.
+  {
+    const harness = namedProfileHarness();
+    let commandCalls = 0;
+    const result = await harness.run(() => runCloudflareWranglerCommand(
+      ["vectorize", "create", "fixture-index", "--dimensions=768", "--metric=cosine"],
+      {
+        accountId: ACCOUNT_ID,
+        authProfile: PROFILE,
+        platformName: "darwin",
+        runCommand: () => {
+          commandCalls += 1;
+          return { ok: false, out: "Authentication error [code: 10000]" };
+        },
+      },
+    ));
+    assert.equal(result.ok, false);
+    assert.match(result.out, /both attempts were rejected/i);
+    assert.match(result.out, /tried once more after the credential changed, then stopped/i);
+    assert.match(result.out, /no further retry was made/i);
+    assert.doesNotMatch(result.out, /rejected operation was not repeated/i);
+    assert.doesNotMatch(result.out, /10000|Authentication error/i);
+    assert.equal(harness.counts().tokenReads, 2, "the real holder re-reads the named profile once");
+    assert.equal(commandCalls, 2, "one changed credential permits exactly one retry");
   }
 } finally {
   globalThis.fetch = savedFetch;
