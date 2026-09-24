@@ -93,6 +93,7 @@ test("macOS staging contains the real prep, handoff, support log wrapper, and un
     assert.match(wrapper, /prep-mac\.sh" --real/);
     assert.match(wrapper, /installer\.log/);
     assert.match(wrapper, /handoff-mac\.sh/);
+    assert.match(wrapper, /set -o pipefail/);
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
