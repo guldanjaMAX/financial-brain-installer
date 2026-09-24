@@ -6,7 +6,7 @@ same readability check used by new loads, records outside a declared source
 scope, unusually heavy items, and records with a stored successor.
 
 The report works in small pages. Each finding says how many items the page
-found, the estimated vectors and text storage a selected rule could save, what
+found, the estimated projected vectors and text characters a selected rule could save, what
 would be lost, and the rule in plain language. Titles stay hidden unless the
 owner asks to see samples. A possible match is not permission to remove it.
 
@@ -29,9 +29,15 @@ planned automatically:
 brain optimize-cleanup ./brain.manifest.json --plan exact-duplicates --json
 ```
 
-The plan names exact counts, estimated savings, and a fingerprint. It also
+The plan names exact counts, estimated savings, a continuation cursor when
+more groups may remain, and a fingerprint. It also
 runs the product's existing forget path as a no-op dry run. The plan changes
-nothing. To apply it, the owner must approve that exact fingerprint:
+nothing. Duplicate equivalence includes source, entity, client, category,
+top folder, platform, and date. Chunk metadata must prove the same boundaries,
+and a document grant or an unprovable boundary refuses collapse.
+
+Confirmed removal is currently unavailable. Even this fully approved form
+rebuilds the plan and then fails closed without changing a document:
 
 ```bash
 brain optimize-cleanup ./brain.manifest.json --plan exact-duplicates \
@@ -39,9 +45,10 @@ brain optimize-cleanup ./brain.manifest.json --plan exact-duplicates \
 ```
 
 The command rebuilds the plan first. If any target changed, the fingerprint
-changes and removal is refused. Exact duplicates keep one canonical document.
-Every known source location is attached to that copy so retrieval can still
-show where the evidence appeared.
+changes. If it did not change, the Worker still returns
+`cleanup_apply_unavailable` until citation preservation, exact boundary and
+content-hash readback, affected-row checks, and deletion are one atomic guarded
+mutation. This is a review surface, not a deletion ceremony.
 
 Near duplicates are candidates only. Size is also never enough to authorize a
 removal. A technician may build a selected-document plan only after the owner
@@ -61,12 +68,13 @@ separate decision. Add `--apply --approve <fingerprint>` only after the owner
 approves it. The command changes only `corpora.google_drive.exclude_paths` in
 the local manifest and verifies the exact write.
 
-## Receipt and recovery
+## Measurement and recovery
 
-An applied cleanup returns document, chunk/vector, duplicate, and D1-size
-measurements before and after. Vector deletion is queued through the normal D1
-outbox, so reclaimed provider space may finish after the D1 removal.
+The report labels the D1 chunk-derived value as `expected_vectors`, leaves
+`actual_vectors` unproved, and reports text length as characters. A plan labels
+the projected queue work as `expected_vector_deletes`. It never describes a
+bounded batch as whole-Brain completion; `more_cleanup_possible` and the plan
+cursor name any remaining scan work.
 
-The current D1 forget path has no one-command undo window. The receipt says so
-plainly. Recovery means loading the original source again. Do not approve a
-cleanup unless the source remains available or that limitation is acceptable.
+No cleanup removal or recovery receipt is produced by this version. The
+separate existing D1 forget path still has no one-command undo window.

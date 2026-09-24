@@ -26917,7 +26917,7 @@ function cleanupCursorFromFlag(value) {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid cursor");
     return parsed;
   } catch {
-    die("--cursor must be the opaque value printed by the preceding optimize-cleanup audit page");
+    die("--cursor must be the opaque value printed by the preceding optimize-cleanup page");
   }
 }
 
@@ -27012,6 +27012,7 @@ export async function cmdOptimizeCleanup(manifestPath, options = {}) {
     if (flags.documents || flags.finding) die("exact-duplicates does not accept --documents or --finding");
     rule = { kind: "exact_duplicates" };
   } else if (planName === "selected-documents") {
+    if (flags.cursor) die("selected-documents does not accept --cursor");
     const docUids = String(flags.documents || "").split(",").map((value) => value.trim()).filter(Boolean);
     if (!docUids.length) die("selected-documents needs --documents <id,id> from the private audit");
     rule = {
@@ -27024,12 +27025,17 @@ export async function cmdOptimizeCleanup(manifestPath, options = {}) {
   }
   const plan = await request("/api/admin/brain/cleanup/plan", {
     rule,
+    cursor: cleanupCursorFromFlag(flags.cursor),
     limit: flags.limit === undefined ? undefined : Number(flags.limit),
     include_sample_titles: flags["sample-titles"] === true,
   }, "cleanup plan");
+  const nextCursor = plan.resume?.complete
+    ? null
+    : Buffer.from(JSON.stringify(plan.resume?.cursor || {}), "utf8").toString("base64url");
+  const plannedOutput = { ...plan, next_cursor: nextCursor };
   if (flags.apply !== true) {
-    console.log(JSON.stringify({ kind: "cleanup_plan", ...plan, applied: false }, null, 2));
-    return plan;
+    console.log(JSON.stringify({ kind: "cleanup_plan", ...plannedOutput, applied: false }, null, 2));
+    return plannedOutput;
   }
   if (typeof flags.approve !== "string") die("--apply needs --approve <cleanup plan fingerprint>");
   if (flags.approve !== plan.fingerprint) {
@@ -27278,8 +27284,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain optimize-cleanup <manifest> --json  read one bounded cleanup audit page; returns an opaque cursor
     brain optimize-cleanup <manifest> --plan exact-duplicates --json
                                            build one bounded, no-op removal plan and fingerprint
-    brain optimize-cleanup <manifest> --plan exact-duplicates --apply --approve <fingerprint> --json
-                                           rebuild and apply only that unchanged approved plan
+    brain optimize-cleanup <manifest> --plan exact-duplicates --apply --approve <fingerprint> --json  rebuild then fail closed; removal is unavailable
+                                           prove the unchanged approved plan without removing content
     brain optimize-cleanup <manifest> --source-exclusion <Drive path> --json
                                            preview a future-load exclusion; add --apply --approve <fingerprint>
     brain sources    <manifest> --json --recovery  one bounded provenance and OCR recovery preview page

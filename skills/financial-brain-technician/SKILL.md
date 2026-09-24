@@ -166,23 +166,23 @@ count.
 Run `brain optimize-cleanup <manifest> --json` as the cleanup portion of the
 read-only Optimize report. Follow its opaque `next_cursor` one page at a time
 and honor the returned pacing hint. Report all six finding classes with their
-count, estimated vector and text-storage savings, owner loss, and plain-language
+count, estimated projected-vector and text-character savings, owner loss, and plain-language
 rule. Do not request sample titles unless the owner asks to see them. Near
 duplicates and heavy items are candidates only. An incomplete cursor sequence
 is not a complete cleanup audit.
 
-Finish the full read-only Optimize report before offering cleanup. The owner
+Finish the full read-only Optimize report before offering a plan. The owner
 must choose one rule. A plan is still read-only and must first prove the
-existing forget dry run. Show its exact counts, loss statement, lack of undo,
-and fingerprint. Do not apply it in the same response that first presents it.
-Only `brain optimize-cleanup <manifest> --plan <rule> --apply --approve
-<fingerprint> --json` may perform the chosen unchanged plan. A changed
-fingerprint stops for fresh review. Never infer approval from the original
-Optimize request, a title sample request, or approval of a different rule.
+existing forget dry run. Show its exact counts, loss statement, continuation
+state, and fingerprint. Confirmed cleanup removal is unavailable and returns
+`cleanup_apply_unavailable` even with the exact fingerprint. Never describe a
+plan or bounded batch as removed content or whole-Brain completion.
 
-Exact duplicates keep one canonical document and preserve every known location
-reference. Do not automatically collapse cross-source, cross-zone, differently
-dated, near-duplicate, transcript/notes/summary, or merely heavy records. When
+Exact duplicate plans require every retrieval and access boundary to match and
+preserve every bounded citation-safe location in the preview. Do not collapse
+cross-source, cross-zone, differently dated, entity, client, category, folder,
+platform, document-grant, unproved-boundary, near-duplicate,
+transcript/notes/summary, or merely heavy records. When
 an approved outside-Drive-path rule should also prevent reloading, preview the
 separate `--source-exclusion <path>` manifest plan and obtain its own exact
 fingerprint approval. State plainly that current D1 removal has no one-command

@@ -3170,6 +3170,7 @@ export default {
         const body = await request.json().catch(() => ({}));
         const plan = await prepareCleanupPlan(env, {
           rule: body.rule,
+          cursor: body.cursor,
           limit: body.limit,
           includeSampleTitles: body.include_sample_titles === true,
         });

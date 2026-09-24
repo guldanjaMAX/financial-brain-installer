@@ -1,13 +1,18 @@
 /**
- * Bounded, resumable cleanup analysis and owner-approved removal plans.
+ * Bounded, resumable cleanup analysis and owner-approved removal previews.
  *
  * This module deliberately does not add a second delete implementation. It
- * identifies exact targets, proves the existing forget dry-run, then delegates
- * the destructive step to store-d1's reviewed D1-first removal path.
+ * identifies exact targets and proves the existing forget dry-run. Confirmed
+ * removal is fail-closed until the store has one atomic guarded mutation that
+ * can preserve locations and delete only unchanged exact targets.
  */
 import { textQuality } from "../../../ingest/quality.mjs";
 import { forget } from "./store-d1.js";
-import { cleanupLocationReferences } from "./cleanup-location-references.js";
+import {
+  MAX_CLEANUP_LOCATION_REFERENCES,
+  cleanupLocationReference,
+  cleanupLocationReferences,
+} from "./cleanup-location-references.js";
 
 const DEFAULT_PAGE = 100;
 const MAX_PAGE = 200;
@@ -15,13 +20,27 @@ const HEAVY_VECTOR_THRESHOLD = 500;
 
 export const CLEANUP_CONTENT_PAGE_SQL = `
   /* optimize-cleanup: content page */
-  SELECT rowid AS document_rowid, doc_uid, source, source_id, title, uri,
-         document_date, top_folder, client, category, content_hash, meta
-    FROM documents INDEXED BY idx_documents_live_content_hash
-   WHERE deleted_at IS NULL
-     AND content_hash IS NOT NULL AND content_hash != ''
-     AND (content_hash > ?1 OR (content_hash = ?1 AND rowid > CAST(?2 AS INTEGER)))
-   ORDER BY content_hash, rowid
+  SELECT d.rowid AS document_rowid, d.doc_uid, d.source, d.source_id, d.title, d.uri,
+         d.document_date, d.top_folder, d.client, d.category, d.platform,
+         d.entity_slug, d.content_hash, d.meta,
+         EXISTS(SELECT 1 FROM document_access_documents access_doc
+                 WHERE access_doc.document_id=d.doc_uid) AS access_grant_count,
+         CASE WHEN EXISTS(SELECT 1 FROM chunks present WHERE present.doc_uid=d.doc_uid)
+                    AND NOT EXISTS(
+                      SELECT 1 FROM chunks boundary_chunk
+                       WHERE boundary_chunk.doc_uid=d.doc_uid
+                         AND (boundary_chunk.source IS NOT d.source
+                           OR boundary_chunk.document_date IS NOT d.document_date
+                           OR boundary_chunk.client IS NOT d.client
+                           OR boundary_chunk.category IS NOT d.category
+                           OR boundary_chunk.top_folder IS NOT d.top_folder
+                           OR boundary_chunk.platform IS NOT d.platform))
+              THEN 1 ELSE 0 END AS retrieval_boundaries_proved
+    FROM documents d INDEXED BY idx_documents_live_content_hash
+   WHERE d.deleted_at IS NULL
+     AND d.content_hash IS NOT NULL AND d.content_hash != ''
+     AND (d.content_hash > ?1 OR (d.content_hash = ?1 AND d.rowid > CAST(?2 AS INTEGER)))
+   ORDER BY d.content_hash, d.rowid
    LIMIT ?3`;
 
 export const CLEANUP_DOCUMENT_PAGE_SQL = `
@@ -31,7 +50,7 @@ export const CLEANUP_DOCUMENT_PAGE_SQL = `
          (SELECT COUNT(*) FROM chunks c INDEXED BY idx_chunks_doc
            WHERE c.doc_uid=d.doc_uid) AS chunk_count,
          (SELECT COALESCE(SUM(length(c.text)), 0) FROM chunks c INDEXED BY idx_chunks_doc
-           WHERE c.doc_uid=d.doc_uid) AS text_bytes
+           WHERE c.doc_uid=d.doc_uid) AS text_characters
     FROM documents d INDEXED BY sqlite_autoindex_documents_1
    WHERE d.doc_uid > ?1 AND d.deleted_at IS NULL
    ORDER BY d.doc_uid
@@ -48,6 +67,20 @@ export const CLEANUP_CHUNK_PAGE_SQL = `
 const boundedPage = (value) => Math.min(Math.max(Number(value) || DEFAULT_PAGE, 1), MAX_PAGE);
 
 const rowsOf = (result) => Array.isArray(result?.results) ? result.results : [];
+
+function cleanupContentCursor(value) {
+  if (value == null) return { content_hash: "", document_rowid: "" };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw cleanupError("cleanup_cursor_invalid", "The cleanup cursor is invalid.");
+  }
+  const contentHash = String(value.content_hash || "");
+  const documentRowid = String(value.document_rowid || "");
+  if (contentHash.length > 256 || documentRowid.length > 32 ||
+      (documentRowid && !/^\d+$/.test(documentRowid))) {
+    throw cleanupError("cleanup_cursor_invalid", "The cleanup cursor is invalid.");
+  }
+  return { content_hash: contentHash, document_rowid: documentRowid };
+}
 
 function parseObject(value) {
   if (!value) return {};
@@ -68,12 +101,12 @@ function normalizedTitle(value) {
     .trim();
 }
 
-function publicRule(kind, count, vectors, storage, loss, rule, extra = {}) {
+function publicRule(kind, count, vectors, characters, loss, rule, extra = {}) {
   return {
     kind,
     count,
-    estimated_vectors_saved: vectors,
-    estimated_storage_bytes_saved: storage,
+    estimated_projected_vectors_saved: vectors,
+    estimated_text_characters_saved: characters,
     what_owner_would_lose: loss,
     rule,
     ...extra,
@@ -85,53 +118,102 @@ function duplicateSafetyKey(row) {
   // duplicate row can affect. Other identical rows stay findings, not targets.
   return [
     row.source,
+    row.entity_slug ?? "",
     row.document_date ?? "",
     row.top_folder ?? "",
     row.client ?? "",
     row.category ?? "",
+    row.platform ?? "",
     row.content_hash,
   ].join("\u001f");
 }
 
-function locationReference(row, { includeTitle = false } = {}) {
-  return {
+function locationReference(row) {
+  return cleanupLocationReference({
     source: String(row.source || ""),
     source_id: String(row.source_id || ""),
-    title: includeTitle && row.title != null ? String(row.title) : null,
+    title: row.title == null ? null : String(row.title),
     uri: row.uri == null ? null : String(row.uri),
+  });
+}
+
+function exactGroupAnalysis(rows, { includeSampleTitles = false } = {}) {
+  const eligible = [];
+  let refusedUnprovedBoundaryRows = 0;
+  let refusedAccessBoundRows = 0;
+  let refusedLocationRows = 0;
+  for (const row of rows) {
+    if (Number(row.access_grant_count || 0) !== 0) {
+      refusedAccessBoundRows += 1;
+      continue;
+    }
+    if (Number(row.retrieval_boundaries_proved || 0) !== 1) {
+      refusedUnprovedBoundaryRows += 1;
+      continue;
+    }
+    const current = locationReference(row);
+    const rawPrior = parseObject(row.meta).cleanup_location_references;
+    const prior = rawPrior === undefined ? [] : cleanupLocationReferences(row.meta);
+    if (!current || (rawPrior !== undefined && (!Array.isArray(rawPrior) ||
+        rawPrior.length > MAX_CLEANUP_LOCATION_REFERENCES || prior.length !== rawPrior.length))) {
+      refusedLocationRows += 1;
+      continue;
+    }
+    eligible.push({ row, current, prior });
+  }
+  const groups = new Map();
+  for (const item of eligible) {
+    const { row } = item;
+    const key = duplicateSafetyKey(row);
+    const group = groups.get(key) || [];
+    group.push(item);
+    groups.set(key, group);
+  }
+  const exact = [...groups.values()]
+    .filter((group) => group.length > 1)
+    .flatMap((group) => {
+      const ordered = [...group].sort((a, b) =>
+        String(a.row.doc_uid).localeCompare(String(b.row.doc_uid)));
+      const referenceCount = ordered.reduce((sum, item) => sum + 1 + item.prior.length, 0);
+      if (referenceCount > MAX_CLEANUP_LOCATION_REFERENCES) {
+        refusedLocationRows += ordered.length;
+        return [];
+      }
+      const canonical = ordered[0];
+      const aliases = ordered.slice(1);
+      return [{
+        canonical_doc_uid: canonical.row.doc_uid,
+        canonical_content_hash: canonical.row.content_hash,
+        remove_doc_uids: aliases.map((item) => item.row.doc_uid),
+        references: ordered.flatMap((item) => {
+          const references = [item.current, ...item.prior];
+          return references.map((reference) => ({
+            ...reference,
+            ...(!includeSampleTitles ? { title: null } : {}),
+          }));
+        }),
+        ...(includeSampleTitles
+          ? { sample_titles: ordered.slice(0, 3).map((item) => item.row.title).filter(Boolean) }
+          : {}),
+      }];
+    });
+  return {
+    groups: exact,
+    refusedUnprovedBoundaryRows,
+    refusedAccessBoundRows,
+    refusedLocationRows,
   };
 }
 
-function exactGroups(rows, { includeSampleTitles = false } = {}) {
-  const groups = new Map();
-  for (const row of rows) {
-    const key = duplicateSafetyKey(row);
-    const group = groups.get(key) || [];
-    group.push(row);
-    groups.set(key, group);
+function visibleContentRows(rows, page) {
+  const visible = rows.slice(0, page);
+  const next = rows[page];
+  const boundaryHash = visible.at(-1)?.content_hash;
+  if (next && boundaryHash === next.content_hash &&
+      visible.filter((row) => row.content_hash === boundaryHash).length === 1) {
+    visible.push(next);
   }
-  return [...groups.values()]
-    .filter((group) => group.length > 1)
-    .map((group) => {
-      const ordered = [...group].sort((a, b) => String(a.doc_uid).localeCompare(String(b.doc_uid)));
-      const canonical = ordered[0];
-      const aliases = ordered.slice(1);
-      return {
-        canonical_doc_uid: canonical.doc_uid,
-        canonical_content_hash: canonical.content_hash,
-        remove_doc_uids: aliases.map((row) => row.doc_uid),
-        references: ordered.flatMap((row) => {
-          const stored = parseObject(row.meta).cleanup_location_references;
-          const prior = Array.isArray(stored)
-            ? stored.map((item) => ({ ...item, ...(!includeSampleTitles ? { title: null } : {}) }))
-            : [];
-          return [locationReference(row, { includeTitle: includeSampleTitles }), ...prior];
-        }),
-        ...(includeSampleTitles
-          ? { sample_titles: ordered.slice(0, 3).map((row) => row.title).filter(Boolean) }
-          : {}),
-      };
-    });
+  return visible;
 }
 
 function crossBoundaryDuplicateCount(rows) {
@@ -228,7 +310,9 @@ async function cleanupTotals(env) {
   return {
     documents: Number(registered?.documents || 0),
     chunks: Number(registered?.chunks || 0),
-    vectors: Number(registered?.chunks || 0),
+    expected_vectors: Number(registered?.chunks || 0),
+    actual_vectors: null,
+    vector_count_observed: false,
     d1_bytes: size,
     count_source: "corpus_stats",
   };
@@ -237,19 +321,19 @@ async function cleanupTotals(env) {
 async function targetStorageEstimate(env, docUids) {
   const ids = [...new Set((docUids || []).map(String))];
   let vectors = 0;
-  let bytes = 0;
+  let characters = 0;
   for (let start = 0; start < ids.length; start += 50) {
     const batch = ids.slice(start, start + 50);
     const marks = batch.map((_, index) => `?${index + 1}`).join(",");
     const result = await env.DB.prepare(
       `/* optimize-cleanup: bounded savings estimate */
-       SELECT COUNT(*) AS chunks, COALESCE(SUM(length(text)), 0) AS text_bytes
+       SELECT COUNT(*) AS chunks, COALESCE(SUM(length(text)), 0) AS text_characters
          FROM chunks WHERE doc_uid IN (${marks})`,
     ).bind(...batch).first();
     vectors += Number(result?.chunks || 0);
-    bytes += Number(result?.text_bytes || 0);
+    characters += Number(result?.text_characters || 0);
   }
-  return { vectors, bytes };
+  return { vectors, characters };
 }
 
 /** One bounded audit slice. The opaque cursors can be handed back unchanged. */
@@ -260,9 +344,10 @@ export async function cleanupAuditPage(env, {
   await assertCleanupIdle(env, now);
   const page = boundedPage(limit);
   const pageLimit = page + 1;
+  const contentPageLimit = page + 2;
   const [contentResult, documentResult, chunkResult, sourceResult, supersededResult, before] = await Promise.all([
     env.DB.prepare(CLEANUP_CONTENT_PAGE_SQL).bind(
-      String(cursor.content_hash || ""), String(cursor.document_rowid || ""), pageLimit,
+      String(cursor.content_hash || ""), String(cursor.document_rowid || ""), contentPageLimit,
     ).all(),
     env.DB.prepare(CLEANUP_DOCUMENT_PAGE_SQL).bind(String(cursor.doc_uid || ""), pageLimit).all(),
     env.DB.prepare(CLEANUP_CHUNK_PAGE_SQL).bind(
@@ -287,11 +372,12 @@ export async function cleanupAuditPage(env, {
   const chunkRows = rowsOf(chunkResult);
   const sourceRows = rowsOf(sourceResult);
   const supersededRows = rowsOf(supersededResult);
-  const visibleContent = contentRows.slice(0, page);
+  const visibleContent = visibleContentRows(contentRows, page);
   const visibleDocuments = documentRows.slice(0, page);
   const visibleChunks = chunkRows.slice(0, page);
   const visibleSuperseded = supersededRows.slice(0, page);
-  const groups = exactGroups(visibleContent, { includeSampleTitles });
+  const duplicateAnalysis = exactGroupAnalysis(visibleContent, { includeSampleTitles });
+  const groups = duplicateAnalysis.groups;
   const removable = groups.reduce((sum, group) => sum + group.remove_doc_uids.length, 0);
   const removedUids = groups.flatMap((group) => group.remove_doc_uids);
 
@@ -345,10 +431,16 @@ export async function cleanupAuditPage(env, {
 
   const findings = [
     publicRule(
-      "exact_duplicates", removable, duplicateEstimate.vectors, duplicateEstimate.bytes,
-      "One stored copy is removed. Every known location remains attached to the canonical copy.",
-      "Keep one copy of each exact duplicate.",
-      { groups: groups.length, cross_boundary_candidate_families: crossBoundary },
+      "exact_duplicates", removable, duplicateEstimate.vectors, duplicateEstimate.characters,
+      "No copy is removed while guarded duplicate removal is unavailable.",
+      "Review exact duplicate groups. Removal remains fail-closed.",
+      {
+        groups: groups.length,
+        cross_boundary_candidate_families: crossBoundary,
+        refused_unproved_boundary_rows: duplicateAnalysis.refusedUnprovedBoundaryRows,
+        refused_access_bound_rows: duplicateAnalysis.refusedAccessBoundRows,
+        refused_location_rows: duplicateAnalysis.refusedLocationRows,
+      },
     ),
     publicRule(
       "near_duplicate_candidates", nearDuplicateCount(visibleContent), 0, 0,
@@ -357,7 +449,7 @@ export async function cleanupAuditPage(env, {
       { candidate_doc_uids: nearCandidates.map((row) => row.doc_uid) },
     ),
     publicRule(
-      "retroactive_junk", badDocs.size, junkEstimate.vectors, junkEstimate.bytes,
+      "retroactive_junk", badDocs.size, junkEstimate.vectors, junkEstimate.characters,
       "The stored extraction for each selected item, after a title-level review.",
       "Remove items that fail the same readable-text check used by new loads.",
       { candidate_doc_uids: [...badDocs.keys()] },
@@ -365,7 +457,7 @@ export async function cleanupAuditPage(env, {
     publicRule(
       "outside_declared_scope", outside.length,
       outside.reduce((sum, row) => sum + Number(row.chunk_count || 0), 0),
-      outside.reduce((sum, row) => sum + Number(row.text_bytes || 0), 0),
+      outside.reduce((sum, row) => sum + Number(row.text_characters || 0), 0),
       "Content outside an explicitly recorded source scope.",
       "Remove Drive items outside the reviewed roots and exclude that path from future loads.",
       { candidate_doc_uids: outside.map((row) => row.doc_uid) },
@@ -373,13 +465,14 @@ export async function cleanupAuditPage(env, {
     publicRule(
       "heavy_low_value_candidates", heavy.length,
       heavy.reduce((sum, row) => sum + Number(row.chunk_count || 0), 0),
-      heavy.reduce((sum, row) => sum + Number(row.text_bytes || 0), 0),
+      heavy.reduce((sum, row) => sum + Number(row.text_characters || 0), 0),
       "Potentially large documents. Size alone never authorizes removal.",
       "Review unusually heavy items, then remove only the ones the owner identifies as low value.",
       { candidate_doc_uids: heavy.map((row) => row.doc_uid) },
     ),
     publicRule(
-      "stale_or_superseded", visibleSuperseded.length, supersededEstimate.vectors, supersededEstimate.bytes,
+      "stale_or_superseded", visibleSuperseded.length, supersededEstimate.vectors,
+      supersededEstimate.characters,
       "Predecessor records whose exact successor is already recorded.",
       "Remove a superseded copy only after reviewing its recorded successor.",
       { candidate_doc_uids: visibleSuperseded.map((row) => row.predecessor_doc_uid) },
@@ -395,14 +488,14 @@ export async function cleanupAuditPage(env, {
     findings,
     before,
     reads: [
-      { lane: "content", rows: contentRows.length, limit: pageLimit },
+      { lane: "content", rows: contentRows.length, limit: contentPageLimit },
       { lane: "documents", rows: documentRows.length, limit: pageLimit },
       { lane: "chunks", rows: chunkRows.length, limit: pageLimit },
       { lane: "sources", rows: sourceRows.length, limit: pageLimit },
       { lane: "superseded", rows: supersededRows.length, limit: pageLimit },
     ],
     resume: {
-      complete: contentRows.length <= page && documentRows.length <= page &&
+      complete: contentRows.length <= page + 1 && documentRows.length <= page &&
         chunkRows.length <= page && supersededRows.length <= page && sourceRows.length <= page,
       cursor: {
         content_hash: lastContent?.content_hash || cursor.content_hash || "",
@@ -418,14 +511,29 @@ export async function cleanupAuditPage(env, {
   };
 }
 
-async function currentDuplicateRows(env, maxRows) {
-  const result = await env.DB.prepare(CLEANUP_CONTENT_PAGE_SQL).bind("", "", maxRows + 1).all();
-  return rowsOf(result).slice(0, maxRows);
+async function currentDuplicateWindow(env, maxRows, cursor = {}) {
+  const safeCursor = cleanupContentCursor(cursor);
+  const result = await env.DB.prepare(CLEANUP_CONTENT_PAGE_SQL).bind(
+    safeCursor.content_hash, safeCursor.document_rowid, maxRows + 2,
+  ).all();
+  const fetched = rowsOf(result);
+  const rows = visibleContentRows(fetched, maxRows);
+  const last = rows.at(-1);
+  return {
+    rows,
+    resume: {
+      complete: fetched.length <= maxRows + 1,
+      cursor: {
+        content_hash: last?.content_hash || safeCursor.content_hash,
+        document_rowid: last?.document_rowid || safeCursor.document_rowid,
+      },
+    },
+  };
 }
 
 /** Build exactly one owner-reviewable rule plan. */
 export async function prepareCleanupPlan(env, {
-  rule, includeSampleTitles = false, limit = MAX_PAGE, now = Date.now(),
+  rule, cursor = {}, includeSampleTitles = false, limit = MAX_PAGE, now = Date.now(),
 } = {}) {
   await assertCleanupIdle(env, now);
   if (!["exact_duplicates", "selected_documents"].includes(rule?.kind)) {
@@ -434,10 +542,16 @@ export async function prepareCleanupPlan(env, {
   let groups = [];
   let targets = [];
   let snapshots = [];
+  let duplicateAnalysis = null;
+  let resume = { complete: true, cursor: {} };
+  const boundedLimit = boundedPage(limit);
+  const safeCursor = cleanupContentCursor(cursor);
   if (rule.kind === "exact_duplicates") {
-    const rows = await currentDuplicateRows(env, boundedPage(limit));
-    groups = exactGroups(rows, { includeSampleTitles });
+    const window = await currentDuplicateWindow(env, boundedLimit, safeCursor);
+    duplicateAnalysis = exactGroupAnalysis(window.rows, { includeSampleTitles });
+    groups = duplicateAnalysis.groups;
     targets = groups.flatMap((group) => group.remove_doc_uids);
+    resume = window.resume;
   } else {
     const selected = Array.isArray(rule.doc_uids) ? [...new Set(rule.doc_uids.map(String))] : [];
     if (!selected.length || selected.length > 50) {
@@ -448,11 +562,12 @@ export async function prepareCleanupPlan(env, {
       const marks = batch.map((_, index) => `?${index + 1}`).join(",");
       const result = await env.DB.prepare(
         `/* optimize-cleanup: selected target readback */
-         SELECT d.doc_uid, d.content_hash, d.title,
+         SELECT d.doc_uid, d.content_hash, d.title, d.source, d.entity_slug,
+                d.client, d.category, d.top_folder, d.platform, d.document_date,
                 (SELECT COUNT(*) FROM chunks c INDEXED BY idx_chunks_doc
                   WHERE c.doc_uid=d.doc_uid) AS chunks,
                 (SELECT COALESCE(SUM(length(c.text)), 0) FROM chunks c INDEXED BY idx_chunks_doc
-                  WHERE c.doc_uid=d.doc_uid) AS text_bytes
+                  WHERE c.doc_uid=d.doc_uid) AS text_characters
            FROM documents d WHERE d.deleted_at IS NULL AND d.doc_uid IN (${marks})`,
       ).bind(...batch).all();
       snapshots.push(...rowsOf(result));
@@ -468,7 +583,7 @@ export async function prepareCleanupPlan(env, {
     const marks = batch.map((_, index) => `?${index + 1}`).join(",");
     const result = await env.DB.prepare(
       `/* optimize-cleanup: plan target counts */
-       SELECT doc_uid, COUNT(*) AS chunks, COALESCE(SUM(length(text)), 0) AS text_bytes
+       SELECT doc_uid, COUNT(*) AS chunks, COALESCE(SUM(length(text)), 0) AS text_characters
          FROM chunks WHERE doc_uid IN (${marks}) GROUP BY doc_uid`,
     ).bind(...batch).all();
     chunkRows.push(...rowsOf(result));
@@ -483,60 +598,48 @@ export async function prepareCleanupPlan(env, {
   const payload = {
     version: 1,
     rule: safeRule,
+    scan: rule.kind === "exact_duplicates"
+      ? { cursor: safeCursor, limit: boundedLimit }
+      : null,
     groups,
     targets,
     target_snapshots: snapshots.map((row) => ({
       doc_uid: row.doc_uid,
       content_hash: row.content_hash,
+      source: row.source,
+      entity_slug: row.entity_slug,
+      client: row.client,
+      category: row.category,
+      top_folder: row.top_folder,
+      platform: row.platform,
+      document_date: row.document_date,
       chunks: Number(row.chunks || 0),
-      text_bytes: Number(row.text_bytes || 0),
+      text_characters: Number(row.text_characters || 0),
       ...(includeSampleTitles && row.title ? { title: row.title } : {}),
     })).sort((a, b) => a.doc_uid.localeCompare(b.doc_uid)),
     counts: {
       documents: targets.length,
       chunks: chunkRows.reduce((sum, row) => sum + Number(row.chunks || 0), 0),
-      estimated_vectors: chunkRows.reduce((sum, row) => sum + Number(row.chunks || 0), 0),
-      estimated_storage_bytes: chunkRows.reduce((sum, row) => sum + Number(row.text_bytes || 0), 0),
+      expected_vector_deletes: chunkRows.reduce((sum, row) => sum + Number(row.chunks || 0), 0),
+      text_characters: chunkRows.reduce((sum, row) => sum + Number(row.text_characters || 0), 0),
     },
+    resume,
+    more_cleanup_possible: rule.kind === "exact_duplicates" ? !resume.complete : false,
+    refused_unproved_boundary_rows: duplicateAnalysis?.refusedUnprovedBoundaryRows || 0,
+    refused_access_bound_rows: duplicateAnalysis?.refusedAccessBoundRows || 0,
+    refused_location_rows: duplicateAnalysis?.refusedLocationRows || 0,
+    apply_available: false,
+    apply_unavailable_reason: "atomic_guarded_removal_not_implemented",
     undo: {
       supported: false,
       command: null,
-      explanation: "This removal path has no one-command restore. Re-load from the original source if recovery is needed.",
+      explanation: "Removal is unavailable. No stored document is changed by this plan.",
     },
   };
   return { ...payload, fingerprint: await sha256(stable(payload)) };
 }
 
-function referenceKey(reference) {
-  return `${reference.source}\u001f${reference.source_id}\u001f${reference.uri || ""}`;
-}
-
-async function preserveLocationReferences(env, groups) {
-  const writes = [];
-  for (const group of groups) {
-    const row = await env.DB.prepare(
-      `/* optimize-cleanup: canonical metadata */
-       SELECT meta, content_hash FROM documents WHERE doc_uid=?1`,
-    ).bind(group.canonical_doc_uid).first();
-    if (!row || row.content_hash !== group.canonical_content_hash) {
-      throw cleanupError("cleanup_plan_changed", "The canonical document changed after this plan was built.");
-    }
-    const meta = parseObject(row.meta);
-    const existing = Array.isArray(meta.cleanup_location_references)
-      ? meta.cleanup_location_references.filter((item) => item && typeof item === "object")
-      : [];
-    const references = new Map([...existing, ...group.references].map((item) => [referenceKey(item), item]));
-    meta.cleanup_location_references = [...references.values()];
-    writes.push(env.DB.prepare(
-      `/* optimize-cleanup: preserve aliases */
-       UPDATE documents SET meta=?1
-        WHERE doc_uid=?2 AND content_hash=?3`,
-    ).bind(JSON.stringify(meta), group.canonical_doc_uid, group.canonical_content_hash));
-  }
-  if (writes.length) await env.DB.batch(writes);
-}
-
-/** Dry-run always happens. Mutation requires the exact current fingerprint. */
+/** Dry-run always happens. Confirmed mutation remains fail-closed. */
 export async function applyCleanupPlan(env, {
   plan, approvalFingerprint = null, confirm = false, now = Date.now(),
 } = {}) {
@@ -546,8 +649,9 @@ export async function applyCleanupPlan(env, {
   }
   const current = await prepareCleanupPlan(env, {
     rule: plan.rule,
+    cursor: plan.scan?.cursor,
     includeSampleTitles: Object.hasOwn(plan.groups?.[0] || {}, "sample_titles"),
-    limit: MAX_PAGE,
+    limit: plan.scan?.limit ?? MAX_PAGE,
     now,
   });
   if (current.fingerprint !== plan.fingerprint) {
@@ -556,37 +660,29 @@ export async function applyCleanupPlan(env, {
     });
   }
   const dryRun = await forget(env, { docUids: current.targets, dryRun: true });
+  const safeDryRun = {
+    documents: dryRun.documents,
+    chunks: dryRun.chunks,
+    expected_vector_deletes: dryRun.vectors,
+    dry_run: true,
+    targets: dryRun.targets,
+  };
   if (!confirm) {
     return {
       applied: false,
       approval_required: true,
       fingerprint: current.fingerprint,
-      dry_run: dryRun,
+      dry_run: safeDryRun,
       before: await cleanupTotals(env),
     };
   }
   if (!approvalFingerprint || approvalFingerprint !== current.fingerprint) {
     throw cleanupError("cleanup_fingerprint_not_approved", "Approve the exact current cleanup fingerprint before applying it.");
   }
-
-  const before = await cleanupTotals(env);
-  await assertCleanupIdle(env, now);
-  await preserveLocationReferences(env, current.groups || []);
-  await assertCleanupIdle(env, now);
-  const removed = await forget(env, { docUids: current.targets, dryRun: false });
-  const afterMeasured = await cleanupTotals(env);
-  return {
-    applied: true,
-    fingerprint: current.fingerprint,
-    rule: current.rule,
-    before,
-    after: afterMeasured,
-    removed,
-    ...(current.rule.kind === "exact_duplicates"
-      ? { duplicates_before: current.counts.documents, duplicates_after: 0 }
-      : {}),
-    undo: current.undo,
-  };
+  throw cleanupError(
+    "cleanup_apply_unavailable",
+    "Cleanup removal is unavailable until exact boundary checks, location preservation, and deletion are one atomic guarded mutation.",
+  );
 }
 
 /** Return a new manifest object; persistence remains an explicit local CLI step. */

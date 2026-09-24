@@ -10,13 +10,14 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
-- **Optimize can now find cleanup opportunities without removing anything.**
+- **Optimize can find cleanup opportunities without removing anything.**
   Its private audit uses small resumable D1 pages to report exact duplicates,
   possible near duplicates, unreadable stored text, records outside a declared
   source scope, unusually heavy candidates, and superseded records. If you
   choose one rule, Optimize shows an exact no-op removal plan and fingerprint.
-  Applying it needs separate approval of that unchanged fingerprint. Duplicate
-  cleanup keeps every known source location on the retained copy. A separately
+  Duplicate plans refuse different or unproved retrieval and access boundaries,
+  preserve every bounded citation location in the preview, and remain
+  non-removing until the full change can be one atomic guarded mutation. A separately
   approved Drive exclusion can prevent an approved path rule from returning on
   the next load. The receipt says what changed before and after and states that
   today's removal path has no one-command restore.
