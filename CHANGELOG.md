@@ -181,12 +181,17 @@ asset publication.
   reindex <manifest>` is the repair; it only matters for a Brain set up
   before that filter existed.
 
-- **Update no longer pauses a Brain while search work is queued.** Before any
-  manifest write, verification, migration, or deployment, `brain update` reads
-  the authenticated vector backlog and stops if work remains or the backlog is
-  unreadable. `--force` is available only as an explicit risky override. To
-  check: start an update while `brain health` still reports queued search work
-  and confirm it changes nothing, then retry after health says query-ready.
+- **Update checks queued search work twice before pausing the Brain.** The first
+  check runs before verification or control-plane work. A second, non-overridable
+  check runs immediately before the paused deployment. Each check requires one
+  exact HTTP 200, a bounded response, and a complete, internally consistent D1
+  queue and readiness receipt. Missing or contradictory fields stop the update.
+  `--force` can override only the first early warning. There is still a narrow
+  remote race if an ingest starts after the second receipt but before the paused
+  Worker takes over; this release does not claim a cross-process atomic lock.
+  To check: start an update while `brain health` reports queued search work and
+  confirm the paused deployment does not start, then retry after health says
+  query-ready.
 
 - **Drive review no longer downloads every stored file label on each sweep.**
   The Brain first identifies the exact absent or already-reviewed families,

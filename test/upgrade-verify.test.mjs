@@ -98,6 +98,7 @@ const cmdUpgrade = (manifestPath, options = {}) => cmdUpgradeWithRealQuiescence(
     waitForVectorDrainQuiescence: async () => {},
     cmdBootstrap: async () => bootstrapCompletion(),
     cmdDrain: async () => {},
+    readUpdateBacklog: async () => ({ pending: 0 }),
     ...options,
   },
 );
