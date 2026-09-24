@@ -243,7 +243,7 @@ const Q_SEARCH = "Harbor Storage service contract";
  * the deterministic evidence rule and never a model's judgement.
  */
 function brainEnv({
-  rows, coverageRows = [], answer = "", evidence = [1], verdict = null, prompts = [],
+  rows, coverageRows = [], answer = "", evidence = [1], verdict = null, inventoryFails = false, prompts = [],
 } = {}) {
   return {
     STORAGE: "d1",
@@ -254,6 +254,11 @@ function brainEnv({
         return {
           bind() { return this; },
           all: async () => {
+            // The document-level tax inventory probe failing leaves its
+            // coverage unverified, as a D1 outage does.
+            if (inventoryFails && /unchunked-tax-document-candidates/.test(sql)) {
+              throw new Error("fixture inventory outage");
+            }
             if (/FROM chunks_fts/.test(sql)) return { results: rows.map((row) => ({ ...row })) };
             if (/SELECT s\.name, s\.kind, s\.zone, s\.status/.test(sql) && /FROM sources s/.test(sql)) {
               return { results: coverageRows.map((row) => ({ ...row })) };
@@ -1071,6 +1076,27 @@ test("a clean scan of the filing whose draft the evidence gate refuses gets the 
   assert.equal(body.gaps[0]?.type, "tax_evidence_unreadable");
   assert.equal(scannedGapOf(body), undefined);
   assert.equal(digest(disclosureOf(body)), MAIN.scannedTaxGateRefusal, "the disclosure is main's, field for field");
+});
+
+test("with the filing inventory unverified, a clean scan that ends in no answer still gets main's unreadable-filing disclosure", async () => {
+  // The injected inventory outage is real: an answer from the same scan keeps
+  // the inventory gap beside it.
+  const answered = await think({ rows: [taxReturnRow("ocr")], answer: A_TAX, inventoryFails: true }, Q_TAX);
+  assert.equal(answered.body.answer, A_TAX);
+  assert.equal(answered.body.gaps.some((gap) => gap.type === "tax_document_inventory_unverified"), true);
+
+  const { body } = await think({ rows: [taxReturnRow("ocr")], answer: REFUSAL, inventoryFails: true }, Q_TAX);
+  assert.equal(body.results[0]?.scanned, true);
+  assert.equal(body.evidence_gate?.reason, "answer model found no direct support");
+  assert.equal(body.answer, null);
+  assert.equal(body.status, "coverage_incomplete");
+  assert.equal(body.gaps.some((gap) => gap.type === "tax_document_inventory_unverified"), false,
+    "as on main, the unreadable-filing gap takes the inventory gap's place");
+  assert.equal(body.gaps.filter((gap) => gap.type === "tax_evidence_unreadable").length, 1);
+  assert.equal(body.notice, TAX_UNREADABLE_NOTICE);
+  // Main pins the same bytes as with a verified inventory: there, too, the
+  // unreadable-filing gap takes the inventory gap's place.
+  assert.equal(digest(disclosureOf(body)), MAIN.scannedTaxModelRefusal, "the disclosure is main's, field for field");
 });
 
 test("ranked search treats a scan with a marked chunk exactly as main", async () => {
