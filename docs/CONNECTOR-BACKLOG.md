@@ -45,7 +45,7 @@ a live service smoke test, not proof of a source connector or customer corpus.
 | Bank CSV, OFX, and QFX | Built | Invented fixtures | None | Use reviewed exports from at least two institutions: reconcile counts and balances, rerun unchanged, import one revision, and prove every ledger row points to its source document and position. |
 | Hosted bank feed | Built | Scripted I/O | None | Against an approved test feed, prove initial load, cursor resume, pending-to-posted replacement, deletion or reversal handling, key rotation, and explicit unavailable status. |
 | Financial ledger | Built schema, import, and reads | Scripted I/O | None, synthetic ledgers only | Complete the bank-export gate, then answer one approved question from ledger rows with source-document provenance rather than text retrieval. |
-| Scanned-PDF OCR | Built, off by default | Fixture and scripted I/O | None, no page reached real Workers AI | In a private disposable gate, test a typed scan, a one-bit fax or photocopy, and handwriting; verify exact page coverage, low-confidence marking, refusal, citation provenance, and no ledger claim from OCR text alone. |
+| Scanned-PDF OCR | Built, off by default | Fixture and scripted I/O | Coverage only: on 2026-09-23 scanned pages on a disposable Brain (a 0.4.8 field build, model llama-4-scout) reached real Workers AI and produced a cited answer. Character accuracy has never been measured | In a private disposable gate, test a typed scan, a one-bit fax or photocopy, and handwriting; verify exact page coverage, low-confidence marking, refusal, citation provenance, and no ledger claim from OCR text alone. |
 | Human custodian or manual portal export | Operational source type | Watched-folder and Drive paths tested as above | None for an actual delivery cadence | Record who supplies the artifact, cadence, expected format, date coverage, and one missed-delivery test that reports stale or unavailable instead of zero. |
 | IMAP | Built, read-only | Scripted real socket, 78 checks; TLS and provider behavior remain outside the harness | None | Use a seeded disposable Yahoo, Fastmail, iCloud, or hosted mailbox to prove TLS, app-password custody, folder inventory, baseline, UID resume, reconnect, no unread-state mutation, and explicit Archive/unclassified-folder reporting. |
 | Facebook Messenger export | Built, export-only | Fixture plus common folder-ingestion path | None | Load one current reviewed Download Your Information JSON export; prove exact timestamps, text repair, stable thread/session identity, attachment/unavailable counts, rerun idempotency, provenance, retrieval, and family deletion. |
@@ -91,7 +91,8 @@ a live service smoke test, not proof of a source connector or customer corpus.
 5. **Prove bank normalization with real exports and a test feed.** The next risk
    is provider shape, direction, revision, and deletion behavior, not another
    bank-specific schema.
-6. **Prove OCR on private real scans.** The implementation is complete and off.
+6. **Prove OCR on private real scans.** The implementation is complete and off. Coverage on real Workers AI was
+   shown on a disposable Brain on 2026-09-23; character accuracy (digits especially) has never been measured.
    The field gate must include typed, one-bit, and handwritten pages and must
    preserve low-confidence and partial states.
 7. **Field-prove the integrated read-only IMAP line.** Email export through MBOX
