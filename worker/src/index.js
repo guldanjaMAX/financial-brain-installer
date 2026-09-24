@@ -55,6 +55,9 @@ import {
   storeFor, backendOf, D1, expectedD1ContentHash, ProvenanceTransitionError,
 } from "./lib/store.js";
 import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, SOURCE_FAMILY_CURSOR_MAX_BYTES, SOURCE_FAMILY_UID_FILTER_MAX, sourceFamilyCounts, reindex, coverageGapReport, freshnessReport, diagnose } from "./lib/store-d1.js";
+import {
+  applyCleanupPlan, cleanupAuditPage, prepareCleanupPlan,
+} from "./lib/optimize-cleanup.js";
 import { embedText, embedTexts } from "./lib/supabase.js";
 import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, newestCurrentEvidence,
@@ -291,6 +294,7 @@ function citationCandidateForResult(result, index) {
     authority: result.authority || null,
     lineage: result.lineage || evidenceLineageFor(result).lineage,
     _lineage_root_ids: evidenceLineageRootIds(result),
+    location_references: Array.isArray(result.location_references) ? result.location_references : [],
     ref: result.ref_key || result.drive_file_id || null,
     snippet: (result.snippet || "").replace(/\s+/g, " ").slice(0, 900),
   };
@@ -309,6 +313,9 @@ function citationForDocument(document) {
     text_source: document.text_source, text_reliable: document.text_reliable,
     authority: document.authority,
     lineage: document.lineage,
+    ...(document.location_references?.length
+      ? { location_references: document.location_references }
+      : {}),
   };
 }
 
@@ -1034,7 +1041,10 @@ async function handleThink(
       const operative = d.authority?.operative_section
         ? `OPERATIVE FOR THIS QUESTION: ${d.authority.operative_section.name} = ${d.authority.operative_section.value} as of ${d.authority.operative_section.as_of}. Values listed under Supersedes are historical, not current.`
         : null;
-      const meta = [d.source, d.client ? `client: ${d.client}` : null, date, read, authority, lineage, operative]
+      const locations = d.location_references?.length
+        ? `also stored at ${d.location_references.map((item) => `${item.source}:${item.source_id}`).join("; ")}`
+        : null;
+      const meta = [d.source, d.client ? `client: ${d.client}` : null, date, read, authority, lineage, operative, locations]
         .filter(Boolean)
         .join(", ");
       return `[${d.n}] (${meta}) ${d.title}\n${d.snippet}`;
@@ -2602,6 +2612,7 @@ const PAUSED_CORPUS_MUTATION_PATHS = new Set([
   "/api/admin/brain/source-register",
   "/api/admin/brain/zones",
   "/api/admin/brain/forget",
+  "/api/admin/brain/cleanup/apply",
   "/api/admin/brain/reindex",
   // vector-retry stays available while paused. Its confirmed form deletes the
   // selected retry-state rows, including their stored failure and backoff
@@ -3123,6 +3134,58 @@ export default {
         if (backendOf(env) !== D1) return jsonResponse({ error: "reliability alerts apply to the d1 backend only" }, 400);
         return privateNoStore(jsonResponse(await ownerReliabilityAlerts(env)));
       }
+      if (path === "/api/admin/brain/cleanup/report" && request.method === "POST") {
+        if (backendOf(env) !== D1) return jsonResponse({ error: "cleanup applies to the d1 backend only" }, 400);
+        if (!scopeIsUnrestricted(scope)) {
+          return jsonResponse({ error: "cleanup reports on the whole corpus. Ask the owner to run it." }, 403);
+        }
+        const body = await request.json().catch(() => ({}));
+        const declaredScopes = {};
+        if (body.declared_scopes && typeof body.declared_scopes === "object" &&
+            !Array.isArray(body.declared_scopes) && Object.keys(body.declared_scopes).length <= 64) {
+          for (const [source, declared] of Object.entries(body.declared_scopes)) {
+            if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(source) || !declared ||
+                typeof declared !== "object" || Array.isArray(declared)) continue;
+            const bounded = (value) => Array.isArray(value) && value.length <= 100
+              ? value.map(String).filter((item) => item.length > 0 && item.length <= 256)
+              : [];
+            declaredScopes[source] = {
+              root_folder_ids: bounded(declared.root_folder_ids),
+              top_folders: bounded(declared.top_folders),
+            };
+          }
+        }
+        return privateNoStore(jsonResponse(await cleanupAuditPage(env, {
+          cursor: body.cursor,
+          limit: body.limit,
+          includeSampleTitles: body.include_sample_titles === true,
+          declaredScopes,
+        })));
+      }
+      if (path === "/api/admin/brain/cleanup/plan" && request.method === "POST") {
+        if (backendOf(env) !== D1) return jsonResponse({ error: "cleanup applies to the d1 backend only" }, 400);
+        if (!scopeIsUnrestricted(scope)) {
+          return jsonResponse({ error: "cleanup planning needs access to the whole corpus. Ask the owner to run it." }, 403);
+        }
+        const body = await request.json().catch(() => ({}));
+        return privateNoStore(jsonResponse(await prepareCleanupPlan(env, {
+          rule: body.rule,
+          limit: body.limit,
+          includeSampleTitles: body.include_sample_titles === true,
+        })));
+      }
+      if (path === "/api/admin/brain/cleanup/apply" && request.method === "POST") {
+        if (backendOf(env) !== D1) return jsonResponse({ error: "cleanup applies to the d1 backend only" }, 400);
+        if (!scopeIsUnrestricted(scope)) {
+          return jsonResponse({ error: "cleanup apply needs access to the whole corpus. Ask the owner to run it." }, 403);
+        }
+        const body = await request.json().catch(() => ({}));
+        return privateNoStore(jsonResponse(await applyCleanupPlan(env, {
+          plan: body.plan,
+          approvalFingerprint: body.approval_fingerprint,
+          confirm: body.confirm === true,
+        })));
+      }
       // Quarantined vector generations are released by an explicit operator
       // decision, never automatically: a row that spent its attempts did so for
       // a reason, and the preview names how many before anything is retried.
@@ -3347,9 +3410,13 @@ export default {
       }
       return jsonResponse({ error: "not found" }, 404);
     } catch (e) {
-      const response = jsonResponse({ error: e.message }, 500);
+      const cleanupStatus = String(e?.code || "").startsWith("cleanup_")
+        ? (String(e.code).endsWith("_active") ? 423 : 409)
+        : 500;
+      const response = jsonResponse({ error: e.message, ...(e?.code ? { code: e.code } : {}) }, cleanupStatus);
       if (path === "/api/admin/brain/source-families" ||
-          path === "/api/admin/brain/documents") {
+          path === "/api/admin/brain/documents" ||
+          path.startsWith("/api/admin/brain/cleanup/")) {
         return privateNoStore(response);
       }
       return response;

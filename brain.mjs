@@ -326,6 +326,10 @@ import {
   formatCorpusReadinessFailure,
   loadCorpusContract,
 } from "./eval/corpus-contract.mjs";
+import {
+  prepareCleanupSourceSetting,
+  writeCleanupSourceSetting,
+} from "./operations/cleanup-source-setting.mjs";
 export {
   DRIVE_STORED_FAMILY_UID_MAX_BYTES,
   DRIVE_REMOVAL_MAX_COUNT,
@@ -7187,6 +7191,7 @@ export const VALUE_FLAGS = new Set([
   // being read as a boolean and then reported as "needs --file".
   "file", "format", "account", "account-kind", "name", "slug", "institution", "currency", "entity", "entity-label",
   "year", "period-start", "period-end", "sections", "cursor", "provenance-baseline",
+  "plan", "documents", "finding", "source-exclusion",
 ]);
 
 /** Read an exact Drive-id exclusion list from either its portable shape or a migration receipt. */
@@ -26905,6 +26910,140 @@ async function cmdImport(target) {
   return cmdImportBank(m, manifestPath, parseFlags(process.argv.slice(4)));
 }
 
+function cleanupCursorFromFlag(value) {
+  if (value === undefined) return {};
+  try {
+    const parsed = JSON.parse(Buffer.from(String(value), "base64url").toString("utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid cursor");
+    return parsed;
+  } catch {
+    die("--cursor must be the opaque value printed by the preceding optimize-cleanup audit page");
+  }
+}
+
+async function cleanupJsonResponse(response, action) {
+  let body = null;
+  try { body = JSON.parse(await response.text()); } catch { /* handled below */ }
+  if (!response.ok || !body) {
+    const code = typeof body?.code === "string" ? `; ${body.code}` : "";
+    die(`the Brain refused the ${action} (HTTP ${response.status}${code}): ${body?.error || "invalid response"}`);
+  }
+  return body;
+}
+
+/**
+ * Owner-facing cleanup ceremony. Read and plan are separate from apply, and
+ * apply rebuilds the current plan before sending the approved fingerprint.
+ */
+export async function cmdOptimizeCleanup(manifestPath, options = {}) {
+  const argv = options.argv ?? process.argv;
+  const flags = options.flags ?? parseFlags(argv.slice(4));
+  assertKnownFlags(flags, [
+    "apply", "approve", "audit", "cursor", "documents", "finding", "json",
+    "limit", "plan", "sample-titles", "source-exclusion",
+  ], "brain optimize-cleanup");
+  if (flags.json !== true) die("brain optimize-cleanup is private machine-readable output and requires --json");
+  if (flags["sample-titles"] !== undefined && flags["sample-titles"] !== true) {
+    die("--sample-titles does not take a value");
+  }
+  const { m } = loadManifest(manifestPath);
+
+  if (flags["source-exclusion"] !== undefined) {
+    if (flags.plan || flags.audit || flags.documents || flags.cursor || flags.limit || flags["sample-titles"]) {
+      die("--source-exclusion is a local manifest-setting ceremony and cannot be combined with Brain audit or plan flags");
+    }
+    const rule = { kind: "outside_drive_path", path: String(flags["source-exclusion"]) };
+    const plan = prepareCleanupSourceSetting(m, rule);
+    if (flags.apply !== true) {
+      console.log(JSON.stringify({ kind: "cleanup_source_setting_plan", ...plan, applied: false }, null, 2));
+      return plan;
+    }
+    if (typeof flags.approve !== "string") die("--apply needs --approve <source-setting fingerprint>");
+    const receipt = writeCleanupSourceSetting(manifestPath, plan, flags.approve);
+    console.log(JSON.stringify({ kind: "cleanup_source_setting_receipt", ...receipt }, null, 2));
+    return receipt;
+  }
+
+  if (flags.approve && flags.apply !== true) die("--approve is valid only with --apply");
+  if (flags.apply === true && !flags.plan) die("cleanup apply needs --plan <exact-duplicates|selected-documents>");
+  const { base, authenticatedRequest } = sourceInventoryAccess(manifestPath, m, options);
+  const request = async (path, body, action) => cleanupJsonResponse(
+    await authenticatedRequest(`${base}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, { what: action, timeoutMs: 30_000 }),
+    action,
+  );
+
+  if (!flags.plan) {
+    if (flags.documents || flags.finding || flags.apply || flags.approve) {
+      die("--documents, --finding, --apply, and --approve require --plan");
+    }
+    const limit = flags.limit === undefined ? 100 : Number(flags.limit);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) die("--limit must be an integer from 1 to 200");
+    const report = await request("/api/admin/brain/cleanup/report", {
+      cursor: cleanupCursorFromFlag(flags.cursor),
+      limit,
+      include_sample_titles: flags["sample-titles"] === true,
+      declared_scopes: {
+        ...(Array.isArray(m.corpora?.google_drive?.root_folder_ids)
+          ? { drive: { root_folder_ids: m.corpora.google_drive.root_folder_ids.map(String) } }
+          : {}),
+      },
+    }, "cleanup audit");
+    const nextCursor = report.resume?.complete
+      ? null
+      : Buffer.from(JSON.stringify(report.resume?.cursor || {}), "utf8").toString("base64url");
+    const output = { ...report, next_cursor: nextCursor };
+    console.log(JSON.stringify(output, null, 2));
+    return output;
+  }
+
+  const planName = String(flags.plan);
+  if (flags.limit !== undefined) {
+    const limit = Number(flags.limit);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+      die("--limit must be an integer from 1 to 200");
+    }
+  }
+  let rule;
+  if (planName === "exact-duplicates") {
+    if (flags.documents || flags.finding) die("exact-duplicates does not accept --documents or --finding");
+    rule = { kind: "exact_duplicates" };
+  } else if (planName === "selected-documents") {
+    const docUids = String(flags.documents || "").split(",").map((value) => value.trim()).filter(Boolean);
+    if (!docUids.length) die("selected-documents needs --documents <id,id> from the private audit");
+    rule = {
+      kind: "selected_documents",
+      finding_kind: String(flags.finding || "reviewed_candidates"),
+      doc_uids: docUids,
+    };
+  } else {
+    die("--plan must be exact-duplicates or selected-documents");
+  }
+  const plan = await request("/api/admin/brain/cleanup/plan", {
+    rule,
+    limit: flags.limit === undefined ? undefined : Number(flags.limit),
+    include_sample_titles: flags["sample-titles"] === true,
+  }, "cleanup plan");
+  if (flags.apply !== true) {
+    console.log(JSON.stringify({ kind: "cleanup_plan", ...plan, applied: false }, null, 2));
+    return plan;
+  }
+  if (typeof flags.approve !== "string") die("--apply needs --approve <cleanup plan fingerprint>");
+  if (flags.approve !== plan.fingerprint) {
+    die(`the cleanup plan changed. Review and approve the current fingerprint ${plan.fingerprint}`);
+  }
+  const receipt = await request("/api/admin/brain/cleanup/apply", {
+    plan,
+    approval_fingerprint: flags.approve,
+    confirm: true,
+  }, "cleanup apply");
+  console.log(JSON.stringify({ kind: "cleanup_receipt", ...receipt }, null, 2));
+  return receipt;
+}
+
 const commands = {
   init: cmdInit,
   setup: cmdSetupInteractive,
@@ -26935,6 +27074,7 @@ const commands = {
   disconnect: cmdDisconnect,
   status: (path) => withManifestCloudflareControl(path, () => cmdStatus(path)),
   sources: cmdSources,
+  "optimize-cleanup": cmdOptimizeCleanup,
   forget: (path) => withManifestCloudflareControl(path, () => cmdForget(path)),
   drain: cmdDrain,
   reindex: cmdReindex,
@@ -26971,6 +27111,7 @@ const versionRequested = VERSION_ARGUMENTS.has(cmd);
 // same decision the installed CLI uses.
 const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "sources",
+  "optimize-cleanup",
   "financial-picture",
   "machine-continuity",
   "provenance-assess",
@@ -27134,6 +27275,13 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain whatsnew   [manifest]            what changed in this version, and are you on it
     brain status     <manifest>            versions, pending migrations, upgrade history
     brain sources    <manifest>            complete read-only D1 source inventory; --json for Optimize
+    brain optimize-cleanup <manifest> --json  read one bounded cleanup audit page; returns an opaque cursor
+    brain optimize-cleanup <manifest> --plan exact-duplicates --json
+                                           build one bounded, no-op removal plan and fingerprint
+    brain optimize-cleanup <manifest> --plan exact-duplicates --apply --approve <fingerprint> --json
+                                           rebuild and apply only that unchanged approved plan
+    brain optimize-cleanup <manifest> --source-exclusion <Drive path> --json
+                                           preview a future-load exclusion; add --apply --approve <fingerprint>
     brain sources    <manifest> --json --recovery  one bounded provenance and OCR recovery preview page
     brain forget     <manifest>            remove one named source (destructive)
     brain upgrade    <manifest>            snapshot, migrate, deploy, verify
