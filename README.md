@@ -1026,19 +1026,20 @@ the CLI refuses before authorizing document deletion.
   Forums are excluded by default; Updates remains searchable. Gmail has not yet
   completed a real-account production run. Each client registers their own
   Google OAuth app, which takes about fifteen minutes.
-- **Google Drive can refresh itself on macOS.** Its schedule is declared in the
-  manifest and installed as a per-user LaunchAgent. Windows and Linux still
-  require manually re-running the Drive refresh.
+- **Google Drive can refresh itself on macOS and Windows.** Its schedule is
+  declared in the manifest. macOS installs a per-user LaunchAgent, and Windows
+  installs a current-user Task Scheduler entry with limited privileges. Linux
+  still requires manually re-running the Drive refresh.
 - **WhatsApp exports are the safer path.** The separate live paired-device
   connector is unofficial, violates WhatsApp's Terms of Service, and may lead
   to an account restriction or ban. Business automation should use Meta's
   official WhatsApp Business Platform, which is not built into this Brain yet.
-- **One local folder can refresh itself too, also macOS only.** Name it in the
+- **One local folder can refresh itself too, on macOS or Windows.** Name it in the
   manifest and `brain schedule <manifest> --install --folder` reloads it on a
   schedule: new files load, edited files reload, deleted files are removed. It
   is what makes "export it into this folder and forget about it" true for a
   folder that is not inside Google Drive. Hourly by default, so it is a drop
-  box, not a live feed. Elsewhere, run the same load yourself.
+  box, not a live feed. On Linux, run the same load yourself.
 - **The admin key is operator-only; people use passkeys.** An owner passkey has
   the owner's full workspace. A scoped person sees only exact documents granted
   to that session, and an unknown or unavailable grant fails closed. These

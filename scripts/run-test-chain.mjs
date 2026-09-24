@@ -13,6 +13,7 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node test/windows-task-scheduler.test.mjs",
   "node --no-warnings test/d1-transient-fault.test.mjs",
   "node --no-warnings test/source-family-inventory-retry.test.mjs",
   "node --no-warnings test/d1-reset-drive-removal.test.mjs",
@@ -243,6 +244,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/acceptance-version.test.mjs",
   "node test/wrangler-session-retry.test.mjs",
   "node test/schedule-platform.test.mjs",
+  "node test/windows-task-scheduler.test.mjs",
   "node test/database-read-failure.test.mjs",
   "node test/schema-ahead-guard.test.mjs",
   "node test/teardown-guards.test.mjs",
