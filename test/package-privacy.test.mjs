@@ -413,6 +413,9 @@ const expected = [
   "docs/CONNECTOR-BACKLOG.md",
   "docs/ENGINEERING-STANDARDS.md",
   "docs/EVALUATION.md",
+  // Generic owner cleanup guide. It contains no instance findings, titles,
+  // source ids, manifest values, or receipts.
+  "docs/HOW-OPTIMIZE-CLEANS-UP-A-BRAIN.md",
   "docs/MAINTAINER.md",
   "docs/OWNER-WORKSPACE-API.md",
   "docs/RECOVERY.md",
@@ -512,6 +515,10 @@ const expected = [
   "operations/claude-workspace.mjs",
   "operations/claude-skill.mjs",
   "operations/local-assistant-repair.mjs",
+  // Local manifest exclusion ceremony. It accepts one reviewed Drive path,
+  // fingerprints the exact change, writes atomically, and contains no instance
+  // data or built-in source identity.
+  "operations/cleanup-source-setting.mjs",
   // Generic read-only continuity auditor. Reviewed 2026-09-11 for local path,
   // manifest/resource/source identity, credential-store error, and ambient
   // environment disclosure. Its public report is constrained to fixed status,
@@ -862,6 +869,12 @@ const expected = [
   "worker/src/lib/query-intent.js",
   "worker/src/lib/retrieval-status.js",
   "worker/src/lib/secret-scan.js",
+  // Closed citation-safe projection for locations preserved by duplicate
+  // cleanup. Arbitrary document metadata cannot cross this boundary.
+  "worker/src/lib/cleanup-location-references.js",
+  // Generic bounded cleanup audit and fingerprinted forget-path coordinator.
+  // It contains no instance rules, samples, ids, or source data.
+  "worker/src/lib/optimize-cleanup.js",
   // Reviewed pure string validator: dependency-free, with no I/O, secrets,
   // owner data, or network access.
   "worker/src/lib/stored-family-identity.js",

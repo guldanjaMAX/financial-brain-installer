@@ -272,6 +272,23 @@ whole-source choices and consequences and lets the owner choose instead of
 guessing. Routine Optimize compares actual records, receipts, and provenance;
 it does not run Golden Questions or a known-answer exercise by default.
 
+Optimize now includes a paged, read-only cleanup audit. It reports exact
+duplicates, near-duplicate candidates, retroactive readability failures,
+content outside an explicitly declared source scope, unusually heavy
+candidates, and stored predecessor records. Every finding includes a count,
+estimated vector and text-storage savings, what removal would lose, and a
+plain-language rule. Titles are returned only when the owner asks for samples.
+
+The audit itself never removes content. After the report, an owner may choose
+one rule and review its exact dry-run plan and fingerprint. Apply rebuilds that
+plan and refuses a changed fingerprint. Exact duplicate collapse preserves all
+known location references on the canonical document and uses the existing
+D1-first forget path. An approved Drive path rule can receive a second,
+separately fingerprinted manifest-setting approval so later loads do not add
+the excluded path again. The current forget path has no one-command restore;
+its receipt says that recovery requires loading the original source again. See
+`docs/HOW-OPTIMIZE-CLEANS-UP-A-BRAIN.md`.
+
 The Owner Financial Map is the denominator for later financial-completeness
 work. Immediately after that opening decision, whether the goal was asked or
 skipped, Optimize reads whether the map is current, stale, or not established
