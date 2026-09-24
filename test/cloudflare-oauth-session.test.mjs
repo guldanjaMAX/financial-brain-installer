@@ -463,6 +463,9 @@ test("account preflight proves the exact account plus Workers subdomain, D1, Vec
         if (new URL(url).pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
           return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected account" }));
         }
+        if (new URL(url).pathname.endsWith(`/accounts/${ACCOUNT_A}/workers/subdomain`)) {
+          return jsonResponse(envelope({ subdomain: "exact-fixture-subdomain" }));
+        }
         return jsonResponse(envelope([]));
       },
     },
@@ -471,6 +474,7 @@ test("account preflight proves the exact account plus Workers subdomain, D1, Vec
     status: "ready",
     account: { id: ACCOUNT_A, name: "Selected account" },
     checks: ["account", "workers", "workers_subdomain", "d1", "vectorize", "workers_ai"],
+    workersSubdomain: "exact-fixture-subdomain",
   });
   assert.deepEqual(paths, [
     `/client/v4/accounts/${ACCOUNT_A}`,

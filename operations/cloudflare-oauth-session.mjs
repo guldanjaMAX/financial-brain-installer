@@ -796,14 +796,21 @@ export async function preflightCloudflareOAuthAccount(token, account, options = 
     );
   }
   const checks = ["account"];
+  let workersSubdomain = null;
   for (const check of PREFLIGHT_PATHS) {
-    await cloudflareGet(`/accounts/${selected.id}${check.suffix}`, token, options);
+    const body = await cloudflareGet(`/accounts/${selected.id}${check.suffix}`, token, options);
+    if (check.name === "workers_subdomain" && typeof body?.result?.subdomain === "string") {
+      // Preserve the authenticated response exactly. The deploy path validates
+      // the label before deriving a hostname and never substitutes account.name.
+      workersSubdomain = body.result.subdomain;
+    }
     checks.push(check.name);
   }
   return Object.freeze({
     status: "ready",
     account: reached,
     checks: Object.freeze(checks),
+    ...(workersSubdomain !== null ? { workersSubdomain } : {}),
   });
 }
 

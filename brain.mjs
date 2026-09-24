@@ -588,6 +588,20 @@ function activeCloudflareToken() {
   return process.env.CLOUDFLARE_API_TOKEN || null;
 }
 
+/** Exact workers.dev subdomain proved for this account by the active OAuth preflight. */
+function activeWorkersDevSubdomainReceipt(accountId) {
+  const scoped = cloudflareTokenSession.getStore();
+  if (scoped?.source !== "wrangler-oauth") return null;
+  const expectedAccountId = String(accountId || "").toLowerCase();
+  const receiptAccountId = String(scoped.account?.id || "").toLowerCase();
+  const preflightAccountId = String(scoped.preflight?.account?.id || "").toLowerCase();
+  if (!expectedAccountId || receiptAccountId !== expectedAccountId ||
+      preflightAccountId !== expectedAccountId) return null;
+  return typeof scoped.preflight?.workersSubdomain === "string"
+    ? scoped.preflight.workersSubdomain
+    : null;
+}
+
 export function cloudflareAccessUsesBrowserProfile() {
   const source = cloudflareTokenSession.getStore()?.source;
   return source === "wrangler-oauth" || source === "wrangler-session";
@@ -1127,6 +1141,8 @@ export async function withCloudflareControlCredential(action, options = {}) {
       source: "wrangler-oauth",
       machineReadable: false,
       announced: true,
+      account: session.account,
+      preflight: session.preflight,
     }, async () => {
       try {
         return await action(Object.freeze({
@@ -2102,32 +2118,11 @@ async function verifyWorkersDevCandidate(domain, {
 /** Save the verified workers.dev hostname so routine commands need no API token. */
 export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName, options = {}) {
   if (m.brain?.domain) return m.brain.domain;
-  // The account listing already returned the account's label. Try the public,
-  // non-expiring address first and trust it only after this exact brain and
-  // package version answer /health. The control-plane subdomain read remains a
-  // fallback for accounts whose display name is not their workers.dev label.
-  const accountLabel = typeof acct?.name === "string" ? acct.name.trim().toLowerCase() : "";
-  const candidateDomain = WORKERS_DEV_LABEL_RE.test(accountLabel)
-    ? `${scriptName}.${accountLabel}.workers.dev`
-    : null;
   const verify = options.verifyWorkersDevCandidate ?? verifyWorkersDevCandidate;
-  let candidateVerdict = { ok: false, reason: "the account label was not a usable workers.dev label" };
-  if (candidateDomain) {
-    candidateVerdict = await verify(candidateDomain, {
-      expectedBrainName: m.client?.slug || "brain",
-      expectedVersion: PRODUCT_VERSION,
-      request: options.request,
-      wait: options.wait,
-    });
-    if (candidateVerdict.ok) {
-      m.brain = { ...(m.brain || {}), domain: candidateDomain };
-      saveManifest(manifestPath, m);
-      ok(`confirmed ${candidateDomain} is this brain and saved it`);
-      return m.brain.domain;
-    }
-  }
-  const readSubdomain = options.readSubdomain ??
-    (() => cf(`/accounts/${acct.id}/workers/subdomain`));
+  const carriedSubdomain = options.workersDevSubdomain;
+  let label = carriedSubdomain;
+  const usedPreflightReceipt = carriedSubdomain !== undefined && carriedSubdomain !== null;
+  const readSubdomain = options.readSubdomain ?? (() => cf(`/accounts/${acct.id}/workers/subdomain`));
   // Three different things can go wrong here and they used to print one
   // sentence. `.catch(() => null)` swallowed every failure, including the
   // credential error whose own text warns against pasting a token into a
@@ -2136,54 +2131,71 @@ export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName,
   // went to the dashboard and correctly changed nothing, and eventually pasted
   // a raw API token at a prompt to get past a message that was not true.
   //
-  // This call authenticates with an API token while the deploy around it can be
-  // running on a browser session, so "no credential for THIS call" is an
-  // ordinary outcome on the path the runbook recommends, not an exotic one.
-  let sub = null;
-  let readFailure = null;
-  try {
-    sub = await readSubdomain();
-  } catch (error) {
-    readFailure = error;
-  }
-  if (readFailure) {
-    const message = String(readFailure?.message || readFailure || "");
-    const noCredential = readFailure instanceof Fatal && NO_CLOUDFLARE_CREDENTIAL_RE.test(message);
-    const denied = SUBDOMAIN_READ_DENIED_RE.test(message);
-    // The no-credential Fatal already says the right thing, including browser
-    // sign-in and why a raw token must not be pasted into a shell. Preserve it.
-    if (noCredential) throw readFailure;
-    if (!denied) {
-      if (readFailure instanceof Fatal) throw readFailure;
-      const detail = message.split("\n")[0].slice(0, 200);
+  // The fallback call can authenticate separately from the deploy around it,
+  // so "no credential for THIS call" remains an ordinary outcome for legacy
+  // and token lanes that do not carry the named-profile preflight receipt.
+  if (!usedPreflightReceipt) {
+    let sub = null;
+    let readFailure = null;
+    try {
+      sub = await readSubdomain();
+    } catch (error) {
+      readFailure = error;
+    }
+    if (readFailure) {
+      const message = String(readFailure?.message || readFailure || "");
+      const noCredential = readFailure instanceof Fatal && NO_CLOUDFLARE_CREDENTIAL_RE.test(message);
+      const denied = SUBDOMAIN_READ_DENIED_RE.test(message);
+      // The no-credential Fatal already says the right thing, including browser
+      // sign-in and why a raw token must not be pasted into a shell. Preserve it.
+      if (noCredential) throw readFailure;
+      if (!denied) {
+        if (readFailure instanceof Fatal) throw readFailure;
+        const detail = message.split("\n")[0].slice(0, 200);
+        die(
+          "the workers.dev route is enabled, but reading the account subdomain failed.\n" +
+            `  Cloudflare did not answer that read: ${detail}\n` +
+            "  This is a failure to ASK, not a missing subdomain, so check the credential this\n" +
+            "  call is using and its scope before changing anything in the dashboard."
+        );
+      }
+      // A 401/403 on the browser-sign-in path is not an account-setting
+      // diagnosis. Name only the action the owner can take, and do not promise
+      // that setup can safely resume a partially completed writer cutover.
       die(
-        "the workers.dev route is enabled, but reading the account subdomain failed.\n" +
-          `  Cloudflare did not answer that read: ${detail}\n` +
-          "  This is a failure to ASK, not a missing subdomain, so check the credential this\n" +
-          "  call is using and its scope before changing anything in the dashboard."
+        "the workers.dev route is enabled and the Worker is deployed, but this run could not\n" +
+          "  confirm the brain's public address because the exact account subdomain read was denied.\n" +
+          "  Sign in again through the browser when prompted, then rerun the same command.\n" +
+          "  Do not change the Workers subdomain setting based on this failure."
       );
     }
-    // A 401/403 on the browser-sign-in path is not an account-setting
-    // diagnosis. Name only the action the owner can take, and do not promise
-    // that setup can safely resume a partially completed writer cutover.
-    die(
-      "the workers.dev route is enabled and the Worker is deployed, but this run could not\n" +
-        `  confirm the brain's public address: ${candidateVerdict.reason}.\n` +
-        "  Sign in again through the browser when prompted, then rerun the same command.\n" +
-        "  Do not change the Workers subdomain setting based on this failure."
-    );
+    label = sub?.subdomain;
   }
-  const label = typeof sub?.subdomain === "string" ? sub.subdomain.trim() : "";
-  if (!WORKERS_DEV_LABEL_RE.test(label)) {
+  if (typeof label !== "string" || !WORKERS_DEV_LABEL_RE.test(label)) {
     die(
-      "the workers.dev route is enabled, but Cloudflare did not return a usable account subdomain.\n" +
+      `the workers.dev route is enabled, but ${usedPreflightReceipt ? "the authenticated preflight" : "Cloudflare"} did not return a usable account subdomain.\n` +
         "  The read succeeded and carried no usable name, so the subdomain really is unset.\n" +
         "  The Worker is deployed, but its token-free URL cannot be saved. Rerun deploy after\n" +
         "  the Workers subdomain is visible in Cloudflare."
     );
   }
-  m.brain = { ...(m.brain || {}), domain: `${scriptName}.${label}.workers.dev` };
+  const candidateDomain = `${scriptName}.${label}.workers.dev`;
+  const candidateVerdict = await verify(candidateDomain, {
+    expectedBrainName: m.client?.slug || "brain",
+    expectedVersion: PRODUCT_VERSION,
+    request: options.request,
+    wait: options.wait,
+  });
+  if (!candidateVerdict.ok) {
+    die(
+      "the workers.dev route is enabled, but its exact account hostname was not confirmed as this brain.\n" +
+        `  ${candidateVerdict.reason}. No address was saved and no admin key was sent to that host.\n` +
+        "  Rerun deploy after the workers.dev route finishes propagating."
+    );
+  }
+  m.brain = { ...(m.brain || {}), domain: candidateDomain };
   saveManifest(manifestPath, m);
+  ok(`confirmed ${candidateDomain} is this brain and saved it`);
   return m.brain.domain;
 }
 
@@ -2452,6 +2464,7 @@ export async function cmdDeploy(manifestPath, options = {}) {
   // workers.dev hostname once, instead of looking it up again on every command.
   if (!m.brain?.domain && options.persistDomain !== false) {
     const domain = await persistWorkersDevDomain(manifestPath, m, acct, scriptName, {
+      workersDevSubdomain: activeWorkersDevSubdomainReceipt(acct.id),
       verifyWorkersDevCandidate: options.verifyWorkersDevCandidate,
       request: options.request,
       wait: options.wait,
