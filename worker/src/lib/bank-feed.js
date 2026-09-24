@@ -329,7 +329,11 @@ export function bankFeedOwnerErrorMessage(data, status) {
   const base = (code && messages[code]) || (status === 503
     ? "This step is temporarily unavailable. Your earlier progress is safe. Please try again."
     : "That step did not finish. Your earlier progress is safe. Please try again.");
-  return code ? `${base} Reference code: ${code}.` : base;
+  if (code) return `${base} Reference code: ${code}.`;
+  const detail = typeof data?.error === "string" ? data.error.trim().slice(0, 300) : "";
+  return detail
+    ? `${base} Details: ${detail} Reference code: BANK_FEED_REQUEST_FAILED.`
+    : base;
 }
 
 /**
