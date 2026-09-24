@@ -60,6 +60,11 @@ import {
   createOcrCallback,
 } from "./ingest/ocr-client.mjs";
 import {
+  CUSTOM_API_RUN_PATH,
+  customApiWorkerBinding,
+  validateCustomApiConfig,
+} from "./worker/src/lib/custom-api.js";
+import {
   D1_QUERY_BIND_LIMIT,
   SOURCE_FAMILY_UID_FILTER_MAX,
 } from "./worker/src/lib/store-d1.js";
@@ -2190,6 +2195,7 @@ export function bankFeedWorkerVars(m) {
 
 /** Every binding this manifest puts on the worker. Exported so a test can read the artifact. */
 export function workerBindings(m, cfg, options = {}) {
+  const customApiBinding = customApiWorkerBinding(m);
   return [
       { type: "d1", name: "DB", id: cfg.d1_database_id },
       { type: "ai", name: "AI" },
@@ -2203,6 +2209,7 @@ export function workerBindings(m, cfg, options = {}) {
       { type: "plain_text", name: "BRAIN_NAME", text: m.client?.slug || "brain" },
       { type: "plain_text", name: "BRAIN_OWNER", text: m.client?.display_name || "the owner" },
       { type: "plain_text", name: "BRAIN_VERSION", text: PRODUCT_VERSION },
+      ...(customApiBinding ? [customApiBinding] : []),
       ...(options.pauseVectorDrainForUpgrade === true
         ? [{ type: "plain_text", name: "VECTOR_DRAIN_MODE", text: "paused-for-upgrade" }]
         : []),
@@ -14064,6 +14071,12 @@ export function loadSourceRegistry(commands = {}) {
         run: () => ingestIphoneBackup(m, manifestPath, { ...flags, from: "iphone-backup" }),
       }],
     },
+    custom_api: {
+      order: 75,
+      label: "Custom business API",
+      scope: "the bounded JSON endpoints declared in this manifest",
+      outsideLoad: "The owner's Worker pulls this source on its own cron, so brain load has no laptop-side work to run. Preview or run it now with brain custom-api <manifest> --dry-run or brain custom-api <manifest>.",
+    },
     zoom: {
       order: 80,
       label: "Zoom cloud recordings",
@@ -14146,9 +14159,9 @@ export async function planLoad({ m, manifestPath, flags = {}, registry, probes, 
       entry.status = "unavailable";
       entry.reason = `enabled in this manifest, but brain ${PRODUCT_VERSION} has no loader for it`;
       entry.fix = "nothing was loaded from it; put its documents in a folder and load that instead";
-    } else if (descriptor.pushOnly) {
+    } else if (descriptor.pushOnly || descriptor.outsideLoad) {
       entry.status = "skipped";
-      entry.reason = descriptor.pushOnly;
+      entry.reason = descriptor.pushOnly || descriptor.outsideLoad;
     } else {
       const probe = probeTable[canonical];
       let verdict = { connected: true };
@@ -17163,6 +17176,15 @@ export async function cmdConnect(target, options = {}) {
   const flags = parseFlags(argv.slice(3));
   const which = (target || "").toLowerCase();
   const manifestPath = argv[4];
+  if (which === "custom-api") {
+    const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
+    const connectCustomApi = options.connectCustomApi ?? cmdConnectCustomApi;
+    return runManifestControl(
+      manifestPath,
+      () => connectCustomApi(manifestPath, flags, options.customApiOptions || {}),
+      options.controlOptions || {},
+    );
+  }
   if (which === "bank") {
     // The owner-custody secret check reads, and may write, the Worker, so it
     // runs under the manifest's saved Cloudflare custody exactly as Zoom does.
@@ -17189,8 +17211,9 @@ export async function cmdConnect(target, options = {}) {
   if (PROVIDER_CONNECTOR_IDS.includes(which)) return cmdConnectProvider(which, manifestPath, flags);
   if (which !== "google") {
     die(
-      "brain connect supports bank, google, imap, imessage, whatsapp, zoom, quickbooks, slack, notion, microsoft, dropbox and hubspot.\n" +
+      "brain connect supports bank, custom-api, google, imap, imessage, whatsapp, zoom, quickbooks, slack, notion, microsoft, dropbox and hubspot.\n" +
         "  Usage: brain connect bank <manifest>\n" +
+        "         brain connect custom-api <manifest>\n" +
         "         brain connect google --scopes drive,gmail,calendar\n" +
         "         brain connect imap <manifest> --host imap.example.com --user you@example.com\n" +
         "         brain connect imessage <manifest>\n" +
@@ -17214,6 +17237,89 @@ export async function cmdConnect(target, options = {}) {
     if (error instanceof SourceIngestLockError) die(error.message);
     throw error;
   }
+}
+
+/** Set only the manifest-declared custom API bearer value through a hidden prompt. */
+export async function cmdConnectCustomApi(manifestPath, flags = {}, options = {}) {
+  if (!manifestPath || String(manifestPath).startsWith("--")) {
+    die("usage: brain connect custom-api <manifest> [--replace-key]");
+  }
+  const unknownFlag = Object.keys(flags).find((name) => name !== "replace-key");
+  if (unknownFlag) die(`brain connect custom-api does not recognize --${unknownFlag}`);
+  if (flags["replace-key"] !== undefined && flags["replace-key"] !== true) {
+    die("brain connect custom-api --replace-key does not take a value");
+  }
+  const { m } = loadManifest(manifestPath);
+  let config;
+  try { config = validateCustomApiConfig(m.corpora?.custom_api); } catch (error) {
+    die(`the manifest's custom_api source is not ready: ${String(error?.message || error)}`);
+  }
+  const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
+  let acct = null;
+  const account = async () => (acct ??= await (options.resolveAccount ?? resolveAccount)(m));
+  const listSecretNames = options.listWorkerSecretNames ?? (async () => {
+    const inventory = await cf(`/accounts/${(await account()).id}/workers/scripts/${scriptName}/secrets`);
+    if (!Array.isArray(inventory) || inventory.some((entry) => typeof entry?.name !== "string")) {
+      throw new Error("Cloudflare returned an invalid Worker secret inventory");
+    }
+    return inventory.map((entry) => entry.name);
+  });
+  const putSecret = options.putWorkerSecret ?? (async (name, text) =>
+    cf(`/accounts/${(await account()).id}/workers/scripts/${scriptName}/secrets`, {
+      method: "PUT", body: { name, text, type: "secret_text" },
+    }));
+  let names;
+  try { names = new Set(await listSecretNames()); } catch {
+    die("the Worker's secret names could not be inspected. No custom API key was written.");
+  }
+  const replace = flags["replace-key"] === true;
+  let wrote = false;
+  if (!names.has(config.token_secret) || replace) {
+    const read = options.readSecret ?? readHiddenSecret;
+    let token;
+    try {
+      token = await read(`  ${config.display_name} bearer key (hidden): `, {
+        noun: "custom API key",
+        insecure: "this terminal cannot prompt securely. Rerun from an interactive terminal; the custom API key is never accepted as a flag or environment variable.",
+      });
+    } catch (error) {
+      die(String(error?.message || error));
+    }
+    if (typeof token !== "string" || token.length < 1 || token.length > 2_048 || /[\u0000-\u001f\u007f]/.test(token)) {
+      die("the custom API key was empty, too long, or contained a control character. Nothing was written.");
+    }
+    try { await putSecret(config.token_secret, token); } catch {
+      die("the custom API key could not be written to the Worker. The value was not printed or saved locally.");
+    }
+    try { names = new Set(await listSecretNames()); } catch {
+      die("the custom API key write returned, but its secret name could not be read back. Do not treat the connection as ready.");
+    }
+    if (!names.has(config.token_secret)) {
+      die("Cloudflare did not list the declared custom API secret after the write. Do not treat the connection as ready.");
+    }
+    wrote = true;
+    ok(`custom API key stored as Worker secret ${config.token_secret}`);
+  } else {
+    ok(`Worker secret ${config.token_secret} is already present; nothing was prompted or written`);
+  }
+
+  // Make the source visible before its first cron tick. Failure here does not
+  // erase a verified secret, but it also does not claim status registration.
+  try {
+    const adminKey = (options.resolveAdminKey ?? resolveAdminKey)(manifestPath);
+    if (!adminKey) throw new Error("admin key unavailable");
+    const base = await (options.resolveBaseUrl ?? resolveBaseUrl)(m, m.brain?.domain ? null : await account());
+    await (options.postSourceExpectation ?? postSourceExpectation)(base, adminKey, {
+      source: config.source,
+      kind: "custom_api",
+      expected_refresh_seconds: config.cadence_seconds,
+    });
+    ok(`${config.display_name} now appears in source status with its declared cadence`);
+  } catch {
+    warn("the key is stored, but source status could not be registered yet. A successful manual or scheduled pull will register it.");
+  }
+  info(`preview the first pull with: brain custom-api ${manifestPath} --dry-run`);
+  return { source: config.source, secret_name: config.token_secret, written: wrote };
 }
 
 async function cmdConnectGoogle(flags, options = {}, assertLockOwned = null) {
@@ -27366,6 +27472,47 @@ async function cmdImport(target) {
   return cmdImportBank(m, manifestPath, parseFlags(process.argv.slice(4)));
 }
 
+/** Ask the deployed Worker to run the same custom API path used by cron. */
+export async function cmdCustomApi(manifestPath, flags = parseFlags(process.argv.slice(3)), options = {}) {
+  if (!manifestPath || String(manifestPath).startsWith("--")) {
+    die("usage: brain custom-api <manifest> [--dry-run]");
+  }
+  const unknownFlag = Object.keys(flags).find((name) => name !== "dry-run");
+  if (unknownFlag) die(`brain custom-api does not recognize --${unknownFlag}`);
+  if (flags["dry-run"] !== undefined && flags["dry-run"] !== true) {
+    die("brain custom-api --dry-run does not take a value");
+  }
+  const { m } = loadManifest(manifestPath);
+  try { validateCustomApiConfig(m.corpora?.custom_api); } catch (error) {
+    die(`the manifest's custom_api source is not ready: ${String(error?.message || error)}`);
+  }
+  const adminKey = (options.resolveAdminKey ?? resolveAdminKey)(manifestPath);
+  if (!adminKey) {
+    die("no durable admin key was found. Repair the install with brain setup; do not paste a key into this command.");
+  }
+  const acct = m.brain?.domain ? null : await (options.resolveAccount ?? resolveAccount)(m);
+  const base = await (options.resolveBaseUrl ?? resolveBaseUrl)(m, acct);
+  const response = await http(`${base}${CUSTOM_API_RUN_PATH}`, {
+    method: "POST",
+    headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
+    body: JSON.stringify({ dry_run: flags["dry-run"] === true }),
+  }, { fetchImpl: options.fetchImpl ?? fetch, what: "the custom API pull" });
+  let receipt;
+  try { receipt = await response.json(); } catch {
+    die(`the Brain returned a non-JSON custom API receipt (HTTP ${response.status}). No success is claimed.`);
+  }
+  if (!response.ok || receipt?.status !== "completed") {
+    die(`${receipt?.error || "the custom API pull did not complete"}${receipt?.code ? ` (${receipt.code})` : ""}`);
+  }
+  const mode = receipt.dry_run ? "previewed" : "completed";
+  ok(`${mode} ${receipt.endpoints} custom API endpoint(s)`);
+  info(`${receipt.rows.created} new row(s), ${receipt.rows.updated} corrected, ${receipt.rows.unchanged} unchanged; ${receipt.documents} document(s) ${receipt.dry_run ? "would change" : "changed"}`);
+  if (receipt.retained_missing_rows) {
+    warn(`${receipt.retained_missing_rows} previously stored row(s) were absent from this response and were retained, not deleted`);
+  }
+  return receipt;
+}
+
 const commands = {
   init: cmdInit,
   setup: cmdSetupInteractive,
@@ -27391,6 +27538,7 @@ const commands = {
     boundaryCommand: cliBoundaryCommand,
   }),
   import: cmdImport,
+  "custom-api": cmdCustomApi,
   load: cmdLoad,
   connect: cmdConnect,
   disconnect: cmdDisconnect,
@@ -27441,6 +27589,7 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "ingest-file-apply",
   "assistant-repair",
   "ocr-preflight",
+  "custom-api",
 ]);
 
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
@@ -27528,6 +27677,10 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect bank     <manifest>      owner-present Plaid pilot: hidden prompt for missing Plaid keys, checked
                                            with Plaid before they are saved, then owner-only Plaid Link and masked
                                            account assignment. --replace-keys re-enters both keys
+    brain connect custom-api <manifest>   store the manifest-declared bearer key at a hidden prompt;
+                                           --replace-key replaces it without putting the value in the manifest
+    brain custom-api <manifest> --dry-run preview the Worker's custom business API pull without writes;
+                                           omit --dry-run to run it now through the same server path as cron
     brain connect <provider> <manifest>    QuickBooks, Slack, Notion, Microsoft, Dropbox or HubSpot OAuth
     brain load       <manifest>            load EVERYTHING this manifest has: one sweep of every
                                            enabled, connected source, one report at the end
@@ -27630,6 +27783,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
   --skip <a,b> to rerun one source after fixing it, and --limit <n>, which marks
   everything it touches as an incomplete load. Zoom is always skipped: it pushes
   new transcripts to the brain's webhook, so there is nothing for a sweep to pull.
+  A custom business API is also stated as a skip because the owner's Worker pulls
+  it on its own cadence; use brain custom-api <manifest> --dry-run to preview it.
 
   brain import bank reads the file on THIS machine and sends figures, never the
   file and never a full account number. A .csv is only a bank export when you say
