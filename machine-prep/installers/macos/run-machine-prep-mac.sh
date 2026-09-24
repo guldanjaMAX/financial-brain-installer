@@ -2,6 +2,7 @@
 # Runs after Installer's one authorization, but inside the console user's
 # session. Prep output is home-path-scrubbed into a client-shareable log.
 set -u
+set -o pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(/usr/bin/dirname -- "$0")" && /bin/pwd)
 LOG_DIR="$HOME/.local/state/financial-brain-machine-prep"
