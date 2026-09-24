@@ -13,7 +13,6 @@ import {
   renameSync,
   rmSync,
   statSync,
-  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -96,6 +95,7 @@ import {
   readPrivateAggregateReceipt,
   reservePrivateAggregateReceipt,
 } from "../operations/private-aggregate-receipt.mjs";
+import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 import {
   V048_DISPOSABLE_CAMPAIGN_CORPORA,
 } from "../operations/v048-disposable-campaign-contract.mjs";
@@ -2990,14 +2990,21 @@ try {
     ".brain-recovery-test-bootstrap-interruption-v1.json",
   );
   if (process.platform !== "win32") {
-    symlinkSync(join(artifactDirectory, "missing-control-target"), ordinaryCheckpointPath);
-    assert.throws(
-      () => previewCloudflareRecoveryFieldGate(baseConfig, { platform: "darwin" }),
-      (error) => error.code ===
-        "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_APPROVAL_REQUIRED",
-      "a dangling live-control symlink is present, never absent",
-    );
-    unlinkSync(ordinaryCheckpointPath);
+    const linkedControl = createTestSymlink({
+      target: join(artifactDirectory, "missing-control-target"),
+      path: ordinaryCheckpointPath,
+      type: "file",
+      onSkip: (reason) => console.log(`SKIP  dangling live-control link # ${reason}`),
+    });
+    if (linkedControl.created) {
+      assert.throws(
+        () => previewCloudflareRecoveryFieldGate(baseConfig, { platform: "darwin" }),
+        (error) => error.code ===
+          "RECOVERY_FIELD_GATE_TEST_BOOTSTRAP_RESUME_APPROVAL_REQUIRED",
+        "a dangling live-control symlink is present, never absent",
+      );
+      unlinkSync(ordinaryCheckpointPath);
+    }
   }
   const ordinaryControlHarness = providerHarness();
   const ordinaryControlGate = createCloudflareRecoveryFieldGateAdapters(
@@ -7594,13 +7601,20 @@ try {
   );
 
   const unsafeWrapper = join(sandbox, "unsafe-wrapper-link");
-  symlinkSync(wrapperPath, unsafeWrapper);
-  assert.throws(
-    () => previewCloudflareRecoveryFieldGate({ ...baseConfig, wranglerWrapperPath: unsafeWrapper }, {
-      platform: "darwin",
-    }),
-    (error) => error.code === "RECOVERY_WRANGLER_WRAPPER_UNSAFE",
-  );
+  const linkedWrapper = createTestSymlink({
+    target: wrapperPath,
+    path: unsafeWrapper,
+    type: "file",
+    onSkip: (reason) => console.log(`SKIP  recovery refuses a linked wrapper # ${reason}`),
+  });
+  if (linkedWrapper.created) {
+    assert.throws(
+      () => previewCloudflareRecoveryFieldGate({ ...baseConfig, wranglerWrapperPath: unsafeWrapper }, {
+        platform: "darwin",
+      }),
+      (error) => error.code === "RECOVERY_WRANGLER_WRAPPER_UNSAFE",
+    );
+  }
 
   if (process.platform !== "win32" && existsSync("/usr/bin/sqlite3")) {
     const localArtifact = join(sandbox, ".brain-recovery-local-verifier.sql");

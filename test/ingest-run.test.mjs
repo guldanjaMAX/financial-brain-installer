@@ -2,12 +2,14 @@ import { walk, prepare, batches, batchStream, splitOversized, estimatedStatement
 import { estimateD1IngestStatements } from "../worker/src/lib/store.js";
 import { extract, isBinaryFormat, register, supported } from "../ingest/extract.mjs";
 import { extractPdf, pdfPassIsolated } from "../ingest/formats.mjs";
-import { linkSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, readdirSync, symlinkSync, realpathSync } from "node:fs";
+import { linkSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, readdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 240))); if (!c) fail++; };
+const skipLinkCase = (name) => (reason) => console.log(`SKIP  ${name} # ${reason}`);
 
 const root = mkdtempSync(join(tmpdir(), "brain-ingest-"));
 const put = (rel, content) => {
@@ -99,11 +101,18 @@ const one = (rel) => walk(root, {}).files.find((f) => f.rel.split(/[\\/]/).join(
   try {
     mkdirSync(targetRoot, { recursive: true });
     writeFileSync(join(targetRoot, "first.txt"), "a linked ancestor must not enter the exact-file pilot");
-    symlinkSync(targetParent, linkedParent, process.platform === "win32" ? "junction" : "dir");
-    let linkedRoot = false;
-    try { resolveExactLocalFile(join(linkedParent, "source"), { relativeLocator: "first.txt" }); }
-    catch (error) { linkedRoot = error?.code === "LOCAL_ROOT_LINK_REFUSED"; }
-    check("exact-file pilot refuses a linked source-root ancestor", linkedRoot);
+    const linked = createTestSymlink({
+      target: targetParent,
+      path: linkedParent,
+      type: "dir",
+      onSkip: skipLinkCase("exact-file pilot refuses a linked source-root ancestor"),
+    });
+    if (linked.created) {
+      let linkedRoot = false;
+      try { resolveExactLocalFile(join(linkedParent, "source"), { relativeLocator: "first.txt" }); }
+      catch (error) { linkedRoot = error?.code === "LOCAL_ROOT_LINK_REFUSED"; }
+      check("exact-file pilot refuses a linked source-root ancestor", linkedRoot);
+    }
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
@@ -113,11 +122,18 @@ const one = (rel) => walk(root, {}).files.find((f) => f.rel.split(/[\\/]/).join(
   const outsideRoot = realpathSync(mkdtempSync(join(tmpdir(), "brain-ingest-exact-outside-")));
   try {
     writeFileSync(join(outsideRoot, "outside.txt"), "outside");
-    symlinkSync(join(outsideRoot, "outside.txt"), join(exactRoot, "first.txt"));
-    let linked = false;
-    try { resolveExactLocalFile(exactRoot, { relativeLocator: "first.txt" }); }
-    catch (error) { linked = ["LOCAL_FILE_NOT_REGULAR", "LOCAL_FILE_LINK_REFUSED"].includes(error?.code); }
-    check("exact-file pilot refuses a linked target before reading it", linked);
+    const created = createTestSymlink({
+      target: join(outsideRoot, "outside.txt"),
+      path: join(exactRoot, "first.txt"),
+      type: "file",
+      onSkip: skipLinkCase("exact-file pilot refuses a linked target before reading it"),
+    });
+    if (created.created) {
+      let linked = false;
+      try { resolveExactLocalFile(exactRoot, { relativeLocator: "first.txt" }); }
+      catch (error) { linked = ["LOCAL_FILE_NOT_REGULAR", "LOCAL_FILE_LINK_REFUSED"].includes(error?.code); }
+      check("exact-file pilot refuses a linked target before reading it", linked);
+    }
   } finally {
     rmSync(exactRoot, { recursive: true, force: true });
     rmSync(outsideRoot, { recursive: true, force: true });
