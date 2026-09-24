@@ -191,26 +191,8 @@ function accountIdentityError(code = "plaid_account_identity_conflict") {
 }
 
 /** Preserve exact historical mappings; new identities use a case-sensitive digest. */
-async function resolveAccountMappings(env, { tenantId, itemRef, accounts, reconnectPlan = null }) {
-  if (!Array.isArray(accounts) || accounts.length === 0 || accounts.length > 250) {
-    throw accountIdentityError();
-  }
-  const ids = accounts.map(account => account.providerAccountId);
-  if (ids.some(id => typeof id !== "string" || !id) || new Set(ids).size !== ids.length) {
-    throw accountIdentityError();
-  }
-  if (reconnectPlan) {
-    if (!validReconnectPlan(reconnectPlan) || reconnectPlan.accounts.length !== ids.length) {
-      throw accountIdentityError();
-    }
-    const mappings = ids.map((providerAccountId) => {
-      const matches = reconnectPlan.accounts.filter((account) => account.providerAccountId === providerAccountId);
-      if (matches.length !== 1) throw accountIdentityError();
-      return { providerAccountId, accountSlug: matches[0].accountSlug };
-    });
-    if (new Set(mappings.map((row) => row.accountSlug)).size !== mappings.length) throw accountIdentityError();
-    return mappings;
-  }
+async function resolveOrdinaryAccountMappings(env, { tenantId, itemRef, ids }) {
+  if (ids.length === 0) return [];
   const candidates = await Promise.all(ids.map(async providerAccountId => ({
     providerAccountId,
     legacySlug: legacyAccountSlug(itemRef, providerAccountId),
@@ -237,6 +219,36 @@ async function resolveAccountMappings(env, { tenantId, itemRef, accounts, reconn
     return { providerAccountId: candidate.providerAccountId, accountSlug: exact[0]?.account_slug || candidate.canonicalSlug };
   });
   if (new Set(mappings.map(row => row.accountSlug)).size !== mappings.length) throw accountIdentityError();
+  return mappings;
+}
+
+async function resolveAccountMappings(env, { tenantId, itemRef, accounts, reconnectPlan = null }) {
+  if (!Array.isArray(accounts) || accounts.length === 0 || accounts.length > 250) {
+    throw accountIdentityError();
+  }
+  const ids = accounts.map(account => account.providerAccountId);
+  if (ids.some(id => typeof id !== "string" || !id) || new Set(ids).size !== ids.length) {
+    throw accountIdentityError();
+  }
+  if (!reconnectPlan) return resolveOrdinaryAccountMappings(env, { tenantId, itemRef, ids });
+  if (!validReconnectPlan(reconnectPlan)) throw accountIdentityError();
+  const savedIds = new Set(reconnectPlan.accounts.map((account) => account.providerAccountId));
+  if (reconnectPlan.accounts.some((account) => !ids.includes(account.providerAccountId))) {
+    throw accountIdentityError();
+  }
+  const retained = reconnectPlan.accounts.map((account) => ({
+    providerAccountId: account.providerAccountId,
+    accountSlug: account.accountSlug,
+  }));
+  const ordinary = await resolveOrdinaryAccountMappings(env, {
+    tenantId,
+    itemRef,
+    ids: ids.filter((providerAccountId) => !savedIds.has(providerAccountId)),
+  });
+  const mappings = [...retained, ...ordinary];
+  if (mappings.length !== ids.length || new Set(mappings.map((row) => row.accountSlug)).size !== mappings.length) {
+    throw accountIdentityError();
+  }
   return mappings;
 }
 
@@ -457,6 +469,7 @@ async function plaidReconnectStatements(env, {
         accountRef: row.accountRef,
         priorIdentityLocator: row.priorIdentityLocator,
       })),
+      expectedProviderAccountIds: review.expectedProviderAccountIds,
     },
   };
 }
@@ -852,6 +865,19 @@ function reconnectReviewResult(itemRef, receipt = {}) {
   };
 }
 
+function reconnectInventoryReviewResult(itemRef) {
+  return {
+    item_ref: itemRef,
+    promoted: false,
+    ok: false,
+    partial: true,
+    status: "review_required",
+    review_required: true,
+    code: "plaid_reconnect_account_inventory_review_required",
+    cursor_advanced: false,
+  };
+}
+
 function validReconnectPlan(plan) {
   if (!(plan && typeof plan === "object" && !Array.isArray(plan) &&
     typeof plan.priorItemRef === "string" && plan.priorItemRef &&
@@ -863,9 +889,15 @@ function validReconnectPlan(plan) {
       typeof account.entitySlug === "string" && account.entitySlug &&
       typeof account.accountRef === "string" && account.accountRef &&
       (account.priorIdentityLocator === null ||
-        (typeof account.priorIdentityLocator === "string" && account.priorIdentityLocator))))) return false;
+        (typeof account.priorIdentityLocator === "string" && account.priorIdentityLocator))) &&
+    Array.isArray(plan.expectedProviderAccountIds) && plan.expectedProviderAccountIds.length > 0 &&
+    plan.expectedProviderAccountIds.length <= 250 &&
+    plan.expectedProviderAccountIds.every((providerAccountId) =>
+      typeof providerAccountId === "string" && providerAccountId))) return false;
   return new Set(plan.accounts.map((account) => account.providerAccountId)).size === plan.accounts.length &&
-    new Set(plan.accounts.map((account) => account.accountSlug)).size === plan.accounts.length;
+    new Set(plan.accounts.map((account) => account.accountSlug)).size === plan.accounts.length &&
+    new Set(plan.expectedProviderAccountIds).size === plan.expectedProviderAccountIds.length &&
+    plan.accounts.every((account) => plan.expectedProviderAccountIds.includes(account.providerAccountId));
 }
 
 function transactionMatch(prior, staged) {
@@ -955,7 +987,7 @@ async function plaidReconnectReconciliation(env, { tenantId, itemRef, windowRef,
         AND account_slug IN (SELECT json_extract(value,'$.accountSlug') FROM json_each(?3))`,
   ).bind(tenantId, priorFeed, planJson).all())?.results || [];
   const staged = (await env.DB.prepare(
-    `SELECT provider_transaction_id,pending_transaction_id,account_slug,posted_on,amount_minor,direction,
+    `SELECT provider_transaction_id,pending_transaction_id,account_slug,posted_on,authorized_on,amount_minor,direction,
             iso_currency_code,description,merchant_name,pending
        FROM plaid_sync_stage_transactions
       WHERE tenant_id=? AND window_ref=? AND operation IN ('added','modified')
@@ -975,12 +1007,22 @@ async function plaidReconnectReconciliation(env, { tenantId, itemRef, windowRef,
       continue;
     }
     const accountHasPriorHistory = prior.some((old) => old.account_slug === row.account_slug);
-    // A posted date after confirmed revocation cannot already exist in this
-    // retained feed after exact stable fields have ruled out every retained
-    // pending row. Everything at or before that boundary remains ambiguous.
-    if (accountHasPriorHistory && (!row.posted_on || row.posted_on <= removedDate)) {
-      return { reviewRequired: true };
-    }
+    if (!accountHasPriorHistory) continue;
+    const evidenceDate = row.authorized_on || row.posted_on;
+    // Newness needs affirmative evidence. Authorization is the economic
+    // boundary; posted date is only its fallback. A same-amount retained
+    // pending row within ten days remains a plausible changed-id settlement,
+    // even when labels and pending linkage changed.
+    const evidenceTime = Date.parse(`${evidenceDate}T00:00:00.000Z`);
+    const pendingEquivalent = prior.some((old) => {
+      if (old.account_slug !== row.account_slug || Number(old.pending) !== 1 ||
+          Number(old.amount_minor) !== Number(row.amount_minor) || !Number.isFinite(evidenceTime)) return false;
+      const pendingTime = old.posted_on ? Date.parse(`${old.posted_on}T00:00:00.000Z`) : Number.NaN;
+      // An undated retained pending row is uncertainty, never evidence of
+      // newness. A dated row blocks only inside the adjudicated ten-day window.
+      return !Number.isFinite(pendingTime) || Math.abs(evidenceTime - pendingTime) <= 10 * 24 * 60 * 60 * 1000;
+    });
+    if (!evidenceDate || evidenceDate <= removedDate || pendingEquivalent) return { reviewRequired: true };
   }
   return {
     reviewRequired: false,
@@ -989,6 +1031,41 @@ async function plaidReconnectReconciliation(env, { tenantId, itemRef, windowRef,
     matches,
     stamp,
     linkSessionRef: state.sessionRef,
+  };
+}
+
+async function plaidReconnectAssignmentReadiness(env, { tenantId, itemRef, windowRef, plan }) {
+  const planJson = JSON.stringify(plan.accounts);
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS account_count,
+            COALESCE(SUM(CASE
+              WHEN EXISTS (SELECT 1 FROM json_each(?4) m
+                WHERE json_extract(m.value,'$.providerAccountId')=s.provider_account_id) THEN 0
+              WHEN a.entity_slug IS NULL THEN 1 ELSE 0 END),0) AS missing_count,
+            COALESCE(SUM(CASE
+              WHEN EXISTS (SELECT 1 FROM json_each(?4) m
+                WHERE json_extract(m.value,'$.providerAccountId')=s.provider_account_id) THEN 0
+              WHEN a.entity_slug IS NOT NULL AND e.entity_slug IS NULL THEN 1 ELSE 0 END),0) AS invalid_count
+       FROM plaid_sync_stage_accounts s
+       LEFT JOIN plaid_account_entity_assignments a
+         ON a.tenant_id=s.tenant_id AND a.item_ref=?3 AND a.provider_account_id=s.provider_account_id
+       LEFT JOIN fin_entities e
+         ON e.tenant_id=a.tenant_id AND e.entity_slug=a.entity_slug
+        AND e.superseded_by_id IS NULL AND e.status='active' AND e.relationship='owned'
+      WHERE s.tenant_id=?1 AND s.window_ref=?2`,
+  ).bind(tenantId, windowRef, itemRef, planJson).first();
+  const accountCount = Number(row?.account_count || 0);
+  const missingCount = Number(row?.missing_count || 0);
+  const invalidCount = Number(row?.invalid_count || 0);
+  return {
+    ready: accountCount > 0 && missingCount === 0 && invalidCount === 0,
+    state: accountCount === 0 ? "unavailable" : missingCount === 0 && invalidCount === 0
+      ? "assigned" : "assignment_required",
+    code: accountCount === 0 ? "plaid_account_inventory_unavailable" : missingCount === 0 && invalidCount === 0
+      ? null : "plaid_account_assignment_required",
+    account_count: accountCount,
+    assignment_required: missingCount + invalidCount,
+    invalid_assignments: invalidCount,
   };
 }
 
@@ -1611,7 +1688,7 @@ async function promotePlaidWindow(env, details, receipt = {}) {
   // owner entity after that copy, so the preflight must not require the row to
   // exist early and weaken the quarantine boundary.
   const readiness = reconnect
-    ? { ready: true, state: "assigned", code: null }
+    ? await plaidReconnectAssignmentReadiness(env, { ...details, plan: reconnect.plan })
     : await plaidAccountAssignmentReadiness(env, details);
   if (!readiness.ready) return assignmentBlockedResult(details.itemRef, readiness, receipt);
   // Window start is a conservative observation bound even for ready rows from
@@ -1759,6 +1836,34 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
     await renewPlaidSyncLease(env, lease);
     const normalizedAccounts = (Array.isArray(accountPayload.accounts) ? accountPayload.accounts : [])
       .map(account => stagedAccount(account, stamp));
+    if (reconnectState && !reconnectState.reviewRequired) {
+      const authoritativeIds = new Set(normalizedAccounts.map((account) => account.providerAccountId));
+      const missingLinkAccounts = reconnectState.plan.expectedProviderAccountIds
+        .filter((providerAccountId) => !authoritativeIds.has(providerAccountId));
+      if (missingLinkAccounts.length > 0) {
+        const detail = "The replacement bank account list changed after Link. No transaction history was read or added. " +
+          "Disconnect this replacement connection and contact support before reconnecting.";
+        await runPlaidSyncBatch(env, lease, [
+          env.DB.prepare(
+            `UPDATE plaid_sync_windows SET state='refused',last_error_code=?,updated_at=?
+              WHERE tenant_id=? AND item_ref=?`,
+          ).bind("plaid_reconnect_account_inventory_review_required", stamp, tenantId, itemRef),
+          env.DB.prepare(
+            `UPDATE bank_feed_items SET status='error',status_detail=?,last_error_at=?
+              WHERE tenant_id=? AND item_ref=? AND removed_at IS NULL`,
+          ).bind(detail, stamp, tenantId, itemRef),
+          env.DB.prepare(
+            `INSERT INTO plaid_reconciliation
+               (tenant_id,item_ref,reason,state,due_at,attempts,last_error_code,updated_at)
+             VALUES (?,?,'reconnect_inventory_review','refused',?,0,?,?)
+             ON CONFLICT(tenant_id,item_ref) DO UPDATE SET
+               reason='reconnect_inventory_review',state='refused',due_at=excluded.due_at,
+               last_error_code=excluded.last_error_code,updated_at=excluded.updated_at`,
+          ).bind(tenantId, itemRef, stamp, "plaid_reconnect_account_inventory_review_required", stamp),
+        ]);
+        return reconnectInventoryReviewResult(itemRef);
+      }
+    }
     const mappings = await resolveAccountMappings(env, {
       tenantId,
       itemRef,
@@ -1772,6 +1877,15 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
         tenantId, itemRef, accounts, at: stamp,
         runBatch: statements => runPlaidSyncBatch(env, lease, statements),
       });
+    } else if (!reconnectState.reviewRequired) {
+      const retainedIds = new Set(reconnectState.plan.accounts.map((account) => account.providerAccountId));
+      const newAccounts = accounts.filter((account) => !retainedIds.has(account.providerAccountId));
+      if (newAccounts.length > 0) {
+        await discoverPlaidAccountAssignments(env, {
+          tenantId, itemRef, accounts: newAccounts, at: stamp,
+          runBatch: statements => runPlaidSyncBatch(env, lease, statements),
+        });
+      }
     }
     const result = await stagePlaidSyncWindow({
       originalCursor: window.original_cursor || null,
@@ -2228,7 +2342,13 @@ export async function plaidFeedStatus(env) {
                  ON e.tenant_id=a.tenant_id AND e.entity_slug=a.entity_slug
                 AND e.superseded_by_id IS NULL AND e.status='active' AND e.relationship='owned'
               WHERE s.tenant_id=w.tenant_id AND s.window_ref=w.window_ref
-                AND w.state IN ('staging','ready','retryable') AND e.entity_slug IS NULL) AS accounts_needing_owner
+                AND w.state IN ('staging','ready','retryable') AND e.entity_slug IS NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM plaid_link_operations l,
+                    json_each(json_extract(l.receipt_json,'$._reconnect_plan.accounts')) m
+                   WHERE l.tenant_id=s.tenant_id AND l.item_ref=w.item_ref AND l.state='completed'
+                     AND json_extract(m.value,'$.providerAccountId')=s.provider_account_id
+                )) AS accounts_needing_owner
        FROM bank_feed_items i
        LEFT JOIN bank_feed_backfill b ON b.tenant_id=i.tenant_id AND b.item_ref=i.item_ref
        LEFT JOIN plaid_reconciliation r ON r.tenant_id=i.tenant_id AND r.item_ref=i.item_ref

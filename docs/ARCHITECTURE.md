@@ -409,23 +409,34 @@ When one removed Item has a complete, unambiguous account match in the same
 Plaid environment and institution, the normalized account name, mask, type,
 and subtype must also match. A saved persistent account identity is compared
 when the client supplies it before exchange. Missing required current-client
-identity or a conflict refuses the reattach before exchange. A legacy removed
-ledger account without the later source locator may stage a replacement, but it
-cannot reattach automatically: the first authoritative window enters the same
-owner review flow without adding ledger money. An accepted exchange records a
-private candidate plan but does not copy an owner assignment or move an account
-or history row. The
-fresh cursor window stays staged until the authoritative replacement account
-identity and every retained transaction match are exact and unambiguous on the
-mapped account and stable money and merchant or name fields. A unique retained
-pending row is reidentified in place when it becomes posted even if the new
-Item reports a different transaction ID, omits the pending link, or changes the
-posted date. An identity conflict, ambiguous pair, or potentially historical
-unmatched row holds the whole window for owner review without advancing the
-cursor or changing live totals. Only that reviewed reconciliation copies the
-retained owner assignment and moves the account and history to the replacement
-feed. The same guarded promotion batch consumes and exactly reads back its
-single-use private plan, so later windows resume ordinary incremental refresh.
+identity or a conflict refuses the reattach before exchange. An ordinary sync
+backfills the complete authoritative identity locator on every live legacy
+account. If an already removed legacy account still lacks that locator,
+reconnect refuses before the one-time exchange, tells the owner to contact
+support, and leaves a masked-account support note without changing the ledger.
+An accepted exchange records a private candidate plan but does not copy an
+owner assignment or move an account or history row. The fresh cursor window
+stays staged until the authoritative replacement account identity and every
+retained transaction match are exact and unambiguous on the mapped account and
+stable money and merchant or name fields. A unique retained pending row is
+reidentified in place when it becomes posted even if the new Item reports a
+different transaction ID, omits the pending link, or changes the posted date.
+An unmatched row is new only when its authorization date, falling back to its
+posted date, is strictly after confirmed removal and no equal-amount retained
+pending row for that account is within ten days. Otherwise the whole window is
+held without advancing the cursor or changing live totals.
+
+A reconnect may contain both exact saved accounts and genuinely new accounts.
+Only the exact saved accounts enter the reattach plan; new authoritative
+accounts use ordinary owner assignment, and the staged window cannot promote
+until those choices are complete. An authoritative account that was absent
+from Link metadata follows that same owner-review path. If an account named by
+Link disappears from the authoritative post-exchange inventory, sync stops
+before transaction history, marks a non-retrying review, and tells the owner to
+disconnect the replacement and contact support. Only guarded reconciliation
+copies retained assignments and moves saved history. The same batch consumes
+and exactly reads back its single-use private plan, so later windows resume
+ordinary incremental refresh.
 
 The macOS Drive scheduler installs a per-user LaunchAgent. Its definition has no
 credentials. It resolves the declared durable admin key at runtime, uses Google

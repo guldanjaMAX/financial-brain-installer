@@ -112,6 +112,17 @@ test("a safe route failure without a provider code remains visible with a stable
   } finally { fixture.close(); }
 });
 
+test("a removed legacy reconnect refusal tells the owner to contact support before retrying", () => {
+  const message = bankFeedOwnerErrorMessage({
+    error: "conflict",
+    code: "plaid_legacy_reconnect_support_required",
+  }, 409);
+  assert.match(message, /predates the identity proof/);
+  assert.match(message, /No replacement was exchanged and nothing was moved/);
+  assert.match(message, /Contact support before trying again/);
+  assert.match(message, /Reference code: plaid_legacy_reconnect_support_required\.$/);
+});
+
 /* ------------------------------------------------------------ the owner page */
 
 class FakeNode {

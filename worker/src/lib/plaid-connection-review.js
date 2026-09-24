@@ -1,4 +1,4 @@
-import { PlaidAccountEntityError } from "./plaid-account-entities.js";
+import { maskedIdentifier, PlaidAccountEntityError } from "./plaid-account-entities.js";
 
 const REVIEW_CODE = "plaid_duplicate_connection_review";
 function review() {
@@ -32,8 +32,9 @@ function plaidIdentity(locator) {
  * Link metadata is an ambiguity signal, never general merge authority. A live
  * match always refuses. A complete, unambiguous match against one removed Item
  * becomes a narrow reattach plan that the caller applies only after exchange.
- * A legacy removed ledger row with no identity locator may use the same private
- * plan only to reach staged review; authoritative reconciliation cannot promote it.
+ * A legacy removed ledger row with no identity locator is refused before the
+ * one-time exchange. Live legacy rows receive the locator from their next
+ * ordinary authoritative sync, so only an already removed row needs support.
  * Plaid recommends this review before the one-time public-token exchange:
  * https://plaid.com/docs/link/duplicate-items/
  *
@@ -131,9 +132,24 @@ export async function assertPlaidConnectionDistinct(env, {
             normalizedText(prior.label) !== account.name ||
             normalizedText(prior.mask) !== account.mask ||
             normalizedText(prior.account_kind) !== account.accountKind) review();
-        // Rows promoted before the identity locator existed may enter the
-        // replacement staging flow, but the missing proof is carried forward
-        // so reconciliation must hold every staged dollar for owner review.
+        // The provider exchange is single-use. An already removed legacy row
+        // cannot regain authoritative identity, so stop before consuming it and
+        // leave a bounded support note that names only the saved masked account.
+        if (legacyIdentityMissing) {
+          const accountLabel = maskedIdentifier(prior.label, prior.mask);
+          const supportDetail = `Reconnect needs support because ${accountLabel} has no saved identity proof. ` +
+            "No replacement was exchanged and saved history was not changed.";
+          const noted = await env.DB.prepare(
+            `UPDATE bank_feed_items SET status_detail=?
+              WHERE tenant_id=? AND item_ref=? AND removed_at IS NOT NULL AND status='removed'`,
+          ).bind(supportDetail, tenantId, item.item_ref).run();
+          if (Number(noted?.meta?.changes ?? noted?.changes ?? 0) !== 1) review();
+          throw new PlaidAccountEntityError(
+            "plaid_legacy_reconnect_support_required",
+            `Contact support about ${accountLabel}. This saved account predates reconnect identity proof, so no replacement was exchanged.`,
+            409,
+          );
+        }
         // A malformed non-null locator is corruption, not a legacy row.
         if (!legacyIdentityMissing && (!identity || identity.type !== account.type ||
             identity.subtype !== account.subtype ||
@@ -145,7 +161,7 @@ export async function assertPlaidConnectionDistinct(env, {
           providerAccountId: account.id,
           accountSlug: prior.account_slug,
           entitySlug: prior.entity_slug,
-          priorIdentityLocator: legacyIdentityMissing ? null : prior.source_locator,
+          priorIdentityLocator: prior.source_locator,
         });
       }
     }
@@ -159,5 +175,6 @@ export async function assertPlaidConnectionDistinct(env, {
     action: "reattach",
     priorItemRef: reattach[0].priorItemRef,
     accounts: reattach,
+    expectedProviderAccountIds: incoming.map((account) => account.id),
   };
 }

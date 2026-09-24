@@ -322,6 +322,7 @@ export function bankFeedOwnerErrorMessage(data, status) {
     entity_not_owned: "That business is not owner-controlled, so the account was not assigned to it.",
     request_id_conflict: "This saved retry belongs to a different choice. Refresh the page and try again.",
     plaid_duplicate_connection_review: "This bank may already be connected. Check the saved connections below and use Repair connection if you need to sign in again. We have not added another copy. If these are separate accounts, their overlap needs review first.",
+    plaid_legacy_reconnect_support_required: "This saved account needs support before it can reconnect because it predates the identity proof used to protect financial history. No replacement was exchanged and nothing was moved. Contact support before trying again.",
     plaid_reconnect_transaction_review_required: "Replacement history is waiting for review because the Brain could not prove one exact match. Nothing uncertain was added to live totals.",
     plaid_connection_in_progress: "Another bank connection is still finishing. Check its result before starting another connection. Your saved accounts are unchanged.",
     plaid_link_handoff_rejected: "That connection link is no longer usable. Your existing accounts are unchanged. Select Connect a bank to start again.",
@@ -1614,7 +1615,8 @@ async function loadConnections() {
 let linkBusy = false;
 function finishLink() { linkBusy = false; el("start").disabled = false; }
 function clearRefusedLink(error, retry) {
-  if (!error || !["plaid_link_handoff_rejected", "plaid_duplicate_connection_review"].includes(error.code)) return;
+  if (!error || !["plaid_link_handoff_rejected", "plaid_duplicate_connection_review",
+    "plaid_legacy_reconnect_support_required"].includes(error.code)) return;
   try { sessionStorage.removeItem("bank_link_session"); sessionStorage.removeItem(retry.key); } catch (ignored) {}
 }
 async function start(existing) {
