@@ -509,6 +509,7 @@ const expected = [
   "operations/admin-key-file.mjs",
   "operations/admin-key-persistence.mjs",
   "operations/wrangler-oauth.mjs",
+  "operations/wrangler-runtime-contract.mjs",
   "operations/claude-workspace.mjs",
   "operations/claude-skill.mjs",
   "operations/local-assistant-repair.mjs",

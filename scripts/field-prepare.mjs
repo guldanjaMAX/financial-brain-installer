@@ -37,10 +37,11 @@ import {
   assertPackedBundleArchive,
   materializeVerifiedBundleCache,
 } from "../operations/package-bundle-verifier.mjs";
+import { REVIEWED_WRANGLER_SPEC } from "../operations/wrangler-runtime-contract.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const IS_WINDOWS = process.platform === "win32";
-const WRANGLER_PACKAGE = "wrangler@4.131.1";
+const WRANGLER_PACKAGE = REVIEWED_WRANGLER_SPEC;
 const FULL_PROFILE = Object.freeze([
   "full-suite",
   "frontend-test",

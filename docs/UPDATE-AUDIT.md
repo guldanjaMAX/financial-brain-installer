@@ -186,9 +186,9 @@ Nothing in this candidate
 weakens the gate: no acceptance criterion was rewritten, and the release
 workflow still refuses to publish while any incident blocks. Earlier candidate
 rehearsals do not automatically clear changed code. Current named-profile OAuth
-uses its reviewed encrypted backend; the explicit legacy TOML helper keeps its
-separate compatible pin. Preflight detects environment and executable traps but
-does not read credentials, authorize an account, or prove a current named-profile
-login.
+uses its reviewed encrypted backend; the legacy TOML reader now refreshes with
+the same exact reviewed Wrangler package. Preflight detects environment and
+executable traps but does not read credentials, authorize an account, or prove
+a current named-profile login.
 
 Source and package Windows DPAPI gates, frontend bundle parity, and zero-findings public-history scanning remain mandatory alongside the shared-package matrix. Windows hosted CI does not prove the physical Windows ARM64 owner journey.

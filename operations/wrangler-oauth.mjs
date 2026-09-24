@@ -24,10 +24,12 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { posix, win32 } from "node:path";
+import { REVIEWED_WRANGLER_SPEC } from "./wrangler-runtime-contract.mjs";
 
-// Only the explicit legacy TOML compatibility path uses this version. Current
-// per-install encrypted browser profiles use cloudflare-oauth-session.mjs.
-export const WRANGLER_SPEC = "wrangler@4.73.0";
+// This parser keeps compatibility with the legacy default-profile TOML layout,
+// but every refresh runs through the same patched runtime as current named
+// profiles. A cached older npx package can therefore never be selected here.
+export const WRANGLER_SPEC = REVIEWED_WRANGLER_SPEC;
 
 /** Every place wrangler is known to keep its config, newest layout first. */
 export function wranglerConfigCandidates(env = process.env, platform = process.platform) {

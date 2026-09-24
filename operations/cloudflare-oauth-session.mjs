@@ -16,8 +16,9 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { REVIEWED_WRANGLER_SPEC } from "./wrangler-runtime-contract.mjs";
 
-export const CLOUDFLARE_OAUTH_WRANGLER_PACKAGE = "wrangler@4.131.1";
+export const CLOUDFLARE_OAUTH_WRANGLER_PACKAGE = REVIEWED_WRANGLER_SPEC;
 export const CLOUDFLARE_OAUTH_CALLBACK_HOST = "localhost";
 export const CLOUDFLARE_OAUTH_CALLBACK_PORT = 8976;
 
