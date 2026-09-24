@@ -905,6 +905,7 @@ export async function toEnvelope(getAccessToken, file, {
   const occurred = dd.value ?? (Number.isFinite(created) ? created : null);
 
   return {
+    quality_flags: q.flags,
     // The bare Drive file id, not the name and not `drive:<id>`. The store owns
     // namespacing and constructs `<source_type>:<source_id>` exactly once. This
     // is also the identity used by the Supabase migration, so the first live

@@ -4,6 +4,7 @@ import { cmdLoadReport, readDiagnosis } from "../brain.mjs";
 import { loadQualityAggregate } from "../worker/src/lib/store-d1.js";
 import worker from "../worker/src/index.js";
 import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 
 {
   const sql = [];
@@ -20,7 +21,16 @@ import { DatabaseSync } from "node:sqlite";
   assert.match(sql[0], /INDEXED BY idx_documents_live_content_hash/);
   assert.match(sql[0], /INDEXED BY idx_chunks_doc/);
   assert.doesNotMatch(sql[0], /\b(?:title|uri|text)\b/i);
-  assert.deepEqual(aggregate.duplicates, { observable: true, groups: 3, extra_documents: 7 });
+  assert.deepEqual(aggregate.duplicates, {
+    observable: true,
+    basis: "same_storage_revision",
+    groups: 3,
+    extra_documents: 7,
+    normalized_text_observable: false,
+    normalized_text_reason: "normalized text hashes are not stored independently of chunk geometry",
+  });
+  assert.equal(aggregate.duplicates.basis, "same_storage_revision");
+  assert.equal(aggregate.duplicates.normalized_text_observable, false);
   assert.deepEqual(aggregate.chunk_outliers, {
     observable: true, largest_document_chunks: 41, total_chunks: 120,
   });
@@ -42,11 +52,26 @@ import { DatabaseSync } from "node:sqlite";
       ('c1','doc-1'),('c2','doc-1'),('c3','doc-1'),('c4','doc-2');
     INSERT INTO corpus_stats VALUES ('upload',4);
   `);
+  const identicalText = "The same normalized text stored under two chunk geometries.";
+  const geometryHash = (size, overlap) => createHash("sha256")
+    .update(`chunk-v1:${size}:${overlap}\0${identicalText}`).digest("hex");
+  db.prepare("INSERT INTO documents VALUES (?, ?, NULL)").run("doc-geometry-a", geometryHash(1500, 300));
+  db.prepare("INSERT INTO documents VALUES (?, ?, NULL)").run("doc-geometry-b", geometryHash(1200, 200));
   try {
     const aggregate = await loadQualityAggregate({ DB: { prepare(statement) {
       return { first: async () => db.prepare(statement).get() };
     } } });
-    assert.deepEqual(aggregate.duplicates, { observable: true, groups: 1, extra_documents: 2 });
+    assert.deepEqual(aggregate.duplicates, {
+      observable: true,
+      basis: "same_storage_revision",
+      groups: 1,
+      extra_documents: 2,
+      normalized_text_observable: false,
+      normalized_text_reason: "normalized text hashes are not stored independently of chunk geometry",
+    });
+    assert.equal(aggregate.duplicates.basis, "same_storage_revision");
+    assert.equal(aggregate.duplicates.normalized_text_observable, false,
+      "mixed-geometry identical text was incorrectly claimed observable");
     assert.deepEqual(aggregate.chunk_outliers, {
       observable: true, largest_document_chunks: 3, total_chunks: 4,
     });
@@ -154,6 +179,11 @@ const report = buildLoadQualityReport({
       "opaque-3": "failed: private-folder/private-file.txt could not be opened",
     },
   },
+  checkpointQualityFlags: {
+    drive: {
+      "opaque-accepted": ["mostly_symbols", "ocr_like_word_shapes"],
+    },
+  },
 });
 
 assert.equal(report.contract_version, 1);
@@ -164,6 +194,10 @@ assert.equal(report.duplicates.extra_documents, 7);
 assert.equal(report.too_large, 1);
 assert.equal(report.refusal_reasons["mostly symbols with too little readable text"], 1);
 assert.equal(report.refusal_reasons["ingest failed"], 1);
+assert.equal(report.quality_review_flags.documents, 1);
+assert.equal(report.quality_review_flags.signals, 2);
+assert.equal(report.quality_review_flags.by_reason["mostly symbols with too little readable text"], 1);
+assert.equal(report.quality_review_flags.by_reason["OCR-like unreadable word shapes"], 1);
 assert.equal(report.chunk_outliers.observable, false);
 
 const active = buildLoadQualityReport({
@@ -200,6 +234,9 @@ const rendered = renderLoadQualityReport(report);
 assert.match(rendered, /AFTER-LOAD QUALITY REPORT/);
 assert.match(rendered, /drive.*18 accepted.*1 refused.*1 failed/i);
 assert.match(rendered, /7 duplicate document/i);
+assert.match(rendered, /same storage revision/i);
+assert.match(rendered, /normalized-text duplicate.*not observable/i);
+assert.match(rendered, /quality review flag/i);
 assert.match(rendered, /1 too large/i);
 assert.doesNotMatch(rendered, /opaque-1|opaque-2/);
 assert.doesNotMatch(rendered, /private-folder|private-file/);
@@ -229,6 +266,7 @@ try {
       findings: [{ title: "PRIVATE_SENTINEL_TITLE", detail: "PRIVATE_SENTINEL_DETAIL", samples: ["PRIVATE_SENTINEL_SAMPLE"] }],
     },
     checkpointSkips: { upload: { "private-file-id": "file is 9.0MB, over the 8MB limit" } },
+    checkpointQualityFlags: {},
   };
   const commandReport = await cmdLoadReport("fixture.manifest.json", {
     ...commandOptions,

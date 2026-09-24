@@ -414,6 +414,7 @@ export async function toEnvelope(
   const ts = msg.internalDate ? Number(msg.internalDate) : null;
 
   return {
+    quality_flags: q.flags,
     envelope: withFirstPartySourceProvenance({
       source_type: sourceName,
       // Bare connector identity. The store adds source_type exactly once;

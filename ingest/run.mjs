@@ -1821,6 +1821,7 @@ export async function prepare(file, { sourceName, ocr = null, qualityPolicy = {}
   return {
     hash,
     observation,
+    quality_flags: q.flags,
     envelope: {
       source_type: sourceName,
       source_id: localSourceLocator,

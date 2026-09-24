@@ -40,6 +40,17 @@ check("a coded inventory export is not refused",
   textQuality(codedInventory, { format: ".tsv" }).ok,
   JSON.stringify(textQuality(codedInventory, { format: ".tsv" })));
 
+const fixedWidthCodedInventory = [
+  "SKU          BIN      CUSTOMER     QTY   STATUS",
+  ...Array.from({ length: 220 }, (_, i) =>
+    `${`ZXQ${String(i).padStart(7, "0")}`.padEnd(13)}${`BRK${String(i % 48).padStart(4, "0")}`.padEnd(9)}` +
+      `${`CST${String(80000 + i)}`.padEnd(13)}${`QT${i % 17}`.padEnd(6)}HLD`
+  ),
+].join("\n");
+check("a fixed-width coded inventory text export is ingested",
+  textQuality(fixedWidthCodedInventory, { format: ".txt" }).ok,
+  JSON.stringify(textQuality(fixedWidthCodedInventory, { format: ".txt" })));
+
 const bankTransactions = [
   "Date,Description,Reference,Debit,Credit,Balance",
   ...Array.from({ length: 160 }, (_, i) =>
@@ -63,6 +74,24 @@ const profitAndLoss = [
 check("a bookkeeping profit-and-loss export is not refused",
   textQuality(profitAndLoss, { format: ".xlsx" }).ok,
   JSON.stringify(textQuality(profitAndLoss, { format: ".xlsx" })));
+
+const invoiceCsv = [
+  "invoice_number,invoice_date,due_date,line_code,quantity,unit_price,total,status",
+  ...Array.from({ length: 140 }, (_, i) =>
+    `INV-${String(40000 + i)},2026-08-${String((i % 28) + 1).padStart(2, "0")},2026-09-${String((i % 28) + 1).padStart(2, "0")},` +
+      `SRV-${String(i % 17).padStart(3, "0")},${(i % 5) + 1},${(75 + i).toFixed(2)},${((i % 5) + 1) * (75 + i)}.00,OPEN`
+  ),
+].join("\n");
+check("an invoice CSV is ingested",
+  textQuality(invoiceCsv, { format: ".csv" }).ok,
+  JSON.stringify(textQuality(invoiceCsv, { format: ".csv" })));
+
+const invoiceTranscription = Array.from({ length: 90 }, (_, i) =>
+  `Invoice ${40000 + i} service line ${i + 1} quantity ${(i % 5) + 1} amount ${(125 + i).toFixed(2)} due 2026-10-${String((i % 28) + 1).padStart(2, "0")}`
+).join("\n");
+check("an invoice transcription is ingested",
+  textQuality(invoiceTranscription, { format: ".txt" }).ok,
+  JSON.stringify(textQuality(invoiceTranscription, { format: ".txt" })));
 
 /* ---- the case this was built for ---- */
 {
@@ -116,7 +145,10 @@ check("a bookkeeping profit-and-loss export is not refused",
 /* ---- failed extraction must not enter as an empty document ---- */
 check("empty text is rejected", !textQuality("").ok);
 check("whitespace only is rejected", !textQuality("   \n\t  ").ok);
-check("below the floor is rejected", !textQuality("x".repeat(MIN_CHARS - 1)).ok);
+check("non-empty text below the old floor is ingested and flagged",
+  textQuality("x".repeat(MIN_CHARS - 1)).ok &&
+    textQuality("x".repeat(MIN_CHARS - 1)).flags?.some((flag) => flag.code === "very_short_text"),
+  JSON.stringify(textQuality("x".repeat(MIN_CHARS - 1))));
 check("the empty-extraction message names the real cause", /empty result/.test(textQuality("").reason));
 check("a bad decode is rejected", !textQuality("�".repeat(100) + " some text here to pad it out").ok);
 
@@ -129,7 +161,8 @@ check("a bad decode is rejected", !textQuality("�".repeat(100) + " some text h
 {
   const soup = Array.from({ length: 240 }, (_, i) => `xq${i % 10} @@@ ### %%% ||| <>`).join(" ");
   const r = textQuality(soup);
-  check("symbol soup is rejected", !r.ok && /symbols with too little readable text/.test(r.reason || ""), JSON.stringify(r));
+  check("symbol soup is ingested and flagged",
+    r.ok && r.flags?.some((flag) => flag.code === "mostly_symbols"), JSON.stringify(r));
 }
 {
   const punctuation = Array.from({ length: 180 }, (_, i) =>
@@ -141,16 +174,19 @@ check("a bad decode is rejected", !textQuality("�".repeat(100) + " some text h
 {
   const garbage = Array.from({ length: 260 }, (_, i) => `xqz${i} brt${i} nvm${i} :::`).join(" ");
   const r = textQuality(garbage);
-  check("OCR-like garbage is rejected", !r.ok && /OCR-like unreadable word shapes/.test(r.reason || ""), JSON.stringify(r));
+  check("OCR-like text is ingested and flagged",
+    r.ok && r.flags?.some((flag) => flag.code === "ocr_like_word_shapes"), JSON.stringify(r));
 }
 {
   const r = textQuality(("CONFIDENTIAL EXPORT PAGE FOOTER\n").repeat(180) + PROSE);
-  check("repeated-line boilerplate is rejected", !r.ok && /same boilerplate line/.test(r.reason || ""), JSON.stringify(r));
+  check("repeated-line boilerplate is ingested and flagged",
+    r.ok && r.flags?.some((flag) => flag.code === "repeated_boilerplate"), JSON.stringify(r));
 }
 {
   const mail = "View in browser\nManage preferences\nPrivacy policy\nUnsubscribe\nCopyright 2026\nClick here";
   const r = textQuality(mail, { sourceKind: "gmail" });
-  check("near-empty templated mail is rejected for mail sources", !r.ok && /mail template with almost no message/.test(r.reason || ""), JSON.stringify(r));
+  check("near-empty templated mail is ingested and flagged for mail sources",
+    r.ok && r.flags?.some((flag) => flag.code === "near_empty_mail_template"), JSON.stringify(r));
   check("the same short text is not silently treated as mail for a folder source", textQuality(mail, { sourceKind: "upload" }).ok);
 }
 
@@ -185,13 +221,20 @@ check("a bad decode is rejected", !textQuality("�".repeat(100) + " some text h
 {
   const garbage = Array.from({ length: 260 }, (_, i) => `xqz${i} brt${i} nvm${i} :::`).join(" ");
   const relaxed = textQuality(garbage, { policy: { min_word_like_ratio: 0 } });
-  check("per-source thresholds can conservatively disable one heuristic", relaxed.ok, JSON.stringify(relaxed));
+  check("per-source thresholds can conservatively disable one heuristic flag",
+    relaxed.ok && !relaxed.flags?.some((flag) => flag.code === "ocr_like_word_shapes"), JSON.stringify(relaxed));
 }
 
 /* ---- repetition, but only where it is genuinely pathological ---- */
 {
   const r = textQuality("row,1,ok\n".repeat(900));
-  check("a giant file of one repeated row is rejected", !r.ok, JSON.stringify(r.metrics));
+  check("500 or more substantive lines at least 99.5% byte-identical are refused",
+    !r.ok && /exact line repeated/.test(r.reason || ""), JSON.stringify(r));
+  const belowHardFloor = "row,1,ok,posted\n".repeat(499);
+  const belowHardFloorResult = textQuality(belowHardFloor);
+  check("499 exact repeated lines are ingested and flagged, not refused",
+    belowHardFloorResult.ok && belowHardFloorResult.flags?.some((flag) => flag.code === "repeated_boilerplate"),
+    JSON.stringify(belowHardFloorResult));
   const varied = Array.from({ length: 900 }, (_, i) => `invoice ${i} client acme amount ${i * 37} status paid`).join("\n");
   check("a large file with genuinely varied rows passes", textQuality(varied).ok, JSON.stringify(textQuality(varied).metrics));
   check("a SHORT repetitive note is not judged", textQuality("ok ok ok ok ok ok ok ok ok ok").ok);

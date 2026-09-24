@@ -128,6 +128,11 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/fin-documents-writer-agreement.test.mjs",
   "node --no-warnings --test worker/test/ocr-reply-shape.test.mjs",
   "node --test test/mcp-moved-brain.test.mjs",
+  // Plaid owner-flow repairs from two sandbox rehearsals: provider precision,
+  // key replacement, Link errors, the first-connection page, and status truth.
+  "node --no-warnings --test worker/test/plaid-amount-precision.test.mjs",
+  "node --no-warnings --test worker/test/plaid-owner-flow.test.mjs",
+  "node --no-warnings --test test/bank-feed-replace-keys.test.mjs",
   "node --no-warnings --test worker/test/owner-document-create.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
@@ -420,6 +425,11 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/source-original-result-family.test.mjs",
   "node --no-warnings --test worker/test/source-original-accepted-resolution.test.mjs",
   "node --no-warnings --test worker/test/source-original-observation.test.mjs",
+  // Plaid owner-flow repairs from two sandbox rehearsals: provider precision,
+  // key replacement, Link errors, the first-connection page, and status truth.
+  "node --no-warnings --test worker/test/plaid-amount-precision.test.mjs",
+  "node --no-warnings --test worker/test/plaid-owner-flow.test.mjs",
+  "node --no-warnings --test test/bank-feed-replace-keys.test.mjs",
 ]);
 
 export function parseTestCommand(command) {

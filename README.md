@@ -747,6 +747,13 @@ The dry run sends nothing. It reports what it **would** load, and more usefully,
 what it would skip and why. Read that list. It is where you find out what your
 brain will not know.
 
+Text that merely looks unusual is still loaded. Symbol-heavy exports, coded
+inventories, OCR-like word shapes, boilerplate, and sparse business tables are
+flagged for review in the preview and `brain load-report`; those signals never
+remove or refuse a document. Only hard evidence such as binary content presented
+as text, a failed decode, or extreme exact repetition stops content quality from
+reaching ingest, and that refusal never enters an automatic removal plan.
+
 Then drop `--dry-run` to load it for real. Large loads are resumable: if it is
 interrupted, run the same command again and it continues from where it stopped.
 

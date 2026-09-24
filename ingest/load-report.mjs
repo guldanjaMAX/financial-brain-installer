@@ -1,6 +1,7 @@
 /** Privacy-safe aggregation for the read-only after-load quality command. */
 
 import { refusalReasonCategory } from "./refusal-reasons.mjs";
+import { QUALITY_FLAG_REASONS } from "./quality.mjs";
 import { sourceCoverageFromEvidence } from "../worker/src/lib/source-coverage.js";
 
 const countIn = (object, key, amount = 1) => {
@@ -13,7 +14,9 @@ const count = (value) => {
   return Number.isSafeInteger(number) && number >= 0 ? number : null;
 };
 
-export function buildLoadQualityReport({ inventory, quality, checkpointSkips = {} } = {}) {
+export function buildLoadQualityReport({
+  inventory, quality, checkpointSkips = {}, checkpointQualityFlags = {},
+} = {}) {
   const sources = (inventory?.sources || []).map((source) => {
     const run = source?.receipt?.latest_run || null;
     const runOutcome = String(run?.outcome || "").toLowerCase();
@@ -53,6 +56,19 @@ export function buildLoadQualityReport({ inventory, quality, checkpointSkips = {
 
   const duplicateAggregate = quality?.duplicates || {};
   const outlierAggregate = quality?.chunk_outliers || {};
+  const qualityFlagReasons = {};
+  let qualityFlagDocuments = 0;
+  let qualityFlagSignals = 0;
+  for (const documents of Object.values(checkpointQualityFlags || {})) {
+    for (const codes of Object.values(documents || {})) {
+      const known = [...new Set(Array.isArray(codes) ? codes : [])]
+        .filter((code) => Object.hasOwn(QUALITY_FLAG_REASONS, code));
+      if (!known.length) continue;
+      qualityFlagDocuments++;
+      qualityFlagSignals += known.length;
+      for (const code of known) countIn(qualityFlagReasons, QUALITY_FLAG_REASONS[code]);
+    }
+  }
   const sourcesMeasured = sources.every((source) =>
     [source.files_seen, source.accepted, source.refused, source.failed]
       .every((value) => value !== null));
@@ -65,10 +81,19 @@ export function buildLoadQualityReport({ inventory, quality, checkpointSkips = {
     refusal_reasons: refusalReasons,
     refusal_reason_basis: "current local source checkpoints; reasons are not yet bound to one durable remote run",
     too_large: tooLarge,
+    quality_review_flags: {
+      documents: qualityFlagDocuments,
+      signals: qualityFlagSignals,
+      by_reason: qualityFlagReasons,
+      basis: "current accepted documents in local source checkpoints",
+    },
     duplicates: {
       observable: quality?.complete === true && duplicateAggregate.observable === true,
+      basis: "same_storage_revision",
       groups: count(duplicateAggregate.groups),
       extra_documents: count(duplicateAggregate.extra_documents),
+      normalized_text_observable: false,
+      normalized_text_reason: "normalized text hashes are not stored independently of chunk geometry",
     },
     chunk_outliers: {
       observable: quality?.complete === true && outlierAggregate.observable === true,
@@ -87,8 +112,16 @@ export function renderLoadQualityReport(report) {
     lines.push(`  ${source.source}: ${accepted}, ${refused}, ${failed}; outcome ${source.outcome}`);
   }
   lines.push(report.duplicates.observable
-    ? `  ${report.duplicates.extra_documents ?? 0} duplicate document(s) beyond one copy`
-    : "  Duplicate document count is not observable from this aggregate receipt");
+    ? `  ${report.duplicates.extra_documents ?? 0} duplicate document(s) beyond one copy within the same storage revision`
+    : "  Same-storage-revision duplicate document count is not observable from this aggregate receipt");
+  lines.push("  Normalized-text duplicates are not observable across storage revisions");
+  const qualityFlags = Object.entries(report.quality_review_flags?.by_reason || {})
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  lines.push(
+    `  Quality review flags: ${report.quality_review_flags?.documents || 0} document(s), ` +
+    `${report.quality_review_flags?.signals || 0} signal(s) in current local checkpoints`,
+  );
+  for (const [reason, total] of qualityFlags) lines.push(`    ${total}: ${reason}`);
   lines.push(`  ${report.too_large} too large in current local checkpoints`);
   lines.push(report.chunk_outliers.observable
     ? `  Largest document: ${report.chunk_outliers.largest_document_chunks ?? 0} chunk(s) of ${report.chunk_outliers.total_chunks ?? 0} total`

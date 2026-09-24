@@ -678,8 +678,8 @@ const workbookBytes = (sheets) => {
   const file = { id: "F3-tiny", name: "A", mimeType: "application/vnd.google-apps.spreadsheet", size: "100", createdTime: "2026-01-01T00:00:00Z" };
   const tiny = workbookBytes([["S", [["x"]]]]);
   const r = await toEnvelope(tok, file, {}, { fetchImpl: async () => binary(tiny), sleep: async () => {} });
-  check("a workbook with too little useful text is refused by the normal quality gate",
-    r.skip?.code === "quality_refused" && !r.envelope, JSON.stringify(r));
+  check("a tiny non-empty workbook reaches the prepared decision with a review flag",
+    !!r.envelope && r.quality_flags?.some((flag) => flag.code === "very_short_text"), JSON.stringify(r));
 }
 {
   const file = { id: "F3-corrupt", name: "Broken", mimeType: "application/vnd.google-apps.spreadsheet", size: "100", createdTime: "2026-01-01T00:00:00Z" };
@@ -704,9 +704,28 @@ const workbookBytes = (sheets) => {
 {
   const file = { id: "F4", name: "junk.txt", mimeType: "text/plain", size: "50", createdTime: "2026-01-01T00:00:00Z" };
   const r = await toEnvelope(tok, file, {}, { fetchImpl: async () => bytes("hi"), sleep: async () => {} });
-  check("a file with too little text is skipped, not indexed empty", !!r.skip && !r.envelope, JSON.stringify(r));
-  check("and the skip carries the Drive id so it can be chased", r.skip.id === "F4");
-  check("a quality refusal carries its stable policy code", r.skip.code === "quality_refused", JSON.stringify(r.skip));
+  check("a short non-empty Drive text reaches the prepared decision",
+    !!r.envelope && !r.skip, JSON.stringify(r));
+  check("a short non-empty Drive text carries its stable review flag",
+    r.quality_flags?.some((flag) => flag.code === "very_short_text"), JSON.stringify(r));
+}
+{
+  const fixedWidthInventory = [
+    "SKU          BIN      CUSTOMER     QTY   STATUS",
+    ...Array.from({ length: 220 }, (_, i) =>
+      `${`ZXQ${String(i).padStart(7, "0")}`.padEnd(13)}${`BRK${String(i % 48).padStart(4, "0")}`.padEnd(9)}` +
+        `${`CST${String(80000 + i)}`.padEnd(13)}${`QT${i % 17}`.padEnd(6)}HLD`
+    ),
+  ].join("\n");
+  const file = {
+    id: "F4-fixed-width", name: "coded-register.txt", mimeType: "text/plain",
+    size: String(Buffer.byteLength(fixedWidthInventory)), createdTime: "2026-01-01T00:00:00Z",
+  };
+  const r = await toEnvelope(tok, file, {}, {
+    fetchImpl: async () => bytes(fixedWidthInventory), sleep: async () => {},
+  });
+  check("a fixed-width coded inventory reaches the Drive prepared/send decision",
+    !!r.envelope && !r.skip && r.envelope.content === fixedWidthInventory, JSON.stringify(r));
 }
 {
   const file = { id: "F5", name: "locked.pdf", mimeType: "application/pdf", size: "1000", createdTime: "2026-01-01T00:00:00Z" };

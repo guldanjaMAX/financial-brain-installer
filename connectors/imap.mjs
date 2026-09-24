@@ -1132,6 +1132,7 @@ export async function toEnvelope(message, {
   }
 
   return {
+    quality_flags: q.flags,
     envelope: withFirstPartySourceProvenance({
       source_type: sourceName,
       // Bare connector identity: the store adds the source type exactly once,

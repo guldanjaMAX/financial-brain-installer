@@ -535,7 +535,7 @@
                 "type": "string",
                 "format": "uri"
               },
-              "description": "The return addresses already registered in the client's own provider dashboard through a separately reviewed setup. Must contain https://<brain.domain>/app/connect/bank. Recording this non-secret evidence does not perform or authorize the held dashboard setup."
+              "description": "The return addresses already on the client's own provider dashboard allowed list (Plaid: Allowed redirect URIs) through a separately reviewed setup. Must contain https://<brain.domain>/app/connect/bank, which the Brain sends with every Link request. Recording this non-secret evidence does not perform or authorize the held dashboard setup."
             },
             "registered_webhook_uris": {
               "type": "array",
@@ -543,7 +543,7 @@
                 "type": "string",
                 "format": "uri"
               },
-              "description": "The webhook destinations already registered in the client's own Plaid environment through a separately reviewed setup. For Plaid, must contain https://<brain.domain>/api/webhooks/plaid before doctor can report the signed webhook ready. Recording this non-secret evidence does not perform or authorize the held dashboard setup."
+              "description": "Optional and informational. The Brain sends its webhook, https://<brain.domain>/api/webhooks/plaid, in every Plaid Link token request, so it needs no dashboard registration and doctor does not require this list. Older manifests that record it keep working."
             },
             "entity_slug": {
               "type": "string",
@@ -689,7 +689,7 @@
         },
         "text_quality": {
           "type": "object",
-          "description": "Conservative deterministic nonsense checks applied before embedding. Omit to use product defaults. Source entries override only the named thresholds and never bypass the credential scanner or extraction limits.",
+          "description": "Conservative pre-embedding review signals. Symbol, word-shape, boilerplate, mail-template, and low-diversity thresholds only flag accepted documents for review. They never refuse ingest. Omit to use product defaults. Source entries override only the named review thresholds and never bypass hard binary, decode, extreme exact-repetition, credential, or extraction limits.",
           "properties": {
             "default": {
               "type": "object",

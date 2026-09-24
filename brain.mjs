@@ -60,7 +60,10 @@ import {
   SOURCE_FAMILY_UID_FILTER_MAX,
 } from "./worker/src/lib/store-d1.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
-import { ensureBankFeedWorkerSecrets } from "./operations/bank-feed-owner-secrets.mjs";
+import {
+  ensureBankFeedWorkerSecrets,
+  validatePlaidApplicationKeys,
+} from "./operations/bank-feed-owner-secrets.mjs";
 import {
   financialPictureRequestFromFlags,
   parseFinancialPictureArgv,
@@ -7612,13 +7615,33 @@ function skippedPartIndexOf(state) {
  * shape, so one recovery cannot erase another file's current failure.
  */
 export function recordAcceptedDocumentState(state, {
-  stateKey, hash, skipKeys = [], legacyPartRoot = null, protectedSkipKeys = [],
+  stateKey, hash, skipKeys = [], legacyPartRoot = null, protectedSkipKeys = [], qualityFlags,
 } = {}) {
   const key = String(stateKey || "");
   if (!key) throw new Error("accepted document state needs a logical state key");
   if (!state.done || typeof state.done !== "object") state.done = {};
   if (!state.skipped || typeof state.skipped !== "object") state.skipped = {};
   state.done[key] = hash;
+  if (qualityFlags !== undefined) {
+    const codes = [...new Set((Array.isArray(qualityFlags) ? qualityFlags : [])
+      .map((flag) => typeof flag === "string" ? flag : flag?.code)
+      .filter((code) => typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code)))]
+      .sort();
+    if (codes.length) {
+      state.quality_review = state.quality_review && typeof state.quality_review === "object"
+        ? state.quality_review
+        : { version: 1, documents: {} };
+      state.quality_review.version = 1;
+      state.quality_review.documents = state.quality_review.documents &&
+        typeof state.quality_review.documents === "object"
+        ? state.quality_review.documents
+        : {};
+      state.quality_review.documents[key] = codes;
+    } else if (state.quality_review?.documents) {
+      delete state.quality_review.documents[key];
+      if (!Object.keys(state.quality_review.documents).length) delete state.quality_review;
+    }
+  }
   const exactSkipKeys = [key, ...(skipKeys || [])]
     .filter((skipKey) => skipKey !== null && skipKey !== undefined && String(skipKey) !== "")
     .map(String);
@@ -11231,6 +11254,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
         recordAcceptedDocumentState(state, {
           stateKey: key,
           hash: r.hash,
+          qualityFlags: r.quality_flags,
           skipKeys: [f.rel, ...r.envelopes.map((e) => e.source_id)],
           legacyPartRoot: f.rel,
           protectedSkipKeys: protectedLocalSkipKeys,
@@ -11274,6 +11298,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
           keep_doc_uids: sanitized.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
           skipKeys: [key, f.rel, ...sanitized.map((envelope) => envelope.source_id)],
           legacyPartRoot: [key, f.rel],
+          qualityFlags: r.quality_flags,
         },
       };
     }
@@ -11283,6 +11308,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
       recordAcceptedDocumentState(state, {
         stateKey: key,
         hash: r.hash,
+        qualityFlags: r.quality_flags,
         skipKeys: [r.envelope?.source_id, f.rel],
         legacyPartRoot: [r.envelope?.source_id, f.rel],
         protectedSkipKeys: protectedLocalSkipKeys,
@@ -11322,6 +11348,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
         keep_doc_uids: envelopes.map((envelope) => `${sourceName}:${envelope.source_id}`),
         skipKeys: [key, f.rel, ...envelopes.map((envelope) => envelope.source_id)],
         legacyPartRoot: [key, f.rel],
+        qualityFlags: r.quality_flags,
       },
     };
   };
@@ -15563,15 +15590,18 @@ const cmdIngestRemoteRun = async (
         const previouslyAccepted = driveStoredBeforeProcessing?.has(key) === true ||
           Object.hasOwn(state.done || {}, key);
         state.skipped[key] = r.skip.reason;
-        if (r.skip.code === "quality_refused" && previouslyAccepted) {
+        const adjudicatedSourceSkip = ["shortcut_not_followed", "non_text_media"].includes(r.skip.code);
+        const sourceResolvedSkip = r.skip.code === "source_deleted";
+        if (!adjudicatedSourceSkip && !sourceResolvedSkip) {
           localRefused++;
-          markRetainedQualityReview(key);
+          if (previouslyAccepted) markRetainedQualityReview(key);
+          else clearRetainedQualityReview(key);
         } else {
           clearRetainedQualityReview(key);
           intentionalRemovalUids.push(key);
         }
-        if (r.skip.code === "source_deleted") sourceResolvedSkipped++;
-        else if (["shortcut_not_followed", "non_text_media"].includes(r.skip.code)) adjudicatedSkipped++;
+        if (sourceResolvedSkip) sourceResolvedSkipped++;
+        else if (adjudicatedSourceSkip) adjudicatedSkipped++;
         return { skip: r.skip };
       }
       const envelope = sanitizeIngestEnvelope(r.envelope);
@@ -15594,6 +15624,7 @@ const cmdIngestRemoteRun = async (
         keep_doc_uids: envelopes.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
         skipKeys: [key, ...envelopes.map((envelope) => envelope.source_id)],
         legacyPartRoot: f.id,
+        qualityFlags: r.quality_flags,
       };
       if (!assistantJson && scanned % 200 === 0) process.stdout.write(`\r  scanned ${scanned}...   `);
       return {
@@ -15956,8 +15987,10 @@ const cmdIngestRemoteRun = async (
           ? storedBeforeSweep.has(key)
           : Object.prototype.hasOwnProperty.call(state.done || {}, key);
         state.skipped[key] = r.skip.reason;
-        if (r.skip.code === "quality_refused" && previouslyAccepted) {
-          markRetainedQualityReview(key);
+        if (r.skip.code === "quality_refused") {
+          localRefused++;
+          if (previouslyAccepted) markRetainedQualityReview(key);
+          else clearRetainedQualityReview(key);
         } else {
           clearRetainedQualityReview(key);
         }
@@ -15990,6 +16023,7 @@ const cmdIngestRemoteRun = async (
         clearRetainedQualityReview(key);
         recordAcceptedDocumentState(state, {
           stateKey: key, hash: r.version, skipKeys: [id], legacyPartRoot: id,
+          qualityFlags: r.quality_flags,
         });
         gmailAcceptedUids.add(key);
         unchanged++;
@@ -16017,6 +16051,7 @@ const cmdIngestRemoteRun = async (
           keep_doc_uids: envelopes.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
           skipKeys: [key, ...envelopes.map((envelope) => envelope.source_id)],
           legacyPartRoot: id,
+          qualityFlags: r.quality_flags,
         },
       };
     };
@@ -16337,8 +16372,10 @@ const cmdIngestRemoteRun = async (
             state.skipped[key] = r.skip.reason;
             const previouslyAccepted = imapStoredBeforeSweep?.has(key) === true ||
               Object.hasOwn(state.done || {}, key);
-            if (r.skip.code === "quality_refused" && previouslyAccepted) {
-              markRetainedQualityReview(key);
+            if (r.skip.code === "quality_refused") {
+              localRefused++;
+              if (previouslyAccepted) markRetainedQualityReview(key);
+              else clearRetainedQualityReview(key);
             } else {
               clearRetainedQualityReview(key);
             }
@@ -16362,6 +16399,7 @@ const cmdIngestRemoteRun = async (
             clearRetainedQualityReview(key);
             recordAcceptedDocumentState(state, {
               stateKey: key, hash: r.version, skipKeys: [r.envelope.source_id], legacyPartRoot: r.envelope.source_id,
+              qualityFlags: r.quality_flags,
             });
             imapAcceptedUids.add(key);
             unchanged++;
@@ -16392,6 +16430,7 @@ const cmdIngestRemoteRun = async (
               keep_doc_uids: envelopes.map((one) => `${one.source_type}:${one.source_id}`),
               skipKeys: [key, ...envelopes.map((one) => one.source_id)],
               legacyPartRoot: r.envelope.source_id,
+              qualityFlags: r.quality_flags,
             },
           };
         };
@@ -16584,7 +16623,7 @@ const cmdIngestRemoteRun = async (
   if (!dry) saveState(statePath, state);
   if (retainedQualityReviewsThisRun.size) {
     warn(
-      `${retainedQualityReviewsThisRun.size} already-stored remote item(s) failed a heuristic text-quality check and were retained for review.\n` +
+      `${retainedQualityReviewsThisRun.size} already-stored remote item(s) had a content-quality refusal and were retained for review.\n` +
         "      They did not enter any automatic removal plan."
     );
   }
@@ -16906,6 +16945,7 @@ async function sendBatches({
           recordAcceptedDocumentState(state, {
             stateKey: base_id,
             hash: item.hash,
+            qualityFlags: item.quality_flags,
             skipKeys: [r.source_id],
             legacyPartRoot: item.envelope.metadata?.part_of || r.source_id,
           });
@@ -22196,6 +22236,29 @@ function localCheckpointSkips(manifestPath, sources) {
   return result;
 }
 
+function localCheckpointQualityFlags(manifestPath, sources) {
+  const result = {};
+  for (const source of sources || []) {
+    const name = String(source?.name || source?.source_id || "");
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) continue;
+    const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName: name });
+    try {
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      const accepted = state?.done && typeof state.done === "object" ? state.done : {};
+      const documents = state?.quality_review?.version === 1 &&
+        state.quality_review.documents && typeof state.quality_review.documents === "object"
+        ? state.quality_review.documents
+        : {};
+      result[name] = Object.fromEntries(Object.entries(documents)
+        .filter(([key, codes]) => Object.hasOwn(accepted, key) && Array.isArray(codes)));
+    } catch (error) {
+      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+      result[name] = {};
+    }
+  }
+  return result;
+}
+
 export async function cmdLoadReport(manifestPath, options = {}) {
   const flags = options.flags ?? parseFlags(process.argv.slice(4));
   assertKnownFlags(flags, ["json"], "brain load-report");
@@ -22207,8 +22270,12 @@ export async function cmdLoadReport(manifestPath, options = {}) {
   });
   const quality = await readLoadQualityAggregate(manifestPath, options.aggregateOptions || options);
   const checkpointSkips = options.checkpointSkips ?? localCheckpointSkips(manifestPath, inventory.sources);
+  const checkpointQualityFlags = options.checkpointQualityFlags ??
+    localCheckpointQualityFlags(manifestPath, inventory.sources);
   const { buildLoadQualityReport, renderLoadQualityReport } = await import("./ingest/load-report.mjs");
-  const report = buildLoadQualityReport({ inventory, quality, checkpointSkips });
+  const report = buildLoadQualityReport({
+    inventory, quality, checkpointSkips, checkpointQualityFlags,
+  });
   console.log(flags.json ? JSON.stringify(report, null, 2) : renderLoadQualityReport(report));
   return report;
 }
@@ -26866,13 +26933,16 @@ export function readBankFeedKeyHidden(promptText, { read = readHiddenSecret } = 
 
 export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
   if (!manifestPath || String(manifestPath).startsWith("--")) {
-    die("usage: brain connect bank <manifest> [--print]");
+    die("usage: brain connect bank <manifest> [--print] [--replace-keys]");
   }
-  const unknownFlags = Object.keys(flags).filter((key) => key !== "print");
+  const unknownFlags = Object.keys(flags).filter((key) => !["print", "replace-keys"].includes(key));
   if (unknownFlags.length) die(`brain connect bank does not recognize --${unknownFlags[0]}`);
-  if (flags.print !== undefined && flags.print !== true) {
-    die("--print is a switch and does not take a value. Put it at the end of the command.");
+  for (const name of ["print", "replace-keys"]) {
+    if (flags[name] !== undefined && flags[name] !== true) {
+      die(`--${name} is a switch and does not take a value. Put it at the end of the command.`);
+    }
   }
+  const replaceKeys = flags["replace-keys"] === true;
   const { m } = loadManifest(manifestPath);
   const feed = m?.corpora?.bank_feed || {};
   if (feed.enabled !== true) {
@@ -26910,8 +26980,13 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
 
   // Plaid Link cannot start on a Worker without its application credentials,
   // so custody is settled before the owner is sent to the browser. The listing
-  // is read-only; the owner is prompted only when a name is actually missing.
+  // is read-only; the owner is prompted only when a name is actually missing,
+  // or for both Plaid keys when --replace-keys corrects a mistyped pair.
   const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
+  const environment = feed.environment ?? "sandbox";
+  const countryCodes = Array.isArray(feed.country_codes) && feed.country_codes.length
+    ? feed.country_codes
+    : ["US"];
   let acct = null;
   const account = async () => (acct ??= await (options.resolveAccount ?? resolveAccount)(m));
   const listSecretNames = options.listWorkerSecretNames ?? (async () => {
@@ -26936,6 +27011,14 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
       body: { name, text, type: "secret_text" },
     }));
   const readSecret = options.readSecret ?? readBankFeedKeyHidden;
+  // The typed pair is proven against this manifest's Plaid environment before
+  // any Worker write, on the first entry and on every replacement.
+  const validateKeys = options.validatePlaidKeys ?? ((pair) => validatePlaidApplicationKeys({
+    ...pair,
+    environment,
+    countryCodes,
+    fetchImpl: options.plaidFetchImpl ?? fetch,
+  }));
   let custody;
   try {
     custody = await ensureBankFeedWorkerSecrets({
@@ -26943,6 +27026,9 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
       listSecretNames,
       putSecret,
       readSecret,
+      validateKeys,
+      environment,
+      replaceKeys,
       generateWrappingKey: options.generateWrappingKey,
       report: info,
     });
@@ -26950,10 +27036,13 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
     if (error instanceof Fatal) throw error;
     die(String(error?.message || error));
   }
-  if (custody.written.length) {
+  if (custody.replaced) {
+    ok(`Plaid accepted the new keys for ${environment}; replaced and verified ${custody.written.join(", ")} on ${scriptName}. BANK_FEED_WRAPPING_KEY_V2 was not touched`);
+  } else if (custody.written.length) {
     ok(`wrote and verified ${custody.written.join(", ")} on ${scriptName}`);
   } else {
     ok(`${custody.names.join(", ")} already present on ${scriptName}; nothing was prompted or written`);
+    info("If a Plaid key was entered wrongly, rerun this command with --replace-keys to enter both keys again.");
   }
 
   const shouldOpen = flags.print !== true && options.open !== false;
@@ -26972,6 +27061,7 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
   return {
     provider: "plaid", url, opened, live_provider_proof: false,
     secrets_written: custody.written,
+    keys_replaced: custody.replaced === true,
   };
 }
 
@@ -27367,8 +27457,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect zoom     <manifest>      Zoom cloud-recording transcripts (needs a paid Zoom seat)
     brain connect imap     <manifest>      any IMAP mailbox (Yahoo, Fastmail, iCloud, a host): app
                                            password entered hidden, proven by a real read first
-    brain connect bank     <manifest>      owner-present Plaid pilot: hidden prompt for missing Plaid keys, then
-                                           owner-only Plaid Link and masked account assignment
+    brain connect bank     <manifest>      owner-present Plaid pilot: hidden prompt for missing Plaid keys, checked
+                                           with Plaid before they are saved, then owner-only Plaid Link and masked
+                                           account assignment. --replace-keys re-enters both keys
     brain connect <provider> <manifest>    QuickBooks, Slack, Notion, Microsoft, Dropbox or HubSpot OAuth
     brain load       <manifest>            load EVERYTHING this manifest has: one sweep of every
                                            enabled, connected source, one report at the end

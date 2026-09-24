@@ -3,7 +3,7 @@ import { api, type FinEntity, type FinSnapshot, type SourceCoverageDetail, type 
 import { derivePhase, phraseFor, type BrainPhase } from "../lib/phase";
 import {
   accountCoverage, dateLabel, documentOutcome, entityLabel, moneyLabel,
-  financialRecordsEmpty, nextDatedDeadline, partyLabel, waitingDetail, waitingMove,
+  financialRecordsEmpty, nextDatedDeadline, partyLabel, roundedFigureNote, waitingDetail, waitingMove,
 } from "../lib/finance";
 import { sourceOutcome } from "../lib/outcome";
 import {
@@ -313,7 +313,7 @@ export function AttentionList({ snapshot, entities, scopeName, onNavigate }: {
   );
 }
 
-function Glance({ snapshot, scopeName }: { snapshot: FinSnapshot; scopeName: string }) {
+export function Glance({ snapshot, scopeName }: { snapshot: FinSnapshot; scopeName: string }) {
   const coverage = snapshot.accounts ? accountCoverage(snapshot.accounts) : null;
   const next = snapshot.deadlines ? nextDatedDeadline(snapshot.deadlines) : null;
   const documents = snapshot.documents;
@@ -333,6 +333,11 @@ function Glance({ snapshot, scopeName }: { snapshot: FinSnapshot; scopeName: str
             <span className="block text-[12.5px] text-ink-soft mt-0.5">
               {snapshot.cash!.as_of ? `As of ${dateLabel(snapshot.cash!.as_of)}` : "No single dated position"}
             </span>
+            {roundedFigureNote(snapshot.cash!.rounded_accounts, "balance") && (
+              <span className="block text-[12.5px] text-ink-soft mt-0.5">
+                {roundedFigureNote(snapshot.cash!.rounded_accounts, "balance")}
+              </span>
+            )}
           </span>
           {!snapshot.cash!.complete && <Chip state="PROBLEM" />}
         </Row>

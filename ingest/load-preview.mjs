@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import { refusalReasonCategory } from "./refusal-reasons.mjs";
+import { QUALITY_FLAG_REASONS } from "./quality.mjs";
 
 const CHUNK_SIZE = 1500;
 const CHUNK_OVERLAP = 300;
@@ -93,9 +94,12 @@ export function createLoadPreview({
   const bySize = Object.create(null);
   const byFolder = Object.create(null);
   const refusalReasons = Object.create(null);
+  const qualityFlagReasons = Object.create(null);
   const junkCounts = Object.create(null);
   let files = 0;
   let refusalCount = 0;
+  let qualityFlagDocuments = 0;
+  let qualityFlagSignals = 0;
   let junkCount = 0;
   let bytes = 0;
   let chunks = 0;
@@ -137,6 +141,17 @@ export function createLoadPreview({
       countIn(refusalReasons, refusalReasonCategory(refusal.reason));
       detail?.write("quality_refusals", refusal);
       return;
+    }
+    const qualityFlags = Array.isArray(prepared?.quality_flags)
+      ? prepared.quality_flags
+        .filter((flag) => typeof flag?.code === "string" && Object.hasOwn(QUALITY_FLAG_REASONS, flag.code))
+        .map((flag) => ({ code: flag.code, reason: QUALITY_FLAG_REASONS[flag.code] }))
+      : [];
+    if (qualityFlags.length) {
+      qualityFlagDocuments++;
+      qualityFlagSignals += qualityFlags.length;
+      for (const flag of qualityFlags) countIn(qualityFlagReasons, flag.reason);
+      detail?.write("quality_review_flags", { path, flags: qualityFlags });
     }
     const envelopes = prepared?.envelopes || (prepared?.envelope ? [prepared.envelope] : []);
     let fileChunks = 0;
@@ -196,6 +211,11 @@ export function createLoadPreview({
       summary: {
         files: { total: files, bytes, by_type: byType, by_size: bySize },
         quality_refusals: { total: refusalCount, by_reason: refusalReasons },
+        quality_review_flags: {
+          documents: qualityFlagDocuments,
+          signals: qualityFlagSignals,
+          by_reason: qualityFlagReasons,
+        },
         exact_duplicates: {
           groups: duplicateGroups,
           extra_locations: duplicateExtras,
@@ -225,7 +245,9 @@ export function createLoadPreview({
   return { observeCandidate, observePrepared, observeWalkSkip, finish };
 }
 
-const DETAIL_SECTIONS = ["files", "quality_refusals", "content_occurrences", "likely_junk"];
+const DETAIL_SECTIONS = [
+  "files", "quality_refusals", "quality_review_flags", "content_occurrences", "likely_junk",
+];
 
 function createDetailSpool(destination) {
   const path = String(destination || "");
@@ -342,6 +364,10 @@ export function renderLoadPreviewSummary(summary) {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([reason, count]) => `${reason}: ${count}`)
     .join(", ") || "none";
+  const qualityFlags = Object.entries(summary.quality_review_flags?.by_reason || {})
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([reason, count]) => `${reason}: ${count}`)
+    .join(", ") || "none";
   const folders = summary.top_heaviest_folders
     .map((folder) => `${folder.folder}: ${folder.files} file(s), ${folder.bytes} bytes, ${folder.estimated_chunks} chunk(s)`)
     .join("; ") || "none";
@@ -350,6 +376,8 @@ export function renderLoadPreviewSummary(summary) {
     `  Files: ${summary.files.total}; bytes: ${summary.files.bytes}; types: ${types}`,
     `  Size bands: ${sizes}`,
     `  Quality refusals: ${summary.quality_refusals.total}; reasons: ${refusals}`,
+    `  Quality review flags: ${summary.quality_review_flags?.documents || 0} document(s), ` +
+      `${summary.quality_review_flags?.signals || 0} signal(s); reasons: ${qualityFlags}`,
     `  Exact duplicate groups: ${summary.exact_duplicates.groups}; extra locations: ${summary.exact_duplicates.extra_locations}`,
     `  Likely junk: ${junk}`,
     `  Heaviest folders: ${folders}`,

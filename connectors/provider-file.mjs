@@ -55,6 +55,7 @@ export async function extractProviderFile(bytes, name, { provider } = {}) {
   return {
     ok: true,
     content,
+    quality_flags: quality.flags,
     provenance: {
       extraction_method: got.how || "native",
       text_source: got.provenance?.text_source || "native",

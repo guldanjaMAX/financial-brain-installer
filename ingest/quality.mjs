@@ -1,5 +1,5 @@
 /**
- * Reject text that will waste an embedding and pollute retrieval.
+ * Flag questionable text for review and refuse only hard extraction evidence.
  *
  * THE CASE THIS IS DESIGNED AGAINST
  *
@@ -10,16 +10,15 @@
  * encoded blobs and only 6% was prose.
  *
  * Nothing errored. Search simply got worse, slowly, in a way no health check
- * could see. So the filter runs BEFORE embedding, and every rejection is
- * recorded with its reason rather than silently dropped: a client asking "why
- * isn't my file in there" deserves an answer better than a shrug.
+ * could see. So the check runs BEFORE embedding. Heuristic signals remain
+ * visible without blocking ingest, while deterministic binary, decode, and
+ * extreme exact-repetition failures are recorded with a reason.
  *
- * The thresholds are deliberately loose. A false accept costs one bad chunk. A
- * false reject silently loses a real document, which is far worse, so anything
- * borderline is kept.
+ * A false accept costs one bad chunk. A false reject silently loses a real
+ * document, which is far worse, so anything heuristic is kept and flagged.
  */
 
-/** Below this there is nothing to retrieve, and it is usually a failed extraction. */
+/** Below this, non-empty text is flagged for review but remains ingestible. */
 export const MIN_CHARS = 24;
 
 /** Long encoded runs are the signature of an embedded image or attachment. */
@@ -100,6 +99,19 @@ export const DEFAULT_NONSENSE_POLICY = Object.freeze({
   repeated_line_min_lines: 80,
   templated_mail_min_substantive_chars: 48,
 });
+
+export const QUALITY_FLAG_REASONS = Object.freeze({
+  very_short_text: "very little text",
+  mostly_symbols: "mostly symbols with too little readable text",
+  ocr_like_word_shapes: "OCR-like unreadable word shapes",
+  repeated_boilerplate: "the same boilerplate line repeated throughout the extraction",
+  near_empty_mail_template: "a mail template with almost no message beyond subscription links",
+  low_word_diversity: "very little distinct text across a long extraction",
+});
+
+/** Hard refusal requires at least 500 substantive lines with 99.5% exact identity. */
+export const EXTREME_EXACT_REPETITION_MIN_LINES = 500;
+export const EXTREME_EXACT_REPETITION_RATIO = 0.995;
 
 const threshold = (policy, name) => {
   const value = Number(policy?.[name]);
@@ -206,6 +218,27 @@ function repeatedLineRatio(text) {
   return { lines, ratio: lines ? repeated / lines : 0 };
 }
 
+/** Byte-exact line identity, kept separate from the normalized boilerplate signal. */
+function exactRepeatedLineRatio(text) {
+  const counts = new Map();
+  let lines = 0;
+  let repeated = 0;
+  let start = 0;
+  for (let index = 0; index <= text.length; index++) {
+    if (index < text.length && text.charCodeAt(index) !== 10) continue;
+    let line = text.slice(start, index);
+    start = index + 1;
+    if (line.endsWith("\r")) line = line.slice(0, -1);
+    if (line.length < 8) continue;
+    lines++;
+    if (counts.size >= 20_000 && !counts.has(line)) continue;
+    const count = (counts.get(line) || 0) + 1;
+    counts.set(line, count);
+    if (count > repeated) repeated = count;
+  }
+  return { lines, ratio: lines ? repeated / lines : 0 };
+}
+
 const MAIL_TEMPLATE_MARKERS = [
   /view (?:this )?(?:email )?in (?:your )?browser/i,
   /manage (?:email )?preferences/i,
@@ -282,19 +315,26 @@ export function isLikelyBinary(buf) {
 /**
  * Judge extracted text.
  *
- * Returns { ok, reason, metrics }. `reason` is written to be shown to a client
- * verbatim, so it says what happened rather than naming a rule.
+ * Hard evidence returns { ok: false, reason, flags: [], metrics }. Heuristic
+ * signals return { ok: true, reason: null, flags, metrics } so they remain
+ * visible for review without silently withholding a real business document.
  */
 export function textQuality(text, { sourceKind = "", format = "", policy = {} } = {}) {
   const s = typeof text === "string" ? text : "";
   const len = s.length;
   const metrics = { chars: len };
+  const flags = [];
+  const flag = (code) => {
+    if (!flags.some((entry) => entry.code === code)) {
+      flags.push({ code, reason: QUALITY_FLAG_REASONS[code] });
+    }
+  };
 
   if (!s.trim()) {
-    return { ok: false, reason: "no text could be extracted (the file produced an empty result)", metrics };
+    return { ok: false, reason: "no text could be extracted (the file produced an empty result)", flags, metrics };
   }
   if (len < MIN_CHARS) {
-    return { ok: false, reason: `only ${len} characters of text, too little to answer anything`, metrics };
+    flag("very_short_text");
   }
 
   // Encoded blobs. Measured as a share of total length, so a document that
@@ -306,6 +346,7 @@ export function textQuality(text, { sourceKind = "", format = "", policy = {} } 
     return {
       ok: false,
       reason: `${Math.round(metrics.encoded_ratio * 100)}% of this file is encoded data (base64 or hex), not readable text`,
+      flags,
       metrics,
     };
   }
@@ -315,7 +356,7 @@ export function textQuality(text, { sourceKind = "", format = "", policy = {} } 
   const repl = scanned.replacement;
   metrics.replacement_ratio = +(repl / len).toFixed(3);
   if (metrics.replacement_ratio > 0.05) {
-    return { ok: false, reason: "the text decoded into mostly unreadable characters (wrong or unsupported encoding)", metrics };
+    return { ok: false, reason: "the text decoded into mostly unreadable characters (wrong or unsupported encoding)", flags, metrics };
   }
 
   const nonsense = nonsenseMetrics(s);
@@ -323,7 +364,7 @@ export function textQuality(text, { sourceKind = "", format = "", policy = {} } 
   metrics.structured_text = structured;
   metrics.control_ratio = +(nonsense.controls / len).toFixed(3);
   if (metrics.control_ratio > threshold(policy, "binary_control_ratio_max")) {
-    return { ok: false, reason: "the extraction contains binary data decoded as text, not a readable document", metrics };
+    return { ok: false, reason: "the extraction contains binary data decoded as text, not a readable document", flags, metrics };
   }
 
   metrics.symbol_ratio = +(nonsense.symbols / Math.max(1, nonsense.visible)).toFixed(3);
@@ -333,7 +374,7 @@ export function textQuality(text, { sourceKind = "", format = "", policy = {} } 
       metrics.symbol_ratio > threshold(policy, "symbol_ratio_max") &&
       nonsense.tokenCount >= 20 &&
       metrics.token_shape_ratio <= 0.05) {
-    return { ok: false, reason: "the extraction is mostly symbols with too little readable text", metrics };
+    flag("mostly_symbols");
   }
 
   if (nonsense.tokenCount >= threshold(policy, "word_shape_min_tokens")) {
@@ -341,16 +382,27 @@ export function textQuality(text, { sourceKind = "", format = "", policy = {} } 
     if (!structured &&
         metrics.word_like_ratio < threshold(policy, "min_word_like_ratio") &&
         metrics.token_shape_ratio <= 0.05) {
-      return { ok: false, reason: "the extraction has OCR-like unreadable word shapes rather than usable text", metrics };
+      flag("ocr_like_word_shapes");
     }
   }
 
   if (len > 4000) {
+    const exactRepeatedLines = exactRepeatedLineRatio(s);
+    metrics.exact_repeated_line_ratio = +exactRepeatedLines.ratio.toFixed(3);
+    if (exactRepeatedLines.lines >= EXTREME_EXACT_REPETITION_MIN_LINES &&
+        exactRepeatedLines.ratio >= EXTREME_EXACT_REPETITION_RATIO) {
+      return {
+        ok: false,
+        reason: "the document has at least 500 substantive lines and 99.5% are one exact line repeated",
+        flags,
+        metrics,
+      };
+    }
     const repeatedLines = repeatedLineRatio(s);
     metrics.repeated_line_ratio = +repeatedLines.ratio.toFixed(3);
     if (repeatedLines.lines >= threshold(policy, "repeated_line_min_lines") &&
         repeatedLines.ratio > threshold(policy, "repeated_line_ratio_max")) {
-      return { ok: false, reason: "the extraction is mostly the same boilerplate line repeated over and over", metrics };
+      flag("repeated_boilerplate");
     }
   }
 
@@ -360,7 +412,7 @@ export function textQuality(text, { sourceKind = "", format = "", policy = {} } 
       metrics.mail_template_markers = template.markers;
       metrics.mail_substantive_chars = template.substantiveChars;
       if (template.substantiveChars < threshold(policy, "templated_mail_min_substantive_chars")) {
-        return { ok: false, reason: "the message is a mail template with almost no message beyond subscription links", metrics };
+        flag("near_empty_mail_template");
       }
     }
   }
@@ -373,12 +425,12 @@ export function textQuality(text, { sourceKind = "", format = "", policy = {} } 
     if (words.words >= 200) {
       metrics.unique_word_ratio = +(words.unique / words.words).toFixed(3);
       if (metrics.unique_word_ratio < 0.02) {
-        return { ok: false, reason: "the file is almost entirely repeated content, with too little distinct text to be worth indexing", metrics };
+        flag("low_word_diversity");
       }
     }
   }
 
-  return { ok: true, reason: null, metrics };
+  return { ok: true, reason: null, flags, metrics };
 }
 
 /**

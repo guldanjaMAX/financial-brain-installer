@@ -14,6 +14,7 @@ const candidates = [
   { rel: "records/archive/copy.txt", name: "copy.txt", size: 1800 },
   { rel: "exports/system-export.json", name: "system-export.json", size: 2_000_000 },
   { rel: "logs/service.log", name: "service.log", size: 900_000 },
+  { rel: "imports/decode-failure.txt", name: "decode-failure.txt", size: 900 },
 ];
 for (const file of candidates) preview.observeCandidate(file);
 
@@ -22,7 +23,11 @@ preview.observePrepared(candidates[0], { envelope: { content: useful } });
 preview.observePrepared(candidates[1], { envelope: { content: useful.replace(/\n/g, "\r\n") } });
 preview.observePrepared(candidates[2], { envelope: { content: "field,value\n".repeat(40_000) } });
 preview.observePrepared(candidates[3], {
-  skip: { reason: "the extraction is mostly symbols with too little readable text", metrics: { symbol_ratio: 0.91 } },
+  envelope: { content: "xq0 @@@ ### %%% ||| <> ".repeat(240) },
+  quality_flags: [{ code: "mostly_symbols", reason: "the extraction is mostly symbols with too little readable text" }],
+});
+preview.observePrepared(candidates[4], {
+  skip: { reason: "the text decoded into mostly unreadable characters (wrong or unsupported encoding)", metrics: { replacement_ratio: 0.91 } },
 });
 preview.observeWalkSkip({
   path: "build",
@@ -32,9 +37,11 @@ preview.observeWalkSkip({
 });
 
 const report = preview.finish();
-assert.equal(report.summary.files.total, 4);
-assert.equal(report.summary.files.by_type[".txt"].count, 2);
+assert.equal(report.summary.files.total, 5);
+assert.equal(report.summary.files.by_type[".txt"].count, 3);
 assert.equal(report.summary.quality_refusals.total, 1);
+assert.equal(report.summary.quality_review_flags.documents, 1);
+assert.equal(report.summary.quality_review_flags.by_reason["mostly symbols with too little readable text"], 1);
 assert.equal(report.summary.exact_duplicates.groups, 1);
 assert.equal(report.summary.exact_duplicates.extra_locations, 1);
 assert.ok(report.summary.estimate.chunks > 100);
@@ -62,6 +69,7 @@ const rendered = renderLoadPreviewSummary(report.summary);
 assert.match(rendered, /LOAD PREVIEW/);
 assert.match(rendered, /exact duplicate/i);
 assert.match(rendered, /quality refusal/i);
+assert.match(rendered, /quality review flag/i);
 assert.match(rendered, /mostly symbols with too little readable text: 1/i);
 assert.match(rendered, /size bands/i);
 assert.match(rendered, /heaviest folders:.*records:/i);
@@ -80,12 +88,17 @@ try {
   detailedPreview.observePrepared(candidates[1], { envelope: { content: useful } });
   detailedPreview.observePrepared(candidates[2], { envelope: { content: "field,value\n".repeat(40_000) } });
   detailedPreview.observePrepared(candidates[3], {
-    skip: { reason: "the extraction is mostly symbols with too little readable text", metrics: { symbol_ratio: 0.91 } },
+    envelope: { content: "xq0 @@@ ### %%% ||| <> ".repeat(240) },
+    quality_flags: [{ code: "mostly_symbols", reason: "the extraction is mostly symbols with too little readable text" }],
+  });
+  detailedPreview.observePrepared(candidates[4], {
+    skip: { reason: "the text decoded into mostly unreadable characters (wrong or unsupported encoding)", metrics: { replacement_ratio: 0.91 } },
   });
   detailedPreview.finish();
   const saved = JSON.parse(readFileSync(output, "utf8"));
   assert.equal(saved.contract_version, 1);
-  assert.equal(saved.detail.files.length, 4);
+  assert.equal(saved.detail.files.length, 5);
+  assert.equal(saved.detail.quality_review_flags.length, 1);
   assert.ok(saved.detail.content_occurrences.some((entry) => entry.path === "records/current/report.txt"));
   assert.equal(statSync(output).mode & 0o777, 0o600);
   assert.throws(() => createLoadPreview({ source: "upload", detailPath: output }), /already exists/);
@@ -110,6 +123,13 @@ try {
   writeFileSync(join(root, "first-record.txt"), useful);
   writeFileSync(join(root, "second-record.txt"), useful);
   writeFileSync(join(root, "symbol-input.txt"), Array.from({ length: 240 }, (_, i) => `xq${i % 10} @@@ ### %%% ||| <>`).join(" "));
+  writeFileSync(join(root, "fixed-width-register.txt"), [
+    "SKU          BIN      CUSTOMER     QTY   STATUS",
+    ...Array.from({ length: 220 }, (_, i) =>
+      `${`ZXQ${String(i).padStart(7, "0")}`.padEnd(13)}${`BRK${String(i % 48).padStart(4, "0")}`.padEnd(9)}` +
+        `${`CST${String(80000 + i)}`.padEnd(13)}${`QT${i % 17}`.padEnd(6)}HLD`
+    ),
+  ].join("\n"));
 
   const lines = [];
   const originalLog = console.log;
@@ -127,11 +147,14 @@ try {
   }
   assert.equal(result.dry_run, true);
   assert.equal(result.load_preview.exact_duplicates.groups, 1);
-  assert.equal(result.load_preview.quality_refusals.total, 1);
+  assert.equal(result.load_preview.quality_refusals.total, 0);
+  assert.equal(result.load_preview.quality_review_flags.documents, 2);
+  assert.equal(result.would_send, 4,
+    "the local fixed-width control and heuristic-flag control did not reach the prepared/send decision");
   assert.equal(result.load_preview.estimate.vectors_per_minute, 75);
   assert.doesNotMatch(lines.join("\n"), /first-record|second-record|symbol-input/);
   const cliDetail = JSON.parse(readFileSync(detailPath, "utf8"));
-  assert.equal(cliDetail.detail.files.length, 3);
+  assert.equal(cliDetail.detail.files.length, 4);
 
   const overrideRoot = join(cliSandbox, "override-source");
   mkdirSync(overrideRoot, { recursive: true });
@@ -141,15 +164,18 @@ try {
     client: { slug: "fixture-client" },
     brain: { domain: "fixture.invalid" },
   }, manifestPath, { path: overrideRoot, "dry-run": true, source: "upload" });
-  assert.equal(defaultResult.load_preview.quality_refusals.total, 1,
-    "the default CLI path did not reach the quality-refusal decision");
-  assert.equal(defaultResult.would_send, 0);
+  assert.equal(defaultResult.load_preview.quality_refusals.total, 0);
+  assert.equal(defaultResult.load_preview.quality_review_flags.documents, 1,
+    "the default CLI path did not reach the quality-review decision");
+  assert.equal(defaultResult.would_send, 1,
+    "a heuristic quality flag blocked the prepared/send decision");
   const overrideResult = await cmdIngestLocal({
     client: { slug: "fixture-client" },
     brain: { domain: "fixture.invalid" },
     safety: { text_quality: { sources: { upload: { min_word_like_ratio: 0 } } } },
   }, manifestPath, { path: overrideRoot, "dry-run": true, source: "upload" });
   assert.equal(overrideResult.load_preview.quality_refusals.total, 0);
+  assert.equal(overrideResult.load_preview.quality_review_flags.documents, 0);
   assert.equal(overrideResult.would_send, 1,
     "the per-source override did not reach the prepared/send decision");
 } finally {

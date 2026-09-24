@@ -478,17 +478,19 @@ file-id, path-prefix and filename-part exclusions before downloading content.
 An excluded document already present in the brain is removed rather than left
 stranded. Gmail has no folder path and does not use these rules.
 
-`safety.text_quality` optionally overrides the conservative deterministic
-pre-embedding checks globally under `default` or for one manifest source under
-`sources.<source>`. The checks name binary-as-text, symbol-heavy extraction,
-OCR-like word shapes, repeated-line boilerplate, and near-empty mail templates
-as separate refusal reasons. Spreadsheet formats and delimiter-shaped ledgers,
-inventory exports, and code tables are treated as structured evidence. Symbol
-density or vowel shape alone never refuses text; either check needs a second,
-strong repetition signal, while binary bytes, decode failure, encoded blobs,
-and extreme repeated content remain direct refusal evidence. Omission keeps the
-reviewed defaults. A source override changes only the listed threshold; it
-cannot bypass extraction size, credential, private-path, or removal gates.
+`safety.text_quality` optionally overrides conservative pre-embedding review
+signals globally under `default` or for one manifest source under
+`sources.<source>`. Symbol density, word shape, OCR-like text, repeated-line
+boilerplate, low diversity, short text, and near-empty mail templates never
+refuse a document. They produce fixed review flags while the document continues
+through the normal send path. Binary content presented as text, decode failure,
+encoded binary blobs, and extreme exact repetition remain hard refusals. The
+exact-repetition stop requires at least 500 substantive lines with at least
+99.5% byte-identical to one line; the looser normalized boilerplate threshold
+only flags. Omission keeps the reviewed defaults. A source override changes
+only the listed review threshold; it cannot bypass hard extraction, credential,
+private-path, or removal gates. A content refusal is never an automatic removal
+candidate.
 
 Flags: `--dry-run`, `--source <name>`, `--limit <n>`, `--reset`, Drive-only
 `--dry-run --json` for a bounded aggregate assistant preview, and the
@@ -497,7 +499,8 @@ Gmail, IMAP, or local-folder cleanup exceeds its routine safety limits.
 
 Local-folder, Drive, and Gmail dry runs now print an aggregate load preview:
 type or MIME/category, size and top-folder weight, named quality refusals,
-same-source normalized-text duplicates, likely junk classes, and estimated
+non-blocking quality review flags, same-source normalized-text duplicates,
+likely junk classes, and estimated
 chunks/vectors and time. `--vectors-per-minute <n>` supplies a measured rate
 for that Brain. `--preview-report <file>` is the only file-level output; it is
 streamed through owner-only local spill files and atomically finalized without
@@ -509,9 +512,11 @@ explicitly unobservable until the read-only inventory contract gains that
 aggregate comparison.
 
 After a load, `brain load-report <manifest>` combines authenticated latest-run
-source counters, a dedicated aggregate-only Worker read for indexed exact-text
-duplicates and per-document chunk totals, and local
-checkpoint refusal reasons without emitting paths or message identifiers.
+source counters, a dedicated aggregate-only Worker read for same-storage-revision
+duplicates and per-document chunk totals, and local checkpoint refusal reasons
+and accepted-document review flags without emitting paths or message
+identifiers. Normalized-text duplicates across chunk-geometry revisions remain
+explicitly unobservable because the current durable hash includes that geometry.
 `--json` returns the same aggregate contract. A legacy run without measured
 refused/failed counters stays unknown. An open run or incomplete walk makes all
 of that run's counters unknown and the report incomplete. The command never

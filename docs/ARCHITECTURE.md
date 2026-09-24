@@ -246,7 +246,7 @@ All producers converge on the same document envelope and batch write path:
 list or walk
   -> enforce private paths and source exclusions
   -> extract text
-  -> judge format and content quality
+  -> refuse only hard format/content failures and flag heuristic quality signals
   -> scan the complete logical document for credential-like material
   -> split oversized content into one document family
   -> send bounded authenticated batches
@@ -369,7 +369,7 @@ original sequential path because revision order is part of their correctness
 contract.
 
 Drive and watched-folder removal candidates from policy, source deletion, and
-intentional quality skips are intersected with the current authenticated
+intentional source-policy skips are intersected with the current authenticated
 stored-family inventory and approved as one deterministic plan. Stored-family
 inventory derives declared `family_of` relationships as well as structural
 `part_of` families, even when a message row belongs to an upload file's family.
@@ -399,7 +399,7 @@ without exposing source identifiers.
 | Slack and Notion | Built behind field gates with scripted provider-I/O proof; no real workspace has completed acceptance |
 | Microsoft 365 and Dropbox | Built behind field gates for mail and files, cursor resume, tombstones, and scheduling; no real tenant or account has completed acceptance |
 | QuickBooks Online and HubSpot CRM | Built behind field gates with owner connection, incremental read, retry, and disconnect paths; no provider sandbox or real account has completed acceptance |
-| Plaid | Native owner connection, incremental read, signed webhook, scheduled reconciliation, retry, repair, and disconnect paths are built, but general bank invitations are held. The owner enters Plaid application credentials only through `brain connect bank`, at a hidden prompt, when the Worker lacks them; it generates a missing wrapping key and verifies the names before Link. Generic setup preserves a complete Worker binding set and refuses a missing or partial set before mutation. Customer invitations wait for the full release-gate journey and a production pilot |
+| Plaid | Native owner connection, incremental read, signed webhook, scheduled reconciliation, retry, repair, and disconnect paths are built, but general bank invitations are held. The owner enters Plaid application credentials only through `brain connect bank`, at a hidden prompt, when the Worker lacks them or with `--replace-keys` to correct them; the pair is checked with one harmless Plaid read in the manifest's environment before anything is written, and the command generates a missing wrapping key and verifies the names before Link. Generic setup preserves a complete Worker binding set and refuses a missing or partial set before mutation. Customer invitations wait for the full release-gate journey and a production pilot |
 | Box and Airtable | No native API connector. Box can use a reviewed export or locally synced watched folder. Airtable requires an approved export until a native connector is built. |
 
 The macOS Drive scheduler installs a per-user LaunchAgent. Its definition has no

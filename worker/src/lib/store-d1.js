@@ -2639,6 +2639,9 @@ const qAll = async (env, sql, ...bind) => {
  * Aggregate-only load quality read. Both groupings are satisfied from covering
  * indexes (`content_hash` for live documents and `doc_uid` for chunks), and no
  * title, URI, source identity, chunk text, or diagnostic sample is selected.
+ * `content_hash` includes chunk geometry, so this can only name duplicates
+ * stored under the same storage revision. It cannot claim normalized-text
+ * equality across geometry changes without a dedicated geometry-free hash.
  */
 export async function loadQualityAggregate(env) {
   try {
@@ -2669,8 +2672,11 @@ export async function loadQualityAggregate(env) {
       complete: true,
       duplicates: {
         observable: true,
+        basis: "same_storage_revision",
         groups: exactCount(row?.duplicate_groups, "duplicate group"),
         extra_documents: exactCount(row?.duplicate_extra_documents, "duplicate document"),
+        normalized_text_observable: false,
+        normalized_text_reason: "normalized text hashes are not stored independently of chunk geometry",
       },
       chunk_outliers: {
         observable: true,
@@ -2686,7 +2692,14 @@ export async function loadQualityAggregate(env) {
       contract_version: 1,
       kind: "load_quality_aggregate",
       complete: false,
-      duplicates: { observable: false, groups: null, extra_documents: null },
+      duplicates: {
+        observable: false,
+        basis: "same_storage_revision",
+        groups: null,
+        extra_documents: null,
+        normalized_text_observable: false,
+        normalized_text_reason: "normalized text hashes are not stored independently of chunk geometry",
+      },
       chunk_outliers: { observable: false, largest_document_chunks: null, total_chunks: null },
       unavailable_categories: ["indexed_quality_aggregates"],
     };
