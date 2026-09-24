@@ -253,9 +253,9 @@
       "base_url": "https://dashboard.example.invalid/api/",
       "token_secret": "STORE_DASHBOARD_TOKEN",
       "cadence_seconds": 86400,
-      "timeout_ms": 10000,
-      "max_response_bytes": 524288,
-      "max_rows": 500,
+      "timeout_ms": 30000,
+      "max_response_bytes": 5242880,
+      "max_rows": 2000,
       "max_pages": 20,
       "retries": 3,
       "endpoints": [
@@ -267,9 +267,13 @@
           "document": {
             "group_by": ["store", "period"],
             "title_template": "{{store}}, {{period}} sales",
-            "body_template": "{{store}}, {{period}}: net sales {{sum.net_sales}} across {{row_count}} streams.\n\n{{rows_table}}",
+            "body_template": "{{store}}, {{period}}: net sales {{sum.net_sales}} across {{row_count}} recorded streams. {{missing.revenue_stream}}\n\n{{rows_table}}",
             "aggregates": { "net_sales": "sum", "transactions": "sum", "units": "sum", "puppies_sold": "sum" },
-            "formats": { "net_sales": "currency" }
+            "formats": { "net_sales": "currency" },
+            "fields": ["store", "period", "revenue_stream", "net_sales", "transactions", "units", "puppies_sold"],
+            "expected_values": {
+              "revenue_stream": ["live_animal", "supplies", "services", "other"]
+            }
           }
         },
         {
@@ -279,7 +283,8 @@
           "document": {
             "group_by": [],
             "title_template": "Inventory snapshot {{fetched_date}}",
-            "body_template": "Inventory snapshot for {{fetched_date}}.\n\n{{rows_table}}"
+            "body_template": "Inventory snapshot for {{fetched_date}}.\n\n{{rows_table}}",
+            "fields": ["store", "breed", "count"]
           }
         },
         {
@@ -290,7 +295,8 @@
             "group_by": [],
             "title_template": "Cost table {{fetched_date}}",
             "body_template": "Average costs received through {{fetched_date}}.\n\n{{rows_table}}",
-            "formats": { "avg_cost": "currency" }
+            "formats": { "avg_cost": "currency" },
+            "fields": ["store", "breed", "avg_cost", "received"]
           }
         }
       ]

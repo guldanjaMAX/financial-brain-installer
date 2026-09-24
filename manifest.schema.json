@@ -649,9 +649,9 @@
               "not": { "pattern": "^((ADMIN_KEY|AI|DB|VECTORIZE|R2|CUSTOM_API_CONFIG)$|(BRAIN|BANK|GOOGLE|ZOOM|PROVIDER)_).*" }
             },
             "cadence_seconds": { "type": "integer", "minimum": 3600, "maximum": 2678400, "default": 86400 },
-            "timeout_ms": { "type": "integer", "minimum": 250, "maximum": 30000, "default": 10000 },
-            "max_response_bytes": { "type": "integer", "minimum": 1024, "maximum": 2097152, "default": 524288 },
-            "max_rows": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 500 },
+            "timeout_ms": { "type": "integer", "minimum": 250, "maximum": 60000, "default": 30000 },
+            "max_response_bytes": { "type": "integer", "minimum": 1024, "maximum": 10485760, "default": 5242880 },
+            "max_rows": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 2000 },
             "max_pages": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
             "retries": { "type": "integer", "minimum": 1, "maximum": 5, "default": 3 },
             "endpoints": {
@@ -674,7 +674,7 @@
                   },
                   "document": {
                     "type": "object",
-                    "required": ["group_by", "title_template", "body_template"],
+                    "required": ["group_by", "title_template", "body_template", "fields"],
                     "properties": {
                       "group_by": {
                         "type": "array", "uniqueItems": true,
@@ -689,6 +689,19 @@
                       "formats": {
                         "type": "object",
                         "additionalProperties": { "enum": ["currency", "number", "integer", "text"] }
+                      },
+                      "fields": {
+                        "type": "array", "minItems": 1, "uniqueItems": true,
+                        "description": "Fields included in readable prose. Provider fields not listed here remain in the structured row only.",
+                        "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" }
+                      },
+                      "expected_values": {
+                        "type": "object",
+                        "description": "Expected categorical values whose absence should be stated rather than rendered as zero.",
+                        "additionalProperties": {
+                          "type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true,
+                          "items": { "type": "string", "minLength": 1, "maxLength": 120 }
+                        }
                       }
                     },
                     "additionalProperties": false

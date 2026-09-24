@@ -112,4 +112,5 @@ test("the D1 writer reads back created and corrected rows plus each fetch receip
   });
   assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custom_api_row_revisions").get().n, 1);
   assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custom_api_fetches").get().n, 2);
+  assert.equal(await persistence.loadResponseHash({ source: "store-dashboard", endpoint: "sales" }), hashB);
 });

@@ -27,9 +27,11 @@ const configuration = (baseUrl) => ({
       document: {
         group_by: ["store", "period"],
         title_template: "{{store}}, {{period}} sales",
-        body_template: "{{store}}, {{period}}: net sales {{sum.net_sales}} across {{row_count}} streams.\n\n{{rows_table}}",
+        body_template: "{{store}}, {{period}}: net sales {{sum.net_sales}} across {{row_count}} streams. {{missing.revenue_stream}}\n\n{{rows_table}}",
         aggregates: { net_sales: "sum", transactions: "sum", units: "sum", puppies_sold: "sum" },
         formats: { net_sales: "currency", avg_cost: "currency" },
+        fields: ["store", "period", "revenue_stream", "net_sales", "transactions", "units", "puppies_sold"],
+        expected_values: { revenue_stream: ["live_animal", "supplies", "services", "other"] },
       },
     },
     {
@@ -40,6 +42,7 @@ const configuration = (baseUrl) => ({
         group_by: [],
         title_template: "Inventory snapshot {{fetched_date}}",
         body_template: "Inventory snapshot for {{fetched_date}}.\n\n{{rows_table}}",
+        fields: ["store", "breed", "count"],
       },
     },
     {
@@ -51,6 +54,7 @@ const configuration = (baseUrl) => ({
         title_template: "Cost table {{fetched_date}}",
         body_template: "Average costs received through {{fetched_date}}.\n\n{{rows_table}}",
         formats: { avg_cost: "currency" },
+        fields: ["store", "breed", "avg_cost", "received"],
       },
     },
   ],
@@ -138,26 +142,22 @@ test("config is declarative, HTTPS-only, and names rather than contains its secr
   );
 });
 
-test("array and data envelopes, paging, labeled and legacy sales all become bounded documents", async (t) => {
+test("the mock serves the real data envelopes and numeric, missing-stream, null-store, and extra-field quirks", async (t) => {
   const mock = await mockServer((request, response) => {
     const url = new URL(request.url, "http://mock.invalid");
-    if (url.pathname === "/api/sales" && !url.searchParams.has("page")) {
+    if (url.pathname === "/api/sales") {
       return json(response, {
         data: [
-          { store: "Store A", period: "2026-08-01", revenue_stream: "live_animal", net_sales: 100, transactions: 1, units: 1, puppies_sold: 1 },
-          { store: "Store A", period: "2026-08-01", revenue_stream: "supplies", net_sales: 25, transactions: 2, units: 3 },
+          { store: "Store A", period: "2026-09-01", revenue_stream: "live_animal", net_sales: 100, transactions: 1, units: 1, puppies_sold: 1, extra_metric: 99 },
+          { store: "Store A", period: "2026-09-01", revenue_stream: "supplies", net_sales: -1.25, transactions: 2, units: -1 },
         ],
-        next_page: 2,
       });
     }
-    if (url.pathname === "/api/sales") {
-      return json(response, [{ store: "Store B", period: "2026-08-01", net_sales: 70, transactions: 2, puppies_sold: 1 }]);
-    }
     if (url.pathname === "/api/inventory") {
-      return json(response, { data: [{ store: "Store A", breed: "Breed One", count: 2 }] });
+      return json(response, { data: [{ store: null, breed: "Item 1", count: 2 }] });
     }
     if (url.pathname === "/api/costs") {
-      return json(response, [{ store: "Store A", breed: "Breed One", avg_cost: 50, received: 2 }]);
+      return json(response, { data: [{ store: null, breed: "Item 1", avg_cost: 50, received: 2 }] });
     }
     return json(response, { error: "not found" }, 404);
   });
@@ -173,11 +173,13 @@ test("array and data envelopes, paging, labeled and legacy sales all become boun
 
   assert.equal(result.status, "completed");
   assert.equal(result.endpoints, 3);
-  assert.equal(result.rows.created, 5);
-  assert.equal(mock.calls.length, 4);
+  assert.equal(result.rows.created, 4);
+  assert.equal(mock.calls.length, 3);
   assert.ok(mock.calls.every((call) => call.authorizationOkay));
-  assert.match(persistence.documents.get("sales:Store A:2026-08-01").content, /\$125\.00 across 2 streams/);
-  assert.match(persistence.documents.get("sales:Store B:2026-08-01").content, /\$70\.00 across 1 streams/);
+  assert.match(persistence.documents.get("sales:Store A:2026-09-01").content, /\$98\.75 across 2 streams/);
+  assert.match(persistence.documents.get("sales:Store A:2026-09-01").content, /no services sales recorded/i);
+  assert.doesNotMatch(persistence.documents.get("sales:Store A:2026-09-01").content, /extra_metric/);
+  assert.match(persistence.documents.get("inventory:2026-09-24").content, /unassigned/);
   assert.ok(persistence.documents.has("inventory:2026-09-24"));
   assert.ok(persistence.documents.has("costs:2026-09-24"));
   for (const document of persistence.documents.values()) {
@@ -236,12 +238,16 @@ test("401, exhausted 500, malformed, oversized, and cross-host redirect failures
     ["malformed", 200, "not-json", "INVALID_RESPONSE"],
     ["oversized", 200, "x".repeat(2048), "RESPONSE_TOO_LARGE"],
     ["redirect", 302, "", "REDIRECT_REFUSED"],
+    ["trailing-slash", 308, { error: "unknown endpoint" }, "CONFIG_INVALID"],
   ];
   let scenario = scenarios[0];
   const mock = await mockServer((_request, response) => {
     const [name, status, body] = scenario;
-    if (name === "redirect") {
-      response.writeHead(status, { location: "https://other.invalid/private" });
+    if (name === "redirect" || name === "trailing-slash") {
+      response.writeHead(status, {
+        "content-type": "application/json",
+        location: name === "redirect" ? "https://other.invalid/private" : "/api/sales",
+      });
       return response.end();
     }
     if (name === "oversized") {

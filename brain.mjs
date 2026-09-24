@@ -27483,7 +27483,8 @@ export async function cmdCustomApi(manifestPath, flags = parseFlags(process.argv
     die("brain custom-api --dry-run does not take a value");
   }
   const { m } = loadManifest(manifestPath);
-  try { validateCustomApiConfig(m.corpora?.custom_api); } catch (error) {
+  let customApiConfig;
+  try { customApiConfig = validateCustomApiConfig(m.corpora?.custom_api); } catch (error) {
     die(`the manifest's custom_api source is not ready: ${String(error?.message || error)}`);
   }
   const adminKey = (options.resolveAdminKey ?? resolveAdminKey)(manifestPath);
@@ -27506,9 +27507,17 @@ export async function cmdCustomApi(manifestPath, flags = parseFlags(process.argv
   }
   const mode = receipt.dry_run ? "previewed" : "completed";
   ok(`${mode} ${receipt.endpoints} custom API endpoint(s)`);
+  for (const endpoint of receipt.endpoint_results || []) {
+    const documentAction = receipt.dry_run ? "would be written" : "written";
+    info(`${endpoint.name}: ${endpoint.rows_received} row(s), ${endpoint.documents} readable document(s) ${documentAction}, ${endpoint.rows_refused} refused`);
+  }
   info(`${receipt.rows.created} new row(s), ${receipt.rows.updated} corrected, ${receipt.rows.unchanged} unchanged; ${receipt.documents} document(s) ${receipt.dry_run ? "would change" : "changed"}`);
   if (receipt.retained_missing_rows) {
     warn(`${receipt.retained_missing_rows} previously stored row(s) were absent from this response and were retained, not deleted`);
+  }
+  if (receipt.next_pull_at) {
+    const cadence = customApiConfig.cadence_seconds === 86400 ? "daily" : "scheduled";
+    info(`${receipt.dry_run ? "If run now, the" : "The"} next ${cadence} pull will run at ${receipt.next_pull_at}`);
   }
   return receipt;
 }

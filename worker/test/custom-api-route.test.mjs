@@ -24,6 +24,7 @@ function env() {
           group_by: ["store", "period"],
           title_template: "{{store}} {{period}} sales",
           body_template: "{{rows_table}}",
+          fields: ["store", "period", "net_sales"],
         },
       }],
     }),
@@ -48,7 +49,7 @@ test("admin-only dry run executes in the Worker, fetches the declared host, and 
     fetches++;
     authorized = String(input) === "https://dashboard.invalid/api/sales" &&
       new Headers(init.headers).get("Authorization") === `Bearer ${TOKEN}`;
-    return new Response(JSON.stringify([{ store: "Store A", period: "2026-08-01", net_sales: 10 }]), {
+    return new Response(JSON.stringify({ data: [{ store: "Store A", period: "2026-08-01", net_sales: 10 }] }), {
       headers: { "content-type": "application/json" },
     });
   };
@@ -62,6 +63,9 @@ test("admin-only dry run executes in the Worker, fetches the declared host, and 
     assert.equal(response.status, 200, JSON.stringify(body));
     assert.equal(body.status, "completed");
     assert.equal(body.dry_run, true);
+    assert.deepEqual(body.endpoint_results.map(({ name, rows_received, rows_refused, documents }) => ({
+      name, rows_received, rows_refused, documents,
+    })), [{ name: "sales", rows_received: 1, rows_refused: 0, documents: 1 }]);
     assert.equal(fetches, 1, "the route reached the configured fetch decision point");
     assert.equal(authorized, true);
     assert.equal(JSON.stringify(body).includes(TOKEN), false);

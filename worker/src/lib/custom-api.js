@@ -25,15 +25,16 @@ const ALLOWED_ENDPOINT_KEYS = new Set([
 ]);
 const ALLOWED_DOCUMENT_KEYS = new Set([
   "group_by", "title_template", "body_template", "aggregates", "formats",
+  "fields", "expected_values",
 ]);
 const ALLOWED_AGGREGATES = new Set(["sum", "min", "max"]);
 const ALLOWED_FORMATS = new Set(["currency", "number", "integer", "text"]);
 const ALLOWED_ENVELOPE_KEYS = new Set(["data", "next", "next_page", "pagination", "has_more"]);
 const ALLOWED_PAGINATION_KEYS = new Set(["next"]);
 
-const DEFAULT_TIMEOUT_MS = 10_000;
-const DEFAULT_MAX_RESPONSE_BYTES = 512 * 1024;
-const DEFAULT_MAX_ROWS = 500;
+const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+const DEFAULT_MAX_ROWS = 2_000;
 const DEFAULT_MAX_PAGES = 20;
 const DEFAULT_RETRIES = 3;
 
@@ -82,12 +83,24 @@ function normalizeDocument(value, label) {
     !SAFE_FIELD.test(field) || !ALLOWED_FORMATS.has(format))) {
     throw new TypeError(`${label}.formats contains an unsupported field or format`);
   }
+  const fields = fieldList(value.fields, `${label}.fields`);
+  const expectedValues = value.expected_values ?? {};
+  if (!isPlainObject(expectedValues) || Object.entries(expectedValues).some(([field, values]) =>
+    !SAFE_FIELD.test(field) || !Array.isArray(values) || values.length < 1 || values.length > 50 ||
+    new Set(values).size !== values.length || values.some((item) =>
+      typeof item !== "string" || !item || item.length > 120 || /[\u0000-\u001f\u007f]/.test(item)))) {
+    throw new TypeError(`${label}.expected_values must map fields to unique bounded string arrays`);
+  }
   return Object.freeze({
     group_by: fieldList(value.group_by ?? [], `${label}.group_by`, { allowEmpty: true }),
     title_template: safeTemplate(value.title_template, `${label}.title_template`),
     body_template: safeTemplate(value.body_template, `${label}.body_template`),
     aggregates: Object.freeze({ ...aggregates }),
     formats: Object.freeze({ ...formats }),
+    fields: Object.freeze(fields),
+    expected_values: Object.freeze(Object.fromEntries(
+      Object.entries(expectedValues).map(([field, values]) => [field, Object.freeze([...values])]),
+    )),
   });
 }
 
@@ -145,9 +158,9 @@ export function validateCustomApiConfig(value) {
     base_url: base.href,
     token_secret: tokenSecret,
     cadence_seconds: boundedInteger(value.cadence_seconds, 86400, 3600, 31 * 86400, "custom_api.cadence_seconds"),
-    timeout_ms: boundedInteger(value.timeout_ms, DEFAULT_TIMEOUT_MS, 250, 30_000, "custom_api.timeout_ms"),
-    max_response_bytes: boundedInteger(value.max_response_bytes, DEFAULT_MAX_RESPONSE_BYTES, 1024, 2 * 1024 * 1024, "custom_api.max_response_bytes"),
-    max_rows: boundedInteger(value.max_rows, DEFAULT_MAX_ROWS, 1, 2_000, "custom_api.max_rows"),
+    timeout_ms: boundedInteger(value.timeout_ms, DEFAULT_TIMEOUT_MS, 250, 60_000, "custom_api.timeout_ms"),
+    max_response_bytes: boundedInteger(value.max_response_bytes, DEFAULT_MAX_RESPONSE_BYTES, 1024, 10 * 1024 * 1024, "custom_api.max_response_bytes"),
+    max_rows: boundedInteger(value.max_rows, DEFAULT_MAX_ROWS, 1, 10_000, "custom_api.max_rows"),
     max_pages: boundedInteger(value.max_pages, DEFAULT_MAX_PAGES, 1, 100, "custom_api.max_pages"),
     retries: boundedInteger(value.retries, DEFAULT_RETRIES, 1, 5, "custom_api.retries"),
     endpoints: Object.freeze(endpoints),
@@ -289,7 +302,7 @@ function normalizeRow(value, endpoint, token) {
   }
   const row = {};
   for (const [field, item] of Object.entries(value)) {
-    if (!SAFE_FIELD.test(field) || !["string", "number", "boolean"].includes(typeof item) ||
+    if (!SAFE_FIELD.test(field) || (item !== null && !["string", "number", "boolean"].includes(typeof item)) ||
         (typeof item === "number" && !Number.isFinite(item)) ||
         (typeof item === "string" && (item.length > 8_000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(item)))) {
       throw new CustomApiError("INVALID_RESPONSE", "custom API row contained an unsupported field or value", { endpoint: endpoint.name });
@@ -304,7 +317,19 @@ function normalizeRow(value, endpoint, token) {
 }
 
 function hasKeyFields(row, fields) {
-  return fields.every((field) => Object.hasOwn(row, field) && row[field] !== "" && row[field] !== null);
+  return fields.every((field) => Object.hasOwn(row, field) && row[field] !== "");
+}
+
+function validateKnownRow(row, endpoint) {
+  if (endpoint.name !== "sales" || !Object.hasOwn(row, "net_sales")) return;
+  const value = row.net_sales;
+  const cents = typeof value === "number" ? value * 100 : Number.NaN;
+  const tolerance = Number.EPSILON * Math.max(1, Math.abs(cents)) * 8;
+  if (!Number.isFinite(cents) || Math.abs(cents - Math.round(cents)) > tolerance) {
+    throw new CustomApiError("ROW_REFUSED", "custom API sales row had net_sales with more than two decimal places", {
+      endpoint: endpoint.name,
+    });
+  }
 }
 
 function rowIdentity(row, endpoint) {
@@ -342,6 +367,12 @@ async function fetchPage(url, config, endpoint, token, { fetchImpl, sleep }) {
     if (response.status >= 300 && response.status < 400) {
       clearTimeout(timer);
       await response.body?.cancel().catch(() => {});
+      if (response.status === 308) {
+        throw new CustomApiError("CONFIG_INVALID", "custom API endpoint path redirected permanently; use its exact canonical path", {
+          endpoint: endpoint.name,
+          status: response.status,
+        });
+      }
       throw new CustomApiError("REDIRECT_REFUSED", "custom API redirect was refused", { endpoint: endpoint.name, status: response.status });
     }
     if (response.status === 401 || response.status === 403) {
@@ -387,6 +418,7 @@ async function fetchEndpoint(config, endpoint, token, dependencies) {
   const rows = [];
   const responseDigests = [];
   let responseBytes = 0;
+  let refusedRows = 0;
   while (url) {
     assertAllowedUrl(url, config, endpoint);
     if (visited.has(url.href) || visited.size >= config.max_pages) {
@@ -401,10 +433,20 @@ async function fetchEndpoint(config, endpoint, token, dependencies) {
     responseDigests.push(await sha256(page.bytes));
     const shaped = pageShape(page.value, url, config, endpoint);
     for (const value of shaped.rows) {
-      if (rows.length >= config.max_rows) {
+      if (rows.length + refusedRows >= config.max_rows) {
         throw new CustomApiError("RESPONSE_TOO_LARGE", "custom API returned too many rows", { endpoint: endpoint.name });
       }
-      rows.push(normalizeRow(value, endpoint, token));
+      try {
+        const row = normalizeRow(value, endpoint, token);
+        validateKnownRow(row, endpoint);
+        rows.push(row);
+      } catch (error) {
+        if (error instanceof CustomApiError && error.code === "ROW_REFUSED") {
+          refusedRows++;
+          continue;
+        }
+        throw error;
+      }
     }
     url = shaped.next;
   }
@@ -418,11 +460,18 @@ async function fetchEndpoint(config, endpoint, token, dependencies) {
     identities.add(key);
     keyed.push({ row_key: key, row, row_hash: await sha256(canonicalJson(row)) });
   }
-  return { rows: keyed, response_hash: await sha256(responseDigests.join(":")), pages: visited.size };
+  return {
+    rows: keyed,
+    response_hash: await sha256(responseDigests.join(":")),
+    pages: visited.size,
+    rows_received: rows.length + refusedRows,
+    refused_rows: refusedRows,
+  };
 }
 
-function formatValue(value, format = "text") {
-  if (value === null || value === undefined) return "";
+function formatValue(value, format = "text", field = "") {
+  if (value === null) return field === "store" ? "unassigned" : "";
+  if (value === undefined) return "";
   if (format === "currency") {
     const number = Number(value);
     return Number.isFinite(number)
@@ -440,19 +489,22 @@ function formatValue(value, format = "text") {
   return String(value);
 }
 
-function markdownTable(rows, formats) {
-  const fields = [...new Set(rows.flatMap((item) => Object.keys(item.row)))].sort();
+function markdownTable(rows, formats, configuredFields) {
+  const fields = configuredFields;
   const header = `| ${fields.join(" | ")} |`;
   const divider = `| ${fields.map(() => "---").join(" | ")} |`;
   const body = rows.map((item) => `| ${fields.map((field) =>
-    formatValue(item.row[field], formats[field]).replaceAll("|", "\\|").replace(/\s+/g, " ").trim()
+    formatValue(item.row[field], formats[field], field).replaceAll("|", "\\|").replace(/\s+/g, " ").trim()
   ).join(" | ")} |`);
   return [header, divider, ...body].join("\n");
 }
 
-function aggregate(rows, field, operation) {
+function aggregate(rows, field, operation, format) {
   const numbers = rows.map((item) => Number(item.row[field])).filter(Number.isFinite);
   if (!numbers.length) return null;
+  if (operation === "sum" && format === "currency") {
+    return numbers.reduce((sum, value) => sum + Math.round(value * 100), 0) / 100;
+  }
   if (operation === "sum") return numbers.reduce((sum, value) => sum + value, 0);
   if (operation === "min") return Math.min(...numbers);
   return Math.max(...numbers);
@@ -485,12 +537,23 @@ function buildDocuments(config, endpoint, rows, fetchedAt, responseHash) {
   const fetchedDate = fetchedAt.slice(0, 10);
   return [...groups.values()].map((group) => {
     group.rows.sort((a, b) => a.row_key.localeCompare(b.row_key));
-    const context = { fetched_date: fetchedDate, row_count: group.rows.length, sum: {}, min: {}, max: {} };
+    const context = { fetched_date: fetchedDate, row_count: group.rows.length, sum: {}, min: {}, max: {}, missing: {} };
     endpoint.document.group_by.forEach((field, index) => { context[field] = group.values[index]; });
     for (const [field, operation] of Object.entries(endpoint.document.aggregates)) {
-      context[operation][field] = formatValue(aggregate(group.rows, field, operation), endpoint.document.formats[field]);
+      context[operation][field] = formatValue(
+        aggregate(group.rows, field, operation, endpoint.document.formats[field]),
+        endpoint.document.formats[field],
+        field,
+      );
     }
-    context.rows_table = markdownTable(group.rows, endpoint.document.formats);
+    for (const [field, expected] of Object.entries(endpoint.document.expected_values)) {
+      const present = new Set(group.rows.map((item) => item.row[field]));
+      context.missing[field] = expected
+        .filter((value) => !present.has(value))
+        .map((value) => `no ${value.replaceAll("_", " ")} sales recorded`)
+        .join("; ");
+    }
+    context.rows_table = markdownTable(group.rows, endpoint.document.formats, endpoint.document.fields);
     const title = renderTemplate(endpoint.document.title_template, context);
     const content = renderTemplate(endpoint.document.body_template, context);
     const sourceIdParts = endpoint.document.group_by.length ? group.values : [fetchedDate];
@@ -567,14 +630,49 @@ export async function runCustomApiPull(rawConfig, {
   const total = { created: 0, updated: 0, unchanged: 0 };
   let documents = 0;
   let retained = 0;
+  let refusedRows = 0;
+  const endpointResults = [];
   for (const endpoint of config.endpoints) {
     logger.info(`custom API: fetching ${endpoint.name}`);
     const fetched = await fetchEndpoint(config, endpoint, token, { fetchImpl, sleep });
+    const priorResponseHash = typeof persistence.loadResponseHash === "function"
+      ? await persistence.loadResponseHash({ source: config.source, endpoint: endpoint.name })
+      : null;
+    if (priorResponseHash === fetched.response_hash) {
+      total.unchanged += fetched.rows.length;
+      refusedRows += fetched.refused_rows;
+      endpointResults.push(Object.freeze({
+        name: endpoint.name,
+        rows_received: fetched.rows_received,
+        rows_accepted: fetched.rows.length,
+        rows_refused: fetched.refused_rows,
+        rows: Object.freeze({ created: 0, updated: 0, unchanged: fetched.rows.length }),
+        documents: 0,
+        retained_missing_rows: 0,
+        body_unchanged: true,
+      }));
+      continue;
+    }
     const prior = await persistence.loadRows({ source: config.source, endpoint: endpoint.name });
     const plan = planEndpoint(config, endpoint, fetched, prior, fetchedAt);
     for (const row of plan.rowChanges) total[row.action]++;
     documents += plan.documents.length;
     retained += plan.retained.length;
+    refusedRows += fetched.refused_rows;
+    endpointResults.push(Object.freeze({
+      name: endpoint.name,
+      rows_received: fetched.rows_received,
+      rows_accepted: fetched.rows.length,
+      rows_refused: fetched.refused_rows,
+      rows: Object.freeze({
+        created: plan.rowChanges.filter((row) => row.action === "created").length,
+        updated: plan.rowChanges.filter((row) => row.action === "updated").length,
+        unchanged: plan.rowChanges.filter((row) => row.action === "unchanged").length,
+      }),
+      documents: plan.documents.length,
+      retained_missing_rows: plan.retained.length,
+      body_unchanged: false,
+    }));
     if (!dryRun) {
       await persistence.persist({
         source: config.source,
@@ -593,8 +691,11 @@ export async function runCustomApiPull(rawConfig, {
     endpoints: config.endpoints.length,
     rows: Object.freeze(total),
     documents,
+    refused_rows: refusedRows,
+    endpoint_results: Object.freeze(endpointResults),
     retained_missing_rows: retained,
     fetched_at: fetchedAt,
+    next_pull_at: new Date(Date.parse(fetchedAt) + config.cadence_seconds * 1000).toISOString(),
   });
 }
 
@@ -622,6 +723,14 @@ export function customApiD1Persistence(env) {
           revision: Number(row.revision || 0),
         };
       });
+    },
+
+    async loadResponseHash({ source, endpoint }) {
+      const row = await env.DB.prepare(
+        `SELECT response_hash FROM custom_api_fetches
+          WHERE source=?1 AND endpoint=?2 ORDER BY fetched_at DESC,rowid DESC LIMIT 1`
+      ).bind(source, endpoint).first();
+      return typeof row?.response_hash === "string" ? row.response_hash : null;
     },
 
     async persist({ source, endpoint, rowChanges, documentChanges, fetchedAt, responseHash }) {

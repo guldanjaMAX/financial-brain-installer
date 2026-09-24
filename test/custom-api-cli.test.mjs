@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -33,6 +33,7 @@ function manifest() {
             group_by: ["store", "period"],
             title_template: "{{store}} {{period}} sales",
             body_template: "{{rows_table}}",
+            fields: ["store", "period", "net_sales"],
           },
         }],
       },
@@ -54,6 +55,28 @@ function withCapturedOutput(operation) {
     console.error = priorError;
   });
 }
+
+test("the public manifest defaults match the full-snapshot real feed", () => {
+  const template = JSON.parse(readFileSync(new URL("../templates/brain.manifest.json", import.meta.url), "utf8"));
+  const schema = JSON.parse(readFileSync(new URL("../manifest.schema.json", import.meta.url), "utf8"));
+  const custom = template.corpora.custom_api;
+  assert.equal(custom.timeout_ms, 30_000);
+  assert.ok(custom.max_response_bytes >= 5 * 1024 * 1024);
+  assert.ok(custom.max_rows >= 1_721);
+  assert.deepEqual(custom.endpoints.map(({ name, path, row_key }) => ({ name, path, row_key })), [
+    { name: "sales", path: "/sales", row_key: ["store", "period", "revenue_stream"] },
+    { name: "inventory", path: "/inventory", row_key: ["store", "breed"] },
+    { name: "costs", path: "/costs", row_key: ["store", "breed"] },
+  ]);
+  assert.deepEqual(custom.endpoints[0].document.expected_values.revenue_stream, [
+    "live_animal", "supplies", "services", "other",
+  ]);
+  assert.match(custom.endpoints[0].document.body_template, /missing\.revenue_stream/);
+  const schemaCustom = schema.properties.corpora.properties.custom_api.properties;
+  assert.equal(schemaCustom.timeout_ms.default, 30_000);
+  assert.ok(schemaCustom.max_response_bytes.default >= 5 * 1024 * 1024);
+  assert.ok(schemaCustom.max_rows.default >= 1_721);
+});
 
 test("deploy binding contains declarative config and only the secret name", () => {
   const m = manifest();
@@ -124,6 +147,13 @@ test("manual dry run calls only the authenticated Brain route and renders aggreg
       return new Response(JSON.stringify({
         status: "completed", dry_run: true, endpoints: 3,
         rows: { created: 2, updated: 1, unchanged: 4 }, documents: 2, retained_missing_rows: 1,
+        refused_rows: 1,
+        next_pull_at: "2026-09-25T15:30:00.000Z",
+        endpoint_results: [
+          { name: "sales", rows_received: 5, rows_refused: 1, documents: 2, body_unchanged: false },
+          { name: "inventory", rows_received: 1, rows_refused: 0, documents: 0, body_unchanged: true },
+          { name: "costs", rows_received: 1, rows_refused: 0, documents: 0, body_unchanged: true },
+        ],
       }), { headers: { "content-type": "application/json" } });
     },
   }));
@@ -134,6 +164,9 @@ test("manual dry run calls only the authenticated Brain route and renders aggreg
   assert.equal(result.value.dry_run, true);
   assert.match(result.output, /2 new row\(s\), 1 corrected, 4 unchanged/);
   assert.match(result.output, /retained, not deleted/);
+  assert.match(result.output, /sales: 5 row\(s\), 2 readable document\(s\) would be written, 1 refused/);
+  assert.match(result.output, /inventory: 1 row\(s\), 0 readable document\(s\) would be written, 0 refused/);
+  assert.match(result.output, /If run now, the next daily pull will run at 2026-09-25T15:30:00.000Z/);
   assert.equal(result.output.includes(TOKEN), false);
 });
 

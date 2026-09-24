@@ -61,6 +61,7 @@ function scheduledEnv() {
             group_by: ["store", "period"],
             title_template: "{{store}} {{period}} sales",
             body_template: "{{rows_table}}",
+            fields: ["store", "period", "net_sales"],
           },
         }],
       }),

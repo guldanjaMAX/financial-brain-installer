@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CustomApiError, runCustomApiPull } from "../src/lib/custom-api.js";
+import {
+  CustomApiError,
+  customApiOwnerMessage,
+  runCustomApiPull,
+  validateCustomApiConfig,
+} from "../src/lib/custom-api.js";
 
 const TOKEN = ["fixture", "scripted", "sentinel", "42"].join("-");
 const AT = new Date("2026-09-24T15:30:00.000Z");
@@ -25,6 +30,7 @@ function config() {
         body_template: "Net sales {{sum.net_sales}} across {{row_count}} streams.\n\n{{rows_table}}",
         aggregates: { net_sales: "sum" },
         formats: { net_sales: "currency" },
+        fields: ["store", "period", "revenue_stream", "net_sales", "transactions", "units", "puppies_sold"],
       },
     }],
   };
@@ -41,14 +47,19 @@ function memoryPersistence() {
   const rows = new Map();
   const documents = new Map();
   const revisions = [];
+  const responseHashes = new Map();
+  const writes = [];
   return {
-    rows, documents, revisions,
+    rows, documents, revisions, responseHashes, writes,
     async loadRows({ source, endpoint }) {
       const prefix = `${source}\u0000${endpoint}\u0000`;
       return [...rows.entries()].filter(([key]) => key.startsWith(prefix))
         .map(([key, value]) => ({ row_key: key.slice(prefix.length), ...value }));
     },
-    async persist({ source, endpoint, rowChanges, documentChanges }) {
+    async loadResponseHash({ source, endpoint }) {
+      return responseHashes.get(`${source}\u0000${endpoint}`) || null;
+    },
+    async persist({ source, endpoint, rowChanges, documentChanges, responseHash }) {
       const prefix = `${source}\u0000${endpoint}\u0000`;
       for (const change of rowChanges) {
         const key = `${prefix}${change.row_key}`;
@@ -58,9 +69,170 @@ function memoryPersistence() {
         if (change.action === "updated") revisions.push({ key, revision });
       }
       for (const document of documentChanges) documents.set(document.source_id, document);
+      responseHashes.set(`${source}\u0000${endpoint}`, responseHash);
+      writes.push({ endpoint, documents: documentChanges.map((document) => document.source_id) });
     },
   };
 }
+
+function realShapeConfig() {
+  return {
+    ...config(),
+    endpoints: [
+      {
+        ...config().endpoints[0],
+        document: {
+          ...config().endpoints[0].document,
+          body_template: "Net sales {{sum.net_sales}}. {{missing.revenue_stream}}\n\n{{rows_table}}",
+          fields: ["store", "period", "revenue_stream", "net_sales", "transactions", "units", "puppies_sold"],
+          expected_values: {
+            revenue_stream: ["live_animal", "supplies", "services", "other"],
+          },
+        },
+      },
+      {
+        name: "inventory",
+        path: "/inventory",
+        row_key: ["store", "breed"],
+        document: {
+          group_by: [],
+          title_template: "Inventory {{fetched_date}}",
+          body_template: "{{rows_table}}",
+          fields: ["store", "breed", "count"],
+        },
+      },
+      {
+        name: "costs",
+        path: "/costs",
+        row_key: ["store", "breed"],
+        document: {
+          group_by: [],
+          title_template: "Costs {{fetched_date}}",
+          body_template: "{{rows_table}}",
+          fields: ["store", "breed", "avg_cost", "received"],
+          formats: { avg_cost: "currency" },
+        },
+      },
+    ],
+  };
+}
+
+test("real-feed defaults allow a slow five-megabyte full-history snapshot", () => {
+  const parsed = validateCustomApiConfig(config());
+  assert.equal(parsed.timeout_ms, 30_000);
+  assert.ok(parsed.max_response_bytes >= 5 * 1024 * 1024);
+  assert.ok(parsed.max_rows >= 1_721);
+});
+
+test("socket-free real-shape fixtures preserve numeric quirks and null stores while keeping extras out of prose", async () => {
+  const persistence = memoryPersistence();
+  const bodies = {
+    sales: { data: [
+      {
+        store: "Store A", period: "2026-09-01", revenue_stream: "live_animal",
+        net_sales: 100, transactions: 2, units: 1, puppies_sold: 1, extra_metric: 99,
+      },
+      {
+        store: "Store A", period: "2026-09-01", revenue_stream: "supplies",
+        net_sales: -1.25, transactions: 1, units: -1,
+      },
+    ] },
+    inventory: { data: [{ store: null, breed: "Item 1", count: 2 }] },
+    costs: { data: [{ store: null, breed: "Item 1", avg_cost: 700, received: 3 }] },
+  };
+  const result = await runCustomApiPull(realShapeConfig(), {
+    token: TOKEN,
+    now: () => AT,
+    sleep: async () => {},
+    persistence,
+    fetchImpl: async (input) => json(bodies[new URL(input).pathname.split("/").pop()]),
+  });
+
+  assert.deepEqual(result.rows, { created: 4, updated: 0, unchanged: 0 });
+  assert.equal(result.refused_rows, 0);
+  assert.equal(result.endpoint_results.length, 3);
+  assert.ok(persistence.rows.has("store-dashboard\u0000inventory\u0000store=null|breed=\"Item 1\""));
+  assert.ok(persistence.rows.has("store-dashboard\u0000costs\u0000store=null|breed=\"Item 1\""));
+  assert.equal(
+    persistence.rows.get("store-dashboard\u0000sales\u0000store=\"Store A\"|period=\"2026-09-01\"|revenue_stream=\"live_animal\"").row.extra_metric,
+    99,
+  );
+  const sales = persistence.documents.get("sales:Store A:2026-09-01").content;
+  assert.match(sales, /\$98\.75/);
+  assert.match(sales, /no services sales recorded/i);
+  assert.match(sales, /no other sales recorded/i);
+  assert.doesNotMatch(sales, /\$0\.00/);
+  assert.doesNotMatch(sales, /extra_metric/);
+  assert.match(persistence.documents.get("inventory:2026-09-24").content, /unassigned/);
+});
+
+test("only the changed current-month document is revised and an identical body skips all writes", async () => {
+  let currentNetSales = 10;
+  const persistence = memoryPersistence();
+  const options = {
+    token: TOKEN,
+    now: () => AT,
+    sleep: async () => {},
+    persistence,
+    fetchImpl: async () => json({ data: [
+      { store: "Store A", period: "2026-08-01", revenue_stream: "services", net_sales: 20, transactions: 1, units: 1, puppies_sold: 0 },
+      { store: "Store A", period: "2026-09-01", revenue_stream: "services", net_sales: currentNetSales, transactions: 1, units: 1, puppies_sold: 0 },
+    ] }),
+  };
+  const salesOnly = { ...realShapeConfig(), endpoints: [realShapeConfig().endpoints[0]] };
+  await runCustomApiPull(salesOnly, options);
+  currentNetSales = 12.5;
+  const changed = await runCustomApiPull(salesOnly, options);
+  const writesBeforeIdentical = persistence.writes.length;
+  const identical = await runCustomApiPull(salesOnly, options);
+
+  assert.deepEqual(persistence.writes[1].documents, ["sales:Store A:2026-09-01"]);
+  assert.equal(changed.documents, 1);
+  assert.equal(identical.documents, 0);
+  assert.equal(identical.endpoint_results[0].body_unchanged, true);
+  assert.equal(persistence.writes.length, writesBeforeIdentical, "the identical body made no persistence call");
+});
+
+test("a three-decimal sale refuses only that row and reports the endpoint count", async () => {
+  const persistence = memoryPersistence();
+  const salesOnly = { ...realShapeConfig(), endpoints: [realShapeConfig().endpoints[0]] };
+  const result = await runCustomApiPull(salesOnly, {
+    token: TOKEN,
+    now: () => AT,
+    sleep: async () => {},
+    persistence,
+    fetchImpl: async () => json({ data: [
+      { store: "Store A", period: "2026-09-01", revenue_stream: "services", net_sales: 1.234, transactions: 1, units: 1, puppies_sold: 0 },
+      { store: "Store A", period: "2026-09-01", revenue_stream: "other", net_sales: -2.5, transactions: 1, units: -1, puppies_sold: 0 },
+    ] }),
+  });
+
+  assert.deepEqual(result.rows, { created: 1, updated: 0, unchanged: 0 });
+  assert.equal(result.refused_rows, 1);
+  assert.equal(result.endpoint_results[0].rows_received, 2);
+  assert.equal(result.endpoint_results[0].rows_refused, 1);
+  assert.equal(persistence.rows.size, 1, "the valid row reached the persistence decision point");
+});
+
+test("a 308 canonical-path redirect is a plain configuration error and is never followed", async () => {
+  let calls = 0;
+  await assert.rejects(
+    runCustomApiPull(config(), {
+      token: TOKEN,
+      now: () => AT,
+      sleep: async () => {},
+      persistence: memoryPersistence(),
+      fetchImpl: async () => {
+        calls++;
+        return json({ error: "canonical path has no trailing slash" }, 308, { location: "https://dashboard.invalid/api/sales" });
+      },
+    }),
+    (error) => error instanceof CustomApiError &&
+      error.code === "CONFIG_INVALID" &&
+      /setup is not valid/i.test(customApiOwnerMessage(error.code, "dashboard")),
+  );
+  assert.equal(calls, 1, "the 308 decision point was reached without following it");
+});
 
 test("scripted paging handles labeled and legacy sales and builds one readable store-month document", async () => {
   const calls = [];
