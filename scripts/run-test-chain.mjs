@@ -120,8 +120,10 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/runtime-identity-receipt.test.mjs",
   "node --test test/windows-onboarding-kit.test.mjs",
   "node --no-warnings --test worker/test/identical-content-no-reembed.test.mjs",
+  "node --no-warnings --test worker/test/fin-documents-writer-agreement.test.mjs",
   "node --no-warnings --test worker/test/ocr-reply-shape.test.mjs",
   "node --test test/mcp-moved-brain.test.mjs",
+  "node --no-warnings --test worker/test/owner-document-create.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -365,6 +367,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/cli-guidance-rendering.test.mjs",
   "node --no-warnings worker/test/plaid-connection-review.test.mjs",
   "node --no-warnings worker/test/owner-entity-create.test.mjs",
+  "node --no-warnings --test worker/test/fin-documents-writer-agreement.test.mjs",
+  "node --no-warnings --test worker/test/owner-document-create.test.mjs",
   "node --no-warnings worker/test/plaid-sync-custody.test.mjs",
   "node --no-warnings worker/test/ready-window-webhook-regression.test.mjs",
   "node --no-warnings test/vector-bootstrap-stale-pending.test.mjs",
