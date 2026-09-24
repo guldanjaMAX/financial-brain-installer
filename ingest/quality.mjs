@@ -90,6 +90,108 @@ function wordDiversity(text) {
   return { words, unique: unique.size };
 }
 
+export const DEFAULT_NONSENSE_POLICY = Object.freeze({
+  binary_control_ratio_max: 0.02,
+  symbol_ratio_max: 0.58,
+  symbol_min_chars: 500,
+  min_word_like_ratio: 0.08,
+  word_shape_min_tokens: 120,
+  repeated_line_ratio_max: 0.70,
+  repeated_line_min_lines: 80,
+  templated_mail_min_substantive_chars: 48,
+});
+
+const threshold = (policy, name) => {
+  const value = Number(policy?.[name]);
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_NONSENSE_POLICY[name];
+};
+
+const isAsciiLetter = (code) => isAsciiUpper(code) || isAsciiLower(code);
+const isAsciiVowel = (code) => [65, 69, 73, 79, 85, 97, 101, 105, 111, 117].includes(code);
+const isWhitespaceCode = (code) => code === 32 || (code >= 9 && code <= 13);
+
+/** One bounded linear pass for extracted-text signals that are not byte-level. */
+function nonsenseMetrics(text) {
+  let controls = 0;
+  let visible = 0;
+  let symbols = 0;
+  let tokenCount = 0;
+  let wordLike = 0;
+  let tokenLetters = 0;
+  let tokenDigits = 0;
+  let tokenVowels = 0;
+  const finishToken = () => {
+    if (tokenLetters + tokenDigits < 2) return;
+    tokenCount++;
+    // Numbers, dates and dollar amounts are useful evidence. Alphabetic OCR
+    // fragments need one vowel to look like a word. This is deliberately a
+    // word-shape check, not an English dictionary.
+    if ((tokenDigits > 0 && tokenLetters === 0) || tokenVowels > 0) wordLike++;
+  };
+  for (let index = 0; index <= text.length; index++) {
+    const code = index < text.length ? text.charCodeAt(index) : 32;
+    const alphaNumeric = isAsciiLetter(code) || isAsciiDigit(code) || code > 127;
+    if (index < text.length && (code === 0 || code < 9 || (code > 13 && code < 32))) controls++;
+    if (index < text.length && !isWhitespaceCode(code)) {
+      visible++;
+      if (!alphaNumeric) symbols++;
+    }
+    if (alphaNumeric) {
+      if (isAsciiDigit(code)) tokenDigits++;
+      else {
+        tokenLetters++;
+        if (code > 127 || isAsciiVowel(code)) tokenVowels++;
+      }
+      continue;
+    }
+    finishToken();
+    tokenLetters = 0;
+    tokenDigits = 0;
+    tokenVowels = 0;
+  }
+  return { controls, visible, symbols, tokenCount, wordLike };
+}
+
+/** Detect one line consuming most of a long extraction without unbounded regexes. */
+function repeatedLineRatio(text) {
+  const counts = new Map();
+  let lines = 0;
+  let repeated = 0;
+  let start = 0;
+  for (let index = 0; index <= text.length; index++) {
+    if (index < text.length && text.charCodeAt(index) !== 10) continue;
+    const line = text.slice(start, index).trim().replace(/[ \t]+/g, " ").toLowerCase();
+    start = index + 1;
+    if (line.length < 12) continue;
+    lines++;
+    if (counts.size >= 20_000 && !counts.has(line)) continue;
+    const count = (counts.get(line) || 0) + 1;
+    counts.set(line, count);
+    if (count > repeated) repeated = count;
+  }
+  return { lines, ratio: lines ? repeated / lines : 0 };
+}
+
+const MAIL_TEMPLATE_MARKERS = [
+  /view (?:this )?(?:email )?in (?:your )?browser/i,
+  /manage (?:email )?preferences/i,
+  /privacy policy/i,
+  /unsubscribe/i,
+  /copyright\s+(?:19|20)\d{2}/i,
+  /click here/i,
+];
+
+function templatedMailEvidence(text) {
+  if (text.length > 800) return null;
+  const matched = MAIL_TEMPLATE_MARKERS.filter((pattern) => pattern.test(text));
+  if (matched.length < 4) return null;
+  let substantive = text;
+  for (const pattern of matched) substantive = substantive.replace(pattern, " ");
+  substantive = substantive.replace(/\b(?:subject|from|to|date|sent):[^\n]*/gi, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+  return { markers: matched.length, substantiveChars: substantive.length };
+}
+
 /**
  * Does this look like a binary file rather than text?
  *
@@ -149,7 +251,7 @@ export function isLikelyBinary(buf) {
  * Returns { ok, reason, metrics }. `reason` is written to be shown to a client
  * verbatim, so it says what happened rather than naming a rule.
  */
-export function textQuality(text) {
+export function textQuality(text, { sourceKind = "", policy = {} } = {}) {
   const s = typeof text === "string" ? text : "";
   const len = s.length;
   const metrics = { chars: len };
@@ -180,6 +282,45 @@ export function textQuality(text) {
   metrics.replacement_ratio = +(repl / len).toFixed(3);
   if (metrics.replacement_ratio > 0.05) {
     return { ok: false, reason: "the text decoded into mostly unreadable characters (wrong or unsupported encoding)", metrics };
+  }
+
+  const nonsense = nonsenseMetrics(s);
+  metrics.control_ratio = +(nonsense.controls / len).toFixed(3);
+  if (metrics.control_ratio > threshold(policy, "binary_control_ratio_max")) {
+    return { ok: false, reason: "the extraction contains binary data decoded as text, not a readable document", metrics };
+  }
+
+  metrics.symbol_ratio = +(nonsense.symbols / Math.max(1, nonsense.visible)).toFixed(3);
+  if (len >= threshold(policy, "symbol_min_chars") &&
+      metrics.symbol_ratio > threshold(policy, "symbol_ratio_max")) {
+    return { ok: false, reason: "the extraction is mostly symbols with too little readable text", metrics };
+  }
+
+  if (nonsense.tokenCount >= threshold(policy, "word_shape_min_tokens")) {
+    metrics.word_like_ratio = +(nonsense.wordLike / nonsense.tokenCount).toFixed(3);
+    if (metrics.word_like_ratio < threshold(policy, "min_word_like_ratio")) {
+      return { ok: false, reason: "the extraction has OCR-like unreadable word shapes rather than usable text", metrics };
+    }
+  }
+
+  if (len > 4000) {
+    const repeatedLines = repeatedLineRatio(s);
+    metrics.repeated_line_ratio = +repeatedLines.ratio.toFixed(3);
+    if (repeatedLines.lines >= threshold(policy, "repeated_line_min_lines") &&
+        repeatedLines.ratio > threshold(policy, "repeated_line_ratio_max")) {
+      return { ok: false, reason: "the extraction is mostly the same boilerplate line repeated over and over", metrics };
+    }
+  }
+
+  if (["gmail", "imap", "mail"].includes(String(sourceKind).toLowerCase())) {
+    const template = templatedMailEvidence(s);
+    if (template) {
+      metrics.mail_template_markers = template.markers;
+      metrics.mail_substantive_chars = template.substantiveChars;
+      if (template.substantiveChars < threshold(policy, "templated_mail_min_substantive_chars")) {
+        return { ok: false, reason: "the message is a mail template with almost no message beyond subscription links", metrics };
+      }
+    }
   }
 
   // Repetition. A 2MB file of one repeated row embeds as well as one copy of it

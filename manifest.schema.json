@@ -687,6 +687,48 @@
             }
           }
         },
+        "text_quality": {
+          "type": "object",
+          "description": "Conservative deterministic nonsense checks applied before embedding. Omit to use product defaults. Source entries override only the named thresholds and never bypass the credential scanner or extraction limits.",
+          "properties": {
+            "default": {
+              "type": "object",
+              "propertyNames": {
+                "enum": [
+                  "binary_control_ratio_max",
+                  "symbol_ratio_max",
+                  "symbol_min_chars",
+                  "min_word_like_ratio",
+                  "word_shape_min_tokens",
+                  "repeated_line_ratio_max",
+                  "repeated_line_min_lines",
+                  "templated_mail_min_substantive_chars"
+                ]
+              },
+              "additionalProperties": { "type": "number", "minimum": 0 }
+            },
+            "sources": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "propertyNames": {
+                  "enum": [
+                    "binary_control_ratio_max",
+                    "symbol_ratio_max",
+                    "symbol_min_chars",
+                    "min_word_like_ratio",
+                    "word_shape_min_tokens",
+                    "repeated_line_ratio_max",
+                    "repeated_line_min_lines",
+                    "templated_mail_min_substantive_chars"
+                  ]
+                },
+                "additionalProperties": { "type": "number", "minimum": 0 }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
         "private_path_prefixes": {
           "type": "array",
           "items": {

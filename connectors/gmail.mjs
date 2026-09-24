@@ -347,7 +347,7 @@ export async function messagePolicy(getAccessToken, id, opts = {}) {
 export async function toEnvelope(
   getAccessToken,
   id,
-  { sourceName = SOURCE_TYPE, trustedEligible = false } = {},
+  { sourceName = SOURCE_TYPE, trustedEligible = false, qualityPolicy = {} } = {},
   opts = {},
 ) {
   let msg;
@@ -399,7 +399,7 @@ export async function toEnvelope(
       cursor_blocking: false,
     };
   }
-  const q = textQuality(got.text);
+  const q = textQuality(got.text, { sourceKind: "gmail", policy: qualityPolicy });
   if (!q.ok) {
     return {
       skip: { path: id, id, reason: q.reason, metrics: q.metrics },

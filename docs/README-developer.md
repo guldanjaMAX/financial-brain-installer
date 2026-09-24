@@ -478,6 +478,14 @@ file-id, path-prefix and filename-part exclusions before downloading content.
 An excluded document already present in the brain is removed rather than left
 stranded. Gmail has no folder path and does not use these rules.
 
+`safety.text_quality` optionally overrides the conservative deterministic
+pre-embedding checks globally under `default` or for one manifest source under
+`sources.<source>`. The checks name binary-as-text, symbol-heavy extraction,
+OCR-like word shapes, repeated-line boilerplate, and near-empty mail templates
+as separate refusal reasons. Omission keeps the reviewed defaults. A source
+override changes only the listed threshold; it cannot bypass extraction size,
+credential, private-path, or removal gates.
+
 Flags: `--dry-run`, `--source <name>`, `--limit <n>`, `--reset`, Drive-only
 `--dry-run --json` for a bounded aggregate assistant preview, and the
 exact-plan acknowledgement `--approve-removals <fingerprint>` when a Drive,

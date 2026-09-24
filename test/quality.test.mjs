@@ -76,6 +76,65 @@ check("below the floor is rejected", !textQuality("x".repeat(MIN_CHARS - 1)).ok)
 check("the empty-extraction message names the real cause", /empty result/.test(textQuality("").reason));
 check("a bad decode is rejected", !textQuality("�".repeat(100) + " some text here to pad it out").ok);
 
+/* ---- cheap deterministic nonsense checks ---- */
+{
+  const binaryText = ("statement total paid\u0000\u0001\u0002\u0003".repeat(80));
+  const r = textQuality(binaryText);
+  check("binary decoded as text is rejected", !r.ok && /binary data decoded as text/.test(r.reason || ""), JSON.stringify(r));
+}
+{
+  const soup = Array.from({ length: 240 }, (_, i) => `${i % 10} @@@ ### %%% ||| <>`).join(" ");
+  const r = textQuality(soup);
+  check("symbol soup is rejected", !r.ok && /symbols with too little readable text/.test(r.reason || ""), JSON.stringify(r));
+}
+{
+  const garbage = Array.from({ length: 260 }, (_, i) => `xqz${i} brt${i} nvm${i} :::`).join(" ");
+  const r = textQuality(garbage);
+  check("OCR-like garbage is rejected", !r.ok && /OCR-like unreadable word shapes/.test(r.reason || ""), JSON.stringify(r));
+}
+{
+  const r = textQuality(("CONFIDENTIAL EXPORT PAGE FOOTER\n").repeat(180) + PROSE);
+  check("repeated-line boilerplate is rejected", !r.ok && /same boilerplate line/.test(r.reason || ""), JSON.stringify(r));
+}
+{
+  const mail = "View in browser\nManage preferences\nPrivacy policy\nUnsubscribe\nCopyright 2026\nClick here";
+  const r = textQuality(mail, { sourceKind: "gmail" });
+  check("near-empty templated mail is rejected for mail sources", !r.ok && /mail template with almost no message/.test(r.reason || ""), JSON.stringify(r));
+  check("the same short text is not silently treated as mail for a folder source", textQuality(mail, { sourceKind: "upload" }).ok);
+}
+
+/* ---- conservative controls: useful difficult documents stay accepted ---- */
+{
+  const taxForm = Array.from({ length: 90 }, (_, i) =>
+    `Line ${i + 1} W-2 1099-R EIN 00-0000000 wages ${1200 + i}.00 withholding ${120 + i}.00`
+  ).join("\n");
+  check("tax-form text is not refused", textQuality(taxForm).ok, JSON.stringify(textQuality(taxForm)));
+}
+{
+  const sheet = Array.from({ length: 240 }, (_, i) =>
+    `Account: ${1000 + i} | Date: 2026-09-${String((i % 28) + 1).padStart(2, "0")} | Debit: ${i}.25 | Status: posted`
+  ).join("\n");
+  check("spreadsheet text is not refused", textQuality(sheet).ok, JSON.stringify(textQuality(sheet)));
+}
+{
+  const legal = Array.from({ length: 80 }, (_, i) =>
+    `Section ${i + 1}. The party shall preserve the record and may request review under the applicable agreement.`
+  ).join("\n");
+  check("legal PDF text is not refused", textQuality(legal).ok, JSON.stringify(textQuality(legal)));
+}
+{
+  const transcript = Array.from({ length: 100 }, (_, i) =>
+    `Speaker ${i % 3 + 1}: We reviewed item ${i + 1}, the current evidence, and the next action for the project.`
+  ).join("\n");
+  check("transcript text is not refused", textQuality(transcript).ok, JSON.stringify(textQuality(transcript)));
+}
+
+{
+  const garbage = Array.from({ length: 260 }, (_, i) => `xqz${i} brt${i} nvm${i} :::`).join(" ");
+  const relaxed = textQuality(garbage, { policy: { min_word_like_ratio: 0 } });
+  check("per-source thresholds can conservatively disable one heuristic", relaxed.ok, JSON.stringify(relaxed));
+}
+
 /* ---- repetition, but only where it is genuinely pathological ---- */
 {
   const r = textQuality("row,1,ok\n".repeat(900));

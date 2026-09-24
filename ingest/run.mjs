@@ -1639,7 +1639,7 @@ export function removedSinceLastRun(knownKeys, present) {
 /**
  * Read one file and turn it into an ingest envelope, or into a reasoned skip.
  */
-export async function prepare(file, { sourceName, ocr = null }) {
+export async function prepare(file, { sourceName, ocr = null, qualityPolicy = {} }) {
   const ext = extensionOf(file.name);
 
   // Local mbox archives are admitted independently of their total size. The
@@ -1754,7 +1754,10 @@ export async function prepare(file, { sourceName, ocr = null }) {
     };
   }
 
-  const q = textQuality(got.text);
+  const q = textQuality(got.text, {
+    sourceKind: [".eml", ".mbox"].includes(ext) ? "mail" : sourceName,
+    policy: qualityPolicy,
+  });
   if (!q.ok) {
     return {
       hash,

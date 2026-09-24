@@ -7357,6 +7357,27 @@ export function ocrPolicy(manifest = {}) {
   };
 }
 
+const TEXT_QUALITY_THRESHOLD_KEYS = Object.freeze([
+  "binary_control_ratio_max",
+  "symbol_ratio_max",
+  "symbol_min_chars",
+  "min_word_like_ratio",
+  "word_shape_min_tokens",
+  "repeated_line_ratio_max",
+  "repeated_line_min_lines",
+  "templated_mail_min_substantive_chars",
+]);
+
+/** Merge the generic conservative thresholds with one source's explicit overrides. */
+export function textQualityPolicy(manifest = {}, sourceName = "") {
+  const configured = manifest?.safety?.text_quality || {};
+  const source = configured?.sources?.[String(sourceName)] || {};
+  const merged = { ...(configured.default || {}), ...source };
+  return Object.fromEntries(TEXT_QUALITY_THRESHOLD_KEYS
+    .filter((key) => Number.isFinite(Number(merged[key])) && Number(merged[key]) >= 0)
+    .map((key) => [key, Number(merged[key])]));
+}
+
 /**
  * The callback `extractPdf` calls once per page of a scanned document.
  *
@@ -11035,6 +11056,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // offered. A dry run never gets a callback, so the safest command in the
   // tool stays the cheapest one.
   const ocrCfg = ocrPolicy(m);
+  const qualityPolicy = textQualityPolicy(m, sourceName);
   let ocrPages = 0;
   const ocrCallback = dry || !ocrCfg.enabled ? null : makeOcrCallback({
     base, adminKey, model: ocrCfg.model, maxPages: ocrCfg.maxPages,
@@ -11163,7 +11185,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // a raw V8 abort no handler can catch, and an interrupt during that silent
   // phase threw away every minute of extraction. Peak memory here is one batch.
   const prepareOne = async (f) => {
-    const r = await prepare(f, { sourceName, ocr: ocrCallback });
+    const r = await prepare(f, { sourceName, ocr: ocrCallback, qualityPolicy });
     if (r.note) notes.push({ path: f.rel, note: r.note });
     if (r.messageExport) messageExportsSeen.add(r.messageExport);
 
@@ -14553,6 +14575,7 @@ const cmdIngestRemoteRun = async (
   // offered. A dry run never gets a callback, so the safest command in the
   // tool stays the cheapest one.
   const ocrCfg = ocrPolicy(m);
+  const qualityPolicy = textQualityPolicy(m, sourceName);
   let ocrPages = 0;
   const ocrCallback = dry || !ocrCfg.enabled ? null : makeOcrCallback({
     base, adminKey, model: ocrCfg.model, maxPages: ocrCfg.maxPages,
@@ -15456,7 +15479,9 @@ const cmdIngestRemoteRun = async (
         return { unchanged: true };
       }
 
-      const r = await drive.toEnvelope(getToken, f, { sourceName, pathOf, ocr: ocrCallback });
+      const r = await drive.toEnvelope(getToken, f, {
+        sourceName, pathOf, ocr: ocrCallback, qualityPolicy,
+      });
       if (!r) return null;
       if (r.skip) {
         state.skipped[key] = r.skip.reason;
@@ -15808,6 +15833,7 @@ const cmdIngestRemoteRun = async (
           id,
           fetched: await gmail.toEnvelope(getToken, id, {
             sourceName,
+            qualityPolicy,
             // A full-list id matched DEFAULT_QUERY. An incremental id reached
             // this point only after its label-only preflight allowed it.
             trustedEligible: !incremental || policy?.allowed === true,
@@ -16162,7 +16188,9 @@ const cmdIngestRemoteRun = async (
         const prepareImap = async (message) => {
           scanned++;
           if (message.uid > highest) highest = message.uid;
-          const r = await imap.toEnvelope(message, { sourceName, host: credentials.host });
+          const r = await imap.toEnvelope(message, {
+            sourceName, host: credentials.host, qualityPolicy,
+          });
           if (r.skip) {
             const key = r.source_id
               ? `${sourceName}:${r.source_id}`
