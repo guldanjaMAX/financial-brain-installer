@@ -2102,6 +2102,30 @@ async function verifyWorkersDevCandidate(domain, {
 /** Save the verified workers.dev hostname so routine commands need no API token. */
 export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName, options = {}) {
   if (m.brain?.domain) return m.brain.domain;
+  // The account listing already returned the account's label. Try the public,
+  // non-expiring address first and trust it only after this exact brain and
+  // package version answer /health. The control-plane subdomain read remains a
+  // fallback for accounts whose display name is not their workers.dev label.
+  const accountLabel = typeof acct?.name === "string" ? acct.name.trim().toLowerCase() : "";
+  const candidateDomain = WORKERS_DEV_LABEL_RE.test(accountLabel)
+    ? `${scriptName}.${accountLabel}.workers.dev`
+    : null;
+  const verify = options.verifyWorkersDevCandidate ?? verifyWorkersDevCandidate;
+  let candidateVerdict = { ok: false, reason: "the account label was not a usable workers.dev label" };
+  if (candidateDomain) {
+    candidateVerdict = await verify(candidateDomain, {
+      expectedBrainName: m.client?.slug || "brain",
+      expectedVersion: PRODUCT_VERSION,
+      request: options.request,
+      wait: options.wait,
+    });
+    if (candidateVerdict.ok) {
+      m.brain = { ...(m.brain || {}), domain: candidateDomain };
+      saveManifest(manifestPath, m);
+      ok(`confirmed ${candidateDomain} is this brain and saved it`);
+      return m.brain.domain;
+    }
+  }
   const readSubdomain = options.readSubdomain ??
     (() => cf(`/accounts/${acct.id}/workers/subdomain`));
   // Three different things can go wrong here and they used to print one
@@ -2126,9 +2150,10 @@ export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName,
     const message = String(readFailure?.message || readFailure || "");
     const noCredential = readFailure instanceof Fatal && NO_CLOUDFLARE_CREDENTIAL_RE.test(message);
     const denied = SUBDOMAIN_READ_DENIED_RE.test(message);
-    if (!noCredential && !denied) {
-      // A credential failure already says the right thing, including how to sign
-      // in without a token. Re-raise it rather than replacing it with a guess.
+    // The no-credential Fatal already says the right thing, including browser
+    // sign-in and why a raw token must not be pasted into a shell. Preserve it.
+    if (noCredential) throw readFailure;
+    if (!denied) {
       if (readFailure instanceof Fatal) throw readFailure;
       const detail = message.split("\n")[0].slice(0, 200);
       die(
@@ -2138,59 +2163,14 @@ export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName,
           "  call is using and its scope before changing anything in the dashboard."
       );
     }
-    // An authentication or permission denial (401/403), or no credential at
-    // all. Everything above this call is already live and billable: D1, the
-    // Vectorize index, every migration, and the Worker itself. Dying here with
-    // the message above would send the owner to check a Cloudflare setting
-    // that is almost certainly already correct (see UPDATE-031 in
-    // docs/update-incidents.json) while leaving those resources sitting there,
-    // unexplained. Before giving up, see whether the exact live address can be
-    // proven another way.
-    //
-    // The account's workers.dev LABEL has exactly one source reachable from
-    // here: this same failing read. Neither the script upload two calls up in
-    // cmdDeploy (`PUT .../workers/scripts/:name`) nor the route-enable call
-    // directly above it (`POST .../workers/scripts/:name/subdomain`) return
-    // it — Cloudflare echoes only `{enabled, previews_enabled}` for that one —
-    // and the account listing used to choose this account returns only
-    // `{id, name}`. `options.knownAccountSubdomain` is the seam for a caller
-    // that legitimately learned it some other way (read earlier in the same
-    // run, before whatever just made this credential stop working); nothing
-    // upstream supplies it today, so "no candidate" is the ordinary outcome
-    // below, not a bug in this check.
-    const hintLabel = typeof options.knownAccountSubdomain === "string"
-      ? options.knownAccountSubdomain.trim()
-      : "";
-    const candidateDomain = WORKERS_DEV_LABEL_RE.test(hintLabel)
-      ? `${scriptName}.${hintLabel}.workers.dev`
-      : null;
-    const verify = options.verifyWorkersDevCandidate ?? verifyWorkersDevCandidate;
-    const verdict = candidateDomain
-      ? await verify(candidateDomain, {
-        expectedBrainName: m.client?.slug || "brain",
-        expectedVersion: PRODUCT_VERSION,
-        request: options.request,
-        wait: options.wait,
-      })
-      : { ok: false, reason: "no candidate address could be assembled without the failed read" };
-    if (verdict.ok) {
-      m.brain = { ...(m.brain || {}), domain: candidateDomain };
-      saveManifest(manifestPath, m);
-      ok(`confirmed ${candidateDomain} is this brain despite the denied subdomain read; saved it`);
-      return m.brain.domain;
-    }
+    // A 401/403 on the browser-sign-in path is not an account-setting
+    // diagnosis. Name only the action the owner can take, and do not promise
+    // that setup can safely resume a partially completed writer cutover.
     die(
       "the workers.dev route is enabled and the Worker is deployed, but this run could not\n" +
-        `  confirm the brain's public address: ${verdict.reason}.\n` +
-        "  Reading the account subdomain needs a permission this credential does not have:\n" +
-        "  Workers Scripts Read on the account, for the subdomain.\n" +
-        "\n" +
-        "  Nothing is stranded. D1, the Vectorize index, and every migration already applied\n" +
-        "  are recorded in this manifest's install state, and so is this deployed Worker;\n" +
-        "  re-running `brain setup` against this same manifest picks up from that recorded\n" +
-        "  state instead of recreating any of them.\n" +
-        "  Grant Workers Scripts Read on the account used for the subdomain (or, on a browser\n" +
-        "  sign-in that has been open a while, sign in again), then run the same command."
+        `  confirm the brain's public address: ${candidateVerdict.reason}.\n` +
+        "  Sign in again through the browser when prompted, then rerun the same command.\n" +
+        "  Do not change the Workers subdomain setting based on this failure."
     );
   }
   const label = typeof sub?.subdomain === "string" ? sub.subdomain.trim() : "";
@@ -2471,13 +2451,7 @@ export async function cmdDeploy(manifestPath, options = {}) {
   // after the one-day Cloudflare control token is revoked. Persist the verified
   // workers.dev hostname once, instead of looking it up again on every command.
   if (!m.brain?.domain && options.persistDomain !== false) {
-    // These four are forwarded, not consumed here: no caller in this codebase
-    // sets knownAccountSubdomain today (see persistWorkersDevDomain's own
-    // comment on why nothing upstream can, yet), but a deploy invoked by a
-    // caller that legitimately learned the subdomain earlier in the same run
-    // has a seam to hand it through instead of guessing at one.
     const domain = await persistWorkersDevDomain(manifestPath, m, acct, scriptName, {
-      knownAccountSubdomain: options.knownAccountSubdomain,
       verifyWorkersDevCandidate: options.verifyWorkersDevCandidate,
       request: options.request,
       wait: options.wait,

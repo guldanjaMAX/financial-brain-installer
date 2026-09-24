@@ -68,6 +68,7 @@ const CHILD_ENV_ALLOWLIST = Object.freeze([
 
 const PREFLIGHT_PATHS = Object.freeze([
   Object.freeze({ name: "workers", suffix: "/workers/scripts" }),
+  Object.freeze({ name: "workers_subdomain", suffix: "/workers/subdomain" }),
   Object.freeze({ name: "d1", suffix: "/d1/database" }),
   Object.freeze({ name: "vectorize", suffix: "/vectorize/v2/indexes" }),
   Object.freeze({ name: "workers_ai", suffix: "/ai/models/search?per_page=1" }),
