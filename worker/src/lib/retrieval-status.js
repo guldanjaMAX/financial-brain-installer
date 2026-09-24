@@ -52,7 +52,12 @@ export const NO_RESULTS_GAP = Object.freeze({
 const CAUSES = {
   vector: {
     cause: "the vector index is still building, so meaning-based search could not cover all stored records",
-    remedy: "Try again once `brain drain` reports the projection complete.",
+    // It finishes on its own: a scheduled background drain runs on every cron
+    // cycle. A looped manual `brain drain` measured 31/min against 61/min
+    // sustained idle, because it competes for the server's own drain lease
+    // instead of helping it, so the remedy must actively steer the reader away
+    // from that command rather than merely omit encouraging it.
+    remedy: "It finishes on its own in the background. Running `brain drain` by hand does not speed it up. Try again shortly.",
   },
   "no-embedding": {
     cause: "the embedding model did not answer, so only keyword search ran and anything phrased differently to the source text was never reachable",

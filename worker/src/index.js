@@ -996,7 +996,7 @@ async function handleThink(
         ? scopedDetail
         : degradedReason === "vector-query-failed"
           ? "Meaning-based search failed. Keyword evidence remains available, but differently phrased evidence may be missing. Try again shortly, and run `brain health` if it keeps happening."
-          : "The vector index is not fully query-ready. Keyword evidence remains available, but new or differently phrased evidence may be missing until `brain drain` confirms the complete projection.",
+          : "The vector index is not fully query-ready. Keyword evidence remains available, but new or differently phrased evidence may be missing until the index catches up. It is still building in the background and finishes on its own; running `brain drain` by hand does not speed it up.",
     });
   }
   if (degraded === "fts") {

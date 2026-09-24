@@ -3076,8 +3076,12 @@ export async function diagnose(env, {
         (needsAttention
           ? "The age of this backlog needs attention; this snapshot alone cannot prove the scheduled drain has stopped."
           : "The queue and exact vector visibility still need to converge."),
+      // Active or arriving means the scheduled background drain is already the
+      // one doing this work; a manual `brain drain` would only compete with it
+      // for the same lease (measured 31/min looped vs. 61/min sustained idle),
+      // so that branch must not offer it as an alternative to waiting.
       action: remedyForState(env, active || arriving
-        ? "Let the active work finish, then check again or run `brain drain <manifest>`."
+        ? "Let the active work finish, then check again. It clears on its own in the background, and running `brain drain` by hand does not speed it up."
         : "Run `brain drain <manifest>` and check the next receipt. If the backlog stops progressing, check this Worker's scheduled trigger.") });
   });
 
@@ -3115,7 +3119,10 @@ export async function diagnose(env, {
     add({ id: "vector_retries", area: "integrity", severity: "info", count: n,
       title: `${n} vector operation(s) are awaiting another attempt`,
       detail: `${delayed} are waiting for their recorded retry delay; ${n - delayed} have no remaining recorded delay. Exact vector visibility is still pending, and a previous attempt alone does not mean the operation needs repair.`,
-      action: remedyForState(env, "Let the scheduled drain retry eligible work, then check the next receipt or run `brain drain <manifest>`. If progress stops, inspect the next drain result.") });
+      // A previous attempt alone does not mean the operation needs repair (see
+      // the detail above): this is ordinary retry backoff, not a stall, so the
+      // remedy must not send the reader to a manual `brain drain` loop either.
+      action: remedyForState(env, "Let the scheduled drain retry eligible work; it retries automatically in the background, and running `brain drain` by hand does not speed it up. If progress stalls, inspect the next drain result.") });
   });
 
   if (chunkScan.complete && chunkScan.counts.orphaned) {
@@ -6748,10 +6755,15 @@ export async function vectorReadiness(env) {
         : submitted > 0
           ? "accepted_mutation_needs_confirmation"
           : "vector_work_queued";
-      action = remedyForState(env, "Run `brain drain <manifest>`; it confirms provider visibility without re-embedding accepted rows.");
+      // Queued, submitted-and-processing, and submitted-awaiting-confirmation
+      // are all states the scheduled background drain clears on its own cron
+      // cycle (see worker/src/index.js `scheduled`). A manual `brain drain`
+      // does not reach Vectorize any faster, it only contends for the same
+      // drain lease, so the remedy must say so instead of prompting a retry.
+      action = remedyForState(env, "This clears on its own as the scheduled background drain submits and confirms it; running `brain drain` by hand does not speed it up.");
     } else if (!mutationProcessed) {
       reason = "accepted_mutation_processing";
-      action = remedyForState(env, "Wait for Vectorize processing, then run `brain drain <manifest>` again.");
+      action = remedyForState(env, "Wait for Vectorize processing; it completes on its own as the scheduled background drain confirms it, and running `brain drain` by hand does not speed it up.");
     } else if (!countsMatch) {
       reason = "vector_count_mismatch";
       action = remedyForState(env, vectorCount < expected
@@ -6759,7 +6771,10 @@ export async function vectorReadiness(env) {
         : "Vectorize has provider-only vectors that reindex cannot enumerate. Use a reviewed recovery to recreate/rebind the index and metadata indexes, then reindex and verify exact readiness.");
     } else {
       reason = "projection_unverified";
-      action = remedyForState(env, "Run `brain drain <manifest>` to finish the exact vector verification receipt.");
+      // Every count already matches; only the store's own verified flag has not
+      // been flipped yet. The next scheduled background drain performs that
+      // exact bookkeeping on its own, so this is not a stall either.
+      action = remedyForState(env, "This finishes on its own on the next scheduled background drain; running `brain drain` by hand does not speed it up.");
     }
   }
   return {
