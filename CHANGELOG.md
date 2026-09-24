@@ -10,6 +10,19 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Backups and an owner-approved restore path now cover accidental changes.**
+  `brain backup` keeps the manifest and resumable source state in an owner-held
+  folder, records a D1 restore time, and never copies the admin key. A daily
+  macOS schedule and retention are available. Risky ingest, removal, update,
+  and rollback commands take a restore point first. `brain undo-last` previews
+  the newest protected operation boundary, while `brain restore --to <time>`
+  binds the exact plan to an approval fingerprint, restores D1, rebuilds a new
+  Vectorize index from D1, and accepts success only after the counts and empty
+  outbox prove the semantic projection. To check: run `brain backup <manifest>`
+  and confirm its receipt says `admin_key_included: false`; preview undo or
+  restore and confirm nothing changes before the printed fingerprint is
+  approved.
+
 - **Re-sending unchanged files no longer rebuilds their meaning-based search.**
   When a newer kit re-sends a file whose text has not changed, for example to
   add the exact-byte provenance an older kit never recorded, the Brain still

@@ -142,10 +142,24 @@ and exact `getByIds` readback must match that generation before the batch
 receipt can be cleared. Only a fully verified projection permits the active
 deployment. Direct `brain migrate` refuses a live D1 install that needs the writer
 protocol migrations because it cannot prove that older Worker invocations are
-quiescent. Rollback is explicit and does not pretend Vectorize is
-transactionally restored with D1. It leaves the Worker paused until supervised
-recovery recreates/rebinds a clean Vectorize index, because reindex cannot
-enumerate provider-only post-bookmark ids.
+quiescent. Legacy `brain rollback` remains an explicit D1-only emergency path
+and does not pretend Vectorize is transactionally restored with D1. It leaves
+the Worker paused because reindex cannot enumerate provider-only post-bookmark
+ids.
+
+The owner restore lane closes that projection gap. Local backups preserve only
+the manifest and adjacent resumable source state; D1 Time Travel remains the
+durable corpus history and Vectorize remains derived. Every mutating CLI lane
+shares one local lifecycle lock and first publishes an owner restore point.
+Restore resolves an RFC3339 time to a D1 bookmark, binds the current and target
+bookmarks, manifest hash, aggregate counts, and deterministic replacement index
+to one approval fingerprint, and refuses active mutation. After exact approval
+it takes a second restore point, runs the existing writer pause and D1 restore,
+requires the returned undo bookmark, creates and binds a clean Vectorize index,
+then uses the paused bootstrap to reproject every D1 chunk. It returns active
+only after chunk and vector counts match and the outbox is empty. The old index
+is retained, and one aggregate before/after receipt records the completed
+boundary.
 
 Verified recovery keeps its stage machine provider-neutral. The disposable
 Cloudflare adapter supplies the live boundaries and binds the reviewed

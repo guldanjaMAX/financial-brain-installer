@@ -201,6 +201,16 @@ import {
   SourceIngestLockError,
   withSourceIngestLock,
 } from "./operations/source-ingest-lock.mjs";
+import {
+  createOwnerBackup,
+  latestOwnerRestorePoint,
+  pruneOwnerBackups,
+  writeOwnerRestoreReceipt,
+} from "./operations/owner-backup.mjs";
+import {
+  executeOwnerRestore,
+  normalizeRestoreTime,
+} from "./operations/owner-restore.mjs";
 import { writeClaudeWorkspaceGuide } from "./operations/claude-workspace.mjs";
 import {
   captureTechnicianSkillRepairSnapshot,
@@ -410,7 +420,7 @@ const die = (s) => {
 
 const SUPPORT_REMOTE_COMMANDS = new Set([
   "check", "deploy", "diagnose", "drain", "health", "migrate", "provision",
-  "reindex", "rollback", "secrets", "update", "upgrade", "verify",
+  "reindex", "restore", "rollback", "secrets", "undo-last", "update", "upgrade", "verify",
 ]);
 export const PROVIDER_CONNECTOR_IDS = Object.freeze([
   "quickbooks", "slack", "notion", "microsoft", "dropbox", "hubspot",
@@ -5878,9 +5888,15 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
     }
     revalidateUpdateManifest(pin, "rollback vector-drain quiescence");
   }
-  await callCloudflare(`/accounts/${acct.id}/d1/database/${dbId}/time_travel/restore?bookmark=${encodeURIComponent(bookmark)}`, {
+  const restoreResponse = await callCloudflare(`/accounts/${acct.id}/d1/database/${dbId}/time_travel/restore?bookmark=${encodeURIComponent(bookmark)}`, {
     method: "POST",
   });
+  if (!validD1Bookmark(restoreResponse?.previous_bookmark) && options.requirePreviousBookmark === true) {
+    die(
+      "D1 reported a restore but did not return the pre-restore bookmark.\n" +
+        "      Keep the Worker paused and do not retry blindly; the current recovery state needs review.",
+    );
+  }
   revalidateUpdateManifest(pin, "rollback restore");
   ok("D1 restored");
   if (usesD1VectorOutbox) {
@@ -5986,15 +6002,17 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
     // recovery creates/rebinds a clean index and rebuilds exact readiness.
   }
   // A rolled-back run must never become the baseline for the next upgrade.
-  const marked = await queryDatabase(
-    acct.id,
-    dbId,
-    "UPDATE upgrade_runs SET status = 'rolled_back' WHERE id = (SELECT MAX(id) FROM upgrade_runs)",
-  ).then(() => true, () => false);
-  if (marked) {
-    info("the most recent upgrade run is marked rolled_back so it cannot become the next baseline.");
-  } else {
-    warn("D1 was restored, but its upgrade-history marker could not be updated. Record this recovery manually.");
+  if (options.markUpgradeRolledBack !== false) {
+    const marked = await queryDatabase(
+      acct.id,
+      dbId,
+      "UPDATE upgrade_runs SET status = 'rolled_back' WHERE id = (SELECT MAX(id) FROM upgrade_runs)",
+    ).then(() => true, () => false);
+    if (marked) {
+      info("the most recent upgrade run is marked rolled_back so it cannot become the next baseline.");
+    } else {
+      warn("D1 was restored, but its upgrade-history marker could not be updated. Record this recovery manually.");
+    }
   }
   warn("the Worker remains paused. Recreate/rebind a clean Vectorize index with every metadata index under supervised recovery, then run `brain update <manifest>` to rebuild, prove exact readiness, and return to active mode. Reindex and drain remain refused until active.");
   return {
@@ -6002,8 +6020,316 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
     restored: true,
     databaseId: dbId,
     bookmark,
+    previousBookmark: validD1Bookmark(restoreResponse?.previous_bookmark) ? restoreResponse.previous_bookmark : null,
+    restoredBookmark: restoreResponse?.bookmark || bookmark,
     requiresVectorizeRecreation: usesD1VectorOutbox,
   };
+}
+
+function ownerMutationStatePath(manifestPath) {
+  return join(dirname(resolve(manifestPath)), ".brain-owner-mutation-v1");
+}
+
+/** One local exclusion boundary shared by ingest, update, restore, and undo. */
+export async function withOwnerMutationLock(manifestPath, action, options = {}) {
+  try {
+    return await (options.withLock ?? withSourceIngestLock)({
+      manifestPath,
+      sourceName: "lifecycle",
+      statePath: ownerMutationStatePath(manifestPath),
+      dryRun: false,
+      ...(options.lockOptions || {}),
+    }, action);
+  } catch (error) {
+    if (error instanceof SourceIngestLockError || /^source_ingest_lock_/.test(String(error?.code || ""))) {
+      die(
+        "this Brain already has an ingest, update, restore, or undo operation running.\n" +
+          "      Nothing from this command was changed. Let that operation finish, then preview again.",
+      );
+    }
+    throw error;
+  }
+}
+
+export async function withAutomaticRestorePoint(manifestPath, reason, action, options = {}) {
+  const create = options.createOwnerBackup ?? createOwnerBackup;
+  const point = await create(manifestPath, {
+    reason,
+    resolveEncryptionKey: (locator) => readAdminKeyFromKeychain(parseAdminKeySecretReference(locator)),
+    ...(options.backupOptions || {}),
+  });
+  info(`automatic restore point saved (${point.restorePoint.timestamp})`);
+  return action({ restorePoint: point.restorePoint, backupPath: point.path });
+}
+
+export async function cmdBackup(manifestPath, options = {}) {
+  if (!manifestPath) die("usage: brain backup <manifest> [--json]");
+  const flags = options.flags ?? parseFlags(process.argv.slice(4));
+  assertKnownFlags(flags, ["json", "scheduled"], "brain backup");
+  const result = await (options.createOwnerBackup ?? createOwnerBackup)(manifestPath, {
+    reason: flags.scheduled ? "scheduled" : "manual",
+    resolveEncryptionKey: (locator) => readAdminKeyFromKeychain(parseAdminKeySecretReference(locator)),
+    ...(options.backupOptions || {}),
+  });
+  const retention = (options.pruneOwnerBackups ?? pruneOwnerBackups)(manifestPath, options.retentionOptions || {});
+  const output = {
+    contract_version: 1,
+    status: "saved",
+    path: result.path,
+    restore_point: result.restorePoint,
+    files: result.files.length,
+    retained_removed: retention.removed.length,
+    admin_key_included: false,
+  };
+  if (flags.json) console.log(JSON.stringify(output));
+  else {
+    ok(`owner backup saved to ${result.path}`);
+    info(`D1 restore time: ${result.restorePoint.timestamp}`);
+    info("the admin key was not copied; keep its recovery copy in the owner's password manager.");
+    if (retention.removed.length) info(`${retention.removed.length} expired owned backup(s) removed by retention`);
+  }
+  return output;
+}
+
+function commitManifestVectorIndex(manifestPath, expectedFingerprint, replacement) {
+  const pin = pinUpdateManifest(manifestPath);
+  if (pin.fingerprint !== expectedFingerprint) {
+    throw new Error("the manifest changed before the replacement Vectorize binding was committed");
+  }
+  const manifest = JSON.parse(pin.raw);
+  manifest.infrastructure = { ...(manifest.infrastructure || {}) };
+  manifest.infrastructure.cloudflare = { ...(manifest.infrastructure.cloudflare || {}), vectorize_index: replacement };
+  const bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  const temporary = join(dirname(pin.target), `.${basename(pin.target)}.restore-${process.pid}-${randomBytes(8).toString("hex")}.tmp`);
+  let descriptor;
+  try {
+    descriptor = openSync(temporary,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW || 0),
+      pin.stat.mode & 0o777);
+    if (writeSync(descriptor, bytes, 0, bytes.length, 0) !== bytes.length) {
+      throw new Error("the restored manifest binding write was incomplete");
+    }
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    revalidateUpdateManifest(pin, "restore vector binding commit");
+    renameSync(temporary, pin.target);
+    const verified = pinUpdateManifest(pin.target);
+    if (verified.manifest?.infrastructure?.cloudflare?.vectorize_index !== replacement) {
+      throw new Error("the replacement Vectorize binding did not read back");
+    }
+    return verified;
+  } finally {
+    bytes.fill(0);
+    if (descriptor !== undefined) closeSync(descriptor);
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+}
+
+export async function rebuildRestoredProjection(manifestPath, plan, options = {}) {
+  const callCloudflare = options.cf ?? cf;
+  const deploy = options.cmdDeploy ?? cmdDeploy;
+  const upgrade = options.cmdUpgrade ?? cmdUpgrade;
+  const pin = pinUpdateManifest(manifestPath);
+  if (pin.fingerprint !== plan.manifest_fingerprint) {
+    throw new Error("the manifest changed after restore approval; the Worker remains paused");
+  }
+  const { databaseId, declaredAccountId } = cloudflareIdentity(pin.manifest);
+  const resolveRestoreAccount = options.resolveAccount ?? resolveAccount;
+  const account = await resolveRestoreAccount(pin.manifest);
+  if (!account?.id || (declaredAccountId && declaredAccountId !== account.id)) {
+    throw new Error("the restore credential no longer matches the pinned manifest account");
+  }
+  const name = plan.replacement_index;
+  let existing = null;
+  try {
+    existing = await callCloudflare(`/accounts/${account.id}/vectorize/v2/indexes/${encodeURIComponent(name)}`);
+  } catch (error) {
+    // Only a confirmed absence permits creation. Authentication, transport,
+    // and provider failures must never be mistaken for an unused name.
+    if (!/\(404\)|\bnot found\b|\bdoes not exist\b/i.test(String(error?.message || error))) throw error;
+  }
+  if (existing) {
+    const dimensions = Number(existing?.config?.dimensions ?? existing?.dimensions);
+    const vectors = Number(existing?.vectorCount ?? existing?.vectorsCount ?? 0);
+    if (dimensions !== 768 || vectors !== 0) {
+      throw new Error("the deterministic replacement Vectorize index is not an empty compatible recovery target");
+    }
+  } else {
+    await callCloudflare(`/accounts/${account.id}/vectorize/v2/indexes`, {
+      method: "POST",
+      body: { name, description: "Financial Brain restore projection", config: { dimensions: 768, metric: "cosine" } },
+    });
+  }
+  for (const { propertyName, indexType } of VECTOR_METADATA_INDEXES) {
+    await ensureMetadataIndex({
+      propertyName,
+      indexType,
+      create: () => callCloudflare(`/accounts/${account.id}/vectorize/v2/indexes/${encodeURIComponent(name)}/metadata_index/create`, {
+        method: "POST",
+        body: { propertyName, indexType },
+      }),
+      exists: async () => {
+        const result = await callCloudflare(`/accounts/${account.id}/vectorize/v2/indexes/${encodeURIComponent(name)}/metadata_index/list`);
+        return (result?.metadataIndexes || []).some((row) =>
+          row.propertyName === propertyName && String(row.indexType).toLowerCase() === indexType);
+      },
+      sleep: options.sleep,
+      log: options.log ?? ok,
+      onFatal: (message) => { throw new Error(message); },
+    });
+  }
+  const rebound = commitManifestVectorIndex(manifestPath, plan.manifest_fingerprint, name);
+  await deploy(rebound.target, { persistDomain: false, pauseVectorDrainForUpgrade: true });
+  await upgrade(rebound.target, options.upgradeOptions || {});
+  return { databaseId, replacementIndex: name };
+}
+
+async function observeOwnerRestore(manifestPath, manifest, targetTime, options = {}) {
+  const resolveRestoreAccount = options.resolveAccount ?? resolveAccount;
+  const callCloudflare = options.cf ?? cf;
+  const queryDatabase = options.d1Query ?? d1Query;
+  const account = await resolveRestoreAccount(manifest);
+  const { databaseId, declaredAccountId } = cloudflareIdentity(manifest);
+  if (!account?.id || (declaredAccountId && declaredAccountId !== account.id)) {
+    throw new Error("the restore credential does not match the manifest account");
+  }
+  const current = await callCloudflare(`/accounts/${account.id}/d1/database/${databaseId}/time_travel/bookmark`);
+  const target = await callCloudflare(
+    `/accounts/${account.id}/d1/database/${databaseId}/time_travel/bookmark?timestamp=${encodeURIComponent(targetTime)}`,
+  );
+  if (!validD1Bookmark(current?.bookmark) || !validD1Bookmark(target?.bookmark)) {
+    throw new Error("D1 did not return exact current and target restore bookmarks");
+  }
+  const aggregate = await queryDatabase(account.id, databaseId,
+    `SELECT (SELECT COUNT(*) FROM documents) AS documents,
+            (SELECT COUNT(*) FROM chunks) AS chunks,
+            (SELECT COUNT(*) FROM sync_runs WHERE finished_at IS NULL) AS active_ingests,
+            (SELECT COUNT(*) FROM upgrade_runs
+              WHERE finished_at IS NULL OR status = 'running') AS active_updates`);
+  const row = aggregate?.results?.[0];
+  const vectorName = manifest.infrastructure.cloudflare.vectorize_index;
+  const vector = await callCloudflare(`/accounts/${account.id}/vectorize/v2/indexes/${encodeURIComponent(vectorName)}`);
+  return {
+    account,
+    databaseId,
+    currentBookmark: current.bookmark,
+    targetBookmark: target.bookmark,
+    before: {
+      documents: Number(row?.documents),
+      chunks: Number(row?.chunks),
+      vectors: Number(vector?.vectorCount ?? vector?.vectorsCount),
+      active_ingests: Number(row?.active_ingests),
+      active_updates: Number(row?.active_updates),
+    },
+  };
+}
+
+export async function cmdRestore(manifestPath, request, options = {}) {
+  let restorePoint = null;
+  let observation = null;
+  const dependencies = {
+    loadPinnedManifest: () => {
+      const pin = pinUpdateManifest(manifestPath);
+      return { manifest: pin.manifest, fingerprint: pin.fingerprint, pin };
+    },
+    observe: async ({ manifest, targetTime }) => {
+      observation = await observeOwnerRestore(manifestPath, manifest, targetTime, options);
+      return observation;
+    },
+    createRestorePoint: async ({ plan }) => {
+      restorePoint = await (options.createOwnerBackup ?? createOwnerBackup)(manifestPath, {
+        reason: `pre-${request.operation || "restore"}`,
+        bookmark: plan.current_bookmark,
+        resolveEncryptionKey: (locator) => readAdminKeyFromKeychain(parseAdminKeySecretReference(locator)),
+      });
+      info(`automatic pre-restore point saved (${restorePoint.restorePoint.timestamp})`);
+    },
+    restoreD1: async ({ plan }) => {
+      const result = await cmdRollback(manifestPath, plan.target_bookmark, {
+        confirmed: true,
+        markUpgradeRolledBack: false,
+        requirePreviousBookmark: true,
+        ...(options.rollbackOptions || {}),
+      });
+      return { previousBookmark: result.previousBookmark, restoredBookmark: result.restoredBookmark };
+    },
+    rebuildProjection: async ({ plan }) => rebuildRestoredProjection(manifestPath, plan, options),
+    readAfter: async ({ plan }) => {
+      const pin = pinUpdateManifest(manifestPath);
+      const account = observation.account;
+      const queryDatabase = options.d1Query ?? d1Query;
+      const callCloudflare = options.cf ?? cf;
+      const aggregate = await queryDatabase(account.id, observation.databaseId,
+        `SELECT (SELECT COUNT(*) FROM documents) AS documents,
+                (SELECT COUNT(*) FROM chunks) AS chunks,
+                (SELECT COUNT(*) FROM vector_outbox) AS pending_outbox`);
+      const row = aggregate?.results?.[0];
+      const indexName = pin.manifest.infrastructure.cloudflare.vectorize_index;
+      if (indexName !== plan.replacement_index) throw new Error("the final manifest does not bind the approved replacement index");
+      const vector = await callCloudflare(`/accounts/${account.id}/vectorize/v2/indexes/${encodeURIComponent(indexName)}`);
+      return {
+        documents: Number(row?.documents),
+        chunks: Number(row?.chunks),
+        vectors: Number(vector?.vectorCount ?? vector?.vectorsCount),
+        pending_outbox: Number(row?.pending_outbox),
+      };
+    },
+    writeReceipt: async ({ receipt }) => {
+      const path = (options.writeOwnerRestoreReceipt ?? writeOwnerRestoreReceipt)(manifestPath, receipt);
+      info(`restore receipt saved to ${path}`);
+    },
+  };
+  const result = await executeOwnerRestore({ manifestPath, ...request }, dependencies);
+  if (result.status === "preview") {
+    warn("restore preview only: nothing was changed.");
+    info(`target ${result.plan.target_time}`);
+    info(`${result.plan.before.documents} document(s), ${result.plan.before.chunks} chunk(s), ${result.plan.before.vectors} vector(s) now`);
+    warn("D1 will be restored in place, a clean Vectorize index will be created, and the old index will be retained.");
+    info(`approval fingerprint: ${result.plan.approval_fingerprint}`);
+    info("Re-run the same command with --approve <fingerprint> after owner review.");
+  } else {
+    ok("D1 restored and the clean Vectorize projection exactly verified");
+    info(`${result.receipt.after.documents} document(s), ${result.receipt.after.chunks} chunk(s), ${result.receipt.after.vectors} vector(s)`);
+  }
+  return result;
+}
+
+async function dispatchRestore(manifestPath) {
+  const flags = parseFlags(process.argv.slice(4));
+  assertKnownFlags(flags, ["to", "approve"], "brain restore");
+  if (!flags.to || flags.to === true) die("usage: brain restore <manifest> --to <RFC3339-time> [--approve <fingerprint>]");
+  const targetTime = normalizeRestoreTime(flags.to);
+  if (flags.approve !== undefined && (typeof flags.approve !== "string" || !/^[a-f0-9]{64}$/.test(flags.approve))) {
+    die("--approve needs the exact lowercase 64-character fingerprint printed by the restore preview");
+  }
+  return withOwnerMutationLock(manifestPath, () =>
+    withManifestCloudflareControl(manifestPath, () => cmdRestore(manifestPath, {
+      targetTime,
+      approval: flags.approve || null,
+      operation: "restore",
+    })));
+}
+
+async function dispatchUndoLast(manifestPath) {
+  const flags = parseFlags(process.argv.slice(4));
+  assertKnownFlags(flags, ["approve"], "brain undo-last");
+  if (flags.approve !== undefined && (typeof flags.approve !== "string" || !/^[a-f0-9]{64}$/.test(flags.approve))) {
+    die("--approve needs the exact lowercase 64-character fingerprint printed by the undo preview");
+  }
+  const point = latestOwnerRestorePoint(manifestPath, {
+    reasons: ["pre-ingest", "pre-load", "pre-forget", "pre-update"],
+  });
+  if (!point) die("there is no owner restore point to undo. Nothing was changed.");
+  const targetTime = point.receipt.restore_point?.timestamp;
+  if (!targetTime) die("the newest owner backup has no valid restore time. Nothing was changed.");
+  info(`undo target: the last recorded ${point.receipt.reason || "mutation"} restore point at ${targetTime}`);
+  return withOwnerMutationLock(manifestPath, () =>
+    withManifestCloudflareControl(manifestPath, () => cmdRestore(manifestPath, {
+      targetTime,
+      approval: flags.approve || null,
+      operation: "undo-last",
+    })));
 }
 
 /* ------------------------------------------------------------ acceptance */
@@ -22532,21 +22858,48 @@ export function schedulePlatformLimitation(
 
 export async function cmdSchedule(manifestPath, options = {}) {
   if (!manifestPath) {
-    die("usage: brain schedule <manifest> [--install|--status|--remove] [--folder|--provider <provider>]");
+    die("usage: brain schedule <manifest> [--install|--status|--remove] [--backup|--folder|--provider <provider>]");
   }
   const flags = options.flags ?? parseFlags(process.argv.slice(4));
-  assertKnownFlags(flags, ["install", "status", "remove", "folder", "provider"], "brain schedule");
+  assertKnownFlags(flags, ["install", "status", "remove", "backup", "folder", "provider"], "brain schedule");
   const requested = ["install", "status", "remove"].filter((name) => flags[name]);
   if (requested.length > 1) {
     die("choose only one of --install, --status, or --remove");
   }
   const action = requested[0] || "status";
-  if (flags.folder && flags.provider) {
-    die("choose only one scheduler lane: --folder or --provider <provider>");
+  if ([Boolean(flags.backup), Boolean(flags.folder), Boolean(flags.provider)].filter(Boolean).length > 1) {
+    die("choose only one scheduler lane: --backup, --folder, or --provider <provider>");
   }
   const provider = flags.provider ? String(flags.provider).trim().toLowerCase() : null;
   if (provider && !PROVIDER_CONNECTOR_IDS.includes(provider)) {
     die(`--provider must be one of ${PROVIDER_CONNECTOR_IDS.join(", ")}`);
+  }
+  if (flags.backup) {
+    const platform = options.platform ?? process.platform;
+    if (platform !== "darwin") {
+      const name = platform === "win32" ? "Windows Task Scheduler" : "cron";
+      die(
+        `automatic owner-backup installation is currently implemented with macOS LaunchAgents.\n` +
+          `      On this machine, schedule this command daily with ${name}: brain backup ${commandPath(manifestPath)}`,
+      );
+    }
+    const scheduler = options.backupScheduler ?? await import("./operations/backup-scheduler.mjs");
+    const schedulerOptions = options.schedulerOptions || {};
+    const result = action === "install"
+      ? scheduler.installBackupScheduler(manifestPath, schedulerOptions)
+      : action === "remove"
+        ? scheduler.removeBackupScheduler(manifestPath, schedulerOptions)
+        : scheduler.statusBackupScheduler(manifestPath, schedulerOptions);
+    for (const warning of result.warnings || []) warn(warning);
+    if (action === "install") ok(`daily owner backup installed for ${result.cron}`);
+    else if (action === "remove") ok(result.removed || result.loaded ? "owner backup schedule removed" : "owner backup schedule was not installed");
+    else if (!result.installed) warn("owner backup schedule is not installed on this Mac");
+    else if (!result.loaded) warn("owner backup schedule has a definition but is not loaded by launchd");
+    else if (result.definitionDrift) warn("the installed owner backup schedule does not match the manifest; reinstall it");
+    else ok(`owner backup schedule is installed for ${result.cron}`);
+    info(`definition: ${result.plistPath}`);
+    info(`logs: ${result.stdoutPath} and ${result.stderrPath}`);
+    return result;
   }
   const limitation = schedulePlatformLimitation(
     options.platform ?? process.platform,
@@ -25730,10 +26083,16 @@ async function dispatchDoctor(manifestPath) {
     if (!manifestPath || manifestPath.startsWith("--") || !existsSync(manifestPath)) {
       die("usage: brain doctor <manifest> --repair [--yes]\n      or: brain doctor <manifest> --rollback [--yes]");
     }
-    return withManifestCloudflareControl(
+    const run = () => withManifestCloudflareControl(
       manifestPath,
       () => cmdDoctorRepair(manifestPath, { action: rollbackRequested ? "rollback" : "repair", confirmed: flags.yes === true }),
     );
+    if (flags.yes !== true) return run();
+    return withOwnerMutationLock(manifestPath, () => withAutomaticRestorePoint(
+      manifestPath,
+      rollbackRequested ? "pre-rollback" : "pre-update",
+      run,
+    ));
   }
   return cmdDoctor(manifestPath);
 }
@@ -26905,6 +27264,28 @@ async function cmdImport(target) {
   return cmdImportBank(m, manifestPath, parseFlags(process.argv.slice(4)));
 }
 
+async function dispatchUpdateWithRestorePoint(path) {
+  if (cliBoundaryCommand !== "update") {
+    return dispatchUpdateCli(process.argv.slice(3), { boundaryCommand: cliBoundaryCommand });
+  }
+  const flags = parseFlags(process.argv.slice(3));
+  let target = updateCommandTarget(path, flags) || path;
+  if (!target) {
+    try {
+      target = discoverInstalledManifest(undefined)?.path;
+    } catch {
+      // The canonical dispatcher renders the established recovery guidance.
+    }
+  }
+  if (!target || String(target).startsWith("--")) {
+    // Let the canonical update parser render its own usage without touching a
+    // lock or creating a local restore point for an invalid invocation.
+    return dispatchUpdateCli(process.argv.slice(3), { boundaryCommand: cliBoundaryCommand });
+  }
+  return withOwnerMutationLock(target, () => withAutomaticRestorePoint(target, "pre-update", () =>
+    dispatchUpdateCli(process.argv.slice(3), { boundaryCommand: cliBoundaryCommand })));
+}
+
 const commands = {
   init: cmdInit,
   setup: cmdSetupInteractive,
@@ -26925,17 +27306,26 @@ const commands = {
   "provenance-repair": cmdProvenanceRepairInteractive,
   migrate: (path) => withManifestCloudflareControl(path, () => cmdMigrate(path)),
   "ocr-preflight": cmdOcrPreflightInteractive,
-  ingest: cmdIngest,
+  ingest: (path) => process.argv.includes("--dry-run")
+    ? cmdIngest(path)
+    : withOwnerMutationLock(path, () =>
+      withAutomaticRestorePoint(path, "pre-ingest", () => cmdIngest(path))),
   "ingest-file": (_path) => cmdFirstSourceFile(process.argv.slice(3), {
     boundaryCommand: cliBoundaryCommand,
   }),
   import: cmdImport,
-  load: cmdLoad,
+  load: (path) => process.argv.includes("--dry-run")
+    ? cmdLoad(path)
+    : withOwnerMutationLock(path, () =>
+      withAutomaticRestorePoint(path, "pre-load", () => cmdLoad(path))),
   connect: cmdConnect,
   disconnect: cmdDisconnect,
   status: (path) => withManifestCloudflareControl(path, () => cmdStatus(path)),
   sources: cmdSources,
-  forget: (path) => withManifestCloudflareControl(path, () => cmdForget(path)),
+  forget: (path) => process.argv.includes("--yes")
+    ? withOwnerMutationLock(path, () => withAutomaticRestorePoint(path, "pre-forget", () =>
+      withManifestCloudflareControl(path, () => cmdForget(path))))
+    : withManifestCloudflareControl(path, () => cmdForget(path)),
   drain: cmdDrain,
   reindex: cmdReindex,
   diagnose: cmdDiagnose,
@@ -26947,11 +27337,15 @@ const commands = {
   invite: cmdInvite,
   devices: cmdDevices,
   token: cmdToken,
-  update: (_path) => dispatchUpdateCli(process.argv.slice(3), {
-    boundaryCommand: cliBoundaryCommand,
-  }),
-  upgrade: cmdUpgradeInteractive,
-  rollback: dispatchRollback,
+  update: dispatchUpdateWithRestorePoint,
+  upgrade: (path) => withOwnerMutationLock(path, () => withAutomaticRestorePoint(path, "pre-update", () =>
+    cmdUpgradeInteractive(path))),
+  rollback: (path) => process.argv.includes("--yes")
+    ? withOwnerMutationLock(path, () => withAutomaticRestorePoint(path, "pre-rollback", () => dispatchRollback(path)))
+    : dispatchRollback(path),
+  backup: cmdBackup,
+  restore: dispatchRestore,
+  "undo-last": dispatchUndoLast,
   schedule: cmdSchedule,
   support: cmdSupport,
   tools: cmdLocalToolsInteractive,
@@ -26980,6 +27374,7 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "ingest-file-apply",
   "assistant-repair",
   "ocr-preflight",
+  "backup",
 ]);
 
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
@@ -27119,6 +27514,10 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            local folder declared in corpora.local_folder (macOS)
     brain schedule   <manifest> --install --provider <id>  install unattended refresh for a
                                            connected OAuth provider (macOS)
+    brain schedule   <manifest> --install --backup  install the daily owner-held backup with
+                                           manifest-configured retention (macOS)
+    brain backup     <manifest>            owner-held manifest and resume-state snapshot plus
+                                           an exact D1 restore time; never copies the admin key
     brain support    [--preview|--export <file>]  inspect private local issue notes
     brain support    --explain <issue-code>       plain-language recovery for a typed issue
 
@@ -27141,10 +27540,15 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain doctor     <manifest> --rollback preview restore to the pre-migration bookmark (--yes performs it)
     brain doctor     <manifest> --repair-checksum  reconcile an applied migration whose file changed (--yes to apply)
     brain rollback   <manifest> <bookmark> preview D1-only restore (--yes performs it)
+    brain restore    <manifest> --to <RFC3339-time>  preview an in-place D1 restore plus clean
+                                           Vectorize rebuild; apply only with --approve <fingerprint>
+    brain undo-last  <manifest>            preview return to the newest automatic restore point;
+                                           apply only with --approve <fingerprint>
     brain schedule   <manifest>            inspect unattended Drive refresh
     brain schedule   <manifest> --remove   remove it and preserve its logs
     brain schedule   <manifest> --folder   inspect (or --install/--remove) the watched folder lane
     brain schedule   <manifest> --provider <id>  inspect (or --install/--remove) that provider lane
+    brain schedule   <manifest> --backup   inspect (or --install/--remove) the owner-backup lane
     brain disconnect imessage <manifest>   stop live capture, flush open sessions, remove the agent
     brain disconnect whatsapp <manifest>   stop the capture daemon and its drain, flush, remove both agents
     brain disconnect zoom     <manifest>   remove the Zoom secrets so the webhook refuses deliveries

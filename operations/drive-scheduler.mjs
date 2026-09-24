@@ -798,7 +798,8 @@ function validateSchedulerReference(reference) {
   if (typeof reference.cron !== "string" || !reference.cron.trim()) {
     throw new Error(spec.cronMissingError);
   }
-  if (typeof reference.manifest?.brain?.domain !== "string" || !reference.manifest.brain.domain.trim()) {
+  if (spec.requiresDomain !== false &&
+      (typeof reference.manifest?.brain?.domain !== "string" || !reference.manifest.brain.domain.trim())) {
     throw new Error(spec.domainMissingError);
   }
   if (spec.validateExtras) spec.validateExtras(reference);

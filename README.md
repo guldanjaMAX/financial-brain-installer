@@ -96,6 +96,25 @@ Windows PowerShell:
 & "$env:LOCALAPPDATA\FinancialBrain\brain.cmd" doctor
 ```
 
+## Keep a recovery point
+
+`brain backup <manifest>` saves an owner-held copy of the manifest and adjacent
+resumable source state. It records the exact UTC time that D1 Time Travel can
+resolve, and it never copies the Brain admin key. Put
+`operations.backup.directory` on owner-controlled off-computer storage, then on
+macOS install the daily job with:
+
+```bash
+brain backup ./brain.manifest.json
+brain schedule ./brain.manifest.json --install --backup
+```
+
+The default retention is 30 days. Optional AES-256-GCM encryption uses a
+separate Keychain key selected by `operations.backup.encryption_key_secret`.
+The key value never belongs in the manifest or a command. See
+[If something goes wrong](docs/RECOVERY.md#if-something-goes-wrong) before
+using `brain undo-last` or `brain restore`.
+
 ---
 
 ## Set it up

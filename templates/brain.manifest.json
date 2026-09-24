@@ -351,6 +351,20 @@
     ],
     "ingest_cron": "0 9 * * *",
     "folder_ingest_cron": "0 * * * *",
+    "backup": {
+      "_comment": [
+        "brain backup preserves this manifest and adjacent resumable source state,",
+        "plus a UTC D1 Time Travel reference. It never copies the admin key.",
+        "Use brain schedule <manifest> --install --backup for the daily macOS job.",
+        "Set directory to owner-controlled off-computer storage for computer-loss recovery.",
+        "Encryption is optional and requires a separate protected Keychain key locator."
+      ],
+      "directory": null,
+      "cron": "0 3 * * *",
+      "retention_days": 30,
+      "encrypt": false,
+      "encryption_key_secret": null
+    },
     "provider_crons": {
       "quickbooks": "0 2 * * *",
       "slack": "15 2 * * *",

@@ -37,6 +37,10 @@ eval/eval.config.local.json
 .brain-ingest-*.json
 .brain-ingest-*.json.tmp-*
 
+# Owner backups contain instance manifests and resumable source identifiers.
+# The default folder is local instance material, never product source.
+brain-backups/
+
 # Exact curated inventories, target locators and coverage receipts are private
 # instance state. Only the generic operation that reads them is product source.
 .brain-curated-sync-*.json

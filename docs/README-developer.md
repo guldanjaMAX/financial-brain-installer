@@ -926,6 +926,47 @@ exceed that cap until it exits, so stale-run monitoring still matters. Rotation
 refuses links, hard links, foreign-owned files, and paths outside the per-user
 `.brain` runtime.
 
+### Owner backups and point-in-time restore
+
+`operations/owner-backup.mjs` owns the local half of recovery. It reads the
+manifest and only adjacent `.brain-ingest-<source>.json` resume files through
+stable no-follow descriptors, writes a mode-0700 snapshot directory with
+mode-0600 files, and records a UTC D1 Time Travel reference. Its allowlist
+cannot copy `.brain-admin-key`. The default `brain-backups` directory is ignored
+by Git. An optional encrypted snapshot uses the existing AES-256-GCM recovery
+artifact envelope and an independent manifest-declared Keychain locator. The
+plaintext bundle is removed before the completed directory is published.
+
+`brain backup <manifest>` is local and makes no Brain or Cloudflare request.
+It prunes only complete, recognized owner-backup directories older than
+`operations.backup.retention_days`; unknown files and directories are retained.
+`brain schedule <manifest> --install --backup` installs a daily macOS
+LaunchAgent through the same hardened scheduler core as ingest, but it does not
+need a Brain domain or admin key. Other platforms receive the exact daily
+`brain backup` command for their native scheduler.
+
+Confirmed ingest, load, removal, update, upgrade, and legacy rollback commands
+share one local lifecycle lock and create a restore point before the risky path
+starts. Dry runs and previews do neither. `brain undo-last` selects only the
+newest pre-ingest, pre-load, pre-forget, or pre-update point, so a newer daily or
+manual backup cannot hide the operation boundary.
+
+`brain restore <manifest> --to <RFC3339-time>` resolves both target and current
+D1 bookmarks and prints a plan fingerprint. It refuses an active ingest or
+update and performs no mutation until `--approve <fingerprint>` matches a fresh
+plan under the lifecycle lock. Execution takes another owner backup, pauses the
+Worker through the existing rollback protocol, restores D1, requires the
+provider's previous bookmark, creates one deterministic empty 768-dimension
+cosine Vectorize index with all metadata indexes, atomically rebinds the
+manifest, and runs the paused upgrade bootstrap. Success requires exact
+chunk/vector equality and an empty outbox, then writes an aggregate before and
+after receipt. The old Vectorize index is retained for operator review.
+
+The restore API overwrites D1 in place. `undo-last` is scoped to one recorded
+CLI operation boundary, not to selected rows. Its preview must disclose that
+every D1 write after the recorded timestamp is in scope. External writers must
+remain stopped for the complete preview and execution window.
+
 ### Unattended watched-folder refresh on macOS
 
 The third consumer of the same generalized scheduler, after Drive and iMessage.

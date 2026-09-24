@@ -724,12 +724,50 @@
     },
     "operations": {
       "type": "object",
-      "description": "Machine-local unattended operations. ingest_cron is wired through the macOS Drive LaunchAgent scheduler. Health reports and webhooks remain descriptive until their commands are implemented.",
+      "description": "Machine-local unattended operations. ingest_cron and backup.cron are wired through separate macOS LaunchAgent scheduler lanes. Health reports and webhooks remain descriptive until their commands are implemented.",
       "properties": {
         "ingest_cron": {
           "type": "string",
           "minLength": 9,
           "description": "Numeric five-field cron schedule for unattended Google Drive ingest. Installed as a per-user macOS LaunchAgent; calendar times use the Mac's local timezone. brain.domain must also be set so refresh needs no Cloudflare deployment credential."
+        },
+        "backup": {
+          "type": "object",
+          "description": "Owner-held local recovery snapshots. D1 Time Travel remains the durable corpus recovery source; this preserves the manifest and adjacent resumable source state without copying the admin key.",
+          "properties": {
+            "_comment": {
+              "type": ["string", "array"],
+              "items": { "type": "string" }
+            },
+            "directory": {
+              "type": ["string", "null"],
+              "minLength": 1,
+              "description": "Owner-controlled backup directory. Relative paths resolve beside the manifest. Null uses ./brain-backups. Put it on owner-controlled off-computer storage for computer-loss recovery."
+            },
+            "cron": {
+              "type": "string",
+              "minLength": 9,
+              "description": "Five-field cron schedule for the macOS owner-backup LaunchAgent. Defaults to 0 3 * * *."
+            },
+            "retention_days": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3650,
+              "default": 30,
+              "description": "Complete owned backup entries older than this are removed by a successful backup run. The supported Workers Paid baseline has 30 days of D1 Time Travel."
+            },
+            "encrypt": {
+              "type": "boolean",
+              "default": false,
+              "description": "Encrypt the manifest and resume-state bundle with AES-256-GCM."
+            },
+            "encryption_key_secret": {
+              "type": ["string", "null"],
+              "pattern": "^keychain://[^/]+/.+$",
+              "description": "Non-secret macOS Keychain locator for the independent owner-backup encryption key. The key itself never enters the manifest, argv, receipt, or logs."
+            }
+          },
+          "additionalProperties": false
         },
         "admin_key_secret": {
           "type": [
