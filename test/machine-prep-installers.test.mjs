@@ -178,6 +178,7 @@ test("Windows package project names every reviewed payload file", () => {
     "FinancialBrainMachinePrep.wixproj",
     "Package.wxs",
     "run-machine-prep.ps1",
+    "verify-msi.ps1",
     "UNINSTALL.txt",
   ];
   for (const name of expected) {
@@ -206,4 +207,37 @@ test("Windows wrapper refuses an unsupported release before prep", { skip: proce
   assert.match(out, /OS_DECISION_REACHED=1/);
   assert.match(out, /REFUSED Windows 10 or newer is required/);
   assert.doesNotMatch(out, /INSTALLER_TEST_GATE_REACHED|INSTALLER_PROGRESS/);
+});
+
+test("machine-prep CI builds only unsigned artifacts with pinned actions and no release path", () => {
+  const workflow = read(".github/workflows/machine-prep-installers.yml");
+  assert.match(workflow, /^  workflow_dispatch:/m);
+  assert.match(workflow, /wix_osmf_confirmed:/);
+  assert.match(workflow, /if: inputs\.wix_osmf_confirmed/);
+  assert.match(workflow, /runs-on: macos-latest/);
+  assert.match(workflow, /runs-on: windows-latest/);
+  assert.match(workflow, /FinancialBrainMachinePrep-unsigned\.pkg/);
+  assert.match(workflow, /FinancialBrainMachinePrep-unsigned\.msi/);
+  assert.equal([...workflow.matchAll(/actions\/upload-artifact@[0-9a-f]{40}/g)].length, 2);
+  for (const match of workflow.matchAll(/^\s+(?:-\s+)?uses: ([^\s#]+)/gm)) {
+    if (match[1].startsWith("./")) continue;
+    assert.match(match[1], /@[0-9a-f]{40}$/);
+  }
+  assert.doesNotMatch(workflow, /gh release|release:|contents:\s*write|id-token:\s*write|notarytool|signtool/i);
+});
+
+test("signing plan names owner purchases, warning behavior, and secretless repository boundaries", () => {
+  const plan = read("machine-prep/SIGNING.md");
+  assert.match(plan, /2026-09-24/);
+  assert.match(plan, /\$99 per year/);
+  assert.match(plan, /Developer ID Installer/);
+  assert.match(plan, /notarytool/);
+  assert.match(plan, /\$9\.99 per month/);
+  assert.match(plan, /\$99\.99 per month/);
+  assert.match(plan, /OV.*\$696/s);
+  assert.match(plan, /EV.*\$972/s);
+  assert.match(plan, /SmartScreen/);
+  assert.match(plan, /Open Source Maintenance Fee/);
+  assert.match(plan, /GitHub OIDC/);
+  assert.match(plan, /No signing credential belongs in the repository/);
 });
