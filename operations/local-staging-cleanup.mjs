@@ -190,6 +190,9 @@ export function buildLocalCleanupPlan({ files = [], sources = {}, confirmations 
     plan_id,
     total_files: items.length,
     total_bytes: items.reduce((sum, item) => sum + item.bytes, 0),
+    inspected_files: inspected,
+    eligible_files: items.length,
+    ineligible_files: inspected - items.length,
     decision_points: inspected,
   });
 }
@@ -385,33 +388,42 @@ export async function executeLocalCleanup(plan, {
 } = {}) {
   if (!plan?.preview || !Array.isArray(plan.items)) throw new TypeError("a cleanup preview is required");
   if (approve !== plan.plan_id) throw new TypeError("cleanup requires the exact preview fingerprint");
-  const choice = plan.only_copies.length ? requireChoice(onlyCopyChoice) : "keep";
-  if (choice === "archive" && typeof archive !== "function") {
+  // A pathname check is evidence only at the instant it runs. This executor
+  // cannot hold recoverable custody of an outside file across a platform Trash
+  // move, so every provisional outside copy is conservatively handled as an
+  // only copy at apply time. The owner's explicit choice is the safety gate.
+  for (const file of plan.copies) {
+    await assertCurrent(file);
+    await assertExternalOriginal(file);
+  }
+  if (plan.copies.length && onlyCopyChoice == null) {
+    throw new TypeError(
+      "outside-copy path validation cannot hold custody through Trash; treat it as an only copy and choose keep, archive, or remove",
+    );
+  }
+  const choice = plan.items.length ? requireChoice(onlyCopyChoice) : "keep";
+  if (choice === "archive" && plan.items.length && typeof archive !== "function") {
     throw new TypeError("archive choice needs an owner-selected encrypted archive destination");
   }
-  const selected = [
-    ...plan.copies,
-    ...(choice === "remove" || choice === "archive" ? plan.only_copies : []),
-  ];
+  const selected = choice === "remove" || choice === "archive" ? plan.items : [];
   let trashed = 0;
   let archived = 0;
   for (const file of selected) {
     await assertCurrent(file);
-    if (choice === "archive" && plan.only_copies.includes(file)) {
+    if (choice === "archive") {
       await archive(file.path);
       archived++;
     }
     const moveContext = trash === moveFileToSystemTrash ? pendingMoveContext(file) : null;
     await beforeMove(file, moveContext);
     try {
-      // This is deliberately the final read before the filesystem mutation.
-      // A vanished or replaced outside copy reclassifies the candidate as an
-      // only copy and clears its pending intent without calling Trash.
-      await assertExternalOriginal(file);
       if (trash === moveFileToSystemTrash) {
         await moveVerifiedFileToSystemTrash(file, trash, moveContext, afterIsolate);
       }
       else await trash(file.path, { expectedIdentity: file.filesystem_identity });
+      if (existsSync(file.path)) {
+        throw new Error("the Trash adapter returned but the cleanup source is still present");
+      }
       trashed++;
       await afterMove(file);
     } catch (error) {
@@ -426,7 +438,7 @@ export async function executeLocalCleanup(plan, {
     considered: plan.total_files,
     moved_to_trash: trashed,
     archived,
-    kept: choice === "keep" ? plan.only_copies.length : 0,
+    kept: choice === "keep" ? plan.items.length : 0,
     bytes_released: selected.reduce((sum, file) => sum + file.bytes, 0),
     recoverable: true,
     deletion_primitive: "system_trash",

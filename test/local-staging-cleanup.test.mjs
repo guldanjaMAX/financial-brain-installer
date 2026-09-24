@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -82,28 +82,113 @@ test("an only-copy file requires an explicit keep, archive, or remove choice", a
   assert.equal(trashCalls, 0);
 });
 
-test("approved cleanup uses the injected system Trash operation, never a delete primitive", async () => {
+test("a validated outside path is not custody for the later Trash move", async () => {
+  const root = mkdtempSync(join(tmpdir(), "brain-cleanup-custody-"));
+  const source = join(root, "copy.txt");
+  const outside = join(root, "outside.txt");
+  const trashDestination = join(root, "trash-copy.txt");
+  writeFileSync(source, "matching bytes");
+  writeFileSync(outside, "matching bytes");
+  const observed = inspectCleanupFile(source);
+  const outsideObserved = inspectCleanupFile(outside);
   const plan = buildLocalCleanupPlan({
-    files: [files[0], files[1]],
+    files: [{ source: "drop", key: "copy.txt", ...observed }],
     sources: { drop: { role: "staging" } },
     confirmations: {
-      "drop:copy.txt": { accepted_resolution_current: true, external_original: external("drive") },
+      "drop:copy.txt": {
+        accepted_resolution_current: true,
+        proof: "p".repeat(64),
+        external_original: outsideObserved,
+      },
+    },
+  });
+  let outsideChecks = 0;
+  let trashCalls = 0;
+  await assert.rejects(() => executeLocalCleanup(plan, {
+    approve: plan.plan_id,
+    assertExternalOriginal: async () => {
+      outsideChecks++;
+      assert.equal(inspectCleanupFile(outside).original_content_sha256, observed.original_content_sha256);
+      rmSync(outside);
+    },
+    trash: async (path) => {
+      trashCalls++;
+      renameSync(path, trashDestination);
+    },
+  }), /custody|only copy/i);
+  assert.equal(plan.copies.length, 1, "the preview reached the provisional outside-copy decision");
+  assert.equal(outsideChecks, 1, "apply reached and completed outside validation");
+  assert.equal(trashCalls, 0, "a transient path check never authorizes Trash");
+  assert.equal(existsSync(source), true, "the verified staging bytes remain on disk");
+  assert.equal(readFileSync(source, "utf8"), "matching bytes");
+  assert.equal(existsSync(trashDestination), false);
+});
+
+test("a no-op Trash adapter cannot earn a successful move receipt", async () => {
+  const root = mkdtempSync(join(tmpdir(), "brain-cleanup-noop-trash-"));
+  const source = join(root, "only.txt");
+  writeFileSync(source, "only bytes");
+  const observed = inspectCleanupFile(source);
+  const plan = buildLocalCleanupPlan({
+    files: [{ source: "drop", key: "only.txt", ...observed }],
+    sources: { drop: { role: "staging" } },
+    confirmations: {
+      "drop:only.txt": { accepted_resolution_current: true, proof: "p".repeat(64) },
+    },
+  });
+  let trashCalls = 0;
+  await assert.rejects(() => executeLocalCleanup(plan, {
+    approve: plan.plan_id,
+    onlyCopyChoice: "remove",
+    trash: async () => { trashCalls++; },
+  }), /did not leave|still present/i);
+  assert.equal(plan.decision_points, 1, "the eligible cleanup decision was reached");
+  assert.equal(trashCalls, 1, "the no-op adapter was actually invoked");
+  assert.equal(existsSync(source), true, "a failed adapter leaves the source in place");
+});
+
+test("approved cleanup uses the injected system Trash operation, never a delete primitive", async () => {
+  const root = mkdtempSync(join(tmpdir(), "brain-cleanup-adapter-boundary-"));
+  const copyPath = join(root, "copy.txt");
+  const onlyPath = join(root, "only.txt");
+  const outsidePath = join(root, "outside.txt");
+  const trashRoot = join(root, "trash");
+  mkdirSync(trashRoot);
+  writeFileSync(copyPath, "copy bytes");
+  writeFileSync(onlyPath, "only bytes");
+  writeFileSync(outsidePath, "copy bytes");
+  const copy = { source: "drop", key: "copy.txt", ...inspectCleanupFile(copyPath) };
+  const only = { source: "drop", key: "only.txt", ...inspectCleanupFile(onlyPath) };
+  const plan = buildLocalCleanupPlan({
+    files: [copy, only],
+    sources: { drop: { role: "staging" } },
+    confirmations: {
+      "drop:copy.txt": { accepted_resolution_current: true, external_original: inspectCleanupFile(outsidePath) },
       "drop:only.txt": { accepted_resolution_current: true, external_original: null },
     },
   });
   const trashed = [];
-  const removed = [];
   const receipt = await executeLocalCleanup(plan, {
     approve: plan.plan_id,
     onlyCopyChoice: "remove",
-    assertCurrent: async () => {},
-    assertExternalOriginal: async () => {},
-    trash: async (path) => trashed.push(path),
-    remove: async (path) => removed.push(path),
+    trash: async (path) => {
+      const destination = join(trashRoot, `${trashed.length}-${path.split("/").at(-1)}`);
+      renameSync(path, destination);
+      trashed.push({ source: path, destination });
+    },
     now: () => "2026-09-24T12:00:00.000Z",
   });
-  assert.deepEqual(trashed, ["/stage/copy.txt", "/stage/only.txt"]);
-  assert.deepEqual(removed, []);
+  assert.deepEqual(trashed.map((item) => item.source), [copyPath, onlyPath]);
+  for (const item of trashed) {
+    assert.equal(existsSync(item.source), false, "a successful move removes the exact source path");
+    assert.equal(existsSync(item.destination), true, "the fixture keeps a recoverable destination");
+  }
+  const moduleSource = readFileSync(new URL("../operations/local-staging-cleanup.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(
+    moduleSource,
+    /import\s*\{[\s\S]*?\b(?:rmSync|unlinkSync)\b[\s\S]*?\}\s*from\s*["']node:fs["']/,
+    "the cleanup adapter imports no permanent-delete primitive",
+  );
   assert.equal(receipt.moved_to_trash, 2);
   assert.equal(receipt.recoverable, true);
 });

@@ -10868,6 +10868,8 @@ async function requestLocalCleanupProof(base, adminKey, body, fetchImpl = fetch)
   return parsed;
 }
 
+const LOCAL_CLEANUP_LOCKS_HELD = Symbol("local-cleanup-locks-held");
+
 /** Owner-approved local copy cleanup. Preview is the default and writes nothing. */
 export async function cmdCleanupLocal(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
@@ -10882,7 +10884,15 @@ export async function cmdCleanupLocal(manifestPath, options = {}) {
       ? `no active staging folder is declared for source "${sourceFilter}".`
       : "no active staging folder is declared. Mark an export folder role staging or one-time-import first.");
   }
-  if (flags.apply && options.cleanupLocksHeld !== true) {
+  const reusableLease = flags.apply && staging.length === 1 &&
+    sourceFilter === staging[0].source &&
+    options.cleanupLease?.source === staging[0].source &&
+    typeof options.cleanupLease?.assertOwned === "function";
+  const cleanupAssertOwned = reusableLease
+    ? options.cleanupLease.assertOwned
+    : options.cleanupAssertOwned;
+  if (reusableLease) cleanupAssertOwned();
+  if (flags.apply && options[LOCAL_CLEANUP_LOCKS_HELD] !== true && !reusableLease) {
     const orderedStaging = [...new Map(staging.map((item) => [item.source, item])).values()]
       .sort((left, right) => left.source.localeCompare(right.source));
     try {
@@ -10891,7 +10901,7 @@ export async function cmdCleanupLocal(manifestPath, options = {}) {
         (assertOwned) => cmdCleanupLocal(manifestPath, {
           ...options,
           flags,
-          cleanupLocksHeld: true,
+          [LOCAL_CLEANUP_LOCKS_HELD]: true,
           cleanupAssertOwned: assertOwned,
         }),
       );
@@ -10929,7 +10939,7 @@ export async function cmdCleanupLocal(manifestPath, options = {}) {
         changed = true;
       }
       if (changed) {
-        options.cleanupAssertOwned?.();
+        cleanupAssertOwned?.();
         library.saveState(statePath, state);
       }
     }
@@ -11066,12 +11076,20 @@ export async function cmdCleanupLocal(manifestPath, options = {}) {
     only_copies: plan.only_copies.length,
     total_files: plan.total_files,
     total_bytes: plan.total_bytes,
+    inspected_files: plan.inspected_files,
+    eligible_files: plan.eligible_files,
+    ineligible_files: plan.ineligible_files,
   };
   if (!flags.apply) {
     if (flags.json) console.log(JSON.stringify(summary));
     else {
-      console.log("Your files are safely in your Brain. Want me to tidy up the copies on this computer? Originals in your Documents and Drive are untouched.");
-      info(`${plan.copies.length} confirmed copy file(s) can move to Trash; ${plan.only_copies.length} file(s) need an explicit keep, archive, or remove choice.`);
+      if (plan.ineligible_files) {
+        console.log(`${plan.ineligible_files} inspected file(s) lack current proof and will stay untouched.`);
+      }
+      if (plan.eligible_files) {
+        console.log(`${plan.eligible_files} eligible file(s) are currently proved safe in your Brain.`);
+      }
+      info(`${plan.copies.length} file(s) have a provisional outside copy; ${plan.only_copies.length} have no proved outside copy. Apply treats both groups as possible only copies and requires keep, archive, or remove.`);
       info(`preview fingerprint: ${plan.plan_id}`);
       info(`nothing was moved. Re-run with --apply --approve ${plan.plan_id}`);
     }
@@ -11105,8 +11123,8 @@ export async function cmdCleanupLocal(manifestPath, options = {}) {
   }
   const approvedPlan = options.approveCurrentPlan ? plan.plan_id : (flags.approve === true ? null : flags.approve);
   if (approvedPlan !== plan.plan_id) die("cleanup requires the exact preview fingerprint from this current state.");
-  if (plan.only_copies.length && !["keep", "remove", "archive"].includes(choice)) {
-    die("files that may be the only external copy need --only-copy keep, archive, or remove.");
+  if (plan.items.length && !["keep", "remove", "archive"].includes(choice)) {
+    die("cleanup cannot hold outside-copy custody through Trash, so every eligible file needs --only-copy keep, archive, or remove.");
   }
   const states = new Map();
   const stateFor = (item) => {
@@ -11115,7 +11133,7 @@ export async function cmdCleanupLocal(manifestPath, options = {}) {
     return { statePath, state: states.get(statePath) };
   };
   const persist = (statePath, state) => {
-    options.cleanupAssertOwned?.();
+    cleanupAssertOwned?.();
     library.saveState(statePath, state);
   };
   const receipt = await executeLocalCleanup(plan, {
@@ -11180,8 +11198,39 @@ export async function cmdCleanupLocal(manifestPath, options = {}) {
   const receiptPath = join(dirname(resolve(manifestPath)), ".brain-cleanup-receipts.jsonl");
   appendFileSync(receiptPath, `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
   if (flags.json) console.log(JSON.stringify(receipt));
-  else ok(`${receipt.moved_to_trash} file(s) moved to the system Trash; ${receipt.kept} only-copy file(s) kept`);
+  else ok(`${receipt.moved_to_trash} file(s) moved to the system Trash; ${receipt.kept} eligible file(s) kept`);
   return receipt;
+}
+
+/** Run recurring cleanup inside the exact source lease already held by ingest. */
+export async function runAutomaticLocalRetentionCleanup({
+  manifestPath,
+  sourceName,
+  sourceDeclaration,
+  options = {},
+  assertLockOwned,
+} = {}) {
+  const action = sourceDeclaration?.only_copy_action || "keep";
+  if (action === "archive") {
+    throw new TypeError(
+      "automatic staging cleanup cannot archive because no reviewed encrypted destination is configured; use keep or remove, or run cleanup-local interactively",
+    );
+  }
+  if (!["keep", "remove"].includes(action)) {
+    throw new TypeError("automatic staging cleanup only_copy_action must be keep or remove");
+  }
+  const { cleanupLocal = cmdCleanupLocal, ...cleanupOptions } = options;
+  return cleanupLocal(manifestPath, {
+    ...cleanupOptions,
+    flags: {
+      automatic: true,
+      apply: true,
+      source: sourceName,
+      "only-copy": action,
+    },
+    approveCurrentPlan: true,
+    cleanupLease: { source: sourceName, assertOwned: assertLockOwned },
+  });
 }
 
 /**
@@ -11996,14 +12045,12 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   await reportBacklog(manifestPath);
   if (role === "staging" && Number.isSafeInteger(sourceDeclaration?.retention_days)) {
     try {
-      await cmdCleanupLocal(manifestPath, {
-        flags: {
-          automatic: true,
-          apply: true,
-          source: sourceName,
-          "only-copy": sourceDeclaration.only_copy_action || "keep",
-        },
-        approveCurrentPlan: true,
+      await runAutomaticLocalRetentionCleanup({
+        manifestPath,
+        sourceName,
+        sourceDeclaration,
+        options,
+        assertLockOwned,
       });
     } catch (error) {
       warn(`automatic staging cleanup did not run: ${String(error?.message || error).slice(0, 180)}`);
@@ -13942,11 +13989,17 @@ export function uploadFoldersOf(corpus) {
   if (!Array.isArray(declared)) {
     throw new Error("corpora.upload.folders must be an array of folder paths");
   }
-  return declared.map((entry) => (
-    typeof entry === "string"
-      ? { path: entry, source: null }
-      : { ...entry, path: entry?.path, source: entry?.source || null }
-  ));
+  return declared.map((entry) => {
+    if (typeof entry === "string") return { path: entry, source: null };
+    const declaresRetirement = entry && typeof entry === "object" &&
+      (Object.hasOwn(entry, "retired") || Object.hasOwn(entry, "retired_at"));
+    if (declaresRetirement && entry.role !== "one-time-import") {
+      throw new Error(
+        `folder source "${entry?.source || "unnamed"}" declares retired lifecycle state, but only role one-time-import may be retired`,
+      );
+    }
+    return { ...entry, path: entry?.path, source: entry?.source || null };
+  });
 }
 
 /**

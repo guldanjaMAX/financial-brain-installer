@@ -962,13 +962,16 @@ cleaned only through `brain cleanup-local`. The Worker proof route joins the
 exact source-original binding to the current complete-provenance document,
 requires no pending chunk operation, and reads every current vector back by id;
 it never treats a local resume hash, source receipt, or queue depth alone as
-consumed proof. Automatic retention runs only after a successful ingest and uses the
-same proof and Trash executor. It keeps possible only-copy files unless the
-manifest records a stronger owner choice. A retired one-time source is omitted
+consumed proof. Automatic retention runs only after a successful ingest, reuses
+that exact source's already-held lease, and uses the same proof and Trash
+executor. It keeps eligible files unless the manifest records `remove`;
+automatic archive is refused because the manifest has no reviewed encrypted
+destination. A transient outside-path check never waives the explicit
+possible-only-copy choice. A retired one-time source is omitted
 from future `brain load` walks as an intentional completed skip while its Brain
-documents remain. Cleanup apply holds the source-ingest lease, binds each plan
-item to its SHA-256 and filesystem identity, re-proves a distinct external copy
-immediately before Trash, and records consumption only after that file moves.
+documents remain. Cleanup apply holds or exactly reuses the source-ingest lease,
+binds each plan item to its SHA-256 and filesystem identity, and records
+consumption only after that file moves.
 
 **Deletions.** The local ingest lane now reconciles files that are gone, through
 the same `buildDriveRemovalPlan` / `assertDriveRemovalPlanSafe` aggregate guard

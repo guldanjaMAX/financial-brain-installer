@@ -536,12 +536,15 @@ The preview includes only unchanged originals whose exact bytes are tied to a
 current stored document family, complete provenance, and confirmed vector
 resolution. D1 keeps extracted text, chunks, and hashes. It does not keep the
 original file bytes, and the manifest's R2 bucket is not wired for originals.
-That is why a file with no other proved external copy needs an explicit `keep`
-`archive`, or `remove` choice. Archive requires an existing owner-held encrypted
+That is why every eligible file needs an explicit `keep`, `archive`, or `remove`
+choice at apply time. A distinct matching outside path remains useful preview
+evidence, but a transient path check is not custody across the later Trash move,
+so it never waives that choice. Archive requires an existing owner-held encrypted
 folder plus `--archive-to <folder> --archive-encrypted`; the copy is hash-read
-back before the original moves. An outside copy counts only when it is a
-distinct physical file outside any overlapping declared root and still has the
-same bytes immediately before the move. The approved command holds the source
+back before the original moves. The preview labels an outside copy only when it
+is a distinct physical file outside any overlapping declared root with the same
+bytes, and apply validates that evidence again before enforcing the explicit
+possible-only-copy choice. The approved command holds the source
 lease, re-hashes the candidate, moves it to the operating system's recoverable
 Trash, and records it consumed only after that move. It never runs `rm`:
 
@@ -551,7 +554,9 @@ brain cleanup-local ./brain.manifest.json --apply \
 ```
 
 Set `retention_days` on a recurring staging folder to apply the same current
-proof after successful scheduled ingests. A `one-time-import` can be previewed
+proof after successful scheduled ingests. Its automatic `only_copy_action` is
+`keep` or `remove`; encrypted archive remains interactive because the manifest
+does not declare an archive destination. A `one-time-import` can be previewed
 and retired with `--retire <source>`; retirement stops future walks and keeps
 the source's documents in the Brain. Ongoing sources are never cleanup-local
 candidates, and their missing-file gate remains unchanged.

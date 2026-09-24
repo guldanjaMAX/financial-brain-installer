@@ -251,9 +251,12 @@ batch response, empty outbox by itself, or matching filename is insufficient.
 
 `brain cleanup-local` re-observes the exact bytes, asks the authenticated Worker
 for that current proof in a private POST body, and builds a state-bound preview.
-Execution takes the source-ingest lease, rechecks the SHA-256 and filesystem
-identity, and re-proves any distinct outside original immediately before the
-move. It records a recoverable per-file intent, isolates and re-hashes that
+Execution takes the source-ingest lease, or reuses the exact same-source lease
+held by a successful ingest. It rechecks the SHA-256 and filesystem identity,
+and re-proves any distinct outside original. Because a path check cannot hold
+custody across the later Trash move, every eligible file is conservatively
+treated as a possible only copy and requires an explicit keep, archive, or
+remove policy. It records a recoverable per-file intent, isolates and re-hashes that
 exact file, moves it through the platform Trash API, and only then marks the
 staging key consumed. A failed move leaves untouched keys unconsumed, while an
 interrupted intent is reconciled from the source pathname before another apply.

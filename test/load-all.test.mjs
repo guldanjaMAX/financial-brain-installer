@@ -149,6 +149,26 @@ try {
     JSON.stringify(uploadFoldersOf({ folders: ["/a", { path: "/b", source: "contracts" }] })) ===
     JSON.stringify([{ path: "/a", source: null }, { path: "/b", source: "contracts" }]));
 
+  const manifestSchema = JSON.parse(readFileSync(join(process.cwd(), "manifest.schema.json"), "utf8"));
+  const corporaProperties = manifestSchema.properties.corpora.properties;
+  const uploadObject = corporaProperties.upload.properties.folders.items.oneOf
+    .find((branch) => branch.type === "object");
+  check("the manifest schema limits automatic retention to keep or remove",
+    JSON.stringify(uploadObject.properties.only_copy_action.enum) === JSON.stringify(["keep", "remove"]) &&
+    JSON.stringify(corporaProperties.local_folder.properties.only_copy_action.enum) === JSON.stringify(["keep", "remove"]));
+  check("the manifest schema conditions retirement fields on one-time-import",
+    uploadObject.allOf?.[0]?.then?.properties?.role?.const === "one-time-import" &&
+    uploadObject.allOf[0].then.required.includes("role"));
+  assert.throws(
+    () => uploadFoldersOf({ folders: [{ path: "/a", source: "mirror", role: "ongoing", retired: false }] }),
+    /only role one-time-import may be retired/,
+  );
+  assert.throws(
+    () => uploadFoldersOf({ folders: [{ path: "/a", source: "stage", role: "staging", retired_at: "2026-09-24T12:00:00.000Z" }] }),
+    /only role one-time-import may be retired/,
+  );
+  check("runtime enforces the schema retirement-field condition even for false or timestamp-only declarations", true);
+
   assert.throws(
     () => describeLoadResult(undefined),
     /no recognized completion receipt/,
@@ -249,6 +269,29 @@ try {
     check("the retired lifecycle remains visible as an intentional completed skip",
       /Folders on this machine.*all declared one-time folder sources are retired/.test(result.text) &&
       result.result?.entries[0]?.lifecycle_state === "retired_complete",
+      result.text);
+  }
+
+  /* -------- only one-time imports may carry retirement lifecycle state */
+  for (const role of ["ongoing", "staging"]) {
+    const dir = mkdtempSync(join(sandbox, `invalid-retired-${role}-`));
+    const manifestPath = writeManifest(dir, {
+      upload: { enabled: true, folders: [
+        { path: join(dir, "source"), source: "snapshot", role, retired: true },
+      ] },
+    });
+    let walks = 0;
+    const result = await runLoad(manifestPath, {
+      flags: {},
+      commands: { ingestLocal: async () => { walks++; throw new Error("invalid retired source walked"); } },
+    });
+    check(`${role} folder retirement is unavailable rather than a completed lifecycle skip`,
+      walks === 0 && result.error &&
+        /NOT LOADED.*skipped \(0\)/.test(result.text) &&
+        /NOT LOADED.*unavailable \(1\)/.test(result.text),
+      `walks=${walks} error=${result.error?.message || "none"}`);
+    check(`${role} folder retirement prints the corrective one-time-import rule`,
+      /retired.*only.*one-time-import|only.*one-time-import.*retired/i.test(result.text),
       result.text);
   }
 

@@ -486,10 +486,22 @@
                       "source": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$", "maxLength": 64 },
                       "role": { "enum": ["ongoing", "staging", "one-time-import"], "default": "ongoing" },
                       "retention_days": { "type": "integer", "minimum": 1 },
-                      "only_copy_action": { "enum": ["keep", "archive", "remove"], "default": "keep" },
+                      "only_copy_action": { "enum": ["keep", "remove"], "default": "keep", "description": "Automatic retention policy. Encrypted archive remains an interactive cleanup-local choice because automatic cleanup has no archive destination." },
                       "retired": { "type": "boolean", "default": false },
                       "retired_at": { "type": "string", "format": "date-time" }
-                    }
+                    },
+                    "allOf": [{
+                      "if": {
+                        "anyOf": [
+                          { "required": ["retired"] },
+                          { "required": ["retired_at"] }
+                        ]
+                      },
+                      "then": {
+                        "required": ["role"],
+                        "properties": { "role": { "const": "one-time-import" } }
+                      }
+                    }]
                   }
                 ]
               }
@@ -529,9 +541,9 @@
               "description": "For a recurring staging feed, automatically tidy confirmed files older than this many days."
             },
             "only_copy_action": {
-              "enum": ["keep", "archive", "remove"],
+              "enum": ["keep", "remove"],
               "default": "keep",
-              "description": "Required policy for confirmed files whose external original cannot be proved. archive also requires an owner-selected encrypted archive destination at execution time."
+              "description": "Automatic retention policy. Encrypted archive remains an interactive cleanup-local choice because automatic cleanup has no archive destination."
             }
           }
         },

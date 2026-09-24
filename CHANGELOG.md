@@ -15,8 +15,9 @@ asset publication.
   `brain cleanup-local <manifest>` for a read-only preview. Only files whose
   exact raw bytes have a current accepted provenance and vector-resolution
   proof are eligible. The approved command moves unchanged files to the system
-  Trash, never permanently deletes them. Files that may be the only external
-  copy require an explicit keep, encrypted archive, or remove choice; ongoing folders keep their
+  Trash, never permanently deletes them. Every eligible file requires an
+  explicit keep, encrypted archive, or remove choice because an outside-path
+  check cannot provide custody across a later Trash move; ongoing folders keep their
   existing missing-file deletion guard. A recurring staging folder can set a
   retention window, and a completed one-time import can be retired while its
   Brain documents remain. To check: preview first, confirm the copy/only-copy
