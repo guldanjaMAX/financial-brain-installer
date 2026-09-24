@@ -150,6 +150,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test test/custom-api-cli.test.mjs",
   "node --no-warnings --test test/custom-api-schema-compat.test.mjs",
   "node --no-warnings --test test/windows-dpapi-launch-retry.test.mjs",
+  "node --test test/machine-prep.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -294,6 +295,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/mcp-apply.test.mjs",
   "node test/mcp-rotation.test.mjs",
   "node --test test/mcp-moved-brain.test.mjs",
+  "node --test test/machine-prep.test.mjs",
   "node test/health-verify-exit.test.mjs",
   "node test/drain-exit.test.mjs",
   "node test/drain-query-ready-gate.test.mjs",
