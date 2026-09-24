@@ -214,6 +214,23 @@ test("the validator names each refusal plainly and never echoes a key", async ()
   assert.equal(plaid.calls.length, 2, "an unsupported environment is refused before any request");
 });
 
+test("a Plaid reply that stalls after its headers cannot hang the owner's prompt", async () => {
+  const { validatePlaidApplicationKeys } = await import("../operations/bank-feed-owner-secrets.mjs");
+  // Headers arrive; the body never does, and this fake ignores the abort signal.
+  const stalled = async () => new Response(new ReadableStream({ start() {} }), {
+    status: 200, headers: { "content-type": "application/json" },
+  });
+  const started = Date.now();
+  const outcome = await Promise.race([
+    validatePlaidApplicationKeys({
+      environment: "sandbox", clientId: CLIENT_ID, secret: SECRET, fetchImpl: stalled, timeoutMs: 50,
+    }).then(() => "accepted", (error) => error.message),
+    new Promise((resolve) => setTimeout(() => resolve("hung"), 2_000)),
+  ]);
+  assert.match(outcome, /could not be reached to check these keys/);
+  assert.ok(Date.now() - started < 2_000);
+});
+
 test("the CLI dispatcher hands --replace-keys to connect bank as a switch", async () => {
   let seen = null;
   await cmdConnect("bank", {

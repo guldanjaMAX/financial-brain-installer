@@ -514,14 +514,6 @@ export async function ledgerCashPosition(
 }
 
 /**
- * The best dated, confirmed figure for one account, or nothing.
- *
- * A parsed statement's closing balance and a feed's balance snapshot are both
- * valid answers; the more recent one wins on date, and the source of the winner
- * is named so the caller can cite it. `proposed` and `unparsed` rows are not
- * eligible: a figure the extractor was unsure of is not a balance.
- */
-/**
  * Which figures of a feed row were rounded from a finer provider decimal.
  *
  * The bank feed stores integer minor units. When a provider reports more
@@ -539,6 +531,14 @@ export function minorRoundedFields(locator) {
   return match[1] ? match[1].split(",").filter(Boolean) : ["amount"];
 }
 
+/**
+ * The best dated, confirmed figure for one account, or nothing.
+ *
+ * A parsed statement's closing balance and a feed's balance snapshot are both
+ * valid answers; the more recent one wins on date, and the source of the winner
+ * is named so the caller can cite it. `proposed` and `unparsed` rows are not
+ * eligible: a figure the extractor was unsure of is not a balance.
+ */
 async function confirmedBalanceFor(env, tenantId, accountSlug) {
   const { results, unavailable } = await safeAll(
     env,

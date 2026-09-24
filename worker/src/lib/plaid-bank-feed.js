@@ -122,10 +122,12 @@ function supportedCurrency(value) {
  * Providers report finer precision than a currency's minor unit: the Plaid
  * sandbox 401k balance is 23631.9805 USD, and investment, fuel and FX lines do
  * the same in production. Refusing that value failed the WHOLE Item, so no
- * account at that bank could load at all. The exact decimal text is kept beside
- * every figure, and the integer is derived by explicit half-even rounding with
- * `rounded` set, so a rounded figure is never presented as exact. Half-even
- * keeps the expected bias at zero across many rounded rows.
+ * account at that bank could load at all. The integer is now derived by
+ * explicit half-even rounding with `rounded` set, so a rounded figure is never
+ * presented as exact. Half-even keeps the expected bias at zero across many
+ * rounded rows. The exact decimal text stays on every staged row and on every
+ * ledger transaction (source_amount_decimal). A promoted balance keeps only the
+ * rounded integer and its marker: schema 46 has no balance decimal column.
  *
  * Still refused: text that is not a plain decimal (the protocol layer already
  * expands exponent notation), an unsupported currency, and a magnitude beyond
@@ -1789,6 +1791,13 @@ export async function plaidFeedStatus(env) {
       WHERE i.tenant_id=? AND (i.removed_at IS NULL OR o.state<>'confirmed') ORDER BY i.connected_at`,
   ).bind(tenantId).all())?.results || [];
   const accountsNeedingOwner = (row) => Number(row.accounts_needing_owner || 0);
+  // A healthy connection held only for owner choices says so in its own detail,
+  // even when the sync that reached the guard stopped before writing that
+  // sentence (a lost lease or deadline). Surfaces read status_detail directly.
+  const waitingOnly = (row) => row.status === "connected" && accountsNeedingOwner(row) > 0;
+  const statusDetail = (row) => waitingOnly(row)
+    ? plaidAssignmentWaitDetail(accountsNeedingOwner(row))
+    : row.status_detail;
   // Balances rounded from a finer provider decimal, per connection, so neither
   // the owner nor the operator reads one as exact. Staged rows carry the flag in
   // provenance; a promoted balance carries it on its latest snapshot's locator.
@@ -1846,7 +1855,7 @@ export async function plaidFeedStatus(env) {
       institution_label: row.institution_label,
       environment: row.environment,
       status: row.status,
-      status_detail: row.status_detail,
+      status_detail: statusDetail(row),
       connected_at: row.connected_at,
       last_synced_at: row.last_synced_at,
       history: {
@@ -1882,11 +1891,11 @@ export async function plaidFeedStatus(env) {
       // otherwise read as nothing to do. Say what is needed, with the count.
       // A connection that is also failing keeps its failure as the headline.
       const waiting = ["connected", "error"].includes(row.status) ? accountsNeedingOwner(row) : 0;
-      const onlyWaiting = waiting > 0 && row.status === "connected";
+      const onlyWaiting = waitingOnly(row);
       return {
         item_ref: row.item_ref,
         status: row.status,
-        detail: onlyWaiting ? plaidAssignmentWaitDetail(waiting) : row.status_detail,
+        detail: statusDetail(row),
         reconciliation_state: row.reconciliation_state || null,
         revocation_state: row.revocation_state || null,
         revocation_outcome_state: row.revocation_outcome_state || null,

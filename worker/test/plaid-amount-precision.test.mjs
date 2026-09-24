@@ -1,9 +1,10 @@
 // Provider precision finer than a currency's minor unit must never fail a whole
 // Plaid Item. Field evidence: every sandbox Item that included the standard
 // 401k account refused `balances.current` 23631.9805 USD, so no account at
-// that institution could load. The exact decimal is kept, the integer is
-// rounded half-even, and the row is flagged so a rounded figure never reads as
-// exact. Every identifier, name and amount here is synthetic.
+// that institution could load. The integer is rounded half-even and the row is
+// flagged so a rounded figure never reads as exact; the exact decimal stays on
+// staged rows and ledger transactions. Every identifier, name and amount here
+// is synthetic.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createProductFixture, seedOwnedEntity } from "./product-contract-fixture.mjs";

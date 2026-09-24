@@ -275,7 +275,7 @@ is assigned and tested.
    follows the owner-present journey in order as written in
    [the Plaid release gate](../../docs/PLAID-RELEASE-GATE.md): keys through
    `brain connect bank` before setup, the sandbox phone code, and where the
-   owner disconnects.
+   owner disconnects (Access > Banks > Disconnect).
 
 The [client onboarding scorecard](../10-client-onboarding-scorecard.md) is the
 shared install record. It uses aggregate counts and receipt IDs, never message

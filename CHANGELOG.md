@@ -13,8 +13,9 @@ asset publication.
 - **One finely reported balance no longer blocks a whole bank.** A bank can
   report more decimal places than its currency has, such as a retirement
   balance of 23631.9805 dollars. That single value used to stop every account
-  at the institution from loading. The Brain now keeps the exact figure,
-  stores it rounded half-even to the currency's smallest unit, and marks it.
+  at the institution from loading. The Brain now stores it rounded half-even
+  to the currency's smallest unit and marks it as rounded, and every
+  transaction keeps the bank's exact decimal.
   Cash totals and uncategorized spending say when they include a rounded
   figure, so it never reads as exact. Values that are not numbers, currencies
   the Brain does not support, and impossibly large amounts are still refused.
@@ -39,7 +40,7 @@ asset publication.
   household, or business yet, the connect page opens "Add a person,
   household, or business" by itself and tells you to add an owner first
   instead of showing empty choices. The page now also says that disconnecting
-  happens in the Brain app under Access, then Banks.
+  happens in the Brain app at Access > Banks > Disconnect.
 
 - **Bank status tells the truth.** A connection waiting on account owner
   choices is listed under needs attention with the number of accounts, and a

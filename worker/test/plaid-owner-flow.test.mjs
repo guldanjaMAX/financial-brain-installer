@@ -215,7 +215,7 @@ test("the connect page says where disconnecting actually happens", async () => {
   try {
     const html = await pageHtml(fixture);
     assert.doesNotMatch(html, /You can disconnect at any time/);
-    assert.match(html, /To disconnect a bank later, open your Brain, go to Access, and choose Disconnect under Banks\./);
+    assert.match(html, /To disconnect a bank later, open your Brain and go to Access &gt; Banks &gt; Disconnect\./);
   } finally { fixture.close(); }
 });
 
@@ -313,6 +313,12 @@ test("a sync waiting on owner choices is visible in needs_attention with the cou
       accounts_needing_owner: 2,
       staged_transactions: 4,
     }]);
+    // A sync that reached the guard but lost its lease before writing that
+    // sentence still reads as waiting on choices, never as "stopped working".
+    fixture.raw("UPDATE bank_feed_items SET status_detail=NULL WHERE item_ref=?", ITEM);
+    const unwritten = await plaidFeedStatus(fixture.env);
+    assert.equal(unwritten.connections[0].status_detail, status.needs_attention[0].detail);
+    assert.equal(unwritten.needs_attention[0].detail, status.needs_attention[0].detail);
   } finally { fixture.close(); }
 });
 

@@ -100,9 +100,16 @@ export async function validatePlaidApplicationKeys({
     countryCodes.length > 0 && countryCodes.every((code) => /^[A-Z]{2}$/.test(String(code)))
     ? countryCodes.map(String)
     : ["US"];
+  const unreachable = () => new Error(
+    `Plaid could not be reached to check these keys for the ${environment} environment, so nothing ` +
+      "was written. Check this computer's internet connection and run the same command again.",
+  );
+  // One deadline covers the headers and the body. A reply that stalls after
+  // its headers must not leave the owner at a hung prompt.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response;
+  let body = null;
   try {
     response = await fetchImpl(`${apiBase}/institutions/get`, {
       method: "POST",
@@ -113,16 +120,19 @@ export async function validatePlaidApplicationKeys({
       redirect: "error",
       signal: controller.signal,
     });
+    body = await Promise.race([
+      response.json().catch(() => null),
+      new Promise((resolve) => {
+        if (controller.signal.aborted) resolve(null);
+        controller.signal.addEventListener("abort", () => resolve(null), { once: true });
+      }),
+    ]);
   } catch {
-    throw new Error(
-      `Plaid could not be reached to check these keys for the ${environment} environment, so nothing ` +
-        "was written. Check this computer's internet connection and run the same command again.",
-    );
+    throw unreachable();
   } finally {
     clearTimeout(timer);
   }
-  let body = null;
-  try { body = await response.json(); } catch { body = null; }
+  if (controller.signal.aborted) throw unreachable();
   if (response.ok && Array.isArray(body?.institutions)) return Object.freeze({ environment, accepted: true });
   const code = typeof body?.error_code === "string" ? body.error_code.replace(/[^A-Z0-9_]/g, "").slice(0, 60) : "";
   if (code === "INVALID_API_KEYS") {

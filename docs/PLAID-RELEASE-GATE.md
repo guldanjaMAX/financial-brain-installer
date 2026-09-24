@@ -82,8 +82,8 @@ Each one was missed or misread in a sandbox rehearsal.
    the owner selected First Platypus Bank and the connection came back as Bank
    of America. Choose "Add new account" or the specific bank rather than a saved
    entry, and check that the connection's institution label matches before
-   assigning accounts. If it does not match, disconnect it in the Brain app
-   (Access, then Banks) and connect again. For sandbox testing, use a fresh
+   assigning accounts. If it does not match, disconnect it in the Brain app at
+   Access > Banks > Disconnect and connect again. For sandbox testing, use a fresh
    test phone number, 415-555-0011 or one of 415-555-0131 through
    415-555-0138, with the code `123456`.
 7. **Add an owner first.** A new Brain has no person, household, or business
@@ -92,8 +92,7 @@ Each one was missed or misread in a sandbox rehearsal.
    transactions enter the ledger, and `/api/bank-feed/status` lists a
    connection waiting on those choices under `needs_attention` with the count.
 8. **Disconnect lives in the owner app.** It is not on the connect page. In the
-   Brain app, open Access (the settings page), find Banks, and choose
-   Disconnect. Saved history stays.
+   Brain app, go to Access > Banks > Disconnect. Saved history stays.
 
 **Turning the feed off deletes the Plaid keys.** Setting
 `corpora.bank_feed.enabled` to `false` and then running `brain secrets` or
@@ -103,9 +102,11 @@ recoverable. Turning the feed back on means the owner runs
 `brain connect bank <manifest>` again and re-enters both keys.
 
 A bank can report more decimal places than its currency has, such as a
-retirement balance of 23631.9805 USD. The Brain keeps the exact decimal, stores
-the figure rounded half-even to the currency's minor unit, and flags it. A
-total that includes a rounded figure says so wherever the owner reads it, and
+retirement balance of 23631.9805 USD. The Brain stores the figure rounded
+half-even to the currency's minor unit and flags it. Every transaction also
+keeps the provider's exact decimal; a balance keeps it only while staged,
+because a saved balance has no decimal column in this schema. A total that
+includes a rounded figure says so wherever the owner reads it, and
 `/api/bank-feed/status` lists each connection's rounded balances under
 `rounded_balances`, first as `staged` and then as `in_ledger`.
 

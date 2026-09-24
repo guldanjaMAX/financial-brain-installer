@@ -1383,7 +1383,7 @@ h1{font-size:1.5rem;margin-bottom:.5rem}h2{font-size:1.15rem;margin:0 0 .4rem}p{
 <h1>Connect a bank account</h1>
 <p>Sign in through ${config.provider === "plaid" ? "Plaid" : "your bank connection provider"} or your bank's secure screen. Financial Brain does not receive your bank
 password or security codes. This connection reads your accounts and transactions. It cannot move money.</p>
-<p class="note">Environment: ${config.environment}. To disconnect a bank later, open your Brain, go to Access, and choose Disconnect under Banks. Disconnecting is not done on this page, and your saved history stays.</p>
+<p class="note">Environment: ${config.environment}. To disconnect a bank later, open your Brain and go to Access &gt; Banks &gt; Disconnect. Disconnecting is not done on this page, and your saved history stays.</p>
 <div class="actions"><button id="start">Connect a bank</button><a href="/app">Back to your Brain</a></div>
 <p id="status" role="status" aria-live="polite"></p>
 <section class="panel" aria-labelledby="connections-heading">
