@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { FinDeadline, FinEntity, FinSnapshot } from "./api";
 import {
   accountCoverage, accountLabel, dateLabel, documentDetail, documentOutcome, entityLabel,
-  financialRecordsEmpty, moneyLabel, nextDatedDeadline, orderedScopes, visibleScopes, waitingDetail, waitingMove,
+  financialRecordsEmpty, moneyLabel, nextDatedDeadline, orderedScopes, roundedFigureNote, visibleScopes,
+  waitingDetail, waitingMove,
 } from "./finance";
 import { sourceOutcome, UNTRANSLATED_STATES } from "./outcome";
 import { unavailableNotice } from "./retrieval-status.js";
@@ -11,6 +12,17 @@ const entity = (overrides: Partial<FinEntity>): FinEntity => ({
   entity_slug: "business", legal_name: "A Business", label: "A Business",
   kind: "business", status: "active", relationship: "owned",
   counterparty: false, fixed: false, ...overrides,
+});
+
+describe("rounded bank figures", () => {
+  it("says a total is not exact whenever it includes a rounded figure", () => {
+    expect(roundedFigureNote(1, "balance")).toBe(
+      "Rounded: 1 balance came from the bank with more decimal places than the currency uses, so this total is not exact.");
+    expect(roundedFigureNote(3, "line")).toContain("3 lines came from the bank");
+  });
+  it("adds nothing for exact totals or for older Brains that send no count", () => {
+    for (const count of [0, undefined, null, -1, 1.5]) expect(roundedFigureNote(count, "balance")).toBeNull();
+  });
 });
 
 describe("exact money display", () => {

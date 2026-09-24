@@ -60,7 +60,10 @@ import {
   SOURCE_FAMILY_UID_FILTER_MAX,
 } from "./worker/src/lib/store-d1.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
-import { ensureBankFeedWorkerSecrets } from "./operations/bank-feed-owner-secrets.mjs";
+import {
+  ensureBankFeedWorkerSecrets,
+  validatePlaidApplicationKeys,
+} from "./operations/bank-feed-owner-secrets.mjs";
 import {
   financialPictureRequestFromFlags,
   parseFinancialPictureArgv,
@@ -26565,13 +26568,16 @@ export function readBankFeedKeyHidden(promptText, { read = readHiddenSecret } = 
 
 export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
   if (!manifestPath || String(manifestPath).startsWith("--")) {
-    die("usage: brain connect bank <manifest> [--print]");
+    die("usage: brain connect bank <manifest> [--print] [--replace-keys]");
   }
-  const unknownFlags = Object.keys(flags).filter((key) => key !== "print");
+  const unknownFlags = Object.keys(flags).filter((key) => !["print", "replace-keys"].includes(key));
   if (unknownFlags.length) die(`brain connect bank does not recognize --${unknownFlags[0]}`);
-  if (flags.print !== undefined && flags.print !== true) {
-    die("--print is a switch and does not take a value. Put it at the end of the command.");
+  for (const name of ["print", "replace-keys"]) {
+    if (flags[name] !== undefined && flags[name] !== true) {
+      die(`--${name} is a switch and does not take a value. Put it at the end of the command.`);
+    }
   }
+  const replaceKeys = flags["replace-keys"] === true;
   const { m } = loadManifest(manifestPath);
   const feed = m?.corpora?.bank_feed || {};
   if (feed.enabled !== true) {
@@ -26609,8 +26615,13 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
 
   // Plaid Link cannot start on a Worker without its application credentials,
   // so custody is settled before the owner is sent to the browser. The listing
-  // is read-only; the owner is prompted only when a name is actually missing.
+  // is read-only; the owner is prompted only when a name is actually missing,
+  // or for both Plaid keys when --replace-keys corrects a mistyped pair.
   const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
+  const environment = feed.environment ?? "sandbox";
+  const countryCodes = Array.isArray(feed.country_codes) && feed.country_codes.length
+    ? feed.country_codes
+    : ["US"];
   let acct = null;
   const account = async () => (acct ??= await (options.resolveAccount ?? resolveAccount)(m));
   const listSecretNames = options.listWorkerSecretNames ?? (async () => {
@@ -26635,6 +26646,14 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
       body: { name, text, type: "secret_text" },
     }));
   const readSecret = options.readSecret ?? readBankFeedKeyHidden;
+  // The typed pair is proven against this manifest's Plaid environment before
+  // any Worker write, on the first entry and on every replacement.
+  const validateKeys = options.validatePlaidKeys ?? ((pair) => validatePlaidApplicationKeys({
+    ...pair,
+    environment,
+    countryCodes,
+    fetchImpl: options.plaidFetchImpl ?? fetch,
+  }));
   let custody;
   try {
     custody = await ensureBankFeedWorkerSecrets({
@@ -26642,6 +26661,9 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
       listSecretNames,
       putSecret,
       readSecret,
+      validateKeys,
+      environment,
+      replaceKeys,
       generateWrappingKey: options.generateWrappingKey,
       report: info,
     });
@@ -26649,10 +26671,13 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
     if (error instanceof Fatal) throw error;
     die(String(error?.message || error));
   }
-  if (custody.written.length) {
+  if (custody.replaced) {
+    ok(`Plaid accepted the new keys for ${environment}; replaced and verified ${custody.written.join(", ")} on ${scriptName}. BANK_FEED_WRAPPING_KEY_V2 was not touched`);
+  } else if (custody.written.length) {
     ok(`wrote and verified ${custody.written.join(", ")} on ${scriptName}`);
   } else {
     ok(`${custody.names.join(", ")} already present on ${scriptName}; nothing was prompted or written`);
+    info("If a Plaid key was entered wrongly, rerun this command with --replace-keys to enter both keys again.");
   }
 
   const shouldOpen = flags.print !== true && options.open !== false;
@@ -26671,6 +26696,7 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
   return {
     provider: "plaid", url, opened, live_provider_proof: false,
     secrets_written: custody.written,
+    keys_replaced: custody.replaced === true,
   };
 }
 
@@ -27064,8 +27090,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect zoom     <manifest>      Zoom cloud-recording transcripts (needs a paid Zoom seat)
     brain connect imap     <manifest>      any IMAP mailbox (Yahoo, Fastmail, iCloud, a host): app
                                            password entered hidden, proven by a real read first
-    brain connect bank     <manifest>      owner-present Plaid pilot: hidden prompt for missing Plaid keys, then
-                                           owner-only Plaid Link and masked account assignment
+    brain connect bank     <manifest>      owner-present Plaid pilot: hidden prompt for missing Plaid keys, checked
+                                           with Plaid before they are saved, then owner-only Plaid Link and masked
+                                           account assignment. --replace-keys re-enters both keys
     brain connect <provider> <manifest>    QuickBooks, Slack, Notion, Microsoft, Dropbox or HubSpot OAuth
     brain load       <manifest>            load EVERYTHING this manifest has: one sweep of every
                                            enabled, connected source, one report at the end

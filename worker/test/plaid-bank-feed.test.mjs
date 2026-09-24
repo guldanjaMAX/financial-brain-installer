@@ -1485,8 +1485,8 @@ test("Plaid missing balances stay null and an older same-day observation cannot 
   } finally { fixture.close(); }
 });
 
-test("Plaid refuses nonrepresentable balances and transactions instead of truncating or assuming USD", async () => {
-  for (const [currency, value] of [["USD", "12.001"], ["JPY", "1.5"], ["USD", "90071992547409.92"], ["ZZZ", "10.00"], [null, "10.00"]]) {
+test("Plaid refuses unsupported currencies and unsafe magnitudes instead of truncating or assuming USD", async () => {
+  for (const [currency, value] of [["USD", "90071992547409.92"], ["ZZZ", "10.00"], [null, "10.00"]]) {
     const { fixture, state, run } = await containmentFixture(["invalid-balance"], { added: [] });
     try {
       state.accounts[0].balances = { current: value, iso_currency_code: currency };
@@ -1497,15 +1497,29 @@ test("Plaid refuses nonrepresentable balances and transactions instead of trunca
       assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_balance_snapshots").n, 0);
     } finally { fixture.close(); }
   }
-  const { fixture, state, run, assignAll } = await containmentFixture(["invalid-transaction"]);
+});
+
+test("Plaid rounds finer-than-minor-unit precision half-even with a flag instead of failing the Item", async () => {
+  // These exact values were refused before, which failed every account at the
+  // institution. They now promote rounded, flagged, and with the exact decimal.
+  const { fixture, state, run, assignAll } = await containmentFixture(["usd-precision", "jpy-precision"]);
   try {
+    state.accounts[0].balances = { current: "12.001", iso_currency_code: "USD" };
+    state.accounts[1].balances = { current: "1.5", iso_currency_code: "JPY" };
     state.page.added[0].amount = "12.001";
-    await run(); await assignAll();
-    const result = await run();
-    assert.equal(result.ok, false);
-    assert.equal(result.code, "plaid_amount_not_representable");
-    assert.equal(fixture.first("SELECT cursor FROM bank_feed_items").cursor, null);
-    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n, 0);
+    await run(); await assignAll(); assertReadyPromotion(await run());
+    assert.equal(fixture.first("SELECT cursor FROM bank_feed_items").cursor, "identity-complete");
+    const balances = fixture.rows(`SELECT f.external_ref,b.current_minor,b.currency,b.source_locator
+      FROM fin_balance_snapshots b JOIN fin_accounts f ON f.account_slug=b.account_slug AND f.tenant_id=b.tenant_id
+      ORDER BY f.external_ref`).map(row => ({ ...row, rounded: /#minor_rounded=current$/.test(row.source_locator) }));
+    assert.deepEqual(balances.map(({ external_ref, current_minor, currency, rounded }) => ({ external_ref, current_minor, currency, rounded })), [
+      { external_ref: "jpy-precision", current_minor: 2, currency: "JPY", rounded: true },
+      { external_ref: "usd-precision", current_minor: 1200, currency: "USD", rounded: true },
+    ]);
+    const line = fixture.first("SELECT amount_minor,source_amount_decimal,source_locator FROM fin_transactions WHERE external_id='identity-transaction-0'");
+    assert.equal(line.amount_minor, 1200);
+    assert.equal(line.source_amount_decimal, "12.001");
+    assert.match(line.source_locator, /#minor_rounded$/);
   } finally { fixture.close(); }
 });
 
