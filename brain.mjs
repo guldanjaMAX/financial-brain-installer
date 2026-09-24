@@ -7767,6 +7767,79 @@ export function assertNoIngestFailures(tally, { noun = "stored part" } = {}) {
   );
 }
 
+const SYSTEMIC_PREPARATION_ERROR_NAMES = new Set([
+  "ArchiveSafetyError",
+  "DriveError",
+  "ExtractorSystemError",
+  "ImapError",
+  "LocalFileSafetyError",
+  "SourceIngestLockError",
+]);
+
+const SYSTEMIC_TRANSPORT_ERROR_CODES = new Set([
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+]);
+
+/**
+ * Only an ordinary exception attributable to one document may be isolated.
+ * Existing run-level gates retain their fail-closed behavior across local,
+ * Drive, Gmail, and IMAP preparation handlers.
+ */
+export function isSystemicIngestPreparationError(error) {
+  if (!error || typeof error !== "object") return true;
+  if (error instanceof Fatal || error instanceof SourceIngestLockError) return true;
+  if (error.fatal === true || error.needsReauth === true) return true;
+  if (SYSTEMIC_PREPARATION_ERROR_NAMES.has(String(error.name || ""))) return true;
+  if (typeof error.operationClass === "string" && error.operationClass) return true;
+  if (Number.isInteger(error.providerStatus)) return true;
+  if (String(error.code || "").startsWith("source_ingest_lock_")) return true;
+  if (SYSTEMIC_TRANSPORT_ERROR_CODES.has(String(error.code || "").toUpperCase())) return true;
+  return error.cause && error.cause !== error
+    ? isSystemicIngestPreparationError(error.cause)
+    : false;
+}
+
+/**
+ * Build the one per-item recovery boundary shared by cursor-backed sources.
+ * The source-specific callback marks the observed identity as active before
+ * any later cleanup plan can interpret a preparation failure as deletion.
+ */
+export function makeRemotePreparationErrorIsolator({
+  sourceLabel,
+  state,
+  statePath,
+  dryRun,
+  saveState,
+  tally,
+  skips,
+  assertOwned = null,
+  stateKeyOf,
+  protectPriorFamily = () => {},
+}) {
+  return (error, item) => {
+    // This must precede every state, tally, or protection mutation.
+    if (isSystemicIngestPreparationError(error)) throw error;
+    const stateKey = stateKeyOf(item);
+    if (typeof stateKey !== "string" || !stateKey) throw error;
+    assertOwned?.();
+    protectPriorFamily(stateKey, item);
+    const reason = `${sourceLabel} item preparation failed unexpectedly; its prior family was retained and it was left for retry`;
+    recordLocalSkippedDocumentState(state, { stateKey, reason });
+    if (!dryRun) saveState(statePath, state);
+    skips.push({ path: `${sourceLabel} item`, reason, failed: true });
+    tally.failed++;
+    return true;
+  };
+}
+
 /**
  * Attach the common ingestion outcome to a message-capture command result.
  *
@@ -8773,6 +8846,25 @@ export async function cmdSources(manifestPath, options = {}) {
       inventory = await collectSourceInventoryWithReadinessRetry(requestPage, options);
     } catch (error) {
       if (!writeAccepted) throw error;
+      const pending = error?.retryable === true || error?.code === "inventory_snapshot_changed";
+      if (!pending) {
+        const errorCode = error instanceof SourceInventoryClientError
+          ? String(error.code || "source_inventory_verification_failed")
+          : "source_inventory_verification_failed";
+        warn(
+          "the source change was accepted, but its inventory verification failed. " +
+          "The write was not repeated. Run `brain sources <manifest>` to verify the current inventory; " +
+          "if the same verification error returns, run `brain diagnose <manifest>`."
+        );
+        return {
+          kind: "source_inventory_verification_failed",
+          write_accepted: true,
+          inventory_pending: false,
+          verification_failed: true,
+          error_code: errorCode,
+          changes: acceptedChanges,
+        };
+      }
       warn(
         "the source change was accepted, but the complete inventory is still becoming available. " +
         "The write was not repeated. Run `brain sources <manifest>` to read it back."
@@ -11261,10 +11353,9 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
 
   const isolatePreparationError = (error, file) => {
-    // Command gates and lease loss protect the whole operation. They are not a
-    // bad document and must retain their original fail-closed behavior.
-    if (error instanceof Fatal || error instanceof SourceIngestLockError ||
-        error?.code === "source_ingest_lock_lost") return false;
+    // This classification must be the first action. A safety or systemic
+    // refusal must not write retry state or let a later file spend or mutate.
+    if (isSystemicIngestPreparationError(error)) throw error;
     assertLockOwned?.();
     const stateKey = String(file?.rel || file?.name || "unnamed document").split(sep).join("/");
     const reason = "file preparation failed unexpectedly; it was left for retry";
@@ -14719,6 +14810,10 @@ const cmdIngestRemoteRun = async (
     assertLockOwned?.();
     return persistState(path, value);
   };
+  const sendPreparedBatches = options.sendBatches ?? sendBatches;
+  const reconcilePreparedFamilies = options.reconcileDocumentFamilies ?? reconcileDocumentFamilies;
+  const listPreparedSourceFamilies = options.listStoredSourceFamilies ?? listStoredSourceFamilies;
+  const applyPreparedRemovals = options.applyDriveRemovals ?? applyDriveRemovals;
   // IMAP holds its own mailbox credential and never touches the Google store.
   // Resolving googleAuth unconditionally would refuse an IMAP sync on a machine
   // that has deliberately never connected Google, which is most of them.
@@ -15218,6 +15313,7 @@ const cmdIngestRemoteRun = async (
   const rejectedFamilyParts = new Map();
   const intentionalRemovalUids = [];
   const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
+  const countedPreparationErrors = new WeakSet();
 
   const addTally = (part) => {
     for (const key of Object.keys(tally)) tally[key] += Number(part?.[key] || 0);
@@ -15251,7 +15347,7 @@ const cmdIngestRemoteRun = async (
     for (const item of group) {
       if (item.familyPlan) familyPlans.set(item.familyPlan.stateKey, item.familyPlan);
     }
-    const part = await sendBatches({
+    const part = await sendPreparedBatches({
       base, adminKey, groups: [group], state, statePath, skips, quiet: true,
       saveState, assertOwned: assertLockOwned,
       onResult: (item, result) => {
@@ -15276,7 +15372,7 @@ const cmdIngestRemoteRun = async (
     const outcome = remoteFamilyOutcomes(familyPlans.values(), sentFamilyParts, acceptedFamilyParts);
     const settlement = remoteFamilySettlement(outcome, rejectedFamilyParts);
     if (settlement.reconciliations.length) {
-      const staleParts = await reconcileDocumentFamilies({
+      const staleParts = await reconcilePreparedFamilies({
         families: settlement.reconciliations, base, adminKey,
         assertOwned: assertLockOwned,
       });
@@ -15402,7 +15498,7 @@ const cmdIngestRemoteRun = async (
       Number(driveRemovalReview?.counts?.pending_source_deletions || 0) > 0
     );
     const driveInventoryBeforeProcessing = needsDrivePreInventory
-      ? await listStoredSourceFamilies({
+      ? await listPreparedSourceFamilies({
           base,
           adminKey,
           source: sourceName,
@@ -15441,7 +15537,7 @@ const cmdIngestRemoteRun = async (
     const labelCandidateUids = [...driveAbsenceCandidates].sort();
     const labelBatches = batchSourceFamilyLabelUids({ source: sourceName, uids: labelCandidateUids });
     for (const batch of labelBatches) {
-      const labelInventory = await listStoredSourceFamilies({
+      const labelInventory = await listPreparedSourceFamilies({
         base,
         adminKey,
         source: sourceName,
@@ -15694,8 +15790,22 @@ const cmdIngestRemoteRun = async (
       };
     };
 
+    const isolateDrivePreparationError = makeRemotePreparationErrorIsolator({
+      sourceLabel: "Drive",
+      state,
+      statePath,
+      dryRun: dry,
+      saveState,
+      tally,
+      skips,
+      assertOwned: assertLockOwned,
+      stateKeyOf: (file) => typeof file?.id === "string" ? `${sourceName}:${file.id}` : "",
+      protectPriorFamily: (stateKey) => seenDriveUids.add(stateKey),
+    });
+
     for await (const group of batchStream(files.slice(0, limit), prepareDrive, {
       onSkip: (skip) => skips.push(skip),
+      onPrepareError: isolateDrivePreparationError,
     })) {
       await consumeGroup(group);
     }
@@ -15704,7 +15814,7 @@ const cmdIngestRemoteRun = async (
       // A preview has no authenticated inventory, but still reports every
       // observed category. It cannot delete or advance a cursor.
       if (!assistantJson) {
-        await applyDriveRemovals({
+        await applyPreparedRemovals({
           uids: excludeProtectedDriveUids(excludedUids),
           base, adminKey, state, dryRun: true, label: "source policy",
         });
@@ -15715,7 +15825,7 @@ const cmdIngestRemoteRun = async (
               "they will be verified and are never deleted on that signal"
           );
         }
-        await applyDriveRemovals({
+        await applyPreparedRemovals({
           uids: excludeProtectedDriveUids(intentionalRemovalUids),
           base, adminKey, state, dryRun: true, label: "intentional source skip",
         });
@@ -15737,7 +15847,7 @@ const cmdIngestRemoteRun = async (
         Number(driveRemovalReview?.counts?.unresolved_absences || 0) > 0 ||
         Number(driveRemovalReview?.counts?.pending_source_deletions || 0) > 0;
       const storedUids = driveStoredBeforeProcessing || (needsStoredInventory
-        ? await listStoredSourceFamilies({ base, adminKey, source: sourceName })
+        ? await listPreparedSourceFamilies({ base, adminKey, source: sourceName })
         : new Set());
       // A valid prior forget may have reached the Worker even if its response
       // was lost. Inventory is authoritative; clear only local retry markers
@@ -15837,7 +15947,7 @@ const cmdIngestRemoteRun = async (
         ["intentional_skip", "intentional source skip", "previously-indexed document(s) removed because the source now skips them"],
       ];
       for (const [category, label, success] of categories) {
-        const result = await applyDriveRemovals({
+        const result = await applyPreparedRemovals({
           uids: excludeProtectedDriveUids(driveRemovalPlan.targets[category]),
           base, adminKey, state, dryRun: false, label,
           assertOwned: assertLockOwned,
@@ -15846,7 +15956,7 @@ const cmdIngestRemoteRun = async (
         if (driveRemovalPlan.targets[category].length) saveState(statePath, state);
       }
       if (driveRemovalPlan.total) {
-        const afterRemoval = await listStoredSourceFamilies({ base, adminKey, source: sourceName });
+        const afterRemoval = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
         const plannedTargets = Object.values(driveRemovalPlan.targets).flat();
         const stillStored = plannedTargets.filter((uid) => afterRemoval.has(uid));
         const failedAt = new Date().toISOString();
@@ -15899,7 +16009,7 @@ const cmdIngestRemoteRun = async (
       deleteKeysOnScannerCommit: ["drive_removal_safety_baseline"],
     };
   } else if (which === "gmail") {
-    const gmail = await import("./connectors/gmail.mjs");
+    const gmail = options.gmail ?? await import("./connectors/gmail.mjs");
     let nextHistory = null;
     let ids;
     let policyById = null;
@@ -15982,7 +16092,7 @@ const cmdIngestRemoteRun = async (
       Object.keys(state.removed || {}).some((uid) => uid.startsWith(`${sourceName}:`));
     let gmailRemovalSafetyCount = null;
     if (!dry && gmailLabelGaps === 0 && gmailHasPotentialRemovalWork) {
-      storedBeforeSweep = await listStoredSourceFamilies({ base, adminKey, source: sourceName });
+      storedBeforeSweep = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
       const baselineKey = JSON.stringify({
         policy_fingerprint: policyFingerprint,
       });
@@ -16007,19 +16117,23 @@ const cmdIngestRemoteRun = async (
       async (id) => {
         const policy = policyById?.get(id);
         if (policy && !policy.allowed) return { id, fetched: policy };
-        return {
-          id,
-          fetched: await gmail.toEnvelope(getToken, id, {
-            sourceName,
-            // A full-list id matched DEFAULT_QUERY. An incremental id reached
-            // this point only after its label-only preflight allowed it.
-            trustedEligible: !incremental || policy?.allowed === true,
-          }),
-        };
+        try {
+          return {
+            id,
+            fetched: await gmail.toEnvelope(getToken, id, {
+              sourceName,
+              // A full-list id matched DEFAULT_QUERY. An incremental id reached
+              // this point only after its label-only preflight allowed it.
+              trustedEligible: !incremental || policy?.allowed === true,
+            }),
+          };
+        } catch (preparationError) {
+          return { id, preparationError };
+        }
       },
       { concurrency: GMAIL_FETCH_CONCURRENCY },
     );
-    const prepareGmail = async ({ id, fetched: r }) => {
+    const prepareGmail = async ({ id, fetched: r, preparationError }) => {
       scanned++;
       // Report the scan before any unchanged or skip return. A resumed first
       // pass may recheck thousands of already-accepted messages before it
@@ -16028,6 +16142,12 @@ const cmdIngestRemoteRun = async (
       if (scanned % 200 === 0) process.stdout.write(`\r  fetched ${scanned}...   `);
       const key = `${sourceName}:${id}`;
       gmailActiveUids.add(key);
+      if (preparationError) {
+        if (preparationError && typeof preparationError === "object") {
+          countedPreparationErrors.add(preparationError);
+        }
+        throw preparationError;
+      }
       if (r.skip) {
         const previouslyAccepted = storedBeforeSweep
           ? storedBeforeSweep.has(key)
@@ -16089,8 +16209,21 @@ const cmdIngestRemoteRun = async (
         },
       };
     };
+    const isolateGmailPreparationError = makeRemotePreparationErrorIsolator({
+      sourceLabel: "Gmail",
+      state,
+      statePath,
+      dryRun: dry,
+      saveState,
+      tally,
+      skips,
+      assertOwned: assertLockOwned,
+      stateKeyOf: (item) => typeof item?.id === "string" ? `${sourceName}:${item.id}` : "",
+      protectPriorFamily: (stateKey) => gmailActiveUids.add(stateKey),
+    });
     for await (const group of batchStream(fetched, prepareGmail, {
       onSkip: (skip) => skips.push(skip),
+      onPrepareError: isolateGmailPreparationError,
     })) {
       await consumeGroup(group);
       for (const item of group) {
@@ -16141,13 +16274,13 @@ const cmdIngestRemoteRun = async (
     }
 
     if (dry) {
-      await applyDriveRemovals({
+      await applyPreparedRemovals({
         uids: gmailPolicyUids, base, adminKey, state, dryRun: true, label: "source policy",
       });
-      await applyDriveRemovals({
+      await applyPreparedRemovals({
         uids: gmailDeletedUids, base, adminKey, state, dryRun: true, label: "Gmail source deletion",
       });
-      await applyDriveRemovals({
+      await applyPreparedRemovals({
         uids: [...gmailIntentionalUids, ...intentionalRemovalUids],
         base, adminKey, state, dryRun: true, label: "intentional source skip",
       });
@@ -16215,7 +16348,7 @@ const cmdIngestRemoteRun = async (
           ["intentional_skip", "intentional Gmail skip", "message(s) removed because the current source revision is ineligible"],
         ];
         for (const [category, label, success] of categories) {
-          const result = await applyDriveRemovals({
+          const result = await applyPreparedRemovals({
             uids: gmailRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
             assertOwned: assertLockOwned,
           });
@@ -16223,7 +16356,7 @@ const cmdIngestRemoteRun = async (
           if (gmailRemovalPlan.targets[category].length) saveState(statePath, state);
         }
         if (gmailRemovalPlan.total) {
-          const afterRemoval = await listStoredSourceFamilies({ base, adminKey, source: sourceName });
+          const afterRemoval = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
           const plannedTargets = Object.values(gmailRemovalPlan.targets).flat();
           const stillStored = plannedTargets.filter((uid) => afterRemoval.has(uid));
           const failedAt = new Date().toISOString();
@@ -16258,7 +16391,7 @@ const cmdIngestRemoteRun = async (
       deleteKeysOnScannerCommit: ["gmail_removal_safety_baseline"],
     };
   } else {
-    const imap = await import("./connectors/imap.mjs");
+    const imap = options.imap ?? await import("./connectors/imap.mjs");
     const imapAuthoritativeSnapshot = !incremental;
     const imapActiveUids = new Set();
     const imapAcceptedUids = new Set();
@@ -16273,7 +16406,7 @@ const cmdIngestRemoteRun = async (
     });
     const captureImapInventory = async () => {
       if (imapStoredBeforeSweep) return imapStoredBeforeSweep;
-      imapStoredBeforeSweep = await listStoredSourceFamilies({ base, adminKey, source: sourceName });
+      imapStoredBeforeSweep = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
       imapRemovalSafetyCount = recordRemovalSafetyBaseline({
         stateKey: "imap_removal_safety_baseline",
         key: imapBaselineKey,
@@ -16433,6 +16566,20 @@ const cmdIngestRemoteRun = async (
           };
         };
 
+        const isolateImapPreparationError = makeRemotePreparationErrorIsolator({
+          sourceLabel: "IMAP",
+          state,
+          statePath,
+          dryRun: dry,
+          saveState,
+          tally,
+          skips,
+          assertOwned: assertLockOwned,
+          stateKeyOf: (message) => Number.isSafeInteger(message?.uid)
+            ? `${sourceName}:${folder.name}#${message.uid}`
+            : "",
+        });
+
         const stream = imap.streamFolder(client, folder.name, {
           criteria: decision.searchCriteria,
           floor: decision.floor,
@@ -16440,6 +16587,7 @@ const cmdIngestRemoteRun = async (
         });
         for await (const group of batchStream(stream, prepareImap, {
           onSkip: (skip) => skips.push(skip),
+          onPrepareError: isolateImapPreparationError,
         })) {
           await consumeGroup(group);
           for (const item of group) {
@@ -16503,10 +16651,10 @@ const cmdIngestRemoteRun = async (
     }
 
     if (dry) {
-      await applyDriveRemovals({
+      await applyPreparedRemovals({
         uids: imapPolicyUids, base, adminKey, state, dryRun: true, label: "IMAP source policy",
       });
-      await applyDriveRemovals({
+      await applyPreparedRemovals({
         uids: intentionalRemovalUids, base, adminKey, state, dryRun: true, label: "intentional IMAP skip",
       });
     } else {
@@ -16518,7 +16666,7 @@ const cmdIngestRemoteRun = async (
       const unmatchedStoredUids = imapAuthoritativeSnapshot
         ? [...storedImapUids].filter((uid) => !imapActiveUids.has(uid))
         : [];
-      const ambiguousSnapshot = imapUnidentifiedSkips > 0 && unmatchedStoredUids.length > 0;
+      const ambiguousSnapshot = (imapUnidentifiedSkips > 0 || tally.failed > 0) && unmatchedStoredUids.length > 0;
       const imapSnapshotGapUids = new Set([
         ...unresolvedActivePendingUids,
         ...ambiguousPendingImapUids.filter((uid) => storedImapUids.has(uid)),
@@ -16569,14 +16717,14 @@ const cmdIngestRemoteRun = async (
         ["intentional_skip", "intentional IMAP skip", "message(s) removed because the current source revision is ineligible"],
       ];
       for (const [category, label, success] of categories) {
-        const result = await applyDriveRemovals({
+        const result = await applyPreparedRemovals({
           uids: imapRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
         });
         if (result.applied) ok(`${result.applied} ${success}`);
         if (imapRemovalPlan.targets[category].length) saveState(statePath, state);
       }
       if (imapRemovalPlan.total) {
-        const afterRemoval = await listStoredSourceFamilies({ base, adminKey, source: sourceName });
+        const afterRemoval = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
         const plannedTargets = Object.values(imapRemovalPlan.targets).flat();
         const stillStored = plannedTargets.filter((uid) => afterRemoval.has(uid));
         const failedAt = new Date().toISOString();
@@ -16811,10 +16959,13 @@ const cmdIngestRemoteRun = async (
         // incomplete walk and closed operation evidence remain the proof.
         const connectorDocumentFailures = which === "gmail" &&
           GMAIL_DOCUMENT_FAILURE_OPERATIONS.has(error?.operationClass) ? 1 : 0;
+        const connectorUnscannedFailures = connectorDocumentFailures && countedPreparationErrors.has(error)
+          ? 0
+          : connectorDocumentFailures;
         await recordSourceReceipt({
           source: sourceName, kind: which, status: "error", run_id: runId,
           lane, started_at: runStartedAt, completed_at: new Date().toISOString(),
-          walk_complete: false, files_seen: scanned + connectorDocumentFailures,
+          walk_complete: false, files_seen: scanned + connectorUnscannedFailures,
           docs_added: tally.created,
           docs_updated: tally.updated,
           docs_unchanged: unchanged + tally.unchanged,

@@ -49,6 +49,32 @@ check("a table of numbers is still text", textQuality(
     `${result.metrics.encoded_ratio} != ${legacyEncodedRatio(mixed)}`);
 }
 
+{
+  const mixedUnit = [
+    "ordinary readable text separates every encoded run! ",
+    "g".repeat(199),
+    "!",
+    "g".repeat(200),
+    "!",
+    "a".repeat(299),
+    "!",
+    "a".repeat(300),
+    "!",
+  ].join("");
+  const units = Math.floor(MAX_TEXT_CHARS / mixedUnit.length);
+  const remainder = MAX_TEXT_CHARS - units * mixedUnit.length;
+  const mixed = mixedUnit.repeat(units) + " ".repeat(remainder);
+  const encodedPerUnit = 200 + 299 + (300 * 2);
+  const expectedRatio = +((units * encodedPerUnit) / MAX_TEXT_CHARS).toFixed(3);
+  let result;
+  let error = null;
+  try { result = textQuality(mixed); } catch (caught) { error = caught; }
+  check("an 8 MiB mixed boundary input is stack-safe", error === null, error?.stack || error);
+  check("the 8 MiB mixed boundary input has the analytically computed encoded ratio",
+    result?.metrics?.encoded_ratio === expectedRatio,
+    `${result?.metrics?.encoded_ratio} != ${expectedRatio}`);
+}
+
 /* ---- maximum-size quality checks must stay stack-safe and bounded ---- */
 {
   const repeated = "A".repeat(MAX_TEXT_CHARS);

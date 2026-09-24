@@ -309,6 +309,47 @@ test("an accepted source write is not reported as failed when bounded inventory 
   });
 });
 
+test("an accepted source write reports a distinct non-retryable verification failure", async () => {
+  await withManifest(async (manifest) => {
+    let writes = 0;
+    let reads = 0;
+    const waits = [];
+    const { value, output } = await captureLogs(() => cmdSources(manifest, {
+      flags: { add: "upload", kind: "upload" },
+      resolveAdminKey: () => OWNER_PROOF,
+      sourceInventorySleep: async (milliseconds) => waits.push(milliseconds),
+      fetchImpl: async (url) => {
+        if (new URL(url).pathname.endsWith("/source-register")) {
+          writes++;
+          return new Response(JSON.stringify({
+            source: "upload",
+            kind: "upload",
+            registered: true,
+            registry_event_recorded: true,
+            operation_id: "fixture-registration-operation",
+          }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        reads++;
+        return new Response(JSON.stringify({ sources: "not-an-array" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    }));
+
+    assert.equal(writes, 1);
+    assert.equal(reads, 1);
+    assert.deepEqual(waits, []);
+    assert.equal(value.kind, "source_inventory_verification_failed");
+    assert.equal(value.write_accepted, true);
+    assert.equal(value.inventory_pending, false);
+    assert.equal(value.verification_failed, true);
+    assert.equal(value.error_code, "inventory_contract_invalid");
+    assert.match(output, /accepted, but its inventory verification failed/);
+    assert.doesNotMatch(output, /still becoming available/);
+  });
+});
+
 test("source inventory CLI exposes only validated Gmail failure evidence in JSON and concise human output", async () => {
   const gmail = sourceRow("gmail", {
     kind: "gmail",
