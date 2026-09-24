@@ -274,6 +274,7 @@ import {
   cloudflareWorkersPlanUrl,
 } from "./operations/cloudflare-account-bootstrap.mjs";
 import {
+  captureCloudflareOAuthToken,
   CloudflareOAuthSessionError,
   cloudflareOAuthChildEnvironment,
   cloudflareOAuthProfileName,
@@ -623,27 +624,43 @@ export function cloudflareAccessUsesBrowserProfile() {
   return source === "wrangler-oauth" || source === "wrangler-session";
 }
 
-// Cloudflare rejected the credential mid-run. If it came from this computer's
-// wrangler login session, the session has expired: wrangler renews only an
-// expired token (whoami on a still-valid one changes nothing), so this is the
-// first moment a refresh can succeed. A rehearsal on 2026-09-02 started with
-// 2m38s left on the hour and died 2.5 minutes into provisioning with
-// "403 9109 Invalid access token", blamed on a token the owner never typed.
+// Cloudflare rejected a browser credential mid-run. Wrangler refreshes only an
+// expired token, so this can be the first moment a refresh can succeed. The
+// holder supplies the correct re-read operation for either the legacy default
+// session or this Brain's named profile.
 // Returns true when a different token is now in place.
 function renewWranglerSessionToken() {
   if (process.env.CLOUDFLARE_API_TOKEN) return false;
   const holder = cloudflareTokenSession.getStore();
-  if (!holder || holder.source !== "wrangler-session" || typeof holder.renew !== "function") return false;
+  if (!holder || !["wrangler-session", "wrangler-oauth"].includes(holder.source) ||
+      typeof holder.renew !== "function") return false;
   let next = null;
   try {
     next = holder.renew();
   } catch {
     next = null;
   }
-  if (!next || String(next) === holder.buffer.toString("ascii")) return false;
+  if (!next) return false;
+  const nextBuffer = Buffer.isBuffer(next)
+    ? next
+    : Buffer.from(String(next), "ascii");
+  if (nextBuffer === holder.buffer || nextBuffer.equals(holder.buffer)) {
+    if (nextBuffer !== holder.buffer) nextBuffer.fill(0);
+    return false;
+  }
   holder.buffer.fill(0);
-  holder.buffer = Buffer.from(String(next), "ascii");
+  holder.buffer = nextBuffer;
   return true;
+}
+
+function namedProfileReauthorizationFailure() {
+  const error = new Fatal(
+    "this Brain's Cloudflare browser sign-in expired before the operation could be authorized.\n" +
+      "      The rejected operation was not repeated. Rerun the same command in an interactive\n" +
+      "      terminal and authorize the browser sign-in again when prompted.",
+  );
+  error.code = "AUTH_REQUIRED";
+  return error;
 }
 
 function isExpiredSessionRejection(error) {
@@ -1166,25 +1183,37 @@ export async function withCloudflareControlCredential(action, options = {}) {
     expectedAccountId: accountId,
     reauthorize,
     prompt: accountPrompt,
-    action: async (session) => cloudflareTokenSession.run({
-      buffer: session.token,
-      source: "wrangler-oauth",
-      machineReadable: false,
-      announced: true,
-      account: session.account,
-      preflight: session.preflight,
-    }, async () => {
-      try {
-        return await action(Object.freeze({
-          method: "wrangler_oauth",
+    action: async (session) => {
+      const holder = {
+        buffer: session.token,
+        source: "wrangler-oauth",
+        machineReadable: false,
+        announced: true,
+        // The exact account and preflight receipt let deploy bind the
+        // workers.dev hostname to the subdomain this sign-in proved.
+        account: session.account,
+        preflight: session.preflight,
+        renew: () => captureCloudflareOAuthToken({
+          ...oauthSessionOptions,
           profile: session.profile,
-          account: session.account,
-          preflight: session.preflight,
-        }));
-      } catch (error) {
-        throw new CloudflareControlActionError(error);
-      }
-    }),
+          accountId: session.account.id,
+        }),
+      };
+      return cloudflareTokenSession.run(holder, async () => {
+        try {
+          return await action(Object.freeze({
+            method: "wrangler_oauth",
+            profile: session.profile,
+            account: session.account,
+            preflight: session.preflight,
+          }));
+        } catch (error) {
+          throw new CloudflareControlActionError(error);
+        } finally {
+          holder.buffer.fill(0);
+        }
+      });
+    },
   });
 
   const initiallyReauthorize = options.reauthorizeOAuth === true;
@@ -1291,10 +1320,23 @@ async function cf(path, options = {}) {
   try {
     return await cfOnce(path, options);
   } catch (error) {
-    if (isExpiredSessionRejection(error) && renewWranglerSessionToken()) return cfOnce(path, options);
+    const holder = cloudflareTokenSession.getStore();
+    if (isExpiredSessionRejection(error) && renewWranglerSessionToken()) {
+      try {
+        return await cfOnce(path, options);
+      } catch (retryError) {
+        if (holder?.source === "wrangler-oauth" && isExpiredSessionRejection(retryError)) {
+          throw namedProfileReauthorizationFailure();
+        }
+        throw retryError;
+      }
+    }
+    if (isExpiredSessionRejection(error) && holder?.source === "wrangler-oauth") {
+      throw namedProfileReauthorizationFailure();
+    }
     if (
       isExpiredSessionRejection(error) && !process.env.CLOUDFLARE_API_TOKEN &&
-      cloudflareTokenSession.getStore()?.source === "wrangler-session"
+      holder?.source === "wrangler-session"
     ) {
       error.credentialSource = "wrangler-session";
     }
@@ -1569,7 +1611,13 @@ async function cmdVerify(manifestPath) {
  * CLOUDFLARE_API_TOKEN must be cleared for the child process. Wrangler prefers it
  * when set and will silently authenticate as the wrong identity.
  */
-function wrangler(args, { accountId, authProfile = null } = {}) {
+export function runCloudflareWranglerCommand(args, {
+  accountId,
+  authProfile = null,
+  runCommand = run,
+  platformName = process.platform,
+  renewSessionToken = renewWranglerSessionToken,
+} = {}) {
   // Through doctor's runner, which knows that npm CLIs are .cmd shims on
   // Windows and that Node refuses to spawn those without a shell since
   // CVE-2024-27980. The previous raw spawnSync returned ENOENT there, which
@@ -1583,15 +1631,31 @@ function wrangler(args, { accountId, authProfile = null } = {}) {
     ? [...baseArgs, "--profile", authProfile]
     : wranglerProfileArgs(baseArgs, accountId);
   const exactArgs = authProfile
-    ? [...profiled, `--env-file=${process.platform === "win32" ? "NUL" : "/dev/null"}`]
+    ? [...profiled, `--env-file=${platformName === "win32" ? "NUL" : "/dev/null"}`]
     : profiled;
-  const r = run("npx", exactArgs, {
+  const invoke = () => runCommand("npx", exactArgs, {
     timeout: 180_000,
     inheritEnv: false,
     env,
   });
-  return { ok: r.ok, out: r.out, status: r.ok ? 0 : 1 };
+  let result = invoke();
+  const authRejected = (value) => {
+    const message = String(value?.out || "");
+    return /invalid access token|authentication error/i.test(message) ||
+      (/\b(9109|10000)\b/.test(message) && /auth|token/i.test(message));
+  };
+  if (authProfile && !result.ok && authRejected(result)) {
+    if (renewSessionToken()) {
+      result = invoke();
+      if (result.ok) return { ok: true, out: result.out, status: 0 };
+      if (!authRejected(result)) return { ok: false, out: result.out, status: 1 };
+    }
+    return { ok: false, out: namedProfileReauthorizationFailure().message, status: 1 };
+  }
+  return { ok: result.ok, out: result.out, status: result.ok ? 0 : 1 };
 }
+
+const wrangler = runCloudflareWranglerCommand;
 
 function wranglerAvailable(accountId, authProfile = null) {
   if (!accountId) return false;
