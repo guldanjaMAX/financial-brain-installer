@@ -2043,6 +2043,78 @@ export function workersDevRouteDisposition({ customDomain = null, workersDevEnab
   return customDomain ? "optional" : "required";
 }
 
+/** Cloudflare's workers.dev account-subdomain label shape. */
+const WORKERS_DEV_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+
+// The exact phrase token() dies with when no Cloudflare credential at all is
+// available, and the exact shape cfOnce() throws for a denied read. Matched
+// narrowly on purpose: a caller-supplied `readSubdomain` can fail for reasons
+// that have nothing to do with credentials (a plain "HTTP 403 Forbidden" from
+// an unrelated proxy, say), and those must keep dying with the message below,
+// not be swept into the recovery path meant for an auth/permission denial.
+const NO_CLOUDFLARE_CREDENTIAL_RE = /no Cloudflare credential is available/;
+const SUBDOMAIN_READ_DENIED_RE = /failed \((401|403)\)/;
+
+/**
+ * Confirm a candidate workers.dev hostname really is THIS brain before an
+ * auth/permission failure is allowed to trust it enough to persist.
+ *
+ * The two fields checked are the only identity a public, unauthenticated
+ * `/health` gives back (worker/src/index.js's handler): `brain` is
+ * `env.BRAIN_NAME`, which workerBindings sets to the client slug, and
+ * `version` is the exact code that answered. Everything else on that response
+ * either needs the admin key (not available at this point in deploy) or is
+ * not an identity fact. These are the same two fields the product records as
+ * this brain's identity once it already trusts a domain; here they are what
+ * lets an UNTRUSTED candidate earn that trust.
+ */
+async function verifyWorkersDevCandidate(domain, {
+  expectedBrainName,
+  expectedVersion,
+  request = http,
+  attempts = 3,
+  wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+  let reason = "no attempt was made";
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let res = null;
+    let body = "";
+    try {
+      res = await request(`https://${domain}/health`, {}, { timeoutMs: 15_000, what: "the health check" });
+      body = await res.text();
+    } catch (error) {
+      reason = `/health did not answer (${String(error?.message || error).split("\n")[0].slice(0, 140)})`;
+    }
+    if (res && !res.ok) reason = `/health returned ${res.status}`;
+    // A route enabled seconds ago can still 404, or the edge can 5xx, while it
+    // propagates. Same lag class cmdHealth already retries for; a single flaky
+    // response here must not throw away a URL that is actually correct.
+    const propagating = res && (res.status === 404 || res.status >= 500);
+    if ((!res || propagating) && attempt < attempts) {
+      await wait(2000);
+      continue;
+    }
+    if (!res || !res.ok) return { ok: false, reason };
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return { ok: false, reason: "/health did not return JSON" };
+    }
+    if (!parsed || typeof parsed !== "object") {
+      return { ok: false, reason: "/health returned no readable body" };
+    }
+    if (parsed.brain !== expectedBrainName) {
+      return { ok: false, reason: `/health identified itself as "${parsed.brain}", not "${expectedBrainName}"` };
+    }
+    if (expectedVersion && parsed.version !== expectedVersion) {
+      return { ok: false, reason: `/health reported version "${parsed.version}", not "${expectedVersion}"` };
+    }
+    return { ok: true };
+  }
+  return { ok: false, reason };
+}
+
 /** Save the verified workers.dev hostname so routine commands need no API token. */
 export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName, options = {}) {
   if (m.brain?.domain) return m.brain.domain;
@@ -2067,19 +2139,78 @@ export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName,
     readFailure = error;
   }
   if (readFailure) {
-    // A credential failure already says the right thing, including how to sign
-    // in without a token. Re-raise it rather than replacing it with a guess.
-    if (readFailure instanceof Fatal) throw readFailure;
-    const detail = String(readFailure?.message || readFailure || "").split("\n")[0].slice(0, 200);
+    const message = String(readFailure?.message || readFailure || "");
+    const noCredential = readFailure instanceof Fatal && NO_CLOUDFLARE_CREDENTIAL_RE.test(message);
+    const denied = SUBDOMAIN_READ_DENIED_RE.test(message);
+    if (!noCredential && !denied) {
+      // A credential failure already says the right thing, including how to sign
+      // in without a token. Re-raise it rather than replacing it with a guess.
+      if (readFailure instanceof Fatal) throw readFailure;
+      const detail = message.split("\n")[0].slice(0, 200);
+      die(
+        "the workers.dev route is enabled, but reading the account subdomain failed.\n" +
+          `  Cloudflare did not answer that read: ${detail}\n` +
+          "  This is a failure to ASK, not a missing subdomain, so check the credential this\n" +
+          "  call is using and its scope before changing anything in the dashboard."
+      );
+    }
+    // An authentication or permission denial (401/403), or no credential at
+    // all. Everything above this call is already live and billable: D1, the
+    // Vectorize index, every migration, and the Worker itself. Dying here with
+    // the message above would send the owner to check a Cloudflare setting
+    // that is almost certainly already correct (see UPDATE-031 in
+    // docs/update-incidents.json) while leaving those resources sitting there,
+    // unexplained. Before giving up, see whether the exact live address can be
+    // proven another way.
+    //
+    // The account's workers.dev LABEL has exactly one source reachable from
+    // here: this same failing read. Neither the script upload two calls up in
+    // cmdDeploy (`PUT .../workers/scripts/:name`) nor the route-enable call
+    // directly above it (`POST .../workers/scripts/:name/subdomain`) return
+    // it — Cloudflare echoes only `{enabled, previews_enabled}` for that one —
+    // and the account listing used to choose this account returns only
+    // `{id, name}`. `options.knownAccountSubdomain` is the seam for a caller
+    // that legitimately learned it some other way (read earlier in the same
+    // run, before whatever just made this credential stop working); nothing
+    // upstream supplies it today, so "no candidate" is the ordinary outcome
+    // below, not a bug in this check.
+    const hintLabel = typeof options.knownAccountSubdomain === "string"
+      ? options.knownAccountSubdomain.trim()
+      : "";
+    const candidateDomain = WORKERS_DEV_LABEL_RE.test(hintLabel)
+      ? `${scriptName}.${hintLabel}.workers.dev`
+      : null;
+    const verify = options.verifyWorkersDevCandidate ?? verifyWorkersDevCandidate;
+    const verdict = candidateDomain
+      ? await verify(candidateDomain, {
+        expectedBrainName: m.client?.slug || "brain",
+        expectedVersion: PRODUCT_VERSION,
+        request: options.request,
+        wait: options.wait,
+      })
+      : { ok: false, reason: "no candidate address could be assembled without the failed read" };
+    if (verdict.ok) {
+      m.brain = { ...(m.brain || {}), domain: candidateDomain };
+      saveManifest(manifestPath, m);
+      ok(`confirmed ${candidateDomain} is this brain despite the denied subdomain read; saved it`);
+      return m.brain.domain;
+    }
     die(
-      "the workers.dev route is enabled, but reading the account subdomain failed.\n" +
-        `  Cloudflare did not answer that read: ${detail}\n` +
-        "  This is a failure to ASK, not a missing subdomain, so check the credential this\n" +
-        "  call is using and its scope before changing anything in the dashboard."
+      "the workers.dev route is enabled and the Worker is deployed, but this run could not\n" +
+        `  confirm the brain's public address: ${verdict.reason}.\n` +
+        "  Reading the account subdomain needs a permission this credential does not have:\n" +
+        "  Workers Scripts Read on the account, for the subdomain.\n" +
+        "\n" +
+        "  Nothing is stranded. D1, the Vectorize index, and every migration already applied\n" +
+        "  are recorded in this manifest's install state, and so is this deployed Worker;\n" +
+        "  re-running `brain setup` against this same manifest picks up from that recorded\n" +
+        "  state instead of recreating any of them.\n" +
+        "  Grant Workers Scripts Read on the account used for the subdomain (or, on a browser\n" +
+        "  sign-in that has been open a while, sign in again), then run the same command."
     );
   }
   const label = typeof sub?.subdomain === "string" ? sub.subdomain.trim() : "";
-  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label)) {
+  if (!WORKERS_DEV_LABEL_RE.test(label)) {
     die(
       "the workers.dev route is enabled, but Cloudflare did not return a usable account subdomain.\n" +
         "  The read succeeded and carried no usable name, so the subdomain really is unset.\n" +
@@ -2358,7 +2489,17 @@ export async function cmdDeploy(manifestPath, options = {}) {
   // after the one-day Cloudflare control token is revoked. Persist the verified
   // workers.dev hostname once, instead of looking it up again on every command.
   if (!m.brain?.domain && options.persistDomain !== false) {
-    const domain = await persistWorkersDevDomain(manifestPath, m, acct, scriptName);
+    // These four are forwarded, not consumed here: no caller in this codebase
+    // sets knownAccountSubdomain today (see persistWorkersDevDomain's own
+    // comment on why nothing upstream can, yet), but a deploy invoked by a
+    // caller that legitimately learned the subdomain earlier in the same run
+    // has a seam to hand it through instead of guessing at one.
+    const domain = await persistWorkersDevDomain(manifestPath, m, acct, scriptName, {
+      knownAccountSubdomain: options.knownAccountSubdomain,
+      verifyWorkersDevCandidate: options.verifyWorkersDevCandidate,
+      request: options.request,
+      wait: options.wait,
+    });
     ok(`saved the live address https://${domain}`);
   }
 
