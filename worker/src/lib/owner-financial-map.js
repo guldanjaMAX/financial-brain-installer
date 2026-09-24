@@ -70,7 +70,7 @@ const ENTITY_STATUSES = new Set(["active", "sold", "dissolved", "closed"]);
 const RELATIONSHIPS = new Set(["owned", "counterparty"]);
 const ACCOUNT_KINDS = new Set([
   "checking", "savings", "card", "loan", "line_of_credit", "investment",
-  "retirement", "merchant", "point_of_sale", "escrow", "other",
+  "retirement", "merchant", "point_of_sale", "escrow", "cd", "hsa", "other",
 ]);
 const BALANCE_ROLES = new Set(["asset", "liability", "neither"]);
 const ACCOUNT_STATUSES = new Set(["open", "closed", "never_connected"]);
@@ -1240,7 +1240,8 @@ async function captureCurrentState(env, signer) {
         ORDER BY id LIMIT ${MAX_ENTITIES + 1}`,
     ).bind(TENANT_ID),
     env.DB.prepare(
-      `SELECT id, account_slug, entity_slug, institution, label, account_kind, balance_role,
+      `SELECT id, account_slug, entity_slug, institution, label,
+              COALESCE(restricted_cash_kind, account_kind) AS account_kind, balance_role,
               currency, status, provenance, basis_state, recorded_at
          FROM fin_accounts
         WHERE tenant_id = ? AND superseded_by_id IS NULL

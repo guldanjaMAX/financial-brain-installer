@@ -10,6 +10,14 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Certificates of deposit and Health Savings Accounts no longer inflate
+  spendable cash.** They remain visible in the financial map and cash summaries
+  under a separate Restricted cash total. The next successful bank sync also
+  corrects an already connected account without changing its transaction
+  history. Restricted cash is money you have, but it is not counted as
+  available to spend. To check: checking and savings add to Spendable cash,
+  while CDs and HSAs add only to Restricted cash.
+
 - **One finely reported balance no longer blocks a whole bank.** A bank can
   report more decimal places than its currency has, such as a retirement
   balance of 23631.9805 dollars. That single value used to stop every account

@@ -64,7 +64,7 @@ export const KNOWN_SIGN_CONVENTIONS = Object.freeze({
 
 const ACCOUNT_KINDS = new Set([
   "checking", "savings", "card", "loan", "line_of_credit", "investment",
-  "retirement", "merchant", "point_of_sale", "escrow", "other",
+  "retirement", "merchant", "point_of_sale", "escrow", "cd", "hsa", "other",
 ]);
 
 const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;

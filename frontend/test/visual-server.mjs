@@ -77,6 +77,16 @@ const cash = {
   ],
   missing: [{ account_slug: "rental-checking", reason: "never_connected", covered_to: null, last_confirmed_as_of: null }],
   excluded: [], accounts_covered: 2, accounts_considered: 3, complete: false,
+  restricted_cash: {
+    label: "Restricted cash",
+    explanation: "Restricted cash is money you have, but it is not counted as available to spend.",
+    as_of: "2026-07-31", total_minor: 2500000, currency: "USD", mixed_currency: false,
+    covered: [
+      { account_slug: "fixture-cd", label: "Fixture certificate", account_kind: "cd", amount_minor: 1500000, currency: "USD", as_of: "2026-07-31" },
+      { account_slug: "fixture-hsa", label: "Fixture health savings", account_kind: "hsa", amount_minor: 1000000, currency: "USD", as_of: "2026-07-31" },
+    ],
+    missing: [], accounts_covered: 2, accounts_considered: 2, complete: true,
+  },
 };
 
 const systemStatus = {

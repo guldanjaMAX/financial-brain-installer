@@ -71,6 +71,9 @@ export const DEFAULT_TENANT = "primary";
  * gets forgotten.
  */
 const DEPOSIT_KINDS = ["checking", "savings"];
+const RESTRICTED_CASH_KINDS = ["cd", "hsa"];
+const RESTRICTED_CASH_EXPLANATION =
+  "Restricted cash is money you have, but it is not counted as available to spend.";
 
 /**
  * Run a read and never let it break the caller. Returns rows plus an explicit
@@ -192,7 +195,8 @@ export async function ledgerAccounts(env, { tenantId = DEFAULT_TENANT, entitySlu
   }
   const { results, unavailable } = await safeAll(
     env,
-    `SELECT a.account_slug, a.entity_slug, a.institution, a.label, a.account_kind,
+    `SELECT a.account_slug, a.entity_slug, a.institution, a.label,
+            COALESCE(a.restricted_cash_kind, a.account_kind) AS account_kind,
             a.balance_role, a.mask, a.currency, a.feed_mode, a.expected_cadence,
             a.status, a.opened_on, a.closed_on,
             a.provenance, a.source_doc_uid, a.source_locator, a.source_feed,
@@ -376,9 +380,10 @@ export async function ledgerStatements(
  * THIS IS THE QUERY MOST LIKELY TO PRODUCE A CONFIDENT WRONG NUMBER, so it is
  * built to refuse rather than to compose:
  *
- *  - only deposit accounts are considered. A card balance is money owed and
- *    never enters this figure, and the accounts it excludes are RETURNED with
- *    the reason so nothing disappears silently;
+ *  - checking and savings form the spendable position. CDs and HSAs use the
+ *    same dated proof rules but return under a separate restricted position.
+ *    A card balance is money owed and never enters either figure, and every
+ *    other excluded account is RETURNED with the reason so nothing disappears;
  *  - A CASH POSITION IS A POINT IN TIME. Every figure summed here is dated to
  *    the SAME day. An account whose most recent confirmed figure is a month
  *    older is not quietly added in at its stale value; it moves to `missing`
@@ -398,38 +403,7 @@ export async function ledgerStatements(
  * not its amount, so there is no stale figure sitting in the payload for a
  * caller to add back in by accident.
  */
-export async function ledgerCashPosition(
-  env,
-  { tenantId = DEFAULT_TENANT, entitySlug = null, asOf = null } = {},
-) {
-  const { accounts, unavailable } = await ledgerAccounts(env, { tenantId, entitySlug });
-  if (unavailable) {
-    return {
-      unavailable: true,
-      as_of: null,
-      total_minor: null,
-      currency: null,
-      covered: [],
-      missing: [],
-      excluded: [],
-      accounts_covered: 0,
-      accounts_considered: 0,
-      rounded_accounts: 0,
-    };
-  }
-
-  const considered = accounts.filter(
-    (a) => a.balance_role === "asset" && DEPOSIT_KINDS.includes(a.account_kind),
-  );
-  const excluded = accounts
-    .filter((a) => !considered.includes(a))
-    .map((a) => ({
-      account_slug: a.account_slug,
-      account_kind: a.account_kind,
-      balance_role: a.balance_role,
-      reason: a.balance_role === "liability" ? "money_owed_not_held" : "not_a_deposit_account",
-    }));
-
+async function cashPositionForAccounts(env, tenantId, considered, asOf) {
   const figures = new Map();
   let balanceUnavailable = false;
   for (const account of considered) {
@@ -479,6 +453,7 @@ export async function ledgerCashPosition(
     covered.push({
       account_slug: account.account_slug,
       label: account.label,
+      account_kind: account.account_kind,
       amount_minor: figure.amount_minor,
       currency: figure.currency,
       as_of: figure.as_of,
@@ -503,13 +478,76 @@ export async function ledgerCashPosition(
     mixed_currency: mixed,
     covered,
     missing,
-    excluded,
     accounts_covered: covered.length,
     accounts_considered: considered.length,
     // Summed figures that were rounded from a finer provider decimal. A total
     // that includes one is not exact, and the surface must say so.
     rounded_accounts: covered.filter((c) => c.minor_rounded).length,
     complete: missing.length === 0 && considered.length > 0,
+  };
+}
+
+function emptyCashPosition(extra = {}) {
+  return {
+    unavailable: true,
+    as_of: null,
+    total_minor: null,
+    currency: null,
+    mixed_currency: false,
+    covered: [],
+    missing: [],
+    accounts_covered: 0,
+    accounts_considered: 0,
+    rounded_accounts: 0,
+    complete: false,
+    ...extra,
+  };
+}
+
+export async function ledgerCashPosition(
+  env,
+  { tenantId = DEFAULT_TENANT, entitySlug = null, asOf = null } = {},
+) {
+  const { accounts, unavailable } = await ledgerAccounts(env, { tenantId, entitySlug });
+  if (unavailable) {
+    return {
+      ...emptyCashPosition(),
+      excluded: [],
+      restricted_cash: emptyCashPosition({
+        label: "Restricted cash",
+        explanation: RESTRICTED_CASH_EXPLANATION,
+      }),
+    };
+  }
+
+  const spendable = accounts.filter(
+    (account) => account.balance_role === "asset" && DEPOSIT_KINDS.includes(account.account_kind),
+  );
+  const restricted = accounts.filter(
+    (account) => account.balance_role === "asset" && RESTRICTED_CASH_KINDS.includes(account.account_kind),
+  );
+  const classified = new Set([...spendable, ...restricted]);
+  const excluded = accounts
+    .filter((account) => !classified.has(account))
+    .map((account) => ({
+      account_slug: account.account_slug,
+      account_kind: account.account_kind,
+      balance_role: account.balance_role,
+      reason: account.balance_role === "liability" ? "money_owed_not_held" : "not_a_deposit_account",
+    }));
+  const [spendablePosition, restrictedPosition] = await Promise.all([
+    cashPositionForAccounts(env, tenantId, spendable, asOf),
+    cashPositionForAccounts(env, tenantId, restricted, asOf),
+  ]);
+  return {
+    ...spendablePosition,
+    unavailable: spendablePosition.unavailable || restrictedPosition.unavailable,
+    excluded,
+    restricted_cash: {
+      ...restrictedPosition,
+      label: "Restricted cash",
+      explanation: RESTRICTED_CASH_EXPLANATION,
+    },
   };
 }
 
@@ -520,8 +558,8 @@ export async function ledgerCashPosition(
  * decimal places than the currency has (a 401k balance of 23631.9805 USD), the
  * writer rounds half-even and marks the row's source locator with
  * `#minor_rounded` (one amount) or `#minor_rounded=current,available` (a
- * balance). Schema 46 has no column for it, so this parser is the one place
- * the marker is read. An unmarked row is an exact figure.
+ * balance). The ledger has no dedicated column for it, so this parser is the
+ * one place the marker is read. An unmarked row is an exact figure.
  */
 export const MINOR_ROUNDED_QUALIFIER = "#minor_rounded";
 
@@ -1089,4 +1127,11 @@ function parseJsonList(value) {
   }
 }
 
-export const __testing = { boundedLimit, parseJsonList, confirmedBalanceFor, LEDGER_TABLES, DEPOSIT_KINDS };
+export const __testing = {
+  boundedLimit,
+  parseJsonList,
+  confirmedBalanceFor,
+  LEDGER_TABLES,
+  DEPOSIT_KINDS,
+  RESTRICTED_CASH_KINDS,
+};

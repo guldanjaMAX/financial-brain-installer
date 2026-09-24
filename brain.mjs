@@ -26909,10 +26909,10 @@ export async function cmdImportBank(m, manifestPath, flags = {}, options = {}) {
   return receipt;
 }
 
-/** The account kinds migration 0015 accepts. Kept beside the flag that sets one. */
+/** The account kinds the ledger accepts. Kept beside the flag that sets one. */
 const LEDGER_ACCOUNT_KINDS = new Set([
   "checking", "savings", "card", "loan", "line_of_credit", "investment",
-  "retirement", "merchant", "point_of_sale", "escrow", "other",
+  "retirement", "merchant", "point_of_sale", "escrow", "cd", "hsa", "other",
 ]);
 
 async function cmdImport(target) {

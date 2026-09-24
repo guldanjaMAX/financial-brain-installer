@@ -970,9 +970,16 @@ function promotionStatements(env, {
       `INSERT INTO fin_accounts
          (tenant_id,account_slug,entity_slug,label,account_kind,balance_role,mask,currency,
           feed_mode,external_ref,provenance,source_feed,basis_state,recorded_at,
-          source_iso_currency_code,source_unofficial_currency_code)
-       SELECT s.tenant_id,s.account_slug,a.entity_slug,s.name,s.account_kind,s.balance_role,s.mask,s.currency,
-              'live',s.provider_account_id,'feed',?,'confirmed',?,s.iso_currency_code,s.unofficial_currency_code
+          source_iso_currency_code,source_unofficial_currency_code,restricted_cash_kind)
+       SELECT s.tenant_id,s.account_slug,a.entity_slug,s.name,
+              CASE WHEN lower(s.account_type)='depository'
+                         AND lower(COALESCE(s.account_subtype,'')) IN ('cd','hsa')
+                   THEN 'other' ELSE s.account_kind END,
+              s.balance_role,s.mask,s.currency,
+              'live',s.provider_account_id,'feed',?,'confirmed',?,s.iso_currency_code,s.unofficial_currency_code,
+              CASE WHEN lower(s.account_type)='depository'
+                          AND lower(COALESCE(s.account_subtype,'')) IN ('cd','hsa')
+                    THEN lower(s.account_subtype) ELSE NULL END
          FROM plaid_sync_stage_accounts s
          JOIN plaid_account_entity_assignments a
            ON a.tenant_id=s.tenant_id AND a.item_ref=? AND a.provider_account_id=s.provider_account_id
@@ -983,6 +990,7 @@ function promotionStatements(env, {
        ON CONFLICT(tenant_id,account_slug) WHERE superseded_by_id IS NULL DO UPDATE SET
          entity_slug=excluded.entity_slug,label=excluded.label,
          account_kind=excluded.account_kind,balance_role=excluded.balance_role,
+         restricted_cash_kind=excluded.restricted_cash_kind,
          mask=excluded.mask,currency=excluded.currency,feed_mode='live',external_ref=excluded.external_ref,
          source_iso_currency_code=excluded.source_iso_currency_code,
          source_unofficial_currency_code=excluded.source_unofficial_currency_code,
@@ -1809,7 +1817,10 @@ export async function plaidFeedStatus(env) {
     roundedBalances.get(itemRef).push(entry);
   };
   const stagedRounded = (await env.DB.prepare(
-    `SELECT w.item_ref,s.name,s.mask,s.account_kind,
+    `SELECT w.item_ref,s.name,s.mask,
+            CASE WHEN lower(s.account_type)='depository'
+                       AND lower(COALESCE(s.account_subtype,'')) IN ('cd','hsa')
+                 THEN lower(s.account_subtype) ELSE s.account_kind END AS account_kind,
             json_extract(s.provenance_json,'$.current_balance_minor_rounded') AS current_rounded,
             json_extract(s.provenance_json,'$.available_balance_minor_rounded') AS available_rounded
        FROM plaid_sync_windows w
@@ -1828,7 +1839,8 @@ export async function plaidFeedStatus(env) {
     });
   }
   const ledgerRounded = (await env.DB.prepare(
-    `SELECT f.source_feed,f.label,f.mask,f.account_kind,
+    `SELECT f.source_feed,f.label,f.mask,
+            COALESCE(f.restricted_cash_kind,f.account_kind) AS account_kind,
             (SELECT b.source_locator FROM fin_balance_snapshots b
               WHERE b.tenant_id=f.tenant_id AND b.account_slug=f.account_slug AND b.provenance='feed'
               ORDER BY b.as_of_date DESC LIMIT 1) AS latest_locator
