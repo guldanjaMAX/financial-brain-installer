@@ -209,6 +209,7 @@ async function runUpdate({
       mark(deployOptions.pauseVectorDrainForUpgrade === true ? "deploy:PAUSED" : "deploy:active");
       return { ok: true };
     },
+    readUpdateBacklog: async () => ({ pending: 0 }),
     cmdHealth: async (path, healthOptions = {}) => {
       clock += 1_000;
       mark(`health:${healthOptions.expectDrainMode || "none"}`, { expectVersion: healthOptions.expectVersion });

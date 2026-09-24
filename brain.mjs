@@ -5643,10 +5643,43 @@ export async function cmdUpgrade(manifestPath, options = {}) {
       // paused-mode health proves the compatibility build has taken over; a
       // full invocation grace then lets every already-started old drain finish.
       if (usesD1VectorOutbox) {
-        await runStage("paused vector-drain deployment", () => deploy(executionPin.target, {
-          persistDomain: false,
-          pauseVectorDrainForUpgrade: true,
-        }));
+        const readPrePauseBacklog = options.readUpdateBacklog ?? readUpdateBacklog;
+        await runStage("paused vector-drain deployment", async () => {
+          if (readPrePauseBacklog) {
+            let immediateBacklog;
+            try {
+              immediateBacklog = await readPrePauseBacklog(
+                originalPin.target,
+                options.updateBacklogOptions || {},
+              );
+              if (!immediateBacklog || typeof immediateBacklog !== "object" ||
+                  Array.isArray(immediateBacklog) ||
+                  !Number.isSafeInteger(immediateBacklog.pending) ||
+                  immediateBacklog.pending < 0) {
+                throw new TypeError("the immediate pre-pause backlog receipt is invalid");
+              }
+            } catch {
+              die(renderCliCommands(
+                "The immediate pre-pause documents backlog read failed, so this Brain's queued search updates could not be read. " +
+                  "The paused deployment was not started. Fix the failed read, wait until `brain health` says query-ready, " +
+                  "then run the update again."
+              ));
+            }
+            if (immediateBacklog.pending > 0) {
+              die(renderCliCommands(
+                `This Brain gained ${immediateBacklog.pending} queued search update(s) before the paused deployment. ` +
+                  "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again."
+              ));
+            }
+          }
+          // No asynchronous local stage sits between the closing queue receipt
+          // and starting the pause upload. This narrows but cannot atomically
+          // eliminate a remote ingest that begins after the receipt.
+          return deploy(executionPin.target, {
+            persistDomain: false,
+            pauseVectorDrainForUpgrade: true,
+          });
+        });
         corpusPauseMayStillBeServing = true;
         await runStage("paused vector-drain health verification", () =>
           verifyHealth(executionPin.target, {
@@ -21458,15 +21491,28 @@ async function backlogCount(manifestPath) {
  * depth, and a missing or malformed private receipt must never become zero.
  */
 export async function readUpdateBacklog(manifestPath, options = {}) {
-  const { m } = loadManifest(manifestPath);
+  const pinManifest = options.pinManifest ?? pinUpdateManifest;
+  const revalidateManifest = options.revalidateManifest ?? revalidateUpdateManifest;
   const resolveDocumentsUrl = options.resolveDocumentsUrl ?? updatePreviewDocumentsUrl;
   const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
   const request = options.http ?? http;
+  const readAggregate = options.readAggregateResponse ?? readUpdatePreviewAggregateResponse;
+  const projection = options.previewLib ?? await updatePreviewLib();
+  let pin;
   let documentsUrl;
   let adminKey;
   try {
-    documentsUrl = resolveDocumentsUrl(m);
-    adminKey = resolveKey(manifestPath, { ignoreEnvironment: true });
+    pin = pinManifest(manifestPath);
+    documentsUrl = resolveDocumentsUrl(pin.manifest);
+    adminKey = resolveKey(pin.target, {
+      ignoreEnvironment: true,
+      read(path) {
+        if (resolve(path) !== pin.target) {
+          throw new TypeError("the pinned manifest identity changed during credential lookup");
+        }
+        return pin.raw;
+      },
+    });
   } catch {
     throw new Error("authenticated documents backlog read failed");
   }
@@ -21476,25 +21522,39 @@ export async function readUpdateBacklog(manifestPath, options = {}) {
 
   let response;
   let body;
+  let responseFailed = false;
   try {
+    // A replacement during credential lookup must stop before the durable key
+    // can be attached to any destination derived from different manifest bytes.
+    revalidateManifest(pin, "update backlog live request");
     response = await request(documentsUrl, {
       headers: { "X-Admin-Key": adminKey },
     }, { timeoutMs: 30_000, what: "the update backlog check" });
-    if (!response?.ok) throw new Error("unreadable response");
-    body = await response.json();
+    if (!response || response.ok !== true || response.status !== 200) {
+      responseFailed = true;
+    } else {
+      body = await readAggregate(response);
+    }
   } catch {
-    throw new Error("authenticated documents backlog read failed");
+    responseFailed = true;
   } finally {
     adminKey = null;
   }
 
-  const backlog = body?.vector_backlog;
-  if (!backlog || typeof backlog !== "object" || Array.isArray(backlog) ||
-      Object.hasOwn(backlog, "error") || !Number.isSafeInteger(backlog.pending) ||
-      backlog.pending < 0) {
+  try {
+    // Close the same local identity after every completed or refused response.
+    // Raw body details and validator codes stay behind this fixed public error.
+    revalidateManifest(pin, "update backlog live receipt");
+    if (responseFailed) throw new TypeError("the update backlog response was unreadable");
+    const aggregate = projection.validateVectorProjectionAggregateReceipt(body, {
+      expectedVersion: pin.manifest?.brain?.version,
+      expectedBackend: "d1",
+      expectedDrainMode: "active",
+    });
+    return Object.freeze({ pending: aggregate.queue.pending });
+  } catch {
     throw new Error("authenticated documents backlog read failed");
   }
-  return Object.freeze({ pending: backlog.pending });
 }
 
 async function reportBacklog(manifestPath) {
