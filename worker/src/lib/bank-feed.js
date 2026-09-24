@@ -1608,6 +1608,10 @@ async function loadConnections() {
 }
 let linkBusy = false;
 function finishLink() { linkBusy = false; el("start").disabled = false; }
+function clearRefusedLink(error, retry) {
+  if (!error || !["plaid_link_handoff_rejected", "plaid_duplicate_connection_review"].includes(error.code)) return;
+  try { sessionStorage.removeItem("bank_link_session"); sessionStorage.removeItem(retry.key); } catch (ignored) {}
+}
 async function start(existing) {
   if (linkBusy) return;
   linkBusy = true;
@@ -1624,9 +1628,7 @@ async function start(existing) {
       item_ref: requestedMode === "reauthorise" ? params.get("item_ref") : null,
     });
   } catch (error) {
-    if (error.code === "plaid_link_handoff_rejected") {
-      try { sessionStorage.removeItem("bank_link_session"); sessionStorage.removeItem(retry.key); } catch (ignored) {}
-    }
+    clearRefusedLink(error, retry);
     throw error;
   }
   const token = begun.link_token;
@@ -1655,9 +1657,7 @@ async function start(existing) {
         loadConnections();
         waitForAccounts();
       } catch (e) {
-        if (e.code === "plaid_link_handoff_rejected") {
-          try { sessionStorage.removeItem("bank_link_session"); sessionStorage.removeItem(retry.key); } catch (ignored) {}
-        }
+        clearRefusedLink(e, retry);
         say(e.message, true);
       } finally { finishLink(); }
     },
