@@ -22,12 +22,17 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cmdDeploy } from "../brain.mjs";
+import {
+  cmdDeploy,
+  persistWorkersDevDomain,
+  withCloudflareControlCredential,
+} from "../brain.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const VERSION = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
 
-const ACCOUNT_ID = "acct-403-fixture";
+const ACCOUNT_ID = "a".repeat(32);
+const AUTH_PROFILE = `financial-brain-${"b".repeat(24)}`;
 const SLUG = "acme";
 const SCRIPT_NAME = "acme-brain";
 const SUBDOMAIN_LABEL = "acme-cf";
@@ -84,7 +89,7 @@ function harness({ subdomainRead, health = null }) {
     const method = init.method || "GET";
     calls.push(`${method} ${path}`);
     if (path === "/client/v4/accounts" && method === "GET") {
-      return apiResponse([{ id: ACCOUNT_ID, name: "Acme" }]);
+      return apiResponse([{ id: ACCOUNT_ID, name: SUBDOMAIN_LABEL }]);
     }
     if (path.endsWith(`/workers/scripts/${SCRIPT_NAME}`) && method === "PUT") {
       return apiResponse({});
@@ -116,8 +121,20 @@ async function withFixture(fetchImpl, run) {
   const priorToken = process.env.CLOUDFLARE_API_TOKEN;
   try {
     globalThis.fetch = fetchImpl;
-    process.env.CLOUDFLARE_API_TOKEN = "fixture-token";
-    return await run();
+    delete process.env.CLOUDFLARE_API_TOKEN;
+    return await withCloudflareControlCredential(run, {
+      accountId: ACCOUNT_ID,
+      authProfile: AUTH_PROFILE,
+      interactive: false,
+      allowBrowserReauth: false,
+      allowTokenRecovery: false,
+      withOAuthSession: async ({ action }) => action({
+        token: Buffer.from("named-profile-fixture-token"),
+        profile: AUTH_PROFILE,
+        account: { id: ACCOUNT_ID, name: SUBDOMAIN_LABEL },
+        preflight: { status: "ready", checks: ["account", "workers", "workers_subdomain", "d1", "vectorize", "workers_ai"] },
+      }),
+    });
   } finally {
     globalThis.fetch = priorFetch;
     if (priorToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
@@ -125,53 +142,41 @@ async function withFixture(fetchImpl, run) {
   }
 }
 
-test("a 403 on the subdomain read, plus a healthy /health for this brain, completes deploy and persists brain.domain", async () => {
+test("the named-profile lane derives and probes the account-label URL before the subdomain API read", async () => {
   const target = writeManifest();
   const { fetchImpl, calls } = harness({ subdomainRead: "denied", health: "healthy" });
-  await withFixture(fetchImpl, () => cmdDeploy(target, {
-    knownAccountSubdomain: SUBDOMAIN_LABEL,
-    wait: async () => {},
-  }));
+  await withFixture(fetchImpl, () => cmdDeploy(target, { wait: async () => {} }));
   const saved = JSON.parse(readFileSync(target, "utf8"));
   assert.equal(saved.brain?.domain, CANDIDATE_DOMAIN);
   assert.ok(calls.includes("GET /health"), "the candidate must be verified live, not merely assumed");
+  assert.ok(!calls.includes(`GET /client/v4/accounts/${ACCOUNT_ID}/workers/subdomain`),
+    "a verified derived URL is primary and must not need the expiring control-plane read");
 });
 
-test("a 403 on the subdomain read, plus /health for the wrong brain, dies with the actionable message", async () => {
+test("the named-profile lane falls back to the subdomain API only after the derived URL fails identity", async () => {
   const target = writeManifest();
-  const { fetchImpl } = harness({ subdomainRead: "denied", health: "wrong-brain" });
-  await assert.rejects(
-    () => withFixture(fetchImpl, () => cmdDeploy(target, {
-      knownAccountSubdomain: SUBDOMAIN_LABEL,
-      wait: async () => {},
-    })),
-    (error) => {
-      assert.match(error.message, /Workers Scripts Read on the account, for the subdomain/,
-        "the exact missing scope must be named");
-      assert.match(error.message, /not "acme"/, "the identity mismatch must be visible");
-      assert.match(error.message, /brain setup/);
-      assert.match(error.message, /instead of recreating/i,
-        "the message must state resuming is safe, not just possible");
-      return true;
-    },
-  );
+  const { fetchImpl, calls } = harness({ subdomainRead: "ok", health: "wrong-brain" });
+  await withFixture(fetchImpl, () => cmdDeploy(target, { wait: async () => {} }));
   const saved = JSON.parse(readFileSync(target, "utf8"));
-  assert.equal(saved.brain?.domain, undefined, "a candidate that failed identity must never be saved");
+  assert.equal(saved.brain?.domain, CANDIDATE_DOMAIN);
+  assert.ok(calls.indexOf("GET /health") <
+    calls.indexOf(`GET /client/v4/accounts/${ACCOUNT_ID}/workers/subdomain`),
+  "the public proof must run before the control-plane fallback");
 });
 
-test("a 403 on the subdomain read, plus /health down, dies with the actionable message", async () => {
+test("the named-profile lane gives only an owner action after both URL proof and API fallback fail", async () => {
   const target = writeManifest();
   const { fetchImpl } = harness({ subdomainRead: "denied", health: "down" });
   await assert.rejects(
-    () => withFixture(fetchImpl, () => cmdDeploy(target, {
-      knownAccountSubdomain: SUBDOMAIN_LABEL,
-      wait: async () => {},
-    })),
+    () => withFixture(fetchImpl, () => cmdDeploy(target, { wait: async () => {} })),
     (error) => {
-      assert.match(error.message, /Workers Scripts Read on the account, for the subdomain/,
-        "the exact missing scope must be named even when there was nothing to probe successfully");
       assert.match(error.message, /confirm the brain's public address/);
-      assert.match(error.message, /instead of recreating/i);
+      assert.match(error.message, /sign in again/i, "the message must name an action the owner can take");
+      assert.match(error.message, /Do not change the Workers subdomain setting/i);
+      assert.doesNotMatch(error.message, /Workers Scripts Read|needs a permission|Grant /i,
+        "the browser-sign-in path must not diagnose a scope for the owner");
+      assert.doesNotMatch(error.message, /Nothing is stranded|picks up|instead of recreating/i,
+        "the failure must not promise an unproved safe setup resume");
       return true;
     },
   );
@@ -179,11 +184,23 @@ test("a 403 on the subdomain read, plus /health down, dies with the actionable m
   assert.equal(saved.brain?.domain, undefined);
 });
 
-test("the normal token path is unchanged: a successful subdomain read still persists brain.domain, with no health probe", async () => {
+test("the no-credential fallback preserves the wrangler-login and no-shell-token guidance", async () => {
   const target = writeManifest();
-  const { fetchImpl, calls } = harness({ subdomainRead: "ok" });
-  await withFixture(fetchImpl, () => cmdDeploy(target, { wait: async () => {} }));
-  const saved = JSON.parse(readFileSync(target, "utf8"));
-  assert.equal(saved.brain?.domain, CANDIDATE_DOMAIN);
-  assert.ok(!calls.includes("GET /health"), "a working credential must never need the fallback probe");
+  const manifest = JSON.parse(readFileSync(target, "utf8"));
+  const priorToken = process.env.CLOUDFLARE_API_TOKEN;
+  try {
+    delete process.env.CLOUDFLARE_API_TOKEN;
+    await assert.rejects(
+      persistWorkersDevDomain(target, manifest, { id: ACCOUNT_ID, name: "not a label" }, SCRIPT_NAME),
+      (error) => {
+        assert.match(error.message, /wrangler@[^\s]+ login/);
+        assert.match(error.message, /never paste it\s+into a shell command/i);
+        assert.doesNotMatch(error.message, /Workers Scripts Read|subdomain really is unset/i);
+        return true;
+      },
+    );
+  } finally {
+    if (priorToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = priorToken;
+  }
 });
