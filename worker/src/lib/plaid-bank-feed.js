@@ -966,6 +966,9 @@ function promotionStatements(env, {
           )
         THEN 1 ELSE json_extract('plaid account assignment required','$') END AS assignment_guard`,
     ).bind(tenantId, windowRef, itemRef, tenantId, windowRef),
+    // Plaid can omit or generalise a subtype on a later read. Preserve a known
+    // restriction unless the staged row either confirms CD/HSA or carries one
+    // of the explicit subtype mappings this product already understands.
     env.DB.prepare(
       `INSERT INTO fin_accounts
          (tenant_id,account_slug,entity_slug,label,account_kind,balance_role,mask,currency,
@@ -990,12 +993,29 @@ function promotionStatements(env, {
        ON CONFLICT(tenant_id,account_slug) WHERE superseded_by_id IS NULL DO UPDATE SET
          entity_slug=excluded.entity_slug,label=excluded.label,
          account_kind=excluded.account_kind,balance_role=excluded.balance_role,
-         restricted_cash_kind=excluded.restricted_cash_kind,
+         restricted_cash_kind=CASE
+           WHEN excluded.restricted_cash_kind IS NOT NULL THEN excluded.restricted_cash_kind
+           WHEN EXISTS (
+             SELECT 1 FROM plaid_sync_stage_accounts evidence
+              WHERE evidence.tenant_id=excluded.tenant_id AND evidence.window_ref=?
+                AND evidence.provider_account_id=excluded.external_ref
+                AND (
+                  (lower(evidence.account_type)='depository' AND lower(evidence.account_subtype)
+                    IN ('checking','savings','money market','cash management')) OR
+                  (lower(evidence.account_type)='credit' AND lower(evidence.account_subtype)='credit card') OR
+                  (lower(evidence.account_type)='loan' AND lower(evidence.account_subtype)
+                    IN ('auto','mortgage','student','line of credit')) OR
+                  (lower(evidence.account_type)='investment' AND lower(evidence.account_subtype)
+                    IN ('brokerage','ira','401k'))
+                )
+           ) THEN NULL
+           ELSE fin_accounts.restricted_cash_kind
+         END,
          mask=excluded.mask,currency=excluded.currency,feed_mode='live',external_ref=excluded.external_ref,
          source_iso_currency_code=excluded.source_iso_currency_code,
          source_unofficial_currency_code=excluded.source_unofficial_currency_code,
          provenance='feed',source_feed=excluded.source_feed,basis_state='confirmed',recorded_at=excluded.recorded_at`,
-    ).bind(sourceFeed, stamp, itemRef, tenantId, windowRef),
+    ).bind(sourceFeed, stamp, itemRef, tenantId, windowRef, windowRef),
     env.DB.prepare(
       `SELECT CASE WHEN NOT EXISTS (
          SELECT 1 FROM json_each(?3) m

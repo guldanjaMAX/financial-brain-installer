@@ -45,7 +45,7 @@ const ACCOUNTS = Object.freeze([
 ]);
 
 function plaidFixtureFetch() {
-  return async (url, init) => {
+  const fetchImpl = async (url, init) => {
     const path = new URL(url).pathname;
     const body = JSON.parse(init.body || "{}");
     if (path === "/link/token/create") {
@@ -58,7 +58,10 @@ function plaidFixtureFetch() {
       assert.equal(body.public_token, "public-fixture-once");
       return jsonResponse({ item_id: "item-fixture-restricted", access_token: "access-fixture-secret" });
     }
-    if (path === "/accounts/get") return jsonResponse({ accounts: ACCOUNTS });
+    if (path === "/accounts/get") {
+      fetchImpl.accountReads += 1;
+      return jsonResponse({ accounts: fetchImpl.accounts });
+    }
     if (path === "/transactions/sync") {
       return jsonResponse({
         added: [], modified: [], removed: [], next_cursor: "fixture-complete",
@@ -67,6 +70,9 @@ function plaidFixtureFetch() {
     }
     throw new Error(`unexpected fixture path ${path}`);
   };
+  fetchImpl.accountReads = 0;
+  fetchImpl.accounts = ACCOUNTS;
+  return fetchImpl;
 }
 
 async function connectedFixture() {
@@ -156,6 +162,10 @@ test("a sandbox-shaped Plaid item separates spendable and restricted cash", asyn
                'bank-feed:item-fixture-restricted','confirmed','2026-09-01T00:00:00.000Z')`,
       stagedCd.account_slug,
     );
+    const historyBefore = fixture.rows(
+      "SELECT * FROM fin_transactions WHERE account_slug=? ORDER BY txn_uid",
+      stagedCd.account_slug,
+    );
 
     const promoted = await syncPlaidItem(
       fixture.env,
@@ -178,13 +188,92 @@ test("a sandbox-shaped Plaid item separates spendable and restricted cash", asyn
       "SELECT account_kind,restricted_cash_kind FROM fin_accounts WHERE external_ref='fixture-cd'",
     );
     assert.equal(durableCd.restricted_cash_kind, "cd", "the next sync reclassifies the stored account");
-    assert.equal(fixture.first(
-      "SELECT COUNT(*) AS count FROM fin_transactions WHERE txn_uid='fixture-existing-cd-history' AND amount_minor=2500",
-    ).count, 1, "reclassification leaves existing ledger history unchanged");
+    const historyAfter = fixture.rows(
+      "SELECT * FROM fin_transactions WHERE account_slug=? ORDER BY txn_uid",
+      stagedCd.account_slug,
+    );
+    assert.equal(historyAfter.length, historyBefore.length, "reclassification adds or removes no history row");
+    assert.deepEqual(historyAfter, historyBefore, "reclassification leaves every ledger history field unchanged");
 
     const map = await readOwnerFinancialMapState(fixture.env);
     const kinds = map.current_inventory.accounts.map((account) => account.fields.kind.current_value).sort();
     assert.deepEqual(kinds, ["cd", "checking", "hsa", "savings"]);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("a later Plaid sync with no subtype preserves an existing restricted-cash classification", async () => {
+  const { fixture, fetchImpl } = await connectedFixture();
+  try {
+    const accountsWithCdSubtype = (subtype) => ACCOUNTS.map((account) => {
+      if (account.account_id !== "fixture-cd") return account;
+      const changed = { ...account };
+      if (subtype === undefined) delete changed.subtype;
+      else changed.subtype = subtype;
+      return changed;
+    });
+    const initialPromotion = await syncPlaidItem(
+      fixture.env,
+      "item-fixture-restricted",
+      { fetchImpl, now: NOW },
+    );
+    assert.equal(initialPromotion.resumed_promotion, true);
+    assert.equal(
+      fixture.first("SELECT restricted_cash_kind FROM fin_accounts WHERE external_ref='fixture-cd'")
+        .restricted_cash_kind,
+      "cd",
+    );
+
+    fetchImpl.accounts = accountsWithCdSubtype(undefined);
+    const laterSync = await syncPlaidItem(
+      fixture.env,
+      "item-fixture-restricted",
+      { fetchImpl, now: NOW },
+    );
+    assert.equal(fetchImpl.accountReads, 2, "the later sync read the provider's omitted subtype");
+    assert.equal(laterSync.promoted, true, "the later promotion decision was reached");
+
+    const durableCd = fixture.first(
+      "SELECT account_kind,restricted_cash_kind FROM fin_accounts WHERE external_ref='fixture-cd'",
+    );
+    assert.equal(durableCd.restricted_cash_kind, "cd");
+    const cash = await ledgerCashPosition(fixture.env, { asOf: "2026-09-24" });
+    assert.equal(cash.total_minor, 30000, "the known CD remains outside spendable cash");
+    assert.equal(cash.restricted_cash.total_minor, 70000);
+
+    fetchImpl.accounts = accountsWithCdSubtype("other");
+    const ambiguousSync = await syncPlaidItem(
+      fixture.env,
+      "item-fixture-restricted",
+      { fetchImpl, now: NOW },
+    );
+    assert.equal(fetchImpl.accountReads, 3);
+    assert.equal(ambiguousSync.promoted, true);
+    assert.equal(
+      fixture.first("SELECT restricted_cash_kind FROM fin_accounts WHERE external_ref='fixture-cd'")
+        .restricted_cash_kind,
+      "cd",
+      "an ambiguous subtype does not clear known restricted cash",
+    );
+
+    fetchImpl.accounts = accountsWithCdSubtype("checking");
+    const authoritativeSync = await syncPlaidItem(
+      fixture.env,
+      "item-fixture-restricted",
+      { fetchImpl, now: NOW },
+    );
+    assert.equal(fetchImpl.accountReads, 4);
+    assert.equal(authoritativeSync.promoted, true);
+    assert.equal(
+      fixture.first("SELECT restricted_cash_kind FROM fin_accounts WHERE external_ref='fixture-cd'")
+        .restricted_cash_kind,
+      null,
+      "an explicit supported subtype clears the stale restriction",
+    );
+    const reclassifiedCash = await ledgerCashPosition(fixture.env, { asOf: "2026-09-24" });
+    assert.equal(reclassifiedCash.total_minor, 60000, "the explicit checking subtype becomes spendable");
+    assert.equal(reclassifiedCash.restricted_cash.total_minor, 40000);
   } finally {
     fixture.close();
   }
