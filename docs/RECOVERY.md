@@ -1,4 +1,100 @@
-# Verified Cloudflare recovery
+# Recovery
+
+## If something goes wrong
+
+Do not start by deleting resources or running setup again. Stop the command that
+is writing, keep the manifest, and choose the smallest recovery below.
+
+### What is protected automatically
+
+- D1 keeps point-in-time history automatically. Cloudflare currently retains
+  30 days on Workers Paid and 7 days on Workers Free. D1 history and restore do
+  not add a separate charge.
+- A confirmed ingest, load, removal, update, upgrade, or legacy rollback first
+  saves the manifest, source settings, and resumable ingest state in the owner
+  backup folder. The Brain admin key is never copied there.
+- `brain schedule <manifest> --install --backup` runs the same local backup
+  daily on macOS and applies the manifest's retention setting. Windows Task
+  Scheduler or Linux cron can run `brain backup <manifest>` daily.
+- D1 is the durable document and chunk record. Vectorize is rebuilt from D1
+  after a restore. A restore is not called complete until every chunk has a
+  vector and the vector queue is empty.
+- Cloudflare retains Worker versions separately. A Worker-code rollback does
+  not roll back D1 or Vectorize.
+
+The backup folder does not contain source files or an admin key. Put
+`operations.backup.directory` on owner-controlled off-computer storage. Do not
+put it inside a folder the Brain ingests. Keep the admin key in the owner's
+password manager under the recovery-card entry.
+
+### Undo the last protected change
+
+First preview:
+
+```bash
+brain undo-last /full/path/to/brain.manifest.json
+```
+
+The preview prints the operation boundary, current counts, effects, and an
+approval fingerprint. It changes nothing. Review it with the owner. If it is
+the right boundary, repeat the command with the exact fingerprint:
+
+```bash
+brain undo-last /full/path/to/brain.manifest.json --approve <fingerprint>
+```
+
+This restores all D1 writes after that recorded operation boundary. It is not a
+selected-row edit. Keep every ingest and update stopped from preview through
+completion. The command pauses the Worker, restores D1, creates a clean
+Vectorize index, rebuilds it from D1, proves exact counts, and writes a receipt.
+The prior Vectorize index is retained for review.
+
+### Go back to yesterday or another exact time
+
+Use an RFC3339 timestamp with its timezone. Preview first:
+
+```bash
+brain restore /full/path/to/brain.manifest.json --to 2026-09-23T17:00:00-07:00
+```
+
+After owner review, use only the fresh fingerprint printed by that preview:
+
+```bash
+brain restore /full/path/to/brain.manifest.json --to 2026-09-23T17:00:00-07:00 --approve <fingerprint>
+```
+
+D1 restore is destructive and in place. Everything written after the selected
+time is in scope. The command takes a pre-restore point and requires the undo
+bookmark returned by Cloudflare before continuing. If any stage stops, keep the
+Worker paused and review the receipt. Do not retry blindly.
+
+### If the computer is lost
+
+1. Install the same reviewed Brain version on the replacement computer.
+2. Recover the exact manifest from the owner backup folder. Do not create a
+   similarly named Brain.
+3. Recover the admin key from the password-manager item named on the recovery
+   card. Enter it only through the reviewed hidden credential ceremony. Never
+   paste it into chat, a command, the manifest, or a support message.
+4. Run `brain machine-continuity <manifest> --json`. Resolve every missing or
+   unproven item before update, ingest, or restore.
+5. Reinstall the daily backup schedule and verify one new local receipt.
+
+If the admin key may be compromised, do not restore the old value. Use the
+owner-approved `brain secrets` rotation path with a new password-manager value,
+then refresh the managed assistant registrations. Cloudflare account access and
+the exact manifest are still required.
+
+### Recovery card
+
+Complete the [recovery card](../onboarding/12-recovery-card.md) during install
+and store it in the owner's password manager. The card records where recovery
+material lives, not any secret value. A backup is not ready for computer loss
+until the exact manifest and password-manager entry exist off that computer.
+
+---
+
+## Verified Cloudflare recovery
 
 Recovery is complete only when an isolated Brain can be rebuilt from a D1
 export and pass retrieval evaluation. A D1 bookmark or SQL file by itself is
