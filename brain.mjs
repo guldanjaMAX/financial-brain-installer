@@ -22901,6 +22901,40 @@ export async function cmdSchedule(manifestPath, options = {}) {
   return result;
 }
 
+/** Read-only install-day gate over remote receipts and local scheduler state. */
+export async function cmdHandoffCheck(manifestPath, options = {}) {
+  if (!manifestPath) die("usage: brain handoff-check <manifest> [--json]");
+  const flags = options.flags ?? parseFlags(process.argv.slice(4));
+  assertKnownFlags(flags, ["json"], "brain handoff-check");
+  const { m } = loadManifest(manifestPath);
+  const readFreshness = options.readFreshness ?? (async () => {
+    const adminKey = (options.resolveAdminKey ?? resolveAdminKey)(manifestPath);
+    if (!adminKey) die("no admin key found, so handoff receipts cannot be read");
+    const base = await (options.resolveBaseUrl ?? resolveBaseUrl)(m, null);
+    const response = await (options.http ?? http)(
+      `${base}/api/admin/brain/freshness`,
+      { headers: { "X-Admin-Key": adminKey } },
+      { timeoutMs: 30_000, what: "the handoff check" },
+    );
+    if (!response.ok) die(`the Brain could not provide handoff receipts (HTTP ${response.status})`);
+    return response.json();
+  });
+  const handoff = options.handoff ?? await import("./operations/handoff-check.mjs");
+  const result = await handoff.collectHandoffCheck(manifestPath, {
+    ...(options.handoffOptions || {}),
+    manifest: m,
+    platform: options.platform ?? process.platform,
+    readFreshness,
+    ...(options.scheduleStatus ? { scheduleStatus: options.scheduleStatus } : {}),
+  });
+  const output = flags.json
+    ? `${JSON.stringify(result, null, 2)}\n`
+    : handoff.renderHandoffCheck(result);
+  (options.write ?? ((value) => process.stdout.write(value)))(output);
+  (options.setExitCode ?? ((code) => { process.exitCode = code; }))(result.complete ? 0 : 2);
+  return result;
+}
+
 /** The account this manifest provisions into, for the per-account token store. */
 /**
  * The account this manifest provisions into, for the per-account token store.
@@ -27171,6 +27205,7 @@ const commands = {
   upgrade: cmdUpgradeInteractive,
   rollback: dispatchRollback,
   schedule: cmdSchedule,
+  "handoff-check": cmdHandoffCheck,
   "windows-scheduled-ingest": cmdWindowsScheduledIngest,
   support: cmdSupport,
   tools: cmdLocalToolsInteractive,
@@ -27200,6 +27235,7 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "assistant-repair",
   "ocr-preflight",
   "windows-scheduled-ingest",
+  "handoff-check",
 ]);
 
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
@@ -27369,6 +27405,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain schedule   <manifest> --provider <id>  inspect (or --install/--remove) that provider lane
     brain schedule   <manifest> --source <id>  inspect (or --install/--remove) Gmail, Calendar,
                                            or IMAP
+    brain handoff-check <manifest>          read-only install-day gate for every in-scope source;
+                                           --json for the machine-readable receipt
     brain disconnect imessage <manifest>   stop live capture, flush open sessions, remove the agent
     brain disconnect whatsapp <manifest>   stop the capture daemon and its drain, flush, remove both agents
     brain disconnect zoom     <manifest>   remove the Zoom secrets so the webhook refuses deliveries

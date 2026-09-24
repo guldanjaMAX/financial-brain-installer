@@ -448,6 +448,16 @@ sends one aggregate event with a count, the status route, and a next action. The
 payload contains no source name, document identity, content, path, credential,
 or raw error. Delivery failure is logged only as a generic maintenance warning.
 
+`operations/handoff-check.mjs` composes the server-side freshness receipt with
+machine-local scheduler status. It is read-only and never installs, repairs,
+runs, or removes a task. The manifest defines scope: every enabled corpus is in
+scope unless its exact source name appears in
+`operations.handoff_out_of_scope_sources`. A row is green only when the source
+has a non-pending server receipt, the local schedule is present, the first and
+second unattended runs are stored, the schedule proof is current, and no local
+or server-side error remains. Unknown or unsupported enabled sources fail the
+gate rather than disappearing.
+
 ## D1, FTS5, Vectorize, and the outbox
 
 D1 is authoritative for documents, chunks, source metadata, freshness,

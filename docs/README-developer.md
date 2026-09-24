@@ -961,6 +961,22 @@ variable can point at an email bridge or notes automation. Leave it unset for no
 outbound request. The hook sends aggregate status only and deliberately carries
 no source identity or content.
 
+### Install-day handoff gate
+
+Run `brain handoff-check <manifest>` after the install has remained online long
+enough for two scheduled cadences. Add `--json` for automation. The command is
+read-only: it reads `/api/admin/brain/freshness` once and inspects machine-local
+schedule definitions. Each in-scope row reports `connected`,
+`schedule_installed`, `first_run`, `second_run_observed`, `next_run`, and
+`last_error`. Exit code 0 means every row is green; exit code 2 means handoff is
+not ready.
+
+An enabled source is in scope by default. If the owner chooses not to finish it
+on install day, add its exact source name to
+`operations.handoff_out_of_scope_sources`. Unsupported enabled sources fail the
+gate unless explicitly excluded. This keeps a newly added connector from being
+silently omitted by older handoff logic.
+
 Scheduler stdout and stderr remain private mode `0600`. At install, after each
 lock-owning ingest child exits, and at removal, each stream is cut back to a
 5 MiB tail with two exact retained history files. A lock-contention skip does

@@ -834,6 +834,16 @@
           "default": "auto",
           "description": "Durable IMAP credential-store choice for unattended ingest. The password itself is never stored in the manifest or scheduler definition."
         },
+        "handoff_out_of_scope_sources": {
+          "type": "array",
+          "description": "Enabled source names the owner explicitly excluded from install-day handoff. Every other enabled source must pass brain handoff-check.",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+          },
+          "uniqueItems": true,
+          "default": []
+        },
         "source_crons": {
           "type": "object",
           "description": "Five-field cron schedules for Gmail, Calendar, and IMAP. Each installs as its own per-user LaunchAgent on macOS or current-user Task Scheduler entry on Windows.",

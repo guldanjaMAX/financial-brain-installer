@@ -254,3 +254,17 @@ That was the point of building it this way.
 [IMPLEMENTATION OWNER]
 [IMPLEMENTATION ORGANIZATION]
 [SUPPORT EMAIL]
+# Schedule proof before handoff
+
+Run the read-only gate before calling installation complete:
+
+```bash
+brain handoff-check <manifest>
+```
+
+Every enabled, in-scope source must show connected, schedule installed, first
+run yes, second run yes, a next run, and no last error. The command exits
+nonzero while any row is incomplete. If the owner deliberately excludes an
+enabled source from install day, record its exact source name in
+`operations.handoff_out_of_scope_sources`; do not treat a missing scheduler or
+an unobserved run as an implicit exclusion.

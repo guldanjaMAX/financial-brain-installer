@@ -1045,6 +1045,11 @@ the CLI refuses before authorizing document deletion.
   expected cadence plus grace without a successful unattended run, status and
   answers call it missed and give one next action. An optional aggregate webhook
   can notify an owner system; it is off unless explicitly configured.
+- **Install day has a read-only finish line.** `brain handoff-check <manifest>`
+  lists every enabled, in-scope source with connection state, local schedule,
+  first run, second run, next run, and last error. It exits nonzero until every
+  row is green. An enabled source can be excluded only by naming it in
+  `operations.handoff_out_of_scope_sources` after the owner chooses that scope.
 - **WhatsApp exports are the safer path.** The separate live paired-device
   connector is unofficial, violates WhatsApp's Terms of Service, and may lead
   to an account restriction or ban. Business automation should use Meta's

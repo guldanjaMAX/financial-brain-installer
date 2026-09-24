@@ -353,7 +353,8 @@
       "Linux uses an owner-only adjacent file. Never put the key itself here.",
       "brain secrets updates and verifies that declared durable location.",
       "google_token_store persists auto, keychain or file for unattended runs.",
-      "folder_ingest_cron, source_crons and provider_crons use the same macOS or Windows scheduler boundary."
+      "folder_ingest_cron, source_crons and provider_crons use the same macOS or Windows scheduler boundary.",
+      "handoff_out_of_scope_sources names an enabled source the owner explicitly chose not to complete on install day."
     ],
     "ingest_cron": "0 9 * * *",
     "folder_ingest_cron": "0 * * * *",
@@ -380,7 +381,8 @@
     },
     "admin_key_secret": null,
     "google_token_store": "auto",
-    "imap_credential_store": "auto"
+    "imap_credential_store": "auto",
+    "handoff_out_of_scope_sources": []
   },
   "testing": {
     "_comment": [

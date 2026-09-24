@@ -30,6 +30,12 @@ asset publication.
   without counting the corpus or replacing a stronger connector error. An
   aggregate owner webhook is available but makes no request unless configured.
 
+- **Handoff now has a read-only source gate.** `brain handoff-check <manifest>`
+  shows connection, schedule installation, first and second unattended runs,
+  next run, and last error for every enabled source. It stays nonzero until all
+  in-scope sources are green or the owner explicitly records an exclusion in
+  the manifest.
+
 - **Windows can now keep Drive, watched folders, and supported providers up to
   date without an open terminal.** `brain schedule` creates one stable
   current-user Task Scheduler entry per Brain and source lane, using the

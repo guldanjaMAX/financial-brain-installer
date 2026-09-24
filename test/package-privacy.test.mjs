@@ -798,6 +798,7 @@ const expected = [
   "operations/drive-removal-plan.mjs",
   "operations/drive-scheduler.mjs",
   "operations/folder-scheduler.mjs",
+  "operations/handoff-check.mjs",
   "operations/source-scheduler.mjs",
   "operations/windows-task-scheduler.mjs",
   "operations/imessage-scheduler.mjs",
