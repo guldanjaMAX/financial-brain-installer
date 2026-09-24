@@ -21455,6 +21455,51 @@ async function backlogCount(manifestPath) {
   return Number((await res.json())?.vector_backlog?.pending || 0);
 }
 
+/**
+ * Read update's fail-closed queue gate from the authenticated aggregate used
+ * by health and post-ingest reporting. Public /health does not carry backlog
+ * depth, and a missing or malformed private receipt must never become zero.
+ */
+export async function readUpdateBacklog(manifestPath, options = {}) {
+  const { m } = loadManifest(manifestPath);
+  const resolveDocumentsUrl = options.resolveDocumentsUrl ?? updatePreviewDocumentsUrl;
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const request = options.http ?? http;
+  let documentsUrl;
+  let adminKey;
+  try {
+    documentsUrl = resolveDocumentsUrl(m);
+    adminKey = resolveKey(manifestPath, { ignoreEnvironment: true });
+  } catch {
+    throw new Error("authenticated documents backlog read failed");
+  }
+  if (typeof adminKey !== "string" || !adminKey) {
+    throw new Error("authenticated documents backlog read failed");
+  }
+
+  let response;
+  let body;
+  try {
+    response = await request(documentsUrl, {
+      headers: { "X-Admin-Key": adminKey },
+    }, { timeoutMs: 30_000, what: "the update backlog check" });
+    if (!response?.ok) throw new Error("unreadable response");
+    body = await response.json();
+  } catch {
+    throw new Error("authenticated documents backlog read failed");
+  } finally {
+    adminKey = null;
+  }
+
+  const backlog = body?.vector_backlog;
+  if (!backlog || typeof backlog !== "object" || Array.isArray(backlog) ||
+      Object.hasOwn(backlog, "error") || !Number.isSafeInteger(backlog.pending) ||
+      backlog.pending < 0) {
+    throw new Error("authenticated documents backlog read failed");
+  }
+  return Object.freeze({ pending: backlog.pending });
+}
+
 async function reportBacklog(manifestPath) {
   try {
     const { m } = loadManifest(manifestPath);
@@ -22815,6 +22860,7 @@ export function classifyCliCredentialBoundary(command, argv = []) {
     return "update-preview";
   }
   let adoptionSeen = false;
+  let forceSeen = false;
   let positionalCount = 0;
   for (const token of argv) {
     if (!token || token.length > 4_096 || /[\u0000-\u001f\u007f]/u.test(token)) {
@@ -22823,6 +22869,11 @@ export function classifyCliCredentialBoundary(command, argv = []) {
     if (token === "--adopt-cloudflare-profile") {
       if (adoptionSeen) return "update-preview";
       adoptionSeen = true;
+      continue;
+    }
+    if (token === "--force") {
+      if (forceSeen) return "update-preview";
+      forceSeen = true;
       continue;
     }
     if (token.startsWith("-")) return "update-preview";
@@ -22845,8 +22896,10 @@ export function classifyCliCredentialBoundary(command, argv = []) {
  */
 export function updateCommandTarget(positional, flags = {}) {
   if (typeof positional === "string" && positional && !positional.startsWith("--")) return positional;
-  const swallowed = flags?.["adopt-cloudflare-profile"];
-  if (typeof swallowed === "string" && swallowed && !swallowed.startsWith("--")) return swallowed;
+  for (const name of ["adopt-cloudflare-profile", "force"]) {
+    const swallowed = flags?.[name];
+    if (typeof swallowed === "string" && swallowed && !swallowed.startsWith("--")) return swallowed;
+  }
   return undefined;
 }
 
@@ -24869,9 +24922,11 @@ export function dispatchUpdateCli(argv = process.argv.slice(3), options = {}) {
   const boundary = options.boundaryCommand ?? classifyCliCredentialBoundary("update", argv);
   if (boundary !== "update") return cmdUpdatePreview(argv, options.previewOptions || {});
   const flags = parseFlags(argv);
+  assertKnownFlags(flags, ["adopt-cloudflare-profile", "force"], "brain update");
   return cmdUpdate(updateCommandTarget(argv[0], flags), {
     ...(options.updateOptions || {}),
     adoptConsent: cloudflareAdoptionConsent(flags),
+    forceQueuedUpdate: flags.force !== undefined && flags.force !== false,
   });
 }
 
@@ -25547,6 +25602,46 @@ export async function cmdUpdate(manifestPath, options = {}) {
       "no installed Brain was found. Run brain update <full path to brain.manifest.json> once; " +
         "future updates will work from any folder."
     );
+  }
+  const forceQueuedUpdate = options.forceQueuedUpdate === true;
+  let backlog = null;
+  // Replacing adoption, verification, or upgrade is a dependency-injection
+  // seam used by their existing focused tests, not an installed CLI path. A
+  // caller that replaces one may inject this read too when exercising the
+  // queue decision. The real command always takes the production reader here.
+  const readBacklog = options.readUpdateBacklog ??
+    (options.adoptCloudflareAuthProfile || options.cmdVerify || options.cmdUpgrade
+      ? null
+      : readUpdateBacklog);
+  if (readBacklog) {
+    try {
+      backlog = await readBacklog(installed.path, options.updateBacklogOptions || {});
+      if (!backlog || typeof backlog !== "object" || Array.isArray(backlog) ||
+          !Number.isSafeInteger(backlog.pending) || backlog.pending < 0) {
+        throw new Error("authenticated documents backlog read failed");
+      }
+    } catch {
+      const message = renderCliCommands(
+        "The authenticated documents backlog read failed, so this Brain's queued search updates could not be read. " +
+          "Updating now could pause it mid-queue. Nothing was changed. Fix the failed read, wait until `brain health` " +
+          "says query-ready, then run the update again."
+      );
+      if (!forceQueuedUpdate) die(message);
+      warn(renderCliCommands(
+        "The authenticated documents backlog read failed. `--force` will update anyway and may pause queued search work mid-queue."
+      ));
+    }
+  }
+  if (backlog?.pending > 0) {
+    const refusal = renderCliCommands(
+      `This Brain is still processing ${backlog.pending} queued search update(s). Updating now would pause it mid-queue. ` +
+        "Nothing was changed. Wait until `brain health` says query-ready, then run the update again."
+    );
+    if (!forceQueuedUpdate) die(refusal);
+    warn(renderCliCommands(
+      `This Brain is still processing ${backlog.pending} queued search update(s). ` +
+        "`--force` will update anyway and may pause it mid-queue."
+    ));
   }
   const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const automationToken = !interactive && Boolean(process.env.CLOUDFLARE_API_TOKEN);
@@ -27158,6 +27253,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain update     [manifest] --adopt-cloudflare-profile  approve the one-time Cloudflare
                                            browser sign-in from a session with no terminal
                                            (an agent). Same as BRAIN_ADOPT_CLOUDFLARE_PROFILE=1
+    brain update     [manifest] --force     update despite queued search updates or an unreadable backlog;
+                                           risky because the update pauses vector processing
     brain whatsnew   [manifest]            what changed in this version, and are you on it
     brain status     <manifest>            versions, pending migrations, upgrade history
     brain sources    <manifest>            complete read-only D1 source inventory; --json for Optimize

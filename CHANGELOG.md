@@ -67,6 +67,13 @@ asset publication.
   reindex <manifest>` is the repair; it only matters for a Brain set up
   before that filter existed.
 
+- **Update no longer pauses a Brain while search work is queued.** Before any
+  manifest write, verification, migration, or deployment, `brain update` reads
+  the authenticated vector backlog and stops if work remains or the backlog is
+  unreadable. `--force` is available only as an explicit risky override. To
+  check: start an update while `brain health` still reports queued search work
+  and confirm it changes nothing, then retry after health says query-ready.
+
 - **Drive review no longer downloads every stored file label on each sweep.**
   The Brain first identifies the exact absent or already-reviewed families,
   then returns names and folders only for those IDs in requests capped at 97
