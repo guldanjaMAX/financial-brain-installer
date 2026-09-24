@@ -75,12 +75,23 @@ Each one was missed or misread in a sandbox rehearsal.
 5. **Phone verification.** Plaid Link shows a phone-verification pane. In
    sandbox the code is `123456`, and no text message arrives. In production,
    Plaid sends a real code to the owner's phone, and only the owner enters it.
-6. **Add an owner first.** A new Brain has no person, household, or business
+6. **Pick the bank, not a saved connection.** Plaid's returning-user flow is
+   keyed to the phone number entered in Link. It can re-share a connection that
+   phone number made earlier instead of the institution the owner selected, and
+   the Brain labels the Item with what Plaid returned. In one sandbox rehearsal
+   the owner selected First Platypus Bank and the connection came back as Bank
+   of America. Choose "Add new account" or the specific bank rather than a saved
+   entry, and check that the connection's institution label matches before
+   assigning accounts. If it does not match, disconnect it in the Brain app
+   (Access, then Banks) and connect again. For sandbox testing, use a fresh
+   test phone number, 415-555-0011 or one of 415-555-0131 through
+   415-555-0138, with the code `123456`.
+7. **Add an owner first.** A new Brain has no person, household, or business
    yet. The connect page opens "Add a person, household, or business" by
    itself when none exists. Every account needs an owner choice before its
    transactions enter the ledger, and `/api/bank-feed/status` lists a
    connection waiting on those choices under `needs_attention` with the count.
-7. **Disconnect lives in the owner app.** It is not on the connect page. In the
+8. **Disconnect lives in the owner app.** It is not on the connect page. In the
    Brain app, open Access (the settings page), find Banks, and choose
    Disconnect. Saved history stays.
 
@@ -94,7 +105,9 @@ recoverable. Turning the feed back on means the owner runs
 A bank can report more decimal places than its currency has, such as a
 retirement balance of 23631.9805 USD. The Brain keeps the exact decimal, stores
 the figure rounded half-even to the currency's minor unit, and flags it. A
-total that includes a rounded figure says so wherever the owner reads it.
+total that includes a rounded figure says so wherever the owner reads it, and
+`/api/bank-feed/status` lists each connection's rounded balances under
+`rounded_balances`, first as `staged` and then as `in_ledger`.
 
 1. Deploy the exact packaged version and named Plaid environment to an approved
    disposable Brain. Read back its version, schema, required secret names and

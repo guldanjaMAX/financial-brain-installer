@@ -7,6 +7,8 @@
  * the provider's already-masked last four only.
  */
 
+import { minorRoundedFields } from "./fin-d1.js";
+
 const TENANT_FALLBACK = "primary";
 const REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const ACCOUNT_REF = /^acct_[0-9a-f]{32}$/;
@@ -155,7 +157,7 @@ export async function plaidAccountAssignmentReadiness(env, { tenantId = tenantId
   };
 }
 
-function maskedIdentifier(label, mask) {
+export function maskedIdentifier(label, mask) {
   const safeLabel = String(label || "Bank account").trim().replace(/\s+/g, " ").slice(0, 80) || "Bank account";
   const lastFour = String(mask || "").replace(/\D/g, "").slice(-4);
   return lastFour ? `${safeLabel} ending ${lastFour}` : safeLabel;
@@ -173,6 +175,16 @@ function freshness(lastSyncedAt, at, intervalMinutes) {
     last_synced_at: lastSyncedAt,
     stale_after_minutes: staleAfterMinutes,
   };
+}
+
+function stagedRoundedFields(provenanceJson) {
+  let provenance = null;
+  try { provenance = JSON.parse(provenanceJson || "null"); } catch { provenance = null; }
+  if (!provenance || typeof provenance !== "object") return [];
+  return [
+    provenance.current_balance_minor_rounded === true && "current",
+    provenance.available_balance_minor_rounded === true && "available",
+  ].filter(Boolean);
 }
 
 /** Owner-safe account inventory. No Item, provider-account, account-slug, or transaction ids leave D1. */
@@ -205,7 +217,11 @@ export async function plaidOwnerAccountStatus(env, { now = null } = {}) {
               b.state AS history_state,b.provider_history_state,b.pages_done,
               b.transactions_seen,b.unread_lines,r.state AS reconciliation_state,r.reason AS reconciliation_reason,
               COALESCE(f.label,s.name) AS account_label,COALESCE(f.mask,s.mask) AS account_mask,
-              c.coverage_status,c.covered_from,c.covered_to,c.basis_note,c.computed_at
+              c.coverage_status,c.covered_from,c.covered_to,c.basis_note,c.computed_at,
+              s.provenance_json AS staged_provenance,
+              (SELECT b.source_locator FROM fin_balance_snapshots b
+                WHERE b.tenant_id=f.tenant_id AND b.account_slug=f.account_slug AND b.provenance='feed'
+                ORDER BY b.as_of_date DESC LIMIT 1) AS latest_balance_locator
          FROM plaid_account_entity_assignments a
          JOIN bank_feed_items i
            ON i.tenant_id=a.tenant_id AND i.item_ref=a.item_ref AND i.removed_at IS NULL
@@ -286,6 +302,12 @@ export async function plaidOwnerAccountStatus(env, { now = null } = {}) {
         covered_to: row.covered_to || null,
         note: row.basis_note || null,
         computed_at: row.computed_at || null,
+      },
+      // Balance fields rounded from a finer provider decimal, so they are not
+      // exact: in the fetched window waiting to load, and in the ledger.
+      balance_minor_rounded: {
+        staged: stagedRoundedFields(row.staged_provenance),
+        in_ledger: minorRoundedFields(row.latest_balance_locator),
       },
     };
   });

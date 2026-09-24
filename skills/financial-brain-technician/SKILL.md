@@ -822,6 +822,12 @@ must stop before resource creation.
   - Plaid's phone-verification pane takes `123456` in sandbox, and no text
     arrives. In production a real code goes to the owner's phone, and only the
     owner enters it.
+  - Plaid can re-share a connection saved for the phone number entered in Link
+    instead of the bank the owner picked. Have the owner choose "Add new
+    account" or the specific bank, and check the connection's institution label
+    before assigning accounts. If it is wrong, disconnect it under Access, then
+    Banks, and connect again. In sandbox, use a fresh test phone number
+    (415-555-0011, or 415-555-0131 through 415-555-0138) with code `123456`.
   - Setting `corpora.bank_feed.enabled` to `false` and then running
     `brain secrets` or `brain setup` DELETES the Plaid client ID and secret
     from the Worker. Re-enabling needs `brain connect bank` again.

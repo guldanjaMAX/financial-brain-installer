@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createProductFixture, seedOwnedEntity } from "./product-contract-fixture.mjs";
 import { completePlaidLink, createPlaidLinkToken, plaidFeedStatus, syncPlaidItem } from "../src/lib/plaid-bank-feed.js";
-import { assignPlaidAccountEntity } from "../src/lib/plaid-account-entities.js";
+import { assignPlaidAccountEntity, plaidOwnerAccountStatus } from "../src/lib/plaid-account-entities.js";
 import { normalisePlaidAccount, normalisePlaidTransaction, PlaidProtocolError } from "../src/lib/plaid-protocol.js";
 import { ledgerCashPosition, ledgerUnsortedSpending } from "../src/lib/fin-d1.js";
 
@@ -91,11 +91,12 @@ async function syncToLedger(options) {
   const stagedTransactions = context.fixture.rows(
     "SELECT provider_transaction_id,amount_decimal,amount_minor,direction,provenance_json FROM plaid_sync_stage_transactions",
   ).map((row) => ({ ...row, provenance: JSON.parse(row.provenance_json) }));
+  const stagedStatus = await plaidFeedStatus(context.fixture.env);
   await context.assignAll();
   const promoted = await context.run();
   assert.equal(promoted.promoted ?? promoted.resumed_promotion, true,
     `the staged window must promote: ${JSON.stringify({ status: promoted.status, code: promoted.code })}`);
-  return { ...context, staged, stagedAccounts, stagedTransactions, promoted };
+  return { ...context, staged, stagedAccounts, stagedTransactions, stagedStatus, promoted };
 }
 
 const snapshotFor = (fixture, providerAccountId) => fixture.first(
@@ -142,8 +143,23 @@ test("a 4-decimal 401k balance no longer fails the Item and is stored rounded, f
     ],
     added: [transaction("exact-line", "checking-exact", 4.33)],
   });
-  const { fixture, stagedAccounts } = run;
+  const { fixture, stagedAccounts, stagedStatus } = run;
   try {
+    // Visible to the owner and operator status before and after promotion.
+    const retirementLabel = "Synthetic 401k retirement-401k ending 0000";
+    assert.deepEqual(stagedStatus.connections[0].rounded_balances.find((row) => row.masked_identifier === retirementLabel),
+      { masked_identifier: retirementLabel, account_kind: "retirement", fields: ["current"], stage: "staged" });
+    const promotedStatus = await plaidFeedStatus(fixture.env);
+    assert.deepEqual(promotedStatus.connections[0].rounded_balances.map(({ masked_identifier, fields, stage }) => ({ masked_identifier, fields, stage })), [
+      { masked_identifier: retirementLabel, fields: ["current"], stage: "in_ledger" },
+      { masked_identifier: "Synthetic checking tie-even ending 0000", fields: ["current", "available"], stage: "in_ledger" },
+    ]);
+    const ownerRows = (await plaidOwnerAccountStatus(fixture.env, { now: NOW })).accounts;
+    const ownerRetirement = ownerRows.find((row) => row.masked_identifier === retirementLabel);
+    assert.deepEqual(ownerRetirement.balance_minor_rounded, { staged: [], in_ledger: ["current"] });
+    assert.deepEqual(ownerRows.find((row) => row.masked_identifier === "Synthetic checking checking-exact ending 0000")
+      .balance_minor_rounded, { staged: [], in_ledger: [] });
+
     const retirement = stagedAccounts.find((row) => row.provider_account_id === "retirement-401k");
     assert.equal(retirement.current_balance_decimal, "23631.9805", "the exact provider decimal is kept");
     assert.equal(retirement.current_balance_minor, 2363198);

@@ -13,7 +13,7 @@ import {
   tenantReference,
 } from "./bank-feed.js";
 import { balanceRoleFor } from "./fin-import.js";
-import { MINOR_ROUNDED_QUALIFIER } from "./fin-d1.js";
+import { MINOR_ROUNDED_QUALIFIER, minorRoundedFields } from "./fin-d1.js";
 import {
   PLAID_DECIMAL_MAX_LENGTH,
   PLAID_HISTORY_STATE,
@@ -33,6 +33,7 @@ import {
 } from "./plaid-protocol.js";
 import {
   discoverPlaidAccountAssignments,
+  maskedIdentifier,
   plaidAccountAssignmentReadiness,
   plaidPublicAccountRef,
 } from "./plaid-account-entities.js";
@@ -1788,6 +1789,52 @@ export async function plaidFeedStatus(env) {
       WHERE i.tenant_id=? AND (i.removed_at IS NULL OR o.state<>'confirmed') ORDER BY i.connected_at`,
   ).bind(tenantId).all())?.results || [];
   const accountsNeedingOwner = (row) => Number(row.accounts_needing_owner || 0);
+  // Balances rounded from a finer provider decimal, per connection, so neither
+  // the owner nor the operator reads one as exact. Staged rows carry the flag in
+  // provenance; a promoted balance carries it on its latest snapshot's locator.
+  // Only masked labels, account kinds and field names leave here.
+  const roundedBalances = new Map();
+  const noteRounded = (itemRef, entry) => {
+    if (!entry.fields.length) return;
+    if (!roundedBalances.has(itemRef)) roundedBalances.set(itemRef, []);
+    roundedBalances.get(itemRef).push(entry);
+  };
+  const stagedRounded = (await env.DB.prepare(
+    `SELECT w.item_ref,s.name,s.mask,s.account_kind,
+            json_extract(s.provenance_json,'$.current_balance_minor_rounded') AS current_rounded,
+            json_extract(s.provenance_json,'$.available_balance_minor_rounded') AS available_rounded
+       FROM plaid_sync_windows w
+       JOIN plaid_sync_stage_accounts s ON s.tenant_id=w.tenant_id AND s.window_ref=w.window_ref
+      WHERE w.tenant_id=? AND w.state IN ('staging','ready','retryable')
+        AND (json_extract(s.provenance_json,'$.current_balance_minor_rounded')=1
+          OR json_extract(s.provenance_json,'$.available_balance_minor_rounded')=1)
+      ORDER BY w.item_ref,s.name`,
+  ).bind(tenantId).all())?.results || [];
+  for (const row of stagedRounded) {
+    noteRounded(row.item_ref, {
+      masked_identifier: maskedIdentifier(row.name, row.mask),
+      account_kind: row.account_kind,
+      fields: [row.current_rounded === 1 && "current", row.available_rounded === 1 && "available"].filter(Boolean),
+      stage: "staged",
+    });
+  }
+  const ledgerRounded = (await env.DB.prepare(
+    `SELECT f.source_feed,f.label,f.mask,f.account_kind,
+            (SELECT b.source_locator FROM fin_balance_snapshots b
+              WHERE b.tenant_id=f.tenant_id AND b.account_slug=f.account_slug AND b.provenance='feed'
+              ORDER BY b.as_of_date DESC LIMIT 1) AS latest_locator
+       FROM fin_accounts f
+      WHERE f.tenant_id=? AND f.superseded_by_id IS NULL AND f.source_feed LIKE 'bank-feed:%'
+      ORDER BY f.source_feed,f.label`,
+  ).bind(tenantId).all())?.results || [];
+  for (const row of ledgerRounded) {
+    noteRounded(String(row.source_feed).slice("bank-feed:".length), {
+      masked_identifier: maskedIdentifier(row.label, row.mask),
+      account_kind: row.account_kind,
+      fields: minorRoundedFields(row.latest_locator),
+      stage: "in_ledger",
+    });
+  }
   return {
     configured: true,
     provider: PROVIDER,
@@ -1815,6 +1862,7 @@ export async function plaidFeedStatus(env) {
         staged_transactions: Number(row.staged_transactions || 0),
       },
       accounts_needing_owner: accountsNeedingOwner(row),
+      rounded_balances: roundedBalances.get(row.item_ref) || [],
       reconciliation: {
         state: row.reconciliation_state || "none", due_at: row.due_at || null,
         refresh_pending: reconciliationRefreshPending(row.reconciliation_state, row.reconciliation_reason),
