@@ -359,6 +359,25 @@ export function latestOwnerRestorePoint(manifestPath, options = {}) {
   return candidates[0] || null;
 }
 
+/**
+ * A D1 restore makes later local cursors untrue. Remove only the adjacent
+ * resumable-state allowlist after the pre-restore snapshot has completed so
+ * the next ingest must perform a full comparison against restored D1 truth.
+ */
+export function resetOwnerIngestState(manifestPath, options = {}) {
+  const absoluteManifest = resolve(manifestPath);
+  const manifestDirectory = dirname(absoluteManifest);
+  const listed = (options.listStateFiles ?? defaultStateFiles)(absoluteManifest);
+  if (!Array.isArray(listed)) throw new Error("the restore state-file inventory is invalid");
+  const files = listed.map((candidate) => safeBackupInput(candidate, manifestDirectory));
+  for (const file of files) {
+    const input = stablePrivateFile(file.absolute);
+    input.bytes.fill(0);
+  }
+  for (const file of files) unlinkSync(file.absolute);
+  return Object.freeze({ reset: files.length });
+}
+
 /** Persist the aggregate before/after proof beside, but outside, snapshot entries. */
 export function writeOwnerRestoreReceipt(manifestPath, receipt, options = {}) {
   const { source, manifest } = readManifest(manifestPath);

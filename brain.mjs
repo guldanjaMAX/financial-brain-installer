@@ -205,6 +205,7 @@ import {
   createOwnerBackup,
   latestOwnerRestorePoint,
   pruneOwnerBackups,
+  resetOwnerIngestState,
   writeOwnerRestoreReceipt,
 } from "./operations/owner-backup.mjs";
 import {
@@ -6254,6 +6255,7 @@ export async function cmdRestore(manifestPath, request, options = {}) {
       });
       return { previousBookmark: result.previousBookmark, restoredBookmark: result.restoredBookmark };
     },
+    resetLocalState: async () => resetOwnerIngestState(manifestPath),
     rebuildProjection: async ({ plan }) => rebuildRestoredProjection(manifestPath, plan, options),
     readAfter: async ({ plan }) => {
       const pin = pinUpdateManifest(manifestPath);

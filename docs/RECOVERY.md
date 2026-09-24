@@ -47,7 +47,9 @@ This restores all D1 writes after that recorded operation boundary. It is not a
 selected-row edit. Keep every ingest and update stopped from preview through
 completion. The command pauses the Worker, restores D1, creates a clean
 Vectorize index, rebuilds it from D1, proves exact counts, and writes a receipt.
-The prior Vectorize index is retained for review.
+The prior Vectorize index is retained for review. Later local ingest cursors are
+cleared only after their pre-restore backup exists, so the next ingest performs
+a full source comparison instead of trusting state from after the restored time.
 
 ### Go back to yesterday or another exact time
 

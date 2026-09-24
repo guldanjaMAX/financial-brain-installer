@@ -158,8 +158,9 @@ it takes a second restore point, runs the existing writer pause and D1 restore,
 requires the returned undo bookmark, creates and binds a clean Vectorize index,
 then uses the paused bootstrap to reproject every D1 chunk. It returns active
 only after chunk and vector counts match and the outbox is empty. The old index
-is retained, and one aggregate before/after receipt records the completed
-boundary.
+is retained. Active local ingest cursors are cleared after their pre-restore
+snapshot exists so they cannot skip rows based on future history. One aggregate
+before/after receipt records the completed boundary and cursor reset count.
 
 Verified recovery keeps its stage machine provider-neutral. The disposable
 Cloudflare adapter supplies the live boundaries and binds the reviewed

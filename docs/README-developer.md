@@ -960,7 +960,11 @@ provider's previous bookmark, creates one deterministic empty 768-dimension
 cosine Vectorize index with all metadata indexes, atomically rebinds the
 manifest, and runs the paused upgrade bootstrap. Success requires exact
 chunk/vector equality and an empty outbox, then writes an aggregate before and
-after receipt. The old Vectorize index is retained for operator review.
+after receipt. Immediately after D1 restore, adjacent resumable ingest state is
+removed from the active manifest directory only after the pre-restore snapshot
+has preserved it. The next source run must therefore make a full comparison
+against restored D1 truth. The old Vectorize index is retained for operator
+review.
 
 The restore API overwrites D1 in place. `undo-last` is scoped to one recorded
 CLI operation boundary, not to selected rows. Its preview must disclose that

@@ -118,7 +118,7 @@ export async function executeOwnerRestore(request, dependencies) {
   if (request.approval !== plan.approval_fingerprint) {
     throw new Error("restore approval no longer matches the current state; preview again");
   }
-  for (const name of ["createRestorePoint", "restoreD1", "rebuildProjection", "readAfter", "writeReceipt"]) {
+  for (const name of ["createRestorePoint", "restoreD1", "resetLocalState", "rebuildProjection", "readAfter", "writeReceipt"]) {
     if (typeof dependencies[name] !== "function") throw new TypeError(`restore execution needs ${name}`);
   }
   await dependencies.createRestorePoint({ plan, pinned });
@@ -126,6 +126,7 @@ export async function executeOwnerRestore(request, dependencies) {
   if (!restoreResult?.previousBookmark) {
     throw new Error("D1 restore did not return the pre-restore bookmark; recovery stopped");
   }
+  const localState = await dependencies.resetLocalState({ plan, pinned, restoreResult });
   const projection = await dependencies.rebuildProjection({ plan, pinned, restoreResult });
   const after = validateAfter(await dependencies.readAfter({ plan, pinned, restoreResult, projection }));
   const receipt = Object.freeze({
@@ -137,10 +138,10 @@ export async function executeOwnerRestore(request, dependencies) {
     undo_bookmark: String(restoreResult.previousBookmark),
     before: plan.before,
     after,
+    local_resume_states_reset: Number(localState?.reset || 0),
     projection: "verified",
     old_vector_index_retained: true,
   });
   await dependencies.writeReceipt({ plan, receipt });
   return Object.freeze({ status: "restored", plan, receipt });
 }
-

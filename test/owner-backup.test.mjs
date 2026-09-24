@@ -9,6 +9,7 @@ import {
   createOwnerBackup,
   latestOwnerRestorePoint,
   pruneOwnerBackups,
+  resetOwnerIngestState,
 } from "../operations/owner-backup.mjs";
 import { generateRecoveryArtifactKey } from "../operations/recovery-artifact-crypto.mjs";
 import { buildBackupSchedulerPlan } from "../operations/backup-scheduler.mjs";
@@ -186,4 +187,28 @@ test("undo selection ignores a newer scheduled snapshot and finds the last prote
     reasons: ["pre-ingest", "pre-load", "pre-forget", "pre-update"],
   });
   assert.equal(selected.path, mutation.path);
+});
+
+test("post-restore state reset reaches only adjacent resumable ingest files", () => {
+  const { manifestPath, root } = fixture();
+  const unrelated = join(root, "keep-me.json");
+  writeFileSync(unrelated, "{}\n");
+  const result = resetOwnerIngestState(manifestPath);
+  assert.equal(result.reset, 1);
+  assert.equal(existsSync(join(root, ".brain-ingest-drive.json")), false);
+  assert.equal(existsSync(join(root, ".brain-admin-key")), true);
+  assert.equal(existsSync(unrelated), true);
+});
+
+test("post-restore state reset refuses an admin-key-shaped candidate non-vacuously", () => {
+  const { manifestPath, root } = fixture();
+  let inventories = 0;
+  assert.throws(() => resetOwnerIngestState(manifestPath, {
+    listStateFiles: () => {
+      inventories += 1;
+      return [join(root, ".brain-admin-key")];
+    },
+  }), /state-file allowlist/);
+  assert.equal(inventories, 1, "the reset allowlist decision point was reached");
+  assert.equal(existsSync(join(root, ".brain-admin-key")), true);
 });

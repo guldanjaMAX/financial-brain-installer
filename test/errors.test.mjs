@@ -28,6 +28,14 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const CLI = join(ROOT, "brain.mjs");
 const shown = (text) => renderCliCommands(text, { scriptPath: fileURLToPath(new URL("../brain.mjs", import.meta.url)) });
+
+function isolatedTemplateManifest() {
+  const directory = mkdtempSync(join(tmpdir(), "brain-error-template-"));
+  const manifest = join(directory, "brain.manifest.json");
+  writeFileSync(manifest, readFileSync(join(ROOT, "templates", "brain.manifest.json")));
+  return { directory, manifest };
+}
+
 function filesBelow(directory, suffix) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
@@ -274,24 +282,34 @@ function ingestExitCli(scenario) {
     offenders.length === 0, offenders.join(" | "));
 }
 {
-  const r = cli(["ingest", join(HERE, "..", "templates", "brain.manifest.json"), "--path", "/definitely/not/here"]);
-  check("a missing ingest folder is explained", r.code === 1 && /no such folder/i.test(r.out), r.out.slice(0, 200));
-  check("and no stack trace", !/\bat .*\.mjs:\d+/.test(r.out));
-  check("invalid local input is classified without retaining the path",
-    journalEvents(r.journal)[0]?.error_code === "CONFIG_INVALID" &&
-      journalEvents(r.journal)[0]?.source === "local" &&
-      !r.journal.includes("definitely"), r.journal);
+  const fixture = isolatedTemplateManifest();
+  try {
+    const r = cli(["ingest", fixture.manifest, "--path", "/definitely/not/here"]);
+    check("a missing ingest folder is explained", r.code === 1 && /no such folder/i.test(r.out), r.out.slice(0, 200));
+    check("and no stack trace", !/\bat .*\.mjs:\d+/.test(r.out));
+    check("invalid local input is classified without retaining the path",
+      journalEvents(r.journal)[0]?.error_code === "CONFIG_INVALID" &&
+        journalEvents(r.journal)[0]?.source === "local" &&
+        !r.journal.includes("definitely"), r.journal);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
 }
 {
-  const r = cli([
-    "ingest", join(HERE, "..", "templates", "brain.manifest.json"),
-    "--from", "slack",
-  ]);
-  check("a public provider-ingest failure is journaled against its exact connector",
-    r.code === 1 && journalEvents(r.journal).length === 1 &&
-      journalEvents(r.journal)[0]?.source === "slack" &&
-      journalEvents(r.journal)[0]?.command === "ingest",
-    r.journal);
+  const fixture = isolatedTemplateManifest();
+  try {
+    const r = cli([
+      "ingest", fixture.manifest,
+      "--from", "slack",
+    ]);
+    check("a public provider-ingest failure is journaled against its exact connector",
+      r.code === 1 && journalEvents(r.journal).length === 1 &&
+        journalEvents(r.journal)[0]?.source === "slack" &&
+        journalEvents(r.journal)[0]?.command === "ingest",
+      r.journal);
+  } finally {
+    rmSync(fixture.directory, { recursive: true, force: true });
+  }
 }
 
 /* ---- a document-level receipt must fail the CLI after saving recovery state ---- */

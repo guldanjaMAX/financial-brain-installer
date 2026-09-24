@@ -97,13 +97,15 @@ test("restore requires an unchanged preview fingerprint before any mutation and 
     observe: async () => observed,
     createRestorePoint: async () => calls.push("restore-point"),
     restoreD1: async () => { calls.push("restore-d1"); return { previousBookmark: "current" }; },
+    resetLocalState: async () => { calls.push("reset-local-state"); return { reset: 2 }; },
     rebuildProjection: async () => { calls.push("rebuild"); return { vectors: 9 }; },
     readAfter: async () => { calls.push("read-after"); return { documents: 4, chunks: 9, vectors: 9, pending_outbox: 0 }; },
     writeReceipt: async () => calls.push("receipt"),
   });
-  assert.deepEqual(calls, ["restore-point", "restore-d1", "rebuild", "read-after", "receipt"]);
+  assert.deepEqual(calls, ["restore-point", "restore-d1", "reset-local-state", "rebuild", "read-after", "receipt"]);
   assert.equal(applied.status, "restored");
   assert.equal(applied.receipt.after.vectors, applied.receipt.after.chunks);
+  assert.equal(applied.receipt.local_resume_states_reset, 2);
 });
 
 test("restore time accepts only an explicit RFC3339 instant", () => {

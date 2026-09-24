@@ -494,6 +494,7 @@ const expected = [
   "onboarding/09-technician-setup-and-rehearsal.md",
   "onboarding/10-client-onboarding-scorecard.md",
   "onboarding/11-windows-onboarding-rehearsal.md",
+  "onboarding/12-recovery-card.md",
   // Generic synthetic-only Windows rehearsal launcher. Reviewed 2026-09-11:
   // accepts only a commit SHA, refuses elevation, a different directory,
   // checkout drift, and old Node, then starts the public local fixture. It has
@@ -734,6 +735,12 @@ const expected = [
   "operations/provider-scheduler.mjs",
   "operations/quickbooks-callback-client.mjs",
   "operations/recovery-artifact-crypto.mjs",
+  // Owner backup and recovery orchestration. These modules copy only the
+  // manifest and allowlisted adjacent resume state, keep secrets out of
+  // receipts, and require a fingerprinted preview before provider mutation.
+  "operations/backup-scheduler.mjs",
+  "operations/owner-backup.mjs",
+  "operations/owner-restore.mjs",
   "operations/windows-dpapi-session.mjs",
   "privacy/credential-dispositions.json",
   "privacy/history-baseline.json",
