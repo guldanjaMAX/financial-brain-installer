@@ -127,3 +127,40 @@ describe("a rounded bank balance never reads as exact", () => {
     expect(renderToStaticMarkup(<UnsortedReview snapshot={snapshot} />)).toContain("Rounded: 2 lines came from the bank");
   });
 });
+
+describe("restricted cash stays visible without inflating spendable cash", () => {
+  const snapshot = {
+    ledger_installed: true,
+    cash: {
+      as_of: "2026-09-24", total_minor: 30000, currency: "USD", mixed_currency: false,
+      covered: [
+        { account_slug: "fixture-checking", label: "Checking", account_kind: "checking", amount_minor: 10000, currency: "USD", as_of: "2026-09-24" },
+        { account_slug: "fixture-savings", label: "Savings", account_kind: "savings", amount_minor: 20000, currency: "USD", as_of: "2026-09-24" },
+      ],
+      missing: [], excluded: [], accounts_covered: 2, accounts_considered: 2, complete: true,
+      restricted_cash: {
+        label: "Restricted cash",
+        explanation: "Restricted cash is money you have, but it is not counted as available to spend.",
+        as_of: "2026-09-24", total_minor: 70000, currency: "USD", mixed_currency: false,
+        covered: [
+          { account_slug: "fixture-cd", label: "Certificate", account_kind: "cd", amount_minor: 30000, currency: "USD", as_of: "2026-09-24" },
+          { account_slug: "fixture-hsa", label: "Health savings", account_kind: "hsa", amount_minor: 40000, currency: "USD", as_of: "2026-09-24" },
+        ],
+        missing: [], accounts_covered: 2, accounts_considered: 2, complete: true,
+      },
+    },
+  } as unknown as FinSnapshot;
+
+  it("shows separate spendable and restricted totals on both cash summaries", () => {
+    for (const html of [
+      renderToStaticMarkup(<Glance snapshot={snapshot} scopeName="Fixture household" />),
+      renderToStaticMarkup(<CashSection snapshot={snapshot} />),
+    ]) {
+      expect(html).toContain("Spendable cash");
+      expect(html).toContain("Restricted cash");
+      expect(html).toContain("$300");
+      expect(html).toContain("$700");
+      expect(html).toContain("not counted as available to spend");
+    }
+  });
+});

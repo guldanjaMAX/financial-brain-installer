@@ -41,8 +41,9 @@
  * What counts as money you HOLD.
  *
  * A card, a loan or a line of credit is money OWED, and the ledger schema
- * refuses by CHECK to record one as an asset. A checking or savings account is
- * money held. Everything else is `neither`, which is the honest value for an
+ * refuses by CHECK to record one as an asset. Checking, savings, CDs and HSAs
+ * are money held, although the last two are restricted rather than spendable.
+ * Everything else is `neither`, which is the honest value for an
  * account whose kind a source did not state: an unknown account must not be
  * counted as cash on the strength of a default. Both readers — the downloaded
  * file and the hosted feed — call this one function, because a second copy of
@@ -50,8 +51,16 @@
  */
 export function balanceRoleFor(accountKind) {
   if (["card", "loan", "line_of_credit"].includes(accountKind)) return "liability";
-  if (["checking", "savings"].includes(accountKind)) return "asset";
+  if (["checking", "savings", "cd", "hsa"].includes(accountKind)) return "asset";
   return "neither";
+}
+
+const RESTRICTED_CASH_KINDS = new Set(["cd", "hsa"]);
+
+function storedAccountKinds(accountKind) {
+  return RESTRICTED_CASH_KINDS.has(accountKind)
+    ? { accountKind: "other", restrictedCashKind: accountKind }
+    : { accountKind, restrictedCashKind: null };
 }
 
 /** Ledger rows written by this module always carry the tenant they belong to. */
@@ -267,16 +276,18 @@ function entityStatement(tenantId, entitySlug, entityLabel, source, stamp) {
 }
 
 function accountStatement(tenantId, entitySlug, account, source, envelope, stamp) {
+  const stored = storedAccountKinds(account.accountKind);
   return [
     `INSERT INTO fin_accounts
        (tenant_id, account_slug, entity_slug, institution, label, account_kind, balance_role, mask,
         currency, feed_mode, status, external_ref, provenance, source_doc_uid, source_locator,
-        source_feed, basis_state, recorded_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?,?,'confirmed',?)
+        source_feed, basis_state, recorded_at, restricted_cash_kind)
+     VALUES (?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?,?,'confirmed',?,?)
      ON CONFLICT (tenant_id, account_slug) WHERE superseded_by_id IS NULL DO UPDATE SET
        institution = COALESCE(excluded.institution, fin_accounts.institution),
        label = COALESCE(excluded.label, fin_accounts.label),
        account_kind = excluded.account_kind,
+       restricted_cash_kind = excluded.restricted_cash_kind,
        balance_role = excluded.balance_role,
        mask = COALESCE(excluded.mask, fin_accounts.mask),
        currency = excluded.currency,
@@ -287,12 +298,12 @@ function accountStatement(tenantId, entitySlug, account, source, envelope, stamp
     [
       tenantId, account.accountKey, entitySlug, account.institution || null,
       account.label || (account.mask ? `account ending ${account.mask}` : null),
-      account.accountKind, account.balanceRole, account.mask || null,
+      stored.accountKind, account.balanceRole, account.mask || null,
       account.currency || "USD",
       source.provenance === "feed" ? "live" : "manual",
       account.externalRef || null,
       source.provenance, source.sourceDocUid, locatorFor(envelope, "account"),
-      source.sourceFeed, stamp,
+      source.sourceFeed, stamp, stored.restrictedCashKind,
     ],
   ];
 }

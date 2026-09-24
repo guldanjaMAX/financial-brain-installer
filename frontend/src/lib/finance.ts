@@ -147,6 +147,9 @@ export function financialRecordsEmpty(
     || cash.covered.length > 0
     || cash.missing.length > 0
     || cash.excluded.length > 0
+    || (cash.restricted_cash?.total_minor !== null && cash.restricted_cash?.total_minor !== undefined)
+    || (cash.restricted_cash?.covered.length || 0) > 0
+    || (cash.restricted_cash?.missing.length || 0) > 0
   )) return false;
 
   const exposure = snapshot.obligation_exposure;

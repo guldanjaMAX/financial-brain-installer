@@ -31,7 +31,7 @@ const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const CURRENCY = /^[A-Z]{3}$/;
 const ACCOUNT_KINDS = new Set([
   "checking", "savings", "card", "loan", "line_of_credit", "investment",
-  "retirement", "merchant", "point_of_sale", "escrow", "other",
+  "retirement", "merchant", "point_of_sale", "escrow", "cd", "hsa", "other",
 ]);
 const CSV_MAPPING_KEYS = new Set([
   "account_slug", "account_kind", "account_label", "institution", "currency",

@@ -3,6 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../lib/api";
 import type { FinancialMapReview, MapReviewField } from "../lib/financial-map";
 import {
+  mapValue,
+} from "../lib/financial-map";
+import {
   copyFinancialMapAssistantPrompt, exactReviewedMapIsActive, financialMapAssistantPrompt,
   financialMapReadFailure, FinancialMap, FinancialMapAssistantPath,
   FinancialMapCorrectionChoice, FinancialMapFieldList,
@@ -11,6 +14,11 @@ import {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Financial Map review clarity", () => {
+  it("labels restricted account kinds plainly", () => {
+    expect(mapValue("kind", "cd")).toBe("Certificate of deposit (restricted cash)");
+    expect(mapValue("kind", "hsa")).toBe("Health Savings Account (restricted cash)");
+  });
+
   it("treats a missing review route as unavailable rather than an empty queue", () => {
     const state = financialMapReadFailure(new ApiError(404, { error: "not found" }, "HTTP 404"));
 

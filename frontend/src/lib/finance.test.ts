@@ -107,6 +107,18 @@ describe("This year truth boundaries", () => {
     ];
     expect(financialRecordsEmpty(base, homeSections)).toBe(true);
     expect(financialRecordsEmpty({ ...base, cash: { ...base.cash!, total_minor: 0, as_of: "2026-08-29", currency: "USD" } }, homeSections)).toBe(false);
+    expect(financialRecordsEmpty({
+      ...base,
+      cash: {
+        ...base.cash!,
+        restricted_cash: {
+          label: "Restricted cash",
+          explanation: "Restricted cash is money you have, but it is not counted as available to spend.",
+          as_of: "2026-08-29", total_minor: 100, currency: "USD", covered: [], missing: [],
+          accounts_covered: 1, accounts_considered: 1, complete: true,
+        },
+      },
+    }, homeSections)).toBe(false);
     expect(financialRecordsEmpty({ ...base, documents: [{ title: "A real record" }] as never }, homeSections)).toBe(false);
     const { documents: _documents, ...partial } = base;
     expect(financialRecordsEmpty(partial, homeSections)).toBe(false);

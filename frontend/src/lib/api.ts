@@ -635,7 +635,7 @@ export type FinObligation = {
   personal_guarantee_state: string;
 };
 
-export type FinCash = {
+export type FinCashGroup = {
   as_of: string | null;
   total_minor: number | null;
   currency: string | null;
@@ -643,6 +643,7 @@ export type FinCash = {
   covered: Array<{
     account_slug: string;
     label: string;
+    account_kind?: string;
     amount_minor: number;
     currency: string;
     as_of: string;
@@ -664,6 +665,13 @@ export type FinCash = {
   /** How many summed balances were rounded. Absent on older Brains. */
   rounded_accounts?: number;
   complete: boolean;
+};
+
+export type FinCash = FinCashGroup & {
+  restricted_cash?: FinCashGroup & {
+    label: "Restricted cash";
+    explanation: string;
+  };
 };
 
 export type FinSnapshot = {

@@ -562,6 +562,8 @@ const KIND_BY_TYPE = new Map([
   ["depository:checking", "checking"],
   ["depository:savings", "savings"],
   ["depository:money market", "savings"],
+  ["depository:cd", "cd"],
+  ["depository:hsa", "hsa"],
   ["credit:credit card", "card"],
   ["loan:auto", "loan"],
   ["loan:mortgage", "loan"],

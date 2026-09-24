@@ -184,6 +184,7 @@ export function CashSection({ snapshot }: { snapshot: FinSnapshot }) {
       {total ? (
         <Row>
           <span>
+            <span className="block text-[12px] uppercase tracking-[0.08em] text-ink-soft">Spendable cash</span>
             <span className="block text-[21px] font-semibold tracking-tight">{total}</span>
             <span className="block text-[13px] text-ink-soft mt-0.5">
               As of {dateLabel(cash.as_of) || "a date that could not be read"}. Covers {cash.accounts_covered} of {cash.accounts_considered} cash {cash.accounts_considered === 1 ? "account" : "accounts"}.
@@ -198,6 +199,24 @@ export function CashSection({ snapshot }: { snapshot: FinSnapshot }) {
         <Note>No deposit account with a confirmed balance is recorded here yet.</Note>
       ) : (
         <Note>No single dated cash figure can be supported by the records available.</Note>
+      )}
+      {cash.restricted_cash && (
+        <Row>
+          <span>
+            <span className="block text-[12px] uppercase tracking-[0.08em] text-ink-soft">Restricted cash</span>
+            <span className="block text-[21px] font-semibold tracking-tight">
+              {cash.restricted_cash.mixed_currency
+                ? "More than one currency"
+                : moneyLabel(cash.restricted_cash.total_minor, cash.restricted_cash.currency) ||
+                  "No restricted cash recorded"}
+            </span>
+            <span className="block text-[13px] text-ink-soft mt-0.5">
+              {cash.restricted_cash.explanation}
+            </span>
+          </span>
+          {cash.restricted_cash.accounts_considered > 0 &&
+            !cash.restricted_cash.complete && <Chip state="PROBLEM" />}
+        </Row>
       )}
     </Section>
   );

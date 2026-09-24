@@ -309,6 +309,8 @@ export function humanMapWord(value: string): string {
 
 export function mapValue(field: string, value: string | number | boolean | null): string {
   if (value === null) return "Not recorded";
+  if (field === "kind" && value === "cd") return "Certificate of deposit (restricted cash)";
+  if (field === "kind" && value === "hsa") return "Health Savings Account (restricted cash)";
   if (field === "ownership" && typeof value === "number") {
     return `${(value / 100).toLocaleString(undefined, { maximumFractionDigits: 2 })}%`;
   }

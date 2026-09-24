@@ -324,7 +324,7 @@ export function Glance({ snapshot, scopeName }: { snapshot: FinSnapshot; scopeNa
       {"cash" in snapshot ? (
         <Row>
           <span>
-            <span className="block text-[12px] uppercase tracking-[0.08em] text-ink-soft">Cash in the records</span>
+            <span className="block text-[12px] uppercase tracking-[0.08em] text-ink-soft">Spendable cash</span>
             <span className="block text-[19px] font-semibold mt-1">
               {snapshot.cash!.mixed_currency
                 ? "More than one currency"
@@ -342,6 +342,26 @@ export function Glance({ snapshot, scopeName }: { snapshot: FinSnapshot; scopeNa
           {!snapshot.cash!.complete && <Chip state="PROBLEM" />}
         </Row>
       ) : <Note>Cash balances were unavailable.</Note>}
+      {snapshot.cash?.restricted_cash && (
+        <Row>
+          <span>
+            <span className="block text-[12px] uppercase tracking-[0.08em] text-ink-soft">Restricted cash</span>
+            <span className="block text-[19px] font-semibold mt-1">
+              {snapshot.cash.restricted_cash.mixed_currency
+                ? "More than one currency"
+                : moneyLabel(
+                  snapshot.cash.restricted_cash.total_minor,
+                  snapshot.cash.restricted_cash.currency,
+                ) || "No restricted cash recorded"}
+            </span>
+            <span className="block text-[12.5px] text-ink-soft mt-0.5">
+              {snapshot.cash.restricted_cash.explanation}
+            </span>
+          </span>
+          {snapshot.cash.restricted_cash.accounts_considered > 0 &&
+            !snapshot.cash.restricted_cash.complete && <Chip state="PROBLEM" />}
+        </Row>
+      )}
       {snapshot.deadlines && (
         <Row>
           <span>

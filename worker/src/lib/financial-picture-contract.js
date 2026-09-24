@@ -1128,11 +1128,11 @@ function assertRecord(section, value, path) {
     assertPublicText(value.masked_identity, `${path}.masked_identity`, { max: 512 });
     assertPublicText(value.institution, `${path}.institution`, { nullable: true, max: 120 });
     assertEnum(value.category, new Set([
-      "bank", "credit_card", "loan", "investment", "payment_processor", "unclassified",
+      "bank", "restricted_cash", "credit_card", "loan", "investment", "payment_processor", "unclassified",
     ]), `${path}.category`);
     assertEnum(value.stored_account_kind, new Set([
       "checking", "savings", "card", "loan", "line_of_credit", "investment",
-      "retirement", "merchant", "point_of_sale", "escrow", "other",
+      "retirement", "merchant", "point_of_sale", "escrow", "cd", "hsa", "other",
     ]), `${path}.stored_account_kind`);
     assertEnum(value.balance_role, new Set(["asset", "liability", "neither"]), `${path}.balance_role`);
     if (typeof value.currency !== "string" || !/^[A-Z]{3}$/.test(value.currency)) {

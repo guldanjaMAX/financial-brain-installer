@@ -966,13 +966,23 @@ function promotionStatements(env, {
           )
         THEN 1 ELSE json_extract('plaid account assignment required','$') END AS assignment_guard`,
     ).bind(tenantId, windowRef, itemRef, tenantId, windowRef),
+    // Plaid can omit or generalise a subtype on a later read. Preserve a known
+    // restriction unless the staged row either confirms CD/HSA or carries one
+    // of the explicit subtype mappings this product already understands.
     env.DB.prepare(
       `INSERT INTO fin_accounts
          (tenant_id,account_slug,entity_slug,label,account_kind,balance_role,mask,currency,
           feed_mode,external_ref,provenance,source_feed,basis_state,recorded_at,
-          source_iso_currency_code,source_unofficial_currency_code)
-       SELECT s.tenant_id,s.account_slug,a.entity_slug,s.name,s.account_kind,s.balance_role,s.mask,s.currency,
-              'live',s.provider_account_id,'feed',?,'confirmed',?,s.iso_currency_code,s.unofficial_currency_code
+          source_iso_currency_code,source_unofficial_currency_code,restricted_cash_kind)
+       SELECT s.tenant_id,s.account_slug,a.entity_slug,s.name,
+              CASE WHEN lower(s.account_type)='depository'
+                         AND lower(COALESCE(s.account_subtype,'')) IN ('cd','hsa')
+                   THEN 'other' ELSE s.account_kind END,
+              s.balance_role,s.mask,s.currency,
+              'live',s.provider_account_id,'feed',?,'confirmed',?,s.iso_currency_code,s.unofficial_currency_code,
+              CASE WHEN lower(s.account_type)='depository'
+                          AND lower(COALESCE(s.account_subtype,'')) IN ('cd','hsa')
+                    THEN lower(s.account_subtype) ELSE NULL END
          FROM plaid_sync_stage_accounts s
          JOIN plaid_account_entity_assignments a
            ON a.tenant_id=s.tenant_id AND a.item_ref=? AND a.provider_account_id=s.provider_account_id
@@ -983,11 +993,29 @@ function promotionStatements(env, {
        ON CONFLICT(tenant_id,account_slug) WHERE superseded_by_id IS NULL DO UPDATE SET
          entity_slug=excluded.entity_slug,label=excluded.label,
          account_kind=excluded.account_kind,balance_role=excluded.balance_role,
+         restricted_cash_kind=CASE
+           WHEN excluded.restricted_cash_kind IS NOT NULL THEN excluded.restricted_cash_kind
+           WHEN EXISTS (
+             SELECT 1 FROM plaid_sync_stage_accounts evidence
+              WHERE evidence.tenant_id=excluded.tenant_id AND evidence.window_ref=?
+                AND evidence.provider_account_id=excluded.external_ref
+                AND (
+                  (lower(evidence.account_type)='depository' AND lower(evidence.account_subtype)
+                    IN ('checking','savings','money market','cash management')) OR
+                  (lower(evidence.account_type)='credit' AND lower(evidence.account_subtype)='credit card') OR
+                  (lower(evidence.account_type)='loan' AND lower(evidence.account_subtype)
+                    IN ('auto','mortgage','student','line of credit')) OR
+                  (lower(evidence.account_type)='investment' AND lower(evidence.account_subtype)
+                    IN ('brokerage','ira','401k'))
+                )
+           ) THEN NULL
+           ELSE fin_accounts.restricted_cash_kind
+         END,
          mask=excluded.mask,currency=excluded.currency,feed_mode='live',external_ref=excluded.external_ref,
          source_iso_currency_code=excluded.source_iso_currency_code,
          source_unofficial_currency_code=excluded.source_unofficial_currency_code,
          provenance='feed',source_feed=excluded.source_feed,basis_state='confirmed',recorded_at=excluded.recorded_at`,
-    ).bind(sourceFeed, stamp, itemRef, tenantId, windowRef),
+    ).bind(sourceFeed, stamp, itemRef, tenantId, windowRef, windowRef),
     env.DB.prepare(
       `SELECT CASE WHEN NOT EXISTS (
          SELECT 1 FROM json_each(?3) m
@@ -1809,7 +1837,10 @@ export async function plaidFeedStatus(env) {
     roundedBalances.get(itemRef).push(entry);
   };
   const stagedRounded = (await env.DB.prepare(
-    `SELECT w.item_ref,s.name,s.mask,s.account_kind,
+    `SELECT w.item_ref,s.name,s.mask,
+            CASE WHEN lower(s.account_type)='depository'
+                       AND lower(COALESCE(s.account_subtype,'')) IN ('cd','hsa')
+                 THEN lower(s.account_subtype) ELSE s.account_kind END AS account_kind,
             json_extract(s.provenance_json,'$.current_balance_minor_rounded') AS current_rounded,
             json_extract(s.provenance_json,'$.available_balance_minor_rounded') AS available_rounded
        FROM plaid_sync_windows w
@@ -1828,7 +1859,8 @@ export async function plaidFeedStatus(env) {
     });
   }
   const ledgerRounded = (await env.DB.prepare(
-    `SELECT f.source_feed,f.label,f.mask,f.account_kind,
+    `SELECT f.source_feed,f.label,f.mask,
+            COALESCE(f.restricted_cash_kind,f.account_kind) AS account_kind,
             (SELECT b.source_locator FROM fin_balance_snapshots b
               WHERE b.tenant_id=f.tenant_id AND b.account_slug=f.account_slug AND b.provenance='feed'
               ORDER BY b.as_of_date DESC LIMIT 1) AS latest_locator

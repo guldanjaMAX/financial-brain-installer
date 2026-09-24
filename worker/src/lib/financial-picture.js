@@ -1237,7 +1237,8 @@ const REFERENCE_INTEGRITY_SQL = `
 
 const ACCOUNT_SQL = `
   SELECT a.id AS internal_id, a.account_slug, a.entity_slug, a.institution,
-         a.account_kind, a.balance_role, a.mask, a.currency, a.feed_mode,
+         COALESCE(a.restricted_cash_kind, a.account_kind) AS account_kind,
+         a.balance_role, a.mask, a.currency, a.feed_mode,
          a.expected_cadence, a.status, a.opened_on, a.closed_on, a.provenance,
          a.source_doc_uid, a.source_locator, a.source_feed,
          EXISTS (SELECT 1 FROM fin_entities ae
@@ -1959,6 +1960,7 @@ const CONFLICT_SQL = `
 
 function categoryFor(kind) {
   if (["checking", "savings", "escrow"].includes(kind)) return "bank";
+  if (["cd", "hsa"].includes(kind)) return "restricted_cash";
   if (kind === "card") return "credit_card";
   if (["loan", "line_of_credit"].includes(kind)) return "loan";
   if (["investment", "retirement"].includes(kind)) return "investment";

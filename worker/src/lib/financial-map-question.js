@@ -74,8 +74,8 @@ const SUBJECT_MODIFIES_ANOTHER_NOUN = new RegExp(
 
 /* "Account" is the one genuinely overloaded noun in SUBJECT. The map's
    accounts are an entity's FINANCIAL accounts — the ledger's account kinds are
-   checking, savings, card, loan, line of credit, investment, retirement,
-   merchant, point of sale and escrow. Every other sense of the word belongs to
+   checking, savings, CD, HSA, card, loan, line of credit, investment,
+   retirement, merchant, point of sale and escrow. Every other sense of the word belongs to
    a different question: the accounting senses (accounts payable, accounts
    receivable, a chart of accounts, expense and revenue accounts), the
    relationship senses (a vendor or customer account), and the login senses (a
