@@ -16765,15 +16765,22 @@ const cmdIngestRemoteRun = async (
   }
   process.stdout.write("\r");
 
-  info(`${scanned} scanned; ${prepared} document(s) prepared in ${batchNo} batch(es); ${unchanged} unchanged; ${skips.length} skipped`);
+  info(
+    `${scanned} scanned; ${prepared} document(s) prepared in ${batchNo} batch(es); ` +
+      `${unchanged} unchanged; ${skips.length} skipped; ${tally.failed} failed`
+  );
 
   const coverageGaps = Math.max(0, skips.length - policySkipped - sourceResolvedSkipped - adjudicatedSkipped) +
     gmailHistoryMarkerMissing + imapSnapshotGaps;
 
   if (dry) {
-    ok("dry run, nothing was sent");
     await reportSkips(skips);
-    return { dry_run: true, would_send: prepared, unchanged, skipped: skips.length };
+    // A preview still has to be complete enough to trust. Report every isolated
+    // item first, then refuse the success-shaped receipt before printing a green
+    // dry-run result. Dry runs never persist the retry marker.
+    assertNoIngestFailures(tally);
+    ok("dry run, nothing was sent");
+    return { dry_run: true, would_send: prepared, unchanged, skipped: skips.length, failed: 0 };
   }
 
   // Every batch landed, so it is now safe to say "we have everything up to

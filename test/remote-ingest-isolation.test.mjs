@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import * as brain from "../brain.mjs";
-import { batchStream, splitOversized } from "../ingest/run.mjs";
+import { batchStream, prefetch, splitOversized } from "../ingest/run.mjs";
 
 test("remote per-item isolation has one shared command-path constructor", () => {
   assert.equal(typeof brain.makeRemotePreparationErrorIsolator, "function");
@@ -22,7 +22,14 @@ async function* orderedPrefetch(items, mapper) {
   for await (const item of items) yield await mapper(item);
 }
 
-async function runRemoteCase(source, { systemic = false } = {}) {
+async function runRemoteCase(source, {
+  systemic = false,
+  dryRun = false,
+  ids = ["good-before", "bad", "good-after"],
+  prefetchImpl = orderedPrefetch,
+  prepareGmailItem = null,
+  duringRun = null,
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), `brain-${source}-isolation-`));
   const manifestPath = join(root, "brain.manifest.json");
   const manifest = {
@@ -54,6 +61,8 @@ async function runRemoteCase(source, { systemic = false } = {}) {
   const prepared = [];
   const reconciled = [];
   const removals = [];
+  const removalCalls = [];
+  const logs = [];
   const systemicError = Object.assign(
     new Error(`synthetic ${source} systemic failure`),
     source === "drive"
@@ -64,7 +73,6 @@ async function runRemoteCase(source, { systemic = false } = {}) {
   );
   const ordinaryError = new Error(`synthetic ${source} per-item failure`);
   const selectedError = systemic ? systemicError : ordinaryError;
-  const ids = ["good-before", "bad", "good-after"];
 
   const drive = {
     startPageToken: async () => "next-drive-cursor",
@@ -93,6 +101,9 @@ async function runRemoteCase(source, { systemic = false } = {}) {
     listMessages: () => ids,
     toEnvelope: async (_token, id) => {
       prepared.push(id);
+      if (prepareGmailItem) {
+        return prepareGmailItem({ id, selectedError, prepared });
+      }
       if (id === "bad") throw selectedError;
       return { version: `version-${id}`, envelope: goodEnvelope("gmail", id) };
     },
@@ -148,15 +159,16 @@ async function runRemoteCase(source, { systemic = false } = {}) {
       splitOversized,
       loadState: () => state,
       saveState: (_path, value) => savedStates.push(structuredClone(value)),
-      prefetch: orderedPrefetch,
+      prefetch: prefetchImpl,
     }),
     drive,
     gmail,
     imap,
     listStoredSourceFamilies,
-    applyDriveRemovals: async ({ uids }) => {
-      removals.push(...uids);
-      return { applied: uids.length };
+    applyDriveRemovals: async ({ uids, dryRun: removalDryRun }) => {
+      removalCalls.push({ uids: [...uids], dryRun: removalDryRun });
+      if (!removalDryRun) removals.push(...uids);
+      return { applied: removalDryRun ? 0 : uids.length };
     },
     postSourceReceipt: async (_base, _key, receipt) => {
       receipts.push(structuredClone(receipt));
@@ -177,14 +189,15 @@ async function runRemoteCase(source, { systemic = false } = {}) {
   };
 
   const priorLog = console.log;
-  console.log = () => {};
+  console.log = (...args) => logs.push(args.join(" "));
   try {
     const run = brain.cmdIngestRemote(
       manifest,
       manifestPath,
-      { from: source, source },
+      { from: source, source, ...(dryRun ? { "dry-run": true } : {}) },
       options,
     );
+    await duringRun?.({ run, prepared });
     if (systemic) {
       await assert.rejects(run, (error) => error === systemicError);
     } else {
@@ -198,6 +211,8 @@ async function runRemoteCase(source, { systemic = false } = {}) {
       prepared,
       reconciled,
       removals,
+      removalCalls,
+      logs,
       priorFamily,
       ordinaryError,
     };
@@ -223,6 +238,20 @@ for (const source of ["drive", "gmail", "imap"]) {
     if (source === "imap") assert.equal(Object.hasOwn(result.state, "imap_folders"), false);
   });
 
+  test(`${source} dry run reports one ordinary bad item and exits incomplete after inspecting both neighbors`, async () => {
+    const result = await runRemoteCase(source, { dryRun: true });
+    assert.deepEqual(result.prepared, ["good-before", "bad", "good-after"]);
+    assert.match(result.logs.join("\n"), /1 failed/);
+    assert.deepEqual(result.sent, []);
+    assert.deepEqual(result.reconciled, []);
+    assert.deepEqual(result.removals, []);
+    assert.equal(result.removalCalls.some((call) => call.dryRun !== true), false);
+    assert.equal(result.savedStates.length, 0);
+    assert.match(result.state.skipped[source === "imap" ? "imap:INBOX#2" : `${source}:bad`], /prior family was retained/);
+  });
+}
+
+for (const source of ["drive", "imap"]) {
   test(`${source} rethrows a systemic preparation failure before later sends or cleanup`, async () => {
     const result = await runRemoteCase(source, { systemic: true });
     assert.deepEqual(result.prepared, ["good-before", "bad"]);
@@ -234,3 +263,54 @@ for (const source of ["drive", "gmail", "imap"]) {
     assert.equal(result.receipts.at(-1)?.walk_complete, false);
   });
 }
+
+test("gmail systemic refusal stops new prefetch work after the concurrent consumer observes it", async () => {
+  let releaseFirst;
+  let releaseBad;
+  let initialWindowStarted;
+  let badSettled;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const badGate = new Promise((resolve) => { releaseBad = resolve; });
+  const initialWindow = new Promise((resolve) => { initialWindowStarted = resolve; });
+  const badResultReady = new Promise((resolve) => { badSettled = resolve; });
+  const ids = [
+    "good-before",
+    "bad",
+    ...Array.from({ length: 6 }, (_, index) => `already-prefetched-${index + 1}`),
+    "refilled-after-first-result",
+    "refilled-before-refusal-is-observed",
+    "must-not-start-after-refusal",
+  ];
+
+  const result = await runRemoteCase("gmail", {
+    systemic: true,
+    ids,
+    prefetchImpl: prefetch,
+    prepareGmailItem: async ({ id, selectedError, prepared }) => {
+      if (prepared.length === 8) initialWindowStarted();
+      if (id === "good-before") await firstGate;
+      if (id === "bad") {
+        await badGate;
+        badSettled();
+        throw selectedError;
+      }
+      return { version: `version-${id}`, envelope: goodEnvelope("gmail", id) };
+    },
+    duringRun: async () => {
+      await initialWindow;
+      releaseBad();
+      await badResultReady;
+      await Promise.resolve();
+      releaseFirst();
+    },
+  });
+
+  // The bounded window legitimately refills before each ordered yield, so later
+  // fetch/preparation work can start before the consumer reaches the earlier
+  // refusal. Once it does, the source iterator closes and no new item starts.
+  assert.deepEqual(result.prepared, ids.slice(0, 10));
+  assert.deepEqual(result.sent, []);
+  assert.deepEqual(result.reconciled, []);
+  assert.deepEqual(result.removals, []);
+  assert.equal(result.receipts.at(-1)?.walk_complete, false);
+});
