@@ -174,14 +174,23 @@ export async function handleOcr(env, request, { now = () => new Date() } = {}) {
   }
   if (claim.state === "pending" || claim.state === "retry_later") {
     const waitingForRereadWindow = claim.state === "retry_later";
+    const dailyModelCallCap = claim.dailyModelCallCap === true;
     return jsonResponse({
-      error: waitingForRereadWindow
+      error: dailyModelCallCap
+        ? `this OCR page has used ${claim.modelCallsInWindow} model calls in 24 hours`
+        : waitingForRereadWindow
         ? "the prior OCR re-read window is still active"
         : "the first OCR attempt is still running",
-      detail: waitingForRereadWindow
+      detail: dailyModelCallCap
+        ? "The page is held until its next daily retry window; no model call was started."
+        : waitingForRereadWindow
         ? "Retry this same request id after the bounded wait; no model call was started."
         : "Retry this same request id after the bounded wait; no second model call was started.",
       ocr_request_pending: true,
+      ...(dailyModelCallCap ? {
+        ocr_model_call_cap_exhausted: true,
+        model_calls_in_24_hours: claim.modelCallsInWindow,
+      } : {}),
       retry_after_ms: Number.isSafeInteger(claim.retryAfterMs) && claim.retryAfterMs > 0
         ? claim.retryAfterMs
         : 2_000,
@@ -287,9 +296,9 @@ export async function handleOcr(env, request, { now = () => new Date() } = {}) {
       request_id: requestId,
     };
     try {
-      // A provider error can arrive after billable work. Keep the model-start
-      // evidence and its bounded ambiguity window, but never make a failed
-      // response replayable or mistake it for a completed transcription.
+      // A returned provider error proves the call ended. Keep the model-start
+      // evidence and durable call count, but use the short failure backoff and
+      // never make the response replayable or call it a transcription.
       await recordRetryableOcrPageFailure(env.DB, {
         requestId, inputSha256, ownerToken, now: now(),
       });

@@ -54,6 +54,7 @@ const routeDb = () => {
     "0002_llm_call_log.sql",
     "0047_ocr_page_idempotency.sql",
     "0048_ocr_page_acknowledgement.sql",
+    "0049_ocr_page_retry_budget.sql",
   ]) {
     sqlite.exec(readFileSync(join(HERE, "..", "..", "migrations", "d1", file), "utf8"));
   }
@@ -459,8 +460,8 @@ test("an unacknowledged completed result keeps its ciphertext and replays after 
 test("a provider failure never replays and permits one replacement after its ambiguity window", async () => {
   const receiptDb = routeDb();
   const failedAt = new Date("2026-09-24T12:00:00.000Z");
-  const beforeRetryWindow = new Date("2026-09-25T12:00:00.000Z");
-  const afterRetryWindow = new Date("2026-10-02T12:00:00.000Z");
+  const beforeRetryWindow = new Date("2026-09-24T12:00:30.000Z");
+  const afterRetryWindow = new Date("2026-09-24T12:02:00.000Z");
   let modelCalls = 0;
   let providerRecovered = false;
   const env = {
@@ -500,15 +501,15 @@ test("a provider failure never replays and permits one replacement after its amb
   const heldBody = await held.json();
   assert.equal(held.status, 425, JSON.stringify(heldBody));
   assert.equal(heldBody.ocr_request_pending, true,
-    "the active failure window must reach the typed no-call decision");
+    "the 60-second provider-failure backoff must reach the typed no-call decision");
   assert.ok(heldBody.retry_after_ms > 0);
-  assert.equal(modelCalls, 1, "the active ambiguity window cannot start another call");
+  assert.equal(modelCalls, 1, "the active provider-failure backoff cannot start another call");
 
   const recovered = await handleOcr(env, ocrRequest(requestBody), { now: () => afterRetryWindow });
   const recoveredBody = await recovered.json();
   assert.equal(recovered.status, 200, JSON.stringify(recoveredBody));
   assert.equal(recoveredBody.ocr_reread_after_expiry, true);
-  assert.equal(modelCalls, 2, "expiry permits exactly one replacement model call");
+  assert.equal(modelCalls, 2, "the 60-second expiry permits exactly one replacement model call");
 
   const replay = await handleOcr(env, ocrRequest(requestBody), { now: () => afterRetryWindow });
   const replayBody = await replay.json();
@@ -516,6 +517,62 @@ test("a provider failure never replays and permits one replacement after its amb
   assert.equal(replayBody.idempotent_replay, true,
     "a lost successful replacement response must replay without another call");
   assert.equal(modelCalls, 2, "the successful replacement cannot charge a third time");
+});
+
+test("three failed model calls hold the page until its next 24-hour window", async () => {
+  const receiptDb = routeDb();
+  const base = new Date("2026-09-24T12:00:00.000Z");
+  let modelCalls = 0;
+  let providerRecovered = false;
+  const env = {
+    ADMIN_KEY,
+    OCR_ENABLED: "1",
+    DB: receiptDb,
+    AI: {
+      run: async () => {
+        modelCalls++;
+        if (!providerRecovered) throw new Error("synthetic terminal provider failure");
+        return { response: "Recovered next-day transcription", usage: {} };
+      },
+    },
+  };
+  const requestBody = {
+    image_base64: "provider-daily-cap-page",
+    page: 1,
+    prompt: "transcribe",
+    replay_key: "G".repeat(43),
+  };
+
+  for (const minutes of [0, 2, 4]) {
+    const response = await handleOcr(env, ocrRequest(requestBody), {
+      now: () => new Date(base.getTime() + minutes * 60_000),
+    });
+    assert.equal(response.status, 502, await response.clone().text());
+  }
+  const capped = await handleOcr(env, ocrRequest(requestBody), {
+    now: () => new Date(base.getTime() + 6 * 60_000),
+  });
+  const cappedBody = await capped.json();
+  const cappedReceipt = receiptDb.sqlite.prepare(
+    "SELECT status,model_call_count,model_call_window_started_at FROM ocr_page_requests",
+  ).get();
+  assert.equal(capped.status, 425, JSON.stringify(cappedBody));
+  assert.equal(cappedBody.ocr_model_call_cap_exhausted, true,
+    "the cap-exhaustion decision point must be explicit to the load report");
+  assert.equal(cappedBody.model_calls_in_24_hours, 3);
+  assert.ok(cappedBody.retry_after_ms > 0);
+  assert.equal(modelCalls, 3, "the fourth same-day request cannot start another model call");
+  assert.equal(cappedReceipt.model_call_count, 3, "the three-call cap must be durable");
+
+  providerRecovered = true;
+  const nextDay = await handleOcr(env, ocrRequest(requestBody), {
+    now: () => new Date(base.getTime() + 25 * 60 * 60 * 1000),
+  });
+  assert.equal(nextDay.status, 200, await nextDay.clone().text());
+  assert.equal(modelCalls, 4, "the next 24-hour window must permit recovery instead of a permanent hold");
+  assert.equal(receiptDb.sqlite.prepare(
+    "SELECT model_call_count FROM ocr_page_requests",
+  ).get().model_call_count, 1, "the next-day call starts a fresh durable window");
 });
 
 test("a ciphertext-less completed tombstone permits exactly one recorded re-read", async () => {
@@ -570,7 +627,7 @@ test("a ciphertext-less completed tombstone permits exactly one recorded re-read
 });
 
 test("expired pre-call reservations and in-flight ambiguity each rearm one bounded call", async () => {
-  const now = new Date("2026-09-24T12:00:00.000Z");
+  const now = new Date("2026-09-24T12:16:00.000Z");
   const expiredAt = "2026-09-24T11:59:00.000Z";
 
   const reclaimDb = routeDb();
@@ -604,10 +661,23 @@ test("expired pre-call reservations and in-flight ambiguity each rearm one bound
   }));
   heldDb.sqlite.prepare(
     `INSERT INTO ocr_page_requests
-       (request_id,input_sha256,status,owner_token,started_at,model_started_at,expires_at)
-     VALUES (?1,?2,'in_flight',?3,?4,?4,?5)`,
-  ).run(heldInput, heldInput, "ambiguous-owner-token".padEnd(32, "x"), "2026-09-17T11:00:00.000Z", expiredAt);
+       (request_id,input_sha256,status,owner_token,started_at,model_started_at,expires_at,
+        model_call_count,model_call_window_started_at)
+     VALUES (?1,?2,'in_flight',?3,?4,?4,?5,1,?4)`,
+  ).run(heldInput, heldInput, "ambiguous-owner-token".padEnd(32, "x"),
+    "2026-09-24T12:00:00.000Z", "2026-09-24T12:15:00.000Z");
   let ambiguityRereadCalls = 0;
+  const stillHeld = await handleOcr({
+    ADMIN_KEY,
+    OCR_ENABLED: "1",
+    DB: heldDb,
+    AI: { run: async () => { ambiguityRereadCalls++; return { response: "Too early", usage: {} }; } },
+  }, ocrRequest({ ...heldBody, request_id: heldInput }), {
+    now: () => new Date("2026-09-24T12:02:00.000Z"),
+  });
+  assert.equal(stillHeld.status, 425);
+  assert.equal(ambiguityRereadCalls, 0,
+    "the T+2 minute ambiguity decision point cannot start a replacement call");
   const rereadResponse = await handleOcr({
     ADMIN_KEY,
     OCR_ENABLED: "1",
@@ -618,7 +688,7 @@ test("expired pre-call reservations and in-flight ambiguity each rearm one bound
   assert.equal(rereadResponse.status, 200, JSON.stringify(rereadResponseBody));
   assert.equal(rereadResponseBody.ocr_reread_after_expiry, true,
     "the expired in-flight decision point must record its bounded replacement");
-  assert.equal(ambiguityRereadCalls, 1, "expired ambiguity authorizes exactly one call in the new window");
+  assert.equal(ambiguityRereadCalls, 1, "T+16 minutes authorizes exactly one call in the new window");
 });
 
 test("every durable OCR receipt state has a bounded exit across time and process outcomes", async () => {
@@ -626,6 +696,9 @@ test("every durable OCR receipt state has a bounded exit across time and process
   const base = new Date("2026-09-24T12:00:00.000Z");
   const clocks = [
     ["fresh", new Date(base.getTime() + 60_000)],
+    ["T+2 minutes", new Date(base.getTime() + 2 * 60_000)],
+    ["T+16 minutes", new Date(base.getTime() + 16 * 60_000)],
+    ["T+25 hours", new Date(base.getTime() + 25 * 60 * 60 * 1000)],
     ["T+8 days", new Date(base.getTime() + 8 * dayMs)],
     ["T+31 days", new Date(base.getTime() + 31 * dayMs)],
   ];
@@ -649,6 +722,7 @@ test("every durable OCR receipt state has a bounded exit across time and process
     { name: "reserved re-read pre-call", status: "pending", reread: true },
     { name: "in-flight", status: "in_flight", reread: false },
     { name: "in-flight re-read", status: "in_flight", reread: true },
+    { name: "daily model-call cap exhausted", status: "in_flight", reread: true, providerFailed: true, modelCallCount: 3 },
     { name: "completed unacknowledged", status: "completed", acknowledged: false, reread: false },
     { name: "completed acknowledged", status: "completed", acknowledged: true, reread: false },
     { name: "completed re-read unacknowledged", status: "completed", acknowledged: false, reread: true },
@@ -745,12 +819,17 @@ test("every durable OCR receipt state has a bounded exit across time and process
                         replay_ciphertext=NULL,acknowledged_at=NULL`,
               ).run(base.toISOString(), new Date(base.getTime() + 5 * 60_000).toISOString());
             } else if (state.status === "in_flight") {
+              const inFlightExpiry = state.providerFailed
+                ? base.getTime() + 60_000
+                : base.getTime() + 15 * 60_000;
               receiptDb.sqlite.prepare(
                 `UPDATE ocr_page_requests
                     SET status='in_flight',started_at=?1,model_started_at=?1,expires_at=?2,completed_at=NULL,
                         response_status=NULL,response_json=NULL,replay_expires_at=NULL,replay_iv=NULL,
-                        replay_ciphertext=NULL,acknowledged_at=NULL`,
-              ).run(base.toISOString(), new Date(base.getTime() + 7 * dayMs).toISOString());
+                        replay_ciphertext=NULL,acknowledged_at=NULL,provider_failed_at=?3,
+                        model_call_count=?4,model_call_window_started_at=?1`,
+              ).run(base.toISOString(), new Date(inFlightExpiry).toISOString(),
+                state.providerFailed ? base.toISOString() : null, state.modelCallCount || 1);
             }
             modelCalls = 0;
 
@@ -766,7 +845,7 @@ test("every durable OCR receipt state has a bounded exit across time and process
                 const stateExpiry = state.status === "pending"
                   ? base.getTime() + 5 * 60_000
                   : state.status === "in_flight"
-                    ? base.getTime() + 7 * dayMs
+                    ? state.providerFailed ? base.getTime() + dayMs : base.getTime() + 15 * 60_000
                     : 0;
                 const retryAt = new Date(Math.max(
                   attemptAt.getTime() + responseBody.retry_after_ms + 1,
@@ -829,13 +908,13 @@ test("every durable OCR receipt state has a bounded exit across time and process
       : 1), 0,
   );
   assert.equal(combinations, stateHandoffAndOutcomeCombinations * clocks.length * outcomes.length);
-  assert.equal(combinations, 900, "the complete state × handoff × stored-outcome × clock × crash matrix ran");
+  assert.equal(combinations, 1818, "the complete state × handoff × stored-outcome × clock × crash matrix ran");
   for (const { name } of handoffs) {
-    assert.equal(completedHandoffDecisions[name], 216,
+    assert.equal(completedHandoffDecisions[name], 432,
       `${name} handoff decision was not reached: ${JSON.stringify(completedHandoffDecisions)}`);
   }
   for (const { name } of storedOutcomes) {
-    assert.equal(completedOutcomeDecisions[name], 144,
+    assert.equal(completedOutcomeDecisions[name], 288,
       `${name} stored outcome decision was not reached: ${JSON.stringify(completedOutcomeDecisions)}`);
   }
   assert.ok(decisions.replay > 0, `replay decision was not reached: ${JSON.stringify(decisions)}`);

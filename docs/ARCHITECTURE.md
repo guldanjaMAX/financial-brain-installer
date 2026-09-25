@@ -291,9 +291,9 @@ before calling Workers AI. A short pre-call reservation may be reclaimed after
 exact expiry; an exact transition to `in_flight` closes that window before the
 billable call. An active duplicate returns 425 without starting another model
 call. The installer polls that state with backoff inside the active deadline;
-425 is not an attempt and carries a bounded polling wait. An expired
-in-flight receipt may start one recorded replacement call only after its full
-seven-day ambiguity window. Before the first attempt, the installer
+425 is not an attempt and carries a bounded polling wait. An in-flight receipt
+with no final response may start one recorded replacement call only after its
+full 15-minute ambiguity window. Before the first attempt, the installer
 derives one AES-GCM replay key with a domain-separated hash of the exact private
 page identity. That key is not persisted and cannot be derived from the durable
 request ID alone, but a later source pass over the same page can reproduce it.
@@ -322,11 +322,16 @@ fresh source acknowledgement. Owner upload carries the opaque request ID in
 its private content-free intent and acknowledges only after exact ingest and
 finalization readback. A replacement with no ciphertext waits for the next
 bounded window instead of looping or becoming a permanent hold. Provider 4xx
-and 5xx results, timeouts, empty text, malformed replies, and all other
-non-successes retain the model-started in-flight receipt and a fresh seven-day
-ambiguity deadline, never a replayable completion. A legacy stored non-success
-follows the same compare-and-swap replacement path as an unusable handoff. Each
-window can authorize at most one replacement call.
+and 5xx results, terminal model errors, empty text, malformed replies, and all
+other definite non-successes retain the model-started receipt but record that
+the call ended. They become eligible for one compare-and-swap replacement after
+a 60-second backoff, never a replayable completion. Migration 0049 durably
+counts every started model call. A page can start at most 3 calls in one
+24-hour window; after that it returns a typed 425 until the next window, and the
+load report counts held pages plainly. The next daily window resets the count,
+so exhaustion is never a permanent hold. A legacy stored non-success follows
+the same compare-and-swap replacement path as an unusable handoff. Each
+ambiguity or backoff window can authorize at most one replacement call.
 Neither the key nor plaintext, plaintext source locator, file name, or
 plaintext document identity is stored, and this table is not part of a recovery
 export.

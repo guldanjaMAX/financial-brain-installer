@@ -3,8 +3,11 @@
 export const OCR_REQUEST_ID = /^[0-9a-f]{64}$/u;
 export const OCR_REPLAY_KEY = /^[A-Za-z0-9_-]{43}$/u;
 export const OCR_RESERVATION_TTL_MS = 5 * 60 * 1000;
-export const OCR_IN_FLIGHT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const OCR_IN_FLIGHT_TTL_MS = 15 * 60 * 1000;
 export const OCR_REPLAY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const OCR_PROVIDER_FAILURE_BACKOFF_MS = 60 * 1000;
+export const OCR_MODEL_CALL_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const OCR_MAX_MODEL_CALLS_PER_WINDOW = 3;
 
 const encoder = new TextEncoder();
 
@@ -78,6 +81,29 @@ function validDate(value) {
 
 function expiryFrom(now, ttlMs) {
   return new Date(now.getTime() + ttlMs).toISOString();
+}
+
+function modelCallBudget(row) {
+  const count = Number(row?.model_call_count);
+  const windowStartedAtMs = Date.parse(String(row?.model_call_window_started_at || ""));
+  if (!Number.isSafeInteger(count) || count < 0 || count > OCR_MAX_MODEL_CALLS_PER_WINDOW ||
+      (count === 0 && row?.model_call_window_started_at != null) ||
+      (count > 0 && !Number.isFinite(windowStartedAtMs))) {
+    throw new Error("the OCR model-call budget receipt is malformed");
+  }
+  return Object.freeze({ count, windowStartedAtMs });
+}
+
+function dailyModelCallCapDecision(budget, now) {
+  if (budget.count < OCR_MAX_MODEL_CALLS_PER_WINDOW) return null;
+  const windowExpiresAtMs = budget.windowStartedAtMs + OCR_MODEL_CALL_WINDOW_MS;
+  if (windowExpiresAtMs <= now.getTime()) return null;
+  return Object.freeze({
+    state: "retry_later",
+    retryAfterMs: Math.max(1, windowExpiresAtMs - now.getTime()),
+    dailyModelCallCap: true,
+    modelCallsInWindow: budget.count,
+  });
 }
 
 function usageReceipt(value) {
@@ -263,13 +289,15 @@ export async function claimOcrPageRequest(db, {
     `SELECT request_id,input_sha256,status,owner_token,started_at,model_started_at,completed_at,
             expires_at,response_status,response_json,
             replay_key_sha256,replay_expires_at,replay_iv,replay_ciphertext,
-            acknowledged_at,reread_count
+            acknowledged_at,reread_count,provider_failed_at,
+            model_call_count,model_call_window_started_at
        FROM ocr_page_requests WHERE request_id=?1`,
   ).bind(requestId).first();
   if (!existing || existing.request_id !== requestId) {
     throw new Error("the OCR idempotency reservation disappeared");
   }
   if (existing.input_sha256 !== inputSha256) return Object.freeze({ state: "conflict" });
+  const budget = modelCallBudget(existing);
   if (existing.status === "pending") {
     const expiresAtMs = Date.parse(String(existing.expires_at || ""));
     if (!Number.isFinite(expiresAtMs)) {
@@ -278,6 +306,8 @@ export async function claimOcrPageRequest(db, {
     if (expiresAtMs > now.getTime()) {
       return Object.freeze({ state: "pending", retryAfterMs: Math.min(2_000, Math.max(1, expiresAtMs - now.getTime())) });
     }
+    const capDecision = dailyModelCallCapDecision(budget, now);
+    if (capDecision) return capDecision;
     // Only this pre-model state is safe to reclaim automatically. The exact old
     // owner and timestamps make the takeover a compare-and-swap rather than a
     // blind lease steal from a concurrent request.
@@ -311,6 +341,8 @@ export async function claimOcrPageRequest(db, {
     if (expiresAtMs > now.getTime()) {
       return Object.freeze({ state: "pending", retryAfterMs: Math.min(2_000, Math.max(1, expiresAtMs - now.getTime())) });
     }
+    const capDecision = dailyModelCallCapDecision(budget, now);
+    if (capDecision) return capDecision;
     // A crashed Worker can leave the row in-flight forever. Once its full
     // ambiguity window has elapsed, permit one replacement inside the next
     // window. The exact old receipt is the compare-and-swap boundary, so two
@@ -320,10 +352,11 @@ export async function claimOcrPageRequest(db, {
           SET status='pending',owner_token=?1,started_at=?2,expires_at=?3,
               model_started_at=NULL,completed_at=NULL,response_status=NULL,response_json=NULL,
               replay_key_sha256=?4,replay_expires_at=NULL,replay_iv=NULL,replay_ciphertext=NULL,
-              acknowledged_at=NULL,reread_count=1
+              acknowledged_at=NULL,reread_count=1,provider_failed_at=NULL
         WHERE request_id=?5 AND input_sha256=?6 AND status='in_flight'
           AND owner_token=?7 AND started_at=?8 AND model_started_at=?9 AND expires_at=?10
-          AND reread_count=?11
+          AND reread_count=?11 AND provider_failed_at IS ?12
+          AND model_call_count=?13 AND model_call_window_started_at=?14
         RETURNING request_id`,
     ).bind(
       ownerToken,
@@ -337,6 +370,9 @@ export async function claimOcrPageRequest(db, {
       existing.model_started_at,
       existing.expires_at,
       existing.reread_count,
+      existing.provider_failed_at,
+      budget.count,
+      existing.model_call_window_started_at,
     ).all();
     if (!exactReturningRow(rearmed, requestId)) {
       throw new Error("the OCR expired in-flight re-read receipt was ambiguous");
@@ -396,6 +432,8 @@ export async function claimOcrPageRequest(db, {
       retryAfterMs: Math.max(1, nextRereadAtMs - now.getTime()),
     });
   }
+  const capDecision = dailyModelCallCapDecision(budget, now);
+  if (capDecision) return capDecision;
   // Missing fields, a mismatched key fingerprint, bad expiry data, failed
   // decryption, and an expired acknowledged handoff all use this one CAS. The
   // replacement result belongs to a fresh receipt and must be acknowledged
@@ -448,12 +486,23 @@ export async function startOcrPageRequest(db, {
   if (!validDate(now)) throw new TypeError("OCR idempotency start is invalid");
   const startedAt = now.toISOString();
   const expiresAt = expiryFrom(now, OCR_IN_FLIGHT_TTL_MS);
+  const modelCallWindowCutoff = new Date(now.getTime() - OCR_MODEL_CALL_WINDOW_MS).toISOString();
   const result = await db.prepare(
     `UPDATE ocr_page_requests
-        SET status='in_flight',model_started_at=?1,expires_at=?2
-      WHERE request_id=?3 AND input_sha256=?4 AND owner_token=?5 AND status='pending'
+        SET status='in_flight',model_started_at=?1,expires_at=?2,provider_failed_at=NULL,
+            model_call_count=CASE
+              WHEN model_call_window_started_at IS NULL OR model_call_window_started_at <= ?3 THEN 1
+              ELSE model_call_count + 1
+            END,
+            model_call_window_started_at=CASE
+              WHEN model_call_window_started_at IS NULL OR model_call_window_started_at <= ?3 THEN ?1
+              ELSE model_call_window_started_at
+            END
+      WHERE request_id=?4 AND input_sha256=?5 AND owner_token=?6 AND status='pending'
+        AND (model_call_window_started_at IS NULL OR model_call_window_started_at <= ?3
+          OR model_call_count < ${OCR_MAX_MODEL_CALLS_PER_WINDOW})
       RETURNING request_id`,
-  ).bind(startedAt, expiresAt, requestId, inputSha256, ownerToken).all();
+  ).bind(startedAt, expiresAt, modelCallWindowCutoff, requestId, inputSha256, ownerToken).all();
   if (!exactReturningRow(result, requestId)) {
     throw new Error("the OCR idempotency model-start receipt was ambiguous");
   }
@@ -505,16 +554,18 @@ export async function recordRetryableOcrPageFailure(db, {
   now = new Date(),
 } = {}) {
   if (!validDate(now)) throw new TypeError("OCR retryable failure receipt is invalid");
-  const expiresAt = expiryFrom(now, OCR_IN_FLIGHT_TTL_MS);
-  // The model-start transition is the durable billing boundary. A non-success
-  // therefore remains in-flight instead of becoming a replayable completion,
-  // but receives a fresh bounded ambiguity window before one CAS replacement.
+  const failedAt = now.toISOString();
+  const expiresAt = expiryFrom(now, OCR_PROVIDER_FAILURE_BACKOFF_MS);
+  // The model-start transition remains the durable billing boundary, while a
+  // returned provider error proves this call is no longer ambiguous. Keep it
+  // non-replayable and use a short backoff before the next budgeted CAS.
   const result = await db.prepare(
     `UPDATE ocr_page_requests
-        SET expires_at=?1
-      WHERE request_id=?2 AND input_sha256=?3 AND owner_token=?4 AND status='in_flight'
+        SET expires_at=?1,provider_failed_at=?2
+      WHERE request_id=?3 AND input_sha256=?4 AND owner_token=?5 AND status='in_flight'
+        AND model_call_count BETWEEN 1 AND ${OCR_MAX_MODEL_CALLS_PER_WINDOW}
       RETURNING request_id`,
-  ).bind(expiresAt, requestId, inputSha256, ownerToken).all();
+  ).bind(expiresAt, failedAt, requestId, inputSha256, ownerToken).all();
   if (!exactReturningRow(result, requestId)) {
     throw new Error("the OCR retryable failure receipt was ambiguous");
   }

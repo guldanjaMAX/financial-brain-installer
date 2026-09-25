@@ -431,7 +431,7 @@ call, then exactly marks it in-flight before invoking the model. An active
 duplicate receives 425 with a bounded retry time. An expired pre-call
 reservation is reclaimed without a re-read marker. An in-flight row receives
 the same bounded treatment and may start one recorded replacement only after
-its seven-day ambiguity window. Identical rendered bytes in two different
+its 15-minute ambiguity window. Identical rendered bytes in two different
 documents produce two identities and two independent calls. Only a verified
 200 response with nonblank transcription text and the exact request identity
 becomes a completed receipt. Those successful receipts are permanent
@@ -456,13 +456,17 @@ acknowledgement, records `ocr_reread_after_expiry`, and leaves a fresh
 ciphertext until the replacement is acknowledged. Owner upload carries the
 opaque request ID in its private content-free intent and acknowledges only
 after exact ingest and finalization readback. A replacement receipt with no
-ciphertext waits for its next seven-day window instead of looping or becoming
-a permanent hold. Provider 4xx and 5xx results, timeouts, empty text, malformed
-replies, and every other non-success remain model-started retryable receipts
-with no replay handoff. They permit one compare-and-swap replacement only after
-the same seven-day ambiguity window. Legacy non-success completions also never
-replay and enter the same bounded replacement path. The source load report
-counts every replacement.
+ciphertext waits for its next seven-day replay window instead of looping or
+becoming a permanent hold. Provider 4xx and 5xx results, terminal model errors,
+empty text, malformed replies, and every other definite non-success remain
+model-started retryable receipts with no replay handoff. They permit one
+compare-and-swap replacement after a 60-second backoff. Migration 0049 records
+every started model call in a durable 24-hour window and caps each page at 3.
+An exhausted page returns typed 425 evidence until the next daily window, then
+becomes eligible again rather than remaining held permanently. Legacy
+non-success completions also never replay and enter the same bounded
+replacement path. The source load report counts both replacements and pages
+held by the daily cap.
 Any reservation, model-start, completion, or release evidence failure is fatal
 and retryable at source level: the prior revision remains, no partial
 replacement or removal plan runs, and the cursor and ready receipt are

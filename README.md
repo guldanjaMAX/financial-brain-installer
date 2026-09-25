@@ -960,9 +960,13 @@ product says all three rather than the first one:
   or making it derivable from the durable request ID alone. A successful
   receipt keeps hashes, status, and usage only, never the transcription or
   source locator. A provider 4xx or 5xx, timeout, empty text, malformed reply,
-  or any other non-success is never replayed as a result. It retains the
-  model-start proof and permits one replacement only after the same seven-day
-  ambiguity window. If the Brain remains healthy but the page stays slow, that
+  or any other non-success is never replayed as a result. A call with no final
+  response keeps its model-start proof for a 15-minute ambiguity window. A
+  definite provider failure can retry after 60 seconds, with no more than 3
+  model calls for that page in 24 hours. The durable count resets in the next
+  daily window, so the page is held rather than permanently abandoned. The
+  load report gives a plain count of held pages. If the Brain remains healthy
+  but the page stays slow, that
   document is skipped
   and the rest of the pass continues. A transport, authentication, malformed
   reply, unknown status, or model failure defers the document as a system
@@ -980,7 +984,7 @@ product says all three rather than the first one:
   only the opaque OCR request ID through its content-free intent and
   acknowledges it after exact ingest and upload-finalization readback, so normal
   expiry pruning can apply. A missing completion remains a bounded retry state;
-  after its seven-day ambiguity window, one recorded replacement call can clear
+  after its 15-minute ambiguity window, one recorded replacement call can clear
   it. No state can retry more than once in one window. If the health check also
   fails, progress is saved and the pass stops resumably.
 

@@ -7411,28 +7411,39 @@ export function makeOcrCallback({
   });
 }
 
-function reportOcrRetryStats(ocrCallback) {
+export function ocrRetryReportLines(ocrCallback) {
   const retried = Math.max(0, Number(ocrCallback?.stats?.retriedPages || 0));
   const skipped = Math.max(0, Number(ocrCallback?.stats?.skippedPages || 0));
   const completed = Math.max(0, retried - skipped);
   const rereadAfterExpiry = Math.max(0, Number(ocrCallback?.stats?.rereadAfterExpiry || 0));
+  const dailyCapHeldPages = Math.max(0, Number(ocrCallback?.stats?.dailyCapHeldPages || 0));
+  const lines = [];
   if (completed) {
-    info(
+    lines.push({ level: "info", message:
       `${completed} OCR page${completed === 1 ? " was" : "s were"} slow; ` +
-        `${completed === 1 ? "it was" : "they were"} retried and completed.`,
-    );
+        `${completed === 1 ? "it was" : "they were"} retried and completed.` });
   }
   if (skipped) {
-    warn(
+    lines.push({ level: "warn", message:
       `${skipped} OCR page${skipped === 1 ? " was" : "s were"} still slow after bounded retries; ` +
-        `${skipped === 1 ? "it was" : "they were"} skipped and will be checked again on the next pass.`,
-    );
+        `${skipped === 1 ? "it was" : "they were"} skipped and will be checked again on the next pass.` });
   }
   if (rereadAfterExpiry) {
-    warn(
+    lines.push({ level: "warn", message:
       `${rereadAfterExpiry} OCR page${rereadAfterExpiry === 1 ? " was" : "s were"} re-read after its encrypted handoff was unavailable. ` +
-        "Each affected page used its one bounded replacement call.",
-    );
+        "Each affected page used its one bounded replacement call." });
+  }
+  if (dailyCapHeldPages) {
+    lines.push({ level: "warn", message:
+      `${dailyCapHeldPages} OCR page${dailyCapHeldPages === 1 ? " reached" : "s reached"} 3 model calls in 24 hours; ` +
+        `${dailyCapHeldPages === 1 ? "it was" : "they were"} held until the next daily retry window.` });
+  }
+  return lines;
+}
+
+function reportOcrRetryStats(ocrCallback) {
+  for (const line of ocrRetryReportLines(ocrCallback)) {
+    (line.level === "warn" ? warn : info)(line.message);
   }
 }
 

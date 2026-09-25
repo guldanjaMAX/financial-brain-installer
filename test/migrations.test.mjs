@@ -223,6 +223,10 @@ for (const t of [
     names.has("idx_ocr_page_requests_expiry"));
   check("0048 records source acknowledgement and caps expiry re-reads",
     ocrRequestColumns.has("acknowledged_at") && ocrRequestColumns.has("reread_count"));
+  check("0049 durably counts terminal-failure retries inside one daily window",
+    ocrRequestColumns.has("provider_failed_at") &&
+      ocrRequestColumns.has("model_call_count") &&
+      ocrRequestColumns.has("model_call_window_started_at"));
 }
 for (const object of [
   "idx_source_original_result_family_members_revision",

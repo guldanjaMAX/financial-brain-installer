@@ -147,7 +147,7 @@ export function createOcrCallback({
     throw new TypeError("OCR callback dependencies are incomplete");
   }
   const totalAttempts = Math.max(1, Math.trunc(Number(attempts) || 1));
-  const stats = { retriedPages: 0, skippedPages: 0, rereadAfterExpiry: 0 };
+  const stats = { retriedPages: 0, skippedPages: 0, rereadAfterExpiry: 0, dailyCapHeldPages: 0 };
 
   const call = async (image, { page, totalPages, source, sourceItemId } = {}) => {
     const prompt = await loadPrompt();
@@ -176,6 +176,7 @@ export function createOcrCallback({
     });
     let lastTimeout = null;
     let retryCounted = false;
+    let dailyCapCounted = false;
 
     const countRetry = () => {
       if (retryCounted) return;
@@ -226,7 +227,13 @@ export function createOcrCallback({
         }
 
         if (response.status === 425 && responseBody?.ocr_request_pending === true) {
-          lastTimeout = new Error("the first OCR attempt is still running");
+          if (responseBody.ocr_model_call_cap_exhausted === true && !dailyCapCounted) {
+            dailyCapCounted = true;
+            stats.dailyCapHeldPages++;
+          }
+          lastTimeout = new Error(responseBody.ocr_model_call_cap_exhausted === true
+            ? `the page reached ${Number(responseBody.model_calls_in_24_hours) || 3} model calls in 24 hours`
+            : "the first OCR attempt is still running");
           const afterResponseMs = Math.max(0, deadlineMs - clockMs(now));
           if (afterResponseMs === 0) {
             deadlineExpired = true;

@@ -77,22 +77,25 @@ asset publication.
   document as system evidence, never as a removal candidate. Authentication,
   malformed replies, and unknown statuses use that same boundary. A later pass
   reclaims only an expired pre-model reservation. Only a successful, nonblank
-  transcription becomes a completed replayable result. Provider errors,
-  timeouts, empty text, malformed replies, and every other non-success keep
-  their model-start proof and wait for one replacement after the seven-day
-  ambiguity window; they can never replay as OCR text. A completed result keeps
-  its encrypted handoff until the whole source document is stored and
+  transcription becomes a completed replayable result. A call with no final
+  response keeps its model-start proof for a 15-minute ambiguity window.
+  Provider errors, empty text, malformed replies, and every other definite
+  non-success keep their model-start proof, wait 60 seconds, and can never
+  replay as OCR text. Each page is capped durably at 3 model calls in 24 hours;
+  an exhausted page is counted in the load report and becomes eligible in the
+  next daily window rather than remaining held permanently. A completed result
+  keeps its encrypted handoff until the whole source document is stored and
   acknowledged on the same receipt, so a delayed pass replays it without
   another charge. An owner image upload uses that same private page identity,
   so rotating the
   Brain admin key after an ingest failure cannot strand the already-paid OCR
   result. A completed receipt with a missing, mismatched, malformed, expired,
   or undecryptable handoff gets one compare-and-swap-protected replacement
-  read in that seven-day window. An in-flight receipt also gets one recorded
-  replacement after its full seven-day ambiguity window. Replacement receipts
-  must be acknowledged again, and owner upload does so only after exact ingest
-  and finalization readback. A result with no handoff waits for the next bounded
-  window instead of becoming a permanent hold. If the Brain health check
+  read in that seven-day replay window. An in-flight receipt also gets one
+  recorded replacement after its full 15-minute ambiguity window. Replacement
+  receipts must be acknowledged again, and owner upload does so only after exact
+  ingest and finalization readback. A result with no handoff waits for the next
+  bounded window instead of becoming a permanent hold. If the Brain health check
   also fails, progress remains saved and the pass stops resumably. To check:
   credential-shaped OCR text reaches the credential refusal without surviving in
   the receipt; a call finishing after the first deadline replays through the real

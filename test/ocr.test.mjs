@@ -37,6 +37,7 @@ import {
   drivePolicyFingerprint,
   ocrPolicy,
   makeOcrCallback,
+  ocrRetryReportLines,
   workerBindings,
 } from "../brain.mjs";
 import * as googleDrive from "../connectors/google-drive.mjs";
@@ -61,6 +62,7 @@ function ocrRouteDb() {
     "0002_llm_call_log.sql",
     "0047_ocr_page_idempotency.sql",
     "0048_ocr_page_acknowledgement.sql",
+    "0049_ocr_page_retry_budget.sql",
   ]) {
     for (const statement of splitStatements(readFileSync(join(HERE, "..", "migrations", "d1", file), "utf8"))) {
       sqlite.exec(statement);
@@ -597,6 +599,7 @@ function stubOcr({ reply = () => pageText, model = "@cf/meta/llama-4-scout-17b-1
     "0002_llm_call_log.sql",
     "0047_ocr_page_idempotency.sql",
     "0048_ocr_page_acknowledgement.sql",
+    "0049_ocr_page_retry_budget.sql",
   ]) {
     for (const statement of splitStatements(readFileSync(join(HERE, "..", "migrations", "d1", file), "utf8"))) {
       sqlite.exec(statement);
@@ -706,6 +709,33 @@ function stubOcr({ reply = () => pageText, model = "@cf/meta/llama-4-scout-17b-1
   });
   check("a replacement read reaches the load-report counter",
     reread.stats.rereadAfterExpiry === 1, JSON.stringify(reread.stats));
+
+  let heldClock = 0;
+  const dailyHeld = makeOcrCallback({
+    base: "b", adminKey: "k", model: "@cf/m", maxPages: 1, attempts: 1,
+    now: () => heldClock,
+    sleep: async (delayMs) => { heldClock += delayMs; },
+    httpImpl: async (url) => url.endsWith("/health")
+      ? { ok: true, status: 200 }
+      : {
+          ok: false,
+          status: 425,
+          json: async () => ({
+            ocr_request_pending: true,
+            ocr_model_call_cap_exhausted: true,
+            model_calls_in_24_hours: 3,
+            retry_after_ms: 24 * 60 * 60 * 1000,
+          }),
+        },
+  });
+  const heldResult = await dailyHeld({ png_base64: "CCCC" }, {
+    page: 1, totalPages: 1, source: "drive", sourceItemId: "daily-cap-report-fixture",
+  });
+  const heldReport = ocrRetryReportLines(dailyHeld).map((line) => line.message).join("\n");
+  check("a daily-capped page reaches the load report as one plain count",
+    heldResult.reason_code === "ocr_page_timeout" && dailyHeld.stats.dailyCapHeldPages === 1 &&
+      /1 OCR page reached 3 model calls in 24 hours.*held until the next daily retry window/i.test(heldReport),
+    JSON.stringify({ heldResult, stats: dailyHeld.stats, heldReport }));
 
   const cap = makeOcrCallback({
     base: "b", adminKey: "k", model: "@cf/m", maxPages: 1,
