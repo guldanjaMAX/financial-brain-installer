@@ -5779,9 +5779,9 @@ export async function cmdUpgrade(manifestPath, options = {}) {
                   "`brain update` again. Never run `brain drain` in a loop to get past this."
               ));
             }
-            if (immediateBacklog.pending > 0) {
+            if (updateBacklogHasQueuedWork(immediateBacklog)) {
               die(renderCliCommands(
-                `This Brain gained ${immediateBacklog.pending} queued search update(s) before the paused deployment. ` +
+                `This Brain gained ${updateBacklogPendingLabel(immediateBacklog)} queued search update(s) before the paused deployment. ` +
                   "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again."
               ));
             }
@@ -22302,7 +22302,13 @@ export async function readUpdateBacklog(manifestPath, options = {}) {
           expectedBackend: "d1",
           expectedDrainMode: "active",
         });
-        return Object.freeze({ pending: aggregate.queue.pending });
+        // The shared validator decides every shape: a pre-summary Worker's exact
+        // receipt, a bounded exact count, or a capped count that only proves
+        // "more than 10,000" and is never zero.
+        return Object.freeze({
+          pending: aggregate.queue.pending,
+          ...(aggregate.queue.pending_is_capped === true ? { pending_is_capped: true } : {}),
+        });
       } catch {
         if (!transient || attempts >= maxAttempts) throw updateBacklogReadFailure(attempts);
       }
@@ -22311,6 +22317,15 @@ export async function readUpdateBacklog(manifestPath, options = {}) {
   } finally {
     adminKey = null;
   }
+}
+
+/** A capped receipt is a lower bound, so it is never shown as an exact count. */
+function updateBacklogPendingLabel(backlog) {
+  return backlog?.pending_is_capped === true ? "over 10,000" : String(backlog?.pending);
+}
+
+function updateBacklogHasQueuedWork(backlog) {
+  return backlog?.pending_is_capped === true || backlog?.pending > 0;
 }
 
 /**
@@ -26524,14 +26539,14 @@ export async function cmdUpdate(manifestPath, options = {}) {
       ));
     }
   }
-  if (backlog?.pending > 0) {
+  if (updateBacklogHasQueuedWork(backlog)) {
     const refusal = renderCliCommands(
-      `This Brain is still processing ${backlog.pending} queued search update(s). Updating now would pause it mid-queue. ` +
+      `This Brain is still processing ${updateBacklogPendingLabel(backlog)} queued search update(s). Updating now would pause it mid-queue. ` +
         "Nothing was changed. Wait until `brain health` says query-ready, then run the update again."
     );
     if (!forceQueuedUpdate) die(refusal);
     warn(renderCliCommands(
-      `This Brain is still processing ${backlog.pending} queued search update(s). ` +
+      `This Brain is still processing ${updateBacklogPendingLabel(backlog)} queued search update(s). ` +
         "`--force` will update anyway and may pause it mid-queue."
     ));
   }

@@ -186,6 +186,9 @@ asset publication.
   check runs immediately before the paused deployment. Each check requires one
   exact HTTP 200, a bounded response, and a complete, internally consistent D1
   queue and readiness receipt. Missing or contradictory fields stop the update.
+  Both checks read the queue exactly as `brain health` does: an older Worker's
+  exact count is accepted, and a queue reported as over 10,000 is never read
+  as empty and always stops the update.
   `--force` can override only the first early warning. There is still a narrow
   remote race if an ingest starts after the second receipt but before the paused
   Worker takes over; this release does not claim a cross-process atomic lock.

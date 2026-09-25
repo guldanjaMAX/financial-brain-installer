@@ -658,3 +658,238 @@ test("a missing admin key refuses without sending a read or claiming one", async
     assert.equal(readFileSync(manifestPath, "utf8"), original);
   });
 });
+
+/* ---- one backlog rule for health, preview, and both update gates ---- */
+
+// The pre-pause gate and the initial gate read the same receipt through the
+// shared projection validator. A pre-summary Worker's exact receipt carries
+// none of the three bounded fields; a bounded Worker carries all three plus
+// the readiness pair. Anything in between matches no shipped Worker.
+function boundedInventory(overrides = {}) {
+  const inventory = projectionInventory(overrides);
+  const capped = overrides.capped === true;
+  Object.assign(inventory.vector_backlog, {
+    pending_is_capped: capped,
+    pending_display: capped ? "10,000+" : String(inventory.vector_backlog.pending),
+    component_counts_exact: !capped,
+  });
+  Object.assign(inventory.vector_readiness, {
+    pending_is_capped: capped,
+    submitted_counts_exact: !capped,
+  });
+  return inventory;
+}
+
+function cappedInventory() {
+  return boundedInventory({ capped: true, pending: 10_001, upserts: 10_001, submitted: 0 });
+}
+
+const CAPPED_PENDING_MESSAGE = renderCliCommands(
+  "This Brain is still processing over 10,000 queued search update(s). Updating now would pause it mid-queue. " +
+    "Nothing was changed. Wait until `brain health` says query-ready, then run the update again.",
+);
+
+// A refusal inside an upgrade stage is wrapped with the stage name and the
+// recovery bookmark guidance; the gate's own sentence is the first line.
+function prePauseRefusal(message) {
+  return `update stopped during paused vector-drain deployment: ${message}\n`;
+}
+
+// Drives the real cmdUpgrade through the immediate pre-pause gate with the
+// production reader and one scripted aggregate response.
+async function prePauseGate(manifestPath, inventory) {
+  const events = [];
+  const { log, options } = scriptedReader(manifestPath, [
+    { status: 200, body: JSON.stringify(inventory) },
+  ]);
+  let error = null;
+  try {
+    await cmdUpdate(manifestPath, {
+      discoverInstalledManifest: () => ({ path: manifestPath, source: "remembered" }),
+      readUpdateBacklog: async () => ({ pending: 0 }),
+      adoptCloudflareAuthProfile: async () => {},
+      withCloudflareControl: async (action) => action(),
+      cmdVerify: async () => {},
+      upgradeOptions: {
+        resolveAccount: async () => ({ id: "1".repeat(32) }),
+        d1Query: async (_account, _database, sql) => {
+          if (/sqlite_master/iu.test(sql)) return { results: [{ name: "install_state" }] };
+          if (/SELECT \* FROM install_state/iu.test(sql)) {
+            return {
+              results: [{ client_slug: "fixture", product_version: "0.4.7", schema_version: 46 }],
+            };
+          }
+          return { results: [] };
+        },
+        cf: async () => ({ bookmark: "fixture-bookmark" }),
+        readUpdateBacklog,
+        updateBacklogOptions: options,
+        cmdDeploy: async () => {
+          events.push("paused deployment");
+          throw new Error("fixture stop after the paused deployment started");
+        },
+        cmdHealth: async () => events.push("health"),
+        cmdMigrate: async () => events.push("migration"),
+      },
+      reconcileExistingOwnerAgents: null,
+      writeClaudeWorkspaceGuideAfterUpdate: null,
+    });
+  } catch (caught) {
+    error = caught;
+  }
+  return { error, events, log };
+}
+
+test("a pre-summary Worker's exact empty backlog proceeds through both gates", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const legacy = projectionInventory({ pending: 0 });
+    assert.equal(Object.hasOwn(legacy.vector_backlog, "pending_is_capped"), false);
+    const { read } = scriptedReader(manifestPath, [
+      { status: 200, body: JSON.stringify(legacy) },
+    ]);
+    assert.deepEqual(await read(), { pending: 0 });
+
+    const { error, events, log } = await prePauseGate(manifestPath, legacy);
+    assert.equal(log.requests, 1);
+    assert.deepEqual(events, ["paused deployment"], error?.message);
+  });
+});
+
+test("a pre-summary Worker's exact queued backlog refuses at both gates", async () => {
+  await withFixture(async ({ manifestPath, original }) => {
+    const legacy = projectionInventory({ pending: 3, upserts: 2, deletes: 1, submitted: 1 });
+    const { read } = scriptedReader(manifestPath, [
+      { status: 200, body: JSON.stringify(legacy) },
+    ]);
+    assert.deepEqual(await read(), { pending: 3 });
+
+    const initial = scriptedReader(manifestPath, [{ status: 200, body: JSON.stringify(legacy) }]);
+    const events = [];
+    await assert.rejects(
+      cmdUpdate(manifestPath, {
+        ...updateHarness(manifestPath, readUpdateBacklog, events),
+        updateBacklogOptions: initial.options,
+      }),
+      (error) => error?.message === PENDING_MESSAGE(3),
+    );
+    assert.deepEqual(events, ["authenticated documents backlog read"]);
+
+    const prePause = await prePauseGate(manifestPath, legacy);
+    assert.ok(prePause.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
+      "This Brain gained 3 queued search update(s) before the paused deployment. " +
+        "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again.",
+    ))), prePause.error?.message);
+    assert.deepEqual(prePause.events, []);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+test("a bounded Worker's exact empty backlog proceeds through both gates", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const bounded = boundedInventory({ pending: 0 });
+    const { read } = scriptedReader(manifestPath, [
+      { status: 200, body: JSON.stringify(bounded) },
+    ]);
+    assert.deepEqual(await read(), { pending: 0 });
+
+    const { error, events } = await prePauseGate(manifestPath, bounded);
+    assert.deepEqual(events, ["paused deployment"], error?.message);
+  });
+});
+
+test("a capped backlog is never read as zero and refuses at both gates", async () => {
+  await withFixture(async ({ manifestPath, original }) => {
+    const { read } = scriptedReader(manifestPath, [
+      { status: 200, body: JSON.stringify(cappedInventory()) },
+    ]);
+    const receipt = await read();
+    assert.equal(receipt.pending_is_capped, true);
+    assert.ok(receipt.pending > 10_000, JSON.stringify(receipt));
+
+    const initial = scriptedReader(manifestPath, [
+      { status: 200, body: JSON.stringify(cappedInventory()) },
+    ]);
+    const events = [];
+    await assert.rejects(
+      cmdUpdate(manifestPath, {
+        ...updateHarness(manifestPath, readUpdateBacklog, events),
+        updateBacklogOptions: initial.options,
+      }),
+      (error) => error?.message === CAPPED_PENDING_MESSAGE,
+    );
+    assert.deepEqual(events, ["authenticated documents backlog read"]);
+
+    const prePause = await prePauseGate(manifestPath, cappedInventory());
+    assert.ok(prePause.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
+      "This Brain gained over 10,000 queued search update(s) before the paused deployment. " +
+        "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again.",
+    ))), prePause.error?.message);
+    assert.deepEqual(prePause.events, []);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+test("partial or malformed bounded receipts refuse on one read at both gates", async () => {
+  await withFixture(async ({ manifestPath, original }) => {
+    const cases = [];
+    for (const kept of [
+      ["pending_is_capped"],
+      ["pending_display"],
+      ["component_counts_exact"],
+      ["pending_is_capped", "pending_display"],
+      ["pending_display", "component_counts_exact"],
+    ]) {
+      const inventory = boundedInventory({ pending: 0 });
+      for (const field of ["pending_is_capped", "pending_display", "component_counts_exact"]) {
+        if (!kept.includes(field)) delete inventory.vector_backlog[field];
+      }
+      cases.push([`backlog keeps only ${kept.join("+")}`, inventory]);
+    }
+    const halfReadiness = boundedInventory({ pending: 0 });
+    delete halfReadiness.vector_readiness.submitted_counts_exact;
+    cases.push(["readiness keeps half of its bounded pair", halfReadiness]);
+    const boundedBacklogLegacyReadiness = boundedInventory({ pending: 0 });
+    delete boundedBacklogLegacyReadiness.vector_readiness.pending_is_capped;
+    delete boundedBacklogLegacyReadiness.vector_readiness.submitted_counts_exact;
+    cases.push(["bounded backlog with pre-summary readiness", boundedBacklogLegacyReadiness]);
+    const extraField = projectionInventory({ pending: 0 });
+    extraField.vector_backlog.pending_estimate = 0;
+    cases.push(["pre-summary backlog with an unknown field", extraField]);
+    const cappedZero = cappedInventory();
+    Object.assign(cappedZero.vector_backlog, { pending: 0, upserts: 0 });
+    Object.assign(cappedZero.vector_readiness, { pending: 0 });
+    cases.push(["capped flag on a zero count", cappedZero]);
+    const cappedWithoutDisplay = cappedInventory();
+    cappedWithoutDisplay.vector_backlog.pending_display = null;
+    cases.push(["capped flag without its display", cappedWithoutDisplay]);
+    const stringFlag = boundedInventory({ pending: 0 });
+    stringFlag.vector_backlog.pending_is_capped = "false";
+    cases.push(["capped flag as a string", stringFlag]);
+    const uncappedOverLimit = boundedInventory({ pending: 10_001, upserts: 10_001 });
+    cases.push(["uncapped count above the bound", uncappedOverLimit]);
+
+    for (const [name, inventory] of cases) {
+      const { log, read } = scriptedReader(manifestPath, [
+        { status: 200, body: JSON.stringify(inventory) },
+        { status: 200, body: JSON.stringify(projectionInventory({ pending: 0 })) },
+      ]);
+      await assert.rejects(
+        read(),
+        (error) => error?.message === "authenticated documents backlog read failed" && error.attempts === 1,
+        name,
+      );
+      assert.equal(log.requests, 1, `${name} must not be retried`);
+      assert.deepEqual(log.sleeps, [], `${name} must not back off`);
+
+      const prePause = await prePauseGate(manifestPath, inventory);
+      assert.ok(prePause.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
+        "The immediate pre-pause documents backlog read failed after 1 read, " +
+          "so this Brain's queued search updates could not be read. The paused deployment was not started. " +
+          "A large Brain's database can be briefly too busy to answer: wait a few minutes, then run " +
+          "`brain update` again. Never run `brain drain` in a loop to get past this.",
+      ))), `${name}: ${prePause.error?.message}`);
+      assert.deepEqual(prePause.events, [], `${name} must not start the paused deployment`);
+    }
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
