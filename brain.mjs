@@ -23276,6 +23276,9 @@ export async function cmdSchedule(manifestPath, options = {}) {
         ? assertSourceName(m?.corpora?.[provider]?.source || provider)
         : "drive";
     const kind = flags.folder ? "upload" : provider || "drive";
+    // Name the lane the way the LaunchAgent path does, so install, status and
+    // remove all speak about "slack refresh" rather than the source label.
+    const lane = flags.folder ? "watched folder" : provider || "Drive";
     let dataPlane = null;
     if (action === "install") {
       const adminKey = resolveAdminKeyImpl(manifestPath);
@@ -23297,13 +23300,14 @@ export async function cmdSchedule(manifestPath, options = {}) {
       await postSourceExpectationImpl(dataPlane.base, dataPlane.adminKey, {
         source, kind, expected_refresh_seconds: result.expectedRefreshSeconds,
       });
-      ok(`${source} refresh installed for ${result.cron}`);
+      ok(`${lane} refresh installed for ${result.cron}`);
       ok(`${source} freshness expectation set to ${result.expectedRefreshSeconds} seconds`);
       info(`Task Scheduler name: ${result.taskName}`);
       return result;
     }
     if (action === "remove") {
-      ok(result.removed ? `${source} refresh removed` : `${source} refresh was not installed`);
+      ok(result.removed ? `${lane} refresh removed` : `${lane} refresh was not installed`);
+      info(`Task Scheduler name: ${result.taskName}`);
       try {
         const adminKey = resolveAdminKeyImpl(manifestPath);
         if (!adminKey) throw new Error("no admin key is available");
@@ -23315,9 +23319,12 @@ export async function cmdSchedule(manifestPath, options = {}) {
       }
       return result;
     }
-    if (result.installed) ok(`${source} refresh is installed for ${result.cron}`);
-    else warn(`${source} refresh is not installed on this Windows PC`);
-    if (result.output) info(result.output);
+    if (!result.installed) warn(`${lane} refresh is not installed on this Windows PC`);
+    else if (result.definitionDrift) warn(`the installed ${lane} refresh does not match the current manifest; reinstall it`);
+    else ok(`${lane} refresh is installed for ${result.cron}`);
+    if (result.installed && result.scheduleError) warn(result.scheduleError);
+    info(`Task Scheduler name: ${result.taskName}`);
+    if (result.installed && result.output) info(result.output);
     return result;
   }
   // The watched local folder is a second lane on the same command, because it

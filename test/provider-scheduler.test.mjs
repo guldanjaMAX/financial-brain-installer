@@ -1,9 +1,10 @@
+import { schedulerRunnerAttempts } from "./helpers/scheduler-runner-guard.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   buildProviderSchedulerPlan,
   createProviderSchedulerSpec,
@@ -127,24 +128,135 @@ try {
     conflictingLaneCalls === 0);
 
   const brainCli = fileURLToPath(new URL("../brain.mjs", import.meta.url));
+  const guardUrl = pathToFileURL(fileURLToPath(new URL("./helpers/scheduler-runner-guard.mjs", import.meta.url))).href;
   const publicCliEnvironment = {};
   for (const key of ["PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP"]) {
     if (process.env[key] !== undefined) publicCliEnvironment[key] = process.env[key];
   }
   publicCliEnvironment.HOME = folder;
   publicCliEnvironment.USERPROFILE = folder;
+  publicCliEnvironment.LOCALAPPDATA = join(folder, "AppData", "Local");
+  publicCliEnvironment.BRAIN_NO_WRANGLER_LOGIN = "1";
+  // The spawned CLI runs on this host's real platform so its dispatch is the
+  // one an owner gets, but its launchctl/schtasks answer is scripted as "no
+  // such task" by the preloaded guard. It never reads this machine's scheduler.
   const publicStatus = spawnSync(
     process.execPath,
-    [brainCli, "schedule", manifestPath, "--provider", "slack", "--status"],
+    ["--import", guardUrl, brainCli, "schedule", manifestPath, "--provider", "slack", "--status"],
     { encoding: "utf8", env: publicCliEnvironment, timeout: 30_000 },
   );
   const publicStatusOutput = `${publicStatus.stdout || ""}${publicStatus.stderr || ""}`;
+  const publicExpectation = {
+    darwin: () => publicStatus.status === 0 && /slack refresh is not installed on this Mac/.test(publicStatusOutput),
+    win32: () => publicStatus.status === 0 &&
+      /slack refresh is not installed on this Windows PC/.test(publicStatusOutput) &&
+      /com\.brain-installer\.fixture-client\.slack-ingest/.test(publicStatusOutput),
+  }[process.platform] ?? (() => publicStatus.status === 1 && /not scheduled by the installer/.test(publicStatusOutput));
   check("the public schedule CLI preserves its provider selection",
     /slack refresh/i.test(publicStatusOutput) && !/Drive refresh/.test(publicStatusOutput) &&
-      (process.platform === "darwin"
-        ? publicStatus.status === 0
-        : publicStatus.status === 1 && /not scheduled by the installer/.test(publicStatusOutput)),
+      !/client-chat refresh/.test(publicStatusOutput) &&
+      !/ERROR:|cannot find the file/i.test(publicStatusOutput) &&
+      publicExpectation(),
     publicStatusOutput);
+
+  // Every platform branch is proven here regardless of the host, with the
+  // platform and the scheduler process runner injected.
+  const captureConsole = async (run) => {
+    const lines = [];
+    const original = console.log;
+    console.log = (...parts) => { lines.push(parts.join(" ")); };
+    try {
+      const result = await run();
+      return { result, text: lines.join("\n") };
+    } finally {
+      console.log = original;
+    }
+  };
+  const windowsCalls = [];
+  const windowsRunner = (answers) => (command, args) => {
+    windowsCalls.push([command, args[0], args[2]]);
+    return answers(args[0]);
+  };
+  const windowsAbsent = windowsRunner(() => ({
+    status: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified.",
+  }));
+  const windowsOptions = (action, runner, extra = {}) => ({
+    platform: "win32",
+    flags: { provider: "slack", [action]: true },
+    resolveAdminKey: () => "fixture-admin-secret-value",
+    resolveBaseUrl: async () => "https://fixture.invalid",
+    postSourceExpectation: async () => {},
+    schedulerOptions: {
+      processRunner: runner,
+      environment: {},
+      localAppData: String.raw`C:\Users\Fixture\AppData\Local`,
+      windowsManifestPath: String.raw`C:\Users\Fixture\brain.manifest.json`,
+      ...extra,
+    },
+  });
+  const windowsStatus = await captureConsole(() => cmdSchedule(manifestPath, windowsOptions("status", windowsAbsent)));
+  check("Windows status of an absent task names the provider lane and hides schtasks' raw error line",
+    windowsStatus.result.installed === false &&
+      /slack refresh is not installed on this Windows PC/.test(windowsStatus.text) &&
+      /com\.brain-installer\.fixture-client\.slack-ingest/.test(windowsStatus.text) &&
+      !/ERROR:|cannot find the file|client-chat refresh/.test(windowsStatus.text),
+    windowsStatus.text);
+  const windowsRemove = await captureConsole(() => cmdSchedule(manifestPath, windowsOptions("remove", windowsAbsent)));
+  check("Windows remove of an absent task is a quiet success that names the same lane",
+    windowsRemove.result.removed === false &&
+      /slack refresh was not installed/.test(windowsRemove.text) &&
+      !/ERROR:|cannot find the file/.test(windowsRemove.text),
+    windowsRemove.text);
+  const windowsInstall = await captureConsole(() => cmdSchedule(manifestPath, windowsOptions("install",
+    windowsRunner(() => ({ status: 0, stdout: "SUCCESS", stderr: "" })))));
+  check("Windows install names the same provider lane as status and remove",
+    windowsInstall.result.installed === true &&
+      /slack refresh installed for 15 \*\/2 \* \* \*/.test(windowsInstall.text) &&
+      /client-chat freshness expectation set to 7200 seconds/.test(windowsInstall.text),
+    windowsInstall.text);
+  const installedCommand = windowsInstall.result.runCommand;
+  const windowsPresent = await captureConsole(() => cmdSchedule(manifestPath, windowsOptions("status",
+    windowsRunner(() => ({ status: 0, stdout: `TaskName: fixture\nTask To Run: ${installedCommand}\n`, stderr: "" })))));
+  check("Windows status of the task install wrote reports it installed without drift",
+    windowsPresent.result.installed === true && windowsPresent.result.definitionDrift === false &&
+      /slack refresh is installed for 15 \*\/2 \* \* \*/.test(windowsPresent.text),
+    windowsPresent.text);
+  const windowsDrifted = await captureConsole(() => cmdSchedule(manifestPath, windowsOptions("status",
+    windowsRunner(() => ({ status: 0, stdout: "TaskName: fixture\nTask To Run: cmd.exe /d /s /c \"older\"\n", stderr: "" })))));
+  check("Windows status reports a stored action that no longer matches install as drift",
+    windowsDrifted.result.definitionDrift === true &&
+      /the installed slack refresh does not match the current manifest; reinstall it/.test(windowsDrifted.text),
+    windowsDrifted.text);
+  check("Windows install, status and remove all address one task name",
+    windowsCalls.length === 5 &&
+      windowsCalls.every(([command, verb, name]) => command === "schtasks.exe" &&
+        (verb === "/Create" || name === "com.brain-installer.fixture-client.slack-ingest")) &&
+      windowsInstall.result.createArgs.includes("com.brain-installer.fixture-client.slack-ingest"),
+    JSON.stringify(windowsCalls));
+
+  const darwinLaunchctl = [];
+  const darwinStatus = await captureConsole(() => cmdSchedule(manifestPath, {
+    platform: "darwin",
+    flags: { provider: "slack", status: true },
+    schedulerOptions: {
+      platform: "darwin", uid: 501, home: folder,
+      nodePath: "/usr/bin/node", brainPath: "/opt/brain/brain.mjs",
+      launchctl: (args) => { darwinLaunchctl.push(args); return { status: 113, stdout: "", stderr: "not found" }; },
+    },
+  }));
+  check("macOS status with an injected launchctl names the same provider lane",
+    darwinStatus.result.installed === false && darwinLaunchctl.length === 1 &&
+      /slack refresh is not installed on this Mac/.test(darwinStatus.text),
+    darwinStatus.text);
+
+  await assert.rejects(
+    cmdSchedule(manifestPath, { platform: "linux", flags: { provider: "slack", status: true } }),
+    /slack refresh is not scheduled by the installer on linux/,
+  );
+  check("an injected unsupported platform refuses with the provider-specific recipe", true);
+
+  check("no scheduler test reached a real launchctl or schtasks",
+    schedulerRunnerAttempts.length === 0, JSON.stringify(schedulerRunnerAttempts));
 
   const changed = JSON.parse(readFileSync(manifestPath, "utf8"));
   changed.corpora.slack.channel_ids.push("C2");

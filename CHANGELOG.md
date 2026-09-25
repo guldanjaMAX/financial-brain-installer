@@ -168,7 +168,9 @@ asset publication.
   date without an open terminal.** `brain schedule` creates one stable
   current-user Task Scheduler entry per Brain and source lane, using the
   absolute installed `brain.cmd` and manifest paths with limited privileges.
-  Install is safe to repeat, while status and remove use the same task name.
+  Install is safe to repeat, while status and remove use the same task name
+  and the same lane wording. Status says plainly when no task exists, and
+  reports a stored task whose action no longer matches the manifest.
   The task follows the manifest's effective five-field cron when one Windows
   entry can express it exactly: hourly at a chosen minute, every N hours when N
   divides 24, daily, or weekly on chosen days. Other valid cron shapes stop

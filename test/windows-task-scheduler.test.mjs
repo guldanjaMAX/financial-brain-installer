@@ -1,3 +1,4 @@
+import { schedulerRunnerAttempts } from "./helpers/scheduler-runner-guard.mjs";
 import assert from "node:assert/strict";
 import * as brain from "../brain.mjs";
 import {
@@ -55,6 +56,21 @@ assert.deepEqual(providerPlan.createArgs, [
   "/TN", "com.brain-installer.fixture-brain.slack-ingest",
   "/TR", String.raw`cmd.exe /d /s /c ""C:\Users\Fixture User\AppData\Local\FinancialBrain\brain.cmd" windows-scheduled-ingest "C:\Users\Fixture User\Financial Brain\brain.manifest.json" --from slack"`,
 ]);
+
+// The CLI passes no environment into the plan. The installed prefix must then
+// come from the process environment, or every real install refuses.
+const priorLocalAppData = process.env.LOCALAPPDATA;
+process.env.LOCALAPPDATA = localAppData;
+try {
+  const ambientPlan = buildWindowsSchedulerPlan(manifestPath, {
+    manifest: baseManifest, windowsManifestPath: manifestPath, provider: "slack",
+  });
+  assert.equal(ambientPlan.brainPath, brainPath,
+    "install without an injected LOCALAPPDATA reads the process environment");
+} finally {
+  if (priorLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+  else process.env.LOCALAPPDATA = priorLocalAppData;
+}
 
 const drivePlan = buildWindowsSchedulerPlan(manifestPath, options());
 assert.equal(drivePlan.taskName, "com.brain-installer.fixture-brain.drive-ingest");
@@ -213,6 +229,8 @@ const missingStatus = statusWindowsScheduler(manifestPath, options({
 }));
 assert.equal(absentStatusCalls, 1, "the absent status reached schtasks /Query");
 assert.equal(missingStatus.installed, false);
+assert.equal(missingStatus.output, "",
+  "an absent task is reported as absent, not by echoing schtasks' raw error line");
 
 const deleteCalls = [];
 const removed = removeWindowsScheduler(manifestPath, options({
@@ -295,5 +313,7 @@ assert.throws(() => installWindowsScheduler(manifestPath, options({
   return true;
 });
 assert.equal(unsupportedCalls, 0, "an inexact cadence refuses before schtasks is called");
+
+assert.deepEqual(schedulerRunnerAttempts, [], "no check reached a real launchctl or schtasks");
 
 console.log("windows task scheduler: exact cadence, argv, identity, symmetry, idempotency, and fallback verified");

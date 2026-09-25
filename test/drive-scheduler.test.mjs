@@ -1,3 +1,4 @@
+import { schedulerRunnerAttempts } from "./helpers/scheduler-runner-guard.mjs";
 import {
   chmodSync,
   closeSync,
@@ -800,5 +801,9 @@ try {
   rmSync(directory, { recursive: true, force: true });
 }
 
+if (schedulerRunnerAttempts.length !== 0) {
+  console.log(`FAIL  a scheduler test reached a real launchctl or schtasks: ${JSON.stringify(schedulerRunnerAttempts)}`);
+  fail++;
+}
 console.log(fail ? `\n${fail} FAILURES` : `\ndrive scheduler: all ${ran} tests passed`);
 process.exit(fail ? 1 : 0);

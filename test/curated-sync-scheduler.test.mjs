@@ -1,3 +1,4 @@
+import { schedulerRunnerAttempts } from "./helpers/scheduler-runner-guard.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -718,3 +719,5 @@ try {
 } finally {
   rmSync(sandbox, { recursive: true, force: true });
 }
+
+assert.deepEqual(schedulerRunnerAttempts, [], "no check reached a real launchctl or schtasks");

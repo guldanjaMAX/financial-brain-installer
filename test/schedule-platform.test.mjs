@@ -1,3 +1,4 @@
+import { schedulerRunnerAttempts } from "./helpers/scheduler-runner-guard.mjs";
 /**
  * `brain schedule` off macOS must say what is and is not supported, with the
  * recipe for the platform, not crash as an installer bug. A Windows owner read
@@ -58,5 +59,7 @@ try {
 } finally {
   rmSync(controlDirectory, { recursive: true, force: true });
 }
+
+assert.deepEqual(schedulerRunnerAttempts, [], "no check reached a real launchctl or schtasks");
 
 console.log("schedule platform: Windows dispatches natively and other unsupported platforms get guidance");

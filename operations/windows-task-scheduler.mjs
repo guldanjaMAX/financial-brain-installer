@@ -167,8 +167,11 @@ export function buildWindowsSchedulerPlan(manifestPath, options = {}) {
   };
   if (installing && options.validateExtras !== false && spec.validateExtras) spec.validateExtras(reference);
   const scheduleArgs = installing ? cronToSchtasks(cron, spec.cronLabels) : [];
+  // The CLI passes no environment of its own, so the installed prefix comes
+  // from the same process environment schtasks and the scheduled child read.
+  // Without this default every real install refused as "LOCALAPPDATA is required".
   const localAppData = installing
-    ? windowsAbsolute(options.localAppData || options.environment?.LOCALAPPDATA, options)
+    ? windowsAbsolute(options.localAppData || (options.environment || process.env).LOCALAPPDATA, options)
     : null;
   const brainPath = installing ? win32.join(localAppData, "FinancialBrain", "brain.cmd") : null;
   const taskName = `com.brain-installer.${slug}.${spec.kind}`;
@@ -270,14 +273,39 @@ export function installWindowsScheduler(manifestPath, options = {}) {
   return { ...plan, installed: true, output: String(result.stdout || "").trim() };
 }
 
+/**
+ * The verbose LIST query names the stored action "Task To Run" on an English
+ * Windows. Another display language uses another label, so an absent label
+ * means "not compared", never "matches".
+ */
+function storedTaskCommand(output) {
+  const match = /^\s*Task To Run:\s*(.+?)\s*$/im.exec(String(output || ""));
+  return match ? match[1] : null;
+}
+
 export function statusWindowsScheduler(manifestPath, options = {}) {
   const plan = options.plan || buildWindowsSchedulerPlan(manifestPath, { ...options, action: "status" });
   const result = runSchtasks(plan.queryArgs, options);
   if (!result?.error && result?.status === 0) {
-    return { ...plan, installed: true, output: String(result.stdout || "").trim() };
+    const output = String(result.stdout || "").trim();
+    // Status reports drift against what install would write now, as the
+    // LaunchAgent status does, while staying reachable when the lane has since
+    // been disabled or its cron can no longer be represented.
+    let scheduleError = null;
+    let definitionDrift = null;
+    try {
+      const expected = buildWindowsSchedulerPlan(manifestPath, { ...options, plan: undefined, action: "install" });
+      const stored = storedTaskCommand(output);
+      if (stored !== null) definitionDrift = stored !== expected.runCommand;
+    } catch (error) {
+      scheduleError = error?.message || String(error);
+    }
+    return { ...plan, installed: true, definitionDrift, scheduleError, output };
   }
   const detail = failureText(result);
-  if (ABSENT_TASK.test(detail)) return { ...plan, installed: false, output: detail };
+  // The absence text is schtasks' own error line. It proves absence here but is
+  // not shown to the owner as if the status command had failed.
+  if (ABSENT_TASK.test(detail)) return { ...plan, installed: false, definitionDrift: null, scheduleError: null, output: "" };
   throw new Error(`schtasks could not query ${plan.taskName}: ${detail || "unknown error"}`);
 }
 
@@ -288,6 +316,6 @@ export function removeWindowsScheduler(manifestPath, options = {}) {
     return { ...plan, installed: false, removed: true, output: String(result.stdout || "").trim() };
   }
   const detail = failureText(result);
-  if (ABSENT_TASK.test(detail)) return { ...plan, installed: false, removed: false, output: detail };
+  if (ABSENT_TASK.test(detail)) return { ...plan, installed: false, removed: false, output: "" };
   throw new Error(`schtasks could not delete ${plan.taskName}: ${detail || "unknown error"}`);
 }
