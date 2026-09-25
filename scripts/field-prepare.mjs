@@ -86,7 +86,10 @@ const npmStep = (id, title, args, proof, timeoutMs = 30 * 60_000) => Object.free
 const STEP_CATALOG = Object.freeze({
   "full-suite": npmStep(
     "full-suite", "Complete offline product suite", ["test"],
-    "Complete repository test-chain proof on synthetic and fixture data.", 90 * 60_000,
+    // The repository test graph owns its focused timeouts. A shorter timeout
+    // here kills npm without joining its active test descendant, after which
+    // private-home cleanup can remove TMPDIR underneath that still-live test.
+    "Complete repository test-chain proof on synthetic and fixture data.", 0,
   ),
   "focused-suite": commandStep(
     "focused-suite", "Field harness contract tests", process.execPath,
@@ -293,6 +296,7 @@ export function createSafeEnvironment(source, privateHome) {
     NO_COLOR: "1",
     CI: "1",
     BRAIN_FIELD_PREPARE: "1",
+    BRAIN_NO_WRANGLER_LOGIN: "1",
   });
   return environment;
 }

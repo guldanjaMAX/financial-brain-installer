@@ -70,6 +70,12 @@ test("the default profile contains every credential-free preparation gate", () =
   assert.deepEqual(historyPrivacy.args, ["run", "privacy:history:field"]);
 });
 
+test("the complete suite has no shorter outer timeout than its own test graph", () => {
+  const fullSuite = buildStepPlan(parseFieldPrepareArgs([]))
+    .find((step) => step.id === "full-suite");
+  assert.equal(fullSuite.timeoutMs, 0);
+});
+
 test("fast and selected profiles cannot become accidental full proof", () => {
   const fast = buildStepPlan(parseFieldPrepareArgs(["--fast"])).map((step) => step.id);
   assert.ok(fast.includes("focused-suite"));
@@ -153,6 +159,7 @@ test("every child environment drops credentials and customer-home access", () =>
     assert.equal(safe.NPM_CONFIG_GLOBALCONFIG, join(temporary, "npm-globalrc"));
     assert.equal(safe.NPM_CONFIG_USERCONFIG, join(temporary, "npmrc"));
     assert.equal(safe.NPM_CONFIG_OFFLINE, "true");
+    assert.equal(safe.BRAIN_NO_WRANGLER_LOGIN, "1");
     assert.equal(safe.BRAIN_FIELD_PREPARE, "1");
   } finally {
     rmSync(temporary, { recursive: true, force: true });
