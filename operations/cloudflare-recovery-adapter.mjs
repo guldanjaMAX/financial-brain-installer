@@ -2630,7 +2630,7 @@ function exactDisposableRecoveryRuntime(binding) {
     binding.chunkOverlap === "300" && binding.dailyLlmCapUsd === "10" &&
     binding.answerModel === "@cf/meta/llama-3.3-70b-instruct-fp8-fast" &&
     binding.credentialScanner === "on" && binding.ocrEnabled === "0" &&
-    binding.ocrModel === "@cf/google/gemma-4-26b-a4b-it";
+    binding.ocrModel === "@cf/meta/llama-4-scout-17b-16e-instruct";
 }
 
 function noDisposableRecoveryConnectors(binding) {

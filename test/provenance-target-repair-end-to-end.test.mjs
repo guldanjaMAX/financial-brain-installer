@@ -602,13 +602,15 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
     recoveredBrain.close();
   });
 
-  assert.match(sourceBrain.migrationFiles.at(-1), /^0046_/);
-  assert.match(recoveredBrain.migrationFiles.at(-1), /^0046_/);
+  assert.match(sourceBrain.migrationFiles.at(-1), /^0048_/);
+  assert.match(recoveredBrain.migrationFiles.at(-1), /^0048_/);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_receipts"), true);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolutions"), true);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_verifications"), false);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolution_activations"), false);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolution_admissions"), false);
+  assert.equal(RECOVERY_EXPORT_TABLES.includes("ocr_page_requests"), false,
+    "short-lived OCR replay receipts are rebuilt by source retry, not recovered as corpus state");
 
   await registerSyntheticSource(sourceBrain, sourceHarness);
 

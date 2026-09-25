@@ -970,7 +970,13 @@ async function upload(env, body, ingestEnvelope, afterIngest, extractUpload = ex
     let extracted = null;
     if (binaryUpload) {
       try {
-        extracted = await extractUpload(env, { mediaType, bytes: binaryBytes, fileName });
+        extracted = await extractUpload(env, {
+          mediaType,
+          bytes: binaryBytes,
+          fileName,
+          source: "upload",
+          sourceItemId: `owner:${entitySlug}:${documentId}`,
+        });
       } catch (error) {
         if (error?.too_large) return respond({
           uploaded: false, error: "extracted text too large", code: "extracted_text_too_large",

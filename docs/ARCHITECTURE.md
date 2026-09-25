@@ -282,6 +282,57 @@ basis, policy, observations, and skip set; only that fingerprint and aggregates
 leave the boundary. It is groundwork for a later approval flow, not
 authorization to perform OCR.
 
+Live OCR is page-idempotent across the installer and Worker. The installer
+hashes the exact source, source item id, page index, model, prompt, and rendered
+page bytes into one opaque request identity and retains it across the 60, 90,
+and 120-second bounded attempts. Identical bytes in different documents remain
+independent. Migration 0047 adds `ocr_page_requests`, which the Worker claims
+before calling Workers AI. A short pre-call reservation may be reclaimed after
+exact expiry; an exact transition to `in_flight` closes that window before the
+billable call. An active duplicate returns 425 without starting another model
+call. The installer polls that state with backoff inside the active deadline;
+425 is not an attempt. Expired in-flight work is held for review because a
+second call cannot be proved free. Before the first attempt, the installer
+derives one AES-GCM replay key with a domain-separated hash of the exact private
+page identity. That key is not persisted and cannot be derived from the durable
+request ID alone, but a later source pass over the same page can reproduce it.
+Owner image uploads instead derive their replay key from the Brain admin key
+and the opaque request identity so the same upload can recover after a later
+ingest failure. A completion keeps a permanent, content-free,
+identity-bearing tombstone with only a response hash, status, bounded numeric
+usage, source acknowledgement time, and bounded re-read count. It may also
+keep ciphertext that the matching replay key can open. The source acknowledges
+the page on that same receipt only after the full logical document family has
+been stored and reconciled. Migration 0048 adds that acknowledgement and the
+one-re-read bound to the original receipt. Until acknowledgement, cleanup
+never prunes the ciphertext,
+including after the former seven-day expiry, so a response that finishes after
+every client deadline remains replayable without a second model call or durable
+plaintext. After acknowledgement, expired ciphertext may be pruned and the
+same document revision is not read again. A legacy row or manually cleaned
+completed tombstone that is still unacknowledged but has no ciphertext may be
+rearmed exactly once. That replacement call is recorded by the
+`ocr_reread_after_expiry` receipt field and counter, and the installer reports
+the count in its load summary. The replacement ciphertext remains until source
+acknowledgement, clearing the hold without allowing a second replacement call.
+Neither the key nor plaintext, plaintext source locator, file name, or
+plaintext document identity is stored, and this table is not part of a recovery
+export.
+
+Every idempotency-evidence failure, non-timeout transport failure,
+authentication failure, malformed reply, unknown HTTP status, and Worker or
+model 5xx is a system-level source stop. Only a validated transcription can
+reach the local content-quality decision that may definitively refuse an
+unreadable page. The client preserves the prior revision, sends no partial
+replacement, enters no removal plan, and withholds both the cursor and
+terminal-ready source receipt.
+
+After the last timeout, the installer probes `/health`. A failed probe stops
+the source run with its existing resumable marker. A healthy probe records the
+page and document as `ocr_page_timeout`, continues the pass, preserves any
+previously stored document revision, clears the accepted source marker, and
+withholds a remote cursor so the same document is checked again next pass.
+
 `ingest/outcome.mjs` is the shared source-level result contract. Only
 `completed` is success-shaped. `partial`, `unavailable`, `retryable`, and
 `refused` carry distinct flags, and a dry run carries no ingestion outcome.

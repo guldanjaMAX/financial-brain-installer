@@ -332,7 +332,7 @@
     "ocr": {
       "_comment": "Read scanned PDFs by sending each page image to a vision model through THIS brain's own Workers AI binding. OFF by default on purpose: it spends money on the client's own Cloudflare account, once per scanned page, and nobody should discover that after the fact. Every page must atomically reserve a conservative amount from the daily estimated-spend budget, and every document read this way is MARKED as OCR so an answer resting on it says so.",
       "enabled": false,
-      "model": "@cf/google/gemma-4-26b-a4b-it",
+      "model": "@cf/meta/llama-4-scout-17b-16e-instruct",
       "_model_note": "Must be a Cloudflare @cf/ model. OCR refuses anything else rather than send a picture of a client document to a provider this manifest does not name.",
       "max_pages_per_document": 40
     }

@@ -211,6 +211,19 @@ for (const t of [
     observationColumns.has("authority_chain_version") &&
       observationColumns.has("predecessor_observation_hash"));
 }
+{
+  const ocrRequestColumns = new Set(db.prepare(
+    "PRAGMA table_info(ocr_page_requests)",
+  ).all().map((row) => row.name));
+  check("0047 adds the durable OCR page idempotency receipt",
+    ["request_id", "input_sha256", "status", "owner_token", "response_json",
+      "replay_key_sha256", "replay_expires_at", "replay_iv", "replay_ciphertext"]
+      .every((column) => ocrRequestColumns.has(column)));
+  check("0047 adds bounded encrypted-handoff cleanup support",
+    names.has("idx_ocr_page_requests_expiry"));
+  check("0048 records source acknowledgement and caps expiry re-reads",
+    ocrRequestColumns.has("acknowledged_at") && ocrRequestColumns.has("reread_count"));
+}
 for (const object of [
   "idx_source_original_result_family_members_revision",
   "idx_source_original_result_family_receipts_original_sequence",

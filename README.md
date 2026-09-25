@@ -239,7 +239,8 @@ Windows PowerShell:
 & "$env:LOCALAPPDATA\FinancialBrain\brain.cmd" setup "$HOME\Financial Brain\brain.manifest.json"
 ```
 
-It asks three short questions and does everything else itself: creates the
+It asks a few short questions, including whether paid OCR should read scanned
+PDF pages, and does everything else itself: creates the
 database and search index in your account, deploys the worker, generates and
 saves your key, checks it is alive, and connects the brain to Claude Code plus
 an installed Codex client. Successful Claude wiring writes an owner-only
@@ -949,10 +950,37 @@ product says all three rather than the first one:
 - **A bad reading is still refused.** If the model described the page instead
   of transcribing it, or produced too little to be a page, the file is reported
   exactly as it was before OCR existed. Refusing beats a confident wrong answer.
+- **One slow page does not end the pass.** A timed-out page is retried twice
+  with longer, bounded deadlines. An already-running call is polled without
+  consuming another attempt. Every retry for that source document and page uses
+  the same opaque durable request identity, so a late first response cannot
+  start a second charged call, while another document with the same page image
+  remains independent. The same private page identity deterministically
+  recovers the encrypted handoff key on a later pass without storing that key
+  or making it derivable from the durable request ID alone. The receipt keeps
+  hashes, status, and usage only, never the transcription or source locator. If
+  the Brain remains healthy but the page stays slow, that document is skipped
+  and the rest of the pass continues. A transport, authentication, malformed
+  reply, unknown status, or model failure defers the document as a system
+  problem and can never become removal evidence. A later pass can reclaim a
+  reservation only when the model never started. A completed result keeps its
+  encrypted handoff until the source confirms that the whole document was
+  stored, so even a much later pass can recover it with no new model call. Once
+  stored, the acknowledgement is written into the same receipt and expired
+  ciphertext may be pruned. A legacy or manually cleaned completed receipt that
+  was never acknowledged can make one clearly counted replacement call, then
+  its hold clears and no second replacement is allowed. Ambiguous in-flight
+  work is still held for review, keeping the previous document and source cursor
+  in place. If the health check also fails, progress is saved and the pass stops
+  resumably.
 
 It is **off by default**, because it spends money on your account, once per
-scanned page. Turn it on with `safety.ocr.enabled` in the manifest. Before a run
-the installer prints what the pages will cost and how long they will take.
+scanned page. Fresh setup asks once and carries a yes answer into the initial
+deployment, so it does not need a separate update. On an existing Brain, turn
+it on with `safety.ocr.enabled` in the manifest and run `brain update`. The
+reviewed default is `@cf/meta/llama-4-scout-17b-16e-instruct`; the manifest can
+still name another Cloudflare model. Before a run the installer prints what the
+pages will cost and how long they will take.
 
 Before enabling it, an owner or technician can inspect a local folder without
 spending anything:

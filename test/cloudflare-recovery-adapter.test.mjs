@@ -2113,7 +2113,7 @@ function providerHarness({
               type: "plain_text",
               name: "OCR_MODEL",
               text: plainTextOverrides.OCR_MODEL ??
-                (manifest.safety?.ocr?.model || "@cf/google/gemma-4-26b-a4b-it"),
+                (manifest.safety?.ocr?.model || "@cf/meta/llama-4-scout-17b-16e-instruct"),
             },
             { type: "secret_text", name: "ADMIN_KEY" },
             { type: "secret_text", name: "RAG_PROXY_KEY" },

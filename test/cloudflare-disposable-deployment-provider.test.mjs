@@ -124,7 +124,7 @@ function manifestBinding(role) {
     embeddingModel: "@cf/baai/bge-base-en-v1.5",
     enabledCorpora: [],
     ocrEnabled: "0",
-    ocrModel: "@cf/google/gemma-4-26b-a4b-it",
+    ocrModel: "@cf/meta/llama-4-scout-17b-16e-instruct",
     productVersion: "0.4.8",
     recoveryArtifactKeySecret: source
       ? null

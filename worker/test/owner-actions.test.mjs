@@ -285,6 +285,52 @@ const uploadBody = {
       JSON.stringify(["upload:owner:acme:scan_receipt"]));
 }
 
+/* ---------------- owner image OCR survives a later ingest failure and retry */
+{
+  const imageBody = {
+    request_id: "upload_image_ingest_retry_1",
+    document_id: "image_retry_fixture",
+    entity_slug: "acme",
+    media_type: "image/jpeg",
+    file_name: "image-fixture.jpg",
+    content_base64: "/9j/2Q==",
+    envelope: { title: "Image fixture" },
+  };
+  let modelCalls = 0;
+  let failedIngestCalls = 0;
+  env.OCR_ENABLED = "1";
+  env.AI = {
+    run: async () => {
+      modelCalls++;
+      return { response: "Fixture image transcription with enough content to store.", usage: {} };
+    },
+  };
+
+  const first = await call("/api/owner/uploads", imageBody, {
+    ingestEnvelope: async () => {
+      failedIngestCalls++;
+      return new Response(JSON.stringify({ error: "fixture ingest failure", code: "fixture_ingest_failure" }), {
+        status: 503, headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+  const firstBody = await bodyOf(first);
+  check("owner image retry probe reaches OCR and then the later ingest failure",
+    first.status === 503 && firstBody.code === "fixture_ingest_failure" &&
+      modelCalls === 1 && failedIngestCalls === 1,
+    JSON.stringify({ status: first.status, firstBody, modelCalls, failedIngestCalls }));
+
+  const retried = await call("/api/owner/uploads", imageBody);
+  const retriedBody = await bodyOf(retried);
+  check("owner image retry reuses the paid OCR result and completes ingestion",
+    retried.ok && retriedBody.uploaded === true && modelCalls === 1 &&
+      db.prepare("SELECT count(*) count FROM documents WHERE doc_uid=?")
+        .get("upload:owner:acme:image_retry_fixture").count === 1,
+    JSON.stringify({ status: retried.status, retriedBody, modelCalls }));
+  delete env.AI;
+  delete env.OCR_ENABLED;
+}
+
 /* ------------------------------------------- exact entity-scoped retrieval */
 {
   db.prepare(

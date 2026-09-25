@@ -7,6 +7,7 @@
 import {
   chooseDbName, assertAdoptable, documentCountOf, ensureMetadataIndex, VECTOR_METADATA_INDEXES,
   driveExclusionIdsOf, driveConnectorConfig, completedDriveFamilyPlans, sourceCursorCanAdvance,
+  sourceReceiptHasRemoteGap,
   remoteFamilyOutcomes, assertDriveLimitSafe, assertRemoteLimitSafe, validateBatchReceipt, postSourceReceipt,
   validateForgetReceipt, validateSourceForgetPreview, validateSourceForgetReceipt,
   assertNoPendingRemovals, credentialRefusalOf, drivePolicyFingerprint,
@@ -208,8 +209,12 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   ];
   const complete = completedDriveFamilyPlans(plans, new Map([["drive:a", 1], ["drive:b", 1]]));
   check("split-family cleanup waits for every replacement part", complete.length === 1 && complete[0].stateKey === "drive:b", JSON.stringify(complete));
-  check("a document-level failure keeps the source cursor retryable", sourceCursorCanAdvance({ failed: 1 }) === false);
-  check("a fully accepted batch may advance its source cursor", sourceCursorCanAdvance({ failed: 0 }) === true);
+check("a document-level failure keeps the source cursor retryable", sourceCursorCanAdvance({ failed: 1 }) === false);
+check("a named retryable OCR skip keeps the source cursor behind the page that must be retried",
+  sourceCursorCanAdvance({ failed: 0 }, { retryableSkips: 1 }) === false);
+check("a named retryable OCR skip also makes the terminal source receipt incomplete",
+  sourceReceiptHasRemoteGap({ tally: { failed: 0 }, retryableSkips: 1 }) === true);
+check("a fully accepted batch may advance its source cursor", sourceCursorCanAdvance({ failed: 0 }) === true);
 
   const crossing = [{ stateKey: "drive:large", expectedParts: 3 }];
   let outcome = remoteFamilyOutcomes(crossing, new Map([["drive:large", 2]]), new Map([["drive:large", 2]]));

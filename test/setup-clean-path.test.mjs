@@ -22,6 +22,7 @@ import {
   cmdMigrate,
   cmdSetup,
   persistWorkersDevDomain,
+  workerBindings,
 } from "../brain.mjs";
 import {
   installedManifestPointerPath,
@@ -76,10 +77,15 @@ try {
     stateDirectory: join(sandbox, "installed-state"),
   };
   const events = [];
+  let ocrConsentPrompts = 0;
   const key = `fixture-${"k".repeat(40)}`;
   const prompt = async (question, fallback) => {
     if (/what is this brain for|short name/i.test(question)) {
       throw new Error("the complete Claude setup context must not ask for the Brain identity");
+    }
+    if (/OCR|scanned PDFs/i.test(question)) {
+      ocrConsentPrompts++;
+      return "y";
     }
     if (/folder to load/i.test(question)) return "";
     return fallback || "";
@@ -109,6 +115,12 @@ try {
     cmdDeploy: async (path) => {
       events.push("deploy");
       const value = JSON.parse(readFileSync(path, "utf8"));
+      assert.equal(value.safety.ocr.enabled, true,
+        "the one fresh-setup OCR consent must be in the manifest before initial deploy");
+      const ocrEnabled = workerBindings(value, value.infrastructure.cloudflare)
+        .find((binding) => binding.name === "OCR_ENABLED");
+      assert.equal(ocrEnabled?.text, "1",
+        "initial deployment must render the enabled setting without a later brain update");
       value.brain.domain = "clean-brain.owner-subdomain.workers.dev";
       writeFileSync(path, JSON.stringify(value));
     },
@@ -142,6 +154,7 @@ try {
     installedManifestOptions,
   });
   assert.deepEqual(events, ["verify", "provision", "migrate", "deploy", "secrets", "drain", "health", "wire", "claude-guide"]);
+  assert.equal(ocrConsentPrompts, 1, "fresh setup asks for OCR consent exactly once");
   const saved = JSON.parse(readFileSync(target, "utf8"));
   assert.equal(saved.infrastructure.cloudflare.account_id, oneAccount.id);
   assert.equal(saved.brain.domain, "clean-brain.owner-subdomain.workers.dev");

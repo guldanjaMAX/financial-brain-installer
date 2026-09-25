@@ -56,6 +56,10 @@ import { PLAID_PROFILE, manifestBankFeedProvider } from "./worker/src/lib/bank-f
 import { ingestEnvelopeValidationError } from "./worker/src/lib/ingest-envelope.js";
 import { normalizeSourceOriginalReceipt } from "./worker/src/lib/source-original-binding.js";
 import {
+  acknowledgeOcrPageRequests,
+  createOcrCallback,
+} from "./ingest/ocr-client.mjs";
+import {
   D1_QUERY_BIND_LIMIT,
   SOURCE_FAMILY_UID_FILTER_MAX,
 } from "./worker/src/lib/store-d1.js";
@@ -2239,7 +2243,7 @@ export function workerBindings(m, cfg, options = {}) {
       {
         type: "plain_text",
         name: "OCR_MODEL",
-        text: String(m.safety?.ocr?.model || "@cf/google/gemma-4-26b-a4b-it"),
+        text: String(m.safety?.ocr?.model || OCR_PREFLIGHT_DEFAULT_MODEL),
       },
     ...bankFeedWorkerVars(m),
   ];
@@ -7369,11 +7373,10 @@ export function ocrPolicy(manifest = {}) {
  * installer already holds. No Cloudflare control-plane token is involved in
  * routine ingest.
  *
- * A cap hit, a provider refusal or a transport failure is marked `fatal` and
- * rethrown, because none of them says anything about the DOCUMENT. Recording
- * "unreadable" for a document that was never looked at writes a permanently
- * wrong reason into resume state, and the source cursor must stay retryable
- * instead.
+ * A cap hit or provider refusal is fatal. A page timeout receives two bounded
+ * retries and then a Brain health probe. Failed health stops resumably; healthy
+ * Brain plus a still-slow page becomes a named retryable document skip. None
+ * of those outcomes records the document as unreadable.
  */
 export function makeOcrCallback({
   base,
@@ -7383,52 +7386,74 @@ export function makeOcrCallback({
   onPage = () => {},
   httpImpl = http,
   assertOwned = null,
+  onRetry = (message) => info(message),
+  onSkip = (message) => warn(message),
+  attempts,
+  sleep,
+  random,
+  now,
 }) {
-  const call = async (image, { page, totalPages } = {}) => {
-    const { OCR_SYSTEM_PROMPT } = await ingestOcrLib();
-    let res;
-    try {
-      assertOwned?.();
-      res = await httpImpl(`${base}/api/admin/brain/ocr`, {
-        method: "POST",
-        headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
-        body: JSON.stringify({ image_base64: image.png_base64, page, prompt: OCR_SYSTEM_PROMPT }),
-      }, { what: "the OCR request" });
-    } catch (error) {
-      if (error?.code === "source_ingest_lock_lost") throw error;
-      const e = new Error(`OCR could not reach the brain: ${error.message}`);
-      e.fatal = true;
-      throw e;
-    }
+  return createOcrCallback({
+    base,
+    adminKey,
+    model,
+    maxPages,
+    onPage,
+    onRetry,
+    onSkip,
+    httpImpl,
+    assertOwned,
+    attempts,
+    sleep,
+    random,
+    now,
+    loadPrompt: async () => (await ingestOcrLib()).OCR_SYSTEM_PROMPT,
+  });
+}
 
-    let body = {};
-    try { body = await res.json(); } catch { /* handled by status below */ }
+function reportOcrRetryStats(ocrCallback) {
+  const retried = Math.max(0, Number(ocrCallback?.stats?.retriedPages || 0));
+  const skipped = Math.max(0, Number(ocrCallback?.stats?.skippedPages || 0));
+  const completed = Math.max(0, retried - skipped);
+  const rereadAfterExpiry = Math.max(0, Number(ocrCallback?.stats?.rereadAfterExpiry || 0));
+  if (completed) {
+    info(
+      `${completed} OCR page${completed === 1 ? " was" : "s were"} slow; ` +
+        `${completed === 1 ? "it was" : "they were"} retried and completed.`,
+    );
+  }
+  if (skipped) {
+    warn(
+      `${skipped} OCR page${skipped === 1 ? " was" : "s were"} still slow after bounded retries; ` +
+        `${skipped === 1 ? "it was" : "they were"} skipped and will be checked again on the next pass.`,
+    );
+  }
+  if (rereadAfterExpiry) {
+    warn(
+      `${rereadAfterExpiry} OCR page${rereadAfterExpiry === 1 ? " was" : "s were"} re-read after an unacknowledged encrypted handoff was already missing. ` +
+        "Each affected page used its one bounded replacement call.",
+    );
+  }
+}
 
-    if (res.status === 429 || body?.llm_cap_exceeded) {
-      const e = new Error(
-        `OCR stopped because the daily spend cap was reached. ${body?.detail || ""}`.trim() +
-        " No document was marked unreadable; re-run once the cap resets or raise safety.daily_llm_spend_cap_usd.",
-      );
-      e.fatal = true;
-      e.llm_cap_exceeded = true;
-      throw e;
-    }
-    if (body?.provider_mismatch || res.status === 409) {
-      const e = new Error(`OCR refused: ${body?.detail || body?.error || "the brain would not run it"}`);
-      e.fatal = true;
-      throw e;
-    }
-    if (!res.ok) {
-      // A 5xx from the model is about THIS page, not about the run, so it is a
-      // page-level error the assembler can count and report inline.
-      return { error: `page ${page}: ${String(body?.detail || body?.error || `HTTP ${res.status}`).slice(0, 160)}` };
-    }
-    onPage({ page, totalPages });
-    return { text: body?.text ?? "" };
-  };
-  call.model = model;
-  call.maxPages = maxPages;
-  return call;
+async function acknowledgeStoredOcrPages({
+  base,
+  adminKey,
+  requestIds,
+  assertOwned = null,
+  httpImpl = http,
+} = {}) {
+  if (!Array.isArray(requestIds) || requestIds.length === 0) return;
+  const uniqueRequestIds = [...new Set(requestIds)];
+  for (let offset = 0; offset < uniqueRequestIds.length; offset += 100) {
+    await acknowledgeOcrPageRequests({
+      base,
+      adminKey,
+      requestIds: uniqueRequestIds.slice(offset, offset + 100),
+      assertOwned,
+      httpImpl,
+    });
+  }
 }
 
 export const DRIVE_FULL_SWEEP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -7694,7 +7719,17 @@ export function recordLocalSkippedDocumentState(state, { stateKey, nativePath, r
   return state;
 }
 
-export const sourceCursorCanAdvance = (tally) => Number(tally?.failed || 0) === 0;
+export const sourceCursorCanAdvance = (tally, { retryableSkips = 0 } = {}) =>
+  Number(tally?.failed || 0) === 0 && Number(retryableSkips || 0) === 0;
+
+export const sourceReceiptHasRemoteGap = ({
+  tally,
+  totalRefused = 0,
+  coverageGaps = 0,
+  driveReviewRequired = false,
+  retryableSkips = 0,
+} = {}) => Number(tally?.failed || 0) > 0 || Number(totalRefused || 0) > 0 ||
+  Number(coverageGaps || 0) > 0 || Number(retryableSkips || 0) > 0 || driveReviewRequired === true;
 
 /**
  * Turn a durable per-document failure receipt into a machine-visible failure.
@@ -11225,6 +11260,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
           keep_doc_uids: sanitized.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
           skipKeys: [key, f.rel, ...sanitized.map((envelope) => envelope.source_id)],
           legacyPartRoot: [key, f.rel],
+          ocrPageRequestIds: Array.isArray(r.ocrPageRequestIds) ? [...r.ocrPageRequestIds] : [],
         },
       };
     }
@@ -11242,6 +11278,11 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
       return { unchanged: true };
     }
     if (r.skip) {
+      // A slow OCR page is a transient extraction outcome, not a statement
+      // that the source document was removed. Clear the accepted hash so the
+      // same stable document identity is read again on the next pass while an
+      // older stored revision, if any, remains untouched.
+      if (r.skip.retryable === true) delete state.done[key];
       recordLocalSkippedDocumentState(state, {
         stateKey: key, nativePath: f.rel, reason: r.skip.reason,
       });
@@ -11273,6 +11314,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
         keep_doc_uids: envelopes.map((envelope) => `${sourceName}:${envelope.source_id}`),
         skipKeys: [key, f.rel, ...envelopes.map((envelope) => envelope.source_id)],
         legacyPartRoot: [key, f.rel],
+        ocrPageRequestIds: Array.isArray(r.ocrPageRequestIds) ? [...r.ocrPageRequestIds] : [],
       },
     };
   };
@@ -11399,6 +11441,14 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
         families: reconciliation,
         base,
         adminKey,
+        assertOwned: assertLockOwned,
+      });
+    }
+    for (const plan of outcome.completed) {
+      await acknowledgeStoredOcrPages({
+        base,
+        adminKey,
+        requestIds: plan.ocrPageRequestIds,
         assertOwned: assertLockOwned,
       });
     }
@@ -11542,9 +11592,12 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   state.credential_scanner_fingerprint = scannerFingerprint;
   saveState(statePath, state);
 
-  const finalStatus = tally.failed ? "error" : "ready";
   const localCoverageGaps = localCoverage.coverageGaps;
   const adjudicatedSkips = localCoverage.adjudicatedSkips;
+  const localRetryableOcrSkips = skips.filter(
+    (skip) => skip?.retryable === true && skip?.code === "ocr_page_timeout",
+  ).length;
+  const finalStatus = tally.failed || localRetryableOcrSkips ? "error" : "ready";
   const localWalkComplete = !flags.limit && walkComplete;
   await recordSourceReceipt({
     source: sourceName,
@@ -11561,7 +11614,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     docs_updated: tally.updated,
     docs_unchanged: unchanged + tally.unchanged,
     docs_refused: localCoverage.docsRefused,
-    docs_failed: tally.failed,
+    docs_failed: tally.failed + localRetryableOcrSkips,
     detail: `local folder ingest ${finalStatus === "ready" ? "completed" : "completed with document failures"}; ` +
       `coverage_gaps=${localCoverageGaps}; adjudicated_skips=${adjudicatedSkips}`,
     ...(tally.failed ? { error: `${tally.failed} document(s) failed` } : {}),
@@ -11569,9 +11622,10 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   sourceRunClosed = true;
 
   const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged`;
-  if (tally.failed) info(summary);
+  if (tally.failed || localRetryableOcrSkips) info(summary);
   else ok(summary);
   if (tally.refused) warn(`${tally.refused} file(s) refused for carrying live credentials. They were NOT indexed.`);
+  reportOcrRetryStats(ocrCallback);
   if (messageExportsSeen.size) {
     // A zone is a sensitivity boundary. A file format is not. One WhatsApp
     // export routinely holds an accountant and an oncologist in the same file,
@@ -15028,6 +15082,7 @@ const cmdIngestRemoteRun = async (
   let scanned = 0;
   let prepared = 0;
   let batchNo = 0;
+  let retryableOcrSkips = 0;
   // Held back until every batch has been accepted. See the note at its
   // assignment: advancing a sync cursor early loses documents silently.
   let pendingCursor = null;
@@ -15100,6 +15155,14 @@ const cmdIngestRemoteRun = async (
         assertOwned: assertLockOwned,
       });
       if (staleParts) ok(`${staleParts} obsolete split-document part(s) removed`);
+    }
+    for (const plan of outcome.completed) {
+      await acknowledgeStoredOcrPages({
+        base,
+        adminKey,
+        requestIds: plan.ocrPageRequestIds,
+        assertOwned: assertLockOwned,
+      });
     }
     intentionalRemovalUids.push(...settlement.intentionalRemovalUids);
     for (const plan of outcome.completed) {
@@ -15463,7 +15526,17 @@ const cmdIngestRemoteRun = async (
       if (!r) return null;
       if (r.skip) {
         state.skipped[key] = r.skip.reason;
-        intentionalRemovalUids.push(key);
+        if (r.skip.retryable === true && r.skip.code === "ocr_page_timeout") {
+          // A transient OCR timeout cannot authorize deletion of a prior
+          // accepted revision. Retire its local acceptance marker so the same
+          // Drive identity is downloaded again, and keep the source cursor
+          // behind this gap until that retry succeeds.
+          delete state.done[key];
+          scannerProgressCanCommit = false;
+          retryableOcrSkips++;
+        } else {
+          intentionalRemovalUids.push(key);
+        }
         if (r.skip.code === "source_deleted") sourceResolvedSkipped++;
         else if (["shortcut_not_followed", "non_text_media"].includes(r.skip.code)) adjudicatedSkipped++;
         return { skip: r.skip };
@@ -15486,6 +15559,7 @@ const cmdIngestRemoteRun = async (
         keep_doc_uids: envelopes.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
         skipKeys: [key, ...envelopes.map((envelope) => envelope.source_id)],
         legacyPartRoot: f.id,
+        ocrPageRequestIds: Array.isArray(r.ocrPageRequestIds) ? [...r.ocrPageRequestIds] : [],
       };
       if (!assistantJson && scanned % 200 === 0) process.stdout.write(`\r  scanned ${scanned}...   `);
       return {
@@ -16431,7 +16505,7 @@ const cmdIngestRemoteRun = async (
   // Every batch landed, so it is now safe to say "we have everything up to
   // here". sendBatches dies rather than returning on a failure, so reaching
   // this line is the proof.
-  const cursorCanAdvance = sourceCursorCanAdvance(tally) &&
+  const cursorCanAdvance = sourceCursorCanAdvance(tally, { retryableSkips: retryableOcrSkips }) &&
     !(which === "gmail" &&
       (gmailLabelGaps > 0 || gmailHistoryMarkerMissing > 0 || gmailPendingRemovalGaps > 0)) &&
     !(which === "imap" && imapSnapshotGaps > 0);
@@ -16451,7 +16525,9 @@ const cmdIngestRemoteRun = async (
       ? `${gmailLabelGaps} message(s) lacked label evidence, ${gmailHistoryMarkerMissing} pre-sweep history marker(s) were unavailable, and ${gmailPendingRemovalGaps} active message(s) had unresolved pending removals`
       : which === "imap" && imapSnapshotGaps
         ? `${imapSnapshotGaps} IMAP source snapshot gap(s) remained unresolved`
-        : `${tally.failed} document(s) failed`;
+        : retryableOcrSkips
+          ? `${retryableOcrSkips} document(s) had OCR pages that stayed slow after bounded retries`
+          : `${tally.failed} document(s) failed`;
     warn(`${reason}, so the source cursor was NOT advanced; the next run will retry them`);
   }
   // A non-policy skip remains visible as incomplete coverage. Gmail still
@@ -16462,7 +16538,9 @@ const cmdIngestRemoteRun = async (
   const totalRefused = tally.refused + localRefused;
   const driveReviewRequired = which === "drive" &&
     (protectedDriveUids().size > 0 || malformedDriveIdentityCount > 0);
-  const hasRemoteGap = tally.failed > 0 || totalRefused > 0 || coverageGaps > 0 || driveReviewRequired;
+  const hasRemoteGap = sourceReceiptHasRemoteGap({
+    tally, totalRefused, coverageGaps, driveReviewRequired, retryableSkips: retryableOcrSkips,
+  });
   const finalStatus = hasRemoteGap ? "error" : "ready";
   assertLockOwned?.();
   await recordSourceReceipt({
@@ -16480,7 +16558,7 @@ const cmdIngestRemoteRun = async (
     // Outcome counters measure document attempts. Deliberate source-policy and
     // adjudicated skips stay in detail; they are not ingest refusals.
     docs_refused: totalRefused,
-    docs_failed: tally.failed,
+    docs_failed: tally.failed + retryableOcrSkips,
     // One shape or the other, never both: a receipt carrying a human detail AND
     // an issue code invites a reader to believe the happier of the two.
     ...(hasRemoteGap
@@ -16502,9 +16580,10 @@ const cmdIngestRemoteRun = async (
   runClosed = true;
 
   const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged`;
-  if (tally.failed) info(summary);
+  if (tally.failed || retryableOcrSkips) info(summary);
   else ok(summary);
   if (totalRefused) warn(`${totalRefused} document(s) refused for carrying live credentials.`);
+  reportOcrRetryStats(ocrCallback);
   await reportSkips(skips);
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
   assertNoIngestFailures(tally);
@@ -18834,6 +18913,14 @@ export async function cmdSetup(manifestPath, options = {}) {
       accountId: account.id,
       authProfile: options.cloudflareAuthProfile || null,
     });
+    const ocrAnswer = String(await prompt(
+      "Read scanned PDF pages with OCR in this Cloudflare account? This uses paid Workers AI once per page. (y/n)",
+      "n",
+    )).trim().toLowerCase();
+    if (!["y", "yes", "n", "no"].includes(ocrAnswer)) {
+      die("answer y or n for scanned PDF OCR. No manifest or Brain resource was created.");
+    }
+    tmpl.safety.ocr.enabled = ocrAnswer === "y" || ocrAnswer === "yes";
     ok(`Cloudflare account "${account.name}" (${account.id})`);
 
     createSetupManifest(target, tmpl);

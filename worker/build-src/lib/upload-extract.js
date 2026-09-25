@@ -5,7 +5,12 @@ import * as XLSX from "@e965/xlsx";
 import PostalMime from "postal-mime";
 import { extractZipEntries, ArchiveSafetyError } from "../../../ingest/archive.mjs";
 import { isPptxSemanticEntry, renderPptxEntries } from "../../../ingest/pptx.mjs";
-import { handleOcr, MAX_IMAGE_BASE64_BYTES } from "./ocr.js";
+import {
+  handleOcr,
+  MAX_IMAGE_BASE64_BYTES,
+  ocrModelFor,
+  ocrPageRequestId,
+} from "./ocr.js";
 
 export const OWNER_BINARY_UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
 export const OWNER_IMAGE_UPLOAD_MAX_BYTES = Math.floor(MAX_IMAGE_BASE64_BYTES / 4) * 3;
@@ -43,6 +48,29 @@ function bytesToBase64(bytes) {
     binary += String.fromCharCode(...bytes.subarray(offset, Math.min(bytes.length, offset + 0x8000)));
   }
   return btoa(binary);
+}
+
+function bytesToBase64Url(bytes) {
+  return bytesToBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+async function ownerUploadReplayKey(env, requestId) {
+  const adminKey = String(env?.ADMIN_KEY || "");
+  if (!adminKey) throw extractionError("private image OCR is unavailable", "owner_upload_ocr_unavailable");
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(adminKey),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(`financial-brain:owner-upload-ocr-replay:v1\0${requestId}`),
+  );
+  return bytesToBase64Url(new Uint8Array(signature));
 }
 
 function startsWith(bytes, signature) {
@@ -187,17 +215,32 @@ async function email(bytes) {
   return { text: clean([...headers, "", body].join("\n")), title: mail.subject || null, occurredAt: mail.date || null };
 }
 
-async function imageOcr(env, bytes, mediaType) {
+async function imageOcr(env, bytes, mediaType, { source, sourceItemId } = {}) {
   if (bytes.byteLength > OWNER_IMAGE_UPLOAD_MAX_BYTES) {
     throw extractionError("the image is over the private OCR request limit", "upload_too_large", { too_large: true });
   }
+  const imageBase64 = bytesToBase64(bytes);
+  const prompt = "Transcribe every readable word exactly. Preserve headings, line order, table labels, values, and dates. Do not summarize or infer missing text.";
+  const page = 1;
+  const requestId = await ocrPageRequestId({
+    image: imageBase64,
+    model: ocrModelFor(env),
+    prompt,
+    source,
+    sourceItemId,
+    page,
+  });
+  const replayKey = await ownerUploadReplayKey(env, requestId);
   const request = new Request("https://brain.invalid/api/admin/brain/ocr", {
     method: "POST",
     headers: { "content-type": "application/json", "x-admin-key": env.ADMIN_KEY || "" },
     body: JSON.stringify({
-      image_base64: bytesToBase64(bytes),
+      image_base64: imageBase64,
       image_media_type: mediaType,
-      prompt: "Transcribe every readable word exactly. Preserve headings, line order, table labels, values, and dates. Do not summarize or infer missing text.",
+      prompt,
+      page,
+      request_id: requestId,
+      replay_key: replayKey,
     }),
   });
   const response = await handleOcr(env, request);
@@ -223,7 +266,10 @@ function ensureTextLimit(text) {
   return bytes;
 }
 
-export async function extractOwnerUpload(env, { mediaType, bytes, fileName = null } = {}) {
+export async function extractOwnerUpload(
+  env,
+  { mediaType, bytes, fileName = null, source = null, sourceItemId = null } = {},
+) {
   assertMediaSignature(mediaType, bytes);
   let text = "";
   let title = null;
@@ -256,7 +302,7 @@ export async function extractOwnerUpload(env, { mediaType, bytes, fileName = nul
     title = result.title;
     occurredAt = result.occurredAt;
   } else if (mediaType === "image/png" || mediaType === "image/jpeg") {
-    const result = await imageOcr(env, bytes, mediaType);
+    const result = await imageOcr(env, bytes, mediaType, { source, sourceItemId });
     text = result.text;
     extractionMethod = "ocr";
     note = result.model ? `Transcribed by ${result.model}` : "Transcribed by the configured OCR model";

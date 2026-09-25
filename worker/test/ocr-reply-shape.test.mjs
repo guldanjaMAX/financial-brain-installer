@@ -1,26 +1,25 @@
 /**
- * OCR never worked as shipped. `callLLM`'s Workers AI branch read only
- * `data.response`, and the product's own default OCR model,
- * `@cf/google/gemma-4-26b-a4b-it`, does not use that field. It answers in the
- * OpenAI chat-completions shape, `choices[0].message.content`, so a perfect
- * transcription was thrown away as "Workers AI returned no answer text" and
- * every scanned page came back a 502. Measured live on 2026-09-23 against the
- * Workers AI REST API, with one real scanned page sent to each model:
+ * Workers AI vision models do not return one common reply shape. These shapes
+ * were measured live on 2026-09-23 with one scanned page sent to each model:
  *
  *   model                                  response        choices
- *   google/gemma-4-26b-a4b-it (OCR default) absent          transcription
+ *   google/gemma-4-26b-a4b-it               absent          transcription
  *   meta/llama-4-scout-17b-16e-instruct    transcription   transcription
  *   mistralai/mistral-small-3.1-24b-instr. transcription   transcription
  *   meta/llama-3.3-70b-instruct-fp8-fast   answer          (absent)
  *
- * This changes how a reply is READ, not which model OCR uses: the default OCR
- * model is unchanged.
+ * A full ingest on 2026-09-24 then attempted 25 single-page scans with Gemma
+ * but stored no readable transcription. Llama-4-scout had separately completed
+ * the end-to-end stored-text path in live testing, so it is now the reviewed
+ * default. Gemma remains a
+ * supported owner override, and its captured choices-only shape remains pinned
+ * so changing the default does not narrow reply parsing.
  *
  * This file pins the reply shapes actually measured that day, so the same
  * defect cannot come back quietly on a future default-model change:
  *
- *   - choices only            (google/gemma-4-26b-a4b-it, the default)
- *   - response AND choices    (meta/llama-4-scout, mistralai/mistral-small)
+ *   - choices only            (google/gemma-4-26b-a4b-it override)
+ *   - response AND choices    (meta/llama-4-scout default, mistralai/mistral-small)
  *   - response only           (meta/llama-3.3-70b, the answer model)
  *   - neither                 (must still refuse, not fabricate)
  *   - choices as a content-part array, not a plain string
@@ -30,9 +29,14 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { callLLM } from "../src/lib/core.js";
 import { handleOcr } from "../src/lib/ocr.js";
+import { canonicalOcrInput, sha256Hex } from "../src/lib/ocr-idempotency.js";
 
 // D1 logging is fire-and-forget in this path; a stub keeps the test offline.
 const db = () => ({
@@ -43,11 +47,40 @@ const db = () => ({
   }),
 });
 
-const GEMMA = "@cf/google/gemma-4-26b-a4b-it";
-const call = (aiRun) =>
-  callLLM({ DB: db(), AI: { run: aiRun } }, { model: GEMMA, system: "s", messages: [{ role: "user", content: "go" }], label: "test" });
+const HERE = dirname(fileURLToPath(import.meta.url));
+const routeDb = () => {
+  const sqlite = new DatabaseSync(":memory:");
+  for (const file of [
+    "0002_llm_call_log.sql",
+    "0047_ocr_page_idempotency.sql",
+    "0048_ocr_page_acknowledgement.sql",
+  ]) {
+    sqlite.exec(readFileSync(join(HERE, "..", "..", "migrations", "d1", file), "utf8"));
+  }
+  return {
+    sqlite,
+    exec: async (sql) => { sqlite.exec(sql); },
+    prepare: (sql) => {
+      const shape = (params = []) => ({
+        bind: (...next) => shape(next),
+        first: async () => sqlite.prepare(sql).get(...params) ?? null,
+        all: async () => ({ results: sqlite.prepare(sql).all(...params) }),
+        run: async () => {
+          const result = sqlite.prepare(sql).run(...params);
+          return { results: [], meta: { changes: Number(result.changes || 0) } };
+        },
+      });
+      return shape();
+    },
+  };
+};
 
-test("choices-only reply (measured shape of the default OCR model, gemma-4) is read", async () => {
+const GEMMA = "@cf/google/gemma-4-26b-a4b-it";
+const LLAMA = "@cf/meta/llama-4-scout-17b-16e-instruct";
+const call = (aiRun, model = GEMMA) =>
+  callLLM({ DB: db(), AI: { run: aiRun } }, { model, system: "s", messages: [{ role: "user", content: "go" }], label: "test" });
+
+test("choices-only reply (measured shape of the Gemma owner override) is read", async () => {
   const result = await call(async () => ({
     choices: [{ message: { content: "QUILLFEATHER MARINA - SLIP RENTAL AGREEMENT" } }],
     usage: { prompt_tokens: 301, completion_tokens: 112 },
@@ -61,7 +94,7 @@ test("when both response and choices are present (llama-4-scout, mistral-small s
     response: "the response field",
     choices: [{ message: { content: "the choices field" } }],
     usage: {},
-  }));
+  }), LLAMA);
   assert.equal(result.content[0].text, "the response field",
     "the existing response branch is untouched; choices is a fallback, not a replacement");
 });
@@ -144,11 +177,37 @@ const ocrRequest = (body) =>
     body: JSON.stringify(body),
   });
 
-test("the OCR route returns 200 with the transcription for a choices-only reply", async () => {
+test("the OCR route default uses llama-4-scout's measured response-plus-choices reply", async () => {
+  let calledModel = null;
   const env = {
     ADMIN_KEY,
     OCR_ENABLED: "1",
-    DB: db(),
+    DB: routeDb(),
+    AI: {
+      run: async (model) => {
+        calledModel = model;
+        return {
+          response: "Renewal date: March 31, 2028.",
+          choices: [{ message: { content: "choices copy of the same transcription" } }],
+          usage: { prompt_tokens: 301, completion_tokens: 12 },
+        };
+      },
+    },
+  };
+  const res = await handleOcr(env, ocrRequest({ image_base64: "AA", page: 1, prompt: "transcribe" }));
+  const body = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(body));
+  assert.equal(body.text, "Renewal date: March 31, 2028.");
+  assert.equal(body.model, LLAMA);
+  assert.equal(calledModel, LLAMA, "the default model decision point must call llama-4-scout");
+});
+
+test("a Gemma owner override still reads its measured choices-only reply", async () => {
+  const env = {
+    ADMIN_KEY,
+    OCR_ENABLED: "1",
+    OCR_MODEL: GEMMA,
+    DB: routeDb(),
     AI: {
       run: async () => ({
         choices: [{ message: { content: "Renewal date: March 31, 2028." } }],
@@ -160,18 +219,294 @@ test("the OCR route returns 200 with the transcription for a choices-only reply"
   const body = await res.json();
   assert.equal(res.status, 200, JSON.stringify(body));
   assert.equal(body.text, "Renewal date: March 31, 2028.");
-  assert.equal(body.model, GEMMA, "the default OCR model is reported even though it needed the fallback");
+  assert.equal(body.model, GEMMA, "the configured owner override is reported after the choices fallback");
 });
 
 test("the OCR route still 502s with its own explanation when a reply truly has no answer text", async () => {
   const env = {
     ADMIN_KEY,
     OCR_ENABLED: "1",
-    DB: db(),
+    DB: routeDb(),
     AI: { run: async () => ({ usage: {} }) },
   };
   const res = await handleOcr(env, ocrRequest({ image_base64: "AA", prompt: "transcribe" }));
   const body = await res.json();
   assert.equal(res.status, 502);
   assert.match(body.detail, /Workers AI returned no answer text/);
+});
+
+test("an in-flight duplicate request is held without starting a second billable model call", async () => {
+  let modelCalls = 0;
+  let releaseModel;
+  let signalStarted;
+  const started = new Promise((resolve) => { signalStarted = resolve; });
+  const held = new Promise((resolve) => { releaseModel = resolve; });
+  const env = {
+    ADMIN_KEY,
+    OCR_ENABLED: "1",
+    DB: routeDb(),
+    AI: {
+      run: async () => {
+        modelCalls++;
+        signalStarted();
+        await held;
+        return { response: "Recovered text", usage: {} };
+      },
+    },
+  };
+  const body = {
+    image_base64: "AA",
+    page: 1,
+    prompt: "transcribe",
+    request_id: "b".repeat(64),
+  };
+  const firstPending = handleOcr(env, ocrRequest(body));
+  await started;
+  const duplicate = await handleOcr(env, ocrRequest(body));
+  const duplicateBody = await duplicate.json();
+  assert.equal(duplicate.status, 425);
+  assert.equal(duplicateBody.ocr_request_pending, true);
+  assert.equal(modelCalls, 1, "the pending decision point was reached after exactly one model call started");
+  releaseModel();
+  const first = await firstPending;
+  assert.equal(first.status, 200);
+  assert.equal(modelCalls, 1);
+});
+
+test("a content-free completion without a handoff permits one re-read but never stores plaintext", async () => {
+  const receiptDb = routeDb();
+  const syntheticCredential = `sk-proj-${"A7".repeat(16)}`;
+  let modelCalls = 0;
+  const env = {
+    ADMIN_KEY,
+    OCR_ENABLED: "1",
+    DB: receiptDb,
+    AI: {
+      run: async () => {
+        modelCalls++;
+        return {
+          response: `Synthetic credential ${syntheticCredential} must be refused by the document gate.`,
+          usage: { prompt_tokens: 301, completion_tokens: 18 },
+        };
+      },
+    },
+  };
+  const requestBody = {
+    image_base64: "credential-shaped-page",
+    page: 1,
+    prompt: "transcribe",
+  };
+  const first = await handleOcr(env, ocrRequest(requestBody));
+  assert.equal(first.status, 200, await first.clone().text());
+
+  const row = receiptDb.sqlite.prepare(
+    "SELECT status,response_status,response_json FROM ocr_page_requests",
+  ).get();
+  assert.equal(row.status, "completed", "the completion decision must have reached durable D1 state");
+  assert.equal(row.response_status, 200);
+  assert.doesNotMatch(row.response_json, /Synthetic credential|sk-proj-|must be refused/u);
+  const receipt = JSON.parse(row.response_json);
+  assert.match(receipt.response_sha256, /^[0-9a-f]{64}$/u);
+
+  const duplicate = await handleOcr(env, ocrRequest(requestBody));
+  const duplicateBody = await duplicate.json();
+  const afterReread = await handleOcr(env, ocrRequest(requestBody));
+  const afterRereadBody = await afterReread.json();
+  assert.equal(duplicate.status, 200, JSON.stringify(duplicateBody));
+  assert.equal(duplicateBody.ocr_reread_after_expiry, true);
+  assert.equal(afterReread.status, 503);
+  assert.equal(afterRereadBody.ocr_idempotency_unavailable, true);
+  assert.equal(afterRereadBody.ocr_request_completed, true);
+  assert.equal(modelCalls, 2, "a handoff-less completion permits only one replacement model call");
+});
+
+test("an acknowledged completed result is pruned after T+8 without another charge", async () => {
+  const receiptDb = routeDb();
+  const completedAt = new Date("2026-09-24T12:00:00.000Z");
+  const afterOldRetentionWindow = new Date("2026-10-02T12:00:00.000Z");
+  let modelCalls = 0;
+  const env = {
+    ADMIN_KEY,
+    OCR_ENABLED: "1",
+    DB: receiptDb,
+    AI: {
+      run: async () => {
+        modelCalls++;
+        return { response: "Durable sample transcription", usage: {} };
+      },
+    },
+  };
+  const requestBody = {
+    image_base64: "durable-completed-page",
+    page: 1,
+    prompt: "transcribe",
+    replay_key: "A".repeat(43),
+  };
+
+  const first = await handleOcr(env, ocrRequest(requestBody), { now: () => completedAt });
+  assert.equal(first.status, 200, await first.clone().text());
+  const firstBody = await first.json();
+  const acknowledgement = await handleOcr({ ...env, OCR_ENABLED: "0" }, ocrRequest({
+    acknowledge_request_ids: [firstBody.request_id],
+  }), { now: () => completedAt });
+  const acknowledgementBody = await acknowledgement.json();
+  const duplicate = await handleOcr(env, ocrRequest(requestBody), { now: () => afterOldRetentionWindow });
+  const duplicateBody = await duplicate.json();
+  const row = receiptDb.sqlite.prepare(
+    "SELECT status,response_json,replay_ciphertext FROM ocr_page_requests",
+  ).get();
+
+  assert.equal(acknowledgement.status, 200, JSON.stringify(acknowledgementBody));
+  assert.equal(acknowledgementBody.ocr_acknowledged, 1,
+    "the source-storage acknowledgement must update the receipt even after paid OCR is disabled");
+  assert.equal(duplicate.status, 503, JSON.stringify(duplicateBody));
+  assert.equal(duplicateBody.ocr_request_completed, true);
+  assert.equal(modelCalls, 1, "the acknowledged T+8 decision point must not start a second model call");
+  assert.equal(row.status, "completed", "the identity-bearing tombstone must still exist after T+8 days");
+  assert.equal(row.replay_ciphertext, null, "only an acknowledged encrypted handoff is pruned");
+  assert.ok(JSON.parse(row.response_json).acknowledged_at,
+    "the acknowledgement must be recorded in the same content-free receipt");
+  assert.match(JSON.parse(row.response_json).response_sha256, /^[0-9a-f]{64}$/u);
+});
+
+test("an unacknowledged completed result keeps its ciphertext and replays after T+8", async () => {
+  const receiptDb = routeDb();
+  const completedAt = new Date("2026-09-24T12:00:00.000Z");
+  const afterOldRetentionWindow = new Date("2026-10-02T12:00:00.000Z");
+  let modelCalls = 0;
+  const env = {
+    ADMIN_KEY,
+    OCR_ENABLED: "1",
+    DB: receiptDb,
+    AI: {
+      run: async () => {
+        modelCalls++;
+        return { response: "Durable sample transcription", usage: {} };
+      },
+    },
+  };
+  const requestBody = {
+    image_base64: "unacknowledged-completed-page",
+    page: 1,
+    prompt: "transcribe",
+    replay_key: "B".repeat(43),
+  };
+
+  const first = await handleOcr(env, ocrRequest(requestBody), { now: () => completedAt });
+  assert.equal(first.status, 200, await first.clone().text());
+  const duplicate = await handleOcr(env, ocrRequest(requestBody), { now: () => afterOldRetentionWindow });
+  const duplicateBody = await duplicate.json();
+  const row = receiptDb.sqlite.prepare(
+    "SELECT status,response_json,replay_ciphertext FROM ocr_page_requests",
+  ).get();
+
+  assert.equal(duplicate.status, 200, JSON.stringify(duplicateBody));
+  assert.equal(duplicateBody.idempotent_replay, true);
+  assert.equal(modelCalls, 1, "the unacknowledged T+8 decision point must replay without another call");
+  assert.equal(row.status, "completed");
+  assert.equal(typeof row.replay_ciphertext, "string",
+    "an unacknowledged handoff must survive its former cleanup deadline");
+});
+
+test("a ciphertext-less completed tombstone permits exactly one recorded re-read", async () => {
+  const receiptDb = routeDb();
+  const completedAt = new Date("2026-09-24T12:00:00.000Z");
+  const afterOldRetentionWindow = new Date("2026-10-02T12:00:00.000Z");
+  let modelCalls = 0;
+  const env = {
+    ADMIN_KEY,
+    OCR_ENABLED: "1",
+    DB: receiptDb,
+    AI: {
+      run: async () => {
+        modelCalls++;
+        return { response: `Durable sample transcription ${modelCalls}`, usage: {} };
+      },
+    },
+  };
+  const requestBody = {
+    image_base64: "legacy-completed-page",
+    page: 1,
+    prompt: "transcribe",
+    replay_key: "C".repeat(43),
+  };
+
+  const first = await handleOcr(env, ocrRequest(requestBody), { now: () => completedAt });
+  assert.equal(first.status, 200, await first.clone().text());
+  receiptDb.sqlite.prepare(
+    `UPDATE ocr_page_requests
+        SET replay_key_sha256=NULL,replay_expires_at=NULL,replay_iv=NULL,replay_ciphertext=NULL`,
+  ).run();
+
+  const reread = await handleOcr(env, ocrRequest(requestBody), { now: () => afterOldRetentionWindow });
+  const rereadBody = await reread.json();
+  const replay = await handleOcr(env, ocrRequest(requestBody), { now: () => afterOldRetentionWindow });
+  const replayBody = await replay.json();
+  const row = receiptDb.sqlite.prepare(
+    "SELECT status,response_json,replay_ciphertext FROM ocr_page_requests",
+  ).get();
+  const receipt = JSON.parse(row.response_json);
+
+  assert.equal(reread.status, 200, JSON.stringify(rereadBody));
+  assert.equal(rereadBody.ocr_reread_after_expiry, true,
+    "the legacy tombstone decision point must identify the one replacement call");
+  assert.equal(replay.status, 200, JSON.stringify(replayBody));
+  assert.equal(replayBody.idempotent_replay, true, "the replacement completion must clear the hold");
+  assert.equal(modelCalls, 2, "the tombstone may authorize one replacement call, never a third");
+  assert.equal(receipt.ocr_reread_after_expiry, 1,
+    "the content-free receipt must retain the re-read counter");
+  assert.equal(typeof row.replay_ciphertext, "string",
+    "the replacement result must leave a fresh handoff until source acknowledgement");
+});
+
+test("expired pre-call reservations are reclaimed but ambiguous in-flight work is held", async () => {
+  const now = new Date("2026-09-24T12:00:00.000Z");
+  const expiredAt = "2026-09-24T11:59:00.000Z";
+
+  const reclaimDb = routeDb();
+  const reclaimBody = { image_base64: "safe-reclaim", page: 1, prompt: "transcribe" };
+  const reclaimInput = await sha256Hex(canonicalOcrInput({
+    image: reclaimBody.image_base64,
+    model: LLAMA,
+    prompt: reclaimBody.prompt,
+  }));
+  reclaimDb.sqlite.prepare(
+    `INSERT INTO ocr_page_requests
+       (request_id,input_sha256,status,owner_token,started_at,expires_at)
+     VALUES (?1,?2,'pending',?3,?4,?5)`,
+  ).run(reclaimInput, reclaimInput, "old-owner-token".padEnd(32, "x"), "2026-09-24T11:50:00.000Z", expiredAt);
+  let reclaimedCalls = 0;
+  const reclaimed = await handleOcr({
+    ADMIN_KEY,
+    OCR_ENABLED: "1",
+    DB: reclaimDb,
+    AI: { run: async () => { reclaimedCalls++; return { response: "Recovered safely", usage: {} }; } },
+  }, ocrRequest({ ...reclaimBody, request_id: reclaimInput }), { now: () => now });
+  assert.equal(reclaimed.status, 200, await reclaimed.clone().text());
+  assert.equal(reclaimedCalls, 1, "the expired reservation reached exactly one new model call");
+
+  const heldDb = routeDb();
+  const heldBody = { image_base64: "ambiguous-in-flight", page: 1, prompt: "transcribe" };
+  const heldInput = await sha256Hex(canonicalOcrInput({
+    image: heldBody.image_base64,
+    model: LLAMA,
+    prompt: heldBody.prompt,
+  }));
+  heldDb.sqlite.prepare(
+    `INSERT INTO ocr_page_requests
+       (request_id,input_sha256,status,owner_token,started_at,model_started_at,expires_at)
+     VALUES (?1,?2,'in_flight',?3,?4,?4,?5)`,
+  ).run(heldInput, heldInput, "ambiguous-owner-token".padEnd(32, "x"), "2026-09-17T11:00:00.000Z", expiredAt);
+  let ambiguousCalls = 0;
+  const heldResponse = await handleOcr({
+    ADMIN_KEY,
+    OCR_ENABLED: "1",
+    DB: heldDb,
+    AI: { run: async () => { ambiguousCalls++; return { response: "must not run", usage: {} }; } },
+  }, ocrRequest({ ...heldBody, request_id: heldInput }), { now: () => now });
+  const heldResponseBody = await heldResponse.json();
+  assert.equal(heldResponse.status, 503, "expired ambiguous work must not remain a 425 forever");
+  assert.equal(heldResponseBody.ocr_idempotency_unavailable, true);
+  assert.equal(heldResponseBody.ocr_request_held, true);
+  assert.equal(ambiguousCalls, 0, "ambiguous prior billing never authorizes a second model call");
 });

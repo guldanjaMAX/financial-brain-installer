@@ -614,7 +614,7 @@ function manifestFor(binding, provider, finalState) {
     safety: {
       credential_scanner: { enabled: true, gate_version: 5, mode: "refuse" },
       daily_llm_spend_cap_usd: 10,
-      ocr: { enabled: false, model: "@cf/google/gemma-4-26b-a4b-it" },
+      ocr: { enabled: false, model: "@cf/meta/llama-4-scout-17b-16e-instruct" },
     },
     operations: source
       ? { admin_key_secret: campaignRole.adminKeyLocator }
@@ -778,7 +778,7 @@ function validateProvisionManifestArtifact(value, binding, finalState = null) {
   const expectedSafety = {
     credential_scanner: { enabled: true, gate_version: 5, mode: "refuse" },
     daily_llm_spend_cap_usd: 10,
-    ocr: { enabled: false, model: "@cf/google/gemma-4-26b-a4b-it" },
+    ocr: { enabled: false, model: "@cf/meta/llama-4-scout-17b-16e-instruct" },
   };
   const cloudflare = value?.infrastructure?.cloudflare;
   const operations = value?.operations;
