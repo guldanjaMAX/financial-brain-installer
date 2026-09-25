@@ -298,6 +298,7 @@ export async function ownerSystemStatus(env, deps) {
       expected,
       visible,
       pending: Number(vectors.pending || 0),
+      pending_is_capped: vectors.pending_is_capped === true,
       // The one number an owner actually asks for on install day.
       percent_visible: expected > 0 ? Math.floor((visible / expected) * 100) : null,
     };

@@ -3280,8 +3280,10 @@ export default {
           }
           const previewDocuments = Number(body?.preview_documents);
           const previewHighWater = Number(body?.preview_document_high_water);
+          const previewMutationGeneration = Number(body?.preview_corpus_mutation_generation);
           if (!Number.isSafeInteger(previewDocuments) || previewDocuments < 0 ||
-              !Number.isSafeInteger(previewHighWater) || previewHighWater < 0) {
+              !Number.isSafeInteger(previewHighWater) || previewHighWater < 0 ||
+              !Number.isSafeInteger(previewMutationGeneration) || previewMutationGeneration < 0) {
             return jsonResponse({
               error: "confirm the exact source preview before deleting",
               code: "source_forget_preview_required",
@@ -3289,19 +3291,32 @@ export default {
           }
           const current = await readExactSourceForgetPreview(env, source);
           if (current.documents !== previewDocuments ||
-              current.document_high_water !== previewHighWater) {
+              current.document_high_water !== previewHighWater ||
+              current.corpus_mutation_generation !== previewMutationGeneration) {
             return jsonResponse({
-              error: "new documents arrived since the preview; preview again",
+              error: "the source changed since the preview; preview again",
               code: "source_forget_preview_changed",
             }, 409);
           }
         }
-        const r = await forget(env, {
-          docUids,
-          source,
-          sourceHighWater: source ? Number(body.preview_document_high_water) : null,
-          dryRun: !confirm,
-        });
+        let r;
+        try {
+          r = await forget(env, {
+            docUids,
+            source,
+            sourceHighWater: source ? Number(body.preview_document_high_water) : null,
+            corpusMutationGeneration: source ? Number(body.preview_corpus_mutation_generation) : null,
+            dryRun: !confirm,
+          });
+        } catch (error) {
+          if (error?.code === "source_forget_preview_changed") {
+            return jsonResponse({
+              error: "the source changed since the preview; preview again",
+              code: "source_forget_preview_changed",
+            }, 409);
+          }
+          throw error;
+        }
         if (!source) return jsonResponse(r);
         const registry = await finalizeForgottenSource(env, source, r.documents);
         const { targets: _privateTargets, ...bounded } = r;

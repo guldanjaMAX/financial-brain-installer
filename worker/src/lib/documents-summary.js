@@ -32,7 +32,9 @@ const HOT_SUMMARY_SQL = `
 
 const SOURCE_DOCUMENT_COUNT_SQL = `
   SELECT COUNT(*) AS documents,
-         COALESCE(MAX(rowid), 0) AS document_high_water
+         COALESCE(MAX(rowid), 0) AS document_high_water,
+         COALESCE((SELECT outbox_generation FROM install_state WHERE id = 1), 0)
+           AS corpus_mutation_generation
     FROM documents
    WHERE source = ?1 AND deleted_at IS NULL`;
 
@@ -201,6 +203,10 @@ export async function readExactSourceForgetPreview(env, source) {
   return {
     documents: safeWhole(row?.documents, "source document count"),
     document_high_water: safeWhole(row?.document_high_water, "source document high water"),
+    corpus_mutation_generation: safeWhole(
+      row?.corpus_mutation_generation,
+      "corpus mutation generation",
+    ),
   };
 }
 

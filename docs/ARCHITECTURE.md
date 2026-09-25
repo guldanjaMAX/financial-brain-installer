@@ -915,8 +915,10 @@ inventory used by health, status, MCP health, meaning answers, and update
 readiness while retaining an on-demand exact count.
 Pending-vector counts are labeled approximate whenever the outbox is non-empty
 at either report fence, because confirmation deletes do not advance the enqueue
-generation. Destructive source removal binds confirmation to the dry-run count
-and source document-row high-water mark. It deletes only that previewed prefix,
+generation. Destructive source removal binds confirmation to the dry-run count,
+source document-row high-water mark, and durable corpus mutation generation.
+The same generation fences target enumeration, so a same-row reingest
+invalidates the preview before deletion. It deletes only that previewed prefix,
 refuses a changed preview, and reports the actual D1 delete receipts when an
 overlapping operation removed some enumerated rows first.
 

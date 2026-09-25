@@ -96,6 +96,7 @@ if (prior.body.families.length) {
       confirm: true,
       preview_documents: priorPreview.body.documents,
       preview_document_high_water: priorPreview.body.document_high_water,
+      preview_corpus_mutation_generation: priorPreview.body.corpus_mutation_generation,
     },
   });
   for (let attempt = 0; attempt < 8; attempt++) {
@@ -193,6 +194,7 @@ const removed = await request("/api/admin/brain/forget", {
     confirm: true,
     preview_documents: preview.body.documents,
     preview_document_high_water: preview.body.document_high_water,
+    preview_corpus_mutation_generation: preview.body.corpus_mutation_generation,
   },
 });
 assert.equal(removed.body.documents, 53);

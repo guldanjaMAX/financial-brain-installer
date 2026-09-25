@@ -163,8 +163,10 @@ the outbox is empty at both ends; while indexing, the report labels them
 approximate because a confirmed outbox row can be deleted between pages.
 Whole-source forget preview and completion use that operation's guarded
 receipts, never the informational documents rows. Confirmation carries the
-preview count and document-row high-water mark, and final removed counts come
-from the D1 delete receipts.
+preview count, document-row high-water mark, and durable corpus mutation
+generation, and final removed counts come from the D1 delete receipts. The
+generation also guards target enumeration, so an in-place reingest cannot keep
+the same count and rowid shape while authorizing deletion of the newer revision.
 
 The diagnostic exits successfully for a coherent `ready`,
 `recoverable_queued_work`, or `queued_work_present` observation because the

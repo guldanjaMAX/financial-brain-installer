@@ -369,7 +369,7 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
 
   const sourcePreview = {
     dry_run: true, documents: 1, document_count_exact: true, chunks: null, vectors: null,
-    document_high_water: 7,
+    document_high_water: 7, corpus_mutation_generation: 11,
     source: "drive", would_unregister_source: true,
     source_unregistered: false, registry_event_recorded: false,
   };
@@ -378,6 +378,7 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   for (const [label, preview] of [
     ["inexact document count", { ...sourcePreview, document_count_exact: false }],
     ["missing document high water", { ...sourcePreview, document_high_water: undefined }],
+    ["missing corpus mutation generation", { ...sourcePreview, corpus_mutation_generation: undefined }],
     ["enumerated target detail", { ...sourcePreview, targets: ["drive:one"] }],
     ["missing registry capability", { ...sourcePreview, would_unregister_source: undefined }],
     ["already-mutated preview", { ...sourcePreview, source_unregistered: true }],
@@ -432,7 +433,8 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   check("brain forget uses its exact same-operation preview and final receipt instead of the hot summary",
     start >= 0 && end > start && !/liveSourceCounts\s*\(/.test(boundary) &&
       /previewSourceForget/.test(boundary) && /sourceUnregistered/.test(boundary) &&
-      /preview_documents/.test(source) && /preview_document_high_water/.test(source),
+      /preview_documents/.test(source) && /preview_document_high_water/.test(source) &&
+      /preview_corpus_mutation_generation/.test(source),
     boundary.slice(0, 1200));
 }
 

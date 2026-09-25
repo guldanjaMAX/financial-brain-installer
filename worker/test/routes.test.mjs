@@ -4011,11 +4011,17 @@ function mkForgetEnv({
   registryProof = true,
   documentIds = ["meeting:1", "meeting:2"],
   overlapDeletes = false,
+  driftAfterPreviewRecheck = false,
 } = {}) {
   const sql = [];
   const queries = [];
   const deleted = [];
-  const state = { registered, eventRecorded: false };
+  const state = {
+    registered,
+    eventRecorded: false,
+    corpusMutationGeneration: 41,
+    previewReads: 0,
+  };
   const env = {
     STORAGE: "d1", ADMIN_KEY: "k",
     VECTORIZE: {
@@ -4031,8 +4037,14 @@ function mkForgetEnv({
             _sql: q,
             _args: b,
             all: async () => ({
-              results: /FROM documents[\s\S]*WHERE source/.test(q)
-                ? documentIds.map((doc_uid) => ({ doc_uid }))
+              results: /WITH fence AS/.test(q)
+                ? Number(b[2]) === state.corpusMutationGeneration
+                  ? (documentIds.length
+                    ? documentIds.map((doc_uid) => ({ doc_uid, mutation_fence_matches: 1 }))
+                    : [{ doc_uid: null, mutation_fence_matches: 1 }])
+                  : [{ doc_uid: null, mutation_fence_matches: 0 }]
+                : /FROM documents[\s\S]*WHERE source/.test(q)
+                  ? documentIds.map((doc_uid) => ({ doc_uid }))
                 : /FROM chunks WHERE doc_uid/.test(q)
                   ? b.flatMap((docUid) => docUid === "meeting:1"
                     ? [{ chunk_uid: "meeting:1#0" }, { chunk_uid: "meeting:1#1" }]
@@ -4048,7 +4060,16 @@ function mkForgetEnv({
                 return { name: b[0] };
               }
               if (/COUNT\(\*\) AS documents[\s\S]*FROM documents[\s\S]*deleted_at IS NULL/.test(q)) {
-                return { documents: documentIds.length, document_high_water: documentIds.length };
+                state.previewReads++;
+                const corpusMutationGeneration = state.corpusMutationGeneration;
+                if (driftAfterPreviewRecheck && state.previewReads === 2) {
+                  state.corpusMutationGeneration++;
+                }
+                return {
+                  documents: documentIds.length,
+                  document_high_water: documentIds.length,
+                  corpus_mutation_generation: corpusMutationGeneration,
+                };
               }
               return null;
             },
@@ -4092,6 +4113,7 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     confirm: true,
     preview_documents: preview.documents,
     preview_document_high_water: preview.document_high_water,
+    preview_corpus_mutation_generation: preview.corpus_mutation_generation,
   });
 }
 
@@ -4106,12 +4128,30 @@ async function postConfirmedSourceForget(env, source = "meeting") {
   check("and uses one exact indexed source count without enumerating the corpus",
     b.documents === 2 && b.document_count_exact === true && b.chunks === null &&
       b.document_high_water === 2 &&
+      b.corpus_mutation_generation === 41 &&
       !Object.hasOwn(b, "targets") &&
       queries.some((q) => /COUNT\(\*\) AS documents[\s\S]*source\s*=\s*\?1[\s\S]*deleted_at IS NULL/.test(q)) &&
       !queries.some((q) => /SELECT doc_uid FROM documents WHERE source/.test(q)),
     JSON.stringify({ body: b, queries }));
   check("without deleting any vectors", deleted.length === 0);
   check("or touching the database", !sql.some((q) => /BATCH/.test(q)), JSON.stringify(sql));
+}
+{
+  const { env, sql, queries, state } = mkForgetEnv({ driftAfterPreviewRecheck: true });
+  const preview = await (await post(env, "/api/admin/brain/forget", { source: "meeting" })).json();
+  const response = await post(env, "/api/admin/brain/forget", {
+    source: "meeting",
+    confirm: true,
+    preview_documents: preview.documents,
+    preview_document_high_water: preview.document_high_water,
+    preview_corpus_mutation_generation: preview.corpus_mutation_generation,
+  });
+  const body = await response.json();
+  check("source forget fences drift between the route recheck and target enumeration",
+    response.status === 409 && body.code === "source_forget_preview_changed" &&
+      state.previewReads === 2 && queries.some((query) => /WITH fence AS/.test(query)) &&
+      !sql.some((query) => /BATCH/.test(query)),
+    JSON.stringify({ status: response.status, body, state, queries, sql }));
 }
 {
   const { env, sql, documentIds } = mkForgetEnv();
@@ -4122,12 +4162,31 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     confirm: true,
     preview_documents: preview.documents,
     preview_document_high_water: preview.document_high_water,
+    preview_corpus_mutation_generation: preview.corpus_mutation_generation,
   });
   const body = await response.json();
   check("source forget refuses when new documents arrived after the preview",
-    response.status === 409 && /new documents arrived since the preview; preview again/i.test(body.error || "") &&
+    response.status === 409 && /source changed since the preview; preview again/i.test(body.error || "") &&
       !sql.some((q) => /BATCH/.test(q)),
     JSON.stringify({ status: response.status, body, sql }));
+}
+{
+  const { env, sql, state } = mkForgetEnv();
+  const preview = await (await post(env, "/api/admin/brain/forget", { source: "meeting" })).json();
+  state.corpusMutationGeneration++;
+  const response = await post(env, "/api/admin/brain/forget", {
+    source: "meeting",
+    confirm: true,
+    preview_documents: preview.documents,
+    preview_document_high_water: preview.document_high_water,
+    preview_corpus_mutation_generation: preview.corpus_mutation_generation,
+  });
+  const body = await response.json();
+  check("source forget refuses a same-row reingest that leaves count and row high-water unchanged",
+    response.status === 409 && body.code === "source_forget_preview_changed" &&
+      /preview again/i.test(body.error || "") && state.previewReads === 2 &&
+      !sql.some((q) => /BATCH/.test(q)),
+    JSON.stringify({ status: response.status, body, state, sql }));
 }
 {
   const { env } = mkForgetEnv({ overlapDeletes: true });
@@ -4136,6 +4195,7 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     confirm: true,
     preview_documents: 2,
     preview_document_high_water: 2,
+    preview_corpus_mutation_generation: 41,
   });
   const body = await response.json();
   check("an overlapping forget reports only rows deleted by this operation",

@@ -1,12 +1,17 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { FinanceScopeProvider } from "./FinanceScope";
-import { AttentionList, FirstFinancialEntityPrompt, Glance, Home, needsFirstFinancialEntity, SourceChip } from "./Home";
+import { AttentionList, FirstFinancialEntityPrompt, Glance, Home, needsFirstFinancialEntity, pendingCountLabel, SourceChip } from "./Home";
 import { CashSection } from "./ThisYear";
 import { UnsortedReview } from "./AddReview";
 import type { FinSnapshot } from "../lib/api";
 
 describe("home composition", () => {
+  it("renders a capped vector queue as a lower bound rather than an exact count", () => {
+    expect(pendingCountLabel(10_001, true)).toBe("10,000+");
+    expect(pendingCountLabel(105, false)).toBe("105");
+  });
+
   it("mounts durable change history before financial reads resolve", () => {
     const html = renderToStaticMarkup(
       <FinanceScopeProvider><Home /></FinanceScopeProvider>,

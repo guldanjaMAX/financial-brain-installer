@@ -6964,17 +6964,41 @@ export async function forget(env, {
   docUids = [],
   source = null,
   sourceHighWater = null,
+  corpusMutationGeneration = null,
   dryRun = true,
 } = {}) {
   let targets = docUids;
   if (source) {
     const boundedSource = Number.isSafeInteger(sourceHighWater) && sourceHighWater >= 0;
+    const fencedSource = Number.isSafeInteger(corpusMutationGeneration) && corpusMutationGeneration >= 0;
     const { results } = await env.DB.prepare(
-      `SELECT doc_uid FROM documents
-        WHERE source = ?1 AND deleted_at IS NULL
-          ${boundedSource ? "AND rowid <= ?2" : ""}`,
-    ).bind(...(boundedSource ? [source, sourceHighWater] : [source])).all();
-    targets = [...new Set([...targets, ...(results || []).map((r) => r.doc_uid)])];
+      fencedSource
+        ? `WITH fence AS (
+             SELECT outbox_generation = ?3 AS matches
+               FROM install_state WHERE id = 1
+           )
+           SELECT documents.doc_uid, fence.matches AS mutation_fence_matches
+             FROM fence
+             LEFT JOIN documents
+               ON fence.matches = 1
+              AND documents.source = ?1
+              AND documents.deleted_at IS NULL
+              ${boundedSource ? "AND documents.rowid <= ?2" : ""}`
+        : `SELECT doc_uid FROM documents
+            WHERE source = ?1 AND deleted_at IS NULL
+              ${boundedSource ? "AND rowid <= ?2" : ""}`,
+    ).bind(...(fencedSource
+      ? [source, boundedSource ? sourceHighWater : null, corpusMutationGeneration]
+      : boundedSource ? [source, sourceHighWater] : [source])).all();
+    if (fencedSource && (!(results || []).length || Number(results[0]?.mutation_fence_matches) !== 1)) {
+      const error = new Error("the source changed since the preview; preview again");
+      error.code = "source_forget_preview_changed";
+      throw error;
+    }
+    targets = [...new Set([
+      ...targets,
+      ...(results || []).map((row) => row.doc_uid).filter((docUid) => typeof docUid === "string" && docUid),
+    ])];
   }
   if (!targets.length) return {
     documents: 0,

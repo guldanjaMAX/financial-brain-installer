@@ -10284,6 +10284,7 @@ const requestWorkerSourceForget = (base, adminKey, name, confirm, preview = null
       ...(confirm ? {
         preview_documents: preview?.documents,
         preview_document_high_water: preview?.document_high_water,
+        preview_corpus_mutation_generation: preview?.corpus_mutation_generation,
       } : {}),
     }),
   });
@@ -11685,6 +11686,10 @@ export function validateSourceForgetPreview(body, source) {
   if (!Number.isSafeInteger(Number(body.document_high_water)) ||
       Number(body.document_high_water) < 0) {
     throw new Error("the source forget preview has no document high water");
+  }
+  if (!Number.isSafeInteger(Number(body.corpus_mutation_generation)) ||
+      Number(body.corpus_mutation_generation) < 0) {
+    throw new Error("the source forget preview has no corpus mutation generation");
   }
   if (body.chunks !== null || body.vectors !== null || Object.hasOwn(body, "targets")) {
     throw new Error("the source forget preview enumerated corpus-sized detail");
