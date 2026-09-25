@@ -3354,13 +3354,15 @@ export async function cmdHealth(manifestPath, {
         const pausedForUpgrade = vectorDrainMode === "paused-for-upgrade";
         const backlog = inventory.vector_backlog;
         const readiness = inventory.vector_readiness;
+        let legacyExactBacklog = false;
         try {
           const projection = await updatePreviewLib();
-          projection.validateVectorProjectionAggregateReceipt(inventory, {
+          const aggregate = projection.validateVectorProjectionAggregateReceipt(inventory, {
             expectedVersion: boundVersion,
             expectedBackend,
             expectedDrainMode: boundDrainMode,
           });
+          legacyExactBacklog = aggregate.queue.count_receipt === projection.LEGACY_EXACT_COUNT_RECEIPT;
         } catch (error) {
           if (error?.code === "UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID") {
             die(
@@ -3388,7 +3390,11 @@ export async function cmdHealth(manifestPath, {
         if (backlog.pending > 0) {
           const pendingLabel = backlog.pending_is_capped === true
             ? "over 10,000 pieces"
-            : `${backlog.pending} vector operation(s)`;
+            : `${backlog.pending.toLocaleString("en-US")} vector operation(s)`;
+          // An older Worker has no capped summary; say why its count is exact.
+          const legacyExactNote = legacyExactBacklog
+            ? "\n      This Brain runs an older Worker, so this is its exact count, not a capped estimate."
+            : "";
           const componentDetail = backlog.component_counts_exact !== false
             ? ` (${backlog.upserts} upsert, ${backlog.deletes} delete, ${backlog.submitted} accepted)`
             : "";
@@ -3407,14 +3413,16 @@ export async function cmdHealth(manifestPath, {
                 "      Do not start `brain update` merely to accelerate a healthy active-mode queue;" + "\n" +
                 "      an update is a version migration that pauses corpus writes." + "\n" +
                 "      Only if repeated checks show no count movement should you inspect the Worker" + "\n" +
-                "      schedule in the Cloudflare dashboard and report the unchanged receipts."
+                "      schedule in the Cloudflare dashboard and report the unchanged receipts." +
+                legacyExactNote
             );
           }
           die(
             `${pendingLabel} are not query-visible yet` +
               `${backlog.component_counts_exact !== false ? ` (${backlog.submitted} accepted by Vectorize)` : ""}, oldest queued ${oldest} min ago.` + "\n" +
               "      Provider acceptance is not completion. This resolves on its own, usually" + "\n" +
-              "      within a couple of minutes; re-run `brain health` rather than forcing it."
+              "      within a couple of minutes; re-run `brain health` rather than forcing it." +
+              legacyExactNote
           );
         }
         if (!readiness.ready || readiness.actual_vectors !== readiness.expected_vectors) {
