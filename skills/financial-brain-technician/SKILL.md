@@ -812,27 +812,7 @@ must stop before resource creation.
   bank page to add any missing person or business and assign each whole account.
   Ask only about unresolved account ownership; do not request bank credentials
   or statements in chat. A configured developer account or passing local test
-  does not establish a working deployed connection. Follow the gate's
-  owner-present journey in order:
-  - When the feed is enabled, `brain connect bank <manifest>` runs BEFORE
-    `brain setup` or `brain secrets`. Only it writes the Plaid keys.
-  - The owner types both keys at its hidden prompt, and the command checks them
-    with Plaid before saving. If a key was wrong, the owner reruns it with
-    `--replace-keys`. Never ask for, paste, or relay a Plaid key yourself.
-  - Plaid's phone-verification pane takes `123456` in sandbox, and no text
-    arrives. In production a real code goes to the owner's phone, and only the
-    owner enters it.
-  - Plaid can re-share a connection saved for the phone number entered in Link
-    instead of the bank the owner picked. Have the owner choose "Add new
-    account" or the specific bank, and check the connection's institution label
-    before assigning accounts. If it is wrong, disconnect it at Access > Banks >
-    Disconnect and connect again. In sandbox, use a fresh test phone number
-    (415-555-0011, or 415-555-0131 through 415-555-0138) with code `123456`.
-  - Setting `corpora.bank_feed.enabled` to `false` and then running
-    `brain secrets` or `brain setup` DELETES the Plaid client ID and secret
-    from the Worker. Re-enabling needs `brain connect bank` again.
-  - Disconnect is in the owner app at Access > Banks > Disconnect. It is not
-    on the connect page.
+  does not establish a working deployed connection.
 - A partial, unavailable, stale, refused, or interrupted source is not
   complete. A healthy empty result and an unavailable result must remain visibly
   different.

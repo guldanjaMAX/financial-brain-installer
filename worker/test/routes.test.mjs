@@ -68,6 +68,9 @@ function mkEnv(rows, {
             return { results: rows };
           },
           first: async () => {
+            if (/^SELECT schema_version FROM install_state WHERE id=1$/.test(sql)) {
+              return { schema_version: 46 };
+            }
             if (/ON CONFLICT\(name\) DO NOTHING[\s\S]*RETURNING name, lower\(trim\(kind\)\) AS kind/.test(sql)) {
               const existing = sourceRows.find((row) => row.name === bound[0]);
               return existing ? null : { name: bound[0], kind: bound[1] };
@@ -2322,6 +2325,9 @@ function mkSourceFamilyEnv(documents, extra = {}) {
     DB: {
       prepare(sql) {
         seen.sql.push(sql);
+        if (/^SELECT schema_version FROM install_state WHERE id=1$/.test(String(sql))) {
+          return { async first() { return { schema_version: 46 }; } };
+        }
         return {
           bind(...binds) {
             seen.binds.push(binds);
@@ -2439,6 +2445,9 @@ const labelProjectionParityRows = [
     ADMIN_KEY: "k",
     DB: {
       prepare(sql) {
+        if (/^SELECT schema_version FROM install_state WHERE id=1$/.test(String(sql))) {
+          return { async first() { return { schema_version: 46 }; } };
+        }
         const statement = database.prepare(sql);
         let bindings = [];
         return {
@@ -2449,6 +2458,9 @@ const labelProjectionParityRows = [
           },
           async all() {
             return { results: statement.all(...bindings) };
+          },
+          async first() {
+            return statement.get(...bindings) ?? null;
           },
         };
       },
@@ -3109,6 +3121,20 @@ const labelProjectionParityRows = [
     failed.status === 500 && /no-store/.test(failed.headers.get("cache-control") || ""),
     `${failed.status} ${failed.headers.get("cache-control") || "missing"}`);
 
+  const resetCanary = "private-looking-worker-reset-canary";
+  const reset = await call(mkSourceFamilyEnv([], {
+    DB: { prepare() { throw new Error(
+      `D1_ERROR: D1 DB exceeded its CPU time limit and was reset. ${resetCanary}`,
+    ); } },
+  }).env, "/api/admin/brain/source-families?source=drive");
+  const resetBody = await reset.json();
+  check("source-family reset is fixed, retryable, content-free, and private",
+    reset.status === 503 && resetBody.code === "d1_cpu_reset" &&
+      resetBody.error === "temporarily unavailable" &&
+      !JSON.stringify(resetBody).includes(resetCanary) &&
+      /no-store/.test(reset.headers.get("cache-control") || ""),
+    JSON.stringify(resetBody));
+
   const max = await call(env, "/api/admin/brain/source-families?source=drive&limit=1000");
   check("the documented 1000-family page limit is accepted with one lookahead row",
     max.status === 200 && seen.binds.at(-1)?.[2] === 1001, JSON.stringify(seen.binds.at(-1)));
@@ -3157,6 +3183,50 @@ const labelProjectionParityRows = [
   check("private aggregate inventory failures cannot be cached",
     failedDocuments.status === 500 && /no-store/.test(failedDocuments.headers.get("cache-control") || ""),
     `${failedDocuments.status} ${failedDocuments.headers.get("cache-control") || "missing"}`);
+
+  const resetCanary = "private-looking-documents-reset-canary";
+  const resetDocuments = await call({
+    STORAGE: "d1", ADMIN_KEY: "k",
+    DB: { prepare() { throw new Error(
+      `D1_ERROR: D1 DB exceeded its CPU time limit and was reset. ${resetCanary}`,
+    ); } },
+  }, "/api/admin/brain/documents");
+  const resetDocumentsBody = await resetDocuments.json();
+  check("documents reset is fixed, retryable, content-free, and private",
+    resetDocuments.status === 503 && resetDocumentsBody.code === "d1_cpu_reset" &&
+      resetDocumentsBody.error === "temporarily unavailable" &&
+      !JSON.stringify(resetDocumentsBody).includes(resetCanary) &&
+      /no-store/.test(resetDocuments.headers.get("cache-control") || ""),
+    JSON.stringify(resetDocumentsBody));
+}
+
+{
+  const resetCanary = "private-looking-forget-reset-canary";
+  const resetForget = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/forget",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        families: [{ base_doc_uid: "fixture:family", keep_doc_uids: [] }],
+        confirm: true,
+      }),
+    },
+  ), {
+    STORAGE: "d1",
+    ADMIN_KEY: "k",
+    DB: { prepare() { throw new Error(
+      `D1_ERROR: D1 DB exceeded its CPU time limit and was reset. ${resetCanary}`,
+    ); } },
+  }, {});
+  const resetForgetBody = await resetForget.json();
+  check("family-forget reset is fixed, ambiguous, and content-free",
+    resetForget.status === 503 && resetForgetBody.code === "d1_cpu_reset_ambiguous" &&
+      resetForgetBody.ambiguous === true &&
+      resetForgetBody.error === "mutation outcome ambiguous" &&
+      !JSON.stringify(resetForgetBody).includes(resetCanary) &&
+      !("retryable" in resetForgetBody),
+    JSON.stringify(resetForgetBody));
 }
 
 {
@@ -3959,6 +4029,9 @@ function mkForgetEnv({
     AI: { run: async () => ({ data: [[0.1]] }) },
     DB: {
       prepare(q) {
+        if (/^SELECT schema_version FROM install_state WHERE id=1$/.test(String(q))) {
+          return { async first() { return { schema_version: 46 }; } };
+        }
         return {
           bind: (...b) => ({
             _sql: q,
@@ -4181,6 +4254,10 @@ function mkForgetEnv({
         const statement = {
           bind: () => statement,
           all: async () => { readOnlyD1Calls++; return { results: [] }; },
+          first: async () => {
+            readOnlyD1Calls++;
+            return { schema_version: 46 };
+          },
         };
         return statement;
       },
@@ -4190,7 +4267,7 @@ function mkForgetEnv({
     source: "drive",
   });
   check("paused mode keeps authenticated read-only source-family inventory available",
-    sourceFamilies.status === 200 && readOnlyD1Calls === 1,
+    sourceFamilies.status === 200 && readOnlyD1Calls === 2,
     `${sourceFamilies.status}/${readOnlyD1Calls}`);
 
   let scheduledPromise = null;
@@ -4227,6 +4304,9 @@ function mkForgetEnv({
             return { meta: { changes: 1 } };
           },
           first: async () => {
+            if (/^SELECT schema_version FROM install_state WHERE id=1$/.test(sql)) {
+              return { schema_version: 13 };
+            }
             if (/SELECT schema_version, vector_projection_status AS status/.test(sql)) {
               return {
                 schema_version: 13,
@@ -4303,6 +4383,9 @@ function mkForgetEnv({
             throw new Error(`unexpected busy bootstrap write: ${sql}`);
           },
           first: async () => {
+            if (/^SELECT schema_version FROM install_state WHERE id=1$/.test(sql)) {
+              return { schema_version: 13 };
+            }
             if (/SELECT schema_version, vector_projection_status AS status/.test(sql)) {
               return {
                 schema_version: 13,

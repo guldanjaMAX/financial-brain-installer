@@ -257,22 +257,4 @@ describe("passkey ceremony context", () => {
     expect(rehearsalConfigured).not.toContain("/app/connect/bank");
     expect(rehearsalConfigured).not.toContain("Repair connection");
   });
-
-  it("shows a connection waiting on account owner choices as one plain sentence", () => {
-    const detail = "2 accounts need an owner choice before their transactions can load. Choose who owns each account on the Connect a bank page.";
-    const waiting = renderToStaticMarkup(
-      <BankConnectionsSection
-        readState="ready"
-        banks={{
-          configured: true,
-          connections: [{ item_ref: "synthetic-bank", institution_label: "Example Bank", status: "connected", status_detail: detail }],
-          needs_attention: [{ item_ref: "synthetic-bank", institution_label: "Example Bank", status: "connected" }],
-        }}
-        busy={false}
-        onDisconnect={() => undefined}
-      />,
-    );
-    expect(waiting).toContain(`${detail} Answers about money`);
-    expect(waiting).not.toContain("page..");
-  });
 });

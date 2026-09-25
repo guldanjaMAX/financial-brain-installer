@@ -174,12 +174,22 @@ const VECTOR_TOPK_MAX = 100;
 export const D1_QUERY_BIND_LIMIT = 100;
 export const SOURCE_FAMILY_UID_FILTER_MAX = D1_QUERY_BIND_LIMIT - 3;
 export const SOURCE_FAMILY_CURSOR_MAX_BYTES = 16 * 1024;
+export const FAMILY_FORGET_MEMBER_PAGE_SIZE = 1000;
+export const FAMILY_FORGET_MAX_MEMBER_PAGES = 100;
 
 export class UnpageableSourceFamilyIdentityError extends Error {
   constructor() {
     super("source-family inventory cannot emit a resumable page boundary");
     this.name = "UnpageableSourceFamilyIdentityError";
     this.code = "unpageable_family_identity";
+  }
+}
+
+export class FamilyForgetInventoryTruncatedError extends Error {
+  constructor() {
+    super("family forget preview exceeded the safe bounded inventory limit");
+    this.name = "FamilyForgetInventoryTruncatedError";
+    this.code = "family_forget_inventory_truncated";
   }
 }
 // Keep one transaction reviewable and bounded independently of the documented
@@ -1567,8 +1577,9 @@ export const DRAIN_LEASE_TTL_MS = 20 * 60 * 1000;
 export const DRAIN_D1_QUERY_BUDGET = 900;
 const DRAIN_LEASE_ACQUIRE_QUERIES = 1;
 const DRAIN_LEASE_RELEASE_QUERIES = 1;
-// Fence read plus either exact-cut update, or probe renewal and receipt write.
-const DRAIN_PROJECTION_VERIFY_QUERIES = 3;
+// Schema-version read, fence read, then either exact-cut update or probe
+// renewal and receipt write.
+const DRAIN_PROJECTION_VERIFY_QUERIES = 4;
 const DRAIN_INITIAL_DEPTH_QUERIES = 1;
 const DRAIN_RETRY_STATE_QUERIES = 2;
 const DRAIN_BATCH_SIZE_MAX = 100;
@@ -2004,6 +2015,10 @@ async function markProjectionVerifiedIfExact(env, lease) {
     // Probe acceptance never certifies the provider's current projection.
     return false;
   }
+  const bounded = await boundedCorpusHotPathsActive(env);
+  const exactCount = bounded
+    ? "(SELECT chunks FROM corpus_runtime_totals WHERE id=1)"
+    : "(SELECT count(*) FROM chunks)";
   const result = await env.DB.prepare(
     `UPDATE install_state
         SET vector_projection_status = 'verified'
@@ -2013,7 +2028,7 @@ async function markProjectionVerifiedIfExact(env, lease) {
              vector_projection_bootstrap_cursor = vector_projection_bootstrap_high_water)
         AND COALESCE(vector_projection_mutation_id, '') = ?1
         AND NOT EXISTS (SELECT 1 FROM vector_outbox)
-        AND (SELECT count(*) FROM chunks) = ?2`
+        AND ${exactCount} = ?2`
   ).bind(fence.mutationId || "", vectorCount).run();
   return drainLeaseChanges(result) === 1;
 }
@@ -6638,9 +6653,13 @@ export async function reindex(env, { source = null, dryRun = true, bootstrap = f
   }
 
   await env.DB.prepare(
-    `INSERT OR REPLACE INTO vector_outbox (chunk_uid, vector_id, op, queued_at, attempts, last_error)
+    `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at, attempts, last_error)
      SELECT c.chunk_uid, COALESCE(c.vector_id, c.chunk_uid), 'upsert', ?${source ? "2" : "1"}, 0, NULL
-     FROM chunks c JOIN documents d ON d.doc_uid = c.doc_uid ${where}`
+     FROM chunks c JOIN documents d ON d.doc_uid = c.doc_uid ${where}
+     ON CONFLICT(chunk_uid) DO UPDATE SET
+       vector_id=excluded.vector_id,op='upsert',queued_at=excluded.queued_at,
+       attempts=0,last_error=NULL,submitted_mutation_id=NULL,submitted_at=NULL,
+       bootstrap_epoch=NULL,bootstrap_batch=NULL`
   ).bind(...bind, Date.now()).run();
 
   const afterRow = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
@@ -6650,8 +6669,13 @@ export async function reindex(env, { source = null, dryRun = true, bootstrap = f
 }
 
 export async function outboxDepth(env) {
+  const bounded = await boundedCorpusHotPathsActive(env);
   const row = await env.DB.prepare(
-    `SELECT count(*) AS n, min(queued_at) AS oldest,
+    bounded
+      ? `SELECT pending AS n,upserts,deletes,submitted,
+                (SELECT queued_at FROM vector_outbox ORDER BY queued_at LIMIT 1) AS oldest
+           FROM vector_outbox_runtime_totals WHERE id=1`
+      : `SELECT count(*) AS n, min(queued_at) AS oldest,
             sum(CASE WHEN op = 'upsert' THEN 1 ELSE 0 END) AS upserts,
             sum(CASE WHEN op = 'delete' THEN 1 ELSE 0 END) AS deletes,
             sum(CASE WHEN submitted_mutation_id IS NOT NULL THEN 1 ELSE 0 END) AS submitted
@@ -6687,6 +6711,16 @@ export async function vectorReadiness(env) {
     throw new Error("the vector index returned an invalid vector count");
   }
 
+  const bounded = await boundedCorpusHotPathsActive(env);
+  const expectedVectors = bounded
+    ? "(SELECT chunks FROM corpus_runtime_totals WHERE id=1)"
+    : "(SELECT count(*) FROM chunks)";
+  const pendingVectors = bounded
+    ? "(SELECT pending FROM vector_outbox_runtime_totals WHERE id=1)"
+    : "(SELECT count(*) FROM vector_outbox)";
+  const submittedVectors = bounded
+    ? "(SELECT submitted FROM vector_outbox_runtime_totals WHERE id=1)"
+    : "(SELECT count(*) FROM vector_outbox WHERE submitted_mutation_id IS NOT NULL)";
   const state = await env.DB.prepare(
     `SELECT schema_version,
             outbox_generation,
@@ -6696,10 +6730,9 @@ export async function vectorReadiness(env) {
             vector_projection_bootstrap_epoch AS bootstrap_epoch,
             vector_projection_bootstrap_cursor AS bootstrap_cursor,
             vector_projection_bootstrap_high_water AS bootstrap_high_water,
-            (SELECT count(*) FROM chunks) AS expected_vectors,
-            (SELECT count(*) FROM vector_outbox) AS pending,
-            (SELECT count(*) FROM vector_outbox
-              WHERE submitted_mutation_id IS NOT NULL) AS submitted,
+            ${expectedVectors} AS expected_vectors,
+            ${pendingVectors} AS pending,
+            ${submittedVectors} AS submitted,
             (SELECT min(queued_at) FROM vector_outbox) AS oldest_queued_at
        FROM install_state WHERE id = 1`
   ).first();
@@ -6811,6 +6844,7 @@ export async function vectorReadiness(env) {
  * the space.
  */
 export async function forget(env, { docUids = [], source = null, dryRun = true } = {}) {
+  const bounded = await boundedCorpusHotPathsActive(env);
   let targets = docUids;
   if (source) {
     const { results } = await env.DB.prepare("SELECT doc_uid FROM documents WHERE source = ?1").bind(source).all();
@@ -6867,7 +6901,7 @@ export async function forget(env, { docUids = [], source = null, dryRun = true }
       ).bind(...group, queuedAt),
       env.DB.prepare(`DELETE FROM chunks WHERE doc_uid IN (${marks})`).bind(...group),
       env.DB.prepare(`DELETE FROM documents WHERE doc_uid IN (${marks})`).bind(...group),
-      ...groupSources.map((src) => env.DB.prepare(
+      ...(bounded ? [] : groupSources.map((src) => env.DB.prepare(
         `INSERT INTO corpus_stats (source, documents, chunks, last_ingest_at)
          SELECT ?1, COUNT(DISTINCT documents.doc_uid), COUNT(chunks.chunk_uid),
                 (SELECT last_ingest_at FROM corpus_stats WHERE source=?1)
@@ -6876,7 +6910,7 @@ export async function forget(env, { docUids = [], source = null, dryRun = true }
           WHERE documents.source=?1 AND documents.deleted_at IS NULL
          ON CONFLICT(source) DO UPDATE SET
            documents=excluded.documents, chunks=excluded.chunks`
-      ).bind(src)),
+      ).bind(src))),
     ]);
   }
 
@@ -6895,33 +6929,63 @@ export async function forget(env, { docUids = [], source = null, dryRun = true }
   };
 }
 
+const PRE_SCHEMA_INSTALL_STATE_ERRORS = new Set([
+  "no such table: install_state",
+  "D1_ERROR: no such table: install_state",
+  "D1_ERROR: no such table: install_state: SQLITE_ERROR",
+]);
+
+export async function boundedCorpusHotPathsActive(env) {
+  try {
+    const row = await env.DB.prepare(
+      "SELECT schema_version FROM install_state WHERE id=1"
+    ).first();
+    const version = row?.schema_version;
+    if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 0) {
+      throw new Error("install-state schema version receipt is malformed");
+    }
+    return version >= 47;
+  } catch (error) {
+    // A schema-46 Worker can be served briefly during the paused upgrade
+    // cutover. Keep its established read shape until migration 0047 commits;
+    // never query a projection table that does not exist yet. Only the exact
+    // pre-schema missing-table result can establish that condition. A reset,
+    // transport failure, or any other SQL error leaves the installed schema
+    // unknown and must stop the request before it performs more work.
+    const message = typeof error?.message === "string" ? error.message.trim() : "";
+    if (PRE_SCHEMA_INSTALL_STATE_ERRORS.has(message)) return false;
+    throw error;
+  }
+}
+
 /** Count live physical rows and logical families in one derived source namespace. */
 export async function sourceFamilyCounts(env, { source } = {}) {
   const normalizedSource = String(source || "");
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(normalizedSource)) {
     throw new TypeError("source family counts need a normalized source name");
   }
-  const row = await env.DB.prepare(
-    `SELECT COUNT(*) AS stored_documents,
+  const bounded = await boundedCorpusHotPathsActive(env);
+  const row = await env.DB.prepare(bounded
+    ? `SELECT stored_documents,logical_documents
+         FROM source_family_stats
+        WHERE family_source=?1`
+    : `SELECT COUNT(*) AS stored_documents,
             COUNT(DISTINCT family_doc_uid) AS logical_documents
        FROM (
          SELECT CASE
-           WHEN json_valid(meta)
-            AND json_type(meta,'$.family_of') = 'text'
+           WHEN json_valid(meta) AND json_type(meta,'$.family_of')='text'
             AND length(json_extract(meta,'$.family_of')) > 0
              THEN json_extract(meta,'$.family_of')
-           WHEN json_valid(meta)
-            AND json_type(meta,'$.part_of') = 'text'
+           WHEN json_valid(meta) AND json_type(meta,'$.part_of')='text'
             AND length(json_extract(meta,'$.part_of')) > 0
              THEN CASE
-               WHEN substr(json_extract(meta,'$.part_of'), 1, length(source) + 1) = source || ':'
+               WHEN substr(json_extract(meta,'$.part_of'),1,length(source)+1)=source||':'
                  THEN json_extract(meta,'$.part_of')
-               ELSE source || ':' || json_extract(meta,'$.part_of')
+               ELSE source||':'||json_extract(meta,'$.part_of')
              END
            ELSE doc_uid
          END AS family_doc_uid
-           FROM documents
-          WHERE deleted_at IS NULL
+           FROM documents WHERE deleted_at IS NULL
        )
       WHERE substr(family_doc_uid, 1, length(?1) + 1) = ?1 || ':'`
   ).bind(normalizedSource).first();
@@ -6974,100 +7038,97 @@ export async function listSourceFamilies(env, {
       `source-family uid filter needs 1 to ${SOURCE_FAMILY_UID_FILTER_MAX} identities`
     );
   }
+  const bounded = await boundedCorpusHotPathsActive(env);
   // With no source filter this query derives the complete source set from live
   // document rows themselves. `corpus_stats` is useful operational metadata,
   // but it is denormalized and therefore cannot be the discovery boundary for
   // a completeness proof. A missing stats row must not hide an indexed family.
-  const labelProjection = includeLabels
-    ? `,
+  const labelProjection = includeLabels && bounded
+    ? `,family_name,folder_path`
+    : includeLabels
+      ? `,
        MAX(CASE
          WHEN length(trim(title)) = 0 THEN NULL
          WHEN json_valid(meta)
           AND json_type(meta,'$.part') = 'integer'
           AND json_type(meta,'$.part_count') = 'integer'
-          AND substr(
-            trim(title),
-            -length(' (part ' || json_extract(meta,'$.part') || ' of ' || json_extract(meta,'$.part_count') || ')')
-          ) = ' (part ' || json_extract(meta,'$.part') || ' of ' || json_extract(meta,'$.part_count') || ')'
-           THEN substr(
-             trim(title),
-             1,
-             length(trim(title)) -
-               length(' (part ' || json_extract(meta,'$.part') || ' of ' || json_extract(meta,'$.part_count') || ')')
-           )
+          AND substr(trim(title),-length(' (part ' || json_extract(meta,'$.part') || ' of ' || json_extract(meta,'$.part_count') || ')'))
+              = ' (part ' || json_extract(meta,'$.part') || ' of ' || json_extract(meta,'$.part_count') || ')'
+           THEN substr(trim(title),1,length(trim(title))-length(' (part ' || json_extract(meta,'$.part') || ' of ' || json_extract(meta,'$.part_count') || ')'))
          ELSE trim(title)
        END) AS family_name,
-       MAX(CASE
-         WHEN json_valid(meta)
-          AND json_type(meta,'$.folder') = 'text'
-          AND length(trim(json_extract(meta,'$.folder'))) > 0
-           THEN trim(json_extract(meta,'$.folder'))
-         ELSE NULL
-       END) AS folder_path`
-    : "";
+       MAX(CASE WHEN json_valid(meta) AND json_type(meta,'$.folder')='text'
+                 AND length(trim(json_extract(meta,'$.folder'))) > 0
+           THEN trim(json_extract(meta,'$.folder')) ELSE NULL END) AS folder_path`
+      : "";
   const grouping = " GROUP BY family_doc_uid";
-  const uidFilter = Array.isArray(uids) && uids.length
+  const sourceUidFilter = Array.isArray(uids) && uids.length
+    ? ` AND family_uid IN (${uids.map((_, index) => `?${index + 4}`).join(", ")})`
+    : "";
+  const globalUidFilter = Array.isArray(uids) && uids.length
+    ? ` AND family_uid IN (${uids.map((_, index) => `?${index + 3}`).join(", ")})`
+    : "";
+  const legacySourceUidFilter = Array.isArray(uids) && uids.length
     ? ` AND family_doc_uid IN (${uids.map((_, index) => `?${index + 4}`).join(", ")})`
     : "";
-  const statement = source
-    ? env.DB.prepare(
-      `SELECT family_doc_uid${labelProjection}
-         FROM (
+  const legacyGlobalUidFilter = Array.isArray(uids) && uids.length
+    ? ` AND family_doc_uid IN (${uids.map((_, index) => `?${index + 3}`).join(", ")})`
+    : "";
+  const legacyProjection = `(
            SELECT CASE
-             WHEN json_valid(meta)
-              AND json_type(meta,'$.family_of') = 'text'
+             WHEN json_valid(meta) AND json_type(meta,'$.family_of')='text'
               AND length(json_extract(meta,'$.family_of')) > 0
                THEN json_extract(meta,'$.family_of')
-             WHEN json_valid(meta)
-              AND json_type(meta,'$.part_of') = 'text'
+             WHEN json_valid(meta) AND json_type(meta,'$.part_of')='text'
               AND length(json_extract(meta,'$.part_of')) > 0
                THEN CASE
-                 WHEN substr(json_extract(meta,'$.part_of'), 1, length(source) + 1) = source || ':'
+                 WHEN substr(json_extract(meta,'$.part_of'),1,length(source)+1)=source||':'
                    THEN json_extract(meta,'$.part_of')
-                 ELSE source || ':' || json_extract(meta,'$.part_of')
+                 ELSE source||':'||json_extract(meta,'$.part_of')
                END
              ELSE doc_uid
-           END AS family_doc_uid,
-           title,
-           meta
-             FROM documents
-            WHERE deleted_at IS NULL
-         )
-        WHERE substr(family_doc_uid, 1, length(?1) + 1) = ?1 || ':'
-          AND family_doc_uid > ?2
-          ${uidFilter}
-        ${grouping}
-        ORDER BY family_doc_uid ASC
+           END AS family_doc_uid,title,meta
+             FROM documents WHERE deleted_at IS NULL
+         )`;
+  const statement = bounded && source
+    ? env.DB.prepare(
+      `SELECT family_uid AS family_doc_uid${labelProjection}
+         FROM document_family_catalog
+        WHERE family_source = ?1
+          AND family_uid > ?2
+          ${sourceUidFilter}
+        ORDER BY family_uid ASC
         LIMIT ?3`
     ).bind(source, cursor, limit + 1, ...(uids || []))
-    : env.DB.prepare(
-      `SELECT family_doc_uid${labelProjection}
-         FROM (
-           SELECT CASE
-             WHEN json_valid(meta)
-              AND json_type(meta,'$.family_of') = 'text'
-              AND length(json_extract(meta,'$.family_of')) > 0
-               THEN json_extract(meta,'$.family_of')
-             WHEN json_valid(meta)
-              AND json_type(meta,'$.part_of') = 'text'
-              AND length(json_extract(meta,'$.part_of')) > 0
-               THEN CASE
-                 WHEN substr(json_extract(meta,'$.part_of'), 1, length(source) + 1) = source || ':'
-                   THEN json_extract(meta,'$.part_of')
-                 ELSE source || ':' || json_extract(meta,'$.part_of')
-               END
-             ELSE doc_uid
-           END AS family_doc_uid,
-           title,
-           meta
-             FROM documents
-            WHERE deleted_at IS NULL
-         )
-        WHERE family_doc_uid > ?1
-        ${grouping}
-        ORDER BY family_doc_uid ASC
+    : bounded
+      ? env.DB.prepare(
+      `SELECT family_uid AS family_doc_uid${labelProjection}
+         FROM document_family_catalog
+        WHERE family_uid > ?1
+        ${globalUidFilter}
+        ORDER BY family_uid ASC
         LIMIT ?2`
-    ).bind(cursor, limit + 1);
+      ).bind(cursor, limit + 1, ...(uids || []))
+      : source
+        ? env.DB.prepare(
+          `SELECT family_doc_uid${labelProjection}
+             FROM ${legacyProjection}
+            WHERE substr(family_doc_uid, 1, length(?1) + 1) = ?1 || ':'
+              AND family_doc_uid > ?2
+              ${legacySourceUidFilter}
+            ${grouping}
+            ORDER BY family_doc_uid ASC
+            LIMIT ?3`
+        ).bind(source, cursor, limit + 1, ...(uids || []))
+        : env.DB.prepare(
+          `SELECT family_doc_uid${labelProjection}
+             FROM ${legacyProjection}
+            WHERE family_doc_uid > ?1
+              ${legacyGlobalUidFilter}
+            ${grouping}
+            ORDER BY family_doc_uid ASC
+            LIMIT ?2`
+        ).bind(cursor, limit + 1, ...(uids || []));
   const { results } = await statement.all();
 
   const hasMore = (results || []).length > limit;
@@ -7158,9 +7219,67 @@ export async function forgetFamilies(env, { families = [], dryRun = true } = {})
   }
   if (!normalized.length) return { documents: 0, chunks: 0, vectors: 0, dry_run: dryRun, targets: [] };
 
+  const bounded = await boundedCorpusHotPathsActive(env);
   const stale = [];
   for (let i = 0; i < normalized.length; i += 25) {
     const group = normalized.slice(i, i + 25);
+    if (bounded) {
+      const bases = group.map((family) => family.base);
+      const marks = bases.map((_, index) => `?${index + 1}`).join(", ");
+      let cursorFamily = "";
+      let cursorDoc = "";
+      let pages = 0;
+      const rows = [];
+      while (true) {
+        const cursorFamilyBind = bases.length + 1;
+        const cursorDocBind = bases.length + 2;
+        const limitBind = bases.length + 3;
+        const { results } = await env.DB.prepare(
+          `SELECT family_uid,doc_uid,declared_family_uid AS family_of
+             FROM document_family_members
+            WHERE family_uid IN (${marks})
+              AND (family_uid > ?${cursorFamilyBind}
+                   OR (family_uid = ?${cursorFamilyBind} AND doc_uid > ?${cursorDocBind}))
+            ORDER BY family_uid ASC,doc_uid ASC
+            LIMIT ?${limitBind}`
+        ).bind(
+          ...bases,
+          cursorFamily,
+          cursorDoc,
+          FAMILY_FORGET_MEMBER_PAGE_SIZE + 1,
+        ).all();
+        const page = results || [];
+        if (page.length > FAMILY_FORGET_MEMBER_PAGE_SIZE) {
+          if (pages + 1 >= FAMILY_FORGET_MAX_MEMBER_PAGES) {
+            throw new FamilyForgetInventoryTruncatedError();
+          }
+          const admitted = page.slice(0, FAMILY_FORGET_MEMBER_PAGE_SIZE);
+          rows.push(...admitted);
+          const tail = admitted[admitted.length - 1];
+          cursorFamily = String(tail.family_uid);
+          cursorDoc = String(tail.doc_uid);
+          pages++;
+          continue;
+        }
+        rows.push(...page);
+        for (const family of group) {
+          const members = new Set(
+            rows.filter((row) => String(row.family_uid) === family.base)
+              .map((row) => String(row.doc_uid))
+          );
+          const stray = family.keep.filter(
+            (uid) => !isStructuralFamilyMember(uid, family.base) && !members.has(uid)
+          );
+          if (stray.length) {
+            throw new Error("each document family needs a base_doc_uid and any keep_doc_uids must belong to it");
+          }
+        }
+        const keep = new Set(group.flatMap((family) => family.keep));
+        stale.push(...rows.map((row) => String(row.doc_uid)).filter((uid) => !keep.has(uid)));
+        break;
+      }
+      continue;
+    }
     const clauses = [];
     const binds = [];
     for (const family of group) {
@@ -7169,23 +7288,19 @@ export async function forgetFamilies(env, { families = [], dryRun = true } = {})
       // exceed that before the literal "#part" suffix is added, so a pattern
       // query cannot be used here. Comparing the exact leading substring keeps
       // %, _ and \\ literal and cannot include a similarly prefixed base id.
-      // The declared arm is a plain equality on a fully qualified uid, so it
-      // has neither problem. Neither arm adds a scan the substr did not already
-      // force, and json_valid() guards a row whose meta is not JSON.
-      clauses.push(
-        `(doc_uid = ?${n + 1}` +
-        ` OR substr(doc_uid, 1, length(?${n + 1} || '#part')) = ?${n + 1} || '#part'` +
-        ` OR (json_valid(meta) AND json_type(meta,'$.family_of') = 'text'` +
-        `     AND json_extract(meta,'$.family_of') = ?${n + 1}))`
-      );
+      // Schema 47 materializes the declared family at the write boundary. The
+      // lexical doc_uid range is the exact literal `#part` prefix without a
+      // LIKE/GLOB pattern, so both arms use bounded indexes on a large brain.
+      clauses.push(`(doc_uid = ?${n + 1}` +
+          ` OR substr(doc_uid,1,length(?${n + 1} || '#part'))=?${n + 1} || '#part'` +
+          ` OR (json_valid(meta) AND json_type(meta,'$.family_of')='text'` +
+          ` AND json_extract(meta,'$.family_of')=?${n + 1}))`);
       binds.push(family.base);
     }
-    const { results } = await env.DB.prepare(
-      `SELECT doc_uid,
-              CASE WHEN json_valid(meta) AND json_type(meta,'$.family_of') = 'text'
+    const { results } = await env.DB.prepare(`SELECT doc_uid,
+              CASE WHEN json_valid(meta) AND json_type(meta,'$.family_of')='text'
                    THEN json_extract(meta,'$.family_of') END AS family_of
-         FROM documents WHERE ${clauses.join(" OR ")}`
-    ).bind(...binds).all();
+         FROM documents WHERE ${clauses.join(" OR ")}`).bind(...binds).all();
     const rows = (results || []).map((row) => ({
       uid: String(row.doc_uid),
       declaredFamily: row.family_of == null ? null : String(row.family_of),

@@ -53,6 +53,24 @@ try {
   assert.match(printed.join("\n"), /Legacy decision \(drive; possible date 2025-12-31\)/,
     "a legacy citation without date_reliable must not be presented as confirmed");
 
+  let resetRequests = 0;
+  const resetCanary = "private-looking-ask-reset-canary";
+  await assert.rejects(
+    cmdAsk(manifest, {
+      ask: async () => "Can the Brain answer now?",
+      adminKey,
+      http: async () => {
+        resetRequests++;
+        return new Response(JSON.stringify({
+          error: `D1_ERROR: D1 DB exceeded its CPU time limit and was reset. ${resetCanary}`,
+        }), { status: 500, headers: { "content-type": "application/json" } });
+      },
+    }),
+    (error) => /d1_cpu_reset/i.test(error.message) && /retryable/i.test(error.message) &&
+      /wait at least 10 seconds/i.test(error.message) && !error.message.includes(resetCanary),
+  );
+  assert.equal(resetRequests, 1, "the think decision point must be reached exactly once");
+
   await assert.rejects(
     cmdAsk(manifest, { ask: async () => "", adminKey }),
     /no question entered/i,

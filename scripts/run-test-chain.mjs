@@ -16,6 +16,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/d1-transient-fault.test.mjs",
   "node --no-warnings test/source-family-inventory-retry.test.mjs",
   "node --no-warnings test/d1-reset-drive-removal.test.mjs",
+  "node --no-warnings test/d1-hot-path-scale.test.mjs",
+  "node --no-warnings test/mcp-d1-reset-state.test.mjs",
   "node --test test/readback-secret-scan.test.mjs",
   "node --test test/cross-platform-field-test-registration.test.mjs",
   "node --test test/disposable-recovery-seeder.test.mjs",
@@ -85,8 +87,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/financial-picture.test.mjs",
   "node --no-warnings test/financial-picture-cli.test.mjs",
   // Client upgrade rehearsals, added after the launcher freeze. Every shipped
-  // release through v0.3.6 ships 22 migrations and this release ships 46, so
-  // 0023..0046 have never run on a real client brain until these.
+  // release through v0.3.6 ships 22 migrations and this tree ships 47, so
+  // 0023..0047 have never run on a real client brain until these.
   "node --no-warnings test/migration-walk-22-to-35.test.mjs",
   "node --no-warnings test/healthy-schema22-update-rehearsal.test.mjs",
   "node --no-warnings test/healthy-v020-install-guards.test.mjs",
@@ -128,16 +130,13 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/fin-documents-writer-agreement.test.mjs",
   "node --no-warnings --test worker/test/ocr-reply-shape.test.mjs",
   "node --test test/mcp-moved-brain.test.mjs",
-  // Plaid owner-flow repairs from two sandbox rehearsals: provider precision,
-  // key replacement, Link errors, the first-connection page, and status truth.
-  "node --no-warnings --test worker/test/plaid-amount-precision.test.mjs",
-  "node --no-warnings --test worker/test/plaid-owner-flow.test.mjs",
-  "node --no-warnings --test test/bank-feed-replace-keys.test.mjs",
   "node --no-warnings --test worker/test/owner-document-create.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
   "node test/test-chain-runner.test.mjs",
+  "node --no-warnings test/d1-hot-path-scale.test.mjs",
+  "node --no-warnings test/mcp-d1-reset-state.test.mjs",
   "node --test test/readback-secret-scan.test.mjs",
   "node --test test/cross-platform-field-test-registration.test.mjs",
   "node --test test/disposable-recovery-seeder.test.mjs",
@@ -221,7 +220,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/vector-delete-outbox.test.mjs",
   "node --no-warnings test/vector-bootstrap-paused-strand.test.mjs",
   // Client upgrade rehearsals. Every shipped release through v0.3.6 carries 22
-  // migrations and this release carries 46, so 0023..0046 have never run on a
+  // migrations and this tree carries 47, so 0023..0047 have never run on a
   // real client brain. These walk a populated schema-22 database forward.
   "node --no-warnings test/migration-walk-22-to-35.test.mjs",
   "node --no-warnings test/healthy-schema22-update-rehearsal.test.mjs",
@@ -423,11 +422,6 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/source-original-result-family.test.mjs",
   "node --no-warnings --test worker/test/source-original-accepted-resolution.test.mjs",
   "node --no-warnings --test worker/test/source-original-observation.test.mjs",
-  // Plaid owner-flow repairs from two sandbox rehearsals: provider precision,
-  // key replacement, Link errors, the first-connection page, and status truth.
-  "node --no-warnings --test worker/test/plaid-amount-precision.test.mjs",
-  "node --no-warnings --test worker/test/plaid-owner-flow.test.mjs",
-  "node --no-warnings --test test/bank-feed-replace-keys.test.mjs",
 ]);
 
 export function parseTestCommand(command) {

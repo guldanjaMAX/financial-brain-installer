@@ -414,7 +414,6 @@ export async function ledgerCashPosition(
       excluded: [],
       accounts_covered: 0,
       accounts_considered: 0,
-      rounded_accounts: 0,
     };
   }
 
@@ -485,7 +484,6 @@ export async function ledgerCashPosition(
       figure_source: figure.figure_source,
       source_doc_uid: figure.source_doc_uid,
       source_feed: figure.source_feed,
-      minor_rounded: figure.minor_rounded === true,
     });
   }
 
@@ -506,29 +504,8 @@ export async function ledgerCashPosition(
     excluded,
     accounts_covered: covered.length,
     accounts_considered: considered.length,
-    // Summed figures that were rounded from a finer provider decimal. A total
-    // that includes one is not exact, and the surface must say so.
-    rounded_accounts: covered.filter((c) => c.minor_rounded).length,
     complete: missing.length === 0 && considered.length > 0,
   };
-}
-
-/**
- * Which figures of a feed row were rounded from a finer provider decimal.
- *
- * The bank feed stores integer minor units. When a provider reports more
- * decimal places than the currency has (a 401k balance of 23631.9805 USD), the
- * writer rounds half-even and marks the row's source locator with
- * `#minor_rounded` (one amount) or `#minor_rounded=current,available` (a
- * balance). Schema 46 has no column for it, so this parser is the one place
- * the marker is read. An unmarked row is an exact figure.
- */
-export const MINOR_ROUNDED_QUALIFIER = "#minor_rounded";
-
-export function minorRoundedFields(locator) {
-  const match = /#minor_rounded(?:=([a-z,]+))?$/.exec(String(locator || ""));
-  if (!match) return [];
-  return match[1] ? match[1].split(",").filter(Boolean) : ["amount"];
 }
 
 /**
@@ -543,14 +520,14 @@ async function confirmedBalanceFor(env, tenantId, accountSlug) {
   const { results, unavailable } = await safeAll(
     env,
     `SELECT period_end AS as_of, closing_balance_minor AS amount_minor, currency,
-            'statement' AS figure_source, source_doc_uid, source_feed, NULL AS source_locator
+            'statement' AS figure_source, source_doc_uid, source_feed
        FROM fin_statements
       WHERE tenant_id = ? AND account_slug = ? AND ${LIVE}
         AND parse_state = 'parsed' AND basis_state = 'confirmed'
         AND closing_balance_minor IS NOT NULL
       UNION ALL
      SELECT as_of_date AS as_of, current_minor AS amount_minor, currency,
-            'balance_snapshot' AS figure_source, source_doc_uid, source_feed, source_locator
+            'balance_snapshot' AS figure_source, source_doc_uid, source_feed
        FROM fin_balance_snapshots
       WHERE tenant_id = ? AND account_slug = ?
         AND basis_state = 'confirmed' AND current_minor IS NOT NULL
@@ -573,9 +550,6 @@ async function confirmedBalanceFor(env, tenantId, accountSlug) {
       figure_source: row.figure_source,
       source_doc_uid: row.source_doc_uid || null,
       source_feed: row.source_feed || null,
-      // A rounded figure must never read as exact. The position counts it.
-      minor_rounded: row.figure_source === "balance_snapshot" &&
-        minorRoundedFields(row.source_locator).includes("current"),
     },
   };
 }
@@ -624,10 +598,7 @@ export async function ledgerUnsortedSpending(
                      THEN amount_minor ELSE 0 END) AS outflow_minor,
             SUM(CASE WHEN basis_state <> 'unparsed' AND direction = 'outflow'
                      THEN 1 ELSE 0 END) AS counted_lines,
-            SUM(CASE WHEN basis_state = 'unparsed' THEN 1 ELSE 0 END) AS unreadable_lines,
-            SUM(CASE WHEN basis_state <> 'unparsed' AND direction = 'outflow'
-                      AND instr(COALESCE(source_locator, ''), '${MINOR_ROUNDED_QUALIFIER}') > 0
-                     THEN 1 ELSE 0 END) AS rounded_lines
+            SUM(CASE WHEN basis_state = 'unparsed' THEN 1 ELSE 0 END) AS unreadable_lines
        FROM fin_transactions
       WHERE ${where} AND ${LIVE}
       GROUP BY account_slug, currency
@@ -643,9 +614,6 @@ export async function ledgerUnsortedSpending(
       counted_lines: Number(row.counted_lines || 0),
       // A total that omits lines it could not read must say how many.
       unreadable_lines: Number(row.unreadable_lines || 0),
-      // A total that includes figures rounded from finer provider decimals is
-      // not exact, and must say how many it includes.
-      rounded_lines: Number(row.rounded_lines || 0),
     })),
   };
 }

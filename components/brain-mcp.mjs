@@ -36,6 +36,10 @@ import { readAdminKeyFromKeychain } from "../operations/admin-key-persistence.mj
 // runtime's remedies name real commands. Rendering here covers every tool.
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import {
+  d1CpuResetMutationState,
+  d1CpuResetReadState,
+} from "../operations/d1-transient-fault.mjs";
+import {
   createBrainCredentialResolver,
   fetchWithBrainCredential,
 } from "./brain-mcp-runtime.mjs";
@@ -126,7 +130,7 @@ const CREDENTIALS = createBrainCredentialResolver({
 /* http                                                                */
 /* ------------------------------------------------------------------ */
 
-async function call(path, { method = "GET", body } = {}) {
+async function call(path, { method = "GET", body, d1ResetMode = null } = {}) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
   try {
@@ -141,17 +145,24 @@ async function call(path, { method = "GET", body } = {}) {
     }, CREDENTIALS);
     const text = CREDENTIALS.redact(await res.text());
     if (!res.ok) {
+      if (d1ResetMode === "read") {
+        const d1Reset = d1CpuResetReadState(text);
+        if (d1Reset) return d1Reset;
+      } else if (d1ResetMode === "mutation") {
+        const ambiguous = d1CpuResetMutationState(text);
+        if (ambiguous) return ambiguous;
+      }
       const hint = text.includes("1010")
         ? " (a bot-protection rule rejected the request; the User-Agent header is the usual cause)"
         : res.status === 401 || res.status === 403
           ? " (the credential was rejected; check it has not expired or been rotated)"
           : "";
-      throw new Error(`${method} ${path} -> HTTP ${res.status}${hint}: ${text.slice(0, 300)}`);
+      throw new Error(`${method} ${path} -> HTTP ${res.status}${hint}`);
     }
     try {
       return JSON.parse(text);
     } catch {
-      throw new Error(`${path} returned non-JSON: ${text.slice(0, 200)}`);
+      throw new Error(`${path} returned a non-JSON response`);
     }
   } finally {
     clearTimeout(timer);
@@ -291,7 +302,9 @@ async function runTool(name, args = {}) {
       const d = await call("/api/rag/think", {
         method: "POST",
         body: { q: args.q, limit: args.limit ?? 8, source: args.source },
+        d1ResetMode: "read",
       });
+      if (d?.code === "d1_cpu_reset") return d;
       // A degraded search is the ONLY thing separating "the brain holds
       // nothing" from "the brain was not fully read", so it rides out on every
       // response that has it, answered or not. Without it this tool hands the
@@ -386,7 +399,9 @@ async function runTool(name, args = {}) {
           source: args.source,
           category: args.category,
         },
+        d1ResetMode: "read",
       });
+      if (d?.code === "d1_cpu_reset") return d;
       const rows = d.results ?? [];
       // Same hazard on the raw-excerpt tool: zero rows out of a half-run search
       // is not evidence of an empty corpus, and this note is what the model
@@ -483,7 +498,11 @@ case "brain_remember": {
         }, { textSource: "native", textReliable: true });
         let res;
         try {
-          res = await call(OWNER_NOTES_ROUTE, { method: "POST", body: envelope });
+          res = await call(OWNER_NOTES_ROUTE, {
+            method: "POST",
+            body: envelope,
+            d1ResetMode: "mutation",
+          });
         } catch (error) {
           return {
             written: confirmed.length > 0,
@@ -498,6 +517,7 @@ case "brain_remember": {
             note: `The Brain did not return a receipt for record ${record.index + 1}. Stop here. Earlier records listed above are confirmed; this record may or may not have reached storage. An exact retry is idempotent. ${String(error?.message || error).slice(0, 180)}`,
           };
         }
+        if (res?.code === "d1_cpu_reset_ambiguous") return res;
         const receipt = validateRememberReceipt(res, envelope);
         const lifecycleConfirmed = res?.confirmed === true &&
           res?.source?.name === OWNER_NOTES_SOURCE &&
@@ -551,14 +571,18 @@ case "brain_remember": {
       };
     }
     case "brain_health":
-      return await call("/api/admin/brain/documents");
+      return await call("/api/admin/brain/documents", { d1ResetMode: "read" });
     case "brain_financial_map": {
       if (!args || typeof args !== "object" || Array.isArray(args)) {
         throw new Error("brain_financial_map requires one object");
       }
       const keys = Object.keys(args).sort();
       if (args.mode === "read" && keys.join(",") === "mode") {
-        return await call(OWNER_FINANCIAL_MAP_READ_PATH, { method: "POST", body: {} });
+        return await call(OWNER_FINANCIAL_MAP_READ_PATH, {
+          method: "POST",
+          body: {},
+          d1ResetMode: "read",
+        });
       }
       if (args.mode === "preview" && keys.join(",") === "mode,snapshot" &&
           args.snapshot && typeof args.snapshot === "object" && !Array.isArray(args.snapshot)) {
@@ -568,6 +592,7 @@ case "brain_remember": {
         return await call(OWNER_FINANCIAL_MAP_PREVIEW_PATH, {
           method: "POST",
           body: { snapshot: args.snapshot },
+          d1ResetMode: "mutation",
         });
       }
       throw new Error("brain_financial_map accepts exactly mode=read, or mode=preview plus one complete snapshot. It has no activation mode.");

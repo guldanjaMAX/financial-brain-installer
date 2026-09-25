@@ -197,11 +197,8 @@ async function readBoundedText(response, maxBytes) {
 function responseFailure(provider, response, raw, attempts, nowMs, maxRetryAfterMs) {
   let data = null;
   try { data = raw ? JSON.parse(raw) : null; } catch { /* bounded text below */ }
-  // Plaid-shaped errors put their sentence in error_message. Reading it first
-  // keeps it inside the bound instead of whatever raw JSON field sorts ahead.
   const detail = boundedProviderText(
-    data?.error_description || data?.message || data?.error_message || data?.error?.message || data?.error ||
-      raw || `HTTP ${response.status}`,
+    data?.error_description || data?.message || data?.error?.message || data?.error || raw || `HTTP ${response.status}`,
   );
   const code = boundedProviderText(
     data?.code || data?.error_code || data?.error?.code || data?.error?.status || `http_${response.status}`,

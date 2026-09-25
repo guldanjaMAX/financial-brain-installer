@@ -383,9 +383,13 @@ const assertOneUpsert = (docUid) => {
   control.fail_finalize_cas_doc_uid = null;
   assert.equal(interrupted[0].ok, false);
 
-  const stale = statsFor("message");
   const authoritative = actualCountsFor("message");
-  assert.equal(stale.chunks - authoritative.chunks, long.chunks - staged.chunks);
+  assert.deepEqual(statsFor("message"), {
+    source: "message",
+    documents: authoritative.documents,
+    chunks: authoritative.chunks,
+    last_ingest_at: statsFor("message").last_ingest_at,
+  }, "schema-47 triggers keep counters exact even when marker finalization is interrupted");
   const inventory = await store.stats(env);
   const reported = inventory.rows.find((row) => row.source_type === "message");
   assert.equal(reported.chunks, authoritative.chunks);

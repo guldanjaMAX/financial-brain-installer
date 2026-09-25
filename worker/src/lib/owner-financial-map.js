@@ -13,6 +13,10 @@ import { ownerSessionPrincipal } from "./owner-auth.js";
 import { issueChallenge, randomToken, sha256Hex, findPasskey } from "./auth-store.js";
 import { verifyAssertion, b64uDecode } from "./webauthn.js";
 import { backendOf, D1 } from "./store.js";
+import {
+  D1_CPU_RESET_AMBIGUOUS_CODE,
+  d1CpuResetReadState,
+} from "../../../operations/d1-transient-fault.mjs";
 
 export const OWNER_FINANCIAL_MAP_PATH_PREFIX = "/api/admin/brain/financial-map/";
 export const OWNER_FINANCIAL_MAP_READ_PATH = `${OWNER_FINANCIAL_MAP_PATH_PREFIX}read`;
@@ -2191,6 +2195,19 @@ export async function handleOwnerFinancialMap(env, request, path, deps = {}) {
         : error.status === 403 ? "forbidden" : error.status === 404 ? "not_found"
           : error.status === 409 ? "conflict" : error.status === 410 ? "gone" : "unavailable";
       return respond({ error: label, code: error.code, detail: error.message }, error.status);
+    }
+    const d1Reset = d1CpuResetReadState(typeof error?.message === "string" ? error.message : "");
+    if (d1Reset) {
+      const mutationPath = path === OWNER_FINANCIAL_MAP_PREVIEW_PATH ||
+        path === OWNER_FINANCIAL_MAP_APP_OPTIONS_PATH ||
+        path === OWNER_FINANCIAL_MAP_APP_ACTIVATE_PATH;
+      return mutationPath
+        ? respond({
+          error: "mutation outcome ambiguous",
+          code: D1_CPU_RESET_AMBIGUOUS_CODE,
+          ambiguous: true,
+        }, 503)
+        : respond({ error: "temporarily unavailable", code: d1Reset.code }, 503);
     }
     return unavailable();
   }

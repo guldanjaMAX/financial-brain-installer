@@ -271,11 +271,7 @@ is assigned and tested.
    existing bank setup only for an already approved pilot. If any required piece
    is missing, stop and use a separately reviewed, version-scoped field plan.
    A future approved pilot must keep current-data proof, history proof,
-   account-to-entity assignment, and disconnect verification separate, and
-   follows the owner-present journey in order as written in
-   [the Plaid release gate](../../docs/PLAID-RELEASE-GATE.md): keys through
-   `brain connect bank` before setup, the sandbox phone code, and where the
-   owner disconnects (Access > Banks > Disconnect).
+   account-to-entity assignment, and disconnect verification separate.
 
 The [client onboarding scorecard](../10-client-onboarding-scorecard.md) is the
 shared install record. It uses aggregate counts and receipt IDs, never message

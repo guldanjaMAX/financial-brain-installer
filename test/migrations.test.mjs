@@ -1049,7 +1049,7 @@ check("restart guard refuses an existing migration column with the wrong contrac
     });
   } catch (error) { schema32Error = error; }
   check("direct migrate refuses a live schema-32 brain before dropping its FTS writer",
-    /0010-0013, 0033, or 0044.*brain update/is.test(schema32Error?.message || "") &&
+    /0010-0013, 0033, 0044, 0046, or 0047.*brain update/is.test(schema32Error?.message || "") &&
       schema32Fault.mutations === 0 &&
       schema32.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='trigger' AND name='chunks_ai'").get().n === 1,
     `${schema32Error?.message}; mutations=${schema32Fault.mutations}`);
@@ -1083,6 +1083,48 @@ check("restart guard refuses an existing migration column with the wrong contrac
     ]), JSON.stringify(reconciledStats));
   schema32.close();
 
+  const schema46 = new DatabaseSync(":memory:");
+  for (const file of files.filter((name) => Number.parseInt(name, 10) <= 46)) {
+    const sql = readFileSync(join(DIR, file), "utf8");
+    for (const statement of splitStatements(sql)) schema46.exec(statement);
+    schema46.prepare(
+      `INSERT INTO schema_migrations (version,name,applied_at,checksum)
+       VALUES (?,?,?,?)`,
+    ).run(
+      Number.parseInt(file, 10),
+      file.replace(/\.sql$/, ""),
+      "2026-01-01T00:00:00Z",
+      createHash("sha256").update(sql).digest("hex").slice(0, 16),
+    );
+  }
+  schema46.exec(
+    `INSERT INTO install_state
+       (id,client_slug,product_version,schema_version,gate_version,installed_at,ring)
+     VALUES (1,'schema-46-fixture','0.4.0',46,0,'2026-01-01T00:00:00Z','test');
+     INSERT INTO sources (name,kind,status,created_at)
+     VALUES ('live','upload','ready','2026-01-01T00:00:00Z');
+     INSERT INTO documents (doc_uid,source,source_id,title,ingested_at,content_hash)
+     VALUES ('live:one','live','one','Live',1,'live-hash');
+     INSERT INTO chunks (chunk_uid,doc_uid,chunk_ix,text,source,title)
+     VALUES ('live:one#0','live:one',0,'live text','live','Live');`,
+  );
+  const schema46Fault = { after: null, mutations: 0 };
+  let schema46Error = null;
+  try {
+    await cmdMigrate(manifestPath, {
+      silent: true,
+      resolveAccount: async () => ({ id: "fixture-account" }),
+      d1Query: adapterFor(schema46, schema46Fault),
+    });
+  } catch (error) { schema46Error = error; }
+  check("direct migrate refuses migration 47 itself before mutating a populated schema-46 brain",
+    /0047.*brain update/is.test(schema46Error?.message || "") &&
+      schema46Fault.mutations === 0 &&
+      schema46.prepare("SELECT count(*) AS n FROM schema_migrations WHERE version=47").get().n === 0 &&
+      schema46.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='corpus_runtime_totals'").get().n === 0,
+    `${schema46Error?.message}; mutations=${schema46Fault.mutations}`);
+  schema46.close();
+
   const noStateTable = new DatabaseSync(":memory:");
   noStateTable.exec("CREATE TABLE legacy_live_corpus (id INTEGER PRIMARY KEY, body TEXT)");
   const noStateFault = { after: null, mutations: 0 };
@@ -1095,7 +1137,9 @@ check("restart guard refuses an existing migration column with the wrong contrac
     });
   } catch (error) { noStateError = error; }
   check("absence of install_state cannot bypass cutover on a nonempty legacy database",
-    /not provably fresh.*brain update/is.test(noStateError?.message || "") &&
+    /not provably fresh.*0010-0013, 0033, 0044, 0046, or 0047.*brain update/is.test(
+      noStateError?.message || "",
+    ) &&
       noStateFault.mutations === 0,
     `${noStateError?.message}; mutations=${noStateFault.mutations}`);
   noStateTable.close();

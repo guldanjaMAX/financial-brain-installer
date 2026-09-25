@@ -1037,6 +1037,9 @@ export function checkBankFeedRedirect(manifest) {
       "  Choose provider plaid or custom and environment sandbox or production.");
   }
   const declared = Array.isArray(feed.registered_redirect_uris) ? feed.registered_redirect_uris : [];
+  const declaredWebhooks = Array.isArray(feed.registered_webhook_uris)
+    ? feed.registered_webhook_uris
+    : [];
   const missingConfig = provider === "custom" ? [
       !feed.api_base && "corpora.bank_feed.api_base",
       !feed.link_sdk_url && "corpora.bank_feed.link_sdk_url",
@@ -1048,21 +1051,28 @@ export function checkBankFeedRedirect(manifest) {
       "Bank feed", FAIL,
       "the return address for this brain is not recorded as registered",
       "  Register this exact address with the bank-data provider, in the CLIENT'S OWN\n" +
-      "  provider dashboard, before the session" +
-      (provider === "plaid" ? " (Plaid: Developers, API, Allowed redirect URIs)" : "") + ":\n\n" +
+      "  provider dashboard, before the session:\n\n" +
       `      ${required}\n\n` +
-      "  It MUST be on the dashboard's allowed list, because this brain sends it as the\n" +
-      "  redirect_uri of every Link request and the provider refuses to open Link for\n" +
-      "  an address that is not on that list.\n\n" +
       "  Then record it in the manifest so this check can confirm it:\n" +
       `      corpora.bank_feed.registered_redirect_uris: ["${required}"]\n\n` +
       "  Skip this and the client will authorise successfully at their bank and then\n" +
       "  land on a dead return, with you sitting next to them."
     );
   }
-  // The Plaid webhook needs no dashboard registration: this brain sends it as
-  // the webhook field of every new Link token request, so each Item carries it.
-  // A recorded registered_webhook_uris list is accepted and is not required.
+  if (provider === "plaid" && !declaredWebhooks.includes(requiredWebhook)) {
+    return check(
+      "Bank feed", FAIL,
+      "the signed webhook destination for this brain is not recorded as registered",
+      "  Plaid credential setup and dashboard changes remain held outside generic\n" +
+      "  onboarding. In the separately reviewed setup, register this exact webhook\n" +
+      "  in the same Plaid environment as the existing Worker credentials:\n\n" +
+      `      ${requiredWebhook}\n\n` +
+      "  Then record only that non-secret URI in the manifest:\n" +
+      `      corpora.bank_feed.registered_webhook_uris: [\"${requiredWebhook}\"]\n\n` +
+      "  Keep scheduled reconciliation enabled. A registered webhook requests prompt\n" +
+      "  refresh, but it is never the only source of truth."
+    );
+  }
   if (missingConfig.length) {
     return check(
       "Bank feed", FAIL,
@@ -1085,8 +1095,7 @@ export function checkBankFeedRedirect(manifest) {
   const webhook = provider === "plaid" ? requiredWebhook : null;
   return check(
     "Bank feed", OK,
-    `${provider}; ${environment}; return address registered (${required})` +
-      (webhook ? `; signed webhook ${webhook} is sent with each Link request, so it needs no dashboard registration` : ""),
+    `${provider}; ${environment}; return address registered (${required})${webhook ? `; signed webhook ${webhook}` : ""}`,
     environment === "sandbox"
       ? "  Sandbox is right for a rehearsal, and it is what lets an install be practised\n" +
         "  the same day. Switch to production once the client's own provider approval\n" +

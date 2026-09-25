@@ -13,9 +13,7 @@ import {
   tenantReference,
 } from "./bank-feed.js";
 import { balanceRoleFor } from "./fin-import.js";
-import { MINOR_ROUNDED_QUALIFIER, minorRoundedFields } from "./fin-d1.js";
 import {
-  PLAID_DECIMAL_MAX_LENGTH,
   PLAID_HISTORY_STATE,
   PLAID_WEBHOOK_PATH,
   PlaidProtocolError,
@@ -33,7 +31,6 @@ import {
 } from "./plaid-protocol.js";
 import {
   discoverPlaidAccountAssignments,
-  maskedIdentifier,
   plaidAccountAssignmentReadiness,
   plaidPublicAccountRef,
 } from "./plaid-account-entities.js";
@@ -116,67 +113,19 @@ function supportedCurrency(value) {
   return value;
 }
 
-/**
- * One provider decimal as integer minor units of its currency.
- *
- * Providers report finer precision than a currency's minor unit: the Plaid
- * sandbox 401k balance is 23631.9805 USD, and investment, fuel and FX lines do
- * the same in production. Refusing that value failed the WHOLE Item, so no
- * account at that bank could load at all. The integer is now derived by
- * explicit half-even rounding with `rounded` set, so a rounded figure is never
- * presented as exact. Half-even keeps the expected bias at zero across many
- * rounded rows. The exact decimal text stays on every staged row and on every
- * ledger transaction (source_amount_decimal). A promoted balance keeps only the
- * rounded integer and its marker: schema 46 has no balance decimal column.
- *
- * Still refused: text that is not a plain decimal (the protocol layer already
- * expands exponent notation), an unsupported currency, and a magnitude beyond
- * JavaScript's safe integers. Those are invalid input, not precision.
- */
-function providerMinorUnits(value, currency) {
+function decimalMinor(value, currency) {
   const exponent = CURRENCY_EXPONENTS[supportedCurrency(currency)];
-  if (value === null || value === undefined) return { minor: null, rounded: false, sign: 0 };
+  if (value === null || value === undefined) return null;
   const raw = String(value).trim();
-  const refuse = () => { throw Object.assign(new Error("A provider amount is not a decimal this Brain can store in supported minor units."), { code: "plaid_amount_not_representable" }); };
-  if (raw.length > PLAID_DECIMAL_MAX_LENGTH || !/^-?\d+(?:\.\d+)?$/.test(raw)) return refuse();
+  const refuse = () => { throw Object.assign(new Error("A provider amount cannot be represented exactly in supported minor units."), { code: "plaid_amount_not_representable" }); };
+  if (raw.length > 128 || !/^-?\d+(?:\.\d+)?$/.test(raw)) return refuse();
   const negative = raw.startsWith("-");
-  const [whole, fraction = ""] = (negative ? raw.slice(1) : raw).split(".");
-  const kept = fraction.slice(0, exponent).padEnd(exponent, "0");
-  const dropped = fraction.slice(exponent);
-  let magnitude = BigInt(whole) * (10n ** BigInt(exponent)) + BigInt(kept || "0");
-  const rounded = /[1-9]/.test(dropped);
-  if (rounded) {
-    const first = Number(dropped[0]);
-    const beyondHalf = /[1-9]/.test(dropped.slice(1));
-    if (first > 5 || (first === 5 && (beyondHalf || magnitude % 2n === 1n))) magnitude += 1n;
-  }
-  if (magnitude > BigInt(Number.MAX_SAFE_INTEGER)) return refuse();
-  const exactZero = !/[1-9]/.test(`${whole}${fraction}`);
-  const minor = Number(magnitude);
-  return {
-    minor: negative && minor !== 0 ? -minor : minor,
-    rounded,
-    // A sub-unit amount can round to zero. Its direction still follows the
-    // provider's exact sign, not the rounded integer.
-    sign: exactZero ? 0 : negative ? -1 : 1,
-  };
-}
-
-/** The feed convention applied to an exact amount that may have rounded to zero. */
-function stagedDirection(money) {
-  return directionFor(money.minor !== 0 ? money.minor : money.sign);
-}
-
-/**
- * The durable marker for a rounded ledger figure. Schema 46 is pinned for this
- * release, so there is no column for it: the qualifier rides on the row's own
- * source locator, which already names the provider figure it came from, and
- * minorRoundedFields in fin-d1.js is the one reader. The exact decimal stays in
- * fin_transactions.source_amount_decimal and in the staged rows.
- */
-function balanceRoundingQualifier(current, available) {
-  const fields = [current.rounded && "current", available.rounded && "available"].filter(Boolean);
-  return fields.length ? `${MINOR_ROUNDED_QUALIFIER}=${fields.join(",")}` : "";
+  const unsigned = negative ? raw.slice(1) : raw;
+  const [whole, fraction = ""] = unsigned.split(".");
+  if (/[1-9]/.test(fraction.slice(exponent))) return refuse();
+  const scaled = BigInt(whole) * (10n ** BigInt(exponent)) + BigInt(fraction.slice(0, exponent).padEnd(exponent, "0") || "0");
+  if (scaled > BigInt(Number.MAX_SAFE_INTEGER)) return refuse();
+  return negative ? -Number(scaled) : Number(scaled);
 }
 
 function legacyAccountSlug(itemRef, accountRef) {
@@ -237,43 +186,29 @@ function balanceObservation(value, stamp) {
   return value;
 }
 
-function stagedProvenance(json) {
-  let provenance;
-  try { provenance = JSON.parse(json || "{}"); } catch { provenance = null; }
-  return provenance && typeof provenance === "object" && !Array.isArray(provenance) ? provenance : null;
-}
-
 // Ready windows may have been staged by an older Worker. Recheck the original
 // decimals rather than trusting a previously truncated integer or USD fallback.
-// The rounding flags are rederived here too: a stored integer that matches its
-// decimal only after rounding, but carries no rounding flag, came from a writer
-// that did not declare it, so it is replayed rather than promoted as exact.
 async function validateStagedMoney(env, details, staged, mappings) {
-  const needsReplay = (message) => Object.assign(new Error(message), { code: "plaid_amount_not_representable" });
   const accountMappings = mappings.map(mapping => {
     const row = staged.find(account => account.providerAccountId === mapping.providerAccountId);
     const currency = supportedCurrency(row.iso_currency_code);
-    const current = providerMinorUnits(row.current_balance_decimal, currency);
-    const available = providerMinorUnits(row.available_balance_decimal, currency);
-    if (row.currency !== currency || row.current_balance_minor !== current.minor || row.available_balance_minor !== available.minor) {
-      throw needsReplay("The staged balance amount needs an exact replay before promotion.");
+    const currentMinor = decimalMinor(row.current_balance_decimal, currency);
+    const availableMinor = decimalMinor(row.available_balance_decimal, currency);
+    if (row.currency !== currency || row.current_balance_minor !== currentMinor || row.available_balance_minor !== availableMinor) {
+      throw Object.assign(new Error("The staged balance amount needs an exact replay before promotion."), { code: "plaid_amount_not_representable" });
     }
-    const provenance = stagedProvenance(row.provenance_json);
-    if (!provenance) {
+    let provenance;
+    try { provenance = JSON.parse(row.provenance_json || "{}"); } catch { provenance = null; }
+    if (!provenance || typeof provenance !== "object" || Array.isArray(provenance)) {
       throw Object.assign(new Error("The staged balance observation needs review before promotion."), { code: "plaid_balance_observation_invalid" });
     }
-    if ((provenance.current_balance_minor_rounded === true) !== current.rounded ||
-        (provenance.available_balance_minor_rounded === true) !== available.rounded) {
-      throw needsReplay("The staged balance rounding needs an exact replay before promotion.");
-    }
-    return { ...mapping, currency, currentMinor: current.minor, availableMinor: available.minor,
-      locatorQualifier: balanceRoundingQualifier(current, available),
+    return { ...mapping, currency, currentMinor, availableMinor,
       observedAt: balanceObservation(provenance.observedAt ?? row.started_at, details.stamp) };
   });
   let afterOperation = "", afterId = "";
   for (;;) {
     const rows = (await env.DB.prepare(
-      `SELECT operation,provider_transaction_id,amount_decimal,amount_minor,direction,iso_currency_code,provenance_json
+      `SELECT operation,provider_transaction_id,amount_decimal,amount_minor,direction,iso_currency_code
          FROM plaid_sync_stage_transactions
         WHERE tenant_id=? AND window_ref=? AND operation IN ('added','modified')
           AND (operation>? OR (operation=? AND provider_transaction_id>?))
@@ -281,12 +216,9 @@ async function validateStagedMoney(env, details, staged, mappings) {
     ).bind(details.tenantId, details.windowRef, afterOperation, afterOperation, afterId).all())?.results;
     if (!Array.isArray(rows)) throw accountIdentityError();
     for (const row of rows) {
-      const money = providerMinorUnits(row.amount_decimal, supportedCurrency(row.iso_currency_code));
-      if (money.minor === null || row.amount_minor !== Math.abs(money.minor) || row.direction !== stagedDirection(money)) {
-        throw needsReplay("The staged transaction amount needs an exact replay before promotion.");
-      }
-      if ((stagedProvenance(row.provenance_json)?.amount_minor_rounded === true) !== money.rounded) {
-        throw needsReplay("The staged transaction rounding needs an exact replay before promotion.");
+      const rawMinor = decimalMinor(row.amount_decimal, supportedCurrency(row.iso_currency_code));
+      if (rawMinor === null || row.amount_minor !== Math.abs(rawMinor) || row.direction !== directionFor(rawMinor)) {
+        throw Object.assign(new Error("The staged transaction amount needs an exact replay before promotion."), { code: "plaid_amount_not_representable" });
       }
     }
     if (rows.length < 500) break;
@@ -680,29 +612,21 @@ function stagedAccount(account, observedAt) {
   const normalized = normalisePlaidAccount(account);
   const currency = supportedCurrency(normalized.isoCurrencyCode);
   const kind = accountKindFor(normalized.type, normalized.subtype);
-  const current = providerMinorUnits(normalized.currentBalance, currency);
-  const available = providerMinorUnits(normalized.availableBalance, currency);
   return {
     ...normalized,
     accountKind: kind,
     balanceRole: balanceRoleFor(kind),
     currency,
-    // currentBalance/availableBalance keep the provider's exact decimal text.
-    currentBalanceMinor: current.minor,
-    availableBalanceMinor: available.minor,
-    provenance: {
-      ...normalized.provenance,
-      observedAt,
-      ...(current.rounded ? { current_balance_minor_rounded: true } : {}),
-      ...(available.rounded ? { available_balance_minor_rounded: true } : {}),
-    },
+    currentBalanceMinor: decimalMinor(normalized.currentBalance, currency),
+    availableBalanceMinor: decimalMinor(normalized.availableBalance, currency),
+    provenance: { ...normalized.provenance, observedAt },
   };
 }
 
 function transactionStageRows(accountMappings, page) {
   const map = (operation, values) => values.map((transaction) => {
     const currency = supportedCurrency(transaction.isoCurrencyCode);
-    const money = providerMinorUnits(transaction.amount, currency);
+    const rawMinor = decimalMinor(transaction.amount, currency);
     return {
       operation,
       pageIndex: page.pageIndex,
@@ -711,8 +635,8 @@ function transactionStageRows(accountMappings, page) {
       providerAccountId: transaction.providerAccountId,
       accountSlug: accountMappings.get(transaction.providerAccountId) || null,
       amountDecimal: transaction.amount,
-      amountMinor: money.minor === null ? null : Math.abs(money.minor),
-      direction: money.minor === null ? null : stagedDirection(money),
+      amountMinor: rawMinor === null ? null : Math.abs(rawMinor),
+      direction: rawMinor === null ? null : directionFor(rawMinor),
       isoCurrencyCode: transaction.isoCurrencyCode,
       unofficialCurrencyCode: transaction.unofficialCurrencyCode,
       date: transaction.date,
@@ -722,9 +646,7 @@ function transactionStageRows(accountMappings, page) {
       merchantName: transaction.merchantName,
       categoryPrimary: transaction.categoryPrimary,
       categoryDetailed: transaction.categoryDetailed,
-      provenance: money.rounded
-        ? { ...transaction.provenance, amount_minor_rounded: true }
-        : transaction.provenance,
+      provenance: transaction.provenance,
     };
   });
   return [
@@ -1003,8 +925,7 @@ function promotionStatements(env, {
           provenance,source_locator,source_feed,basis_state,recorded_at)
        SELECT ?1,json_extract(m.value,'$.accountSlug'),substr(json_extract(m.value,'$.observedAt'),1,10),
               json_extract(m.value,'$.currentMinor'),json_extract(m.value,'$.availableMinor'),
-              json_extract(m.value,'$.currency'),'feed',
-              'plaid/balance/'||?3||'/'||s.provider_account_id||COALESCE(json_extract(m.value,'$.locatorQualifier'),''),
+              json_extract(m.value,'$.currency'),'feed','plaid/balance/'||?3||'/'||s.provider_account_id,
               ?2,'confirmed',json_extract(m.value,'$.observedAt')
          FROM json_each(?4) m
          JOIN plaid_sync_stage_accounts s ON s.tenant_id=?1 AND s.window_ref=?3
@@ -1077,9 +998,7 @@ function promotionStatements(env, {
               CASE WHEN direction='inflow' THEN -amount_minor ELSE amount_minor END,
               'feed_positive_amount_is_outflow',iso_currency_code,
               description,merchant_name,COALESCE(category_detailed,category_primary),COALESCE(pending,0),
-              provider_transaction_id,'feed',
-              'plaid/transactions/'||provider_transaction_id||CASE
-                WHEN json_extract(provenance_json,'$.amount_minor_rounded')=1 THEN '${MINOR_ROUNDED_QUALIFIER}' ELSE '' END,?,
+              provider_transaction_id,'feed','plaid/transactions/'||provider_transaction_id,?,
               'confirmed',?,pending_transaction_id,iso_currency_code,unofficial_currency_code,
               amount_decimal,'plaid',window_ref,page_index
          FROM plaid_sync_stage_transactions
@@ -1088,7 +1007,7 @@ function promotionStatements(env, {
          account_slug=excluded.account_slug,posted_on=excluded.posted_on,amount_minor=excluded.amount_minor,
          direction=excluded.direction,raw_amount_minor=excluded.raw_amount_minor,currency=excluded.currency,
          description=excluded.description,payee=excluded.payee,pending=excluded.pending,
-         pending_transaction_id=excluded.pending_transaction_id,source_locator=excluded.source_locator,
+         pending_transaction_id=excluded.pending_transaction_id,
          source_iso_currency_code=excluded.source_iso_currency_code,
          source_unofficial_currency_code=excluded.source_unofficial_currency_code,
          source_amount_decimal=excluded.source_amount_decimal,source_window_ref=excluded.source_window_ref,
@@ -1117,20 +1036,8 @@ function promotionStatements(env, {
             ELSE 'Plaid is still preparing historical transactions. The available activity is partial.' END,
           last_error_at=NULL WHERE tenant_id=?1 AND item_ref=?2`,
     ).bind(tenantId, itemRef, finalCursor, stamp, observedAt, historicalComplete ? 1 : 0),
-    // History progress comes from the promoted window itself, read inside this
-    // batch before the window row is deleted below, so a mutation restart or a
-    // replayed ready window can never count its pages twice. Like the generic
-    // feed, progress stops accruing once the history load has completed.
-    // unread_lines stays as it is: Plaid refuses a whole page rather than
-    // storing a line it cannot read, and that refusal is a visible retry.
     env.DB.prepare(
       `UPDATE bank_feed_backfill SET
-          pages_done=pages_done+CASE WHEN state='complete' THEN 0 ELSE COALESCE((
-            SELECT w.next_page_index FROM plaid_sync_windows w
-             WHERE w.tenant_id=?1 AND w.item_ref=?2 AND w.window_ref=?6),0) END,
-          transactions_seen=transactions_seen+CASE WHEN state='complete' THEN 0 ELSE COALESCE((
-            SELECT w.added_count+w.modified_count FROM plaid_sync_windows w
-             WHERE w.tenant_id=?1 AND w.item_ref=?2 AND w.window_ref=?6),0) END,
           state=CASE WHEN ?3 AND NOT (${pendingItem}) THEN 'complete' ELSE 'running' END,
           provider_history_state=CASE
             WHEN provider_history_state='HISTORICAL_UPDATE_COMPLETE' OR ?4='HISTORICAL_UPDATE_COMPLETE' THEN 'HISTORICAL_UPDATE_COMPLETE'
@@ -1139,7 +1046,7 @@ function promotionStatements(env, {
             ELSE 'TRANSACTIONS_UPDATE_STATUS_UNKNOWN' END,
           finished_at=CASE WHEN ?3 AND NOT (${pendingItem}) THEN ?5 ELSE NULL END,last_error=NULL
         WHERE tenant_id=?1 AND item_ref=?2`,
-    ).bind(tenantId, itemRef, historicalComplete ? 1 : 0, historyState, observedAt, windowRef),
+    ).bind(tenantId, itemRef, historicalComplete ? 1 : 0, historyState, observedAt),
     env.DB.prepare("DELETE FROM plaid_sync_stage_transactions WHERE tenant_id=? AND window_ref=?")
       .bind(tenantId, windowRef),
     env.DB.prepare("DELETE FROM plaid_sync_stage_accounts WHERE tenant_id=? AND window_ref=?")
@@ -1160,13 +1067,6 @@ function promotionStatements(env, {
     env.DB.prepare("SELECT reason,due_at FROM plaid_reconciliation WHERE tenant_id=? AND item_ref=?")
       .bind(tenantId, itemRef),
   ];
-}
-
-/** The owner-facing sentence for a sync that is waiting only on account choices. */
-export function plaidAssignmentWaitDetail(count) {
-  const one = Number(count) === 1;
-  return `${count} ${one ? "account needs" : "accounts need"} an owner choice before ` +
-    `${one ? "its" : "their"} transactions can load. Choose who owns each account on the Connect a bank page.`;
 }
 
 function assignmentBlockedResult(itemRef, readiness, receipt = {}) {
@@ -1253,7 +1153,7 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
     // An owner may finish assignment after our readiness read while this lease
     // is held. Preserve that newer due-now wakeup instead of delaying it again.
     const dueAt = new Date(Date.parse(stamp) + 5 * 60_000).toISOString();
-    const statements = [env.DB.prepare(
+    await runPlaidSyncBatch(env, lease, [env.DB.prepare(
       `INSERT INTO plaid_reconciliation
          (tenant_id,item_ref,reason,state,due_at,attempts,last_error_code,updated_at)
        VALUES (?,?,'assignment_wait','pending',?,0,?,?)
@@ -1262,18 +1162,7 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
          last_error_code=excluded.last_error_code,updated_at=excluded.updated_at
        WHERE NOT (plaid_reconciliation.reason='owner_assignment'
          AND plaid_reconciliation.updated_at>=excluded.updated_at)`,
-    ).bind(tenantId, itemRef, dueAt, receipt.code || null, stamp)];
-    // Every provider read of this window succeeded, so an earlier failure on
-    // the connection is no longer the truth. The owner's choice is the only
-    // thing left, and the connection says so instead of keeping a stale error.
-    const remaining = Number(receipt.assignments_remaining);
-    if (receipt.assignment_required === true && Number.isSafeInteger(remaining) && remaining > 0) {
-      statements.push(env.DB.prepare(
-        `UPDATE bank_feed_items SET status='connected',status_detail=?,last_error_at=NULL
-          WHERE tenant_id=? AND item_ref=? AND removed_at IS NULL AND status IN ('connected','error')`,
-      ).bind(plaidAssignmentWaitDetail(remaining), tenantId, itemRef));
-    }
-    await runPlaidSyncBatch(env, lease, statements);
+    ).bind(tenantId, itemRef, dueAt, receipt.code || null, stamp)]);
     return receipt;
   };
   try {
@@ -1762,88 +1651,18 @@ export async function plaidFeedStatus(env) {
       needs_attention: [],
     };
   }
-  // A staged window is fetched provider history that has not reached the ledger
-  // yet. The owner-choice count mirrors plaidAccountAssignmentReadiness, the
-  // exact guard that holds promotion, so status and sync can never disagree.
   const rows = (await env.DB.prepare(
     `SELECT i.item_ref,i.institution_label,i.environment,i.status,i.status_detail,i.connected_at,
             i.last_synced_at,b.state AS history_state,b.provider_history_state,
             b.pages_done,b.transactions_seen,b.unread_lines,
             r.state AS reconciliation_state,r.reason AS reconciliation_reason,r.due_at,o.state AS revocation_state,
-            o.outcome_state AS revocation_outcome_state,o.attempts AS revocation_attempts,
-            CASE WHEN w.state IN ('staging','ready','retryable') THEN w.next_page_index ELSE 0 END AS staged_pages,
-            CASE WHEN w.state IN ('staging','ready','retryable')
-                 THEN w.added_count+w.modified_count ELSE 0 END AS staged_transactions,
-            (SELECT COUNT(*) FROM plaid_sync_stage_accounts s
-               LEFT JOIN plaid_account_entity_assignments a
-                 ON a.tenant_id=s.tenant_id AND a.item_ref=w.item_ref
-                AND a.provider_account_id=s.provider_account_id
-               LEFT JOIN fin_entities e
-                 ON e.tenant_id=a.tenant_id AND e.entity_slug=a.entity_slug
-                AND e.superseded_by_id IS NULL AND e.status='active' AND e.relationship='owned'
-              WHERE s.tenant_id=w.tenant_id AND s.window_ref=w.window_ref
-                AND w.state IN ('staging','ready','retryable') AND e.entity_slug IS NULL) AS accounts_needing_owner
+            o.outcome_state AS revocation_outcome_state,o.attempts AS revocation_attempts
        FROM bank_feed_items i
        LEFT JOIN bank_feed_backfill b ON b.tenant_id=i.tenant_id AND b.item_ref=i.item_ref
        LEFT JOIN plaid_reconciliation r ON r.tenant_id=i.tenant_id AND r.item_ref=i.item_ref
        LEFT JOIN plaid_revocation_outbox o ON o.tenant_id=i.tenant_id AND o.item_ref=i.item_ref
-       LEFT JOIN plaid_sync_windows w ON w.tenant_id=i.tenant_id AND w.item_ref=i.item_ref
       WHERE i.tenant_id=? AND (i.removed_at IS NULL OR o.state<>'confirmed') ORDER BY i.connected_at`,
   ).bind(tenantId).all())?.results || [];
-  const accountsNeedingOwner = (row) => Number(row.accounts_needing_owner || 0);
-  // A healthy connection held only for owner choices says so in its own detail,
-  // even when the sync that reached the guard stopped before writing that
-  // sentence (a lost lease or deadline). Surfaces read status_detail directly.
-  const waitingOnly = (row) => row.status === "connected" && accountsNeedingOwner(row) > 0;
-  const statusDetail = (row) => waitingOnly(row)
-    ? plaidAssignmentWaitDetail(accountsNeedingOwner(row))
-    : row.status_detail;
-  // Balances rounded from a finer provider decimal, per connection, so neither
-  // the owner nor the operator reads one as exact. Staged rows carry the flag in
-  // provenance; a promoted balance carries it on its latest snapshot's locator.
-  // Only masked labels, account kinds and field names leave here.
-  const roundedBalances = new Map();
-  const noteRounded = (itemRef, entry) => {
-    if (!entry.fields.length) return;
-    if (!roundedBalances.has(itemRef)) roundedBalances.set(itemRef, []);
-    roundedBalances.get(itemRef).push(entry);
-  };
-  const stagedRounded = (await env.DB.prepare(
-    `SELECT w.item_ref,s.name,s.mask,s.account_kind,
-            json_extract(s.provenance_json,'$.current_balance_minor_rounded') AS current_rounded,
-            json_extract(s.provenance_json,'$.available_balance_minor_rounded') AS available_rounded
-       FROM plaid_sync_windows w
-       JOIN plaid_sync_stage_accounts s ON s.tenant_id=w.tenant_id AND s.window_ref=w.window_ref
-      WHERE w.tenant_id=? AND w.state IN ('staging','ready','retryable')
-        AND (json_extract(s.provenance_json,'$.current_balance_minor_rounded')=1
-          OR json_extract(s.provenance_json,'$.available_balance_minor_rounded')=1)
-      ORDER BY w.item_ref,s.name`,
-  ).bind(tenantId).all())?.results || [];
-  for (const row of stagedRounded) {
-    noteRounded(row.item_ref, {
-      masked_identifier: maskedIdentifier(row.name, row.mask),
-      account_kind: row.account_kind,
-      fields: [row.current_rounded === 1 && "current", row.available_rounded === 1 && "available"].filter(Boolean),
-      stage: "staged",
-    });
-  }
-  const ledgerRounded = (await env.DB.prepare(
-    `SELECT f.source_feed,f.label,f.mask,f.account_kind,
-            (SELECT b.source_locator FROM fin_balance_snapshots b
-              WHERE b.tenant_id=f.tenant_id AND b.account_slug=f.account_slug AND b.provenance='feed'
-              ORDER BY b.as_of_date DESC LIMIT 1) AS latest_locator
-       FROM fin_accounts f
-      WHERE f.tenant_id=? AND f.superseded_by_id IS NULL AND f.source_feed LIKE 'bank-feed:%'
-      ORDER BY f.source_feed,f.label`,
-  ).bind(tenantId).all())?.results || [];
-  for (const row of ledgerRounded) {
-    noteRounded(String(row.source_feed).slice("bank-feed:".length), {
-      masked_identifier: maskedIdentifier(row.label, row.mask),
-      account_kind: row.account_kind,
-      fields: minorRoundedFields(row.latest_locator),
-      stage: "in_ledger",
-    });
-  }
   return {
     configured: true,
     provider: PROVIDER,
@@ -1855,23 +1674,17 @@ export async function plaidFeedStatus(env) {
       institution_label: row.institution_label,
       environment: row.environment,
       status: row.status,
-      status_detail: statusDetail(row),
+      status_detail: row.status_detail,
       connected_at: row.connected_at,
       last_synced_at: row.last_synced_at,
       history: {
         state: row.history_state || "none",
         provider_history_state: row.provider_history_state || PLAID_HISTORY_STATE.UNKNOWN,
         partial: row.history_state !== "complete" || row.provider_history_state !== PLAID_HISTORY_STATE.HISTORICAL,
-        // Promoted into the ledger.
         pages_done: row.pages_done || 0,
         transactions_seen: row.transactions_seen || 0,
         unread_lines: row.unread_lines || 0,
-        // Fetched and held in the current window, not yet in the ledger.
-        staged_pages: Number(row.staged_pages || 0),
-        staged_transactions: Number(row.staged_transactions || 0),
       },
-      accounts_needing_owner: accountsNeedingOwner(row),
-      rounded_balances: roundedBalances.get(row.item_ref) || [],
       reconciliation: {
         state: row.reconciliation_state || "none", due_at: row.due_at || null,
         refresh_pending: reconciliationRefreshPending(row.reconciliation_state, row.reconciliation_reason),
@@ -1885,27 +1698,14 @@ export async function plaidFeedStatus(env) {
     })),
     needs_attention: rows.filter((row) => row.status !== "connected" ||
       ["retryable", "unavailable", "refused"].includes(row.reconciliation_state) ||
-      row.revocation_state === "retryable" || row.revocation_outcome_state === "unknown" ||
-      accountsNeedingOwner(row) > 0).map((row) => {
-      // A sync held for owner choices is healthy at the provider and would
-      // otherwise read as nothing to do. Say what is needed, with the count.
-      // A connection that is also failing keeps its failure as the headline.
-      const waiting = ["connected", "error"].includes(row.status) ? accountsNeedingOwner(row) : 0;
-      const onlyWaiting = waitingOnly(row);
-      return {
-        item_ref: row.item_ref,
-        status: row.status,
-        detail: statusDetail(row),
-        reconciliation_state: row.reconciliation_state || null,
-        revocation_state: row.revocation_state || null,
-        revocation_outcome_state: row.revocation_outcome_state || null,
-        ...(onlyWaiting ? { code: "plaid_account_assignment_required" } : {}),
-        ...(waiting > 0 ? {
-          accounts_needing_owner: waiting,
-          staged_transactions: Number(row.staged_transactions || 0),
-        } : {}),
-      };
-    }),
+      row.revocation_state === "retryable" || row.revocation_outcome_state === "unknown").map((row) => ({
+      item_ref: row.item_ref,
+      status: row.status,
+      detail: row.status_detail,
+      reconciliation_state: row.reconciliation_state || null,
+      revocation_state: row.revocation_state || null,
+      revocation_outcome_state: row.revocation_outcome_state || null,
+    })),
   };
 }
 

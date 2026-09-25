@@ -60,10 +60,7 @@ import {
   SOURCE_FAMILY_UID_FILTER_MAX,
 } from "./worker/src/lib/store-d1.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
-import {
-  ensureBankFeedWorkerSecrets,
-  validatePlaidApplicationKeys,
-} from "./operations/bank-feed-owner-secrets.mjs";
+import { ensureBankFeedWorkerSecrets } from "./operations/bank-feed-owner-secrets.mjs";
 import {
   financialPictureRequestFromFlags,
   parseFinancialPictureArgv,
@@ -234,7 +231,11 @@ import {
   zoneAssignmentRecoveredNotice,
   zoneAssignmentRetryNotice,
 } from "./operations/zone-assignment-retry.mjs";
-import { d1ResetDuringRemovalMessage, isD1TransientFaultBody } from "./operations/d1-transient-fault.mjs";
+import {
+  d1CpuResetReadState,
+  d1ResetDuringRemovalMessage,
+  isD1TransientFaultBody,
+} from "./operations/d1-transient-fault.mjs";
 import {
   requestSourceFamilyPageWithRetry,
   sourceFamilyInventoryRetryNotice,
@@ -3447,6 +3448,13 @@ export async function cmdHealth(manifestPath, {
           "      Health cannot pass until the local admin key matches the deployed secret."
       );
     }
+    const d1Reset = d1CpuResetReadState(dbody);
+    if (d1Reset) {
+      die(
+        `documents endpoint ${docs.status}: ${d1Reset.code} (retryable).` + "\n" +
+          `      ${d1Reset.guidance}`
+      );
+    }
     die(
       `documents endpoint ${docs.status}, so authenticated access was not proven.` + "\n" +
         "      Fix the endpoint and re-run `brain health`."
@@ -3485,6 +3493,13 @@ export async function cmdAsk(manifestPath, options = {}) {
   let body;
   try { body = JSON.parse(raw); } catch { /* validated below */ }
   if (!response.ok || !body || typeof body !== "object") {
+    const d1Reset = d1CpuResetReadState(raw);
+    if (d1Reset) {
+      die(
+        `the Brain could not answer: ${d1Reset.code} (retryable).` + "\n" +
+          `      ${d1Reset.guidance}`
+      );
+    }
     die(`the Brain could not answer (HTTP ${response.status}). Run \`brain support --preview\` for the safe issue note.`);
   }
 
@@ -3974,8 +3989,23 @@ export async function runRestartSafeMigrationStatements(
         skipped = true;
       }
     }
+    const boundedPage = /^WITH\s+schema47_bounded_page\s+AS\s*\(/i.test(statement.trim());
+    if (!skipped && boundedPage) {
+      let page = 0;
+      while (true) {
+        const result = await queryStatement(statement);
+        const changes = result?.meta?.changes;
+        if (!Number.isSafeInteger(changes) || changes < 0) {
+          throw new Error("bounded migration page returned no exact changes receipt");
+        }
+        if (afterStatement) await afterStatement({ index, statement, skipped, page, changes });
+        page++;
+        if (changes === 0) break;
+      }
+      continue;
+    }
     if (!skipped) await queryStatement(statement);
-    if (afterStatement) await afterStatement({ index, statement, skipped });
+    if (afterStatement) await afterStatement({ index, statement, skipped, page: null, changes: null });
   }
 }
 
@@ -4051,8 +4081,9 @@ export async function cmdMigrate(manifestPath, options = {}) {
 
   // 0010-0013 change the protocol used by every Vectorize writer. Migration
   // 0033 replaces the live FTS insert trigger across two independently
-  // committed D1 statements. 0044 adds the exact chunk-receipt columns read by
-  // the result-family writer. A public `brain migrate` against an active Worker
+  // committed D1 statements. 0044 and 0046 add exact receipt columns read by
+  // active writers. 0047 backfills the live corpus projection before its
+  // maintenance triggers exist. A public `brain migrate` against an active Worker
   // could therefore race either the vector protocol change, the interval
   // between DROP TRIGGER and CREATE TRIGGER, or a schema-44 chunk write. The
   // private option keeps its
@@ -4065,7 +4096,8 @@ export async function cmdMigrate(manifestPath, options = {}) {
   // migrate is `vectorDrainPauseCompleted`: setup/update set it once the
   // paused deployment and the full grace are behind them. Unverified is loud,
   // not fatal, because a transport blip must not block every update.
-  const writerQuiescenceMigrations = new Set([10, 11, 12, 13, 33, 44, 46]);
+  const writerQuiescenceMigrations = new Set([10, 11, 12, 13, 33, 44, 46, 47]);
+  const writerQuiescenceMigrationList = "0010-0013, 0033, 0044, 0046, or 0047";
   const cutoverAuthorized = options.vectorDrainQuiesced === true ||
     options.vectorDrainPauseCompleted === true;
   if ((m.infrastructure?.cloudflare?.storage || "d1") === "d1" &&
@@ -4092,7 +4124,7 @@ export async function cmdMigrate(manifestPath, options = {}) {
       // eligible for the direct fresh-install path; every other prefix must use
       // setup/update's paused-worker quiescence protocol.
       die(
-        "this existing brain needs the verified paused-writer cutover before migrations 0010-0013, 0033, or 0044.\n" +
+        `this existing brain needs the verified paused-writer cutover before migrations ${writerQuiescenceMigrationList}.\n` +
         "      Run `brain update` instead; direct migrate was stopped before changing D1.",
       );
     }
@@ -4111,7 +4143,7 @@ export async function cmdMigrate(manifestPath, options = {}) {
     if (!inventory || !Array.isArray(inventory.results) || inventory.results.length !== 1 ||
         Number(inventory.results[0]?.user_table_count) !== 0) {
       die(
-        "this database is not provably fresh, so migrations 0010-0013, 0033, or 0044 require the verified paused-writer cutover.\n" +
+        `this database is not provably fresh, so migrations ${writerQuiescenceMigrationList} require the verified paused-writer cutover.\n` +
         "      Run `brain update` instead; direct migrate was stopped before changing D1.",
       );
     }
@@ -26568,16 +26600,13 @@ export function readBankFeedKeyHidden(promptText, { read = readHiddenSecret } = 
 
 export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
   if (!manifestPath || String(manifestPath).startsWith("--")) {
-    die("usage: brain connect bank <manifest> [--print] [--replace-keys]");
+    die("usage: brain connect bank <manifest> [--print]");
   }
-  const unknownFlags = Object.keys(flags).filter((key) => !["print", "replace-keys"].includes(key));
+  const unknownFlags = Object.keys(flags).filter((key) => key !== "print");
   if (unknownFlags.length) die(`brain connect bank does not recognize --${unknownFlags[0]}`);
-  for (const name of ["print", "replace-keys"]) {
-    if (flags[name] !== undefined && flags[name] !== true) {
-      die(`--${name} is a switch and does not take a value. Put it at the end of the command.`);
-    }
+  if (flags.print !== undefined && flags.print !== true) {
+    die("--print is a switch and does not take a value. Put it at the end of the command.");
   }
-  const replaceKeys = flags["replace-keys"] === true;
   const { m } = loadManifest(manifestPath);
   const feed = m?.corpora?.bank_feed || {};
   if (feed.enabled !== true) {
@@ -26615,13 +26644,8 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
 
   // Plaid Link cannot start on a Worker without its application credentials,
   // so custody is settled before the owner is sent to the browser. The listing
-  // is read-only; the owner is prompted only when a name is actually missing,
-  // or for both Plaid keys when --replace-keys corrects a mistyped pair.
+  // is read-only; the owner is prompted only when a name is actually missing.
   const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
-  const environment = feed.environment ?? "sandbox";
-  const countryCodes = Array.isArray(feed.country_codes) && feed.country_codes.length
-    ? feed.country_codes
-    : ["US"];
   let acct = null;
   const account = async () => (acct ??= await (options.resolveAccount ?? resolveAccount)(m));
   const listSecretNames = options.listWorkerSecretNames ?? (async () => {
@@ -26646,14 +26670,6 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
       body: { name, text, type: "secret_text" },
     }));
   const readSecret = options.readSecret ?? readBankFeedKeyHidden;
-  // The typed pair is proven against this manifest's Plaid environment before
-  // any Worker write, on the first entry and on every replacement.
-  const validateKeys = options.validatePlaidKeys ?? ((pair) => validatePlaidApplicationKeys({
-    ...pair,
-    environment,
-    countryCodes,
-    fetchImpl: options.plaidFetchImpl ?? fetch,
-  }));
   let custody;
   try {
     custody = await ensureBankFeedWorkerSecrets({
@@ -26661,9 +26677,6 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
       listSecretNames,
       putSecret,
       readSecret,
-      validateKeys,
-      environment,
-      replaceKeys,
       generateWrappingKey: options.generateWrappingKey,
       report: info,
     });
@@ -26671,13 +26684,10 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
     if (error instanceof Fatal) throw error;
     die(String(error?.message || error));
   }
-  if (custody.replaced) {
-    ok(`Plaid accepted the new keys for ${environment}; replaced and verified ${custody.written.join(", ")} on ${scriptName}. BANK_FEED_WRAPPING_KEY_V2 was not touched`);
-  } else if (custody.written.length) {
+  if (custody.written.length) {
     ok(`wrote and verified ${custody.written.join(", ")} on ${scriptName}`);
   } else {
     ok(`${custody.names.join(", ")} already present on ${scriptName}; nothing was prompted or written`);
-    info("If a Plaid key was entered wrongly, rerun this command with --replace-keys to enter both keys again.");
   }
 
   const shouldOpen = flags.print !== true && options.open !== false;
@@ -26696,7 +26706,6 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
   return {
     provider: "plaid", url, opened, live_provider_proof: false,
     secrets_written: custody.written,
-    keys_replaced: custody.replaced === true,
   };
 }
 
@@ -27090,9 +27099,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect zoom     <manifest>      Zoom cloud-recording transcripts (needs a paid Zoom seat)
     brain connect imap     <manifest>      any IMAP mailbox (Yahoo, Fastmail, iCloud, a host): app
                                            password entered hidden, proven by a real read first
-    brain connect bank     <manifest>      owner-present Plaid pilot: hidden prompt for missing Plaid keys, checked
-                                           with Plaid before they are saved, then owner-only Plaid Link and masked
-                                           account assignment. --replace-keys re-enters both keys
+    brain connect bank     <manifest>      owner-present Plaid pilot: hidden prompt for missing Plaid keys, then
+                                           owner-only Plaid Link and masked account assignment
     brain connect <provider> <manifest>    QuickBooks, Slack, Notion, Microsoft, Dropbox or HubSpot OAuth
     brain load       <manifest>            load EVERYTHING this manifest has: one sweep of every
                                            enabled, connected source, one report at the end

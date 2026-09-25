@@ -97,6 +97,11 @@ if (SCENARIO) {
       if (SCENARIO === "health-documents-http-then-healthy" && documentRequests === 1) {
         return json({ error: "fixture temporary-looking HTTP response" }, 503);
       }
+      if (SCENARIO === "health-documents-d1-cpu-reset") {
+        return json({
+          error: "D1_ERROR: D1 DB exceeded its CPU time limit and was reset. private-looking-health-reset-canary",
+        }, 500);
+      }
       if (SCENARIO === "health-documents-unreachable") {
         return json({ error: "fixture documents unavailable" }, 503);
       }
@@ -381,6 +386,14 @@ if (SCENARIO) {
     httpFailure.code === 1 && /documents endpoint 503/i.test(httpFailure.output) &&
       !/still checking once more|documents endpoint 200|vector index is query-ready/i.test(httpFailure.output),
     httpFailure.output);
+
+  const d1CpuReset = runScenario("health-documents-d1-cpu-reset", "health", { adminKey: true });
+  check("health names a D1 CPU reset as retryable without claiming authenticated readiness",
+    d1CpuReset.code === 1 && /d1_cpu_reset/i.test(d1CpuReset.output) &&
+      /retryable/i.test(d1CpuReset.output) && /wait at least 10 seconds/i.test(d1CpuReset.output) &&
+      !/private-looking-health-reset-canary/i.test(d1CpuReset.output) &&
+      !/ok\s+documents endpoint|vector index is query-ready/i.test(d1CpuReset.output),
+    d1CpuReset.output);
 
   const incompletePublic = runScenario("health-public-incomplete", "health", { adminKey: true });
   check("health rejects a 200 public response that cannot prove an exact Worker state",
