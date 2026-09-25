@@ -5661,11 +5661,13 @@ export async function cmdUpgrade(manifestPath, options = {}) {
                   immediateBacklog.pending < 0) {
                 throw new TypeError("the immediate pre-pause backlog receipt is invalid");
               }
-            } catch {
+            } catch (error) {
+              const reads = Number.isSafeInteger(error?.attempts) && error.attempts > 0 ? error.attempts : 1;
               die(renderCliCommands(
-                "The immediate pre-pause documents backlog read failed, so this Brain's queued search updates could not be read. " +
-                  "The paused deployment was not started. Fix the failed read, wait until `brain health` says query-ready, " +
-                  "then run the update again."
+                `The immediate pre-pause documents backlog read failed after ${reads} read${reads === 1 ? "" : "s"}, ` +
+                  "so this Brain's queued search updates could not be read. The paused deployment was not started. " +
+                  "A large Brain's database can be briefly too busy to answer: wait a few minutes, then run " +
+                  "`brain update` again. Never run `brain drain` in a loop to get past this."
               ));
             }
             if (immediateBacklog.pending > 0) {
@@ -21488,10 +21490,28 @@ async function backlogCount(manifestPath) {
   return Number((await res.json())?.vector_backlog?.pending || 0);
 }
 
+// Field evidence (2026-09-25, a 1.8M-vector Brain): the documents aggregate
+// returned HTTP 500 "D1 DB exceeded its CPU time limit and was reset", and the
+// same read 30 minutes later succeeded in 36 s. One busy moment must not look
+// like an unreadable Brain, so the read is repeated with a long per-attempt
+// timeout and a real backoff before update refuses. It is a read-only GET.
+export const UPDATE_BACKLOG_READ_TIMEOUT_MS = 90_000;
+export const UPDATE_BACKLOG_RETRY_DELAYS_MS = Object.freeze([10_000, 30_000]);
+const D1_CPU_RESET_PATTERN = /CPU time limit|\bwas reset\b/iu;
+
+function updateBacklogReadFailure(attempts) {
+  return Object.assign(new Error("authenticated documents backlog read failed"), { attempts });
+}
+
 /**
  * Read update's fail-closed queue gate from the authenticated aggregate used
  * by health and post-ingest reporting. Public /health does not carry backlog
  * depth, and a missing or malformed private receipt must never become zero.
+ *
+ * Only a 5xx, a D1 CPU-reset body, or a transport failure is retried. 401, 403
+ * and 404 are answers, not busy moments, and every other refusal (a partial
+ * receipt, a non-200 2xx, an oversized body) stays a single-read refusal. The
+ * thrown error carries only the number of reads tried.
  */
 export async function readUpdateBacklog(manifestPath, options = {}) {
   const pinManifest = options.pinManifest ?? pinUpdateManifest;
@@ -21500,6 +21520,8 @@ export async function readUpdateBacklog(manifestPath, options = {}) {
   const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
   const request = options.http ?? http;
   const readAggregate = options.readAggregateResponse ?? readUpdatePreviewAggregateResponse;
+  const sleep = options.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
+  const retryDelays = options.retryDelaysMs ?? UPDATE_BACKLOG_RETRY_DELAYS_MS;
   const projection = options.previewLib ?? await updatePreviewLib();
   let pin;
   let documentsUrl;
@@ -21517,47 +21539,105 @@ export async function readUpdateBacklog(manifestPath, options = {}) {
       },
     });
   } catch {
-    throw new Error("authenticated documents backlog read failed");
+    throw updateBacklogReadFailure(0);
   }
   if (typeof adminKey !== "string" || !adminKey) {
-    throw new Error("authenticated documents backlog read failed");
+    throw updateBacklogReadFailure(0);
   }
 
-  let response;
-  let body;
-  let responseFailed = false;
+  const maxAttempts = retryDelays.length + 1;
+  let attempts = 0;
   try {
-    // A replacement during credential lookup must stop before the durable key
-    // can be attached to any destination derived from different manifest bytes.
-    revalidateManifest(pin, "update backlog live request");
-    response = await request(documentsUrl, {
-      headers: { "X-Admin-Key": adminKey },
-    }, { timeoutMs: 30_000, what: "the update backlog check" });
-    if (!response || response.ok !== true || response.status !== 200) {
-      responseFailed = true;
-    } else {
-      body = await readAggregate(response);
+    while (true) {
+      attempts += 1;
+      let response;
+      let body;
+      let responseFailed = false;
+      let transient = false;
+      try {
+        // A replacement during credential lookup or a backoff must stop before
+        // the durable key can reach a destination derived from different bytes.
+        revalidateManifest(pin, "update backlog live request");
+      } catch {
+        throw updateBacklogReadFailure(attempts - 1);
+      }
+      try {
+        response = await request(documentsUrl, {
+          headers: { "X-Admin-Key": adminKey },
+        }, { timeoutMs: UPDATE_BACKLOG_READ_TIMEOUT_MS, what: "the update backlog check" });
+      } catch {
+        // No response at all: a timeout, reset, or DNS failure.
+        responseFailed = true;
+        transient = true;
+      }
+      // A body that is oversized, truncated, or not JSON is a malformed answer,
+      // not a busy database, so it refuses on this read.
+      if (!responseFailed && (!response || response.ok !== true || response.status !== 200)) {
+        responseFailed = true;
+        const status = Number(response?.status);
+        if (status >= 500) {
+          transient = true;
+        } else if (![401, 403, 404].includes(status)) {
+          // Only the D1 error text is inspected, and it never leaves here.
+          try {
+            const refused = await readAggregate(response);
+            transient = typeof refused?.error === "string" && D1_CPU_RESET_PATTERN.test(refused.error);
+          } catch { /* an unreadable refusal is not evidence of a busy database */ }
+        }
+      } else if (!responseFailed) {
+        try {
+          body = await readAggregate(response);
+        } catch {
+          responseFailed = true;
+        }
+      }
+
+      try {
+        // Close the same local identity after every completed or refused response.
+        // Raw body details and validator codes stay behind this fixed public error.
+        revalidateManifest(pin, "update backlog live receipt");
+        if (responseFailed) throw new TypeError("the update backlog response was unreadable");
+        if (typeof body?.error === "string" && D1_CPU_RESET_PATTERN.test(body.error)) {
+          transient = true;
+          throw new TypeError("the update backlog response was a database reset");
+        }
+        const aggregate = projection.validateVectorProjectionAggregateReceipt(body, {
+          expectedVersion: pin.manifest?.brain?.version,
+          expectedBackend: "d1",
+          expectedDrainMode: "active",
+        });
+        return Object.freeze({ pending: aggregate.queue.pending });
+      } catch {
+        if (!transient || attempts >= maxAttempts) throw updateBacklogReadFailure(attempts);
+      }
+      await sleep(retryDelays[attempts - 1]);
     }
-  } catch {
-    responseFailed = true;
   } finally {
     adminKey = null;
   }
+}
 
-  try {
-    // Close the same local identity after every completed or refused response.
-    // Raw body details and validator codes stay behind this fixed public error.
-    revalidateManifest(pin, "update backlog live receipt");
-    if (responseFailed) throw new TypeError("the update backlog response was unreadable");
-    const aggregate = projection.validateVectorProjectionAggregateReceipt(body, {
-      expectedVersion: pin.manifest?.brain?.version,
-      expectedBackend: "d1",
-      expectedDrainMode: "active",
-    });
-    return Object.freeze({ pending: aggregate.queue.pending });
-  } catch {
-    throw new Error("authenticated documents backlog read failed");
+/**
+ * The owner-facing refusal for an unreadable backlog. It names how many reads
+ * were tried and the one safe remedy; a looping drain adds load to the same
+ * database that just refused a read.
+ */
+function updateBacklogUnreadableMessage(error) {
+  if (error?.attempts === 0) {
+    // The admin key or Brain address could not be loaded, so no read was sent
+    // and waiting cannot help.
+    return renderCliCommands(
+      "The authenticated documents backlog read could not be sent: this computer's admin key or Brain address " +
+        "could not be loaded. Nothing was changed. Fix that, then run `brain update` again."
+    );
   }
+  const reads = Number.isSafeInteger(error?.attempts) && error.attempts > 0 ? error.attempts : 1;
+  return renderCliCommands(
+    `The authenticated documents backlog read failed after ${reads} read${reads === 1 ? "" : "s"}, ` +
+      "so this Brain's queued search updates could not be read. Updating now could pause it mid-queue. " +
+      "Nothing was changed. A large Brain's database can be briefly too busy to answer: wait a few minutes, " +
+      "then run `brain update` again. Never run `brain drain` in a loop to get past this."
+  );
 }
 
 async function reportBacklog(manifestPath) {
@@ -25680,12 +25760,8 @@ export async function cmdUpdate(manifestPath, options = {}) {
           !Number.isSafeInteger(backlog.pending) || backlog.pending < 0) {
         throw new Error("authenticated documents backlog read failed");
       }
-    } catch {
-      const message = renderCliCommands(
-        "The authenticated documents backlog read failed, so this Brain's queued search updates could not be read. " +
-          "Updating now could pause it mid-queue. Nothing was changed. Fix the failed read, wait until `brain health` " +
-          "says query-ready, then run the update again."
-      );
+    } catch (error) {
+      const message = updateBacklogUnreadableMessage(error);
       if (!forceQueuedUpdate) die(message);
       warn(renderCliCommands(
         "The authenticated documents backlog read failed. `--force` will update anyway and may pause queued search work mid-queue."

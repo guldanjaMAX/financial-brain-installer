@@ -79,6 +79,16 @@ asset publication.
   confirm the paused deployment does not start, then retry after health says
   query-ready.
 
+- **A busy database no longer makes a large Brain look unreadable to update.**
+  On a very large Brain the backlog read can briefly fail while its database
+  is busy. `brain update` now tries that read up to three times, waiting 10
+  seconds and then 30 seconds, and gives each read up to 90 seconds. A Brain
+  that refuses the admin key, or a route that does not exist, is still refused
+  on the first read. If every read fails, the message says how many were tried:
+  wait a few minutes and run `brain update` again. Never run `brain drain` in a
+  loop to get past it. Queued search work still stops the update exactly as
+  before. To check: a refusal names the number of reads it tried.
+
 - **Drive review no longer downloads every stored file label on each sweep.**
   The Brain first identifies the exact absent or already-reviewed families,
   then returns names and folders only for those IDs in requests capped at 97
