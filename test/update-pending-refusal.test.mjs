@@ -25,9 +25,10 @@ const PENDING_MESSAGE = (pending) => renderCliCommands(
 );
 
 const UNREADABLE_MESSAGE = renderCliCommands(
-  "The authenticated documents backlog read failed, so this Brain's queued search updates could not be read. " +
-    "Updating now could pause it mid-queue. Nothing was changed. Fix the failed read, wait until `brain health` " +
-    "says query-ready, then run the update again.",
+  "The authenticated documents backlog read failed after 1 read, so this Brain's queued search updates could not " +
+    "be read. Updating now could pause it mid-queue. Nothing was changed. A large Brain's database can be briefly " +
+    "too busy to answer: wait a few minutes, then run `brain update` again. Never run `brain drain` in a loop to " +
+    "get past this.",
 );
 
 const FORCE_WARNING = (pending) => renderCliCommands(
@@ -471,4 +472,189 @@ test("the force switch remains on the live update boundary and is documented", (
   assert.equal(help.status, 0, help.stderr);
   assert.ok(help.stdout.includes(renderCliCommands("brain update     [manifest] --force")));
   assert.match(help.stdout, /queued search update/);
+});
+
+/* ---- transient D1 CPU resets on large Brains (field report, 2026-09-25) ---- */
+
+const CPU_RESET_BODY = JSON.stringify({
+  error: "D1_ERROR: D1 DB exceeded its CPU time limit and was reset.",
+});
+
+const UNREADABLE_AFTER = (reads) => renderCliCommands(
+  `The authenticated documents backlog read failed after ${reads} read${reads === 1 ? "" : "s"}, ` +
+    "so this Brain's queued search updates could not be read. Updating now could pause it mid-queue. " +
+    "Nothing was changed. A large Brain's database can be briefly too busy to answer: wait a few minutes, " +
+    "then run `brain update` again. Never run `brain drain` in a loop to get past this.",
+);
+
+// Replays one scripted response per request and records every request, sleep
+// and per-attempt timeout so no test ever waits on a real backoff.
+function scriptedReader(manifestPath, script) {
+  const log = { requests: 0, sleeps: [], timeouts: [] };
+  const options = {
+    resolveAdminKey: () => "unit-test-admin-key",
+    sleep: async (ms) => {
+      log.sleeps.push(ms);
+    },
+    http: async (_url, _init, requestOptions) => {
+      log.timeouts.push(requestOptions?.timeoutMs);
+      const step = script[log.requests++];
+      if (!step) throw new Error("the scripted fixture ran out of responses");
+      if (step.network) {
+        throw Object.assign(new Error("connection reset"), { code: "ECONNRESET", retryable: true });
+      }
+      return streamedResponse(step.body, { status: step.status });
+    },
+  };
+  return { log, options, read: () => readUpdateBacklog(manifestPath, options) };
+}
+
+test("two transient 500s then an empty backlog proceeds after bounded backoff", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const { log, read } = scriptedReader(manifestPath, [
+      { status: 500, body: CPU_RESET_BODY },
+      { status: 500, body: CPU_RESET_BODY },
+      { status: 200, body: JSON.stringify(projectionInventory({ pending: 0 })) },
+    ]);
+
+    assert.deepEqual(await read(), { pending: 0 });
+    assert.equal(log.requests, 3);
+    assert.deepEqual(log.sleeps, [10_000, 30_000]);
+    assert.ok(log.timeouts.every((ms) => Number.isSafeInteger(ms) && ms >= 90_000), JSON.stringify(log.timeouts));
+  });
+});
+
+test("a CPU-reset body, a network error, and 502 are each retried", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const { log, read } = scriptedReader(manifestPath, [
+      { network: true },
+      { status: 502, body: "bad gateway" },
+      { status: 200, body: JSON.stringify(projectionInventory({ pending: 0 })) },
+    ]);
+    assert.deepEqual(await read(), { pending: 0 });
+    assert.equal(log.requests, 3);
+
+    const cpu = scriptedReader(manifestPath, [
+      { status: 400, body: CPU_RESET_BODY },
+      { status: 200, body: JSON.stringify(projectionInventory({ pending: 0 })) },
+    ]);
+    assert.deepEqual(await cpu.read(), { pending: 0 });
+    assert.equal(cpu.log.requests, 2);
+  });
+});
+
+test("three transient 500s refuse the update and name how many reads were tried", async () => {
+  await withFixture(async ({ manifestPath, original }) => {
+    const { log, options } = scriptedReader(manifestPath, [
+      { status: 500, body: CPU_RESET_BODY },
+      { status: 500, body: CPU_RESET_BODY },
+      { status: 500, body: CPU_RESET_BODY },
+    ]);
+    const events = [];
+    let error = null;
+    try {
+      await cmdUpdate(manifestPath, {
+        ...updateHarness(manifestPath, readUpdateBacklog, events),
+        updateBacklogOptions: options,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    assert.equal(error?.message, UNREADABLE_AFTER(3));
+    assert.doesNotMatch(error?.message || "", /CPU time limit|D1_ERROR/);
+    assert.equal(log.requests, 3);
+    assert.deepEqual(log.sleeps, [10_000, 30_000]);
+    assert.deepEqual(events, ["authenticated documents backlog read"]);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+test("401, 403 and 404 refuse at once without a retry", async () => {
+  await withFixture(async ({ manifestPath, original }) => {
+    for (const status of [401, 403, 404]) {
+      const { log, options } = scriptedReader(manifestPath, [
+        { status, body: CPU_RESET_BODY },
+        { status: 200, body: JSON.stringify(projectionInventory({ pending: 0 })) },
+      ]);
+      const events = [];
+      let error = null;
+      try {
+        await cmdUpdate(manifestPath, {
+          ...updateHarness(manifestPath, readUpdateBacklog, events),
+          updateBacklogOptions: options,
+        });
+      } catch (caught) {
+        error = caught;
+      }
+
+      assert.equal(error?.message, UNREADABLE_AFTER(1), `HTTP ${status}`);
+      assert.equal(log.requests, 1, `HTTP ${status} must not be retried`);
+      assert.deepEqual(log.sleeps, [], `HTTP ${status} must not back off`);
+      assert.deepEqual(events, ["authenticated documents backlog read"]);
+      assert.equal(readFileSync(manifestPath, "utf8"), original);
+    }
+  });
+});
+
+test("a readable backlog with pending work refuses before any deploy call", async () => {
+  await withFixture(async ({ manifestPath, original }) => {
+    const { log, options } = scriptedReader(manifestPath, [
+      { status: 500, body: CPU_RESET_BODY },
+      { status: 200, body: JSON.stringify(projectionInventory({ pending: 5, upserts: 5 })) },
+    ]);
+    const events = [];
+    let decided = null;
+    let error = null;
+    try {
+      await cmdUpdate(manifestPath, {
+        ...updateHarness(manifestPath, async (...args) => {
+          decided = await readUpdateBacklog(...args);
+          events.push("queue decision");
+          return decided;
+        }, events),
+        updateBacklogOptions: options,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    assert.deepEqual(decided, { pending: 5 }, "the queue decision point must be reached");
+    assert.equal(error?.message, PENDING_MESSAGE(5));
+    assert.equal(log.requests, 2);
+    assert.deepEqual(events, ["authenticated documents backlog read", "queue decision"]);
+    assert.ok(!events.includes("paused vector-drain deployment"), "the deploy must never be reached");
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+test("a missing admin key refuses without sending a read or claiming one", async () => {
+  await withFixture(async ({ manifestPath, original }) => {
+    let requests = 0;
+    const events = [];
+    let error = null;
+    try {
+      await cmdUpdate(manifestPath, {
+        ...updateHarness(manifestPath, readUpdateBacklog, events),
+        updateBacklogOptions: {
+          resolveAdminKey: () => undefined,
+          sleep: async () => assert.fail("no backoff without a read"),
+          http: async () => {
+            requests++;
+            return inventoryResponse(projectionInventory());
+          },
+        },
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    assert.equal(error?.message, renderCliCommands(
+      "The authenticated documents backlog read could not be sent: this computer's admin key or Brain address " +
+        "could not be loaded. Nothing was changed. Fix that, then run `brain update` again.",
+    ));
+    assert.equal(requests, 0);
+    assert.deepEqual(events, ["authenticated documents backlog read"]);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
 });
