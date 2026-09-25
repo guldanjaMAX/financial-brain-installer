@@ -104,6 +104,9 @@ assert.equal(markerReads, 2, "the report must compare opening and closing marker
 console.log("documents report mutation fence: 2 assertions passed");
 
 let reportMarkerReads = 0;
+let chunkPageReads = 0;
+let outboxDeletes = 0;
+const pendingOutbox = new Set(["chunk-1", "chunk-2"]);
 const pendingReportEnv = {
   DB: {
     prepare(sql) {
@@ -114,20 +117,38 @@ const pendingReportEnv = {
             reportMarkerReads++;
             return {
               ...changingMarker(7),
-              outbox_pending: 1,
+              chunk_high_water: 2,
+              outbox_pending: pendingOutbox.size > 0 ? 1 : 0,
             };
           }
           return null;
         },
-        all: async () => ({ results: [] }),
+        all: async () => {
+          if (/WITH page AS MATERIALIZED[\s\S]*FROM chunks/i.test(sql)) {
+            chunkPageReads++;
+            if (chunkPageReads === 2) {
+              pendingOutbox.delete("chunk-1");
+              outboxDeletes++;
+            }
+            return { results: [
+              { page_state: 1, source_type: null, chunks: 1, pending_vectors: 0,
+                last_id: chunkPageReads },
+              { page_state: 0, source_type: "synthetic", chunks: 1,
+                pending_vectors: chunkPageReads === 1 ? 1 : 0, last_id: null },
+            ] };
+          }
+          return { results: [] };
+        },
       };
       return prepared;
     },
   },
 };
-const pendingReport = await readExactDocumentReport(pendingReportEnv);
+const pendingReport = await readExactDocumentReport(pendingReportEnv, { chunkPageSize: 1 });
 assert.equal(reportMarkerReads, 2, "the pending report must bracket its pages");
+assert.equal(chunkPageReads, 2, "the pending report must reach a second chunk page");
+assert.equal(outboxDeletes, 1, "the fixture must delete an outbox row between chunk pages");
 assert.equal(pendingReport.summary.exact, false,
   "a non-empty outbox cannot produce an exact mixed pending-vector snapshot");
 assert.equal(pendingReport.summary.pending_vector_counts_exact, false);
-console.log("documents report pending-vector accuracy: 3 assertions passed");
+console.log("documents report pending-vector accuracy: 5 assertions passed");

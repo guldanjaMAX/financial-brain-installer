@@ -72,6 +72,7 @@ export const UPDATE_PREVIEW_FAILURE_CODES = Object.freeze([
   "UPDATE_PREVIEW_DEPLOYED_DRAIN_PAUSED",
   "UPDATE_PREVIEW_PROJECTION_EXCESS",
   "UPDATE_PREVIEW_PROJECTION_WORK_INSUFFICIENT",
+  "UPDATE_PREVIEW_PROJECTION_WORK_UNCOUNTED",
   "UPDATE_PREVIEW_PROJECTION_WORK_MISSING",
   "UPDATE_PREVIEW_PROJECTION_VISIBILITY_PENDING",
   "UPDATE_PREVIEW_PLAN_INVALID",
@@ -1202,7 +1203,9 @@ function readinessReasonIsCoherent({
  * under one command and rejected under the other because their count rules
  * drifted apart.
  */
-function validateProjectionAggregateFields(inventory, expectedBackend) {
+function validateProjectionAggregateFields(inventory, expectedBackend, {
+  requireBoundedMetadata = false,
+} = {}) {
   if (inventory.backend !== expectedBackend) {
     refuse("UPDATE_PREVIEW_DEPLOYED_BACKEND_MISMATCH");
   }
@@ -1213,6 +1216,27 @@ function validateProjectionAggregateFields(inventory, expectedBackend) {
       !validCount(backlog.upserts) || !validCount(backlog.deletes) ||
       !validCount(backlog.submitted) || backlog.upserts + backlog.deletes !== backlog.pending ||
       backlog.submitted > backlog.pending) {
+    refuse("UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID");
+  }
+  const hasBacklogBoundedMetadata = Object.hasOwn(backlog, "pending_is_capped") &&
+    Object.hasOwn(backlog, "pending_display") &&
+    Object.hasOwn(backlog, "component_counts_exact");
+  if (requireBoundedMetadata && !hasBacklogBoundedMetadata) {
+    refuse("UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID");
+  }
+  const pendingIsCapped = hasBacklogBoundedMetadata
+    ? backlog.pending_is_capped === true
+    : false;
+  const componentCountsExact = hasBacklogBoundedMetadata
+    ? backlog.component_counts_exact === true
+    : true;
+  if (hasBacklogBoundedMetadata && (
+    typeof backlog.pending_is_capped !== "boolean" ||
+    typeof backlog.component_counts_exact !== "boolean" ||
+    backlog.pending_display !== (pendingIsCapped ? "10,000+" : String(backlog.pending)) ||
+    pendingIsCapped !== !componentCountsExact ||
+    (pendingIsCapped ? backlog.pending !== 10_001 : backlog.pending > 10_000)
+  )) {
     refuse("UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID");
   }
   const oldestQueuedAt = backlog.oldest_queued_at;
@@ -1229,6 +1253,19 @@ function validateProjectionAggregateFields(inventory, expectedBackend) {
       !validCount(readiness.pending) || !validCount(readiness.submitted) ||
       readiness.pending !== backlog.pending || readiness.submitted !== backlog.submitted ||
       readiness.submitted > readiness.pending) {
+    refuse("UPDATE_PREVIEW_VECTOR_READINESS_INVALID");
+  }
+  const hasReadinessBoundedMetadata = Object.hasOwn(readiness, "pending_is_capped") &&
+    Object.hasOwn(readiness, "submitted_counts_exact");
+  if (requireBoundedMetadata && !hasReadinessBoundedMetadata) {
+    refuse("UPDATE_PREVIEW_VECTOR_READINESS_INVALID");
+  }
+  if (hasReadinessBoundedMetadata && (
+    typeof readiness.pending_is_capped !== "boolean" ||
+    typeof readiness.submitted_counts_exact !== "boolean" ||
+    readiness.pending_is_capped !== pendingIsCapped ||
+    readiness.submitted_counts_exact !== componentCountsExact
+  )) {
     refuse("UPDATE_PREVIEW_VECTOR_READINESS_INVALID");
   }
   const readinessOldestQueuedAt = readiness.oldest_queued_at;
@@ -1253,6 +1290,11 @@ function validateProjectionAggregateFields(inventory, expectedBackend) {
     actual_vectors: readiness.actual_vectors,
     queue: {
       pending: backlog.pending,
+      ...(requireBoundedMetadata ? {
+        pending_is_capped: pendingIsCapped,
+        pending_display: backlog.pending_display,
+        component_counts_exact: componentCountsExact,
+      } : {}),
       upserts: backlog.upserts,
       deletes: backlog.deletes,
       submitted: backlog.submitted,
@@ -1290,7 +1332,9 @@ export function validateVectorProjectionAggregateReceipt(inventory, options = {}
     refuse("UPDATE_PREVIEW_DEPLOYED_GENERATION_MISMATCH");
   }
 
-  const aggregate = validateProjectionAggregateFields(inventory, expectedBackend);
+  const aggregate = validateProjectionAggregateFields(inventory, expectedBackend, {
+    requireBoundedMetadata: true,
+  });
   return immutable({
     worker_version: inventory.version,
     backend: aggregate.backend,
@@ -1311,6 +1355,9 @@ function projectionAggregateVerdict(aggregate) {
   }
   return aggregate.actual_vectors > aggregate.expected_vectors
     ? "projection_excess"
+    : aggregate.queue.pending > 0 &&
+        (aggregate.queue.pending_is_capped || !aggregate.queue.component_counts_exact)
+      ? "projection_work_queued_uncounted"
     : aggregate.actual_vectors < aggregate.expected_vectors
       ? aggregate.queue.pending > 0
         ? aggregate.queue.upserts >= aggregate.expected_vectors - aggregate.actual_vectors
@@ -1330,7 +1377,8 @@ function checkedProjectionProof(value) {
       value.backend !== "d1" || value.vector_drain_mode !== "active" ||
       typeof value.query_ready !== "boolean" ||
       !exactKeys(value.queue, [
-        "pending", "upserts", "deletes", "submitted", "oldest_queued_at",
+        "pending", "pending_is_capped", "pending_display", "component_counts_exact",
+        "upserts", "deletes", "submitted", "oldest_queued_at",
       ])) {
     refuse("UPDATE_PREVIEW_PLAN_INVALID");
   }
@@ -1343,6 +1391,12 @@ function checkedProjectionProof(value) {
   const pending = value.queue.pending;
   if (value.queue.upserts + value.queue.deletes !== pending ||
       value.queue.submitted > pending ||
+      typeof value.queue.pending_is_capped !== "boolean" ||
+      typeof value.queue.component_counts_exact !== "boolean" ||
+      value.queue.pending_display !==
+        (value.queue.pending_is_capped ? "10,000+" : String(pending)) ||
+      value.queue.pending_is_capped !== !value.queue.component_counts_exact ||
+      (value.queue.pending_is_capped ? pending !== 10_001 : pending > 10_000) ||
       (pending > 0 && (!Number.isSafeInteger(value.queue.oldest_queued_at) ||
         value.queue.oldest_queued_at < 0)) ||
       (pending === 0 && value.queue.oldest_queued_at !== null)) {
@@ -1373,9 +1427,13 @@ function checkedProjectionProof(value) {
     ((value.verdict === "ready" && pending === 0 && relation === "exact" &&
       value.query_ready === true && value.readiness_reason === null) ||
     (value.verdict === "recoverable_queued_work" && pending > 0 && relation === "short" &&
-      value.queue.upserts >= deficit && value.query_ready === false && reasonIsQueued) ||
+      value.queue.component_counts_exact && value.queue.upserts >= deficit &&
+      value.query_ready === false && reasonIsQueued) ||
     (value.verdict === "projection_work_insufficient" && pending > 0 && relation === "short" &&
-      value.queue.upserts < deficit && value.query_ready === false && reasonIsQueued) ||
+      value.queue.component_counts_exact && value.queue.upserts < deficit &&
+      value.query_ready === false && reasonIsQueued) ||
+    (value.verdict === "projection_work_queued_uncounted" && pending > 0 &&
+      !value.queue.component_counts_exact && value.query_ready === false && reasonIsQueued) ||
     (value.verdict === "queued_work_present" && pending > 0 && relation === "exact" &&
       value.query_ready === false && reasonIsQueued) ||
     (value.verdict === "projection_work_missing" && pending === 0 && relation === "short" &&
@@ -1721,7 +1779,7 @@ export function createUpdatePreviewSuccessReceipt(plan, observedEffects) {
   const checked = checkedPlan(plan);
   if ([
     "projection_work_insufficient", "projection_work_missing",
-    "projection_visibility_pending", "projection_excess",
+    "projection_work_queued_uncounted", "projection_visibility_pending", "projection_excess",
   ]
       .includes(checked.deployed_projection.verdict)) {
     refuse("UPDATE_PREVIEW_PLAN_INVALID");
@@ -1750,6 +1808,8 @@ export function createUpdatePreviewProjectionFailureReceipt(plan, observedEffect
   const verdict = checked.deployed_projection.verdict;
   const errorCode = verdict === "projection_work_insufficient"
     ? "UPDATE_PREVIEW_PROJECTION_WORK_INSUFFICIENT"
+    : verdict === "projection_work_queued_uncounted"
+      ? "UPDATE_PREVIEW_PROJECTION_WORK_UNCOUNTED"
     : verdict === "projection_work_missing"
       ? "UPDATE_PREVIEW_PROJECTION_WORK_MISSING"
     : verdict === "projection_visibility_pending"
@@ -1766,6 +1826,9 @@ export function createUpdatePreviewProjectionFailureReceipt(plan, observedEffect
     authorizes_update: false,
     projection_ready: false,
     error_code: errorCode,
+    ...(verdict === "projection_work_queued_uncounted" ? {
+      owner_message: "A large indexing queue is still working; wait for it before updating.",
+    } : {}),
     plan: checked,
     plan_fingerprint: updatePreviewPlanFingerprint(checked),
     proof_boundary: { ...PROOF_BOUNDARY },

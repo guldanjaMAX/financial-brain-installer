@@ -210,7 +210,7 @@ function makeEnv({
     )
     INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at, attempts)
     SELECT printf('queued:%07d', n), printf('vector:%07d', n),
-           CASE WHEN n % 2 = 0 THEN 'upsert' ELSE 'delete' END,
+           'upsert',
            n, 0
       FROM rows`);
   db.prepare(
@@ -223,6 +223,17 @@ function makeEnv({
   const readiness = await vectorReadiness(env);
   const readinessMs = performance.now() - readinessStarted;
   const hotSql = d1Queries.sql.slice(-2);
+  const statementsBeforeDrain = d1Queries.submitted;
+  const drainStarted = performance.now();
+  const drain = await drainOutbox(env, {
+    embed: async () => [0.1],
+    maxBatches: 10,
+    skipUpserts: true,
+  });
+  const drainMs = performance.now() - drainStarted;
+  const drainStatements = d1Queries.submitted - statementsBeforeDrain;
+  const deletePriorityQueries = d1Queries.sql.filter((sql) =>
+    /drain-delete-priority/i.test(sql)).length;
   const plans = hotSql.flatMap((sql) => db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all())
     .map((row) => row.detail);
   check("a 1.15M-row queue is displayed as a truthful bounded count",
@@ -236,7 +247,13 @@ function makeEnv({
   check("full-size bounded timings complete without corpus-sized result work",
     backlogMs < 1_000 && readinessMs < 1_000,
     JSON.stringify({ backlog_ms: backlogMs, readiness_ms: readinessMs }));
-  console.log(`full-size bounded timings: backlog=${backlogMs.toFixed(3)}ms readiness=${readinessMs.toFixed(3)}ms`);
+  check("one 1.15M all-upsert drain tick runs the delete-priority probe once",
+    drain.has_remaining === true && deletePriorityQueries === 1,
+    JSON.stringify({ drain, deletePriorityQueries }));
+  check("the full-size all-upsert drain tick stays inside the statement budget",
+    drainStatements < DRAIN_D1_QUERY_BUDGET,
+    JSON.stringify({ drainStatements, budget: DRAIN_D1_QUERY_BUDGET }));
+  console.log(`full-size bounded timings: backlog=${backlogMs.toFixed(3)}ms readiness=${readinessMs.toFixed(3)}ms drain_tick=${drainMs.toFixed(3)}ms statements=${drainStatements}`);
   db.close();
 }
 
@@ -261,6 +278,36 @@ const insertChunk = (db, uid, doc, ix, vectorId = uid) => {
   return result;
 };
 
+/* A scaled 300-row all-upsert queue reaches multiple batches in one real
+   invocation. The negative delete answer must be reused, not reprobed. */
+{
+  const { env, db, d1Queries } = makeEnv({ autoProcessVectorMutations: false });
+  insertDocument(db, "drive:scaled-upsert-drain");
+  db.exec(`WITH RECURSIVE rows(n) AS (
+      VALUES(0) UNION ALL SELECT n + 1 FROM rows WHERE n < 299
+    )
+    INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, vector_id)
+    SELECT printf('drive:scaled-upsert-drain#%03d', n),
+           'drive:scaled-upsert-drain', n, printf('synthetic text %03d', n),
+           'drive', printf('drive:scaled-upsert-drain#%03d', n)
+      FROM rows`);
+  db.exec(`INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
+    SELECT chunk_uid, vector_id, 'upsert', chunk_ix
+      FROM chunks WHERE doc_uid='drive:scaled-upsert-drain'`);
+  const result = await drainOutbox(env, {
+    embed: async () => [0.1],
+    maxBatches: 10,
+    batchSize: 100,
+  });
+  const deletePriorityQueries = d1Queries.sql.filter((sql) =>
+    /drain-delete-priority/i.test(sql)).length;
+  check("a multi-batch all-upsert drain reuses one negative delete-priority probe",
+    result.submitted === 200 && result.waiting === 200 &&
+      result.has_remaining === true && deletePriorityQueries === 1,
+    JSON.stringify({ result, deletePriorityQueries, statements: d1Queries.submitted }));
+  db.close();
+}
+
 /* The actual drain entry point may use indexed existence probes and its own
    batch receipts, but never a whole-queue/chunk count before or after work. */
 {
@@ -275,6 +322,9 @@ const insertChunk = (db, uid, doc, ix, vectorId = uid) => {
   let error = null;
   try {
     result = await drainOutbox(env, { embed: async () => [0.1] });
+    if (result?.submitted === 1) {
+      await drainOutbox(env, { embed: async () => [0.1] });
+    }
   } catch (caught) {
     error = caught;
   }
@@ -286,11 +336,24 @@ const insertChunk = (db, uid, doc, ix, vectorId = uid) => {
   const drainPlans = drainSql.flatMap((sql) => {
     const bindCount = Math.max(0, ...[...sql.matchAll(/\?(\d+)/g)].map((match) => Number(match[1])));
     return db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...Array(bindCount).fill(0))
-      .map((row) => row.detail);
+      .map((row) => ({ sql, detail: row.detail }));
   });
+  const corpusScans = drainPlans.filter(({ detail }) =>
+    /\bSCAN (?:vector_outbox|chunks)\b/i.test(detail));
   check("the executed drain plans do not scan vector_outbox or chunks",
-    !drainPlans.some((detail) => /\bSCAN (?:vector_outbox|chunks)\b/i.test(detail)),
-    drainPlans.join("\n"));
+    corpusScans.length === 0,
+    corpusScans.map(({ sql, detail }) => `${detail}: ${sql}`).join("\n"));
+  const projectionSql = d1Queries.sql.find((sql) =>
+    /vector_projection_status = 'verified'/i.test(sql));
+  const projectionPlan = projectionSql
+    ? db.prepare(`EXPLAIN QUERY PLAN ${projectionSql}`).all().map((row) => row.detail)
+    : [];
+  check("empty-queue projection verification seeks deleted documents by source",
+    projectionPlan.length > 0 &&
+      !projectionPlan.some((detail) => /\bSCAN (?:d|documents|c|chunks)\b/i.test(detail)) &&
+      projectionPlan.some((detail) => /idx_documents_live/i.test(detail)) &&
+      projectionPlan.some((detail) => /idx_chunks_doc/i.test(detail)),
+    projectionPlan.join("\n"));
   db.close();
 }
 
@@ -1242,7 +1305,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
      FROM install_state WHERE id = 1`
   ).get();
   check("the batch reservation includes the per-row confirmation worst case",
-    drainBatchQueryUpperBound(100) === 312);
+    drainBatchQueryUpperBound(100) === 313);
   check("the default query budget stops before an unreserved third batch",
     drained.drained === 0 && drained.submitted === 200 &&
       drained.waiting === 200 && drained.remaining === 100 &&

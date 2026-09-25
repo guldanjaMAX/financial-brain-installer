@@ -234,6 +234,8 @@ function projectionInventory(overrides = {}) {
   const upserts = overrides.upserts ?? pending;
   const deletes = overrides.deletes ?? 0;
   const submitted = overrides.submitted ?? 0;
+  const pendingIsCapped = overrides.pendingIsCapped ?? false;
+  const componentCountsExact = overrides.componentCountsExact ?? !pendingIsCapped;
   const ready = overrides.ready ?? (pending === 0 && actual === expected);
   const reason = Object.hasOwn(overrides, "reason")
     ? overrides.reason
@@ -245,9 +247,12 @@ function projectionInventory(overrides = {}) {
     rows: overrides.rows ?? [{ private_source: "must-not-escape" }],
     vector_backlog: {
       pending,
+      pending_is_capped: pendingIsCapped,
+      pending_display: pendingIsCapped ? "10,000+" : String(pending),
       upserts,
       deletes,
       submitted,
+      component_counts_exact: componentCountsExact,
       oldest_queued_at: Object.hasOwn(overrides, "oldestQueuedAt")
         ? overrides.oldestQueuedAt
         : pending > 0 ? 1_750_000_000_000 : null,
@@ -258,7 +263,9 @@ function projectionInventory(overrides = {}) {
       expected_vectors: expected,
       actual_vectors: actual,
       pending: overrides.readinessPending ?? pending,
+      pending_is_capped: overrides.readinessPendingIsCapped ?? pendingIsCapped,
       submitted: overrides.readinessSubmitted ?? submitted,
+      submitted_counts_exact: overrides.readinessSubmittedCountsExact ?? componentCountsExact,
       oldest_queued_at: Object.hasOwn(overrides, "readinessOldestQueuedAt")
         ? overrides.readinessOldestQueuedAt
         : Object.hasOwn(overrides, "oldestQueuedAt")
@@ -1035,6 +1042,9 @@ test("authenticated projection validation returns only one frozen aggregate cut"
     actual_vectors: 10,
     queue: {
       pending: 0,
+      pending_is_capped: false,
+      pending_display: "0",
+      component_counts_exact: true,
       upserts: 0,
       deletes: 0,
       submitted: 0,
@@ -1293,6 +1303,32 @@ test("projection classifier distinguishes ready, sufficient, insufficient, missi
     assert.equal(proof.queue.pending, fixture.pending ?? 0);
     assert.ok(Object.isFrozen(proof));
   }
+});
+
+test("a capped million-row queue is blocked as uncounted work without comparing its sample to the deficit", () => {
+  const proof = syntheticProjection({
+    expected: 1_150_274,
+    actual: 0,
+    pending: 10_001,
+    upserts: 10_001,
+    pendingIsCapped: true,
+    componentCountsExact: false,
+  });
+  assert.equal(proof.verdict, "projection_work_queued_uncounted");
+  assert.equal(proof.queue.pending_is_capped, true);
+  assert.equal(proof.queue.component_counts_exact, false);
+  assert.equal(proof.queue.pending_display, "10,000+");
+  assert.doesNotMatch(JSON.stringify(proof), /1150274-row queue/u);
+
+  const plan = syntheticPlan({ deployedProjection: proof });
+  const receipt = createUpdatePreviewProjectionFailureReceipt(plan, {
+    credential_reads: 1,
+    network_requests: 1,
+  });
+  assert.equal(receipt.status, "failed");
+  assert.equal(receipt.error_code, "UPDATE_PREVIEW_PROJECTION_WORK_UNCOUNTED");
+  assert.equal(receipt.authorizes_update, false);
+  assert.match(receipt.owner_message, /large indexing queue is still working; wait for it before updating/i);
 });
 
 test("projection validation fails closed on mixed or incoherent same-response fields", () => {

@@ -878,6 +878,9 @@ export class Acceptance {
         (a, r) => a + (Number(r.total || 0) - Number(r.embedded || 0)),
         0
       );
+    const unembeddedLabel = docs.json?.vector_backlog?.pending_is_capped === true
+      ? "10,000+"
+      : String(unembedded);
     // A backlog is normal mid-ingest; a large one means the embedder is stuck,
     // and the symptom a user sees is simply "search does not find my document".
     this.record(
@@ -887,7 +890,7 @@ export class Acceptance {
         ? unembedded === 0 ? PASS : unembedded < 1000 ? WARN : FAIL
         : FAIL,
       Number.isSafeInteger(unembedded) && unembedded >= 0
-        ? `${unembedded} vector operation(s) awaiting visibility`
+        ? `${unembeddedLabel} vector operation(s) awaiting visibility`
         : "the exact vector backlog was unavailable"
     );
 
@@ -916,12 +919,15 @@ export class Acceptance {
         readiness.submitted <= readiness.pending;
       const ready = valid && readiness.ready === true && readiness.pending === 0 &&
         readiness.submitted === 0 && readiness.actual_vectors === readiness.expected_vectors;
+      const readinessPendingLabel = readiness?.pending_is_capped === true
+        ? "10,000+"
+        : String(readiness?.pending);
       this.record(
         t,
         "semantic index is query-ready",
         ready ? PASS : FAIL,
         valid
-          ? `${readiness.actual_vectors}/${readiness.expected_vectors} vector(s), ${readiness.pending} operation(s) pending` +
+          ? `${readiness.actual_vectors}/${readiness.expected_vectors} vector(s), ${readinessPendingLabel} operation(s) pending` +
             (ready ? "" : `; ${readiness.action || "run brain drain, then brain diagnose"}`)
           : "the Worker did not provide a valid Vectorize visibility receipt",
       );

@@ -22118,14 +22118,16 @@ export function validateDrainReceipt(body) {
  */
 export function assertDrainComplete({
   remaining,
+  remainingIsLowerBound = false,
   rounds,
   maxRounds = 400,
   expectedVectors = null,
   actualVectors = null,
 } = {}) {
   if (remaining !== 0) {
+    const remainingLabel = renderDrainRemaining(remaining, remainingIsLowerBound);
     die(
-      `the drain reached its ${maxRounds}-round safety limit with ${remaining} vector operation(s) still queued.\n` +
+      `the drain reached its ${maxRounds}-round safety limit with ${remainingLabel} vector operation(s) still queued.\n` +
         "      Completed chunks are safe, but the vector index is still incomplete. Re-run `brain drain` to continue."
     );
   }
@@ -22145,6 +22147,35 @@ export function assertDrainComplete({
     }
   }
   return { remaining, rounds };
+}
+
+/** Preserve bounded queue semantics in every manual-drain status sentence. */
+export function renderDrainRemaining(remaining, remainingIsLowerBound = false) {
+  return remainingIsLowerBound ? `more than ${remaining}` : String(remaining);
+}
+
+/** A lower bound cannot support a truthful ETA, even when throughput is known. */
+export function renderDrainProgress({
+  actualVectors,
+  drained,
+  submitted,
+  remaining,
+  remainingIsLowerBound = false,
+  rate = null,
+} = {}) {
+  const progress = [
+    Number.isSafeInteger(actualVectors)
+      ? `${actualVectors} total query-visible vector(s)`
+      : "total query-visible vector count unavailable",
+    `${drained} newly confirmed this run`,
+    `${submitted} accepted this run`,
+    `${renderDrainRemaining(remaining, remainingIsLowerBound)} to go`,
+  ];
+  if (rate) progress.push(`~${rate}/min`);
+  if (rate && remaining && !remainingIsLowerBound) {
+    progress.push(`about ${Math.max(1, Math.ceil(remaining / rate))} min left`);
+  }
+  return progress.join("; ");
 }
 
 /**
@@ -22277,6 +22308,7 @@ async function cmdDrain(manifestPath, options = {}) {
   let routeWarmups = 0;
   let submitted = 0;
   let remaining = null;
+  let remainingIsLowerBound = false;
   let rounds = 0;
   let expectedVectors = null;
   let actualVectors = null;
@@ -22303,6 +22335,7 @@ async function cmdDrain(manifestPath, options = {}) {
     if (res.status === 409) {
       const busy = validateDrainBusyReceipt(body);
       remaining = busy.remaining;
+      remainingIsLowerBound = busy.remainingIsLowerBound === true;
       const delayMs = Math.min(busy.retryAfterSeconds * 1_000, Math.max(0, deadline - now()));
       if (delayMs <= 0) break;
       info(`another vector drain is finishing; retrying in ${Math.ceil(delayMs / 1_000)} second(s)`);
@@ -22363,19 +22396,17 @@ async function cmdDrain(manifestPath, options = {}) {
     drained += receipt.drained;
     submitted += receipt.submitted;
     remaining = receipt.remaining;
+    remainingIsLowerBound = receipt.remaining_is_lower_bound === true;
     const mins = (now() - started) / 60000;
     const rate = mins > 0.05 ? Math.round(drained / mins) : null;
-    const progress = [
-      Number.isSafeInteger(actualVectors)
-        ? `${actualVectors} total query-visible vector(s)`
-        : "total query-visible vector count unavailable",
-      `${drained} newly confirmed this run`,
-      `${submitted} accepted this run`,
-      `${remaining} to go`,
-    ];
-    if (rate) progress.push(`~${rate}/min`);
-    if (rate && remaining) progress.push(`about ${Math.max(1, Math.ceil(remaining / rate))} min left`);
-    info(progress.join("; "));
+    info(renderDrainProgress({
+      actualVectors,
+      drained,
+      submitted,
+      remaining,
+      remainingIsLowerBound,
+      rate,
+    }));
     if (remaining === 0) break;
     if (receipt.waiting > 0) {
       // Vectorize V2 processes changesets asynchronously. Poll slowly enough to
@@ -22387,13 +22418,23 @@ async function cmdDrain(manifestPath, options = {}) {
     }
   }
   if (remaining !== 0 && now() >= deadline) {
+    const remainingLabel = remaining === null
+      ? "unknown"
+      : renderDrainRemaining(remaining, remainingIsLowerBound);
     die(
       `the drain reached its ${Math.ceil(maxDurationMs / 60_000)}-minute wall-clock safety limit with ` +
-        `${remaining ?? "unknown"} vector operation(s) still queued.\n` +
+        `${remainingLabel} vector operation(s) still queued.\n` +
         "      Completed chunks are safe. Re-run `brain drain` to resume from the durable queue.",
     );
   }
-  assertDrainComplete({ remaining, rounds, maxRounds, expectedVectors, actualVectors });
+  assertDrainComplete({
+    remaining,
+    remainingIsLowerBound,
+    rounds,
+    maxRounds,
+    expectedVectors,
+    actualVectors,
+  });
   const result = buildCompletedDrainResult({
     drained,
     submitted,
@@ -24912,7 +24953,7 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
     });
     const projectionFailed = [
       "projection_work_insufficient", "projection_work_missing",
-      "projection_visibility_pending", "projection_excess",
+      "projection_work_queued_uncounted", "projection_visibility_pending", "projection_excess",
     ]
       .includes(deployedProjection.verdict);
     const receipt = projectionFailed

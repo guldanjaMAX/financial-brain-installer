@@ -1570,32 +1570,10 @@ const DRAIN_LEASE_RELEASE_QUERIES = 1;
 // Fence read plus either exact-cut update, or probe renewal and receipt write.
 const DRAIN_PROJECTION_VERIFY_QUERIES = 3;
 const DRAIN_INITIAL_DEPTH_QUERIES = 1;
-const DRAIN_RETRY_STATE_QUERIES = 2;
 const DRAIN_BATCH_SIZE_MAX = 100;
 export const DRAIN_IN_FLIGHT_BATCH_WINDOW = 3;
 export const VECTOR_RETRY_MAX_ATTEMPTS = 5;
 const VECTOR_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000];
-
-/**
- * Drop retry state whose outbox row is gone. The retry table is keyed by
- * (chunk_uid, generation) and a newer ingest bumps the generation, so without
- * this a re-ingested chunk would inherit the previous generation's attempt
- * count and backoff. Bounded per call so it can never dominate the drain's
- * query budget.
- */
-async function cleanupVectorRetryState(env, limit = 500) {
-  await env.DB.prepare(
-    `DELETE FROM vector_outbox_retry_state
-      WHERE rowid IN (
-        SELECT s.rowid FROM vector_outbox_retry_state s
-         WHERE NOT EXISTS (
-           SELECT 1 FROM vector_outbox o
-            WHERE o.chunk_uid=s.chunk_uid AND o.generation=s.generation
-         )
-         LIMIT ?
-      )`
-  ).bind(limit).run();
-}
 
 function vectorRetryDelay(attempt) {
   return VECTOR_RETRY_DELAYS_MS[Math.min(Math.max(attempt - 1, 0), VECTOR_RETRY_DELAYS_MS.length - 1)];
@@ -1676,7 +1654,9 @@ export function drainBatchQueryUpperBound(batchSize = DRAIN_BATCH_SIZE_MAX) {
   const boundedBatchSize = Number.isInteger(batchSize)
     ? Math.min(DRAIN_BATCH_SIZE_MAX, Math.max(1, batchSize))
     : DRAIN_BATCH_SIZE_MAX;
-  return 12 + (3 * boundedBatchSize);
+  // One fixed set cleanup removes retry history only for rows whose exact
+  // confirmation CAS won. This replaces the old whole retry-table sweep.
+  return 13 + (3 * boundedBatchSize);
 }
 
 const drainLeaseChanges = (result) => Number(
@@ -2010,15 +1990,17 @@ const OUTBOX_EXISTS_SQL = `
   ) AS has_rows`;
 
 // corpus_stats is exact for live documents. Soft-deleted documents deliberately
-// retain their chunks, so add those back through the document and chunk indexes
-// instead of counting or scanning the full chunks table on a readiness tick.
+// retain their chunks. Drive the exceptional add-back from the source-sized
+// statistics table so idx_documents_live can seek (source, deleted_at) for each
+// source instead of scanning every document to find the deleted minority.
 const EXACT_PROJECTED_CHUNKS_SQL = `
   COALESCE((SELECT SUM(chunks) FROM corpus_stats), 0) +
   COALESCE((
     SELECT count(*)
-      FROM documents d INDEXED BY idx_documents_live
+      FROM corpus_stats s
+      CROSS JOIN documents d INDEXED BY idx_documents_live
+        ON d.source = s.source AND d.deleted_at IS NOT NULL
       JOIN chunks c INDEXED BY idx_chunks_doc ON c.doc_uid = d.doc_uid
-     WHERE d.deleted_at IS NOT NULL
   ), 0)`;
 
 const boundedOutboxReceipt = (row) => {
@@ -2183,6 +2165,18 @@ async function confirmSubmittedVectors(env, rows, lease) {
       throw new Error("the vector confirmation receipts were ambiguous");
     }
     confirmed = confirmed.filter((_, index) => drainLeaseChanges(changes[index]) === 1);
+    if (confirmed.length) {
+      const confirmedIds = JSON.stringify(confirmed.map((row) => row.chunk_uid));
+      await env.DB.prepare(
+        `DELETE FROM vector_outbox_retry_state AS stale
+          WHERE stale.chunk_uid IN (SELECT value FROM json_each(?1))
+            AND NOT EXISTS (
+              SELECT 1 FROM vector_outbox current
+               WHERE current.chunk_uid=stale.chunk_uid
+                 AND current.generation=stale.generation
+            )`
+      ).bind(confirmedIds).run();
+    }
   }
   if (retrying.length) {
     const detail = "accepted Vectorize mutation was processed but the exact vector state was not query-visible; retrying";
@@ -2272,6 +2266,7 @@ async function drainOutboxBatch(env, {
   lease,
   inFlightMutationIds = new Set(),
   skipUpserts = false,
+  deletePriority = null,
 } = {}) {
   const remainingReceipt = async (known = 0) => {
     const hasRemaining = await outboxHasRows(env);
@@ -2329,21 +2324,34 @@ async function drainOutboxBatch(env, {
     };
   }
 
-  // Delete first. Orphans still consume Vectorize candidate slots even though
-  // D1 hydration makes them unreachable, so leaving them behind damages recall.
-  const { results: deletePending } = await env.DB.prepare(
-    `SELECT o.chunk_uid, COALESCE(o.vector_id, o.chunk_uid) AS vector_id,
-            o.queued_at, o.generation, COALESCE(s.attempts,o.attempts,0) AS attempts,
-            s.failure_code
-       FROM vector_outbox o
-       LEFT JOIN vector_outbox_retry_state s
-         ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
-      WHERE o.op = 'delete' AND o.queued_at >= -9223372036854775808
-        AND o.submitted_mutation_id IS NULL
-        AND s.quarantined_at IS NULL
-        AND COALESCE(s.next_attempt_at,0) <= ?1
-      ORDER BY o.queued_at LIMIT ?2`
-  ).bind(lease.now(), batchSize).all();
+  // Delete first. Without an operation-leading index, proving that an all-upsert
+  // queue has no delete is one full ordered walk. Pay that cost at most once per
+  // invocation and reuse the negative answer for every later batch. A concurrent
+  // external enqueue is deliberately left for the next leased tick. Only a
+  // delete enqueued by this invocation may invalidate this cache; no current
+  // drain path enqueues one.
+  let deletePending = [];
+  if (!deletePriority?.checked || deletePriority.hasEligibleDeletes) {
+    const { results: deleteCandidates } = await env.DB.prepare(
+      `/* drain-delete-priority */
+       SELECT o.chunk_uid, COALESCE(o.vector_id, o.chunk_uid) AS vector_id,
+              o.queued_at, o.generation, COALESCE(s.attempts,o.attempts,0) AS attempts,
+              s.failure_code
+         FROM vector_outbox o
+         LEFT JOIN vector_outbox_retry_state s
+           ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
+        WHERE o.op = 'delete' AND o.queued_at >= -9223372036854775808
+          AND o.submitted_mutation_id IS NULL
+          AND s.quarantined_at IS NULL
+          AND COALESCE(s.next_attempt_at,0) <= ?1
+        ORDER BY o.queued_at LIMIT ?2`
+    ).bind(lease.now(), batchSize + 1).all();
+    deletePending = (deleteCandidates || []).slice(0, batchSize);
+    if (deletePriority) {
+      deletePriority.checked = true;
+      deletePriority.hasEligibleDeletes = (deleteCandidates || []).length > batchSize;
+    }
+  }
   if (deletePending?.length) {
     const selected = headRetryNeedsIsolation(deletePending[0])
       ? deletePending.slice(0, 1)
@@ -2534,7 +2542,6 @@ async function drainOutboxBatch(env, {
 
 async function drainOutboxWithLease(env, options, lease) {
   await requireVectorRetryStateTable(env);
-  await cleanupVectorRetryState(env);
   const rawMaxBatches = Number(options.maxBatches ?? 1);
   const maxBatches = Number.isInteger(rawMaxBatches)
     ? Math.min(10, Math.max(1, rawMaxBatches))
@@ -2558,14 +2565,14 @@ async function drainOutboxWithLease(env, options, lease) {
     errors: [], busy: false,
   };
   let reservedQueries = DRAIN_LEASE_ACQUIRE_QUERIES + DRAIN_LEASE_RELEASE_QUERIES +
-    DRAIN_PROJECTION_VERIFY_QUERIES + DRAIN_INITIAL_DEPTH_QUERIES +
-    DRAIN_RETRY_STATE_QUERIES;
+    DRAIN_PROJECTION_VERIFY_QUERIES + DRAIN_INITIAL_DEPTH_QUERIES;
   const batchQueryUpperBound = drainBatchQueryUpperBound(batchSize);
   const rawQueryBudget = Number(options.d1QueryBudget ?? DRAIN_D1_QUERY_BUDGET);
   const queryBudget = Number.isInteger(rawQueryBudget)
     ? Math.min(DRAIN_D1_QUERY_BUDGET, Math.max(0, rawQueryBudget))
     : DRAIN_D1_QUERY_BUDGET;
   const inFlightMutations = new Map();
+  const deletePriority = { checked: false, hasEligibleDeletes: false };
   for (let batch = 0; batch < maxBatches; batch++) {
     if (now() - startedAt >= maxInvocationMs) break;
     // Never begin provider work unless every possible D1 receipt/remap for
@@ -2579,6 +2586,7 @@ async function drainOutboxWithLease(env, options, lease) {
       batchSize,
       inFlightMutationIds: new Set(inFlightMutations.keys()),
       lease: { ownerToken: lease.ownerToken, now },
+      deletePriority,
     });
     result.drained += Number(part.drained || 0);
     result.deleted += Number(part.deleted || 0);
@@ -5201,8 +5209,12 @@ export async function bootstrapVectorProjectionPage(env, {
             vector_projection_bootstrap_epoch AS epoch,
             vector_projection_bootstrap_cursor AS cursor,
             vector_projection_bootstrap_high_water AS high_water,
-            (SELECT count(*) FROM chunks) AS chunks,
-            (SELECT count(*) FROM vector_outbox) AS pending
+            (${EXACT_PROJECTED_CHUNKS_SQL}) AS chunks,
+            (SELECT count(*) FROM (
+              SELECT 1 FROM vector_outbox
+               WHERE queued_at >= -9223372036854775808
+               ORDER BY queued_at LIMIT ${OUTBOX_DISPLAY_LIMIT}
+            )) AS pending
        FROM install_state WHERE id = 1 AND schema_version >= 12`
   ).first();
   if (!state || !["verified", "pending", "bootstrap_required"].includes(String(state.status))) {
@@ -5292,7 +5304,13 @@ export async function bootstrapVectorProjectionPage(env, {
       drainLeaseChanges(results.at(-1)) !== 1) {
     throw new Error("vector bootstrap epoch changed; retry from durable state");
   }
-  const after = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
+  const after = await env.DB.prepare(
+    `SELECT count(*) AS n FROM (
+       SELECT 1 FROM vector_outbox
+        WHERE queued_at >= -9223372036854775808
+        ORDER BY queued_at LIMIT ${OUTBOX_DISPLAY_LIMIT}
+     )`
+  ).first();
   const afterPending = Number(after?.n);
   if (!Number.isSafeInteger(afterPending) || afterPending < 0) {
     throw new Error("vector bootstrap outbox receipt is invalid");
