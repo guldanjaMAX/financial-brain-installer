@@ -270,8 +270,9 @@ test("known default schemas refuse only invalid rows and count each reason", asy
   assert.equal(persistence.rows.size, 3, "all three valid neighbors reached persistence");
 });
 
-test("deletion-only snapshots keep history but exclude missing rows from all three current documents", async () => {
+test("deletion-only snapshots keep row history and stage no replacement for disappeared document groups", async () => {
   let second = false;
+  let fetches = 0;
   const persistence = memoryPersistence();
   const bodies = () => ({
     sales: { data: second ? [] : [{ store: "Store A", period: "2026-09-01", revenue_stream: "services", net_sales: 9, transactions: 1, units: 1, puppies_sold: 0 }] },
@@ -280,17 +281,26 @@ test("deletion-only snapshots keep history but exclude missing rows from all thr
   });
   const options = {
     token: TOKEN, now: () => AT, sleep: async () => {}, persistence,
-    fetchImpl: async (input) => json(bodies()[new URL(input).pathname.split("/").pop()]),
+    fetchImpl: async (input) => {
+      fetches++;
+      return json(bodies()[new URL(input).pathname.split("/").pop()]);
+    },
   };
   await runCustomApiPull(realShapeConfig(), options);
   second = true;
   const result = await runCustomApiPull(realShapeConfig(), options);
   assert.equal(result.retained_missing_rows, 3);
-  assert.equal(result.documents, 3, "each deletion-only endpoint reached the document decision point");
+  assert.equal(result.documents, 0);
+  assert.equal(fetches, 6, "all three deletion-only endpoints reached the document decision point");
+  assert.deepEqual(persistence.writes.slice(-3), [
+    { endpoint: "sales", documents: [] },
+    { endpoint: "inventory", documents: [] },
+    { endpoint: "costs", documents: [] },
+  ]);
   assert.equal([...persistence.rows.values()].every((entry) => entry.present === false), true);
-  assert.doesNotMatch(persistence.documents.get("sales:Store A:2026-09-01").content, /\$9\.00/);
-  assert.doesNotMatch(persistence.documents.get("inventory:2026-09-24").content, /Item 1/);
-  assert.doesNotMatch(persistence.documents.get("costs:2026-09-24").content, /\$12\.50/);
+  assert.match(persistence.documents.get("sales:Store A:2026-09-01").content, /\$9\.00/);
+  assert.match(persistence.documents.get("inventory:2026-09-24").content, /Item 1/);
+  assert.match(persistence.documents.get("costs:2026-09-24").content, /\$12\.50/);
 });
 
 test("a 308 canonical-path redirect is a plain configuration error and is never followed", async () => {

@@ -37,7 +37,10 @@ function scheduledEnv() {
       id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT NOT NULL, event TEXT NOT NULL,
       at TEXT NOT NULL, documents INTEGER, detail TEXT
     );
-    CREATE TABLE documents (id TEXT PRIMARY KEY, source TEXT NOT NULL, deleted_at TEXT);
+    CREATE TABLE documents (
+      id TEXT PRIMARY KEY, source TEXT NOT NULL, source_id TEXT,
+      meta TEXT, deleted_at TEXT
+    );
   `);
   database.exec(readFileSync(new URL("../../migrations/d1/0048_custom_api_source.sql", import.meta.url), "utf8"));
   return {

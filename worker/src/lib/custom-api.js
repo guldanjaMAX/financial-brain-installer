@@ -613,6 +613,7 @@ function renderTemplate(template, context) {
 function buildDocuments(config, endpoint, rows, priorPresentRows, fetchedAt, responseHash) {
   const fetchedDate = fetchedAt.slice(0, 10);
   const documents = [];
+  const currentLogicalSourceIds = [];
   for (const document of endpoint.documents) {
     const groups = new Map();
     const addGroup = (item, prior = false) => {
@@ -633,11 +634,18 @@ function buildDocuments(config, endpoint, rows, priorPresentRows, fetchedAt, res
         groups.get(canonicalJson(values)).changed = true;
       }
     }
-    if (groups.size === 0 && document.group_by.length === 0) {
-      groups.set("[]", { values: [], rows: [], changed: priorPresentRows.length > 0 });
-    }
     for (const group of groups.values()) {
-      if (!group.changed) continue;
+      // A group with no current rows disappeared from the provider snapshot.
+      // It must be absent from the exact version map, not promoted as an empty
+      // replacement document.
+      if (group.rows.length === 0) continue;
+      const sourceIdParts = document.group_by.length ? group.values : [fetchedDate];
+      const layout = endpoint.documents.length > 1 ? `${document.name}:` : "";
+      const sourceId = `${endpoint.name}:${layout}${sourceIdParts.map(String).join(":")}`;
+      currentLogicalSourceIds.push(sourceId);
+      // Ungrouped documents include fetched_date in their logical identity and
+      // prose, so a new dated snapshot always needs its own physical version.
+      if (!group.changed && document.group_by.length > 0) continue;
       group.rows.sort((a, b) => a.row_key.localeCompare(b.row_key));
     const context = { fetched_date: fetchedDate, row_count: group.rows.length, sum: {}, min: {}, max: {}, missing: {} };
       document.group_by.forEach((field, index) => { context[field] = group.values[index]; });
@@ -662,9 +670,6 @@ function buildDocuments(config, endpoint, rows, priorPresentRows, fetchedAt, res
     );
     const title = renderTemplate(document.title_template, context);
     const content = renderTemplate(document.body_template, context);
-    const sourceIdParts = document.group_by.length ? group.values : [fetchedDate];
-    const layout = endpoint.documents.length > 1 ? `${document.name}:` : "";
-    const sourceId = `${endpoint.name}:${layout}${sourceIdParts.map(String).join(":")}`;
     const metadata = {
       connector: "custom_api",
       endpoint: endpoint.path,
@@ -694,7 +699,7 @@ function buildDocuments(config, endpoint, rows, priorPresentRows, fetchedAt, res
       documents.push(envelope);
     }
   }
-  return documents;
+  return { documents, currentLogicalSourceIds };
 }
 
 function planEndpoint(config, endpoint, fetched, priorRows, fetchedAt) {
@@ -726,8 +731,15 @@ function planEndpoint(config, endpoint, fetched, priorRows, fetchedAt) {
       prior_revision: Number(item.revision || 0), prior_hash: String(item.row_hash),
     }));
   const priorPresent = [...prior.values()].filter((item) => item.present !== false && isPlainObject(item.row));
-  const documents = buildDocuments(config, endpoint, rowChanges, priorPresent, fetchedAt, fetched.response_hash);
-  return { rowChanges: [...rowChanges, ...retained], retained, documents };
+  const { documents, currentLogicalSourceIds } = buildDocuments(
+    config,
+    endpoint,
+    rowChanges,
+    priorPresent,
+    fetchedAt,
+    fetched.response_hash,
+  );
+  return { rowChanges: [...rowChanges, ...retained], retained, documents, currentLogicalSourceIds };
 }
 
 export async function runCustomApiPull(rawConfig, {
@@ -957,11 +969,21 @@ export function customApiD1Persistence(env, hooks = {}) {
     await env.DB.prepare(
       "UPDATE custom_api_jobs SET status='verified' WHERE job_id=?1 AND status='promoted'"
     ).bind(job.job_id).run();
+    const stagedPlan = await readStagedPlan(job);
     const terminal = await env.DB.prepare(
       `SELECT j.status,j.verified_at,c.job_id AS current_job_id,c.promoted_at,
               f.job_id AS fetch_job_id,f.source AS fetch_source,f.fetched_at AS fetch_fetched_at,
               f.response_hashes_json AS fetch_hashes,f.stats_json AS fetch_stats,
-              f.verified_at AS fetch_verified_at
+              f.verified_at AS fetch_verified_at,
+              (SELECT COUNT(*) FROM custom_api_document_versions v
+                WHERE v.job_id=j.job_id AND v.source=j.source) AS version_count,
+              (SELECT COUNT(*) FROM custom_api_document_versions v
+                JOIN documents d ON d.source=v.source AND d.source_id=v.document_source_id
+                 AND d.deleted_at IS NULL
+               WHERE v.job_id=c.job_id AND v.source=c.source
+                 AND CASE WHEN json_valid(d.meta) THEN json_extract(d.meta,'$.connector') END='custom_api'
+                 AND CASE WHEN json_valid(d.meta) THEN json_extract(d.meta,'$.custom_api_source_id') END=v.logical_source_id
+              ) AS visible_version_count
          FROM custom_api_jobs j
          LEFT JOIN custom_api_current_jobs c ON c.source=j.source
          LEFT JOIN custom_api_fetches f ON f.job_id=j.job_id
@@ -971,27 +993,47 @@ export function customApiD1Persistence(env, hooks = {}) {
         terminal?.current_job_id !== job.job_id || terminal?.promoted_at !== job.fetched_at ||
         terminal?.fetch_job_id !== job.job_id || terminal?.fetch_source !== job.source ||
         terminal?.fetch_fetched_at !== job.fetched_at || terminal?.fetch_verified_at !== job.fetched_at ||
-        terminal?.fetch_hashes !== canonicalJson(job.response_hashes) || terminal?.fetch_stats !== canonicalJson(job.stats)) {
+        terminal?.fetch_hashes !== canonicalJson(job.response_hashes) || terminal?.fetch_stats !== canonicalJson(job.stats) ||
+        Number(terminal?.version_count) !== stagedPlan.versions.length ||
+        Number(terminal?.visible_version_count) !== stagedPlan.versions.length) {
       throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API terminal receipt did not read back exactly");
     }
     return completed(job);
   };
 
-  const verifyStagedPlan = async (job) => {
-    const result = await env.DB.prepare(
+  const readStagedPlan = async (job) => {
+    const sliceResult = await env.DB.prepare(
       `SELECT slice_index,kind,payload_hash,verified_at
          FROM custom_api_job_slices WHERE job_id=?1 ORDER BY slice_index`
     ).bind(job.job_id).all();
-    const slices = result?.results || [];
-    const jobHash = await sha256(slices.map((slice) => slice.payload_hash).join(":"));
+    const versionResult = await env.DB.prepare(
+      `SELECT logical_source_id,document_source_id
+         FROM custom_api_document_versions WHERE job_id=?1 AND source=?2
+        ORDER BY logical_source_id`
+    ).bind(job.job_id, job.source).all();
+    const slices = sliceResult?.results || [];
+    const versions = versionResult?.results || [];
+    const jobHash = await sha256(canonicalJson({
+      slice_hashes: slices.map((slice) => slice.payload_hash),
+      document_versions: versions.map((version) => ({
+        logical_source_id: version.logical_source_id,
+        document_source_id: version.document_source_id,
+      })),
+    }));
     if (slices.length !== job.total_slices || jobHash !== job.job_hash ||
         slices.some((slice) => slice.kind === "rows" && slice.verified_at == null)) {
       throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API staged plan did not read back exactly");
     }
+    return { slices, versions };
+  };
+
+  const verifyStagedPlan = async (job) => {
+    const { slices, versions } = await readStagedPlan(job);
     await hooks.afterStagedPlanReadback?.({
       jobId: job.job_id,
       rowSlices: slices.filter((slice) => slice.kind === "rows").length,
       documentSlices: slices.filter((slice) => slice.kind === "document").length,
+      documentVersions: versions.length,
     });
   };
 
@@ -1044,7 +1086,15 @@ export function customApiD1Persistence(env, hooks = {}) {
       const jobId = crypto.randomUUID();
       const rowSlices = [];
       const documentSlices = [];
+      const currentLogicalSourceIds = new Set();
+      const changedDocumentVersions = new Map();
       for (const { endpoint, plan } of planned) {
+        for (const logicalSourceId of plan.currentLogicalSourceIds) {
+          if (currentLogicalSourceIds.has(logicalSourceId)) {
+            throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API logical document identity was duplicated", { endpoint: endpoint.name });
+          }
+          currentLogicalSourceIds.add(logicalSourceId);
+        }
         const durableRows = plan.rowChanges
           .map((item) => {
             const changed = ["created", "updated", "missing"].includes(item.action);
@@ -1069,9 +1119,10 @@ export function customApiD1Persistence(env, hooks = {}) {
         }
         for (const document of plan.documents) {
           const logicalSourceId = document.source_id;
+          const documentSourceId = customApiVersionedSourceId(logicalSourceId, jobId);
           const payload = canonicalJson({
             ...document,
-            source_id: customApiVersionedSourceId(logicalSourceId, jobId),
+            source_id: documentSourceId,
             metadata: {
               ...document.metadata,
               custom_api_job_id: jobId,
@@ -1079,17 +1130,42 @@ export function customApiD1Persistence(env, hooks = {}) {
             },
           });
           documentSlices.push({ kind: "document", endpoint: endpoint.name, target: JSON.parse(payload).source_id, payload });
+          changedDocumentVersions.set(logicalSourceId, documentSourceId);
         }
       }
+      const priorResult = await env.DB.prepare(
+        `SELECT v.logical_source_id,v.document_source_id
+           FROM custom_api_document_versions v
+           JOIN custom_api_current_jobs c ON c.source=v.source AND c.job_id=v.job_id
+          WHERE v.source=?1`
+      ).bind(source).all();
+      const priorVersions = new Map((priorResult?.results || []).map((version) => [
+        String(version.logical_source_id),
+        String(version.document_source_id),
+      ]));
+      const documentVersions = [...currentLogicalSourceIds].sort().map((logicalSourceId) => {
+        const documentSourceId = changedDocumentVersions.get(logicalSourceId) ?? priorVersions.get(logicalSourceId);
+        if (!documentSourceId) {
+          throw new CustomApiError(
+            "PERSISTENCE_VERIFY_FAILED",
+            "custom API unchanged document has no prior verified version",
+          );
+        }
+        return { logical_source_id: logicalSourceId, document_source_id: documentSourceId };
+      });
       // All durable row versions are applied and read back before the first
       // document enters the live ingest machinery. Document versions then use
-      // a separate promotion phase and remain hidden until the pointer flip.
+      // a separate promotion phase. The complete version map remains hidden
+      // until the current-job pointer flips.
       const slices = [...rowSlices, ...documentSlices];
-      if (slices.length + 1 > MAX_JOB_STAGE_STATEMENTS) {
+      if (slices.length + documentVersions.length + 1 > MAX_JOB_STAGE_STATEMENTS) {
         throw new CustomApiError("RESPONSE_TOO_LARGE", "custom API snapshot needs too many bounded job slices");
       }
       for (const slice of slices) slice.hash = await sha256(`${slice.kind}:${slice.endpoint}:${slice.target}:${slice.payload}`);
-      const jobHash = await sha256(slices.map((slice) => slice.hash).join(":"));
+      const jobHash = await sha256(canonicalJson({
+        slice_hashes: slices.map((slice) => slice.hash),
+        document_versions: documentVersions,
+      }));
       const statements = [env.DB.prepare(
         `INSERT INTO custom_api_jobs
           (job_id,source,fetched_at,status,next_slice,total_slices,job_hash,response_hashes_json,stats_json,created_at)
@@ -1100,13 +1176,20 @@ export function customApiD1Persistence(env, hooks = {}) {
           (job_id,slice_index,kind,endpoint,target_key,payload_json,payload_hash)
          VALUES (?1,?2,?3,?4,?5,?6,?7)`
       ).bind(jobId, index, slice.kind, slice.endpoint, slice.target, slice.payload, slice.hash)));
+      documentVersions.forEach((version) => statements.push(env.DB.prepare(
+        `INSERT INTO custom_api_document_versions
+          (source,job_id,logical_source_id,document_source_id)
+         VALUES (?1,?2,?3,?4)`
+      ).bind(source, jobId, version.logical_source_id, version.document_source_id)));
       await env.DB.batch(statements);
       const receipt = await env.DB.prepare(
-        `SELECT j.job_hash,j.total_slices,COUNT(s.slice_index) AS stored_slices
-           FROM custom_api_jobs j LEFT JOIN custom_api_job_slices s ON s.job_id=j.job_id
-          WHERE j.job_id=?1 GROUP BY j.job_id`
+        `SELECT j.job_hash,j.total_slices,
+                (SELECT COUNT(*) FROM custom_api_job_slices s WHERE s.job_id=j.job_id) AS stored_slices,
+                (SELECT COUNT(*) FROM custom_api_document_versions v WHERE v.job_id=j.job_id) AS stored_versions
+           FROM custom_api_jobs j WHERE j.job_id=?1`
       ).bind(jobId).first();
-      if (receipt?.job_hash !== jobHash || Number(receipt?.stored_slices) !== slices.length || Number(receipt?.total_slices) !== slices.length) {
+      if (receipt?.job_hash !== jobHash || Number(receipt?.stored_slices) !== slices.length ||
+          Number(receipt?.stored_versions) !== documentVersions.length || Number(receipt?.total_slices) !== slices.length) {
         throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API staged job did not read back exactly");
       }
       await hooks.afterStageReadback?.({ jobId, slices: slices.length });
@@ -1226,6 +1309,23 @@ export function customApiD1Persistence(env, hooks = {}) {
       if (Number(receipt?.slices) !== job.total_slices || Number(receipt?.verified) !== job.total_slices || Number(receipt?.exact) !== job.total_slices) {
         throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API terminal verification did not match every slice");
       }
+      const stagedPlan = await readStagedPlan(job);
+      const versionReceipt = await env.DB.prepare(
+        `SELECT COUNT(*) AS versions,
+                SUM(CASE
+                  WHEN d.source_id IS NOT NULL
+                   AND CASE WHEN json_valid(d.meta) THEN json_extract(d.meta,'$.connector') END='custom_api'
+                   AND CASE WHEN json_valid(d.meta) THEN json_extract(d.meta,'$.custom_api_source_id') END=v.logical_source_id
+                  THEN 1 ELSE 0 END) AS exact
+           FROM custom_api_document_versions v
+           LEFT JOIN documents d ON d.source=v.source AND d.source_id=v.document_source_id
+            AND d.deleted_at IS NULL
+          WHERE v.job_id=?1 AND v.source=?2`
+      ).bind(job.job_id, job.source).first();
+      if (Number(versionReceipt?.versions) !== stagedPlan.versions.length ||
+          Number(versionReceipt?.exact) !== stagedPlan.versions.length) {
+        throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API terminal version map did not match every current document");
+      }
       await hooks.afterTerminalReadback?.({ jobId: job.job_id });
       await env.DB.batch([
         env.DB.prepare(
@@ -1248,7 +1348,16 @@ export function customApiD1Persistence(env, hooks = {}) {
         `SELECT j.status,j.verified_at,c.job_id AS current_job_id,c.promoted_at,
                 f.job_id AS fetch_job_id,f.source AS fetch_source,f.fetched_at AS fetch_fetched_at,
                 f.response_hashes_json AS fetch_hashes,f.stats_json AS fetch_stats,
-                f.verified_at AS fetch_verified_at
+                f.verified_at AS fetch_verified_at,
+                (SELECT COUNT(*) FROM custom_api_document_versions v
+                  WHERE v.job_id=j.job_id AND v.source=j.source) AS version_count,
+                (SELECT COUNT(*) FROM custom_api_document_versions v
+                  JOIN documents d ON d.source=v.source AND d.source_id=v.document_source_id
+                   AND d.deleted_at IS NULL
+                 WHERE v.job_id=c.job_id AND v.source=c.source
+                   AND CASE WHEN json_valid(d.meta) THEN json_extract(d.meta,'$.connector') END='custom_api'
+                   AND CASE WHEN json_valid(d.meta) THEN json_extract(d.meta,'$.custom_api_source_id') END=v.logical_source_id
+                ) AS visible_version_count
            FROM custom_api_jobs j
            LEFT JOIN custom_api_current_jobs c ON c.source=j.source
            LEFT JOIN custom_api_fetches f ON f.job_id=j.job_id
@@ -1258,7 +1367,9 @@ export function customApiD1Persistence(env, hooks = {}) {
           terminal?.current_job_id !== job.job_id || terminal?.promoted_at !== job.fetched_at ||
           terminal?.fetch_job_id !== job.job_id || terminal?.fetch_source !== job.source ||
           terminal?.fetch_fetched_at !== job.fetched_at || terminal?.fetch_verified_at !== job.fetched_at ||
-          terminal?.fetch_hashes !== canonicalJson(job.response_hashes) || terminal?.fetch_stats !== canonicalJson(job.stats)) {
+          terminal?.fetch_hashes !== canonicalJson(job.response_hashes) || terminal?.fetch_stats !== canonicalJson(job.stats) ||
+          Number(terminal?.version_count) !== stagedPlan.versions.length ||
+          Number(terminal?.visible_version_count) !== stagedPlan.versions.length) {
         throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API terminal receipt did not read back exactly");
       }
       await hooks.afterPromotionReadback?.({ jobId: job.job_id });

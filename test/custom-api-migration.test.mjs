@@ -9,6 +9,7 @@ import {
   runCustomApiPull,
   runCustomApiWorker,
 } from "../worker/src/lib/custom-api.js";
+import { currentCustomApiDocumentSql } from "../worker/src/lib/custom-api-visibility.js";
 
 const sql = readFileSync(new URL("../migrations/d1/0048_custom_api_source.sql", import.meta.url), "utf8");
 const TOKEN = ["fixture", "durable", "sentinel", "42"].join("-");
@@ -53,7 +54,7 @@ function setupDatabase() {
   database.exec(`
     CREATE TABLE documents (
       doc_uid TEXT PRIMARY KEY, source TEXT NOT NULL, source_id TEXT NOT NULL,
-      meta TEXT, deleted_at TEXT, UNIQUE(source,source_id)
+      content TEXT, meta TEXT, deleted_at TEXT, UNIQUE(source,source_id)
     );
     CREATE TABLE chunks (chunk_uid TEXT PRIMARY KEY, source TEXT NOT NULL);
     CREATE TABLE vector_outbox (chunk_uid TEXT PRIMARY KEY);
@@ -94,10 +95,16 @@ function compactConfig() {
 function documentWriter(DB) {
   return async (envelope) => {
     await DB.prepare(
-      `INSERT INTO documents (doc_uid,source,source_id,meta,deleted_at)
-       VALUES (?1,?2,?3,?4,NULL)
-       ON CONFLICT(source,source_id) DO UPDATE SET meta=excluded.meta,deleted_at=NULL`
-    ).bind(`${envelope.source_type}:${envelope.source_id}`, envelope.source_type, envelope.source_id, JSON.stringify(envelope.metadata)).run();
+      `INSERT INTO documents (doc_uid,source,source_id,content,meta,deleted_at)
+       VALUES (?1,?2,?3,?4,?5,NULL)
+       ON CONFLICT(source,source_id) DO UPDATE SET content=excluded.content,meta=excluded.meta,deleted_at=NULL`
+    ).bind(
+      `${envelope.source_type}:${envelope.source_id}`,
+      envelope.source_type,
+      envelope.source_id,
+      envelope.content,
+      JSON.stringify(envelope.metadata),
+    ).run();
     return { action: "updated" };
   };
 }
@@ -148,8 +155,8 @@ test("0048 accepts its compact job schema without any schema-47 table", () => {
   try {
     const tables = database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'custom_api_%' ORDER BY name").all();
     assert.deepEqual(tables.map((row) => row.name), [
-      "custom_api_current_jobs", "custom_api_fetches", "custom_api_job_slices", "custom_api_jobs",
-      "custom_api_row_chunks", "custom_api_schedule_state",
+      "custom_api_current_jobs", "custom_api_document_versions", "custom_api_fetches",
+      "custom_api_job_slices", "custom_api_jobs", "custom_api_row_chunks", "custom_api_schedule_state",
     ]);
   } finally { database.close(); }
 });
@@ -404,6 +411,123 @@ test("current rows and documents stay on the prior job through every slice and s
   assert.equal(terminalChecks, 2, "terminal pre-promotion visibility survived an interruption");
   assert.equal(promotionChecks, 1, "post-promotion completeness was checked");
   assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custom_api_row_chunks WHERE job_id<>?1").get(second.job_id).n, 0);
+});
+
+test("promotion keeps unchanged logical documents, replaces one changed group, and omits a disappeared group", async (t) => {
+  const database = setupDatabase();
+  t.after(() => database.close());
+  const DB = countedD1(database);
+  const document = (groupBy, title, fields) => ({
+    group_by: groupBy,
+    title_template: title,
+    body_template: "{{rows_table}}",
+    fields,
+  });
+  const sourceConfig = {
+    enabled: true,
+    source: "store-dashboard",
+    base_url: "https://dashboard.invalid/api/",
+    token_secret: "STORE_DASHBOARD_TOKEN",
+    endpoints: [
+      {
+        name: "sales",
+        path: "/sales",
+        row_key: ["store", "period"],
+        document: document(["period"], "{{period}} sales", ["store", "net_sales"]),
+      },
+      {
+        name: "inventory",
+        path: "/inventory",
+        row_key: ["store", "item"],
+        document: document(["store"], "{{store}} inventory", ["item", "count"]),
+      },
+    ],
+  };
+  let feeds = {
+    sales: { data: [
+      { store: "Store 1", period: "2026-08-01", net_sales: 10 },
+      { store: "Store 1", period: "2026-09-01", net_sales: 20 },
+    ] },
+    inventory: { data: [
+      { store: "Store 1", item: "Item 1", count: 2 },
+      { store: "Store 2", item: "Item 2", count: 3 },
+    ] },
+  };
+  let currentAt = AT;
+  const persistence = customApiD1Persistence({ STORAGE: "d1", DB }, {
+    ingestDocument: documentWriter(DB),
+  });
+  const options = {
+    token: TOKEN,
+    now: () => currentAt,
+    sleep: async () => {},
+    persistence,
+    fetchImpl: async (input) => new Response(
+      JSON.stringify(feeds[new URL(input).pathname.split("/").pop()]),
+      { headers: { "content-type": "application/json" } },
+    ),
+  };
+  const first = await settlePull(sourceConfig, options);
+  feeds = {
+    sales: { data: [
+      { store: "Store 1", period: "2026-08-01", net_sales: 11 },
+      { store: "Store 1", period: "2026-09-01", net_sales: 20 },
+    ] },
+    inventory: { data: [
+      { store: "Store 1", item: "Item 1", count: 2 },
+    ] },
+  };
+  currentAt = new Date("2026-09-25T15:30:00.000Z");
+  let promotionChecks = 0;
+  const secondPersistence = customApiD1Persistence({ STORAGE: "d1", DB }, {
+    ingestDocument: documentWriter(DB),
+    afterPromotionReadback: ({ jobId }) => {
+      promotionChecks++;
+      assert.equal(jobId === first.job_id, false);
+    },
+  });
+  const second = await settlePull(sourceConfig, { ...options, persistence: secondPersistence });
+
+  const versionMap = database.prepare(
+    `SELECT logical_source_id,document_source_id
+       FROM custom_api_document_versions WHERE job_id=?1 ORDER BY logical_source_id`
+  ).all(second.job_id).map((row) => ({ ...row }));
+  assert.deepEqual(versionMap, [
+    {
+      logical_source_id: "inventory:Store 1",
+      document_source_id: `inventory:Store 1:job:${first.job_id}`,
+    },
+    {
+      logical_source_id: "sales:2026-08-01",
+      document_source_id: `sales:2026-08-01:job:${second.job_id}`,
+    },
+    {
+      logical_source_id: "sales:2026-09-01",
+      document_source_id: `sales:2026-09-01:job:${first.job_id}`,
+    },
+  ]);
+  const visible = database.prepare(
+    `SELECT d.source_id,d.content,d.meta FROM documents d
+      WHERE d.source='store-dashboard' AND d.deleted_at IS NULL${currentCustomApiDocumentSql("d")}
+      ORDER BY json_extract(d.meta,'$.custom_api_source_id')`
+  ).all();
+  const byLogicalId = new Map(visible.map((row) => [
+    JSON.parse(row.meta).custom_api_source_id,
+    { ...row, metadata: JSON.parse(row.meta) },
+  ]));
+
+  assert.equal(promotionChecks, 1, "terminal promotion was reached exactly once");
+  assert.equal(second.status, "completed");
+  assert.deepEqual([...byLogicalId.keys()], [
+    "inventory:Store 1",
+    "sales:2026-08-01",
+    "sales:2026-09-01",
+  ]);
+  assert.match(byLogicalId.get("sales:2026-08-01").content, /\| Store 1 \| 11 \|/);
+  assert.equal(byLogicalId.get("sales:2026-08-01").metadata.custom_api_job_id, second.job_id);
+  assert.equal(byLogicalId.get("sales:2026-09-01").metadata.custom_api_job_id, first.job_id);
+  assert.equal(byLogicalId.get("inventory:Store 1").metadata.custom_api_job_id, first.job_id);
+  assert.equal(byLogicalId.has("inventory:Store 2"), false);
 });
 
 for (const [label, body] of [

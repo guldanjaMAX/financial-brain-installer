@@ -54,6 +54,24 @@ CREATE TABLE IF NOT EXISTS custom_api_current_jobs (
   promoted_at  TEXT NOT NULL
 );
 
+-- Every job stages the exact current logical-document set before promotion.
+-- Changed logical documents point at that job's new physical version, while
+-- unchanged logical documents carry forward their prior verified version.
+-- Readers join this map through custom_api_current_jobs, so the pointer flip
+-- exposes the complete set atomically and a disappeared group has no entry.
+CREATE TABLE IF NOT EXISTS custom_api_document_versions (
+  source              TEXT NOT NULL,
+  job_id              TEXT NOT NULL REFERENCES custom_api_jobs(job_id) ON DELETE RESTRICT,
+  logical_source_id   TEXT NOT NULL,
+  document_source_id  TEXT NOT NULL,
+  PRIMARY KEY (job_id, logical_source_id),
+  UNIQUE (job_id, document_source_id),
+  CHECK (source GLOB '[a-z0-9]*' AND source NOT GLOB '*[^a-z0-9_-]*' AND length(source) BETWEEN 1 AND 64)
+);
+
+CREATE INDEX IF NOT EXISTS idx_custom_api_document_versions_source
+  ON custom_api_document_versions (source, job_id, logical_source_id);
+
 CREATE TABLE IF NOT EXISTS custom_api_job_slices (
   job_id        TEXT NOT NULL REFERENCES custom_api_jobs(job_id) ON DELETE RESTRICT,
   slice_index   INTEGER NOT NULL CHECK (slice_index >= 0),
