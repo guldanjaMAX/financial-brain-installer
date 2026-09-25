@@ -478,7 +478,7 @@ const uploadBody = {
         Number.isSafeInteger(responseBody.retry_after_ms) && responseBody.retry_after_ms > 0 &&
         responseBody.model_calls_in_24_hours === item.modelCallCount &&
         responseBody.ocr_model_call_cap_exhausted === item.capExhausted &&
-        responseBody.error.includes("still being read") && responseBody.error.includes("retry after"),
+        responseBody.error.includes("not ready yet") && responseBody.error.includes("Nothing was added") && responseBody.error.includes("Try this upload again after"),
       JSON.stringify({ status: response.status, responseBody }));
     check(`owner upload ${item.name} reaches the OCR decision without another model call`,
       modelCalls === callsBefore,

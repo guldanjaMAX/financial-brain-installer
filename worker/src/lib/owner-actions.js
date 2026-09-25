@@ -1014,7 +1014,7 @@ async function upload(env, body, ingestEnvelope, afterIngest, extractUpload = ex
             : 0;
           return respond({
             uploaded: false,
-            error: `This page is still being read. It will retry after ${retryAfterSeconds} seconds.`,
+            error: `This page is not ready yet. Nothing was added. Try this upload again after ${retryAfterSeconds} seconds.`,
             code: error.code,
             retry_after_ms: retryAfterMs,
             ocr_request_pending: true,
