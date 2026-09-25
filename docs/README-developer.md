@@ -500,10 +500,49 @@ file-id, path-prefix and filename-part exclusions before downloading content.
 An excluded document already present in the brain is removed rather than left
 stranded. Gmail has no folder path and does not use these rules.
 
+`safety.text_quality` optionally overrides conservative pre-embedding review
+signals globally under `default` or for one manifest source under
+`sources.<source>`. Symbol density, word shape, OCR-like text, repeated-line
+boilerplate, low diversity, short text, and near-empty mail templates never
+refuse a document. They produce fixed review flags while the document continues
+through the normal send path. Binary content presented as text, decode failure,
+encoded binary blobs, and extreme exact repetition remain hard refusals. The
+exact-repetition stop requires at least 500 substantive lines with at least
+99.5% byte-identical to one line; the looser normalized boilerplate threshold
+only flags. Omission keeps the reviewed defaults. A source override changes
+only the listed review threshold; it cannot bypass hard extraction, credential,
+private-path, or removal gates. A content refusal is never an automatic removal
+candidate.
+
 Flags: `--dry-run`, `--source <name>`, `--limit <n>`, `--reset`, Drive-only
 `--dry-run --json` for a bounded aggregate assistant preview, and the
 exact-plan acknowledgement `--approve-removals <fingerprint>` when a Drive,
 Gmail, IMAP, or local-folder cleanup exceeds its routine safety limits.
+
+Local-folder, Drive, and Gmail dry runs now print an aggregate load preview:
+type or MIME/category, size and top-folder weight, named quality refusals,
+non-blocking quality review flags, same-source normalized-text duplicates,
+likely junk classes, and estimated
+chunks/vectors and time. `--vectors-per-minute <n>` supplies a measured rate
+for that Brain. `--preview-report <file>` is the only file-level output; it is
+streamed through owner-only local spill files and atomically finalized without
+holding the corpus detail in memory. The default preview retains bounded
+aggregate buckets, content-hash counts, and no file-level paths. The report
+never overwrites an existing file. Dry-run does not
+contact the Brain, so already-loaded and cross-source hash matches remain
+explicitly unobservable until the read-only inventory contract gains that
+aggregate comparison.
+
+After a load, `brain load-report <manifest>` combines authenticated latest-run
+source counters, a dedicated aggregate-only Worker read for same-storage-revision
+duplicates and per-document chunk totals, and local checkpoint refusal reasons
+and accepted-document review flags without emitting paths or message
+identifiers. Normalized-text duplicates across chunk-geometry revisions remain
+explicitly unobservable because the current durable hash includes that geometry.
+`--json` returns the same aggregate contract. A legacy run without measured
+refused/failed counters stays unknown. An open run or incomplete walk makes all
+of that run's counters unknown and the report incomplete. The command never
+invokes or renders the sample-bearing whole-corpus diagnostic.
 
 ---
 

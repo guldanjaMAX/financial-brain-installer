@@ -2752,6 +2752,77 @@ const qAll = async (env, sql, ...bind) => {
 };
 
 /**
+ * Aggregate-only load quality read. Both groupings are satisfied from covering
+ * indexes (`content_hash` for live documents and `doc_uid` for chunks), and no
+ * title, URI, source identity, chunk text, or diagnostic sample is selected.
+ * `content_hash` includes chunk geometry, so this can only name duplicates
+ * stored under the same storage revision. It cannot claim normalized-text
+ * equality across geometry changes without a dedicated geometry-free hash.
+ */
+export async function loadQualityAggregate(env) {
+  try {
+    const row = await q1(env,
+      `WITH duplicate_groups AS (
+         SELECT COUNT(*) AS n
+           FROM documents INDEXED BY idx_documents_live_content_hash
+          WHERE deleted_at IS NULL AND content_hash IS NOT NULL AND content_hash != ''
+          GROUP BY content_hash HAVING COUNT(*) > 1
+       ),
+       chunk_counts AS (
+         SELECT COUNT(*) AS n FROM chunks INDEXED BY idx_chunks_doc GROUP BY doc_uid
+       )
+       SELECT (SELECT COUNT(*) FROM duplicate_groups) AS duplicate_groups,
+              COALESCE((SELECT SUM(n - 1) FROM duplicate_groups), 0) AS duplicate_extra_documents,
+              COALESCE((SELECT MAX(n) FROM chunk_counts), 0) AS largest_document_chunks,
+              COALESCE((SELECT SUM(chunks) FROM corpus_stats), 0) AS total_chunks`);
+    const exactCount = (value, label) => {
+      const number = Number(value);
+      if (!Number.isSafeInteger(number) || number < 0) {
+        throw new Error(`load quality returned an invalid ${label} count`);
+      }
+      return number;
+    };
+    return {
+      contract_version: 1,
+      kind: "load_quality_aggregate",
+      complete: true,
+      duplicates: {
+        observable: true,
+        basis: "same_storage_revision",
+        groups: exactCount(row?.duplicate_groups, "duplicate group"),
+        extra_documents: exactCount(row?.duplicate_extra_documents, "duplicate document"),
+        normalized_text_observable: false,
+        normalized_text_reason: "normalized text hashes are not stored independently of chunk geometry",
+      },
+      chunk_outliers: {
+        observable: true,
+        largest_document_chunks: exactCount(row?.largest_document_chunks, "largest document chunk"),
+        total_chunks: exactCount(row?.total_chunks, "total chunk"),
+      },
+      unavailable_categories: [],
+    };
+  } catch {
+    // This route is aggregate-safe even on failure. Raw D1 errors can contain
+    // schema or binding detail and never belong in load-report output.
+    return {
+      contract_version: 1,
+      kind: "load_quality_aggregate",
+      complete: false,
+      duplicates: {
+        observable: false,
+        basis: "same_storage_revision",
+        groups: null,
+        extra_documents: null,
+        normalized_text_observable: false,
+        normalized_text_reason: "normalized text hashes are not stored independently of chunk geometry",
+      },
+      chunk_outliers: { observable: false, largest_document_chunks: null, total_chunks: null },
+      unavailable_categories: ["indexed_quality_aggregates"],
+    };
+  }
+}
+
+/**
  * Post-install diagnostic: what is missing, what is stored wrong, what is stored
  * wastefully.
  *

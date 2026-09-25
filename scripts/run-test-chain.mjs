@@ -291,6 +291,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/migrations.test.mjs",
   "node test/doc-date.test.mjs",
   "node test/quality.test.mjs",
+  "node test/load-preview.test.mjs",
+  "node test/load-report.test.mjs",
   "node test/ingest-run.test.mjs",
   "node --no-warnings test/ingest-prefetch.test.mjs",
   "node --no-warnings test/source-ingest-lock.test.mjs",

@@ -109,6 +109,10 @@ async function ingestOcrLib() {
   return await import("./ingest/ocr.mjs");
 }
 
+async function loadPreviewLib() {
+  return await import("./ingest/load-preview.mjs");
+}
+
 /**
  * The one-target provenance executor imports the real extraction stack. Keep it
  * lazy for the same reason as ingestLib(): `brain doctor` must still be able to
@@ -425,7 +429,7 @@ export function supportSourceForCommand(command = "") {
   if (command === "ocr-preflight" || command === "provenance-assess" ||
       command === "ingest-file-preview") return "local";
   if (command === "update-preview" || command === "ingest-file-apply") return "brain-data-plane";
-  if (["financial-picture", "machine-continuity"].includes(command)) return "brain-data-plane";
+  if (["financial-picture", "machine-continuity", "load-report"].includes(command)) return "brain-data-plane";
   if (command === "ingest") {
     const index = process.argv.indexOf("--from");
     const remote = index >= 0 ? process.argv[index + 1] : null;
@@ -7189,6 +7193,7 @@ export const VALUE_FLAGS = new Set([
   "path", "source", "limit", "from", "manifest", "scopes", "port", "host", "user", "run", "confirm-host", "kind", "add", "bookmark", "export", "explain", "backup", "provider",
   "golden", "profile", "k", "repeat", "baseline", "save", "artifacts",
   "corpus-contract", "approve-removals", "only", "skip",
+  "preview-report", "vectors-per-minute",
   "approve", "target",
   "can", "zones", "exclude-zones", "until", "as", "subject",
   // brain import bank. `--file` with no value must die saying so rather than
@@ -7363,6 +7368,27 @@ export function ocrPolicy(manifest = {}) {
       ? Math.floor(cfg.max_pages_per_document)
       : 40,
   };
+}
+
+const TEXT_QUALITY_THRESHOLD_KEYS = Object.freeze([
+  "binary_control_ratio_max",
+  "symbol_ratio_max",
+  "symbol_min_chars",
+  "min_word_like_ratio",
+  "word_shape_min_tokens",
+  "repeated_line_ratio_max",
+  "repeated_line_min_lines",
+  "templated_mail_min_substantive_chars",
+]);
+
+/** Merge the generic conservative thresholds with one source's explicit overrides. */
+export function textQualityPolicy(manifest = {}, sourceName = "") {
+  const configured = manifest?.safety?.text_quality || {};
+  const source = configured?.sources?.[String(sourceName)] || {};
+  const merged = { ...(configured.default || {}), ...source };
+  return Object.fromEntries(TEXT_QUALITY_THRESHOLD_KEYS
+    .filter((key) => Number.isFinite(Number(merged[key])) && Number(merged[key]) >= 0)
+    .map((key) => [key, Number(merged[key])]));
 }
 
 /**
@@ -7594,13 +7620,33 @@ function skippedPartIndexOf(state) {
  * shape, so one recovery cannot erase another file's current failure.
  */
 export function recordAcceptedDocumentState(state, {
-  stateKey, hash, skipKeys = [], legacyPartRoot = null, protectedSkipKeys = [],
+  stateKey, hash, skipKeys = [], legacyPartRoot = null, protectedSkipKeys = [], qualityFlags,
 } = {}) {
   const key = String(stateKey || "");
   if (!key) throw new Error("accepted document state needs a logical state key");
   if (!state.done || typeof state.done !== "object") state.done = {};
   if (!state.skipped || typeof state.skipped !== "object") state.skipped = {};
   state.done[key] = hash;
+  if (qualityFlags !== undefined) {
+    const codes = [...new Set((Array.isArray(qualityFlags) ? qualityFlags : [])
+      .map((flag) => typeof flag === "string" ? flag : flag?.code)
+      .filter((code) => typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code)))]
+      .sort();
+    if (codes.length) {
+      state.quality_review = state.quality_review && typeof state.quality_review === "object"
+        ? state.quality_review
+        : { version: 1, documents: {} };
+      state.quality_review.version = 1;
+      state.quality_review.documents = state.quality_review.documents &&
+        typeof state.quality_review.documents === "object"
+        ? state.quality_review.documents
+        : {};
+      state.quality_review.documents[key] = codes;
+    } else if (state.quality_review?.documents) {
+      delete state.quality_review.documents[key];
+      if (!Object.keys(state.quality_review.documents).length) delete state.quality_review;
+    }
+  }
   const exactSkipKeys = [key, ...(skipKeys || [])]
     .filter((skipKey) => skipKey !== null && skipKey !== undefined && String(skipKey) !== "")
     .map(String);
@@ -10970,6 +11016,15 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     saveState: persistState,
     removedSinceLastRun,
   } = await (options.ingestLib ?? ingestLib)();
+  if (flags["preview-report"] && !dry) {
+    die("--preview-report is read-only output and requires --dry-run. Nothing was sent or written.");
+  }
+  const requestedVectorRate = flags["vectors-per-minute"] == null
+    ? undefined
+    : Number(flags["vectors-per-minute"]);
+  if (requestedVectorRate !== undefined && (!Number.isFinite(requestedVectorRate) || requestedVectorRate <= 0)) {
+    die("--vectors-per-minute must be a positive measured rate.");
+  }
   const saveState = (path, value) => {
     assertLockOwned?.();
     return persistState(path, value);
@@ -11046,6 +11101,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // offered. A dry run never gets a callback, so the safest command in the
   // tool stays the cheapest one.
   const ocrCfg = ocrPolicy(m);
+  const qualityPolicy = textQualityPolicy(m, sourceName);
   let ocrPages = 0;
   const ocrCallback = dry || !ocrCfg.enabled ? null : makeOcrCallback({
     base, adminKey, model: ocrCfg.model, maxPages: ocrCfg.maxPages,
@@ -11068,7 +11124,10 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
 
   const privatePrefixes = m.safety?.private_path_prefixes || [];
   info(`walking ${root}`);
-  const { files, skipped: walkSkips, complete: walkComplete } = walk(root, { privatePrefixes });
+  const { files, skipped: walkSkips, complete: walkComplete } = walk(root, {
+    privatePrefixes,
+    reportJunk: dry,
+  });
   info(`${files.length} candidate file(s), ${walkSkips.length} skipped during the walk`);
   if (privatePrefixes.length) {
     info(`private prefixes enforced: ${privatePrefixes.join(", ")}`);
@@ -11085,6 +11144,18 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   if (flags.limit) warn(`--limit ${flags.limit}: only the first ${limited.length} file(s) will be considered`);
 
   const skips = [...walkSkips];
+  let loadPreview = null;
+  let renderLoadPreviewSummary = null;
+  if (dry) {
+    ({ createLoadPreview: loadPreview, renderLoadPreviewSummary } = await loadPreviewLib());
+    loadPreview = loadPreview({
+      source: sourceName,
+      vectorsPerMinute: requestedVectorRate,
+      detailPath: flags["preview-report"] ? resolve(String(flags["preview-report"])) : null,
+    });
+    for (const file of limited) loadPreview.observeCandidate(file);
+    for (const skip of walkSkips) loadPreview.observeWalkSkip(skip);
+  }
   const notes = [];
   const adjudicatedRemovals = localWalkRemovalCandidates(walkSkips, previouslyKnownKeys);
   const privateRemovalKeys = adjudicatedRemovals.policy;
@@ -11174,7 +11245,8 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // a raw V8 abort no handler can catch, and an interrupt during that silent
   // phase threw away every minute of extraction. Peak memory here is one batch.
   const prepareOne = async (f) => {
-    const r = await prepare(f, { sourceName, ocr: ocrCallback });
+    const r = await prepare(f, { sourceName, ocr: ocrCallback, qualityPolicy });
+    loadPreview?.observePrepared(f, r);
     if (r.note) notes.push({ path: f.rel, note: r.note });
     if (r.messageExport) messageExportsSeen.add(r.messageExport);
 
@@ -11190,6 +11262,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
         recordAcceptedDocumentState(state, {
           stateKey: key,
           hash: r.hash,
+          qualityFlags: r.quality_flags,
           skipKeys: [f.rel, ...r.envelopes.map((e) => e.source_id)],
           legacyPartRoot: f.rel,
           protectedSkipKeys: protectedLocalSkipKeys,
@@ -11233,6 +11306,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
           keep_doc_uids: sanitized.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
           skipKeys: [key, f.rel, ...sanitized.map((envelope) => envelope.source_id)],
           legacyPartRoot: [key, f.rel],
+          qualityFlags: r.quality_flags,
         },
       };
     }
@@ -11242,6 +11316,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
       recordAcceptedDocumentState(state, {
         stateKey: key,
         hash: r.hash,
+        qualityFlags: r.quality_flags,
         skipKeys: [r.envelope?.source_id, f.rel],
         legacyPartRoot: [r.envelope?.source_id, f.rel],
         protectedSkipKeys: protectedLocalSkipKeys,
@@ -11281,6 +11356,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
         keep_doc_uids: envelopes.map((envelope) => `${sourceName}:${envelope.source_id}`),
         skipKeys: [key, f.rel, ...envelopes.map((envelope) => envelope.source_id)],
         legacyPartRoot: [key, f.rel],
+        qualityFlags: r.quality_flags,
       },
     };
   };
@@ -11288,12 +11364,10 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   if (flags["dry-run"]) {
     // A dry run streams too, so it exercises the same code path rather than a
     // parallel one that could quietly diverge.
-    const preview = [];
     for await (const group of batchStream(limited, prepareOne, {
       onSkip: (sk) => skips.push(sk),
       onProgress: (n) => { if (n % 250 === 0) process.stdout.write(`\r  scanned ${n}/${limited.length}...   `); },
     })) {
-      for (const item of group) if (preview.length < 5) preview.push(item);
       scanned += group.length;
     }
     process.stdout.write("\r");
@@ -11309,17 +11383,21 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     reportNotes(notes);
     console.log("");
     ok("dry run, nothing was sent");
-    await reportSkips(skips);
-    if (preview.length) {
-      console.log(`\n  first few that WOULD be sent:`);
-      for (const r of preview) {
-        const d = r.envelope.occurred_at ? r.envelope.occurred_at.slice(0, 10) : "no date";
-        console.log(`    ${r.rel}  (${d}, ${r.envelope.content.length} chars)`);
-      }
+    const loadReport = loadPreview.finish();
+    console.log(`\n${renderLoadPreviewSummary(loadReport.summary)}`);
+    if (flags["preview-report"]) {
+      const detailPath = resolve(String(flags["preview-report"]));
+      info(`private file-level preview written to ${detailPath}`);
     }
     // dry_run is stated on the returned shape rather than left to be inferred
     // from a zero, so a sweep reporting this leg can never call a preview a load.
-    return { dry_run: true, would_send: scanned, unchanged, skipped: skips.length };
+    return {
+      dry_run: true,
+      would_send: scanned,
+      unchanged,
+      skipped: skips.length,
+      load_preview: loadReport.summary,
+    };
   }
 
   // Routine ingest is a data-plane operation. Once setup has saved the live
@@ -14604,6 +14682,7 @@ const cmdIngestRemoteRun = async (
   // offered. A dry run never gets a callback, so the safest command in the
   // tool stays the cheapest one.
   const ocrCfg = ocrPolicy(m);
+  const qualityPolicy = textQualityPolicy(m, sourceName);
   let ocrPages = 0;
   const ocrCallback = dry || !ocrCfg.enabled ? null : makeOcrCallback({
     base, adminKey, model: ocrCfg.model, maxPages: ocrCfg.maxPages,
@@ -15084,7 +15163,50 @@ const cmdIngestRemoteRun = async (
   const acceptedFamilyParts = new Map();
   const rejectedFamilyParts = new Map();
   const intentionalRemovalUids = [];
+  const retainedQualityReviewUids = new Set(
+    Array.isArray(state?.retained_quality_review?.uids)
+      ? state.retained_quality_review.uids.filter((uid) =>
+          typeof uid === "string" && uid.startsWith(`${sourceName}:`))
+      : [],
+  );
+  const retainedQualityReviewsThisRun = new Set();
+  const markRetainedQualityReview = (uid) => {
+    retainedQualityReviewUids.add(uid);
+    retainedQualityReviewsThisRun.add(uid);
+  };
+  const clearRetainedQualityReview = (uid) => retainedQualityReviewUids.delete(uid);
+  const updateRetainedQualityReviewState = () => {
+    if (retainedQualityReviewUids.size) {
+      state.retained_quality_review = {
+        version: 1,
+        count: retainedQualityReviewUids.size,
+        uids: [...retainedQualityReviewUids].sort(),
+      };
+    } else {
+      delete state.retained_quality_review;
+    }
+  };
   const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
+  let remoteLoadPreview = null;
+  let renderRemoteLoadPreviewSummary = null;
+  if (flags["preview-report"] && !dry) {
+    die("--preview-report is read-only output and requires --dry-run. Nothing was sent or written.");
+  }
+  const requestedVectorRate = flags["vectors-per-minute"] == null
+    ? undefined
+    : Number(flags["vectors-per-minute"]);
+  if (requestedVectorRate !== undefined && (!Number.isFinite(requestedVectorRate) || requestedVectorRate <= 0)) {
+    die("--vectors-per-minute must be a positive measured rate.");
+  }
+  if (dry && !assistantJson && ["drive", "gmail"].includes(which)) {
+    const previewModule = await loadPreviewLib();
+    remoteLoadPreview = previewModule.createLoadPreview({
+      source: sourceName,
+      vectorsPerMinute: requestedVectorRate,
+      detailPath: flags["preview-report"] ? resolve(String(flags["preview-report"])) : null,
+    });
+    renderRemoteLoadPreviewSummary = previewModule.renderLoadPreviewSummary;
+  }
 
   const addTally = (part) => {
     for (const key of Object.keys(tally)) tally[key] += Number(part?.[key] || 0);
@@ -15500,6 +15622,7 @@ const cmdIngestRemoteRun = async (
         driveStoredBeforeProcessing.has(key);
       if (storedFamilyConfirmed &&
           (!scannerPolicyChanged || scannerResumeAccepted) && state.done[key] === listedVersion) {
+        clearRetainedQualityReview(key);
         recordAcceptedDocumentState(state, {
           stateKey: key, hash: listedVersion, skipKeys: [f.id], legacyPartRoot: f.id,
         });
@@ -15507,13 +15630,26 @@ const cmdIngestRemoteRun = async (
         return { unchanged: true };
       }
 
-      const r = await drive.toEnvelope(getToken, f, { sourceName, pathOf, ocr: ocrCallback });
+      const r = await drive.toEnvelope(getToken, f, {
+        sourceName, pathOf, ocr: ocrCallback, qualityPolicy,
+      });
       if (!r) return null;
       if (r.skip) {
+        const previouslyAccepted = driveStoredBeforeProcessing?.has(key) === true ||
+          Object.hasOwn(state.done || {}, key);
         state.skipped[key] = r.skip.reason;
-        intentionalRemovalUids.push(key);
-        if (r.skip.code === "source_deleted") sourceResolvedSkipped++;
-        else if (["shortcut_not_followed", "non_text_media"].includes(r.skip.code)) adjudicatedSkipped++;
+        const adjudicatedSourceSkip = ["shortcut_not_followed", "non_text_media"].includes(r.skip.code);
+        const sourceResolvedSkip = r.skip.code === "source_deleted";
+        if (!adjudicatedSourceSkip && !sourceResolvedSkip) {
+          localRefused++;
+          if (previouslyAccepted) markRetainedQualityReview(key);
+          else clearRetainedQualityReview(key);
+        } else {
+          clearRetainedQualityReview(key);
+          intentionalRemovalUids.push(key);
+        }
+        if (sourceResolvedSkip) sourceResolvedSkipped++;
+        else if (adjudicatedSourceSkip) adjudicatedSkipped++;
         return { skip: r.skip };
       }
       const envelope = sanitizeIngestEnvelope(r.envelope);
@@ -15522,10 +15658,12 @@ const cmdIngestRemoteRun = async (
         const skip = { path: safeIngestDisplay(envelope.title, f.name, f.id), id: f.id, reason: refusal.reason };
         state.skipped[key] = refusal.reason;
         localRefused++;
+        clearRetainedQualityReview(key);
         intentionalRemovalUids.push(key);
         return { skip };
       }
       const envelopes = splitOversized(envelope);
+      clearRetainedQualityReview(key);
       const familyPlan = {
         stateKey: key,
         hash: r.version,
@@ -15534,6 +15672,7 @@ const cmdIngestRemoteRun = async (
         keep_doc_uids: envelopes.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
         skipKeys: [key, ...envelopes.map((envelope) => envelope.source_id)],
         legacyPartRoot: f.id,
+        qualityFlags: r.quality_flags,
       };
       if (!assistantJson && scanned % 200 === 0) process.stdout.write(`\r  scanned ${scanned}...   `);
       return {
@@ -15542,7 +15681,21 @@ const cmdIngestRemoteRun = async (
       };
     };
 
-    for await (const group of batchStream(files.slice(0, limit), prepareDrive, {
+    const previewDrive = async (file) => {
+      const folder = pathOf(file);
+      const observed = {
+        rel: [folder, file.name || file.id].filter(Boolean).join("/"),
+        name: file.name || file.id,
+        size: Number(file.size || 0),
+        type: file.mimeType || "drive-item",
+        folder: folder || "(root)",
+      };
+      remoteLoadPreview?.observeCandidate(observed);
+      const result = await prepareDrive(file);
+      remoteLoadPreview?.observePrepared(observed, result);
+      return result;
+    };
+    for await (const group of batchStream(files.slice(0, limit), previewDrive, {
       onSkip: (skip) => skips.push(skip),
     })) {
       await consumeGroup(group);
@@ -15859,6 +16012,7 @@ const cmdIngestRemoteRun = async (
           id,
           fetched: await gmail.toEnvelope(getToken, id, {
             sourceName,
+            qualityPolicy,
             // A full-list id matched DEFAULT_QUERY. An incremental id reached
             // this point only after its label-only preflight allowed it.
             trustedEligible: !incremental || policy?.allowed === true,
@@ -15881,6 +16035,13 @@ const cmdIngestRemoteRun = async (
           ? storedBeforeSweep.has(key)
           : Object.prototype.hasOwnProperty.call(state.done || {}, key);
         state.skipped[key] = r.skip.reason;
+        if (r.skip.code === "quality_refused") {
+          localRefused++;
+          if (previouslyAccepted) markRetainedQualityReview(key);
+          else clearRetainedQualityReview(key);
+        } else {
+          clearRetainedQualityReview(key);
+        }
         if (r.policy_skip === true) {
           policySkipped++;
           gmailPolicyUids.push(key);
@@ -15907,8 +16068,10 @@ const cmdIngestRemoteRun = async (
       const storedFamilyConfirmed = storedBeforeSweep == null || storedBeforeSweep.has(key);
       if (storedFamilyConfirmed &&
           (!scannerPolicyChanged || scannerResumeAccepted) && state.done[key] === r.version) {
+        clearRetainedQualityReview(key);
         recordAcceptedDocumentState(state, {
           stateKey: key, hash: r.version, skipKeys: [id], legacyPartRoot: id,
+          qualityFlags: r.quality_flags,
         });
         gmailAcceptedUids.add(key);
         unchanged++;
@@ -15920,10 +16083,12 @@ const cmdIngestRemoteRun = async (
         const skip = { path: safeIngestDisplay(envelope.title, id), id, reason: refusal.reason };
         state.skipped[key] = refusal.reason;
         localRefused++;
+        clearRetainedQualityReview(key);
         gmailIntentionalUids.push(key);
         return { skip };
       }
       const envelopes = splitOversized(envelope);
+      clearRetainedQualityReview(key);
       return {
         hash: r.version, envelopes, rel: id, stateKey: key, deferState: true,
         familyPlan: {
@@ -15934,10 +16099,31 @@ const cmdIngestRemoteRun = async (
           keep_doc_uids: envelopes.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
           skipKeys: [key, ...envelopes.map((envelope) => envelope.source_id)],
           legacyPartRoot: id,
+          qualityFlags: r.quality_flags,
         },
       };
     };
-    for await (const group of batchStream(fetched, prepareGmail, {
+    const previewGmail = async (item) => {
+      const labels = Array.isArray(item?.fetched?.envelope?.metadata?.labels)
+        ? item.fetched.envelope.metadata.labels
+        : [];
+      const category = labels.find((label) => /^CATEGORY_/i.test(label)) ||
+        labels.find((label) => ["INBOX", "SENT"].includes(String(label).toUpperCase())) ||
+        "other";
+      const content = String(item?.fetched?.envelope?.content || "");
+      const observed = {
+        rel: String(item.id),
+        name: String(item.id),
+        size: Buffer.byteLength(content, "utf8"),
+        type: "message/rfc822",
+        folder: String(category).toLowerCase(),
+      };
+      remoteLoadPreview?.observeCandidate(observed);
+      const result = await prepareGmail(item);
+      remoteLoadPreview?.observePrepared(observed, result);
+      return result;
+    };
+    for await (const group of batchStream(fetched, previewGmail, {
       onSkip: (skip) => skips.push(skip),
     })) {
       await consumeGroup(group);
@@ -16213,7 +16399,9 @@ const cmdIngestRemoteRun = async (
         const prepareImap = async (message) => {
           scanned++;
           if (message.uid > highest) highest = message.uid;
-          const r = await imap.toEnvelope(message, { sourceName, host: credentials.host });
+          const r = await imap.toEnvelope(message, {
+            sourceName, host: credentials.host, qualityPolicy,
+          });
           if (r.skip) {
             const key = r.source_id
               ? `${sourceName}:${r.source_id}`
@@ -16230,6 +16418,15 @@ const cmdIngestRemoteRun = async (
               }
             }
             state.skipped[key] = r.skip.reason;
+            const previouslyAccepted = imapStoredBeforeSweep?.has(key) === true ||
+              Object.hasOwn(state.done || {}, key);
+            if (r.skip.code === "quality_refused") {
+              localRefused++;
+              if (previouslyAccepted) markRetainedQualityReview(key);
+              else clearRetainedQualityReview(key);
+            } else {
+              clearRetainedQualityReview(key);
+            }
             if (r.source_deleted === true) sourceResolvedSkipped++;
             if (r.policy_skip === true || /^bulk mail:/i.test(r.skip.reason || "")) {
               policySkipped++;
@@ -16247,8 +16444,10 @@ const cmdIngestRemoteRun = async (
           const storedFamilyConfirmed = imapStoredBeforeSweep == null || imapStoredBeforeSweep.has(key);
           if (storedFamilyConfirmed &&
               (!scannerPolicyChanged || scannerResumeAccepted) && state.done[key] === r.version) {
+            clearRetainedQualityReview(key);
             recordAcceptedDocumentState(state, {
               stateKey: key, hash: r.version, skipKeys: [r.envelope.source_id], legacyPartRoot: r.envelope.source_id,
+              qualityFlags: r.quality_flags,
             });
             imapAcceptedUids.add(key);
             unchanged++;
@@ -16262,10 +16461,12 @@ const cmdIngestRemoteRun = async (
             const skip = { path: safeIngestDisplay(envelope.title, key), id: key, reason: refusal.reason };
             state.skipped[key] = refusal.reason;
             localRefused++;
+            clearRetainedQualityReview(key);
             intentionalRemovalUids.push(key);
             return { skip };
           }
           const envelopes = splitOversized(envelope);
+          clearRetainedQualityReview(key);
           if (scanned % 200 === 0) process.stdout.write(`\r  fetched ${scanned}...   `);
           return {
             hash: r.version, envelopes, rel: key, stateKey: key, deferState: true,
@@ -16277,6 +16478,7 @@ const cmdIngestRemoteRun = async (
               keep_doc_uids: envelopes.map((one) => `${one.source_type}:${one.source_id}`),
               skipKeys: [key, ...envelopes.map((one) => one.source_id)],
               legacyPartRoot: r.envelope.source_id,
+              qualityFlags: r.quality_flags,
             },
           };
         };
@@ -16465,6 +16667,15 @@ const cmdIngestRemoteRun = async (
   }
   process.stdout.write("\r");
 
+  updateRetainedQualityReviewState();
+  if (!dry) saveState(statePath, state);
+  if (retainedQualityReviewsThisRun.size) {
+    warn(
+      `${retainedQualityReviewsThisRun.size} already-stored remote item(s) had a content-quality refusal and were retained for review.\n` +
+        "      They did not enter any automatic removal plan."
+    );
+  }
+
   info(`${scanned} scanned; ${prepared} document(s) prepared in ${batchNo} batch(es); ${unchanged} unchanged; ${skips.length} skipped`);
 
   const coverageGaps = Math.max(0, skips.length - policySkipped - sourceResolvedSkipped - adjudicatedSkipped) +
@@ -16472,8 +16683,23 @@ const cmdIngestRemoteRun = async (
 
   if (dry) {
     ok("dry run, nothing was sent");
-    await reportSkips(skips);
-    return { dry_run: true, would_send: prepared, unchanged, skipped: skips.length };
+    const loadReport = remoteLoadPreview?.finish() || null;
+    if (loadReport) {
+      console.log(`\n${renderRemoteLoadPreviewSummary(loadReport.summary)}`);
+      if (flags["preview-report"]) {
+        const detailPath = resolve(String(flags["preview-report"]));
+        info(`private file-level preview written to ${detailPath}`);
+      }
+    } else {
+      await reportSkips(skips);
+    }
+    return {
+      dry_run: true,
+      would_send: prepared,
+      unchanged,
+      skipped: skips.length,
+      ...(loadReport ? { load_preview: loadReport.summary } : {}),
+    };
   }
 
   // Every batch landed, so it is now safe to say "we have everything up to
@@ -16552,7 +16778,7 @@ const cmdIngestRemoteRun = async (
   const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged`;
   if (tally.failed) info(summary);
   else ok(summary);
-  if (totalRefused) warn(`${totalRefused} document(s) refused for carrying live credentials.`);
+  if (totalRefused) warn(`${totalRefused} document(s) refused by content safety or text-quality checks.`);
   await reportSkips(skips);
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
   assertNoIngestFailures(tally);
@@ -16767,6 +16993,7 @@ async function sendBatches({
           recordAcceptedDocumentState(state, {
             stateKey: base_id,
             hash: item.hash,
+            qualityFlags: item.quality_flags,
             skipKeys: [r.source_id],
             legacyPartRoot: item.envelope.metadata?.part_of || r.source_id,
           });
@@ -21937,33 +22164,171 @@ async function cmdEval(manifestPath) {
   return assertEvalSucceeded(r);
 }
 
-async function cmdDiagnose(manifestPath) {
+function incompleteDiagnosisResult(reason) {
+  return Object.freeze({
+    kind: "diagnosis_incomplete",
+    complete: false,
+    reason: String(reason || "one or more diagnostic checks could not run"),
+  });
+}
+
+export async function readDiagnosis(manifestPath, options = {}) {
+  if (options.diagnosis) {
+    const receipt = diagnosisReceiptVerdict(options.diagnosis);
+    if (receipt.ok) return options.diagnosis;
+    if (options.renderIncomplete !== false && options.diagnosis?.verdict === "incomplete") {
+      renderDiagnosis(options.diagnosis);
+    }
+    if (options.returnIncomplete === true) return incompleteDiagnosisResult(receipt.reason);
+    die(`diagnose could not establish a trustworthy result: ${receipt.reason}.`);
+  }
   const { m } = loadManifest(manifestPath);
   // Cloudflare is OPTIONAL here, deliberately. This command talks to the worker
   // over plain HTTPS with the admin key, so it must keep working after our token
   // is revoked at handoff. A command that proves the brain works, but only while
   // we still hold a key to the client's account, proves the wrong thing.
-  const acct = m.brain?.domain ? null : await resolveAccount(m);
-  const base = await resolveBaseUrl(m, acct);
-  const adminKey = resolveAdminKey(manifestPath);
+  const resolveAcct = options.resolveAccount ?? resolveAccount;
+  const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const request = options.http ?? http;
+  const acct = m.brain?.domain ? null : await resolveAcct(m);
+  const base = await resolveBase(m, acct);
+  const adminKey = resolveKey(manifestPath);
   if (!adminKey) die("no durable admin key was found. Repair it with `brain setup <manifest>` or `brain secrets <manifest>`.");
 
-  const res = await http(`${base}/api/admin/brain/diagnose`, { headers: { "X-Admin-Key": adminKey } },
+  const res = await request(`${base}/api/admin/brain/diagnose`, { headers: { "X-Admin-Key": adminKey } },
     { timeoutMs: 120_000, what: "the diagnostic" });
   const raw = await res.text();
   let r = null;
   try { r = JSON.parse(raw); } catch { /* handled below */ }
   const receipt = diagnosisReceiptVerdict(r);
-  if (!receipt.ok && r?.verdict === "incomplete") {
-    renderDiagnosis(r);
-    die(`diagnose could not establish a trustworthy result: ${receipt.reason}.`);
+  if (!receipt.ok) {
+    if (options.renderIncomplete !== false && r?.verdict === "incomplete") renderDiagnosis(r);
+    if (options.returnIncomplete === true) return incompleteDiagnosisResult(receipt.reason);
+    if (r?.verdict === "incomplete") {
+      die(`diagnose could not establish a trustworthy result: ${receipt.reason}.`);
+    }
   }
   if (!res.ok) die(`diagnose failed (${res.status}): ${raw.slice(0, 200)}`);
   if (!receipt.ok) die(`diagnose returned HTTP success without a trustworthy receipt: ${receipt.reason}.`);
 
+  return r;
+}
+
+function loadQualityAggregateVerdict(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      value.contract_version !== 1 || value.kind !== "load_quality_aggregate" ||
+      typeof value.complete !== "boolean" || !value.duplicates || !value.chunk_outliers ||
+      !Array.isArray(value.unavailable_categories || [])) {
+    return { ok: false, reason: "the load-quality response has an unsupported contract" };
+  }
+  const exact = (count) => Number.isSafeInteger(count) && count >= 0;
+  if (value.complete === true &&
+      (!exact(value.duplicates.groups) || !exact(value.duplicates.extra_documents) ||
+       !exact(value.chunk_outliers.largest_document_chunks) || !exact(value.chunk_outliers.total_chunks) ||
+       value.duplicates.observable !== true || value.chunk_outliers.observable !== true)) {
+    return { ok: false, reason: "the load-quality response is missing measured aggregate counts" };
+  }
+  if (value.complete === false &&
+      (value.duplicates.observable !== false || value.chunk_outliers.observable !== false)) {
+    return { ok: false, reason: "the incomplete load-quality response claims measured aggregates" };
+  }
+  return { ok: true, reason: null };
+}
+
+async function readLoadQualityAggregate(manifestPath, options = {}) {
+  if (options.aggregate) {
+    const receipt = loadQualityAggregateVerdict(options.aggregate);
+    if (!receipt.ok) die(`load-report could not verify its aggregate receipt: ${receipt.reason}.`);
+    return options.aggregate;
+  }
+  const { m } = loadManifest(manifestPath);
+  const resolveAcct = options.resolveAccount ?? resolveAccount;
+  const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const request = options.http ?? http;
+  const acct = m.brain?.domain ? null : await resolveAcct(m);
+  const base = await resolveBase(m, acct);
+  const adminKey = resolveKey(manifestPath);
+  if (!adminKey) die("no durable admin key was found. Repair it with `brain setup <manifest>` or `brain secrets <manifest>`.");
+  const res = await request(`${base}/api/admin/brain/load-quality`, {
+    headers: { "X-Admin-Key": adminKey },
+  }, { timeoutMs: 30_000, what: "the aggregate load-quality report" });
+  const raw = await res.text();
+  let aggregate = null;
+  try { aggregate = JSON.parse(raw); } catch { /* fixed error below */ }
+  const receipt = loadQualityAggregateVerdict(aggregate);
+  if (!receipt.ok) die(`load-report could not verify its aggregate receipt: ${receipt.reason}.`);
+  return aggregate;
+}
+
+export async function cmdDiagnose(manifestPath, options = {}) {
+  const r = await readDiagnosis(manifestPath, options);
+
   renderDiagnosis(r);
   renderMalformedDriveIdentities(readMalformedDriveIdentities(manifestPath));
   return r;
+}
+
+function localCheckpointSkips(manifestPath, sources) {
+  const result = {};
+  for (const source of sources || []) {
+    const name = String(source?.name || source?.source_id || "");
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) continue;
+    const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName: name });
+    try {
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      result[name] = state?.skipped && typeof state.skipped === "object" ? state.skipped : {};
+    } catch (error) {
+      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+      result[name] = {};
+    }
+  }
+  return result;
+}
+
+function localCheckpointQualityFlags(manifestPath, sources) {
+  const result = {};
+  for (const source of sources || []) {
+    const name = String(source?.name || source?.source_id || "");
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) continue;
+    const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName: name });
+    try {
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      const accepted = state?.done && typeof state.done === "object" ? state.done : {};
+      const documents = state?.quality_review?.version === 1 &&
+        state.quality_review.documents && typeof state.quality_review.documents === "object"
+        ? state.quality_review.documents
+        : {};
+      result[name] = Object.fromEntries(Object.entries(documents)
+        .filter(([key, codes]) => Object.hasOwn(accepted, key) && Array.isArray(codes)));
+    } catch (error) {
+      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+      result[name] = {};
+    }
+  }
+  return result;
+}
+
+export async function cmdLoadReport(manifestPath, options = {}) {
+  const flags = options.flags ?? parseFlags(process.argv.slice(4));
+  assertKnownFlags(flags, ["json"], "brain load-report");
+  if (flags.json !== undefined && flags.json !== true) die("--json does not take a value");
+  const inventory = options.inventory ?? await cmdSources(manifestPath, {
+    ...(options.sourceOptions || {}),
+    flags: { json: true },
+    silent: true,
+  });
+  const quality = await readLoadQualityAggregate(manifestPath, options.aggregateOptions || options);
+  const checkpointSkips = options.checkpointSkips ?? localCheckpointSkips(manifestPath, inventory.sources);
+  const checkpointQualityFlags = options.checkpointQualityFlags ??
+    localCheckpointQualityFlags(manifestPath, inventory.sources);
+  const { buildLoadQualityReport, renderLoadQualityReport } = await import("./ingest/load-report.mjs");
+  const report = buildLoadQualityReport({
+    inventory, quality, checkpointSkips, checkpointQualityFlags,
+  });
+  console.log(flags.json ? JSON.stringify(report, null, 2) : renderLoadQualityReport(report));
+  return report;
 }
 
 export function readMalformedDriveIdentities(manifestPath) {
@@ -27065,6 +27430,7 @@ const commands = {
   }),
   import: cmdImport,
   load: cmdLoad,
+  "load-report": cmdLoadReport,
   connect: cmdConnect,
   disconnect: cmdDisconnect,
   status: (path) => withManifestCloudflareControl(path, () => cmdStatus(path)),
@@ -27105,6 +27471,7 @@ const versionRequested = VERSION_ARGUMENTS.has(cmd);
 // same decision the installed CLI uses.
 const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "sources",
+  "load-report",
   "financial-picture",
   "machine-continuity",
   "provenance-assess",
@@ -27204,12 +27571,18 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect <provider> <manifest>    QuickBooks, Slack, Notion, Microsoft, Dropbox or HubSpot OAuth
     brain load       <manifest>            load EVERYTHING this manifest has: one sweep of every
                                            enabled, connected source, one report at the end
+    brain load-report <manifest>           read-only after-load quality totals from indexed source
+                                           receipts, duplicate diagnostics, and local skip reasons;
+                                           --json returns the same aggregate contract
     brain ocr-preflight <manifest> --path <dir> --json
                                            read-only aggregate scanned-PDF plan: affected and
                                            cap-eligible pages, priced-model estimate, daily cap,
                                            shared-budget and local file-provider unknowns; no OCR,
                                            app HTTP/key-store, Brain, or local-state write
     brain ingest     <manifest> --path <dir>  load a folder into the brain
+                                           add --dry-run for an aggregate load preview;
+                                           --preview-report <file> writes private file-level detail;
+                                           --vectors-per-minute <measured rate> refines the ETA
     brain ingest-file <manifest> --source <id> --file <direct-name> --expect-runtime-sha256 <64hex> --json
                                            read-only Windows x64 preview of exactly one direct
                                            native-text file in its dedicated manifest source root
@@ -27288,7 +27661,10 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            Dropbox or HubSpot OAuth connection
     brain support    --clear --yes         clear private local issue notes
 
-  brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. It is
+  brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. Local
+  folder dry-run adds an aggregate load preview; --preview-report <file> writes
+  the private file-level list with owner-only permissions and refuses overwrite.
+  --vectors-per-minute <n> replaces the reference measured rate in its ETA. It is
   resumable: re-run the same command to continue an interrupted load. A large
   Drive, Gmail, or IMAP cleanup stops first and prints the exact
   --approve-removals fingerprint.

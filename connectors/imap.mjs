@@ -1049,7 +1049,9 @@ export function messageIdentity({ messageId, headers, occurredAt, from, subject,
  * or forwarded body and title the document with somebody else's subject. That
  * bug is not ported here.
  */
-export async function toEnvelope(message, { sourceName = SOURCE_TYPE, host = "", policy = BULK_POLICY } = {}) {
+export async function toEnvelope(message, {
+  sourceName = SOURCE_TYPE, host = "", policy = BULK_POLICY, qualityPolicy = {},
+} = {}) {
   const where = `${message.folder}#${message.uid}`;
   if (message.missing) {
     return {
@@ -1120,16 +1122,17 @@ export async function toEnvelope(message, { sourceName = SOURCE_TYPE, host = "",
     text: got.text,
   });
 
-  const q = textQuality(got.text);
+  const q = textQuality(got.text, { sourceKind: "imap", format: ".eml", policy: qualityPolicy });
   if (!q.ok) {
     return {
-      skip: { path: where, id: where, reason: q.reason, metrics: q.metrics },
+      skip: { path: where, id: where, reason: q.reason, metrics: q.metrics, code: "quality_refused" },
       source_id: identity.id,
       retain_existing: true,
     };
   }
 
   return {
+    quality_flags: q.flags,
     envelope: withFirstPartySourceProvenance({
       source_type: sourceName,
       // Bare connector identity: the store adds the source type exactly once,

@@ -840,7 +840,9 @@ export async function fetchContent(getAccessToken, file, plan, opts = {}) {
  * Deliberately mirrors ingest/run.mjs prepare() so a Drive document and a local
  * one are judged by exactly the same rules.
  */
-export async function toEnvelope(getAccessToken, file, { sourceName = SOURCE_TYPE, pathOf = () => "", ocr = null } = {}, opts = {}) {
+export async function toEnvelope(getAccessToken, file, {
+  sourceName = SOURCE_TYPE, pathOf = () => "", ocr = null, qualityPolicy = {},
+} = {}, opts = {}) {
   const plan = triage(file);
   if (plan.folder) return null;
   if (plan.skip) {
@@ -887,7 +889,7 @@ export async function toEnvelope(getAccessToken, file, { sourceName = SOURCE_TYP
       },
     };
   }
-  const q = textQuality(got.text);
+  const q = textQuality(got.text, { sourceKind: "drive", format: name, policy: qualityPolicy });
   if (!q.ok) {
     return {
       skip: { path: file.name, id: file.id, reason: q.reason, metrics: q.metrics, code: "quality_refused" },
@@ -903,6 +905,7 @@ export async function toEnvelope(getAccessToken, file, { sourceName = SOURCE_TYP
   const occurred = dd.value ?? (Number.isFinite(created) ? created : null);
 
   return {
+    quality_flags: q.flags,
     // The bare Drive file id, not the name and not `drive:<id>`. The store owns
     // namespacing and constructs `<source_type>:<source_id>` exactly once. This
     // is also the identity used by the Supabase migration, so the first live

@@ -639,6 +639,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     if (process.env[name] !== undefined) environment[name] = process.env[name];
   }
   Object.assign(environment, {
+    HOME: userRoot,
+    BRAIN_NO_WRANGLER_LOGIN: "1",
     NO_COLOR: "1",
     BRAIN_GOOGLE_TOKEN_STORE: "file",
     BRAIN_DRIVE_SKIP_USER_ROOT: userRoot,
@@ -701,16 +703,18 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
     assert.equal(evidence.ingestBatchWrites, 0, "an adjudicated or locally refused file reached Worker ingest");
     assert.equal(evidence.retainedFamilyReachedForget, false, "an unchanged adjudicated family was removed");
-    assert.equal(evidence.removedFamilies, 3, "the approved typed removals did not converge");
+    assert.equal(evidence.removedFamilies, 2, "the approved typed removals did not converge");
+    assert.equal(evidence.contentRefusalReachedForget, false,
+      "binary content presented as text entered the approved removal plan");
     assert.deepEqual(evidence.lastFinalReceipt, {
       status: "error",
       complete_sweep: false,
       walk_complete: true,
-      docs_refused: 1,
+      docs_refused: 2,
       docs_failed: 0,
       issue_code: "INPUT_REFUSED",
       detail: null,
-    }, "an adjudicated non-text skip inflated the measured credential-refusal count");
+    }, "the hard content refusal and credential refusal were not both measured");
 
     environment.BRAIN_DRIVE_SKIP_MODE = "adjudicated-only";
     const adjudicatedReview = run(["--reset"]);
@@ -730,6 +734,90 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       issue_code: null,
       detail: "drive sweep sync completed; skipped=1; policy_skipped=0; coverage_gaps=0; source_resolved=0; adjudicated_skips=1",
     }, `an adjudicated Drive skip blocked a zero-refusal completed walk:\n${adjudicatedAccepted.output.slice(-1_200)}`);
+
+    environment.BRAIN_DRIVE_SKIP_MODE = "quality-review";
+    writeFileSync(statePath, JSON.stringify({
+      version: 1,
+      done: { "drive:active-quality": "prior-quality-version" },
+      skipped: {},
+      sync_token: "fixture-prior-cursor",
+      drive_policy_fingerprint: policyFingerprint,
+      credential_scanner_fingerprint: scannerFingerprint,
+      drive_last_full_sweep_at: "2000-01-01T00:00:00.000Z",
+    }), { mode: 0o600 });
+    rmSync(evidencePath, { force: true });
+    const qualityReview = run();
+    assert.equal(qualityReview.code, 0, qualityReview.output.slice(-1_200));
+    assert.doesNotMatch(qualityReview.output, /already-stored remote item.*retained for review/is);
+    assert.doesNotMatch(qualityReview.output, /--approve-removals/);
+    const qualityEvidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+    assert.equal(qualityEvidence.ingestBatchWrites, 1,
+      "a heuristic review flag did not reach the prepared/send decision");
+    assert.equal(qualityEvidence.forgetRequests, 0,
+      "a heuristic review flag reached the remote removal decision");
+    assert.equal(qualityEvidence.retainedFamilyReachedForget, false);
+    assert.deepEqual(qualityEvidence.lastFinalReceipt, {
+      status: "ready",
+      complete_sweep: true,
+      walk_complete: true,
+      docs_refused: 0,
+      docs_failed: 0,
+      issue_code: null,
+      detail: "drive sweep sync completed; skipped=0; policy_skipped=0; coverage_gaps=0; source_resolved=0; adjudicated_skips=0",
+    });
+    const qualityState = JSON.parse(readFileSync(statePath, "utf8"));
+    assert.equal(qualityState.retained_quality_review, undefined);
+    assert.deepEqual(qualityState.quality_review, {
+      version: 1,
+      documents: { "drive:active-quality": ["ocr_like_word_shapes"] },
+    });
+
+    environment.BRAIN_DRIVE_SKIP_MODE = "quality-new-item";
+    writeFileSync(statePath, JSON.stringify({
+      version: 1,
+      done: {},
+      skipped: {},
+      sync_token: "fixture-prior-cursor",
+      drive_policy_fingerprint: policyFingerprint,
+      credential_scanner_fingerprint: scannerFingerprint,
+      drive_last_full_sweep_at: "2000-01-01T00:00:00.000Z",
+    }), { mode: 0o600 });
+    rmSync(evidencePath, { force: true });
+    const newQualityRefusal = run();
+    assert.equal(newQualityRefusal.code, 0, newQualityRefusal.output.slice(-1_200));
+    assert.doesNotMatch(newQualityRefusal.output, /--approve-removals|Drive cleanup plan/,
+      "a new quality refusal reached a non-empty removal-plan decision");
+    const newQualityEvidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+    assert.equal(newQualityEvidence.ingestBatchWrites, 0,
+      "a deterministic decode refusal reached the prepared/send decision");
+    assert.equal(newQualityEvidence.forgetRequests, 0,
+      "a new quality refusal reached the remote removal decision");
+    assert.deepEqual(newQualityEvidence.lastFinalReceipt, {
+      status: "error",
+      complete_sweep: false,
+      walk_complete: true,
+      docs_refused: 1,
+      docs_failed: 0,
+      issue_code: "INPUT_REFUSED",
+      detail: null,
+    });
+    const newQualityState = JSON.parse(readFileSync(statePath, "utf8"));
+    assert.equal(newQualityState.retained_quality_review, undefined,
+      "a never-stored quality refusal was mislabeled as retained");
+
+    environment.BRAIN_DRIVE_SKIP_MODE = "binary-new-item";
+    rmSync(evidencePath, { force: true });
+    const binaryRefusal = run(["--reset"]);
+    assert.equal(binaryRefusal.code, 0, binaryRefusal.output.slice(-1_200));
+    assert.doesNotMatch(binaryRefusal.output, /--approve-removals|Drive cleanup plan/,
+      "binary content presented as text reached a non-empty removal-plan decision");
+    const binaryEvidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+    assert.equal(binaryEvidence.ingestBatchWrites, 0,
+      "binary content presented as text reached the prepared/send decision");
+    assert.equal(binaryEvidence.forgetRequests, 0,
+      "binary content presented as text reached the remote removal decision");
+    assert.equal(binaryEvidence.lastFinalReceipt?.docs_refused, 1);
+    assert.equal(binaryEvidence.lastFinalReceipt?.issue_code, "INPUT_REFUSED");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

@@ -246,7 +246,7 @@ All producers converge on the same document envelope and batch write path:
 list or walk
   -> enforce private paths and source exclusions
   -> extract text
-  -> judge format and content quality
+  -> refuse only hard format/content failures and flag heuristic quality signals
   -> scan the complete logical document for credential-like material
   -> split oversized content into one document family
   -> send bounded authenticated batches
@@ -369,7 +369,7 @@ original sequential path because revision order is part of their correctness
 contract.
 
 Drive and watched-folder removal candidates from policy, source deletion, and
-intentional quality skips are intersected with the current authenticated
+intentional source-policy skips are intersected with the current authenticated
 stored-family inventory and approved as one deterministic plan. Stored-family
 inventory derives declared `family_of` relationships as well as structural
 `part_of` families, even when a message row belongs to an upload file's family.
