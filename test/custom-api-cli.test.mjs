@@ -185,6 +185,8 @@ test("connect prompts hidden, writes the one declared Worker secret, verifies it
   const expectations = [];
   let prompts = 0;
   const result = await withCapturedOutput(() => cmdConnectCustomApi(path, {}, {
+    // The hidden prompt is the non-Windows default; Windows defaults to clipboard entry (tested below).
+    platform: "linux",
     listWorkerSecretNames: async () => [...names],
     putWorkerSecret: async (name, value) => { writes.push({ name, matches: value === TOKEN }); names.add(name); },
     readSecret: async () => { prompts++; return TOKEN; },
@@ -208,6 +210,7 @@ test("connect does not prompt or rewrite an existing secret", async (t) => {
   let writes = 0;
   let inventories = 0;
   const result = await withCapturedOutput(() => cmdConnectCustomApi(path, {}, {
+    platform: "linux",
     listWorkerSecretNames: async () => { inventories++; return ["CUSTOM_API_TOKEN_STORE_DASHBOARD"]; },
     putWorkerSecret: async () => { writes++; },
     readSecret: async () => { prompts++; return TOKEN; },
