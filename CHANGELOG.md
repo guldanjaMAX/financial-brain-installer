@@ -79,10 +79,12 @@ asset publication.
   reclaims only an expired pre-model reservation. A completed result keeps its
   encrypted handoff until the whole source document is stored and acknowledged
   on the same receipt, so a delayed pass replays it without another charge. A
-  legacy or manually cleaned, unacknowledged receipt with no handoff gets one
-  counted replacement read and can never get a second. Ambiguous in-flight work
-  stays held for review while the prior document and source cursor stay
-  unchanged. If the Brain health check
+  completed receipt with no usable handoff gets one counted replacement read in
+  that seven-day window, whether it was acknowledged, pruned, or inherited from
+  an older release. An in-flight receipt also gets one recorded replacement
+  after its full seven-day ambiguity window. Replacement receipts must be
+  acknowledged again, and a result with no handoff waits for the next bounded
+  window instead of becoming a permanent hold. If the Brain health check
   also fails, progress remains saved and the pass stops resumably. To check:
   credential-shaped OCR text reaches the credential refusal without surviving in
   the receipt; a call finishing after the first deadline replays through the real

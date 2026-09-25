@@ -254,7 +254,8 @@ export async function claimOcrPageRequest(db, {
   }
 
   const existing = await db.prepare(
-    `SELECT request_id,input_sha256,status,owner_token,started_at,expires_at,response_status,response_json,
+    `SELECT request_id,input_sha256,status,owner_token,started_at,model_started_at,completed_at,
+            expires_at,response_status,response_json,
             replay_key_sha256,replay_expires_at,replay_iv,replay_ciphertext,
             acknowledged_at,reread_count
        FROM ocr_page_requests WHERE request_id=?1`,
@@ -269,7 +270,7 @@ export async function claimOcrPageRequest(db, {
       throw new Error("the OCR idempotency reservation expiry is malformed");
     }
     if (expiresAtMs > now.getTime()) {
-      return Object.freeze({ state: "pending" });
+      return Object.freeze({ state: "pending", retryAfterMs: Math.min(2_000, Math.max(1, expiresAtMs - now.getTime())) });
     }
     // Only this pre-model state is safe to reclaim automatically. The exact old
     // owner and timestamps make the takeover a compare-and-swap rather than a
@@ -301,9 +302,40 @@ export async function claimOcrPageRequest(db, {
     if (!Number.isFinite(expiresAtMs)) {
       throw new Error("the OCR idempotency in-flight expiry is malformed");
     }
-    return Object.freeze({
-      state: expiresAtMs <= now.getTime() ? "held" : "pending",
-    });
+    if (expiresAtMs > now.getTime()) {
+      return Object.freeze({ state: "pending", retryAfterMs: Math.min(2_000, Math.max(1, expiresAtMs - now.getTime())) });
+    }
+    // A crashed Worker can leave the row in-flight forever. Once its full
+    // ambiguity window has elapsed, permit one replacement inside the next
+    // window. The exact old receipt is the compare-and-swap boundary, so two
+    // resumptions cannot both start a model call.
+    const rearmed = await db.prepare(
+      `UPDATE ocr_page_requests
+          SET status='pending',owner_token=?1,started_at=?2,expires_at=?3,
+              model_started_at=NULL,completed_at=NULL,response_status=NULL,response_json=NULL,
+              replay_key_sha256=?4,replay_expires_at=NULL,replay_iv=NULL,replay_ciphertext=NULL,
+              acknowledged_at=NULL,reread_count=1
+        WHERE request_id=?5 AND input_sha256=?6 AND status='in_flight'
+          AND owner_token=?7 AND started_at=?8 AND model_started_at=?9 AND expires_at=?10
+          AND reread_count=?11
+        RETURNING request_id`,
+    ).bind(
+      ownerToken,
+      nowIso,
+      reservationExpiresAt,
+      replayKeySha256,
+      requestId,
+      inputSha256,
+      existing.owner_token,
+      existing.started_at,
+      existing.model_started_at,
+      existing.expires_at,
+      existing.reread_count,
+    ).all();
+    if (!exactReturningRow(rearmed, requestId)) {
+      throw new Error("the OCR expired in-flight re-read receipt was ambiguous");
+    }
+    return Object.freeze({ state: "claimed", rereadAfterExpiry: true });
   }
   if (existing.status !== "completed" || !Number.isSafeInteger(existing.response_status) ||
       typeof existing.response_json !== "string") {
@@ -340,21 +372,43 @@ export async function claimOcrPageRequest(db, {
       });
     }
   }
-  if (!handoffPresent && existing.acknowledged_at == null && Number(existing.reread_count) === 0) {
-    // Legacy rows and manual cleanup can leave an unconsumed paid result without
-    // its encrypted handoff. Re-arm that exact request once. The compare-and-swap
-    // both closes the concurrent double-charge race and makes the one-extra-call
-    // allowance durable before the replacement model invocation begins.
+  const handoffUnavailable = !handoffPresent || (
+    existing.acknowledged_at != null && Date.parse(existing.replay_expires_at) <= now.getTime()
+  );
+  if (handoffUnavailable) {
+    const completedAtMs = Date.parse(String(existing.completed_at || ""));
+    if (!Number.isFinite(completedAtMs)) {
+      throw new Error("the OCR idempotency completion time is malformed");
+    }
+    // The first legacy/pruned receipt gets one immediate exit. A fresh receipt
+    // produced by that replacement starts a new seven-day window, preventing a
+    // caller without a replay key from turning retries into an unbounded loop.
+    const nextRereadAtMs = Number(existing.reread_count) === 0
+      ? now.getTime()
+      : completedAtMs + OCR_REPLAY_TTL_MS;
+    if (nextRereadAtMs > now.getTime()) {
+      return Object.freeze({
+        state: "retry_later",
+        retryAfterMs: Math.max(1, nextRereadAtMs - now.getTime()),
+      });
+    }
+    // A completed receipt whose encrypted handoff is unavailable must always
+    // have an exit, whether it was acknowledged, pruned, or inherited from a
+    // legacy row. Clearing acknowledgement here is essential: the replacement
+    // result belongs to a fresh receipt and must be acknowledged only after its
+    // transcription reaches the complete stored document family.
     const rearmed = await db.prepare(
       `UPDATE ocr_page_requests
           SET status='pending',owner_token=?1,started_at=?2,expires_at=?3,
               model_started_at=NULL,completed_at=NULL,response_status=NULL,response_json=NULL,
               replay_key_sha256=?4,replay_expires_at=NULL,replay_iv=NULL,replay_ciphertext=NULL,
-              reread_count=1
+              acknowledged_at=NULL,reread_count=1
         WHERE request_id=?5 AND input_sha256=?6 AND status='completed'
-          AND acknowledged_at IS NULL AND reread_count=0
-          AND replay_key_sha256 IS NULL AND replay_expires_at IS NULL
-          AND replay_iv IS NULL AND replay_ciphertext IS NULL
+          AND owner_token=?7 AND started_at=?8 AND model_started_at=?9
+          AND completed_at=?10 AND expires_at=?11 AND response_status=?12
+          AND response_json=?13 AND reread_count=?14
+          AND replay_key_sha256 IS ?15 AND replay_expires_at IS ?16
+          AND replay_iv IS ?17 AND replay_ciphertext IS ?18
         RETURNING request_id`,
     ).bind(
       ownerToken,
@@ -363,6 +417,18 @@ export async function claimOcrPageRequest(db, {
       replayKeySha256,
       requestId,
       inputSha256,
+      existing.owner_token,
+      existing.started_at,
+      existing.model_started_at,
+      existing.completed_at,
+      existing.expires_at,
+      existing.response_status,
+      existing.response_json,
+      existing.reread_count,
+      existing.replay_key_sha256,
+      existing.replay_expires_at,
+      existing.replay_iv,
+      existing.replay_ciphertext,
     ).all();
     if (!exactReturningRow(rearmed, requestId)) {
       throw new Error("the OCR expiry re-read receipt was ambiguous");

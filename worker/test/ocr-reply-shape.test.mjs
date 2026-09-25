@@ -314,13 +314,14 @@ test("a content-free completion without a handoff permits one re-read but never 
   const afterRereadBody = await afterReread.json();
   assert.equal(duplicate.status, 200, JSON.stringify(duplicateBody));
   assert.equal(duplicateBody.ocr_reread_after_expiry, true);
-  assert.equal(afterReread.status, 503);
-  assert.equal(afterRereadBody.ocr_idempotency_unavailable, true);
-  assert.equal(afterRereadBody.ocr_request_completed, true);
+  assert.equal(afterReread.status, 425);
+  assert.equal(afterRereadBody.ocr_request_pending, true);
+  assert.ok(afterRereadBody.retry_after_ms > 0,
+    "the fresh replacement receipt must name the bounded next re-read window");
   assert.equal(modelCalls, 2, "a handoff-less completion permits only one replacement model call");
 });
 
-test("an acknowledged completed result is pruned after T+8 without another charge", async () => {
+test("an acknowledged completed result is pruned after T+8 and gets one recorded re-read", async () => {
   const receiptDb = routeDb();
   const completedAt = new Date("2026-09-24T12:00:00.000Z");
   const afterOldRetentionWindow = new Date("2026-10-02T12:00:00.000Z");
@@ -359,13 +360,16 @@ test("an acknowledged completed result is pruned after T+8 without another charg
   assert.equal(acknowledgement.status, 200, JSON.stringify(acknowledgementBody));
   assert.equal(acknowledgementBody.ocr_acknowledged, 1,
     "the source-storage acknowledgement must update the receipt even after paid OCR is disabled");
-  assert.equal(duplicate.status, 503, JSON.stringify(duplicateBody));
-  assert.equal(duplicateBody.ocr_request_completed, true);
-  assert.equal(modelCalls, 1, "the acknowledged T+8 decision point must not start a second model call");
+  assert.equal(duplicate.status, 200, JSON.stringify(duplicateBody));
+  assert.equal(duplicateBody.ocr_reread_after_expiry, true,
+    "acknowledgement must not remove the expired receipt's recovery exit");
+  assert.equal(modelCalls, 2, "the acknowledged T+8 decision point permits exactly one replacement call");
   assert.equal(row.status, "completed", "the identity-bearing tombstone must still exist after T+8 days");
-  assert.equal(row.replay_ciphertext, null, "only an acknowledged encrypted handoff is pruned");
-  assert.ok(JSON.parse(row.response_json).acknowledged_at,
-    "the acknowledgement must be recorded in the same content-free receipt");
+  assert.equal(typeof row.replay_ciphertext, "string", "the replacement must leave a fresh encrypted handoff");
+  assert.equal(JSON.parse(row.response_json).acknowledged_at, undefined,
+    "the fresh replacement receipt must await a fresh source acknowledgement");
+  assert.equal(JSON.parse(row.response_json).ocr_reread_after_expiry, 1,
+    "the fresh receipt must record the replacement call");
   assert.match(JSON.parse(row.response_json).response_sha256, /^[0-9a-f]{64}$/u);
 });
 
@@ -459,7 +463,7 @@ test("a ciphertext-less completed tombstone permits exactly one recorded re-read
     "the replacement result must leave a fresh handoff until source acknowledgement");
 });
 
-test("expired pre-call reservations are reclaimed but ambiguous in-flight work is held", async () => {
+test("expired pre-call reservations and in-flight ambiguity each rearm one bounded call", async () => {
   const now = new Date("2026-09-24T12:00:00.000Z");
   const expiredAt = "2026-09-24T11:59:00.000Z";
 
@@ -497,16 +501,181 @@ test("expired pre-call reservations are reclaimed but ambiguous in-flight work i
        (request_id,input_sha256,status,owner_token,started_at,model_started_at,expires_at)
      VALUES (?1,?2,'in_flight',?3,?4,?4,?5)`,
   ).run(heldInput, heldInput, "ambiguous-owner-token".padEnd(32, "x"), "2026-09-17T11:00:00.000Z", expiredAt);
-  let ambiguousCalls = 0;
-  const heldResponse = await handleOcr({
+  let ambiguityRereadCalls = 0;
+  const rereadResponse = await handleOcr({
     ADMIN_KEY,
     OCR_ENABLED: "1",
     DB: heldDb,
-    AI: { run: async () => { ambiguousCalls++; return { response: "must not run", usage: {} }; } },
+    AI: { run: async () => { ambiguityRereadCalls++; return { response: "Recovered after expiry", usage: {} }; } },
   }, ocrRequest({ ...heldBody, request_id: heldInput }), { now: () => now });
-  const heldResponseBody = await heldResponse.json();
-  assert.equal(heldResponse.status, 503, "expired ambiguous work must not remain a 425 forever");
-  assert.equal(heldResponseBody.ocr_idempotency_unavailable, true);
-  assert.equal(heldResponseBody.ocr_request_held, true);
-  assert.equal(ambiguousCalls, 0, "ambiguous prior billing never authorizes a second model call");
+  const rereadResponseBody = await rereadResponse.json();
+  assert.equal(rereadResponse.status, 200, JSON.stringify(rereadResponseBody));
+  assert.equal(rereadResponseBody.ocr_reread_after_expiry, true,
+    "the expired in-flight decision point must record its bounded replacement");
+  assert.equal(ambiguityRereadCalls, 1, "expired ambiguity authorizes exactly one call in the new window");
+});
+
+test("every durable OCR receipt state has a bounded exit across time and process outcomes", async () => {
+  const dayMs = 24 * 60 * 60 * 1000;
+  const base = new Date("2026-09-24T12:00:00.000Z");
+  const clocks = [
+    ["fresh", new Date(base.getTime() + 60_000)],
+    ["T+8 days", new Date(base.getTime() + 8 * dayMs)],
+    ["T+31 days", new Date(base.getTime() + 31 * dayMs)],
+  ];
+  const outcomes = ["normal", "response lost after commit", "crash before local save"];
+  const states = [
+    { name: "reserved pre-call", status: "pending", reread: false },
+    { name: "reserved re-read pre-call", status: "pending", reread: true },
+    { name: "in-flight", status: "in_flight", reread: false },
+    { name: "in-flight re-read", status: "in_flight", reread: true },
+    { name: "completed ciphertext unacknowledged", status: "completed",
+      handoff: true, acknowledged: false, reread: false },
+    { name: "completed ciphertext acknowledged", status: "completed",
+      handoff: true, acknowledged: true, reread: false },
+    { name: "completed re-read ciphertext unacknowledged", status: "completed",
+      handoff: true, acknowledged: false, reread: true },
+    { name: "completed re-read ciphertext acknowledged", status: "completed",
+      handoff: true, acknowledged: true, reread: true },
+    { name: "completed legacy without ciphertext", status: "completed",
+      handoff: false, acknowledged: false, reread: false },
+    { name: "completed pruned without ciphertext", status: "completed",
+      handoff: false, acknowledged: true, reread: false },
+    { name: "completed re-read without ciphertext unacknowledged", status: "completed",
+      handoff: false, acknowledged: false, reread: true },
+    { name: "completed re-read without ciphertext acknowledged", status: "completed",
+      handoff: false, acknowledged: true, reread: true },
+  ];
+  const decisions = { replay: 0, new_call: 0, retry_later: 0 };
+  let combinations = 0;
+
+  for (const [stateIndex, state] of states.entries()) {
+    for (const [clockIndex, [clockName, clock]] of clocks.entries()) {
+      for (const [outcomeIndex, outcome] of outcomes.entries()) {
+        const receiptDb = routeDb();
+        let modelCalls = 0;
+        const env = {
+          ADMIN_KEY,
+          OCR_ENABLED: "1",
+          DB: receiptDb,
+          AI: {
+            run: async () => {
+              modelCalls++;
+              return { response: `Synthetic OCR response ${modelCalls}`, usage: {} };
+            },
+          },
+        };
+        const requestBody = {
+          image_base64: `state-${stateIndex}-${clockIndex}-${outcomeIndex}`,
+          page: 1,
+          prompt: "transcribe",
+          replay_key: "D".repeat(43),
+        };
+        const context = `${state.name}; ${clockName}; ${outcome}`;
+
+        const seeded = await handleOcr(env, ocrRequest(requestBody), { now: () => base });
+        assert.equal(seeded.status, 200, `${context}: seed completion failed`);
+        if (state.reread) {
+          receiptDb.sqlite.prepare(
+            `UPDATE ocr_page_requests
+                SET replay_key_sha256=NULL,replay_expires_at=NULL,replay_iv=NULL,replay_ciphertext=NULL`,
+          ).run();
+          const rereadSeed = await handleOcr(env, ocrRequest(requestBody), { now: () => base });
+          assert.equal(rereadSeed.status, 200, `${context}: re-read seed failed`);
+          assert.equal((await rereadSeed.json()).ocr_reread_after_expiry, true,
+            `${context}: re-read seed did not reach its decision point`);
+        }
+        const seededBody = await seeded.json();
+        if (state.acknowledged) {
+          const acknowledgement = await handleOcr({ ...env, OCR_ENABLED: "0" }, ocrRequest({
+            acknowledge_request_ids: [seededBody.request_id],
+          }), { now: () => base });
+          assert.equal(acknowledgement.status, 200, `${context}: acknowledgement seed failed`);
+        }
+        if (state.handoff === false) {
+          receiptDb.sqlite.prepare(
+            `UPDATE ocr_page_requests
+                SET replay_key_sha256=NULL,replay_expires_at=NULL,replay_iv=NULL,replay_ciphertext=NULL`,
+          ).run();
+        }
+        if (state.status === "pending") {
+          receiptDb.sqlite.prepare(
+            `UPDATE ocr_page_requests
+                SET status='pending',started_at=?1,expires_at=?2,model_started_at=NULL,completed_at=NULL,
+                    response_status=NULL,response_json=NULL,replay_expires_at=NULL,replay_iv=NULL,
+                    replay_ciphertext=NULL,acknowledged_at=NULL`,
+          ).run(base.toISOString(), new Date(base.getTime() + 5 * 60_000).toISOString());
+        } else if (state.status === "in_flight") {
+          receiptDb.sqlite.prepare(
+            `UPDATE ocr_page_requests
+                SET status='in_flight',started_at=?1,model_started_at=?1,expires_at=?2,completed_at=NULL,
+                    response_status=NULL,response_json=NULL,replay_expires_at=NULL,replay_iv=NULL,
+                    replay_ciphertext=NULL,acknowledged_at=NULL`,
+          ).run(base.toISOString(), new Date(base.getTime() + 7 * dayMs).toISOString());
+        }
+        modelCalls = 0;
+
+        const settle = async (attemptAt, label) => {
+          const callsBefore = modelCalls;
+          let response = await handleOcr(env, ocrRequest(requestBody), { now: () => attemptAt });
+          let responseBody = await response.json();
+          if (response.status === 425) {
+            decisions.retry_later++;
+            assert.equal(responseBody.ocr_request_pending, true, `${context}; ${label}: retry was not typed`);
+            assert.ok(Number.isSafeInteger(responseBody.retry_after_ms) && responseBody.retry_after_ms > 0,
+              `${context}; ${label}: retry was not bounded: ${JSON.stringify(responseBody)}`);
+            const stateExpiry = state.status === "pending"
+              ? base.getTime() + 5 * 60_000
+              : state.status === "in_flight"
+                ? base.getTime() + 7 * dayMs
+                : 0;
+            const retryAt = new Date(Math.max(
+              attemptAt.getTime() + responseBody.retry_after_ms + 1,
+              stateExpiry + 1,
+            ));
+            response = await handleOcr(env, ocrRequest(requestBody), { now: () => retryAt });
+            responseBody = await response.json();
+            attemptAt = retryAt;
+          }
+          const newCalls = modelCalls - callsBefore;
+          assert.equal(response.status, 200,
+            `${context}; ${label}: permanent hold: ${JSON.stringify(responseBody)}`);
+          assert.ok(newCalls === 0 || newCalls === 1,
+            `${context}; ${label}: ${newCalls} model calls crossed one decision`);
+          if (newCalls === 0) {
+            decisions.replay++;
+            assert.equal(responseBody.idempotent_replay, true,
+              `${context}; ${label}: a no-charge exit was not a replay`);
+          } else {
+            decisions.new_call++;
+          }
+          return { attemptAt, responseBody };
+        };
+
+        let settled = await settle(clock, "initial exit");
+        if (outcome === "response lost after commit") {
+          const callsBeforeReplay = modelCalls;
+          const replay = await handleOcr(env, ocrRequest(requestBody), { now: () => settled.attemptAt });
+          const replayBody = await replay.json();
+          assert.equal(replay.status, 200, `${context}: lost response did not recover`);
+          assert.equal(replayBody.idempotent_replay, true, `${context}: lost response did not replay`);
+          assert.equal(modelCalls, callsBeforeReplay, `${context}: lost response caused another charge`);
+          decisions.replay++;
+        } else if (outcome === "crash before local save") {
+          const acknowledgement = await handleOcr({ ...env, OCR_ENABLED: "0" }, ocrRequest({
+            acknowledge_request_ids: [settled.responseBody.request_id],
+          }), { now: () => settled.attemptAt });
+          assert.equal(acknowledgement.status, 200, `${context}: committed acknowledgement was not durable`);
+          settled = await settle(new Date(settled.attemptAt.getTime() + 8 * dayMs), "resume after local crash");
+          assert.equal(typeof settled.responseBody.text, "string", `${context}: resumed text was unavailable`);
+        }
+        combinations++;
+      }
+    }
+  }
+
+  assert.equal(combinations, states.length * clocks.length * outcomes.length);
+  assert.ok(decisions.replay > 0, `replay decision was not reached: ${JSON.stringify(decisions)}`);
+  assert.ok(decisions.new_call > 0, `new-call decision was not reached: ${JSON.stringify(decisions)}`);
+  assert.ok(decisions.retry_later > 0, `retry-later decision was not reached: ${JSON.stringify(decisions)}`);
 });

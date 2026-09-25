@@ -7430,7 +7430,7 @@ function reportOcrRetryStats(ocrCallback) {
   }
   if (rereadAfterExpiry) {
     warn(
-      `${rereadAfterExpiry} OCR page${rereadAfterExpiry === 1 ? " was" : "s were"} re-read after an unacknowledged encrypted handoff was already missing. ` +
+      `${rereadAfterExpiry} OCR page${rereadAfterExpiry === 1 ? " was" : "s were"} re-read after its encrypted handoff was unavailable. ` +
         "Each affected page used its one bounded replacement call.",
     );
   }

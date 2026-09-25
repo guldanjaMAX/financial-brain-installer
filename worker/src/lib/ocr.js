@@ -171,21 +171,20 @@ export async function handleOcr(env, request, { now = () => new Date() } = {}) {
       ocr_idempotency_conflict: true,
     }, 409);
   }
-  if (claim.state === "pending") {
+  if (claim.state === "pending" || claim.state === "retry_later") {
+    const waitingForRereadWindow = claim.state === "retry_later";
     return jsonResponse({
-      error: "the first OCR attempt is still running",
-      detail: "Wait briefly and retry this same request id; no second model call was started.",
+      error: waitingForRereadWindow
+        ? "the prior OCR re-read window is still active"
+        : "the first OCR attempt is still running",
+      detail: waitingForRereadWindow
+        ? "Retry this same request id after the bounded wait; no model call was started."
+        : "Retry this same request id after the bounded wait; no second model call was started.",
       ocr_request_pending: true,
-      retry_after_ms: 2_000,
+      retry_after_ms: Number.isSafeInteger(claim.retryAfterMs) && claim.retryAfterMs > 0
+        ? claim.retryAfterMs
+        : 2_000,
     }, 425);
-  }
-  if (claim.state === "held") {
-    return jsonResponse({
-      error: "the earlier OCR attempt passed the billable boundary but did not leave a completion receipt",
-      detail: "This page is held for review. An automatic retry cannot prove that a second model call would be free.",
-      ocr_idempotency_unavailable: true,
-      ocr_request_held: true,
-    }, 503);
   }
   if (claim.state === "replayable") {
     try {

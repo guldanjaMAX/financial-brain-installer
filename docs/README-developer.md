@@ -427,10 +427,11 @@ prompt, and image bytes. The first call uses a 60-second deadline; two retries
 use 90 and 120 seconds with bounded jitter. A 425 response is polled with
 backoff inside the current deadline and does not consume an attempt. The Worker
 reserves that opaque identity in `ocr_page_requests` before the billable model
-call, then exactly marks it in-flight before invoking the model. Only an expired
-pre-call reservation is reclaimable. An active duplicate receives 425; an
-expired in-flight row is held for review instead of returning 425 forever or
-authorizing another model call. Identical rendered bytes in two different
+call, then exactly marks it in-flight before invoking the model. An active
+duplicate receives 425 with a bounded retry time. An expired pre-call
+reservation is reclaimed without a re-read marker. An in-flight row receives
+the same bounded treatment and may start one recorded replacement only after
+its seven-day ambiguity window. Identical rendered bytes in two different
 documents produce two identities and two independent calls. Completed receipts
 are permanent content-free tombstones containing only a response hash, status,
 and bounded numeric usage. The client derives a separate AES-GCM replay key
@@ -445,12 +446,13 @@ keeping durable plaintext ahead of the complete-document credential gate. The
 source acknowledges the OCR page on the same receipt only after every part of
 the logical document family is stored and reconciled. Cleanup prunes expired
 ciphertext only after that acknowledgement; an unacknowledged result remains
-replayable after the former seven-day boundary. If a legacy or manually cleaned
-completed receipt has no ciphertext and no acknowledgement, an exact
-compare-and-swap permits one replacement call, records
-`ocr_reread_after_expiry`, and leaves its new ciphertext until acknowledgement.
-The source load report counts those replacement calls. A second replacement is
-never allowed.
+replayable after the former seven-day boundary. If any completed receipt has
+no usable ciphertext, whether acknowledged, pruned, or legacy, an exact
+compare-and-swap permits one replacement call in that window, clears the old
+acknowledgement, records `ocr_reread_after_expiry`, and leaves a fresh
+ciphertext until the replacement is acknowledged. A replacement receipt with
+no ciphertext waits for its next seven-day window instead of looping or
+becoming a permanent hold. The source load report counts every replacement.
 Any reservation, model-start, completion, or release evidence failure is fatal
 and retryable at source level: the prior revision remains, no partial
 replacement or removal plan runs, and the cursor and ready receipt are

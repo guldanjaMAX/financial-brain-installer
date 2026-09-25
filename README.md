@@ -967,12 +967,14 @@ product says all three rather than the first one:
   encrypted handoff until the source confirms that the whole document was
   stored, so even a much later pass can recover it with no new model call. Once
   stored, the acknowledgement is written into the same receipt and expired
-  ciphertext may be pruned. A legacy or manually cleaned completed receipt that
-  was never acknowledged can make one clearly counted replacement call, then
-  its hold clears and no second replacement is allowed. Ambiguous in-flight
-  work is still held for review, keeping the previous document and source cursor
-  in place. If the health check also fails, progress is saved and the pass stops
-  resumably.
+  ciphertext may be pruned. If a completed receipt has no usable ciphertext,
+  whether it was acknowledged, pruned, or inherited from an older release, it
+  can make one clearly counted replacement call in that seven-day window. The
+  replacement gets a fresh receipt and must be acknowledged again after the
+  full document is stored. A missing completion remains a bounded retry state;
+  after its seven-day ambiguity window, one recorded replacement call can clear
+  it. No state can retry more than once in one window. If the health check also
+  fails, progress is saved and the pass stops resumably.
 
 It is **off by default**, because it spends money on your account, once per
 scanned page. Fresh setup asks once and carries a yes answer into the initial

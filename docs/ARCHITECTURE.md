@@ -291,8 +291,9 @@ before calling Workers AI. A short pre-call reservation may be reclaimed after
 exact expiry; an exact transition to `in_flight` closes that window before the
 billable call. An active duplicate returns 425 without starting another model
 call. The installer polls that state with backoff inside the active deadline;
-425 is not an attempt. Expired in-flight work is held for review because a
-second call cannot be proved free. Before the first attempt, the installer
+425 is not an attempt and carries a bounded polling wait. An expired
+in-flight receipt may start one recorded replacement call only after its full
+seven-day ambiguity window. Before the first attempt, the installer
 derives one AES-GCM replay key with a domain-separated hash of the exact private
 page identity. That key is not persisted and cannot be derived from the durable
 request ID alone, but a later source pass over the same page can reproduce it.
@@ -308,13 +309,14 @@ one-re-read bound to the original receipt. Until acknowledgement, cleanup
 never prunes the ciphertext,
 including after the former seven-day expiry, so a response that finishes after
 every client deadline remains replayable without a second model call or durable
-plaintext. After acknowledgement, expired ciphertext may be pruned and the
-same document revision is not read again. A legacy row or manually cleaned
-completed tombstone that is still unacknowledged but has no ciphertext may be
-rearmed exactly once. That replacement call is recorded by the
-`ocr_reread_after_expiry` receipt field and counter, and the installer reports
-the count in its load summary. The replacement ciphertext remains until source
-acknowledgement, clearing the hold without allowing a second replacement call.
+plaintext. After acknowledgement, expired ciphertext may be pruned. Any
+completed receipt whose ciphertext is unavailable can be rearmed once in that
+seven-day window, whether it was acknowledged, pruned, or inherited from an
+older release. That replacement clears the prior acknowledgement and is
+recorded by the `ocr_reread_after_expiry` receipt field and counter, which the
+installer reports in its load summary. Its fresh ciphertext remains until a
+fresh source acknowledgement. A replacement with no ciphertext waits for the
+next bounded window instead of looping or becoming a permanent hold.
 Neither the key nor plaintext, plaintext source locator, file name, or
 plaintext document identity is stored, and this table is not part of a recovery
 export.
