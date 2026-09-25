@@ -79,6 +79,50 @@ function boundedDocumentsReceipt(body) {
   };
 }
 
+// The exact outbox receipt every Worker before the bounded documents summary
+// emits: SELECT count(*) totals with none of the three bounded-summary fields.
+function preSummaryDocumentsReceipt(pending, backlogExtras = {}) {
+  const oldestQueuedAt = pending > 0 ? Date.now() - 1_000 : null;
+  return {
+    backend: "d1",
+    rows: [{ source_type: "synthetic", has_documents: true }],
+    vector_backlog: {
+      pending,
+      upserts: pending,
+      deletes: 0,
+      submitted: pending > 0 ? 200 : 0,
+      oldest_queued_at: oldestQueuedAt,
+      ...backlogExtras,
+    },
+    vector_readiness: {
+      ready: pending === 0,
+      reason: pending === 0 ? null : "accepted_mutation_needs_confirmation",
+      expected_vectors: pending,
+      actual_vectors: 0,
+      pending,
+      submitted: pending > 0 ? 200 : 0,
+      oldest_queued_at: oldestQueuedAt,
+    },
+  };
+}
+
+// Every partial or malformed arrangement of the three bounded-summary fields.
+// None of these is a shape any shipped Worker emits, so each must refuse.
+const PARTIAL_BOUNDED_BACKLOGS = {
+  "health-partial-capped-only": { pending_is_capped: false },
+  "health-partial-display-only": { pending_display: "84075" },
+  "health-partial-exact-only": { component_counts_exact: true },
+  "health-partial-capped-display": { pending_is_capped: false, pending_display: "84075" },
+  "health-partial-capped-exact": { pending_is_capped: false, component_counts_exact: true },
+  "health-partial-display-exact": { pending_display: "84075", component_counts_exact: true },
+  "health-partial-capped-without-display": {
+    pending_is_capped: true, pending_display: null, component_counts_exact: false,
+  },
+  "health-partial-wrong-types": {
+    pending_is_capped: "false", pending_display: 84075, component_counts_exact: "true",
+  },
+};
+
 function requestUrl(input) {
   return new URL(typeof input === "string" || input instanceof URL ? String(input) : input.url);
 }
@@ -156,6 +200,15 @@ if (SCENARIO) {
           rows: [],
           vector_backlog: { pending: "0", upserts: 0, deletes: 0 },
         });
+      }
+      if (SCENARIO === "health-pre-summary-queued") {
+        return json(preSummaryDocumentsReceipt(84_075));
+      }
+      if (SCENARIO === "health-pre-summary-empty") {
+        return json(preSummaryDocumentsReceipt(0));
+      }
+      if (Object.hasOwn(PARTIAL_BOUNDED_BACKLOGS, SCENARIO)) {
+        return json(preSummaryDocumentsReceipt(84_075, PARTIAL_BOUNDED_BACKLOGS[SCENARIO]));
       }
       if (SCENARIO === "health-backlog-oldest-missing") {
         return json(boundedDocumentsReceipt({
@@ -436,6 +489,31 @@ if (SCENARIO) {
     check(`${scenario} exits nonzero instead of claiming semantic indexing is healthy`,
       invalidBacklog.code === 1 && /could not prove a valid D1 vector backlog/is.test(invalidBacklog.output) &&
         !/vector index is query-ready/.test(invalidBacklog.output), invalidBacklog.output);
+  }
+
+  const preSummaryQueued = runScenario("health-pre-summary-queued", "health", { adminKey: true });
+  check("a pre-summary Worker's exact backlog is read, not refused as invalid",
+    preSummaryQueued.code === 1 &&
+      !/could not prove a valid D1 vector backlog/i.test(preSummaryQueued.output) &&
+      /84,075 vector operation\(s\) are not query-visible yet \(200 accepted by Vectorize\)/
+        .test(preSummaryQueued.output) &&
+      /older Worker.*exact count/is.test(preSummaryQueued.output) &&
+      !/10,000\+|over 10,000/i.test(preSummaryQueued.output) &&
+      !/vector index is query-ready/.test(preSummaryQueued.output),
+    preSummaryQueued.output);
+
+  const preSummaryEmpty = runScenario("health-pre-summary-empty", "health", { adminKey: true });
+  check("a pre-summary Worker's exact zero backlog is healthy and ready",
+    preSummaryEmpty.code === 0 && /vector index is query-ready/.test(preSummaryEmpty.output) &&
+      !/could not prove a valid D1 vector backlog/i.test(preSummaryEmpty.output),
+    preSummaryEmpty.output);
+
+  for (const scenario of Object.keys(PARTIAL_BOUNDED_BACKLOGS)) {
+    const partial = runScenario(scenario, "health", { adminKey: true });
+    check(`${scenario} still refuses as an invalid D1 vector backlog`,
+      partial.code === 1 && /could not prove a valid D1 vector backlog/i.test(partial.output) &&
+        !/vector index is query-ready|84,075/.test(partial.output),
+      partial.output);
   }
 
   const missingOldest = runScenario("health-backlog-oldest-missing", "health", { adminKey: true });

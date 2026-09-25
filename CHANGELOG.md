@@ -19,7 +19,10 @@ asset publication.
   exact document, family, chunk, and meaning-search totals in bounded pages and
   refuses a mixed result if the corpus changes while it runs. Source removal
   uses the exact guarded preview and final receipt from that removal, so a
-  delayed summary cannot falsely say removed documents remain. To check: run
+  delayed summary cannot falsely say removed documents remain. A Brain whose
+  Worker is still the older one reports its indexing queue as an exact count;
+  health and the update preview read that count as exact and say so, instead
+  of refusing it. To check: run
   `brain health <manifest>`, then `brain report <manifest>` when you want the
   complete counts.
 

@@ -183,6 +183,23 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 
+const BACKLOG_BOUNDED_FIELDS = Object.freeze([
+  "pending_is_capped", "pending_display", "component_counts_exact",
+]);
+// The exact outbox receipt returned by every Worker before the bounded
+// documents summary: SELECT count(*) totals and nothing else.
+const LEGACY_EXACT_BACKLOG_FIELDS = Object.freeze([
+  "pending", "upserts", "deletes", "submitted", "oldest_queued_at",
+]);
+const PROOF_QUEUE_FIELDS = Object.freeze([
+  "pending", "pending_is_capped", "pending_display", "component_counts_exact",
+  "upserts", "deletes", "submitted", "oldest_queued_at",
+]);
+export const LEGACY_EXACT_COUNT_RECEIPT = "legacy_exact";
+export const LEGACY_EXACT_BACKLOG_NOTE =
+  "This Brain runs an older Worker that reports its indexing queue as an exact count, " +
+  "so the number shown is exact rather than a capped estimate.";
+
 function exactKeys(value, expected) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) &&
     canonical(Object.keys(value).sort()) === canonical([...expected].sort());
@@ -1218,10 +1235,17 @@ function validateProjectionAggregateFields(inventory, expectedBackend, {
       backlog.submitted > backlog.pending) {
     refuse("UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID");
   }
-  const hasBacklogBoundedMetadata = Object.hasOwn(backlog, "pending_is_capped") &&
-    Object.hasOwn(backlog, "pending_display") &&
-    Object.hasOwn(backlog, "component_counts_exact");
-  if (requireBoundedMetadata && !hasBacklogBoundedMetadata) {
+  const boundedFieldCount = BACKLOG_BOUNDED_FIELDS
+    .filter((field) => Object.hasOwn(backlog, field)).length;
+  const hasBacklogBoundedMetadata = boundedFieldCount === BACKLOG_BOUNDED_FIELDS.length;
+  // Every Worker before the bounded documents summary reports the same 0.4.8
+  // label and returns an exact SELECT count(*) outbox receipt with none of the
+  // three bounded fields. That complete pre-summary shape is an exact count,
+  // not missing evidence. Any partial field set matches no shipped Worker and
+  // still refuses.
+  const legacyExactReceipt = requireBoundedMetadata && boundedFieldCount === 0 &&
+    exactKeys(backlog, LEGACY_EXACT_BACKLOG_FIELDS);
+  if (requireBoundedMetadata && !hasBacklogBoundedMetadata && !legacyExactReceipt) {
     refuse("UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID");
   }
   const pendingIsCapped = hasBacklogBoundedMetadata
@@ -1255,9 +1279,13 @@ function validateProjectionAggregateFields(inventory, expectedBackend, {
       readiness.submitted > readiness.pending) {
     refuse("UPDATE_PREVIEW_VECTOR_READINESS_INVALID");
   }
-  const hasReadinessBoundedMetadata = Object.hasOwn(readiness, "pending_is_capped") &&
-    Object.hasOwn(readiness, "submitted_counts_exact");
-  if (requireBoundedMetadata && !hasReadinessBoundedMetadata) {
+  const readinessBoundedFieldCount = ["pending_is_capped", "submitted_counts_exact"]
+    .filter((field) => Object.hasOwn(readiness, field)).length;
+  const hasReadinessBoundedMetadata = readinessBoundedFieldCount === 2;
+  // The pre-summary Worker's readiness carries neither bounded field. Half of
+  // the pair is never a shipped shape.
+  if (requireBoundedMetadata && !hasReadinessBoundedMetadata &&
+      !(legacyExactReceipt && readinessBoundedFieldCount === 0)) {
     refuse("UPDATE_PREVIEW_VECTOR_READINESS_INVALID");
   }
   if (hasReadinessBoundedMetadata && (
@@ -1292,8 +1320,9 @@ function validateProjectionAggregateFields(inventory, expectedBackend, {
       pending: backlog.pending,
       ...(requireBoundedMetadata ? {
         pending_is_capped: pendingIsCapped,
-        pending_display: backlog.pending_display,
+        pending_display: legacyExactReceipt ? String(backlog.pending) : backlog.pending_display,
         component_counts_exact: componentCountsExact,
+        ...(legacyExactReceipt ? { count_receipt: LEGACY_EXACT_COUNT_RECEIPT } : {}),
       } : {}),
       upserts: backlog.upserts,
       deletes: backlog.deletes,
@@ -1376,10 +1405,9 @@ function checkedProjectionProof(value) {
   ]) || typeof value.worker_version !== "string" || !VERSION_RE.test(value.worker_version) ||
       value.backend !== "d1" || value.vector_drain_mode !== "active" ||
       typeof value.query_ready !== "boolean" ||
-      !exactKeys(value.queue, [
-        "pending", "pending_is_capped", "pending_display", "component_counts_exact",
-        "upserts", "deletes", "submitted", "oldest_queued_at",
-      ])) {
+      !(exactKeys(value.queue, PROOF_QUEUE_FIELDS) ||
+        (exactKeys(value.queue, [...PROOF_QUEUE_FIELDS, "count_receipt"]) &&
+          value.queue.count_receipt === LEGACY_EXACT_COUNT_RECEIPT))) {
     refuse("UPDATE_PREVIEW_PLAN_INVALID");
   }
   for (const count of [
@@ -1389,6 +1417,7 @@ function checkedProjectionProof(value) {
     safeInteger(count, 0, Number.MAX_SAFE_INTEGER, "UPDATE_PREVIEW_PLAN_INVALID");
   }
   const pending = value.queue.pending;
+  const legacyExact = value.queue.count_receipt === LEGACY_EXACT_COUNT_RECEIPT;
   if (value.queue.upserts + value.queue.deletes !== pending ||
       value.queue.submitted > pending ||
       typeof value.queue.pending_is_capped !== "boolean" ||
@@ -1396,7 +1425,8 @@ function checkedProjectionProof(value) {
       value.queue.pending_display !==
         (value.queue.pending_is_capped ? "10,000+" : String(pending)) ||
       value.queue.pending_is_capped !== !value.queue.component_counts_exact ||
-      (value.queue.pending_is_capped ? pending !== 10_001 : pending > 10_000) ||
+      (legacyExact && (value.queue.pending_is_capped || !value.queue.component_counts_exact)) ||
+      (value.queue.pending_is_capped ? pending !== 10_001 : !legacyExact && pending > 10_000) ||
       (pending > 0 && (!Number.isSafeInteger(value.queue.oldest_queued_at) ||
         value.queue.oldest_queued_at < 0)) ||
       (pending === 0 && value.queue.oldest_queued_at !== null)) {
@@ -1774,6 +1804,13 @@ export function createLegacyV046UpdatePreviewReceipt(observation, observedEffect
   });
 }
 
+/** Tell the owner, where the receipt already describes the queue, why it is exact. */
+function legacyExactBacklogNote(plan) {
+  return plan.deployed_projection.queue.count_receipt === LEGACY_EXACT_COUNT_RECEIPT
+    ? { owner_note: LEGACY_EXACT_BACKLOG_NOTE }
+    : {};
+}
+
 /** Return a non-authorizing receipt that includes one live aggregate proof. */
 export function createUpdatePreviewSuccessReceipt(plan, observedEffects) {
   const checked = checkedPlan(plan);
@@ -1791,6 +1828,7 @@ export function createUpdatePreviewSuccessReceipt(plan, observedEffects) {
     read_only: true,
     authorizes_update: false,
     projection_ready: checked.deployed_projection.verdict === "ready",
+    ...legacyExactBacklogNote(checked),
     plan: checked,
     plan_fingerprint: updatePreviewPlanFingerprint(checked),
     proof_boundary: { ...PROOF_BOUNDARY },
@@ -1829,6 +1867,7 @@ export function createUpdatePreviewProjectionFailureReceipt(plan, observedEffect
     ...(verdict === "projection_work_queued_uncounted" ? {
       owner_message: "A large indexing queue is still working; wait for it before updating.",
     } : {}),
+    ...legacyExactBacklogNote(checked),
     plan: checked,
     plan_fingerprint: updatePreviewPlanFingerprint(checked),
     proof_boundary: { ...PROOF_BOUNDARY },
