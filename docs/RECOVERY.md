@@ -425,7 +425,7 @@ export, so a retry cannot reuse an encrypted provenance artifact poisoned by an
 invocation-local lease, mutation fence, or old provider receipt. Older exact
 migration prefixes remain offline-inspectable, but the live field runner
 requires both source and restored target to match the latest packaged migration
-(currently exact schema 47) before any current bootstrap operation.
+(currently exact schema 48) before any current bootstrap operation.
 
 The v0.4.8 campaign records two separate deletion-state identities. During
 `verify_export`, the adapter double-captures the source's exact binding,

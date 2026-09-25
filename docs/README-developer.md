@@ -6,7 +6,7 @@ Nothing runs on our infrastructure. Normal setup uses an owner-approved named
 Cloudflare browser profile in the owner's operating-system credential store; it
 does not create or copy an API token.
 
-**Status: unreleased 0.4.8/schema47 field candidate, held.** Provisioning,
+**Status: unreleased 0.4.8/schema48 field candidate, held.** Provisioning,
 retrieval, resumable ingest, guarded deletion, owner actions, exact entity
 scope, document grants, passkey observability, financial imports, provenance
 binding for eligible single-record local file ingests, bounded one-original
@@ -1732,7 +1732,7 @@ apply.
 Preview acquires the source lease before reading the private manifest, source
 file, saved credential, or Brain state. Under that lease it reads the complete
 authenticated source and observation history, prepares the exact one-file
-ingest envelope, checks the current schema-47 Brain and vector state, and seals
+ingest envelope, checks the current schema-48 Brain and vector state, and seals
 a state-bound plan. It releases the lease without changing Brain data,
 configuration, source receipts, cursors, or removals. Public output excludes the
 local root, locator, private retrieval query, content hashes, document IDs,
