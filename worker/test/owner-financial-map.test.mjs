@@ -747,3 +747,43 @@ test("missing structured state and unknown current enums fail closed", async (t)
   unknown.raw("UPDATE fin_accounts SET account_kind='unknown_kind'");
   assert.equal((await readMap(unknown)).response.status, 503);
 });
+
+test("D1 reset responses are content-free and distinguish preview ambiguity", async (t) => {
+  const fixture = await createProductFixture();
+  t.after(() => fixture.close());
+  const privateCanary = "D1_ERROR: D1 DB exceeded its CPU time limit and was reset. private-looking-row";
+  let prepareCalls = 0;
+  const resetEnv = {
+    ...fixture.env,
+    DB: {
+      prepare() {
+        prepareCalls += 1;
+        throw new Error(privateCanary);
+      },
+    },
+  };
+  const post = async (path) => json(await handleOwnerFinancialMap(
+    resetEnv,
+    new Request(`${ORIGIN}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...ADMIN },
+      body: JSON.stringify(path === `${PREFIX}preview` ? { snapshot: { version: 1 } } : {}),
+    }),
+    path,
+  ));
+
+  const read = await post(`${PREFIX}read`);
+  assert.ok(prepareCalls > 0, "the read must reach the failing D1 decision point");
+  assert.deepEqual(read.body, { error: "temporarily unavailable", code: "d1_cpu_reset" });
+  assert.equal(JSON.stringify(read.body).includes("private-looking-row"), false);
+
+  const preview = await post(`${PREFIX}preview`);
+  assert.ok(prepareCalls > 1, "the preview must reach the failing D1 decision point");
+  assert.deepEqual(preview.body, {
+    error: "mutation outcome ambiguous",
+    code: "d1_cpu_reset_ambiguous",
+    ambiguous: true,
+  });
+  assert.equal(JSON.stringify(preview.body).includes("private-looking-row"), false);
+  assert.equal(JSON.stringify(preview.body).toLowerCase().includes("retry"), false);
+});

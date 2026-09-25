@@ -96,7 +96,7 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
                   {attention.has(bank.item_ref) && (
                     <span className="block text-amber-800 mt-0.5">
                       {bank.status_detail
-                        ? `${bank.status_detail.replace(/[.\s]+$/, "")}. `
+                        ? `${bank.status_detail}. `
                         : "This connection stopped working. "}
                       Answers about money are missing anything that has happened here since.
                     </span>

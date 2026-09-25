@@ -42,8 +42,10 @@
 /** Intra-line whitespace. \s would let one reason span two unrelated lines. */
 const GAP = "[^\\S\\r\\n]+";
 
+const D1_CPU_RESET_REASON = new RegExp(`exceeded${GAP}(?:its${GAP})?CPU${GAP}time${GAP}limit`, "i");
+
 export const D1_TRANSIENT_FAULT_REASONS = Object.freeze([
-  new RegExp(`exceeded${GAP}(?:its${GAP})?CPU${GAP}time${GAP}limit`, "i"),
+  D1_CPU_RESET_REASON,
   new RegExp(`network${GAP}connection${GAP}lost`, "i"),
 ]);
 
@@ -71,6 +73,83 @@ export function isD1TransientFaultBody(raw) {
     if (D1_TRANSIENT_FAULT_REASONS.some((reason) => reason.test(message))) return true;
   }
   return false;
+}
+
+export const D1_CPU_RESET_CODE = "d1_cpu_reset";
+export const D1_CPU_RESET_AMBIGUOUS_CODE = "d1_cpu_reset_ambiguous";
+
+function hasFixedD1CpuResetCode(raw) {
+  if (typeof raw !== "string") return false;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+      parsed.code === D1_CPU_RESET_CODE;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Convert the observed D1 CPU reset into one content-free read state that the
+ * CLI and MCP can relay without exposing a provider response or inventing an
+ * application failure. Reads may be retried, but not immediately or forever:
+ * repeated health polling is itself load on a database that just hit its CPU
+ * ceiling.
+ */
+export function d1CpuResetReadState(raw) {
+  if (typeof raw !== "string") return null;
+  if (hasFixedD1CpuResetCode(raw)) {
+    return Object.freeze({
+      status: "temporarily_unavailable",
+      code: D1_CPU_RESET_CODE,
+      retryable: true,
+      retry_after_seconds: 10,
+      guidance:
+        "The Brain database reached its temporary D1 CPU limit and reset. " +
+        "Wait at least 10 seconds, then retry this read once. If it repeats, stop polling and run `brain support --preview`.",
+    });
+  }
+  for (const match of raw.matchAll(/D1_ERROR/gi)) {
+    const rest = raw.slice(match.index + match[0].length);
+    const end = rest.search(D1_MESSAGE_END);
+    const message = end === -1 ? rest : rest.slice(0, end);
+    if (!D1_CPU_RESET_REASON.test(message)) continue;
+    return Object.freeze({
+      status: "temporarily_unavailable",
+      code: D1_CPU_RESET_CODE,
+      retryable: true,
+      retry_after_seconds: 10,
+      guidance:
+        "The Brain database reached its temporary D1 CPU limit and reset. " +
+        "Wait at least 10 seconds, then retry this read once. If it repeats, stop polling and run `brain support --preview`.",
+    });
+  }
+  return null;
+}
+
+/**
+ * A write whose response was lost to a D1 reset is not retryable evidence.
+ * The fixed state deliberately carries no request body, provider body, source
+ * identity, or automatic-retry instruction.
+ */
+export function d1CpuResetMutationState(raw) {
+  let fixedAmbiguous = false;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      fixedAmbiguous = parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+        parsed.code === D1_CPU_RESET_AMBIGUOUS_CODE;
+    } catch { /* raw provider form is checked below */ }
+  }
+  if (!fixedAmbiguous && !d1CpuResetReadState(raw)) return null;
+  return Object.freeze({
+    status: "ambiguous",
+    code: D1_CPU_RESET_AMBIGUOUS_CODE,
+    ambiguous: true,
+    note:
+      "The Brain database reset before the mutation receipt was returned. " +
+      "The change may or may not have committed. Stop and inspect current state before deciding what to do next.",
+  });
 }
 
 /**

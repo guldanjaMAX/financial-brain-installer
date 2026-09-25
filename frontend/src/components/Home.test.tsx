@@ -1,9 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { FinanceScopeProvider } from "./FinanceScope";
-import { AttentionList, FirstFinancialEntityPrompt, Glance, Home, needsFirstFinancialEntity, SourceChip } from "./Home";
-import { CashSection } from "./ThisYear";
-import { UnsortedReview } from "./AddReview";
+import { AttentionList, FirstFinancialEntityPrompt, Home, needsFirstFinancialEntity, SourceChip } from "./Home";
 import type { FinSnapshot } from "../lib/api";
 
 describe("home composition", () => {
@@ -82,48 +80,5 @@ describe("home composition", () => {
     expect(documents).toContain("This copy could not be read");
     expect(source).toContain("Source out of date");
     expect(source).toContain("Problem");
-  });
-});
-
-describe("a rounded bank balance never reads as exact", () => {
-  const cash = (rounded: number | undefined) => ({
-    ledger_installed: true,
-    cash: {
-      as_of: "2026-09-20", total_minor: 2536298, currency: "USD", mixed_currency: false,
-      covered: [
-        { account_slug: "fixture-checking", label: "Checking", amount_minor: 11000, currency: "USD", as_of: "2026-09-20", minor_rounded: false },
-        { account_slug: "fixture-savings", label: "Savings", amount_minor: 2525298, currency: "USD", as_of: "2026-09-20", minor_rounded: rounded === 1 },
-      ],
-      missing: [], excluded: [], accounts_covered: 2, accounts_considered: 2, complete: true,
-      ...(rounded === undefined ? {} : { rounded_accounts: rounded }),
-    },
-  }) as unknown as FinSnapshot;
-
-  it("names the rounded balance on Home and on This Year", () => {
-    const home = renderToStaticMarkup(<Glance snapshot={cash(1)} scopeName="Fixture Household" />);
-    const year = renderToStaticMarkup(<CashSection snapshot={cash(1)} />);
-    for (const html of [home, year]) {
-      expect(html).toContain("Rounded: 1 balance came from the bank with more decimal places than the currency uses");
-      expect(html).toContain("not exact");
-    }
-  });
-
-  it("stays silent for an exact total and for an older Brain that sends no count", () => {
-    for (const snapshot of [cash(0), cash(undefined)]) {
-      expect(renderToStaticMarkup(<Glance snapshot={snapshot} scopeName="Fixture Household" />)).not.toContain("Rounded:");
-      expect(renderToStaticMarkup(<CashSection snapshot={snapshot} />)).not.toContain("Rounded:");
-    }
-  });
-
-  it("names rounded lines inside an uncategorized spending total", () => {
-    const snapshot = {
-      ledger_installed: true,
-      accounts: [{ account_slug: "fixture-card", label: "Card", account_kind: "card", balance_role: "liability" }],
-      unsorted_spending: [{
-        account_slug: "fixture-card", currency: "USD", outflow_minor: 2470,
-        counted_lines: 3, unreadable_lines: 0, rounded_lines: 2,
-      }],
-    } as unknown as FinSnapshot;
-    expect(renderToStaticMarkup(<UnsortedReview snapshot={snapshot} />)).toContain("Rounded: 2 lines came from the bank");
   });
 });

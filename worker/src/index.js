@@ -79,6 +79,10 @@ import {
 import {
   COVERAGE_INCOMPLETE, SEARCH_UNAVAILABLE, coverageIncompleteNotice, emptyRetrievalDisclosure,
 } from "./lib/retrieval-status.js";
+import {
+  D1_CPU_RESET_AMBIGUOUS_CODE,
+  d1CpuResetReadState,
+} from "../../operations/d1-transient-fault.mjs";
 import { answerGenerationError } from "./lib/answer-render.js";
 import {
   handleOwnerAuth, handleAdminInvite, handleAdminDevices, handleAdminGrants, handleZones,
@@ -3224,7 +3228,19 @@ export default {
           try {
             return jsonResponse(await forgetFamilies(env, { families, dryRun: !confirm }));
           } catch (error) {
-            return jsonResponse({ error: error.message }, 400);
+            if (d1CpuResetReadState(typeof error?.message === "string" ? error.message : "")) {
+              throw error;
+            }
+            if (error?.code === "family_forget_inventory_truncated") {
+              return jsonResponse({
+                error: "family forget preview exceeded its safe bounded inventory limit",
+                code: error.code,
+              }, 409);
+            }
+            return jsonResponse({
+              error: "family forget request was refused",
+              code: "family_forget_refused",
+            }, 400);
           }
         }
         if (source) {
@@ -3347,7 +3363,25 @@ export default {
       }
       return jsonResponse({ error: "not found" }, 404);
     } catch (e) {
-      const response = jsonResponse({ error: e.message }, 500);
+      const d1Reset = d1CpuResetReadState(typeof e?.message === "string" ? e.message : "");
+      const resetRead = readRoute ||
+        (path === "/api/admin/brain/source-families" && request.method === "POST") ||
+        (path === "/api/admin/brain/documents" && request.method === "GET") ||
+        request.method === "GET";
+      const response = d1Reset
+        ? resetRead
+          ? jsonResponse({ error: "temporarily unavailable", code: d1Reset.code }, 503)
+          : jsonResponse({
+            error: "mutation outcome ambiguous",
+            code: D1_CPU_RESET_AMBIGUOUS_CODE,
+            ambiguous: true,
+          }, 503)
+        : e?.code === "family_forget_inventory_truncated"
+          ? jsonResponse({
+            error: "family forget preview exceeded its safe bounded inventory limit",
+            code: "family_forget_inventory_truncated",
+          }, 409)
+          : jsonResponse({ error: "internal server error", code: "internal_error" }, 500);
       if (path === "/api/admin/brain/source-families" ||
           path === "/api/admin/brain/documents") {
         return privateNoStore(response);

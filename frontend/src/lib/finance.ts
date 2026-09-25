@@ -202,20 +202,6 @@ export function moneyLabel(minor: number | null | undefined, currency: string | 
   }
 }
 
-/**
- * A bank can report more decimal places than a currency has (a retirement
- * balance of 23631.9805 dollars). The Brain stores the exact figure beside a
- * rounded one, and the ledger counts how many rounded figures a total holds.
- * This is the one sentence every surface shows beside such a total, so a
- * rounded figure never reads as exact. No count, or zero, means no sentence.
- */
-export function roundedFigureNote(count: number | null | undefined, noun: "balance" | "line"): string | null {
-  const total = Number(count);
-  if (!Number.isSafeInteger(total) || total <= 0) return null;
-  const subject = total === 1 ? `1 ${noun} came` : `${total} ${noun}s came`;
-  return `Rounded: ${subject} from the bank with more decimal places than the currency uses, so this total is not exact.`;
-}
-
 export function partyLabel(party: string | null | undefined): string {
   if (!party) return "not recorded";
   return /^(owner|you)$/i.test(party.trim()) ? "you" : party;

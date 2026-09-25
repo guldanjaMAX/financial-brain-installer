@@ -1152,7 +1152,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
   check("the default query budget stops before an unreserved third batch",
     drained.drained === 0 && drained.submitted === 200 &&
       drained.waiting === 200 && drained.remaining === 600 &&
-      submitted <= 8 + (2 * drainBatchQueryUpperBound(100)) &&
+      submitted <= 9 + (2 * drainBatchQueryUpperBound(100)) &&
       submitted < DRAIN_D1_QUERY_BUDGET,
     JSON.stringify({ drained, submitted, budget: DRAIN_D1_QUERY_BUDGET }));
   check("the bounded invocation never strands the exclusive drain lease",
@@ -1175,7 +1175,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
   }
   markAllOutboxSubmitted(env, db);
   const before = d1Queries.submitted;
-  const queryBudget = 8 + drainBatchQueryUpperBound(count);
+  const queryBudget = 9 + drainBatchQueryUpperBound(count);
   const result = await drainOutbox(env, {
     embed: async () => [0.1],
     maxBatches: 10,
@@ -1190,7 +1190,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
   ).get();
   check("a fully refused confirmation slice stays within its reserved D1 budget",
     result.failed === count && result.remaining === count && retryState.n === count &&
-      queries <= queryBudget && queries <= 8 + drainBatchQueryUpperBound(count),
+      queries <= queryBudget && queries <= 9 + drainBatchQueryUpperBound(count),
     JSON.stringify({ result, retryState, queries, queryBudget }));
 }
 
@@ -1207,7 +1207,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
     embed: async () => [0.1],
     maxBatches: 10,
     batchSize: 100,
-    d1QueryBudget: 8 + drainBatchQueryUpperBound(100),
+    d1QueryBudget: 9 + drainBatchQueryUpperBound(100),
   });
   const submitted = db.prepare(
     `SELECT count(*) AS n FROM vector_outbox

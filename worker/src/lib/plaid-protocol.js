@@ -69,57 +69,11 @@ function asIsoDate(value) {
   return text && /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
 }
 
-const PLAIN_DECIMAL = /^-?\d+(?:\.\d+)?$/;
-const EXPONENT_DECIMAL = /^(-?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/;
-// Every finite double expands to at most about 330 characters. The bound only
-// stops a pathological provider string from allocating an unbounded expansion.
-export const PLAID_DECIMAL_MAX_LENGTH = 512;
-
-function expandExponent(sign, whole, fraction, exponentText) {
-  const exponent = Number(exponentText);
-  const digits = `${whole}${fraction}`;
-  const point = whole.length + exponent;
-  if (!Number.isSafeInteger(exponent) || Math.abs(point) > PLAID_DECIMAL_MAX_LENGTH) return null;
-  let text;
-  if (point <= 0) text = `0.${"0".repeat(-point)}${digits}`;
-  else if (point >= digits.length) text = `${digits}${"0".repeat(point - digits.length)}`;
-  else text = `${digits.slice(0, point)}.${digits.slice(point)}`;
-  // Leading integer zeros carry no value; the fraction is kept digit for digit.
-  const [integer, rest] = text.split(".");
-  const trimmed = integer.replace(/^0+(?=\d)/, "");
-  return `${sign}${trimmed}${rest === undefined ? "" : `.${rest}`}`;
-}
-
-/**
- * The exact decimal text of one provider amount, always in plain positional
- * notation. Plaid sends JSON numbers, and String(number) switches to exponent
- * notation below 1e-6 and from 1e21 upward ("1e-7", "1.5e+21"). Those are
- * finite, exact values, so they are expanded digit for digit rather than
- * refused. The shortest round-trip text of a number is the provider's own
- * digits whenever it serialised them minimally. Non-numeric and non-finite
- * values remain invalid input.
- */
-export function plaidDecimalText(value) {
-  let text = null;
-  if (typeof value === "number") {
-    if (Number.isFinite(value)) text = String(value);
-  } else if (typeof value === "string") {
-    text = value.trim();
-  }
-  if (text !== null && text.length <= PLAID_DECIMAL_MAX_LENGTH) {
-    if (PLAIN_DECIMAL.test(text)) return text;
-    const exponent = EXPONENT_DECIMAL.exec(text);
-    if (exponent) {
-      const expanded = expandExponent(exponent[1], exponent[2], exponent[3] || "", exponent[4]);
-      if (expanded !== null && expanded.length <= PLAID_DECIMAL_MAX_LENGTH && PLAIN_DECIMAL.test(expanded)) {
-        return expanded;
-      }
-    }
-  }
+function decimalSource(value) {
+  if (typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value.trim())) return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
   throw new PlaidProtocolError("INVALID_AMOUNT", "Plaid returned a non-decimal transaction amount");
 }
-
-const decimalSource = plaidDecimalText;
 
 function base64UrlBytes(value) {
   const input = String(value || "").replace(/-/g, "+").replace(/_/g, "/");

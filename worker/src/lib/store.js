@@ -1273,8 +1273,18 @@ const d1Backend = {
   },
 
   async stats(env) {
+    const bounded = await d1.boundedCorpusHotPathsActive(env);
     const { results } = await env.DB.prepare(
-      `WITH source_names AS (
+      bounded ? `SELECT s.source AS source_type,
+              s.documents AS stored_documents,
+              s.logical_documents AS logical_documents,
+              s.chunks AS total,
+              s.last_ingest_at,
+              MAX(s.chunks - COALESCE(o.pending, 0), 0) AS embedded
+       FROM corpus_stats s
+       LEFT JOIN vector_outbox_source_counts o ON o.source = s.source
+       ORDER BY s.source`
+      : `WITH source_names AS (
          SELECT source FROM corpus_stats
          UNION
          SELECT source FROM documents WHERE deleted_at IS NULL
@@ -1296,18 +1306,18 @@ const d1Backend = {
           GROUP BY d.source
        )
        SELECT n.source AS source_type,
-              COALESCE(d.stored_documents, 0) AS stored_documents,
-              COALESCE(d.logical_documents, 0) AS logical_documents,
-              COALESCE(c.chunks, 0) AS total,
+              COALESCE(d.stored_documents,0) AS stored_documents,
+              COALESCE(d.logical_documents,0) AS logical_documents,
+              COALESCE(c.chunks,0) AS total,
               s.last_ingest_at,
-              COALESCE(c.chunks, 0) - COALESCE(o.pending, 0) AS embedded
-       FROM source_names n
-       LEFT JOIN corpus_stats s ON s.source = n.source
-       LEFT JOIN document_counts d ON d.source = n.source
-       LEFT JOIN chunk_counts c ON c.source = n.source
-       LEFT JOIN (SELECT c.source, count(*) AS pending
-                    FROM vector_outbox v JOIN chunks c ON c.chunk_uid = v.chunk_uid
-                   GROUP BY c.source) o ON o.source = n.source`
+              COALESCE(c.chunks,0)-COALESCE(o.pending,0) AS embedded
+         FROM source_names n
+         LEFT JOIN corpus_stats s ON s.source=n.source
+         LEFT JOIN document_counts d ON d.source=n.source
+         LEFT JOIN chunk_counts c ON c.source=n.source
+         LEFT JOIN (SELECT c.source,count(*) AS pending
+                      FROM vector_outbox v JOIN chunks c ON c.chunk_uid=v.chunk_uid
+                     GROUP BY c.source) o ON o.source=n.source`
     ).all();
     return {
       rows: (results || []).map((r) => ({
@@ -1318,9 +1328,9 @@ const d1Backend = {
         // ignore the one time it means something.
         documents: Number(r.logical_documents || 0),
         logical_documents: Number(r.logical_documents || 0),
-        // These two counts come from the live documents table, not the
-        // denormalized corpus_stats cache. Replay completion uses this marker to
-        // reject an older Worker that could falsely confirm a stale count.
+        // Schema 47 maintains these exact counters in the same D1 transaction
+        // as every document/chunk change. Reading the corpus again here made a
+        // health check proportional to corpus size and reset large D1 brains.
         stored_documents: Number(r.stored_documents || 0),
         document_counts_exact: true,
         chunks: Number(r.total || 0),
