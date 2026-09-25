@@ -2,7 +2,7 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
     Name="Financial Brain Machine Prep"
-    Manufacturer="Financial Brain"
+    Manufacturer="Financial Brain LLC"
     Version="0.1.0"
     UpgradeCode="A49C8F6E-AD20-4C23-89B7-0E2A5B63C02D"
     Scope="perMachine"

@@ -3,7 +3,7 @@
   <title>Financial Brain Machine Prep</title>
   <organization>com.financialbrain</organization>
   <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/>
-  <options customize="never" require-scripts="true" rootVolumeOnly="true"/>
+  <options customize="never" require-scripts="true" rootVolumeOnly="true" hostArchitectures="arm64,x86_64"/>
   <allowed-os-versions>
     <os-version min="13.5"/>
   </allowed-os-versions>

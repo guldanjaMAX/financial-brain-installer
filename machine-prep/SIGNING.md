@@ -48,7 +48,7 @@ CI secret boundary:
 - Prefer Artifact Signing with GitHub OIDC and Azure federated credentials. The future signing job receives `id-token: write` only inside a protected environment and keeps the account and certificate profile names in protected configuration.
 - Artifact Signing keeps the private key in the managed service, so no PFX or hardware-token secret is copied into CI.
 - A traditional OV or EV certificate requires an HSM, token, or vendor cloud-signing integration. Do not export a private key into a repository secret merely to make CI convenient.
-- No signing credential belongs in the repository. The current workflow has `contents: read`, no OIDC permission, and no signing or release step.
+- No signing credential belongs in the repository. The unsigned workflow has `contents: read`, no OIDC permission, and no signing or release step.
 
 ## Owner decisions and purchases
 
@@ -57,3 +57,13 @@ CI secret boundary:
 3. Confirm whether the WiX OSMF applies and, if it does, approve the correct $10, $40, or $60 monthly tier before running the Windows artifact job.
 4. Choose the legal publisher names to display on macOS and Windows and complete both identity checks.
 5. Approve a protected signing environment and named reviewers. Until then, CI remains unsigned artifact-only.
+
+## Signing workflow
+
+`.github/workflows/installer-signing.yml` is the separate, manually dispatched signing path. It takes the numeric run ID of a reviewed `machine-prep-installers` run, downloads that run's unsigned artifact, and uploads a separately named signed artifact with a SHA-256 receipt. It never publishes a release. Both jobs run only in the protected `installer-signing` GitHub Environment; the owner must add required reviewers to that environment before the first run.
+
+- macOS job: environment secrets `APPLE_DEVID_INSTALLER_P12_BASE64`, `APPLE_DEVID_INSTALLER_P12_PASSWORD`, `APPLE_NOTARY_KEY_P8`, `APPLE_NOTARY_KEY_ID`, and `APPLE_NOTARY_ISSUER_ID`. It imports the identity into a temporary keychain, runs `productsign --timestamp`, `pkgutil --check-signature`, `xcrun notarytool submit --wait`, reads the notary log, staples, validates, runs `spctl -a -vv -t install`, and always deletes the keychain.
+- Windows job: GitHub OIDC with Azure Artifact Signing. Environment variables (not secrets) `ARTIFACT_SIGNING_ENDPOINT`, `ARTIFACT_SIGNING_ACCOUNT_NAME`, `ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID`. It signs with SHA-256 and the `http://timestamp.acs.microsoft.com` timestamp server, then requires `Get-AuthenticodeSignature` to report Valid and `signtool verify /pa /v` to pass.
+- Either job stops with a "not configured yet" message before downloading anything when its secrets or variables are missing.
+- The MSI's Manufacturer is the planned publisher, Financial Brain LLC. It must match the legal name validated for the Artifact Signing certificate profile before the first signed build.
+- The owner approved the WiX Open Source Maintenance Fee. The unsigned Windows build still accepts the WiX v7 EULA only when `wix_osmf_confirmed=true`; otherwise it stops before downloading WiX.

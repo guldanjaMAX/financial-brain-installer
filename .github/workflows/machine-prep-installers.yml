@@ -42,9 +42,17 @@ jobs:
 
   windows-unsigned:
     name: build unsigned Windows MSI
-    if: inputs.wix_osmf_confirmed
     runs-on: windows-latest
     steps:
+      # WiX v7 requires its Open Source Maintenance Fee EULA to be accepted by
+      # name. The acceptance below is passed only after the dispatcher confirms
+      # the fee decision; without it the job stops before downloading WiX.
+      - name: stop unless the WiX OSMF decision is confirmed
+        if: ${{ !inputs.wix_osmf_confirmed }}
+        shell: powershell
+        run: |
+          Write-Output "::error::The Windows MSI was not built. WiX v7 requires its Open Source Maintenance Fee EULA. Re-run this workflow with wix_osmf_confirmed=true once the fee decision is confirmed."
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -59,9 +67,13 @@ jobs:
         shell: powershell
         run: node --test test/machine-prep-installers.test.mjs test/machine-prep.test.mjs
       - name: build and inspect unsigned Windows MSI
+        if: inputs.wix_osmf_confirmed
         shell: powershell
+        env:
+          WIX_OSMF_CONFIRMED: ${{ inputs.wix_osmf_confirmed }}
         run: |
-          dotnet build machine-prep/installers/windows/FinancialBrainMachinePrep.wixproj --configuration Release
+          if ($env:WIX_OSMF_CONFIRMED -ne 'true') { throw "WiX OSMF decision is not confirmed; nothing was built" }
+          dotnet build machine-prep/installers/windows/FinancialBrainMachinePrep.wixproj --configuration Release -p:WixOsmfConfirmed=true
           $msi = Get-ChildItem machine-prep/installers/windows/bin -Filter *.msi -Recurse | Select-Object -First 1
           if (-not $msi) { throw "WiX build did not produce an MSI" }
           New-Item -ItemType Directory -Path dist -Force | Out-Null

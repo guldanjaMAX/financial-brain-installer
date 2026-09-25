@@ -1,0 +1,245 @@
+name: installer-signing
+
+# Signs artifacts that machine-prep-installers.yml already built and uploaded.
+# This workflow is separate so the unsigned build stays free of every signing
+# tool, secret, and OIDC permission. Each job runs only inside the protected
+# installer-signing environment, whose reviewers approve every run, and each
+# job stops before touching an artifact when its configuration is missing.
+on:
+  workflow_dispatch:
+    inputs:
+      unsigned_run_id:
+        description: Numeric run ID of the reviewed machine-prep-installers run whose unsigned artifacts are signed
+        required: true
+        type: string
+      target:
+        description: Which unsigned artifact to sign
+        required: true
+        type: choice
+        default: both
+        options:
+          - both
+          - macos
+          - windows
+
+permissions: {}
+
+concurrency:
+  group: installer-signing
+  cancel-in-progress: false
+
+jobs:
+  macos-sign:
+    name: sign, notarize, and staple the macOS package
+    if: inputs.target == 'both' || inputs.target == 'macos'
+    runs-on: macos-latest
+    environment: installer-signing
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: stop unless macOS signing is configured
+        env:
+          P12_BASE64: ${{ secrets.APPLE_DEVID_INSTALLER_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVID_INSTALLER_P12_PASSWORD }}
+          NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          UNSIGNED_RUN_ID: ${{ inputs.unsigned_run_id }}
+        run: |
+          missing=""
+          [ -n "$P12_BASE64" ] || missing="$missing APPLE_DEVID_INSTALLER_P12_BASE64"
+          [ -n "$P12_PASSWORD" ] || missing="$missing APPLE_DEVID_INSTALLER_P12_PASSWORD"
+          [ -n "$NOTARY_KEY_P8" ] || missing="$missing APPLE_NOTARY_KEY_P8"
+          [ -n "$NOTARY_KEY_ID" ] || missing="$missing APPLE_NOTARY_KEY_ID"
+          [ -n "$NOTARY_ISSUER_ID" ] || missing="$missing APPLE_NOTARY_ISSUER_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::macOS installer signing is not configured yet. Add these installer-signing environment secrets:$missing. Nothing was downloaded or signed."
+            exit 1
+          fi
+          if ! printf '%s' "$UNSIGNED_RUN_ID" | grep -Eq '^[0-9]{1,20}$'; then
+            echo "::error::unsigned_run_id must be the numeric run ID of a machine-prep-installers run. Nothing was downloaded or signed."
+            exit 1
+          fi
+      - name: download the reviewed unsigned macOS package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: FinancialBrainMachinePrep-macOS-unsigned
+          path: unsigned
+          run-id: ${{ inputs.unsigned_run_id }}
+          github-token: ${{ github.token }}
+      - name: create a temporary signing keychain
+        env:
+          P12_BASE64: ${{ secrets.APPLE_DEVID_INSTALLER_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVID_INSTALLER_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          keychain="$RUNNER_TEMP/installer-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/devid-installer.p12"
+          security import "$RUNNER_TEMP/devid-installer.p12" -k "$keychain" -f pkcs12 -P "$P12_PASSWORD" -T /usr/bin/productsign -T /usr/bin/pkgbuild
+          rm -f "$RUNNER_TEMP/devid-installer.p12"
+          # Lets productsign use the key without an interactive access prompt.
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p basic "$keychain" | awk '/Developer ID Installer/ { print $2; exit }')"
+          if [ -z "$identity" ]; then
+            echo "::error::the imported certificate is not a Developer ID Installer identity. Nothing was signed."
+            exit 1
+          fi
+          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+      - name: sign the package with a secure timestamp
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          productsign --timestamp --sign "$SIGNING_IDENTITY" --keychain "$SIGNING_KEYCHAIN" \
+            unsigned/FinancialBrainMachinePrep-unsigned.pkg dist/FinancialBrainMachinePrep.pkg
+          pkgutil --check-signature dist/FinancialBrainMachinePrep.pkg | tee "$RUNNER_TEMP/signature.txt"
+          if grep -q "Status: no signature" "$RUNNER_TEMP/signature.txt"; then
+            echo "::error::productsign produced an unsigned package."
+            exit 1
+          fi
+          grep -q "Developer ID Installer" "$RUNNER_TEMP/signature.txt"
+      - name: notarize, read the notary log, and staple
+        env:
+          NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/notary-key.p8"
+          printf '%s' "$NOTARY_KEY_P8" > "$key"
+          xcrun notarytool submit dist/FinancialBrainMachinePrep.pkg \
+            --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+            --wait --output-format json > "$RUNNER_TEMP/notary-submit.json"
+          submission="$(plutil -extract id raw -o - "$RUNNER_TEMP/notary-submit.json")"
+          status="$(plutil -extract status raw -o - "$RUNNER_TEMP/notary-submit.json")"
+          xcrun notarytool log "$submission" \
+            --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+            "$RUNNER_TEMP/notary-log.json"
+          rm -f "$key"
+          cat "$RUNNER_TEMP/notary-log.json"
+          if [ "$status" != "Accepted" ]; then
+            echo "::error::notarization finished with status $status; the notary log above names each issue."
+            exit 1
+          fi
+          xcrun stapler staple dist/FinancialBrainMachinePrep.pkg
+      - name: verify the exact distributed bytes
+        run: |
+          set -euo pipefail
+          xcrun stapler validate dist/FinancialBrainMachinePrep.pkg
+          spctl -a -vv -t install dist/FinancialBrainMachinePrep.pkg
+          pkgutil --check-signature dist/FinancialBrainMachinePrep.pkg
+          shasum -a 256 dist/FinancialBrainMachinePrep.pkg | tee dist/FinancialBrainMachinePrep.pkg.sha256
+      - name: upload the signed macOS package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: FinancialBrainMachinePrep-macOS-signed
+          path: |
+            dist/FinancialBrainMachinePrep.pkg
+            dist/FinancialBrainMachinePrep.pkg.sha256
+          retention-days: 14
+      - name: delete the temporary signing keychain
+        if: always()
+        run: |
+          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then security delete-keychain "$SIGNING_KEYCHAIN" || true; fi
+          security delete-keychain "$RUNNER_TEMP/installer-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/devid-installer.p12" "$RUNNER_TEMP/notary-key.p8"
+
+  windows-sign:
+    name: sign the Windows MSI with Artifact Signing
+    if: inputs.target == 'both' || inputs.target == 'windows'
+    runs-on: windows-latest
+    environment: installer-signing
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - name: stop unless Artifact Signing is configured
+        shell: pwsh
+        env:
+          ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT_NAME: ${{ vars.ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          UNSIGNED_RUN_ID: ${{ inputs.unsigned_run_id }}
+        run: |
+          $required = @(
+            'ARTIFACT_SIGNING_ENDPOINT', 'ARTIFACT_SIGNING_ACCOUNT_NAME', 'ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME',
+            'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID'
+          )
+          $missing = @($required | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) })
+          if ($missing.Count -gt 0) {
+            Write-Output "::error::Windows installer signing is not configured yet. Add these installer-signing environment variables: $($missing -join ', '). Nothing was downloaded or signed."
+            exit 1
+          }
+          if ($env:UNSIGNED_RUN_ID -notmatch '^[0-9]{1,20}$') {
+            Write-Output "::error::unsigned_run_id must be the numeric run ID of a machine-prep-installers run. Nothing was downloaded or signed."
+            exit 1
+          }
+      - name: download the reviewed unsigned Windows MSI
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: FinancialBrainMachinePrep-Windows-unsigned
+          path: unsigned
+          run-id: ${{ inputs.unsigned_run_id }}
+          github-token: ${{ github.token }}
+      - name: stage the MSI under its signed name
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item -LiteralPath unsigned/FinancialBrainMachinePrep-unsigned.msi -Destination dist/FinancialBrainMachinePrep.msi
+      - name: sign in to Azure with GitHub OIDC
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: sign with Artifact Signing
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          files: ${{ github.workspace }}\dist\FinancialBrainMachinePrep.msi
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-azure-cli-credential: false
+      - name: verify the Authenticode signature
+        shell: pwsh
+        run: |
+          $msi = Resolve-Path dist/FinancialBrainMachinePrep.msi
+          $signature = Get-AuthenticodeSignature -LiteralPath $msi
+          $signature | Format-List Status, StatusMessage, SignerCertificate, TimeStamperCertificate
+          if ($signature.Status -ne 'Valid') { throw "the MSI signature is $($signature.Status), not Valid" }
+          if (-not $signature.TimeStamperCertificate) { throw "the MSI signature carries no timestamp" }
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { throw "signtool.exe was not found in the Windows SDK" }
+          & $signtool.FullName verify /pa /v $msi
+          if ($LASTEXITCODE -ne 0) { throw "signtool verify failed with exit code $LASTEXITCODE" }
+          $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $msi
+          $hash | Format-List
+          "$($hash.Hash.ToLowerInvariant())  FinancialBrainMachinePrep.msi" | Set-Content -Encoding ascii dist/FinancialBrainMachinePrep.msi.sha256
+      - name: upload the signed Windows MSI
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: FinancialBrainMachinePrep-Windows-signed
+          path: |
+            dist/FinancialBrainMachinePrep.msi
+            dist/FinancialBrainMachinePrep.msi.sha256
+          retention-days: 14

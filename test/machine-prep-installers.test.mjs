@@ -242,3 +242,206 @@ test("signing plan names owner purchases, warning behavior, and secretless repos
   assert.match(plan, /GitHub OIDC/);
   assert.match(plan, /No signing credential belongs in the repository/);
 });
+
+// The publisher the owner plans to validate for both signing identities. One
+// constant, so the MSI metadata cannot drift from the signed identity.
+const PLANNED_PUBLISHER = "Financial Brain LLC";
+const SIGNING_ENVIRONMENT = "installer-signing";
+const MAC_SIGNING_SECRETS = [
+  "APPLE_DEVID_INSTALLER_P12_BASE64",
+  "APPLE_DEVID_INSTALLER_P12_PASSWORD",
+  "APPLE_NOTARY_KEY_P8",
+  "APPLE_NOTARY_KEY_ID",
+  "APPLE_NOTARY_ISSUER_ID",
+];
+const WINDOWS_SIGNING_VARIABLES = [
+  "ARTIFACT_SIGNING_ENDPOINT",
+  "ARTIFACT_SIGNING_ACCOUNT_NAME",
+  "ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME",
+  "AZURE_CLIENT_ID",
+  "AZURE_TENANT_ID",
+  "AZURE_SUBSCRIPTION_ID",
+];
+
+/** Split a workflow's `jobs:` block into its top-level job bodies. */
+function workflowJobs(workflow) {
+  const jobsBlock = workflow.slice(workflow.indexOf("\njobs:\n") + "\njobs:\n".length);
+  const jobs = new Map();
+  for (const match of jobsBlock.matchAll(/^  ([a-z0-9-]+):\n([\s\S]*?)(?=^  [a-z0-9-]+:\n|(?![\s\S]))/gm)) {
+    jobs.set(match[1], match[2]);
+  }
+  return jobs;
+}
+
+/** Each step's text, in order, so gates can be checked for position. */
+function workflowSteps(job) {
+  return job.split(/^      - /m).slice(1);
+}
+
+/** The literal script of every `run:` block, where expressions would be interpolated into a shell. */
+function runScripts(workflow) {
+  const scripts = [];
+  const lines = workflow.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    const match = /^(\s*)(?:- )?run: ?(.*)$/.exec(lines[index]);
+    if (!match) continue;
+    const indent = match[1].length;
+    const body = [match[2]];
+    while (index + 1 < lines.length &&
+      (lines[index + 1].trim() === "" || /^\s*/.exec(lines[index + 1])[0].length > indent)) {
+      body.push(lines[++index]);
+    }
+    scripts.push(body.join("\n"));
+  }
+  return scripts;
+}
+
+test("installer signing runs only by hand, in the protected environment, with every action pinned", () => {
+  const workflow = read(".github/workflows/installer-signing.yml");
+  const triggers = workflow.slice(workflow.indexOf("\non:\n"), workflow.indexOf("\npermissions:"));
+  assert.match(triggers, /^  workflow_dispatch:$/m);
+  assert.deepEqual([...triggers.matchAll(/^  ([a-z_]+):$/gm)].map((match) => match[1]), ["workflow_dispatch"],
+    "signing must never start from a push, pull request, schedule, tag, or another workflow");
+  assert.match(workflow, /^permissions: \{\}$/m, "no job inherits a default token scope");
+  const jobs = workflowJobs(workflow);
+  assert.deepEqual([...jobs.keys()].sort(), ["macos-sign", "windows-sign"]);
+  for (const [name, job] of jobs) {
+    assert.match(job, new RegExp(`^    environment: ${SIGNING_ENVIRONMENT}$`, "m"), `${name} runs in the protected environment`);
+    assert.doesNotMatch(job, /contents:\s*write|packages:\s*write|gh release|releases/i, `${name} cannot publish`);
+  }
+  assert.doesNotMatch(jobs.get("macos-sign"), /id-token/, "only the Windows job may request an OIDC token");
+  assert.match(jobs.get("windows-sign"), /^      id-token: write$/m);
+  const references = [...workflow.matchAll(/^\s+(?:-\s+)?uses: ([^\s#]+)/gm)].map((match) => match[1]);
+  assert.ok(references.length >= 5);
+  for (const reference of references) {
+    assert.match(reference, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/, `${reference} is pinned to a full commit`);
+  }
+  assert.ok(references.some((reference) => /^azure\/(?:artifact|trusted)-signing-action@[0-9a-f]{40}$/.test(reference)),
+    "Windows signing uses the official Artifact Signing action");
+  assert.ok(references.some((reference) => /^azure\/login@[0-9a-f]{40}$/.test(reference)));
+  assert.match(workflow, /unsigned_run_id:/);
+  assert.match(workflow, /FinancialBrainMachinePrep-macOS-unsigned/);
+  assert.match(workflow, /FinancialBrainMachinePrep-Windows-unsigned/);
+});
+
+test("installer signing carries only secret and variable names, never a value", () => {
+  const workflow = read(".github/workflows/installer-signing.yml");
+  const secrets = new Set([...workflow.matchAll(/\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}/g)].map((match) => match[1]));
+  assert.deepEqual([...secrets].sort(), [...MAC_SIGNING_SECRETS].sort(), "only the declared Apple secrets are read");
+  const variables = new Set([...workflow.matchAll(/\$\{\{\s*vars\.([A-Za-z0-9_]+)\s*\}\}/g)].map((match) => match[1]));
+  assert.deepEqual([...variables].sort(), [...WINDOWS_SIGNING_VARIABLES].sort(),
+    "Windows identifiers come from repository or environment variables");
+  const withoutPins = workflow.replace(/@[0-9a-f]{40}/g, "@PINNED");
+  assert.doesNotMatch(withoutPins, /-----BEGIN|PRIVATE KEY|MII[A-Za-z0-9+/]{20}/, "no certificate or key material");
+  assert.doesNotMatch(withoutPins, /[A-Za-z0-9+/]{40,}={0,2}/, "no long encoded token");
+  assert.doesNotMatch(withoutPins, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+    "no tenant, client, or subscription ID is written into the workflow");
+  assert.doesNotMatch(withoutPins, /\.codesigning\.azure\.net/, "the signing endpoint is configuration, not source");
+  assert.doesNotMatch(withoutPins, /(?:password|-p|-P)\s+["']?(?!\$)[A-Za-z0-9]{6,}/,
+    "every password argument comes from a variable");
+  const scripts = runScripts(workflow);
+  assert.ok(scripts.length >= 8, "every run block was inspected");
+  for (const script of scripts) {
+    assert.doesNotMatch(script, /\$\{\{/, `run scripts read inputs and secrets through env, not interpolation:\n${script}`);
+  }
+});
+
+test("each signing job refuses before touching an artifact when its configuration is missing", () => {
+  const jobs = workflowJobs(read(".github/workflows/installer-signing.yml"));
+  const macSteps = workflowSteps(jobs.get("macos-sign"));
+  assert.match(macSteps[0], /not configured yet/);
+  for (const name of MAC_SIGNING_SECRETS) assert.match(macSteps[0], new RegExp(`\\b${name}\\b`));
+  assert.match(macSteps[0], /exit 1/);
+  const windowsSteps = workflowSteps(jobs.get("windows-sign"));
+  assert.match(windowsSteps[0], /not configured yet/);
+  for (const name of WINDOWS_SIGNING_VARIABLES) assert.match(windowsSteps[0], new RegExp(`\\b${name}\\b`));
+  assert.match(windowsSteps[0], /exit 1/);
+  for (const steps of [macSteps, windowsSteps]) {
+    assert.match(steps[0], /unsigned_run_id must be the numeric run ID/);
+    assert.doesNotMatch(steps[0], /uses:/, "the gate is a local check, not an action");
+    assert.match(steps[1], /actions\/download-artifact@[0-9a-f]{40}/, "the first action after the gate is the download");
+  }
+});
+
+test("macOS signing signs, notarizes, staples, verifies, and always removes its keychain", () => {
+  const job = workflowJobs(read(".github/workflows/installer-signing.yml")).get("macos-sign");
+  const ordered = [
+    /security create-keychain/,
+    /security import [^\n]*-f pkcs12/,
+    /productsign --timestamp/,
+    /pkgutil --check-signature/,
+    /xcrun notarytool submit[\s\S]*?--wait/,
+    /xcrun notarytool log/,
+    /xcrun stapler staple/,
+    /xcrun stapler validate/,
+    /spctl -a -vv -t install/,
+    /shasum -a 256/,
+  ];
+  let cursor = 0;
+  for (const pattern of ordered) {
+    const found = job.slice(cursor).search(pattern);
+    assert.notEqual(found, -1, `${pattern} appears after the previous macOS signing step`);
+    cursor += found;
+  }
+  assert.match(job, /--key-id "\$NOTARY_KEY_ID" --issuer "\$NOTARY_ISSUER_ID"/, "notarization uses an App Store Connect API key");
+  assert.match(job, /status" != "Accepted"/, "a rejected submission stops before stapling");
+  const cleanup = workflowSteps(job).find((step) => /delete-keychain/.test(step));
+  assert.ok(cleanup, "a keychain deletion step exists");
+  assert.match(cleanup, /^\s*if: always\(\)$/m, "the keychain is deleted even when signing fails");
+  assert.match(cleanup, /notary-key\.p8/);
+});
+
+test("Windows signing uses OIDC Artifact Signing with a SHA-256 timestamp and verifies the result", () => {
+  const job = workflowJobs(read(".github/workflows/installer-signing.yml")).get("windows-sign");
+  const signing = workflowSteps(job).find((step) => /-signing-action@/.test(step));
+  assert.ok(signing);
+  assert.match(signing, /endpoint: \$\{\{ vars\.ARTIFACT_SIGNING_ENDPOINT \}\}/);
+  assert.match(signing, /signing-account-name: \$\{\{ vars\.ARTIFACT_SIGNING_ACCOUNT_NAME \}\}/);
+  assert.match(signing, /certificate-profile-name: \$\{\{ vars\.ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME \}\}/);
+  assert.match(signing, /^\s+file-digest: SHA256$/m);
+  assert.match(signing, /^\s+timestamp-rfc3161: http:\/\/timestamp\.acs\.microsoft\.com$/m);
+  assert.match(signing, /^\s+timestamp-digest: SHA256$/m);
+  assert.doesNotMatch(job, /client-secret|azure-password|creds:/, "no long-lived Azure credential is accepted");
+  assert.match(job, /Get-AuthenticodeSignature/);
+  assert.match(job, /Status -ne 'Valid'/);
+  assert.match(job, /verify \/pa \/v/);
+  assert.match(job, /Get-FileHash -Algorithm SHA256/);
+});
+
+test("the unsigned workflow stays free of signing tools, secrets, and the signing environment", () => {
+  const workflow = read(".github/workflows/machine-prep-installers.yml");
+  assert.doesNotMatch(workflow,
+    /notarytool|signtool|productsign|stapler|codesign|id-token|secrets\.|vars\.|environment:|azure\/|signing-action|security import/i);
+});
+
+test("the WiX v7 EULA is accepted only after the OSMF decision is confirmed", () => {
+  const project = read("machine-prep/installers/windows/FinancialBrainMachinePrep.wixproj");
+  assert.match(project,
+    /<PropertyGroup Condition="'\$\(WixOsmfConfirmed\)' == 'true'">\s*<AcceptEula>wix7<\/AcceptEula>\s*<\/PropertyGroup>/,
+    "the EULA acceptance is conditional on the confirmed decision");
+  assert.equal([...project.matchAll(/AcceptEula/g)].length, 2, "there is no unconditional acceptance");
+  assert.match(project,
+    /<Target Name="RequireWixOsmfDecision" BeforeTargets="BeforeBuild" Condition="'\$\(WixOsmfConfirmed\)' != 'true'">\s*<Error Text="[^"]*Open Source Maintenance Fee/);
+  const workflow = read(".github/workflows/machine-prep-installers.yml");
+  const jobs = workflowJobs(workflow);
+  const windowsSteps = workflowSteps(jobs.get("windows-unsigned"));
+  assert.match(windowsSteps[0], /^\s*if: \$\{\{ !inputs\.wix_osmf_confirmed \}\}$/m,
+    "an unconfirmed dispatch stops at the first step, before WiX is downloaded");
+  assert.match(windowsSteps[0], /Open Source Maintenance Fee/);
+  assert.match(windowsSteps[0], /exit 1/);
+  const build = windowsSteps.find((step) => /dotnet build/.test(step));
+  assert.match(build, /^\s*if: inputs\.wix_osmf_confirmed$/m);
+  assert.match(build, /WIX_OSMF_CONFIRMED: \$\{\{ inputs\.wix_osmf_confirmed \}\}/);
+  assert.match(build, /-p:WixOsmfConfirmed=true/);
+  assert.equal([...workflow.matchAll(/WixOsmfConfirmed=true/g)].length, 1, "only the gated build passes the confirmation");
+});
+
+test("the MSI names the planned publisher and the macOS package runs natively on Apple silicon", () => {
+  const wix = read("machine-prep/installers/windows/Package.wxs");
+  const manufacturers = [...wix.matchAll(/Manufacturer="([^"]*)"/g)].map((match) => match[1]);
+  assert.deepEqual(manufacturers, [PLANNED_PUBLISHER]);
+  assert.match(read("machine-prep/SIGNING.md"), new RegExp(PLANNED_PUBLISHER));
+  const distribution = read("machine-prep/installers/macos/Distribution.xml");
+  assert.match(distribution, /<options [^>]*hostArchitectures="arm64,x86_64"/,
+    "declaring both architectures stops Installer from asking for Rosetta");
+});

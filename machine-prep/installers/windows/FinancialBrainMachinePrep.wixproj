@@ -4,6 +4,15 @@
     <OutputType>Package</OutputType>
     <Platform>x64</Platform>
   </PropertyGroup>
+  <!-- WiX v7 builds only after its OSMF EULA is accepted by name. The owner
+       approved the fee; the acceptance still applies only when the build is
+       explicitly told the decision is confirmed (the CI workflow input). -->
+  <PropertyGroup Condition="'$(WixOsmfConfirmed)' == 'true'">
+    <AcceptEula>wix7</AcceptEula>
+  </PropertyGroup>
+  <Target Name="RequireWixOsmfDecision" BeforeTargets="BeforeBuild" Condition="'$(WixOsmfConfirmed)' != 'true'">
+    <Error Text="WiX v7 requires its Open Source Maintenance Fee EULA. Build with -p:WixOsmfConfirmed=true only after the fee decision is confirmed; nothing was built." />
+  </Target>
   <Target Name="GenerateClaudeHandoffUrl" BeforeTargets="BeforeBuild">
     <Exec Command="node &quot;$(MSBuildProjectDirectory)\..\..\handoff\render-url.mjs&quot; &quot;$(MSBuildProjectDirectory)\..\..\handoff\message-windows.txt&quot; &gt; &quot;$(MSBuildProjectDirectory)\handoff-windows.url&quot;" />
   </Target>
