@@ -61,7 +61,7 @@ export {
   V048_D1_DELETION_STATE_SEQUENCE_SQL,
 };
 
-const V048_SCHEMA_VERSION = 46;
+const V048_SCHEMA_VERSION = 47;
 const DATABASE_NAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,126}[A-Za-z0-9])?$/u;
 const ACCOUNT_ID_RE = /^[a-f0-9]{32}$/u;
 const DATABASE_ID_RE =
@@ -400,7 +400,7 @@ function cleanupPrivateDirectory(directory, createdDirectory) {
 }
 
 /**
- * Return the v048_d1_deletion_state_v1 SHA-256 for one exact schema-46 D1.
+ * Return the v048_d1_deletion_state_v1 SHA-256 for one exact schema-47 D1.
  *
  * `runWrangler(args)` must execute the already approved wrapper in its standard
  * argv mode and resolve with a bounded Buffer containing stdout. The caller owns

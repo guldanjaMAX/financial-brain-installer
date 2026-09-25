@@ -573,6 +573,10 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   // the control table explicit, but its rows are never exported; source and
   // target probes require it empty while the artifact opens and closes it.
   "source_original_result_family_recovery_state",
+  // Schema 47: page-level OCR receipts are permanent, content-free
+  // idempotency tombstones. Recovery must preserve them so a restored Brain
+  // cannot spend the same bounded model-call budget again.
+  "ocr_page_requests",
 ]);
 
 /**

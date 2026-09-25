@@ -406,7 +406,7 @@ function loadMigrations(executionPins) {
       pin.relative.startsWith(MIGRATION_PREFIX))
     .map(readPinnedMigration)
     .sort((left, right) => left.version - right.version);
-  if (migrations.length !== 46 || migrations.at(-1)?.version !== 46 ||
+  if (migrations.length !== 47 || migrations.at(-1)?.version !== 47 ||
       migrations.some((migration, index) => migration.version !== index + 1) ||
       new Set(migrations.map(({ name }) => name)).size !== migrations.length) {
     refuse("CF_DISPOSABLE_PROVIDER_MIGRATION_INVENTORY_INVALID");
@@ -417,7 +417,7 @@ function loadMigrations(executionPins) {
   return Object.freeze({
     migrations: Object.freeze(migrations),
     migrationInventorySha256: sha256(canonical(inventory)),
-    schemaVersion: 46,
+    schemaVersion: 47,
   });
 }
 
@@ -1042,7 +1042,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
     refuse("CF_DISPOSABLE_PROVIDER_DEPENDENCY_INVALID");
   }
   // Loading both inventories here binds preview output to the exact package
-  // that later supplies A2/A4 and schema 46, even though the A1/A3 bootstrap
+  // that later supplies A2/A4 and schema 47, even though the A1/A3 bootstrap
   // Worker itself is a deliberately tiny maintenance response.
   const moduleSet = loadModules(executionPins);
   for (const module of moduleSet.modules) module.bytes.fill(0);
@@ -1498,7 +1498,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
       const observed = await query(
         `SELECT
           (SELECT COUNT(*) FROM install_state) AS install_state_total_rows,
-          (SELECT COUNT(*) FROM install_state WHERE id = 1 AND schema_version = 46
+          (SELECT COUNT(*) FROM install_state WHERE id = 1 AND schema_version = 47
              AND client_slug = 'v048-field-proof' AND product_version = '0.4.8'
              AND gate_version = 5 AND ring = 'stable'
              AND vector_projection_status = 'verified') AS install_state_valid_rows,
@@ -1555,7 +1555,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
            vector_projection_bootstrap_cursor, vector_projection_bootstrap_high_water,
            source_original_retrieval_generation)
          VALUES (1,?,?,?,?,?,?,'verified',0,NULL,NULL,0)`,
-          ["v048-field-proof", "0.4.8", 46, 5, installedAt, "stable"],
+          ["v048-field-proof", "0.4.8", 47, 5, installedAt, "stable"],
         );
         state = await inspectSourcePostlude(query);
       }
@@ -1593,7 +1593,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
       const counts = validateD1CountRow(final.results[0], [
         "migrations", "schema_version", "documents", "chunks", "fts", "outbox",
       ]);
-      if (counts.migrations !== migrationSet.migrations.length || counts.schema_version !== 46 ||
+      if (counts.migrations !== migrationSet.migrations.length || counts.schema_version !== 47 ||
           counts.documents !== 0 || counts.chunks !== 0 || counts.fts !== 0 ||
           counts.outbox !== 0) {
         refuse("CF_DISPOSABLE_PROVIDER_D1_READBACK_INVALID");
@@ -1602,7 +1602,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
         provider_metadata: aggregateProviderMetadata(evidence),
         result: Object.freeze({
           migration_inventory_sha256: migrationSet.migrationInventorySha256,
-          schema_version: 46,
+          schema_version: 47,
         }),
       });
     };
@@ -1763,7 +1763,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
             (SELECT COUNT(*) FROM chunks_fts) AS fts,
             (SELECT COUNT(*) FROM vector_outbox) AS outbox,
             (SELECT COUNT(*) FROM install_state) AS install_state_total_rows,
-            (SELECT COUNT(*) FROM install_state WHERE id = 1 AND schema_version = 46
+            (SELECT COUNT(*) FROM install_state WHERE id = 1 AND schema_version = 47
                AND client_slug = 'v048-field-proof' AND product_version = '0.4.8'
                AND gate_version = 5 AND ring = 'stable'
                AND vector_projection_status = 'verified') AS install_state_valid_rows,
@@ -1790,7 +1790,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
           "owner_key_total_rows", "owner_key_valid_rows",
           "source_key_total_rows", "source_key_valid_rows", "equal_primary_key_rows",
         ]);
-        if (counts.migrations !== 46 || counts.schema_version !== 46 ||
+        if (counts.migrations !== 47 || counts.schema_version !== 47 ||
             counts.documents !== 0 || counts.chunks !== 0 || counts.fts !== 0 ||
             counts.outbox !== 0 || counts.install_state_total_rows !== 1 ||
             counts.install_state_valid_rows !== 1 || counts.owner_key_total_rows !== 1 ||
@@ -1840,7 +1840,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
           bindings_sha256: version.bindings_sha256,
           bootstrap_tag_sha256: settings.tag_sha256,
           resource: resourceSemantic(resource),
-          schema_version: checkedRole === "source" ? 46 : null,
+          schema_version: checkedRole === "source" ? 47 : null,
           user_tables: checkedRole === "source" ? null : 0,
           content_rows: 0,
           vector_count: 0,

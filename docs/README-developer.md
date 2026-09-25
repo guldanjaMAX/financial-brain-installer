@@ -6,7 +6,7 @@ Nothing runs on our infrastructure. Normal setup uses an owner-approved named
 Cloudflare browser profile in the owner's operating-system credential store; it
 does not create or copy an API token.
 
-**Status: unreleased 0.4.8/schema46 field candidate, held.** Provisioning,
+**Status: unreleased 0.4.8/schema47 field candidate, held.** Provisioning,
 retrieval, resumable ingest, guarded deletion, owner actions, exact entity
 scope, document grants, passkey observability, financial imports, provenance
 binding for eligible single-record local file ingests, bounded one-original
@@ -462,8 +462,8 @@ receipt with no ciphertext waits for its next seven-day replay window instead
 of looping or becoming a permanent hold. Provider 4xx and 5xx results, terminal
 model errors, empty text, malformed replies, and every other definite non-success remain
 model-started retryable receipts with no replay handoff. They permit one
-compare-and-swap replacement after a 60-second backoff. Migration 0049 records
-the last three model-call start timestamps and caps each page at 3 started calls
+compare-and-swap replacement after a 60-second backoff. Consolidated migration
+0047 records the last three model-call start timestamps and caps each page at 3 started calls
 in any rolling 24 hours. An exhausted page returns typed 425 evidence until the
 oldest start leaves that rolling window, then becomes eligible again rather
 than remaining held permanently. Rows from the initial fixed-anchor
@@ -1677,7 +1677,7 @@ apply.
 Preview acquires the source lease before reading the private manifest, source
 file, saved credential, or Brain state. Under that lease it reads the complete
 authenticated source and observation history, prepares the exact one-file
-ingest envelope, checks the current schema-46 Brain and vector state, and seals
+ingest envelope, checks the current schema-47 Brain and vector state, and seals
 a state-bound plan. It releases the lease without changing Brain data,
 configuration, source receipts, cursors, or removals. Public output excludes the
 local root, locator, private retrieval query, content hashes, document IDs,

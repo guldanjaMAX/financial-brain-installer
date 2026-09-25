@@ -1,21 +1,7 @@
--- 0047_ocr_page_idempotency
---
--- A page-level OCR request can finish inside Workers AI after the installer's
--- 60-second HTTP deadline. Retrying that POST without a durable receipt can
--- bill the owner twice for the same rendered page and return two independent
--- transcriptions. Reserve the opaque page request before inference, then move
--- it to an explicit in-flight state immediately before the model call. Only a
--- pre-call reservation may expire and be reclaimed automatically. An expired
--- in-flight row is held for review because billing is ambiguous.
---
--- A completed row keeps a permanent content-free tombstone. A bounded replay
--- handoff may accompany it as AES-GCM ciphertext whose key exists only in the
--- caller that submitted the page. The source acknowledges the receipt only
--- after the complete logical document is stored. A definite failed provider
--- call receives a short backoff, while every started call is retained in a
--- durable rolling budget capped at three starts per 24 hours. OCR plaintext
--- must still reach the complete-document credential gate before any durable
--- corpus write. No source locator, file name or document identity is stored.
+-- Test-only snapshot of the unshipped 0047-0049 OCR migration suffix.
+-- It lets the migration suite prove that the consolidated 0047 produces the
+-- same normalized sqlite_master rows without keeping 0048 or 0049 in the
+-- product migration inventory.
 
 CREATE TABLE IF NOT EXISTS ocr_page_requests (
   request_id       TEXT PRIMARY KEY
@@ -42,13 +28,6 @@ CREATE TABLE IF NOT EXISTS ocr_page_requests (
   replay_expires_at TEXT,
   replay_iv         TEXT,
   replay_ciphertext TEXT,
-  acknowledged_at TEXT,
-  reread_count INTEGER NOT NULL DEFAULT 0
-    CHECK (reread_count IN (0, 1)),
-  provider_failed_at TEXT,
-  model_call_count INTEGER NOT NULL DEFAULT 0
-    CHECK (model_call_count BETWEEN 0 AND 3),
-  model_call_window_started_at TEXT,
   CHECK (
     (status = 'pending' AND model_started_at IS NULL AND completed_at IS NULL
       AND response_status IS NULL AND response_json IS NULL)
@@ -72,3 +51,30 @@ CREATE TABLE IF NOT EXISTS ocr_page_requests (
 
 CREATE INDEX IF NOT EXISTS idx_ocr_page_requests_expiry
   ON ocr_page_requests(status, replay_expires_at);
+
+ALTER TABLE ocr_page_requests
+  ADD COLUMN acknowledged_at TEXT;
+
+ALTER TABLE ocr_page_requests
+  ADD COLUMN reread_count INTEGER NOT NULL DEFAULT 0
+    CHECK (reread_count IN (0, 1));
+
+ALTER TABLE ocr_page_requests
+  ADD COLUMN provider_failed_at TEXT;
+
+ALTER TABLE ocr_page_requests
+  ADD COLUMN model_call_count INTEGER NOT NULL DEFAULT 0
+    CHECK (model_call_count BETWEEN 0 AND 3);
+
+ALTER TABLE ocr_page_requests
+  ADD COLUMN model_call_window_started_at TEXT;
+
+UPDATE ocr_page_requests
+   SET model_call_count = CASE
+         WHEN model_started_at IS NULL THEN reread_count
+         ELSE reread_count + 1
+       END,
+       model_call_window_started_at = CASE
+         WHEN model_started_at IS NULL AND reread_count = 0 THEN NULL
+         ELSE COALESCE(model_started_at, started_at)
+       END;

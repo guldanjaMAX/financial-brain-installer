@@ -61,8 +61,6 @@ function ocrRouteDb() {
   for (const file of [
     "0002_llm_call_log.sql",
     "0047_ocr_page_idempotency.sql",
-    "0048_ocr_page_acknowledgement.sql",
-    "0049_ocr_page_retry_budget.sql",
   ]) {
     for (const statement of splitStatements(readFileSync(join(HERE, "..", "migrations", "d1", file), "utf8"))) {
       sqlite.exec(statement);
@@ -598,8 +596,6 @@ function stubOcr({ reply = () => pageText, model = "@cf/meta/llama-4-scout-17b-1
   for (const file of [
     "0002_llm_call_log.sql",
     "0047_ocr_page_idempotency.sql",
-    "0048_ocr_page_acknowledgement.sql",
-    "0049_ocr_page_retry_budget.sql",
   ]) {
     for (const statement of splitStatements(readFileSync(join(HERE, "..", "migrations", "d1", file), "utf8"))) {
       sqlite.exec(statement);

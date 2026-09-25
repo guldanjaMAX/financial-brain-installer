@@ -602,8 +602,8 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
     recoveredBrain.close();
   });
 
-  assert.match(sourceBrain.migrationFiles.at(-1), /^0049_/);
-  assert.match(recoveredBrain.migrationFiles.at(-1), /^0049_/);
+  assert.match(sourceBrain.migrationFiles.at(-1), /^0047_/);
+  assert.match(recoveredBrain.migrationFiles.at(-1), /^0047_/);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_receipts"), true);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolutions"), true);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_verifications"), false);

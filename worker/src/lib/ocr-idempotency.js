@@ -101,7 +101,7 @@ function modelCallBudget(row) {
     legacyAnchor = true;
   }
   if (legacyAnchor) {
-    // Migration 0049 originally stored only the fixed-window anchor. The exact
+    // The initial 0047 draft stored only the fixed-window anchor. The exact
     // intervening starts cannot be reconstructed, so retain the full count at
     // the latest receipt timestamp. This may delay a retry but cannot forget a
     // recent charged call. The next accepted start writes the exact array.

@@ -306,8 +306,8 @@ only a response hash, status, bounded numeric usage, source acknowledgement
 time, and bounded re-read count. It may also
 keep ciphertext that the matching replay key can open. The source acknowledges
 the page on that same receipt only after the full logical document family has
-been stored and reconciled. Migration 0048 adds that acknowledgement and the
-one-re-read bound to the original receipt. Until acknowledgement, cleanup
+been stored and reconciled. The consolidated migration 0047 includes that
+acknowledgement and the one-re-read bound on the original receipt. Until acknowledgement, cleanup
 never prunes the ciphertext,
 including after the former seven-day expiry, so a response that finishes after
 every client deadline remains replayable without a second model call or durable
@@ -328,8 +328,8 @@ a permanent hold. Provider 4xx and 5xx results, terminal model errors, empty
 text, malformed replies, and all
 other definite non-successes retain the model-started receipt but record that
 the call ended. They become eligible for one compare-and-swap replacement after
-a 60-second backoff, never a replayable completion. Migration 0049 durably
-retains the last three model-call start timestamps. A page can start at most 3
+a 60-second backoff, never a replayable completion. The same consolidated
+migration 0047 durably retains the last three model-call start timestamps. A page can start at most 3
 calls in any rolling 24 hours; after that it returns a typed 425 until the
 oldest start leaves that rolling window, and the load report counts held pages
 plainly. Rows from the initial fixed-anchor implementation retain their full

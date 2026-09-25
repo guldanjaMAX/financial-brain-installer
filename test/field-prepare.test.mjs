@@ -799,7 +799,7 @@ test("the generated checklist keeps offline proof separate from human field gate
   });
   assert.match(checklist, /Clean Windows owner profile/);
   assert.match(checklist, /Disposable Cloudflare Brain/);
-  assert.match(checklist, /schema 46/);
+  assert.match(checklist, /schema 47/);
   assert.match(checklist, /Plaid Sandbox through the deployed Brain/);
   assert.match(checklist, /QuickBooks Online Sandbox/);
   assert.match(checklist, /Runtime identity scheme: brain\.runtime-payload\.sha256\.v1/);

@@ -60,8 +60,6 @@ const routeDb = () => {
   for (const file of [
     "0002_llm_call_log.sql",
     "0047_ocr_page_idempotency.sql",
-    "0048_ocr_page_acknowledgement.sql",
-    "0049_ocr_page_retry_budget.sql",
   ]) {
     sqlite.exec(readFileSync(join(HERE, "..", "..", "migrations", "d1", file), "utf8"));
   }

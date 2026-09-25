@@ -71,6 +71,10 @@ CREATE TABLE d (w INT);`);
 /* ---- every migration, applied for real, in order ---- */
 const files = readdirSync(DIR).filter((f) => f.endsWith(".sql")).sort();
 check("migration files were found", files.length > 0, DIR);
+const ocrMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) >= 47);
+check("the unshipped OCR schema is one consolidated migration 0047",
+  ocrMigrationFiles.length === 1 && ocrMigrationFiles[0] === "0047_ocr_page_idempotency.sql",
+  JSON.stringify(ocrMigrationFiles));
 
 const db = new DatabaseSync(":memory:");
 let applied = 0;
@@ -82,6 +86,43 @@ for (const f of files) {
   }
 }
 check(`all ${applied} statements across ${files.length} files applied`, true);
+
+/* ---- consolidated 0047 is byte-shape equivalent to old 0047..0049 ---- */
+{
+  const beforeConsolidation = new DatabaseSync(":memory:");
+  for (const f of files.filter((name) => Number(name.slice(0, 4)) <= 46)) {
+    for (const statement of splitStatements(readFileSync(join(DIR, f), "utf-8"))) {
+      beforeConsolidation.exec(statement);
+    }
+  }
+  const oldOcrSuffix = readFileSync(
+    join(HERE, "fixtures", "ocr-page-schema-before-consolidation.sql"),
+    "utf-8",
+  );
+  for (const statement of splitStatements(oldOcrSuffix)) beforeConsolidation.exec(statement);
+
+  const normalizeSql = (sql) => sql === null ? null : sql
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/\s*([(),])\s*/g, "$1");
+  const normalizedMaster = (handle) => handle.prepare(
+    `SELECT type,name,tbl_name,sql
+       FROM sqlite_master
+      ORDER BY type,name,tbl_name`,
+  ).all().map((row) => ({
+    type: row.type,
+    name: row.name,
+    table: row.tbl_name,
+    sql: normalizeSql(row.sql),
+  }));
+  const oldRows = normalizedMaster(beforeConsolidation);
+  const currentRows = normalizedMaster(db);
+  check("fresh 0001-0047 sqlite_master matches the old 0001-0049 schema",
+    JSON.stringify(currentRows) === JSON.stringify(oldRows),
+    `current=${JSON.stringify(currentRows)} old=${JSON.stringify(oldRows)}`);
+  beforeConsolidation.close();
+}
 db.prepare(
   `INSERT INTO install_state
      (id, client_slug, product_version, schema_version, gate_version, installed_at, ring)
@@ -221,9 +262,9 @@ for (const t of [
       .every((column) => ocrRequestColumns.has(column)));
   check("0047 adds bounded encrypted-handoff cleanup support",
     names.has("idx_ocr_page_requests_expiry"));
-  check("0048 records source acknowledgement and caps expiry re-reads",
+  check("0047 records source acknowledgement and caps expiry re-reads",
     ocrRequestColumns.has("acknowledged_at") && ocrRequestColumns.has("reread_count"));
-  check("0049 adds the durable model-call retry budget fields",
+  check("0047 adds the durable model-call retry budget fields",
     ocrRequestColumns.has("provider_failed_at") &&
       ocrRequestColumns.has("model_call_count") &&
       ocrRequestColumns.has("model_call_window_started_at"));
