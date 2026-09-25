@@ -3561,6 +3561,31 @@ function missingSyncRunsTable(error) {
   return /no such table|does not exist/.test(message) && message.includes("sync_runs");
 }
 
+function missingCustomApiJobsTable(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return /no such table|does not exist/.test(message) && message.includes("custom_api_jobs");
+}
+
+async function activeCustomApiJobStarts(env, rows) {
+  const needsReceipt = (rows || []).some((row) =>
+    String(row?.kind || "").toLowerCase() === "custom_api" &&
+    String(row?.status || "").toLowerCase() === "indexing" &&
+    !Number.isFinite(timestampMs(row?.indexing_started_at)));
+  if (!needsReceipt) return new Map();
+  try {
+    const result = await env.DB.prepare(
+      `SELECT source,MIN(created_at) AS started_at
+         FROM custom_api_jobs
+        WHERE status IN ('staged','applying','promoting','promoted')
+        GROUP BY source`
+    ).all();
+    return new Map((result?.results || []).map((row) => [String(row.source), row.started_at]));
+  } catch (error) {
+    if (missingCustomApiJobsTable(error)) return new Map();
+    throw error;
+  }
+}
+
 /**
  * The source row says what the connector last reported; sync_runs says whether
  * an `indexing` report still belongs to a live attempt. Keeping this separate
@@ -3645,6 +3670,7 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
   } catch {
     return { gaps: [], unavailable: true };
   }
+  const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
 
   const allowed = allowedSources === null
     ? null
@@ -3663,7 +3689,10 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
     const last = s.last_ingest_at ? Date.parse(s.last_ingest_at) : NaN;
     const ageSec = Number.isFinite(last) ? Math.floor((now - last) / 1000) : null;
     const days = ageSec === null ? null : Math.floor(ageSec / 86400);
-    const operational = operationalFreshness(s, now);
+    const operational = operationalFreshness({
+      ...s,
+      indexing_started_at: s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null,
+    }, now);
 
     if (operational.state === "broken") {
       gaps.push(gapWithRemedy(s, "refresh", {
@@ -3765,6 +3794,7 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
   } catch {
     return { sources: [], unavailable: true };
   }
+  const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
   const latestRuns = new Map();
   try {
     let result;
@@ -3833,7 +3863,8 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
       const days = Number.isFinite(last) ? Math.floor((now - last) / 86400000) : null;
       const expected = Number(s.expected_refresh_seconds) || null;
       const automatable = AUTOMATABLE_SOURCE_KINDS.has(String(s.kind));
-      const operational = operationalFreshness(s, now);
+      const effectiveIndexingStartedAt = s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null;
+      const operational = operationalFreshness({ ...s, indexing_started_at: effectiveIndexingStartedAt }, now);
       let state = unregistered ? "unregistered" : "ok";
       let reason = unregistered ? "the source registry entry is missing" : operational.reason;
       if (!unregistered && operational.state) state = operational.state;
@@ -3851,8 +3882,8 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
         days_since_ingest: days,
         expected_every_days: expected ? Math.max(1, Math.round(expected / 86400)) : null,
         last_complete_sweep_at: s.last_complete_sweep_at || null,
-        indexing_started_at: Number.isFinite(timestampMs(s.indexing_started_at))
-          ? new Date(timestampMs(s.indexing_started_at)).toISOString()
+        indexing_started_at: Number.isFinite(timestampMs(effectiveIndexingStartedAt))
+          ? new Date(timestampMs(effectiveIndexingStartedAt)).toISOString()
           : null,
         hours_indexing: operational.indexingMs === null
           ? null
@@ -4422,6 +4453,12 @@ export async function sourceInventory(env, {
       .all();
   }
   const rawRows = Array.isArray(result?.results) ? result.results : [];
+  const activeCustomJobs = await activeCustomApiJobStarts(env, rawRows.map((row) => ({
+    name: row.name,
+    kind: row.kind,
+    status: row.status,
+    indexing_started_at: row.run_finished_at === null ? row.run_started_at : null,
+  })));
   const total = rawRows.length ? inventoryCount(rawRows[0].inventory_total) : 0;
   if (total > maxRows || rawRows.length > maxRows) {
     const error = new Error("source inventory exceeds the safe row limit");
@@ -4446,7 +4483,8 @@ export async function sourceInventory(env, {
       : null;
     const operational = operationalFreshness({
       ...row,
-      indexing_started_at: row.run_finished_at === null ? row.run_started_at : null,
+      indexing_started_at: (row.run_finished_at === null ? row.run_started_at : null) ??
+        activeCustomJobs.get(sourceId) ?? null,
     }, now);
     const automatable = AUTOMATABLE_SOURCE_KINDS.has(String(row.kind || "").toLowerCase());
     let state = registered ? "ok" : "unregistered";

@@ -103,8 +103,9 @@ sharing off. Open the key email, copy only the key, and run this one line:
 ```
 
 Clipboard mode is the Windows default. The command trims surrounding whitespace,
-writes only the declared Worker secret, clears the clipboard even if the write
-fails, and verifies only that the secret name exists. Wait for **Store key saved
+writes only the declared Worker secret, and clears the clipboard exactly once
+even when secret inventory fails, the name already exists, validation refuses,
+or the write fails. It verifies only that the secret name exists. Wait for **Store key saved
 in your Brain and cleared from the clipboard.** before turning screen sharing
 on again. If the clipboard is empty or cannot be read, copy only the key and run
 the same line again.
@@ -120,6 +121,11 @@ Follow the printed path exactly: **Workers & Pages → the named Worker → Sett
 → Variables and Secrets → Add → type Secret**. Paste the value only into
 Cloudflare's masked field. The command waits up to two minutes and verifies only
 that the declared name exists, never its value.
+
+For a deliberate dashboard replacement, add `--replace-key`. After saving the
+new masked value, type `REPLACED` at the terminal prompt. The command then reads
+the secret name back. A name that existed before the ceremony is never treated
+as proof that the value changed.
 
 macOS keeps the hidden terminal prompt. Turn screen sharing off before running:
 

@@ -17281,75 +17281,78 @@ export async function cmdConnectCustomApi(manifestPath, flags = {}, options = {}
     cf(`/accounts/${(await account()).id}/workers/scripts/${scriptName}/secrets`, {
       method: "PUT", body: { name, text, type: "secret_text" },
     }));
-  let names;
-  try { names = new Set(await listSecretNames()); } catch {
-    die("the Worker's secret names could not be inspected. No custom API key was written.");
-  }
   const replace = flags["replace-key"] === true;
   const platform = options.platform ?? process.platform;
   const dashboardEntry = flags["key-set-in-dashboard"] === true;
   const clipboardEntry = flags["from-clipboard"] === true || (platform === "win32" && !dashboardEntry);
+  if (clipboardEntry && platform !== "win32" && platform !== "darwin") {
+    die("clipboard entry is available only on Windows and macOS. Use --key-set-in-dashboard instead. Nothing was stored.");
+  }
+  const readClipboard = options.readClipboard ?? (() => readCustomApiClipboard({ platform }));
+  const clearClipboard = options.clearClipboard ?? (() => clearCustomApiClipboard({ platform }));
   let wrote = false;
-  if (!names.has(config.token_secret) || replace) {
-    if (dashboardEntry) {
-      info(`In Cloudflare, open Workers & Pages → ${scriptName} → Settings → Variables and Secrets → Add → type Secret.`);
-      info(`Enter the exact secret NAME ${config.token_secret}, paste its value only into Cloudflare's masked field, and save it.`);
-      info("Keep the masked Cloudflare field off the shared screen. This command will verify only the secret name, never its value.");
-      const wait = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
-      for (let attempt = 0; attempt < 24 && !names.has(config.token_secret); attempt++) {
-        await wait(5_000);
-        try { names = new Set(await listSecretNames()); } catch {
-          die("the Worker's secret names could not be inspected while waiting. No secret value was read.");
+  const credentialPhase = async () => {
+    let names;
+    try { names = new Set(await listSecretNames()); } catch {
+      die("the Worker's secret names could not be inspected. No custom API key was written.");
+    }
+    if (!names.has(config.token_secret) || replace) {
+      if (dashboardEntry) {
+        info(`In Cloudflare, open Workers & Pages → ${scriptName} → Settings → Variables and Secrets → Add or edit → type Secret.`);
+        info(`Enter the exact secret NAME ${config.token_secret}, paste its value only into Cloudflare's masked field, and save it.`);
+        info("Keep the masked Cloudflare field off the shared screen. This command will verify only the secret name, never its value.");
+        if (replace) {
+          const confirmReplacement = options.confirmDashboardReplacement ?? ask;
+          const confirmation = await confirmReplacement(
+            `After saving the replacement for ${config.token_secret}, type REPLACED to confirm that you pasted a new value`,
+            "",
+          );
+          if (String(confirmation || "").trim() !== "REPLACED") {
+            die("the dashboard replacement was not confirmed. The existing secret name is not proof that its value changed.");
+          }
+          try { names = new Set(await listSecretNames()); } catch {
+            die("the Worker's secret names could not be inspected after replacement confirmation. No secret value was read.");
+          }
+          if (!names.has(config.token_secret)) {
+            die(`Cloudflare did not list ${config.token_secret} after the confirmed replacement. The command never requested or handled the key value.`);
+          }
+          ok(`Worker secret replacement for ${config.token_secret} was owner-confirmed and its name was read back`);
+        } else {
+          const wait = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+          for (let attempt = 0; attempt < 24 && !names.has(config.token_secret); attempt++) {
+            await wait(5_000);
+            try { names = new Set(await listSecretNames()); } catch {
+              die("the Worker's secret names could not be inspected while waiting. No secret value was read.");
+            }
+          }
+          if (!names.has(config.token_secret)) {
+            die(`Cloudflare did not list ${config.token_secret} within 2 minutes. The command never requested or handled the key value.`);
+          }
+          ok(`Worker secret name ${config.token_secret} is present`);
         }
-      }
-      if (!names.has(config.token_secret)) {
-        die(`Cloudflare did not list ${config.token_secret} within 2 minutes. The command never requested or handled the key value.`);
-      }
-      ok(`Worker secret name ${config.token_secret} is present`);
-    } else if (clipboardEntry) {
-      if (platform !== "win32" && platform !== "darwin") {
-        die("clipboard entry is available only on Windows and macOS. Use --key-set-in-dashboard instead. Nothing was stored.");
-      }
-      const readClipboard = options.readClipboard ?? (() => readCustomApiClipboard({ platform }));
-      const clearClipboard = options.clearClipboard ?? (() => clearCustomApiClipboard({ platform }));
+      } else if (clipboardEntry) {
       let clipboardText;
       let failure = null;
-      let cleared = false;
       try {
-        try {
-          clipboardText = await readClipboard();
-        } catch {
-          failure = "The clipboard could not be read or was empty. Copy the key from the email and run the same command again. If needed, use --key-set-in-dashboard as the fallback. Nothing was stored.";
-        }
-        const token = typeof clipboardText === "string" ? clipboardText.trim() : "";
-        if (!failure && !token) {
-          failure = "The clipboard could not be read or was empty. Copy the key from the email and run the same command again. If needed, use --key-set-in-dashboard as the fallback. Nothing was stored.";
-        } else if (!failure && /\r|\n/.test(token)) {
-          failure = "The clipboard looks like more than one line. Copy only the key from the email and run the same command again. Nothing was stored.";
-        } else if (!failure && token.includes(" ")) {
-          failure = "The clipboard looks like prose instead of one key. Copy only the key from the email and run the same command again. Nothing was stored.";
-        } else if (!failure && (Buffer.byteLength(token, "utf8") > 2_048 || !/^[\x21-\x7e]+$/.test(token))) {
-          failure = "The clipboard did not contain a valid store key. It must be 1 to 2,048 printable ASCII bytes with no spaces. Nothing was stored.";
-        } else if (!failure) {
-          try { await putSecret(config.token_secret, token); } catch {
-            failure = "The custom API key could not be written to the Worker. The value was not printed or saved locally.";
-          }
-        }
-      } finally {
-        try {
-          await clearClipboard();
-          cleared = true;
-        } catch {
-          cleared = false;
+        clipboardText = await readClipboard();
+      } catch {
+        failure = "The clipboard could not be read or was empty. Copy the key from the email and run the same command again. If needed, use --key-set-in-dashboard as the fallback. Nothing was stored.";
+      }
+      const token = typeof clipboardText === "string" ? clipboardText.trim() : "";
+      if (!failure && !token) {
+        failure = "The clipboard could not be read or was empty. Copy the key from the email and run the same command again. If needed, use --key-set-in-dashboard as the fallback. Nothing was stored.";
+      } else if (!failure && /\r|\n/.test(token)) {
+        failure = "The clipboard looks like more than one line. Copy only the key from the email and run the same command again. Nothing was stored.";
+      } else if (!failure && token.includes(" ")) {
+        failure = "The clipboard looks like prose instead of one key. Copy only the key from the email and run the same command again. Nothing was stored.";
+      } else if (!failure && (Buffer.byteLength(token, "utf8") > 2_048 || !/^[\x21-\x7e]+$/.test(token))) {
+        failure = "The clipboard did not contain a valid store key. It must be 1 to 2,048 printable ASCII bytes with no spaces. Nothing was stored.";
+      } else if (!failure) {
+        try { await putSecret(config.token_secret, token); } catch {
+          failure = "The custom API key could not be written to the Worker. The value was not printed or saved locally.";
         }
       }
-      if (failure) {
-        if (!cleared) failure += " The clipboard also could not be cleared; clear it manually.";
-        die(failure);
-      }
-      if (!cleared) {
-        die("The store key was written to the Brain, but the clipboard could not be cleared. Clear the clipboard manually before continuing.");
-      }
+      if (failure) die(failure);
       try { names = new Set(await listSecretNames()); } catch {
         die("the custom API key write returned, but its secret name could not be read back. Do not treat the connection as ready.");
       }
@@ -17357,35 +17360,66 @@ export async function cmdConnectCustomApi(manifestPath, flags = {}, options = {}
         die("Cloudflare did not list the declared custom API secret after the write. Do not treat the connection as ready.");
       }
       wrote = true;
-      say("Store key saved in your Brain and cleared from the clipboard.");
+      } else {
+        const read = options.readSecret ?? readHiddenSecret;
+        let token;
+        try {
+          token = await read(`  ${config.display_name} bearer key (hidden): `, {
+            noun: "custom API key",
+            insecure: "this terminal cannot prompt securely. Rerun from an interactive terminal; the custom API key is never accepted as a flag or environment variable.",
+          });
+        } catch (error) {
+          die(String(error?.message || error));
+        }
+        if (typeof token !== "string" || token.length < 1 || token.length > 2_048 || /[\u0000-\u001f\u007f]/.test(token)) {
+          die("the custom API key was empty, too long, or contained a control character. Nothing was written.");
+        }
+        try { await putSecret(config.token_secret, token); } catch {
+          die("the custom API key could not be written to the Worker. The value was not printed or saved locally.");
+        }
+        try { names = new Set(await listSecretNames()); } catch {
+          die("the custom API key write returned, but its secret name could not be read back. Do not treat the connection as ready.");
+        }
+        if (!names.has(config.token_secret)) {
+          die("Cloudflare did not list the declared custom API secret after the write. Do not treat the connection as ready.");
+        }
+        wrote = true;
+        ok(`custom API key stored as Worker secret ${config.token_secret}`);
+      }
     } else {
-      const read = options.readSecret ?? readHiddenSecret;
-      let token;
-      try {
-        token = await read(`  ${config.display_name} bearer key (hidden): `, {
-          noun: "custom API key",
-          insecure: "this terminal cannot prompt securely. Rerun from an interactive terminal; the custom API key is never accepted as a flag or environment variable.",
-        });
-      } catch (error) {
-        die(String(error?.message || error));
-      }
-      if (typeof token !== "string" || token.length < 1 || token.length > 2_048 || /[\u0000-\u001f\u007f]/.test(token)) {
-        die("the custom API key was empty, too long, or contained a control character. Nothing was written.");
-      }
-      try { await putSecret(config.token_secret, token); } catch {
-        die("the custom API key could not be written to the Worker. The value was not printed or saved locally.");
-      }
-      try { names = new Set(await listSecretNames()); } catch {
-        die("the custom API key write returned, but its secret name could not be read back. Do not treat the connection as ready.");
-      }
-      if (!names.has(config.token_secret)) {
-        die("Cloudflare did not list the declared custom API secret after the write. Do not treat the connection as ready.");
-      }
-      wrote = true;
-      ok(`custom API key stored as Worker secret ${config.token_secret}`);
+      ok(`Worker secret ${config.token_secret} is already present; nothing was prompted or written`);
     }
+  };
+
+  if (clipboardEntry) {
+    let credentialError = null;
+    let cleared = false;
+    try {
+      await credentialPhase();
+    } catch (error) {
+      credentialError = error;
+    } finally {
+      try {
+        await clearClipboard();
+        cleared = true;
+      } catch {
+        cleared = false;
+      }
+    }
+    if (credentialError) {
+      if (!cleared && credentialError instanceof Error) {
+        credentialError.message += " The clipboard also could not be cleared; clear it manually.";
+      }
+      throw credentialError;
+    }
+    if (!cleared) {
+      die(wrote
+        ? "The store key was written to the Brain, but the clipboard could not be cleared. Clear the clipboard manually before continuing."
+        : "The clipboard could not be cleared. Clear it manually before continuing.");
+    }
+    if (wrote) say("Store key saved in your Brain and cleared from the clipboard.");
   } else {
-    ok(`Worker secret ${config.token_secret} is already present; nothing was prompted or written`);
+    await credentialPhase();
   }
 
   // Make the source visible before its first cron tick. Failure here does not

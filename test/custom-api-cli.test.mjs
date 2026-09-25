@@ -163,6 +163,56 @@ test("connect does not prompt or rewrite an existing secret", async (t) => {
   assert.equal(result.output.includes(TOKEN), false);
 });
 
+test("clipboard mode clears exactly once when the initial secret inventory fails", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "brain-custom-api-clipboard-inventory-failure-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "brain.manifest.json");
+  writeFileSync(path, JSON.stringify(manifest()));
+  let inventories = 0;
+  let reads = 0;
+  let writes = 0;
+  let clears = 0;
+  const result = await withCapturedFailure(() => cmdConnectCustomApi(path, { "from-clipboard": true }, {
+    platform: "darwin",
+    listWorkerSecretNames: async () => { inventories++; throw new Error("synthetic inventory failure"); },
+    putWorkerSecret: async () => { writes++; },
+    readClipboard: async () => { reads++; return TOKEN; },
+    clearClipboard: async () => { clears++; },
+  }));
+  assert.equal(inventories, 1, "the failing inventory decision point was reached");
+  assert.equal(reads, 0);
+  assert.equal(writes, 0);
+  assert.equal(clears, 1, "the copied value was cleared across the pre-read failure");
+  assert.equal(result.error.message.includes(TOKEN), false);
+  assert.equal(result.output.includes(TOKEN), false);
+});
+
+test("clipboard mode clears exactly once when the declared secret already exists", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "brain-custom-api-clipboard-existing-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "brain.manifest.json");
+  writeFileSync(path, JSON.stringify(manifest()));
+  let inventories = 0;
+  let reads = 0;
+  let writes = 0;
+  let clears = 0;
+  const result = await withCapturedOutput(() => cmdConnectCustomApi(path, { "from-clipboard": true }, {
+    platform: "darwin",
+    listWorkerSecretNames: async () => { inventories++; return ["STORE_DASHBOARD_TOKEN"]; },
+    putWorkerSecret: async () => { writes++; },
+    readClipboard: async () => { reads++; return TOKEN; },
+    clearClipboard: async () => { clears++; },
+    resolveAdminKey: () => "fixture-admin-key",
+    resolveBaseUrl: async () => "https://fixture.invalid",
+    postSourceExpectation: async () => {},
+  }));
+  assert.equal(inventories, 1, "the already-present decision point was reached");
+  assert.equal(reads, 0);
+  assert.equal(writes, 0);
+  assert.equal(clears, 1, "the copied value was cleared even though no write was needed");
+  assert.equal(result.output.includes(TOKEN), false);
+});
+
 test("Windows defaults to clipboard entry, writes only the declared secret, clears, and verifies its name", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "brain-custom-api-windows-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -375,6 +425,33 @@ test("the dashboard flag remains an explicit fallback on Windows", async (t) => 
   assert.equal(inventories, 2, "the declared name was re-read after dashboard entry");
   assert.match(result.output, /Workers & Pages.*fixture-brain.*Settings.*Variables and Secrets.*Add.*Secret/s);
   assert.match(result.output, /STORE_DASHBOARD_TOKEN/);
+});
+
+test("dashboard replacement requires a positive post-paste confirmation", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "brain-custom-api-dashboard-replacement-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "brain.manifest.json");
+  writeFileSync(path, JSON.stringify(manifest()));
+  let inventories = 0;
+  let confirmations = 0;
+  let writes = 0;
+  const result = await withCapturedOutput(() => cmdConnectCustomApi(path, {
+    "replace-key": true,
+    "key-set-in-dashboard": true,
+  }, {
+    platform: "win32",
+    listWorkerSecretNames: async () => { inventories++; return ["STORE_DASHBOARD_TOKEN"]; },
+    confirmDashboardReplacement: async () => { confirmations++; return "REPLACED"; },
+    putWorkerSecret: async () => { writes++; },
+    resolveAdminKey: () => "fixture-admin-key",
+    resolveBaseUrl: async () => "https://fixture.invalid",
+    postSourceExpectation: async () => {},
+  }));
+  assert.equal(confirmations, 1, "the replacement confirmation decision point was reached");
+  assert.equal(inventories, 2, "the confirmed replacement name was read back after the ceremony");
+  assert.equal(writes, 0);
+  assert.match(result.output, /replacement.*confirmed/i);
+  assert.equal(result.output.includes(TOKEN), false);
 });
 
 test("manual dry run calls only the authenticated Brain route and renders aggregate output", async (t) => {

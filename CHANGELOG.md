@@ -33,7 +33,14 @@ asset publication.
   Monthly summaries cover every store, and per-store sales, inventory, and cost
   documents stay bounded. The preview names every endpoint's row,
   readable-document, and refused-row counts. The 10,000-row ceiling refuses an
-  oversized endpoint without changing it. Saved data and meaning-search
+  oversized endpoint without changing it. A refused known row now keeps its
+  last verified value visibly marked as not refreshed instead of disappearing,
+  and a wholly refused pull leaves the last good snapshot current. Invalid
+  sales months are refused before a job starts. Superseded document versions
+  are removed in bounded cleanup passes so old vectors cannot crowd current
+  evidence out of meaning search. Clipboard entry clears copied material even
+  when inventory fails or the secret name already exists, and dashboard key
+  replacement requires an explicit post-paste confirmation. Saved data and meaning-search
   readiness are reported separately so an owner question never races indexing.
   To check: preview the first pull with `brain custom-api <manifest> --dry-run`,
   run the first pull immediately, wait for meaning search to be ready, then

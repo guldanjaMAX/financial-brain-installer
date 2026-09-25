@@ -35,13 +35,14 @@ CREATE TABLE IF NOT EXISTS custom_api_jobs (
   stats_json             TEXT NOT NULL CHECK (json_valid(stats_json) AND json_type(stats_json) = 'object'),
   created_at             TEXT NOT NULL,
   verified_at            TEXT,
+  cleanup_documents_queued INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_documents_queued >= 0),
   CHECK (next_slice <= total_slices),
   CHECK (length(job_hash) = 64 AND job_hash NOT GLOB '*[^a-f0-9]*'),
   CHECK ((status IN ('promoted','verified')) = (verified_at IS NOT NULL))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_api_jobs_one_active
-  ON custom_api_jobs (source) WHERE status IN ('staged','applying','promoting','promoted','failed');
+  ON custom_api_jobs (source) WHERE status IN ('staged','applying','promoting','promoted');
 
 CREATE INDEX IF NOT EXISTS idx_custom_api_jobs_verified
   ON custom_api_jobs (source, verified_at DESC) WHERE status = 'verified';

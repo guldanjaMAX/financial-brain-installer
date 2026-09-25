@@ -1259,8 +1259,13 @@ Read this before scoping an engagement.
 - **The custom business API source is locally proven only.** Its declarative
   Worker path, strict HTTPS boundary, durable checkpointed job, verified-only
   full-snapshot body-hash skip, row-level refusal counts, retries, compact D1
-  row history, freshness, and platform-specific secret ceremony have local mock
-  and SQLite coverage. The public defaults allow a 30-second request, 5 MiB
+  row history, durable active-job freshness, and platform-specific secret ceremony have local mock
+  and SQLite coverage. Refused known keys retain their prior verified row with
+  an explicit not-refreshed marker, while an all-refused pull leaves the current
+  pointer unchanged and exposes a source refusal. Sales months and fully stamped
+  documents are validated before staging. Promotion cleans obsolete physical
+  document versions through bounded guarded deletes before the job settles, so
+  their queued vector deletes run ahead of upserts. The public defaults allow a 30-second request, 5 MiB
   response, and exactly 10,000 rows per endpoint. A 10,001st row refuses that
   endpoint without staging the snapshot. The 1,612/407/1,721-row fixture stays
   below 600 D1 statements per invocation and resumes after every slice

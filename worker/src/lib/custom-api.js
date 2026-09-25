@@ -10,6 +10,8 @@
 import { scan as scanSecrets } from "./secret-scan.js";
 import { restampFirstPartySourceProvenance } from "./provenance-receipt.js";
 import { backendOf, D1, storeFor } from "./store.js";
+import { ingestEnvelopeValidationError } from "./ingest-envelope.js";
+import { forget } from "./store-d1.js";
 import {
   currentCustomApiDocumentSql, customApiVersionedSourceId,
 } from "./custom-api-visibility.js";
@@ -44,6 +46,7 @@ const ROW_CHUNK_SIZE = 50;
 const ROW_CHUNK_MAX_BYTES = 64 * 1024;
 const MAX_JOB_STAGE_STATEMENTS = 500;
 const ROW_GC_SLICE_SIZE = 25;
+const DOCUMENT_GC_SLICE_SIZE = 25;
 
 const isPlainObject = (value) => value !== null && typeof value === "object" &&
   !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
@@ -356,6 +359,9 @@ function validateKnownRow(row, endpoint) {
     throw new CustomApiError("ROW_REFUSED", message, { endpoint: endpoint.name, refusalReason: reason });
   };
   if (endpoint.name === "sales") {
+    if (typeof row.period !== "string" || !/^\d{4}-(?:0[1-9]|1[0-2])-01$/.test(row.period)) {
+      refuse("invalid_period", "custom API sales row had an invalid monthly period");
+    }
     if (!currencyIsValid(row.net_sales)) refuse("invalid_net_sales", "custom API sales row had missing or invalid net_sales");
     for (const field of ["transactions", "units", "puppies_sold"]) {
       if (Object.hasOwn(row, field) && (!Number.isSafeInteger(row[field]))) {
@@ -464,6 +470,8 @@ async function fetchEndpoint(config, endpoint, token, dependencies) {
   let responseBytes = 0;
   let refusedRows = 0;
   const refusalReasons = {};
+  const refused = [];
+  const identities = new Set();
   while (url) {
     assertAllowedUrl(url, config, endpoint);
     if (visited.has(url.href) || visited.size >= config.max_pages) {
@@ -483,13 +491,20 @@ async function fetchEndpoint(config, endpoint, token, dependencies) {
       }
       try {
         const row = normalizeRow(value, endpoint, token);
+        const key = rowIdentity(row, endpoint);
+        if (identities.has(key)) {
+          throw new CustomApiError("DUPLICATE_ROW_KEY", "custom API returned the same row identity more than once", { endpoint: endpoint.name });
+        }
+        identities.add(key);
         validateKnownRow(row, endpoint);
-        rows.push(row);
+        rows.push({ row_key: key, row });
       } catch (error) {
         if (error instanceof CustomApiError && error.code === "ROW_REFUSED") {
           refusedRows++;
           const reason = error.refusalReason || "invalid_known_field";
           refusalReasons[reason] = Number(refusalReasons[reason] || 0) + 1;
+          const row = normalizeRow(value, endpoint, token);
+          refused.push({ row_key: rowIdentity(row, endpoint), reason });
           continue;
         }
         throw error;
@@ -497,15 +512,9 @@ async function fetchEndpoint(config, endpoint, token, dependencies) {
     }
     url = shaped.next;
   }
-  const identities = new Set();
   const keyed = [];
-  for (const row of rows) {
-    const key = rowIdentity(row, endpoint);
-    if (identities.has(key)) {
-      throw new CustomApiError("DUPLICATE_ROW_KEY", "custom API returned the same row identity more than once", { endpoint: endpoint.name });
-    }
-    identities.add(key);
-    keyed.push({ row_key: key, row, row_hash: await sha256(canonicalJson(row)) });
+  for (const item of rows) {
+    keyed.push({ ...item, row_hash: await sha256(canonicalJson(item.row)) });
   }
   return {
     rows: keyed,
@@ -514,6 +523,7 @@ async function fetchEndpoint(config, endpoint, token, dependencies) {
     rows_received: rows.length + refusedRows,
     refused_rows: refusedRows,
     refusal_reasons: Object.freeze({ ...refusalReasons }),
+    refused: Object.freeze(refused.map((item) => Object.freeze({ ...item }))),
   };
 }
 
@@ -704,6 +714,7 @@ function buildDocuments(config, endpoint, rows, priorPresentRows, fetchedAt, res
 
 function planEndpoint(config, endpoint, fetched, priorRows, fetchedAt) {
   const prior = new Map((priorRows || []).map((item) => [String(item.row_key), item]));
+  const refused = new Map((fetched.refused || []).map((item) => [String(item.row_key), item.reason]));
   const rowChanges = fetched.rows.map((item) => ({
     ...item,
     prior_hash: prior.get(item.row_key)?.row_hash || null,
@@ -722,8 +733,21 @@ function planEndpoint(config, endpoint, fetched, priorRows, fetchedAt) {
           : "updated",
   }));
   const present = new Set(rowChanges.map((item) => item.row_key));
+  const carriedRefused = [...refused.entries()]
+    .filter(([rowKey]) => !present.has(rowKey) && prior.get(rowKey)?.present !== false && isPlainObject(prior.get(rowKey)?.row))
+    .map(([rowKey, reason]) => ({
+      ...prior.get(rowKey),
+      row_key: rowKey,
+      row_hash: String(prior.get(rowKey).row_hash),
+      row: prior.get(rowKey).row,
+      action: "unchanged_refused",
+      prior_revision: Number(prior.get(rowKey).revision || 0),
+      prior_hash: String(prior.get(rowKey).row_hash),
+      refresh_status: "not refreshed (refused)",
+      refusal_reason: reason,
+    }));
   const retained = [...prior.values()]
-    .filter((item) => !present.has(String(item.row_key)) && isPlainObject(item.row))
+    .filter((item) => !present.has(String(item.row_key)) && !refused.has(String(item.row_key)) && isPlainObject(item.row))
     .map((item) => ({
       ...item,
       row_key: String(item.row_key), row_hash: String(item.row_hash), row: item.row,
@@ -734,12 +758,18 @@ function planEndpoint(config, endpoint, fetched, priorRows, fetchedAt) {
   const { documents, currentLogicalSourceIds } = buildDocuments(
     config,
     endpoint,
-    rowChanges,
+    [...rowChanges, ...carriedRefused],
     priorPresent,
     fetchedAt,
     fetched.response_hash,
   );
-  return { rowChanges: [...rowChanges, ...retained], retained, documents, currentLogicalSourceIds };
+  return {
+    rowChanges: [...rowChanges, ...carriedRefused, ...retained],
+    retained,
+    carriedRefused,
+    documents,
+    currentLogicalSourceIds,
+  };
 }
 
 export async function runCustomApiPull(rawConfig, {
@@ -768,15 +798,17 @@ export async function runCustomApiPull(rawConfig, {
   let documents = 0;
   let retained = 0;
   let refusedRows = 0;
+  let acceptedRows = 0;
   const endpointResults = [];
   const planned = [];
   for (const endpoint of config.endpoints) {
     logger.info(`custom API: fetching ${endpoint.name}`);
     const fetched = await fetchEndpoint(config, endpoint, token, { fetchImpl, sleep });
+    acceptedRows += fetched.rows.length;
     const priorResponseHash = typeof persistence.loadResponseHash === "function"
       ? await persistence.loadResponseHash({ source: config.source, endpoint: endpoint.name })
       : null;
-    if (priorResponseHash === fetched.response_hash) {
+    if (fetched.refused_rows === 0 && priorResponseHash === fetched.response_hash) {
       total.unchanged += fetched.rows.length;
       refusedRows += fetched.refused_rows;
       endpointResults.push(Object.freeze({
@@ -813,6 +845,7 @@ export async function runCustomApiPull(rawConfig, {
       }),
       documents: plan.documents.length,
       retained_missing_rows: plan.retained.length,
+      rows_carried_refused: plan.carriedRefused.length,
       body_unchanged: false,
     }));
     planned.push({ endpoint, fetched, plan });
@@ -826,6 +859,16 @@ export async function runCustomApiPull(rawConfig, {
         responseHash: fetched.response_hash,
       });
     }
+  }
+  if (acceptedRows === 0 && refusedRows > 0) {
+    return Object.freeze({
+      status: "refused", dry_run: dryRun, source: config.source,
+      endpoints: config.endpoints.length, rows: Object.freeze(total), documents: 0,
+      refused_rows: refusedRows, endpoint_results: Object.freeze(endpointResults),
+      retained_missing_rows: 0, fetched_at: fetchedAt, saved: false,
+      meaning_search_ready: false,
+      next_pull_at: new Date(Date.parse(fetchedAt) + config.cadence_seconds * 1000).toISOString(),
+    });
   }
   if (!dryRun && typeof persistence.stageJob === "function") {
     const verified = typeof persistence.loadVerifiedSnapshot === "function"
@@ -904,6 +947,8 @@ function chunkRows(values) {
 /** D1 adapter kept here so scheduled and manual runs share one checkpointed writer. */
 export function customApiD1Persistence(env, hooks = {}) {
   const ingestDocument = hooks.ingestDocument ?? (async (envelope) => storeFor(env).ingest(env, envelope));
+  const forgetDocuments = hooks.forgetDocuments ?? (async (docUids) =>
+    forget(env, { docUids, dryRun: false }));
 
   const parseJob = (row) => {
     if (!row) return null;
@@ -918,7 +963,8 @@ export function customApiD1Persistence(env, hooks = {}) {
     return {
       job_id: String(row.job_id), source: String(row.source), fetched_at: String(row.fetched_at),
       status: String(row.status), next_slice: Number(row.next_slice), total_slices: Number(row.total_slices),
-      job_hash: String(row.job_hash), stats, response_hashes: responseHashes,
+      job_hash: String(row.job_hash), cleanup_documents_queued: Number(row.cleanup_documents_queued || 0),
+      stats, response_hashes: responseHashes,
     };
   };
 
@@ -939,9 +985,8 @@ export function customApiD1Persistence(env, hooks = {}) {
     fetched_at: job.fetched_at,
     job_id: job.job_id, job_phase: "verified", saved: true,
     meaning_search_ready: await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM vector_outbox o
-        JOIN chunks c ON c.chunk_uid=o.chunk_uid WHERE c.source=?1`
-    ).bind(job.source).first().then((row) => Number(row?.n || 0) === 0),
+      "SELECT COUNT(*) AS n FROM vector_outbox"
+    ).first().then((row) => Number(row?.n || 0) === 0),
   });
 
   const collectPriorRowChunks = async (job) => {
@@ -950,6 +995,40 @@ export function customApiD1Persistence(env, hooks = {}) {
     ).bind(job.source).first();
     if (pointer?.job_id !== job.job_id) {
       throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API current-job pointer did not read back exactly");
+    }
+    const staleResult = await env.DB.prepare(
+      `SELECT d.doc_uid
+         FROM documents d
+        WHERE d.source=?1 AND d.deleted_at IS NULL
+          AND CASE WHEN json_valid(d.meta) THEN json_extract(d.meta,'$.connector') END='custom_api'
+          AND NOT EXISTS (
+            SELECT 1 FROM custom_api_document_versions v
+             WHERE v.source=?1 AND v.job_id=?2 AND v.document_source_id=d.source_id
+          )
+        ORDER BY d.doc_uid LIMIT ?3`
+    ).bind(job.source, job.job_id, DOCUMENT_GC_SLICE_SIZE).all();
+    const staleDocUids = (staleResult?.results || []).map((row) => String(row.doc_uid));
+    if (staleDocUids.length) {
+      const forgotten = await forgetDocuments(staleDocUids);
+      if (Number(forgotten?.documents) !== staleDocUids.length || forgotten?.dry_run !== false) {
+        throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API obsolete document cleanup did not queue exactly");
+      }
+      const expectedQueued = Number(job.cleanup_documents_queued || 0) + staleDocUids.length;
+      await env.DB.prepare(
+        `UPDATE custom_api_jobs SET cleanup_documents_queued=?2
+          WHERE job_id=?1 AND status='promoted' AND cleanup_documents_queued=?3`
+      ).bind(job.job_id, expectedQueued, Number(job.cleanup_documents_queued || 0)).run();
+      const tracked = await env.DB.prepare(
+        "SELECT cleanup_documents_queued FROM custom_api_jobs WHERE job_id=?1 AND status='promoted'"
+      ).bind(job.job_id).first();
+      if (Number(tracked?.cleanup_documents_queued) !== expectedQueued) {
+        throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API obsolete document cleanup progress did not read back exactly");
+      }
+      await hooks.afterDocumentCleanupSlice?.({ jobId: job.job_id, queued: staleDocUids.length, totalQueued: expectedQueued });
+      return progress({ ...job, cleanup_documents_queued: expectedQueued }, {
+        job_phase: "collecting_documents", saved: true,
+        cleanup_documents_queued: expectedQueued,
+      });
     }
     await env.DB.prepare(
       `DELETE FROM custom_api_row_chunks
@@ -1059,26 +1138,28 @@ export function customApiD1Persistence(env, hooks = {}) {
 
     async loadActiveJob({ source }) {
       return parseJob(await env.DB.prepare(
-        `SELECT job_id,source,fetched_at,status,next_slice,total_slices,job_hash,stats_json,response_hashes_json
+        `SELECT job_id,source,fetched_at,status,next_slice,total_slices,job_hash,stats_json,response_hashes_json,
+                cleanup_documents_queued
            FROM custom_api_jobs
-          WHERE source=?1 AND status IN ('staged','applying','promoting','promoted','failed')
+          WHERE source=?1 AND status IN ('staged','applying','promoting','promoted')
           ORDER BY created_at DESC,rowid DESC LIMIT 1`
       ).bind(source).first());
     },
 
     async loadVerifiedSnapshot({ source }) {
       return parseJob(await env.DB.prepare(
-        `SELECT job_id,source,fetched_at,status,next_slice,total_slices,job_hash,stats_json,response_hashes_json
+        `SELECT job_id,source,fetched_at,status,next_slice,total_slices,job_hash,stats_json,response_hashes_json,
+                cleanup_documents_queued
            FROM custom_api_jobs
           WHERE job_id=(SELECT job_id FROM custom_api_current_jobs WHERE source=?1)`
       ).bind(source).first());
     },
 
     async meaningSearchReady({ source }) {
+      void source;
       const row = await env.DB.prepare(
-        `SELECT COUNT(*) AS n FROM vector_outbox o
-          JOIN chunks c ON c.chunk_uid=o.chunk_uid WHERE c.source=?1`
-      ).bind(source).first();
+        "SELECT COUNT(*) AS n FROM vector_outbox"
+      ).first();
       return Number(row?.n || 0) === 0;
     },
 
@@ -1110,6 +1191,10 @@ export function customApiD1Persistence(env, hooks = {}) {
               last_seen_at: present ? fetchedAt : (item.last_seen_at || item.updated_at || fetchedAt),
               present,
               history_hashes: history,
+              ...(item.action === "unchanged_refused" ? {
+                refresh_status: item.refresh_status,
+                refusal_reason: item.refusal_reason,
+              } : {}),
             };
           })
           .sort((a, b) => a.row_key.localeCompare(b.row_key));
@@ -1120,7 +1205,7 @@ export function customApiD1Persistence(env, hooks = {}) {
         for (const document of plan.documents) {
           const logicalSourceId = document.source_id;
           const documentSourceId = customApiVersionedSourceId(logicalSourceId, jobId);
-          const payload = canonicalJson({
+          const unstamped = {
             ...document,
             source_id: documentSourceId,
             metadata: {
@@ -1128,7 +1213,19 @@ export function customApiD1Persistence(env, hooks = {}) {
               custom_api_job_id: jobId,
               custom_api_source_id: logicalSourceId,
             },
+          };
+          const stagedEnvelope = restampFirstPartySourceProvenance(unstamped, {
+            textSource: "native", textReliable: true, sourceType: source,
           });
+          const validationError = ingestEnvelopeValidationError(stagedEnvelope);
+          if (validationError) {
+            throw new CustomApiError(
+              "INVALID_RESPONSE",
+              `custom API document failed the storage contract: ${validationError}`,
+              { endpoint: endpoint.name },
+            );
+          }
+          const payload = canonicalJson(stagedEnvelope);
           documentSlices.push({ kind: "document", endpoint: endpoint.name, target: JSON.parse(payload).source_id, payload });
           changedDocumentVersions.set(logicalSourceId, documentSourceId);
         }
@@ -1245,11 +1342,22 @@ export function customApiD1Persistence(env, hooks = {}) {
           }
           let document;
           try { document = JSON.parse(slice.payload_json); } catch { document = null; }
-          if (!isPlainObject(document)) throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API document slice could not be parsed");
-          const envelope = restampFirstPartySourceProvenance(document, {
-            textSource: "native", textReliable: true, sourceType: job.source,
-          });
-          await ingestDocument(envelope);
+          const validationError = isPlainObject(document)
+            ? ingestEnvelopeValidationError(document)
+            : "ingest body must be a document object";
+          if (validationError) {
+            await env.DB.prepare(
+              `UPDATE custom_api_jobs SET status='failed'
+                WHERE job_id=?1 AND status IN ('staged','applying','promoting')`
+            ).bind(job.job_id).run();
+            const failed = await env.DB.prepare("SELECT status FROM custom_api_jobs WHERE job_id=?1").bind(job.job_id).first();
+            if (failed?.status !== "failed") {
+              throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API invalid staged job could not be failed safely");
+            }
+            await hooks.afterJobFailed?.({ jobId: job.job_id, sliceIndex: job.next_slice });
+            throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", `staged custom API document is invalid: ${validationError}`);
+          }
+          await ingestDocument(document);
           const stored = await env.DB.prepare(
             "SELECT meta FROM documents WHERE source=?1 AND source_id=?2 AND deleted_at IS NULL"
           ).bind(job.source, slice.target_key).first();
@@ -1500,6 +1608,9 @@ export async function runCustomApiWorker(env, options = {}) {
       if (result.status === "completed" && result.saved !== false) {
         await setSourceState(env, config, "ready", { at: result.fetched_at });
         await releaseRunLease(env, config, lease.token, { successAt: result.fetched_at });
+      } else if (result.status === "refused") {
+        await setSourceState(env, config, "error", { at: result.fetched_at, message: "INPUT_REFUSED" });
+        await releaseRunLease(env, config, lease.token);
       } else {
         await releaseRunLease(env, config, lease.token);
       }
