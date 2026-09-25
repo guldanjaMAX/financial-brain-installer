@@ -41,6 +41,7 @@ import {
   canonicalOcrInput,
   claimOcrPageRequest,
   completeOcrPageRequest,
+  recordRetryableOcrPageFailure,
   releaseOcrPageRequest,
   ocrPageReplayKey,
   ocrPageRequestId,
@@ -286,10 +287,11 @@ export async function handleOcr(env, request, { now = () => new Date() } = {}) {
       request_id: requestId,
     };
     try {
-      // A provider error can arrive after billable work. Seal a content-free
-      // completion receipt rather than guessing that a new attempt is free.
-      await completeOcrPageRequest(env.DB, {
-        requestId, inputSha256, ownerToken, status: 502, body: responseBody, replayKey, now: now(),
+      // A provider error can arrive after billable work. Keep the model-start
+      // evidence and its bounded ambiguity window, but never make a failed
+      // response replayable or mistake it for a completed transcription.
+      await recordRetryableOcrPageFailure(env.DB, {
+        requestId, inputSha256, ownerToken, now: now(),
       });
     } catch {
       return jsonResponse({

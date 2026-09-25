@@ -299,9 +299,11 @@ page identity. That key is not persisted and cannot be derived from the durable
 request ID alone, but a later source pass over the same page can reproduce it.
 Owner image uploads derive their replay key from that same private page
 identity, so the same upload can recover after a later ingest failure even if
-the Brain admin key rotates. A completion keeps a permanent, content-free,
-identity-bearing tombstone with only a response hash, status, bounded numeric
-usage, source acknowledgement time, and bounded re-read count. It may also
+the Brain admin key rotates. Only a verified 200 response with nonblank
+transcription text bound to the exact request ID becomes a completion. That
+completion keeps a permanent, content-free, identity-bearing tombstone with
+only a response hash, status, bounded numeric usage, source acknowledgement
+time, and bounded re-read count. It may also
 keep ciphertext that the matching replay key can open. The source acknowledges
 the page on that same receipt only after the full logical document family has
 been stored and reconciled. Migration 0048 adds that acknowledgement and the
@@ -319,7 +321,12 @@ installer reports in its load summary. Its fresh ciphertext remains until a
 fresh source acknowledgement. Owner upload carries the opaque request ID in
 its private content-free intent and acknowledges only after exact ingest and
 finalization readback. A replacement with no ciphertext waits for the next
-bounded window instead of looping or becoming a permanent hold.
+bounded window instead of looping or becoming a permanent hold. Provider 4xx
+and 5xx results, timeouts, empty text, malformed replies, and all other
+non-successes retain the model-started in-flight receipt and a fresh seven-day
+ambiguity deadline, never a replayable completion. A legacy stored non-success
+follows the same compare-and-swap replacement path as an unusable handoff. Each
+window can authorize at most one replacement call.
 Neither the key nor plaintext, plaintext source locator, file name, or
 plaintext document identity is stored, and this table is not part of a recovery
 export.

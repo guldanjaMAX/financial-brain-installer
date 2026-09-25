@@ -90,6 +90,12 @@ function usageReceipt(value) {
   return receipt;
 }
 
+function isUsableOcrSuccess(status, body, requestId) {
+  return status === 200 && body && typeof body === "object" && !Array.isArray(body) &&
+    typeof body.text === "string" && body.text.trim().length > 0 &&
+    body.request_id === requestId && body.error == null;
+}
+
 async function contentFreeReceipt(body) {
   return {
     schema_version: 1,
@@ -337,25 +343,19 @@ export async function claimOcrPageRequest(db, {
     }
     return Object.freeze({ state: "claimed", rereadAfterExpiry: true });
   }
-  if (existing.status !== "completed" || !Number.isSafeInteger(existing.response_status) ||
-      typeof existing.response_json !== "string") {
+  if (existing.status !== "completed" || ![0, 1].includes(Number(existing.reread_count))) {
     throw new Error("the OCR idempotency receipt is malformed");
   }
-  let body;
+  let body = null;
   try { body = JSON.parse(existing.response_json); }
-  catch { throw new Error("the OCR idempotency response is malformed"); }
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw new Error("the OCR idempotency response is malformed");
-  }
-  if (!OCR_REQUEST_ID.test(String(body.response_sha256 || "")) || body.schema_version !== 1 ||
-      ![0, 1].includes(Number(body.ocr_reread_after_expiry || 0)) ||
-      ![0, 1].includes(Number(existing.reread_count))) {
-    throw new Error("the OCR idempotency response is malformed");
-  }
+  catch { /* A malformed stored result is unusable, not a permanent hold. */ }
+  const receiptUsable = body && typeof body === "object" && !Array.isArray(body) &&
+    OCR_REQUEST_ID.test(String(body.response_sha256 || "")) && body.schema_version === 1 &&
+    [0, 1].includes(Number(body.ocr_reread_after_expiry || 0));
   const handoffFields = [existing.replay_key_sha256, existing.replay_expires_at,
     existing.replay_iv, existing.replay_ciphertext];
   const handoffPresent = handoffFields.every((value) => typeof value === "string" && value.length > 0);
-  if (handoffPresent) {
+  if (existing.response_status === 200 && receiptUsable && handoffPresent) {
     const replayExpiresAtMs = Date.parse(existing.replay_expires_at);
     const unacknowledged = existing.acknowledged_at == null;
     if (Number.isFinite(replayExpiresAtMs) && replayKeySha256 === existing.replay_key_sha256 &&
@@ -366,7 +366,9 @@ export async function claimOcrPageRequest(db, {
           handoff: { iv: existing.replay_iv, ciphertext: existing.replay_ciphertext },
           replayKey,
         });
-        return Object.freeze({ state: "replayable", status: existing.response_status, replay });
+        if (isUsableOcrSuccess(existing.response_status, replay, requestId)) {
+          return Object.freeze({ state: "replayable", status: existing.response_status, replay });
+        }
       } catch {
         // A matching fingerprint is not proof that the IV, ciphertext, or
         // plaintext receipt is usable. Fall through to the same compare-and-
@@ -376,16 +378,18 @@ export async function claimOcrPageRequest(db, {
   }
 
   const completedAtMs = Date.parse(String(existing.completed_at || ""));
-  if (!Number.isFinite(completedAtMs)) {
-    throw new Error("the OCR idempotency completion time is malformed");
-  }
+  const priorWindowExpiresAtMs = Date.parse(String(existing.expires_at || ""));
   // The first unusable handoff gets one immediate exit. A fresh receipt
   // produced by that replacement starts a new seven-day window, preventing a
   // caller without the matching private identity from creating an unbounded
   // series of model calls.
   const nextRereadAtMs = Number(existing.reread_count) === 0
     ? now.getTime()
-    : completedAtMs + OCR_REPLAY_TTL_MS;
+    : Number.isFinite(completedAtMs)
+      ? completedAtMs + OCR_REPLAY_TTL_MS
+      : Number.isFinite(priorWindowExpiresAtMs)
+        ? priorWindowExpiresAtMs
+        : now.getTime();
   if (nextRereadAtMs > now.getTime()) {
     return Object.freeze({
       state: "retry_later",
@@ -404,8 +408,8 @@ export async function claimOcrPageRequest(db, {
             acknowledged_at=NULL,reread_count=1
       WHERE request_id=?5 AND input_sha256=?6 AND status='completed'
         AND owner_token=?7 AND started_at=?8 AND model_started_at=?9
-        AND completed_at=?10 AND expires_at=?11 AND response_status=?12
-        AND response_json=?13 AND reread_count=?14
+        AND completed_at IS ?10 AND expires_at IS ?11 AND response_status IS ?12
+        AND response_json IS ?13 AND reread_count=?14
         AND replay_key_sha256 IS ?15 AND replay_expires_at IS ?16
         AND replay_iv IS ?17 AND replay_ciphertext IS ?18
       RETURNING request_id`,
@@ -464,8 +468,7 @@ export async function completeOcrPageRequest(db, {
   replayKey = null,
   now = new Date(),
 } = {}) {
-  if (!Number.isSafeInteger(status) || status < 200 || status > 599 ||
-      !body || typeof body !== "object" || Array.isArray(body) || !validDate(now)) {
+  if (!isUsableOcrSuccess(status, body, requestId) || !validDate(now)) {
     throw new TypeError("OCR idempotency completion is invalid");
   }
   const completedAt = now.toISOString();
@@ -492,6 +495,28 @@ export async function completeOcrPageRequest(db, {
   ).all();
   if (!exactReturningRow(result, requestId)) {
     throw new Error("the OCR idempotency completion receipt was ambiguous");
+  }
+}
+
+export async function recordRetryableOcrPageFailure(db, {
+  requestId,
+  inputSha256,
+  ownerToken,
+  now = new Date(),
+} = {}) {
+  if (!validDate(now)) throw new TypeError("OCR retryable failure receipt is invalid");
+  const expiresAt = expiryFrom(now, OCR_IN_FLIGHT_TTL_MS);
+  // The model-start transition is the durable billing boundary. A non-success
+  // therefore remains in-flight instead of becoming a replayable completion,
+  // but receives a fresh bounded ambiguity window before one CAS replacement.
+  const result = await db.prepare(
+    `UPDATE ocr_page_requests
+        SET expires_at=?1
+      WHERE request_id=?2 AND input_sha256=?3 AND owner_token=?4 AND status='in_flight'
+      RETURNING request_id`,
+  ).bind(expiresAt, requestId, inputSha256, ownerToken).all();
+  if (!exactReturningRow(result, requestId)) {
+    throw new Error("the OCR retryable failure receipt was ambiguous");
   }
 }
 

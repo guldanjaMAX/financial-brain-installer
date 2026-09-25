@@ -76,10 +76,15 @@ asset publication.
   the rest of the pass continues. Transport and model failures defer the
   document as system evidence, never as a removal candidate. Authentication,
   malformed replies, and unknown statuses use that same boundary. A later pass
-  reclaims only an expired pre-model reservation. A completed result keeps its
-  encrypted handoff until the whole source document is stored and acknowledged
-  on the same receipt, so a delayed pass replays it without another charge. An
-  owner image upload uses that same private page identity, so rotating the
+  reclaims only an expired pre-model reservation. Only a successful, nonblank
+  transcription becomes a completed replayable result. Provider errors,
+  timeouts, empty text, malformed replies, and every other non-success keep
+  their model-start proof and wait for one replacement after the seven-day
+  ambiguity window; they can never replay as OCR text. A completed result keeps
+  its encrypted handoff until the whole source document is stored and
+  acknowledged on the same receipt, so a delayed pass replays it without
+  another charge. An owner image upload uses that same private page identity,
+  so rotating the
   Brain admin key after an ingest failure cannot strand the already-paid OCR
   result. A completed receipt with a missing, mismatched, malformed, expired,
   or undecryptable handoff gets one compare-and-swap-protected replacement

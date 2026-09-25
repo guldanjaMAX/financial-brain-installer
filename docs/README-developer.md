@@ -432,9 +432,11 @@ duplicate receives 425 with a bounded retry time. An expired pre-call
 reservation is reclaimed without a re-read marker. An in-flight row receives
 the same bounded treatment and may start one recorded replacement only after
 its seven-day ambiguity window. Identical rendered bytes in two different
-documents produce two identities and two independent calls. Completed receipts
-are permanent content-free tombstones containing only a response hash, status,
-and bounded numeric usage. The client derives a separate AES-GCM replay key
+documents produce two identities and two independent calls. Only a verified
+200 response with nonblank transcription text and the exact request identity
+becomes a completed receipt. Those successful receipts are permanent
+content-free tombstones containing only a response hash, status, and bounded
+numeric usage. The client derives a separate AES-GCM replay key
 from the exact private page identity with a domain-separated hash. The key is
 not persisted and cannot be derived from the stored request ID alone, but the
 same source pass on a later run can reproduce it while the row retains its
@@ -455,7 +457,12 @@ ciphertext until the replacement is acknowledged. Owner upload carries the
 opaque request ID in its private content-free intent and acknowledges only
 after exact ingest and finalization readback. A replacement receipt with no
 ciphertext waits for its next seven-day window instead of looping or becoming
-a permanent hold. The source load report counts every replacement.
+a permanent hold. Provider 4xx and 5xx results, timeouts, empty text, malformed
+replies, and every other non-success remain model-started retryable receipts
+with no replay handoff. They permit one compare-and-swap replacement only after
+the same seven-day ambiguity window. Legacy non-success completions also never
+replay and enter the same bounded replacement path. The source load report
+counts every replacement.
 Any reservation, model-start, completion, or release evidence failure is fatal
 and retryable at source level: the prior revision remains, no partial
 replacement or removal plan runs, and the cursor and ready receipt are

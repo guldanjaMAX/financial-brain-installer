@@ -957,9 +957,13 @@ product says all three rather than the first one:
   start a second charged call, while another document with the same page image
   remains independent. The same private page identity deterministically
   recovers the encrypted handoff key on a later pass without storing that key
-  or making it derivable from the durable request ID alone. The receipt keeps
-  hashes, status, and usage only, never the transcription or source locator. If
-  the Brain remains healthy but the page stays slow, that document is skipped
+  or making it derivable from the durable request ID alone. A successful
+  receipt keeps hashes, status, and usage only, never the transcription or
+  source locator. A provider 4xx or 5xx, timeout, empty text, malformed reply,
+  or any other non-success is never replayed as a result. It retains the
+  model-start proof and permits one replacement only after the same seven-day
+  ambiguity window. If the Brain remains healthy but the page stays slow, that
+  document is skipped
   and the rest of the pass continues. A transport, authentication, malformed
   reply, unknown status, or model failure defers the document as a system
   problem and can never become removal evidence. A later pass can reclaim a
