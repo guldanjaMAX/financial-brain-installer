@@ -614,7 +614,7 @@ function manifestFor(binding, provider, finalState) {
     safety: {
       credential_scanner: { enabled: true, gate_version: 5, mode: "refuse" },
       daily_llm_spend_cap_usd: 10,
-      ocr: { enabled: false, model: "@cf/google/gemma-4-26b-a4b-it" },
+      ocr: { enabled: false, model: "@cf/meta/llama-4-scout-17b-16e-instruct" },
     },
     operations: source
       ? { admin_key_secret: campaignRole.adminKeyLocator }
@@ -687,7 +687,7 @@ function validateFinalSemantic(value, binding) {
       value.resource.vector_count !== 0 || value.resource.vector_dimensions !== 768 ||
       value.resource.vector_metric !== "cosine" || value.content_rows !== 0 ||
       value.vector_count !== 0 ||
-      binding.role === "source" && (value.schema_version !== 46 || value.user_tables !== null) ||
+      binding.role === "source" && (value.schema_version !== 47 || value.user_tables !== null) ||
       binding.role === "target" && (value.schema_version !== null || value.user_tables !== 0)) {
     refuse("DISPOSABLE_RECOVERY_PROVISION_FINAL_READBACK_INVALID");
   }
@@ -778,7 +778,7 @@ function validateProvisionManifestArtifact(value, binding, finalState = null) {
   const expectedSafety = {
     credential_scanner: { enabled: true, gate_version: 5, mode: "refuse" },
     daily_llm_spend_cap_usd: 10,
-    ocr: { enabled: false, model: "@cf/google/gemma-4-26b-a4b-it" },
+    ocr: { enabled: false, model: "@cf/meta/llama-4-scout-17b-16e-instruct" },
   };
   const cloudflare = value?.infrastructure?.cloudflare;
   const operations = value?.operations;
@@ -1104,7 +1104,7 @@ export async function runDisposableRecoveryProvisionPhase({
       schema = await journalMutation({
         binding, role, directory, journalPath,
         step: "initialize_source_schema", effect: "initialize_d1_schema",
-        request: { action: "A1", database_id: d1.database_id, schema_version: 46,
+        request: { action: "A1", database_id: d1.database_id, schema_version: 47,
           migration_inventory_sha256: binding.migration_inventory_sha256,
           content_rows: 0 },
         mutate: () => mutationProvider.initializeSourceSchema(d1.database_id, beforeBoundary),
@@ -1171,8 +1171,8 @@ export async function runDisposableRecoveryProvisionPhase({
         first.semantic.account_id !== binding.account_id ||
         first.semantic.active_version_id !== baseline.version_id ||
         first.semantic.vector_count !== 0 || first.semantic.content_rows !== 0 ||
-        role === "source" && (first.semantic.schema_version !== 46 ||
-          schema?.schema_version !== 46) ||
+        role === "source" && (first.semantic.schema_version !== 47 ||
+          schema?.schema_version !== 47) ||
         role === "target" && first.semantic.user_tables !== 0) {
       refuse("DISPOSABLE_RECOVERY_PROVISION_FINAL_READBACK_INVALID");
     }

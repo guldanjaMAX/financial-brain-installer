@@ -1930,7 +1930,7 @@ function genuineProvisionProvider(role) {
       workers_dev_enabled: true,
     },
     bootstrap_tag_sha256: HASH("a"),
-    schema_version: source ? 46 : null,
+    schema_version: source ? 47 : null,
     user_tables: source ? null : 0,
     content_rows: 0,
     vector_count: 0,
@@ -1990,7 +1990,7 @@ function genuineProvisionProvider(role) {
         async initializeSourceSchema() {
           return providerResult({
             migration_inventory_sha256: HASH("d"),
-            schema_version: 46,
+            schema_version: 47,
           });
         },
         async reconcileSourceSchema() { return { outcome: "resume_safe" }; },

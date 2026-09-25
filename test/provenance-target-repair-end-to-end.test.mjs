@@ -602,13 +602,15 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
     recoveredBrain.close();
   });
 
-  assert.match(sourceBrain.migrationFiles.at(-1), /^0046_/);
-  assert.match(recoveredBrain.migrationFiles.at(-1), /^0046_/);
+  assert.match(sourceBrain.migrationFiles.at(-1), /^0047_/);
+  assert.match(recoveredBrain.migrationFiles.at(-1), /^0047_/);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_receipts"), true);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolutions"), true);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_verifications"), false);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolution_activations"), false);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolution_admissions"), false);
+  assert.equal(RECOVERY_EXPORT_TABLES.includes("ocr_page_requests"), true,
+    "permanent OCR idempotency tombstones recover so a restored Brain cannot repeat model calls");
 
   await registerSyntheticSource(sourceBrain, sourceHarness);
 

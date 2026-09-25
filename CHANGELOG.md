@@ -63,6 +63,61 @@ asset publication.
   Plaid webhook registration, because the Brain sends its webhook with every
   connection request. The return address must still be on the Plaid dashboard's
   allowed list.
+
+- **Scanned-PDF OCR now defaults to the model that completed the stored-text
+  path in live testing.** Fresh installs use Llama 4 Scout, while the manifest
+  can still name another Cloudflare model. Setup also asks once whether to turn
+  paid OCR on and carries a yes answer into the first deployment, so a new
+  install no longer needs a separate update before its first scanned-PDF load.
+  To check: accept OCR during a fixture setup and confirm its initial Worker
+  bindings contain `OCR_ENABLED=1`; the captured Llama and Gemma reply shapes
+  must both remain readable through the real OCR route.
+
+- **One slow scanned page no longer ends the whole OCR pass.** The installer
+  retries that page twice with longer bounded timeouts and tells you when it is
+  doing so. An already-running call is polled within the current deadline rather
+  than counted as another attempt. The exact source document and page keep one
+  opaque durable request identity, so a late first response cannot start another
+  charged call while a different document with the same page image remains a
+  separate request. The same private page identity can reproduce its encrypted
+  handoff key on a later pass without storing that key or making it derivable
+  from the durable request ID alone. Its permanent receipt stores only hashes,
+  status, and numeric usage, never OCR text or a source locator ahead of the
+  document credential gate. Its encrypted handoff is not deleted until the
+  source confirms that the full document was stored.
+  If the Brain is healthy but the page remains slow, the document is skipped and
+  the rest of the pass continues. Transport and model failures defer the
+  document as system evidence, never as a removal candidate. Authentication,
+  malformed replies, and unknown statuses use that same boundary. A later pass
+  reclaims only an expired pre-model reservation. Only a successful, nonblank
+  transcription becomes a completed replayable result. A call with no final
+  response keeps its model-start proof for a 15-minute ambiguity window.
+  Provider errors, empty text, malformed replies, and every other definite
+  non-success keep their model-start proof, wait 60 seconds, and can never
+  replay as OCR text. Each page is capped durably at 3 started model calls in
+  any rolling 24 hours; an exhausted page is counted in the load report and
+  becomes eligible when the oldest start leaves that rolling window rather
+  than remaining held permanently. A completed result
+  keeps its encrypted handoff until the whole source document is stored and
+  acknowledged on the same receipt, so a delayed pass replays it without
+  another charge. An owner image upload uses that same private page identity,
+  so rotating the
+  Brain admin key after an ingest failure cannot strand the already-paid OCR
+  result. A completed receipt with a missing, mismatched, malformed, expired,
+  or undecryptable handoff gets one compare-and-swap-protected replacement
+  read in that seven-day replay window. An in-flight receipt also gets one
+  recorded replacement after its full 15-minute ambiguity window. Replacement
+  receipts must be acknowledged again, and owner upload does so only after exact
+  ingest and finalization readback. A result with no handoff waits for the next
+  bounded window instead of becoming a permanent hold. If the Brain health check
+  also fails, progress remains saved and the pass stops resumably. To check:
+  credential-shaped OCR text reaches the credential refusal without surviving in
+  the receipt; a call finishing after the first deadline replays through the real
+  route with one model call and one stored transcription; a result that finishes
+  after every client deadline is reused on the next pass with no second charge;
+  two documents with the same rendered page both load; and system failures
+  permit no replacement, removal, cursor, or ready receipt.
+
 - **Re-sending unchanged files no longer rebuilds their meaning-based search.**
   When a newer kit re-sends a file whose text has not changed, for example to
   add the exact-byte provenance an older kit never recorded, the Brain still

@@ -573,6 +573,10 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   // the control table explicit, but its rows are never exported; source and
   // target probes require it empty while the artifact opens and closes it.
   "source_original_result_family_recovery_state",
+  // Schema 47: page-level OCR receipts are permanent, content-free
+  // idempotency tombstones. Recovery must preserve them so a restored Brain
+  // cannot spend the same bounded model-call budget again.
+  "ocr_page_requests",
 ]);
 
 /**
@@ -820,6 +824,7 @@ const SCHEMA_45_TABLES = Object.freeze([
   "source_original_accepted_resolutions",
   "source_original_accepted_resolution_activations",
 ]);
+const SCHEMA_47_TABLES = Object.freeze(["ocr_page_requests"]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -842,7 +847,7 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
      ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
      ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
-     ...SCHEMA_45_TABLES].includes(table)
+     ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -2630,7 +2635,7 @@ function exactDisposableRecoveryRuntime(binding) {
     binding.chunkOverlap === "300" && binding.dailyLlmCapUsd === "10" &&
     binding.answerModel === "@cf/meta/llama-3.3-70b-instruct-fp8-fast" &&
     binding.credentialScanner === "on" && binding.ocrEnabled === "0" &&
-    binding.ocrModel === "@cf/google/gemma-4-26b-a4b-it";
+    binding.ocrModel === "@cf/meta/llama-4-scout-17b-16e-instruct";
 }
 
 function noDisposableRecoveryConnectors(binding) {
@@ -4351,7 +4356,8 @@ function expectedRecoveryTables(migrations) {
     (latest >= 42 || !SCHEMA_42_TABLES.includes(table)) &&
     (latest >= 43 || !SCHEMA_43_TABLES.includes(table)) &&
     (latest >= 44 || !SCHEMA_44_TABLES.includes(table)) &&
-    (latest >= 45 || !SCHEMA_45_TABLES.includes(table)));
+    (latest >= 45 || !SCHEMA_45_TABLES.includes(table)) &&
+    (latest >= 47 || !SCHEMA_47_TABLES.includes(table)));
 }
 
 export function recoveryExportTables(

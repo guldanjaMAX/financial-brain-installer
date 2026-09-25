@@ -4,6 +4,7 @@ import {
 } from "../connectors/google-drive.mjs";
 import { toEnvelope as gmailToEnvelope } from "../connectors/gmail.mjs";
 import { buildAuthUrl, pkce, exchangeCode, createTokenProvider, redirectUri } from "../connectors/google-auth.mjs";
+import { scanPdf } from "./fixtures/scan-pdf.mjs";
 import * as XLSX from "@e965/xlsx";
 
 let fail = 0, ran = 0;
@@ -715,6 +716,27 @@ const workbookBytes = (sheets) => {
   });
   check("a permanent per-file permission failure is a reasoned skip", !!r.skip && /could not be fetched/.test(r.skip.reason), r.skip?.reason);
   check("a permanent per-file permission failure is typed", r.skip.code === "file_unavailable", JSON.stringify(r.skip));
+}
+{
+  const file = {
+    id: "F5-slow-ocr", name: "scan.pdf", mimeType: "application/pdf",
+    size: "1000", createdTime: "2026-01-01T00:00:00Z",
+  };
+  let pagesReached = 0;
+  const ocr = async (_image, { page }) => {
+    pagesReached++;
+    return page === 1
+      ? { error: "page 1 stayed slow", reason_code: "ocr_page_timeout", retry_document: true }
+      : { text: "Second page text that is long enough to prove the remaining page was processed." };
+  };
+  ocr.model = "@cf/test/ocr";
+  ocr.maxPages = 2;
+  const r = await toEnvelope(tok, file, { ocr }, {
+    fetchImpl: async () => binary(scanPdf({ pages: 2 })), sleep: async () => {},
+  });
+  check("a Drive document with one exhausted OCR page preserves the named retryable skip",
+    pagesReached === 2 && !r.envelope && r.skip?.code === "ocr_page_timeout" && r.skip?.retryable === true,
+    JSON.stringify({ pagesReached, skip: r.skip }));
 }
 {
   const file = { id: "F5-export", name: "locked doc", mimeType: "application/vnd.google-apps.document", createdTime: "2026-01-01T00:00:00Z" };

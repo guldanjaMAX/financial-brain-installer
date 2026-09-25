@@ -230,6 +230,8 @@ assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_accepted_resoluti
 assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolution_admissions"), false);
 assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_result_family_recovery_state"), true);
 assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_recovery_state"), false);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("ocr_page_requests"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("ocr_page_requests"), true);
 assert.ok(
   RECOVERY_EXPORT_TABLES.indexOf("source_original_observations") <
     RECOVERY_EXPORT_TABLES.indexOf("source_original_result_bindings") &&
@@ -689,6 +691,8 @@ assert.equal(recoveryExportTables(appliedMigrations.slice(0, 44)).includes("sour
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_accepted_resolutions"), true);
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_accepted_resolution_activations"), false);
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_accepted_resolution_admissions"), false);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 46)).includes("ocr_page_requests"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("ocr_page_requests"), true);
 assert.equal(
   recoveryExportTables(appliedMigrations, { excludeLlmCallLog: true })
     .includes("llm_call_log"),
@@ -1919,7 +1923,8 @@ function providerHarness({
     (version >= 42 || !sourceOriginalTables.has(name)) &&
     (version >= 43 || name !== "source_original_result_bindings") &&
     (version >= 44 || !sourceOriginalResultFamilyTables.has(name)) &&
-    (version >= 45 || !sourceOriginalAcceptedResolutionTables.has(name)));
+    (version >= 45 || !sourceOriginalAcceptedResolutionTables.has(name)) &&
+    (version >= 47 || name !== "ocr_page_requests"));
 
   const runWrangler = async ({ command, args, env, cwd }) => {
     wranglerCalls.push({ command, args: [...args], env: { ...env }, cwd });
@@ -2113,7 +2118,7 @@ function providerHarness({
               type: "plain_text",
               name: "OCR_MODEL",
               text: plainTextOverrides.OCR_MODEL ??
-                (manifest.safety?.ocr?.model || "@cf/google/gemma-4-26b-a4b-it"),
+                (manifest.safety?.ocr?.model || "@cf/meta/llama-4-scout-17b-16e-instruct"),
             },
             { type: "secret_text", name: "ADMIN_KEY" },
             { type: "secret_text", name: "RAG_PROXY_KEY" },

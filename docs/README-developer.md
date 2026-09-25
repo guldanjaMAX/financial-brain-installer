@@ -6,7 +6,7 @@ Nothing runs on our infrastructure. Normal setup uses an owner-approved named
 Cloudflare browser profile in the owner's operating-system credential store; it
 does not create or copy an API token.
 
-**Status: unreleased 0.4.8/schema46 field candidate, held.** Provisioning,
+**Status: unreleased 0.4.8/schema47 field candidate, held.** Provisioning,
 retrieval, resumable ingest, guarded deletion, owner actions, exact entity
 scope, document grants, passkey observability, financial imports, provenance
 binding for eligible single-record local file ingests, bounded one-original
@@ -426,7 +426,10 @@ counts but cannot answer from. Measured on a random sample of 70 PDFs from a
 real 4,458-file corpus: 79% had a usable text layer, 7% were thin (under 100
 characters per page, flagged and indexed anyway), and 14% had zero text.
 
-`safety.ocr.enabled` is off by default. When enabled, the existing PDF child
+`safety.ocr.enabled` is off by default. Fresh setup asks once before it writes
+and deploys the manifest, so an owner-approved yes is present in the initial
+`OCR_ENABLED` binding. On an existing install, changing the manifest still
+requires `brain update`. When enabled, the existing PDF child
 extracts page images without a native dependency and sends each page through
 `POST /api/admin/brain/ocr` to Workers AI in the owner's Cloudflare account.
 The daily spend cap applies to every page. A scan is stored only when the
@@ -435,6 +438,72 @@ inline, and a majority-unreadable or descriptive response refuses the whole
 document. `documents.text_source` and `text_reliable` carry the OCR provenance
 through retrieval and citations. Local synthetic scans prove this contract;
 real typed, fax-quality, and handwritten scans remain a private field gate.
+The reviewed default is `@cf/meta/llama-4-scout-17b-16e-instruct`, whose
+captured reply contains both `response` and `choices`; `callLLM` consumes
+`response`. An owner can still override it with another `@cf/` model, and the
+captured Gemma choices-only shape remains supported and regression-tested.
+
+`ingest/ocr-client.mjs` gives each rendered page a stable SHA-256 request
+identity derived from the exact source, source item id, page index, model,
+prompt, and image bytes. The first call uses a 60-second deadline; two retries
+use 90 and 120 seconds with bounded jitter. A 425 response is polled with
+backoff inside the current deadline and does not consume an attempt. The Worker
+reserves that opaque identity in `ocr_page_requests` before the billable model
+call, then exactly marks it in-flight before invoking the model. An active
+duplicate receives 425 with a bounded retry time. An expired pre-call
+reservation is reclaimed without a re-read marker. An in-flight row receives
+the same bounded treatment and may start one recorded replacement only after
+its 15-minute ambiguity window. Identical rendered bytes in two different
+documents produce two identities and two independent calls. Only a verified
+200 response with nonblank transcription text and the exact request identity
+becomes a completed receipt. Those successful receipts are permanent
+content-free tombstones containing only a response hash, status, and bounded
+numeric usage. The client derives a separate AES-GCM replay key
+from the exact private page identity with a domain-separated hash. The key is
+not persisted and cannot be derived from the stored request ID alone, but the
+same source pass on a later run can reproduce it while the row retains its
+ciphertext. Owner image uploads use that same private page identity, so an
+admin-key rotation after a later ingest failure cannot strand the already-paid
+result. This lets a retry recover it without another model call or durable key
+while keeping plaintext behind the complete-document credential gate. Missing,
+mismatched, malformed, expired-after-acknowledgement, and undecryptable
+handoffs all enter the same compare-and-swap replacement boundary. The
+source acknowledges the OCR page on the same receipt only after every part of
+the logical document family is stored and reconciled. Cleanup prunes expired
+ciphertext only after that acknowledgement; an unacknowledged result remains
+replayable after the former seven-day boundary. If any completed receipt has
+no usable ciphertext, whether acknowledged, pruned, or legacy, an exact
+compare-and-swap permits one replacement call in that window, clears the old
+acknowledgement, records `ocr_reread_after_expiry`, and leaves a fresh
+ciphertext until the replacement is acknowledged. Owner upload carries the
+opaque request ID in its private content-free intent and acknowledges only
+after exact ingest and finalization readback. Its active reservation,
+ambiguous-call, failure-backoff, and rolling-cap responses preserve the route's
+typed 425, bounded delay, pending flag, and rolling call count. A replacement
+receipt with no ciphertext waits for its next seven-day replay window instead
+of looping or becoming a permanent hold. Provider 4xx and 5xx results, terminal
+model errors, empty text, malformed replies, and every other definite non-success remain
+model-started retryable receipts with no replay handoff. They permit one
+compare-and-swap replacement after a 60-second backoff. Consolidated migration
+0047 records the last three model-call start timestamps and caps each page at 3 started calls
+in any rolling 24 hours. An exhausted page returns typed 425 evidence until the
+oldest start leaves that rolling window, then becomes eligible again rather
+than remaining held permanently. Rows from the initial fixed-anchor
+implementation retain their full count at the latest known receipt timestamp
+until the next accepted start rewrites the exact timestamp array. Legacy
+non-success completions also never replay and enter the same bounded
+replacement path. The source load report counts both replacements and pages
+held by the rolling cap.
+Any reservation, model-start, completion, or release evidence failure is fatal
+and retryable at source level: the prior revision remains, no partial
+replacement or removal plan runs, and the cursor and ready receipt are
+withheld. Non-timeout transport failures, authentication failures, malformed
+replies, unknown HTTP statuses, and Worker or model 5xx responses use the same
+source-level system boundary. They are never extraction refusals or removal
+evidence. Only a validated transcription reaches the local content-quality
+decision that may definitively refuse an unreadable page. A healthy Brain plus
+three expired transport deadlines remains a named `ocr_page_timeout` skip. A
+failed health probe remains fatal and resumable.
 
 `brain ocr-preflight <manifest> --path <folder> --json` is the no-model planning
 boundary for that local PDF path. `ingest/extract.mjs` forwards the PDF parser's
@@ -1630,7 +1699,7 @@ apply.
 Preview acquires the source lease before reading the private manifest, source
 file, saved credential, or Brain state. Under that lease it reads the complete
 authenticated source and observation history, prepares the exact one-file
-ingest envelope, checks the current schema-46 Brain and vector state, and seals
+ingest envelope, checks the current schema-47 Brain and vector state, and seals
 a state-bound plan. It releases the lease without changing Brain data,
 configuration, source receipts, cursors, or removals. Public output excludes the
 local root, locator, private retrieval query, content hashes, document IDs,

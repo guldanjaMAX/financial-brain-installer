@@ -253,7 +253,7 @@ Never combine those into a broader claim than the evidence supports.
 
 ## Cut an immutable release
 
-The current 0.4.8/schema46 field candidate remains held. The earlier 0.4.7
+The current 0.4.8/schema47 field candidate remains held. The earlier 0.4.7
 candidate was never tagged, published, or offered as a customer update; its
 identity is retired so its evidence cannot be mistaken for evidence from these
 changed bytes. At this freeze the current candidate's

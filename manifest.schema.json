@@ -709,7 +709,7 @@
             },
             "model": {
               "type": "string",
-              "default": "@cf/google/gemma-4-26b-a4b-it",
+              "default": "@cf/meta/llama-4-scout-17b-16e-instruct",
               "description": "Must be a Cloudflare @cf/ model. OCR refuses any other, because a page of a scanned document may only reach the provider the manifest names."
             },
             "max_pages_per_document": {

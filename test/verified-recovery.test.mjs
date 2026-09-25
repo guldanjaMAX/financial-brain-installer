@@ -39,13 +39,13 @@ import {
   writeVerifiedRecoveryState,
 } from "../operations/verified-recovery.mjs";
 import {
-  V048_DISPOSABLE_CAMPAIGN_ARTIFACT_KEY_LOCATOR,
+  V048_DISPOSABLE_CAMPAIGN_ARTIFACT_KEY_LOCATOR as campaignArtifactKeyLocator,
   V048_DISPOSABLE_CAMPAIGN_CLIENT_SLUG,
   V048_DISPOSABLE_CAMPAIGN_CORPORA,
   V048_DISPOSABLE_CAMPAIGN_DISPLAY_NAME,
-  V048_DISPOSABLE_CAMPAIGN_SOURCE_ADMIN_KEY_LOCATOR,
+  V048_DISPOSABLE_CAMPAIGN_SOURCE_ADMIN_KEY_LOCATOR as campaignSourceAdminKeyLocator,
   V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME,
-  V048_DISPOSABLE_CAMPAIGN_TARGET_ADMIN_KEY_LOCATOR,
+  V048_DISPOSABLE_CAMPAIGN_TARGET_ADMIN_KEY_LOCATOR as campaignTargetAdminKeyLocator,
   V048_DISPOSABLE_CAMPAIGN_TARGET_NAME,
 } from "../operations/v048-disposable-campaign-contract.mjs";
 import {
@@ -94,7 +94,7 @@ const sourceManifest = {
     credential_scanner: { enabled: true },
     ocr: {
       enabled: false,
-      model: "@cf/google/gemma-4-26b-a4b-it",
+      model: "@cf/meta/llama-4-scout-17b-16e-instruct",
     },
   },
   _private_fixture: sentinel,
@@ -138,7 +138,7 @@ const exactCampaignSourceManifest = {
   corpora: Object.fromEntries(
     V048_DISPOSABLE_CAMPAIGN_CORPORA.map((name) => [name, { enabled: false }]),
   ),
-  operations: { admin_key_secret: V048_DISPOSABLE_CAMPAIGN_SOURCE_ADMIN_KEY_LOCATOR },
+  operations: { admin_key_secret: campaignSourceAdminKeyLocator },
 };
 const exactCampaignTargetManifest = {
   ...structuredClone(exactCampaignSourceManifest),
@@ -154,8 +154,8 @@ const exactCampaignTargetManifest = {
     vectorize_index: V048_DISPOSABLE_CAMPAIGN_TARGET_NAME,
   } },
   operations: {
-    admin_key_secret: V048_DISPOSABLE_CAMPAIGN_TARGET_ADMIN_KEY_LOCATOR,
-    recovery_artifact_key_secret: V048_DISPOSABLE_CAMPAIGN_ARTIFACT_KEY_LOCATOR,
+    admin_key_secret: campaignTargetAdminKeyLocator,
+    recovery_artifact_key_secret: campaignArtifactKeyLocator,
     recovery_field_gate: { routes: [], custom_domains: [] },
   },
 };
@@ -378,7 +378,7 @@ try {
     assert.equal(binding.answerModel, "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
     assert.equal(binding.credentialScanner, "on");
     assert.equal(binding.ocrEnabled, "0");
-    assert.equal(binding.ocrModel, "@cf/google/gemma-4-26b-a4b-it");
+    assert.equal(binding.ocrModel, "@cf/meta/llama-4-scout-17b-16e-instruct");
   }
 
   const exactCampaignSourcePath = join(sandbox, "v048-source.manifest.json");

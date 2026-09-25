@@ -133,6 +133,7 @@ for (const [label, bytes, expectedCode] of [
   try {
     await extractOwnerUpload({ ADMIN_KEY: "fixture", OCR_ENABLED: "0" }, {
       mediaType: "image/jpeg", bytes: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), fileName: "scan.jpg",
+      source: "upload", sourceItemId: "owner:fixture:scan",
     });
   } catch (caught) { error = caught; }
   check("image upload reports that private OCR is off instead of calling it unreadable",
