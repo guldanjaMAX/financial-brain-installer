@@ -718,6 +718,7 @@ const expected = [
   // injected list, write, and hidden-prompt callbacks; refuses ambient values
   // and reports secret names, never values.
   "operations/bank-feed-owner-secrets.mjs",
+  "operations/custom-api-clipboard.mjs",
   "operations/bootstrap-status.mjs",
   // Generic local timing helper. It receives only injected clock/scheduler
   // callbacks and timestamps, with no filesystem, credential, network, or

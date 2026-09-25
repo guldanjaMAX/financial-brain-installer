@@ -70,6 +70,10 @@ import {
 } from "./worker/src/lib/store-d1.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
 import {
+  clearCustomApiClipboard,
+  readCustomApiClipboard,
+} from "./operations/custom-api-clipboard.mjs";
+import {
   ensureBankFeedWorkerSecrets,
   validatePlaidApplicationKeys,
 } from "./operations/bank-feed-owner-secrets.mjs";
@@ -17242,15 +17246,21 @@ export async function cmdConnect(target, options = {}) {
 /** Connect the declared custom API secret without exposing its value. */
 export async function cmdConnectCustomApi(manifestPath, flags = {}, options = {}) {
   if (!manifestPath || String(manifestPath).startsWith("--")) {
-    die("usage: brain connect custom-api <manifest> [--replace-key] [--key-set-in-dashboard]");
+    die("usage: brain connect custom-api <manifest> [--replace-key] [--from-clipboard|--key-set-in-dashboard]");
   }
-  const unknownFlag = Object.keys(flags).find((name) => !["replace-key", "key-set-in-dashboard"].includes(name));
+  const unknownFlag = Object.keys(flags).find((name) => !["replace-key", "from-clipboard", "key-set-in-dashboard"].includes(name));
   if (unknownFlag) die(`brain connect custom-api does not recognize --${unknownFlag}`);
   if (flags["replace-key"] !== undefined && flags["replace-key"] !== true) {
     die("brain connect custom-api --replace-key does not take a value");
   }
+  if (flags["from-clipboard"] !== undefined && flags["from-clipboard"] !== true) {
+    die("brain connect custom-api --from-clipboard does not take a value");
+  }
   if (flags["key-set-in-dashboard"] !== undefined && flags["key-set-in-dashboard"] !== true) {
     die("brain connect custom-api --key-set-in-dashboard does not take a value");
+  }
+  if (flags["from-clipboard"] === true && flags["key-set-in-dashboard"] === true) {
+    die("choose either --from-clipboard or --key-set-in-dashboard, not both. Nothing was stored.");
   }
   const { m } = loadManifest(manifestPath);
   let config;
@@ -17276,7 +17286,9 @@ export async function cmdConnectCustomApi(manifestPath, flags = {}, options = {}
     die("the Worker's secret names could not be inspected. No custom API key was written.");
   }
   const replace = flags["replace-key"] === true;
-  const dashboardEntry = flags["key-set-in-dashboard"] === true || (options.platform ?? process.platform) === "win32";
+  const platform = options.platform ?? process.platform;
+  const dashboardEntry = flags["key-set-in-dashboard"] === true;
+  const clipboardEntry = flags["from-clipboard"] === true || (platform === "win32" && !dashboardEntry);
   let wrote = false;
   if (!names.has(config.token_secret) || replace) {
     if (dashboardEntry) {
@@ -17294,6 +17306,59 @@ export async function cmdConnectCustomApi(manifestPath, flags = {}, options = {}
         die(`Cloudflare did not list ${config.token_secret} within 2 minutes. The command never requested or handled the key value.`);
       }
       ok(`Worker secret name ${config.token_secret} is present`);
+    } else if (clipboardEntry) {
+      if (platform !== "win32" && platform !== "darwin") {
+        die("clipboard entry is available only on Windows and macOS. Use --key-set-in-dashboard instead. Nothing was stored.");
+      }
+      const readClipboard = options.readClipboard ?? (() => readCustomApiClipboard({ platform }));
+      const clearClipboard = options.clearClipboard ?? (() => clearCustomApiClipboard({ platform }));
+      let clipboardText;
+      try {
+        clipboardText = await readClipboard();
+      } catch {
+        die("The clipboard could not be read or was empty. Copy the key from the email and run the same command again. If needed, use --key-set-in-dashboard as the fallback. Nothing was stored.");
+      }
+
+      let failure = null;
+      let cleared = false;
+      try {
+        const token = typeof clipboardText === "string" ? clipboardText.trim() : "";
+        if (!token) {
+          failure = "The clipboard could not be read or was empty. Copy the key from the email and run the same command again. If needed, use --key-set-in-dashboard as the fallback. Nothing was stored.";
+        } else if (/\r|\n/.test(token)) {
+          failure = "The clipboard looks like more than one line. Copy only the key from the email and run the same command again. Nothing was stored.";
+        } else if (token.includes(" ")) {
+          failure = "The clipboard looks like prose instead of one key. Copy only the key from the email and run the same command again. Nothing was stored.";
+        } else if (Buffer.byteLength(token, "utf8") > 2_048 || !/^[\x21-\x7e]+$/.test(token)) {
+          failure = "The clipboard did not contain a valid store key. It must be 1 to 2,048 printable ASCII bytes with no spaces. Nothing was stored.";
+        } else {
+          try { await putSecret(config.token_secret, token); } catch {
+            failure = "The custom API key could not be written to the Worker. The value was not printed or saved locally.";
+          }
+        }
+      } finally {
+        try {
+          await clearClipboard();
+          cleared = true;
+        } catch {
+          cleared = false;
+        }
+      }
+      if (failure) {
+        if (!cleared) failure += " The clipboard also could not be cleared; clear it manually.";
+        die(failure);
+      }
+      if (!cleared) {
+        die("The store key was written to the Brain, but the clipboard could not be cleared. Clear the clipboard manually before continuing.");
+      }
+      try { names = new Set(await listSecretNames()); } catch {
+        die("the custom API key write returned, but its secret name could not be read back. Do not treat the connection as ready.");
+      }
+      if (!names.has(config.token_secret)) {
+        die("Cloudflare did not list the declared custom API secret after the write. Do not treat the connection as ready.");
+      }
+      wrote = true;
+      say("Store key saved in your Brain and cleared from the clipboard.");
     } else {
       const read = options.readSecret ?? readHiddenSecret;
       let token;
@@ -27725,8 +27790,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect bank     <manifest>      owner-present Plaid pilot: hidden prompt for missing Plaid keys, checked
                                            with Plaid before they are saved, then owner-only Plaid Link and masked
                                            account assignment. --replace-keys re-enters both keys
-    brain connect custom-api <manifest>   store the bearer key hidden on macOS or verify dashboard entry on Windows;
-                                           --replace-key replaces it without putting the value in the manifest
+    brain connect custom-api <manifest>   store the bearer key from the clipboard by default on Windows;
+                                           add --from-clipboard on macOS, --replace-key to replace it, or
+                                           --key-set-in-dashboard as a fallback
     brain custom-api <manifest> --dry-run preview the Worker's custom business API pull without writes;
                                            omit --dry-run to run it now through the same server path as cron
     brain connect <provider> <manifest>    QuickBooks, Slack, Notion, Microsoft, Dropbox or HubSpot OAuth

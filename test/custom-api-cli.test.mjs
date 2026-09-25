@@ -5,6 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  clearCustomApiClipboard,
+  readCustomApiClipboard,
+} from "../operations/custom-api-clipboard.mjs";
+import {
   cmdConnectCustomApi,
   cmdCustomApi,
   planLoad,
@@ -56,9 +60,25 @@ function withCapturedOutput(operation) {
   });
 }
 
+function withCapturedFailure(operation) {
+  const priorLog = console.log;
+  const priorError = console.error;
+  const lines = [];
+  console.log = (...args) => lines.push(args.join(" "));
+  console.error = (...args) => lines.push(args.join(" "));
+  return Promise.resolve().then(operation).then(
+    () => { throw new Error("expected operation to fail"); },
+    (error) => ({ error, output: lines.join("\n") }),
+  ).finally(() => {
+    console.log = priorLog;
+    console.error = priorError;
+  });
+}
+
 test("the public manifest defaults match the full-snapshot real feed", () => {
   const template = JSON.parse(readFileSync(new URL("../templates/brain.manifest.json", import.meta.url), "utf8"));
   const schema = JSON.parse(readFileSync(new URL("../manifest.schema.json", import.meta.url), "utf8"));
+  const installGuide = readFileSync(new URL("../onboarding/12-custom-api-source-setup.md", import.meta.url), "utf8");
   const custom = template.corpora.custom_api;
   assert.equal(custom.timeout_ms, 30_000);
   assert.ok(custom.max_response_bytes >= 5 * 1024 * 1024);
@@ -81,6 +101,9 @@ test("the public manifest defaults match the full-snapshot real feed", () => {
   assert.equal(schemaCustom.timeout_ms.default, 30_000);
   assert.ok(schemaCustom.max_response_bytes.default >= 5 * 1024 * 1024);
   assert.equal(schemaCustom.max_rows.default, 10_000);
+  assert.match(installGuide, /clipboard history is already off in Card Q/i);
+  assert.match(installGuide, /--from-clipboard/);
+  assert.match(installGuide, /--key-set-in-dashboard/);
 });
 
 test("deploy binding contains declarative config and only the secret name", () => {
@@ -140,13 +163,13 @@ test("connect does not prompt or rewrite an existing secret", async (t) => {
   assert.equal(result.output.includes(TOKEN), false);
 });
 
-test("Windows defaults to dashboard key entry, never prompts, and verifies only the declared name", async (t) => {
+test("Windows defaults to clipboard entry, writes only the declared secret, clears, and verifies its name", async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "brain-custom-api-windows-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const path = join(directory, "brain.manifest.json");
   writeFileSync(path, JSON.stringify(manifest()));
+  const calls = [];
   let prompts = 0;
-  let writes = 0;
   let inventories = 0;
   const result = await withCapturedOutput(() => cmdConnectCustomApi(path, {}, {
     platform: "win32",
@@ -154,15 +177,198 @@ test("Windows defaults to dashboard key entry, never prompts, and verifies only 
       inventories++;
       return inventories >= 2 ? ["STORE_DASHBOARD_TOKEN"] : [];
     },
-    putWorkerSecret: async () => { writes++; },
+    putWorkerSecret: async (name, value) => calls.push({ kind: "write", name, matches: value === TOKEN }),
+    readClipboard: async () => { calls.push({ kind: "read" }); return `\r\n  ${TOKEN}  \r\n`; },
+    clearClipboard: async () => { calls.push({ kind: "clear" }); },
     readSecret: async () => { prompts++; return TOKEN; },
-    sleep: async () => {},
     resolveAdminKey: () => "fixture-admin-key",
     resolveBaseUrl: async () => "https://fixture.invalid",
     postSourceExpectation: async () => {},
   }));
   assert.equal(prompts, 0, "the Windows branch never attempted a terminal prompt");
-  assert.equal(writes, 0, "the Windows branch never handled the bearer value");
+  assert.deepEqual(calls, [
+    { kind: "read" },
+    { kind: "write", name: "STORE_DASHBOARD_TOKEN", matches: true },
+    { kind: "clear" },
+  ]);
+  assert.equal(inventories, 2, "the declared name was re-read after the clipboard write");
+  assert.match(result.output, /^Store key saved in your Brain and cleared from the clipboard\.$/m);
+  assert.equal(result.output.includes(TOKEN), false);
+});
+
+test("macOS supports explicit clipboard entry", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "brain-custom-api-macos-clipboard-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "brain.manifest.json");
+  writeFileSync(path, JSON.stringify(manifest()));
+  const names = new Set();
+  let reads = 0;
+  let clears = 0;
+  const result = await withCapturedOutput(() => cmdConnectCustomApi(path, { "from-clipboard": true }, {
+    platform: "darwin",
+    listWorkerSecretNames: async () => [...names],
+    putWorkerSecret: async (name, value) => {
+      assert.equal(value, TOKEN);
+      names.add(name);
+    },
+    readClipboard: async () => { reads++; return TOKEN; },
+    clearClipboard: async () => { clears++; },
+    resolveAdminKey: () => "fixture-admin-key",
+    resolveBaseUrl: async () => "https://fixture.invalid",
+    postSourceExpectation: async () => {},
+  }));
+  assert.equal(reads, 1);
+  assert.equal(clears, 1);
+  assert.equal(result.value.written, true);
+  assert.match(result.output, /^Store key saved in your Brain and cleared from the clipboard\.$/m);
+  assert.equal(result.output.includes(TOKEN), false);
+});
+
+test("native clipboard commands use captured no-shell processes and scrub the child environment", () => {
+  const windowsCalls = [];
+  const windowsSpawn = (command, args, options) => {
+    windowsCalls.push({ command, args, options });
+    return { status: 0, signal: null, stdout: args.at(-1).startsWith("Get-") ? TOKEN : "", stderr: "" };
+  };
+  const environment = { PATH: "fixture-path", HOME: "/fixture-home", PRIVATE_FIXTURE: TOKEN };
+  assert.equal(readCustomApiClipboard({ platform: "win32", spawn: windowsSpawn, environment }), TOKEN);
+  clearCustomApiClipboard({ platform: "win32", spawn: windowsSpawn, environment });
+  assert.deepEqual(windowsCalls.map(({ command, args }) => ({ command, args })), [
+    {
+      command: "powershell",
+      args: ["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"],
+    },
+    {
+      command: "powershell",
+      args: ["-NoProfile", "-NonInteractive", "-Command", "Set-Clipboard -Value $null"],
+    },
+  ]);
+  for (const { options } of windowsCalls) {
+    assert.equal(options.shell, false);
+    assert.equal(options.env.PRIVATE_FIXTURE, undefined);
+    assert.equal(JSON.stringify(options).includes(TOKEN), false);
+  }
+
+  const macCalls = [];
+  const macSpawn = (command, args, options) => {
+    macCalls.push({ command, args, options });
+    return { status: 0, signal: null, stdout: command === "pbpaste" ? TOKEN : "", stderr: "" };
+  };
+  assert.equal(readCustomApiClipboard({ platform: "darwin", spawn: macSpawn, environment }), TOKEN);
+  clearCustomApiClipboard({ platform: "darwin", spawn: macSpawn, environment });
+  assert.deepEqual(macCalls.map(({ command, args }) => ({ command, args })), [
+    { command: "pbpaste", args: [] },
+    { command: "pbcopy", args: [] },
+  ]);
+  assert.equal(macCalls[0].options.shell, false);
+  assert.equal(macCalls[1].options.shell, false);
+  assert.equal(macCalls[1].options.input, "");
+  assert.deepEqual(macCalls[1].options.stdio, ["pipe", "ignore", "pipe"]);
+  assert.equal(JSON.stringify(macCalls.map(({ options }) => options)).includes(TOKEN), false);
+});
+
+test("a clipboard read failure gives copy-and-retry guidance plus the dashboard fallback", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "brain-custom-api-clipboard-read-failure-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "brain.manifest.json");
+  writeFileSync(path, JSON.stringify(manifest()));
+  let inventories = 0;
+  let reads = 0;
+  let writes = 0;
+  const result = await withCapturedFailure(() => cmdConnectCustomApi(path, { "from-clipboard": true }, {
+    platform: "darwin",
+    listWorkerSecretNames: async () => { inventories++; return []; },
+    putWorkerSecret: async () => { writes++; },
+    readClipboard: async () => { reads++; throw new Error("synthetic clipboard failure"); },
+    clearClipboard: async () => { throw new Error("must not clear after a failed read"); },
+  }));
+  assert.equal(inventories, 1, "the absent-name decision point was reached");
+  assert.equal(reads, 1, "the clipboard-read decision point was reached");
+  assert.equal(writes, 0);
+  assert.match(result.error.message, /copy the key from the email.*same command again.*--key-set-in-dashboard/is);
+  assert.equal(result.error.message.includes(TOKEN), false);
+  assert.equal(result.output.includes(TOKEN), false);
+});
+
+test("clipboard is cleared when the Worker secret write fails", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "brain-custom-api-clipboard-write-failure-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "brain.manifest.json");
+  writeFileSync(path, JSON.stringify(manifest()));
+  let inventories = 0;
+  let writes = 0;
+  let clears = 0;
+  const result = await withCapturedFailure(() => cmdConnectCustomApi(path, { "from-clipboard": true }, {
+    platform: "darwin",
+    listWorkerSecretNames: async () => { inventories++; return []; },
+    putWorkerSecret: async (_name, value) => { writes++; assert.equal(value, TOKEN); throw new Error("synthetic write failure"); },
+    readClipboard: async () => TOKEN,
+    clearClipboard: async () => { clears++; },
+  }));
+  assert.equal(inventories, 1, "the absent-name decision point was reached");
+  assert.equal(writes, 1, "the Worker secret write decision point was reached");
+  assert.equal(clears, 1, "the clipboard was cleared in the write-failure path");
+  assert.match(result.error.message, /could not be written.*value was not printed or saved locally/i);
+  assert.equal(result.error.message.includes(TOKEN), false);
+  assert.equal(result.output.includes(TOKEN), false);
+});
+
+for (const [label, clipboard, expected] of [
+  ["empty", " \r\n ", /copy the key from the email.*same command again.*--key-set-in-dashboard/is],
+  ["multiple lines", `${TOKEN}\nsecond-line`, /more than one line.*nothing was stored/i],
+  ["prose", "this is a sentence, not a key", /looks like prose.*nothing was stored/i],
+  ["more than 2,048 bytes", "x".repeat(2_049), /1 to 2,048 printable ASCII bytes.*nothing was stored/i],
+  ["non-ASCII text", "fixture-é", /1 to 2,048 printable ASCII bytes.*nothing was stored/i],
+]) {
+  test(`clipboard entry refuses ${label} input without writing`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), `brain-custom-api-clipboard-${label.replaceAll(" ", "-")}-`));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const path = join(directory, "brain.manifest.json");
+    writeFileSync(path, JSON.stringify(manifest()));
+    let inventories = 0;
+    let reads = 0;
+    let writes = 0;
+    let clears = 0;
+    const result = await withCapturedFailure(() => cmdConnectCustomApi(path, { "from-clipboard": true }, {
+      platform: "darwin",
+      listWorkerSecretNames: async () => { inventories++; return []; },
+      putWorkerSecret: async () => { writes++; },
+      readClipboard: async () => { reads++; return clipboard; },
+      clearClipboard: async () => { clears++; },
+    }));
+    assert.equal(inventories, 1, "the absent-name decision point was reached");
+    assert.equal(reads, 1, "the clipboard-read decision point was reached");
+    assert.equal(writes, 0);
+    assert.equal(clears, 1, "rejected clipboard content was cleared");
+    assert.match(result.error.message, expected);
+    assert.equal(result.error.message.includes(TOKEN), false);
+    assert.equal(result.output.includes(TOKEN), false);
+  });
+}
+
+test("the dashboard flag remains an explicit fallback on Windows", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "brain-custom-api-windows-dashboard-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "brain.manifest.json");
+  writeFileSync(path, JSON.stringify(manifest()));
+  let reads = 0;
+  let writes = 0;
+  let inventories = 0;
+  const result = await withCapturedOutput(() => cmdConnectCustomApi(path, { "key-set-in-dashboard": true }, {
+    platform: "win32",
+    listWorkerSecretNames: async () => {
+      inventories++;
+      return inventories >= 2 ? ["STORE_DASHBOARD_TOKEN"] : [];
+    },
+    putWorkerSecret: async () => { writes++; },
+    readClipboard: async () => { reads++; return TOKEN; },
+    sleep: async () => {},
+    resolveAdminKey: () => "fixture-admin-key",
+    resolveBaseUrl: async () => "https://fixture.invalid",
+    postSourceExpectation: async () => {},
+  }));
+  assert.equal(reads, 0);
+  assert.equal(writes, 0);
   assert.equal(inventories, 2, "the declared name was re-read after dashboard entry");
   assert.match(result.output, /Workers & Pages.*fixture-brain.*Settings.*Variables and Secrets.*Add.*Secret/s);
   assert.match(result.output, /STORE_DASHBOARD_TOKEN/);

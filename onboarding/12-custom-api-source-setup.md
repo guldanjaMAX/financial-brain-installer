@@ -95,17 +95,31 @@ canonical path and the pull stops with a configuration error.
 Never paste the bearer key into chat, the manifest, a command argument, a ticket,
 or a support log.
 
-Windows does not use a terminal prompt. Keep the Cloudflare secret field off the
-shared screen, then run:
+On Windows, confirm clipboard history is already off in Card Q and turn screen
+sharing off. Open the key email, copy only the key, and run this one line:
+
+```powershell
+& "$env:LOCALAPPDATA\FinancialBrain\brain.cmd" connect custom-api "$HOME\Financial Brain\brain.manifest.json" --from-clipboard
+```
+
+Clipboard mode is the Windows default. The command trims surrounding whitespace,
+writes only the declared Worker secret, clears the clipboard even if the write
+fails, and verifies only that the secret name exists. Wait for **Store key saved
+in your Brain and cleared from the clipboard.** before turning screen sharing
+on again. If the clipboard is empty or cannot be read, copy only the key and run
+the same line again.
+
+If clipboard entry still fails, keep screen sharing off and use the dashboard
+fallback:
 
 ```powershell
 & "$env:LOCALAPPDATA\FinancialBrain\brain.cmd" connect custom-api "$HOME\Financial Brain\brain.manifest.json" --key-set-in-dashboard
 ```
 
 Follow the printed path exactly: **Workers & Pages → the named Worker → Settings
-→ Variables and Secrets → Add → type Secret**. Enter the exact printed secret
-name and paste the value only into Cloudflare's masked value field. The command
-waits up to two minutes and verifies only that the name exists, never its value.
+→ Variables and Secrets → Add → type Secret**. Paste the value only into
+Cloudflare's masked field. The command waits up to two minutes and verifies only
+that the declared name exists, never its value.
 
 macOS keeps the hidden terminal prompt. Turn screen sharing off before running:
 
@@ -115,6 +129,8 @@ macOS keeps the hidden terminal prompt. Turn screen sharing off before running:
 
 Wait for confirmation that the declared secret name was read back. On macOS,
 turn screen sharing on again only after the hidden prompt and command complete.
+Clipboard entry is also available on macOS by copying the key and adding
+`--from-clipboard`; the same validation, clearing, and name-only readback apply.
 
 ## 0:07 to 0:10: preview the live feed without saving
 
