@@ -68,7 +68,7 @@ async function runFixture({
       response.end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
-    if (url.pathname === "/api/admin/brain/documents") {
+    if (url.pathname === "/api/admin/brain/documents/report") {
       response.end(JSON.stringify({
         rows: [{
           source_type: "curated", documents: 1, chunks: 1, embedded: 1,
@@ -334,7 +334,7 @@ test("corpus pagination keeps a private continuation identity out of every URL",
     args: ["--no-think"],
     artifacts: true,
     route: ({ url, request, body }) => {
-      if (url.pathname === "/api/admin/brain/documents") {
+      if (url.pathname === "/api/admin/brain/documents/report") {
         return {
           body: {
             rows: [{
@@ -694,7 +694,7 @@ test("the distributed runner records reproducible provenance and CI artifacts", 
       response.end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
-    if (url.pathname === "/api/admin/brain/documents") {
+    if (url.pathname === "/api/admin/brain/documents/report") {
       response.end(JSON.stringify({
         rows: [{
           source_type: "curated", documents: 2, chunks: 4, embedded: 4,
@@ -811,6 +811,43 @@ test("the distributed runner records reproducible provenance and CI artifacts", 
   }
 });
 
+test("a capped eval backlog records the cap instead of persisting 10001 as an exact count", async () => {
+  const result = await runFixture({
+    questions: [{
+      id: "capped-backlog",
+      kind: "single",
+      risk: "normal",
+      domains: ["general"],
+      formats: ["text"],
+      question: "Which synthetic record should be found?",
+      expect: [{ any_of: ["curated:doc-a"] }],
+    }],
+    args: ["--no-think"],
+    artifacts: true,
+    route: ({ url }) => url.pathname === "/api/admin/brain/documents/report"
+      ? {
+        body: {
+          rows: [{
+            source_type: "curated", documents: 1, chunks: 1, embedded: 0,
+            last_ingested: "2026-08-24T00:00:00.000Z",
+          }],
+          vector_backlog: {
+            pending: 10_001,
+            pending_is_capped: true,
+            pending_display: "10,000+",
+          },
+        },
+      }
+      : null,
+  });
+  assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.runArtifact.corpus.vector_backlog, "10,000+");
+  assert.equal(result.runArtifact.corpus.vector_backlog_is_capped, true);
+  assert.doesNotMatch(JSON.stringify(result.runArtifact.corpus),
+    /"vector_backlog"\s*:\s*10001/u);
+  assert.match(result.runArtifact.corpus.snapshot_hash, /^sha256:[a-f0-9]{64}$/u);
+});
+
 test("a critical unanswerable fabrication fails the process", async () => {
   const result = await runFixture({
     questions: [{
@@ -895,7 +932,7 @@ test("malformed inventory remains not observable instead of becoming zero", asyn
     }],
     args: ["--no-think"],
     artifacts: true,
-    route: ({ url }) => url.pathname === "/api/admin/brain/documents" ? { body: {} } : null,
+    route: ({ url }) => url.pathname === "/api/admin/brain/documents/report" ? { body: {} } : null,
   });
   assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
   assert.deepEqual(result.runArtifact.corpus, {

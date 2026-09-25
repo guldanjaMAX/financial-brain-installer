@@ -3382,12 +3382,17 @@ export async function cmdHealth(manifestPath, {
           );
         }
         if (backlog.pending > 0) {
+          const pendingLabel = backlog.pending_is_capped === true
+            ? "over 10,000 pieces"
+            : `${backlog.pending} vector operation(s)`;
+          const componentDetail = backlog.component_counts_exact !== false
+            ? ` (${backlog.upserts} upsert, ${backlog.deletes} delete, ${backlog.submitted} accepted)`
+            : "";
           const queuedAt = backlog.oldest_queued_at;
           const oldest = Math.max(0, Math.floor((Date.now() - queuedAt) / 60000));
           if (oldest > 30) {
             die(
-              `${backlog.pending} vector operation(s) are still processing` +
-                ` (${backlog.upserts} upsert, ${backlog.deletes} delete, ${backlog.submitted} accepted), oldest queued ${oldest} min ago.` + "\n" +
+              `${pendingLabel} are still processing${componentDetail}, oldest queued ${oldest} min ago.` + "\n" +
                 "      Age alone does not prove a stall. This one snapshot cannot tell whether the" + "\n" +
                 "      queue is moving. If the pending count is falling between checks, indexing is" + "\n" +
                 "      working; leave the scheduled drain running and check again later." + "\n" +
@@ -3402,8 +3407,8 @@ export async function cmdHealth(manifestPath, {
             );
           }
           die(
-            `${backlog.pending} vector operation(s) are not query-visible yet` +
-              ` (${backlog.submitted} accepted by Vectorize), oldest queued ${oldest} min ago.` + "\n" +
+            `${pendingLabel} are not query-visible yet` +
+              `${backlog.component_counts_exact !== false ? ` (${backlog.submitted} accepted by Vectorize)` : ""}, oldest queued ${oldest} min ago.` + "\n" +
               "      Provider acceptance is not completion. This resolves on its own, usually" + "\n" +
               "      within a couple of minutes; re-run `brain health` rather than forcing it."
           );
@@ -8038,33 +8043,7 @@ async function resolveBase(m, acct) {
   return sub?.subdomain ? `https://${scriptName}.${sub.subdomain}.workers.dev` : null;
 }
 
-/**
- * What the document store actually holds, per source.
- *
- * The registry's own document_count is a receipt from the last ingest, not the
- * truth. Reading the store is what turns "the brain has 1,204 documents from
- * this source" from a claim into an observation, and the gap between the two
- * numbers is the cheapest signal available that an ingest died halfway.
- *
- * Returns null rather than throwing: a listing that works without the admin key
- * is more useful than one that refuses to print anything.
- */
-async function liveSourceCounts(base, adminKey) {
-  if (!base || !adminKey) return null;
-  try {
-    const res = await http(`${base}/api/admin/brain/documents`, {
-      headers: { "X-Admin-Key": adminKey },
-    });
-    if (!res.ok) return null;
-    const body = await res.json();
-    const map = new Map();
-    for (const r of body.rows || []) map.set(r.source_type, r);
-    return map;
-  } catch {
-    return null;
-  }
-}
-
+/** Read registered sources from the already resolved control-plane database. */
 async function readSources(acctId, dbId) {
   const r = await d1Query(acctId, dbId, "SELECT * FROM sources ORDER BY name").catch(() => null);
   if (!r) {
@@ -8082,6 +8061,7 @@ const num = (n) => Number(n || 0).toLocaleString("en-US");
 export function documentCountOf(row) {
   if (!row) return undefined;
   const value = row.documents ?? row.total;
+  if (value === null || value === undefined) return undefined;
   const count = Number(value);
   return Number.isFinite(count) ? count : undefined;
 }
@@ -10294,7 +10274,53 @@ export async function cmdProvenanceRepairInteractive(manifestPath, options = {})
  * them as unregistered with no way left to remove them. A rollback that half
  * works is the specific failure this whole feature exists to prevent.
  */
-async function purgeDocuments(base, adminKey, name) {
+const requestWorkerSourceForget = (base, adminKey, name, confirm, preview = null) =>
+  http(`${base}/api/admin/brain/forget`, {
+    method: "POST",
+    headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source: name,
+      confirm,
+      ...(confirm ? {
+        preview_documents: preview?.documents,
+        preview_document_high_water: preview?.document_high_water,
+        preview_corpus_mutation_generation: preview?.corpus_mutation_generation,
+      } : {}),
+    }),
+  });
+
+/** Exact, read-only count and finalization-capability receipt for one source. */
+async function previewSourceForget(base, adminKey, name) {
+  if (!base || !adminKey) {
+    die(
+      "the guarded Worker cannot be addressed, so the exact source-forget preview is unavailable.\n" +
+        "      Nothing was removed. Repair the saved Brain URL or durable admin key, then retry."
+    );
+  }
+  const response = await requestWorkerSourceForget(base, adminKey, name, false)
+    .catch((error) => ({ ok: false, status: 0, netError: error.message }));
+  if (!response.ok) {
+    const detail = typeof response.text === "function" ? await response.text().catch(() => "") : "";
+    die(
+      `the worker's exact forget preview returned ${response.status || "a network error"}: ` +
+        `${String(detail || response.netError || "").slice(0, 200)}\n` +
+        "      Nothing was removed. Update or repair the Worker, then retry."
+    );
+  }
+  const raw = await response.text().catch(() => "");
+  let body = null;
+  try { body = JSON.parse(raw); } catch { /* validated below */ }
+  try {
+    return validateSourceForgetPreview(body, name);
+  } catch (error) {
+    die(
+      `the worker's read-only forget preview did not prove guarded registry cleanup: ${error.message}\n` +
+        "      Nothing was removed. Update the Worker, then rerun the same `brain forget` command."
+    );
+  }
+}
+
+async function purgeDocuments(base, adminKey, name, exactPreview = null) {
   const warnings = [];
 
   if (!base || !adminKey) {
@@ -10302,23 +10328,21 @@ async function purgeDocuments(base, adminKey, name) {
       "the worker could not be addressed (no URL or no ADMIN_KEY), so the store was edited directly"
     );
   } else {
-    const requestWorkerForget = (confirm) => http(`${base}/api/admin/brain/forget`, {
-      method: "POST",
-      headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
-      body: JSON.stringify({ source: name, confirm }),
-    });
-
     // Prove the deployed Worker owns BOTH halves before authorizing either one.
     // An older route can remove documents but cannot unregister the source
     // behind the pause barrier. Discovering that after confirm:true would leave
     // a half-finished destructive operation, so the read-only preview is the
     // compatibility handshake.
-    const preview = await requestWorkerForget(false)
-      .catch((e) => ({ ok: false, status: 0, netError: e.message }));
+    const preview = exactPreview
+      ? { ok: true, prepared: true }
+      : await requestWorkerSourceForget(base, adminKey, name, false)
+        .catch((e) => ({ ok: false, status: 0, netError: e.message }));
     if (preview.ok) {
-      const rawPreview = await preview.text().catch(() => "");
-      let previewBody = null;
-      try { previewBody = JSON.parse(rawPreview); } catch { /* validated below */ }
+      let previewBody = exactPreview;
+      if (!previewBody) {
+        const rawPreview = await preview.text().catch(() => "");
+        try { previewBody = JSON.parse(rawPreview); } catch { /* validated below */ }
+      }
       try {
         validateSourceForgetPreview(previewBody, name);
       } catch (error) {
@@ -10328,7 +10352,7 @@ async function purgeDocuments(base, adminKey, name) {
         );
       }
 
-      const res = await requestWorkerForget(true)
+      const res = await requestWorkerSourceForget(base, adminKey, name, true, previewBody)
         .catch((e) => ({ ok: false, status: 0, netError: e.message }));
       if (!res.ok) {
         const detail = typeof res.text === "function" ? await res.text().catch(() => "") : "";
@@ -10352,6 +10376,11 @@ async function purgeDocuments(base, adminKey, name) {
         );
       }
       const removed = Number(body.documents);
+      if (body.document_count_exact === false || body.chunk_count_exact === false) {
+        warnings.push(
+          String(body.count_note || "Another operation removed some rows before this operation reached them.")
+        );
+      }
       const queued = Number(body?.vector_cleanup_queued || 0);
       if (queued > 0) {
         warnings.push(
@@ -10490,18 +10519,13 @@ async function cmdForget(manifestPath) {
 
   const base = await resolveBase(m, acct);
   const adminKey = resolveAdminKey(manifestPath);
-  const live = await liveSourceCounts(base, adminKey);
-  const liveCount = documentCountOf(live?.get(name));
+  const exactPreview = await previewSourceForget(base, adminKey, name);
+  const liveCount = Number(exactPreview.documents);
 
   // Print the damage BEFORE anything happens, every time, --yes or not.
   console.log(`\n  ${c.bold(`forget "${name}"`)} from ${m.client?.display_name || m.client?.slug || "this install"}\n`);
   console.log("  this removes:");
-  if (liveCount !== undefined) {
-    console.log(`    ${num(liveCount).padStart(9)}  documents in the brain (source_type = "${name}")`);
-  } else {
-    console.log(`    ${num(row.document_count).padStart(9)}  documents, per the registry's last receipt`);
-    console.log(`    ${c.dim("           the live count could not be read, so this number may be stale")}`);
-  }
+  console.log(`    ${num(liveCount).padStart(9)}  documents in the brain (exact guarded preview)`);
   console.log(`    ${"1".padStart(9)}  registry row in sources`);
   if (row.sync_cursor) {
     console.log(`    ${"1".padStart(9)}  sync cursor (a later ingest of "${name}" starts from the beginning)`);
@@ -10522,7 +10546,7 @@ async function cmdForget(manifestPath) {
   }
 
   console.log("");
-  const out = await purgeDocuments(base, adminKey, name);
+  const out = await purgeDocuments(base, adminKey, name, exactPreview);
 
   // Never substitute an expectation for an observation.
   //
@@ -10541,25 +10565,9 @@ async function cmdForget(manifestPath) {
   const removed = out.removed;
   ok(`removed ${num(removed)} document(s) via ${out.channel}`);
 
-  // Confirm against the live brain before freeing the name. Freeing it while
-  // documents survive is the one outcome with no recovery: they stay in the
-  // index with no name left to address them by, which is precisely what this
-  // feature exists to prevent.
-  const post = await liveSourceCounts(base, adminKey);
-  const stillThere = documentCountOf(post?.get(name));
-  if (stillThere) {
-    die(
-      `${num(stillThere)} document(s) for "${name}" are STILL in the brain after the purge.\n` +
-        "      The registry row was left in place. Do not treat this source as removed."
-    );
-  }
-  if (post === null || post === undefined) {
-    warn(
-      "the live count could not be re-read, so removal is reported but not independently\n" +
-        "        confirmed. Run `brain sources` once the worker is reachable."
-    );
-  }
-
+  // The guarded final receipt is the exact postcondition. Its source-registry
+  // transaction can succeed only when no live source document remains, so a
+  // second hot summary read would be weaker and can lag this operation.
   if (out.sourceUnregistered !== true) {
     die(
       `the documents were removed via ${out.channel}, but that path cannot finalize the source registry\n` +
@@ -11668,7 +11676,24 @@ export function validateForgetReceipt(body) {
 
 /** A whole-source preview must prove that confirmation includes registry cleanup. */
 export function validateSourceForgetPreview(body, source) {
-  validateForgetBody(body);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("the source forget preview is not a JSON object");
+  }
+  if (!Number.isSafeInteger(Number(body.documents)) || Number(body.documents) < 0 ||
+      body.document_count_exact !== true) {
+    throw new Error("the source forget preview has no exact document count");
+  }
+  if (!Number.isSafeInteger(Number(body.document_high_water)) ||
+      Number(body.document_high_water) < 0) {
+    throw new Error("the source forget preview has no document high water");
+  }
+  if (!Number.isSafeInteger(Number(body.corpus_mutation_generation)) ||
+      Number(body.corpus_mutation_generation) < 0) {
+    throw new Error("the source forget preview has no corpus mutation generation");
+  }
+  if (body.chunks !== null || body.vectors !== null || Object.hasOwn(body, "targets")) {
+    throw new Error("the source forget preview enumerated corpus-sized detail");
+  }
   if (body.dry_run !== true) throw new Error("the source forget preview is not a dry run");
   if (body.source !== source) throw new Error("the source forget preview names a different source");
   if (body.would_unregister_source !== true || body.source_unregistered !== false ||
@@ -11680,7 +11705,30 @@ export function validateSourceForgetPreview(body, source) {
 
 /** A whole-source receipt binds document removal to the exact registry finalization. */
 export function validateSourceForgetReceipt(body, source) {
-  validateForgetReceipt(body);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("the source forget receipt is not a JSON object");
+  }
+  for (const field of ["documents", "chunks", "vectors"]) {
+    if (!Number.isSafeInteger(Number(body[field])) || Number(body[field]) < 0) {
+      throw new Error(`the source forget receipt has no valid ${field} count`);
+    }
+  }
+  if (![true, false].includes(body.document_count_exact) ||
+      ![true, false].includes(body.chunk_count_exact) || Object.hasOwn(body, "targets")) {
+    throw new Error("the source forget receipt is not a bounded deletion receipt");
+  }
+  if (body.document_count_exact === false || body.chunk_count_exact === false) {
+    for (const field of ["targeted_documents", "targeted_chunks"]) {
+      if (!Number.isSafeInteger(Number(body[field])) || Number(body[field]) < 0) {
+        throw new Error(`the source forget receipt has no valid ${field} count`);
+      }
+    }
+    if (typeof body.count_note !== "string" ||
+        !/another operation removed some rows/i.test(body.count_note)) {
+      throw new Error("the source forget receipt does not explain its overlapping deletion");
+    }
+  }
+  if (body.dry_run !== false) throw new Error("the source forget receipt did not confirm a real deletion");
   if (body.source !== source) throw new Error("the source forget receipt names a different source");
   if (body.source_unregistered !== true || body.registry_event_recorded !== true ||
       typeof body.operation_id !== "string" || !body.operation_id.trim()) {
@@ -21467,6 +21515,9 @@ async function reportBacklog(manifestPath) {
     if (!res.ok) return;
     const body = await res.json();
     const pending = Number(body?.vector_backlog?.pending || 0);
+    const pendingLabel = body?.vector_backlog?.pending_is_capped === true
+      ? "Over 10,000 chunks"
+      : `${pending} chunk(s)`;
     const readiness = body?.vector_readiness;
     if (!pending && readiness?.ready === true &&
         readiness.actual_vectors === readiness.expected_vectors) {
@@ -21482,7 +21533,7 @@ async function reportBacklog(manifestPath) {
       return;
     }
     warn(
-      `${pending} chunk(s) are queued or awaiting visibility. Until confirmed they are findable` + "\n" +
+      `${pendingLabel} are queued or awaiting visibility. Until confirmed they are findable` + "\n" +
         "        by keyword and INVISIBLE to meaning-based search, and nothing else reports that." + "\n" +
         "        The scheduled drain finishes this on its own, roughly fifty a minute, and" + "\n" +
         "        `brain health` shows it moving. Do not run `brain drain` while the cron is" + "\n" +
@@ -22013,6 +22064,7 @@ export function validateDrainReceipt(body) {
   const submitted = nonNegativeReceiptCount(body, "submitted", "the drain receipt");
   const waiting = nonNegativeReceiptCount(body, "waiting", "the drain receipt");
   const remaining = nonNegativeReceiptCount(body, "remaining", "the drain receipt");
+  const remainingIsLowerBound = body.remaining_is_lower_bound === true;
   if (typeof body.vector_ready !== "boolean") {
     die("the drain receipt did not prove Vectorize query readiness. Nothing was declared complete.");
   }
@@ -22043,11 +22095,20 @@ export function validateDrainReceipt(body) {
   }
   if (remaining > 0 && drained === 0 && submitted === 0 && waiting === 0) {
     die(
-      `the drain stopped making progress with ${remaining} vector operation(s) still queued.\n` +
+      `the drain stopped making progress with ${remainingIsLowerBound ? "more vector work" : `${remaining} vector operation(s)`} still queued.\n` +
         "      The vector index is incomplete. Run `brain diagnose <manifest>` for the exact retry reason."
     );
   }
-  return { drained, submitted, waiting, remaining, vector_ready: body.vector_ready };
+  return {
+    drained,
+    submitted,
+    waiting,
+    remaining,
+    ...(Object.hasOwn(body, "remaining_is_lower_bound")
+      ? { remaining_is_lower_bound: remainingIsLowerBound }
+      : {}),
+    vector_ready: body.vector_ready,
+  };
 }
 
 /**
@@ -22062,14 +22123,16 @@ export function validateDrainReceipt(body) {
  */
 export function assertDrainComplete({
   remaining,
+  remainingIsLowerBound = false,
   rounds,
   maxRounds = 400,
   expectedVectors = null,
   actualVectors = null,
 } = {}) {
   if (remaining !== 0) {
+    const remainingLabel = renderDrainRemaining(remaining, remainingIsLowerBound);
     die(
-      `the drain reached its ${maxRounds}-round safety limit with ${remaining} vector operation(s) still queued.\n` +
+      `the drain reached its ${maxRounds}-round safety limit with ${remainingLabel} vector operation(s) still queued.\n` +
         "      Completed chunks are safe, but the vector index is still incomplete. Re-run `brain drain` to continue."
     );
   }
@@ -22089,6 +22152,35 @@ export function assertDrainComplete({
     }
   }
   return { remaining, rounds };
+}
+
+/** Preserve bounded queue semantics in every manual-drain status sentence. */
+export function renderDrainRemaining(remaining, remainingIsLowerBound = false) {
+  return remainingIsLowerBound ? `more than ${remaining}` : String(remaining);
+}
+
+/** A lower bound cannot support a truthful ETA, even when throughput is known. */
+export function renderDrainProgress({
+  actualVectors,
+  drained,
+  submitted,
+  remaining,
+  remainingIsLowerBound = false,
+  rate = null,
+} = {}) {
+  const progress = [
+    Number.isSafeInteger(actualVectors)
+      ? `${actualVectors} total query-visible vector(s)`
+      : "total query-visible vector count unavailable",
+    `${drained} newly confirmed this run`,
+    `${submitted} accepted this run`,
+    `${renderDrainRemaining(remaining, remainingIsLowerBound)} to go`,
+  ];
+  if (rate) progress.push(`~${rate}/min`);
+  if (rate && remaining && !remainingIsLowerBound) {
+    progress.push(`about ${Math.max(1, Math.ceil(remaining / rate))} min left`);
+  }
+  return progress.join("; ");
 }
 
 /**
@@ -22188,7 +22280,13 @@ export function validateDrainBusyReceipt(body) {
   if (retryAfterSeconds < 1 || retryAfterSeconds > Math.ceil(MANUAL_DRAIN_MAX_MS / 1_000)) {
     die("the drain busy receipt included an unsafe retry delay. Nothing was declared complete.");
   }
-  return { remaining, retryAfterSeconds };
+  return {
+    remaining,
+    ...(Object.hasOwn(body, "remaining_is_lower_bound")
+      ? { remainingIsLowerBound: body.remaining_is_lower_bound === true }
+      : {}),
+    retryAfterSeconds,
+  };
 }
 
 async function cmdDrain(manifestPath, options = {}) {
@@ -22215,6 +22313,7 @@ async function cmdDrain(manifestPath, options = {}) {
   let routeWarmups = 0;
   let submitted = 0;
   let remaining = null;
+  let remainingIsLowerBound = false;
   let rounds = 0;
   let expectedVectors = null;
   let actualVectors = null;
@@ -22241,6 +22340,7 @@ async function cmdDrain(manifestPath, options = {}) {
     if (res.status === 409) {
       const busy = validateDrainBusyReceipt(body);
       remaining = busy.remaining;
+      remainingIsLowerBound = busy.remainingIsLowerBound === true;
       const delayMs = Math.min(busy.retryAfterSeconds * 1_000, Math.max(0, deadline - now()));
       if (delayMs <= 0) break;
       info(`another vector drain is finishing; retrying in ${Math.ceil(delayMs / 1_000)} second(s)`);
@@ -22301,19 +22401,17 @@ async function cmdDrain(manifestPath, options = {}) {
     drained += receipt.drained;
     submitted += receipt.submitted;
     remaining = receipt.remaining;
+    remainingIsLowerBound = receipt.remaining_is_lower_bound === true;
     const mins = (now() - started) / 60000;
     const rate = mins > 0.05 ? Math.round(drained / mins) : null;
-    const progress = [
-      Number.isSafeInteger(actualVectors)
-        ? `${actualVectors} total query-visible vector(s)`
-        : "total query-visible vector count unavailable",
-      `${drained} newly confirmed this run`,
-      `${submitted} accepted this run`,
-      `${remaining} to go`,
-    ];
-    if (rate) progress.push(`~${rate}/min`);
-    if (rate && remaining) progress.push(`about ${Math.max(1, Math.ceil(remaining / rate))} min left`);
-    info(progress.join("; "));
+    info(renderDrainProgress({
+      actualVectors,
+      drained,
+      submitted,
+      remaining,
+      remainingIsLowerBound,
+      rate,
+    }));
     if (remaining === 0) break;
     if (receipt.waiting > 0) {
       // Vectorize V2 processes changesets asynchronously. Poll slowly enough to
@@ -22325,13 +22423,23 @@ async function cmdDrain(manifestPath, options = {}) {
     }
   }
   if (remaining !== 0 && now() >= deadline) {
+    const remainingLabel = remaining === null
+      ? "unknown"
+      : renderDrainRemaining(remaining, remainingIsLowerBound);
     die(
       `the drain reached its ${Math.ceil(maxDurationMs / 60_000)}-minute wall-clock safety limit with ` +
-        `${remaining ?? "unknown"} vector operation(s) still queued.\n` +
+        `${remainingLabel} vector operation(s) still queued.\n` +
         "      Completed chunks are safe. Re-run `brain drain` to resume from the durable queue.",
     );
   }
-  assertDrainComplete({ remaining, rounds, maxRounds, expectedVectors, actualVectors });
+  assertDrainComplete({
+    remaining,
+    remainingIsLowerBound,
+    rounds,
+    maxRounds,
+    expectedVectors,
+    actualVectors,
+  });
   const result = buildCompletedDrainResult({
     drained,
     submitted,
@@ -24850,7 +24958,7 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
     });
     const projectionFailed = [
       "projection_work_insufficient", "projection_work_missing",
-      "projection_visibility_pending", "projection_excess",
+      "projection_work_queued_uncounted", "projection_visibility_pending", "projection_excess",
     ]
       .includes(deployedProjection.verdict);
     const receipt = projectionFailed

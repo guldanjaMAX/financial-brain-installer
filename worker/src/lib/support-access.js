@@ -920,6 +920,7 @@ export function supportSystemProjection(status) {
       expected: Number(status.vectors.expected || 0),
       visible: Number(status.vectors.visible || 0),
       pending: Number(status.vectors.pending || 0),
+      pending_is_capped: status.vectors.pending_is_capped === true,
       percent_visible: status.vectors.percent_visible === null ? null : Number(status.vectors.percent_visible),
     };
   }

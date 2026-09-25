@@ -867,6 +867,9 @@ const expected = [
   "worker/src/lib/stored-family-identity.js",
   "worker/src/lib/store-d1.js",
   "worker/src/lib/store.js",
+  // Hot source-sized inventory plus an owner-admin exact report. The report
+  // pages private family identities inside the Worker and emits aggregates.
+  "worker/src/lib/documents-summary.js",
   "worker/src/lib/system-status.js",
   "worker/src/lib/supabase.js",
   "worker/src/lib/vtt.js",

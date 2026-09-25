@@ -10,6 +10,19 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Health checks stay quick on large Brains.** Health, status, and assistant
+  checks now get their document inventory from bounded source receipts. That
+  inventory no longer joins every chunk, parses every document's metadata, or
+  shows an old total as current. Those screens say "not counted on large
+  Brains; run `brain report` for the full count" when an exact size is not
+  needed. `brain report` still computes
+  exact document, family, chunk, and meaning-search totals in bounded pages and
+  refuses a mixed result if the corpus changes while it runs. Source removal
+  uses the exact guarded preview and final receipt from that removal, so a
+  delayed summary cannot falsely say removed documents remain. To check: run
+  `brain health <manifest>`, then `brain report <manifest>` when you want the
+  complete counts.
+
 - **One finely reported balance no longer blocks a whole bank.** A bank can
   report more decimal places than its currency has, such as a retirement
   balance of 23631.9805 dollars. That single value used to stop every account

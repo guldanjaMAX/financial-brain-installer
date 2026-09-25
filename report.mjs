@@ -58,6 +58,7 @@ export function corpusReportCounts(corpus) {
     extractedChunks: sumKnown(rows, (row) =>
       firstCount(row?.chunks, row?.total)),
     semanticVisibleChunks: sumKnown(rows, (row) => finiteCount(row?.embedded)),
+    semanticVisibleExact: rows.every((row) => row?.pending_vector_counts_exact !== false),
   };
 }
 
@@ -306,8 +307,12 @@ export async function buildReport({
   try {
     const docsRes = await fetchBrainWithAdminKey(
       fetchImpl,
-      `${base}/api/admin/brain/documents`,
-      {},
+      `${base}/api/admin/brain/documents/report`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      },
       () => adminKey,
     );
     if (docsRes.ok) docs = await docsRes.json();
@@ -315,7 +320,9 @@ export async function buildReport({
     // The report remains useful, but the counts below must stay unknown.
   }
   const counts = corpusReportCounts(docs);
-  const { rows, logicalDocuments, extractedChunks, semanticVisibleChunks } = counts;
+  const {
+    rows, logicalDocuments, extractedChunks, semanticVisibleChunks, semanticVisibleExact,
+  } = counts;
 
   let sourceInventory = null;
   let sourceInventoryError = null;
@@ -352,6 +359,17 @@ export async function buildReport({
   /* ------------------------------------------------------------ what is in it */
   L.push("## What is stored and searchable");
   L.push("");
+  const snapshotAt = (docs?.summary?.exact === true ||
+      (docs?.summary?.document_counts_exact === true &&
+       docs?.summary?.chunk_counts_exact === true)) &&
+    typeof docs?.summary?.as_of === "string" &&
+    !Number.isNaN(Date.parse(docs.summary.as_of))
+    ? new Date(docs.summary.as_of).toISOString()
+    : null;
+  if (snapshotAt) {
+    L.push(`Exact corpus snapshot counted at ${snapshotAt}.`);
+    L.push("");
+  }
   if (!docs || !Array.isArray(docs.rows)) {
     L.push("The authenticated corpus count was unavailable, so document and chunk totals are **unknown**.");
     L.push("");
@@ -361,7 +379,7 @@ export async function buildReport({
   } else {
     L.push(`- Logical documents: **${logicalDocuments === null ? "not reported" : num(logicalDocuments)}**`);
     L.push(`- Extracted keyword-searchable chunks: **${extractedChunks === null ? "not reported" : num(extractedChunks)}**`);
-    L.push(`- Visibility-confirmed semantic chunks: **${semanticVisibleChunks === null ? "not reported" : num(semanticVisibleChunks)}**`);
+    L.push(`- Visibility-confirmed semantic chunks: **${semanticVisibleChunks === null ? "not reported" : `${semanticVisibleExact ? "" : "approximately "}${num(semanticVisibleChunks)}`}**`);
     L.push("");
     L.push("| Kind | Logical documents | Extracted chunks | Meaning-search visible | Last stored ingest receipt |");
     L.push("|---|---:|---:|---:|---|");
@@ -373,7 +391,7 @@ export async function buildReport({
       L.push(
         `| ${label} | ${logical === null ? "not reported" : num(logical)} | ` +
         `${chunks === null ? "not reported" : num(chunks)} | ` +
-        `${visible === null ? "not reported" : num(visible)} | ` +
+        `${visible === null ? "not reported" : `${r.pending_vector_counts_exact === false ? "approximately " : ""}${num(visible)}`} | ` +
         `${isoDay(r.last_ingested) || "not reported"} |`
       );
     }
@@ -382,7 +400,7 @@ export async function buildReport({
   if (extractedChunks !== null && semanticVisibleChunks !== null && semanticVisibleChunks < extractedChunks) {
     const pending = extractedChunks - semanticVisibleChunks;
     L.push(
-      `${num(pending)} extracted chunk${pending === 1 ? " is" : "s are"} not yet visibility-confirmed for meaning search. ` +
+      `${semanticVisibleExact ? "" : "Approximately "}${num(pending)} extracted chunk${pending === 1 ? " is" : "s are"} not yet visibility-confirmed for meaning search. ` +
         `Those chunks may still be available to keyword search; this report does not call them absent.`
     );
     L.push("");

@@ -146,6 +146,28 @@ authenticated network request, with zero Brain writes, Cloudflare control
 requests, deployments, or installs. Modern same-response behavior is
 unchanged.
 
+The ordinary authenticated documents response is intentionally informational
+about corpus size. It reads `corpus_stats` and the trigger-maintained
+`document_source_inventory`, so health, status, the MCP health tool, meaning
+answers, and update readiness do not join chunk rows or parse document metadata
+to produce their document inventory. Presence is exact, but logical-document
+and chunk totals are `null` with the
+owner copy "not counted on large Brains; run `brain report` for the full
+count". The explicit owner-admin `POST
+`/api/admin/brain/documents/report` path supplies those exact totals. It walks
+documents and chunks through separate fixed keyset pages, caps chunk rows per
+statement, and compares cheap opening and closing corpus, source, outbox, and
+projection markers before returning a complete result. Document and chunk
+totals remain exact under that fence. Pending-vector totals are exact only when
+the outbox is empty at both ends; while indexing, the report labels them
+approximate because a confirmed outbox row can be deleted between pages.
+Whole-source forget preview and completion use that operation's guarded
+receipts, never the informational documents rows. Confirmation carries the
+preview count, document-row high-water mark, and durable corpus mutation
+generation, and final removed counts come from the D1 delete receipts. The
+generation also guards target enumeration, so an in-place reingest cannot keep
+the same count and rowid shape while authorizing deletion of the newer revision.
+
 The diagnostic exits successfully for a coherent `ready`,
 `recoverable_queued_work`, or `queued_work_present` observation because the
 check itself completed. Only the first has `projection_ready: true`; every

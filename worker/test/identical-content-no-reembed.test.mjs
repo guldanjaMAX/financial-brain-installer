@@ -474,6 +474,12 @@ async function seedProjectedLegacyDocument(brain, sourceId, content, { driftChun
       metadata: await vectorMetadataFor({ ...chunk, generation: index + 1 }),
     });
   }
+  brain.fixture.raw(
+    `UPDATE install_state
+        SET vector_projection_status='verified',
+            vector_projection_bootstrap_base_count=(SELECT COUNT(*) FROM chunks)
+      WHERE id=1`,
+  );
   assert.equal(documentRow(brain, docUid).provenance_receipt_status, null);
   assert.equal((await vectorReadiness(brain.env)).ready, true);
   return { older, docUid, hash, chunkCount: pieces.length };

@@ -47,6 +47,8 @@ function readinessInventory(overrides = {}) {
   const expected = overrides.expected ?? 10;
   const actual = overrides.actual ?? expected;
   const pending = overrides.pending ?? 0;
+  const pendingIsCapped = overrides.pendingIsCapped ?? false;
+  const componentCountsExact = overrides.componentCountsExact ?? !pendingIsCapped;
   const ready = overrides.ready ?? (pending === 0 && actual === expected);
   return {
     version: overrides.version ?? "0.4.7",
@@ -55,9 +57,12 @@ function readinessInventory(overrides = {}) {
     rows: [{ source_type: "private-source-must-not-escape" }],
     vector_backlog: {
       pending,
+      pending_is_capped: pendingIsCapped,
+      pending_display: pendingIsCapped ? "10,000+" : String(pending),
       upserts: overrides.upserts ?? pending,
       deletes: overrides.deletes ?? 0,
       submitted: overrides.submitted ?? 0,
+      component_counts_exact: componentCountsExact,
       oldest_queued_at: pending > 0 ? 1_750_000_000_000 : null,
     },
     vector_readiness: {
@@ -68,7 +73,9 @@ function readinessInventory(overrides = {}) {
       expected_vectors: expected,
       actual_vectors: actual,
       pending,
+      pending_is_capped: pendingIsCapped,
       submitted: overrides.submitted ?? 0,
+      submitted_counts_exact: componentCountsExact,
       oldest_queued_at: pending > 0 ? 1_750_000_000_000 : null,
     },
   };
@@ -1013,6 +1020,35 @@ test("queued shortfall is reported as recoverable work, never as readiness", asy
   assert.equal(receipt.plan.deployed_projection.query_ready, false);
   assert.equal(receipt.plan.deployed_projection.queue.pending, 8);
   assert.doesNotMatch(output, /private-source-must-not-escape|unit-test-admin-key/u);
+});
+
+test("the live adapter blocks a capped million-row queue as uncounted work", async () => {
+  let successWrites = 0;
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      inventory: readinessInventory({
+        expected: 1_150_274,
+        actual: 0,
+        pending: 10_001,
+        pendingIsCapped: true,
+        componentCountsExact: false,
+      }),
+      write() { successWrites += 1; },
+    })),
+    (error) => {
+      assert.equal(error.payload.error_code, "UPDATE_PREVIEW_PROJECTION_WORK_UNCOUNTED");
+      assert.equal(error.payload.plan.deployed_projection.verdict,
+        "projection_work_queued_uncounted");
+      assert.equal(error.payload.plan.deployed_projection.queue.pending_is_capped, true);
+      assert.equal(error.payload.authorizes_update, false);
+      assert.match(error.payload.owner_message,
+        /large indexing queue is still working; wait for it before updating/i);
+      return true;
+    },
+  );
+  assert.equal(successWrites, 0);
 });
 
 test("delete-only and undersized upsert queues emit fingerprinted insufficiency refusals", async () => {

@@ -877,6 +877,20 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
   const recoveredVectors = attachVectorIndex(recoveredBrain);
   recoveredVectors.seedCurrentChunks();
   assert.equal(recoveredVectors.vectors.size, 1);
+  // Portable recovery copies the corpus and provider projection separately
+  // from deployment-local verification state. Model the exact receipt that a
+  // completed recovery records before the repair CLI reads bounded health;
+  // otherwise the fixture advertises a verified zero-vector deployment while
+  // asking the CLI to trust one recovered vector.
+  recoveredBrain.raw(
+    `UPDATE install_state
+        SET vector_projection_status='verified',
+            vector_projection_bootstrap_base_count=(SELECT COUNT(*) FROM chunks)
+      WHERE id=1`,
+  );
+  assert.equal(recoveredBrain.first(
+    "SELECT vector_projection_bootstrap_base_count AS n FROM install_state WHERE id=1",
+  ).n, recoveredVectors.vectors.size);
   const recoveredHarness = orchestratorHarness(recoveredBrain, install);
 
   const { response: recoveredVerifyResponse, value: recoveredVerify } =

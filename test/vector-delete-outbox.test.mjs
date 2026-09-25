@@ -24,6 +24,7 @@ import {
   drainOutbox,
   forget,
   forgetFamilies,
+  outboxDepth,
   vectorReadiness,
 } from "../worker/src/lib/store-d1.js";
 import { storeFor } from "../worker/src/lib/store.js";
@@ -31,7 +32,7 @@ import { storeFor } from "../worker/src/lib/store.js";
 let fail = 0, ran = 0;
 const check = (name, condition, detail = "") => {
   ran++;
-  console.log((condition ? "PASS  " : "FAIL  ") + name + (condition ? "" : "  " + String(detail).slice(0, 240)));
+  console.log((condition ? "PASS  " : "FAIL  ") + name + (condition ? "" : "  " + String(detail).slice(0, 1_000)));
   if (!condition) fail++;
 };
 
@@ -42,6 +43,7 @@ function makeEnv({
   enforceD1PatternLimit = false,
   invalidGetByIdsPage = null,
   malformedAcceleratedVectorIdReadback = false,
+  rejectFullOutboxCounts = false,
   skipAcceleratedVectorIdUpdate = false,
 } = {}) {
   const db = new DatabaseSync(":memory:");
@@ -73,7 +75,7 @@ function makeEnv({
     }
     return { mutationId };
   };
-  const d1Queries = { submitted: 0, maxBinds: 0 };
+  const d1Queries = { submitted: 0, maxBinds: 0, sql: [] };
   // D1 hands a write back its RETURNING rows, and derives meta.changes from a
   // total_changes() delta that counts trigger writes too. node:sqlite's run()
   // reports neither, so a stub built on it cannot carry the ingest finalizer's
@@ -89,6 +91,13 @@ function makeEnv({
     return { results, meta: { changes: db.prepare("SELECT total_changes() AS n").get().n - before } };
   };
   const prepare = (sql) => {
+    d1Queries.sql.push(sql);
+    const compactSql = sql.replace(/\s+/g, " ").trim();
+    if (rejectFullOutboxCounts &&
+        (/^SELECT count\(\*\) AS n FROM vector_outbox$/i.test(compactSql) ||
+         /\(SELECT count\(\*\) FROM chunks\) AS expected_vectors/i.test(compactSql))) {
+      throw new Error("UNBOUNDED_QUEUE_COUNT");
+    }
     const shape = (params = []) => ({
       bind: (...next) => shape(next),
       all: async () => {
@@ -191,15 +200,162 @@ function makeEnv({
   return { env, db, deleted, upserted, upsertBatches, visible, d1Queries, getByIdsCalls };
 }
 
+/* Hot queue/readiness displays are capped and index-bounded even when a
+   provenance replay leaves more than a million rows waiting. */
+{
+  const { env, db, d1Queries } = makeEnv();
+  db.exec("DROP TRIGGER vector_outbox_generation_ai; DROP TRIGGER vector_outbox_generation_au;");
+  db.exec(`WITH RECURSIVE rows(n) AS (
+      VALUES(1) UNION ALL SELECT n + 1 FROM rows WHERE n < 1150274
+    )
+    INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at, attempts)
+    SELECT printf('queued:%07d', n), printf('vector:%07d', n),
+           'upsert',
+           n, 0
+      FROM rows`);
+  db.prepare(
+    "INSERT INTO corpus_stats (source, documents, chunks) VALUES ('synthetic', 1, 1150274)",
+  ).run();
+  const started = performance.now();
+  const backlog = await outboxDepth(env);
+  const backlogMs = performance.now() - started;
+  const readinessStarted = performance.now();
+  const readiness = await vectorReadiness(env);
+  const readinessMs = performance.now() - readinessStarted;
+  const hotSql = d1Queries.sql.slice(-2);
+  const statementsBeforeDrain = d1Queries.submitted;
+  const drainStarted = performance.now();
+  const drain = await drainOutbox(env, {
+    embed: async () => [0.1],
+    maxBatches: 10,
+    skipUpserts: true,
+  });
+  const drainMs = performance.now() - drainStarted;
+  const drainStatements = d1Queries.submitted - statementsBeforeDrain;
+  const deletePriorityQueries = d1Queries.sql.filter((sql) =>
+    /drain-delete-priority/i.test(sql)).length;
+  const plans = hotSql.flatMap((sql) => db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all())
+    .map((row) => row.detail);
+  check("a 1.15M-row queue is displayed as a truthful bounded count",
+    backlog.pending === 10001 && backlog.pending_is_capped === true &&
+      backlog.pending_display === "10,000+" && readiness.pending === 10001 &&
+      readiness.pending_is_capped === true,
+    JSON.stringify({ backlog, readiness }));
+  check("hot backlog and readiness plans never scan vector_outbox or chunks",
+    !plans.some((detail) => /\bSCAN (?:vector_outbox|chunks)\b/i.test(detail)),
+    plans.join("\n"));
+  check("full-size bounded timings complete without corpus-sized result work",
+    backlogMs < 1_000 && readinessMs < 1_000,
+    JSON.stringify({ backlog_ms: backlogMs, readiness_ms: readinessMs }));
+  check("one 1.15M all-upsert drain tick runs the delete-priority probe once",
+    drain.has_remaining === true && deletePriorityQueries === 1,
+    JSON.stringify({ drain, deletePriorityQueries }));
+  check("the full-size all-upsert drain tick stays inside the statement budget",
+    drainStatements < DRAIN_D1_QUERY_BUDGET,
+    JSON.stringify({ drainStatements, budget: DRAIN_D1_QUERY_BUDGET }));
+  console.log(`full-size bounded timings: backlog=${backlogMs.toFixed(3)}ms readiness=${readinessMs.toFixed(3)}ms drain_tick=${drainMs.toFixed(3)}ms statements=${drainStatements}`);
+  db.close();
+}
+
 const insertDocument = (db, uid, source = "drive") => db.prepare(
   `INSERT INTO documents (doc_uid, source, source_id, title, ingested_at, content_hash)
    VALUES (?, ?, ?, ?, ?, ?)`
 ).run(uid, source, uid, uid, Date.now(), `hash:${uid}`);
 
-const insertChunk = (db, uid, doc, ix, vectorId = uid) => db.prepare(
-  `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, vector_id)
-   VALUES (?, ?, ?, ?, 'drive', ?)`
-).run(uid, doc, ix, `old text ${ix}`, vectorId);
+const insertChunk = (db, uid, doc, ix, vectorId = uid) => {
+  const result = db.prepare(
+    `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, vector_id)
+     VALUES (?, ?, ?, ?, 'drive', ?)`,
+  ).run(uid, doc, ix, `old text ${ix}`, vectorId);
+  db.prepare(
+    `INSERT INTO corpus_stats (source, documents, chunks)
+     SELECT 'drive', COUNT(DISTINCT documents.doc_uid), COUNT(chunks.chunk_uid)
+       FROM documents LEFT JOIN chunks ON chunks.doc_uid=documents.doc_uid
+      WHERE documents.source='drive' AND documents.deleted_at IS NULL
+     ON CONFLICT(source) DO UPDATE SET
+       documents=excluded.documents, chunks=excluded.chunks`,
+  ).run();
+  return result;
+};
+
+/* A scaled 300-row all-upsert queue reaches multiple batches in one real
+   invocation. The negative delete answer must be reused, not reprobed. */
+{
+  const { env, db, d1Queries } = makeEnv({ autoProcessVectorMutations: false });
+  insertDocument(db, "drive:scaled-upsert-drain");
+  db.exec(`WITH RECURSIVE rows(n) AS (
+      VALUES(0) UNION ALL SELECT n + 1 FROM rows WHERE n < 299
+    )
+    INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, vector_id)
+    SELECT printf('drive:scaled-upsert-drain#%03d', n),
+           'drive:scaled-upsert-drain', n, printf('synthetic text %03d', n),
+           'drive', printf('drive:scaled-upsert-drain#%03d', n)
+      FROM rows`);
+  db.exec(`INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
+    SELECT chunk_uid, vector_id, 'upsert', chunk_ix
+      FROM chunks WHERE doc_uid='drive:scaled-upsert-drain'`);
+  const result = await drainOutbox(env, {
+    embed: async () => [0.1],
+    maxBatches: 10,
+    batchSize: 100,
+  });
+  const deletePriorityQueries = d1Queries.sql.filter((sql) =>
+    /drain-delete-priority/i.test(sql)).length;
+  check("a multi-batch all-upsert drain reuses one negative delete-priority probe",
+    result.submitted === 200 && result.waiting === 200 &&
+      result.has_remaining === true && deletePriorityQueries === 1,
+    JSON.stringify({ result, deletePriorityQueries, statements: d1Queries.submitted }));
+  db.close();
+}
+
+/* The actual drain entry point may use indexed existence probes and its own
+   batch receipts, but never a whole-queue/chunk count before or after work. */
+{
+  const { env, db, d1Queries } = makeEnv({ rejectFullOutboxCounts: true });
+  insertDocument(db, "drive:bounded-drain");
+  insertChunk(db, "drive:bounded-drain#0", "drive:bounded-drain", 0);
+  db.prepare(
+    `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at)
+     VALUES ('drive:bounded-drain#0', 'drive:bounded-drain#0', 'upsert', 1)`,
+  ).run();
+  let result = null;
+  let error = null;
+  try {
+    result = await drainOutbox(env, { embed: async () => [0.1] });
+    if (result?.submitted === 1) {
+      await drainOutbox(env, { embed: async () => [0.1] });
+    }
+  } catch (caught) {
+    error = caught;
+  }
+  check("the drain reaches a real queued decision without a full outbox count",
+    error === null && result?.submitted === 1,
+    error?.message || JSON.stringify(result));
+  const drainSql = d1Queries.sql.filter((sql) =>
+    /^\s*(?:SELECT|WITH|UPDATE)\b/i.test(sql) && /\b(?:vector_outbox|chunks)\b/i.test(sql));
+  const drainPlans = drainSql.flatMap((sql) => {
+    const bindCount = Math.max(0, ...[...sql.matchAll(/\?(\d+)/g)].map((match) => Number(match[1])));
+    return db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...Array(bindCount).fill(0))
+      .map((row) => ({ sql, detail: row.detail }));
+  });
+  const corpusScans = drainPlans.filter(({ detail }) =>
+    /\bSCAN (?:vector_outbox|chunks)\b/i.test(detail));
+  check("the executed drain plans do not scan vector_outbox or chunks",
+    corpusScans.length === 0,
+    corpusScans.map(({ sql, detail }) => `${detail}: ${sql}`).join("\n"));
+  const projectionSql = d1Queries.sql.find((sql) =>
+    /vector_projection_status = 'verified'/i.test(sql));
+  const projectionPlan = projectionSql
+    ? db.prepare(`EXPLAIN QUERY PLAN ${projectionSql}`).all().map((row) => row.detail)
+    : [];
+  check("empty-queue projection verification seeks deleted documents by source",
+    projectionPlan.length > 0 &&
+      !projectionPlan.some((detail) => /\bSCAN (?:d|documents|c|chunks)\b/i.test(detail)) &&
+      projectionPlan.some((detail) => /idx_documents_live/i.test(detail)) &&
+      projectionPlan.some((detail) => /idx_chunks_doc/i.test(detail)),
+    projectionPlan.join("\n"));
+  db.close();
+}
 
 async function drainFully(env, options = {}, maxRounds = 20) {
   const total = { drained: 0, deleted: 0, upserted: 0, submitted: 0, failed: 0, remaining: null };
@@ -727,6 +883,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
     id: "async-delete-vector", values: [0.4], metadata: { outbox_generation: "0" },
   });
   await replaceDocumentChunks(env, "drive:async-delete");
+  db.prepare("UPDATE corpus_stats SET chunks=0 WHERE source='drive'").run();
   const accepted = await drainOutbox(env, { embed: async () => [0.4] });
   const processing = await vectorReadiness(env);
   check("an accepted async delete remains queued while the old vector is visible",
@@ -1148,10 +1305,11 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
      FROM install_state WHERE id = 1`
   ).get();
   check("the batch reservation includes the per-row confirmation worst case",
-    drainBatchQueryUpperBound(100) === 312);
+    drainBatchQueryUpperBound(100) === 313);
   check("the default query budget stops before an unreserved third batch",
     drained.drained === 0 && drained.submitted === 200 &&
-      drained.waiting === 200 && drained.remaining === 600 &&
+      drained.waiting === 200 && drained.remaining === 100 &&
+      drained.remaining_is_lower_bound === true &&
       submitted <= 8 + (2 * drainBatchQueryUpperBound(100)) &&
       submitted < DRAIN_D1_QUERY_BUDGET,
     JSON.stringify({ drained, submitted, budget: DRAIN_D1_QUERY_BUDGET }));
@@ -1215,7 +1373,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
   ).get().n;
   check("an exact one-batch D1 query budget fires the reservation guard after one batch",
     result.submitted === 100 && result.waiting === 100 &&
-      result.remaining === 300 && submitted === 100,
+      result.remaining === 100 && result.remaining_is_lower_bound === true && submitted === 100,
     JSON.stringify({ result, submitted }));
 }
 

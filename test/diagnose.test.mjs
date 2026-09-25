@@ -155,6 +155,9 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   const env = makeEnv({ vectorCount: 0, drainMode: "paused-for-upgrade" });
   source(env._db, "documents");
   for (let i = 0; i < 10; i++) { doc(env._db, `paused-d${i}`); chunk(env._db, `paused-d${i}#0`, `paused-d${i}`); }
+  env._db.prepare(
+    "INSERT INTO corpus_stats (source, documents, chunks) VALUES ('documents', 10, 10)",
+  ).run();
 
   const finding = find(await diagnose(env), "store_agreement");
   check("paused diagnose names update as the only supported projection writer",
@@ -163,7 +166,12 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   check("paused diagnose does not forward the active-only whole-corpus reindex remedy",
     !/Run `brain reindex <manifest>/.test(finding?.action || ""), finding?.action);
 
-  env._db.prepare("UPDATE install_state SET schema_version=36").run();
+  env._db.prepare(
+    `UPDATE install_state
+        SET schema_version=36,
+            vector_projection_status='pending',
+            vector_projection_bootstrap_base_count=10`,
+  ).run();
   const readiness = await vectorReadiness(env);
   check("paused readiness applies the same recovery contract",
     readiness.reason === "vector_count_mismatch" &&

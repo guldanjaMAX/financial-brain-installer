@@ -154,7 +154,7 @@ export class BrainClient {
 
   /** Authenticated corpus inventory used to make saved baselines reproducible. */
   async documents() {
-    return this.#get(`/api/admin/brain/documents?_cb=${Date.now()}`);
+    return this.#post("/api/admin/brain/documents/report", {});
   }
 
   /** Private logical-family pagination; identities and cursors stay in the body. */
