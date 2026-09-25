@@ -115,12 +115,23 @@ function readExact(length) {
 async function invoke({ helper, helperIdentity, expected, operation, expectedLength, maxOutput, env }, input) {
   const revalidated = assertHelper(helper, expected);
   if (!sameFile(revalidated, helperIdentity)) throw new Error("DPAPI helper identity changed");
-  const child = spawn(helper, [operation, String(expectedLength)], {
-    env,
-    shell: false,
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-  });
+  let child;
+  try {
+    child = spawn(helper, [operation, String(expectedLength)], {
+      env,
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+  } catch (caught) {
+    // Node throws synchronously, before any pid exists, for every OS spawn error
+    // except EACCES/EAGAIN/EMFILE/ENFILE/ENOENT. That includes UNKNOWN, which
+    // is how libuv reports a Code Integrity (Smart App Control) refusal, and
+    // EPERM (access denied). The helper never ran, so this is a launch refusal.
+    // A programming error (no OS errno) is not, and keeps its original failure.
+    if (caught?.syscall === "spawn" || typeof caught?.errno === "number") throw launchRefused();
+    throw caught;
+  }
   const chunks = [];
   let total = 0;
   let failed = false;

@@ -369,3 +369,71 @@ test("the bridge reports a helper that never started as the launch stage, and a 
     rmSync(sandbox, { recursive: true, force: true });
   }
 });
+
+// Node throws UNKNOWN (how libuv reports a Code Integrity / Smart App Control
+// refusal) and EPERM (ERROR_ACCESS_DENIED) synchronously from spawn(), before a
+// pid exists; only EACCES/EAGAIN/EMFILE/ENFILE/ENOENT arrive as async 'error'
+// events. This drives the real bridge through that synchronous path.
+for (const code of ["UNKNOWN", "EPERM"]) {
+  test(`the bridge reports a synchronous ${code} spawn refusal as the launch stage`, {
+    skip: process.platform === "win32" ? "the preload models the Windows refusal on POSIX" : false,
+  }, () => {
+    const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-dpapi-bridge-sync-")));
+    try {
+      const preload = join(sandbox, "sync-refusal.cjs");
+      writeFileSync(preload, [
+        'const cp = require("node:child_process");',
+        'const { syncBuiltinESMExports } = require("node:module");',
+        "const original = cp.spawn;",
+        "let refused = 0;",
+        "cp.spawn = function (command, ...rest) {",
+        '  if (String(command).endsWith("windows-dpapi-helper.exe")) {',
+        "    refused += 1;",
+        '    process.on("exit", () => process.stderr.write(`FIXTURE_REFUSALS:${refused}\\n`));',
+        "    const error = new Error(`spawn ${process.env.FIXTURE_SPAWN_CODE}`);",
+        "    error.code = process.env.FIXTURE_SPAWN_CODE;",
+        '    error.errno = process.env.FIXTURE_SPAWN_CODE === "UNKNOWN" ? -4094 : -1;',
+        '    error.syscall = "spawn";',
+        "    throw error;",
+        "  }",
+        "  return original.call(this, command, ...rest);",
+        "};",
+        "syncBuiltinESMExports();",
+        "",
+      ].join("\n"));
+      const directory = join(sandbox, "helper");
+      mkdirSync(directory);
+      const helper = join(directory, "windows-dpapi-helper.exe");
+      writeFileSync(helper, "#!/bin/sh\ncat\n");
+      chmodSync(helper, 0o700);
+      const identity = lstatSync(helper);
+      const result = spawnSync(process.execPath, [
+        "--require", preload,
+        bridgeFile,
+        "--helper", helper,
+        "--sha256", createHash("sha256").update(readFileSync(helper)).digest("hex"),
+        "--size", String(identity.size),
+        "--dev", String(identity.dev),
+        "--ino", String(identity.ino),
+        "--operation", "unprotect",
+        "--length", "4",
+        "--max", "65536",
+      ], {
+        encoding: "utf8",
+        input: Buffer.from([1, 2, 3, 4]),
+        env: { SystemRoot: "/fixture/windows", USERNAME: "fixture-user", FIXTURE_SPAWN_CODE: code },
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 10_000,
+      });
+      // Decision point reached: the bridge really tried to start the helper.
+      assert.match(result.stderr, /FIXTURE_REFUSALS:1\n/);
+      assert.notEqual(result.status, 0);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /BRAIN_DPAPI_STAGE:launch\n/,
+        "a spawn that throws before a pid exists is a launch refusal, not an unprotect failure");
+      assert.doesNotMatch(result.stderr, /BRAIN_DPAPI_STAGE:unprotect/);
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
+}
