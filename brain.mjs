@@ -11765,7 +11765,11 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     );
   }
 
-  state.credential_scanner_fingerprint = scannerFingerprint;
+  // A file isolated as failed keeps its previously indexed revision in state.done.
+  // Committing the new scanner fingerprint now would let the next run short-circuit
+  // that revision as unchanged, so it would never meet the current scanner. The
+  // remote lanes already commit their fingerprint only on a failure-free run.
+  if (tally.failed === 0) state.credential_scanner_fingerprint = scannerFingerprint;
   saveState(statePath, state);
 
   const localCoverageGaps = localCoverage.coverageGaps;

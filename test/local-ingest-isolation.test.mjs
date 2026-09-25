@@ -205,3 +205,92 @@ for (const [label, preparationError] of [
     }
   });
 }
+
+test("an isolated preparation failure keeps the credential-scanner upgrade unfinished, so the next run rechecks that file", async () => {
+  const root = mkdtempSync(join(tmpdir(), "brain-local-scanner-fence-"));
+  const sourceRoot = join(root, "source");
+  const manifestPath = join(root, "brain.manifest.json");
+  mkdirSync(sourceRoot);
+  writeFileSync(manifestPath, JSON.stringify({ brain: { domain: "brain.example.invalid" } }));
+
+  const files = ["kept.txt", "flaky.txt"].map((rel) => ({ name: rel, rel }));
+  const credential = ["sk", "b".repeat(32)].join("-");
+  // Both files were indexed under an earlier scanner; the stored fingerprint is stale.
+  let persisted = {
+    version: 1,
+    done: { "kept.txt": "hash-kept.txt", "flaky.txt": "hash-flaky.txt" },
+    skipped: {},
+    credential_scanner_fingerprint: "pre-upgrade-fingerprint",
+  };
+  let run = 0;
+  const prepared = [];
+  const priorLog = console.log;
+  console.log = () => {};
+
+  const deps = () => ({
+    withSourceIngestLock: async (_lock, fn) => fn({ assertOwned: () => true }),
+    resolveBaseUrl: async () => "https://brain.example.invalid",
+    resolveAdminKey: () => "fixture-owner-proof",
+    ingestLib: async () => ({
+      walk: () => ({ files, skipped: [], complete: true }),
+      prepare: async (file) => {
+        prepared.push(`${run}:${file.rel}`);
+        if (run === 1 && file.rel === "flaky.txt") throw new Error("synthetic one-off parser failure");
+        return {
+          hash: `hash-${file.rel}`,
+          envelope: {
+            source_type: "upload",
+            source_id: file.rel,
+            title: file.rel,
+            // The unchanged revision indexed under the old scanner carries a credential.
+            content: file.rel === "flaky.txt" ? `Old revision carries ${credential}` : "Readable synthetic content",
+          },
+        };
+      },
+      batchStream,
+      splitOversized,
+      loadState: () => structuredClone(persisted),
+      saveState: (_path, state) => { persisted = structuredClone(state); },
+      removedSinceLastRun,
+    }),
+    postSourceReceipt: async (_base, _key, receipt) => receipt,
+    sendBatches: async ({ groups, onResult }) => {
+      const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
+      for (const item of groups.flat()) {
+        tally.unchanged++;
+        onResult?.(item, { source_id: item.envelope.source_id, status: "unchanged" });
+      }
+      return tally;
+    },
+    reconcileDocumentFamilies: async ({ families }) => ({ reconciled: families.length }),
+    listStoredSourceFamilies: async () => new Set(),
+  });
+  const manifest = { brain: { domain: "brain.example.invalid" }, safety: { credential_scanner: { enabled: true } } };
+
+  try {
+    run = 1;
+    await assert.rejects(
+      cmdIngestLocal(manifest, manifestPath, { path: sourceRoot, source: "upload" }, deps()),
+      /1 file failed, so this ingest is incomplete/,
+    );
+    // Decision point reached: the failure was isolated and recorded ...
+    assert.ok(prepared.includes("1:flaky.txt"));
+    assert.equal(persisted.skipped["flaky.txt"], "file preparation failed unexpectedly; it was left for retry");
+    // ... and the scanner upgrade was NOT marked complete.
+    assert.equal(persisted.credential_scanner_fingerprint, "pre-upgrade-fingerprint");
+
+    run = 2;
+    try {
+      await cmdIngestLocal(manifest, manifestPath, { path: sourceRoot, source: "upload" }, deps());
+    } catch {
+      // A refusal of a previously indexed file may stop the run for owner review; either way
+      // the file must have been rechecked, not short-circuited as unchanged.
+    }
+    assert.ok(prepared.includes("2:flaky.txt"), "the failed file is prepared again on the next run");
+    assert.match(persisted.skipped["flaky.txt"] || "", /^refused: carries /,
+      "the next run applies the current credential scanner to the old revision instead of reporting it unchanged");
+  } finally {
+    console.log = priorLog;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
