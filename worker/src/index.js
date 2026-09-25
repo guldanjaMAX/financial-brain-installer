@@ -12,7 +12,8 @@
  *   POST /api/admin/brain/source-families read-only private inventory paging
  *   POST /api/admin/brain/financial-map owner map read and compact preview
  *   POST /api/owner/financial-map       private owner-app review and ceremony
- *   GET  /api/admin/brain/documents     per-source counts and freshness
+ *   GET  /api/admin/brain/documents     bounded source presence and readiness
+ *   POST /api/admin/brain/documents/report exact paged owner report
  *
  * Everything except /health requires a route-specific credential. The source
  * inventory accepts either the full admin key or the owner's passkey session.
@@ -117,6 +118,10 @@ import {
 import {
   financialMapGuidance, hasFinancialMapStatusIntent,
 } from "./lib/financial-map-question.js";
+import {
+  readExactDocumentReport,
+  readExactSourceDocumentCount,
+} from "./lib/documents-summary.js";
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -2510,7 +2515,7 @@ async function handleSourceFamilies(env, request) {
 }
 
 async function handleDocuments(env) {
-  const { rows } = await storeFor(env).stats(env);
+  const { rows, summary } = await storeFor(env).stats(env);
   // Keep the writer mode on the same authenticated response as readiness.
   // /health is a separate request and a rolling deployment can legitimately
   // route the two probes to different Worker generations. Recovery advice must
@@ -2520,6 +2525,7 @@ async function handleDocuments(env) {
     version: WORKER_VERSION,
     backend: backendOf(env),
     rows: rows || [],
+    ...(summary ? { summary } : {}),
     vector_drain_mode: upgradePauseHolds(env) ? "paused-for-upgrade" : "active",
   };
   if (backendOf(env) === D1) {
@@ -2540,6 +2546,12 @@ async function handleDocuments(env) {
     }
   }
   return jsonResponse(out);
+}
+
+async function handleExactDocumentsReport(env) {
+  const exact = await readExactDocumentReport(env);
+  const status = await (await handleDocuments(env)).json();
+  return jsonResponse({ ...status, ...exact });
 }
 
 /**
@@ -3119,6 +3131,19 @@ export default {
       if (path === "/api/admin/brain/documents" && request.method === "GET") {
         return privateNoStore(await handleDocuments(env));
       }
+      if (path === "/api/admin/brain/documents/report" && request.method === "POST") {
+        if (backendOf(env) !== D1) {
+          return privateNoStore(jsonResponse({ error: "documents report applies to the d1 backend only" }, 400));
+        }
+        if (!ownerKeyAuthorized) {
+          return privateNoStore(jsonResponse({ error: "documents report requires the owner admin key" }, 403));
+        }
+        const body = await request.json().catch(() => null);
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 0) {
+          return privateNoStore(jsonResponse({ error: "documents report accepts only an empty JSON object" }, 400));
+        }
+        return privateNoStore(await handleExactDocumentsReport(env));
+      }
       if (path === "/api/admin/brain/reliability-alerts" && request.method === "GET") {
         if (backendOf(env) !== D1) return jsonResponse({ error: "reliability alerts apply to the d1 backend only" }, 400);
         return privateNoStore(jsonResponse(await ownerReliabilityAlerts(env)));
@@ -3234,20 +3259,31 @@ export default {
           if (registered?.name !== source) {
             return jsonResponse({ error: "source is not registered", code: "source_not_registered" }, 404);
           }
+          if (!confirm) {
+            const documents = await readExactSourceDocumentCount(env, source);
+            return jsonResponse({
+              documents,
+              document_count_exact: true,
+              chunks: null,
+              vectors: null,
+              dry_run: true,
+              source,
+              would_unregister_source: true,
+              source_unregistered: false,
+              registry_event_recorded: false,
+            });
+          }
         }
         const r = await forget(env, { docUids, source, dryRun: !confirm });
         if (!source) return jsonResponse(r);
-        if (!confirm) {
-          return jsonResponse({
-            ...r,
-            source,
-            would_unregister_source: true,
-            source_unregistered: false,
-            registry_event_recorded: false,
-          });
-        }
         const registry = await finalizeForgottenSource(env, source, r.documents);
-        return jsonResponse({ ...r, ...registry });
+        const { targets: _privateTargets, ...bounded } = r;
+        return jsonResponse({
+          ...bounded,
+          document_count_exact: true,
+          chunk_count_exact: true,
+          ...registry,
+        });
       }
 
       // Force a drain. The cron normally does this, but when the cron is wedged
@@ -3349,7 +3385,8 @@ export default {
     } catch (e) {
       const response = jsonResponse({ error: e.message }, 500);
       if (path === "/api/admin/brain/source-families" ||
-          path === "/api/admin/brain/documents") {
+          path === "/api/admin/brain/documents" ||
+          path === "/api/admin/brain/documents/report") {
         return privateNoStore(response);
       }
       return response;

@@ -68,7 +68,7 @@ async function runFixture({
       response.end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
-    if (url.pathname === "/api/admin/brain/documents") {
+    if (url.pathname === "/api/admin/brain/documents/report") {
       response.end(JSON.stringify({
         rows: [{
           source_type: "curated", documents: 1, chunks: 1, embedded: 1,
@@ -334,7 +334,7 @@ test("corpus pagination keeps a private continuation identity out of every URL",
     args: ["--no-think"],
     artifacts: true,
     route: ({ url, request, body }) => {
-      if (url.pathname === "/api/admin/brain/documents") {
+      if (url.pathname === "/api/admin/brain/documents/report") {
         return {
           body: {
             rows: [{
@@ -694,7 +694,7 @@ test("the distributed runner records reproducible provenance and CI artifacts", 
       response.end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
-    if (url.pathname === "/api/admin/brain/documents") {
+    if (url.pathname === "/api/admin/brain/documents/report") {
       response.end(JSON.stringify({
         rows: [{
           source_type: "curated", documents: 2, chunks: 4, embedded: 4,
@@ -895,7 +895,7 @@ test("malformed inventory remains not observable instead of becoming zero", asyn
     }],
     args: ["--no-think"],
     artifacts: true,
-    route: ({ url }) => url.pathname === "/api/admin/brain/documents" ? { body: {} } : null,
+    route: ({ url }) => url.pathname === "/api/admin/brain/documents/report" ? { body: {} } : null,
   });
   assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
   assert.deepEqual(result.runArtifact.corpus, {

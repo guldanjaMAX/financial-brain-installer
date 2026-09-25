@@ -3121,8 +3121,7 @@ const labelProjectionParityRows = [
 /* ---- documents reports the backend and the vector backlog ---- */
 {
   const { env } = mkEnv([{
-    source_type: "meeting", stored_documents: 3, logical_documents: 2,
-    total: 4, embedded: 4, last_ingest_at: 1750000000000,
+    source_type: "meeting", has_documents: 1, last_ingest_at: 1750000000000,
   }]);
   const documentsResponse = await call(env, "/api/admin/brain/documents");
   const b = await documentsResponse.json();
@@ -3131,8 +3130,10 @@ const labelProjectionParityRows = [
   check("documents names the backend", b.backend === "d1", JSON.stringify(b));
   check("documents binds active writer mode to the same receipt as readiness",
     b.vector_drain_mode === "active", JSON.stringify(b));
-  check("documents separates source files from stored split parts",
-    b.rows[0]?.documents === 2 && b.rows[0]?.logical_documents === 2 && b.rows[0]?.stored_documents === 3, JSON.stringify(b.rows[0]));
+  check("documents keeps corpus-sized counts off the hot readiness path",
+    b.rows[0]?.has_documents === true && b.rows[0]?.documents === null &&
+      b.rows[0]?.chunks === null && /not counted on large Brains/.test(b.rows[0]?.count_note || ""),
+    JSON.stringify(b.rows[0]));
   check("and reports vector backlog", b.vector_backlog && "pending" in b.vector_backlog, JSON.stringify(b.vector_backlog));
   check("and reports exact query-visible vector readiness",
     b.vector_readiness?.ready === true && b.vector_readiness.expected_vectors === 0 &&
@@ -3157,6 +3158,69 @@ const labelProjectionParityRows = [
   check("private aggregate inventory failures cannot be cached",
     failedDocuments.status === 500 && /no-store/.test(failedDocuments.headers.get("cache-control") || ""),
     `${failedDocuments.status} ${failedDocuments.headers.get("cache-control") || "missing"}`);
+}
+
+{
+  const statements = [];
+  const marker = {
+    schema_version: 48,
+    outbox_generation: 7,
+    document_high_water: 1,
+    chunk_high_water: 1,
+    latest_document_ingest: 1_750_000_000_000,
+    corpus_documents: 1,
+    corpus_chunks: 1,
+    last_ingest_at: 1_750_000_000_000,
+    source_event_high_water: 0,
+    source_count: 1,
+    vector_projection_status: "verified",
+    vector_projection_mutation_id: "",
+    vector_projection_submitted_at: 0,
+  };
+  const env = {
+    STORAGE: "d1", ADMIN_KEY: "k",
+    DB: {
+      prepare(sql) {
+        statements.push(sql);
+        const prepared = {
+          bind: () => prepared,
+          first: async () => /document_high_water/.test(sql) ? marker : null,
+          all: async () => ({
+            results: /SELECT names\.source AS source_type/.test(sql)
+              ? [{ source_type: "synthetic", last_ingest_at: 1_750_000_000_000 }]
+              : /document_rowid/.test(sql)
+                ? [{ document_rowid: 1, source: "synthetic", source_id: "one", part_of: null }]
+                : /page_state/.test(sql)
+                  ? [
+                    { page_state: 1, source_type: null, chunks: 1, pending_vectors: 0, last_id: 1 },
+                    { page_state: 0, source_type: "synthetic", chunks: 1, pending_vectors: 0, last_id: null },
+                  ]
+                  : [],
+          }),
+        };
+        return prepared;
+      },
+    },
+  };
+  const response = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/documents/report",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: "{}",
+    },
+  ), env, {});
+  const body = await response.json();
+  check("the explicit documents report route returns exact paged totals",
+    response.status === 200 && body.summary?.exact === true &&
+      body.rows?.[0]?.documents === 1 && body.rows?.[0]?.chunks === 1,
+    JSON.stringify(body));
+  check("the exact report route reaches both bounded document and chunk pages",
+    statements.some((sql) => /document_rowid/.test(sql)) &&
+      statements.some((sql) => /page_state/.test(sql)), JSON.stringify(statements));
+  check("private exact report responses cannot be cached",
+    /no-store/.test(response.headers.get("cache-control") || ""),
+    response.headers.get("cache-control") || "missing");
 }
 
 {
@@ -3948,6 +4012,7 @@ function mkForgetEnv({
   documentIds = ["meeting:1", "meeting:2"],
 } = {}) {
   const sql = [];
+  const queries = [];
   const deleted = [];
   const state = { registered, eventRecorded: false };
   const env = {
@@ -3959,6 +4024,7 @@ function mkForgetEnv({
     AI: { run: async () => ({ data: [[0.1]] }) },
     DB: {
       prepare(q) {
+        queries.push(q);
         return {
           bind: (...b) => ({
             _sql: q,
@@ -3976,9 +4042,15 @@ function mkForgetEnv({
                     }))
                   : [],
             }),
-            first: async () => /SELECT name FROM sources WHERE name=\?1/.test(q) && state.registered
-              ? { name: b[0] }
-              : null,
+            first: async () => {
+              if (/SELECT name FROM sources WHERE name=\?1/.test(q) && state.registered) {
+                return { name: b[0] };
+              }
+              if (/COUNT\(\*\) AS documents[\s\S]*FROM documents[\s\S]*deleted_at IS NULL/.test(q)) {
+                return { documents: documentIds.length };
+              }
+              return null;
+            },
             run: async () => { sql.push(q); return {}; },
           }),
         };
@@ -3997,18 +4069,23 @@ function mkForgetEnv({
       },
     },
   };
-  return { env, sql, deleted, state };
+  return { env, sql, queries, deleted, state };
 }
 
 {
-  const { env, deleted, sql } = mkForgetEnv();
+  const { env, deleted, sql, queries } = mkForgetEnv();
   const b = await (await post(env, "/api/admin/brain/forget", { source: "meeting" })).json();
   // Irreversible, so it must be asked for explicitly rather than by default.
   check("forget DRY RUNS unless confirmed",
     b.dry_run === true && b.source === "meeting" &&
       b.would_unregister_source === true && b.source_unregistered === false,
     JSON.stringify(b));
-  check("and reports what it would remove", b.documents === 2 && b.chunks === 3, JSON.stringify(b));
+  check("and uses one exact indexed source count without enumerating the corpus",
+    b.documents === 2 && b.document_count_exact === true && b.chunks === null &&
+      !Object.hasOwn(b, "targets") &&
+      queries.some((q) => /COUNT\(\*\) AS documents[\s\S]*source\s*=\s*\?1[\s\S]*deleted_at IS NULL/.test(q)) &&
+      !queries.some((q) => /SELECT doc_uid FROM documents WHERE source/.test(q)),
+    JSON.stringify({ body: b, queries }));
   check("without deleting any vectors", deleted.length === 0);
   check("or touching the database", !sql.some((q) => /BATCH/.test(q)), JSON.stringify(sql));
 }
@@ -4017,6 +4094,8 @@ function mkForgetEnv({
   const b = await (await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true })).json();
   check("confirm actually deletes",
     b.dry_run === false && b.documents === 2 && b.source === "meeting" &&
+      b.document_count_exact === true && b.chunk_count_exact === true &&
+      !Object.hasOwn(b, "targets") &&
       b.source_unregistered === true && b.registry_event_recorded === true &&
       typeof b.operation_id === "string" && b.operation_id.length > 0,
     JSON.stringify(b));

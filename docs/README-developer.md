@@ -146,6 +146,22 @@ authenticated network request, with zero Brain writes, Cloudflare control
 requests, deployments, or installs. Modern same-response behavior is
 unchanged.
 
+The ordinary authenticated documents response is intentionally informational
+about corpus size. It reads `corpus_stats` and the trigger-maintained
+`document_source_inventory`, so health, status, the MCP health tool, meaning
+answers, and update readiness do not join chunk rows or parse document metadata
+to produce their document inventory. Presence is exact, but logical-document
+and chunk totals are `null` with the
+owner copy "not counted on large Brains; run `brain report` for the full
+count". The explicit owner-admin `POST
+`/api/admin/brain/documents/report` path supplies those exact totals. It walks
+documents and chunks through separate fixed keyset pages, caps chunk rows per
+statement, and compares cheap opening and closing corpus, source, outbox, and
+projection markers before returning a complete result. It refuses if a
+supported mutation overlaps the report. Whole-source forget preview and
+completion use that operation's guarded exact receipts, never the
+informational documents rows.
+
 The diagnostic exits successfully for a coherent `ready`,
 `recoverable_queued_work`, or `queued_work_present` observation because the
 check itself completed. Only the first has `projection_ready: true`; every

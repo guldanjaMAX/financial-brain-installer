@@ -8038,33 +8038,7 @@ async function resolveBase(m, acct) {
   return sub?.subdomain ? `https://${scriptName}.${sub.subdomain}.workers.dev` : null;
 }
 
-/**
- * What the document store actually holds, per source.
- *
- * The registry's own document_count is a receipt from the last ingest, not the
- * truth. Reading the store is what turns "the brain has 1,204 documents from
- * this source" from a claim into an observation, and the gap between the two
- * numbers is the cheapest signal available that an ingest died halfway.
- *
- * Returns null rather than throwing: a listing that works without the admin key
- * is more useful than one that refuses to print anything.
- */
-async function liveSourceCounts(base, adminKey) {
-  if (!base || !adminKey) return null;
-  try {
-    const res = await http(`${base}/api/admin/brain/documents`, {
-      headers: { "X-Admin-Key": adminKey },
-    });
-    if (!res.ok) return null;
-    const body = await res.json();
-    const map = new Map();
-    for (const r of body.rows || []) map.set(r.source_type, r);
-    return map;
-  } catch {
-    return null;
-  }
-}
-
+/** Read registered sources from the already resolved control-plane database. */
 async function readSources(acctId, dbId) {
   const r = await d1Query(acctId, dbId, "SELECT * FROM sources ORDER BY name").catch(() => null);
   if (!r) {
@@ -8082,6 +8056,7 @@ const num = (n) => Number(n || 0).toLocaleString("en-US");
 export function documentCountOf(row) {
   if (!row) return undefined;
   const value = row.documents ?? row.total;
+  if (value === null || value === undefined) return undefined;
   const count = Number(value);
   return Number.isFinite(count) ? count : undefined;
 }
@@ -10294,7 +10269,45 @@ export async function cmdProvenanceRepairInteractive(manifestPath, options = {})
  * them as unregistered with no way left to remove them. A rollback that half
  * works is the specific failure this whole feature exists to prevent.
  */
-async function purgeDocuments(base, adminKey, name) {
+const requestWorkerSourceForget = (base, adminKey, name, confirm) =>
+  http(`${base}/api/admin/brain/forget`, {
+    method: "POST",
+    headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
+    body: JSON.stringify({ source: name, confirm }),
+  });
+
+/** Exact, read-only count and finalization-capability receipt for one source. */
+async function previewSourceForget(base, adminKey, name) {
+  if (!base || !adminKey) {
+    die(
+      "the guarded Worker cannot be addressed, so the exact source-forget preview is unavailable.\n" +
+        "      Nothing was removed. Repair the saved Brain URL or durable admin key, then retry."
+    );
+  }
+  const response = await requestWorkerSourceForget(base, adminKey, name, false)
+    .catch((error) => ({ ok: false, status: 0, netError: error.message }));
+  if (!response.ok) {
+    const detail = typeof response.text === "function" ? await response.text().catch(() => "") : "";
+    die(
+      `the worker's exact forget preview returned ${response.status || "a network error"}: ` +
+        `${String(detail || response.netError || "").slice(0, 200)}\n` +
+        "      Nothing was removed. Update or repair the Worker, then retry."
+    );
+  }
+  const raw = await response.text().catch(() => "");
+  let body = null;
+  try { body = JSON.parse(raw); } catch { /* validated below */ }
+  try {
+    return validateSourceForgetPreview(body, name);
+  } catch (error) {
+    die(
+      `the worker's read-only forget preview did not prove guarded registry cleanup: ${error.message}\n` +
+        "      Nothing was removed. Update the Worker, then rerun the same `brain forget` command."
+    );
+  }
+}
+
+async function purgeDocuments(base, adminKey, name, exactPreview = null) {
   const warnings = [];
 
   if (!base || !adminKey) {
@@ -10302,23 +10315,21 @@ async function purgeDocuments(base, adminKey, name) {
       "the worker could not be addressed (no URL or no ADMIN_KEY), so the store was edited directly"
     );
   } else {
-    const requestWorkerForget = (confirm) => http(`${base}/api/admin/brain/forget`, {
-      method: "POST",
-      headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
-      body: JSON.stringify({ source: name, confirm }),
-    });
-
     // Prove the deployed Worker owns BOTH halves before authorizing either one.
     // An older route can remove documents but cannot unregister the source
     // behind the pause barrier. Discovering that after confirm:true would leave
     // a half-finished destructive operation, so the read-only preview is the
     // compatibility handshake.
-    const preview = await requestWorkerForget(false)
-      .catch((e) => ({ ok: false, status: 0, netError: e.message }));
+    const preview = exactPreview
+      ? { ok: true, prepared: true }
+      : await requestWorkerSourceForget(base, adminKey, name, false)
+        .catch((e) => ({ ok: false, status: 0, netError: e.message }));
     if (preview.ok) {
-      const rawPreview = await preview.text().catch(() => "");
-      let previewBody = null;
-      try { previewBody = JSON.parse(rawPreview); } catch { /* validated below */ }
+      let previewBody = exactPreview;
+      if (!previewBody) {
+        const rawPreview = await preview.text().catch(() => "");
+        try { previewBody = JSON.parse(rawPreview); } catch { /* validated below */ }
+      }
       try {
         validateSourceForgetPreview(previewBody, name);
       } catch (error) {
@@ -10328,7 +10339,7 @@ async function purgeDocuments(base, adminKey, name) {
         );
       }
 
-      const res = await requestWorkerForget(true)
+      const res = await requestWorkerSourceForget(base, adminKey, name, true)
         .catch((e) => ({ ok: false, status: 0, netError: e.message }));
       if (!res.ok) {
         const detail = typeof res.text === "function" ? await res.text().catch(() => "") : "";
@@ -10490,18 +10501,13 @@ async function cmdForget(manifestPath) {
 
   const base = await resolveBase(m, acct);
   const adminKey = resolveAdminKey(manifestPath);
-  const live = await liveSourceCounts(base, adminKey);
-  const liveCount = documentCountOf(live?.get(name));
+  const exactPreview = await previewSourceForget(base, adminKey, name);
+  const liveCount = Number(exactPreview.documents);
 
   // Print the damage BEFORE anything happens, every time, --yes or not.
   console.log(`\n  ${c.bold(`forget "${name}"`)} from ${m.client?.display_name || m.client?.slug || "this install"}\n`);
   console.log("  this removes:");
-  if (liveCount !== undefined) {
-    console.log(`    ${num(liveCount).padStart(9)}  documents in the brain (source_type = "${name}")`);
-  } else {
-    console.log(`    ${num(row.document_count).padStart(9)}  documents, per the registry's last receipt`);
-    console.log(`    ${c.dim("           the live count could not be read, so this number may be stale")}`);
-  }
+  console.log(`    ${num(liveCount).padStart(9)}  documents in the brain (exact guarded preview)`);
   console.log(`    ${"1".padStart(9)}  registry row in sources`);
   if (row.sync_cursor) {
     console.log(`    ${"1".padStart(9)}  sync cursor (a later ingest of "${name}" starts from the beginning)`);
@@ -10522,7 +10528,7 @@ async function cmdForget(manifestPath) {
   }
 
   console.log("");
-  const out = await purgeDocuments(base, adminKey, name);
+  const out = await purgeDocuments(base, adminKey, name, exactPreview);
 
   // Never substitute an expectation for an observation.
   //
@@ -10541,25 +10547,9 @@ async function cmdForget(manifestPath) {
   const removed = out.removed;
   ok(`removed ${num(removed)} document(s) via ${out.channel}`);
 
-  // Confirm against the live brain before freeing the name. Freeing it while
-  // documents survive is the one outcome with no recovery: they stay in the
-  // index with no name left to address them by, which is precisely what this
-  // feature exists to prevent.
-  const post = await liveSourceCounts(base, adminKey);
-  const stillThere = documentCountOf(post?.get(name));
-  if (stillThere) {
-    die(
-      `${num(stillThere)} document(s) for "${name}" are STILL in the brain after the purge.\n` +
-        "      The registry row was left in place. Do not treat this source as removed."
-    );
-  }
-  if (post === null || post === undefined) {
-    warn(
-      "the live count could not be re-read, so removal is reported but not independently\n" +
-        "        confirmed. Run `brain sources` once the worker is reachable."
-    );
-  }
-
+  // The guarded final receipt is the exact postcondition. Its source-registry
+  // transaction can succeed only when no live source document remains, so a
+  // second hot summary read would be weaker and can lag this operation.
   if (out.sourceUnregistered !== true) {
     die(
       `the documents were removed via ${out.channel}, but that path cannot finalize the source registry\n` +
@@ -11668,7 +11658,16 @@ export function validateForgetReceipt(body) {
 
 /** A whole-source preview must prove that confirmation includes registry cleanup. */
 export function validateSourceForgetPreview(body, source) {
-  validateForgetBody(body);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("the source forget preview is not a JSON object");
+  }
+  if (!Number.isSafeInteger(Number(body.documents)) || Number(body.documents) < 0 ||
+      body.document_count_exact !== true) {
+    throw new Error("the source forget preview has no exact document count");
+  }
+  if (body.chunks !== null || body.vectors !== null || Object.hasOwn(body, "targets")) {
+    throw new Error("the source forget preview enumerated corpus-sized detail");
+  }
   if (body.dry_run !== true) throw new Error("the source forget preview is not a dry run");
   if (body.source !== source) throw new Error("the source forget preview names a different source");
   if (body.would_unregister_source !== true || body.source_unregistered !== false ||
@@ -11680,7 +11679,19 @@ export function validateSourceForgetPreview(body, source) {
 
 /** A whole-source receipt binds document removal to the exact registry finalization. */
 export function validateSourceForgetReceipt(body, source) {
-  validateForgetReceipt(body);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("the source forget receipt is not a JSON object");
+  }
+  for (const field of ["documents", "chunks", "vectors"]) {
+    if (!Number.isSafeInteger(Number(body[field])) || Number(body[field]) < 0) {
+      throw new Error(`the source forget receipt has no valid ${field} count`);
+    }
+  }
+  if (body.document_count_exact !== true || body.chunk_count_exact !== true ||
+      Object.hasOwn(body, "targets")) {
+    throw new Error("the source forget receipt is not a bounded exact receipt");
+  }
+  if (body.dry_run !== false) throw new Error("the source forget receipt did not confirm a real deletion");
   if (body.source !== source) throw new Error("the source forget receipt names a different source");
   if (body.source_unregistered !== true || body.registry_event_recorded !== true ||
       typeof body.operation_id !== "string" || !body.operation_id.trim()) {

@@ -847,7 +847,10 @@ export function createDisposableRecoveryLiveTransports({
       return response.body;
     },
     readInventory: async () => {
-      const response = await request("/api/admin/brain/documents");
+      const response = await request("/api/admin/brain/documents/report", {
+        method: "POST",
+        body: {},
+      });
       if (response.status !== 200) refuse("DISPOSABLE_RECOVERY_SEED_INVENTORY_FAILED");
       return response.body;
     },

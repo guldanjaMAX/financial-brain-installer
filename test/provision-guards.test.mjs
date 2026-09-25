@@ -368,13 +368,15 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   }
 
   const sourcePreview = {
-    dry_run: true, documents: 1, chunks: 3, vectors: 3, targets: ["drive:one"],
+    dry_run: true, documents: 1, document_count_exact: true, chunks: null, vectors: null,
     source: "drive", would_unregister_source: true,
     source_unregistered: false, registry_event_recorded: false,
   };
   check("a source forget preview proves registry cleanup before destructive confirmation",
     validateSourceForgetPreview(sourcePreview, "drive") === sourcePreview);
   for (const [label, preview] of [
+    ["inexact document count", { ...sourcePreview, document_count_exact: false }],
+    ["enumerated target detail", { ...sourcePreview, targets: ["drive:one"] }],
     ["missing registry capability", { ...sourcePreview, would_unregister_source: undefined }],
     ["already-mutated preview", { ...sourcePreview, source_unregistered: true }],
     ["different source preview", { ...sourcePreview, source: "gmail" }],
@@ -384,7 +386,8 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   }
 
   const sourceReceipt = {
-    ...sourcePreview, dry_run: false, would_unregister_source: undefined,
+    ...sourcePreview, dry_run: false, chunks: 3, vectors: 0,
+    chunk_count_exact: true, would_unregister_source: undefined,
     source_unregistered: true, registry_event_recorded: true,
     operation_id: "fixture-forget-operation",
   };
@@ -412,6 +415,10 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   const boundary = source.slice(start, end);
   check("brain forget performs no direct Cloudflare D1 mutation after the guarded Worker call",
     start >= 0 && end > start && !/d1Query\s*\(/.test(boundary), boundary.slice(-500));
+  check("brain forget uses its exact same-operation preview and final receipt instead of the hot summary",
+    start >= 0 && end > start && !/liveSourceCounts\s*\(/.test(boundary) &&
+      /previewSourceForget/.test(boundary) && /sourceUnregistered/.test(boundary),
+    boundary.slice(0, 1200));
 }
 
 /* ---- full-sweep source inventory is authenticated, complete, and paged ---- */

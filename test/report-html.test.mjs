@@ -103,6 +103,12 @@ const cleanCorpus = {
     pending: 0,
     submitted: 0,
   },
+  summary: {
+    status: "complete",
+    complete: true,
+    exact: true,
+    as_of: "2026-08-16T01:02:03.000Z",
+  },
   rows: [
     { source_type: "drive_file", logical_documents: 2040, chunks: 2915, total: 2915, embedded: 2915, last_ingested: "2026-08-15T12:00:00.000Z" },
     { source_type: "message", logical_documents: 910, chunks: 1187, total: 1187, embedded: 1100, last_ingested: "2026-01-01T12:00:00.000Z" },
@@ -593,6 +599,8 @@ check("a prediction that was wrong says so and shows the answer",
   has(surprise, "It answered anyway") && has(surprise, "Three hires in Q1"));
 
 check("coverage totals are formatted for a human", has(cleanReport, "4,102"));
+check("the exact HTML report shows when its paged snapshot was counted",
+  has(cleanReport, "Exact corpus snapshot counted at 2026-08-16T01:02:03.000Z"));
 check("coverage names sources in the client's words",
   has(cleanReport, "Documents and files") && !has(cleanReport, ">drive_file<"));
 check("logical documents, extracted chunks, and semantic visibility stay separate",
@@ -801,6 +809,9 @@ const fetchStub = async (url, init = {}) => {
   if (!authed) return reply(401, { error: "unauthorized" });
   if (u.pathname === "/api/admin/brain/sources") return reply(200, cleanSourceInventory);
   if (u.pathname === "/api/admin/brain/documents") return reply(200, cleanCorpus);
+  if (u.pathname === "/api/admin/brain/documents/report" && init.method === "POST" && init.body === "{}") {
+    return reply(200, cleanCorpus);
+  }
   // Added when this file was found failing: the acceptance suite calls these two
   // and the stub's catch-all answered 404, which reads as "the Worker cannot
   // measure its own corpus" rather than "the test forgot an endpoint".
@@ -919,6 +930,8 @@ check("the Markdown report keeps all three corpus units separate",
   /Logical documents: \*\*2,950\*\*/.test(markdownReport.markdown) &&
     /Extracted keyword-searchable chunks: \*\*4,102\*\*/.test(markdownReport.markdown) &&
     /Visibility-confirmed semantic chunks: \*\*4,015\*\*/.test(markdownReport.markdown));
+check("the exact Markdown report shows when its paged snapshot was counted",
+  /Exact corpus snapshot counted at 2026-08-16T01:02:03.000Z/.test(markdownReport.markdown));
 check("the Markdown report uses receipt-based freshness without fixed-age claims",
   /current against the authenticated refresh expectation/.test(markdownReport.markdown) &&
     /freshness unverified; no authenticated refresh expectation/.test(markdownReport.markdown) &&

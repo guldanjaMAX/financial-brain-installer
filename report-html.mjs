@@ -792,6 +792,11 @@ function renderManifestIntent(manifest) {
 
 function renderCoverage(corpus, manifest, sourceInventory, sourceInventoryError) {
   const knownCorpus = corpus && Array.isArray(corpus.rows);
+  const snapshotAt = corpus?.summary?.exact === true &&
+    typeof corpus?.summary?.as_of === "string" &&
+    !Number.isNaN(Date.parse(corpus.summary.as_of))
+    ? new Date(corpus.summary.as_of).toISOString()
+    : null;
   const counts = corpusReportCounts(corpus);
   const rows = counts.rows.slice().sort((a, b) =>
     Number(b.chunks ?? b.total ?? 0) - Number(a.chunks ?? a.total ?? 0));
@@ -819,6 +824,9 @@ function renderCoverage(corpus, manifest, sourceInventory, sourceInventoryError)
       ? Math.max(0, counts.extractedChunks - counts.semanticVisibleChunks)
       : null;
     corpusHtml = (
+      (snapshotAt
+        ? `<p class="note">Exact corpus snapshot counted at ${h(snapshotAt)}.</p>`
+        : "") +
       `<div class="stats">` +
       `<div class="stat"><b>${h(displayCount(counts.logicalDocuments))}</b><span>logical documents</span></div>` +
       `<div class="stat"><b>${h(displayCount(counts.extractedChunks))}</b><span>extracted chunks</span></div>` +
@@ -1223,8 +1231,12 @@ export async function collectReportData({
   try {
     const res = await fetchBrainWithAdminKey(
       fetchImpl,
-      `${root}/api/admin/brain/documents`,
-      {},
+      `${root}/api/admin/brain/documents/report`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      },
       () => adminKey,
     );
     if (res.ok) corpus = await res.json();

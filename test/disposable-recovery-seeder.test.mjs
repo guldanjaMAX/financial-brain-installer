@@ -227,8 +227,12 @@ test("real Worker and SQLite D1 prove 6,001 actual chunks and an exact unchanged
   };
   const readInventory = async () => {
     const response = await fixture.worker.fetch(new Request(
-      "https://brain.invalid/api/admin/brain/documents",
-      { headers },
+      "https://brain.invalid/api/admin/brain/documents/report",
+      {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: "{}",
+      },
     ), fixture.env, {});
     assert.equal(response.status, 200);
     return response.json();

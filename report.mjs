@@ -306,8 +306,12 @@ export async function buildReport({
   try {
     const docsRes = await fetchBrainWithAdminKey(
       fetchImpl,
-      `${base}/api/admin/brain/documents`,
-      {},
+      `${base}/api/admin/brain/documents/report`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      },
       () => adminKey,
     );
     if (docsRes.ok) docs = await docsRes.json();
@@ -352,6 +356,15 @@ export async function buildReport({
   /* ------------------------------------------------------------ what is in it */
   L.push("## What is stored and searchable");
   L.push("");
+  const snapshotAt = docs?.summary?.exact === true &&
+    typeof docs?.summary?.as_of === "string" &&
+    !Number.isNaN(Date.parse(docs.summary.as_of))
+    ? new Date(docs.summary.as_of).toISOString()
+    : null;
+  if (snapshotAt) {
+    L.push(`Exact corpus snapshot counted at ${snapshotAt}.`);
+    L.push("");
+  }
   if (!docs || !Array.isArray(docs.rows)) {
     L.push("The authenticated corpus count was unavailable, so document and chunk totals are **unknown**.");
     L.push("");

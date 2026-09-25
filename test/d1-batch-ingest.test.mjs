@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { splitStatements } from "../brain.mjs";
 import worker from "../worker/src/index.js";
 import { storeFor } from "../worker/src/lib/store.js";
+import { readExactDocumentReport } from "../worker/src/lib/documents-summary.js";
 import { forget, replaceDocumentChunks, upsertChunks } from "../worker/src/lib/store-d1.js";
 import { sourceOriginalResultBindingReadiness } from "../worker/src/lib/source-original-observation.js";
 import { sourceOriginalChunkReceiptHash } from "../worker/src/lib/source-original-chunk.js";
@@ -365,9 +366,8 @@ const assertOneUpsert = (docUid) => {
 };
 
 // Staging a shorter revision changes authoritative chunk rows before its
-// marker-bound finalization. If that final transaction is interrupted, the
-// cache may retain the older larger count. Admin inventory must still report
-// the exact D1 count, and an ordinary retry must reconcile the cache.
+// marker-bound finalization. The hot inventory must not promote the derived
+// source receipt to current truth. The explicit report still reads exact rows.
 {
   const sourceId = "interrupted-shorter-cache";
   const docUid = `message:${sourceId}`;
@@ -387,7 +387,12 @@ const assertOneUpsert = (docUid) => {
   const authoritative = actualCountsFor("message");
   assert.equal(stale.chunks - authoritative.chunks, long.chunks - staged.chunks);
   const inventory = await store.stats(env);
-  const reported = inventory.rows.find((row) => row.source_type === "message");
+  const informational = inventory.rows.find((row) => row.source_type === "message");
+  assert.equal(informational.chunks, null);
+  assert.equal(informational.chunk_counts_exact, false);
+  assert.match(informational.count_note, /not counted on large Brains/);
+  const exact = await readExactDocumentReport(env);
+  const reported = exact.rows.find((row) => row.source_type === "message");
   assert.equal(reported.chunks, authoritative.chunks);
   assert.equal(reported.chunk_counts_exact, true);
 

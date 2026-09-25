@@ -897,6 +897,19 @@ matching mutable human wording.
 | `npm test` and CI | Does shared product behavior pass offline on supported operating systems and Node versions? |
 | Live field gates | Does the real connector, scale, scheduler, or account lifecycle work outside mocks? |
 
+The authenticated documents surface has separate informational and exact
+lanes. The hot GET reads only source-sized receipt and inventory tables and
+returns exact presence plus freshness. Corpus-sized totals are explicitly
+unknown there, never zero and never a stale cache value. Monthly reporting uses
+the owner-admin POST report lane. That lane keyset-pages document metadata and
+chunk rows independently, applies a fixed chunk-row budget to every statement,
+and publishes exact totals only when its opening and closing mutation markers
+match. This removes corpus-sized metadata and chunk joins from the document
+inventory used by health, status, MCP health, meaning answers, and update
+readiness while retaining an on-demand exact count.
+Destructive source removal uses its dry-run and final guarded receipts for both
+the preflight count and the postcondition.
+
 The D1 diagnostic's chunk-integrity lane is a bounded snapshot, not a collection
 of independent whole-table aggregates. It fixes one integer chunk-id high-water
 mark, visits that range once with keyset pages, and fuses the exact total, blank,
