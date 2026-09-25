@@ -133,7 +133,10 @@ function harness({ subdomainRead, health = null }) {
   return { fetchImpl, calls, healthHosts };
 }
 
+let namedProfileTokenReReads = 0;
+
 async function withFixture(fetchImpl, run, { workersSubdomain = SUBDOMAIN_LABEL } = {}) {
+  namedProfileTokenReReads = 0;
   const priorFetch = globalThis.fetch;
   const priorToken = process.env.CLOUDFLARE_API_TOKEN;
   try {
@@ -145,6 +148,14 @@ async function withFixture(fetchImpl, run, { workersSubdomain = SUBDOMAIN_LABEL 
       interactive: false,
       allowBrowserReauth: false,
       allowTokenRecovery: false,
+      // A rejected named-profile request tries one token re-read. The fixture
+      // answers it offline as unavailable instead of spawning Wrangler.
+      oauthOptions: {
+        processRunner: () => {
+          namedProfileTokenReReads += 1;
+          return { status: 1, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+        },
+      },
       withOAuthSession: async ({ action }) => action({
         token: Buffer.from("named-profile-fixture-token"),
         profile: AUTH_PROFILE,
@@ -248,6 +259,13 @@ test("the named-profile lane gives only an owner action after both URL proof and
   );
   assert.ok(calls.includes(`GET /client/v4/accounts/${ACCOUNT_ID}/workers/subdomain`),
     "the refusal must follow an attempted authenticated fallback read");
+  assert.equal(namedProfileTokenReReads, 1,
+    "the rejected named-profile read must try exactly one token re-read");
+  assert.equal(
+    calls.filter((call) => call === `GET /client/v4/accounts/${ACCOUNT_ID}/workers/subdomain`).length,
+    1,
+    "without a changed token the rejected read must not be repeated",
+  );
   assert.deepEqual(healthHosts, [],
     "without an exact subdomain receipt, no guessed hostname may be probed");
   const saved = JSON.parse(readFileSync(target, "utf8"));

@@ -665,6 +665,9 @@ function namedProfileReauthorizationFailure({ retried = false } = {}) {
       "      terminal and authorize the browser sign-in again when prompted.",
   );
   error.code = "AUTH_REQUIRED";
+  // The Cloudflare 401/403 behind this message is gone from its text, so a
+  // caller with its own denied-read guidance can still recognize it.
+  error.namedProfileSessionRejected = true;
   return error;
 }
 
@@ -2334,7 +2337,11 @@ export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName,
     if (readFailure) {
       const message = String(readFailure?.message || readFailure || "");
       const noCredential = readFailure instanceof Fatal && NO_CLOUDFLARE_CREDENTIAL_RE.test(message);
-      const denied = SUBDOMAIN_READ_DENIED_RE.test(message);
+      // A named-profile 401/403 reaches here only after one renewal was tried
+      // (or was unavailable). For this read it is still a denied subdomain
+      // read, whose guidance also forbids changing the dashboard setting.
+      const denied = SUBDOMAIN_READ_DENIED_RE.test(message) ||
+        readFailure?.namedProfileSessionRejected === true;
       // The no-credential Fatal already says the right thing, including browser
       // sign-in and why a raw token must not be pasted into a shell. Preserve it.
       if (noCredential) throw readFailure;
