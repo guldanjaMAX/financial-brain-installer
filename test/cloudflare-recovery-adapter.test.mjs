@@ -691,6 +691,8 @@ assert.equal(recoveryExportTables(appliedMigrations.slice(0, 44)).includes("sour
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_accepted_resolutions"), true);
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_accepted_resolution_activations"), false);
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_accepted_resolution_admissions"), false);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 46)).includes("ocr_page_requests"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("ocr_page_requests"), true);
 assert.equal(
   recoveryExportTables(appliedMigrations, { excludeLlmCallLog: true })
     .includes("llm_call_log"),

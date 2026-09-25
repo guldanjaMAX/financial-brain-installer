@@ -824,6 +824,7 @@ const SCHEMA_45_TABLES = Object.freeze([
   "source_original_accepted_resolutions",
   "source_original_accepted_resolution_activations",
 ]);
+const SCHEMA_47_TABLES = Object.freeze(["ocr_page_requests"]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -846,7 +847,7 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
      ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
      ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
-     ...SCHEMA_45_TABLES].includes(table)
+     ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -4355,7 +4356,8 @@ function expectedRecoveryTables(migrations) {
     (latest >= 42 || !SCHEMA_42_TABLES.includes(table)) &&
     (latest >= 43 || !SCHEMA_43_TABLES.includes(table)) &&
     (latest >= 44 || !SCHEMA_44_TABLES.includes(table)) &&
-    (latest >= 45 || !SCHEMA_45_TABLES.includes(table)));
+    (latest >= 45 || !SCHEMA_45_TABLES.includes(table)) &&
+    (latest >= 47 || !SCHEMA_47_TABLES.includes(table)));
 }
 
 export function recoveryExportTables(
