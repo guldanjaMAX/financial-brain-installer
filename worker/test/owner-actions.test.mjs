@@ -320,6 +320,29 @@ const uploadBody = {
       modelCalls === 1 && failedIngestCalls === 1,
     JSON.stringify({ status: first.status, firstBody, modelCalls, failedIngestCalls }));
 
+  env.ADMIN_KEY = "rotated-fixture-admin-key";
+  const lostAfterRotation = await call("/api/owner/uploads", imageBody, {
+    afterIngest: async () => { throw new Error("drop rotated-key response after ingest commit"); },
+  });
+  const lostAfterRotationBody = await bodyOf(lostAfterRotation);
+  const pendingIntent = JSON.parse(db.prepare(
+    "SELECT response_json FROM owner_action_requests WHERE request_id=?",
+  ).get(imageBody.request_id)?.response_json || "null");
+  check("owner image retry crosses admin-key rotation without a second OCR call",
+    lostAfterRotation.status === 503 &&
+      lostAfterRotationBody.code === "owner_upload_finalize_unavailable" &&
+      modelCalls === 1,
+    JSON.stringify({ status: lostAfterRotation.status, lostAfterRotationBody, modelCalls }));
+  check("the content-free pending intent carries the opaque OCR request id",
+    pendingIntent?.pending === true && /^[0-9a-f]{64}$/.test(pendingIntent.ocr_request_id || ""),
+    JSON.stringify(pendingIntent));
+  const beforeFinalization = db.prepare(
+    "SELECT acknowledged_at FROM ocr_page_requests WHERE request_id=?",
+  ).get(pendingIntent?.ocr_request_id || "");
+  check("OCR remains unacknowledged before exact owner-upload finalization",
+    beforeFinalization && beforeFinalization.acknowledged_at === null,
+    JSON.stringify(beforeFinalization));
+
   const retried = await call("/api/owner/uploads", imageBody);
   const retriedBody = await bodyOf(retried);
   check("owner image retry reuses the paid OCR result and completes ingestion",
@@ -327,6 +350,19 @@ const uploadBody = {
       db.prepare("SELECT count(*) count FROM documents WHERE doc_uid=?")
         .get("upload:owner:acme:image_retry_fixture").count === 1,
     JSON.stringify({ status: retried.status, retriedBody, modelCalls }));
+  const finalizedReceipt = JSON.parse(db.prepare(
+    "SELECT response_json FROM owner_action_requests WHERE request_id=?",
+  ).get(imageBody.request_id)?.response_json || "null");
+  const afterFinalization = db.prepare(
+    "SELECT acknowledged_at,response_json FROM ocr_page_requests WHERE request_id=?",
+  ).get(pendingIntent?.ocr_request_id || "");
+  check("exact upload finalization acknowledges the OCR receipt for normal expiry pruning",
+    typeof afterFinalization?.acknowledged_at === "string" &&
+      JSON.parse(afterFinalization.response_json).acknowledged_at === afterFinalization.acknowledged_at &&
+      finalizedReceipt.ocr_request_id === pendingIntent.ocr_request_id &&
+      retriedBody.ocr_request_id === undefined,
+    JSON.stringify({ afterFinalization, finalizedReceipt, retriedBody }));
+  env.ADMIN_KEY = "fixture-admin-key";
   delete env.AI;
   delete env.OCR_ENABLED;
 }

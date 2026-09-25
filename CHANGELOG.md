@@ -78,12 +78,15 @@ asset publication.
   malformed replies, and unknown statuses use that same boundary. A later pass
   reclaims only an expired pre-model reservation. A completed result keeps its
   encrypted handoff until the whole source document is stored and acknowledged
-  on the same receipt, so a delayed pass replays it without another charge. A
-  completed receipt with no usable handoff gets one counted replacement read in
-  that seven-day window, whether it was acknowledged, pruned, or inherited from
-  an older release. An in-flight receipt also gets one recorded replacement
-  after its full seven-day ambiguity window. Replacement receipts must be
-  acknowledged again, and a result with no handoff waits for the next bounded
+  on the same receipt, so a delayed pass replays it without another charge. An
+  owner image upload uses that same private page identity, so rotating the
+  Brain admin key after an ingest failure cannot strand the already-paid OCR
+  result. A completed receipt with a missing, mismatched, malformed, expired,
+  or undecryptable handoff gets one compare-and-swap-protected replacement
+  read in that seven-day window. An in-flight receipt also gets one recorded
+  replacement after its full seven-day ambiguity window. Replacement receipts
+  must be acknowledged again, and owner upload does so only after exact ingest
+  and finalization readback. A result with no handoff waits for the next bounded
   window instead of becoming a permanent hold. If the Brain health check
   also fails, progress remains saved and the pass stops resumably. To check:
   credential-shaped OCR text reaches the credential refusal without surviving in

@@ -967,11 +967,15 @@ product says all three rather than the first one:
   encrypted handoff until the source confirms that the whole document was
   stored, so even a much later pass can recover it with no new model call. Once
   stored, the acknowledgement is written into the same receipt and expired
-  ciphertext may be pruned. If a completed receipt has no usable ciphertext,
-  whether it was acknowledged, pruned, or inherited from an older release, it
-  can make one clearly counted replacement call in that seven-day window. The
-  replacement gets a fresh receipt and must be acknowledged again after the
-  full document is stored. A missing completion remains a bounded retry state;
+  ciphertext may be pruned. Owner image upload uses that same private page
+  identity, so an admin-key rotation cannot strand an already-paid result. If a
+  completed receipt has missing, mismatched, malformed, expired-after-acknowledgement,
+  or undecryptable ciphertext, it can make one clearly counted replacement
+  call in that seven-day window. The replacement gets a fresh receipt and must
+  be acknowledged again after the full document is stored. Owner upload carries
+  only the opaque OCR request ID through its content-free intent and
+  acknowledges it after exact ingest and upload-finalization readback, so normal
+  expiry pruning can apply. A missing completion remains a bounded retry state;
   after its seven-day ambiguity window, one recorded replacement call can clear
   it. No state can retry more than once in one window. If the health check also
   fails, progress is saved and the pass stops resumably.

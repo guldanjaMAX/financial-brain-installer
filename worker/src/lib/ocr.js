@@ -42,13 +42,13 @@ import {
   claimOcrPageRequest,
   completeOcrPageRequest,
   releaseOcrPageRequest,
-  replayOcrPageResponse,
+  ocrPageReplayKey,
   ocrPageRequestId,
   sha256Hex,
   startOcrPageRequest,
 } from "./ocr-idempotency.js";
 
-export { ocrPageRequestId };
+export { ocrPageReplayKey, ocrPageRequestId };
 
 export const OCR_PATH = "/api/admin/brain/ocr";
 
@@ -187,29 +187,7 @@ export async function handleOcr(env, request, { now = () => new Date() } = {}) {
     }, 425);
   }
   if (claim.state === "replayable") {
-    try {
-      const replay = await replayOcrPageResponse({
-        receipt: claim.receipt,
-        handoff: claim.handoff,
-        replayKey,
-      });
-      return jsonResponse({ ...replay, idempotent_replay: true }, claim.status);
-    } catch {
-      return jsonResponse({
-        error: "the earlier OCR result could not be recovered from its encrypted handoff",
-        detail: "This page is held for review. The permanent receipt prevents a second charge.",
-        ocr_idempotency_unavailable: true,
-        ocr_request_completed: true,
-      }, 503);
-    }
-  }
-  if (claim.state === "completed") {
-    return jsonResponse({
-      error: "the earlier OCR attempt completed but its plaintext was not retained",
-      detail: "This page is held for review because the content-free receipt prevents a second charge but cannot replay document text.",
-      ocr_idempotency_unavailable: true,
-      ocr_request_completed: true,
-    }, 503);
+    return jsonResponse({ ...claim.replay, idempotent_replay: true }, claim.status);
   }
 
   try {

@@ -297,9 +297,9 @@ seven-day ambiguity window. Before the first attempt, the installer
 derives one AES-GCM replay key with a domain-separated hash of the exact private
 page identity. That key is not persisted and cannot be derived from the durable
 request ID alone, but a later source pass over the same page can reproduce it.
-Owner image uploads instead derive their replay key from the Brain admin key
-and the opaque request identity so the same upload can recover after a later
-ingest failure. A completion keeps a permanent, content-free,
+Owner image uploads derive their replay key from that same private page
+identity, so the same upload can recover after a later ingest failure even if
+the Brain admin key rotates. A completion keeps a permanent, content-free,
 identity-bearing tombstone with only a response hash, status, bounded numeric
 usage, source acknowledgement time, and bounded re-read count. It may also
 keep ciphertext that the matching replay key can open. The source acknowledges
@@ -310,13 +310,16 @@ never prunes the ciphertext,
 including after the former seven-day expiry, so a response that finishes after
 every client deadline remains replayable without a second model call or durable
 plaintext. After acknowledgement, expired ciphertext may be pruned. Any
-completed receipt whose ciphertext is unavailable can be rearmed once in that
-seven-day window, whether it was acknowledged, pruned, or inherited from an
-older release. That replacement clears the prior acknowledgement and is
+completed receipt whose ciphertext is missing, mismatched, malformed, expired
+after acknowledgement, or undecryptable can be rearmed once in that seven-day
+window. The one-call decision uses the same exact compare-and-swap for every
+unusable handoff. That replacement clears the prior acknowledgement and is
 recorded by the `ocr_reread_after_expiry` receipt field and counter, which the
 installer reports in its load summary. Its fresh ciphertext remains until a
-fresh source acknowledgement. A replacement with no ciphertext waits for the
-next bounded window instead of looping or becoming a permanent hold.
+fresh source acknowledgement. Owner upload carries the opaque request ID in
+its private content-free intent and acknowledges only after exact ingest and
+finalization readback. A replacement with no ciphertext waits for the next
+bounded window instead of looping or becoming a permanent hold.
 Neither the key nor plaintext, plaintext source locator, file name, or
 plaintext document identity is stored, and this table is not part of a recovery
 export.

@@ -9,6 +9,7 @@ import {
   handleOcr,
   MAX_IMAGE_BASE64_BYTES,
   ocrModelFor,
+  ocrPageReplayKey,
   ocrPageRequestId,
 } from "./ocr.js";
 
@@ -48,29 +49,6 @@ function bytesToBase64(bytes) {
     binary += String.fromCharCode(...bytes.subarray(offset, Math.min(bytes.length, offset + 0x8000)));
   }
   return btoa(binary);
-}
-
-function bytesToBase64Url(bytes) {
-  return bytesToBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
-}
-
-async function ownerUploadReplayKey(env, requestId) {
-  const adminKey = String(env?.ADMIN_KEY || "");
-  if (!adminKey) throw extractionError("private image OCR is unavailable", "owner_upload_ocr_unavailable");
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(adminKey),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    encoder.encode(`financial-brain:owner-upload-ocr-replay:v1\0${requestId}`),
-  );
-  return bytesToBase64Url(new Uint8Array(signature));
 }
 
 function startsWith(bytes, signature) {
@@ -222,15 +200,18 @@ async function imageOcr(env, bytes, mediaType, { source, sourceItemId } = {}) {
   const imageBase64 = bytesToBase64(bytes);
   const prompt = "Transcribe every readable word exactly. Preserve headings, line order, table labels, values, and dates. Do not summarize or infer missing text.";
   const page = 1;
-  const requestId = await ocrPageRequestId({
+  const pageIdentity = {
     image: imageBase64,
     model: ocrModelFor(env),
     prompt,
     source,
     sourceItemId,
     page,
-  });
-  const replayKey = await ownerUploadReplayKey(env, requestId);
+  };
+  const [requestId, replayKey] = await Promise.all([
+    ocrPageRequestId(pageIdentity),
+    ocrPageReplayKey(pageIdentity),
+  ]);
   const request = new Request("https://brain.invalid/api/admin/brain/ocr", {
     method: "POST",
     headers: { "content-type": "application/json", "x-admin-key": env.ADMIN_KEY || "" },
@@ -253,7 +234,7 @@ async function imageOcr(env, bytes, mediaType, { source, sourceItemId } = {}) {
       status: response.status,
     });
   }
-  return { text: clean(result.text), model: result.model || null };
+  return { text: clean(result.text), model: result.model || null, requestId };
 }
 
 function ensureTextLimit(text) {
@@ -275,6 +256,7 @@ export async function extractOwnerUpload(
   let title = null;
   let occurredAt = null;
   let extractionMethod = "native";
+  let ocrRequestId = null;
   let note = null;
   if (mediaType === "application/pdf") {
     const { extractText } = await import("unpdf");
@@ -305,6 +287,7 @@ export async function extractOwnerUpload(
     const result = await imageOcr(env, bytes, mediaType, { source, sourceItemId });
     text = result.text;
     extractionMethod = "ocr";
+    ocrRequestId = result.requestId;
     note = result.model ? `Transcribed by ${result.model}` : "Transcribed by the configured OCR model";
   } else {
     throw extractionError("this binary media type is not supported", "unsupported_media");
@@ -317,6 +300,7 @@ export async function extractOwnerUpload(
     occurredAt,
     textSource: extractionMethod === "ocr" ? "ocr" : "native",
     textReliable: extractionMethod !== "ocr",
+    ocrRequestId,
     metadata: {
       extracted_as: mediaType,
       extraction_method: extractionMethod,

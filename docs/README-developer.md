@@ -438,11 +438,12 @@ and bounded numeric usage. The client derives a separate AES-GCM replay key
 from the exact private page identity with a domain-separated hash. The key is
 not persisted and cannot be derived from the stored request ID alone, but the
 same source pass on a later run can reproduce it while the row retains its
-ciphertext. Owner image uploads instead
-derive their replay key from the Brain admin key and opaque request identity,
-so a later ingest failure can retry the upload without another model call or
-another durable key. This lets a retry recover an already-paid result without
-keeping durable plaintext ahead of the complete-document credential gate. The
+ciphertext. Owner image uploads use that same private page identity, so an
+admin-key rotation after a later ingest failure cannot strand the already-paid
+result. This lets a retry recover it without another model call or durable key
+while keeping plaintext behind the complete-document credential gate. Missing,
+mismatched, malformed, expired-after-acknowledgement, and undecryptable
+handoffs all enter the same compare-and-swap replacement boundary. The
 source acknowledges the OCR page on the same receipt only after every part of
 the logical document family is stored and reconciled. Cleanup prunes expired
 ciphertext only after that acknowledgement; an unacknowledged result remains
@@ -450,9 +451,11 @@ replayable after the former seven-day boundary. If any completed receipt has
 no usable ciphertext, whether acknowledged, pruned, or legacy, an exact
 compare-and-swap permits one replacement call in that window, clears the old
 acknowledgement, records `ocr_reread_after_expiry`, and leaves a fresh
-ciphertext until the replacement is acknowledged. A replacement receipt with
-no ciphertext waits for its next seven-day window instead of looping or
-becoming a permanent hold. The source load report counts every replacement.
+ciphertext until the replacement is acknowledged. Owner upload carries the
+opaque request ID in its private content-free intent and acknowledges only
+after exact ingest and finalization readback. A replacement receipt with no
+ciphertext waits for its next seven-day window instead of looping or becoming
+a permanent hold. The source load report counts every replacement.
 Any reservation, model-start, completion, or release evidence failure is fatal
 and retryable at source level: the prior revision remains, no partial
 replacement or removal plan runs, and the cursor and ready receipt are
