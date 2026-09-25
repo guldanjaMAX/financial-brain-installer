@@ -12,6 +12,7 @@ import {
 import { currentCustomApiDocumentSql } from "../worker/src/lib/custom-api-visibility.js";
 import {
   coverageGaps,
+  forget,
   freshnessReport,
   RETRIEVAL_CANDIDATE_DEPTH,
   searchVector,
@@ -126,7 +127,7 @@ function compactConfig() {
     enabled: true,
     source: "store-dashboard",
     base_url: "https://dashboard.invalid/api/",
-    token_secret: "STORE_DASHBOARD_TOKEN",
+    token_secret: "CUSTOM_API_TOKEN_STORE_DASHBOARD",
     endpoints: [{
       name: "sales",
       path: "/sales",
@@ -177,7 +178,7 @@ function config() {
   });
   return {
     enabled: true, source: "store-dashboard", base_url: "https://dashboard.invalid/api/",
-    token_secret: "STORE_DASHBOARD_TOKEN", max_rows: 10_000,
+    token_secret: "CUSTOM_API_TOKEN_STORE_DASHBOARD", max_rows: 10_000,
     endpoints: [
       {
         name: "sales", path: "/sales", row_key: ["store", "period", "revenue_stream"],
@@ -223,7 +224,7 @@ test("real volume stays under 600 statements per invocation and resumes after ev
   const workerEnv = {
     STORAGE: "d1",
     DB,
-    STORE_DASHBOARD_TOKEN: TOKEN,
+    CUSTOM_API_TOKEN_STORE_DASHBOARD: TOKEN,
     CUSTOM_API_CONFIG: JSON.stringify(config()),
   };
   const interrupted = new Set();
@@ -482,7 +483,7 @@ test("promotion keeps unchanged logical documents, replaces one changed group, a
     enabled: true,
     source: "store-dashboard",
     base_url: "https://dashboard.invalid/api/",
-    token_secret: "STORE_DASHBOARD_TOKEN",
+    token_secret: "CUSTOM_API_TOKEN_STORE_DASHBOARD",
     endpoints: [
       {
         name: "sales",
@@ -585,6 +586,141 @@ test("promotion keeps unchanged logical documents, replaces one changed group, a
   assert.equal(byLogicalId.has("inventory:Store 2"), false);
 });
 
+test("a forgotten current document is regenerated and terminal map failure cannot strand the next pull", async (t) => {
+  const database = setupDatabase();
+  t.after(() => database.close());
+  const DB = countedD1(database);
+  const sourceConfig = compactConfig();
+  let currentAt = AT;
+  let feed = { data: [
+    { store: "Store 1", period: "2026-08-01", revenue_stream: "services", net_sales: 10 },
+    { store: "Store 1", period: "2026-09-01", revenue_stream: "services", net_sales: 20 },
+  ] };
+  let providerFetches = 0;
+  const persistence = customApiD1Persistence({ STORAGE: "d1", DB }, { ingestDocument: documentWriter(DB) });
+  const options = {
+    token: TOKEN,
+    now: () => currentAt,
+    sleep: async () => {},
+    persistence,
+    fetchImpl: async () => {
+      providerFetches++;
+      return new Response(JSON.stringify(feed), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const currentDocument = (logicalSourceId) => database.prepare(
+    `SELECT d.doc_uid,d.source_id,d.content
+       FROM custom_api_current_jobs c
+       JOIN custom_api_document_versions v ON v.source=c.source AND v.job_id=c.job_id
+       JOIN documents d ON d.source=v.source AND d.source_id=v.document_source_id
+      WHERE c.source='store-dashboard' AND v.logical_source_id=?1 AND d.deleted_at IS NULL`,
+  ).get(logicalSourceId);
+
+  const first = await settlePull(sourceConfig, options);
+  const forgottenLogicalId = "sales:2026-08-01";
+  const firstDocument = currentDocument(forgottenLogicalId);
+  assert.ok(firstDocument, "the first pull reached the mapped live-document decision point");
+  const forgotten = await forget({ STORAGE: "d1", DB }, { docUids: [firstDocument.doc_uid], dryRun: false });
+  assert.equal(forgotten.documents, 1, "the confirmed forget path removed one current document");
+  assert.equal(currentDocument(forgottenLogicalId), undefined);
+
+  currentAt = new Date("2026-09-25T15:30:00.000Z");
+  const repaired = await settlePull(sourceConfig, options);
+  assert.equal(providerFetches, 2, "the identical response was fetched before integrity recovery");
+  assert.notEqual(repaired.job_id, first.job_id, "a hash match did not reuse an incomplete snapshot");
+  const repairedDocument = currentDocument(forgottenLogicalId);
+  assert.ok(repairedDocument, "the identical pull restored the exact missing logical document");
+  assert.notEqual(repairedDocument.source_id, firstDocument.source_id);
+
+  database.prepare(
+    "DELETE FROM custom_api_row_chunks WHERE source='store-dashboard' AND job_id=?1 AND endpoint='sales'",
+  ).run(repaired.job_id);
+  currentAt = new Date("2026-09-26T15:30:00.000Z");
+  const rowRepaired = await settlePull(sourceConfig, options);
+  assert.notEqual(rowRepaired.job_id, repaired.job_id, "a missing current row chunk also invalidated the hash shortcut");
+  assert.equal((await persistence.loadRows({ source: "store-dashboard", endpoint: "sales" })).length, 2,
+    "the identical response restored every current structured row");
+
+  feed = { data: [
+    { store: "Store 1", period: "2026-08-01", revenue_stream: "services", net_sales: 10 },
+    { store: "Store 1", period: "2026-09-01", revenue_stream: "services", net_sales: 21 },
+  ] };
+  currentAt = new Date("2026-09-27T15:30:00.000Z");
+  const staged = await runCustomApiPull(sourceConfig, options);
+  assert.equal(staged.status, "in_progress");
+  const carriedDocument = currentDocument(forgottenLogicalId);
+  await forget({ STORAGE: "d1", DB }, { docUids: [carriedDocument.doc_uid], dryRun: false });
+
+  let terminalFailure = null;
+  for (let attempt = 0; attempt < 20 && !terminalFailure; attempt++) {
+    try {
+      await runCustomApiPull(sourceConfig, options);
+    } catch (error) {
+      terminalFailure = error;
+    }
+  }
+  assert.match(terminalFailure?.message || "", /terminal version map/i,
+    "the missing carried version reached terminal verification");
+  assert.equal(database.prepare("SELECT status FROM custom_api_jobs WHERE job_id=?1").get(staged.job_id).status, "failed");
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS n FROM custom_api_jobs WHERE source='store-dashboard' AND status IN ('staged','applying','promoting','promoted')",
+  ).get().n, 0, "terminal failure released the active-job uniqueness boundary");
+
+  const recovered = await settlePull(sourceConfig, options);
+  assert.equal(recovered.status, "completed");
+  assert.equal(providerFetches, 5, "the failed job forced one fresh provider pull");
+  assert.ok(currentDocument(forgottenLogicalId), "the fresh pull regenerated the document missing from the failed map");
+  assert.ok(currentDocument("sales:2026-09-01"), "the unrelated changed document also completed");
+});
+
+test("sales absence statements stay scoped to each store and month in both layouts", async () => {
+  const sourceConfig = config();
+  sourceConfig.endpoints = [sourceConfig.endpoints[0]];
+  for (const document of sourceConfig.endpoints[0].documents) {
+    document.expected_values = { revenue_stream: ["live_animal", "supplies", "services", "other"] };
+    document.body_template = "{{missing.revenue_stream}}\n\n{{rows_table}}";
+  }
+  const documents = [];
+  let providerFetches = 0;
+  const result = await runCustomApiPull(sourceConfig, {
+    token: TOKEN,
+    now: () => AT,
+    sleep: async () => {},
+    fetchImpl: async () => {
+      providerFetches++;
+      return new Response(JSON.stringify({ data: [
+        { store: "Store 1", period: "2026-09-01", revenue_stream: "live_animal", net_sales: 100 },
+        { store: "Store 1", period: "2026-09-01", revenue_stream: "supplies", net_sales: 10 },
+        { store: "Store 2", period: "2026-09-01", revenue_stream: "services", net_sales: 20 },
+        { store: "Store 2", period: "2026-09-01", revenue_stream: "other", net_sales: 5 },
+      ] }), { headers: { "content-type": "application/json" } });
+    },
+    persistence: {
+      async loadRows() { return []; },
+      async persist({ documentChanges }) { documents.push(...documentChanges); },
+    },
+  });
+  assert.equal(providerFetches, 1, "the complementary-stream fixture reached the provider decision point");
+  assert.equal(result.documents, 3);
+  assert.equal(documents.length, 3, "both document layouts reached persistence");
+  const byId = new Map(documents.map((document) => [document.source_id, document.content]));
+  const expected = [
+    ["Store 1", "services"],
+    ["Store 1", "other"],
+    ["Store 2", "live_animal"],
+    ["Store 2", "supplies"],
+  ];
+  for (const [store, stream] of expected) {
+    const statement = `${store}, 2026-09-01: no ${stream.replaceAll("_", " ")} sales recorded`;
+    assert.match(byId.get("sales:monthly:2026-09-01"), new RegExp(statement));
+    assert.match(byId.get(`sales:store-history:${store}`), new RegExp(statement));
+  }
+  for (const content of byId.values()) {
+    assert.doesNotMatch(content, /\|\s*(?:live_animal|supplies|services|other)\s*\|\s*\$?0(?:\.00)?\s*\|/,
+      "an absent stream is prose, never an invented zero row");
+  }
+});
+
 for (const [label, body] of [
   ["empty first pull", { data: [] }],
 ]) {
@@ -627,7 +763,7 @@ test("first-pull refusal creates no snapshot and leaves an owner-visible refusal
   t.after(() => database.close());
   const DB = countedD1(database);
   const env = {
-    STORAGE: "d1", DB, STORE_DASHBOARD_TOKEN: TOKEN,
+    STORAGE: "d1", DB, CUSTOM_API_TOKEN_STORE_DASHBOARD: TOKEN,
     CUSTOM_API_CONFIG: JSON.stringify(compactConfig()),
   };
   let fetches = 0;
@@ -663,7 +799,7 @@ test("a partial refusal is marked in the document and source until a clean pull 
   const DB = countedD1(database);
   const sourceConfig = { ...compactConfig(), display_name: "store dashboard" };
   const env = {
-    STORAGE: "d1", DB, STORE_DASHBOARD_TOKEN: TOKEN,
+    STORAGE: "d1", DB, CUSTOM_API_TOKEN_STORE_DASHBOARD: TOKEN,
     CUSTOM_API_CONFIG: JSON.stringify(sourceConfig),
   };
   const persistence = customApiD1Persistence(env, { ingestDocument: documentWriter(DB) });
@@ -695,6 +831,7 @@ test("a partial refusal is marked in the document and source until a clean pull 
   assert.equal(carried.row.net_sales, 20);
   assert.equal(carried.refresh_status, "not refreshed (refused)");
   assert.equal(carried.refusal_reason, "invalid_net_sales");
+  assert.equal(carried.last_seen_at, AT.toISOString(), "a refused carry preserves the last accepted observation time");
   const visible = database.prepare(
     `SELECT content,meta FROM documents d
       WHERE d.source='store-dashboard' AND d.deleted_at IS NULL${currentCustomApiDocumentSql("d")}`,
@@ -726,7 +863,9 @@ test("a partial refusal is marked in the document and source until a clean pull 
   const clean = await settleWorker(env, options);
   assert.equal(clean.source_status, "ready");
   const cleanRows = await persistence.loadRows({ source: "store-dashboard", endpoint: "sales" });
-  assert.equal(cleanRows.find((row) => row.row.store === "Store 2").refresh_status, undefined);
+  const cleanCarried = cleanRows.find((row) => row.row.store === "Store 2");
+  assert.equal(cleanCarried.refresh_status, undefined);
+  assert.equal(cleanCarried.last_seen_at, currentAt.toISOString(), "the next accepted row advances its observation time");
   const cleanVisible = database.prepare(
     `SELECT content,meta FROM documents d
       WHERE d.source='store-dashboard' AND d.deleted_at IS NULL${currentCustomApiDocumentSql("d")}`,

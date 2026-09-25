@@ -16,7 +16,7 @@ const configuration = (baseUrl) => ({
   enabled: true,
   source: "store-dashboard",
   base_url: baseUrl,
-  token_secret: "STORE_DASHBOARD_TOKEN",
+  token_secret: "CUSTOM_API_TOKEN_STORE_DASHBOARD",
   cadence_seconds: 86400,
   endpoints: [
     {
@@ -132,7 +132,7 @@ function memoryPersistence() {
 
 test("config is declarative, HTTPS-only, and names rather than contains its secret", () => {
   const parsed = validateCustomApiConfig(configuration("https://dashboard.invalid/api/"));
-  assert.equal(parsed.token_secret, "STORE_DASHBOARD_TOKEN");
+  assert.equal(parsed.token_secret, "CUSTOM_API_TOKEN_STORE_DASHBOARD");
   assert.equal(JSON.stringify(parsed).includes(TOKEN), false);
   assert.throws(
     () => validateCustomApiConfig(configuration("http://dashboard.invalid/api/")),
@@ -140,8 +140,49 @@ test("config is declarative, HTTPS-only, and names rather than contains its secr
   );
   assert.throws(
     () => validateCustomApiConfig({ ...configuration("https://dashboard.invalid/api/"), token_secret: "ADMIN_KEY" }),
-    /dedicated uppercase Worker secret/i,
+    /CUSTOM_API_TOKEN_/i,
   );
+});
+
+test("every non-custom secret family is refused before a provider request", async () => {
+  const firstPartySecrets = [
+    "ADMIN_KEY",
+    "SESSION_SIGNING_KEY",
+    "RAG_PROXY_KEY",
+    "ANTHROPIC_API_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "PLAID_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "ZOOM_CLIENT_SECRET",
+    "RESEND_API_KEY",
+    "CLOUDFLARE_API_TOKEN",
+    "CUSTOM_API_CONFIG",
+    "OTHER_VENDOR_TOKEN",
+  ];
+  let refusalDecisions = 0;
+  let providerRequests = 0;
+  for (const tokenSecret of firstPartySecrets) {
+    await assert.rejects(
+      runCustomApiPull({
+        ...configuration("https://dashboard.invalid/api/"),
+        token_secret: tokenSecret,
+      }, {
+        token: TOKEN,
+        fetchImpl: async () => {
+          providerRequests++;
+          throw new Error("provider fetch must not run");
+        },
+        persistence: memoryPersistence(),
+      }),
+      (error) => {
+        refusalDecisions++;
+        return error instanceof TypeError && /CUSTOM_API_TOKEN_/i.test(error.message);
+      },
+      tokenSecret,
+    );
+  }
+  assert.equal(refusalDecisions, firstPartySecrets.length, "every secret family reached the namespace refusal");
+  assert.equal(providerRequests, 0, "no refused binding reached the provider");
 });
 
 test("the mock serves the real data envelopes and numeric, missing-stream, null-store, and extra-field quirks", async (t) => {

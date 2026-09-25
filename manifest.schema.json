@@ -645,8 +645,7 @@
             "base_url": { "type": "string", "format": "uri", "pattern": "^https://" },
             "token_secret": {
               "type": "string",
-              "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
-              "not": { "pattern": "^((ADMIN_KEY|AI|DB|VECTORIZE|R2|CUSTOM_API_CONFIG)$|(BRAIN|BANK|GOOGLE|ZOOM|PROVIDER)_).*" }
+              "pattern": "^CUSTOM_API_TOKEN_[A-Z0-9_]{1,40}$"
             },
             "cadence_seconds": { "type": "integer", "minimum": 3600, "maximum": 2678400, "default": 86400 },
             "timeout_ms": { "type": "integer", "minimum": 250, "maximum": 60000, "default": 30000 },

@@ -510,6 +510,59 @@ test("source inventory pages are complete, stable, supported, and read-only", as
   assert.ok(seen.prepared.every((sql) => !/^\s*(?:INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP)\b/i.test(sql)));
 });
 
+test("source inventory counts only the current mapped custom-source document", async () => {
+  const db = migratedDb("custom-current");
+  db.prepare(
+    `INSERT INTO sources (name,kind,status,created_at,last_ingest_at,document_count)
+     VALUES ('custom-source','custom_api','ready','2026-09-24T00:00:00.000Z','2026-09-24T00:00:00.000Z',1)`,
+  ).run();
+  const jobHash = "a".repeat(64);
+  const insertJob = db.prepare(
+    `INSERT INTO custom_api_jobs
+       (job_id,source,fetched_at,status,next_slice,total_slices,job_hash,response_hashes_json,stats_json,created_at,verified_at)
+     VALUES (?,?,?,?,0,0,?,'{}','{}',?,?)`,
+  );
+  insertJob.run("job-current", "custom-source", "2026-09-24T00:00:00.000Z", "verified", jobHash,
+    "2026-09-24T00:00:00.000Z", "2026-09-24T00:00:00.000Z");
+  insertJob.run("job-staged", "custom-source", "2026-09-25T00:00:00.000Z", "staged", jobHash,
+    "2026-09-25T00:00:00.000Z", null);
+  db.prepare(
+    "INSERT INTO custom_api_current_jobs (source,job_id,promoted_at) VALUES ('custom-source','job-current','2026-09-24T00:00:00.000Z')",
+  ).run();
+  db.prepare(
+    "INSERT INTO custom_api_document_versions (source,job_id,logical_source_id,document_source_id) VALUES ('custom-source','job-current','logical','current')",
+  ).run();
+  const insertDocument = db.prepare(
+    `INSERT INTO documents (doc_uid,source,source_id,title,content_hash,ingested_at,meta,text_source,text_reliable)
+     VALUES (?1,'custom-source',?2,?2,?3,?4,?5,'native',1)`,
+  );
+  const insertChunk = db.prepare(
+    "INSERT INTO chunks (chunk_uid,doc_uid,chunk_ix,text,source) VALUES (?1,?2,0,'fixture','custom-source')",
+  );
+  for (const [id, jobId] of [["current", "job-current"], ["staged", "job-staged"], ["superseded", "job-old"]]) {
+    insertDocument.run(`custom-source:${id}`, id, `hash-${id}`, Date.parse("2026-09-24T00:00:00.000Z"), JSON.stringify({
+      connector: "custom_api",
+      custom_api_job_id: jobId,
+      custom_api_source_id: "logical",
+    }));
+    insertChunk.run(`custom-source:${id}#0`, `custom-source:${id}`);
+  }
+  const { env, seen } = d1Env(db, "custom-current");
+  const inventory = await sourceInventory(env, { now: Date.parse("2026-09-24T01:00:00.000Z") });
+  const custom = inventory.rows.find((row) => row.source_id === "custom-source");
+  assert.ok(custom, "the custom source reached the inventory rollup decision point");
+  assert.deepEqual(custom.storage, {
+    physical_documents: 1,
+    logical_documents: 1,
+    chunks: 1,
+    readable_documents: 1,
+    unreadable_documents: 0,
+    basis: "document rows are attributed by a validated family_of or part_of receipt when present, otherwise by doc_uid; readable means at least one nonblank stored chunk",
+  });
+  assert.equal(seen.runs, 0);
+  assert.equal(seen.batches, 0);
+});
+
 test("latest run truth keeps bounded ingest success separate from whole-source completeness", async () => {
   const db = migratedDb("run-truth");
   const privateSentinel = "SYNTHETIC_PRIVATE_OLD_RUN /private/source/path secret-account@example.invalid";

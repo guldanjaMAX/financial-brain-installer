@@ -57,13 +57,13 @@ function scheduledEnv() {
     env: {
       STORAGE: "d1",
       DB: databaseBinding(database),
-      STORE_DASHBOARD_TOKEN: TOKEN,
+      CUSTOM_API_TOKEN_STORE_DASHBOARD: TOKEN,
       CUSTOM_API_CONFIG: JSON.stringify({
         enabled: true,
         display_name: "store dashboard",
         source: "store-dashboard",
         base_url: "https://dashboard.invalid/api/",
-        token_secret: "STORE_DASHBOARD_TOKEN",
+        token_secret: "CUSTOM_API_TOKEN_STORE_DASHBOARD",
         cadence_seconds: 86400,
         endpoints: [{
           name: "sales",

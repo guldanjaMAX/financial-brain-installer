@@ -29,7 +29,7 @@ function manifest() {
         display_name: "store dashboard",
         source: "store-dashboard",
         base_url: "https://dashboard.invalid/api/",
-        token_secret: "STORE_DASHBOARD_TOKEN",
+        token_secret: "CUSTOM_API_TOKEN_STORE_DASHBOARD",
         cadence_seconds: 86400,
         endpoints: [{
           name: "sales", path: "/sales", row_key: ["store", "period"],
@@ -100,6 +100,8 @@ test("the public manifest defaults match the full-snapshot real feed", () => {
   assert.match(custom.endpoints[0].documents[0].body_template, /missing\.revenue_stream/);
   assert.deepEqual(custom.endpoints.slice(1).map((endpoint) => endpoint.document.group_by), [["store"], ["store"]]);
   const schemaCustom = schema.properties.corpora.properties.custom_api.properties;
+  assert.equal(schemaCustom.token_secret.pattern, "^CUSTOM_API_TOKEN_[A-Z0-9_]{1,40}$");
+  assert.equal(custom.token_secret, "CUSTOM_API_TOKEN_STORE_DASHBOARD");
   assert.equal(schemaCustom.timeout_ms.default, 30_000);
   assert.ok(schemaCustom.max_response_bytes.default >= 5 * 1024 * 1024);
   assert.equal(schemaCustom.max_rows.default, 10_000);
@@ -114,13 +116,62 @@ test("the public manifest defaults match the full-snapshot real feed", () => {
   }
 });
 
+test("deploy and connect refuse non-custom secret families before any outbound operation", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "brain-custom-api-secret-namespace-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "brain.manifest.json");
+  const firstPartySecrets = [
+    "ADMIN_KEY",
+    "SESSION_SIGNING_KEY",
+    "RAG_PROXY_KEY",
+    "ANTHROPIC_API_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "PLAID_SECRET",
+    "GOOGLE_CLIENT_SECRET",
+    "ZOOM_WEBHOOK_SECRET_TOKEN",
+    "RESEND_API_KEY",
+    "CLOUDFLARE_API_TOKEN",
+    "CUSTOM_API_CONFIG",
+    "OTHER_VENDOR_TOKEN",
+  ];
+  let refusalDecisions = 0;
+  let outboundOperations = 0;
+  for (const tokenSecret of firstPartySecrets) {
+    const invalid = manifest();
+    invalid.corpora.custom_api.token_secret = tokenSecret;
+    writeFileSync(path, JSON.stringify(invalid));
+    assert.throws(
+      () => workerBindings(invalid, invalid.infrastructure.cloudflare),
+      (error) => {
+        refusalDecisions++;
+        return /CUSTOM_API_TOKEN_/i.test(error.message);
+      },
+      `deploy ${tokenSecret}`,
+    );
+    await assert.rejects(
+      cmdConnectCustomApi(path, {}, {
+        listWorkerSecretNames: async () => { outboundOperations++; return []; },
+        putWorkerSecret: async () => { outboundOperations++; },
+        postSourceExpectation: async () => { outboundOperations++; },
+      }),
+      (error) => {
+        refusalDecisions++;
+        return /CUSTOM_API_TOKEN_/i.test(error.message);
+      },
+      `connect ${tokenSecret}`,
+    );
+  }
+  assert.equal(refusalDecisions, firstPartySecrets.length * 2, "every deploy and connect reached the namespace refusal");
+  assert.equal(outboundOperations, 0, "validation stopped before secret inventory, writes, or source registration");
+});
+
 test("deploy binding contains declarative config and only the secret name", () => {
   const m = manifest();
   const bindings = workerBindings(m, m.infrastructure.cloudflare);
   const binding = bindings.find((item) => item.name === "CUSTOM_API_CONFIG");
   assert.ok(binding);
   assert.equal(binding.type, "plain_text");
-  assert.equal(JSON.parse(binding.text).token_secret, "STORE_DASHBOARD_TOKEN");
+  assert.equal(JSON.parse(binding.text).token_secret, "CUSTOM_API_TOKEN_STORE_DASHBOARD");
   assert.equal(JSON.stringify(bindings).includes(TOKEN), false);
 });
 
@@ -142,7 +193,7 @@ test("connect prompts hidden, writes the one declared Worker secret, verifies it
     postSourceExpectation: async (_base, _key, body) => expectations.push(body),
   }));
   assert.equal(prompts, 1);
-  assert.deepEqual(writes, [{ name: "STORE_DASHBOARD_TOKEN", matches: true }]);
+  assert.deepEqual(writes, [{ name: "CUSTOM_API_TOKEN_STORE_DASHBOARD", matches: true }]);
   assert.deepEqual(expectations, [{ source: "store-dashboard", kind: "custom_api", expected_refresh_seconds: 86400 }]);
   assert.equal(result.value.written, true);
   assert.equal(result.output.includes(TOKEN), false);
@@ -157,7 +208,7 @@ test("connect does not prompt or rewrite an existing secret", async (t) => {
   let writes = 0;
   let inventories = 0;
   const result = await withCapturedOutput(() => cmdConnectCustomApi(path, {}, {
-    listWorkerSecretNames: async () => { inventories++; return ["STORE_DASHBOARD_TOKEN"]; },
+    listWorkerSecretNames: async () => { inventories++; return ["CUSTOM_API_TOKEN_STORE_DASHBOARD"]; },
     putWorkerSecret: async () => { writes++; },
     readSecret: async () => { prompts++; return TOKEN; },
     resolveAdminKey: () => "fixture-admin-key",
@@ -206,7 +257,7 @@ test("clipboard mode clears exactly once when the declared secret already exists
   let clears = 0;
   const result = await withCapturedOutput(() => cmdConnectCustomApi(path, { "from-clipboard": true }, {
     platform: "darwin",
-    listWorkerSecretNames: async () => { inventories++; return ["STORE_DASHBOARD_TOKEN"]; },
+    listWorkerSecretNames: async () => { inventories++; return ["CUSTOM_API_TOKEN_STORE_DASHBOARD"]; },
     putWorkerSecret: async () => { writes++; },
     readClipboard: async () => { reads++; return TOKEN; },
     clearClipboard: async () => { clears++; },
@@ -233,7 +284,7 @@ test("Windows defaults to clipboard entry, writes only the declared secret, clea
     platform: "win32",
     listWorkerSecretNames: async () => {
       inventories++;
-      return inventories >= 2 ? ["STORE_DASHBOARD_TOKEN"] : [];
+      return inventories >= 2 ? ["CUSTOM_API_TOKEN_STORE_DASHBOARD"] : [];
     },
     putWorkerSecret: async (name, value) => calls.push({ kind: "write", name, matches: value === TOKEN }),
     readClipboard: async () => { calls.push({ kind: "read" }); return `\r\n  ${TOKEN}  \r\n`; },
@@ -246,7 +297,7 @@ test("Windows defaults to clipboard entry, writes only the declared secret, clea
   assert.equal(prompts, 0, "the Windows branch never attempted a terminal prompt");
   assert.deepEqual(calls, [
     { kind: "read" },
-    { kind: "write", name: "STORE_DASHBOARD_TOKEN", matches: true },
+    { kind: "write", name: "CUSTOM_API_TOKEN_STORE_DASHBOARD", matches: true },
     { kind: "clear" },
   ]);
   assert.equal(inventories, 2, "the declared name was re-read after the clipboard write");
@@ -419,7 +470,7 @@ test("the dashboard flag remains an explicit fallback on Windows", async (t) => 
     platform: "win32",
     listWorkerSecretNames: async () => {
       inventories++;
-      return inventories >= 2 ? ["STORE_DASHBOARD_TOKEN"] : [];
+      return inventories >= 2 ? ["CUSTOM_API_TOKEN_STORE_DASHBOARD"] : [];
     },
     putWorkerSecret: async () => { writes++; },
     readClipboard: async () => { reads++; return TOKEN; },
@@ -432,7 +483,7 @@ test("the dashboard flag remains an explicit fallback on Windows", async (t) => 
   assert.equal(writes, 0);
   assert.equal(inventories, 2, "the declared name was re-read after dashboard entry");
   assert.match(result.output, /Workers & Pages.*fixture-brain.*Settings.*Variables and Secrets.*Add.*Secret/s);
-  assert.match(result.output, /STORE_DASHBOARD_TOKEN/);
+  assert.match(result.output, /CUSTOM_API_TOKEN_STORE_DASHBOARD/);
 });
 
 test("dashboard replacement requires a positive post-paste confirmation", async (t) => {
@@ -448,7 +499,7 @@ test("dashboard replacement requires a positive post-paste confirmation", async 
     "key-set-in-dashboard": true,
   }, {
     platform: "win32",
-    listWorkerSecretNames: async () => { inventories++; return ["STORE_DASHBOARD_TOKEN"]; },
+    listWorkerSecretNames: async () => { inventories++; return ["CUSTOM_API_TOKEN_STORE_DASHBOARD"]; },
     confirmDashboardReplacement: async () => { confirmations++; return "REPLACED"; },
     putWorkerSecret: async () => { writes++; },
     resolveAdminKey: () => "fixture-admin-key",

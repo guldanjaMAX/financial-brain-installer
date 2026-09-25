@@ -19,6 +19,8 @@ new history document each day. No daily history documents are created.
 
 Copy this block into `corpora` in the instance manifest. Replace only the
 placeholder HTTPS base URL and, if needed, the dedicated Worker secret name.
+The name must match `CUSTOM_API_TOKEN_[A-Z0-9_]{1,40}`. No first-party Brain,
+provider, or control-plane binding is accepted as the bearer-key slot.
 The bearer value never belongs in this file.
 
 ```json
@@ -27,7 +29,7 @@ The bearer value never belongs in this file.
   "display_name": "store dashboard",
   "source": "store-dashboard",
   "base_url": "https://dashboard.example.invalid/api/",
-  "token_secret": "STORE_DASHBOARD_TOKEN",
+  "token_secret": "CUSTOM_API_TOKEN_STORE_DASHBOARD",
   "cadence_seconds": 86400,
   "timeout_ms": 30000,
   "max_response_bytes": 5242880,
@@ -54,10 +56,11 @@ The bearer value never belongs in this file.
           "name": "store-history",
           "group_by": ["store"],
           "title_template": "{{store}} sales by month",
-          "body_template": "{{store}} monthly sales history through {{fetched_date}}.\n\n{{rows_table}}",
+          "body_template": "{{store}} monthly sales history through {{fetched_date}}. {{missing.revenue_stream}}\n\n{{rows_table}}",
           "aggregates": { "net_sales": "sum", "transactions": "sum", "units": "sum", "puppies_sold": "sum" },
           "formats": { "net_sales": "currency" },
-          "fields": ["period", "net_sales", "transactions", "units", "puppies_sold"]
+          "fields": ["period", "net_sales", "transactions", "units", "puppies_sold"],
+          "expected_values": { "revenue_stream": ["live_animal", "supplies", "services", "other"] }
         }
       ]
     },
@@ -95,7 +98,9 @@ canonical path and the pull stops with a configuration error.
 ## 0:04 to 0:07: connect the bearer key privately
 
 Never paste the bearer key into chat, the manifest, a command argument, a ticket,
-or a support log.
+or a support log. Before deployment and connection, confirm the manifest's
+secret name starts with `CUSTOM_API_TOKEN_` and contains only the allowed
+uppercase letters, digits, or underscores after that prefix.
 
 On Windows, confirm clipboard history is already off in Card Q and turn screen
 sharing off. Open the key email, copy only the key, and run this one line:
@@ -184,8 +189,8 @@ count, and mark each carried value in the readable document as not refreshed on
 that pull's date. A later clean pull clears that warning even when the accepted
 value is unchanged. A wholly refused pull prints its endpoint refusal counts and
 saves no snapshot.
-A missing revenue stream is
-reported as not recorded, never as zero. A null store is retained as
+A missing revenue stream is reported with its store and month in both the
+monthly and store-history documents, never as zero. A null store is retained as
 `unassigned`. Unknown provider fields remain in the structured row but stay out
 of the readable document unless the manifest lists them in `fields`.
 

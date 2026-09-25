@@ -2925,7 +2925,7 @@ export async function diagnose(env, {
   }
 
   const totalRow = await safe("totals", () => one(
-    `SELECT (SELECT count(*) FROM documents WHERE deleted_at IS NULL) AS documents,
+    `SELECT (SELECT count(*) FROM documents WHERE deleted_at IS NULL${currentCustomApiDocumentSql("documents")}) AS documents,
             (SELECT count(*) FROM sources) AS sources`,
   ));
   const totalValue = (value, name) => {
@@ -4195,7 +4195,7 @@ THEN 1 ELSE 0 END`;
  * `sourceRecoverySql` keeps its own two for the reason documented there. Every
  * statement still returns the same rows in the same order.
  */
-const INVENTORY_DOCUMENT_CTES_SQL = `
+const inventoryDocumentCtesSql = ({ includeCurrentCustomApi = true } = {}) => `
   WITH live_documents AS MATERIALIZED (
     SELECT d.rowid AS document_rowid,
            d.doc_uid,
@@ -4225,7 +4225,7 @@ const INVENTORY_DOCUMENT_CTES_SQL = `
              OR (json_type(d.meta,'$.part_of')='text' AND length(trim(json_extract(d.meta,'$.part_of'))) > 0)
            ) THEN 1 ELSE 0 END AS family_lineage
       FROM documents d
-     WHERE d.deleted_at IS NULL
+     WHERE d.deleted_at IS NULL${includeCurrentCustomApi ? currentCustomApiDocumentSql("d") : ""}
   ),
   attributed_documents AS (
     SELECT live_documents.document_rowid,
@@ -4304,7 +4304,10 @@ const INVENTORY_DOCUMENT_CTES_SQL = `
 
 // Exported so the scale regression can run this exact statement against a
 // synthetic corpus and diff its rows with the 0.4.8 SQL it replaced.
-export const sourceInventorySql = ({ includeFailureEvidence = true } = {}) => `${INVENTORY_DOCUMENT_CTES_SQL},
+export const sourceInventorySql = ({
+  includeFailureEvidence = true,
+  includeCurrentCustomApi = true,
+} = {}) => `${inventoryDocumentCtesSql({ includeCurrentCustomApi })},
   source_names AS (
     SELECT name FROM sources
     UNION
@@ -4497,17 +4500,29 @@ export async function sourceInventory(env, {
     throw new TypeError("source inventory row limit is invalid");
   }
 
+  const readInventory = async (includeCurrentCustomApi) => {
+    try {
+      return await env.DB.prepare(sourceInventorySql({ includeCurrentCustomApi })).bind(maxRows + 1).all();
+    } catch (error) {
+      if (!missingFailureEvidenceColumn(error)) throw error;
+      // Schema 39 remains readable while migration 0040 is pending. Missing
+      // failure evidence is unknown; every older receipt and coverage field
+      // keeps its exact meaning, and malformed/non-schema errors never retry.
+      return env.DB.prepare(sourceInventorySql({
+        includeFailureEvidence: false,
+        includeCurrentCustomApi,
+      })).bind(maxRows + 1).all();
+    }
+  };
   let result;
   try {
-    result = await env.DB.prepare(sourceInventorySql()).bind(maxRows + 1).all();
+    result = await readInventory(true);
   } catch (error) {
-    if (!missingFailureEvidenceColumn(error)) throw error;
-    // Schema 39 remains readable while migration 0040 is pending. Missing
-    // failure evidence is unknown; every older receipt and coverage field
-    // keeps its exact meaning, and malformed/non-schema errors never retry.
-    result = await env.DB.prepare(sourceInventorySql({ includeFailureEvidence: false }))
-      .bind(maxRows + 1)
-      .all();
+    if (!customApiPointerTableMissing(error)) throw error;
+    // Custom-source version tables arrive after the v3 inventory contract.
+    // An older schema has no custom documents to filter, so its legacy reader
+    // remains exact without referencing tables that do not exist yet.
+    result = await readInventory(false);
   }
   const rawRows = Array.isArray(result?.results) ? result.results : [];
   const activeCustomJobs = await activeCustomApiJobStarts(env, rawRows.map((row) => ({
@@ -4860,7 +4875,7 @@ const sourceRecoveryMarkerSql = `
  * separate statements. Each statement scans the corpus once and remains
  * bracketed by the same opening and closing snapshot markers.
  */
-const SOURCE_RECOVERY_CANDIDATES_SQL = `${INVENTORY_DOCUMENT_CTES_SQL},
+const SOURCE_RECOVERY_CANDIDATES_SQL = `${inventoryDocumentCtesSql()},
   candidate_rows AS MATERIALIZED (
     SELECT f.*,
            COALESCE(s.kind,'unregistered') AS source_kind,

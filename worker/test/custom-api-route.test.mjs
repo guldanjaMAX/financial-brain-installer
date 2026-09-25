@@ -10,13 +10,13 @@ function env() {
   return {
     STORAGE: "d1",
     ADMIN_KEY: "fixture-admin-key",
-    STORE_DASHBOARD_TOKEN: TOKEN,
+    CUSTOM_API_TOKEN_STORE_DASHBOARD: TOKEN,
     CUSTOM_API_CONFIG: JSON.stringify({
       enabled: true,
       display_name: "store dashboard",
       source: "store-dashboard",
       base_url: "https://dashboard.invalid/api/",
-      token_secret: "STORE_DASHBOARD_TOKEN",
+      token_secret: "CUSTOM_API_TOKEN_STORE_DASHBOARD",
       cadence_seconds: 86400,
       endpoints: [{
         name: "sales", path: "/sales", row_key: ["store", "period"],
@@ -152,7 +152,7 @@ test("a monthly answer document carries more than eight stores through the real 
     enabled: true,
     source: "store-dashboard",
     base_url: "https://dashboard.invalid/api/",
-    token_secret: "STORE_DASHBOARD_TOKEN",
+    token_secret: "CUSTOM_API_TOKEN_STORE_DASHBOARD",
     endpoints: [{
       name: "sales",
       path: "/sales",

@@ -1257,13 +1257,14 @@ Read this before scoping an engagement.
   and Airtable still have no native API connector; use a reviewed export or a
   watched folder where suitable.
 - **The custom business API source is locally proven only.** Its declarative
-  Worker path, strict HTTPS boundary, durable checkpointed job, verified-only
+  Worker path, strict HTTPS boundary, dedicated `CUSTOM_API_TOKEN_` secret
+  namespace, durable checkpointed job, exact-row-and-document verified
   full-snapshot body-hash skip, row-level refusal counts, retries, compact
   gap-aware D1 row history, durable active-job freshness, and platform-specific
   secret ceremony have local mock and SQLite coverage. Sales rows require the
   configured revenue stream; a missing stream can carry forward only prior
   labeled rows for that exact store-month. Refused known keys retain their
-  prior verified row with an explicit dated not-refreshed marker, and every
+  prior verified row and last-seen time with an explicit dated not-refreshed marker, and every
   affected document begins with the same fixed warning independently of its
   template. A partial refusal reports ready with
   warnings plus the refused count and keeps freshness degraded until a clean
@@ -1271,11 +1272,16 @@ Read this before scoping an engagement.
   and exposes a source refusal with the current refusal count. Scheduled
   failures preserve a closed issue code for reader-boundary owner guidance.
   Known store, period, revenue-stream, and breed
-  identities are validated before they can authorize absence. Inventory and
+  identities are validated before they can authorize absence. Missing sales
+  streams are computed at the store-month boundary and named with that store
+  and month in both readable sales layouts. Inventory and
   cost search contains only the current per-store snapshot; stored rows retain
   every prior full value with effective dates and preserve disappearance gaps
   before reappearance, and no daily history documents are created. Fully
-  stamped documents are validated before staging. Promotion cleans obsolete physical
+  stamped documents are validated before staging. An unchanged document version
+  is carried only after exact live readback; a missing version is regenerated,
+  and terminal map failure releases the active-job boundary for a fresh pull.
+  Owner-facing counts exclude staged and superseded versions. Promotion cleans obsolete physical
   document versions through bounded guarded deletes before the job settles, so
   their queued vector deletes run ahead of upserts. The public defaults allow a 30-second request, 5 MiB
   response, and exactly 10,000 rows per endpoint. A 10,001st row refuses that
