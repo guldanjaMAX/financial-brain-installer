@@ -34,6 +34,7 @@ import {
   readWindowsDpapiSessionMetrics,
   recordWindowsDpapiHelperInvocation,
   resetWindowsDpapiSessionMetrics,
+  runWithWindowsDpapiHelper,
 } from "./windows-dpapi-session.mjs";
 
 const WINDOWS_DPAPI_HEADER = Buffer.from("BRAIN-ADMIN-KEY-DPAPI-V1\n", "ascii");
@@ -241,60 +242,86 @@ function runWindowsDpapi(input, options, operation, secretForMetadataCheck = nul
     "-Operation", operation,
     "-ExpectedLength", String(input.length),
   ];
+  const failureMessage = (stage) => operation === "protect"
+    ? `Windows could not protect the admin key with DPAPI at the ${stage} stage; the prior key was left untouched`
+    : `Windows could not decrypt the admin key with DPAPI at the ${stage} stage for the current user`;
+  const stagedFailure = (caught, fallback) => {
+    const stage = /^[a-z_]+$/.test(String(caught?.stage || "")) ? caught.stage : fallback;
+    const error = new Error(failureMessage(stage));
+    error.code = `WINDOWS_DPAPI_${stage.toUpperCase()}`;
+    error.stage = stage;
+    return error;
+  };
+  const runner = options.runPowerShell ?? options.runDpapiBridge ?? spawnSync;
+  const runnerCommand = options.runPowerShell ? command : process.execPath;
+  const invoke = (session) => {
+    const runnerArgs = options.runPowerShell
+      ? powerShellArgs
+      : [
+          WINDOWS_DPAPI_BRIDGE,
+          "--helper", session.helper,
+          "--sha256", session.sha256,
+          "--size", String(session.size),
+          "--dev", session.dev,
+          "--ino", session.ino,
+          "--operation", operation,
+          "--length", String(input.length),
+          "--max", String(MAX_ADMIN_KEY_FILE_BYTES),
+        ];
+    if (secretForMetadataCheck) {
+      const metadata = [runnerCommand, ...runnerArgs, ...Object.entries(env).flat()].join("\0");
+      const encodedSecret = Buffer.from(secretForMetadataCheck, "utf8").toString("base64");
+      if (metadata.includes(secretForMetadataCheck) || metadata.includes(encodedSecret)) {
+        throw new Error("Windows refused to expose the admin key in DPAPI process metadata");
+      }
+    }
+    return runner(runnerCommand, runnerArgs, {
+      encoding: null,
+      env,
+      input,
+      maxBuffer: 64 * 1024,
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 30_000,
+      windowsHide: true,
+    });
+  };
   // Tests inject the legacy PowerShell runner directly. Production asks a
-  // fixed Node bridge to compile the fixed C# helper before it reads any secret,
-  // then uses an ordinary asynchronous pipe for the exact bytes.
-  let session = null;
-  if (!options.runPowerShell) {
+  // fixed Node bridge to run a helper compiled before it reads any secret,
+  // then uses an ordinary asynchronous pipe for the exact bytes. The shared
+  // launch retry replaces a helper Windows refused to start with a fresh one.
+  let result;
+  if (options.runPowerShell) {
+    result = invoke(null);
+  } else {
     try {
-      session = (options.prepareWindowsDpapiSession ?? prepareWindowsDpapiSession)({
-        environment: options.environment ?? process.env,
-        ...(options.dpapiSessionOptions || {}),
+      result = runWithWindowsDpapiHelper(invoke, {
+        prepare: () => {
+          try {
+            return (options.prepareWindowsDpapiSession ?? prepareWindowsDpapiSession)({
+              environment: options.environment ?? process.env,
+              ...(options.dpapiSessionOptions || {}),
+            });
+          } catch (caught) {
+            throw stagedFailure(caught, "compile");
+          }
+        },
+        dispose: () => (options.disposeWindowsDpapiSession ?? disposeWindowsDpapiSession)(
+          options.dpapiDisposeOptions || {},
+        ),
       });
     } catch (caught) {
-      const stage = /^[a-z_]+$/.test(String(caught?.stage || "")) ? caught.stage : "compile";
+      if (caught?.code !== "WINDOWS_DPAPI_LAUNCH_REFUSED") throw caught;
       const error = new Error(
-        operation === "protect"
-          ? `Windows could not protect the admin key with DPAPI at the ${stage} stage; the prior key was left untouched`
-          : `Windows could not decrypt the admin key with DPAPI at the ${stage} stage for the current user`,
+        (operation === "protect"
+          ? "Windows could not protect the admin key with DPAPI; the prior key was left untouched. "
+          : "Windows could not decrypt the admin key with DPAPI. ") + caught.message,
       );
-      error.code = `WINDOWS_DPAPI_${stage.toUpperCase()}`;
-      error.stage = stage;
+      error.code = caught.code;
+      error.stage = caught.stage;
       throw error;
     }
   }
-  const runner = options.runPowerShell ?? options.runDpapiBridge ?? spawnSync;
-  const runnerCommand = options.runPowerShell ? command : process.execPath;
-  const runnerArgs = options.runPowerShell
-    ? powerShellArgs
-    : [
-        WINDOWS_DPAPI_BRIDGE,
-        "--helper", session.helper,
-        "--sha256", session.sha256,
-        "--size", String(session.size),
-        "--dev", session.dev,
-        "--ino", session.ino,
-        "--operation", operation,
-        "--length", String(input.length),
-        "--max", String(MAX_ADMIN_KEY_FILE_BYTES),
-      ];
-  if (secretForMetadataCheck) {
-    const metadata = [runnerCommand, ...runnerArgs, ...Object.entries(env).flat()].join("\0");
-    const encodedSecret = Buffer.from(secretForMetadataCheck, "utf8").toString("base64");
-    if (metadata.includes(secretForMetadataCheck) || metadata.includes(encodedSecret)) {
-      throw new Error("Windows refused to expose the admin key in DPAPI process metadata");
-    }
-  }
-  const result = runner(runnerCommand, runnerArgs, {
-    encoding: null,
-    env,
-    input,
-    maxBuffer: 64 * 1024,
-    shell: false,
-    stdio: ["pipe", "pipe", "pipe"],
-    timeout: 30_000,
-    windowsHide: true,
-  });
   if (result?.error || result?.status !== 0) {
     const stderr = Buffer.isBuffer(result?.stderr)
       ? result.stderr.toString("ascii")
@@ -304,11 +331,7 @@ function runWindowsDpapi(input, options, operation, secretForMetadataCheck = nul
     // process data, and the caller only needs the safe recovery boundary.
     if (Buffer.isBuffer(result?.stdout)) result.stdout.fill(0);
     if (Buffer.isBuffer(result?.stderr)) result.stderr.fill(0);
-    const error = new Error(
-      operation === "protect"
-        ? `Windows could not protect the admin key with DPAPI at the ${stage} stage; the prior key was left untouched`
-        : `Windows could not decrypt the admin key with DPAPI at the ${stage} stage for the current user`,
-    );
+    const error = new Error(failureMessage(stage));
     error.code = `WINDOWS_DPAPI_${stage.toUpperCase()}`;
     error.stage = stage;
     throw error;

@@ -716,6 +716,15 @@ macOS token file is deleted only after the full credential record has been
 written to Keychain and read back exactly. Browser, Keychain, Expect, ACL, and
 DPAPI helper processes receive a small allowlisted environment rather than the
 Terminal's ambient credentials.
+On a Windows machine with Smart App Control on, Windows can intermittently
+refuse to start the freshly compiled, unsigned DPAPI helper, and a refused file
+stays refused. Both the admin key and the Google credential record share one
+retry in `operations/windows-dpapi-session.mjs`: only a launch refusal (a
+launch-class spawn error or the bridge's `launch` stage, with no output) disposes
+that helper and compiles a fresh one into a new private folder, for at most three
+launches. A DPAPI answer such as a wrong-user decrypt, and any compile failure,
+is never retried. The session metrics record `launch_refusals` and
+`max_launch_attempts`, which `brain doctor` and the release gate report.
 Planning and dry-run reads never trigger either legacy migration. A real source
 run performs migration only while holding both its source lease and the shared
 Google credential-record lease; `brain connect google` holds the shared lease

@@ -10,6 +10,13 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Windows credential protection survives a Smart App Control refusal.** On
+  some Windows 11 machines Smart App Control occasionally refuses to start the
+  temporary helper that encrypts the admin key and the Google connection. The
+  Brain now removes that helper, builds a fresh one, and tries again, up to
+  three times. A real decryption failure is never retried. If Windows refuses
+  all three, the message says so plainly and that re-running the command
+  usually works. `brain doctor` shows any refused launches it recovered from.
 - **Health checks stay quick on large Brains.** Health, status, and assistant
   checks now get their document inventory from bounded source receipts. That
   inventory no longer joins every chunk, parses every document's metadata, or

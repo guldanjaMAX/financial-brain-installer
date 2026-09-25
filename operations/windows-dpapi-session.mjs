@@ -30,7 +30,25 @@ const WINDOWS_RUNTIME_ENV = Object.freeze([
 let activeSession = null;
 let exitHookInstalled = false;
 let exitCleanupAttempted = false;
-let sessionMetrics = { compile_count: 0, helper_invocations: 0 };
+let sessionMetrics = freshMetrics();
+
+// Smart App Control (and other Code Integrity policy) can refuse to start the
+// freshly compiled, unsigned helper. Field evidence: the refusal is
+// intermittent, a refused FILE stays refused on every later launch, and a new
+// compile in a new folder usually runs. Three total launches bound the extra
+// compile work while making a lone refusal invisible to the owner.
+export const WINDOWS_DPAPI_LAUNCH_ATTEMPTS = 3;
+// libuv reports the Code Integrity refusal as UNKNOWN (-4094); access and
+// permission refusals are the other ways Windows declines to start an image.
+const LAUNCH_REFUSAL_CODES = new Set(["UNKNOWN", "EACCES", "EPERM"]);
+const LAUNCH_REFUSED_MESSAGE =
+  "Windows refused to run the temporary DPAPI helper, even after compiling a fresh copy. " +
+  "This is most likely Smart App Control blocking the unsigned helper. " +
+  "Nothing was changed; re-running the command usually works.";
+
+function freshMetrics() {
+  return { compile_count: 0, helper_invocations: 0, launch_refusals: 0, max_launch_attempts: 0 };
+}
 
 function staged(stage, message) {
   const error = new Error(message);
@@ -257,7 +275,7 @@ export function resetWindowsDpapiSessionMetrics() {
   if (activeSession) {
     throw staged("metrics", "Windows DPAPI metrics cannot reset while a helper session is active");
   }
-  sessionMetrics = { compile_count: 0, helper_invocations: 0 };
+  sessionMetrics = freshMetrics();
 }
 
 export function recordWindowsDpapiHelperInvocation() {
@@ -318,5 +336,67 @@ export function prepareWindowsDpapiSession(options = {}) {
       } catch { /* no safe captured identity was available to remove */ }
     }
     throw error;
+  }
+}
+
+function outputLength(value) {
+  if (Buffer.isBuffer(value)) return value.length;
+  return value === undefined || value === null ? 0 : String(value).length;
+}
+
+/**
+ * True only when a bridge result proves the helper never produced a DPAPI
+ * answer because Windows would not start it: a launch-class spawn error, or
+ * the bridge's own launch stage, with no output at all. A helper that ran and
+ * failed reports its protect or unprotect stage instead, and a wrong-user
+ * decrypt or corrupt ciphertext must never be retried as if it were transient.
+ */
+export function isWindowsDpapiLaunchRefusal(result) {
+  if (!result || (result.status === 0 && !result.error)) return false;
+  if (outputLength(result.stdout) !== 0) return false;
+  if (LAUNCH_REFUSAL_CODES.has(String(result.error?.code || ""))) return true;
+  const stderr = Buffer.isBuffer(result.stderr)
+    ? result.stderr.toString("ascii")
+    : String(result.stderr || "");
+  return /(?:^|\n)BRAIN_DPAPI_STAGE:launch(?:\r?\n|$)/.test(stderr);
+}
+
+function recordLaunchAttempts(attempts) {
+  sessionMetrics.max_launch_attempts = Math.max(sessionMetrics.max_launch_attempts, attempts);
+}
+
+/**
+ * The one shared launch retry for every DPAPI caller (admin key and Google
+ * credential record). `invoke(session)` runs the bridge against that session's
+ * captured helper and returns the raw child result for the caller to judge.
+ *
+ * Only a launch refusal is retried. The refused helper is disposed through the
+ * normal captured-identity cleanup, and the next prepare compiles a new helper
+ * into a new random private folder with the same compiler discovery, ACL, and
+ * hard-link checks. Preparation and compile failures propagate unretried.
+ */
+export function runWithWindowsDpapiHelper(invoke, {
+  prepare = prepareWindowsDpapiSession,
+  dispose = disposeWindowsDpapiSession,
+  attempts = WINDOWS_DPAPI_LAUNCH_ATTEMPTS,
+} = {}) {
+  for (let attempt = 1; ; attempt++) {
+    const session = prepare();
+    const result = invoke(session);
+    if (!isWindowsDpapiLaunchRefusal(result)) {
+      recordLaunchAttempts(attempt);
+      return result;
+    }
+    wipeResult(result);
+    sessionMetrics.launch_refusals += 1;
+    // Never launch that exact file again. If its removal is deferred, the
+    // session still holds it, so a retry would only reuse the refused file.
+    const cleanup = dispose();
+    if (attempt >= attempts || cleanup?.status !== "clean") {
+      recordLaunchAttempts(attempt);
+      const error = staged("launch_refused", LAUNCH_REFUSED_MESSAGE);
+      error.attempts = attempt;
+      throw error;
+    }
   }
 }
