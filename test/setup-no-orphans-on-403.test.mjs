@@ -193,6 +193,28 @@ test("an exact preflight hostname that fails identity is neither persisted nor r
   assert.equal(saved.brain?.domain, undefined);
 });
 
+test("a fallback hostname whose /health answers for a different brain is refused and never saved", async () => {
+  const target = writeManifest();
+  const { fetchImpl, calls, healthHosts } = harness({ subdomainRead: "ok", health: "wrong-brain" });
+  await assert.rejects(
+    () => withFixture(fetchImpl, () => cmdDeploy(target, { wait: async () => {} }), {
+      workersSubdomain: null,
+    }),
+    (error) => {
+      assert.match(error.message, /exact account hostname was not confirmed as this brain/i);
+      assert.match(error.message, /identified itself as "someone-else"/);
+      assert.match(error.message, /No address was saved and no admin key was sent to that host/);
+      return true;
+    },
+  );
+  assert.ok(calls.includes(`GET /client/v4/accounts/${ACCOUNT_ID}/workers/subdomain`),
+    "the no-receipt lane must reach the authenticated fallback decision point");
+  assert.deepEqual(healthHosts, [CANDIDATE_DOMAIN],
+    "the refusal decision must be reached through the exact fallback hostname");
+  const saved = JSON.parse(readFileSync(target, "utf8"));
+  assert.equal(saved.brain?.domain, undefined);
+});
+
 test("the named-profile lane gives only an owner action after both URL proof and API fallback fail", async () => {
   const target = writeManifest();
   const { fetchImpl, calls, healthHosts } = harness({ subdomainRead: "denied", health: "down" });
