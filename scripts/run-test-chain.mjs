@@ -138,6 +138,14 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/documents-summary-scale.test.mjs",
   "node --test test/local-ingest-isolation.test.mjs",
   "node --test test/remote-ingest-isolation.test.mjs",
+  // Worker-hosted custom API source: migration 0048, the declarative setup
+  // commands, the owner route, the scheduled pull, and the scripted lifecycle.
+  "node --no-warnings --test test/custom-api-migration.test.mjs",
+  "node --no-warnings --test worker/test/custom-api.test.mjs",
+  "node --no-warnings --test worker/test/custom-api-route.test.mjs",
+  "node --no-warnings --test worker/test/custom-api-scheduled.test.mjs",
+  "node --no-warnings --test worker/test/custom-api-scripted.test.mjs",
+  "node --no-warnings --test test/custom-api-cli.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -436,6 +444,14 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test test/bank-feed-replace-keys.test.mjs",
   "node --no-warnings --test worker/test/documents-summary-lightweight.test.mjs",
   "node --no-warnings --test worker/test/documents-summary-scale.test.mjs",
+  // Worker-hosted custom API source: migration 0048, the declarative setup
+  // commands, the owner route, the scheduled pull, and the scripted lifecycle.
+  "node --no-warnings --test test/custom-api-migration.test.mjs",
+  "node --no-warnings --test worker/test/custom-api.test.mjs",
+  "node --no-warnings --test worker/test/custom-api-route.test.mjs",
+  "node --no-warnings --test worker/test/custom-api-scheduled.test.mjs",
+  "node --no-warnings --test worker/test/custom-api-scripted.test.mjs",
+  "node --no-warnings --test test/custom-api-cli.test.mjs",
 ]);
 
 export function parseTestCommand(command) {
