@@ -35,8 +35,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { callLLM } from "../src/lib/core.js";
+import { createOcrCallback } from "../../ingest/ocr-client.mjs";
 import { handleOcr } from "../src/lib/ocr.js";
-import { canonicalOcrInput, sha256Hex } from "../src/lib/ocr-idempotency.js";
+import { extractOwnerUpload } from "../src/lib/upload-extract.js";
+import {
+  canonicalOcrInput,
+  ocrPageReplayKey,
+  ocrPageRequestId,
+  sha256Hex,
+} from "../src/lib/ocr-idempotency.js";
 
 // D1 logging is fire-and-forget in this path; a stub keeps the test offline.
 const db = () => ({
@@ -519,7 +526,7 @@ test("a provider failure never replays and permits one replacement after its amb
   assert.equal(modelCalls, 2, "the successful replacement cannot charge a third time");
 });
 
-test("three failed model calls hold the page until its next 24-hour window", async () => {
+test("three failed model calls hold the page until the oldest start leaves the rolling day", async () => {
   const receiptDb = routeDb();
   const base = new Date("2026-09-24T12:00:00.000Z");
   let modelCalls = 0;
@@ -573,6 +580,138 @@ test("three failed model calls hold the page until its next 24-hour window", asy
   assert.equal(receiptDb.sqlite.prepare(
     "SELECT model_call_count FROM ocr_page_requests",
   ).get().model_call_count, 1, "the next-day call starts a fresh durable window");
+});
+
+test("the model-call cap is enforced across the rolling 24-hour boundary", async () => {
+  const receiptDb = routeDb();
+  const base = new Date("2026-09-24T12:00:00.000Z");
+  const offsets = [
+    0,
+    23 * 60 * 60 * 1000 + 56 * 60 * 1000,
+    23 * 60 * 60 * 1000 + 58 * 60 * 1000,
+    24 * 60 * 60 * 1000 + 6 * 1000,
+    24 * 60 * 60 * 1000 + 2 * 60 * 1000 + 6 * 1000,
+    24 * 60 * 60 * 1000 + 4 * 60 * 1000 + 6 * 1000,
+  ];
+  const providerStarts = [];
+  let attemptAt = base;
+  const env = {
+    ADMIN_KEY,
+    OCR_ENABLED: "1",
+    DB: receiptDb,
+    AI: {
+      run: async () => {
+        providerStarts.push(attemptAt.getTime());
+        throw new Error("synthetic terminal provider failure");
+      },
+    },
+  };
+  const requestBody = {
+    image_base64: "rolling-boundary-page",
+    page: 1,
+    prompt: "transcribe",
+    replay_key: "H".repeat(43),
+  };
+  const decisions = [];
+
+  for (const offset of offsets) {
+    attemptAt = new Date(base.getTime() + offset);
+    const response = await handleOcr(env, ocrRequest(requestBody), { now: () => attemptAt });
+    const body = await response.json();
+    decisions.push({ status: response.status, body });
+  }
+
+  let maxStartsInRollingDay = 0;
+  for (const end of providerStarts) {
+    const count = providerStarts.filter((start) => start > end - 24 * 60 * 60 * 1000 && start <= end).length;
+    maxStartsInRollingDay = Math.max(maxStartsInRollingDay, count);
+  }
+  assert.equal(maxStartsInRollingDay, 3,
+    `provider starts exceeded the rolling cap: ${JSON.stringify(providerStarts)}`);
+  assert.deepEqual(decisions.map(({ status }) => status), [502, 502, 502, 502, 425, 425]);
+  for (const { body } of decisions.slice(4)) {
+    assert.equal(body.ocr_request_pending, true, "the rolling-cap decision must be typed");
+    assert.equal(body.ocr_model_call_cap_exhausted, true, "the rolling-cap cause must be explicit");
+    assert.equal(body.model_calls_in_24_hours, 3);
+    assert.ok(Number.isSafeInteger(body.retry_after_ms) && body.retry_after_ms > 0,
+      `the rolling-cap delay must be bounded: ${JSON.stringify(body)}`);
+  }
+  assert.equal(decisions[4].body.retry_after_ms - decisions[5].body.retry_after_ms, 2 * 60_000,
+    "the typed retry delay must track the oldest retained start");
+  const receipt = receiptDb.sqlite.prepare(
+    "SELECT model_call_count,model_call_window_started_at FROM ocr_page_requests",
+  ).get();
+  assert.equal(receipt.model_call_count, 3);
+  assert.deepEqual(JSON.parse(receipt.model_call_window_started_at), offsets.slice(1, 4)
+    .map((offset) => new Date(base.getTime() + offset).toISOString()),
+    "the receipt must retain the exact last three starts across the boundary");
+});
+
+test("a legacy fixed-window receipt cannot forget a recent model start during conversion", async () => {
+  const receiptDb = routeDb();
+  const base = new Date("2026-09-24T12:00:00.000Z");
+  const latestLegacyStart = new Date(base.getTime() + 23 * 60 * 60 * 1000);
+  const firstRetry = new Date(base.getTime() + 24 * 60 * 60 * 1000 + 60_000);
+  const secondRetry = new Date(firstRetry.getTime() + 2 * 60_000);
+  const requestBody = {
+    image_base64: "legacy-fixed-window-page",
+    page: 1,
+    prompt: "transcribe",
+  };
+  const requestId = await sha256Hex(canonicalOcrInput({
+    image: requestBody.image_base64,
+    model: LLAMA,
+    prompt: requestBody.prompt,
+  }));
+  receiptDb.sqlite.prepare(
+    `INSERT INTO ocr_page_requests
+       (request_id,input_sha256,status,owner_token,started_at,model_started_at,expires_at,
+        reread_count,provider_failed_at,model_call_count,model_call_window_started_at)
+     VALUES (?1,?1,'in_flight',?2,?3,?3,?4,0,?3,2,?5)`,
+  ).run(
+    requestId,
+    "legacy-owner-token".padEnd(32, "x"),
+    latestLegacyStart.toISOString(),
+    new Date(latestLegacyStart.getTime() + 60_000).toISOString(),
+    base.toISOString(),
+  );
+  let modelCalls = 0;
+  const env = {
+    ADMIN_KEY,
+    OCR_ENABLED: "1",
+    DB: receiptDb,
+    AI: {
+      run: async () => {
+        modelCalls++;
+        throw new Error("synthetic terminal provider failure");
+      },
+    },
+  };
+
+  const replacement = await handleOcr(env, ocrRequest({ ...requestBody, request_id: requestId }), {
+    now: () => firstRetry,
+  });
+  assert.equal(replacement.status, 502, await replacement.clone().text());
+  const capped = await handleOcr(env, ocrRequest({ ...requestBody, request_id: requestId }), {
+    now: () => secondRetry,
+  });
+  const cappedBody = await capped.json();
+  const row = receiptDb.sqlite.prepare(
+    "SELECT model_call_count,model_call_window_started_at FROM ocr_page_requests",
+  ).get();
+
+  assert.equal(capped.status, 425, JSON.stringify(cappedBody));
+  assert.equal(cappedBody.ocr_model_call_cap_exhausted, true,
+    "the converted legacy row must reach the rolling-cap decision");
+  assert.equal(cappedBody.model_calls_in_24_hours, 3);
+  assert.ok(cappedBody.retry_after_ms > 0);
+  assert.equal(modelCalls, 1, "conversion may start one replacement but cannot forget it on the next retry");
+  assert.equal(row.model_call_count, 3);
+  assert.deepEqual(JSON.parse(row.model_call_window_started_at), [
+    latestLegacyStart.toISOString(),
+    latestLegacyStart.toISOString(),
+    firstRetry.toISOString(),
+  ], "legacy uncertainty must remain conservatively counted in the exact timestamp array");
 });
 
 test("a ciphertext-less completed tombstone permits exactly one recorded re-read", async () => {
@@ -691,7 +830,7 @@ test("expired pre-call reservations and in-flight ambiguity each rearm one bound
   assert.equal(ambiguityRereadCalls, 1, "T+16 minutes authorizes exactly one call in the new window");
 });
 
-test("every durable OCR receipt state has a bounded exit across time and process outcomes", async () => {
+test("the route receipt matrix reaches every applicable process outcome and labels exclusions", async () => {
   const dayMs = 24 * 60 * 60 * 1000;
   const base = new Date("2026-09-24T12:00:00.000Z");
   const clocks = [
@@ -731,7 +870,9 @@ test("every durable OCR receipt state has a bounded exit across time and process
   const decisions = { replay: 0, new_call: 0, retry_later: 0 };
   const completedHandoffDecisions = Object.fromEntries(handoffs.map(({ name }) => [name, 0]));
   const completedOutcomeDecisions = Object.fromEntries(storedOutcomes.map(({ name }) => [name, 0]));
-  let combinations = 0;
+  let routeDecisionCells = 0;
+  let reachableProcessOutcomeCells = 0;
+  let inapplicablePreSaveCrashCells = 0;
 
   for (const [stateIndex, state] of states.entries()) {
     const stateHandoffs = state.status === "completed"
@@ -887,15 +1028,27 @@ test("every durable OCR receipt state has a bounded exit across time and process
               assert.equal(replayBody.idempotent_replay, true, `${context}: lost response did not replay`);
               assert.equal(modelCalls, callsBeforeReplay, `${context}: lost response caused another charge`);
               decisions.replay++;
+              reachableProcessOutcomeCells++;
             } else if (outcome === "crash before local save") {
-              const acknowledgement = await handleOcr({ ...env, OCR_ENABLED: "0" }, ocrRequest({
-                acknowledge_request_ids: [settled.responseBody.request_id],
-              }), { now: () => settled.attemptAt });
-              assert.equal(acknowledgement.status, 200, `${context}: committed acknowledgement was not durable`);
-              settled = await settle(new Date(settled.attemptAt.getTime() + 8 * dayMs), "resume after local crash");
-              assert.equal(typeof settled.responseBody.text, "string", `${context}: resumed text was unavailable`);
+              const crashReceipt = receiptDb.sqlite.prepare(
+                "SELECT acknowledged_at FROM ocr_page_requests WHERE request_id=?",
+              ).get(settled.responseBody.request_id);
+              if (crashReceipt?.acknowledged_at == null) {
+                assert.equal(crashReceipt?.acknowledged_at, null,
+                  `${context}: a crash before local save must leave the OCR receipt unacknowledged`);
+                settled = await settle(new Date(settled.attemptAt.getTime() + 8 * dayMs), "resume after local crash");
+                assert.equal(typeof settled.responseBody.text, "string", `${context}: resumed text was unavailable`);
+                reachableProcessOutcomeCells++;
+              } else {
+                // A replay of an already acknowledged historical receipt does
+                // not create a new pre-save acknowledgement decision. Keep it
+                // out of the crash-axis count instead of claiming a false cell.
+                inapplicablePreSaveCrashCells++;
+              }
+            } else {
+              reachableProcessOutcomeCells++;
             }
-            combinations++;
+            routeDecisionCells++;
           }
         }
       }
@@ -907,8 +1060,15 @@ test("every durable OCR receipt state has a bounded exit across time and process
       ? handoffs.length * storedOutcomes.length
       : 1), 0,
   );
-  assert.equal(combinations, stateHandoffAndOutcomeCombinations * clocks.length * outcomes.length);
-  assert.equal(combinations, 1818, "the complete state × handoff × stored-outcome × clock × crash matrix ran");
+  assert.equal(routeDecisionCells, stateHandoffAndOutcomeCombinations * clocks.length * outcomes.length);
+  assert.equal(routeDecisionCells, 1818,
+    "the route state × handoff × stored-outcome × clock × requested-process cells ran");
+  assert.equal(reachableProcessOutcomeCells + inapplicablePreSaveCrashCells, routeDecisionCells,
+    "every requested process cell must be either reached or explicitly inapplicable");
+  assert.equal(reachableProcessOutcomeCells, 1810,
+    "the route matrix reachable-process count drifted");
+  assert.equal(inapplicablePreSaveCrashCells, 8,
+    "already acknowledged replays must be counted as inapplicable, not pre-save crashes");
   for (const { name } of handoffs) {
     assert.equal(completedHandoffDecisions[name], 432,
       `${name} handoff decision was not reached: ${JSON.stringify(completedHandoffDecisions)}`);
@@ -920,4 +1080,186 @@ test("every durable OCR receipt state has a bounded exit across time and process
   assert.ok(decisions.replay > 0, `replay decision was not reached: ${JSON.stringify(decisions)}`);
   assert.ok(decisions.new_call > 0, `new-call decision was not reached: ${JSON.stringify(decisions)}`);
   assert.ok(decisions.retry_later > 0, `retry-later decision was not reached: ${JSON.stringify(decisions)}`);
+});
+
+test("installer source and owner upload cross the reachable OCR receipt states", async () => {
+  const base = new Date("2026-09-24T12:30:00.000Z");
+  const prompt = "Transcribe every readable word exactly. Preserve headings, line order, table labels, values, and dates. Do not summarize or infer missing text.";
+  const image = "/9j/2Q==";
+  const imageBytes = Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]);
+  const callers = ["installer source", "owner upload"];
+  const states = [
+    { name: "active pre-call reservation", status: "pending", count: 0, expiresOffsetMs: 4 * 60_000, expectedStatus: 425, expectedCalls: 0 },
+    { name: "expired pre-call reservation", status: "pending", count: 0, expiresOffsetMs: -1, expectedStatus: 200, expectedCalls: 1 },
+    { name: "active ambiguous in-flight", status: "in_flight", count: 1, startedOffsetMs: -60_000, expiresOffsetMs: 14 * 60_000, expectedStatus: 425, expectedCalls: 0 },
+    { name: "expired ambiguous in-flight", status: "in_flight", count: 1, startedOffsetMs: -16 * 60_000, expiresOffsetMs: -1, expectedStatus: 200, expectedCalls: 1 },
+    { name: "definite provider-failure backoff", status: "in_flight", count: 2, startedOffsetMs: -2 * 60_000, expiresOffsetMs: 30_000, providerFailed: true, expectedStatus: 425, expectedCalls: 0 },
+    { name: "rolling cap exhausted", status: "in_flight", count: 3, startedOffsetMs: -6 * 60_000, expiresOffsetMs: -1, providerFailed: true, expectedStatus: 425, expectedCalls: 0, capExhausted: true },
+    { name: "completed unacknowledged", status: "completed", count: 1, acknowledged: false, expectedStatus: 200, expectedCalls: 0 },
+    { name: "completed acknowledged", status: "completed", count: 1, acknowledged: true, expectedStatus: 200, expectedCalls: 0 },
+  ];
+  const reachedByCaller = Object.fromEntries(callers.map((caller) => [caller, 0]));
+  const reachedCounts = new Set();
+  let cells = 0;
+
+  for (const caller of callers) {
+    for (const [stateIndex, state] of states.entries()) {
+      const receiptDb = routeDb();
+      const source = caller === "owner upload" ? "upload" : "drive";
+      const sourceItemId = caller === "owner upload"
+        ? `owner:fixture:caller-matrix-${stateIndex}`
+        : `caller-matrix-${stateIndex}`;
+      const pageIdentity = {
+        image,
+        model: LLAMA,
+        prompt,
+        source,
+        sourceItemId,
+        page: 1,
+      };
+      const [requestId, replayKey, inputSha256] = await Promise.all([
+        ocrPageRequestId(pageIdentity),
+        ocrPageReplayKey(pageIdentity),
+        sha256Hex(canonicalOcrInput(pageIdentity)),
+      ]);
+      let modelCalls = 0;
+      const env = {
+        ADMIN_KEY,
+        OCR_ENABLED: "1",
+        DB: receiptDb,
+        AI: {
+          run: async () => {
+            modelCalls++;
+            return { response: "Caller matrix transcription", usage: {} };
+          },
+        },
+      };
+
+      if (state.status === "completed") {
+        const seeded = await handleOcr(env, ocrRequest({
+          image_base64: image,
+          page: 1,
+          prompt,
+          request_id: requestId,
+          replay_key: replayKey,
+        }), { now: () => new Date(base.getTime() - 30_000) });
+        assert.equal(seeded.status, 200, `${caller}; ${state.name}: completion seed failed`);
+        if (state.acknowledged) {
+          const acknowledged = await handleOcr({ ...env, OCR_ENABLED: "0" }, ocrRequest({
+            acknowledge_request_ids: [requestId],
+          }), { now: () => new Date(base.getTime() - 20_000) });
+          assert.equal(acknowledged.status, 200, `${caller}; ${state.name}: acknowledgement seed failed`);
+        }
+        modelCalls = 0;
+      } else {
+        const modelStartedAt = state.status === "in_flight"
+          ? new Date(base.getTime() + state.startedOffsetMs).toISOString()
+          : null;
+        const starts = state.count === 0
+          ? null
+          : JSON.stringify(Array.from({ length: state.count }, (_, index) =>
+            new Date(base.getTime() - (state.count - index) * 2 * 60_000).toISOString()));
+        receiptDb.sqlite.prepare(
+          `INSERT INTO ocr_page_requests
+             (request_id,input_sha256,status,owner_token,started_at,model_started_at,expires_at,
+              reread_count,provider_failed_at,model_call_count,model_call_window_started_at)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,0,?8,?9,?10)`,
+        ).run(
+          requestId,
+          inputSha256,
+          state.status,
+          `matrix-${caller}-${stateIndex}`.padEnd(32, "x").slice(0, 64),
+          new Date(base.getTime() + (state.startedOffsetMs ?? -60_000)).toISOString(),
+          modelStartedAt,
+          new Date(base.getTime() + state.expiresOffsetMs).toISOString(),
+          state.providerFailed ? new Date(base.getTime() - 1_000).toISOString() : null,
+          state.count,
+          starts,
+        );
+      }
+
+      const routeDecisions = [];
+      const observeRoute = async (routeEnv, request, options) => {
+        const response = await handleOcr(routeEnv, request, options);
+        routeDecisions.push({ status: response.status, body: await response.clone().json() });
+        return response;
+      };
+      let callerResult = null;
+      let callerError = null;
+      if (caller === "installer source") {
+        let clockReads = 0;
+        const callback = createOcrCallback({
+          base: "https://brain.invalid",
+          adminKey: ADMIN_KEY,
+          model: LLAMA,
+          maxPages: 1,
+          attempts: 1,
+          loadPrompt: async () => prompt,
+          now: () => (++clockReads <= 2 ? base.getTime() : base.getTime() + 60_001),
+          sleep: async () => {},
+          random: () => 0,
+          httpImpl: async (url, options) => {
+            if (url.endsWith("/health")) return new Response("{}", { status: 200 });
+            return observeRoute(env, new Request(url, options), { now: () => base });
+          },
+        });
+        callerResult = await callback({ png_base64: image }, {
+          page: 1,
+          totalPages: 1,
+          source,
+          sourceItemId,
+        });
+      } else {
+        try {
+          callerResult = await extractOwnerUpload(env, {
+            mediaType: "image/jpeg",
+            bytes: imageBytes,
+            fileName: "image-fixture.jpg",
+            source,
+            sourceItemId,
+            now: () => base,
+            handleOcrImpl: observeRoute,
+          });
+        } catch (error) {
+          callerError = error;
+        }
+      }
+
+      const decision = routeDecisions.at(-1);
+      const context = `${caller}; ${state.name}`;
+      assert.equal(decision?.status, state.expectedStatus,
+        `${context}: route decision was not reached: ${JSON.stringify(decision)}`);
+      assert.equal(modelCalls, state.expectedCalls,
+        `${context}: model counter advanced incorrectly`);
+      if (state.expectedStatus === 425) {
+        assert.equal(decision.body?.ocr_request_pending, true, `${context}: pending decision was not typed`);
+        assert.equal(decision.body?.model_calls_in_24_hours, state.count,
+          `${context}: rolling count was not preserved`);
+        assert.ok(Number.isSafeInteger(decision.body?.retry_after_ms) && decision.body.retry_after_ms > 0,
+          `${context}: retry delay was not bounded`);
+        assert.equal(decision.body?.ocr_model_call_cap_exhausted === true, state.capExhausted === true,
+          `${context}: cap classification drifted`);
+        if (caller === "installer source") {
+          assert.equal(callerResult?.reason_code, "ocr_page_timeout",
+            `${context}: installer did not retain its bounded retry path`);
+        } else {
+          assert.equal(callerError?.code, "owner_upload_ocr_retry_later",
+            `${context}: owner upload did not retain its typed retry path`);
+        }
+      } else {
+        assert.equal(callerError, null, `${context}: caller failed: ${callerError?.message}`);
+        const returnedText = caller === "owner upload" ? callerResult?.content : callerResult?.text;
+        assert.equal(typeof returnedText, "string", `${context}: successful text was unavailable`);
+      }
+      reachedByCaller[caller]++;
+      reachedCounts.add(state.count);
+      cells++;
+    }
+  }
+
+  assert.equal(cells, callers.length * states.length, "the caller × reachable-state matrix count drifted");
+  assert.equal(cells, 16, "the named caller matrix must contain exactly 16 reachable cells");
+  assert.deepEqual(reachedByCaller, { "installer source": 8, "owner upload": 8 });
+  assert.deepEqual([...reachedCounts].sort(), [0, 1, 2, 3],
+    "the caller matrix must cross all durable cap counts");
 });

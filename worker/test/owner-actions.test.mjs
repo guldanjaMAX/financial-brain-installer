@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 import { splitStatements } from "../../brain.mjs";
 import worker from "../src/index.js";
 import { handleOwnerActions, recordOwnerActivity } from "../src/lib/owner-actions.js";
+import { DEFAULT_OCR_MODEL } from "../src/lib/ocr.js";
+import { canonicalOcrInput, ocrPageRequestId, sha256Hex } from "../src/lib/ocr-idempotency.js";
+import { extractOwnerUpload } from "../src/lib/upload-extract.js";
 import { mintSessionCookie } from "../src/lib/sessions.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -363,6 +366,124 @@ const uploadBody = {
       retriedBody.ocr_request_id === undefined,
     JSON.stringify({ afterFinalization, finalizedReceipt, retriedBody }));
   env.ADMIN_KEY = "fixture-admin-key";
+  delete env.AI;
+  delete env.OCR_ENABLED;
+}
+
+/* ---------------- owner image OCR preserves typed retry-later decisions */
+{
+  const prompt = "Transcribe every readable word exactly. Preserve headings, line order, table labels, values, and dates. Do not summarize or infer missing text.";
+  const image = "/9j/2Q==";
+  const nowMs = Date.parse("2026-09-24T20:00:00.000Z");
+  const extractAtFixedTime = (uploadEnv, options) => extractOwnerUpload(uploadEnv, {
+    ...options,
+    now: () => new Date(nowMs),
+  });
+  let modelCalls = 0;
+  env.OCR_ENABLED = "1";
+  env.AI = {
+    run: async () => {
+      modelCalls++;
+      return { response: "This model call must remain unreachable.", usage: {} };
+    },
+  };
+
+  const cases = [
+    {
+      name: "active pending",
+      status: "pending",
+      modelCallCount: 0,
+      startedAt: new Date(nowMs).toISOString(),
+      expiresAt: new Date(nowMs + 5 * 60_000).toISOString(),
+      modelStartedAt: null,
+      providerFailedAt: null,
+      capExhausted: false,
+    },
+    {
+      name: "ambiguous in-flight",
+      status: "in_flight",
+      modelCallCount: 1,
+      startedAt: new Date(nowMs - 60_000).toISOString(),
+      expiresAt: new Date(nowMs + 14 * 60_000).toISOString(),
+      modelStartedAt: new Date(nowMs - 60_000).toISOString(),
+      providerFailedAt: null,
+      capExhausted: false,
+    },
+    {
+      name: "definite-failure backoff",
+      status: "in_flight",
+      modelCallCount: 1,
+      startedAt: new Date(nowMs - 1_000).toISOString(),
+      expiresAt: new Date(nowMs + 59_000).toISOString(),
+      modelStartedAt: new Date(nowMs - 1_000).toISOString(),
+      providerFailedAt: new Date(nowMs - 1_000).toISOString(),
+      capExhausted: false,
+    },
+    {
+      name: "model-call cap exhaustion",
+      status: "in_flight",
+      modelCallCount: 3,
+      startedAt: new Date(nowMs - 10 * 60_000).toISOString(),
+      expiresAt: new Date(nowMs - 1_000).toISOString(),
+      modelStartedAt: new Date(nowMs - 10 * 60_000).toISOString(),
+      providerFailedAt: new Date(nowMs - 2_000).toISOString(),
+      capExhausted: true,
+    },
+  ];
+
+  for (const [index, item] of cases.entries()) {
+    const documentId = `retry_later_${index}`;
+    const requestBody = {
+      request_id: `upload_retry_later_${index}`,
+      document_id: documentId,
+      entity_slug: "acme",
+      media_type: "image/jpeg",
+      file_name: "image-fixture.jpg",
+      content_base64: image,
+      envelope: { title: "Image fixture" },
+    };
+    const pageIdentity = {
+      image,
+      model: DEFAULT_OCR_MODEL,
+      prompt,
+      source: "upload",
+      sourceItemId: `owner:acme:${documentId}`,
+      page: 1,
+    };
+    const requestId = await ocrPageRequestId(pageIdentity);
+    const inputSha256 = await sha256Hex(canonicalOcrInput(pageIdentity));
+    db.prepare(
+      `INSERT INTO ocr_page_requests
+         (request_id,input_sha256,status,owner_token,started_at,model_started_at,expires_at,
+          reread_count,provider_failed_at,model_call_count,model_call_window_started_at)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,0,?8,?9,?10)`,
+    ).run(
+      requestId,
+      inputSha256,
+      item.status,
+      `owner-${index}`.padEnd(32, "x"),
+      item.startedAt,
+      item.modelStartedAt,
+      item.expiresAt,
+      item.providerFailedAt,
+      item.modelCallCount,
+      item.modelCallCount > 0 ? item.modelStartedAt : null,
+    );
+    const callsBefore = modelCalls;
+    const response = await call("/api/owner/uploads", requestBody, { extractUpload: extractAtFixedTime });
+    const responseBody = await bodyOf(response);
+    check(`owner upload preserves ${item.name} as typed retry-later`,
+      response.status === 425 && responseBody.code === "owner_upload_ocr_retry_later" &&
+        responseBody.ocr_request_pending === true &&
+        Number.isSafeInteger(responseBody.retry_after_ms) && responseBody.retry_after_ms > 0 &&
+        responseBody.model_calls_in_24_hours === item.modelCallCount &&
+        responseBody.ocr_model_call_cap_exhausted === item.capExhausted &&
+        responseBody.error.includes("still being read") && responseBody.error.includes("retry after"),
+      JSON.stringify({ status: response.status, responseBody }));
+    check(`owner upload ${item.name} reaches the OCR decision without another model call`,
+      modelCalls === callsBefore,
+      JSON.stringify({ callsBefore, modelCalls }));
+  }
   delete env.AI;
   delete env.OCR_ENABLED;
 }

@@ -193,7 +193,12 @@ async function email(bytes) {
   return { text: clean([...headers, "", body].join("\n")), title: mail.subject || null, occurredAt: mail.date || null };
 }
 
-async function imageOcr(env, bytes, mediaType, { source, sourceItemId } = {}) {
+async function imageOcr(env, bytes, mediaType, {
+  source,
+  sourceItemId,
+  now = () => new Date(),
+  handleOcrImpl = handleOcr,
+} = {}) {
   if (bytes.byteLength > OWNER_IMAGE_UPLOAD_MAX_BYTES) {
     throw extractionError("the image is over the private OCR request limit", "upload_too_large", { too_large: true });
   }
@@ -224,10 +229,19 @@ async function imageOcr(env, bytes, mediaType, { source, sourceItemId } = {}) {
       replay_key: replayKey,
     }),
   });
-  const response = await handleOcr(env, request);
+  const response = await handleOcrImpl(env, request, { now });
   let result;
   try { result = await response.json(); } catch { result = {}; }
   if (!response.ok) {
+    if (response.status === 425 && result?.ocr_request_pending === true) {
+      throw extractionError("private image OCR is still pending", "owner_upload_ocr_retry_later", {
+        status: response.status,
+        retry_after_ms: result.retry_after_ms,
+        ocr_request_pending: true,
+        ocr_model_call_cap_exhausted: result.ocr_model_call_cap_exhausted === true,
+        model_calls_in_24_hours: result.model_calls_in_24_hours,
+      });
+    }
     throw extractionError("private image OCR did not complete", result?.ocr_enabled === false
       ? "owner_upload_ocr_disabled"
       : result?.llm_cap_exceeded ? "owner_upload_ocr_spend_cap" : "owner_upload_ocr_unavailable", {
@@ -249,7 +263,15 @@ function ensureTextLimit(text) {
 
 export async function extractOwnerUpload(
   env,
-  { mediaType, bytes, fileName = null, source = null, sourceItemId = null } = {},
+  {
+    mediaType,
+    bytes,
+    fileName = null,
+    source = null,
+    sourceItemId = null,
+    now = () => new Date(),
+    handleOcrImpl = handleOcr,
+  } = {},
 ) {
   assertMediaSignature(mediaType, bytes);
   let text = "";
@@ -284,7 +306,7 @@ export async function extractOwnerUpload(
     title = result.title;
     occurredAt = result.occurredAt;
   } else if (mediaType === "image/png" || mediaType === "image/jpeg") {
-    const result = await imageOcr(env, bytes, mediaType, { source, sourceItemId });
+    const result = await imageOcr(env, bytes, mediaType, { source, sourceItemId, now, handleOcrImpl });
     text = result.text;
     extractionMethod = "ocr";
     ocrRequestId = result.requestId;

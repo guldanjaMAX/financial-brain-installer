@@ -81,9 +81,10 @@ asset publication.
   response keeps its model-start proof for a 15-minute ambiguity window.
   Provider errors, empty text, malformed replies, and every other definite
   non-success keep their model-start proof, wait 60 seconds, and can never
-  replay as OCR text. Each page is capped durably at 3 model calls in 24 hours;
-  an exhausted page is counted in the load report and becomes eligible in the
-  next daily window rather than remaining held permanently. A completed result
+  replay as OCR text. Each page is capped durably at 3 started model calls in
+  any rolling 24 hours; an exhausted page is counted in the load report and
+  becomes eligible when the oldest start leaves that rolling window rather
+  than remaining held permanently. A completed result
   keeps its encrypted handoff until the whole source document is stored and
   acknowledged on the same receipt, so a delayed pass replays it without
   another charge. An owner image upload uses that same private page identity,

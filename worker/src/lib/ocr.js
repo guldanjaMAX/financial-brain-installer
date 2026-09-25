@@ -174,22 +174,22 @@ export async function handleOcr(env, request, { now = () => new Date() } = {}) {
   }
   if (claim.state === "pending" || claim.state === "retry_later") {
     const waitingForRereadWindow = claim.state === "retry_later";
-    const dailyModelCallCap = claim.dailyModelCallCap === true;
+    const rollingModelCallCap = claim.rollingModelCallCap === true;
     return jsonResponse({
-      error: dailyModelCallCap
-        ? `this OCR page has used ${claim.modelCallsInWindow} model calls in 24 hours`
+      error: rollingModelCallCap
+        ? `this OCR page has used ${claim.modelCallsInWindow} model calls in the last 24 hours`
         : waitingForRereadWindow
         ? "the prior OCR re-read window is still active"
         : "the first OCR attempt is still running",
-      detail: dailyModelCallCap
-        ? "The page is held until its next daily retry window; no model call was started."
+      detail: rollingModelCallCap
+        ? "The page is held until the oldest start leaves its rolling 24-hour window; no model call was started."
         : waitingForRereadWindow
         ? "Retry this same request id after the bounded wait; no model call was started."
         : "Retry this same request id after the bounded wait; no second model call was started.",
       ocr_request_pending: true,
-      ...(dailyModelCallCap ? {
+      model_calls_in_24_hours: claim.modelCallsInWindow,
+      ...(rollingModelCallCap ? {
         ocr_model_call_cap_exhausted: true,
-        model_calls_in_24_hours: claim.modelCallsInWindow,
       } : {}),
       retry_after_ms: Number.isSafeInteger(claim.retryAfterMs) && claim.retryAfterMs > 0
         ? claim.retryAfterMs
@@ -207,7 +207,17 @@ export async function handleOcr(env, request, { now = () => new Date() } = {}) {
     await startOcrPageRequest(env.DB, {
       requestId, inputSha256, ownerToken, now: now(),
     });
-  } catch {
+  } catch (error) {
+    if (error?.ocrModelCallCapExhausted === true) {
+      return jsonResponse({
+        error: `this OCR page has used ${error.modelCallsInWindow} model calls in the last 24 hours`,
+        detail: "The page is held until its rolling retry window opens; no model call was started.",
+        ocr_request_pending: true,
+        ocr_model_call_cap_exhausted: true,
+        model_calls_in_24_hours: error.modelCallsInWindow,
+        retry_after_ms: error.retryAfterMs,
+      }, 425);
+    }
     return jsonResponse({
       error: "OCR could not confirm its model-start receipt",
       detail: "No model call was started. Retry after D1 is available.",

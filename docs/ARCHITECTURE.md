@@ -320,16 +320,22 @@ recorded by the `ocr_reread_after_expiry` receipt field and counter, which the
 installer reports in its load summary. Its fresh ciphertext remains until a
 fresh source acknowledgement. Owner upload carries the opaque request ID in
 its private content-free intent and acknowledges only after exact ingest and
-finalization readback. A replacement with no ciphertext waits for the next
-bounded window instead of looping or becoming a permanent hold. Provider 4xx
-and 5xx results, terminal model errors, empty text, malformed replies, and all
+finalization readback. It preserves active reservation, ambiguous-call,
+failure-backoff, and rolling-cap 425 receipts through the owner response with
+their bounded delay, pending flag, and rolling call count. A replacement with
+no ciphertext waits for the next bounded window instead of looping or becoming
+a permanent hold. Provider 4xx and 5xx results, terminal model errors, empty
+text, malformed replies, and all
 other definite non-successes retain the model-started receipt but record that
 the call ended. They become eligible for one compare-and-swap replacement after
 a 60-second backoff, never a replayable completion. Migration 0049 durably
-counts every started model call. A page can start at most 3 calls in one
-24-hour window; after that it returns a typed 425 until the next window, and the
-load report counts held pages plainly. The next daily window resets the count,
-so exhaustion is never a permanent hold. A legacy stored non-success follows
+retains the last three model-call start timestamps. A page can start at most 3
+calls in any rolling 24 hours; after that it returns a typed 425 until the
+oldest start leaves that rolling window, and the load report counts held pages
+plainly. Rows from the initial fixed-anchor implementation retain their full
+count at the latest known receipt timestamp until the next accepted start
+rewrites the exact timestamp array. Exhaustion is bounded but never a permanent hold. A legacy
+stored non-success follows
 the same compare-and-swap replacement path as an unusable handoff. Each
 ambiguity or backoff window can authorize at most one replacement call.
 Neither the key nor plaintext, plaintext source locator, file name, or

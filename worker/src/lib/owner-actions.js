@@ -1003,6 +1003,25 @@ async function upload(env, body, ingestEnvelope, afterIngest, extractUpload = ex
         if (error?.code === "owner_upload_ocr_spend_cap") {
           return respond({ uploaded: false, error: "OCR spend limit reached", code: error.code }, 429);
         }
+        if (error?.code === "owner_upload_ocr_retry_later") {
+          const retryAfterMs = Number.isSafeInteger(error.retry_after_ms) && error.retry_after_ms > 0
+            ? error.retry_after_ms
+            : 2_000;
+          const retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+          const modelCallsInWindow = Number.isSafeInteger(error.model_calls_in_24_hours) &&
+              error.model_calls_in_24_hours >= 0
+            ? error.model_calls_in_24_hours
+            : 0;
+          return respond({
+            uploaded: false,
+            error: `This page is still being read. It will retry after ${retryAfterSeconds} seconds.`,
+            code: error.code,
+            retry_after_ms: retryAfterMs,
+            ocr_request_pending: true,
+            ocr_model_call_cap_exhausted: error.ocr_model_call_cap_exhausted === true,
+            model_calls_in_24_hours: modelCallsInWindow,
+          }, 425);
+        }
         if (error?.code === "owner_upload_ocr_unavailable") {
           return unavailable(error.code);
         }

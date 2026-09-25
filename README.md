@@ -962,9 +962,10 @@ product says all three rather than the first one:
   source locator. A provider 4xx or 5xx, timeout, empty text, malformed reply,
   or any other non-success is never replayed as a result. A call with no final
   response keeps its model-start proof for a 15-minute ambiguity window. A
-  definite provider failure can retry after 60 seconds, with no more than 3
-  model calls for that page in 24 hours. The durable count resets in the next
-  daily window, so the page is held rather than permanently abandoned. The
+  definite provider failure can retry after 60 seconds, with at most 3 started
+  model calls for that page in any rolling 24 hours. The oldest of those three
+  starts must leave the rolling window before another call can begin, so the
+  page is held rather than permanently abandoned. The
   load report gives a plain count of held pages. If the Brain remains healthy
   but the page stays slow, that
   document is skipped
@@ -976,7 +977,9 @@ product says all three rather than the first one:
   stored, so even a much later pass can recover it with no new model call. Once
   stored, the acknowledgement is written into the same receipt and expired
   ciphertext may be pruned. Owner image upload uses that same private page
-  identity, so an admin-key rotation cannot strand an already-paid result. If a
+  identity, so an admin-key rotation cannot strand an already-paid result. A
+  pending owner image returns a plain retry message with the bounded wait and
+  rolling call count instead of becoming a generic service failure. If a
   completed receipt has missing, mismatched, malformed, expired-after-acknowledgement,
   or undecryptable ciphertext, it can make one clearly counted replacement
   call in that seven-day window. The replacement gets a fresh receipt and must

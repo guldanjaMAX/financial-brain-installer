@@ -455,18 +455,23 @@ compare-and-swap permits one replacement call in that window, clears the old
 acknowledgement, records `ocr_reread_after_expiry`, and leaves a fresh
 ciphertext until the replacement is acknowledged. Owner upload carries the
 opaque request ID in its private content-free intent and acknowledges only
-after exact ingest and finalization readback. A replacement receipt with no
-ciphertext waits for its next seven-day replay window instead of looping or
-becoming a permanent hold. Provider 4xx and 5xx results, terminal model errors,
-empty text, malformed replies, and every other definite non-success remain
+after exact ingest and finalization readback. Its active reservation,
+ambiguous-call, failure-backoff, and rolling-cap responses preserve the route's
+typed 425, bounded delay, pending flag, and rolling call count. A replacement
+receipt with no ciphertext waits for its next seven-day replay window instead
+of looping or becoming a permanent hold. Provider 4xx and 5xx results, terminal
+model errors, empty text, malformed replies, and every other definite non-success remain
 model-started retryable receipts with no replay handoff. They permit one
 compare-and-swap replacement after a 60-second backoff. Migration 0049 records
-every started model call in a durable 24-hour window and caps each page at 3.
-An exhausted page returns typed 425 evidence until the next daily window, then
-becomes eligible again rather than remaining held permanently. Legacy
+the last three model-call start timestamps and caps each page at 3 started calls
+in any rolling 24 hours. An exhausted page returns typed 425 evidence until the
+oldest start leaves that rolling window, then becomes eligible again rather
+than remaining held permanently. Rows from the initial fixed-anchor
+implementation retain their full count at the latest known receipt timestamp
+until the next accepted start rewrites the exact timestamp array. Legacy
 non-success completions also never replay and enter the same bounded
 replacement path. The source load report counts both replacements and pages
-held by the daily cap.
+held by the rolling cap.
 Any reservation, model-start, completion, or release evidence failure is fatal
 and retryable at source level: the prior revision remains, no partial
 replacement or removal plan runs, and the cursor and ready receipt are
