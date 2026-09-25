@@ -146,6 +146,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/custom-api-scheduled.test.mjs",
   "node --no-warnings --test worker/test/custom-api-scripted.test.mjs",
   "node --no-warnings --test test/custom-api-cli.test.mjs",
+  "node --no-warnings --test test/custom-api-schema-compat.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -452,6 +453,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/custom-api-scheduled.test.mjs",
   "node --no-warnings --test worker/test/custom-api-scripted.test.mjs",
   "node --no-warnings --test test/custom-api-cli.test.mjs",
+  "node --no-warnings --test test/custom-api-schema-compat.test.mjs",
 ]);
 
 export function parseTestCommand(command) {

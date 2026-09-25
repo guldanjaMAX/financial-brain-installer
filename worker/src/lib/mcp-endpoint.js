@@ -46,7 +46,7 @@ import {
 } from "./provenance-receipt.js";
 import { memoryHistoryForDocument } from "./memory-supersession.js";
 import {
-  currentCustomApiDocumentSql, customApiPointerTableMissing,
+  customApiVisibilitySql, readWithCustomApiVisibility,
 } from "./custom-api-visibility.js";
 
 const PROTOCOLS = new Set(["2025-06-18", "2025-03-26", "2024-11-05"]);
@@ -284,7 +284,7 @@ async function runFetch(env, args, origin) {
                               COALESCE((SELECT kind FROM sources WHERE name = documents.source), 'unregistered') AS source_kind
                          FROM documents`;
   const fetchDocument = async (withCurrentPointer) => {
-    const visibility = withCurrentPointer ? currentCustomApiDocumentSql("documents") : "";
+    const visibility = customApiVisibilitySql("documents", withCurrentPointer);
     const exact = await env.DB.prepare(
       `${projection} WHERE doc_uid = ?1${visibility}`,
     ).bind(docUid).first();
@@ -296,12 +296,7 @@ async function runFetch(env, args, origin) {
     ).bind(source, sourceId).first();
   };
   try {
-    try {
-      doc = await fetchDocument(true);
-    } catch (error) {
-      if (!customApiPointerTableMissing(error)) throw error;
-      doc = await fetchDocument(false);
-    }
+    doc = await readWithCustomApiVisibility(env, fetchDocument);
   } catch (error) {
     return toolError(`fetch failed: ${String(error?.message || error).slice(0, 120)}`);
   }

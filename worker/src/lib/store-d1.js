@@ -72,8 +72,8 @@ import {
 } from "./diagnose-scan.js";
 import { sourceOriginalChunkReceiptHash } from "./source-original-chunk.js";
 import {
-  currentCustomApiDocumentSql, customApiLogicalSourceId, customApiOwnerMessage,
-  customApiPointerTableMissing,
+  customApiLogicalSourceId, customApiOwnerMessage, customApiVisibilitySql,
+  readWithCustomApiVisibility,
 } from "./custom-api-visibility.js";
 
 const RRF_K = 60;
@@ -605,7 +605,7 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
     JOIN chunks c ON c.id = chunks_fts.rowid
     JOIN documents d ON d.doc_uid = c.doc_uid
     LEFT JOIN sources src ON src.name = d.source
-    WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}${withCurrentPointer ? currentCustomApiDocumentSql("d") : ""}${memoryClause}
+    WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}
     ORDER BY bm25(chunks_fts)
     LIMIT ?2`;
 
@@ -613,12 +613,7 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
     const execute = (withCurrentPointer) => env.DB.prepare(sql(memoryClause, withCurrentPointer)).bind(
       terms, limit, ...f.params, ...sc.params, ...a.params,
     ).all();
-    try {
-      return await execute(true);
-    } catch (error) {
-      if (!customApiPointerTableMissing(error)) throw error;
-      return execute(false);
-    }
+    return readWithCustomApiVisibility(env, execute);
   };
   let response;
   try {
@@ -672,18 +667,12 @@ export async function unchunkedTaxDocumentCandidates(env, {
       WHERE d.deleted_at IS NULL
         ${selectorSql}
         AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.doc_uid = d.doc_uid)
-        ${f.clause}${sc.clause}${a.clause}${withCurrentPointer ? currentCustomApiDocumentSql("d") : ""}
+        ${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}
       ORDER BY d.ingested_at DESC
       LIMIT ${limitParameter}`;
   const execute = (withCurrentPointer) => env.DB.prepare(sql(withCurrentPointer))
     .bind(...binds, ...f.params, ...sc.params, ...a.params).all();
-  let response;
-  try {
-    response = await execute(true);
-  } catch (error) {
-    if (!customApiPointerTableMissing(error)) throw error;
-    response = await execute(false);
-  }
+  const response = await readWithCustomApiVisibility(env, execute);
   const { results } = response;
   const page = (results || []).map(assessStoredProvenance);
   return {
@@ -764,17 +753,12 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
                    THEN json_extract(d.meta, '$.start') END AS occurred_at
        FROM chunks c JOIN documents d ON d.doc_uid = c.doc_uid
        LEFT JOIN sources src ON src.name = d.source
-       WHERE c.chunk_uid IN (${placeholders})${f.clause}${sc.clause}${withCurrentPointer ? currentCustomApiDocumentSql("d") : ""}${memoryClause}`;
+       WHERE c.chunk_uid IN (${placeholders})${f.clause}${sc.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}`;
     const run = async (memoryClause) => {
       const execute = (withCurrentPointer) => env.DB.prepare(sql(memoryClause, withCurrentPointer))
         .bind(...batch, ...f.params, ...sc.params)
         .all();
-      try {
-        return await execute(true);
-      } catch (error) {
-        if (!customApiPointerTableMissing(error)) throw error;
-        return execute(false);
-      }
+      return readWithCustomApiVisibility(env, execute);
     };
     let response;
     try {
@@ -2924,10 +2908,10 @@ export async function diagnose(env, {
     }
   }
 
-  const totalRow = await safe("totals", () => one(
-    `SELECT (SELECT count(*) FROM documents WHERE deleted_at IS NULL${currentCustomApiDocumentSql("documents")}) AS documents,
+  const totalRow = await safe("totals", () => readWithCustomApiVisibility(env, (withCurrentPointer) => one(
+    `SELECT (SELECT count(*) FROM documents WHERE deleted_at IS NULL${customApiVisibilitySql("documents", withCurrentPointer)}) AS documents,
             (SELECT count(*) FROM sources) AS sources`,
-  ));
+  ), { probe: false }));
   const totalValue = (value, name) => {
     const number = Number(value);
     if (!Number.isSafeInteger(number) || number < 0) {
@@ -4225,7 +4209,7 @@ const inventoryDocumentCtesSql = ({ includeCurrentCustomApi = true } = {}) => `
              OR (json_type(d.meta,'$.part_of')='text' AND length(trim(json_extract(d.meta,'$.part_of'))) > 0)
            ) THEN 1 ELSE 0 END AS family_lineage
       FROM documents d
-     WHERE d.deleted_at IS NULL${includeCurrentCustomApi ? currentCustomApiDocumentSql("d") : ""}
+     WHERE d.deleted_at IS NULL${customApiVisibilitySql("d", includeCurrentCustomApi)}
   ),
   attributed_documents AS (
     SELECT live_documents.document_rowid,
@@ -4514,16 +4498,10 @@ export async function sourceInventory(env, {
       })).bind(maxRows + 1).all();
     }
   };
-  let result;
-  try {
-    result = await readInventory(true);
-  } catch (error) {
-    if (!customApiPointerTableMissing(error)) throw error;
-    // Custom-source version tables arrive after the v3 inventory contract.
-    // An older schema has no custom documents to filter, so its legacy reader
-    // remains exact without referencing tables that do not exist yet.
-    result = await readInventory(false);
-  }
+  // Custom-source version tables arrive after the v3 inventory contract. An
+  // older schema has no custom documents, so its reader stays exact without
+  // referencing tables that do not exist yet.
+  const result = await readWithCustomApiVisibility(env, readInventory, { probe: false });
   const rawRows = Array.isArray(result?.results) ? result.results : [];
   const activeCustomJobs = await activeCustomApiJobStarts(env, rawRows.map((row) => ({
     name: row.name,
@@ -4875,7 +4853,7 @@ const sourceRecoveryMarkerSql = `
  * separate statements. Each statement scans the corpus once and remains
  * bracketed by the same opening and closing snapshot markers.
  */
-const SOURCE_RECOVERY_CANDIDATES_SQL = `${inventoryDocumentCtesSql()},
+const sourceRecoveryCandidatesSql = ({ includeCurrentCustomApi = true } = {}) => `${inventoryDocumentCtesSql({ includeCurrentCustomApi })},
   candidate_rows AS MATERIALIZED (
     SELECT f.*,
            COALESCE(s.kind,'unregistered') AS source_kind,
@@ -4910,7 +4888,7 @@ const SOURCE_RECOVERY_CANDIDATES_SQL = `${inventoryDocumentCtesSql()},
 // This prevents D1's 30-second statement clock from combining page selection,
 // global totals, source grouping, and JSON aggregation into one all-or-nothing
 // request on a large Brain.
-export const sourceRecoverySummarySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
+const sourceRecoverySummarySqlFor = (options) => `${sourceRecoveryCandidatesSql(options)}
   ,source_groups AS MATERIALIZED (
     SELECT inventory_source AS source_id,
            source_kind,
@@ -4956,8 +4934,9 @@ export const sourceRecoverySummarySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
            global_summary.*,1 AS summary_only
       FROM global_summary
      ORDER BY summary_only DESC,source_id`;
+export const sourceRecoverySummarySql = sourceRecoverySummarySqlFor();
 
-export const sourceRecoverySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
+const sourceRecoverySqlFor = (options) => `${sourceRecoveryCandidatesSql(options)}
   SELECT candidate_rows.document_rowid,
          candidate_rows.doc_uid,
          candidate_rows.physical_source,
@@ -5003,24 +4982,28 @@ export const sourceRecoverySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
    WHERE document_rowid>?2
    ORDER BY document_rowid ASC
    LIMIT ?3`;
+export const sourceRecoverySql = sourceRecoverySqlFor();
 
 export function sourceRecoveryPlan({
   source = null,
   afterRowId = 0,
   afterSourceId = null,
   limit = 100,
+  // False only on a pre-0048 schema, which has no custom API documents.
+  customApiPointerTables = true,
 } = {}) {
+  const options = { includeCurrentCustomApi: customApiPointerTables };
   return Object.freeze([
     Object.freeze({
       kind: "source_summary",
-      sql: sourceRecoverySummarySql,
+      sql: customApiPointerTables ? sourceRecoverySummarySql : sourceRecoverySummarySqlFor(options),
       // One independent global-summary row plus up to page-size + 1 source
       // groups. The extra group is the truncation probe.
       binds: Object.freeze([source, afterSourceId, SOURCE_RECOVERY_MAX_PAGE_SIZE + 2]),
     }),
     Object.freeze({
       kind: "candidate_page",
-      sql: sourceRecoverySql,
+      sql: customApiPointerTables ? sourceRecoverySql : sourceRecoverySqlFor(options),
       binds: Object.freeze([source, afterRowId, limit + 1]),
     }),
   ]);
@@ -5099,18 +5082,23 @@ export async function sourceRecoveryCandidates(env, {
   }
 
   const openingMarker = await sourceRecoveryMarker(env);
-  const [summaryStep, pageStep] = sourceRecoveryPlan({
-    source: normalizedSource,
-    afterRowId,
-    afterSourceId,
-    limit,
-  });
-  const summaryResult = await env.DB.prepare(summaryStep.sql)
-    .bind(...summaryStep.binds)
-    .all();
-  const result = await env.DB.prepare(pageStep.sql)
-    .bind(...pageStep.binds)
-    .all();
+  const { summaryResult, result } = await readWithCustomApiVisibility(env, async (customApiPointerTables) => {
+    const [summaryStep, pageStep] = sourceRecoveryPlan({
+      source: normalizedSource,
+      afterRowId,
+      afterSourceId,
+      limit,
+      customApiPointerTables,
+    });
+    return {
+      summaryResult: await env.DB.prepare(summaryStep.sql)
+        .bind(...summaryStep.binds)
+        .all(),
+      result: await env.DB.prepare(pageStep.sql)
+        .bind(...pageStep.binds)
+        .all(),
+    };
+  }, { probe: false });
   const closingMarker = await sourceRecoveryMarker(env);
   if (JSON.stringify(openingMarker) !== JSON.stringify(closingMarker)) {
     const error = new Error("source recovery inventory changed during the read");

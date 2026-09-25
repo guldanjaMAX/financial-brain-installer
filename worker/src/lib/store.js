@@ -45,7 +45,7 @@ import {
 } from "./provenance-receipt.js";
 import { ingestEnvelopeValidationError } from "./ingest-envelope.js";
 import {
-  currentCustomApiDocumentSql, customApiLogicalSourceId, customApiPointerTableMissing,
+  customApiLogicalSourceId,
 } from "./custom-api-visibility.js";
 import {
   deriveSourceOriginalId,
