@@ -46,7 +46,7 @@ const schemaRows = Object.freeze(inventory.map((name) => Object.freeze({
     ? "CREATE VIRTUAL TABLE chunks_fts USING fts5(text,content='chunks',content_rowid='id')"
     : `CREATE TABLE ${name} (fixture BLOB)`,
 })));
-const migrations = Object.freeze(Array.from({ length: 47 }, (_, index) => Object.freeze({
+const migrations = Object.freeze(Array.from({ length: 48 }, (_, index) => Object.freeze({
   version: index + 1,
   name: `${String(index + 1).padStart(4, "0")}_fixture`,
   checksum: sha256(`migration:${index + 1}`).slice(0, 16),

@@ -205,14 +205,17 @@ const runVariant = async (name) => {
 
 try {
   database.exec("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA temp_store=MEMORY;");
-  for (const name of migrationFiles.filter((file) => Number(file.slice(0, 4)) <= 46)) {
+  // The terminal schema, so the bounded plans are proven with the custom API
+  // current-version clause (0048) that the exact report pages now carry.
+  for (const name of migrationFiles) {
     applyMigration(name);
   }
+  const terminalSchema = Number(migrationFiles.at(-1).slice(0, 4));
   database.prepare(
     `INSERT INTO install_state
        (id,client_slug,product_version,schema_version,gate_version,installed_at,ring)
-     VALUES (1,'synthetic','0.0.0',46,0,'2026-01-01T00:00:00.000Z','test')`,
-  ).run();
+     VALUES (1,'synthetic','0.0.0',?,0,'2026-01-01T00:00:00.000Z','test')`,
+  ).run(terminalSchema);
   for (const row of database.prepare(
     `SELECT name FROM sqlite_master
       WHERE type='trigger' AND tbl_name IN ('documents','chunks','vector_outbox')`,
