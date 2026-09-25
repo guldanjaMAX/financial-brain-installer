@@ -79,6 +79,8 @@ test("the public manifest defaults match the full-snapshot real feed", () => {
   const template = JSON.parse(readFileSync(new URL("../templates/brain.manifest.json", import.meta.url), "utf8"));
   const schema = JSON.parse(readFileSync(new URL("../manifest.schema.json", import.meta.url), "utf8"));
   const installGuide = readFileSync(new URL("../onboarding/12-custom-api-source-setup.md", import.meta.url), "utf8");
+  const sourceMatrix = readFileSync(new URL("../onboarding/07-ingest-source-matrix.md", import.meta.url), "utf8");
+  const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
   const custom = template.corpora.custom_api;
   assert.equal(custom.timeout_ms, 30_000);
   assert.ok(custom.max_response_bytes >= 5 * 1024 * 1024);
@@ -104,6 +106,12 @@ test("the public manifest defaults match the full-snapshot real feed", () => {
   assert.match(installGuide, /clipboard history is already off in Card Q/i);
   assert.match(installGuide, /--from-clipboard/);
   assert.match(installGuide, /--key-set-in-dashboard/);
+  const schemaDescription = schema.properties.corpora.properties.custom_api.description;
+  for (const text of [custom._comment.join(" "), schemaDescription, installGuide, sourceMatrix, changelog]) {
+    assert.match(text, /current (?:per-store )?snapshot/i);
+    assert.match(text, /stored rows\s+keep prior (?:full )?values/i);
+    assert.match(text, /no daily history documents|does not create\s+daily history documents/i);
+  }
 });
 
 test("deploy binding contains declarative config and only the secret name", () => {
@@ -519,6 +527,35 @@ test("manual pull resumes bounded calls to terminal saved proof and reports mean
   assert.match(result.output, /1 of 2 slice\(s\) verified/);
   assert.match(result.output, /saved snapshot verified/);
   assert.match(result.output, /meaning search is still indexing/i);
+});
+
+test("an all-refused manual pull prints the refusal counts instead of an invalid progress receipt", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "brain-custom-api-refused-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "brain.manifest.json");
+  writeFileSync(path, JSON.stringify(manifest()));
+  let calls = 0;
+  const result = await withCapturedFailure(() => cmdCustomApi(path, {}, {
+    resolveAdminKey: () => "fixture-admin-key",
+    resolveBaseUrl: async () => "https://fixture.invalid",
+    fetchImpl: async () => {
+      calls++;
+      return new Response(JSON.stringify({
+        status: "refused", dry_run: false, endpoints: 1,
+        rows: { created: 0, updated: 0, unchanged: 0 }, documents: 0,
+        retained_missing_rows: 0, refused_rows: 2, saved: false,
+        next_pull_at: "2026-09-25T15:30:00.000Z",
+        endpoint_results: [{
+          name: "sales", rows_received: 2, rows_accepted: 0, rows_refused: 2,
+          refusal_reasons: { invalid_store: 1, invalid_period: 1 }, documents: 0,
+        }],
+      }), { headers: { "content-type": "application/json" } });
+    },
+  }));
+  assert.equal(calls, 1, "the terminal refusal receipt reached the CLI status decision");
+  assert.match(result.output, /sales: 2 row\(s\), 0 accepted, 2 refused/);
+  assert.match(result.error.message, /pull was refused.*2 row\(s\).*No snapshot was saved/i);
+  assert.doesNotMatch(`${result.output}\n${result.error.message}`, /invalid progress receipt/i);
 });
 
 test("brain load names the server-managed source without claiming it has no loader", async () => {

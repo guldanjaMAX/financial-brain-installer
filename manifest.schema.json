@@ -631,7 +631,7 @@
         },
         "custom_api": {
           "type": "object",
-          "description": "A declarative read-only JSON API pulled by the client's Worker on its existing cron. The manifest names the bearer-token Worker secret but never contains its value.",
+          "description": "A declarative read-only JSON API pulled by the client's Worker on its existing cron. The manifest names the bearer-token Worker secret but never contains its value. For inventory and costs, search contains only the current snapshot; stored rows keep prior values as history with effective dates. The connector does not create daily history documents.",
           "properties": {
             "_comment": {
               "oneOf": [

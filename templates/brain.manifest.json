@@ -246,7 +246,9 @@
         "After reviewing these mappings, deploy, run brain connect custom-api, then preview",
         "the first pull with brain custom-api <manifest> --dry-run. The structured rows are",
         "a future financial-map input and are not posted to the ledger. A real pull resumes",
-        "one durable slice per request and reports saved data separately from meaning search."
+        "one durable slice per request and reports saved data separately from meaning search.",
+        "For inventory and costs, search contains only the current snapshot; stored rows keep",
+        "prior values as history with effective dates. No daily history documents are written."
       ],
       "enabled": false,
       "display_name": "store dashboard",

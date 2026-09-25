@@ -30,13 +30,17 @@ asset publication.
   complete snapshot becomes a resumable, exactly verified job instead of one
   oversized request. Exact rows are stored compactly with correction and
   last-seen history; missing rows leave current totals without being erased.
-  Monthly summaries cover every store, and per-store sales, inventory, and cost
-  documents stay bounded. The preview names every endpoint's row,
+  Inventory and cost search contains only the current per-store snapshot, while
+  stored rows keep prior full values with effective dates. It does not create
+  daily history documents. Monthly summaries cover every store, and per-store
+  sales, inventory, and cost documents stay bounded. The preview names every endpoint's row,
   readable-document, and refused-row counts. The 10,000-row ceiling refuses an
   oversized endpoint without changing it. A refused known row now keeps its
-  last verified value visibly marked as not refreshed instead of disappearing,
-  and a wholly refused pull leaves the last good snapshot current. Invalid
-  sales months are refused before a job starts. Superseded document versions
+  last verified value visibly marked with the refusal date instead of disappearing.
+  The source says ready with warnings and gives the refused count until a clean
+  pull succeeds. A wholly refused pull leaves the last good snapshot current and
+  prints the useful refusal counts. Invalid store, month, revenue-stream, and
+  breed identities are refused before they can hide a valid prior key. Superseded document versions
   are removed in bounded cleanup passes so old vectors cannot crowd current
   evidence out of meaning search. Clipboard entry clears copied material even
   when inventory fails or the secret name already exists, and dashboard key

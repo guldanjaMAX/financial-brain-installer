@@ -11,6 +11,9 @@ durable job, then advances one bounded, exactly read-back slice per request.
 Rows that disappear remain as history with `present: false`; current totals and
 snapshots use only rows in the new response. The same resumable job advances on
 the owner's Worker cron, so the laptop does not need to stay on.
+For inventory and costs, search contains only the current snapshot; stored rows
+keep prior values as history with effective dates. The Brain does not create a
+new history document each day. No daily history documents are created.
 
 ## 0:00 to 0:04: add and deploy the manifest block
 
@@ -177,6 +180,11 @@ The command starts or resumes one durable job and makes one bounded Worker
 request per slice, printing progress until terminal verification succeeds.
 Confirm the separately printed saved-snapshot result, all three endpoint lines,
 the readable-document count, any refused-row count, and the next daily pull.
+A partial refusal must say **Source ready with warnings**, name the refused-row
+count, and mark each carried value in the readable document as not refreshed on
+that pull's date. A later clean pull clears that warning even when the accepted
+value is unchanged. A wholly refused pull prints its endpoint refusal counts and
+saves no snapshot.
 A missing revenue stream is
 reported as not recorded, never as zero. A null store is retained as
 `unassigned`. Unknown provider fields remain in the structured row but stay out
@@ -225,8 +233,10 @@ macOS Terminal:
 ```
 
 The `store-dashboard` source must be ready and show a successful ingest after
-the install-night pull, inside its one-day freshness window. An unchanged full
-response may write zero documents; the fresh successful pull is still visible.
+the install-night pull, inside its one-day freshness window. If any row was
+refused, it must instead say ready with warnings and show the refusal count
+until a clean pull succeeds. An unchanged full response may write zero
+documents; the fresh successful pull is still visible.
 If freshness did not advance, leave the saved rows unchanged and inspect the
 named source error. A `401` means the dashboard refused the key. A `308` means
 the manifest endpoint path is not canonical. Never paste the provider response

@@ -3586,6 +3586,27 @@ async function activeCustomApiJobStarts(env, rows) {
   }
 }
 
+async function currentCustomApiWarnings(env, rows) {
+  if (!(rows || []).some((row) =>
+    String(row?.kind || "").toLowerCase() === "custom_api" &&
+    String(row?.stale_reason || "").trim().toUpperCase() === "INPUT_REFUSED")) return new Map();
+  try {
+    const result = await env.DB.prepare(
+      `SELECT c.source,j.stats_json
+         FROM custom_api_current_jobs c
+         JOIN custom_api_jobs j ON j.job_id=c.job_id AND j.source=c.source`
+    ).all();
+    return new Map((result?.results || []).map((row) => {
+      let stats = null;
+      try { stats = JSON.parse(row.stats_json); } catch { stats = null; }
+      return [String(row.source), Number(stats?.refused_rows || 0)];
+    }));
+  } catch (error) {
+    if (missingCustomApiJobsTable(error)) return new Map();
+    throw error;
+  }
+}
+
 /**
  * The source row says what the connector last reported; sync_runs says whether
  * an `indexing` report still belongs to a live attempt. Keeping this separate
@@ -3602,6 +3623,15 @@ function operationalFreshness(s, now) {
     return {
       state: "review",
       reason: sourceReceiptOwnerMessage(SOURCE_REVIEW_ISSUE_CODE),
+      indexingMs,
+    };
+  }
+  if (String(s.stale_reason || "").trim().toUpperCase() === "INPUT_REFUSED" &&
+      Number(s.custom_api_refused_rows || 0) > 0) {
+    const count = Number(s.custom_api_refused_rows);
+    return {
+      state: "broken",
+      reason: `${count} ${count === 1 ? "row was" : "rows were"} not refreshed because the latest source response could not be read safely`,
       indexingMs,
     };
   }
@@ -3671,6 +3701,7 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
     return { gaps: [], unavailable: true };
   }
   const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
+  const customApiWarnings = await currentCustomApiWarnings(env, rows);
 
   const allowed = allowedSources === null
     ? null
@@ -3689,8 +3720,10 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
     const last = s.last_ingest_at ? Date.parse(s.last_ingest_at) : NaN;
     const ageSec = Number.isFinite(last) ? Math.floor((now - last) / 1000) : null;
     const days = ageSec === null ? null : Math.floor(ageSec / 86400);
+    const customApiRefusedRows = customApiWarnings.get(String(s.name)) || 0;
     const operational = operationalFreshness({
       ...s,
+      custom_api_refused_rows: customApiRefusedRows,
       indexing_started_at: s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null,
     }, now);
 
@@ -3795,6 +3828,7 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
     return { sources: [], unavailable: true };
   }
   const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
+  const customApiWarnings = await currentCustomApiWarnings(env, rows);
   const latestRuns = new Map();
   try {
     let result;
@@ -3864,7 +3898,12 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
       const expected = Number(s.expected_refresh_seconds) || null;
       const automatable = AUTOMATABLE_SOURCE_KINDS.has(String(s.kind));
       const effectiveIndexingStartedAt = s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null;
-      const operational = operationalFreshness({ ...s, indexing_started_at: effectiveIndexingStartedAt }, now);
+      const customApiRefusedRows = customApiWarnings.get(String(s.name)) || 0;
+      const operational = operationalFreshness({
+        ...s,
+        indexing_started_at: effectiveIndexingStartedAt,
+        custom_api_refused_rows: customApiRefusedRows,
+      }, now);
       let state = unregistered ? "unregistered" : "ok";
       let reason = unregistered ? "the source registry entry is missing" : operational.reason;
       if (!unregistered && operational.state) state = operational.state;
@@ -3877,7 +3916,10 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
         // Unregistered is distinguished by `state`; ownerSystemStatus converts
         // both into explicit public states without exposing this raw slug.
         zone: typeof s.zone === "string" && s.zone.trim() ? s.zone.trim() : null,
-        source_status: String(s.status || "") || null,
+        source_status: String(s.status || "").toLowerCase() === "ready" && customApiRefusedRows > 0
+          ? "ready_with_warnings"
+          : String(s.status || "") || null,
+        refused_rows: customApiRefusedRows,
         documents: Number(s.document_count || 0),
         days_since_ingest: days,
         expected_every_days: expected ? Math.max(1, Math.round(expected / 86400)) : null,

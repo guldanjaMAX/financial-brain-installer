@@ -248,14 +248,17 @@ test("known default schemas refuse only invalid rows and count each reason", asy
   const bodies = {
     sales: { data: [
       { store: "Store A", period: "2026-09-01", revenue_stream: "services", transactions: 1, units: 1, puppies_sold: 0 },
+      { store: "Store A", period: "2026-09-01", revenue_stream: "unconfigured", net_sales: 2, transactions: 1, units: 1, puppies_sold: 0 },
       { store: "Store A", period: "2026-09-01", revenue_stream: "other", net_sales: 2, transactions: 1, units: 1, puppies_sold: 0 },
     ] },
     inventory: { data: [
       { store: "Store A", breed: "Item 1", count: 1.5 },
+      { store: "Store A", breed: " Item 1 ", count: 1 },
       { store: "Store A", breed: "Item 2", count: 2 },
     ] },
     costs: { data: [
       { store: "Store A", breed: "Item 1", received: 2 },
+      { store: "Store A", breed: 7, avg_cost: 12.5, received: 2 },
       { store: "Store A", breed: "Item 2", avg_cost: 12.5, received: 2 },
     ] },
   };
@@ -263,9 +266,11 @@ test("known default schemas refuse only invalid rows and count each reason", asy
     token: TOKEN, now: () => AT, sleep: async () => {}, persistence,
     fetchImpl: async (input) => json(bodies[new URL(input).pathname.split("/").pop()]),
   });
-  assert.equal(result.refused_rows, 3);
+  assert.equal(result.refused_rows, 6);
   assert.deepEqual(result.endpoint_results.map((endpoint) => endpoint.refusal_reasons), [
-    { invalid_net_sales: 1 }, { invalid_inventory_count: 1 }, { invalid_avg_cost: 1 },
+    { invalid_net_sales: 1, invalid_revenue_stream: 1 },
+    { invalid_inventory_count: 1, invalid_breed: 1 },
+    { invalid_avg_cost: 1, invalid_breed: 1 },
   ]);
   assert.equal(persistence.rows.size, 3, "all three valid neighbors reached persistence");
 });

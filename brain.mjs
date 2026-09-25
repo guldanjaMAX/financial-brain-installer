@@ -27626,6 +27626,12 @@ export async function cmdCustomApi(manifestPath, flags = parseFlags(process.argv
       die(`${receipt?.error || "the custom API pull did not complete"}${receipt?.code ? ` (${receipt.code})` : ""}`);
     }
     if (receipt?.status === "completed") break;
+    if (receipt?.status === "refused") {
+      for (const endpoint of receipt.endpoint_results || []) {
+        info(`${endpoint.name}: ${endpoint.rows_received} row(s), ${endpoint.rows_accepted || 0} accepted, ${endpoint.rows_refused || 0} refused`);
+      }
+      die(`The custom API pull was refused after ${receipt.refused_rows || 0} row(s) could not be read safely. No snapshot was saved.`);
+    }
     if (receipt?.status !== "in_progress" || flags["dry-run"] === true) {
       die("the custom API pull returned an invalid progress receipt. No success is claimed.");
     }
@@ -27642,6 +27648,9 @@ export async function cmdCustomApi(manifestPath, flags = parseFlags(process.argv
   for (const endpoint of receipt.endpoint_results || []) {
     const documentAction = receipt.dry_run ? "would be written" : "written";
     info(`${endpoint.name}: ${endpoint.rows_received} row(s), ${endpoint.documents} readable document(s) ${documentAction}, ${endpoint.rows_refused} refused`);
+  }
+  if (Number(receipt.refused_rows || 0) > 0) {
+    warn(`Source ready with warnings: ${receipt.refused_rows} row(s) were refused and their last verified values are marked not refreshed.`);
   }
   info(`${receipt.rows.created} new row(s), ${receipt.rows.updated} corrected, ${receipt.rows.unchanged} unchanged; ${receipt.documents} document(s) ${receipt.dry_run ? "would change" : "changed"}`);
   if (receipt.retained_missing_rows) {

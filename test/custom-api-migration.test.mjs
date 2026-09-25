@@ -10,7 +10,12 @@ import {
   runCustomApiWorker,
 } from "../worker/src/lib/custom-api.js";
 import { currentCustomApiDocumentSql } from "../worker/src/lib/custom-api-visibility.js";
-import { RETRIEVAL_CANDIDATE_DEPTH, searchVector } from "../worker/src/lib/store-d1.js";
+import {
+  coverageGaps,
+  freshnessReport,
+  RETRIEVAL_CANDIDATE_DEPTH,
+  searchVector,
+} from "../worker/src/lib/store-d1.js";
 
 const sql = readFileSync(new URL("../migrations/d1/0048_custom_api_source.sql", import.meta.url), "utf8");
 const TOKEN = ["fixture", "durable", "sentinel", "42"].join("-");
@@ -95,13 +100,21 @@ function setupDatabase() {
     CREATE TABLE install_state (id INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL);
     INSERT INTO install_state (id,schema_version) VALUES (1,48);
     CREATE TABLE sources (
-      name TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
+      name TEXT PRIMARY KEY, kind TEXT NOT NULL, zone TEXT, status TEXT NOT NULL,
       created_at TEXT NOT NULL, last_ingest_at TEXT, document_count INTEGER NOT NULL DEFAULT 0,
-      expected_refresh_seconds INTEGER, stale_reason TEXT
+      last_complete_sweep_at TEXT, expected_refresh_seconds INTEGER, stale_reason TEXT
     );
     CREATE TABLE source_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT NOT NULL, event TEXT NOT NULL,
       at TEXT NOT NULL, documents INTEGER, detail TEXT
+    );
+    CREATE TABLE document_source_inventory (source TEXT PRIMARY KEY);
+    CREATE TABLE sync_runs (
+      run_id TEXT PRIMARY KEY, source TEXT, lane TEXT, started_at TEXT, finished_at TEXT,
+      walk_complete INTEGER, files_seen INTEGER, docs_added INTEGER, docs_updated INTEGER,
+      docs_unchanged INTEGER, docs_refused INTEGER, docs_failed INTEGER, metrics_version INTEGER,
+      confirmed_from TEXT, confirmed_through TEXT, target_from TEXT, target_through TEXT,
+      refusal_reason TEXT, error TEXT, failure_evidence TEXT
     );
   `);
   database.exec(sql);
@@ -148,6 +161,12 @@ function documentWriter(DB) {
 async function settlePull(sourceConfig, options) {
   let result = await runCustomApiPull(sourceConfig, options);
   while (result.status !== "completed") result = await runCustomApiPull(sourceConfig, options);
+  return result;
+}
+
+async function settleWorker(env, options) {
+  let result = await runCustomApiWorker(env, options);
+  while (result.status === "in_progress") result = await runCustomApiWorker(env, options);
   return result;
 }
 
@@ -638,12 +657,16 @@ test("first-pull refusal creates no snapshot and leaves an owner-visible refusal
   assert.equal(source.stale_reason, "INPUT_REFUSED");
 });
 
-test("a refused existing key is carried with explicit freshness while an accepted key advances", async (t) => {
+test("a partial refusal is marked in the document and source until a clean pull clears it", async (t) => {
   const database = setupDatabase();
   t.after(() => database.close());
   const DB = countedD1(database);
-  const persistence = customApiD1Persistence({ STORAGE: "d1", DB }, { ingestDocument: documentWriter(DB) });
-  const sourceConfig = compactConfig();
+  const sourceConfig = { ...compactConfig(), display_name: "store dashboard" };
+  const env = {
+    STORAGE: "d1", DB, STORE_DASHBOARD_TOKEN: TOKEN,
+    CUSTOM_API_CONFIG: JSON.stringify(sourceConfig),
+  };
+  const persistence = customApiD1Persistence(env, { ingestDocument: documentWriter(DB) });
   let currentAt = AT;
   let feed = { data: [
     { store: "Store 1", period: "2026-09-01", revenue_stream: "services", net_sales: 10 },
@@ -657,13 +680,13 @@ test("a refused existing key is carried with explicit freshness while an accepte
       return new Response(JSON.stringify(feed), { headers: { "content-type": "application/json" } });
     },
   };
-  const first = await settlePull(sourceConfig, options);
+  const first = await settleWorker(env, options);
   feed = { data: [
     { store: "Store 1", period: "2026-09-01", revenue_stream: "services", net_sales: 11 },
     { store: "Store 2", period: "2026-09-01", revenue_stream: "services" },
   ] };
   currentAt = new Date("2026-09-25T15:30:00.000Z");
-  const second = await settlePull(sourceConfig, options);
+  const second = await settleWorker(env, options);
   assert.ok(fetches >= 2, "both provider snapshots reached the refusal decision point");
   assert.notEqual(second.job_id, first.job_id);
   const rows = await persistence.loadRows({ source: "store-dashboard", endpoint: "sales" });
@@ -673,28 +696,58 @@ test("a refused existing key is carried with explicit freshness while an accepte
   assert.equal(carried.refresh_status, "not refreshed (refused)");
   assert.equal(carried.refusal_reason, "invalid_net_sales");
   const visible = database.prepare(
-    `SELECT content FROM documents d
+    `SELECT content,meta FROM documents d
       WHERE d.source='store-dashboard' AND d.deleted_at IS NULL${currentCustomApiDocumentSql("d")}`,
   ).get();
   assert.match(visible.content, /Store 2/);
   assert.match(visible.content, /20/);
+  assert.match(visible.content, /not refreshed on 2026-09-25: the store dashboard sent a row the Brain could not read/i);
+  assert.equal(JSON.parse(visible.meta).not_refreshed_rows, 1);
+  assert.equal(second.refused_rows, 1);
+  assert.equal(second.source_status, "ready_with_warnings");
+  const warnedSource = database.prepare(
+    "SELECT status,last_ingest_at,document_count,stale_reason FROM sources WHERE name='store-dashboard'",
+  ).get();
+  assert.equal(warnedSource.status, "ready");
+  assert.equal(warnedSource.last_ingest_at, second.fetched_at);
+  assert.equal(warnedSource.stale_reason, "INPUT_REFUSED");
+  const warnedFreshness = await freshnessReport(env, { now: Date.parse(second.fetched_at) });
+  assert.equal(warnedFreshness.sources[0].source_status, "ready_with_warnings");
+  assert.equal(warnedFreshness.sources[0].refused_rows, 1);
+  assert.match(warnedFreshness.sources[0].reason, /1 row.*not refreshed/i);
+  const warnedGaps = await coverageGaps(env, { now: Date.parse(second.fetched_at) });
+  assert.ok(warnedGaps.some((gap) => gap.type === "sync_broken" && /1 row.*not refreshed/i.test(gap.detail)));
+
+  feed = { data: [
+    { store: "Store 1", period: "2026-09-01", revenue_stream: "services", net_sales: 11 },
+    { store: "Store 2", period: "2026-09-01", revenue_stream: "services", net_sales: 20 },
+  ] };
+  currentAt = new Date("2026-09-26T15:30:00.000Z");
+  const clean = await settleWorker(env, options);
+  assert.equal(clean.source_status, "ready");
+  const cleanRows = await persistence.loadRows({ source: "store-dashboard", endpoint: "sales" });
+  assert.equal(cleanRows.find((row) => row.row.store === "Store 2").refresh_status, undefined);
+  const cleanVisible = database.prepare(
+    `SELECT content,meta FROM documents d
+      WHERE d.source='store-dashboard' AND d.deleted_at IS NULL${currentCustomApiDocumentSql("d")}`,
+  ).get();
+  assert.doesNotMatch(cleanVisible.content, /not refreshed/i);
+  assert.equal(JSON.parse(cleanVisible.meta).not_refreshed_rows, 0);
+  const cleanSource = database.prepare(
+    "SELECT status,last_ingest_at,stale_reason FROM sources WHERE name='store-dashboard'",
+  ).get();
+  assert.equal(cleanSource.status, "ready");
+  assert.equal(cleanSource.last_ingest_at, clean.fetched_at);
+  assert.equal(cleanSource.stale_reason, null);
 
   const pointerBeforeAllRefused = database.prepare(
     "SELECT job_id FROM custom_api_current_jobs WHERE source='store-dashboard'",
   ).get().job_id;
-  database.prepare(
-    `INSERT INTO sources (name,kind,status,created_at,last_ingest_at,document_count)
-     VALUES ('store-dashboard','custom_api','ready',?1,?1,1)`,
-  ).run(second.fetched_at);
   feed = { data: [
     { store: "Store 1", period: "2026-09-01", revenue_stream: "services" },
     { store: "Store 2", period: "2026-09-01", revenue_stream: "services" },
   ] };
-  currentAt = new Date("2026-09-26T15:30:00.000Z");
-  const env = {
-    STORAGE: "d1", DB, STORE_DASHBOARD_TOKEN: TOKEN,
-    CUSTOM_API_CONFIG: JSON.stringify(sourceConfig),
-  };
+  currentAt = new Date("2026-09-27T15:30:00.000Z");
   const refused = await runCustomApiWorker(env, {
     now: () => currentAt,
     sleep: async () => {},
@@ -714,9 +767,123 @@ test("a refused existing key is carried with explicit freshness while an accepte
     "SELECT status,last_ingest_at,document_count,stale_reason FROM sources WHERE name='store-dashboard'",
   ).get();
   assert.equal(source.status, "error");
-  assert.equal(source.last_ingest_at, second.fetched_at);
+  assert.equal(source.last_ingest_at, clean.fetched_at);
   assert.equal(source.document_count, 1);
   assert.equal(source.stale_reason, "INPUT_REFUSED");
+});
+
+test("changed inventory and costs keep prior structured values while search exposes only current values", async (t) => {
+  const database = setupDatabase();
+  t.after(() => database.close());
+  const DB = countedD1(database);
+  const sourceConfig = {
+    ...config(),
+    endpoints: config().endpoints.filter((endpoint) => ["inventory", "costs"].includes(endpoint.name)),
+  };
+  const persistence = customApiD1Persistence({ STORAGE: "d1", DB }, { ingestDocument: documentWriter(DB) });
+  let currentAt = AT;
+  let feeds = {
+    inventory: { data: [{ store: "Store 1", breed: "Item 1", count: 3 }] },
+    costs: { data: [{ store: "Store 1", breed: "Item 1", avg_cost: 10, received: 2 }] },
+  };
+  let providerCalls = 0;
+  const options = {
+    token: TOKEN, now: () => currentAt, sleep: async () => {}, persistence,
+    fetchImpl: async (input) => {
+      providerCalls++;
+      return new Response(JSON.stringify(feeds[new URL(input).pathname.split("/").pop()]), {
+        headers: { "content-type": "application/json" },
+      });
+    },
+  };
+  const first = await settlePull(sourceConfig, options);
+  feeds = {
+    inventory: { data: [{ store: "Store 1", breed: "Item 1", count: 4 }] },
+    costs: { data: [{ store: "Store 1", breed: "Item 1", avg_cost: 11, received: 3 }] },
+  };
+  currentAt = new Date("2026-09-25T15:30:00.000Z");
+  const second = await settlePull(sourceConfig, options);
+  assert.ok(providerCalls >= 4, "both dated snapshots reached both endpoint decision points");
+  assert.notEqual(second.job_id, first.job_id);
+
+  const inventoryRows = await persistence.loadRows({ source: "store-dashboard", endpoint: "inventory" });
+  const costRows = await persistence.loadRows({ source: "store-dashboard", endpoint: "costs" });
+  assert.equal(inventoryRows[0].row.count, 4);
+  assert.deepEqual(inventoryRows[0].history_rows, [{
+    row_hash: inventoryRows[0].history_rows[0].row_hash,
+    row: { store: "Store 1", breed: "Item 1", count: 3 },
+    effective_from: AT.toISOString(),
+    effective_to: currentAt.toISOString(),
+  }]);
+  assert.equal(costRows[0].row.avg_cost, 11);
+  assert.deepEqual(costRows[0].history_rows, [{
+    row_hash: costRows[0].history_rows[0].row_hash,
+    row: { store: "Store 1", breed: "Item 1", avg_cost: 10, received: 2 },
+    effective_from: AT.toISOString(),
+    effective_to: currentAt.toISOString(),
+  }]);
+
+  const visible = database.prepare(
+    `SELECT d.content,json_extract(d.meta,'$.custom_api_source_id') AS logical_id
+       FROM documents d
+      WHERE d.source='store-dashboard' AND d.deleted_at IS NULL${currentCustomApiDocumentSql("d")}
+      ORDER BY logical_id`,
+  ).all();
+  assert.equal(visible.length, 2, "search keeps one current inventory and cost document per store");
+  const documents = new Map(visible.map((row) => [row.logical_id, row.content]));
+  assert.match(documents.get("inventory:Store 1"), /\| Item 1 \| 4 \|/);
+  assert.doesNotMatch(documents.get("inventory:Store 1"), /\| Item 1 \| 3 \|/);
+  assert.match(documents.get("costs:Store 1"), /\| Item 1 \| \$11\.00 \| 3 \|/);
+  assert.doesNotMatch(documents.get("costs:Store 1"), /\$10\.00/);
+});
+
+test("malformed known identities are refused without hiding prior keys and unknown fields remain allowed", async (t) => {
+  const database = setupDatabase();
+  t.after(() => database.close());
+  const DB = countedD1(database);
+  const sourceConfig = compactConfig();
+  sourceConfig.endpoints[0].document.expected_values = { revenue_stream: ["services"] };
+  const persistence = customApiD1Persistence({ STORAGE: "d1", DB }, { ingestDocument: documentWriter(DB) });
+  let currentAt = AT;
+  let feed = { data: [
+    { store: "Store 1", period: "2026-09-01", revenue_stream: "services", net_sales: 10 },
+    { store: "Store 2", period: "2026-09-01", revenue_stream: "services", net_sales: 20 },
+    { store: "Store 3", period: "2026-09-01", revenue_stream: "services", net_sales: 30 },
+  ] };
+  let fetches = 0;
+  const options = {
+    token: TOKEN, now: () => currentAt, sleep: async () => {}, persistence,
+    fetchImpl: async () => {
+      fetches++;
+      return new Response(JSON.stringify(feed), { headers: { "content-type": "application/json" } });
+    },
+  };
+  await settlePull(sourceConfig, options);
+  feed = { data: [
+    { store: "Store 1", period: "2026-09-01", revenue_stream: "services", net_sales: 11, harmless_extra: "kept" },
+    { store: false, period: "2026-09-01", revenue_stream: "services", net_sales: 20 },
+    { store: "Store 3", period: 20260901, revenue_stream: "services", net_sales: 30 },
+  ] };
+  currentAt = new Date("2026-09-25T15:30:00.000Z");
+  const result = await settlePull(sourceConfig, options);
+  assert.ok(fetches >= 2, "the malformed identities reached provider row validation");
+  assert.equal(result.refused_rows, 2);
+  assert.equal(result.endpoint_results[0].refusal_reasons.invalid_store, 1);
+  assert.equal(result.endpoint_results[0].refusal_reasons.invalid_period, 1);
+  const rows = await persistence.loadRows({ source: "store-dashboard", endpoint: "sales" });
+  assert.equal(rows.length, 3);
+  assert.equal(rows.find((row) => row.row.store === "Store 1").row.harmless_extra, "kept");
+  for (const store of ["Store 2", "Store 3"]) {
+    const carried = rows.find((row) => row.row.store === store);
+    assert.equal(carried.present, true);
+    assert.equal(carried.refresh_status, "not refreshed (refused)");
+  }
+  const visible = database.prepare(
+    `SELECT content FROM documents d
+      WHERE d.source='store-dashboard' AND d.deleted_at IS NULL${currentCustomApiDocumentSql("d")}`,
+  ).get();
+  assert.match(visible.content, /Store 2/);
+  assert.match(visible.content, /Store 3/);
 });
 
 test("an invalid sales period creates no active job and a corrected pull can finish", async (t) => {
