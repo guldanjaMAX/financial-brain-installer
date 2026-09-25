@@ -17313,25 +17313,24 @@ export async function cmdConnectCustomApi(manifestPath, flags = {}, options = {}
       const readClipboard = options.readClipboard ?? (() => readCustomApiClipboard({ platform }));
       const clearClipboard = options.clearClipboard ?? (() => clearCustomApiClipboard({ platform }));
       let clipboardText;
-      try {
-        clipboardText = await readClipboard();
-      } catch {
-        die("The clipboard could not be read or was empty. Copy the key from the email and run the same command again. If needed, use --key-set-in-dashboard as the fallback. Nothing was stored.");
-      }
-
       let failure = null;
       let cleared = false;
       try {
-        const token = typeof clipboardText === "string" ? clipboardText.trim() : "";
-        if (!token) {
+        try {
+          clipboardText = await readClipboard();
+        } catch {
           failure = "The clipboard could not be read or was empty. Copy the key from the email and run the same command again. If needed, use --key-set-in-dashboard as the fallback. Nothing was stored.";
-        } else if (/\r|\n/.test(token)) {
+        }
+        const token = typeof clipboardText === "string" ? clipboardText.trim() : "";
+        if (!failure && !token) {
+          failure = "The clipboard could not be read or was empty. Copy the key from the email and run the same command again. If needed, use --key-set-in-dashboard as the fallback. Nothing was stored.";
+        } else if (!failure && /\r|\n/.test(token)) {
           failure = "The clipboard looks like more than one line. Copy only the key from the email and run the same command again. Nothing was stored.";
-        } else if (token.includes(" ")) {
+        } else if (!failure && token.includes(" ")) {
           failure = "The clipboard looks like prose instead of one key. Copy only the key from the email and run the same command again. Nothing was stored.";
-        } else if (Buffer.byteLength(token, "utf8") > 2_048 || !/^[\x21-\x7e]+$/.test(token)) {
+        } else if (!failure && (Buffer.byteLength(token, "utf8") > 2_048 || !/^[\x21-\x7e]+$/.test(token))) {
           failure = "The clipboard did not contain a valid store key. It must be 1 to 2,048 printable ASCII bytes with no spaces. Nothing was stored.";
-        } else {
+        } else if (!failure) {
           try { await putSecret(config.token_secret, token); } catch {
             failure = "The custom API key could not be written to the Worker. The value was not printed or saved locally.";
           }

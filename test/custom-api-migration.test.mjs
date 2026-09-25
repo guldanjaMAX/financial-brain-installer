@@ -71,6 +71,43 @@ function setupDatabase() {
   return database;
 }
 
+function compactConfig() {
+  return {
+    enabled: true,
+    source: "store-dashboard",
+    base_url: "https://dashboard.invalid/api/",
+    token_secret: "STORE_DASHBOARD_TOKEN",
+    endpoints: [{
+      name: "sales",
+      path: "/sales",
+      row_key: ["store", "period", "revenue_stream"],
+      document: {
+        group_by: ["period"],
+        title_template: "{{period}} sales",
+        body_template: "{{rows_table}}",
+        fields: ["store", "revenue_stream", "net_sales"],
+      },
+    }],
+  };
+}
+
+function documentWriter(DB) {
+  return async (envelope) => {
+    await DB.prepare(
+      `INSERT INTO documents (doc_uid,source,source_id,meta,deleted_at)
+       VALUES (?1,?2,?3,?4,NULL)
+       ON CONFLICT(source,source_id) DO UPDATE SET meta=excluded.meta,deleted_at=NULL`
+    ).bind(`${envelope.source_type}:${envelope.source_id}`, envelope.source_type, envelope.source_id, JSON.stringify(envelope.metadata)).run();
+    return { action: "updated" };
+  };
+}
+
+async function settlePull(sourceConfig, options) {
+  let result = await runCustomApiPull(sourceConfig, options);
+  while (result.status !== "completed") result = await runCustomApiPull(sourceConfig, options);
+  return result;
+}
+
 function config() {
   const document = (name, groupBy, title, fields, aggregates = {}, formats = {}) => ({
     ...(name ? { name } : {}), group_by: groupBy, title_template: title,
@@ -111,7 +148,7 @@ test("0048 accepts its compact job schema without any schema-47 table", () => {
   try {
     const tables = database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'custom_api_%' ORDER BY name").all();
     assert.deepEqual(tables.map((row) => row.name), [
-      "custom_api_fetches", "custom_api_job_slices", "custom_api_jobs",
+      "custom_api_current_jobs", "custom_api_fetches", "custom_api_job_slices", "custom_api_jobs",
       "custom_api_row_chunks", "custom_api_schedule_state",
     ]);
   } finally { database.close(); }
@@ -133,8 +170,8 @@ test("real volume stays under 600 statements per invocation and resumes after ev
   let storeHistoryDocument = null;
   const persistence = customApiD1Persistence(workerEnv, {
     ingestDocument: async (envelope) => {
-      if (envelope.source_id === "sales:monthly:2019-01-01") monthlyDocument = envelope;
-      if (envelope.source_id === "sales:store-history:Store 0") storeHistoryDocument = envelope;
+      if (envelope.metadata.custom_api_source_id === "sales:monthly:2019-01-01") monthlyDocument = envelope;
+      if (envelope.metadata.custom_api_source_id === "sales:store-history:Store 0") storeHistoryDocument = envelope;
       await DB.prepare(
         `INSERT INTO documents (doc_uid,source,source_id,meta,deleted_at)
          VALUES (?1,?2,?3,?4,NULL)
@@ -219,23 +256,7 @@ test("row history reads only chunks from the latest verified job after chunk com
       return { action: "updated" };
     },
   });
-  const compactConfig = {
-    enabled: true,
-    source: "store-dashboard",
-    base_url: "https://dashboard.invalid/api/",
-    token_secret: "STORE_DASHBOARD_TOKEN",
-    endpoints: [{
-      name: "sales",
-      path: "/sales",
-      row_key: ["store", "period", "revenue_stream"],
-      document: {
-        group_by: ["period"],
-        title_template: "{{period}} sales",
-        body_template: "{{rows_table}}",
-        fields: ["store", "revenue_stream", "net_sales"],
-      },
-    }],
-  };
+  const sourceConfig = compactConfig();
   let padding = "x".repeat(2_000);
   let currentAt = AT;
   const options = {
@@ -252,8 +273,8 @@ test("row history reads only chunks from the latest verified job after chunk com
     })) }), { headers: { "content-type": "application/json" } }),
   };
   const settle = async () => {
-    let result = await runCustomApiPull(compactConfig, options);
-    while (result.status !== "completed") result = await runCustomApiPull(compactConfig, options);
+    let result = await runCustomApiPull(sourceConfig, options);
+    while (result.status !== "completed") result = await runCustomApiPull(sourceConfig, options);
     return result;
   };
 
@@ -263,10 +284,162 @@ test("row history reads only chunks from the latest verified job after chunk com
   currentAt = new Date("2026-09-25T15:30:00.000Z");
   const second = await settle();
   assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custom_api_row_chunks WHERE job_id=?1").get(second.job_id).n, 2);
-  assert.ok(database.prepare("SELECT COUNT(*) AS n FROM custom_api_row_chunks WHERE job_id<>?1").get(second.job_id).n > 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custom_api_row_chunks WHERE job_id<>?1").get(second.job_id).n, 0);
   const rows = await persistence.loadRows({ source: "store-dashboard", endpoint: "sales" });
   assert.equal(rows.length, 60, "stale physical chunks cannot re-enter the logical current history");
   assert.ok(rows.every((row) => row.row.padding === "x"));
   assert.ok(rows.every((row) => row.first_seen_at === AT.toISOString()));
   assert.ok(rows.every((row) => row.history_hashes.length === 1));
 });
+
+test("current rows and documents stay on the prior job through every slice and switch together at promotion", async (t) => {
+  const database = setupDatabase();
+  t.after(() => database.close());
+  const DB = countedD1(database);
+  const sourceConfig = compactConfig();
+  const rows = (marker) => Array.from({ length: 60 }, (_, index) => ({
+    store: `Store ${index}`,
+    period: "2026-09-01",
+    revenue_stream: "services",
+    net_sales: marker,
+    padding: "x".repeat(2_000),
+  }));
+  let feed = { data: rows(1) };
+  let currentAt = AT;
+  const fetchImpl = async () => new Response(JSON.stringify(feed), { headers: { "content-type": "application/json" } });
+  const firstPersistence = customApiD1Persistence({ STORAGE: "d1", DB }, { ingestDocument: documentWriter(DB) });
+  const first = await settlePull(sourceConfig, {
+    token: TOKEN, now: () => currentAt, sleep: async () => {}, persistence: firstPersistence, fetchImpl,
+  });
+
+  feed = { data: rows(2) };
+  currentAt = new Date("2026-09-25T15:30:00.000Z");
+  let sliceChecks = 0;
+  let stagedPlanChecks = 0;
+  let terminalChecks = 0;
+  let promotionChecks = 0;
+  let documentWrites = 0;
+  const faultedSlices = new Set();
+  let stagedPlanFaulted = false;
+  let terminalFaulted = false;
+  let promotionFaulted = false;
+  const priorVisible = async () => {
+    const visibleRows = await secondPersistence.loadRows({ source: "store-dashboard", endpoint: "sales" });
+    assert.equal(visibleRows.length, 60);
+    assert.ok(visibleRows.every((row) => row.row.net_sales === 1));
+    const document = database.prepare(
+      `SELECT d.meta FROM documents d
+        JOIN custom_api_current_jobs c
+          ON c.source=d.source AND c.job_id=json_extract(d.meta,'$.custom_api_job_id')
+       WHERE d.source='store-dashboard'
+         AND json_extract(d.meta,'$.custom_api_source_id')='sales:2026-09-01'
+       LIMIT 1`
+    ).get();
+    assert.ok(document, "the prior verified document remains visible before promotion");
+    assert.equal(JSON.parse(document.meta).custom_api_job_id, first.job_id);
+  };
+  const secondPersistence = customApiD1Persistence({ STORAGE: "d1", DB }, {
+    ingestDocument: async (envelope) => { documentWrites++; return documentWriter(DB)(envelope); },
+    afterSliceReadback: async ({ kind, sliceIndex }) => {
+      sliceChecks++;
+      if (kind === "rows") assert.equal(documentWrites, 0, "live document ingest waits for staged-plan verification");
+      await priorVisible();
+      if (!faultedSlices.has(sliceIndex)) {
+        faultedSlices.add(sliceIndex);
+        throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", `synthetic fault after ${kind} slice`);
+      }
+    },
+    afterStagedPlanReadback: async () => {
+      stagedPlanChecks++;
+      await priorVisible();
+      if (!stagedPlanFaulted) {
+        stagedPlanFaulted = true;
+        throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "synthetic fault after staged-plan readback");
+      }
+    },
+    afterTerminalReadback: async () => {
+      terminalChecks++;
+      await priorVisible();
+      if (!terminalFaulted) {
+        terminalFaulted = true;
+        throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "synthetic fault before pointer flip");
+      }
+    },
+    afterPromotionReadback: async ({ jobId }) => {
+      promotionChecks++;
+      const visibleRows = await secondPersistence.loadRows({ source: "store-dashboard", endpoint: "sales" });
+      assert.equal(visibleRows.length, 60);
+      assert.ok(visibleRows.every((row) => row.row.net_sales === 2));
+      const current = database.prepare("SELECT job_id FROM custom_api_current_jobs WHERE source='store-dashboard'").get();
+      assert.equal(current?.job_id, jobId);
+      const document = database.prepare(
+        `SELECT d.meta FROM documents d
+          JOIN custom_api_current_jobs c
+            ON c.source=d.source AND c.job_id=json_extract(d.meta,'$.custom_api_job_id')
+         WHERE d.source='store-dashboard'
+           AND json_extract(d.meta,'$.custom_api_source_id')='sales:2026-09-01'
+         LIMIT 1`
+      ).get();
+      assert.equal(JSON.parse(document.meta).custom_api_job_id, jobId);
+      if (!promotionFaulted) {
+        promotionFaulted = true;
+        throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "synthetic fault after pointer flip");
+      }
+    },
+  });
+  const secondOptions = {
+    token: TOKEN, now: () => currentAt, sleep: async () => {}, persistence: secondPersistence, fetchImpl,
+  };
+  let second;
+  while (!second || second.status !== "completed") {
+    try {
+      second = await runCustomApiPull(sourceConfig, secondOptions);
+    } catch (error) {
+      assert.match(String(error.message), /synthetic fault/);
+    }
+  }
+  assert.notEqual(second.job_id, first.job_id);
+  assert.ok(sliceChecks >= 3, "every row and document slice reached the visibility decision point");
+  assert.equal(stagedPlanChecks, 2, "the complete staged plan survived an interrupted verification");
+  assert.equal(terminalChecks, 2, "terminal pre-promotion visibility survived an interruption");
+  assert.equal(promotionChecks, 1, "post-promotion completeness was checked");
+  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custom_api_row_chunks WHERE job_id<>?1").get(second.job_id).n, 0);
+});
+
+for (const [label, body] of [
+  ["empty first pull", { data: [] }],
+  ["all-refused first pull", { data: [{ store: "Store 1", period: "2026-09-01" }] }],
+]) {
+  test(`${label} promotes atomically and repeated resumes stay idempotent`, async (t) => {
+    const database = setupDatabase();
+    t.after(() => database.close());
+    const DB = countedD1(database);
+    let terminalChecks = 0;
+    let promotionChecks = 0;
+    const persistence = customApiD1Persistence({ STORAGE: "d1", DB }, {
+      ingestDocument: documentWriter(DB),
+      afterTerminalReadback: () => { terminalChecks++; },
+      afterPromotionReadback: () => { promotionChecks++; },
+    });
+    const options = {
+      token: TOKEN,
+      now: () => AT,
+      sleep: async () => {},
+      persistence,
+      fetchImpl: async () => new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } }),
+    };
+    const staged = await runCustomApiPull(compactConfig(), options);
+    assert.equal(staged.status, "in_progress");
+    assert.equal(staged.slices_total, 0);
+    const completed = await runCustomApiPull(compactConfig(), options);
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.saved, true);
+    const repeated = await runCustomApiPull(compactConfig(), options);
+    assert.equal(repeated.status, "completed");
+    assert.equal(repeated.job_id, completed.job_id);
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custom_api_fetches").get().n, 1);
+    assert.equal(database.prepare("SELECT job_id FROM custom_api_current_jobs WHERE source='store-dashboard'").get().job_id, completed.job_id);
+    assert.ok(terminalChecks >= 1, "the zero-slice terminal decision point was reached");
+    assert.ok(promotionChecks >= 1, "the zero-slice promotion decision point was reached");
+  });
+}

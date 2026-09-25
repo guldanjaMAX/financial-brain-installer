@@ -10,6 +10,9 @@
 import { scan as scanSecrets } from "./secret-scan.js";
 import { restampFirstPartySourceProvenance } from "./provenance-receipt.js";
 import { backendOf, D1, storeFor } from "./store.js";
+import {
+  currentCustomApiDocumentSql, customApiVersionedSourceId,
+} from "./custom-api-visibility.js";
 
 const SAFE_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const SAFE_SECRET_NAME = /^[A-Z][A-Z0-9_]{1,63}$/;
@@ -40,6 +43,7 @@ const DEFAULT_RETRIES = 3;
 const ROW_CHUNK_SIZE = 50;
 const ROW_CHUNK_MAX_BYTES = 64 * 1024;
 const MAX_JOB_STAGE_STATEMENTS = 500;
+const ROW_GC_SLICE_SIZE = 25;
 
 const isPlainObject = (value) => value !== null && typeof value === "object" &&
   !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
@@ -917,16 +921,86 @@ export function customApiD1Persistence(env, hooks = {}) {
     ...overrides,
   });
 
+  const completed = async (job) => Object.freeze({
+    status: "completed", dry_run: false, source: job.source,
+    ...job.stats,
+    fetched_at: job.fetched_at,
+    job_id: job.job_id, job_phase: "verified", saved: true,
+    meaning_search_ready: await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM vector_outbox o
+        JOIN chunks c ON c.chunk_uid=o.chunk_uid WHERE c.source=?1`
+    ).bind(job.source).first().then((row) => Number(row?.n || 0) === 0),
+  });
+
+  const collectPriorRowChunks = async (job) => {
+    const pointer = await env.DB.prepare(
+      "SELECT job_id FROM custom_api_current_jobs WHERE source=?1"
+    ).bind(job.source).first();
+    if (pointer?.job_id !== job.job_id) {
+      throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API current-job pointer did not read back exactly");
+    }
+    await env.DB.prepare(
+      `DELETE FROM custom_api_row_chunks
+        WHERE rowid IN (
+          SELECT rowid FROM custom_api_row_chunks
+           WHERE source=?1 AND job_id<>?2
+           ORDER BY rowid LIMIT ?3
+        )`
+    ).bind(job.source, job.job_id, ROW_GC_SLICE_SIZE).run();
+    const residue = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM custom_api_row_chunks WHERE source=?1 AND job_id<>?2"
+    ).bind(job.source, job.job_id).first();
+    await hooks.afterGarbageCollectSlice?.({ jobId: job.job_id, remaining: Number(residue?.n || 0) });
+    if (Number(residue?.n || 0) > 0) {
+      return progress(job, { job_phase: "collecting", saved: true });
+    }
+    await env.DB.prepare(
+      "UPDATE custom_api_jobs SET status='verified' WHERE job_id=?1 AND status='promoted'"
+    ).bind(job.job_id).run();
+    const terminal = await env.DB.prepare(
+      `SELECT j.status,j.verified_at,c.job_id AS current_job_id,c.promoted_at,
+              f.job_id AS fetch_job_id,f.source AS fetch_source,f.fetched_at AS fetch_fetched_at,
+              f.response_hashes_json AS fetch_hashes,f.stats_json AS fetch_stats,
+              f.verified_at AS fetch_verified_at
+         FROM custom_api_jobs j
+         LEFT JOIN custom_api_current_jobs c ON c.source=j.source
+         LEFT JOIN custom_api_fetches f ON f.job_id=j.job_id
+        WHERE j.job_id=?1`
+    ).bind(job.job_id).first();
+    if (terminal?.status !== "verified" || terminal?.verified_at !== job.fetched_at ||
+        terminal?.current_job_id !== job.job_id || terminal?.promoted_at !== job.fetched_at ||
+        terminal?.fetch_job_id !== job.job_id || terminal?.fetch_source !== job.source ||
+        terminal?.fetch_fetched_at !== job.fetched_at || terminal?.fetch_verified_at !== job.fetched_at ||
+        terminal?.fetch_hashes !== canonicalJson(job.response_hashes) || terminal?.fetch_stats !== canonicalJson(job.stats)) {
+      throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API terminal receipt did not read back exactly");
+    }
+    return completed(job);
+  };
+
+  const verifyStagedPlan = async (job) => {
+    const result = await env.DB.prepare(
+      `SELECT slice_index,kind,payload_hash,verified_at
+         FROM custom_api_job_slices WHERE job_id=?1 ORDER BY slice_index`
+    ).bind(job.job_id).all();
+    const slices = result?.results || [];
+    const jobHash = await sha256(slices.map((slice) => slice.payload_hash).join(":"));
+    if (slices.length !== job.total_slices || jobHash !== job.job_hash ||
+        slices.some((slice) => slice.kind === "rows" && slice.verified_at == null)) {
+      throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API staged plan did not read back exactly");
+    }
+    await hooks.afterStagedPlanReadback?.({
+      jobId: job.job_id,
+      rowSlices: slices.filter((slice) => slice.kind === "rows").length,
+      documentSlices: slices.filter((slice) => slice.kind === "document").length,
+    });
+  };
+
   return {
     async loadRows({ source, endpoint }) {
       const result = await env.DB.prepare(
         `SELECT rows_json FROM custom_api_row_chunks
           WHERE source=?1 AND endpoint=?2
-            AND job_id=(
-              SELECT job_id FROM custom_api_jobs
-               WHERE source=?1 AND status='verified'
-               ORDER BY verified_at DESC,rowid DESC LIMIT 1
-            )
+            AND job_id=(SELECT job_id FROM custom_api_current_jobs WHERE source=?1)
           ORDER BY chunk_index`
       ).bind(source, endpoint).all();
       const rows = [];
@@ -945,7 +1019,7 @@ export function customApiD1Persistence(env, hooks = {}) {
       return parseJob(await env.DB.prepare(
         `SELECT job_id,source,fetched_at,status,next_slice,total_slices,job_hash,stats_json,response_hashes_json
            FROM custom_api_jobs
-          WHERE source=?1 AND status IN ('staged','applying','failed')
+          WHERE source=?1 AND status IN ('staged','applying','promoting','promoted','failed')
           ORDER BY created_at DESC,rowid DESC LIMIT 1`
       ).bind(source).first());
     },
@@ -953,8 +1027,8 @@ export function customApiD1Persistence(env, hooks = {}) {
     async loadVerifiedSnapshot({ source }) {
       return parseJob(await env.DB.prepare(
         `SELECT job_id,source,fetched_at,status,next_slice,total_slices,job_hash,stats_json,response_hashes_json
-           FROM custom_api_jobs WHERE source=?1 AND status='verified'
-          ORDER BY verified_at DESC,rowid DESC LIMIT 1`
+           FROM custom_api_jobs
+          WHERE job_id=(SELECT job_id FROM custom_api_current_jobs WHERE source=?1)`
       ).bind(source).first());
     },
 
@@ -968,7 +1042,8 @@ export function customApiD1Persistence(env, hooks = {}) {
 
     async stageJob({ source, fetchedAt, responseHashes, planned, stats }) {
       const jobId = crypto.randomUUID();
-      const slices = [];
+      const rowSlices = [];
+      const documentSlices = [];
       for (const { endpoint, plan } of planned) {
         const durableRows = plan.rowChanges
           .map((item) => {
@@ -990,16 +1065,26 @@ export function customApiD1Persistence(env, hooks = {}) {
           .sort((a, b) => a.row_key.localeCompare(b.row_key));
         for (const [chunkIndex, rows] of chunkRows(durableRows).entries()) {
           const payload = canonicalJson(rows);
-          slices.push({ kind: "rows", endpoint: endpoint.name, target: String(chunkIndex), payload });
+          rowSlices.push({ kind: "rows", endpoint: endpoint.name, target: String(chunkIndex), payload });
         }
         for (const document of plan.documents) {
+          const logicalSourceId = document.source_id;
           const payload = canonicalJson({
             ...document,
-            metadata: { ...document.metadata, custom_api_job_id: jobId },
+            source_id: customApiVersionedSourceId(logicalSourceId, jobId),
+            metadata: {
+              ...document.metadata,
+              custom_api_job_id: jobId,
+              custom_api_source_id: logicalSourceId,
+            },
           });
-          slices.push({ kind: "document", endpoint: endpoint.name, target: document.source_id, payload });
+          documentSlices.push({ kind: "document", endpoint: endpoint.name, target: JSON.parse(payload).source_id, payload });
         }
       }
+      // All durable row versions are applied and read back before the first
+      // document enters the live ingest machinery. Document versions then use
+      // a separate promotion phase and remain hidden until the pointer flip.
+      const slices = [...rowSlices, ...documentSlices];
       if (slices.length + 1 > MAX_JOB_STAGE_STATEMENTS) {
         throw new CustomApiError("RESPONSE_TOO_LARGE", "custom API snapshot needs too many bounded job slices");
       }
@@ -1030,6 +1115,8 @@ export function customApiD1Persistence(env, hooks = {}) {
 
     async advanceJob(inputJob) {
       let job = inputJob;
+      if (job.status === "promoted") return collectPriorRowChunks(job);
+      if (job.status === "verified") return completed(job);
       if (job.next_slice < job.total_slices) {
         const slice = await env.DB.prepare(
           `SELECT kind,endpoint,target_key,payload_json,payload_hash
@@ -1040,22 +1127,39 @@ export function customApiD1Persistence(env, hooks = {}) {
           throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API job slice hash did not verify");
         }
         if (slice.kind === "rows") {
+          if (job.status === "promoting") {
+            throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API row slice appeared after promotion began");
+          }
           await env.DB.prepare(
             `INSERT INTO custom_api_row_chunks
               (source,endpoint,chunk_index,rows_json,content_hash,job_id,updated_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7)
-             ON CONFLICT(source,endpoint,chunk_index) DO UPDATE SET
+             ON CONFLICT(job_id,endpoint,chunk_index) DO UPDATE SET
                rows_json=excluded.rows_json,content_hash=excluded.content_hash,
-               job_id=excluded.job_id,updated_at=excluded.updated_at`
+               source=excluded.source,updated_at=excluded.updated_at`
           ).bind(job.source, slice.endpoint, Number(slice.target_key), slice.payload_json, slice.payload_hash, job.job_id, job.fetched_at).run();
           const stored = await env.DB.prepare(
             `SELECT content_hash,job_id FROM custom_api_row_chunks
-              WHERE source=?1 AND endpoint=?2 AND chunk_index=?3`
-          ).bind(job.source, slice.endpoint, Number(slice.target_key)).first();
+              WHERE source=?1 AND endpoint=?2 AND chunk_index=?3 AND job_id=?4`
+          ).bind(job.source, slice.endpoint, Number(slice.target_key), job.job_id).first();
           if (stored?.content_hash !== slice.payload_hash || stored?.job_id !== job.job_id) {
             throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API row slice did not read back exactly", { endpoint: slice.endpoint });
           }
         } else if (slice.kind === "document") {
+          if (job.status !== "promoting") {
+            await verifyStagedPlan(job);
+            await env.DB.prepare(
+              `UPDATE custom_api_jobs SET status='promoting'
+                WHERE job_id=?1 AND status IN ('staged','applying') AND next_slice=?2`
+            ).bind(job.job_id, job.next_slice).run();
+            const promoting = await env.DB.prepare(
+              "SELECT status,next_slice FROM custom_api_jobs WHERE job_id=?1"
+            ).bind(job.job_id).first();
+            if (promoting?.status !== "promoting" || Number(promoting?.next_slice) !== job.next_slice) {
+              throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API promotion cursor did not read back exactly");
+            }
+            job = { ...job, status: "promoting" };
+          }
           let document;
           try { document = JSON.parse(slice.payload_json); } catch { document = null; }
           if (!isPlainObject(document)) throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API document slice could not be parsed");
@@ -1081,19 +1185,29 @@ export function customApiD1Persistence(env, hooks = {}) {
             "UPDATE custom_api_job_slices SET verified_at=?3 WHERE job_id=?1 AND slice_index=?2"
           ).bind(job.job_id, job.next_slice, job.fetched_at),
           env.DB.prepare(
-            "UPDATE custom_api_jobs SET status='applying',next_slice=?2 WHERE job_id=?1 AND next_slice=?3"
-          ).bind(job.job_id, next, job.next_slice),
+            `UPDATE custom_api_jobs SET status=?4,next_slice=?2
+              WHERE job_id=?1 AND next_slice=?3`
+          ).bind(job.job_id, next, job.next_slice, slice.kind === "document" ? "promoting" : "applying"),
         ]);
         const cursor = await env.DB.prepare(
           "SELECT status,next_slice FROM custom_api_jobs WHERE job_id=?1"
         ).bind(job.job_id).first();
-        if (Number(cursor?.next_slice) !== next || cursor?.status !== "applying") {
+        const expectedStatus = slice.kind === "document" ? "promoting" : "applying";
+        if (Number(cursor?.next_slice) !== next || cursor?.status !== expectedStatus) {
           throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API job cursor did not read back exactly");
         }
-        job = { ...job, status: "applying", next_slice: next };
+        job = { ...job, status: expectedStatus, next_slice: next };
         return progress(job);
       }
 
+      if (job.status !== "promoting") {
+        await verifyStagedPlan(job);
+        await env.DB.prepare(
+          `UPDATE custom_api_jobs SET status='promoting'
+            WHERE job_id=?1 AND status IN ('staged','applying') AND next_slice=total_slices`
+        ).bind(job.job_id).run();
+        job = { ...job, status: "promoting" };
+      }
       const receipt = await env.DB.prepare(
         `SELECT COUNT(*) AS slices,
                 SUM(CASE WHEN s.verified_at IS NOT NULL THEN 1 ELSE 0 END) AS verified,
@@ -1103,7 +1217,8 @@ export function customApiD1Persistence(env, hooks = {}) {
                   ELSE 0 END) AS exact
            FROM custom_api_job_slices s
            LEFT JOIN custom_api_row_chunks r
-             ON s.kind='rows' AND r.source=?2 AND r.endpoint=s.endpoint AND r.chunk_index=CAST(s.target_key AS INTEGER)
+             ON s.kind='rows' AND r.source=?2 AND r.endpoint=s.endpoint
+              AND r.chunk_index=CAST(s.target_key AS INTEGER) AND r.job_id=s.job_id
            LEFT JOIN documents d
              ON s.kind='document' AND d.source=?2 AND d.source_id=s.target_key AND d.deleted_at IS NULL
           WHERE s.job_id=?1`
@@ -1114,27 +1229,40 @@ export function customApiD1Persistence(env, hooks = {}) {
       await hooks.afterTerminalReadback?.({ jobId: job.job_id });
       await env.DB.batch([
         env.DB.prepare(
-          "UPDATE custom_api_jobs SET status='verified',verified_at=?2 WHERE job_id=?1 AND status='applying' AND next_slice=total_slices"
+          `UPDATE custom_api_jobs SET status='promoted',verified_at=?2
+            WHERE job_id=?1 AND status IN ('promoting','promoted') AND next_slice=total_slices`
+        ).bind(job.job_id, job.fetched_at),
+        env.DB.prepare(
+          `INSERT INTO custom_api_current_jobs (source,job_id,promoted_at)
+           SELECT source,job_id,?2 FROM custom_api_jobs WHERE job_id=?1 AND status='promoted'
+           ON CONFLICT(source) DO UPDATE SET job_id=excluded.job_id,promoted_at=excluded.promoted_at`
         ).bind(job.job_id, job.fetched_at),
         env.DB.prepare(
           `INSERT INTO custom_api_fetches (job_id,source,fetched_at,response_hashes_json,stats_json,verified_at)
-           VALUES (?1,?2,?3,?4,?5,?3)`
-        ).bind(job.job_id, job.source, job.fetched_at, canonicalJson(job.response_hashes), canonicalJson(job.stats)),
+           SELECT job_id,source,fetched_at,response_hashes_json,stats_json,?3
+             FROM custom_api_jobs WHERE job_id=?1 AND source=?2 AND status='promoted'
+           ON CONFLICT(job_id) DO UPDATE SET verified_at=excluded.verified_at`
+        ).bind(job.job_id, job.source, job.fetched_at),
       ]);
       const terminal = await env.DB.prepare(
-        "SELECT status,verified_at FROM custom_api_jobs WHERE job_id=?1"
+        `SELECT j.status,j.verified_at,c.job_id AS current_job_id,c.promoted_at,
+                f.job_id AS fetch_job_id,f.source AS fetch_source,f.fetched_at AS fetch_fetched_at,
+                f.response_hashes_json AS fetch_hashes,f.stats_json AS fetch_stats,
+                f.verified_at AS fetch_verified_at
+           FROM custom_api_jobs j
+           LEFT JOIN custom_api_current_jobs c ON c.source=j.source
+           LEFT JOIN custom_api_fetches f ON f.job_id=j.job_id
+          WHERE j.job_id=?1`
       ).bind(job.job_id).first();
-      if (terminal?.status !== "verified" || terminal?.verified_at !== job.fetched_at) {
+      if (terminal?.status !== "promoted" || terminal?.verified_at !== job.fetched_at ||
+          terminal?.current_job_id !== job.job_id || terminal?.promoted_at !== job.fetched_at ||
+          terminal?.fetch_job_id !== job.job_id || terminal?.fetch_source !== job.source ||
+          terminal?.fetch_fetched_at !== job.fetched_at || terminal?.fetch_verified_at !== job.fetched_at ||
+          terminal?.fetch_hashes !== canonicalJson(job.response_hashes) || terminal?.fetch_stats !== canonicalJson(job.stats)) {
         throw new CustomApiError("PERSISTENCE_VERIFY_FAILED", "custom API terminal receipt did not read back exactly");
       }
-      const meaningSearchReady = await this.meaningSearchReady({ source: job.source });
-      return Object.freeze({
-        status: "completed", dry_run: false, source: job.source,
-        ...job.stats,
-        fetched_at: job.fetched_at,
-        job_id: job.job_id, job_phase: "verified", saved: true,
-        meaning_search_ready: meaningSearchReady,
-      });
+      await hooks.afterPromotionReadback?.({ jobId: job.job_id });
+      return collectPriorRowChunks({ ...job, status: "promoted" });
     },
   };
 }
@@ -1170,7 +1298,8 @@ async function setSourceState(env, config, state, { at, message = null } = {}) {
     return;
   }
   const count = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM documents WHERE source=?1 AND deleted_at IS NULL"
+    `SELECT COUNT(*) AS n FROM documents d
+      WHERE source=?1 AND deleted_at IS NULL${currentCustomApiDocumentSql("d")}`
   ).bind(config.source).first();
   if (state === "ready") {
     await env.DB.batch([

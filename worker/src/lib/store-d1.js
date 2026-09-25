@@ -71,6 +71,9 @@ import {
   scanChunkPages,
 } from "./diagnose-scan.js";
 import { sourceOriginalChunkReceiptHash } from "./source-original-chunk.js";
+import {
+  currentCustomApiDocumentSql, customApiLogicalSourceId, customApiPointerTableMissing,
+} from "./custom-api-visibility.js";
 
 const RRF_K = 60;
 const LEXICAL_CHAMPION_RATIO = 4;
@@ -585,7 +588,7 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
   const f = filterSql(filters, "c", 3);
   const sc = scopeSql(scope, "d", f.nextParam);
   const a = documentAccessSql(access, "c", "d", sc.nextParam);
-  const sql = (memoryClause) => `
+  const sql = (memoryClause, withCurrentPointer = true) => `
     SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
            COALESCE(src.kind, 'unregistered') AS source_kind,
            c.title, c.document_date,
@@ -601,13 +604,21 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
     JOIN chunks c ON c.id = chunks_fts.rowid
     JOIN documents d ON d.doc_uid = c.doc_uid
     LEFT JOIN sources src ON src.name = d.source
-    WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}${memoryClause}
+    WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}${withCurrentPointer ? currentCustomApiDocumentSql("d") : ""}${memoryClause}
     ORDER BY bm25(chunks_fts)
     LIMIT ?2`;
 
-  const run = (memoryClause) => env.DB.prepare(sql(memoryClause)).bind(
-    terms, limit, ...f.params, ...sc.params, ...a.params,
-  ).all();
+  const run = async (memoryClause) => {
+    const execute = (withCurrentPointer) => env.DB.prepare(sql(memoryClause, withCurrentPointer)).bind(
+      terms, limit, ...f.params, ...sc.params, ...a.params,
+    ).all();
+    try {
+      return await execute(true);
+    } catch (error) {
+      if (!customApiPointerTableMissing(error)) throw error;
+      return execute(false);
+    }
+  };
   let response;
   try {
     response = await run(currentMemorySql("d"));
@@ -649,7 +660,7 @@ export async function unchunkedTaxDocumentCandidates(env, {
   const selectorSql = entityBound ? "AND d.entity_slug = ?1" : "";
   const limitParameter = entityBound ? "?2" : "?1";
   const binds = entityBound ? [entitySlug, pageLimit] : [pageLimit];
-  const { results } = await env.DB.prepare(
+  const sql = (withCurrentPointer) =>
     `/* unchunked-tax-document-candidates */
      SELECT d.doc_uid, d.source, COALESCE(src.kind, 'unregistered') AS source_kind,
             d.source_id, d.title, d.uri, d.document_date, d.date_source, d.date_reliable,
@@ -660,10 +671,19 @@ export async function unchunkedTaxDocumentCandidates(env, {
       WHERE d.deleted_at IS NULL
         ${selectorSql}
         AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.doc_uid = d.doc_uid)
-        ${f.clause}${sc.clause}${a.clause}
+        ${f.clause}${sc.clause}${a.clause}${withCurrentPointer ? currentCustomApiDocumentSql("d") : ""}
       ORDER BY d.ingested_at DESC
-      LIMIT ${limitParameter}`
-  ).bind(...binds, ...f.params, ...sc.params, ...a.params).all();
+      LIMIT ${limitParameter}`;
+  const execute = (withCurrentPointer) => env.DB.prepare(sql(withCurrentPointer))
+    .bind(...binds, ...f.params, ...sc.params, ...a.params).all();
+  let response;
+  try {
+    response = await execute(true);
+  } catch (error) {
+    if (!customApiPointerTableMissing(error)) throw error;
+    response = await execute(false);
+  }
+  const { results } = response;
   const page = (results || []).map(assessStoredProvenance);
   return {
     results: page.slice(0, boundedLimit).map((row) => ({ ...row, has_chunks: false })),
@@ -730,7 +750,7 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
     const placeholders = batch.map((_, i) => "?" + (i + 1)).join(",");
     const f = filterSql(filters, "c", batch.length + 1);
     const sc = scopeSql(scope, "d", f.nextParam);
-    const sql = (memoryClause) =>
+    const sql = (memoryClause, withCurrentPointer = true) =>
       `SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
               COALESCE(src.kind, 'unregistered') AS source_kind,
               c.title, c.document_date,
@@ -743,10 +763,18 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
                    THEN json_extract(d.meta, '$.start') END AS occurred_at
        FROM chunks c JOIN documents d ON d.doc_uid = c.doc_uid
        LEFT JOIN sources src ON src.name = d.source
-       WHERE c.chunk_uid IN (${placeholders})${f.clause}${sc.clause}${memoryClause}`;
-    const run = (memoryClause) => env.DB.prepare(sql(memoryClause))
-      .bind(...batch, ...f.params, ...sc.params)
-      .all();
+       WHERE c.chunk_uid IN (${placeholders})${f.clause}${sc.clause}${withCurrentPointer ? currentCustomApiDocumentSql("d") : ""}${memoryClause}`;
+    const run = async (memoryClause) => {
+      const execute = (withCurrentPointer) => env.DB.prepare(sql(memoryClause, withCurrentPointer))
+        .bind(...batch, ...f.params, ...sc.params)
+        .all();
+      try {
+        return await execute(true);
+      } catch (error) {
+        if (!customApiPointerTableMissing(error)) throw error;
+        return execute(false);
+      }
+    };
     let response;
     try {
       response = await run(currentMemorySql("d"));
@@ -989,8 +1017,13 @@ export async function search(env, {
       row.source,
       row.authority_meta ?? row._authority_meta,
     );
+    const publicSourceId = customApiLogicalSourceId(
+      row.authority_meta ?? row._authority_meta,
+      publicRow.source_id,
+    );
     documents.push(attachEvidenceLineage({
       ...publicRow,
+      source_id: publicSourceId,
       authority,
       lineage: lineage.lineage,
       ...(writeProvenance ? { write_provenance: writeProvenance } : {}),

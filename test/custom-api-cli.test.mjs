@@ -275,17 +275,20 @@ test("a clipboard read failure gives copy-and-retry guidance plus the dashboard 
   let inventories = 0;
   let reads = 0;
   let writes = 0;
+  let clears = 0;
   const result = await withCapturedFailure(() => cmdConnectCustomApi(path, { "from-clipboard": true }, {
     platform: "darwin",
     listWorkerSecretNames: async () => { inventories++; return []; },
     putWorkerSecret: async () => { writes++; },
     readClipboard: async () => { reads++; throw new Error("synthetic clipboard failure"); },
-    clearClipboard: async () => { throw new Error("must not clear after a failed read"); },
+    clearClipboard: async () => { clears++; throw new Error("synthetic clear failure"); },
   }));
   assert.equal(inventories, 1, "the absent-name decision point was reached");
   assert.equal(reads, 1, "the clipboard-read decision point was reached");
   assert.equal(writes, 0);
+  assert.equal(clears, 1, "clipboard clearing was attempted after the read failure");
   assert.match(result.error.message, /copy the key from the email.*same command again.*--key-set-in-dashboard/is);
+  assert.match(result.error.message, /clipboard.*could not be cleared.*clear it manually/is);
   assert.equal(result.error.message.includes(TOKEN), false);
   assert.equal(result.output.includes(TOKEN), false);
 });

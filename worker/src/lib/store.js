@@ -45,6 +45,9 @@ import {
 } from "./provenance-receipt.js";
 import { ingestEnvelopeValidationError } from "./ingest-envelope.js";
 import {
+  currentCustomApiDocumentSql, customApiLogicalSourceId, customApiPointerTableMissing,
+} from "./custom-api-visibility.js";
+import {
   deriveSourceOriginalId,
   hashSourceOriginalResultBinding,
   loadSourceOriginalSigningKey,
@@ -759,11 +762,12 @@ const d1Backend = {
     });
     return {
       results: r.results.map((x) => {
-        const sourceId = x.source_id || (
+        const storedSourceId = x.source_id || (
           x.doc_uid && x.source && x.doc_uid.startsWith(`${x.source}:`)
             ? x.doc_uid.slice(x.source.length + 1)
             : x.doc_uid || x.chunk_uid
         );
+        const sourceId = customApiLogicalSourceId(x.authority_meta, storedSourceId);
         const publicRow = {
           chunk_uid: x.chunk_uid,
           doc_uid: x.doc_uid || null,

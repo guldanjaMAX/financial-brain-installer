@@ -14,20 +14,20 @@ CREATE TABLE IF NOT EXISTS custom_api_row_chunks (
   content_hash  TEXT NOT NULL,
   job_id        TEXT NOT NULL,
   updated_at    TEXT NOT NULL,
-  PRIMARY KEY (source, endpoint, chunk_index),
+  PRIMARY KEY (job_id, endpoint, chunk_index),
   CHECK (source GLOB '[a-z0-9]*' AND source NOT GLOB '*[^a-z0-9_-]*' AND length(source) BETWEEN 1 AND 64),
   CHECK (endpoint GLOB '[a-z0-9]*' AND endpoint NOT GLOB '*[^a-z0-9_-]*' AND length(endpoint) BETWEEN 1 AND 64),
   CHECK (length(content_hash) = 64 AND content_hash NOT GLOB '*[^a-f0-9]*')
 );
 
 CREATE INDEX IF NOT EXISTS idx_custom_api_row_chunks_endpoint
-  ON custom_api_row_chunks (source, endpoint, chunk_index);
+  ON custom_api_row_chunks (source, endpoint, job_id, chunk_index);
 
 CREATE TABLE IF NOT EXISTS custom_api_jobs (
   job_id                 TEXT PRIMARY KEY,
   source                 TEXT NOT NULL,
   fetched_at             TEXT NOT NULL,
-  status                 TEXT NOT NULL CHECK (status IN ('staged','applying','failed','verified')),
+  status                 TEXT NOT NULL CHECK (status IN ('staged','applying','promoting','promoted','failed','verified')),
   next_slice             INTEGER NOT NULL CHECK (next_slice >= 0),
   total_slices           INTEGER NOT NULL CHECK (total_slices >= 0),
   job_hash               TEXT NOT NULL,
@@ -37,14 +37,22 @@ CREATE TABLE IF NOT EXISTS custom_api_jobs (
   verified_at            TEXT,
   CHECK (next_slice <= total_slices),
   CHECK (length(job_hash) = 64 AND job_hash NOT GLOB '*[^a-f0-9]*'),
-  CHECK ((status = 'verified') = (verified_at IS NOT NULL))
+  CHECK ((status IN ('promoted','verified')) = (verified_at IS NOT NULL))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_api_jobs_one_active
-  ON custom_api_jobs (source) WHERE status IN ('staged','applying','failed');
+  ON custom_api_jobs (source) WHERE status IN ('staged','applying','promoting','promoted','failed');
 
 CREATE INDEX IF NOT EXISTS idx_custom_api_jobs_verified
   ON custom_api_jobs (source, verified_at DESC) WHERE status = 'verified';
+
+-- Readers never infer the current snapshot from timestamps or job status. The
+-- one-row pointer is flipped in the same transaction that records promotion.
+CREATE TABLE IF NOT EXISTS custom_api_current_jobs (
+  source       TEXT PRIMARY KEY,
+  job_id       TEXT NOT NULL UNIQUE REFERENCES custom_api_jobs(job_id) ON DELETE RESTRICT,
+  promoted_at  TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS custom_api_job_slices (
   job_id        TEXT NOT NULL REFERENCES custom_api_jobs(job_id) ON DELETE RESTRICT,
