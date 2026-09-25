@@ -455,7 +455,7 @@ test("CLI requires the explicit read-only JSON shape before inspecting anything"
   assert.equal(remoteCalls, 0);
 });
 
-test("an npm-style global symlink runs the current package CLI without writing locally", async () => {
+test("an npm-style global symlink runs the current package CLI without writing locally", async (t) => {
   const sandbox = mkdtempSync(join(tmpdir(), "brain-machine-wrapper-"));
   try {
     const manifestPath = join(sandbox, "brain.manifest.json");

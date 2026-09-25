@@ -44,12 +44,16 @@ const CLI = join(HERE, "..", "brain.mjs");
 const LOCK_MODULE = new URL("../operations/source-ingest-lock.mjs", import.meta.url).href;
 const OLD = new Date(Date.now() - 180_000);
 let ran = 0;
+let skippedLinkChecks = 0;
 const check = (name, condition, detail = "") => {
   ran++;
   assert.ok(condition, `${name}${detail ? `: ${detail}` : ""}`);
   console.log(`PASS  ${name}`);
 };
-const skipLinkCase = (name) => (reason) => console.log(`SKIP  ${name} # ${reason}`);
+const skipLinkCase = (name) => (reason) => {
+  skippedLinkChecks++;
+  console.log(`SKIP  ${name} # ${reason}`);
+};
 
 const fixture = () => {
   const root = mkdtempSync(join(tmpdir(), "brain-source-ingest-lock-"));
@@ -1084,7 +1088,7 @@ if (process.platform !== "win32") {
         () => acquireSourceIngestLock({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home }),
         (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
       );
-      check("a linked lock path fails closed", true);
+      check("a linked lock path fails closed", lstatSync(path).isSymbolicLink());
     }
   } finally {
     rmSync(f.root, { recursive: true, force: true });
@@ -1157,4 +1161,4 @@ if (process.platform !== "win32") {
   }
 }
 
-console.log(`\n${ran} source ingest lock checks passed.`);
+console.log(`\n${ran} source ingest lock checks passed; ${skippedLinkChecks} skipped.`);

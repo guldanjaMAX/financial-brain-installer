@@ -149,6 +149,7 @@ function mockWindowsNodeShims(target = MOCK_BIN_TARGET) {
 
 function bundledBinFixture(t, platform) {
   const temporary = nativeRealpath(mkdtempSync(join(nativeRealpath(tmpdir()), "brain-shim-fixture-")));
+  t.after(() => rmSync(temporary, { recursive: true, force: true }));
   const root = join(temporary, "runtime");
   const dependencyRoot = join(root, "node_modules", "@scope", "tool");
   const binDirectory = join(root, "node_modules", ".bin");
@@ -174,7 +175,6 @@ function bundledBinFixture(t, platform) {
     writeFileSync(join(binDirectory, "tool.cmd"), shims.cmd);
     writeFileSync(join(binDirectory, "tool.ps1"), shims.powershell);
   }
-  t.after(() => rmSync(temporary, { recursive: true, force: true }));
   const allowlist = [
     "package.json",
     "node_modules/@scope/tool/package.json",

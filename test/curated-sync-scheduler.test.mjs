@@ -37,6 +37,8 @@ import {
 } from "../operations/curated-sync-scheduler.mjs";
 import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 
+let skippedLinkChecks = 0;
+
 const sandbox = mkdtempSync(join(tmpdir(), "brain-curated-scheduler-"));
 const home = join(sandbox, "home");
 const planPath = join(sandbox, ".brain-curated-sync-plan.json");
@@ -647,7 +649,10 @@ try {
     target: lockTarget,
     path: plan.lockPath,
     type: "file",
-    onSkip: (reason) => console.log(`SKIP  scheduler refuses a symlinked lock # ${reason}`),
+    onSkip: (reason) => {
+      skippedLinkChecks++;
+      console.log(`SKIP  scheduler refuses a symlinked lock # ${reason}`);
+    },
   });
   if (symlinkedLock.created) {
     let unsafeSpawned = 0;
@@ -721,7 +726,8 @@ try {
     assert.equal(eventText.includes(forbidden), false, `support event omitted ${forbidden}`);
   }
 
-  console.log("PASS  curated scheduler locks, strips credentials, tracks freshness, and records private issues");
+  console.log("PASS  curated scheduler locks, strips credentials, tracks freshness, and records private " +
+    `issues; ${skippedLinkChecks} skipped`);
 } finally {
   rmSync(sandbox, { recursive: true, force: true });
 }

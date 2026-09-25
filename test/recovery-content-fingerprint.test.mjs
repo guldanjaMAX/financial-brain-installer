@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   chmodSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -51,6 +52,7 @@ test("shared symlink fixture capability skips only missing privilege", () => {
     target: "target",
     path: "link",
     type: "file",
+    platform: "win32",
     symlink() {
       const error = new Error("privilege not held");
       error.code = "EPERM";
@@ -59,6 +61,26 @@ test("shared symlink fixture capability skips only missing privilege", () => {
     onSkip: (reason) => skipped.push(reason),
   });
   assert.deepEqual(unavailable, { created: false, type: null });
+  assert.deepEqual(skipped, [SYMLINK_PRIVILEGE_UNAVAILABLE_REASON]);
+
+  let linuxAttempts = 0;
+  assert.throws(
+    () => createTestSymlink({
+      target: "target",
+      path: "link",
+      type: "file",
+      platform: "linux",
+      symlink() {
+        linuxAttempts += 1;
+        const error = new Error("privilege not held");
+        error.code = "EPERM";
+        throw error;
+      },
+      onSkip: (reason) => skipped.push(reason),
+    }),
+    (error) => error?.code === "EPERM",
+  );
+  assert.equal(linuxAttempts, 1, "the non-Windows link attempt reached the platform decision");
   assert.deepEqual(skipped, [SYMLINK_PRIVILEGE_UNAVAILABLE_REASON]);
 
   const directoryAttempts = [];
@@ -99,6 +121,24 @@ test("shared symlink fixture capability skips only missing privilege", () => {
     (error) => error?.code === "EINVAL",
   );
   assert.deepEqual(skipped, [SYMLINK_PRIVILEGE_UNAVAILABLE_REASON]);
+});
+
+test("Windows directory junctions are reported as symbolic links by lstat", {
+  skip: process.platform !== "win32",
+}, (t) => {
+  const root = fixture(t);
+  const target = join(root, "target-directory");
+  const path = join(root, "directory-junction");
+  mkdirSync(target);
+  const linked = createTestSymlink({
+    target,
+    path,
+    type: "junction",
+    platform: "win32",
+    onSkip: (reason) => t.skip(reason),
+  });
+  if (!linked.created) return;
+  assert.equal(lstatSync(path).isSymbolicLink(), true);
 });
 
 test("normalized recovery fingerprint hashes the prefix and exact export bytes", (t) => {

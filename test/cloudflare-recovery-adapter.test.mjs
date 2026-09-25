@@ -144,6 +144,8 @@ import {
   createDisposableCampaignAuthorityFixture,
 } from "./helpers/disposable-campaign-authority.mjs";
 
+let skippedLinkChecks = 0;
+
 const residuePolicyOnly =
   process.env.FINANCIAL_BRAIN_ADAPTER_RESIDUE_POLICY_TEST === "1";
 const classifiedResidueNames = (directory) => readdirSync(directory)
@@ -2993,7 +2995,10 @@ try {
     target: join(artifactDirectory, "missing-control-target"),
     path: ordinaryCheckpointPath,
     type: "file",
-    onSkip: (reason) => console.log(`SKIP  dangling live-control link # ${reason}`),
+    onSkip: (reason) => {
+      skippedLinkChecks++;
+      console.log(`SKIP  dangling live-control link # ${reason}`);
+    },
   });
   if (linkedControl.created) {
     assert.throws(
@@ -7603,7 +7608,10 @@ try {
     target: wrapperPath,
     path: unsafeWrapper,
     type: "file",
-    onSkip: (reason) => console.log(`SKIP  recovery refuses a linked wrapper # ${reason}`),
+    onSkip: (reason) => {
+      skippedLinkChecks++;
+      console.log(`SKIP  recovery refuses a linked wrapper # ${reason}`);
+    },
   });
   if (linkedWrapper.created) {
     assert.throws(
@@ -7731,7 +7739,8 @@ try {
     assert.notEqual(schema33.schema_fingerprint, local.schema_fingerprint);
   }
 
-  console.log("PASS  Cloudflare recovery adapter is disposable-only, credential-safe, redirect-safe, and resumable");
+  console.log("PASS  Cloudflare recovery adapter is disposable-only, credential-safe, redirect-safe, and " +
+    `resumable; ${skippedLinkChecks} skipped`);
 } finally {
   try { unlinkSync(join(artifactDirectory, ".brain-recovery-field-gate.lock")); } catch { /* absent */ }
   rmSync(sandbox, { recursive: true, force: true });

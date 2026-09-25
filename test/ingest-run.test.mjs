@@ -7,9 +7,12 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 
-let fail = 0, ran = 0;
+let fail = 0, ran = 0, skippedLinkChecks = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 240))); if (!c) fail++; };
-const skipLinkCase = (name) => (reason) => console.log(`SKIP  ${name} # ${reason}`);
+const skipLinkCase = (name) => (reason) => {
+  skippedLinkChecks++;
+  console.log(`SKIP  ${name} # ${reason}`);
+};
 
 const root = mkdtempSync(join(tmpdir(), "brain-ingest-"));
 const put = (rel, content) => {
@@ -104,7 +107,7 @@ const one = (rel) => walk(root, {}).files.find((f) => f.rel.split(/[\\/]/).join(
     const linked = createTestSymlink({
       target: targetParent,
       path: linkedParent,
-      type: "dir",
+      type: process.platform === "win32" ? "junction" : "dir",
       onSkip: skipLinkCase("exact-file pilot refuses a linked source-root ancestor"),
     });
     if (linked.created) {
@@ -528,5 +531,6 @@ function textPdf() {
 }
 
 rmSync(root, { recursive: true, force: true });
-console.log(fail ? `\n${fail} FAILURES` : `\ningest-run: all ${ran} tests passed`);
+console.log(fail ? `\n${fail} FAILURES` :
+  `\ningest-run: all ${ran} tests passed; ${skippedLinkChecks} skipped`);
 process.exit(fail ? 1 : 0);

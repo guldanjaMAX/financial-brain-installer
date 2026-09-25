@@ -30,7 +30,7 @@ export function createTestSymlink({
   try {
     return attempt(type);
   } catch (error) {
-    if (!isPrivilegeUnavailable(error)) throw error;
+    if (platform !== "win32" || !isPrivilegeUnavailable(error)) throw error;
   }
 
   if (platform === "win32" && type === "dir") {
