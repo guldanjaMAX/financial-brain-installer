@@ -63,8 +63,10 @@ assert.ok(statements.every((sql) => !/document_summary/i.test(sql)),
 assert.equal(body.rows?.[0]?.has_documents, true, JSON.stringify(body));
 assert.equal(body.rows?.[0]?.documents, null, JSON.stringify(body));
 assert.match(body.rows?.[0]?.count_note || "", /not counted on large Brains; run `brain report`/i);
+assert.equal(body.vector_readiness?.error, undefined, JSON.stringify(body.vector_readiness));
+assert.equal(body.vector_readiness?.ready, true, JSON.stringify(body.vector_readiness));
 
-console.log("lightweight documents summary: 6 assertions passed");
+console.log("lightweight documents summary: 8 assertions passed");
 
 let markerReads = 0;
 const changingMarker = (generation) => ({
@@ -100,3 +102,32 @@ await assert.rejects(
 );
 assert.equal(markerReads, 2, "the report must compare opening and closing markers");
 console.log("documents report mutation fence: 2 assertions passed");
+
+let reportMarkerReads = 0;
+const pendingReportEnv = {
+  DB: {
+    prepare(sql) {
+      const prepared = {
+        bind: () => prepared,
+        first: async () => {
+          if (/FROM install_state/i.test(sql)) {
+            reportMarkerReads++;
+            return {
+              ...changingMarker(7),
+              outbox_pending: 1,
+            };
+          }
+          return null;
+        },
+        all: async () => ({ results: [] }),
+      };
+      return prepared;
+    },
+  },
+};
+const pendingReport = await readExactDocumentReport(pendingReportEnv);
+assert.equal(reportMarkerReads, 2, "the pending report must bracket its pages");
+assert.equal(pendingReport.summary.exact, false,
+  "a non-empty outbox cannot produce an exact mixed pending-vector snapshot");
+assert.equal(pendingReport.summary.pending_vector_counts_exact, false);
+console.log("documents report pending-vector accuracy: 3 assertions passed");

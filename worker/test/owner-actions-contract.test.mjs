@@ -363,7 +363,12 @@ test("upload resumes committed ingest after finalization response loss and remai
 
     fixture.control.vectorDrainFails = true;
     const removed = await json(await fixture.post(
-      "/api/admin/brain/forget", { source: "upload", confirm: true }, admin,
+      "/api/admin/brain/forget", {
+        source: "upload",
+        confirm: true,
+        preview_documents: preview.body.documents,
+        preview_document_high_water: preview.body.document_high_water,
+      }, admin,
     ));
     assert.equal(removed.response.status, 200);
     assert.equal(removed.body.dry_run, false);

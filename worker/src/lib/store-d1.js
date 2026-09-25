@@ -1985,13 +1985,95 @@ async function projectionFenceProcessed(env, fence, lease) {
   return covered;
 }
 
+const OUTBOX_DISPLAY_LIMIT = 10_001;
+
+const BOUNDED_OUTBOX_SUMMARY_SQL = `
+  WITH bounded AS MATERIALIZED (
+    SELECT op, queued_at, submitted_mutation_id
+      FROM vector_outbox
+     WHERE queued_at >= -9223372036854775808
+     ORDER BY queued_at
+     LIMIT ${OUTBOX_DISPLAY_LIMIT}
+  )
+  SELECT count(*) AS n,
+         (SELECT queued_at FROM vector_outbox
+           WHERE queued_at >= -9223372036854775808 ORDER BY queued_at LIMIT 1) AS oldest,
+         sum(CASE WHEN op = 'upsert' THEN 1 ELSE 0 END) AS upserts,
+         sum(CASE WHEN op = 'delete' THEN 1 ELSE 0 END) AS deletes,
+         sum(CASE WHEN submitted_mutation_id IS NOT NULL THEN 1 ELSE 0 END) AS submitted
+    FROM bounded`;
+
+const OUTBOX_EXISTS_SQL = `
+  SELECT EXISTS(
+    SELECT 1 FROM vector_outbox
+     WHERE queued_at >= -9223372036854775808 LIMIT 1
+  ) AS has_rows`;
+
+// corpus_stats is exact for live documents. Soft-deleted documents deliberately
+// retain their chunks, so add those back through the document and chunk indexes
+// instead of counting or scanning the full chunks table on a readiness tick.
+const EXACT_PROJECTED_CHUNKS_SQL = `
+  COALESCE((SELECT SUM(chunks) FROM corpus_stats), 0) +
+  COALESCE((
+    SELECT count(*)
+      FROM documents d INDEXED BY idx_documents_live
+      JOIN chunks c INDEXED BY idx_chunks_doc ON c.doc_uid = d.doc_uid
+     WHERE d.deleted_at IS NOT NULL
+  ), 0)`;
+
+const boundedOutboxReceipt = (row) => {
+  const pending = Number(row?.n || 0);
+  if (!Number.isSafeInteger(pending) || pending < 0 || pending > OUTBOX_DISPLAY_LIMIT) {
+    throw new Error("the bounded vector backlog receipt is invalid");
+  }
+  const upserts = Number(row?.upserts || 0);
+  const deletes = Number(row?.deletes || 0);
+  const submitted = Number(row?.submitted || 0);
+  const oldest = row?.oldest === null || row?.oldest === undefined
+    ? null
+    : Number(row.oldest);
+  if (![upserts, deletes, submitted].every((value) =>
+    Number.isSafeInteger(value) && value >= 0 && value <= pending) ||
+      upserts + deletes !== pending) {
+    throw new Error("the bounded vector backlog components are invalid");
+  }
+  if (pending > 0 && (!Number.isSafeInteger(oldest) || oldest < 0)) {
+    throw new Error("the bounded vector backlog age receipt is invalid");
+  }
+  const capped = pending === OUTBOX_DISPLAY_LIMIT;
+  return {
+    pending,
+    pending_is_capped: capped,
+    pending_display: capped ? "10,000+" : String(pending),
+    upserts,
+    deletes,
+    submitted,
+    component_counts_exact: !capped,
+    oldest_queued_at: oldest,
+  };
+};
+
+async function outboxHasRows(env) {
+  const row = await env.DB.prepare(OUTBOX_EXISTS_SQL).first();
+  const hasRows = Number(row?.has_rows);
+  if (hasRows !== 0 && hasRows !== 1) {
+    throw new Error("the vector backlog existence receipt is invalid");
+  }
+  return hasRows === 1;
+}
+
 /** Mark the full projection verified only across one exact, empty-queue cut. */
-async function markProjectionVerifiedIfExact(env, lease) {
+async function markProjectionVerifiedIfExact(env, lease, {
+  expectedVectorCount = null,
+} = {}) {
   const description = await env.VECTORIZE.describe();
   const vectorCount = Number(
     description?.vectorCount ?? description?.vectorsCount ?? description?.count,
   );
   if (!Number.isSafeInteger(vectorCount) || vectorCount < 0) return false;
+  const expected = expectedVectorCount === null ? null : Number(expectedVectorCount);
+  if (expected !== null && (!Number.isSafeInteger(expected) || expected < 0)) return false;
+  if (expected !== null && vectorCount !== expected) return false;
   const fence = await projectionFenceState(env);
   const processed = fence.mutationId === null
     ? true
@@ -2006,15 +2088,25 @@ async function markProjectionVerifiedIfExact(env, lease) {
   }
   const result = await env.DB.prepare(
     `UPDATE install_state
-        SET vector_projection_status = 'verified'
+        SET vector_projection_status = 'verified',
+            vector_projection_bootstrap_base_count = ?2
       WHERE id = 1 AND schema_version >= 12
         AND vector_projection_status = 'pending'
         AND (vector_projection_bootstrap_high_water IS NULL OR
              vector_projection_bootstrap_cursor = vector_projection_bootstrap_high_water)
         AND COALESCE(vector_projection_mutation_id, '') = ?1
-        AND NOT EXISTS (SELECT 1 FROM vector_outbox)
-        AND (SELECT count(*) FROM chunks) = ?2`
-  ).bind(fence.mutationId || "", vectorCount).run();
+        AND NOT EXISTS (
+          SELECT 1 FROM vector_outbox
+           WHERE queued_at >= -9223372036854775808 LIMIT 1
+        )
+        AND ?2 = CASE WHEN ?3 = 1 THEN ?4
+          ELSE ${EXACT_PROJECTED_CHUNKS_SQL} END`
+  ).bind(
+    fence.mutationId || "",
+    vectorCount,
+    expected !== null ? 1 : 0,
+    expected ?? 0,
+  ).run();
   return drainLeaseChanges(result) === 1;
 }
 
@@ -2181,9 +2273,16 @@ async function drainOutboxBatch(env, {
   inFlightMutationIds = new Set(),
   skipUpserts = false,
 } = {}) {
+  const remainingReceipt = async (known = 0) => {
+    const hasRemaining = await outboxHasRows(env);
+    return {
+      has_remaining: hasRemaining,
+      remaining: hasRemaining ? Math.max(1, Number(known || 0)) : 0,
+      remaining_is_lower_bound: hasRemaining,
+    };
+  };
   const confirmAcceptedRows = async (rows) => {
     const confirmed = await confirmSubmittedVectors(env, rows, lease);
-    const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
     return {
       drained: confirmed.confirmed,
       deleted: confirmed.confirmedDeletes,
@@ -2191,7 +2290,7 @@ async function drainOutboxBatch(env, {
       submitted: 0,
       waiting: confirmed.waiting,
       failed: confirmed.retrying,
-      remaining: Number(rest?.n || 0),
+      ...await remainingReceipt(confirmed.waiting + confirmed.retrying),
       errors: confirmed.retrying ? ["accepted vector state was not visible and was re-queued"] : [],
       observed_mutation_ids: [...new Set(rows.map((row) => row.submitted_mutation_id))],
     };
@@ -2207,6 +2306,7 @@ async function drainOutboxBatch(env, {
        LEFT JOIN vector_outbox_retry_state s
          ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
       WHERE o.submitted_mutation_id IS NOT NULL
+        AND o.queued_at >= -9223372036854775808
       ORDER BY o.queued_at LIMIT ?1`
   ).bind(batchSize).all();
   const submittedByThisInvocation = submittedRows?.length && submittedRows.every((row) =>
@@ -2222,11 +2322,10 @@ async function drainOutboxBatch(env, {
   const fence = await projectionFenceState(env);
   const fenceWasSubmittedHere = fence.mutationId && inFlightMutationIds.has(fence.mutationId);
   if (!fenceWasSubmittedHere && !await projectionFenceProcessed(env, fence, lease)) {
-    const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
-    const remaining = Number(rest?.n || 0);
     return {
       drained: 0, deleted: 0, upserted: 0, submitted: 0,
-      waiting: remaining, failed: 0, remaining, errors: [],
+      waiting: 1, failed: 0, errors: [],
+      ...await remainingReceipt(1),
     };
   }
 
@@ -2239,7 +2338,8 @@ async function drainOutboxBatch(env, {
        FROM vector_outbox o
        LEFT JOIN vector_outbox_retry_state s
          ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
-      WHERE o.op = 'delete' AND o.submitted_mutation_id IS NULL
+      WHERE o.op = 'delete' AND o.queued_at >= -9223372036854775808
+        AND o.submitted_mutation_id IS NULL
         AND s.quarantined_at IS NULL
         AND COALESCE(s.next_attempt_at,0) <= ?1
       ORDER BY o.queued_at LIMIT ?2`
@@ -2250,10 +2350,10 @@ async function drainOutboxBatch(env, {
       : deletePending;
     const submission = await submitQueuedDeletes(env, selected, lease);
     const submitted = submission.submitted;
-    const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
     return {
       drained: 0, deleted: 0, upserted: 0, submitted, waiting: submitted,
-      failed: 0, remaining: Number(rest?.n || 0), errors: [],
+      failed: 0, errors: [],
+      ...await remainingReceipt(submitted),
       submission_mutation_id: submission.mutationId,
     };
   }
@@ -2262,10 +2362,10 @@ async function drainOutboxBatch(env, {
   // only clears what that walk cannot page (deletes, and rows already submitted).
   if (skipUpserts) {
     if (submittedRows?.length) return confirmAcceptedRows(submittedRows);
-    const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
     return {
       drained: 0, deleted: 0, upserted: 0, submitted: 0, waiting: 0,
-      failed: 0, remaining: Number(rest?.n || 0), errors: [],
+      failed: 0, errors: [],
+      ...await remainingReceipt(0),
     };
   }
   const { results: pending } = await env.DB.prepare(
@@ -2277,7 +2377,8 @@ async function drainOutboxBatch(env, {
      FROM vector_outbox o JOIN chunks c ON c.chunk_uid = o.chunk_uid
      LEFT JOIN vector_outbox_retry_state s
        ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
-     WHERE o.op = 'upsert' AND o.submitted_mutation_id IS NULL
+     WHERE o.op = 'upsert' AND o.queued_at >= -9223372036854775808
+       AND o.submitted_mutation_id IS NULL
        AND s.quarantined_at IS NULL
        AND COALESCE(s.next_attempt_at,0) <= ?1
      ORDER BY o.queued_at LIMIT ?2`
@@ -2287,10 +2388,10 @@ async function drainOutboxBatch(env, {
 
   if (!pending?.length) {
     if (submittedRows?.length) return confirmAcceptedRows(submittedRows);
-    const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
     return {
       drained: 0, deleted: 0, upserted: 0, submitted: 0, waiting: 0,
-      failed: 0, remaining: Number(rest?.n || 0), errors: [],
+      failed: 0, errors: [],
+      ...await remainingReceipt(0),
     };
   }
 
@@ -2418,7 +2519,6 @@ async function drainOutboxBatch(env, {
     }))).catch(() => {});
   }
 
-  const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
   return {
     drained: 0,
     deleted: 0,
@@ -2426,7 +2526,7 @@ async function drainOutboxBatch(env, {
     submitted,
     waiting: submitted,
     failed: poisoned.length,
-    remaining: Number(rest?.n || 0),
+    ...await remainingReceipt(submitted + poisoned.length),
     errors: poisoned.slice(0, 3).map((p) => p.error),
     submission_mutation_id: submissionMutationId,
   };
@@ -2449,14 +2549,13 @@ async function drainOutboxWithLease(env, options, lease) {
     : 10 * 60 * 1_000;
   const startedAt = lease.startedAt;
 
-  const initialDepth = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
-  const initialRemaining = Number(initialDepth?.n);
-  if (!Number.isSafeInteger(initialRemaining) || initialRemaining < 0) {
-    throw new Error("vector drain initial backlog is invalid");
-  }
+  const initialHasRemaining = await outboxHasRows(env);
   let result = {
     drained: 0, deleted: 0, upserted: 0, submitted: 0, waiting: 0, failed: 0,
-    remaining: initialRemaining, errors: [], busy: false,
+    remaining: initialHasRemaining ? 1 : 0,
+    remaining_is_lower_bound: initialHasRemaining,
+    has_remaining: initialHasRemaining,
+    errors: [], busy: false,
   };
   let reservedQueries = DRAIN_LEASE_ACQUIRE_QUERIES + DRAIN_LEASE_RELEASE_QUERIES +
     DRAIN_PROJECTION_VERIFY_QUERIES + DRAIN_INITIAL_DEPTH_QUERIES +
@@ -2501,10 +2600,14 @@ async function drainOutboxWithLease(env, options, lease) {
     result.waiting = trackedWaiting || Number(part.waiting || 0);
     result.failed += Number(part.failed || 0);
     result.remaining = Number(part.remaining || 0);
+    result.remaining_is_lower_bound = part.remaining_is_lower_bound === true;
+    result.has_remaining = part.has_remaining === true;
     result.errors.push(...(part.errors || []).slice(0, Math.max(0, 3 - result.errors.length)));
-    if (result.remaining === 0 && options.disableBootstrapAdvance !== true) {
+    if (!result.has_remaining && options.disableBootstrapAdvance !== true) {
       const bootstrap = await bootstrapVectorProjectionPage(env, { now: now() });
       result.remaining = bootstrap.pending;
+      result.has_remaining = bootstrap.pending > 0;
+      result.remaining_is_lower_bound = bootstrap.pending > 0;
       if (bootstrap.pending > 0) {
         result.waiting = 0;
         continue;
@@ -2514,12 +2617,12 @@ async function drainOutboxWithLease(env, options, lease) {
     // already become visible. Once that check reports waiting, stop rather
     // than spinning inside one Worker invocation. A later manual/cron call
     // confirms it without another embedding bill.
-    if (!result.remaining) break;
+    if (!result.has_remaining) break;
     if (part.waiting && !part.submitted) break;
     if (!part.drained && !part.submitted) break;
   }
 
-  if (result.remaining === 0) {
+  if (!result.has_remaining) {
     result.projection_verified = await markProjectionVerifiedIfExact(env, lease);
   }
   return result;
@@ -2550,9 +2653,9 @@ export async function drainOutbox(env, options = {}) {
   const startedAt = now();
   const lease = await acquireDrainLease(env, { now: startedAt });
   if (!lease.acquired) {
-    let rest;
+    let hasRemaining;
     try {
-      rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
+      hasRemaining = await outboxHasRows(env);
     } catch {
       throw new Error("vector drain is busy and its remaining backlog could not be verified");
     }
@@ -2563,7 +2666,9 @@ export async function drainOutbox(env, options = {}) {
       submitted: 0,
       waiting: 0,
       failed: 0,
-      remaining: Number(rest?.n || 0),
+      remaining: hasRemaining ? 1 : 0,
+      remaining_is_lower_bound: hasRemaining,
+      has_remaining: hasRemaining,
       errors: [],
       busy: true,
       retry_after_seconds: lease.retryAfterSeconds,
@@ -5340,7 +5445,9 @@ async function acceleratedBootstrapReceipt(env, phase, blocked = null, options =
     vectorReadiness(env),
   ]);
   const total = Number(counts?.n);
-  const historicalConfirmed = state.baseCount + Number(batches?.confirmed || 0);
+  const historicalConfirmed = state.status === "verified"
+    ? state.baseCount
+    : state.baseCount + Number(batches?.confirmed || 0);
   const pendingUpserts = Number(queue?.pending_upserts || 0);
   const queued = Number(queue?.queued || 0);
   const submitted = Number(queue?.submitted || 0);
@@ -5388,7 +5495,7 @@ async function acceleratedBootstrapReceipt(env, phase, blocked = null, options =
     retrying,
     complete,
     vector_ready: readiness.ready === true,
-    expected_vectors: readiness.expected_vectors,
+    expected_vectors: total,
     actual_vectors: readiness.actual_vectors,
     // The fields below exist only for a CLI that declared receipt contract 2.
     // A 0.4.1-kit CLI validates receipts against an exact field list, so a new
@@ -6434,7 +6541,20 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
           AND COALESCE(vector_projection_bootstrap_cursor,'')=
               COALESCE(vector_projection_bootstrap_high_water,'')`
     ).run();
-    phase = await markProjectionVerifiedIfExact(env, lease) ? "complete" : "waiting";
+    const expected = await env.DB.prepare(
+      `SELECT MAX(
+                i.vector_projection_bootstrap_base_count +
+                  COALESCE(SUM(CASE WHEN b.status='confirmed' THEN b.row_count ELSE 0 END),0),
+                COALESCE((SELECT SUM(chunks) FROM corpus_stats), 0)
+              ) AS n
+         FROM install_state i
+         LEFT JOIN vector_bootstrap_batches b
+           ON b.epoch=i.vector_projection_bootstrap_epoch
+        WHERE i.id=1`,
+    ).first();
+    phase = await markProjectionVerifiedIfExact(env, lease, {
+      expectedVectorCount: Number(expected?.n),
+    }) ? "complete" : "waiting";
     // A residue epoch's base count never counts rows the ordinary drain
     // projected after the walk closed (rows released by vector-retry), so its
     // ledger cannot certify the corpus on its own. Rebase in the verifying
@@ -6650,20 +6770,9 @@ export async function reindex(env, { source = null, dryRun = true, bootstrap = f
 }
 
 export async function outboxDepth(env) {
-  const row = await env.DB.prepare(
-    `SELECT count(*) AS n, min(queued_at) AS oldest,
-            sum(CASE WHEN op = 'upsert' THEN 1 ELSE 0 END) AS upserts,
-            sum(CASE WHEN op = 'delete' THEN 1 ELSE 0 END) AS deletes,
-            sum(CASE WHEN submitted_mutation_id IS NOT NULL THEN 1 ELSE 0 END) AS submitted
-     FROM vector_outbox`
-  ).first();
-  return {
-    pending: Number(row?.n || 0),
-    upserts: Number(row?.upserts || 0),
-    deletes: Number(row?.deletes || 0),
-    submitted: Number(row?.submitted || 0),
-    oldest_queued_at: row?.oldest ?? null,
-  };
+  return boundedOutboxReceipt(
+    await env.DB.prepare(BOUNDED_OUTBOX_SUMMARY_SQL).first(),
+  );
 }
 
 /**
@@ -6673,7 +6782,7 @@ export async function outboxDepth(env) {
  * those observations, the newer queue/fence makes this fail closed. A write
  * that starts after the D1 read simply starts after this point-in-time check.
  */
-export async function vectorReadiness(env) {
+export async function vectorReadiness(env, { outbox = null } = {}) {
   let description;
   try {
     description = await env.VECTORIZE.describe();
@@ -6687,6 +6796,9 @@ export async function vectorReadiness(env) {
     throw new Error("the vector index returned an invalid vector count");
   }
 
+  const backlog = outbox && Number.isSafeInteger(outbox.pending)
+    ? outbox
+    : await outboxDepth(env);
   const state = await env.DB.prepare(
     `SELECT schema_version,
             outbox_generation,
@@ -6696,21 +6808,26 @@ export async function vectorReadiness(env) {
             vector_projection_bootstrap_epoch AS bootstrap_epoch,
             vector_projection_bootstrap_cursor AS bootstrap_cursor,
             vector_projection_bootstrap_high_water AS bootstrap_high_water,
-            (SELECT count(*) FROM chunks) AS expected_vectors,
-            (SELECT count(*) FROM vector_outbox) AS pending,
-            (SELECT count(*) FROM vector_outbox
-              WHERE submitted_mutation_id IS NOT NULL) AS submitted,
-            (SELECT min(queued_at) FROM vector_outbox) AS oldest_queued_at
+            vector_projection_bootstrap_base_count AS expected_vectors,
+            (SELECT COALESCE(sum(chunks), 0) FROM corpus_stats) AS live_vectors
        FROM install_state WHERE id = 1`
   ).first();
   if (!state || Number(state.schema_version) < 12) {
     throw new Error("the vector visibility receipt schema is not active");
   }
-  const expected = Number(state.expected_vectors);
-  const pending = Number(state.pending);
-  const submitted = Number(state.submitted);
+  const verifiedVectors = Number(state.expected_vectors);
+  // `live_vectors` only improves the informational pending-state lower bound.
+  // Readiness is already false while pending, so an older narrow adapter that
+  // omits it may safely retain the last verified count rather than fail a read.
+  const liveVectors = Number(state.live_vectors ?? state.expected_vectors);
+  const status = String(state.projection_status || "");
+  const expected = status === "verified"
+    ? verifiedVectors
+    : Math.max(verifiedVectors, liveVectors);
+  const pending = Number(backlog.pending);
+  const submitted = Number(backlog.submitted);
   const outboxGeneration = Number(state.outbox_generation ?? 0);
-  if (![expected, pending, submitted, outboxGeneration]
+  if (![expected, verifiedVectors, liveVectors, pending, submitted, outboxGeneration]
       .every((value) => Number.isSafeInteger(value) && value >= 0) ||
       submitted > pending) {
     throw new Error("the vector readiness counts are invalid");
@@ -6735,7 +6852,6 @@ export async function vectorReadiness(env) {
   }
 
   const countsMatch = vectorCount === expected;
-  const status = String(state.projection_status || "");
   const bootstrapEpoch = Number(state.bootstrap_epoch);
   if (!["verified", "pending", "bootstrap_required"].includes(status) ||
       !Number.isSafeInteger(bootstrapEpoch) || bootstrapEpoch < 0) {
@@ -6781,12 +6897,16 @@ export async function vectorReadiness(env) {
     ready,
     reason,
     expected_vectors: expected,
+    expected_vectors_exact: status === "verified",
     actual_vectors: vectorCount,
     pending,
+    pending_is_capped: backlog.pending_is_capped === true,
+    pending_display: backlog.pending_display,
     submitted,
+    submitted_counts_exact: backlog.component_counts_exact === true,
     outbox_generation: outboxGeneration,
     mutation_id: mutationId,
-    oldest_queued_at: state.oldest_queued_at ?? null,
+    oldest_queued_at: backlog.oldest_queued_at ?? null,
     mutation_submitted_at: state.mutation_submitted_at ?? null,
     projection_status: status,
     bootstrap_epoch: bootstrapEpoch,
@@ -6810,13 +6930,33 @@ export async function vectorReadiness(env) {
  * way to fail. The exclusive leased drain later removes the vectors to reclaim
  * the space.
  */
-export async function forget(env, { docUids = [], source = null, dryRun = true } = {}) {
+export async function forget(env, {
+  docUids = [],
+  source = null,
+  sourceHighWater = null,
+  dryRun = true,
+} = {}) {
   let targets = docUids;
   if (source) {
-    const { results } = await env.DB.prepare("SELECT doc_uid FROM documents WHERE source = ?1").bind(source).all();
+    const boundedSource = Number.isSafeInteger(sourceHighWater) && sourceHighWater >= 0;
+    const { results } = await env.DB.prepare(
+      `SELECT doc_uid FROM documents
+        WHERE source = ?1 AND deleted_at IS NULL
+          ${boundedSource ? "AND rowid <= ?2" : ""}`,
+    ).bind(...(boundedSource ? [source, sourceHighWater] : [source])).all();
     targets = [...new Set([...targets, ...(results || []).map((r) => r.doc_uid)])];
   }
-  if (!targets.length) return { documents: 0, chunks: 0, vectors: 0, dry_run: dryRun, targets: [] };
+  if (!targets.length) return {
+    documents: 0,
+    chunks: 0,
+    vectors: 0,
+    targeted_documents: 0,
+    targeted_chunks: 0,
+    document_count_exact: true,
+    chunk_count_exact: true,
+    dry_run: dryRun,
+    targets: [],
+  };
 
   // D1 accepts at most 100 bound variables in one statement. Source-level
   // forget routinely targets hundreds or thousands of documents, so every
@@ -6844,19 +6984,31 @@ export async function forget(env, { docUids = [], source = null, dryRun = true }
   // when the readable id was too long. Deleting by chunk_uid alone would leave
   // those vectors orphaned and still competing for retrieval slots.
   if (dryRun) {
-    return { documents: targets.length, chunks: chunkUids.length, vectors: chunkUids.length, dry_run: true, targets };
+    return {
+      documents: targets.length,
+      chunks: chunkUids.length,
+      vectors: chunkUids.length,
+      targeted_documents: targets.length,
+      targeted_chunks: chunkUids.length,
+      document_count_exact: true,
+      chunk_count_exact: true,
+      dry_run: true,
+      targets,
+    };
   }
 
   // D1 first. The FTS index follows via the delete trigger, and ON DELETE
   // CASCADE removes the chunks with their document.
   const queuedAt = Date.now();
+  let deletedDocuments = 0;
+  let deletedChunks = 0;
   for (const group of groups) {
     const marks = group.map((_, i) => "?" + (i + 1)).join(",");
     const groupSet = new Set(group);
     const groupSources = [...new Set(documentRows
       .filter((row) => groupSet.has(row.doc_uid))
       .map((row) => row.source))];
-    await env.DB.batch([
+    const receipts = await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at, attempts, last_error)
          SELECT chunk_uid, COALESCE(vector_id, chunk_uid), 'delete', ?${group.length + 1}, 0, NULL
@@ -6865,8 +7017,12 @@ export async function forget(env, { docUids = [], source = null, dryRun = true }
            vector_id=excluded.vector_id, op='delete', queued_at=excluded.queued_at,
            attempts=0, last_error=NULL`
       ).bind(...group, queuedAt),
-      env.DB.prepare(`DELETE FROM chunks WHERE doc_uid IN (${marks})`).bind(...group),
-      env.DB.prepare(`DELETE FROM documents WHERE doc_uid IN (${marks})`).bind(...group),
+      env.DB.prepare(
+        `DELETE FROM chunks WHERE doc_uid IN (${marks}) RETURNING chunk_uid`,
+      ).bind(...group),
+      env.DB.prepare(
+        `DELETE FROM documents WHERE doc_uid IN (${marks}) RETURNING doc_uid`,
+      ).bind(...group),
       ...groupSources.map((src) => env.DB.prepare(
         `INSERT INTO corpus_stats (source, documents, chunks, last_ingest_at)
          SELECT ?1, COUNT(DISTINCT documents.doc_uid), COUNT(chunks.chunk_uid),
@@ -6878,6 +7034,15 @@ export async function forget(env, { docUids = [], source = null, dryRun = true }
            documents=excluded.documents, chunks=excluded.chunks`
       ).bind(src)),
     ]);
+    if (!Array.isArray(receipts) || receipts.length < 3) {
+      throw new Error("the forget delete receipts were incomplete");
+    }
+    deletedChunks += Array.isArray(receipts[1]?.results)
+      ? receipts[1].results.length
+      : drainLeaseChanges(receipts[1]);
+    deletedDocuments += Array.isArray(receipts[2]?.results)
+      ? receipts[2].results.length
+      : drainLeaseChanges(receipts[2]);
   }
 
   // Physical vector deletion is deliberately enqueue-only here. `drainOutbox`
@@ -6888,9 +7053,21 @@ export async function forget(env, { docUids = [], source = null, dryRun = true }
   // retryable after crashes or a busy drain.
   const vectors = 0;
 
+  const documentCountExact = deletedDocuments === targets.length;
+  const chunkCountExact = deletedChunks === chunkUids.length;
+  const overlapped = !documentCountExact || !chunkCountExact;
   return {
-    documents: targets.length, chunks: chunkUids.length, vectors,
-    vector_cleanup_queued: chunkUids.length,
+    documents: deletedDocuments,
+    chunks: deletedChunks,
+    targeted_documents: targets.length,
+    targeted_chunks: chunkUids.length,
+    document_count_exact: documentCountExact,
+    chunk_count_exact: chunkCountExact,
+    ...(overlapped ? {
+      count_note: "Another operation removed some rows before this operation reached them.",
+    } : {}),
+    vectors,
+    vector_cleanup_queued: deletedChunks,
     dry_run: false, vector_error: null, targets,
   };
 }

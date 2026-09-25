@@ -175,7 +175,11 @@ const runVariant = async (name) => {
 
   const report = await readExactDocumentReport(env, { now: () => 1_760_000_000_000 });
   assert.deepEqual(normalizedReportRows(report.rows), expectedSummary(database));
-  assert.equal(report.summary.exact, true);
+  assert.equal(report.summary.exact, false);
+  assert.equal(report.summary.document_counts_exact, true);
+  assert.equal(report.summary.chunk_counts_exact, true);
+  assert.equal(report.summary.pending_vector_counts_exact, false);
+  assert.equal(report.summary.pending_vectors_approximate, true);
   assert.ok(report.summary.document_pages > 1 && report.summary.chunk_pages > 1,
     JSON.stringify(report.summary));
   const corpusStatements = statementTimings.filter(({ sql }) =>

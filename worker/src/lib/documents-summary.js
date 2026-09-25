@@ -31,7 +31,8 @@ const HOT_SUMMARY_SQL = `
    ORDER BY names.source`;
 
 const SOURCE_DOCUMENT_COUNT_SQL = `
-  SELECT COUNT(*) AS documents
+  SELECT COUNT(*) AS documents,
+         COALESCE(MAX(rowid), 0) AS document_high_water
     FROM documents
    WHERE source = ?1 AND deleted_at IS NULL`;
 
@@ -48,7 +49,11 @@ const REPORT_MARKER_SQL = `
          (SELECT COUNT(*) FROM sources) AS source_count,
          COALESCE(i.vector_projection_status, '') AS vector_projection_status,
          COALESCE(i.vector_projection_mutation_id, '') AS vector_projection_mutation_id,
-         COALESCE(i.vector_projection_submitted_at, 0) AS vector_projection_submitted_at
+         COALESCE(i.vector_projection_submitted_at, 0) AS vector_projection_submitted_at,
+         EXISTS(
+           SELECT 1 FROM vector_outbox
+            WHERE queued_at >= -9223372036854775808 LIMIT 1
+         ) AS outbox_pending
     FROM install_state i
    WHERE i.id = 1`;
 
@@ -124,11 +129,12 @@ const normalizedMarker = (row) => {
     vector_projection_status: safeMarkerText(row.vector_projection_status, "projection status"),
     vector_projection_mutation_id: safeMarkerText(row.vector_projection_mutation_id, "projection mutation"),
     vector_projection_submitted_at: safeWhole(row.vector_projection_submitted_at, "projection timestamp"),
+    outbox_pending: safeWhole(row.outbox_pending ?? 0, "outbox state"),
   });
 };
 
 const sameMarker = (left, right) =>
-  Object.keys(left).every((key) => left[key] === right[key]);
+  Object.keys(left).every((key) => key === "outbox_pending" || left[key] === right[key]);
 
 const emptyReportRow = (source) => ({
   source_type: source,
@@ -139,7 +145,7 @@ const emptyReportRow = (source) => ({
   last_ingested: null,
 });
 
-const publicReportRow = (row) => ({
+const publicReportRow = (row, pendingVectorCountsExact) => ({
   source_type: row.source_type,
   documents: row.logical_documents,
   logical_documents: row.logical_documents,
@@ -150,6 +156,7 @@ const publicReportRow = (row) => ({
   total: row.chunks,
   embedded: Math.max(0, row.chunks - row.pending_vectors),
   pending_vectors: row.pending_vectors,
+  pending_vector_counts_exact: pendingVectorCountsExact,
   last_ingested: row.last_ingested,
 });
 
@@ -185,13 +192,20 @@ export async function readDocumentSummary(env) {
 }
 
 /** Exact source-scoped preflight for a destructive forget confirmation. */
-export async function readExactSourceDocumentCount(env, source) {
+export async function readExactSourceForgetPreview(env, source) {
   const normalized = String(source || "");
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(normalized)) {
     throw new TypeError("source document count needs a normalized source name");
   }
   const row = await env.DB.prepare(SOURCE_DOCUMENT_COUNT_SQL).bind(normalized).first();
-  return safeWhole(row?.documents, "source document count");
+  return {
+    documents: safeWhole(row?.documents, "source document count"),
+    document_high_water: safeWhole(row?.document_high_water, "source document high water"),
+  };
+}
+
+export async function readExactSourceDocumentCount(env, source) {
+  return (await readExactSourceForgetPreview(env, source)).documents;
 }
 
 /**
@@ -302,13 +316,18 @@ export async function readExactDocumentReport(env, {
   }
   const at = Number(now());
   if (!Number.isSafeInteger(at) || at < 0) throw new TypeError("documents report clock is invalid");
+  const pendingVectorCountsExact = opening.outbox_pending === 0 && closing.outbox_pending === 0;
   return {
     rows: [...sourceRows.values()].sort((a, b) => a.source_type.localeCompare(b.source_type))
-      .map(publicReportRow),
+      .map((row) => publicReportRow(row, pendingVectorCountsExact)),
     summary: {
       status: "complete",
       complete: true,
-      exact: true,
+      exact: pendingVectorCountsExact,
+      document_counts_exact: true,
+      chunk_counts_exact: true,
+      pending_vector_counts_exact: pendingVectorCountsExact,
+      pending_vectors_approximate: !pendingVectorCountsExact,
       as_of: new Date(at).toISOString(),
       document_pages: documentPages,
       chunk_pages: chunkPages,

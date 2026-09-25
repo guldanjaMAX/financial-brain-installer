@@ -611,6 +611,27 @@ check("logical documents, extracted chunks, and semantic visibility stay separat
 check("pending semantic visibility stays distinct from keyword search",
   has(cleanReport, "not yet visibility-confirmed for meaning search") &&
     has(cleanReport, "may still be available to keyword search"));
+const approximateCorpus = structuredClone(cleanCorpus);
+approximateCorpus.summary = {
+  ...approximateCorpus.summary,
+  exact: false,
+  document_counts_exact: true,
+  chunk_counts_exact: true,
+  pending_vector_counts_exact: false,
+};
+approximateCorpus.rows = approximateCorpus.rows.map((row) => ({
+  ...row,
+  pending_vector_counts_exact: false,
+}));
+const approximateReport = renderReportHtml({
+  manifest: cleanManifest,
+  acceptance: passingAcceptance,
+  corpus: approximateCorpus,
+});
+check("an indexing report keeps document and chunk timing exact but labels semantic counts approximate",
+  has(approximateReport, "Exact corpus snapshot counted at 2026-08-16T01:02:03.000Z") &&
+    has(approximateReport, "approximately 4,015") &&
+    has(approximateReport, "Approximately 87 extracted chunks"));
 check("authenticated registry receipts, not manifest toggles, name live status",
   has(cleanReport, "Authenticated source receipts") &&
     has(cleanReport, "Only the Brain's live source registry") &&

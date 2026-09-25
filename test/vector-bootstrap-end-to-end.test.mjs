@@ -97,6 +97,14 @@ function seedStaleBrain(db, visible, { epoch = 4, stranded = 1200, drainedSince 
     db.prepare("INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at) VALUES (?1, ?1, 'delete', 2100)").run(uid);
     forgotten.push(uid);
   }
+  db.prepare(
+    `INSERT INTO corpus_stats (source, documents, chunks)
+     SELECT 'drive', COUNT(DISTINCT documents.doc_uid), COUNT(chunks.chunk_uid)
+       FROM documents LEFT JOIN chunks ON chunks.doc_uid=documents.doc_uid
+      WHERE documents.source='drive' AND documents.deleted_at IS NULL
+     ON CONFLICT(source) DO UPDATE SET
+       documents=excluded.documents, chunks=excluded.chunks`,
+  ).run();
   db.prepare("UPDATE install_state SET vector_projection_status='pending' WHERE id=1").run();
   return { stranded: uids, forgotten };
 }

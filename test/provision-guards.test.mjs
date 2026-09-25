@@ -369,6 +369,7 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
 
   const sourcePreview = {
     dry_run: true, documents: 1, document_count_exact: true, chunks: null, vectors: null,
+    document_high_water: 7,
     source: "drive", would_unregister_source: true,
     source_unregistered: false, registry_event_recorded: false,
   };
@@ -376,6 +377,7 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
     validateSourceForgetPreview(sourcePreview, "drive") === sourcePreview);
   for (const [label, preview] of [
     ["inexact document count", { ...sourcePreview, document_count_exact: false }],
+    ["missing document high water", { ...sourcePreview, document_high_water: undefined }],
     ["enumerated target detail", { ...sourcePreview, targets: ["drive:one"] }],
     ["missing registry capability", { ...sourcePreview, would_unregister_source: undefined }],
     ["already-mutated preview", { ...sourcePreview, source_unregistered: true }],
@@ -393,6 +395,18 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   };
   check("a source forget receipt binds document deletion to registry finalization",
     validateSourceForgetReceipt(sourceReceipt, "drive") === sourceReceipt);
+  const overlapReceipt = {
+    ...sourceReceipt,
+    documents: 0,
+    chunks: 1,
+    targeted_documents: 1,
+    targeted_chunks: 2,
+    document_count_exact: false,
+    chunk_count_exact: false,
+    count_note: "Another operation removed some rows before this operation reached them.",
+  };
+  check("an overlapping source forget receipt remains valid but plainly inexact",
+    validateSourceForgetReceipt(overlapReceipt, "drive") === overlapReceipt);
   for (const [label, receipt] of [
     ["missing registry deletion", { ...sourceReceipt, source_unregistered: false }],
     ["missing audit event", { ...sourceReceipt, registry_event_recorded: false }],
@@ -417,7 +431,8 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
     start >= 0 && end > start && !/d1Query\s*\(/.test(boundary), boundary.slice(-500));
   check("brain forget uses its exact same-operation preview and final receipt instead of the hot summary",
     start >= 0 && end > start && !/liveSourceCounts\s*\(/.test(boundary) &&
-      /previewSourceForget/.test(boundary) && /sourceUnregistered/.test(boundary),
+      /previewSourceForget/.test(boundary) && /sourceUnregistered/.test(boundary) &&
+      /preview_documents/.test(source) && /preview_document_high_water/.test(source),
     boundary.slice(0, 1200));
 }
 

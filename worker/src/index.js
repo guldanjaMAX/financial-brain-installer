@@ -120,7 +120,7 @@ import {
 } from "./lib/financial-map-question.js";
 import {
   readExactDocumentReport,
-  readExactSourceDocumentCount,
+  readExactSourceForgetPreview,
 } from "./lib/documents-summary.js";
 
 /* ------------------------------------------------------------ retrieval */
@@ -2532,15 +2532,17 @@ async function handleDocuments(env) {
     // How far the vector index trails the text. A brain whose outbox is not
     // draining still answers keyword queries, which is exactly why the number
     // has to be visible rather than inferred from search feeling worse.
+    let backlog = null;
     try {
-      out.vector_backlog = await outboxDepth(env);
+      backlog = await outboxDepth(env);
+      out.vector_backlog = backlog;
     } catch (e) {
       out.vector_backlog = { error: e.message };
     }
     // Queue depth proves work is durable; readiness proves accepted async
     // mutations are actually visible to Vectorize queries. Both are required.
     try {
-      out.vector_readiness = await vectorReadiness(env);
+      out.vector_readiness = await vectorReadiness(env, { outbox: backlog });
     } catch (e) {
       out.vector_readiness = { ready: false, error: e.message };
     }
@@ -3260,9 +3262,9 @@ export default {
             return jsonResponse({ error: "source is not registered", code: "source_not_registered" }, 404);
           }
           if (!confirm) {
-            const documents = await readExactSourceDocumentCount(env, source);
+            const preview = await readExactSourceForgetPreview(env, source);
             return jsonResponse({
-              documents,
+              ...preview,
               document_count_exact: true,
               chunks: null,
               vectors: null,
@@ -3273,15 +3275,35 @@ export default {
               registry_event_recorded: false,
             });
           }
+          const previewDocuments = Number(body?.preview_documents);
+          const previewHighWater = Number(body?.preview_document_high_water);
+          if (!Number.isSafeInteger(previewDocuments) || previewDocuments < 0 ||
+              !Number.isSafeInteger(previewHighWater) || previewHighWater < 0) {
+            return jsonResponse({
+              error: "confirm the exact source preview before deleting",
+              code: "source_forget_preview_required",
+            }, 409);
+          }
+          const current = await readExactSourceForgetPreview(env, source);
+          if (current.documents !== previewDocuments ||
+              current.document_high_water !== previewHighWater) {
+            return jsonResponse({
+              error: "new documents arrived since the preview; preview again",
+              code: "source_forget_preview_changed",
+            }, 409);
+          }
         }
-        const r = await forget(env, { docUids, source, dryRun: !confirm });
+        const r = await forget(env, {
+          docUids,
+          source,
+          sourceHighWater: source ? Number(body.preview_document_high_water) : null,
+          dryRun: !confirm,
+        });
         if (!source) return jsonResponse(r);
         const registry = await finalizeForgottenSource(env, source, r.documents);
         const { targets: _privateTargets, ...bounded } = r;
         return jsonResponse({
           ...bounded,
-          document_count_exact: true,
-          chunk_count_exact: true,
           ...registry,
         });
       }
@@ -3366,6 +3388,7 @@ export default {
             error: "another vector drain is already in progress",
             busy: true,
             remaining: r.remaining,
+            remaining_is_lower_bound: r.remaining_is_lower_bound === true,
             retry_after_seconds: r.retry_after_seconds,
           }, 409);
         }
@@ -3375,6 +3398,7 @@ export default {
           submitted: r.submitted,
           waiting: r.waiting,
           remaining: r.remaining,
+          remaining_is_lower_bound: r.remaining_is_lower_bound === true,
           vector_ready: readiness.ready,
           readiness_reason: readiness.reason,
           expected_vectors: readiness.expected_vectors,
@@ -3434,7 +3458,9 @@ export default {
           // stalled fence run silent for hours. Waiting a cycle or two is
           // normal; the line exists so more than that is visible in a tail.
           else if (!r.paused && !r.busy && !r.submitted && Number(r.waiting) > 0) {
-            console.log(`vector outbox: waiting on confirmation, ${r.remaining} queued`);
+            console.log(r.remaining_is_lower_bound
+              ? "vector outbox: waiting on confirmation; queued work remains"
+              : `vector outbox: waiting on confirmation, ${r.remaining} queued`);
           }
         } else {
           console.warn("vector outbox: scheduled drain failed");

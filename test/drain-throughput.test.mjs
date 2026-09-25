@@ -21,6 +21,7 @@ const mkEnv = (rows, upserted, deleted = [], updates = [], statementSql = []) =>
           if (/FROM json_each/.test(q)) {
             try { return { n: JSON.parse(b[0]).length }; } catch { return { n: 0 }; }
           }
+          if (/AS has_rows/.test(q)) return { has_rows: rows.length > 0 ? 1 : 0 };
           return { n: 1 };
         },
         run: async () => /UPDATE install_state/.test(q)

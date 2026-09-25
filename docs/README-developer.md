@@ -157,10 +157,14 @@ count". The explicit owner-admin `POST
 `/api/admin/brain/documents/report` path supplies those exact totals. It walks
 documents and chunks through separate fixed keyset pages, caps chunk rows per
 statement, and compares cheap opening and closing corpus, source, outbox, and
-projection markers before returning a complete result. It refuses if a
-supported mutation overlaps the report. Whole-source forget preview and
-completion use that operation's guarded exact receipts, never the
-informational documents rows.
+projection markers before returning a complete result. Document and chunk
+totals remain exact under that fence. Pending-vector totals are exact only when
+the outbox is empty at both ends; while indexing, the report labels them
+approximate because a confirmed outbox row can be deleted between pages.
+Whole-source forget preview and completion use that operation's guarded
+receipts, never the informational documents rows. Confirmation carries the
+preview count and document-row high-water mark, and final removed counts come
+from the D1 delete receipts.
 
 The diagnostic exits successfully for a coherent `ready`,
 `recoverable_queued_work`, or `queued_work_present` observation because the

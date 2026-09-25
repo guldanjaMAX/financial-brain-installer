@@ -1004,7 +1004,12 @@ brain forget ./brain.manifest.json --source documents
 Shows you exactly what would be removed. Nothing goes until you add `--yes`.
 The preview also proves that the deployed Worker can remove the source registry
 row and record the audit event behind the same write barrier. If it cannot,
-the CLI refuses before authorizing document deletion.
+the CLI refuses before authorizing document deletion. Confirmation is bound to
+that preview's exact document count and row high-water mark. If a new document
+arrives before confirmation, the command refuses and asks for a new preview.
+The final receipt reports what this operation actually removed; if another
+forget overlapped it, the receipt says the counts are not exact rather than
+claiming the original enumeration as the removal count.
 
 ---
 

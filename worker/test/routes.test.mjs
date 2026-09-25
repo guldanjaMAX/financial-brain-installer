@@ -4010,6 +4010,7 @@ function mkForgetEnv({
   registered = true,
   registryProof = true,
   documentIds = ["meeting:1", "meeting:2"],
+  overlapDeletes = false,
 } = {}) {
   const sql = [];
   const queries = [];
@@ -4030,7 +4031,7 @@ function mkForgetEnv({
             _sql: q,
             _args: b,
             all: async () => ({
-              results: /FROM documents WHERE source/.test(q)
+              results: /FROM documents[\s\S]*WHERE source/.test(q)
                 ? documentIds.map((doc_uid) => ({ doc_uid }))
                 : /FROM chunks WHERE doc_uid/.test(q)
                   ? b.flatMap((docUid) => docUid === "meeting:1"
@@ -4047,7 +4048,7 @@ function mkForgetEnv({
                 return { name: b[0] };
               }
               if (/COUNT\(\*\) AS documents[\s\S]*FROM documents[\s\S]*deleted_at IS NULL/.test(q)) {
-                return { documents: documentIds.length };
+                return { documents: documentIds.length, document_high_water: documentIds.length };
               }
               return null;
             },
@@ -4059,7 +4060,19 @@ function mkForgetEnv({
         sql.push("BATCH:" + stmts.length, ...stmts.map((statement) => statement?._sql || ""));
         const registryFinalization = stmts.some((statement) =>
           /source_events[\s\S]*'forget'/.test(statement?._sql || ""));
-        if (!registryFinalization) return stmts.map(() => ({ meta: { changes: 1 } }));
+        if (!registryFinalization) {
+          return stmts.map((statement) => ({
+            meta: {
+              changes: /DELETE FROM documents/.test(statement?._sql || "")
+                ? Math.max(0, statement._args.length - (overlapDeletes ? 1 : 0))
+                : /DELETE FROM chunks/.test(statement?._sql || "")
+                  ? Math.max(0, statement._args.reduce(
+                    (total, uid) => total + (uid === "meeting:1" ? 2 : 1), 0,
+                  ) - (overlapDeletes ? 1 : 0))
+                  : 1,
+            },
+          }));
+        }
         const changes = state.registered && registryProof ? 1 : 0;
         if (changes === 1) {
           state.eventRecorded = true;
@@ -4069,7 +4082,17 @@ function mkForgetEnv({
       },
     },
   };
-  return { env, sql, queries, deleted, state };
+  return { env, sql, queries, deleted, state, documentIds };
+}
+
+async function postConfirmedSourceForget(env, source = "meeting") {
+  const preview = await (await post(env, "/api/admin/brain/forget", { source })).json();
+  return post(env, "/api/admin/brain/forget", {
+    source,
+    confirm: true,
+    preview_documents: preview.documents,
+    preview_document_high_water: preview.document_high_water,
+  });
 }
 
 {
@@ -4082,6 +4105,7 @@ function mkForgetEnv({
     JSON.stringify(b));
   check("and uses one exact indexed source count without enumerating the corpus",
     b.documents === 2 && b.document_count_exact === true && b.chunks === null &&
+      b.document_high_water === 2 &&
       !Object.hasOwn(b, "targets") &&
       queries.some((q) => /COUNT\(\*\) AS documents[\s\S]*source\s*=\s*\?1[\s\S]*deleted_at IS NULL/.test(q)) &&
       !queries.some((q) => /SELECT doc_uid FROM documents WHERE source/.test(q)),
@@ -4090,8 +4114,39 @@ function mkForgetEnv({
   check("or touching the database", !sql.some((q) => /BATCH/.test(q)), JSON.stringify(sql));
 }
 {
+  const { env, sql, documentIds } = mkForgetEnv();
+  const preview = await (await post(env, "/api/admin/brain/forget", { source: "meeting" })).json();
+  documentIds.push("meeting:3");
+  const response = await post(env, "/api/admin/brain/forget", {
+    source: "meeting",
+    confirm: true,
+    preview_documents: preview.documents,
+    preview_document_high_water: preview.document_high_water,
+  });
+  const body = await response.json();
+  check("source forget refuses when new documents arrived after the preview",
+    response.status === 409 && /new documents arrived since the preview; preview again/i.test(body.error || "") &&
+      !sql.some((q) => /BATCH/.test(q)),
+    JSON.stringify({ status: response.status, body, sql }));
+}
+{
+  const { env } = mkForgetEnv({ overlapDeletes: true });
+  const response = await post(env, "/api/admin/brain/forget", {
+    source: "meeting",
+    confirm: true,
+    preview_documents: 2,
+    preview_document_high_water: 2,
+  });
+  const body = await response.json();
+  check("an overlapping forget reports only rows deleted by this operation",
+    response.status === 200 && body.documents === 1 && body.targeted_documents === 2 &&
+      body.document_count_exact === false && body.chunk_count_exact === false &&
+      /another operation removed some rows/i.test(body.count_note || ""),
+    JSON.stringify(body));
+}
+{
   const { env, deleted, sql, state } = mkForgetEnv();
-  const b = await (await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true })).json();
+  const b = await (await postConfirmedSourceForget(env)).json();
   check("confirm actually deletes",
     b.dry_run === false && b.documents === 2 && b.source === "meeting" &&
       b.document_count_exact === true && b.chunk_count_exact === true &&
@@ -4112,7 +4167,7 @@ function mkForgetEnv({
 }
 {
   const { env, state } = mkForgetEnv({ documentIds: [] });
-  const response = await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true });
+  const response = await postConfirmedSourceForget(env);
   const body = await response.json();
   check("an empty registered source is still unregistered by the guarded source forget",
     response.status === 200 && body.documents === 0 && body.source_unregistered === true &&
@@ -4121,7 +4176,9 @@ function mkForgetEnv({
 }
 {
   const { env, sql } = mkForgetEnv({ registered: false });
-  const response = await post(env, "/api/admin/brain/forget", { source: "typo", confirm: true });
+  const response = await post(env, "/api/admin/brain/forget", {
+    source: "typo", confirm: true, preview_documents: 0, preview_document_high_water: 0,
+  });
   const body = await response.json();
   check("a source typo is refused before any forget mutation",
     response.status === 404 && body.code === "source_not_registered" &&
@@ -4133,7 +4190,7 @@ function mkForgetEnv({
   // before the final registry transaction. Both guarded statements affect zero
   // rows, so the live source remains addressable and no audit event is forged.
   const { env, state } = mkForgetEnv({ registryProof: false });
-  const response = await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true });
+  const response = await postConfirmedSourceForget(env);
   const body = await response.json();
   check("a concurrent ingest keeps the source registered and prevents a false forget receipt",
     response.status === 500 && state.registered === true && state.eventRecorded === false &&
@@ -4159,7 +4216,7 @@ function mkForgetEnv({
   // Provider availability cannot make forget partially execute. Content is
   // already unreachable in D1 and the leased drain owns physical cleanup.
   const { env } = mkForgetEnv({ vectorThrows: true });
-  const b = await (await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true })).json();
+  const b = await (await postConfirmedSourceForget(env)).json();
   check("enqueue-only forget does not call an unavailable vector provider",
     b.vector_error === null && b.vector_cleanup_queued === 3, JSON.stringify(b));
   check("and the D1 delete still counted", b.documents === 2);
@@ -4328,6 +4385,9 @@ function mkForgetEnv({
             if (/FROM vector_bootstrap_batches WHERE epoch/.test(sql)) {
               return { confirmed: 0, in_flight: 0 };
             }
+            if (/WITH bounded AS MATERIALIZED/.test(sql)) {
+              return { n: 0, oldest: null, upserts: 0, deletes: 0, submitted: 0 };
+            }
             if (/vector_projection_mutation_id AS mutation_id/.test(sql)) {
               return {
                 schema_version: 13,
@@ -4407,6 +4467,9 @@ function mkForgetEnv({
             if (/FROM vector_bootstrap_batches WHERE epoch/.test(sql)) {
               return { confirmed: 0, in_flight: 0 };
             }
+            if (/WITH bounded AS MATERIALIZED/.test(sql)) {
+              return { n: 0, oldest: null, upserts: 0, deletes: 0, submitted: 0 };
+            }
             if (/vector_projection_mutation_id AS mutation_id/.test(sql)) {
               return {
                 schema_version: 13,
@@ -4483,7 +4546,7 @@ function mkForgetEnv({
             if (/CASE WHEN vector_drain_lease_owner IS NULL/.test(q)) {
               return { held: 1, schema_ready: 1, expires_at: Date.now() + 60_000 };
             }
-            if (/count\(\*\).*vector_outbox/i.test(q)) return { n: 7 };
+            if (/EXISTS[\s\S]*vector_outbox/i.test(q)) return { has_rows: 1 };
             return null;
           },
           all: async () => ({ results: [] }),
@@ -4500,7 +4563,8 @@ function mkForgetEnv({
     const raw = await response.text();
     const body = JSON.parse(raw);
     check("a busy manual drain returns an explicit fail-closed conflict",
-      response.status === 409 && body.busy === true && body.remaining === 7,
+      response.status === 409 && body.busy === true && body.remaining === 1 &&
+        body.remaining_is_lower_bound === true,
       raw);
     check("the busy conflict performs no embedding, vector write, or outbox mutation",
       vectorWrites === 0 && outboxMutations === 0, JSON.stringify({ vectorWrites, outboxMutations }));

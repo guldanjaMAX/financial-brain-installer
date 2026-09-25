@@ -443,9 +443,11 @@ The source-forget path is enqueue-only: it deletes authoritative D1 content and
 queues vector deletes, but never writes Vectorize directly. This makes the
 leased drain the only Vectorize writer. Each drain also maintains a conservative
 900-query internal budget, including lease operations, worst-case hashed-ID
-remaps, cleanup, failure bookkeeping, and final depth. `maxBatches` is a latency
+remaps, cleanup, failure bookkeeping, and indexed existence checks. `maxBatches` is a latency
 preference, not permission to cross that budget; a drain stops cleanly with
-remaining work queued and always reserves its lease-release query.
+remaining work queued and always reserves its lease-release query. It never
+counts the complete outbox before a loop or on a return path. Non-empty drain
+receipts therefore carry a truthful lower bound rather than a fake exact depth.
 
 Vectorize V2 accepts a mutation before that mutation is query-visible. A drain
 therefore has two durable phases. First it records the provider mutation ID on
@@ -456,9 +458,13 @@ for a delete. Only that confirmation deletes the outbox row. A processed receipt
 whose vector is missing or stale is requeued with an explicit failure instead
 of being counted as embedded.
 
-Readiness is similarly exact: D1 chunk count, outbox depth, submitted depth,
-the provider watermark, and Vectorize count must all agree. The documents
-inventory exposes this as `vector_readiness`; `brain health`, `brain test`, the
+Readiness is similarly exact at the decision boundary: the maintained verified
+projection-count receipt, indexed outbox emptiness, provider watermark, and
+Vectorize count must all agree. The empty-queue fence advances that receipt
+from the provider count only after exact row confirmation has preserved the
+previous verified cut. Queue displays count at most 10,001 indexed
+rows and render that cap as `10,000+`; they are not readiness evidence. The
+documents inventory exposes the decision as `vector_readiness`; `brain health`, `brain test`, the
 message-migration completion receipt, and every semantic answer fail or mark
 degradation until it is true. This prevents a non-empty but partially updated
 Vectorize result page from looking like complete semantic retrieval.
@@ -907,8 +913,12 @@ and publishes exact totals only when its opening and closing mutation markers
 match. This removes corpus-sized metadata and chunk joins from the document
 inventory used by health, status, MCP health, meaning answers, and update
 readiness while retaining an on-demand exact count.
-Destructive source removal uses its dry-run and final guarded receipts for both
-the preflight count and the postcondition.
+Pending-vector counts are labeled approximate whenever the outbox is non-empty
+at either report fence, because confirmation deletes do not advance the enqueue
+generation. Destructive source removal binds confirmation to the dry-run count
+and source document-row high-water mark. It deletes only that previewed prefix,
+refuses a changed preview, and reports the actual D1 delete receipts when an
+overlapping operation removed some enumerated rows first.
 
 The D1 diagnostic's chunk-integrity lane is a bounded snapshot, not a collection
 of independent whole-table aggregates. It fixes one integer chunk-id high-water
