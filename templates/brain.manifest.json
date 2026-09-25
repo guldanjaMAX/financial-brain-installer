@@ -245,7 +245,8 @@
         "The bearer value is never stored here. This manifest names only the Worker secret.",
         "After reviewing these mappings, deploy, run brain connect custom-api, then preview",
         "the first pull with brain custom-api <manifest> --dry-run. The structured rows are",
-        "a future financial-map input and are not posted to the ledger."
+        "a future financial-map input and are not posted to the ledger. A real pull resumes",
+        "one durable slice per request and reports saved data separately from meaning search."
       ],
       "enabled": false,
       "display_name": "store dashboard",
@@ -255,7 +256,7 @@
       "cadence_seconds": 86400,
       "timeout_ms": 30000,
       "max_response_bytes": 5242880,
-      "max_rows": 2000,
+      "max_rows": 10000,
       "max_pages": 20,
       "retries": 3,
       "endpoints": [
@@ -264,26 +265,36 @@
           "path": "/sales",
           "row_key": ["store", "period", "revenue_stream"],
           "legacy_row_key": ["store", "period"],
-          "document": {
-            "group_by": ["store", "period"],
-            "title_template": "{{store}}, {{period}} sales",
-            "body_template": "{{store}}, {{period}}: net sales {{sum.net_sales}} across {{row_count}} recorded streams. {{missing.revenue_stream}}\n\n{{rows_table}}",
-            "aggregates": { "net_sales": "sum", "transactions": "sum", "units": "sum", "puppies_sold": "sum" },
-            "formats": { "net_sales": "currency" },
-            "fields": ["store", "period", "revenue_stream", "net_sales", "transactions", "units", "puppies_sold"],
-            "expected_values": {
-              "revenue_stream": ["live_animal", "supplies", "services", "other"]
+          "documents": [
+            {
+              "name": "monthly",
+              "group_by": ["period"],
+              "title_template": "{{period}} sales across all stores",
+              "body_template": "{{period}}: net sales {{sum.net_sales}} across {{row_count}} store and stream rows. {{missing.revenue_stream}}\n\n{{rows_table}}",
+              "aggregates": { "net_sales": "sum", "transactions": "sum", "units": "sum", "puppies_sold": "sum" },
+              "formats": { "net_sales": "currency" },
+              "fields": ["store", "revenue_stream", "net_sales", "transactions", "units", "puppies_sold"],
+              "expected_values": { "revenue_stream": ["live_animal", "supplies", "services", "other"] }
+            },
+            {
+              "name": "store-history",
+              "group_by": ["store"],
+              "title_template": "{{store}} sales by month",
+              "body_template": "{{store}} monthly sales history through {{fetched_date}}.\n\n{{rows_table}}",
+              "aggregates": { "net_sales": "sum", "transactions": "sum", "units": "sum", "puppies_sold": "sum" },
+              "formats": { "net_sales": "currency" },
+              "fields": ["period", "net_sales", "transactions", "units", "puppies_sold"]
             }
-          }
+          ]
         },
         {
           "name": "inventory",
           "path": "/inventory",
           "row_key": ["store", "breed"],
           "document": {
-            "group_by": [],
-            "title_template": "Inventory snapshot {{fetched_date}}",
-            "body_template": "Inventory snapshot for {{fetched_date}}.\n\n{{rows_table}}",
+            "group_by": ["store"],
+            "title_template": "{{store}} inventory snapshot {{fetched_date}}",
+            "body_template": "{{store}} inventory snapshot for {{fetched_date}}.\n\n{{rows_table}}",
             "fields": ["store", "breed", "count"]
           }
         },
@@ -292,9 +303,9 @@
           "path": "/costs",
           "row_key": ["store", "breed"],
           "document": {
-            "group_by": [],
-            "title_template": "Cost table {{fetched_date}}",
-            "body_template": "Average costs received through {{fetched_date}}.\n\n{{rows_table}}",
+            "group_by": ["store"],
+            "title_template": "{{store}} cost table {{fetched_date}}",
+            "body_template": "{{store}} average costs received through {{fetched_date}}.\n\n{{rows_table}}",
             "formats": { "avg_cost": "currency" },
             "fields": ["store", "breed", "avg_cost", "received"]
           }

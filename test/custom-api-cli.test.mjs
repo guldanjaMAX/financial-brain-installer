@@ -62,20 +62,25 @@ test("the public manifest defaults match the full-snapshot real feed", () => {
   const custom = template.corpora.custom_api;
   assert.equal(custom.timeout_ms, 30_000);
   assert.ok(custom.max_response_bytes >= 5 * 1024 * 1024);
-  assert.ok(custom.max_rows >= 1_721);
+  assert.equal(custom.max_rows, 10_000);
   assert.deepEqual(custom.endpoints.map(({ name, path, row_key }) => ({ name, path, row_key })), [
     { name: "sales", path: "/sales", row_key: ["store", "period", "revenue_stream"] },
     { name: "inventory", path: "/inventory", row_key: ["store", "breed"] },
     { name: "costs", path: "/costs", row_key: ["store", "breed"] },
   ]);
-  assert.deepEqual(custom.endpoints[0].document.expected_values.revenue_stream, [
+  assert.deepEqual(custom.endpoints[0].documents[0].expected_values.revenue_stream, [
     "live_animal", "supplies", "services", "other",
   ]);
-  assert.match(custom.endpoints[0].document.body_template, /missing\.revenue_stream/);
+  assert.deepEqual(custom.endpoints[0].documents.map(({ name, group_by }) => ({ name, group_by })), [
+    { name: "monthly", group_by: ["period"] },
+    { name: "store-history", group_by: ["store"] },
+  ]);
+  assert.match(custom.endpoints[0].documents[0].body_template, /missing\.revenue_stream/);
+  assert.deepEqual(custom.endpoints.slice(1).map((endpoint) => endpoint.document.group_by), [["store"], ["store"]]);
   const schemaCustom = schema.properties.corpora.properties.custom_api.properties;
   assert.equal(schemaCustom.timeout_ms.default, 30_000);
   assert.ok(schemaCustom.max_response_bytes.default >= 5 * 1024 * 1024);
-  assert.ok(schemaCustom.max_rows.default >= 1_721);
+  assert.equal(schemaCustom.max_rows.default, 10_000);
 });
 
 test("deploy binding contains declarative config and only the secret name", () => {
@@ -119,8 +124,9 @@ test("connect does not prompt or rewrite an existing secret", async (t) => {
   writeFileSync(path, JSON.stringify(manifest()));
   let prompts = 0;
   let writes = 0;
+  let inventories = 0;
   const result = await withCapturedOutput(() => cmdConnectCustomApi(path, {}, {
-    listWorkerSecretNames: async () => ["STORE_DASHBOARD_TOKEN"],
+    listWorkerSecretNames: async () => { inventories++; return ["STORE_DASHBOARD_TOKEN"]; },
     putWorkerSecret: async () => { writes++; },
     readSecret: async () => { prompts++; return TOKEN; },
     resolveAdminKey: () => "fixture-admin-key",
@@ -129,8 +135,37 @@ test("connect does not prompt or rewrite an existing secret", async (t) => {
   }));
   assert.equal(prompts, 0);
   assert.equal(writes, 0);
+  assert.equal(inventories, 1, "the existing-name inventory decision point was reached");
   assert.equal(result.value.written, false);
   assert.equal(result.output.includes(TOKEN), false);
+});
+
+test("Windows defaults to dashboard key entry, never prompts, and verifies only the declared name", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "brain-custom-api-windows-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "brain.manifest.json");
+  writeFileSync(path, JSON.stringify(manifest()));
+  let prompts = 0;
+  let writes = 0;
+  let inventories = 0;
+  const result = await withCapturedOutput(() => cmdConnectCustomApi(path, {}, {
+    platform: "win32",
+    listWorkerSecretNames: async () => {
+      inventories++;
+      return inventories >= 2 ? ["STORE_DASHBOARD_TOKEN"] : [];
+    },
+    putWorkerSecret: async () => { writes++; },
+    readSecret: async () => { prompts++; return TOKEN; },
+    sleep: async () => {},
+    resolveAdminKey: () => "fixture-admin-key",
+    resolveBaseUrl: async () => "https://fixture.invalid",
+    postSourceExpectation: async () => {},
+  }));
+  assert.equal(prompts, 0, "the Windows branch never attempted a terminal prompt");
+  assert.equal(writes, 0, "the Windows branch never handled the bearer value");
+  assert.equal(inventories, 2, "the declared name was re-read after dashboard entry");
+  assert.match(result.output, /Workers & Pages.*fixture-brain.*Settings.*Variables and Secrets.*Add.*Secret/s);
+  assert.match(result.output, /STORE_DASHBOARD_TOKEN/);
 });
 
 test("manual dry run calls only the authenticated Brain route and renders aggregate output", async (t) => {
@@ -168,6 +203,36 @@ test("manual dry run calls only the authenticated Brain route and renders aggreg
   assert.match(result.output, /inventory: 1 row\(s\), 0 readable document\(s\) would be written, 0 refused/);
   assert.match(result.output, /If run now, the next daily pull will run at 2026-09-25T15:30:00.000Z/);
   assert.equal(result.output.includes(TOKEN), false);
+});
+
+test("manual pull resumes bounded calls to terminal saved proof and reports meaning readiness separately", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "brain-custom-api-resume-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, "brain.manifest.json");
+  writeFileSync(path, JSON.stringify(manifest()));
+  let calls = 0;
+  const result = await withCapturedOutput(() => cmdCustomApi(path, {}, {
+    resolveAdminKey: () => "fixture-admin-key",
+    resolveBaseUrl: async () => "https://fixture.invalid",
+    fetchImpl: async () => {
+      calls++;
+      const body = calls < 3
+        ? { status: "in_progress", job_phase: calls === 1 ? "staged" : "applying", slice_completed: calls - 1, slices_total: 2 }
+        : {
+          status: "completed", dry_run: false, endpoints: 1,
+          rows: { created: 1, updated: 0, unchanged: 0 }, documents: 1,
+          retained_missing_rows: 0, refused_rows: 0, saved: true, meaning_search_ready: false,
+          job_id: "job-fixture", next_pull_at: "2026-09-25T15:30:00.000Z",
+          endpoint_results: [{ name: "sales", rows_received: 1, rows_refused: 0, documents: 1 }],
+        };
+      return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+    },
+  }));
+  assert.equal(calls, 3, "the CLI kept calling one bounded Worker slice at a time");
+  assert.equal(result.value.saved, true);
+  assert.match(result.output, /1 of 2 slice\(s\) verified/);
+  assert.match(result.output, /saved snapshot verified/);
+  assert.match(result.output, /meaning search is still indexing/i);
 });
 
 test("brain load names the server-managed source without claiming it has no loader", async () => {

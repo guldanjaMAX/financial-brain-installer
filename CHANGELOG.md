@@ -25,15 +25,20 @@ asset publication.
 
 - **A read-only business dashboard can refresh without leaving a laptop on.**
   An operator can declare bounded HTTPS JSON endpoints in the manifest, store
-  the bearer key through one hidden prompt, and let the owner's Worker pull the
-  source daily. Exact rows, corrections, readable summaries, provenance, and
-  freshness remain visible; missing rows are retained instead of silently
-  deleted. The preview now names every endpoint's row, readable-document, and
-  refused-row counts. It handles negative sales and units, null stores, partial
-  months, and absent revenue streams without turning missing data into zero.
+  the bearer key through a hidden macOS prompt or the masked Cloudflare
+  dashboard on Windows, and let the owner's Worker pull the source daily. A
+  complete snapshot becomes a resumable, exactly verified job instead of one
+  oversized request. Exact rows are stored compactly with correction and
+  last-seen history; missing rows leave current totals without being erased.
+  Monthly summaries cover every store, and per-store sales, inventory, and cost
+  documents stay bounded. The preview names every endpoint's row,
+  readable-document, and refused-row counts. The 10,000-row ceiling refuses an
+  oversized endpoint without changing it. Saved data and meaning-search
+  readiness are reported separately so an owner question never races indexing.
   To check: preview the first pull with `brain custom-api <manifest> --dry-run`,
-  run the first pull immediately, then confirm the named source and its refresh
-  time in `brain sources <manifest>`. This build has local mock proof only and
+  run the first pull immediately, wait for meaning search to be ready, then
+  confirm the named source and its refresh time in `brain sources <manifest>`.
+  This build has local mock proof only and
   has not contacted a provider endpoint.
 
 - **One finely reported balance no longer blocks a whole bank.** A bank can

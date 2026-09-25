@@ -39,7 +39,7 @@ function scheduledEnv() {
     );
     CREATE TABLE documents (id TEXT PRIMARY KEY, source TEXT NOT NULL, deleted_at TEXT);
   `);
-  database.exec(readFileSync(new URL("../../migrations/d1/0047_custom_api_source.sql", import.meta.url), "utf8"));
+  database.exec(readFileSync(new URL("../../migrations/d1/0048_custom_api_source.sql", import.meta.url), "utf8"));
   return {
     database,
     env: {
@@ -126,4 +126,13 @@ test("a source name already owned by another kind is refused before any fetch", 
   assert.ok(prepared >= 2, "the lease and source ownership decision points were reached");
   assert.equal(fetches, 0);
   assert.equal(database.prepare("SELECT COUNT(*) AS n FROM source_events").get().n, 0);
+});
+
+test("a configured custom API tick reserves the D1 budget by shrinking the vector drain", () => {
+  const source = readFileSync(new URL("../src/index.js", import.meta.url), "utf8");
+  assert.match(
+    source,
+    /maxBatches:\s*env\.CUSTOM_API_CONFIG\s*\?\s*1\s*:\s*10/,
+    "the scheduled decision point limits vector drain work on custom API ticks",
+  );
 });

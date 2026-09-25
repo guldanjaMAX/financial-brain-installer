@@ -17239,15 +17239,18 @@ export async function cmdConnect(target, options = {}) {
   }
 }
 
-/** Set only the manifest-declared custom API bearer value through a hidden prompt. */
+/** Connect the declared custom API secret without exposing its value. */
 export async function cmdConnectCustomApi(manifestPath, flags = {}, options = {}) {
   if (!manifestPath || String(manifestPath).startsWith("--")) {
-    die("usage: brain connect custom-api <manifest> [--replace-key]");
+    die("usage: brain connect custom-api <manifest> [--replace-key] [--key-set-in-dashboard]");
   }
-  const unknownFlag = Object.keys(flags).find((name) => name !== "replace-key");
+  const unknownFlag = Object.keys(flags).find((name) => !["replace-key", "key-set-in-dashboard"].includes(name));
   if (unknownFlag) die(`brain connect custom-api does not recognize --${unknownFlag}`);
   if (flags["replace-key"] !== undefined && flags["replace-key"] !== true) {
     die("brain connect custom-api --replace-key does not take a value");
+  }
+  if (flags["key-set-in-dashboard"] !== undefined && flags["key-set-in-dashboard"] !== true) {
+    die("brain connect custom-api --key-set-in-dashboard does not take a value");
   }
   const { m } = loadManifest(manifestPath);
   let config;
@@ -17273,32 +17276,50 @@ export async function cmdConnectCustomApi(manifestPath, flags = {}, options = {}
     die("the Worker's secret names could not be inspected. No custom API key was written.");
   }
   const replace = flags["replace-key"] === true;
+  const dashboardEntry = flags["key-set-in-dashboard"] === true || (options.platform ?? process.platform) === "win32";
   let wrote = false;
   if (!names.has(config.token_secret) || replace) {
-    const read = options.readSecret ?? readHiddenSecret;
-    let token;
-    try {
-      token = await read(`  ${config.display_name} bearer key (hidden): `, {
-        noun: "custom API key",
-        insecure: "this terminal cannot prompt securely. Rerun from an interactive terminal; the custom API key is never accepted as a flag or environment variable.",
-      });
-    } catch (error) {
-      die(String(error?.message || error));
+    if (dashboardEntry) {
+      info(`In Cloudflare, open Workers & Pages → ${scriptName} → Settings → Variables and Secrets → Add → type Secret.`);
+      info(`Enter the exact secret NAME ${config.token_secret}, paste its value only into Cloudflare's masked field, and save it.`);
+      info("Keep the masked Cloudflare field off the shared screen. This command will verify only the secret name, never its value.");
+      const wait = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+      for (let attempt = 0; attempt < 24 && !names.has(config.token_secret); attempt++) {
+        await wait(5_000);
+        try { names = new Set(await listSecretNames()); } catch {
+          die("the Worker's secret names could not be inspected while waiting. No secret value was read.");
+        }
+      }
+      if (!names.has(config.token_secret)) {
+        die(`Cloudflare did not list ${config.token_secret} within 2 minutes. The command never requested or handled the key value.`);
+      }
+      ok(`Worker secret name ${config.token_secret} is present`);
+    } else {
+      const read = options.readSecret ?? readHiddenSecret;
+      let token;
+      try {
+        token = await read(`  ${config.display_name} bearer key (hidden): `, {
+          noun: "custom API key",
+          insecure: "this terminal cannot prompt securely. Rerun from an interactive terminal; the custom API key is never accepted as a flag or environment variable.",
+        });
+      } catch (error) {
+        die(String(error?.message || error));
+      }
+      if (typeof token !== "string" || token.length < 1 || token.length > 2_048 || /[\u0000-\u001f\u007f]/.test(token)) {
+        die("the custom API key was empty, too long, or contained a control character. Nothing was written.");
+      }
+      try { await putSecret(config.token_secret, token); } catch {
+        die("the custom API key could not be written to the Worker. The value was not printed or saved locally.");
+      }
+      try { names = new Set(await listSecretNames()); } catch {
+        die("the custom API key write returned, but its secret name could not be read back. Do not treat the connection as ready.");
+      }
+      if (!names.has(config.token_secret)) {
+        die("Cloudflare did not list the declared custom API secret after the write. Do not treat the connection as ready.");
+      }
+      wrote = true;
+      ok(`custom API key stored as Worker secret ${config.token_secret}`);
     }
-    if (typeof token !== "string" || token.length < 1 || token.length > 2_048 || /[\u0000-\u001f\u007f]/.test(token)) {
-      die("the custom API key was empty, too long, or contained a control character. Nothing was written.");
-    }
-    try { await putSecret(config.token_secret, token); } catch {
-      die("the custom API key could not be written to the Worker. The value was not printed or saved locally.");
-    }
-    try { names = new Set(await listSecretNames()); } catch {
-      die("the custom API key write returned, but its secret name could not be read back. Do not treat the connection as ready.");
-    }
-    if (!names.has(config.token_secret)) {
-      die("Cloudflare did not list the declared custom API secret after the write. Do not treat the connection as ready.");
-    }
-    wrote = true;
-    ok(`custom API key stored as Worker secret ${config.token_secret}`);
   } else {
     ok(`Worker secret ${config.token_secret} is already present; nothing was prompted or written`);
   }
@@ -27493,17 +27514,30 @@ export async function cmdCustomApi(manifestPath, flags = parseFlags(process.argv
   }
   const acct = m.brain?.domain ? null : await (options.resolveAccount ?? resolveAccount)(m);
   const base = await (options.resolveBaseUrl ?? resolveBaseUrl)(m, acct);
-  const response = await http(`${base}${CUSTOM_API_RUN_PATH}`, {
-    method: "POST",
-    headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
-    body: JSON.stringify({ dry_run: flags["dry-run"] === true }),
-  }, { fetchImpl: options.fetchImpl ?? fetch, what: "the custom API pull" });
   let receipt;
-  try { receipt = await response.json(); } catch {
-    die(`the Brain returned a non-JSON custom API receipt (HTTP ${response.status}). No success is claimed.`);
+  for (let call = 0; call < 1_000; call++) {
+    const response = await http(`${base}${CUSTOM_API_RUN_PATH}`, {
+      method: "POST",
+      headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: flags["dry-run"] === true }),
+    }, { fetchImpl: options.fetchImpl ?? fetch, what: "the custom API pull" });
+    try { receipt = await response.json(); } catch {
+      die(`the Brain returned a non-JSON custom API receipt (HTTP ${response.status}). No success is claimed.`);
+    }
+    if (!response.ok) {
+      die(`${receipt?.error || "the custom API pull did not complete"}${receipt?.code ? ` (${receipt.code})` : ""}`);
+    }
+    if (receipt?.status === "completed") break;
+    if (receipt?.status !== "in_progress" || flags["dry-run"] === true) {
+      die("the custom API pull returned an invalid progress receipt. No success is claimed.");
+    }
+    info(`custom API job ${receipt.job_phase}: ${receipt.slice_completed} of ${receipt.slices_total} slice(s) verified`);
   }
-  if (!response.ok || receipt?.status !== "completed") {
-    die(`${receipt?.error || "the custom API pull did not complete"}${receipt?.code ? ` (${receipt.code})` : ""}`);
+  if (receipt?.status !== "completed") {
+    die("the custom API job did not reach terminal verification within 1000 bounded requests. Rerun the same command to resume it.");
+  }
+  if (!receipt.dry_run && receipt.saved !== true) {
+    die("the custom API receipt did not prove a terminally verified saved snapshot. No success is claimed.");
   }
   const mode = receipt.dry_run ? "previewed" : "completed";
   ok(`${mode} ${receipt.endpoints} custom API endpoint(s)`);
@@ -27518,6 +27552,11 @@ export async function cmdCustomApi(manifestPath, flags = parseFlags(process.argv
   if (receipt.next_pull_at) {
     const cadence = customApiConfig.cadence_seconds === 86400 ? "daily" : "scheduled";
     info(`${receipt.dry_run ? "If run now, the" : "The"} next ${cadence} pull will run at ${receipt.next_pull_at}`);
+  }
+  if (!receipt.dry_run) {
+    ok(`saved snapshot verified${receipt.job_id ? ` for job ${receipt.job_id}` : ""}`);
+    if (receipt.meaning_search_ready === true) ok("meaning search is ready for this source");
+    else warn("the snapshot is saved, but meaning search is still indexing this source; wait for the vector outbox to empty before the owner question");
   }
   return receipt;
 }
@@ -27686,7 +27725,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect bank     <manifest>      owner-present Plaid pilot: hidden prompt for missing Plaid keys, checked
                                            with Plaid before they are saved, then owner-only Plaid Link and masked
                                            account assignment. --replace-keys re-enters both keys
-    brain connect custom-api <manifest>   store the manifest-declared bearer key at a hidden prompt;
+    brain connect custom-api <manifest>   store the bearer key hidden on macOS or verify dashboard entry on Windows;
                                            --replace-key replaces it without putting the value in the manifest
     brain custom-api <manifest> --dry-run preview the Worker's custom business API pull without writes;
                                            omit --dry-run to run it now through the same server path as cron

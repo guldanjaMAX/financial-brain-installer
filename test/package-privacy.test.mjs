@@ -712,7 +712,7 @@ const expected = [
   "migrations/d1/0045_source_original_accepted_resolutions.sql",
   "migrations/d1/0046_source_original_observation_authority_chain.sql",
   "migrations/d1/0047_ocr_page_idempotency.sql",
-  "migrations/d1/0047_custom_api_source.sql",
+  "migrations/d1/0048_custom_api_source.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values

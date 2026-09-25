@@ -119,7 +119,10 @@ function memoryPersistence() {
         const key = `${source}\u0000${endpoint}\u0000${change.row_key}`;
         const prior = rows.get(key);
         const revision = (prior?.revision || 0) + (change.action === "unchanged" ? 0 : 1);
-        rows.set(key, { row_hash: change.row_hash, row: change.row, revision });
+        rows.set(key, {
+          row_hash: change.row_hash, row: change.row, revision,
+          present: !["missing", "unchanged_missing"].includes(change.action),
+        });
         if (change.action === "updated") revisions.push({ endpoint, row_key: change.row_key, revision });
       }
       for (const document of documentChanges) documents.set(document.source_id, document);
@@ -321,9 +324,11 @@ test("unexpected envelope keys, duplicate row identities, and token reflection f
     [[{ store: "Store A", period: "2026-08-01", net_sales: 1, note: TOKEN }], "SECRET_IN_RESPONSE"],
   ]) {
     body = value;
+    const before = mock.calls.length;
     await assert.rejects(
       runCustomApiPull(config, { token: TOKEN, fetchImpl: mock.fetchImpl, now: () => AT, sleep: async () => {}, persistence: memoryPersistence() }),
       (error) => error instanceof CustomApiError && error.code === code && !String(error.message).includes(TOKEN),
     );
+    assert.ok(mock.calls.length > before, `${code} reached the request decision point`);
   }
 });

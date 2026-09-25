@@ -65,7 +65,10 @@ function memoryPersistence() {
         const key = `${prefix}${change.row_key}`;
         const prior = rows.get(key);
         const revision = Number(prior?.revision || 0) + (change.action === "unchanged" ? 0 : 1);
-        rows.set(key, { row_hash: change.row_hash, row: change.row, revision });
+        rows.set(key, {
+          row_hash: change.row_hash, row: change.row, revision,
+          present: !["missing", "unchanged_missing"].includes(change.action),
+        });
         if (change.action === "updated") revisions.push({ key, revision });
       }
       for (const document of documentChanges) documents.set(document.source_id, document);
@@ -121,7 +124,33 @@ test("real-feed defaults allow a slow five-megabyte full-history snapshot", () =
   const parsed = validateCustomApiConfig(config());
   assert.equal(parsed.timeout_ms, 30_000);
   assert.ok(parsed.max_response_bytes >= 5 * 1024 * 1024);
-  assert.ok(parsed.max_rows >= 1_721);
+  assert.equal(parsed.max_rows, 10_000);
+});
+
+test("the row ceiling accepts 2,001 and 10,000, refuses 10,001, and leaves the refused endpoint unchanged", async () => {
+  const salesOnly = { ...realShapeConfig(), endpoints: [realShapeConfig().endpoints[0]] };
+  const row = (index) => ({
+    store: `Store ${index}`, period: "2026-09-01", revenue_stream: "services",
+    net_sales: index, transactions: 1, units: 1, puppies_sold: 0,
+  });
+  for (const rowCount of [2_001, 10_000]) {
+    const accepted = memoryPersistence();
+    const result = await runCustomApiPull(salesOnly, {
+      token: TOKEN, now: () => AT, sleep: async () => {}, persistence: accepted,
+      fetchImpl: async () => json({ data: Array.from({ length: rowCount }, (_, index) => row(index)) }),
+    });
+    assert.equal(result.endpoint_results[0].rows_accepted, rowCount);
+    assert.ok(accepted.rows.size > 0, `the ${rowCount}-row decision reached persistence`);
+  }
+  const refused = memoryPersistence();
+  await assert.rejects(
+    runCustomApiPull(salesOnly, {
+      token: TOKEN, now: () => AT, sleep: async () => {}, persistence: refused,
+      fetchImpl: async () => json({ data: Array.from({ length: 10_001 }, (_, index) => row(index)) }),
+    }),
+    (error) => error?.code === "RESPONSE_TOO_LARGE" && /left unchanged/i.test(customApiOwnerMessage(error.code)),
+  );
+  assert.equal(refused.rows.size, 0, "the refused endpoint did not reach persistence");
 });
 
 test("socket-free real-shape fixtures preserve numeric quirks and null stores while keeping extras out of prose", async () => {
@@ -212,6 +241,56 @@ test("a three-decimal sale refuses only that row and reports the endpoint count"
   assert.equal(result.endpoint_results[0].rows_received, 2);
   assert.equal(result.endpoint_results[0].rows_refused, 1);
   assert.equal(persistence.rows.size, 1, "the valid row reached the persistence decision point");
+});
+
+test("known default schemas refuse only invalid rows and count each reason", async () => {
+  const persistence = memoryPersistence();
+  const bodies = {
+    sales: { data: [
+      { store: "Store A", period: "2026-09-01", revenue_stream: "services", transactions: 1, units: 1, puppies_sold: 0 },
+      { store: "Store A", period: "2026-09-01", revenue_stream: "other", net_sales: 2, transactions: 1, units: 1, puppies_sold: 0 },
+    ] },
+    inventory: { data: [
+      { store: "Store A", breed: "Item 1", count: 1.5 },
+      { store: "Store A", breed: "Item 2", count: 2 },
+    ] },
+    costs: { data: [
+      { store: "Store A", breed: "Item 1", received: 2 },
+      { store: "Store A", breed: "Item 2", avg_cost: 12.5, received: 2 },
+    ] },
+  };
+  const result = await runCustomApiPull(realShapeConfig(), {
+    token: TOKEN, now: () => AT, sleep: async () => {}, persistence,
+    fetchImpl: async (input) => json(bodies[new URL(input).pathname.split("/").pop()]),
+  });
+  assert.equal(result.refused_rows, 3);
+  assert.deepEqual(result.endpoint_results.map((endpoint) => endpoint.refusal_reasons), [
+    { invalid_net_sales: 1 }, { invalid_inventory_count: 1 }, { invalid_avg_cost: 1 },
+  ]);
+  assert.equal(persistence.rows.size, 3, "all three valid neighbors reached persistence");
+});
+
+test("deletion-only snapshots keep history but exclude missing rows from all three current documents", async () => {
+  let second = false;
+  const persistence = memoryPersistence();
+  const bodies = () => ({
+    sales: { data: second ? [] : [{ store: "Store A", period: "2026-09-01", revenue_stream: "services", net_sales: 9, transactions: 1, units: 1, puppies_sold: 0 }] },
+    inventory: { data: second ? [] : [{ store: "Store A", breed: "Item 1", count: 2 }] },
+    costs: { data: second ? [] : [{ store: "Store A", breed: "Item 1", avg_cost: 12.5, received: 2 }] },
+  });
+  const options = {
+    token: TOKEN, now: () => AT, sleep: async () => {}, persistence,
+    fetchImpl: async (input) => json(bodies()[new URL(input).pathname.split("/").pop()]),
+  };
+  await runCustomApiPull(realShapeConfig(), options);
+  second = true;
+  const result = await runCustomApiPull(realShapeConfig(), options);
+  assert.equal(result.retained_missing_rows, 3);
+  assert.equal(result.documents, 3, "each deletion-only endpoint reached the document decision point");
+  assert.equal([...persistence.rows.values()].every((entry) => entry.present === false), true);
+  assert.doesNotMatch(persistence.documents.get("sales:Store A:2026-09-01").content, /\$9\.00/);
+  assert.doesNotMatch(persistence.documents.get("inventory:2026-09-24").content, /Item 1/);
+  assert.doesNotMatch(persistence.documents.get("costs:2026-09-24").content, /\$12\.50/);
 });
 
 test("a 308 canonical-path redirect is a plain configuration error and is never followed", async () => {

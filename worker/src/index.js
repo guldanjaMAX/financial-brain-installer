@@ -3495,7 +3495,11 @@ export default {
           drainOutbox(env, {
             embed: (text) => embedText(env, text),
             embedBatch: (texts) => embedTexts(env, texts),
-            maxBatches: 10,
+            // A configured custom-API job can stage or advance one durable
+            // slice in this same scheduled invocation. Keep the drain to one
+            // batch so the two writers stay comfortably below the shared D1
+            // invocation budget even when the source is due.
+            maxBatches: env.CUSTOM_API_CONFIG ? 1 : 10,
           }),
           cleanupPublicAuthState(env),
           cleanupQuickBooksOAuthIntents(env),
