@@ -39,7 +39,6 @@ The bearer value never belongs in this file.
       "name": "sales",
       "path": "/sales",
       "row_key": ["store", "period", "revenue_stream"],
-      "legacy_row_key": ["store", "period"],
       "documents": [
         {
           "name": "monthly",

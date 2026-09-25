@@ -105,5 +105,15 @@ CREATE TABLE IF NOT EXISTS custom_api_schedule_state (
   last_success_at  TEXT,
   lease_token      TEXT,
   lease_expires_at INTEGER,
+  display_name     TEXT,
+  last_issue_code  TEXT CHECK (
+    last_issue_code IS NULL OR last_issue_code IN (
+      'AUTH_REQUIRED','CONFIG_INVALID','DUPLICATE_ROW_KEY','INTERNAL_ERROR',
+      'INVALID_RESPONSE','INVALID_ROW_KEY','INPUT_REFUSED','NETWORK_UNREACHABLE',
+      'PERSISTENCE_VERIFY_FAILED','RATE_LIMITED','REDIRECT_REFUSED',
+      'REMOTE_UNAVAILABLE','RESPONSE_TOO_LARGE','RUN_BUSY','SECRET_IN_RESPONSE'
+    )
+  ),
+  last_refused_rows INTEGER NOT NULL DEFAULT 0 CHECK (last_refused_rows >= 0),
   CHECK ((lease_token IS NULL) = (lease_expires_at IS NULL))
 );

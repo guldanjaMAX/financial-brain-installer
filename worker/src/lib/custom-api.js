@@ -13,8 +13,10 @@ import { backendOf, D1, storeFor } from "./store.js";
 import { ingestEnvelopeValidationError } from "./ingest-envelope.js";
 import { forget } from "./store-d1.js";
 import {
-  currentCustomApiDocumentSql, customApiVersionedSourceId,
+  currentCustomApiDocumentSql, customApiOwnerMessage, customApiVersionedSourceId,
 } from "./custom-api-visibility.js";
+
+export { customApiOwnerMessage } from "./custom-api-visibility.js";
 
 const SAFE_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const SAFE_SECRET_NAME = /^[A-Z][A-Z0-9_]{1,63}$/;
@@ -47,6 +49,12 @@ const ROW_CHUNK_MAX_BYTES = 64 * 1024;
 const MAX_JOB_STAGE_STATEMENTS = 500;
 const ROW_GC_SLICE_SIZE = 25;
 const DOCUMENT_GC_SLICE_SIZE = 25;
+const CUSTOM_API_ISSUE_CODES = new Set([
+  "AUTH_REQUIRED", "CONFIG_INVALID", "DUPLICATE_ROW_KEY", "INTERNAL_ERROR",
+  "INVALID_RESPONSE", "INVALID_ROW_KEY", "INPUT_REFUSED", "NETWORK_UNREACHABLE",
+  "PERSISTENCE_VERIFY_FAILED", "RATE_LIMITED", "REDIRECT_REFUSED",
+  "REMOTE_UNAVAILABLE", "RESPONSE_TOO_LARGE", "RUN_BUSY", "SECRET_IN_RESPONSE",
+]);
 
 const isPlainObject = (value) => value !== null && typeof value === "object" &&
   !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
@@ -202,6 +210,7 @@ export class CustomApiError extends Error {
     retryable = false,
     refusalReason = null,
     identityInvalid = false,
+    identityScope = null,
   } = {}) {
     super(message);
     this.name = "CustomApiError";
@@ -211,19 +220,8 @@ export class CustomApiError extends Error {
     this.retryable = retryable;
     this.refusalReason = refusalReason;
     this.identityInvalid = identityInvalid;
+    this.identityScope = identityScope;
   }
-}
-
-export function customApiOwnerMessage(code, displayName = "store dashboard") {
-  const name = String(displayName || "store dashboard").replace(/\s+/g, " ").trim().slice(0, 80) || "store dashboard";
-  if (code === "AUTH_REQUIRED") return `The ${name} refused the key. Ask its developer to check it.`;
-  if (code === "RATE_LIMITED") return `The ${name} asked the Brain to wait. It will try again on the next scheduled pull.`;
-  if (code === "REMOTE_UNAVAILABLE" || code === "NETWORK_UNREACHABLE") return `The ${name} could not be reached. The saved data was left unchanged.`;
-  if (code === "RESPONSE_TOO_LARGE") return `The ${name} returned more data than this source allows. That endpoint was left unchanged. Ask its developer to add paging or narrow the endpoint.`;
-  if (code === "REDIRECT_REFUSED") return `The ${name} tried to send the Brain to another address. The pull was refused before following it.`;
-  if (code === "PERSISTENCE_VERIFY_FAILED") return `The Brain could not verify the saved ${name} update. The source remains marked for installer review.`;
-  if (code === "CONFIG_INVALID") return `The ${name} setup is not valid. Ask the installer to review its manifest mapping.`;
-  return `The ${name} returned data the Brain could not safely understand. The saved data was left unchanged.`;
 }
 
 function canonicalJson(value) {
@@ -362,11 +360,12 @@ function validateKnownRow(row, endpoint) {
     const tolerance = Number.EPSILON * Math.max(1, Math.abs(cents)) * 8;
     return Number.isFinite(cents) && Math.abs(cents - Math.round(cents)) <= tolerance;
   };
-  const refuse = (reason, message, { identityInvalid = false } = {}) => {
+  const refuse = (reason, message, { identityInvalid = false, identityScope = null } = {}) => {
     throw new CustomApiError("ROW_REFUSED", message, {
       endpoint: endpoint.name,
       refusalReason: reason,
       identityInvalid,
+      identityScope,
     });
   };
   const trimmedString = (value) => typeof value === "string" && value.length > 0 && value === value.trim();
@@ -384,13 +383,19 @@ function validateKnownRow(row, endpoint) {
     if (endpoint.row_key.includes("revenue_stream")) {
       if (!Object.hasOwn(row, "revenue_stream")) {
         if (!endpoint.legacy_row_key) {
-          refuse("invalid_revenue_stream", "custom API sales row had no revenue stream identity", { identityInvalid: true });
+          refuse("invalid_revenue_stream", "custom API sales row had no revenue stream identity", {
+            identityInvalid: true,
+            identityScope: { store: row.store, period: row.period },
+          });
         }
       } else {
         const configured = new Set(endpoint.documents.flatMap((document) =>
           document.expected_values.revenue_stream || []));
         if (!trimmedString(row.revenue_stream) || (configured.size > 0 && !configured.has(row.revenue_stream))) {
-          refuse("invalid_revenue_stream", "custom API sales row had an invalid revenue stream identity", { identityInvalid: true });
+          refuse("invalid_revenue_stream", "custom API sales row had an invalid revenue stream identity", {
+            identityInvalid: true,
+            identityScope: { store: row.store, period: row.period },
+          });
         }
       }
     }
@@ -545,9 +550,11 @@ async function fetchEndpoint(config, endpoint, token, dependencies) {
           refusalReasons[reason] = Number(refusalReasons[reason] || 0) + 1;
           const row = normalizeRow(value, endpoint, token);
           refused.push({
+            refusal_id: String(refusedRows),
             row_key: error.identityInvalid ? null : rowIdentity(row, endpoint),
             reason,
             identity_invalid: error.identityInvalid === true,
+            identity_scope: error.identityScope,
           });
           continue;
         }
@@ -632,7 +639,8 @@ function documentTableRows(endpoint, document, rows) {
     },
     ...(items.some((item) => item.refresh_status) ? {
       refresh_status: "not refreshed (refused)",
-      not_refreshed_count: items.filter((item) => item.refresh_status).length,
+      not_refreshed_count: new Set(items.flatMap((item) => item.refusal_ids || [])).size ||
+        items.filter((item) => item.refresh_status).length,
     } : {}),
   });
   if (document.name === "monthly") {
@@ -710,57 +718,64 @@ function buildDocuments(config, endpoint, rows, priorPresentRows, fetchedAt, res
       // prose, so a new dated snapshot always needs its own physical version.
       if (!group.changed && document.group_by.length > 0) continue;
       group.rows.sort((a, b) => a.row_key.localeCompare(b.row_key));
-    const context = { fetched_date: fetchedDate, row_count: group.rows.length, sum: {}, min: {}, max: {}, missing: {} };
+      const context = { fetched_date: fetchedDate, row_count: group.rows.length, sum: {}, min: {}, max: {}, missing: {} };
       document.group_by.forEach((field, index) => { context[field] = group.values[index]; });
-    for (const [field, operation] of Object.entries(document.aggregates)) {
-      context[operation][field] = formatValue(
-        aggregate(group.rows, field, operation, document.formats[field]),
-        document.formats[field],
-        field,
+      for (const [field, operation] of Object.entries(document.aggregates)) {
+        context[operation][field] = formatValue(
+          aggregate(group.rows, field, operation, document.formats[field]),
+          document.formats[field],
+          field,
+        );
+      }
+      for (const [field, expected] of Object.entries(document.expected_values)) {
+        const present = new Set(group.rows.map((item) => item.row[field]));
+        context.missing[field] = expected
+          .filter((value) => !present.has(value))
+          .map((value) => `no ${value.replaceAll("_", " ")} sales recorded`)
+          .join("; ");
+      }
+      context.rows_table = markdownTable(
+        documentTableRows(endpoint, document, group.rows),
+        document.formats,
+        document.fields,
+        { fetchedDate, displayName: config.display_name },
       );
-    }
-    for (const [field, expected] of Object.entries(document.expected_values)) {
-      const present = new Set(group.rows.map((item) => item.row[field]));
-      context.missing[field] = expected
-        .filter((value) => !present.has(value))
-        .map((value) => `no ${value.replaceAll("_", " ")} sales recorded`)
-        .join("; ");
-    }
-    context.rows_table = markdownTable(
-      documentTableRows(endpoint, document, group.rows),
-      document.formats,
-      document.fields,
-      { fetchedDate, displayName: config.display_name },
-    );
-    const title = renderTemplate(document.title_template, context);
-    const content = renderTemplate(document.body_template, context);
-    const metadata = {
-      connector: "custom_api",
-      endpoint: endpoint.path,
-      fetched_at: fetchedAt,
-      response_hash: responseHash,
-      row_keys: group.rows.map((item) => item.row_key),
-      not_refreshed_rows: group.rows.filter((item) => item.refresh_status).length,
-    };
-    const envelope = {
-      source_type: config.source,
-      source_id: sourceId,
-      title,
-      content,
-      occurred_at: document.group_by.includes("period")
-        ? String(context.period)
-        : fetchedDate,
-      date_source: document.group_by.includes("period")
-        ? "custom_api:period"
-        : "custom_api:fetched_date",
-      date_reliable: true,
-      text_source: "native",
-      text_reliable: true,
-      metadata,
-    };
-    if (scanSecrets(canonicalJson(envelope)).shouldRefuse) {
-      throw new CustomApiError("SECRET_IN_RESPONSE", "custom API document was held by the credential scanner", { endpoint: endpoint.name });
-    }
+      const title = renderTemplate(document.title_template, context);
+      const refusedRowCount = new Set(group.rows.flatMap((item) => item.refusal_ids || [])).size ||
+        group.rows.filter((item) => item.refresh_status).length;
+      const warning = refusedRowCount > 0
+        ? `Some rows weren't refreshed on ${fetchedDate}: ${refusedRowCount} ${refusedRowCount === 1 ? "row" : "rows"} the ${config.display_name} sent couldn't be read. Figures below may include earlier values.`
+        : null;
+      const renderedBody = renderTemplate(document.body_template, context);
+      const content = warning ? `${warning}\n\n${renderedBody}` : renderedBody;
+      const metadata = {
+        connector: "custom_api",
+        endpoint: endpoint.path,
+        fetched_at: fetchedAt,
+        response_hash: responseHash,
+        row_keys: group.rows.map((item) => item.row_key),
+        not_refreshed_rows: group.rows.filter((item) => item.refresh_status).length,
+        refused_rows: refusedRowCount,
+      };
+      const envelope = {
+        source_type: config.source,
+        source_id: sourceId,
+        title,
+        content,
+        occurred_at: document.group_by.includes("period")
+          ? String(context.period)
+          : fetchedDate,
+        date_source: document.group_by.includes("period")
+          ? "custom_api:period"
+          : "custom_api:fetched_date",
+        date_reliable: true,
+        text_source: "native",
+        text_reliable: true,
+        metadata,
+      };
+      if (scanSecrets(canonicalJson(envelope)).shouldRefuse) {
+        throw new CustomApiError("SECRET_IN_RESPONSE", "custom API document was held by the credential scanner", { endpoint: endpoint.name });
+      }
       documents.push(envelope);
     }
   }
@@ -769,10 +784,16 @@ function buildDocuments(config, endpoint, rows, priorPresentRows, fetchedAt, res
 
 function planEndpoint(config, endpoint, fetched, priorRows, fetchedAt) {
   const prior = new Map((priorRows || []).map((item) => [String(item.row_key), item]));
-  const refused = new Map((fetched.refused || [])
-    .filter((item) => typeof item.row_key === "string")
-    .map((item) => [item.row_key, item.reason]));
-  const identityRefused = (fetched.refused || []).some((item) => item.identity_invalid === true);
+  const refusedItems = fetched.refused || [];
+  const refused = new Map();
+  for (const item of refusedItems) {
+    if (typeof item.row_key !== "string") continue;
+    if (!refused.has(item.row_key)) refused.set(item.row_key, []);
+    refused.get(item.row_key).push(item);
+  }
+  const scopedRefused = refusedItems.filter((item) => isPlainObject(item.identity_scope));
+  const globalIdentityRefused = refusedItems.filter((item) =>
+    item.identity_invalid === true && !isPlainObject(item.identity_scope));
   const rowChanges = fetched.rows.map((item) => ({
     ...item,
     prior_hash: prior.get(item.row_key)?.row_hash || null,
@@ -787,6 +808,7 @@ function planEndpoint(config, endpoint, fetched, priorRows, fetchedAt) {
       : [],
     prior_row: prior.get(item.row_key)?.row || null,
     prior_effective_from: prior.get(item.row_key)?.effective_from || prior.get(item.row_key)?.first_seen_at || null,
+    prior_present: prior.get(item.row_key)?.present !== false,
     action: !prior.has(item.row_key)
       ? "created"
       : prior.get(item.row_key).present === false
@@ -798,24 +820,15 @@ function planEndpoint(config, endpoint, fetched, priorRows, fetchedAt) {
           : "updated",
   }));
   const present = new Set(rowChanges.map((item) => item.row_key));
-  const carriedRefused = [...refused.entries()]
-    .filter(([rowKey]) => !present.has(rowKey) && prior.get(rowKey)?.present !== false && isPlainObject(prior.get(rowKey)?.row))
-    .map(([rowKey, reason]) => ({
-      ...prior.get(rowKey),
-      row_key: rowKey,
-      row_hash: String(prior.get(rowKey).row_hash),
-      row: prior.get(rowKey).row,
-      action: "unchanged_refused",
-      prior_revision: Number(prior.get(rowKey).revision || 0),
-      prior_hash: String(prior.get(rowKey).row_hash),
-      refresh_status: "not refreshed (refused)",
-      refusal_reason: reason,
-    }));
-  const carriedInvalidIdentity = identityRefused
-    ? [...prior.values()]
-      .filter((item) => !present.has(String(item.row_key)) && !refused.has(String(item.row_key)) &&
-        item.present !== false && isPlainObject(item.row))
-      .map((item) => ({
+  const carriedRefused = [...prior.values()]
+    .filter((item) => !present.has(String(item.row_key)) && item.present !== false && isPlainObject(item.row))
+    .map((item) => {
+      const exact = refused.get(String(item.row_key)) || [];
+      const scoped = scopedRefused.filter((refusal) => Object.entries(refusal.identity_scope)
+        .every(([field, value]) => item.row[field] === value));
+      const matches = [...exact, ...scoped, ...globalIdentityRefused];
+      if (matches.length === 0) return null;
+      return {
         ...item,
         row_key: String(item.row_key),
         row_hash: String(item.row_hash),
@@ -823,33 +836,38 @@ function planEndpoint(config, endpoint, fetched, priorRows, fetchedAt) {
         action: "unchanged_refused",
         prior_revision: Number(item.revision || 0),
         prior_hash: String(item.row_hash),
+        prior_present: true,
         refresh_status: "not refreshed (refused)",
-        refusal_reason: "invalid_identity",
-      }))
-    : [];
-  const carriedKeys = new Set([...carriedRefused, ...carriedInvalidIdentity].map((item) => item.row_key));
+        refusal_reason: matches[0].reason || "invalid_identity",
+        refusal_ids: [...new Set(matches.map((match) => String(match.refusal_id)))],
+      };
+    })
+    .filter(Boolean);
+  const carriedKeys = new Set(carriedRefused.map((item) => item.row_key));
   const retained = [...prior.values()]
-    .filter((item) => !present.has(String(item.row_key)) && !refused.has(String(item.row_key)) &&
-      !carriedKeys.has(String(item.row_key)) && isPlainObject(item.row))
+    .filter((item) => !present.has(String(item.row_key)) && !carriedKeys.has(String(item.row_key)) && isPlainObject(item.row))
     .map((item) => ({
       ...item,
       row_key: String(item.row_key), row_hash: String(item.row_hash), row: item.row,
       action: item.present === false ? "unchanged_missing" : "missing",
       prior_revision: Number(item.revision || 0), prior_hash: String(item.row_hash),
+      prior_present: item.present !== false,
+      prior_row: item.row,
+      prior_effective_from: item.effective_from || item.first_seen_at || null,
     }));
   const priorPresent = [...prior.values()].filter((item) => item.present !== false && isPlainObject(item.row));
   const { documents, currentLogicalSourceIds } = buildDocuments(
     config,
     endpoint,
-    [...rowChanges, ...carriedRefused, ...carriedInvalidIdentity],
+    [...rowChanges, ...carriedRefused],
     priorPresent,
     fetchedAt,
     fetched.response_hash,
   );
   return {
-    rowChanges: [...rowChanges, ...carriedRefused, ...carriedInvalidIdentity, ...retained],
+    rowChanges: [...rowChanges, ...carriedRefused, ...retained],
     retained,
-    carriedRefused: [...carriedRefused, ...carriedInvalidIdentity],
+    carriedRefused,
     documents,
     currentLogicalSourceIds,
   };
@@ -1265,11 +1283,14 @@ export function customApiD1Persistence(env, hooks = {}) {
             const changed = ["created", "updated", "refreshed", "missing"].includes(item.action);
             const present = !["missing", "unchanged_missing"].includes(item.action);
             const history = Array.isArray(item.history_hashes) ? [...item.history_hashes] : [];
-            if (item.action === "updated" && item.prior_hash && !history.includes(item.prior_hash)) history.push(item.prior_hash);
+            if (item.action === "updated" && item.prior_hash && item.prior_hash !== item.row_hash &&
+                !history.includes(item.prior_hash)) history.push(item.prior_hash);
             const retainValueHistory = endpoint.name === "inventory" || endpoint.name === "costs";
             const historyRows = retainValueHistory && Array.isArray(item.history_rows) ? [...item.history_rows] : [];
-            if (retainValueHistory && item.action === "updated" && item.prior_hash &&
-                item.prior_hash !== item.row_hash && isPlainObject(item.prior_row)) {
+            const closesPriorValue = item.prior_present !== false && item.prior_hash &&
+              (item.action === "missing" ||
+                (item.action === "updated" && item.prior_hash !== item.row_hash));
+            if (retainValueHistory && closesPriorValue && isPlainObject(item.prior_row)) {
               historyRows.push({
                 row_hash: item.prior_hash,
                 row: item.prior_row,
@@ -1288,7 +1309,9 @@ export function customApiD1Persistence(env, hooks = {}) {
               history_hashes: history,
               ...(retainValueHistory ? {
                 effective_from: item.action === "created" ||
-                  (item.action === "updated" && item.prior_hash !== item.row_hash)
+                  item.action === "missing" ||
+                  (item.action === "updated" &&
+                    (item.prior_present === false || item.prior_hash !== item.row_hash))
                   ? fetchedAt
                   : (item.prior_effective_from || item.effective_from || item.first_seen_at || fetchedAt),
                 history_rows: historyRows,
@@ -1617,6 +1640,11 @@ async function setSourceState(env, config, state, { at, message = null, refusedR
     await env.DB.prepare(
       "INSERT INTO source_events (source_name,event,at,detail) VALUES (?1,'ingest',?2,'custom API pull started')"
     ).bind(config.source, at).run();
+    await env.DB.prepare(
+      `UPDATE custom_api_schedule_state
+          SET display_name=?2,last_issue_code=NULL,last_refused_rows=0
+        WHERE source=?1`
+    ).bind(config.source, config.display_name).run();
     return;
   }
   const count = await env.DB.prepare(
@@ -1636,17 +1664,30 @@ async function setSourceState(env, config, state, { at, message = null, refusedR
       env.DB.prepare(
         "INSERT INTO source_events (source_name,event,at,documents,detail) VALUES (?1,'ingest',?2,?3,?4)"
       ).bind(config.source, at, Number(count?.n || 0), detail),
+      env.DB.prepare(
+        `UPDATE custom_api_schedule_state
+            SET display_name=?2,last_issue_code=?3,last_refused_rows=?4
+          WHERE source=?1`
+      ).bind(config.source, config.display_name, warning ? "INPUT_REFUSED" : null, warning ? Number(refusedRows) : 0),
     ]);
     return;
   }
+  const issueCode = CUSTOM_API_ISSUE_CODES.has(message)
+    ? message
+    : "INTERNAL_ERROR";
   await env.DB.batch([
     env.DB.prepare(
       `UPDATE sources SET status='error',expected_refresh_seconds=?2,stale_reason=?3
        WHERE name=?1 AND kind='custom_api'`
-    ).bind(config.source, config.cadence_seconds, message),
+    ).bind(config.source, config.cadence_seconds, issueCode),
     env.DB.prepare(
       "INSERT INTO source_events (source_name,event,at,detail) VALUES (?1,'error',?2,?3)"
-    ).bind(config.source, at, message),
+    ).bind(config.source, at, issueCode),
+    env.DB.prepare(
+      `UPDATE custom_api_schedule_state
+          SET display_name=?2,last_issue_code=?3,last_refused_rows=?4
+        WHERE source=?1`
+    ).bind(config.source, config.display_name, issueCode, Number(refusedRows) || 0),
   ]);
 }
 
@@ -1721,7 +1762,11 @@ export async function runCustomApiWorker(env, options = {}) {
         });
         await releaseRunLease(env, config, lease.token, { successAt: result.fetched_at });
       } else if (result.status === "refused") {
-        await setSourceState(env, config, "error", { at: result.fetched_at, message: "INPUT_REFUSED" });
+        await setSourceState(env, config, "error", {
+          at: result.fetched_at,
+          message: "INPUT_REFUSED",
+          refusedRows: result.refused_rows,
+        });
         await releaseRunLease(env, config, lease.token);
       } else {
         await releaseRunLease(env, config, lease.token);
@@ -1741,7 +1786,7 @@ export async function runCustomApiWorker(env, options = {}) {
     if (options.dryRun !== true && sourceStarted) {
       await setSourceState(env, config, "error", {
         at,
-        message: customApiOwnerMessage(safe.code, config.display_name),
+        message: safe.code,
       }).catch(() => {});
     }
     if (options.dryRun !== true) await releaseRunLease(env, config, lease?.token).catch(() => {});

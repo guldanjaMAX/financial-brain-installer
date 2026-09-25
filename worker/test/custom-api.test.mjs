@@ -23,7 +23,6 @@ const configuration = (baseUrl) => ({
       name: "sales",
       path: "/sales",
       row_key: ["store", "period", "revenue_stream"],
-      legacy_row_key: ["store", "period"],
       document: {
         group_by: ["store", "period"],
         title_template: "{{store}}, {{period}} sales",

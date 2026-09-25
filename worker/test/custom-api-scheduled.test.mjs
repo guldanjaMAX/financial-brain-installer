@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { runCustomApiWorker } from "../src/lib/custom-api.js";
+import { freshnessReport } from "../src/lib/store-d1.js";
 
 const TOKEN = ["fixture", "scheduled", "sentinel", "42"].join("-");
 
@@ -29,9 +30,9 @@ function scheduledEnv() {
   const database = new DatabaseSync(":memory:");
   database.exec(`
     CREATE TABLE sources (
-      name TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
+      name TEXT PRIMARY KEY, kind TEXT NOT NULL, zone TEXT, status TEXT NOT NULL,
       created_at TEXT NOT NULL, last_ingest_at TEXT, document_count INTEGER NOT NULL DEFAULT 0,
-      expected_refresh_seconds INTEGER, stale_reason TEXT
+      last_complete_sweep_at TEXT, expected_refresh_seconds INTEGER, stale_reason TEXT
     );
     CREATE TABLE source_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT, source_name TEXT NOT NULL, event TEXT NOT NULL,
@@ -40,6 +41,14 @@ function scheduledEnv() {
     CREATE TABLE documents (
       id TEXT PRIMARY KEY, source TEXT NOT NULL, source_id TEXT,
       meta TEXT, deleted_at TEXT
+    );
+    CREATE TABLE document_source_inventory (source TEXT PRIMARY KEY);
+    CREATE TABLE sync_runs (
+      run_id TEXT PRIMARY KEY, source TEXT, lane TEXT, started_at TEXT, finished_at TEXT,
+      walk_complete INTEGER, files_seen INTEGER, docs_added INTEGER, docs_updated INTEGER,
+      docs_unchanged INTEGER, docs_refused INTEGER, docs_failed INTEGER, metrics_version INTEGER,
+      confirmed_from TEXT, confirmed_through TEXT, target_from TEXT, target_through TEXT,
+      refusal_reason TEXT, error TEXT, failure_evidence TEXT
     );
   `);
   database.exec(readFileSync(new URL("../../migrations/d1/0048_custom_api_source.sql", import.meta.url), "utf8"));
@@ -129,6 +138,35 @@ test("a source name already owned by another kind is refused before any fetch", 
   assert.ok(prepared >= 2, "the lease and source ownership decision points were reached");
   assert.equal(fetches, 0);
   assert.equal(database.prepare("SELECT COUNT(*) AS n FROM source_events").get().n, 0);
+});
+
+test("a scheduled authorization failure keeps its closed detail in freshness", async (t) => {
+  const { database, env } = scheduledEnv();
+  t.after(() => database.close());
+  let fetches = 0;
+  await assert.rejects(
+    runCustomApiWorker(env, {
+      scheduled: true,
+      now: () => new Date("2026-09-24T00:00:00.000Z"),
+      fetchImpl: async () => {
+        fetches++;
+        return new Response(JSON.stringify({ error: "held" }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        });
+      },
+      persistence: { async loadRows() { return []; }, async persist() {} },
+    }),
+    (error) => error?.code === "AUTH_REQUIRED",
+  );
+  assert.equal(fetches, 1, "the scheduled pull reached provider authorization");
+  const source = database.prepare(
+    "SELECT status,stale_reason FROM sources WHERE name='store-dashboard'",
+  ).get();
+  assert.deepEqual({ ...source }, { status: "error", stale_reason: "AUTH_REQUIRED" });
+  const freshness = await freshnessReport(env, { now: Date.parse("2026-09-24T00:00:00.000Z") });
+  assert.equal(freshness.sources[0].state, "broken");
+  assert.match(freshness.sources[0].reason, /store dashboard refused the key/i);
 });
 
 test("a configured custom API tick reserves the D1 budget by shrinking the vector drain", () => {

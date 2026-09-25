@@ -770,6 +770,148 @@ test("a partial refusal is marked in the document and source until a clean pull 
   assert.equal(source.last_ingest_at, clean.fetched_at);
   assert.equal(source.document_count, 1);
   assert.equal(source.stale_reason, "INPUT_REFUSED");
+  const refusedFreshness = await freshnessReport(env, { now: Date.parse(refused.fetched_at) });
+  assert.equal(refusedFreshness.sources[0].refused_rows, 2);
+  assert.match(refusedFreshness.sources[0].reason, /2 rows.*not refreshed/i);
+});
+
+test("a missing sales stream refuses one provider row without hiding other store-month keys", async (t) => {
+  const database = setupDatabase();
+  t.after(() => database.close());
+  const DB = countedD1(database);
+  const sourceConfig = compactConfig();
+  sourceConfig.endpoints[0].document.expected_values = {
+    revenue_stream: ["live_animal", "services", "other"],
+  };
+  const persistence = customApiD1Persistence({ STORAGE: "d1", DB }, { ingestDocument: documentWriter(DB) });
+  let currentAt = AT;
+  let feed = { data: [
+    { store: "Store 1", period: "2026-09-01", revenue_stream: "live_animal", net_sales: 10 },
+    { store: "Store 1", period: "2026-09-01", revenue_stream: "services", net_sales: 20 },
+    { store: "Store 2", period: "2026-09-01", revenue_stream: "other", net_sales: 30 },
+    { store: "Store 3", period: "2026-09-01", revenue_stream: "services", net_sales: 40 },
+  ] };
+  let fetches = 0;
+  const options = {
+    token: TOKEN, now: () => currentAt, sleep: async () => {}, persistence,
+    fetchImpl: async () => {
+      fetches++;
+      return new Response(JSON.stringify(feed), { headers: { "content-type": "application/json" } });
+    },
+  };
+  await settlePull(sourceConfig, options);
+  feed = { data: [
+    { store: "Store 1", period: "2026-09-01", net_sales: 99 },
+    { store: "Store 2", period: "2026-09-01", revenue_stream: "other", net_sales: 31 },
+  ] };
+  currentAt = new Date("2026-09-25T15:30:00.000Z");
+  const second = await settlePull(sourceConfig, options);
+
+  assert.ok(fetches >= 2, "the unlabeled row reached known sales identity validation");
+  assert.equal(second.refused_rows, 1, "one malformed provider row remains one refusal");
+  const rows = await persistence.loadRows({ source: "store-dashboard", endpoint: "sales" });
+  const byStoreAndStream = new Map(rows.map((item) => [
+    `${item.row.store}:${item.row.revenue_stream}`,
+    item,
+  ]));
+  for (const stream of ["live_animal", "services"]) {
+    const carried = byStoreAndStream.get(`Store 1:${stream}`);
+    assert.equal(carried.present, true);
+    assert.equal(carried.refresh_status, "not refreshed (refused)");
+  }
+  assert.equal(byStoreAndStream.get("Store 2:other").row.net_sales, 31);
+  assert.equal(byStoreAndStream.get("Store 3:services").present, false,
+    "the scoped refusal cannot preserve an unrelated key");
+  const visible = database.prepare(
+    `SELECT content,meta FROM documents d
+      WHERE d.source='store-dashboard' AND d.deleted_at IS NULL${currentCustomApiDocumentSql("d")}`,
+  ).get();
+  assert.match(visible.content, /Some rows weren't refreshed on 2026-09-25: 1 row the custom business API sent couldn't be read\./);
+  assert.match(visible.content, /Store 1/);
+  assert.doesNotMatch(visible.content, /Store 3/);
+});
+
+test("a configured legacy refusal carries only its exact legacy key", async (t) => {
+  const database = setupDatabase();
+  t.after(() => database.close());
+  const DB = countedD1(database);
+  const sourceConfig = compactConfig();
+  sourceConfig.endpoints[0].legacy_row_key = ["store", "period"];
+  const persistence = customApiD1Persistence({ STORAGE: "d1", DB }, { ingestDocument: documentWriter(DB) });
+  let currentAt = AT;
+  let feed = { data: [
+    { store: "Store 1", period: "2026-09-01", revenue_stream: "live_animal", net_sales: 10 },
+    { store: "Store 1", period: "2026-09-01", revenue_stream: "services", net_sales: 20 },
+    { store: "Store 1", period: "2026-09-01", net_sales: 5 },
+  ] };
+  let fetches = 0;
+  const options = {
+    token: TOKEN, now: () => currentAt, sleep: async () => {}, persistence,
+    fetchImpl: async () => {
+      fetches++;
+      return new Response(JSON.stringify(feed), { headers: { "content-type": "application/json" } });
+    },
+  };
+  await settlePull(sourceConfig, options);
+  feed = { data: [
+    { store: "Store 1", period: "2026-09-01", revenue_stream: "services", net_sales: 21 },
+    { store: "Store 1", period: "2026-09-01" },
+  ] };
+  currentAt = new Date("2026-09-25T15:30:00.000Z");
+  const second = await settlePull(sourceConfig, options);
+
+  assert.ok(fetches >= 2, "the legacy-shaped row reached value refusal");
+  assert.equal(second.refused_rows, 1);
+  const rows = await persistence.loadRows({ source: "store-dashboard", endpoint: "sales" });
+  const exactLegacy = rows.find((row) => row.row_key === 'store="Store 1"|period="2026-09-01"');
+  const missingLabeled = rows.find((row) => row.row.revenue_stream === "live_animal");
+  assert.equal(exactLegacy.present, true);
+  assert.equal(exactLegacy.refresh_status, "not refreshed (refused)");
+  assert.equal(missingLabeled.present, false, "a legacy refusal cannot preserve a different labeled key");
+});
+
+test("a carried refusal adds the fixed envelope warning without a rows table", async (t) => {
+  const database = setupDatabase();
+  t.after(() => database.close());
+  const DB = countedD1(database);
+  const sourceConfig = compactConfig();
+  sourceConfig.display_name = "dashboard";
+  sourceConfig.endpoints[0].document = {
+    ...sourceConfig.endpoints[0].document,
+    body_template: "Net sales: {{sum.net_sales}}",
+    aggregates: { net_sales: "sum" },
+    formats: { net_sales: "currency" },
+  };
+  const persistence = customApiD1Persistence({ STORAGE: "d1", DB }, { ingestDocument: documentWriter(DB) });
+  let currentAt = AT;
+  let feed = { data: [
+    { store: "Store 1", period: "2026-09-01", revenue_stream: "services", net_sales: 100 },
+    { store: "Store 2", period: "2026-09-01", revenue_stream: "services", net_sales: 50 },
+  ] };
+  let fetches = 0;
+  const options = {
+    token: TOKEN, now: () => currentAt, sleep: async () => {}, persistence,
+    fetchImpl: async () => {
+      fetches++;
+      return new Response(JSON.stringify(feed), { headers: { "content-type": "application/json" } });
+    },
+  };
+  await settlePull(sourceConfig, options);
+  feed = { data: [
+    { store: "Store 1", period: "2026-09-01", revenue_stream: "services", net_sales: 100 },
+    { store: "Store 2", period: "2026-09-01", revenue_stream: "services" },
+  ] };
+  currentAt = new Date("2026-09-25T15:30:00.000Z");
+  await settlePull(sourceConfig, options);
+  assert.ok(fetches >= 2, "the refusal reached the durable document planner");
+  const visible = database.prepare(
+    `SELECT content,meta FROM documents d
+      WHERE d.source='store-dashboard' AND d.deleted_at IS NULL${currentCustomApiDocumentSql("d")}`,
+  ).get();
+  assert.match(visible.content, /^Some rows weren't refreshed on 2026-09-25: 1 row the dashboard sent couldn't be read\. Figures below may include earlier values\./);
+  assert.match(visible.content, /Net sales: \$150\.00/);
+  assert.doesNotMatch(sourceConfig.endpoints[0].document.body_template, /rows_table/);
+  assert.equal(JSON.parse(visible.meta).not_refreshed_rows, 1);
 });
 
 test("changed inventory and costs keep prior structured values while search exposes only current values", async (t) => {
@@ -835,6 +977,64 @@ test("changed inventory and costs keep prior structured values while search expo
   assert.doesNotMatch(documents.get("inventory:Store 1"), /\| Item 1 \| 3 \|/);
   assert.match(documents.get("costs:Store 1"), /\| Item 1 \| \$11\.00 \| 3 \|/);
   assert.doesNotMatch(documents.get("costs:Store 1"), /\$10\.00/);
+});
+
+test("inventory and cost history close at disappearance and reopen after the gap", async (t) => {
+  const database = setupDatabase();
+  t.after(() => database.close());
+  const DB = countedD1(database);
+  const sourceConfig = {
+    ...config(),
+    endpoints: config().endpoints.filter((endpoint) => ["inventory", "costs"].includes(endpoint.name)),
+  };
+  const persistence = customApiD1Persistence({ STORAGE: "d1", DB }, { ingestDocument: documentWriter(DB) });
+  let currentAt = AT;
+  let feeds = {
+    inventory: { data: [{ store: "Store 1", breed: "Item 1", count: 3 }] },
+    costs: { data: [{ store: "Store 1", breed: "Item 1", avg_cost: 10, received: 2 }] },
+  };
+  let providerCalls = 0;
+  const options = {
+    token: TOKEN, now: () => currentAt, sleep: async () => {}, persistence,
+    fetchImpl: async (input) => {
+      providerCalls++;
+      return new Response(JSON.stringify(feeds[new URL(input).pathname.split("/").pop()]), {
+        headers: { "content-type": "application/json" },
+      });
+    },
+  };
+  await settlePull(sourceConfig, options);
+  const absentAt = new Date("2026-09-25T15:30:00.000Z");
+  currentAt = absentAt;
+  feeds = { inventory: { data: [] }, costs: { data: [] } };
+  await settlePull(sourceConfig, options);
+  for (const endpoint of ["inventory", "costs"]) {
+    const [absent] = await persistence.loadRows({ source: "store-dashboard", endpoint });
+    assert.equal(absent.present, false, `${endpoint} reached the disappearance decision`);
+    assert.equal(absent.effective_from, absentAt.toISOString());
+    assert.equal(absent.history_rows[0].effective_to, absentAt.toISOString());
+  }
+
+  const reappearedAt = new Date("2026-09-26T15:30:00.000Z");
+  currentAt = reappearedAt;
+  feeds = {
+    inventory: { data: [{ store: "Store 1", breed: "Item 1", count: 3 }] },
+    costs: { data: [{ store: "Store 1", breed: "Item 1", avg_cost: 11, received: 3 }] },
+  };
+  await settlePull(sourceConfig, options);
+  assert.ok(providerCalls >= 6, "all three snapshots reached both endpoint decisions");
+  for (const endpoint of ["inventory", "costs"]) {
+    const [row] = await persistence.loadRows({ source: "store-dashboard", endpoint });
+    assert.equal(row.present, true);
+    assert.equal(row.effective_from, reappearedAt.toISOString(), `${endpoint} opened a new value interval`);
+    assert.deepEqual(row.history_rows.map((history) => ({
+      effective_from: history.effective_from,
+      effective_to: history.effective_to,
+    })), [{
+      effective_from: AT.toISOString(),
+      effective_to: absentAt.toISOString(),
+    }]);
+  }
 });
 
 test("malformed known identities are refused without hiding prior keys and unknown fields remain allowed", async (t) => {

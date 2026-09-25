@@ -23,7 +23,6 @@ function config() {
       name: "sales",
       path: "/sales",
       row_key: ["store", "period", "revenue_stream"],
-      legacy_row_key: ["store", "period"],
       document: {
         group_by: ["store", "period"],
         title_template: "{{store}}, {{period}} sales",
@@ -328,7 +327,7 @@ test("a 308 canonical-path redirect is a plain configuration error and is never 
   assert.equal(calls, 1, "the 308 decision point was reached without following it");
 });
 
-test("scripted paging handles labeled and legacy sales and builds one readable store-month document", async () => {
+test("scripted paging handles labeled sales and builds one readable store-month document", async () => {
   const calls = [];
   const persistence = memoryPersistence();
   const result = await runCustomApiPull(config(), {
@@ -340,7 +339,7 @@ test("scripted paging handles labeled and legacy sales and builds one readable s
       calls.push({ url: String(input), authorized: new Headers(init.headers).get("Authorization") === `Bearer ${TOKEN}` });
       const url = new URL(input);
       return url.searchParams.get("page") === "2"
-        ? json([{ store: "Store B", period: "2026-08-01", net_sales: 70, transactions: 2 }])
+        ? json([{ store: "Store B", period: "2026-08-01", revenue_stream: "services", net_sales: 70, transactions: 2 }])
         : json({
           data: [
             { store: "Store A", period: "2026-08-01", revenue_stream: "live_animal", net_sales: 100, units: 1, puppies_sold: 1 },
@@ -428,7 +427,7 @@ test("scripted provider failures are bounded, classified, and never reveal the b
       attempts++;
       return attempts < 3
         ? json({ detail: TOKEN }, 429)
-        : json([{ store: "Store A", period: "2026-08-01", net_sales: 1 }]);
+        : json([{ store: "Store A", period: "2026-08-01", revenue_stream: "services", net_sales: 1 }]);
     },
   });
   assert.equal(recovered.status, "completed");

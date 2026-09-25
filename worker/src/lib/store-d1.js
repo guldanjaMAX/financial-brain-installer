@@ -72,7 +72,8 @@ import {
 } from "./diagnose-scan.js";
 import { sourceOriginalChunkReceiptHash } from "./source-original-chunk.js";
 import {
-  currentCustomApiDocumentSql, customApiLogicalSourceId, customApiPointerTableMissing,
+  currentCustomApiDocumentSql, customApiLogicalSourceId, customApiOwnerMessage,
+  customApiPointerTableMissing,
 } from "./custom-api-visibility.js";
 
 const RRF_K = 60;
@@ -3586,21 +3587,19 @@ async function activeCustomApiJobStarts(env, rows) {
   }
 }
 
-async function currentCustomApiWarnings(env, rows) {
+async function currentCustomApiReceipts(env, rows) {
   if (!(rows || []).some((row) =>
-    String(row?.kind || "").toLowerCase() === "custom_api" &&
-    String(row?.stale_reason || "").trim().toUpperCase() === "INPUT_REFUSED")) return new Map();
+    String(row?.kind || "").toLowerCase() === "custom_api" && row?.stale_reason)) return new Map();
   try {
     const result = await env.DB.prepare(
-      `SELECT c.source,j.stats_json
-         FROM custom_api_current_jobs c
-         JOIN custom_api_jobs j ON j.job_id=c.job_id AND j.source=c.source`
+      `SELECT source,display_name,last_issue_code,last_refused_rows
+         FROM custom_api_schedule_state`
     ).all();
-    return new Map((result?.results || []).map((row) => {
-      let stats = null;
-      try { stats = JSON.parse(row.stats_json); } catch { stats = null; }
-      return [String(row.source), Number(stats?.refused_rows || 0)];
-    }));
+    return new Map((result?.results || []).map((row) => [String(row.source), {
+      displayName: typeof row.display_name === "string" && row.display_name ? row.display_name : null,
+      issueCode: typeof row.last_issue_code === "string" ? row.last_issue_code : null,
+      refusedRows: Number(row.last_refused_rows || 0),
+    }]));
   } catch (error) {
     if (missingCustomApiJobsTable(error)) return new Map();
     throw error;
@@ -3636,6 +3635,16 @@ function operationalFreshness(s, now) {
     };
   }
   if (s.stale_reason) {
+    if (String(s.kind || "").toLowerCase() === "custom_api") {
+      return {
+        state: "broken",
+        reason: customApiOwnerMessage(
+          String(s.custom_api_issue_code || s.stale_reason).trim().toUpperCase(),
+          s.custom_api_display_name || "custom business API",
+        ),
+        indexingMs,
+      };
+    }
     return { state: "broken", reason: sourceReceiptOwnerMessage(s.stale_reason), indexingMs };
   }
   if (status === "error") {
@@ -3701,7 +3710,7 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
     return { gaps: [], unavailable: true };
   }
   const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
-  const customApiWarnings = await currentCustomApiWarnings(env, rows);
+  const customApiReceipts = await currentCustomApiReceipts(env, rows);
 
   const allowed = allowedSources === null
     ? null
@@ -3720,10 +3729,13 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
     const last = s.last_ingest_at ? Date.parse(s.last_ingest_at) : NaN;
     const ageSec = Number.isFinite(last) ? Math.floor((now - last) / 1000) : null;
     const days = ageSec === null ? null : Math.floor(ageSec / 86400);
-    const customApiRefusedRows = customApiWarnings.get(String(s.name)) || 0;
+    const customApiReceipt = customApiReceipts.get(String(s.name)) || null;
+    const customApiRefusedRows = customApiReceipt?.refusedRows || 0;
     const operational = operationalFreshness({
       ...s,
       custom_api_refused_rows: customApiRefusedRows,
+      custom_api_issue_code: customApiReceipt?.issueCode || null,
+      custom_api_display_name: customApiReceipt?.displayName || null,
       indexing_started_at: s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null,
     }, now);
 
@@ -3828,7 +3840,7 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
     return { sources: [], unavailable: true };
   }
   const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
-  const customApiWarnings = await currentCustomApiWarnings(env, rows);
+  const customApiReceipts = await currentCustomApiReceipts(env, rows);
   const latestRuns = new Map();
   try {
     let result;
@@ -3898,11 +3910,14 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
       const expected = Number(s.expected_refresh_seconds) || null;
       const automatable = AUTOMATABLE_SOURCE_KINDS.has(String(s.kind));
       const effectiveIndexingStartedAt = s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null;
-      const customApiRefusedRows = customApiWarnings.get(String(s.name)) || 0;
+      const customApiReceipt = customApiReceipts.get(String(s.name)) || null;
+      const customApiRefusedRows = customApiReceipt?.refusedRows || 0;
       const operational = operationalFreshness({
         ...s,
         indexing_started_at: effectiveIndexingStartedAt,
         custom_api_refused_rows: customApiRefusedRows,
+        custom_api_issue_code: customApiReceipt?.issueCode || null,
+        custom_api_display_name: customApiReceipt?.displayName || null,
       }, now);
       let state = unregistered ? "unregistered" : "ok";
       let reason = unregistered ? "the source registry entry is missing" : operational.reason;
@@ -4501,6 +4516,7 @@ export async function sourceInventory(env, {
     status: row.status,
     indexing_started_at: row.run_finished_at === null ? row.run_started_at : null,
   })));
+  const customApiReceipts = await currentCustomApiReceipts(env, rawRows);
   const total = rawRows.length ? inventoryCount(rawRows[0].inventory_total) : 0;
   if (total > maxRows || rawRows.length > maxRows) {
     const error = new Error("source inventory exceeds the safe row limit");
@@ -4523,10 +4539,14 @@ export async function sourceInventory(env, {
     const expectedSeconds = Number(row.expected_refresh_seconds) > 0
       ? Math.floor(Number(row.expected_refresh_seconds))
       : null;
+    const customApiReceipt = customApiReceipts.get(sourceId) || null;
     const operational = operationalFreshness({
       ...row,
       indexing_started_at: (row.run_finished_at === null ? row.run_started_at : null) ??
         activeCustomJobs.get(sourceId) ?? null,
+      custom_api_refused_rows: customApiReceipt?.refusedRows || 0,
+      custom_api_issue_code: customApiReceipt?.issueCode || null,
+      custom_api_display_name: customApiReceipt?.displayName || null,
     }, now);
     const automatable = AUTOMATABLE_SOURCE_KINDS.has(String(row.kind || "").toLowerCase());
     let state = registered ? "ok" : "unregistered";

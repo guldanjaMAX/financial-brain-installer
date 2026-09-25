@@ -31,16 +31,23 @@ asset publication.
   oversized request. Exact rows are stored compactly with correction and
   last-seen history; missing rows leave current totals without being erased.
   Inventory and cost search contains only the current per-store snapshot, while
-  stored rows keep prior full values with effective dates. It does not create
-  daily history documents. Monthly summaries cover every store, and per-store
-  sales, inventory, and cost documents stay bounded. The preview names every endpoint's row,
+  stored rows keep prior full values with effective dates. A row that disappears
+  closes its prior interval, and a later return starts a new one instead of
+  hiding the gap. It does not create daily history documents. Monthly summaries
+  cover every store, and per-store sales, inventory, and cost documents stay
+  bounded. The preview names every endpoint's row,
   readable-document, and refused-row counts. The 10,000-row ceiling refuses an
   oversized endpoint without changing it. A refused known row now keeps its
   last verified value visibly marked with the refusal date instead of disappearing.
+  Every affected document begins with the same dated warning even when its
+  template has no row table. Sales requires the configured revenue stream; an
+  unlabeled row cannot hide another store or month.
   The source says ready with warnings and gives the refused count until a clean
   pull succeeds. A wholly refused pull leaves the last good snapshot current and
-  prints the useful refusal counts. Invalid store, month, revenue-stream, and
-  breed identities are refused before they can hide a valid prior key. Superseded document versions
+  prints and retains the useful refusal counts. Scheduled failures retain their
+  reviewed issue guidance instead of collapsing to a generic failure. Invalid
+  store, month, revenue-stream, and breed identities are refused before they can
+  hide a valid prior key. Superseded document versions
   are removed in bounded cleanup passes so old vectors cannot crowd current
   evidence out of meaning search. Clipboard entry clears copied material even
   when inventory fails or the secret name already exists, and dashboard key
