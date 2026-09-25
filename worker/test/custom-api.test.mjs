@@ -290,7 +290,7 @@ test("429 retries with backoff and never exposes the bearer sentinel", async (t)
     if (!request.url.includes("sales")) return json(response, []);
     attempts++;
     if (attempts < 3) return json(response, { provider_detail: TOKEN }, 429);
-    return json(response, [{ store: "Store A", period: "2026-08-01", net_sales: 1, transactions: 1 }]);
+    return json(response, [{ store: "Store A", period: "2026-08-01", revenue_stream: "supplies", net_sales: 1, transactions: 1 }]);
   });
   t.after(mock.close);
   const messages = [];
@@ -317,10 +317,10 @@ test("unexpected envelope keys, duplicate row identities, and token reflection f
   for (const [value, code] of [
     [{ data: [], unexpected: true }, "INVALID_RESPONSE"],
     [[
-      { store: "Store A", period: "2026-08-01", net_sales: 1 },
-      { store: "Store A", period: "2026-08-01", net_sales: 2 },
+      { store: "Store A", period: "2026-08-01", revenue_stream: "supplies", net_sales: 1 },
+      { store: "Store A", period: "2026-08-01", revenue_stream: "supplies", net_sales: 2 },
     ], "DUPLICATE_ROW_KEY"],
-    [[{ store: "Store A", period: "2026-08-01", net_sales: 1, note: TOKEN }], "SECRET_IN_RESPONSE"],
+    [[{ store: "Store A", period: "2026-08-01", revenue_stream: "supplies", net_sales: 1, note: TOKEN }], "SECRET_IN_RESPONSE"],
   ]) {
     body = value;
     const before = mock.calls.length;
