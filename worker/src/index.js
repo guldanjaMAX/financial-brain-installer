@@ -319,6 +319,7 @@ function citationForDocument(document) {
 
 async function unifiedRetrieve(env, url, {
   limit, access = null, scope = { all: true }, scopePrincipalKind = "owner",
+  projectionReadiness = null,
 }) {
   const q = url.searchParams.get("q");
   const rrfK = Math.min(Math.max(parseInt(url.searchParams.get("rrf_k")) || 60, 1), 1e3);
@@ -341,6 +342,7 @@ async function unifiedRetrieve(env, url, {
     },
     access,
     scope,
+    projectionReadiness,
   });
 
   const matches = normalizeRetrievedDocuments(r.results);
@@ -2807,7 +2809,7 @@ export default {
         // Keep the private query inside this request while exercising the exact
         // production owner retrieval and citation projections twice. Calling
         // unifiedRetrieve directly guarantees the proof cannot enable rerank.
-        retrieve: async ({ query, limit }) => {
+        retrieve: async ({ query, limit, projectionReadiness }) => {
           const internal = new URL("https://brain.invalid/api/rag/unified");
           internal.searchParams.set("q", query);
           const retrieval = await unifiedRetrieve(env, internal, {
@@ -2815,6 +2817,7 @@ export default {
             access: null,
             scope: { all: true },
             scopePrincipalKind: "owner",
+            projectionReadiness,
           });
           const results = retrieval.matches.slice(0, limit).map((result, index) => ({
             result,

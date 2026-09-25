@@ -348,13 +348,13 @@ async function exactFamilySnapshot(env, request, originalId) {
   };
 }
 
-async function projectionReceipt(env, originalId, expectedReadiness) {
-  const state = await env.DB.prepare(
+async function readProjectionState(env, originalId) {
+  return env.DB.prepare(
     `SELECT schema_version,outbox_generation,source_original_retrieval_generation,
             vector_projection_mutation_id,vector_projection_submitted_at,
             vector_projection_status,vector_projection_bootstrap_epoch,
             (SELECT COUNT(*) FROM chunks) AS expected_vector_count,
-            (SELECT COUNT(*) FROM vector_outbox) AS global_outbox_count,
+            EXISTS(SELECT 1 FROM vector_outbox LIMIT 1) AS global_outbox_count,
             (SELECT COUNT(*)
                FROM vector_outbox AS pending
                JOIN chunks AS c ON c.chunk_uid=pending.chunk_uid
@@ -363,6 +363,10 @@ async function projectionReceipt(env, originalId, expectedReadiness) {
               WHERE bound.tenant_id=?1 AND bound.original_id=?2) AS target_outbox_count
        FROM install_state WHERE id=1`,
   ).bind(SOURCE_ORIGINAL_TENANT_ID, originalId).first();
+}
+
+async function projectionReceipt(env, originalId, expectedReadiness, state = null) {
+  state ??= await readProjectionState(env, originalId);
   if (!state || Number(state.schema_version) < 44) {
     throw new SourceOriginalResultFamilyError(
       503,
@@ -497,10 +501,21 @@ async function retrievedIdentity(env, pair) {
   };
 }
 
-async function runProbe(env, retrieve, query, retrievalProbeId, memberKeys) {
+async function runProbe(
+  env,
+  retrieve,
+  query,
+  retrievalProbeId,
+  memberKeys,
+  projectionReadiness,
+) {
   let response;
   try {
-    response = await retrieve({ query, limit: MAX_RETRIEVAL_RESULTS });
+    response = await retrieve({
+      query,
+      limit: MAX_RETRIEVAL_RESULTS,
+      projectionReadiness,
+    });
   } catch {
     throw new SourceOriginalResultFamilyError(
       503,
@@ -898,9 +913,47 @@ export async function buildSourceOriginalResultFamilyProof(env, body, {
   };
   familyReceipt.family_receipt_hash = await sha256Id(canonical(familyReceipt));
 
+  const openingProjectionState = await readProjectionState(env, originalId);
+  const exactExpectedVectors = Number(openingProjectionState?.expected_vector_count);
+  const targetOutboxCount = Number(openingProjectionState?.target_outbox_count);
+  const globalOutboxCount = Number(openingProjectionState?.global_outbox_count);
+  if ([exactExpectedVectors, targetOutboxCount, globalOutboxCount].some((value) =>
+    !Number.isSafeInteger(value) || value < 0)) {
+    throw new SourceOriginalResultFamilyError(
+      503,
+      "source_original_result_family_vector_unavailable",
+      "the exact result-family vector readiness receipt is unavailable",
+    );
+  }
+  if (targetOutboxCount > 0) {
+    refuse("source_original_result_family_vector_unready", "the exact result family still has queued vector work", 409);
+  }
+  if (globalOutboxCount > 0) {
+    refuse(
+      SOURCE_ORIGINAL_RESULT_FAMILY_UNRELATED_BACKLOG_CODE,
+      "unrelated vector work prevents an exact global result-family proof",
+      409,
+    );
+  }
+
   let readiness;
   try {
-    readiness = await readVectorReadiness(env);
+    readiness = await readVectorReadiness(env, {
+      // Result-family verification needs an exact zero, not the hot path's
+      // capped global sample. The opening receipt proves that empty cut and
+      // supplies the exact vector denominator used by the shipped D1 seal.
+      outbox: {
+        pending: 0,
+        pending_is_capped: false,
+        pending_display: "0",
+        upserts: 0,
+        deletes: 0,
+        submitted: 0,
+        component_counts_exact: true,
+        oldest_queued_at: null,
+      },
+      expectedVectorCount: exactExpectedVectors,
+    });
   } catch {
     throw new SourceOriginalResultFamilyError(
       503,
@@ -913,13 +966,22 @@ export async function buildSourceOriginalResultFamilyProof(env, body, {
   // whether this exact family is still queued or only unrelated work remains.
   // A second complete projection receipt below preserves the original
   // after-probe fence; neither check drains or changes the queue.
-  const openingProjection = await projectionReceipt(env, originalId, readiness);
+  const openingProjection = await projectionReceipt(
+    env,
+    originalId,
+    readiness,
+    openingProjectionState,
+  );
   const retrievalProbeId = await probeId(signingKey, originalId, request.query);
   const memberKeys = new Set(family.members.map((member) =>
     `${member.document_revision_id}\0${member.chunk_ix}\0${member.chunk_receipt_hash}`
   ));
-  const firstProbe = await runProbe(env, retrieve, request.query, retrievalProbeId, memberKeys);
-  const secondProbe = await runProbe(env, retrieve, request.query, retrievalProbeId, memberKeys);
+  const firstProbe = await runProbe(
+    env, retrieve, request.query, retrievalProbeId, memberKeys, readiness,
+  );
+  const secondProbe = await runProbe(
+    env, retrieve, request.query, retrievalProbeId, memberKeys, readiness,
+  );
   if (firstProbe.result_hash !== secondProbe.result_hash ||
       firstProbe.citation_set_hash !== secondProbe.citation_set_hash ||
       firstProbe.document_revision_id !== secondProbe.document_revision_id ||

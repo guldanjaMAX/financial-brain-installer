@@ -771,6 +771,7 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
  */
 export async function search(env, {
   query, embedding, limit = 10, filters = {}, weights = {}, rrfK = RRF_K, access = null, scope = null,
+  projectionReadiness = null,
 }) {
   // Refuse malformed or schema-skewed scope before the first D1 or Vectorize
   // call. If each modality caught this independently, the invalid scope could
@@ -795,7 +796,9 @@ export async function search(env, {
     // readiness contract that gates health and acceptance so every answer
     // advertises partial projection instead of looking fully healthy.
     vectorEligible
-      ? vectorReadiness(env).catch(() => ({ ready: false }))
+      ? projectionReadiness === null
+        ? vectorReadiness(env).catch(() => ({ ready: false }))
+        : Promise.resolve(projectionReadiness)
       : Promise.resolve(null),
   ]);
   // Ordinary FTS or Vectorize failures remain independent degraded modalities.
@@ -6800,7 +6803,10 @@ export async function outboxDepth(env) {
  * those observations, the newer queue/fence makes this fail closed. A write
  * that starts after the D1 read simply starts after this point-in-time check.
  */
-export async function vectorReadiness(env, { outbox = null } = {}) {
+export async function vectorReadiness(env, {
+  outbox = null,
+  expectedVectorCount = null,
+} = {}) {
   let description;
   try {
     description = await env.VECTORIZE.describe();
@@ -6839,9 +6845,15 @@ export async function vectorReadiness(env, { outbox = null } = {}) {
   // omits it may safely retain the last verified count rather than fail a read.
   const liveVectors = Number(state.live_vectors ?? state.expected_vectors);
   const status = String(state.projection_status || "");
-  const expected = status === "verified"
+  const exactExpected = expectedVectorCount === null
+    ? null
+    : Number(expectedVectorCount);
+  if (exactExpected !== null && (!Number.isSafeInteger(exactExpected) || exactExpected < 0)) {
+    throw new Error("the exact vector readiness count is invalid");
+  }
+  const expected = exactExpected ?? (status === "verified"
     ? verifiedVectors
-    : Math.max(verifiedVectors, liveVectors);
+    : Math.max(verifiedVectors, liveVectors));
   const pending = Number(backlog.pending);
   const submitted = Number(backlog.submitted);
   const outboxGeneration = Number(state.outbox_generation ?? 0);
@@ -7055,12 +7067,16 @@ export async function forget(env, {
     if (!Array.isArray(receipts) || receipts.length < 3) {
       throw new Error("the forget delete receipts were incomplete");
     }
-    deletedChunks += Array.isArray(receipts[1]?.results)
-      ? receipts[1].results.length
-      : drainLeaseChanges(receipts[1]);
-    deletedDocuments += Array.isArray(receipts[2]?.results)
-      ? receipts[2].results.length
-      : drainLeaseChanges(receipts[2]);
+    const exactMutationCount = (receipt) => {
+      const returned = Array.isArray(receipt?.results) ? receipt.results.length : null;
+      const changed = drainLeaseChanges(receipt);
+      // Cloudflare D1 may omit RETURNING rows from a batch receipt while still
+      // exposing the exact affected-row count. Prefer a nonempty returned set,
+      // but never turn an exact positive mutation receipt into zero.
+      return returned === null || (returned === 0 && changed > 0) ? changed : returned;
+    };
+    deletedChunks += exactMutationCount(receipts[1]);
+    deletedDocuments += exactMutationCount(receipts[2]);
   }
 
   // Physical vector deletion is deliberately enqueue-only here. `drainOutbox`

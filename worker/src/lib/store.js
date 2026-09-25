@@ -742,7 +742,10 @@ const d1Backend = {
     };
   },
 
-  async search(env, { query, limit, filters = {}, weights = {}, rrfK = 60, access = null, scope = null }) {
+  async search(env, {
+    query, limit, filters = {}, weights = {}, rrfK = 60, access = null, scope = null,
+    projectionReadiness = null,
+  }) {
     let embedding = null;
     if (access?.kind !== "grant" && scopeIsUnrestricted(scope)) {
       try {
@@ -751,7 +754,9 @@ const d1Backend = {
         // Degrade to keyword rather than fail. store-d1 reports which side answered.
       }
     }
-    const r = await d1.search(env, { query, embedding, limit, filters, weights, rrfK, access, scope });
+    const r = await d1.search(env, {
+      query, embedding, limit, filters, weights, rrfK, access, scope, projectionReadiness,
+    });
     return {
       results: r.results.map((x) => {
         const sourceId = x.source_id || (

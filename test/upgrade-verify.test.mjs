@@ -132,9 +132,12 @@ const readyProjectionInventory = (overrides = {}) => {
     vector_drain_mode: overrides.drainMode ?? "paused-for-upgrade",
     vector_backlog: {
       pending,
+      pending_is_capped: false,
+      pending_display: String(pending),
       upserts,
       deletes,
       submitted,
+      component_counts_exact: true,
       oldest_queued_at: oldestQueuedAt,
     },
     vector_readiness: {
@@ -147,7 +150,9 @@ const readyProjectionInventory = (overrides = {}) => {
       expected_vectors: expected,
       actual_vectors: actual,
       pending,
+      pending_is_capped: false,
       submitted,
+      submitted_counts_exact: true,
       oldest_queued_at: oldestQueuedAt,
     },
   };
