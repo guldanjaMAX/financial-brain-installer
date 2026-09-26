@@ -24,7 +24,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   cmdDeploy,
+  commandPath,
+  displayPathForTesting,
   persistWorkersDevDomain,
+  renderCliCommands,
   withCloudflareControlCredential,
 } from "../brain.mjs";
 
@@ -110,6 +113,16 @@ function harness({ subdomainRead, health = null }) {
     }
     if (path === "/health") {
       healthHosts.push(url.hostname);
+      if (Array.isArray(health)) {
+        // A scripted route: each probe consumes the next answer, and the last
+        // one repeats, so "permanent" outcomes need only one entry.
+        const step = health[Math.min(healthHosts.length - 1, health.length - 1)];
+        if (step === "fetch-error") throw new Error("fetch failed: connection reset (fixture)");
+        if (step === "healthy") return healthResponse({ brain: SLUG, version: VERSION });
+        if (step === "stale") return healthResponse({ brain: SLUG, version: "0.0.1" });
+        if (step === "wrong-brain") return healthResponse({ brain: "someone-else", version: VERSION });
+        return healthResponse({ error: "fixture" }, { status: step });
+      }
       if (health === "healthy") return healthResponse({ brain: SLUG, version: VERSION });
       if (health === "wrong-brain") return healthResponse({ brain: "someone-else", version: VERSION });
       if (health === "down") throw new Error("fetch failed: connection refused (fixture)");
@@ -260,4 +273,105 @@ test("the no-credential fallback preserves the wrangler-login and no-shell-token
     if (priorToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
     else process.env.CLOUDFLARE_API_TOKEN = priorToken;
   }
+});
+
+/** An injected sleep that records every requested delay and never waits. */
+function recordingWait() {
+  const delays = [];
+  return { delays, wait: async (ms) => { delays.push(ms); } };
+}
+
+// A brand-new workers.dev route routinely takes longer than a few seconds to
+// answer as the new Worker. The identity gate must give it at least the budget
+// cmdHealth gives the same propagation lag (six probes five seconds apart).
+const MIN_PROPAGATION_BUDGET_MS = 25_000;
+
+test("a fresh workers.dev route that 404s five times while propagating is still confirmed and saved", async () => {
+  const target = writeManifest();
+  const { fetchImpl, healthHosts } = harness({
+    subdomainRead: "ok",
+    health: [404, 404, 404, 404, 404, "healthy"],
+  });
+  const { delays, wait } = recordingWait();
+  await withFixture(fetchImpl, () => cmdDeploy(target, { wait }));
+  const saved = JSON.parse(readFileSync(target, "utf8"));
+  assert.equal(saved.brain?.domain, CANDIDATE_DOMAIN);
+  assert.equal(healthHosts.length, 6, "the gate must keep probing through propagation 404s");
+  assert.ok(healthHosts.every((host) => host === CANDIDATE_DOMAIN));
+  assert.equal(delays.length, 5, "each propagation miss waits exactly once before the next probe");
+});
+
+test("edge 5xx answers and fetch errors while a route propagates are retried, not fatal", async () => {
+  const target = writeManifest();
+  const { fetchImpl, healthHosts } = harness({
+    subdomainRead: "ok",
+    health: ["fetch-error", 503, 522, "fetch-error", "healthy"],
+  });
+  const { delays, wait } = recordingWait();
+  await withFixture(fetchImpl, () => cmdDeploy(target, { wait }));
+  const saved = JSON.parse(readFileSync(target, "utf8"));
+  assert.equal(saved.brain?.domain, CANDIDATE_DOMAIN);
+  assert.equal(healthHosts.length, 5);
+  assert.equal(delays.length, 4);
+});
+
+test("this brain still answering its previous version three times is retried until the new version is live", async () => {
+  const target = writeManifest();
+  const { fetchImpl, healthHosts } = harness({
+    subdomainRead: "ok",
+    health: ["stale", "stale", "stale", "healthy"],
+  });
+  const { delays, wait } = recordingWait();
+  await withFixture(fetchImpl, () => cmdDeploy(target, { wait }));
+  const saved = JSON.parse(readFileSync(target, "utf8"));
+  assert.equal(saved.brain?.domain, CANDIDATE_DOMAIN);
+  assert.equal(healthHosts.length, 4, "a stale version of THIS brain is propagation, not a refusal");
+  assert.equal(delays.length, 3);
+});
+
+test("a workers.dev host that answers for a different brain is refused at once, without retries", async () => {
+  const target = writeManifest();
+  const { fetchImpl, healthHosts } = harness({
+    subdomainRead: "ok",
+    health: ["wrong-brain", "healthy"],
+  });
+  const { delays, wait } = recordingWait();
+  await assert.rejects(
+    () => withFixture(fetchImpl, () => cmdDeploy(target, { wait })),
+    (error) => {
+      assert.match(error.message, /identified itself as "someone-else"/);
+      assert.match(error.message, /No address was saved and no admin key was sent to that host/);
+      return true;
+    },
+  );
+  assert.deepEqual(healthHosts, [CANDIDATE_DOMAIN],
+    "the identity refusal must be reached on the first probe and never retried");
+  assert.deepEqual(delays, [], "a different brain is not propagation, so nothing waits");
+  const saved = JSON.parse(readFileSync(target, "utf8"));
+  assert.equal(saved.brain?.domain, undefined);
+});
+
+test("a route that never stops 404ing dies after the full propagation budget and names the resume command", async () => {
+  const target = writeManifest();
+  const { fetchImpl, healthHosts } = harness({ subdomainRead: "ok", health: [404] });
+  const { delays, wait } = recordingWait();
+  const resume = renderCliCommands(`brain setup ${commandPath(displayPathForTesting(target, process.cwd()))}`);
+  await assert.rejects(
+    () => withFixture(fetchImpl, () => cmdDeploy(target, { wait })),
+    (error) => {
+      assert.match(error.message, /exact account hostname was not confirmed as this brain/i);
+      assert.match(error.message, /\/health returned 404/);
+      assert.ok(renderCliCommands(error.message).includes(resume),
+        `the final refusal must name the resume command ${resume}`);
+      return true;
+    },
+  );
+  assert.ok(healthHosts.length >= 6, `expected at least six probes, saw ${healthHosts.length}`);
+  assert.ok(healthHosts.every((host) => host === CANDIDATE_DOMAIN));
+  assert.equal(delays.length, healthHosts.length - 1, "no sleep after the final probe");
+  const waited = delays.reduce((sum, ms) => sum + ms, 0);
+  assert.ok(waited >= MIN_PROPAGATION_BUDGET_MS,
+    `the gate waited ${waited} ms in total, less than the propagation budget`);
+  const saved = JSON.parse(readFileSync(target, "utf8"));
+  assert.equal(saved.brain?.domain, undefined);
 });

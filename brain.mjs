@@ -2083,52 +2083,68 @@ const SUBDOMAIN_READ_DENIED_RE = /failed \((401|403)\)/;
  * not an identity fact. These are the same two fields the product records as
  * this brain's identity once it already trusts a domain; here they are what
  * lets an UNTRUSTED candidate earn that trust.
+ *
+ * A route enabled seconds ago routinely answers 404, an edge 5xx, a failed
+ * fetch, or the PREVIOUS build of this same brain for longer than a few
+ * seconds, so every one of those is retried within the same budget cmdHealth
+ * gives that lag (a minute, five seconds apart). An answer naming a DIFFERENT
+ * brain is not lag: it is refused on the spot and never retried, because no
+ * amount of waiting makes another brain's host this one's address.
  */
+const WORKERS_DEV_PROBE_ATTEMPTS = 12;
+const WORKERS_DEV_PROBE_WAIT_MS = 5000;
 async function verifyWorkersDevCandidate(domain, {
   expectedBrainName,
   expectedVersion,
   request = http,
-  attempts = 3,
+  attempts = WORKERS_DEV_PROBE_ATTEMPTS,
   wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   let reason = "no attempt was made";
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    let res = null;
-    let body = "";
-    try {
-      res = await request(`https://${domain}/health`, {}, { timeoutMs: 15_000, what: "the health check" });
-      body = await res.text();
-    } catch (error) {
-      reason = `/health did not answer (${String(error?.message || error).split("\n")[0].slice(0, 140)})`;
-    }
-    if (res && !res.ok) reason = `/health returned ${res.status}`;
-    // A route enabled seconds ago can still 404, or the edge can 5xx, while it
-    // propagates. Same lag class cmdHealth already retries for; a single flaky
-    // response here must not throw away a URL that is actually correct.
-    const propagating = res && (res.status === 404 || res.status >= 500);
-    if ((!res || propagating) && attempt < attempts) {
-      await wait(2000);
-      continue;
-    }
-    if (!res || !res.ok) return { ok: false, reason };
-    let parsed;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      return { ok: false, reason: "/health did not return JSON" };
-    }
-    if (!parsed || typeof parsed !== "object") {
-      return { ok: false, reason: "/health returned no readable body" };
-    }
-    if (parsed.brain !== expectedBrainName) {
-      return { ok: false, reason: `/health identified itself as "${parsed.brain}", not "${expectedBrainName}"` };
-    }
-    if (expectedVersion && parsed.version !== expectedVersion) {
-      return { ok: false, reason: `/health reported version "${parsed.version}", not "${expectedVersion}"` };
-    }
-    return { ok: true };
+    const verdict = await probeWorkersDevCandidate(domain, { expectedBrainName, expectedVersion, request });
+    if (verdict.ok || !verdict.retry) return verdict.ok ? { ok: true } : { ok: false, reason: verdict.reason };
+    reason = verdict.reason;
+    if (attempt < attempts) await wait(WORKERS_DEV_PROBE_WAIT_MS);
   }
-  return { ok: false, reason };
+  return { ok: false, reason: `${reason} after ${attempts} attempts` };
+}
+
+/** One /health probe: accept, refuse outright, or report propagation lag. */
+async function probeWorkersDevCandidate(domain, { expectedBrainName, expectedVersion, request }) {
+  let res;
+  let body;
+  try {
+    res = await request(`https://${domain}/health`, {}, { timeoutMs: 15_000, what: "the health check" });
+    body = await res.text();
+  } catch (error) {
+    return {
+      ok: false,
+      retry: true,
+      reason: `/health did not answer (${String(error?.message || error).split("\n")[0].slice(0, 140)})`,
+    };
+  }
+  if (!res.ok) {
+    return { ok: false, retry: res.status === 404 || res.status >= 500, reason: `/health returned ${res.status}` };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { ok: false, retry: false, reason: "/health did not return JSON" };
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return { ok: false, retry: false, reason: "/health returned no readable body" };
+  }
+  if (parsed.brain !== expectedBrainName) {
+    return { ok: false, retry: false, reason: `/health identified itself as "${parsed.brain}", not "${expectedBrainName}"` };
+  }
+  if (expectedVersion && parsed.version !== expectedVersion) {
+    // Cloudflare keeps serving the replaced build for a while after a deploy.
+    // This brain answering its previous version is lag, not a wrong host.
+    return { ok: false, retry: true, reason: `/health reported version "${parsed.version}", not "${expectedVersion}"` };
+  }
+  return { ok: true };
 }
 
 /** Save the verified workers.dev hostname so routine commands need no API token. */
@@ -2206,7 +2222,8 @@ export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName,
     die(
       "the workers.dev route is enabled, but its exact account hostname was not confirmed as this brain.\n" +
         `  ${candidateVerdict.reason}. No address was saved and no admin key was sent to that host.\n` +
-        "  Rerun deploy after the workers.dev route finishes propagating."
+        "  Once the workers.dev route finishes propagating, resume with:\n" +
+        `    brain setup ${commandPath(displayPath(manifestPath))}`
     );
   }
   m.brain = { ...(m.brain || {}), domain: candidateDomain };
