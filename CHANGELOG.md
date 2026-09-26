@@ -245,6 +245,25 @@ asset publication.
   never `brain rollback`. If the health check cannot be read, the refusal says
   so rather than guessing. A paused v0.4.6 Brain with an empty queue proceeds.
   To check: a refused update names the Worker's release and `brain deploy`.
+  That advice is given only when the Brain's semantic index is intact. If the
+  Brain's own report shows the index marked for a full rebuild (what a v0.4.6
+  `brain rollback --yes` leaves) or holding more vectors than the database
+  expects, deploying would un-pause a rolled-back Brain that can never become
+  query-ready. The refusal then says the Worker is paused, without claiming an
+  unfinished update caused it, and gives the supervised-recovery and support
+  path instead of `brain deploy`. To check: such a refusal names supervised
+  recovery and does not mention `brain deploy` as a remedy.
+
+- **A Worker older than the release your manifest records can be replaced by
+  update again.** If an earlier kit's `brain deploy` or `brain rollback --yes`
+  put its older Worker back after an update had finished, `brain update`,
+  `brain update --force` and (for a paused Worker) `brain doctor --repair --yes`
+  refused with no working remedy. Update now treats that Worker as a stale
+  deploy it replaces: an empty queue proceeds, queued work on an active Worker
+  gets "wait until query-ready", and queued work on a paused Worker gets the
+  paused-Brain refusal. A Worker newer than this CLI is still refused. To
+  check: `brain health` reports the older Worker version, and `brain update`
+  reaches the paused deployment when the queue is empty.
 
 - **A busy database no longer makes a large Brain look unreadable to update.**
   On a very large Brain the backlog read can briefly fail while its database

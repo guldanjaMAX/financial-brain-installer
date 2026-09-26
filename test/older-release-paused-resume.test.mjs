@@ -542,3 +542,154 @@ test(`a Worker paused on ${NEXT_VERSION} that the manifest records is still refu
     brain.close();
   }
 });
+
+/* ---- a stale deploy: the Worker is OLDER than the release the manifest records ---- */
+
+/**
+ * The manifest already records `recorded` (an update finished), and then the
+ * older kit's `brain deploy` or `brain rollback --yes` put its own Worker back:
+ * Worker `older`, active or paused, manifest and CLI `recorded`. That Worker
+ * is a stale deploy this CLI's update replaces, not a generation it cannot
+ * bind. Its queue is still read in the mode it reports.
+ */
+async function staleOlderWorker(recorded, older, mode) {
+  const brain = installation(recorded);
+  await brain.kit(older).cmdDeploy(brain.manifestPath, {
+    pauseVectorDrainForUpgrade: mode === "paused-for-upgrade",
+  });
+  assert.equal(brain.live.release, older);
+  assert.equal(brain.live.mode, mode);
+  assert.equal(brain.manifestVersion(), recorded.version);
+  brain.events.length = 0;
+  brain.reads.backlog = 0;
+  brain.reads.probe = 0;
+  return brain;
+}
+
+const ACTIVE_QUEUED_MESSAGE = (pending) => renderCliCommands(
+  `This Brain is still processing ${pending} queued search update(s). Updating now would pause it mid-queue. ` +
+    "Nothing was changed. Wait until `brain health` says query-ready, then run the update again.",
+);
+
+for (const [recorded, older] of [[CHECKED_OUT, PREVIOUS], [NEXT, CHECKED_OUT]]) {
+  for (const mode of ["active", "paused-for-upgrade"]) {
+    const stale = `Worker ${older.version} ${mode}, manifest ${recorded.version}, CLI ${recorded.version}`;
+
+    test(`${stale}: an empty queue lets brain update replace the stale Worker`, async () => {
+      const brain = await staleOlderWorker(recorded, older, mode);
+      try {
+        const run = await update(brain, recorded);
+        assert.equal(run.error, null, run.error?.message);
+        assert.equal(brain.reads.backlog, 2);
+        assertResumedTo(brain, recorded);
+      } finally {
+        brain.close();
+      }
+    });
+
+    test(`${stale}: an empty queue lets brain update --force replace the stale Worker`, async () => {
+      const brain = await staleOlderWorker(recorded, older, mode);
+      try {
+        const run = await update(brain, recorded, { force: true });
+        assert.equal(run.error, null, run.error?.message);
+        assert.equal(brain.reads.backlog, 2);
+        assertResumedTo(brain, recorded);
+      } finally {
+        brain.close();
+      }
+    });
+
+    test(`${stale}: an empty queue and doctor --repair --yes`, async () => {
+      const brain = await staleOlderWorker(recorded, older, mode);
+      try {
+        const repaired = await doctorRepair(brain, recorded);
+        assert.equal(repaired.error, null, repaired.error?.message);
+        if (mode === "paused-for-upgrade") {
+          assert.equal(brain.reads.backlog, 1);
+          assertResumedTo(brain, recorded);
+        } else {
+          // doctor --repair resumes only a paused Brain (origin/main as well);
+          // an active stale Worker is diagnosed as accepting documents and
+          // left alone. `brain update` above is its remedy.
+          assert.deepEqual(repaired.result, { paused: false });
+          assert.equal(brain.reads.backlog, 0);
+          assert.deepEqual(brain.events, []);
+          assert.equal(brain.live.release, older);
+        }
+      } finally {
+        brain.close();
+      }
+    });
+
+    test(`${stale}: 3 queued updates refuse truthfully with drain or recovery advice`, async () => {
+      const brain = await staleOlderWorker(recorded, older, mode);
+      try {
+        queueVectorWork(brain.db, 3);
+        const run = await update(brain, recorded);
+        // An active stale Worker drains its own queue; a paused one never does.
+        assert.equal(run.error?.message, mode === "active"
+          ? ACTIVE_QUEUED_MESSAGE(3)
+          : PAUSED_QUEUED_MESSAGE(3, "Nothing was changed."));
+        assert.doesNotMatch(run.error?.message || "", /not an earlier update|install that release|few minutes/u);
+        assert.equal(brain.reads.backlog, 1);
+        assert.deepEqual(brain.events, []);
+
+        brain.reads.backlog = 0;
+        const forced = await update(brain, recorded, { force: true });
+        assert.ok(forced.error, "queued work must still refuse at the pre-pause gate");
+        assert.doesNotMatch(String(forced.error?.message || ""), /not an earlier update|install that release/u);
+        assert.equal(brain.reads.backlog, 2);
+
+        const repaired = await doctorRepair(brain, recorded);
+        if (mode === "paused-for-upgrade") {
+          assert.ok(String(repaired.error?.message || "").includes(
+            PAUSED_QUEUED_MESSAGE(3, "The paused deployment was not started."),
+          ), repaired.error?.message);
+        } else {
+          assert.deepEqual(repaired.result, { paused: false });
+        }
+
+        assert.equal(brain.events.some((event) => event.startsWith("deploy:")), false);
+        assert.equal(brain.live.release, older);
+        assert.equal(brain.live.mode, mode);
+        assert.equal(brain.manifestVersion(), recorded.version);
+      } finally {
+        brain.close();
+      }
+    });
+  }
+}
+
+for (const mode of ["active", "paused-for-upgrade"]) {
+  test(`a ${mode} Worker on ${NEXT_VERSION} over a ${PRODUCT_VERSION} manifest is still refused by CLI ${PRODUCT_VERSION}`, async () => {
+    const brain = installation(CHECKED_OUT);
+    try {
+      await brain.kit(NEXT).cmdDeploy(brain.manifestPath, {
+        pauseVectorDrainForUpgrade: mode === "paused-for-upgrade",
+      });
+      brain.events.length = 0;
+      const run = await update(brain, CHECKED_OUT);
+      assert.equal(run.error?.message, renderCliCommands(
+        `This Brain's Worker reports version ${NEXT_VERSION} (${mode}), but this manifest records ` +
+          `${PRODUCT_VERSION} and this CLI is ${PRODUCT_VERSION}. That is not an earlier update of this CLI to ` +
+          "resume, so its queued search updates cannot be bound to this manifest. Nothing was changed. Run " +
+          "`brain health` to see what is serving; if the Worker is newer than this CLI, install that release, " +
+          "then run `brain update` again.",
+      ));
+      const forced = await update(brain, CHECKED_OUT, { force: true });
+      assert.ok(forced.error, "--force must not replace a Worker newer than this CLI");
+      const repaired = await doctorRepair(brain, CHECKED_OUT);
+      if (mode === "paused-for-upgrade") {
+        assert.ok(repaired.error, "doctor must not resume a Worker newer than this CLI");
+      } else {
+        assert.deepEqual(repaired.result, { paused: false });
+      }
+      assert.equal(brain.events.some((event) => event.startsWith("deploy:")), false);
+      assert.equal(brain.live.release, NEXT);
+      assert.equal(brain.live.mode, mode);
+      assert.equal(brain.manifestVersion(), PRODUCT_VERSION);
+    } finally {
+      brain.close();
+    }
+  });
+}

@@ -22223,8 +22223,8 @@ function updateBacklogSemver(value) {
  * earlier attempt, so its receipt is read in whichever writer mode it reports
  * and the rerun can finish the pause it started. A Worker paused on the version
  * the manifest records, when that version is no newer than this CLI, is also a
- * resume (see below). A Worker newer than this CLI or older than the manifest
- * is not a resume.
+ * resume (see below). A Worker older than the manifest is a stale deploy that
+ * update replaces (see below). A Worker newer than this CLI is never bound.
  *
  * A manifest with no brain.version predates version recording, so it is older
  * than every release: it accepts the v0.4.6 envelope and any versioned
@@ -22249,7 +22249,12 @@ function updateBacklogReceiptQueue(body, recordedVersion, projection) {
       expectedVersion: recordedVersion ?? "0.0.0",
       expectedBackend: "d1",
     });
-    return { pending: aggregate.queue.pending, paused: false, legacy: true };
+    return {
+      pending: aggregate.queue.pending,
+      paused: false,
+      legacy: true,
+      projectionRecovery: legacyProjectionRecovery(aggregate),
+    };
   }
   const workerVersion = updateBacklogSemver(body.version);
   const workerMode = UPDATE_BACKLOG_DRAIN_MODES.has(body.vector_drain_mode) ? body.vector_drain_mode : null;
@@ -22261,7 +22266,19 @@ function updateBacklogReceiptQueue(body, recordedVersion, projection) {
   if (workerVersion && workerMode && workerVersion !== recordedVersion) {
     const resumable = (recordedVersion === null || compareSemver(recordedVersion, workerVersion) < 0) &&
       compareSemver(workerVersion, PRODUCT_VERSION) <= 0;
-    if (!resumable) throw generationRefusal();
+    // A Worker OLDER than the release the manifest records is a stale deploy:
+    // the manifest is written only after a verified update, so an older kit's
+    // `brain deploy` or `brain rollback --yes` put that Worker back afterwards.
+    // This CLI's update replaces it as long as this CLI is not older than the
+    // recorded release (otherwise update is a downgrade and refuses anyway).
+    // Its queue is read in the mode it reports, so an active stale Worker with
+    // queued work gets "wait", a paused one gets the paused refusal, and an
+    // empty queue proceeds. A Worker newer than this CLI never matches either,
+    // and neither does a versioned receipt claiming a pre-0.4.7 release: no
+    // shipped Worker before 0.4.7 reported its version on this route.
+    const staleDeploy = recordedVersion !== null && compareSemver(workerVersion, recordedVersion) < 0 &&
+      compareSemver(recordedVersion, PRODUCT_VERSION) <= 0 && !projection.isLegacyPre047Version(workerVersion);
+    if (!resumable && !staleDeploy) throw generationRefusal();
     expectedVersion = workerVersion;
     expectedDrainMode = workerMode;
   } else if (workerVersion && workerVersion === recordedVersion &&
@@ -22300,6 +22317,33 @@ function updateBacklogReceiptQueue(body, recordedVersion, projection) {
     pendingIsCapped: aggregate.queue.pending_is_capped === true,
     paused: aggregate.vector_drain_mode === "paused-for-upgrade",
   };
+}
+
+/**
+ * Whether a pre-0.4.7 projection can become query-ready by draining its queue.
+ *
+ * v0.4.6's `brain rollback --yes` restores D1, marks the projection
+ * bootstrap_required and leaves the Worker paused; its own output says a
+ * clean index must be recreated under supervised recovery before active use,
+ * because D1 cannot enumerate the vectors written after the bookmark. A
+ * provider count ABOVE the D1 count is that same signature (index-only
+ * vectors a drain can never remove), and update preview's shared verdict
+ * treats every excess as projection_excess for the same reason. For either,
+ * returning the Worker to active drains the queue but never reaches
+ * query-ready, so update must not advise it. A short count the queued
+ * upserts do not cover is left to the Worker's own count-mismatch advice once
+ * active (reindex rebuilds missing vectors), so it is not flagged here.
+ * Returns null for an intact projection.
+ */
+function legacyProjectionRecovery(aggregate) {
+  const counts = { expected_vectors: aggregate.expected_vectors, actual_vectors: aggregate.actual_vectors };
+  if (aggregate.readiness_reason === "projection_bootstrap_required") {
+    return Object.freeze({ cause: "bootstrap_required", ...counts });
+  }
+  if (aggregate.actual_vectors > aggregate.expected_vectors) {
+    return Object.freeze({ cause: "provider_excess", ...counts });
+  }
+  return null;
 }
 
 /**
@@ -22472,6 +22516,12 @@ export async function readUpdateBacklog(manifestPath, options = {}) {
           // so no extra read is sent for it.
           const legacyMode = await readLegacyUpdateDrainMode(documentsUrl, { request, readAggregate, projection });
           revalidateManifest(pin, "update backlog drain-mode receipt");
+          // A projection a rollback left unusable changes the advice only
+          // where it would otherwise be "deploy the older release": paused, or
+          // a mode that could not be read. An active Worker keeps its advice.
+          const recovery = queue.projectionRecovery && (legacyMode === null || legacyMode.paused)
+            ? { projection_recovery: queue.projectionRecovery }
+            : {};
           return Object.freeze({
             pending: queue.pending,
             ...(legacyMode === null
@@ -22479,6 +22529,7 @@ export async function readUpdateBacklog(manifestPath, options = {}) {
               : legacyMode.paused
                 ? { paused_for_upgrade: true, legacy_worker_version: legacyMode.version }
                 : {}),
+            ...recovery,
           });
         }
         return Object.freeze({
@@ -22512,6 +22563,22 @@ const UPDATE_BACKLOG_GATE_CONSEQUENCE = Object.freeze({
   "pre-pause": "The paused deployment was not started.",
 });
 
+/** One sentence of evidence that draining cannot make a legacy projection query-ready, or null. */
+function updateBacklogProjectionRecoveryEvidence(recovery) {
+  if (!recovery || typeof recovery !== "object") return null;
+  if (recovery.cause === "bootstrap_required") {
+    return "Its database marks the semantic index for a full rebuild, as a rollback does, so draining the queue " +
+      "cannot make this Brain query-ready.";
+  }
+  if (recovery.cause === "provider_excess" && Number.isSafeInteger(recovery.expected_vectors) &&
+      Number.isSafeInteger(recovery.actual_vectors)) {
+    return `Its semantic index holds ${recovery.actual_vectors} vectors but its database expects ` +
+      `${recovery.expected_vectors}; draining cannot remove vectors that exist only in the index, so it cannot ` +
+      "make this Brain query-ready.";
+  }
+  return null;
+}
+
 /**
  * The owner-facing refusal for queued work. A Brain still paused by an earlier
  * attempt does not drain, so "wait" would be false advice there. At the
@@ -22521,6 +22588,32 @@ const UPDATE_BACKLOG_GATE_CONSEQUENCE = Object.freeze({
 function updateBacklogQueuedMessage(backlog, gate, initialBacklog = null) {
   const pending = updateBacklogPendingLabel(backlog);
   const consequence = UPDATE_BACKLOG_GATE_CONSEQUENCE[gate];
+  const recoveryEvidence = updateBacklogProjectionRecoveryEvidence(backlog?.projection_recovery);
+  if (recoveryEvidence && backlog?.paused_for_upgrade === true &&
+      typeof backlog.legacy_worker_version === "string") {
+    // The evidence says the projection cannot become query-ready by draining,
+    // which is what a rollback leaves. Deploying the older release would
+    // un-pause a rolled-back Brain, so the advice is the same support and
+    // supervised-recovery path any other paused Brain gets. The pause is
+    // named neutrally: a rollback, not an unfinished update, may have made it.
+    const release = backlog.legacy_worker_version;
+    return renderCliCommands(
+      `This Brain's Worker is version ${release}, it is paused, and it has ${pending} queued search update(s). ` +
+        `${recoveryEvidence} ${consequence} Do not run \`brain deploy\` to return it to active: the queue would ` +
+        "drain, but this Brain would still not become query-ready. Do not run `brain rollback` or `brain drain`, " +
+        "and do not clear VECTOR_DRAIN_MODE by hand. Its semantic index must be recreated under supervised " +
+        "recovery before this Brain is used again. Run `brain health` and keep its output for support."
+    );
+  }
+  if (recoveryEvidence && backlog?.drain_mode_unknown === true) {
+    return renderCliCommands(
+      `This Brain has ${pending} queued search update(s), and its public health check could not be read to tell ` +
+        `whether its Worker is paused. ${recoveryEvidence} ${consequence} Do not run \`brain deploy\`, ` +
+        "`brain rollback` or `brain drain`, and do not clear VECTOR_DRAIN_MODE by hand. Its semantic index must " +
+        "be recreated under supervised recovery before this Brain is used again. Run `brain health` and keep its " +
+        "output for support."
+    );
+  }
   if (backlog?.paused_for_upgrade === true && typeof backlog.legacy_worker_version === "string") {
     // A paused pre-0.4.7 Worker never drains, and this CLI's update will not
     // continue over its queue. Only that release's own deploy returns it to

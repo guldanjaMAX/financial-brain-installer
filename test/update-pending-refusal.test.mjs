@@ -15,6 +15,7 @@ import {
   cmdUpdate,
   dispatchUpdateCli,
   readUpdateBacklog,
+  supportErrorCode,
   updateCommandTarget,
 } from "../brain.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
@@ -1373,6 +1374,164 @@ test("queued v0.4.6 work with an unreadable or contradictory /health refuses wit
       assert.deepEqual(run.initial.sleeps, []);
     }
     assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+/* ---- a paused v0.4.6 Worker whose projection a rollback left unusable ---- */
+
+// Byte-for-byte what the v0.4.6 Worker router returns on the authenticated
+// documents route while paused for an upgrade, generated once from
+// `git archive v0.4.6 worker migrations` answering over sqlite at the v0.4.6
+// schema (36 migrations) with the stated projection status, chunk count,
+// outbox rows and provider vector count. v0.4.6's rollback marks the
+// projection bootstrap_required and leaves the Worker paused; its own output
+// says a clean index must be recreated under supervised recovery before active
+// use. Provider-only excess (the index holds vectors D1 no longer has) is the
+// other rollback signature, and draining can never remove it.
+const V046_ACTION_PAUSED_DRAIN = '"action":"This brain is paused for an upgrade, so reindex and drain both return 503 ' +
+  "until it finishes. Complete or resume the update first; the pause lifts with it. Once it is running again, the " +
+  'remedy is: Run `brain drain <manifest>`; it confirms provider visibility without re-embedding accepted rows."';
+const v046PausedRows = (chunks, embedded) => '"rows":[{"source_type":"drive","documents":1,"logical_documents":1,' +
+  `"stored_documents":1,"document_counts_exact":true,"chunks":${chunks},"chunk_counts_exact":true,"total":${chunks},` +
+  `"embedded":${embedded},"last_ingested":null}]`;
+// 9 chunks, 2 queued upserts, 9 provider vectors, projection bootstrap_required.
+const V046_PAUSED_BOOTSTRAP_QUEUED_ENVELOPE = '{"backend":"d1",' + v046PausedRows(9, 7) + ',"vector_backlog":' +
+  '{"pending":2,"upserts":2,"deletes":0,"submitted":0,"oldest_queued_at":1750000000000},"vector_readiness":' +
+  '{"ready":false,"reason":"projection_bootstrap_required","expected_vectors":9,"actual_vectors":9,"pending":2,' +
+  '"submitted":0,"oldest_queued_at":1750000000000,"mutation_submitted_at":null,"projection_status":' +
+  '"bootstrap_required","bootstrap_epoch":1,"action":"Run `brain update <manifest>` to resume the bounded legacy ' +
+  'vector bootstrap."}}';
+// 5 chunks, 1 queued upsert, 7 provider vectors: provider-only excess of 2.
+const V046_PAUSED_EXCESS_QUEUED_ENVELOPE = '{"backend":"d1",' + v046PausedRows(5, 4) + ',"vector_backlog":' +
+  '{"pending":1,"upserts":1,"deletes":0,"submitted":0,"oldest_queued_at":1750000000000},"vector_readiness":' +
+  '{"ready":false,"reason":"vector_work_queued","expected_vectors":5,"actual_vectors":7,"pending":1,"submitted":0,' +
+  '"oldest_queued_at":1750000000000,"mutation_submitted_at":null,"projection_status":"pending","bootstrap_epoch":0,' +
+  V046_ACTION_PAUSED_DRAIN + "}}";
+// 9 chunks, 3 queued upserts, 6 provider vectors: the queue covers the deficit.
+const V046_PAUSED_SHORT_COVERED_ENVELOPE = '{"backend":"d1",' + v046PausedRows(9, 6) + ',"vector_backlog":' +
+  '{"pending":3,"upserts":3,"deletes":0,"submitted":0,"oldest_queued_at":1750000000000},"vector_readiness":' +
+  '{"ready":false,"reason":"vector_work_queued","expected_vectors":9,"actual_vectors":6,"pending":3,"submitted":0,' +
+  '"oldest_queued_at":1750000000000,"mutation_submitted_at":null,"projection_status":"pending","bootstrap_epoch":0,' +
+  V046_ACTION_PAUSED_DRAIN + "}}";
+const V046_PROJECTION_EVIDENCE = Object.freeze({
+  bootstrap_required: "Its database marks the semantic index for a full rebuild, as a rollback does, so draining " +
+    "the queue cannot make this Brain query-ready.",
+  provider_excess: (expected, actual) => `Its semantic index holds ${actual} vectors but its database expects ` +
+    `${expected}; draining cannot remove vectors that exist only in the index, so it cannot make this Brain ` +
+    "query-ready.",
+});
+
+const V046_PAUSED_RECOVERY_MESSAGE = (pending, evidence, consequence) => renderCliCommands(
+  `This Brain's Worker is version 0.4.6, it is paused, and it has ${pending} queued search update(s). ${evidence} ` +
+    `${consequence} Do not run \`brain deploy\` to return it to active: the queue would drain, but this Brain would ` +
+    "still not become query-ready. Do not run `brain rollback` or `brain drain`, and do not clear VECTOR_DRAIN_MODE " +
+    "by hand. Its semantic index must be recreated under supervised recovery before this Brain is used again. " +
+    "Run `brain health` and keep its output for support.",
+);
+
+const V046_UNKNOWN_RECOVERY_MESSAGE = (pending, evidence, consequence) => renderCliCommands(
+  `This Brain has ${pending} queued search update(s), and its public health check could not be read to tell ` +
+    `whether its Worker is paused. ${evidence} ${consequence} Do not run \`brain deploy\`, \`brain rollback\` or ` +
+    "`brain drain`, and do not clear VECTOR_DRAIN_MODE by hand. Its semantic index must be recreated under " +
+    "supervised recovery before this Brain is used again. Run `brain health` and keep its output for support.",
+);
+
+// The decision point itself: what the production reader hands update.
+async function legacyDecision(manifestPath, envelope, health) {
+  const reader = scriptedReader(manifestPath, [{ status: 200, body: envelope }], { health });
+  const backlog = await readUpdateBacklog(manifestPath, reader.options);
+  return { backlog, log: reader.log };
+}
+
+function assertNothingDeployed(run) {
+  assert.equal(run.events.includes("paused deployment"), false, JSON.stringify(run.events));
+  assert.equal(run.events.includes("migration"), false);
+  assert.equal(run.cfPaths.some((path) => /\/workers\/scripts\//u.test(path)), false, JSON.stringify(run.cfPaths));
+}
+
+test("paused v0.4.6 with an intact projection and queued work: the decision is the older release's deploy", async () => {
+  await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath, original }) => {
+    for (const [envelope, pending] of [[V046_PAUSED_QUEUED_ENVELOPE, 7], [V046_PAUSED_SHORT_COVERED_ENVELOPE, 3]]) {
+      const decision = await legacyDecision(manifestPath, envelope, V046_HEALTH_PAUSED);
+      assert.deepEqual({ ...decision.backlog }, {
+        pending,
+        paused_for_upgrade: true,
+        legacy_worker_version: "0.4.6",
+      });
+      assert.equal(decision.log.healthReads, 1);
+
+      const run = await throughBothGates(manifestPath, { first: JSON.parse(envelope), health: V046_HEALTH_PAUSED });
+      assert.equal(run.error?.message, V046_PAUSED_QUEUED_MESSAGE(pending, "Nothing was changed."));
+      assert.deepEqual(run.events, ["initial backlog read"]);
+      assertNothingDeployed(run);
+    }
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+for (const [label, envelope, pending, cause, evidence] of [
+  ["projection bootstrap_required (a v0.4.6 rollback)", V046_PAUSED_BOOTSTRAP_QUEUED_ENVELOPE, 2,
+    { cause: "bootstrap_required", expected_vectors: 9, actual_vectors: 9 },
+    V046_PROJECTION_EVIDENCE.bootstrap_required],
+  ["a provider-only excess (expected 5, actual 7)", V046_PAUSED_EXCESS_QUEUED_ENVELOPE, 1,
+    { cause: "provider_excess", expected_vectors: 5, actual_vectors: 7 },
+    V046_PROJECTION_EVIDENCE.provider_excess(5, 7)],
+]) {
+  test(`paused v0.4.6 with ${label} and queued work: supervised recovery, never deploy`, async () => {
+    await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath, original }) => {
+      const decision = await legacyDecision(manifestPath, envelope, V046_HEALTH_PAUSED);
+      assert.deepEqual({ ...decision.backlog, projection_recovery: { ...decision.backlog.projection_recovery } }, {
+        pending,
+        paused_for_upgrade: true,
+        legacy_worker_version: "0.4.6",
+        projection_recovery: cause,
+      });
+      assert.equal(decision.log.healthReads, 1);
+
+      const run = await throughBothGates(manifestPath, { first: JSON.parse(envelope), health: V046_HEALTH_PAUSED });
+      assert.equal(run.error?.message, V046_PAUSED_RECOVERY_MESSAGE(pending, evidence, "Nothing was changed."));
+      // Neither the older release's deploy advice nor the unfinished-update story.
+      assert.doesNotMatch(run.error?.message || "", /run `brain deploy` with it|did not finish|has not finished/u);
+      assert.match(run.error?.message || "", /supervised recovery/u);
+      assert.equal(supportErrorCode(run.error, { command: "update" }), "UPGRADE_FAILED");
+      assert.deepEqual(run.events, ["initial backlog read"]);
+      assertNothingDeployed(run);
+
+      const forced = await throughBothGates(manifestPath, {
+        first: JSON.parse(envelope),
+        health: V046_HEALTH_PAUSED,
+        force: true,
+      });
+      assert.ok(forced.error?.message?.startsWith(prePauseRefusal(V046_PAUSED_RECOVERY_MESSAGE(
+        pending, evidence, "The paused deployment was not started.",
+      ))), forced.error?.message);
+      assert.deepEqual(forced.events, [
+        "initial backlog read",
+        "profile adoption",
+        "verification",
+        "pre-pause backlog read",
+      ]);
+      assertNothingDeployed(forced);
+      assert.equal(readFileSync(manifestPath, "utf8"), original);
+    });
+  });
+}
+
+test("queued v0.4.6 work over a rollback-marked projection with unreadable /health says paused neutrally", async () => {
+  await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath }) => {
+    const decision = await legacyDecision(manifestPath, V046_PAUSED_BOOTSTRAP_QUEUED_ENVELOPE, { status: 500, body: "{}" });
+    assert.equal(decision.backlog.drain_mode_unknown, true);
+    assert.equal(decision.backlog.projection_recovery?.cause, "bootstrap_required");
+
+    const run = await throughBothGates(manifestPath, {
+      first: JSON.parse(V046_PAUSED_BOOTSTRAP_QUEUED_ENVELOPE),
+      health: { status: 500, body: "{}" },
+    });
+    assert.equal(run.error?.message, V046_UNKNOWN_RECOVERY_MESSAGE(
+      2, V046_PROJECTION_EVIDENCE.bootstrap_required, "Nothing was changed.",
+    ));
+    assert.doesNotMatch(run.error?.message || "", /did not finish|has not finished/u);
+    assertNothingDeployed(run);
   });
 });
 
