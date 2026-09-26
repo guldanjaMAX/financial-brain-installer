@@ -122,9 +122,49 @@ assert.match(traps, /\.packaged-preflight\\package\\tools\\preflight.ps1/);
 assert.doesNotMatch(traps, /-File \.\\tools\\preflight.ps1/);
 const release = read('.github/workflows/release.yml').replace(/\r\n/g, '\n');
 const installMatrix = read('.github/workflows/install-matrix.yml').replace(/\r\n/g, '\n');
+const windowsArmProbe = read('.github/workflows/windows-arm-probe.yml').replace(/\r\n/g, '\n');
 assert.ok(release.indexOf('node scripts/audit-updates.mjs --release') < release.indexOf('gh release create'));
 assert.doesNotMatch(release, /continue-on-error: true|if: always\(\)/);
 assert.match(installMatrix, /^  workflow_call:$/m);
 assert.match(release, /public-contract-install:[\s\S]*uses: \.\/\.github\/workflows\/install-matrix\.yml/);
 assert.match(release, /needs:\n      - gate\n      - public-contract-install/);
+
+// This lane is deliberately evidence-only. It may reveal that Windows ARM64
+// is broken without weakening the required x64 matrix or granting release
+// authority. Pin the runner, architecture assertions, local install smoke, and
+// incident-focused tests so the probe cannot quietly become a green no-op.
+assert.match(windowsArmProbe, /^name: windows-arm64-probe$/m);
+assert.match(windowsArmProbe, /^  workflow_dispatch:$/m);
+assert.match(windowsArmProbe, /^  pull_request:$/m);
+assert.doesNotMatch(windowsArmProbe, /^  (?:push|schedule):$/m);
+assert.match(windowsArmProbe, /^permissions:\n  contents: read$/m);
+assert.match(windowsArmProbe, /^    runs-on: windows-11-arm$/m);
+assert.match(windowsArmProbe, /^    continue-on-error: true$/m);
+assert.match(windowsArmProbe, /github\.head_ref == 'claude\/windows-arm-probe'/);
+assert.match(windowsArmProbe, /actions\/checkout@[0-9a-f]{40}/);
+assert.match(windowsArmProbe, /actions\/setup-node@[0-9a-f]{40}/);
+for (const action of windowsArmProbe.matchAll(/^\s+- uses: ([^\s#]+)/gm)) {
+  assert.match(action[1], /@[0-9a-f]{40}$/, `Windows ARM64 probe action is not commit-pinned: ${action[1]}`);
+}
+assert.match(windowsArmProbe, /node-version: '24'/);
+assert.match(windowsArmProbe, /RuntimeInformation\]::OSArchitecture\.ToString\(\)/);
+assert.match(windowsArmProbe, /osArchitecture -ne 'Arm64'/);
+assert.match(windowsArmProbe, /runner_arch: process\.env\.RUNNER_ARCH/);
+assert.match(windowsArmProbe, /arch: process\.arch/);
+assert.match(windowsArmProbe, /process\.arch !== "arm64"/);
+assert.match(windowsArmProbe, /npm ci --ignore-scripts/);
+assert.match(windowsArmProbe, /npm\.cmd install --global --prefix/);
+assert.match(windowsArmProbe, /node scripts\/windows-dpapi-release-gate\.mjs/);
+for (const path of [
+  'test/cli-guidance-rendering.test.mjs',
+  'test/cli-path-persist.test.mjs',
+  'test/technician-setup.test.mjs',
+  'test/install-contract-runtime.test.mjs',
+  'test/windows-native-architecture.test.mjs',
+  'test/windows-dpapi-release-gate.test.mjs',
+  'test/windows-preflight-contract.test.mjs',
+  'test/onboarding-sandbox.test.mjs',
+]) {
+  assert.ok(windowsArmProbe.includes(path), `Windows ARM64 probe omits ${path}`);
+}
 console.log('Release coverage: script tests join npm test; history, frontend, DPAPI, shared-package traps, public contract, and held incident gates remain mandatory');
