@@ -196,6 +196,22 @@ asset publication.
   confirm the paused deployment does not start, then retry after health says
   query-ready.
 
+- **Rerunning an update that stopped partway now resumes instead of being
+  refused.** The manifest records the new version last, so an update that
+  stopped after its paused deployment leaves a Worker newer than the manifest.
+  Both queue checks now read such a Worker, paused or active, when its version
+  is newer than the manifest and no newer than this CLI, and the rerun finishes
+  the update. A Worker newer than this CLI, or older than the manifest, is
+  refused with its version named instead of a "database busy" message. A Worker
+  from v0.4.6 or earlier, which does not report its version, is read by the
+  same exact queue rule as update preview. A manifest with no Brain address
+  is checked once Cloudflare access is confirmed, just before the paused
+  deployment. A paused Brain with queued work is refused with the truth: it
+  does not process its queue while paused, so waiting will not clear it.
+  `--force` passes only the first check; help and its warning now say so. To
+  check: after an update that stopped partway, `brain update` again reaches the
+  paused deployment when `brain health` shows an empty queue.
+
 - **A busy database no longer makes a large Brain look unreadable to update.**
   On a very large Brain the backlog read can briefly fail while its database
   is busy. `brain update` now tries that read up to three times, waiting 10

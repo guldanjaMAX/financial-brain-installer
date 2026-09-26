@@ -33,7 +33,8 @@ const UNREADABLE_MESSAGE = renderCliCommands(
 
 const FORCE_WARNING = (pending) => renderCliCommands(
   `This Brain is still processing ${pending} queued search update(s). ` +
-    "`--force` will update anyway and may pause it mid-queue.",
+    "`--force` continues past this first check only; the final check just before the paused deployment " +
+    "reads the queue again and still refuses queued work.",
 );
 
 function fixtureManifest() {
@@ -891,5 +892,324 @@ test("partial or malformed bounded receipts refuse on one read at both gates", a
       assert.deepEqual(prePause.events, [], `${name} must not start the paused deployment`);
     }
     assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+/* ---- resuming an earlier attempt, pre-0.4.7 Workers, and domainless manifests ---- */
+
+const PRODUCT_VERSION = JSON.parse(
+  readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
+).version;
+
+// The exact authenticated envelope v0.4.6 handleDocuments returns for a D1
+// Brain: backend, rows, outboxDepth, and vectorReadiness. It carries neither
+// the Worker version nor its vector drain mode.
+function v046DocumentsEnvelope(pending = 0) {
+  const oldest = pending > 0 ? 1_750_000_000_000 : null;
+  return {
+    backend: "d1",
+    rows: [{ source: "drive", documents: 3, chunks: 9 }],
+    vector_backlog: { pending, upserts: pending, deletes: 0, submitted: 0, oldest_queued_at: oldest },
+    vector_readiness: {
+      ready: pending === 0,
+      reason: pending > 0 ? "vector_work_queued" : null,
+      expected_vectors: 9,
+      actual_vectors: 9,
+      pending,
+      submitted: 0,
+      oldest_queued_at: oldest,
+      mutation_submitted_at: null,
+      projection_status: "verified",
+      bootstrap_epoch: 0,
+      action: pending > 0
+        ? "Run `brain drain <manifest>`; it confirms provider visibility without re-embedding accepted rows."
+        : null,
+    },
+  };
+}
+
+async function withManifest(mutate, run) {
+  const sandbox = mkdtempSync(join(tmpdir(), "brain-update-resume-"));
+  const manifestPath = join(sandbox, "brain.manifest.json");
+  const manifest = fixtureManifest();
+  mutate(manifest);
+  const original = `${JSON.stringify(manifest, null, 2)}\n`;
+  writeFileSync(manifestPath, original);
+  try {
+    await run({ manifestPath, original });
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+// Drives the real cmdUpdate into the real cmdUpgrade with the production
+// reader at BOTH gates. Only the HTTP transport, the Cloudflare control-plane
+// stubs, and the paused deployment itself are faked; the deployment throws a
+// fixture stop so reaching it is the observable "the update proceeded" signal.
+async function throughBothGates(manifestPath, {
+  first,
+  second = first,
+  force = false,
+  subdomain = "owner-sub",
+} = {}) {
+  const events = [];
+  const cfPaths = [];
+  const urls = [];
+  const initial = scriptedReader(manifestPath, [{ status: 200, body: JSON.stringify(first) }]);
+  const prePause = scriptedReader(manifestPath, [{ status: 200, body: JSON.stringify(second) }]);
+  for (const [label, reader] of [["initial", initial], ["pre-pause", prePause]]) {
+    const scripted = reader.options.http;
+    reader.options.http = async (url, ...rest) => {
+      events.push(`${label} backlog read`);
+      urls.push(url);
+      return scripted(url, ...rest);
+    };
+  }
+  const output = [];
+  const priorLog = console.log;
+  console.log = (...values) => output.push(values.map(String).join(" ").replace(/\x1b\[[0-9;]*m/g, ""));
+  let error = null;
+  try {
+    await cmdUpdate(manifestPath, {
+      discoverInstalledManifest: () => ({ path: manifestPath, source: "remembered" }),
+      readUpdateBacklog,
+      updateBacklogOptions: initial.options,
+      forceQueuedUpdate: force,
+      adoptCloudflareAuthProfile: async () => events.push("profile adoption"),
+      withCloudflareControl: async (action) => action(),
+      cmdVerify: async () => events.push("verification"),
+      upgradeOptions: {
+        resolveAccount: async () => ({ id: "1".repeat(32) }),
+        d1Query: async (_account, _database, sql) => {
+          if (/sqlite_master/iu.test(sql)) return { results: [{ name: "install_state" }] };
+          if (/SELECT \* FROM install_state/iu.test(sql)) {
+            return {
+              results: [{ client_slug: "fixture", product_version: "0.4.6", schema_version: 46 }],
+            };
+          }
+          return { results: [] };
+        },
+        cf: async (path) => {
+          cfPaths.push(path);
+          if (path.endsWith("/workers/subdomain")) return subdomain ? { subdomain } : {};
+          return { bookmark: "fixture-bookmark" };
+        },
+        readUpdateBacklog,
+        updateBacklogOptions: prePause.options,
+        cmdDeploy: async () => {
+          events.push("paused deployment");
+          throw new Error("fixture stop after the paused deployment started");
+        },
+        cmdHealth: async () => events.push("health"),
+        cmdMigrate: async () => events.push("migration"),
+      },
+      reconcileExistingOwnerAgents: null,
+      writeClaudeWorkspaceGuideAfterUpdate: null,
+    });
+  } catch (caught) {
+    error = caught;
+  } finally {
+    console.log = priorLog;
+  }
+  return { error, events, output, cfPaths, urls, initial: initial.log, prePause: prePause.log };
+}
+
+const PROCEEDED = [
+  "initial backlog read",
+  "profile adoption",
+  "verification",
+  "pre-pause backlog read",
+  "paused deployment",
+];
+
+const RESUME_PAUSED_PENDING_MESSAGE = (pending, consequence) => renderCliCommands(
+  `This Brain is still paused by an earlier update that did not finish, and it has ${pending} queued search ` +
+    "update(s). A paused Brain does not process its queue, so waiting will not clear it, and this update will " +
+    `not continue over queued work. ${consequence} Do not run \`brain drain\` or clear VECTOR_DRAIN_MODE by hand. ` +
+    "Run `brain health` and keep its output for support.",
+);
+
+test("a Worker paused on this CLI's version by an earlier failed update resumes through both gates", async () => {
+  await withManifest(() => {}, async ({ manifestPath, original }) => {
+    const paused = boundedInventory({ version: PRODUCT_VERSION, drainMode: "paused-for-upgrade" });
+    const run = await throughBothGates(manifestPath, { first: paused });
+    assert.deepEqual(run.events, PROCEEDED, run.error?.message);
+    assert.equal(run.initial.requests, 1);
+    assert.equal(run.prePause.requests, 1);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+test("a Worker already active on this CLI's version with an older manifest proceeds through both gates", async () => {
+  await withManifest(() => {}, async ({ manifestPath }) => {
+    const active = boundedInventory({ version: PRODUCT_VERSION, drainMode: "active" });
+    const run = await throughBothGates(manifestPath, { first: active });
+    assert.deepEqual(run.events, PROCEEDED, run.error?.message);
+  });
+});
+
+test("a paused resume generation with queued work refuses truthfully at both gates, even with force", async () => {
+  await withManifest(() => {}, async ({ manifestPath, original }) => {
+    const queued = boundedInventory({ version: PRODUCT_VERSION, drainMode: "paused-for-upgrade", pending: 7 });
+    const run = await throughBothGates(manifestPath, { first: queued });
+    assert.equal(run.error?.message, RESUME_PAUSED_PENDING_MESSAGE(7, "Nothing was changed."));
+    assert.doesNotMatch(run.error?.message || "", /mid-queue|busy|few minutes/u);
+    // The decision point was reached: exactly one successful read, no retry.
+    assert.deepEqual(run.events, ["initial backlog read"]);
+    assert.deepEqual(run.initial.sleeps, []);
+
+    const forced = await throughBothGates(manifestPath, { first: queued, force: true });
+    assert.ok(forced.error?.message?.startsWith(prePauseRefusal(RESUME_PAUSED_PENDING_MESSAGE(
+      7, "The paused deployment was not started.",
+    ))), forced.error?.message);
+    assert.deepEqual(forced.events, [
+      "initial backlog read",
+      "profile adoption",
+      "verification",
+      "pre-pause backlog read",
+    ]);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+test("control: a Worker and manifest on the same older version, active, proceed through both gates", async () => {
+  await withManifest(() => {}, async ({ manifestPath }) => {
+    const run = await throughBothGates(manifestPath, { first: boundedInventory({ version: "0.4.7" }) });
+    assert.deepEqual(run.events, PROCEEDED, run.error?.message);
+  });
+});
+
+test("a Worker newer than this CLI refuses on one read with a truthful generation message", async () => {
+  await withManifest(() => {}, async ({ manifestPath, original }) => {
+    const newer = boundedInventory({ version: "9.9.9", drainMode: "active" });
+    const run = await throughBothGates(manifestPath, { first: newer });
+    assert.equal(run.error?.message, renderCliCommands(
+      `This Brain's Worker reports version 9.9.9 (active), but this manifest records 0.4.7 and this CLI is ` +
+        `${PRODUCT_VERSION}. That is not an earlier update of this CLI to resume, so its queued search updates ` +
+        "cannot be bound to this manifest. Nothing was changed. Run `brain health` to see what is serving; " +
+        "if the Worker is newer than this CLI, install that release, then run `brain update` again.",
+    ));
+    assert.doesNotMatch(run.error?.message || "", /busy|few minutes/u);
+    assert.deepEqual(run.events, ["initial backlog read"]);
+    assert.equal(run.initial.requests, 1);
+    assert.deepEqual(run.initial.sleeps, []);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+test("a Worker older than this manifest is not a resume and refuses at the generation decision", async () => {
+  await withManifest(() => {}, async ({ manifestPath }) => {
+    const older = boundedInventory({ version: "0.4.6", drainMode: "paused-for-upgrade" });
+    const run = await throughBothGates(manifestPath, { first: older });
+    assert.match(run.error?.message || "", /reports version 0\.4\.6 \(paused-for-upgrade\), but this manifest records 0\.4\.7/u);
+    assert.deepEqual(run.events, ["initial backlog read"]);
+  });
+});
+
+test("the exact v0.4.6 envelope with an empty queue proceeds through both gates", async () => {
+  await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath }) => {
+    const run = await throughBothGates(manifestPath, { first: v046DocumentsEnvelope(0) });
+    assert.deepEqual(run.events, PROCEEDED, run.error?.message);
+  });
+});
+
+test("the exact v0.4.6 envelope with queued work refuses at both gates", async () => {
+  await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath, original }) => {
+    const queued = v046DocumentsEnvelope(7);
+    const run = await throughBothGates(manifestPath, { first: queued });
+    assert.equal(run.error?.message, PENDING_MESSAGE(7));
+    assert.deepEqual(run.events, ["initial backlog read"]);
+
+    const late = await throughBothGates(manifestPath, { first: v046DocumentsEnvelope(0), second: queued });
+    assert.ok(late.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
+      "This Brain gained 7 queued search update(s) before the paused deployment. " +
+        "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again.",
+    ))), late.error?.message);
+    assert.equal(late.events.includes("paused deployment"), false);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+test("the v0.4.6 envelope is refused for a manifest that records 0.4.7 or later", async () => {
+  await withManifest(() => {}, async ({ manifestPath }) => {
+    const { log, read } = scriptedReader(manifestPath, [
+      { status: 200, body: JSON.stringify(v046DocumentsEnvelope(0)) },
+    ]);
+    await assert.rejects(read(), (error) => error?.attempts === 1);
+    assert.equal(log.requests, 1);
+  });
+});
+
+test("a versionless manifest is older than every release: legacy envelope and resume generation are both read", async () => {
+  await withManifest((manifest) => { delete manifest.brain.version; }, async ({ manifestPath }) => {
+    const legacy = await throughBothGates(manifestPath, { first: v046DocumentsEnvelope(0) });
+    assert.deepEqual(legacy.events, PROCEEDED, legacy.error?.message);
+    const legacyQueued = await throughBothGates(manifestPath, { first: v046DocumentsEnvelope(2) });
+    assert.equal(legacyQueued.error?.message, PENDING_MESSAGE(2));
+    const resumed = await throughBothGates(manifestPath, {
+      first: boundedInventory({ version: PRODUCT_VERSION, drainMode: "paused-for-upgrade" }),
+    });
+    assert.deepEqual(resumed.events, PROCEEDED, resumed.error?.message);
+  });
+});
+
+test("a manifest with no Brain address defers the first read and resolves workers.dev read-only before the pause", async () => {
+  await withManifest((manifest) => { delete manifest.brain.domain; }, async ({ manifestPath, original }) => {
+    const run = await throughBothGates(manifestPath, { first: boundedInventory({ version: "0.4.7" }) });
+    assert.deepEqual(run.events, [
+      "profile adoption",
+      "verification",
+      "pre-pause backlog read",
+      "paused deployment",
+    ], run.error?.message);
+    assert.equal(run.initial.requests, 0);
+    assert.ok(run.output.some((line) => line.includes(renderCliCommands(
+      "This manifest records no Brain address, so no queued-update read was sent yet. The same read runs once " +
+        "Cloudflare access is confirmed, immediately before the paused deployment.",
+    ))), run.output.join("\n"));
+    assert.deepEqual(run.cfPaths.filter((path) => path.endsWith("/workers/subdomain")),
+      [`/accounts/${"1".repeat(32)}/workers/subdomain`]);
+    assert.deepEqual(run.urls, ["https://fixture-brain.owner-sub.workers.dev/api/admin/brain/documents"]);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+test("a manifest with no resolvable Brain address refuses before the pause and says no read was sent", async () => {
+  await withManifest((manifest) => { delete manifest.brain.domain; }, async ({ manifestPath }) => {
+    const run = await throughBothGates(manifestPath, {
+      first: boundedInventory({ version: "0.4.7" }),
+      subdomain: null,
+    });
+    assert.ok(run.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
+      "The immediate pre-pause documents backlog read could not be sent: this computer's admin key or Brain " +
+        "address could not be loaded, so no read was sent. The paused deployment was not started. " +
+        "Fix that, then run `brain update` again.",
+    ))), run.error?.message);
+    assert.equal(run.initial.requests + run.prePause.requests, 0);
+    assert.equal(run.events.includes("paused deployment"), false);
+  });
+});
+
+test("force says the truth: the pre-pause gate still refuses queued work and says it still has it", async () => {
+  await withManifest(() => {}, async ({ manifestPath, original }) => {
+    const queued = boundedInventory({ version: "0.4.7", pending: 3 });
+    const run = await throughBothGates(manifestPath, { first: queued, force: true });
+    assert.equal(run.output.filter((line) => line.includes(FORCE_WARNING(3))).length, 1, run.output.join("\n"));
+    assert.ok(run.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
+      "This Brain still has 3 queued search update(s) before the paused deployment. " +
+        "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again.",
+    ))), run.error?.message);
+    assert.equal(run.events.includes("paused deployment"), false);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+
+    const help = spawnSync(process.execPath, [fileURLToPath(new URL("../brain.mjs", import.meta.url)), "--help"], {
+      encoding: "utf8",
+      env: { ...process.env, NO_COLOR: "1" },
+    });
+    assert.equal(help.status, 0, help.stderr);
+    assert.doesNotMatch(help.stdout, /update despite queued search updates/u);
+    assert.ok(help.stdout.includes(renderCliCommands(
+      "continue past the first queued search update check;",
+    )), help.stdout);
   });
 });

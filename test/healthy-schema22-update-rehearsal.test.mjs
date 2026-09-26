@@ -33,6 +33,7 @@ import {
   splitStatements,
   VECTOR_DRAIN_CUTOVER_QUIESCENCE_MS,
   VECTOR_DRAIN_CUTOVER_POLL_MS,
+  readUpdateBacklog,
   waitForVectorDrainCutover,
 } from "../brain.mjs";
 
@@ -150,12 +151,15 @@ async function runUpdate({
   startAtVersion = "0.2.0",
   startAtSchema = PUBLISHED_SCHEMA,
   failBootstrap = false,
+  database = null,
+  backlogReader = async () => ({ pending: 0 }),
+  updateBacklogOptions,
 } = {}) {
   const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "oldest-install-update-")));
   const manifestPath = join(sandbox, "brain.manifest.json");
   writeFileSync(manifestPath, JSON.stringify(publishedReleaseManifest(), null, 2) + "\n");
 
-  const db = publishedReleaseDatabase({ inFlightOutboxRow, startAtVersion, startAtSchema });
+  const db = database ?? publishedReleaseDatabase({ inFlightOutboxRow, startAtVersion, startAtSchema });
   const timeline = [];
   const sqlLog = [];
   let clock = 1_700_000_000_000;
@@ -209,7 +213,8 @@ async function runUpdate({
       mark(deployOptions.pauseVectorDrainForUpgrade === true ? "deploy:PAUSED" : "deploy:active");
       return { ok: true };
     },
-    readUpdateBacklog: async () => ({ pending: 0 }),
+    readUpdateBacklog: backlogReader,
+    ...(updateBacklogOptions ? { updateBacklogOptions } : {}),
     cmdHealth: async (path, healthOptions = {}) => {
       clock += 1_000;
       mark(`health:${healthOptions.expectDrainMode || "none"}`, { expectVersion: healthOptions.expectVersion });
@@ -250,7 +255,7 @@ async function runUpdate({
   const corpus = db.prepare("SELECT (SELECT count(*) FROM documents) AS documents, (SELECT count(*) FROM chunks) AS chunks").get();
   const manifestAfter = JSON.parse(readFileSync(manifestPath, "utf8"));
   rmSync(sandbox, { recursive: true, force: true });
-  db.close();
+  if (!database) db.close();
   return { error, timeline, waits, sqlLog, state, ledger, manifestAfter, tables, corpus };
 }
 
@@ -432,6 +437,76 @@ check("the schema has already moved but the recorded product version has NOT, wh
   stranded.state.product_version === "0.2.0" &&
   stranded.ledger.n === migrations.length,
   JSON.stringify({ state: stranded.state, ledger: stranded.ledger }));
+
+/* The check above injects an empty backlog. Rerun from that exact state with
+   the REAL backlog reader instead, so the Worker the failed attempt left behind
+   (this CLI's version, still paused) answers the gate. Only the HTTP transport
+   is faked; its receipt is derived from the same sqlite database. */
+function workerDocumentsResponse(db, { version, drainMode }) {
+  const pending = db.prepare("SELECT count(*) AS n FROM vector_outbox").get().n;
+  const chunks = db.prepare("SELECT count(*) AS n FROM chunks").get().n;
+  const body = JSON.stringify({
+    version,
+    backend: "d1",
+    vector_drain_mode: drainMode,
+    rows: [],
+    vector_backlog: {
+      pending, upserts: pending, deletes: 0, submitted: 0,
+      pending_is_capped: false, pending_display: String(pending), component_counts_exact: true,
+      oldest_queued_at: pending > 0 ? 1_700_000_000_000 : null,
+    },
+    vector_readiness: {
+      ready: pending === 0, reason: pending === 0 ? null : "vector_work_queued",
+      expected_vectors: chunks, actual_vectors: chunks, pending, pending_is_capped: false,
+      submitted: 0, submitted_counts_exact: true,
+      oldest_queued_at: pending > 0 ? 1_700_000_000_000 : null,
+    },
+  });
+  const bytes = Buffer.from(body, "utf8");
+  let sent = false;
+  return {
+    ok: true,
+    status: 200,
+    headers: new Headers(),
+    body: { getReader: () => ({
+      async read() {
+        if (sent) return { done: true, value: undefined };
+        sent = true;
+        return { done: false, value: bytes };
+      },
+      async cancel() {},
+      releaseLock() {},
+    }) },
+  };
+}
+const resumeDb = publishedReleaseDatabase();
+const failedAttempt = await runUpdate({ failBootstrap: true, database: resumeDb });
+const leftPaused = failedAttempt.timeline.map((entry) => entry.event);
+const backlogReads = [];
+const rerun = await runUpdate({
+  database: resumeDb,
+  backlogReader: readUpdateBacklog,
+  updateBacklogOptions: {
+    resolveAdminKey: () => "rehearsal-admin-key",
+    sleep: async () => { throw new Error("a resumable receipt must not be retried"); },
+    http: async (url) => {
+      backlogReads.push(url);
+      return workerDocumentsResponse(resumeDb, { version: PRODUCT_VERSION, drainMode: "paused-for-upgrade" });
+    },
+  },
+});
+resumeDb.close();
+check("a rerun that reads the REAL backlog receipt of the paused new Worker resumes and completes",
+  failedAttempt.error !== null && leftPaused.includes("deploy:PAUSED") && !leftPaused.includes("deploy:active") &&
+  rerun.error === null && backlogReads.length === 1 &&
+  rerun.state.product_version === PRODUCT_VERSION &&
+  rerun.manifestAfter.brain.version === PRODUCT_VERSION &&
+  rerun.timeline.map((entry) => entry.event).includes("deploy:active"),
+  JSON.stringify({
+    error: String(rerun.error?.message || "").slice(0, 300),
+    reads: backlogReads.length,
+    state: rerun.state,
+  }));
 
 /* -------------------------------- 4. RECORDED FINDING, not desired behaviour --
  * `brain setup` learned to refuse a brain that is already live on this release
