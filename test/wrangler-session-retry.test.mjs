@@ -13,12 +13,15 @@ import {
   runCloudflareWranglerCommand,
   cloudflareApiRequest,
   cloudflareAccessUsesBrowserProfile,
+  supportErrorCode,
 } from "../brain.mjs";
 import { cloudflareOAuthProfileName } from "../operations/cloudflare-oauth-session.mjs";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
 const denied = { success: false, errors: [{ code: 9109, message: "Invalid access token" }], result: null };
+// The same shape Cloudflare gives a VALID token that lacks a permission.
+const permissionDenied = { success: false, errors: [{ code: 10000, message: "Authentication error" }], result: null };
 const granted = { success: true, errors: [], result: [{ id: "acct" }] };
 const ACCOUNT_ID = "c".repeat(32);
 const PROFILE = cloudflareOAuthProfileName("synthetic-install-identity-0001");
@@ -52,7 +55,7 @@ function oauthEnvelope(result, extra = {}) {
   return { success: true, errors: [], messages: [], result, ...extra };
 }
 
-function namedProfileHarness({ renewal = B, rejectRenewed = false } = {}) {
+function namedProfileHarness({ renewal = B, rejectRenewed = false, deniedBody = denied } = {}) {
   let tokenReads = 0;
   let mutationCalls = 0;
   let created = 0;
@@ -99,7 +102,7 @@ function namedProfileHarness({ renewal = B, rejectRenewed = false } = {}) {
           headers: { "content-type": "application/json" },
         });
       }
-      return new Response(JSON.stringify(denied), {
+      return new Response(JSON.stringify(deniedBody), {
         status: 403,
         headers: { "content-type": "application/json" },
       });
@@ -345,6 +348,86 @@ try {
     assert.doesNotMatch(result.out, /10000|Authentication error/i);
     assert.equal(harness.counts().tokenReads, 2, "the real holder re-reads the named profile once");
     assert.equal(commandCalls, 2, "one changed credential permits exactly one retry");
+  }
+
+  // A 403/10000 is also what a VALID token without a permission receives. If
+  // the one re-read returns the very same token, nothing expired: the original
+  // refusal, with its method, path and status, is the truthful answer, and it
+  // must stay a permission denial rather than become "sign in again".
+  {
+    const harness = namedProfileHarness({ renewal: A, deniedBody: permissionDenied });
+    globalThis.fetch = harness.fetchImpl;
+    const probePath = `/accounts/${ACCOUNT_ID}/workers/scripts/renewal-probe`;
+    await assert.rejects(
+      harness.run(() => cloudflareApiRequest(probePath, { method: "POST", body: { probe: true } })),
+      (error) => {
+        assert.ok(error.message.includes(`POST ${probePath} failed (403)`),
+          `the original operation and status must survive, got: ${error.message}`);
+        assert.match(error.message, /10000/);
+        assert.doesNotMatch(error.message, /expired|authorize the browser sign-in|both attempts/i);
+        assert.notEqual(error.namedProfileSessionRejected, true);
+        assert.equal(supportErrorCode(error), "REMOTE_PERMISSION_DENIED");
+        return true;
+      },
+    );
+    assert.deepEqual(harness.counts(), { tokenReads: 2, mutationCalls: 1, created: 0 },
+      "the renewal decision is reached once, and an unchanged token never repeats the write");
+  }
+
+  // The same unchanged-token denial from a Wrangler subprocess keeps the
+  // subprocess's own refusal instead of claiming the sign-in expired.
+  {
+    const harness = namedProfileHarness({ renewal: A });
+    let commandCalls = 0;
+    const result = await harness.run(() => runCloudflareWranglerCommand(
+      ["vectorize", "create", "fixture-index", "--dimensions=768", "--metric=cosine"],
+      {
+        accountId: ACCOUNT_ID,
+        authProfile: PROFILE,
+        platformName: "darwin",
+        runCommand: () => {
+          commandCalls += 1;
+          return { ok: false, out: "Authentication error [code: 10000]" };
+        },
+      },
+    ));
+    assert.equal(result.ok, false);
+    assert.equal(result.out, "Authentication error [code: 10000]");
+    assert.doesNotMatch(result.out, /expired|authorize the browser sign-in/i);
+    assert.equal(harness.counts().tokenReads, 2, "the real holder re-reads the named profile once");
+    assert.equal(commandCalls, 1, "an unchanged credential never repeats the command");
+  }
+
+  // A CHANGED token whose retry is still refused with the permission-shaped
+  // code is the case where claiming a rejected sign-in is justified.
+  {
+    const harness = namedProfileHarness({ rejectRenewed: true, deniedBody: permissionDenied });
+    globalThis.fetch = harness.fetchImpl;
+    await assert.rejects(
+      harness.run(() => cloudflareApiRequest(
+        `/accounts/${ACCOUNT_ID}/workers/scripts/renewal-probe`,
+        { method: "POST", body: { probe: true } },
+      )),
+      (error) => {
+        assert.match(error.message, /both attempts were rejected/i);
+        assert.match(error.message, /authorize the browser sign-in again/i);
+        assert.equal(error.namedProfileSessionRejected, true);
+        return true;
+      },
+    );
+    assert.deepEqual(harness.counts(), { tokenReads: 2, mutationCalls: 2, created: 0 });
+  }
+
+  // A CHANGED token whose retry succeeds simply proceeds.
+  {
+    const harness = namedProfileHarness({ deniedBody: permissionDenied });
+    globalThis.fetch = harness.fetchImpl;
+    const out = await harness.run(() => cloudflareApiRequest(
+      `/accounts/${ACCOUNT_ID}/workers/scripts/renewal-probe`,
+      { method: "POST", body: { probe: true } },
+    ));
+    assert.equal(out.id, "created");
+    assert.deepEqual(harness.counts(), { tokenReads: 2, mutationCalls: 2, created: 1 });
   }
 } finally {
   globalThis.fetch = savedFetch;

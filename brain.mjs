@@ -628,29 +628,36 @@ export function cloudflareAccessUsesBrowserProfile() {
 // expired token, so this can be the first moment a refresh can succeed. The
 // holder supplies the correct re-read operation for either the legacy default
 // session or this Brain's named profile.
-// Returns true when a different token is now in place.
+// Returns "changed" when a different token is now in place, "unchanged" when
+// the re-read returned the very token Cloudflare just refused, and
+// "unavailable" when no re-read could be made or it produced nothing.
+//
+// The distinction matters because a 401/403 carrying 9109 or 10000 is also
+// what a VALID token without a permission receives. An unchanged token after
+// a successful re-read means nothing expired, so the refusal is a permission
+// answer, not a sign-in problem.
 function renewWranglerSessionToken() {
-  if (process.env.CLOUDFLARE_API_TOKEN) return false;
+  if (process.env.CLOUDFLARE_API_TOKEN) return "unavailable";
   const holder = cloudflareTokenSession.getStore();
   if (!holder || !["wrangler-session", "wrangler-oauth"].includes(holder.source) ||
-      typeof holder.renew !== "function") return false;
+      typeof holder.renew !== "function") return "unavailable";
   let next = null;
   try {
     next = holder.renew();
   } catch {
     next = null;
   }
-  if (!next) return false;
+  if (!next) return "unavailable";
   const nextBuffer = Buffer.isBuffer(next)
     ? next
     : Buffer.from(String(next), "ascii");
   if (nextBuffer === holder.buffer || nextBuffer.equals(holder.buffer)) {
     if (nextBuffer !== holder.buffer) nextBuffer.fill(0);
-    return false;
+    return "unchanged";
   }
   holder.buffer.fill(0);
   holder.buffer = nextBuffer;
-  return true;
+  return "changed";
 }
 
 function namedProfileReauthorizationFailure({ retried = false } = {}) {
@@ -1329,7 +1336,8 @@ async function cf(path, options = {}) {
     return await cfOnce(path, options);
   } catch (error) {
     const holder = cloudflareTokenSession.getStore();
-    if (isExpiredSessionRejection(error) && renewWranglerSessionToken()) {
+    const renewal = isExpiredSessionRejection(error) ? renewWranglerSessionToken() : null;
+    if (renewal === "changed") {
       try {
         return await cfOnce(path, options);
       } catch (retryError) {
@@ -1339,7 +1347,9 @@ async function cf(path, options = {}) {
         throw retryError;
       }
     }
-    if (isExpiredSessionRejection(error) && holder?.source === "wrangler-oauth") {
+    // The profile answered with the same token it already had, so nothing
+    // expired. Keep Cloudflare's own refusal, with its method, path and status.
+    if (renewal === "unavailable" && holder?.source === "wrangler-oauth") {
       throw namedProfileReauthorizationFailure();
     }
     if (
@@ -1653,7 +1663,10 @@ export function runCloudflareWranglerCommand(args, {
       (/\b(9109|10000)\b/.test(message) && /auth|token/i.test(message));
   };
   if (authProfile && !result.ok && authRejected(result)) {
-    if (renewSessionToken()) {
+    const renewal = renewSessionToken();
+    // An unchanged token means nothing expired: keep the command's own refusal.
+    if (renewal === "unchanged") return { ok: false, out: result.out, status: 1 };
+    if (renewal === "changed") {
       result = invoke();
       if (result.ok) return { ok: true, out: result.out, status: 0 };
       if (!authRejected(result)) return { ok: false, out: result.out, status: 1 };
