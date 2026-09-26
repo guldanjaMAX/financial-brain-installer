@@ -33,12 +33,31 @@ jobs:
           pkgutil --payload-files dist/FinancialBrainMachinePrep-unsigned.pkg
           shasum -a 256 dist/FinancialBrainMachinePrep-unsigned.pkg
       - name: upload unsigned macOS package only
+        id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          # With archive: false the artifact is named after the file
+          # (FinancialBrainMachinePrep-unsigned.pkg); upload-artifact ignores this name.
           name: FinancialBrainMachinePrep-macOS-unsigned
           path: dist/FinancialBrainMachinePrep-unsigned.pkg
           archive: false
           retention-days: 14
+      # installer-signing.yml signs only an artifact whose ID and digest the
+      # dispatcher copies from here, and re-proves both through the API.
+      - name: record the artifact ID and digest to sign
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### FinancialBrainMachinePrep-unsigned.pkg"
+            echo ""
+            echo "- unsigned_run_id: $GITHUB_RUN_ID"
+            echo "- unsigned_artifact_id: $ARTIFACT_ID"
+            echo "- unsigned_sha256: ${ARTIFACT_DIGEST#sha256:}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   windows-unsigned:
     name: build unsigned Windows MSI
@@ -81,9 +100,28 @@ jobs:
           & machine-prep/installers/windows/verify-msi.ps1 dist/FinancialBrainMachinePrep-unsigned.msi
           Get-FileHash -Algorithm SHA256 dist/FinancialBrainMachinePrep-unsigned.msi
       - name: upload unsigned Windows MSI only
+        id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          # With archive: false the artifact is named after the file
+          # (FinancialBrainMachinePrep-unsigned.msi); upload-artifact ignores this name.
           name: FinancialBrainMachinePrep-Windows-unsigned
           path: dist/FinancialBrainMachinePrep-unsigned.msi
           archive: false
           retention-days: 14
+      # installer-signing.yml signs only an artifact whose ID and digest the
+      # dispatcher copies from here, and re-proves both through the API.
+      - name: record the artifact ID and digest to sign
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### FinancialBrainMachinePrep-unsigned.msi"
+            echo ""
+            echo "- unsigned_run_id: $GITHUB_RUN_ID"
+            echo "- unsigned_artifact_id: $ARTIFACT_ID"
+            echo "- unsigned_sha256: ${ARTIFACT_DIGEST#sha256:}"
+          } >> "$GITHUB_STEP_SUMMARY"

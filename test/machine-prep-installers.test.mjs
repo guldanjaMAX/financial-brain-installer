@@ -254,6 +254,9 @@ const MAC_SIGNING_SECRETS = [
   "APPLE_NOTARY_KEY_ID",
   "APPLE_NOTARY_ISSUER_ID",
 ];
+// Not a secret: the Apple Developer Team ID that the one accepted Developer ID
+// Installer identity must carry.
+const MAC_SIGNING_VARIABLES = ["APPLE_TEAM_ID"];
 const WINDOWS_SIGNING_VARIABLES = [
   "ARTIFACT_SIGNING_ENDPOINT",
   "ARTIFACT_SIGNING_ACCOUNT_NAME",
@@ -329,8 +332,8 @@ test("installer signing carries only secret and variable names, never a value", 
   const secrets = new Set([...workflow.matchAll(/\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}/g)].map((match) => match[1]));
   assert.deepEqual([...secrets].sort(), [...MAC_SIGNING_SECRETS].sort(), "only the declared Apple secrets are read");
   const variables = new Set([...workflow.matchAll(/\$\{\{\s*vars\.([A-Za-z0-9_]+)\s*\}\}/g)].map((match) => match[1]));
-  assert.deepEqual([...variables].sort(), [...WINDOWS_SIGNING_VARIABLES].sort(),
-    "Windows identifiers come from repository or environment variables");
+  assert.deepEqual([...variables].sort(), [...WINDOWS_SIGNING_VARIABLES, ...MAC_SIGNING_VARIABLES].sort(),
+    "Windows identifiers and the Apple team come from repository or environment variables");
   const withoutPins = workflow.replace(/@[0-9a-f]{40}/g, "@PINNED");
   assert.doesNotMatch(withoutPins, /-----BEGIN|PRIVATE KEY|MII[A-Za-z0-9+/]{20}/, "no certificate or key material");
   assert.doesNotMatch(withoutPins, /[A-Za-z0-9+/]{40,}={0,2}/, "no long encoded token");
@@ -351,6 +354,7 @@ test("each signing job refuses before touching an artifact when its configuratio
   const macSteps = workflowSteps(jobs.get("macos-sign"));
   assert.match(macSteps[0], /not configured yet/);
   for (const name of MAC_SIGNING_SECRETS) assert.match(macSteps[0], new RegExp(`\\b${name}\\b`));
+  for (const name of MAC_SIGNING_VARIABLES) assert.match(macSteps[0], new RegExp(`\\b${name}\\b`));
   assert.match(macSteps[0], /exit 1/);
   const windowsSteps = workflowSteps(jobs.get("windows-sign"));
   assert.match(windowsSteps[0], /not configured yet/);
