@@ -95,6 +95,32 @@ asset publication.
   the Plaid dashboard's Allowed redirect URIs list, it names the exact address
   to add. The reference code stays in the message.
 
+- **Bank disconnect and reconnect now finish cleanly.** A refused connection
+  attempt starts a new Link operation on the next click, and a safe failure
+  without a provider code now keeps its redacted reason and a stable reference
+  code. Disconnect removes staged account and transaction details that never
+  reached the ledger while preserving saved ledger history. A removed account
+  is reattached only when its environment, institution, normalized name, mask,
+  type, and subtype match exactly. Replacement history stays staged while the
+  Brain reconciles it against retained transactions. An exact, unique match on
+  stable account, money, and merchant or name fields reuses a saved pending row
+  when it becomes posted, even when Plaid changes the transaction ID, omits the
+  pending link, or reports a later posted date. A changed-label transaction is
+  not assumed new unless its authorization date is after disconnect and no
+  equal-amount pending row for that account is within ten days. Anything
+  uncertain stays held for review instead of being added to live totals. Live
+  older accounts receive their identity proof on the next normal sync. An
+  already disconnected account that still lacks it stops before the one-time
+  exchange and asks the owner to contact support. A reconnect containing both
+  saved and new accounts reattaches only the exact saved accounts; each new
+  account waits for the ordinary owner choice before the cursor or totals move.
+  If the account list changes after Link, the connection enters visible review
+  instead of retrying forever. A match against a live connection is still
+  refused for review. To check: reconnect a synthetic bank whose retained
+  pending row later posts under a changed ID and no pending link, and confirm
+  that underlying transaction still has one live row; an ambiguous pair must
+  remain staged.
+
 - **The first bank connection no longer dead-ends.** On a Brain with no person,
   household, or business yet, the connect page opens "Add a person,
   household, or business" by itself and tells you to add an owner first

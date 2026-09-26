@@ -96,6 +96,33 @@ test("an unrelated invalid field keeps the generic retry message and its referen
   } finally { fixture.close(); }
 });
 
+test("a safe route failure without a provider code remains visible with a stable reference", async () => {
+  const fixture = await createProductFixture({ env: { ...ENV, BANK_FEED_CLIENT_ID: "" } });
+  try {
+    const { status, body } = await postLinkToken(fixture, async () => {
+      throw new Error("the provider must not be contacted without configuration");
+    });
+    assert.equal(status, 503);
+    assert.equal(Object.hasOwn(body, "code"), false);
+    assert.match(body.error, /not configured/);
+    const message = bankFeedOwnerErrorMessage(body, status);
+    assert.match(message, /^This step is temporarily unavailable\. Your earlier progress is safe\. Please try again\./);
+    assert.match(message, /the bank feed is not configured on this brain/);
+    assert.match(message, /Reference code: BANK_FEED_REQUEST_FAILED\.$/);
+  } finally { fixture.close(); }
+});
+
+test("a removed legacy reconnect refusal tells the owner to contact support before retrying", () => {
+  const message = bankFeedOwnerErrorMessage({
+    error: "conflict",
+    code: "plaid_legacy_reconnect_support_required",
+  }, 409);
+  assert.match(message, /predates the identity proof/);
+  assert.match(message, /No replacement was exchanged and nothing was moved/);
+  assert.match(message, /Contact support before trying again/);
+  assert.match(message, /Reference code: plaid_legacy_reconnect_support_required\.$/);
+});
+
 /* ------------------------------------------------------------ the owner page */
 
 class FakeNode {
@@ -166,6 +193,87 @@ async function runPage(html, { entities, accounts }) {
   return nodes;
 }
 
+async function runDuplicateRefusalPage(html) {
+  const script = [...html.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)]
+    .map((match) => match[1]).filter(Boolean);
+  assert.equal(script.length, 1);
+  const ids = ["start", "status", "connections", "accounts", "account-status", "entity-create",
+    "entity-name", "entity-kind", "entity-save", "entity-status", "refresh", "entity-details"];
+  const nodes = new Map(ids.map((id) => [id, new FakeNode(id === "entity-details" ? "details" : "div", id)]));
+  const storage = new Map();
+  const linkRequests = [];
+  let exchangeCalls = 0;
+  let opened = 0;
+  let nextId = 0;
+  const response = (body, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  });
+  const context = vm.createContext({
+    document: {
+      getElementById: (id) => nodes.get(id) ?? null,
+      createElement: (tag) => new FakeNode(tag),
+    },
+    fetch: async (path, init = {}) => {
+      const body = init.body ? JSON.parse(init.body) : null;
+      if (path === "/api/bank-feed/link-token") {
+        linkRequests.push(body);
+        return response({
+          link_token: `fixture-link-${linkRequests.length}`,
+          session_ref: `fixture-session-${linkRequests.length}`,
+        });
+      }
+      if (path === "/api/bank-feed/exchange") {
+        exchangeCalls += 1;
+        return response({ error: "conflict", code: "plaid_duplicate_connection_review" }, 409);
+      }
+      if (path === "/api/bank-feed/accounts") {
+        return response({ provider: "plaid", state: "current", accounts: [], summary: { assignment_required: 0 } });
+      }
+      if (path === "/api/fin/snapshot") return response({ entities: [] });
+      if (path === "/api/bank-feed/status") return response({ connections: [] });
+      throw new Error(`unexpected owner-page path ${path}`);
+    },
+    sessionStorage: {
+      getItem: (key) => storage.get(key) ?? null,
+      setItem: (key, value) => storage.set(key, String(value)),
+      removeItem: (key) => storage.delete(key),
+    },
+    crypto: { randomUUID: () => `fixture-request-${String(++nextId).padStart(4, "0")}` },
+    location: { search: "", href: "https://brain.invalid/app/connect/bank" },
+    URLSearchParams,
+    setTimeout,
+    console,
+  });
+  context.Plaid = {
+    create(config) {
+      return {
+        open() {
+          opened += 1;
+          if (opened === 1) void config.onSuccess("fixture-public-token", {
+            institution: { institution_id: "fixture-institution", name: "Synthetic Bank" },
+            accounts: [{ id: "fixture-account", name: "Synthetic checking", mask: "1234" }],
+          });
+        },
+      };
+    },
+  };
+  context.window = context;
+  vm.runInContext(script[0], context);
+  for (let tick = 0; tick < 20; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  nodes.get("start").onclick();
+  for (let tick = 0; tick < 50 && nodes.get("start").disabled; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(exchangeCalls, 1, "the duplicate decision point must be reached");
+  nodes.get("start").onclick();
+  for (let tick = 0; tick < 50 && linkRequests.length < 2; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  return { linkRequests, exchangeCalls, opened, storage };
+}
+
 const unassigned = (index) => ({
   account_ref: `acct_${String(index).padStart(32, "0")}`,
   masked_identifier: `Synthetic checking ending 000${index}`,
@@ -210,12 +318,26 @@ test("once an owner exists, the section starts closed and every account offers t
   } finally { fixture.close(); }
 });
 
-test("the connect page says where disconnecting actually happens", async () => {
+test("the connect page states the disconnect location and reconnect review boundary", async () => {
   const fixture = await createProductFixture({ env: ENV });
   try {
     const html = await pageHtml(fixture);
     assert.doesNotMatch(html, /You can disconnect at any time/);
     assert.match(html, /To disconnect a bank later, open your Brain and go to Access &gt; Banks &gt; Disconnect\./);
+    assert.match(html, /Disconnecting removes the bank connection and any bank data still waiting for an owner choice\./);
+    assert.match(html, /Ledger history already saved stays\./);
+    assert.match(html, /A reconnect resumes only an exact saved account match\./);
+    assert.match(html, /Replacement history stays waiting until each retained transaction is matched without ambiguity\./);
+  } finally { fixture.close(); }
+});
+
+test("a duplicate-review refusal discards that Link request before the next click", async () => {
+  const fixture = await createProductFixture({ env: ENV });
+  try {
+    const result = await runDuplicateRefusalPage(await pageHtml(fixture));
+    assert.equal(result.exchangeCalls, 1, "the first Link session must reach duplicate review");
+    assert.equal(result.linkRequests.length, 2, "the next click must create another Link operation");
+    assert.notEqual(result.linkRequests[0].request_id, result.linkRequests[1].request_id);
   } finally { fixture.close(); }
 });
 
