@@ -4,6 +4,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+// Shared with the signing workflow test so both see every YAML key spelling.
+import { triggerNames, workflowJobs } from "./helpers/workflow-yaml.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const HANDOFF = join(ROOT, "machine-prep", "handoff");
@@ -266,15 +268,6 @@ const WINDOWS_SIGNING_VARIABLES = [
   "AZURE_SUBSCRIPTION_ID",
 ];
 
-/** Split a workflow's `jobs:` block into its top-level job bodies. */
-function workflowJobs(workflow) {
-  const jobsBlock = workflow.slice(workflow.indexOf("\njobs:\n") + "\njobs:\n".length);
-  const jobs = new Map();
-  for (const match of jobsBlock.matchAll(/^  ([a-z0-9-]+):\n([\s\S]*?)(?=^  [a-z0-9-]+:\n|(?![\s\S]))/gm)) {
-    jobs.set(match[1], match[2]);
-  }
-  return jobs;
-}
 
 /** Each step's text, in order, so gates can be checked for position. */
 function workflowSteps(job) {
@@ -299,11 +292,11 @@ function runScripts(workflow) {
   return scripts;
 }
 
-test("installer signing runs only by hand, in the protected environment, with every action pinned", () => {
-  const workflow = read(".github/workflows/installer-signing.yml");
-  const triggers = workflow.slice(workflow.indexOf("\non:\n"), workflow.indexOf("\npermissions:"));
-  assert.match(triggers, /^  workflow_dispatch:$/m);
-  assert.deepEqual([...triggers.matchAll(/^  ([a-z_]+):$/gm)].map((match) => match[1]), ["workflow_dispatch"],
+/** The signing workflow's trigger, token, environment and action policy; throws on any drift. */
+function assertSigningWorkflowShape(workflow) {
+  const triggers = triggerNames(workflow);
+  assert.ok(triggers.includes("workflow_dispatch"));
+  assert.deepEqual(triggers, ["workflow_dispatch"],
     "signing must never start from a push, pull request, schedule, tag, or another workflow");
   assert.match(workflow, /^permissions: \{\}$/m, "no job inherits a default token scope");
   const jobs = workflowJobs(workflow);
@@ -325,7 +318,64 @@ test("installer signing runs only by hand, in the protected environment, with ev
   assert.match(workflow, /unsigned_run_id:/);
   assert.match(workflow, /FinancialBrainMachinePrep-macOS-unsigned/);
   assert.match(workflow, /FinancialBrainMachinePrep-Windows-unsigned/);
+}
+
+/** The unsigned build's exact trigger and job set; throws on any drift. */
+function assertUnsignedWorkflowShape(workflow) {
+  assert.deepEqual(triggerNames(workflow), ["workflow_dispatch"], "the unsigned build starts only by hand");
+  assert.deepEqual([...workflowJobs(workflow).keys()].sort(), ["macos-unsigned", "windows-unsigned"]);
+}
+
+test("installer signing runs only by hand, in the protected environment, with every action pinned", () => {
+  assertSigningWorkflowShape(read(".github/workflows/installer-signing.yml"));
 });
+
+test("the unsigned build has exactly its two jobs and a dispatch-only trigger", () => {
+  assertUnsignedWorkflowShape(read(".github/workflows/machine-prep-installers.yml"));
+});
+
+// Job and trigger keys in every spelling YAML accepts must be seen: an extra
+// job or trigger that only the parser misses is a policy hole.
+// No permissions block, so only the job-key parser can notice the job.
+const extraJob = (key) => `  ${key}\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo extra\n`;
+const shapeMutations = [
+  ["an appended Extra_Job key with a trailing comment", (text) => `${text}${extraJob("Extra_Job:  # comment")}`],
+  ["an appended double-quoted job key", (text) => `${text}${extraJob('"quoted-job":')}`],
+  ["an appended single-quoted job key", (text) => `${text}${extraJob("'quoted-job':")}`],
+  ["an appended uppercase job key", (text) => `${text}${extraJob("PUBLISH:")}`],
+  ["a single-quoted pull_request_target trigger", (text) => text.replace(/^on:\n/m, "on:\n  'pull_request_target':\n")],
+  ["a double-quoted push trigger with a comment", (text) => text.replace(/^on:\n/m, 'on:\n  "push":  # comment\n    branches: [main]\n')],
+  ["a schedule trigger with a comment", (text) => text.replace(/^on:\n/m, "on:\n  schedule:  # nightly\n    - cron: '0 0 * * *'\n")],
+  ["a quoted workflow_dispatch beside an added workflow_run", (text) => text.replace(/^  workflow_dispatch:$/m, "  'workflow_dispatch':\n  \"workflow_run\":\n    workflows: [ci]")],
+];
+const equivalentRewrites = [
+  ["a single-quoted workflow_dispatch key", (text) => text.replace(/^  workflow_dispatch:$/m, "  'workflow_dispatch':")],
+  ["a double-quoted workflow_dispatch key with a comment", (text) => text.replace(/^  workflow_dispatch:$/m, '  "workflow_dispatch":  # by hand only')],
+  ["job keys with trailing comments", (text) => text.replace(/^  ([a-z-]+-(?:sign|unsigned)):$/gm, "  $1:  # reviewed job")],
+  ["double-quoted job keys", (text) => text.replace(/^  ([a-z-]+-(?:sign|unsigned)):$/gm, '  "$1":')],
+];
+for (const [path, assertShape] of [
+  [".github/workflows/installer-signing.yml", assertSigningWorkflowShape],
+  [".github/workflows/machine-prep-installers.yml", assertUnsignedWorkflowShape],
+]) {
+  for (const [name, mutate] of shapeMutations) {
+    test(`${path} mutation "${name}" is detected`, () => {
+      const original = read(path);
+      assertShape(original);
+      const mutated = mutate(original);
+      assert.notEqual(mutated, original, "the mutation applied to the current workflow");
+      assert.throws(() => assertShape(mutated), assert.AssertionError);
+    });
+  }
+  for (const [name, rewrite] of equivalentRewrites) {
+    test(`${path} with ${name} still passes its shape check`, () => {
+      const original = read(path);
+      const rewritten = rewrite(original);
+      assert.notEqual(rewritten, original, "the rewrite applied to the current workflow");
+      assertShape(rewritten);
+    });
+  }
+}
 
 test("installer signing carries only secret and variable names, never a value", () => {
   const workflow = read(".github/workflows/installer-signing.yml");

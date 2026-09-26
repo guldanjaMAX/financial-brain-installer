@@ -17,6 +17,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import test from "node:test";
+// Job and trigger keys are read by the shared parser, which sees every key
+// spelling YAML accepts (S3-R); the rest of this file's readers are local.
+import { beforeJobs, triggerNames, workflowJobs } from "./helpers/workflow-yaml.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const read = (path) => readFileSync(join(ROOT, path), "utf8").replaceAll("\r\n", "\n");
@@ -40,16 +43,6 @@ function topLevelBlock(workflow, key) {
   return { inline, body };
 }
 
-/** Every event that can start the workflow, inline or block form. */
-function triggerNames(workflow) {
-  const on = topLevelBlock(workflow, "on") ?? topLevelBlock(workflow, "true");
-  if (!on) return [];
-  if (on.inline) {
-    return on.inline.replace(/^\[|\]$/g, "").split(",").map((name) => name.trim()).filter(Boolean);
-  }
-  return on.body.filter((line) => /^  [A-Za-z_]+:/.test(line)).map((line) => line.trim().replace(/:.*$/, ""));
-}
-
 /** A permissions value: null (undeclared), a string (read-all/write-all), or a map. */
 function permissionsAt(lines, indent) {
   const pattern = new RegExp(`^ {${indent}}permissions:(.*)$`);
@@ -70,17 +63,8 @@ function permissionsAt(lines, indent) {
   return map;
 }
 
-function workflowJobs(workflow) {
-  const jobsBlock = workflow.slice(workflow.indexOf("\njobs:\n") + "\njobs:\n".length);
-  const jobs = new Map();
-  for (const match of jobsBlock.matchAll(/^  ([a-z0-9-]+):\n([\s\S]*?)(?=^  [a-z0-9-]+:\n|(?![\s\S]))/gm)) {
-    jobs.set(match[1], match[2]);
-  }
-  return jobs;
-}
-
 const workflowSteps = (job) => job.split(/^      - /m).slice(1);
-const topPermissions = (workflow) => permissionsAt(workflow.slice(0, workflow.indexOf("\njobs:\n")).split("\n"), 0);
+const topPermissions = (workflow) => permissionsAt(beforeJobs(workflow).split("\n"), 0);
 const jobPermissions = (job) => permissionsAt(job.split("\n"), 4);
 
 function stepNamed(job, name) {
@@ -607,6 +591,24 @@ const mutations = [
   [UNSIGNED_PATH, UNSIGNED_POLICY, "an unsigned workflow_run trigger", (text) => text.replace(/^on:\n/m, "on:\n  workflow_run:\n    workflows: [ci]\n")],
   [UNSIGNED_PATH, UNSIGNED_POLICY, "a persisted unsigned checkout", (text) => text.replace(/^          persist-credentials: false$/m, "          persist-credentials: true")],
   [UNSIGNED_PATH, UNSIGNED_POLICY, "an unsigned checkout without persist-credentials", (text) => text.replace(/^        with:\n          persist-credentials: false\n/m, "")],
+  // S3-R: job and trigger keys in every spelling YAML accepts.
+  ...[[SIGNING_PATH, SIGNING_POLICY, /^  windows-sign:$/m], [UNSIGNED_PATH, UNSIGNED_POLICY, /^  windows-unsigned:$/m]].flatMap(([path, policy, lastJob]) => {
+    // No permissions block, so only the job-key parser can notice the job.
+    const extraJob = (key) => `  ${key}\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo extra\n`;
+    const label = path === SIGNING_PATH ? "" : "unsigned ";
+    return [
+      [path, policy, `${label}an appended Extra_Job key with a trailing comment`, (text) => `${text}${extraJob("Extra_Job:  # comment")}`],
+      [path, policy, `${label}an inserted double-quoted job key`, (text) => text.replace(lastJob, (line) => `${extraJob('"quoted-job":')}${line}`)],
+      [path, policy, `${label}an inserted single-quoted job key`, (text) => text.replace(lastJob, (line) => `${extraJob("'quoted-job':")}${line}`)],
+      [path, policy, `${label}an appended uppercase job key`, (text) => `${text}${extraJob("PUBLISH:")}`],
+      [path, policy, `${label}an appended job key with a digit and underscore`, (text) => `${text}${extraJob("job_2:")}`],
+      [path, policy, `${label}a single-quoted pull_request_target trigger`, (text) => text.replace(/^on:\n/m, "on:\n  'pull_request_target':\n")],
+      [path, policy, `${label}a double-quoted push trigger with a comment`, (text) => text.replace(/^on:\n/m, 'on:\n  "push":  # comment\n    branches: [main]\n')],
+      [path, policy, `${label}a schedule trigger with a comment`, (text) => text.replace(/^on:\n/m, "on:\n  schedule:  # nightly\n    - cron: '0 0 * * *'\n")],
+      [path, policy, `${label}a quoted workflow_dispatch beside an added workflow_run`, (text) => text.replace(/^  workflow_dispatch:$/m, "  'workflow_dispatch':\n  \"workflow_run\":\n    workflows: [ci]")],
+      [path, policy, `${label}a commented on: key with an added push`, (text) => text.replace(/^on:\n/m, "on:  # triggers\n  push:\n")],
+    ];
+  }),
 ];
 for (const [path, policy, name, mutate] of mutations) {
   test(`S3 mutation "${name}" fails the policy check`, () => {
@@ -616,6 +618,30 @@ for (const [path, policy, name, mutate] of mutations) {
     assert.notEqual(mutated, original, "the mutation applied to the current workflow");
     assert.throws(() => assertWorkflowPolicy(mutated, policy), assert.AssertionError);
   });
+}
+
+// Rewrites YAML treats as the same workflow must still pass, so the parser
+// cannot satisfy the mutation cases above just by refusing unusual spellings.
+const equivalentRewrites = [
+  ["a single-quoted workflow_dispatch key", (text) => text.replace(/^  workflow_dispatch:$/m, "  'workflow_dispatch':")],
+  ["a double-quoted workflow_dispatch key with a comment", (text) => text.replace(/^  workflow_dispatch:$/m, '  "workflow_dispatch":  # by hand only')],
+  ["a commented on: key", (text) => text.replace(/^on:$/m, "on:  # triggers")],
+  ["a commented jobs: key", (text) => text.replace(/^jobs:$/m, "jobs:  # every job")],
+  ["a quoted jobs: key", (text) => text.replace(/^jobs:$/m, '"jobs":')],
+  ["job keys with trailing comments", (text) => text.replace(/^  ([a-z-]+-(?:sign|unsigned)):$/gm, "  $1:  # reviewed job")],
+  ["single-quoted job keys", (text) => text.replace(/^  ([a-z-]+-(?:sign|unsigned)):$/gm, "  '$1':")],
+  ["double-quoted job keys", (text) => text.replace(/^  ([a-z-]+-(?:sign|unsigned)):$/gm, '  "$1":')],
+  ["a comment line between jobs", (text) => text.replace(/^  (windows-(?:sign|unsigned)):$/m, "# the Windows job\n  $1:")],
+];
+for (const [path, policy] of [[SIGNING_PATH, SIGNING_POLICY], [UNSIGNED_PATH, UNSIGNED_POLICY]]) {
+  for (const [name, rewrite] of equivalentRewrites) {
+    test(`S3-R ${basename(path)} with ${name} still parses to the same policy`, () => {
+      const original = read(path);
+      const rewritten = rewrite(original);
+      assert.notEqual(rewritten, original, "the rewrite applied to the current workflow");
+      assertWorkflowPolicy(rewritten, policy);
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
