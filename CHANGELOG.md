@@ -175,10 +175,15 @@ asset publication.
   Install needs `brain.domain`, as on a Mac. A drive root such as `D:\` or a
   folder path ending in a backslash now reaches the refresh intact.
   Install is safe to repeat, while status and remove use the same task name
-  and the same lane wording. Status says plainly when no task exists, in any
-  Windows display language, and reports drift when the schedule, domain, admin
-  key name, token store, source settings, folder, or interpreter changed since
-  install or when a power setting was weakened. A run refuses to start in that
+  and the same lane wording. Status and remove ask about this lane's task
+  only, so one corrupt unrelated task in Task Scheduler no longer breaks them,
+  and removing a task that is already gone still clears the Brain's freshness
+  expectation. Status prints the last run time, the last result, and the lane
+  log path, and the scheduled entry's own failures now land in that log
+  instead of disappearing with the hidden console. Status says plainly when
+  no task exists, in any Windows display language, and reports drift when the
+  schedule, domain, admin key name, token store, source settings, folder, or
+  interpreter changed since install or when a power setting was weakened. A run refuses to start in that
   state until you reinstall.
   The task follows the manifest's effective five-field cron when one Windows
   entry can express it exactly: hourly at a chosen minute, every N hours when N

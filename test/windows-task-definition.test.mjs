@@ -70,6 +70,8 @@ const options = (extra = {}) => ({
   nodePath,
   environment: { LOCALAPPDATA: localAppData, SystemRoot: systemRoot },
   now: new Date(2026, 8, 1, 12, 0, 0),
+  // Fixture paths are absolute on a Windows CI host but do not exist there.
+  fileExists: () => true,
   ...extra,
 });
 
@@ -431,10 +433,19 @@ await check("W4 the scheduled entrypoint requires and forwards --config-hash", a
 
 const csvListing = (names, status = "Bereit") =>
   names.map((name) => `"\\${name}","N/V","${status}"`).join("\r\n");
+// The German display language's rendering of ERROR_FILE_NOT_FOUND, as both
+// schtasks and `net helpmsg 2` print it from the same message table.
+const germanNotFound = "Das System kann die angegebene Datei nicht finden.";
 const statusRunner = (installedXml, { listing = [taskName], calls = [] } = {}) => (command, args) => {
   calls.push(args);
+  if (/net(\.exe)?$/i.test(command)) return { status: 0, stdout: `\r\n${germanNotFound}\r\n\r\n`, stderr: "" };
   if (args[0] === "/Query" && args.includes("/XML")) return { status: 0, stdout: installedXml, stderr: "" };
-  if (args[0] === "/Query") return { status: 0, stdout: csvListing(listing), stderr: "" };
+  // A targeted query answers for the named task only: its row, or not found.
+  if (args[0] === "/Query" && args.includes("/TN")) {
+    return listing.includes(args[args.indexOf("/TN") + 1])
+      ? { status: 0, stdout: csvListing(listing), stderr: "" }
+      : { status: 1, stdout: "", stderr: `FEHLER: ${germanNotFound}` };
+  }
   return { status: 1, stdout: "", stderr: "unexpected" };
 };
 
@@ -472,7 +483,7 @@ await check("W4 a stored definition that omits a battery setting is judged by th
 
 // ---------------------------------------------------------------------------
 // W6: absence and drift are decided without reading localized text.
-await check("W6 status on a German Windows proves absence from the task listing", () => {
+await check("W6 status on a German Windows proves absence from the targeted query", () => {
   const calls = [];
   const result = statusWindowsScheduler(manifestPath, options({
     provider: "slack",
@@ -480,7 +491,8 @@ await check("W6 status on a German Windows proves absence from the task listing"
   }));
   assert.equal(result.installed, false);
   assert.equal(result.output, "");
-  assert.deepEqual(calls, [["/Query", "/FO", "CSV", "/NH"]], "absence came from the listing, not from an error string");
+  assert.deepEqual(calls, [["/Query", "/TN", taskName, "/FO", "CSV", "/V", "/NH"], ["helpmsg", "2"]],
+    "absence came from the targeted query and the system's own not-found message, not from an English string");
 });
 
 await check("W6 status of a present task reads the stored XML, not localized LIST labels", () => {
@@ -490,7 +502,7 @@ await check("W6 status of a present task reads the stored XML, not localized LIS
   }));
   assert.equal(result.installed, true);
   assert.equal(result.definitionDrift, false);
-  assert.deepEqual(calls, [["/Query", "/FO", "CSV", "/NH"], ["/Query", "/TN", taskName, "/XML"]]);
+  assert.deepEqual(calls, [["/Query", "/TN", taskName, "/FO", "CSV", "/V", "/NH"], ["/Query", "/TN", taskName, "/XML"]]);
 });
 
 await check("W6 UTF-16 schtasks output is decoded before the exact task-name match", () => {
@@ -506,11 +518,11 @@ await check("W6 UTF-16 schtasks output is decoded before the exact task-name mat
   assert.equal(result.definitionDrift, false);
 });
 
-await check("W6 a failed task listing is an error, never a quiet absence", () => {
+await check("W6 a failed task query is an error, never a quiet absence", () => {
   assert.throws(() => statusWindowsScheduler(manifestPath, options({
     provider: "slack",
     processRunner() { return { status: 1, stdout: "", stderr: "FEHLER: Zugriff verweigert" }; },
-  })), /could not list/);
+  })), /could not read .* cannot be proven present or absent: FEHLER: Zugriff verweigert/);
 });
 
 await check("W6 remove of an already-deleted task on a French Windows is a quiet success", () => {
@@ -519,13 +531,15 @@ await check("W6 remove of an already-deleted task on a French Windows is a quiet
     provider: "slack",
     processRunner(command, args) {
       calls.push(args);
-      if (args[0] === "/Delete") return { status: 1, stdout: "", stderr: "ERREUR : Le fichier spécifié est introuvable." };
-      return { status: 0, stdout: csvListing(["Autre tâche"], "Prêt"), stderr: "" };
+      if (/net(\.exe)?$/i.test(command)) return { status: 0, stdout: "\r\nLe fichier spécifié est introuvable.\r\n", stderr: "" };
+      return { status: 1, stdout: "", stderr: "ERREUR : Le fichier spécifié est introuvable." };
     },
   }));
   assert.equal(result.removed, false);
   assert.equal(result.installed, false);
-  assert.deepEqual(calls, [["/Delete", "/TN", taskName, "/F"], ["/Query", "/FO", "CSV", "/NH"]]);
+  assert.deepEqual(calls, [
+    ["/Delete", "/TN", taskName, "/F"], ["/Query", "/TN", taskName, "/FO", "CSV", "/V", "/NH"], ["helpmsg", "2"],
+  ]);
 });
 
 await check("W6 a failed delete of a task that is still listed is an error", () => {
@@ -570,6 +584,337 @@ await check("W7 the scheduled child writes to a private per-lane log", () => {
   assert.equal(calls[0].command, nodePath);
   assert.deepEqual(calls[0].args, [brainCliPath, ...providerPlan.childArguments]);
 });
+
+
+// ---------------------------------------------------------------------------
+// W6-R: absence is decided from a query of the named task only. One corrupt
+// task elsewhere in the owner's library made every unfiltered listing fail,
+// which broke status before install and stopped --remove before the Brain's
+// freshness expectation was cleared.
+const corruptListingText = "ERROR: The task image is corrupt or has been tampered with.";
+const notFoundText = "The system cannot find the file specified.";
+const targetedQuery = ["/Query", "/TN", taskName, "/FO", "CSV", "/V", "/NH"];
+const isNetCommand = (command) => /(^|[\\/])net(\.exe)?$/i.test(String(command));
+const verboseRow = (name, { lastRun = "9/1/2026 2:15:00 AM", lastResult = "0" } = {}) =>
+  ["FIXTURE-PC", `\\${name}`, "9/1/2026 4:45:00 AM", "Ready", "Interactive only", lastRun, lastResult,
+    "FIXTURE-PC\\owner", "C:\\Windows\\System32\\conhost.exe --headless", "N/A"]
+    .map((value) => `"${value.replaceAll('"', '""')}"`).join(",");
+// A library holding one corrupt unrelated task: any unfiltered listing fails,
+// while a query of this lane's exact name answers for that name alone.
+const corruptLibraryRunner = ({ calls = [], task = null, deleteAnswer = null, targeted = null, help = null } = {}) =>
+  (command, args) => {
+    calls.push([isNetCommand(command) ? "net" : command, ...args]);
+    if (isNetCommand(command)) return help ?? { status: 0, stdout: `\r\n${notFoundText}\r\n\r\n`, stderr: "" };
+    if (args[0] === "/Query" && !args.includes("/TN")) return { status: 1, stdout: "", stderr: corruptListingText };
+    if (args[0] === "/Delete") return deleteAnswer ?? { status: 1, stdout: "", stderr: `ERROR: ${notFoundText}` };
+    if (args[0] === "/Query" && args.includes("/XML")) {
+      return task ? { status: 0, stdout: task.xml, stderr: "" } : { status: 1, stdout: "", stderr: `ERROR: ${notFoundText}` };
+    }
+    if (targeted) return targeted;
+    return task
+      ? { status: 0, stdout: verboseRow(taskName, task), stderr: "" }
+      : { status: 1, stdout: "", stderr: `ERROR: ${notFoundText}` };
+  };
+const unfilteredListingCalls = (calls) => calls.filter((call) => call[0] !== "net" && call[1] === "/Query" && !call.includes("/TN"));
+
+const { mkdtempSync, rmSync, writeFileSync: writeFixtureFile } = await import("node:fs");
+const { tmpdir } = await import("node:os");
+const { join: joinHost } = await import("node:path");
+const cliDirectory = mkdtempSync(joinHost(tmpdir(), "brain-windows-schedule-evidence-"));
+const cliManifestPath = joinHost(cliDirectory, "brain.manifest.json");
+writeFixtureFile(cliManifestPath, JSON.stringify(baseManifest));
+const captureCli = async (run) => {
+  const lines = [];
+  const original = console.log;
+  console.log = (...parts) => { lines.push(parts.join(" ")); };
+  try {
+    return { result: await run(), text: lines.join("\n") };
+  } catch (error) {
+    return { error, text: lines.join("\n") };
+  } finally {
+    console.log = original;
+  }
+};
+const cliOptions = (action, processRunner, posted, extra = {}) => ({
+  platform: "win32",
+  flags: { provider: "slack", [action]: true },
+  resolveAdminKey: () => "fixture-admin-value",
+  resolveBaseUrl: async () => "https://fixture.invalid",
+  postSourceExpectation: async (base, key, body) => { posted.push(body); },
+  schedulerOptions: {
+    processRunner,
+    environment: { LOCALAPPDATA: localAppData, SystemRoot: systemRoot },
+    localAppData,
+    systemRoot,
+    nodePath,
+    writeTaskDefinition() {},
+    fileExists: () => true,
+    windowsManifestPath: manifestPath,
+    ...extra,
+  },
+});
+
+await check("W6-R status before install survives a corrupt unrelated task and uses only the targeted query", () => {
+  const calls = [];
+  const result = statusWindowsScheduler(manifestPath, options({
+    provider: "slack", processRunner: corruptLibraryRunner({ calls }),
+  }));
+  assert.equal(result.installed, false);
+  assert.deepEqual(unfilteredListingCalls(calls), [], "the unfiltered task listing was never queried");
+  assert.deepEqual(calls, [["schtasks.exe", ...targetedQuery], ["net", "helpmsg", "2"]],
+    "absence came from the named-task query plus the system's own not-found message");
+});
+
+await check("W6-R CLI status before install prints not installed despite a corrupt unrelated task", async () => {
+  const calls = [];
+  const posted = [];
+  const run = await captureCli(() => brain.cmdSchedule(cliManifestPath,
+    cliOptions("status", corruptLibraryRunner({ calls }), posted)));
+  assert.equal(run.error, undefined, String(run.error?.message || ""));
+  assert.match(run.text, /slack refresh is not installed on this Windows PC/);
+  assert.doesNotMatch(run.text, /corrupt|tampered/);
+  assert.deepEqual(unfilteredListingCalls(calls), []);
+});
+
+await check("W6-R remove of an already-absent task clears the freshness expectation despite a corrupt unrelated task", async () => {
+  const calls = [];
+  const posted = [];
+  const run = await captureCli(() => brain.cmdSchedule(cliManifestPath,
+    cliOptions("remove", corruptLibraryRunner({ calls }), posted)));
+  assert.equal(run.error, undefined, String(run.error?.message || ""));
+  assert.equal(run.result.removed, false);
+  assert.match(run.text, /slack refresh was not installed/);
+  assert.match(run.text, /team-chat freshness expectation cleared/);
+  assert.deepEqual(posted, [{ source: "team-chat", kind: "slack", expected_refresh_seconds: null }],
+    "the remote expectation was cleared exactly once, to null");
+  assert.deepEqual(calls, [
+    ["schtasks.exe", "/Delete", "/TN", taskName, "/F"],
+    ["schtasks.exe", ...targetedQuery],
+    ["net", "helpmsg", "2"],
+  ], "absence after the failed delete came from the targeted query, never the unfiltered listing");
+});
+
+await check("W6-R an ambiguous targeted query failure refuses rather than claiming absence", async () => {
+  // The named task answered with a different error than the system's own
+  // not-found message: it may exist and be unreadable, so nothing is claimed.
+  const deniedCalls = [];
+  assert.throws(() => statusWindowsScheduler(manifestPath, options({
+    provider: "slack",
+    processRunner: corruptLibraryRunner({
+      calls: deniedCalls, targeted: { status: 1, stdout: "", stderr: "ERROR: Access is denied." },
+    }),
+  })), /cannot be proven present or absent/);
+  assert.deepEqual(deniedCalls, [["schtasks.exe", ...targetedQuery], ["net", "helpmsg", "2"]]);
+
+  // Every call failing alike (the service itself unavailable) is not absence.
+  const serviceDown = { status: 1, stdout: "", stderr: "ERROR: The Task Scheduler service is not available." };
+  assert.throws(() => statusWindowsScheduler(manifestPath, options({
+    provider: "slack",
+    processRunner: corruptLibraryRunner({ targeted: serviceDown, help: serviceDown }),
+  })), /cannot be proven present or absent/);
+
+  // The not-found message could not be read at all.
+  assert.throws(() => statusWindowsScheduler(manifestPath, options({
+    provider: "slack",
+    processRunner: corruptLibraryRunner({ help: { error: Object.assign(new Error("spawnSync net.exe ENOENT"), { code: "ENOENT" }) } }),
+  })), /cannot be proven present or absent/);
+
+  // A successful targeted query that does not name the task is not absence either.
+  assert.throws(() => statusWindowsScheduler(manifestPath, options({
+    provider: "slack",
+    processRunner: corruptLibraryRunner({ targeted: { status: 0, stdout: verboseRow(`${taskName}.old`), stderr: "" } }),
+  })), /cannot be proven present or absent/);
+
+  // Remove of a task whose delete and targeted query both fail ambiguously
+  // stops before the remote expectation is touched.
+  const calls = [];
+  const posted = [];
+  const run = await captureCli(() => brain.cmdSchedule(cliManifestPath, cliOptions("remove", corruptLibraryRunner({
+    calls,
+    deleteAnswer: { status: 1, stdout: "", stderr: "ERROR: Access is denied." },
+    targeted: { status: 1, stdout: "", stderr: "ERROR: Access is denied." },
+  }), posted)));
+  assert.match(String(run.error?.message || ""), /could not delete/);
+  assert.deepEqual(posted, [], "an unproven removal never clears the freshness expectation");
+  assert.deepEqual(unfilteredListingCalls(calls), []);
+});
+
+// ---------------------------------------------------------------------------
+// W7-R: status reports the last run and where its log is, and the runner's
+// own failures reach that log, since a headless console host discards them.
+const laneLogPath = `${localAppData}\\FinancialBrain\\logs\\${taskName}.log`;
+
+await check("W7-R status reports the last run time, last result, and the lane log path", async () => {
+  const calls = [];
+  const result = statusWindowsScheduler(manifestPath, options({
+    provider: "slack",
+    processRunner: corruptLibraryRunner({ calls, task: { xml: providerPlan.taskXml, lastResult: "0" } }),
+  }));
+  assert.equal(result.installed, true);
+  assert.equal(result.definitionDrift, false);
+  assert.equal(result.lastRunTime, "9/1/2026 2:15:00 AM");
+  assert.equal(result.lastResult, 0);
+  assert.equal(result.logPath, laneLogPath);
+  assert.deepEqual(calls, [["schtasks.exe", ...targetedQuery], ["schtasks.exe", "/Query", "/TN", taskName, "/XML"]]);
+
+  const posted = [];
+  const okRun = await captureCli(() => brain.cmdSchedule(cliManifestPath, cliOptions("status",
+    corruptLibraryRunner({ task: { xml: providerPlan.taskXml, lastResult: "0" } }), posted)));
+  assert.equal(okRun.error, undefined, String(okRun.error?.message || ""));
+  assert.match(okRun.text, /last run: 9\/1\/2026 2:15:00 AM/);
+  assert.match(okRun.text, /last result: 0 \(success\)/);
+  assert.ok(okRun.text.includes(`log: ${laneLogPath}`), okRun.text);
+
+  const failedRun = await captureCli(() => brain.cmdSchedule(cliManifestPath, cliOptions("status",
+    corruptLibraryRunner({ task: { xml: providerPlan.taskXml, lastResult: "1" } }), posted)));
+  assert.match(failedRun.text, /last result: 1 \(failed/);
+  assert.match(failedRun.text, /warn.*last slack refresh did not succeed/);
+
+  const neverRun = await captureCli(() => brain.cmdSchedule(cliManifestPath, cliOptions("status",
+    corruptLibraryRunner({ task: { xml: providerPlan.taskXml, lastRun: "N/A", lastResult: "267011" } }), posted)));
+  assert.match(neverRun.text, /last result: 0x00041303 \(has not run yet\)/);
+  assert.doesNotMatch(neverRun.text, /did not succeed/);
+});
+
+const recordingLog = () => {
+  const appended = [];
+  return { appended, appendLog(path, text) { appended.push([path, text]); } };
+};
+
+await check("W7-R a die() inside the scheduled entrypoint is appended to the lane log", async () => {
+  const log = recordingLog();
+  await assert.rejects(brain.cmdWindowsScheduledIngest(manifestPath, {
+    platform: "win32",
+    flags: { from: "slack" },
+    schedulerOptions: options({ appendLog: log.appendLog }),
+    setExitCode() {},
+  }), /config-hash/);
+  assert.equal(log.appended.length, 1, JSON.stringify(log.appended));
+  assert.equal(log.appended[0][0], laneLogPath);
+  assert.match(log.appended[0][1], /^\d{4}-\d{2}-\d{2}T\S+ scheduled ingest failed: .*config-hash/);
+});
+
+await check("W7-R a spawn error is appended to the lane log once", async () => {
+  const log = recordingLog();
+  const spawnError = Object.assign(new Error(`spawnSync ${nodePath} ENOENT`), { code: "ENOENT" });
+  await assert.rejects(brain.cmdWindowsScheduledIngest(manifestPath, {
+    platform: "win32",
+    flags: { from: "slack", "config-hash": providerPlan.configHash },
+    schedulerOptions: options({
+      brainCliPath,
+      fileExists: () => true,
+      openLog() { return 42; },
+      closeLog() {},
+      appendLog: log.appendLog,
+      ingestRunner() { return { error: spawnError, status: null }; },
+    }),
+    setExitCode() {},
+  }), /ENOENT/);
+  assert.equal(log.appended.length, 1, "the runner and the entrypoint did not both record it");
+  assert.equal(log.appended[0][0], laneLogPath);
+  assert.match(log.appended[0][1], /scheduled ingest failed: .*ENOENT/);
+});
+
+await check("W7-R a runner refusal reaches the lane log once, not again from the entrypoint", async () => {
+  const log = recordingLog();
+  let children = 0;
+  await assert.rejects(brain.cmdWindowsScheduledIngest(manifestPath, {
+    platform: "win32",
+    flags: { from: "slack", "config-hash": "0".repeat(64) },
+    schedulerOptions: options({
+      brainCliPath,
+      appendLog: log.appendLog,
+      openLog() { return 42; },
+      closeLog() {},
+      ingestRunner() { children++; return { status: 0 }; },
+    }),
+    setExitCode() {},
+  }), (error) => error.code === "WINDOWS_SCHEDULE_CONFIG_CHANGED");
+  assert.equal(children, 0);
+  assert.equal(log.appended.length, 1, JSON.stringify(log.appended));
+  assert.equal(log.appended[0][0], laneLogPath);
+  assert.match(log.appended[0][1], /scheduled ingest refused: .*reinstall/);
+});
+
+await check("W7-R a log rotation error is appended to the lane log and nothing runs", () => {
+  const log = recordingLog();
+  let children = 0;
+  assert.throws(() => runWindowsScheduledIngest(manifestPath, options({
+    provider: "slack",
+    brainCliPath,
+    fileExists: () => true,
+    expectedConfigHash: providerPlan.configHash,
+    expectedChildArguments: providerPlan.childArguments,
+    openLog() { throw Object.assign(new Error(`EPERM: operation not permitted, rename '${laneLogPath}'`), { code: "EPERM" }); },
+    closeLog() {},
+    appendLog: log.appendLog,
+    ingestRunner() { children++; return { status: 0 }; },
+  })), /EPERM/);
+  assert.equal(children, 0);
+  assert.equal(log.appended.length, 1);
+  assert.equal(log.appended[0][0], laneLogPath);
+  assert.match(log.appended[0][1], /scheduled ingest failed: .*could not open or rotate the lane log.*EPERM/);
+});
+
+await check("W7-R a missing installed brain.mjs is appended to the lane log before any child starts", () => {
+  const log = recordingLog();
+  const checked = [];
+  let children = 0;
+  assert.throws(() => runWindowsScheduledIngest(manifestPath, options({
+    provider: "slack",
+    brainCliPath,
+    fileExists(path) { checked.push(path); return false; },
+    expectedConfigHash: providerPlan.configHash,
+    expectedChildArguments: providerPlan.childArguments,
+    openLog() { return 42; },
+    closeLog() {},
+    appendLog: log.appendLog,
+    ingestRunner() { children++; return { status: 0 }; },
+  })), (error) => error.code === "WINDOWS_SCHEDULE_RUNNER_MISSING");
+  assert.equal(children, 0);
+  assert.deepEqual(checked, [brainCliPath]);
+  assert.equal(log.appended.length, 1);
+  assert.equal(log.appended[0][0], laneLogPath);
+  assert.ok(log.appended[0][1].includes(`the installed brain.mjs is missing at ${brainCliPath}`), log.appended[0][1]);
+});
+
+await check("W7-R a nonzero ingest exit is recorded in the lane log", () => {
+  const log = recordingLog();
+  const result = runWindowsScheduledIngest(manifestPath, options({
+    provider: "slack",
+    brainCliPath,
+    fileExists: () => true,
+    expectedConfigHash: providerPlan.configHash,
+    expectedChildArguments: providerPlan.childArguments,
+    openLog() { return 42; },
+    closeLog() {},
+    appendLog: log.appendLog,
+    ingestRunner() { return { status: 3 }; },
+  }));
+  assert.equal(result.status, 3);
+  assert.deepEqual(log.appended.map(([path]) => path), [laneLogPath]);
+  assert.match(log.appended[0][1], /scheduled ingest child exited with status 3/);
+});
+
+await check("W7-R an unreadable manifest is recorded as metadata only in the runner log", async () => {
+  const log = recordingLog();
+  await assert.rejects(brain.cmdWindowsScheduledIngest(manifestPath, {
+    platform: "win32",
+    flags: { from: "slack", "config-hash": providerPlan.configHash },
+    schedulerOptions: {
+      ...options({ appendLog: log.appendLog }),
+      manifest: undefined,
+      readFile() { return '{"client": "fixture-private-content"'; },
+    },
+    setExitCode() {},
+  }));
+  assert.equal(log.appended.length, 1, JSON.stringify(log.appended));
+  assert.equal(log.appended[0][0], `${localAppData}\\FinancialBrain\\logs\\windows-scheduled-ingest.log`);
+  assert.match(log.appended[0][1], /scheduled ingest failed: the manifest is not valid JSON/);
+  assert.doesNotMatch(log.appended[0][1], /fixture-private-content/);
+});
+
+rmSync(cliDirectory, { recursive: true, force: true });
 
 assert.deepEqual(schedulerRunnerAttempts, [], "no check reached a real schtasks");
 

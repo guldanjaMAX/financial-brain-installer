@@ -14,7 +14,8 @@ import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { basename } from "node:path";
 
-const SCHEDULER_PROGRAMS = new Set(["launchctl", "schtasks", "schtasks.exe"]);
+// net.exe is here because Windows absence is confirmed with `net helpmsg 2`.
+const SCHEDULER_PROGRAMS = new Set(["launchctl", "schtasks", "schtasks.exe", "net", "net.exe"]);
 export const schedulerRunnerAttempts = [];
 
 function schedulerProgram(command) {
@@ -27,12 +28,16 @@ function absentAnswer(program, args) {
   if (program === "launchctl") {
     return { status: 113, stdout: "", stderr: "Could not find service in domain for port", signal: null, pid: 0, output: [] };
   }
-  // Task Scheduler absence is proven by an empty CSV task listing; every
-  // other schtasks verb answers as if the named task does not exist.
-  const list = Array.isArray(args) && args[0] === "/Query" && !args.includes("/TN");
-  return list
-    ? { status: 0, stdout: "", stderr: "", signal: null, pid: 0, output: [] }
-    : { status: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified.", signal: null, pid: 0, output: [] };
+  // Task Scheduler absence is a failed query of the named task whose error is
+  // the system's own ERROR_FILE_NOT_FOUND text, the same text `net helpmsg 2`
+  // prints. Every schtasks verb answers as if the named task does not exist;
+  // an unfiltered listing is answered as a failure, since product code must
+  // never depend on it.
+  const notFound = "The system cannot find the file specified.";
+  if (program === "net" || program === "net.exe") {
+    return { status: 0, stdout: `\r\n${notFound}\r\n\r\n`, stderr: "", signal: null, pid: 0, output: [] };
+  }
+  return { status: 1, stdout: "", stderr: `ERROR: ${notFound}`, signal: null, pid: 0, output: [] };
 }
 
 const realSpawnSync = childProcess.spawnSync;

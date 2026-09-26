@@ -12,6 +12,7 @@ $Task = "com.brain-installer.$Slug.folder-ingest"
 $TaskXml = Join-Path $env:TEMP "brain-schedule-proof.xml"
 
 & $Brain sources $Manifest --json
+& $Brain schedule $Manifest --folder --status
 & $Brain schedule $Manifest --folder --install
 schtasks.exe /Query /TN $Task /XML > $TaskXml
 [xml]$StoredTask = Get-Content -LiteralPath $TaskXml -Raw
@@ -25,7 +26,9 @@ do {
   $TaskState = schtasks.exe /Query /TN $Task /FO LIST /V
 } while ($TaskState -match "Running")
 $TaskState
+& $Brain schedule $Manifest --folder --status
 & $Brain sources $Manifest --json
+& $Brain schedule $Manifest --folder --remove
 & $Brain schedule $Manifest --folder --remove
 schtasks.exe /Query /TN $Task /FO LIST /V
 Remove-Item -LiteralPath $TaskXml
@@ -38,6 +41,9 @@ Required evidence:
    Repeat the install on battery power with the lid closed across a trigger time, and confirm the missed run starts after wake.
 3. The run request succeeds. The polling query shows that the task stopped and its last-run result is `0`.
 4. `brain sources` returns `contract_version: 3`; the watched-folder source's `receipt.last_successful_run_at` is later than the pre-run value recorded by the technician.
-5. Remove prints that the refresh was removed. The final direct query reports that the task does not exist.
+5. Remove prints that the refresh was removed. The second remove prints that it was not installed and that the freshness expectation was cleared. The final direct query reports that the task does not exist.
+6. The status before install prints that the refresh is not installed and names the lane log path. The status after the run prints the last run time, `last result: 0 (success)`, and the same log path, and the log ends with the run's output.
+7. Repeat steps 5 and 6 on a PC whose display language is not English, and on a PC that holds one deliberately corrupted unrelated task (for example a copy of a disposable task whose XML under `%SystemRoot%\System32\Tasks` was edited by an administrator). Both status before install and remove of the already-absent task must still succeed; `schtasks /Query /FO CSV` on that PC fails, which is the condition being proven.
+8. Run `& $Brain windows-scheduled-ingest $Manifest --path <watched folder> --source <source>` without `--config-hash`. It must refuse before reading any credential, and the lane log must gain exactly one `scheduled ingest failed:` line that names the missing `--config-hash`.
 
 For a provider lane, substitute `--provider <provider>` for `--folder`, use the task name `com.brain-installer.$Slug.<provider>-ingest`, and verify that provider's source receipt advanced. Do not paste source content, credentials, manifest contents, or private paths into the proof record.

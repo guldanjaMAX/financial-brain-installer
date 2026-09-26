@@ -178,11 +178,13 @@ try {
     windowsCalls.push([command, ...args]);
     return answers(args);
   };
-  // Absence is proven by the CSV task listing, never by schtasks' error text.
+  // Absence is proven by a query of the named task failing with the system's
+  // own ERROR_FILE_NOT_FOUND message (`net helpmsg 2`), never by English text.
   const windowsListing = (...names) => names.map((name) => `"\\${name}","N/A","Ready"`).join("\r\n");
-  const windowsAbsent = windowsRunner((args) => args[0] === "/Query"
-    ? { status: 0, stdout: windowsListing("Other task"), stderr: "" }
-    : { status: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." });
+  const windowsNotFound = "The system cannot find the file specified.";
+  const windowsAbsent = windowsRunner((args) => args[0] === "helpmsg"
+    ? { status: 0, stdout: `\r\n${windowsNotFound}\r\n`, stderr: "" }
+    : { status: 1, stdout: "", stderr: `ERROR: ${windowsNotFound}` });
   const windowsOptions = (action, runner, extra = {}) => ({
     platform: "win32",
     flags: { provider: "slack", [action]: true },
@@ -196,6 +198,7 @@ try {
       systemRoot: String.raw`C:\Windows`,
       nodePath: String.raw`C:\Program Files\nodejs\node.exe`,
       writeTaskDefinition() {},
+      fileExists: () => true,
       windowsManifestPath: String.raw`C:\Users\Fixture\brain.manifest.json`,
       ...extra,
     },
@@ -236,11 +239,13 @@ try {
     windowsDrifted.result.definitionDrift === true &&
       /the installed slack refresh does not match the current manifest; reinstall it/.test(windowsDrifted.text),
     windowsDrifted.text);
-  const windowsListingCall = JSON.stringify(["schtasks.exe", "/Query", "/FO", "CSV", "/NH"]);
+  // The only other program is the not-found message lookup; the unfiltered
+  // task listing is never used, since one corrupt unrelated task breaks it.
+  const windowsHelpCall = JSON.stringify([String.raw`C:\Windows\System32\net.exe`, "helpmsg", "2"]);
   check("Windows install, status and remove all address one task name",
-    windowsCalls.length === 8 &&
-      windowsCalls.every((call) => call[0] === "schtasks.exe" &&
-        (JSON.stringify(call) === windowsListingCall || call[call.indexOf("/TN") + 1] === windowsTask)) &&
+    windowsCalls.length === 10 &&
+      windowsCalls.every((call) => JSON.stringify(call) === windowsHelpCall ||
+        (call[0] === "schtasks.exe" && call[call.indexOf("/TN") + 1] === windowsTask)) &&
       windowsInstall.result.createArgs.includes(windowsTask),
     JSON.stringify(windowsCalls));
 

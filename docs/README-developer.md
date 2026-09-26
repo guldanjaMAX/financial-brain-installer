@@ -1017,12 +1017,28 @@ does not inherit `BRAIN_GOOGLE_TOKEN_STORE=file` from the Terminal that ran
 OAuth. Use `auto` for the normal macOS Keychain default, or `file` only when that
 fallback was chosen deliberately. Status compares the installed plist with the
 current manifest and code paths, reports definition drift, and surfaces
-launchd's run count and last exit code. Windows `--status` proves presence
-from the exact task name in `schtasks /Query /FO CSV /NH`, then compares the
-stored `/Query /XML` definition's config hash, action host and power settings
-with what install would write now; `--remove` deletes the same stable task
-name and treats a failed delete as success only when the listing no longer
-shows it. None of these decisions read localized `schtasks` text.
+launchd's run count and last exit code. Windows `--status` queries only the
+lane's own task, `schtasks /Query /TN <name> /FO CSV /V /NH`, and never the
+unfiltered task listing, which fails as a whole when any unrelated task in the
+owner's library is corrupt. The task is present when that query succeeds and
+names the exact task path. It is absent only when the query exits nonzero and
+its error is the system's own ERROR_FILE_NOT_FOUND message as printed by
+`net helpmsg 2` in the same display language; access denied, a corrupt copy of
+this task, a stopped service, or an unreadable message fail closed. Status then
+compares the stored `/Query /XML` definition's config hash, action host and
+power settings with what install would write now, and prints the last run time,
+the last result (decimal exit code or Task Scheduler HRESULT with its meaning),
+the lane log path, and a warning when the task's own `brain.mjs` is missing.
+`--remove` deletes the same stable task name, treats a failed delete as success
+only when the same targeted query proves absence, and then clears the Brain's
+freshness expectation, including for a task that was already gone. None of
+these decisions read English `schtasks` text. The scheduled entry runs under a
+headless console host that discards its output, so its own failures (a refusal,
+a spawn error, a log rotation error, a missing installed `brain.mjs`, a nonzero
+ingest exit) are appended as one metadata line to the lane log, or to
+`windows-scheduled-ingest.log` beside it when the manifest cannot name the lane.
+A task whose `brain.mjs` was removed fails inside Node before any of this runs;
+status and the last result are the only evidence of that case.
 Windows accepts an exact one-entry translation for hourly schedules at minute
 M, every N hours when N divides 24, daily schedules, and weekly schedules on
 one or more numeric weekdays. Any other valid five-field cron is refused before

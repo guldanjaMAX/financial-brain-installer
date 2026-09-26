@@ -23197,8 +23197,31 @@ export async function cmdWindowsScheduledIngest(manifestPath, options = {}) {
   if ((options.platform ?? process.platform) !== "win32") {
     die("windows-scheduled-ingest is available only to the installed Windows Task Scheduler entry");
   }
-  if (!manifestPath) die("the Windows scheduled ingest entry needs its manifest path");
   const flags = options.flags ?? parseFlags(process.argv.slice(4));
+  try {
+    return await runWindowsScheduledIngestEntry(manifestPath, flags, options);
+  } catch (error) {
+    // Task Scheduler starts this under a headless console host that discards
+    // stdout and stderr, so a die() here, a spawn error or a log rotation
+    // error was visible only as a numeric last result. Each is appended to the
+    // lane log as one metadata line; the runner marks what it already wrote.
+    try {
+      const scheduler = options.scheduler ?? await import("./operations/windows-task-scheduler.mjs");
+      const from = typeof flags?.from === "string" ? flags.from : null;
+      scheduler.recordWindowsScheduledFailure?.(manifestPath, error, {
+        ...(options.schedulerOptions || {}),
+        folder: typeof flags?.path === "string" && flags.path.length > 0,
+        provider: from && from !== "drive" && PROVIDER_CONNECTOR_IDS.includes(from) ? from : null,
+      });
+    } catch {
+      // The original failure below is the one to report.
+    }
+    throw error;
+  }
+}
+
+async function runWindowsScheduledIngestEntry(manifestPath, flags, options) {
+  if (!manifestPath) die("the Windows scheduled ingest entry needs its manifest path");
   assertKnownFlags(flags, ["from", "path", "source", "config-hash"], "windows-scheduled-ingest");
   // The registered action carries the hash of the configuration the owner
   // approved. Without it a run could not prove that approval still holds.
@@ -23332,7 +23355,19 @@ export async function cmdSchedule(manifestPath, options = {}) {
     else if (result.definitionDrift) warn(`the installed ${lane} refresh does not match the current manifest; reinstall it`);
     else ok(`${lane} refresh is installed for ${result.cron}`);
     if (result.installed && result.scheduleError) warn(result.scheduleError);
+    if (result.installed && result.runnerMissing) {
+      warn(`the brain.mjs this ${lane} refresh runs is missing, so its runs cannot start or write the log; reinstall the package, then run brain schedule --install`);
+    }
     info(`Task Scheduler name: ${result.taskName}`);
+    if (result.installed) {
+      const last = scheduler.describeWindowsTaskResult
+        ? scheduler.describeWindowsTaskResult(result.lastResult)
+        : { text: "unknown", failed: false };
+      info(`last run: ${result.lastRunTime || "unknown"}`);
+      info(`last result: ${last.text}`);
+      if (last.failed) warn(`the last ${lane} refresh did not succeed; its log below records why`);
+    }
+    if (result.logPath) info(`log: ${result.logPath}`);
     return result;
   }
   // The watched local folder is a second lane on the same command, because it

@@ -42,6 +42,8 @@ const options = (extra = {}) => ({
   systemRoot,
   nodePath,
   writeTaskDefinition() {},
+  // Fixture paths are absolute on a Windows CI host but do not exist there.
+  fileExists: () => true,
   ...extra,
 });
 
@@ -226,6 +228,12 @@ assert.deepEqual(calls[1].args, providerPlan.createArgs,
   "/Create /F makes a reinstall replace the same stable task");
 
 const listing = (...names) => names.map((name) => `"\\${name}","N/A","Ready"`).join("\r\n");
+// schtasks answers a query of a missing name with a nonzero exit and the
+// system's ERROR_FILE_NOT_FOUND text, which `net helpmsg 2` also prints.
+const notFound = "The system cannot find the file specified.";
+const notFoundAnswer = { status: 1, stdout: "", stderr: `ERROR: ${notFound}` };
+const helpAnswer = { status: 0, stdout: `\r\n${notFound}\r\n\r\n`, stderr: "" };
+const isNet = (command) => /net(\.exe)?$/i.test(command);
 const statusCalls = [];
 const present = statusWindowsScheduler(manifestPath, options({
   provider: "slack",
@@ -239,19 +247,20 @@ const present = statusWindowsScheduler(manifestPath, options({
 assert.equal(present.installed, true);
 assert.equal(present.definitionDrift, false);
 assert.deepEqual(statusCalls, [
-  ["schtasks.exe", ["/Query", "/FO", "CSV", "/NH"]],
+  ["schtasks.exe", ["/Query", "/TN", "com.brain-installer.fixture-brain.slack-ingest", "/FO", "CSV", "/V", "/NH"]],
   ["schtasks.exe", ["/Query", "/TN", "com.brain-installer.fixture-brain.slack-ingest", "/XML"]],
 ]);
 
 let absentStatusCalls = 0;
 const missingStatus = statusWindowsScheduler(manifestPath, options({
   provider: "slack",
-  processRunner() {
+  processRunner(command) {
     absentStatusCalls++;
-    return { status: 0, stdout: listing("Microsoft\\Windows\\Other"), stderr: "" };
+    return isNet(command) ? helpAnswer : notFoundAnswer;
   },
 }));
-assert.equal(absentStatusCalls, 1, "the absent status reached the schtasks /Query listing");
+assert.equal(absentStatusCalls, 2,
+  "the absent status reached the targeted schtasks /Query and the system not-found message");
 assert.equal(missingStatus.installed, false);
 assert.equal(missingStatus.output, "",
   "an absent task is reported as absent, not by echoing schtasks' raw error line");
@@ -275,13 +284,11 @@ const absent = removeWindowsScheduler(manifestPath, options({
   provider: "slack",
   processRunner(command, args) {
     absentDeleteCalls++;
-    return args[0] === "/Delete"
-      ? { status: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." }
-      : { status: 0, stdout: listing(), stderr: "" };
+    return isNet(command) ? helpAnswer : notFoundAnswer;
   },
 }));
-assert.equal(absentDeleteCalls, 2,
-  "the absent-task success reached schtasks /Delete and then the listing that proves absence");
+assert.equal(absentDeleteCalls, 3,
+  "the absent-task success reached schtasks /Delete and then the targeted query that proves absence");
 assert.equal(absent.removed, false);
 
 let driftedRemoveCalls = 0;
@@ -294,12 +301,10 @@ const driftedRemove = removeWindowsScheduler(manifestPath, options({
   folder: true,
   processRunner(command, args) {
     driftedRemoveCalls++;
-    return args[0] === "/Delete"
-      ? { status: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." }
-      : { status: 0, stdout: listing(), stderr: "" };
+    return isNet(command) ? helpAnswer : notFoundAnswer;
   },
 }));
-assert.equal(driftedRemoveCalls, 2,
+assert.equal(driftedRemoveCalls, 3,
   "remove still reaches schtasks after the lane is disabled, the folder disappears, and the cron is cleared");
 assert.equal(driftedRemove.removed, false);
 

@@ -1,6 +1,7 @@
 import {
   appendFileSync,
   closeSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -362,7 +363,9 @@ export function buildWindowsSchedulerPlan(manifestPath, options = {}) {
     taskName,
     childArguments,
     createArgs: [],
-    listArgs: ["/Query", "/FO", "CSV", "/NH"],
+    // Only this lane's task is ever queried. An unfiltered listing fails as a
+    // whole when any unrelated task in the owner's library is corrupt.
+    presenceArgs: ["/Query", "/TN", taskName, "/FO", "CSV", "/V", "/NH"],
     queryArgs: ["/Query", "/TN", taskName, "/XML"],
     deleteArgs: ["/Delete", "/TN", taskName, "/F"],
   };
@@ -467,9 +470,48 @@ function openLaneLog(path) {
   return openSync(path, "a");
 }
 
+/**
+ * The lane log's path from the task name alone, for the moments no full plan
+ * exists: status of a lane whose manifest no longer builds, and a run that
+ * failed before its plan did.
+ */
+export function windowsLaneLogPath(taskName, options = {}) {
+  const environment = options.environment || process.env;
+  const localAppData = options.localAppData || environment.LOCALAPPDATA;
+  if (!localAppData || !win32.isAbsolute(String(localAppData))) return null;
+  const root = win32.join(win32.normalize(String(localAppData)), "FinancialBrain", "logs");
+  return win32.join(root, taskName ? `${taskName}.log` : "windows-scheduled-ingest.log");
+}
+
+/**
+ * One metadata line for the lane log. The owner's own paths and the runner's
+ * refusal wording are fine there; a manifest parse error is not, because newer
+ * Node versions quote a slice of the offending JSON text.
+ */
+function laneFailureSummary(error) {
+  if (error instanceof SyntaxError) return "the manifest is not valid JSON";
+  const message = String(error?.message || error || "unknown error").split(/\r?\n/)[0];
+  const code = typeof error?.code === "string" && !message.includes(error.code) ? ` (${error.code})` : "";
+  return `${message}${code}`.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 400);
+}
+
+function laneFailureLine(error) {
+  return `${new Date().toISOString()} scheduled ingest failed: ${laneFailureSummary(error)}\n`;
+}
+
 function laneLog(options) {
   return {
     open: options.openLog || openLaneLog,
+    // Recording a failure must never replace it with a logging error.
+    record(path, error) {
+      if (!path) return false;
+      try {
+        this.append(path, laneFailureLine(error));
+        return true;
+      } catch {
+        return false;
+      }
+    },
     append: options.appendLog || ((path, text) => {
       mkdirSync(dirname(hostWindowsPath(path)), { recursive: true });
       appendFileSync(path, text);
@@ -490,6 +532,42 @@ function scheduleRefusal(message, code = "WINDOWS_SCHEDULE_CONFIG_CHANGED") {
  * The task has no console, so the child's output and every refusal here land
  * in the lane's private log.
  */
+// Marks an error already written to the lane log, so the entrypoint's outer
+// recorder does not write the same failure twice.
+function markLogged(error, recorded) {
+  if (recorded && error && typeof error === "object") {
+    try { error.windowsLaneLogged = true; } catch { /* a frozen error is still reported */ }
+  }
+  return error;
+}
+
+/**
+ * Record a failure of the scheduled entry in the log its lane would use. The
+ * task runs under a headless console host that discards stdout and stderr, so
+ * without this a die(), a spawn error or a rotation error left no trace but
+ * Task Scheduler's numeric last result. When the manifest cannot name the lane
+ * the line goes to the shared runner log beside the lane logs instead.
+ */
+export function recordWindowsScheduledFailure(manifestPath, error, options = {}) {
+  if (error?.windowsLaneLogged) return true;
+  const log = laneLog(options);
+  let taskName = null;
+  try {
+    ({ taskName } = buildWindowsSchedulerPlan(manifestPath, { ...options, plan: undefined, action: "status" }));
+  } catch {
+    // The lane is unknown; the shared runner log below still records the run.
+  }
+  const recorded = log.record(windowsLaneLogPath(taskName, options), error);
+  markLogged(error, recorded);
+  return recorded;
+}
+
+function defaultHostFileExists(path) {
+  // Only a real Windows host can check a Windows path; elsewhere it is unknown.
+  if (!isHostAbsolute(path) || !win32.isAbsolute(path)) return true;
+  return existsSync(path);
+}
+
 export function runWindowsScheduledIngest(manifestPath, options = {}) {
   const log = laneLog(options);
   let plan;
@@ -498,26 +576,18 @@ export function runWindowsScheduledIngest(manifestPath, options = {}) {
   } catch (error) {
     // A manifest that no longer builds (lane disabled, domain removed) is
     // still recorded in the log this lane would have used, when it is known.
-    const environment = options.environment || process.env;
-    const localAppData = options.localAppData || environment.LOCALAPPDATA;
-    if (localAppData && win32.isAbsolute(localAppData)) {
-      try {
-        const { taskName } = buildWindowsSchedulerPlan(manifestPath, { ...options, action: "status" });
-        log.append(win32.join(localAppData, "FinancialBrain", "logs", `${taskName}.log`),
-          `${new Date().toISOString()} scheduled ingest refused: ${error?.message || error}\n`);
-      } catch {
-        // The original refusal below is the one to report.
-      }
-    }
+    recordWindowsScheduledFailure(manifestPath, error, options);
     throw error;
   }
   const refuse = (message) => {
+    let recorded = false;
     try {
       log.append(plan.logPath, `${new Date().toISOString()} scheduled ingest refused: ${message}\n`);
+      recorded = true;
     } catch {
       // An unwritable log must not turn a refusal into a run.
     }
-    return scheduleRefusal(message);
+    return markLogged(scheduleRefusal(message), recorded);
   };
   if (typeof options.expectedConfigHash !== "string" || !/^[0-9a-f]{64}$/.test(options.expectedConfigHash)) {
     throw refuse("the scheduled task carries no configuration hash; reinstall it with brain schedule --install");
@@ -529,8 +599,23 @@ export function runWindowsScheduledIngest(manifestPath, options = {}) {
       JSON.stringify(options.expectedChildArguments) !== JSON.stringify(plan.childArguments)) {
     throw refuse("the scheduled ingest action no longer matches this manifest; reinstall the task");
   }
+  const fail = (error) => markLogged(error, log.record(plan.logPath, error));
+  // A child started on a missing brain.mjs would print its module error into
+  // the log too, but this names the cause and the reinstall directly.
+  if (!(options.fileExists || defaultHostFileExists)(plan.brainCliPath)) {
+    throw fail(scheduleRefusal(
+      `the installed brain.mjs is missing at ${plan.brainCliPath}; reinstall the package, then run brain schedule --install`,
+      "WINDOWS_SCHEDULE_RUNNER_MISSING"));
+  }
   const run = options.ingestRunner || spawnSync;
-  const fd = log.open(plan.logPath);
+  let fd;
+  try {
+    fd = log.open(plan.logPath);
+  } catch (error) {
+    const wrapped = new Error(`could not open or rotate the lane log: ${error?.message || error}`, { cause: error });
+    if (typeof error?.code === "string") wrapped.code = error.code;
+    throw fail(wrapped);
+  }
   let result;
   try {
     result = run(plan.nodePath, [plan.brainCliPath, ...plan.childArguments], {
@@ -541,14 +626,24 @@ export function runWindowsScheduledIngest(manifestPath, options = {}) {
       stdio: ["ignore", fd, fd],
       env: safeWindowsScheduledEnvironment(options.environment || process.env),
     });
+  } catch (error) {
+    throw fail(error);
   } finally {
     log.close(fd);
   }
-  if (result?.error) throw result.error;
-  return { ...plan, status: Number.isInteger(result?.status) ? result.status : 1 };
+  if (result?.error) throw fail(result.error);
+  const status = Number.isInteger(result?.status) ? result.status : 1;
+  if (status !== 0) {
+    try {
+      log.append(plan.logPath, `${new Date().toISOString()} scheduled ingest child exited with status ${status}\n`);
+    } catch {
+      // The exit status still reaches Task Scheduler's last result.
+    }
+  }
+  return { ...plan, status };
 }
 
-function runSchtasks(args, options) {
+function runSchtasks(args, options, program = options.schtasksPath || "schtasks.exe") {
   const run = options.processRunner || spawnSync;
   const sourceEnvironment = options.environment || process.env;
   const environment = {};
@@ -557,7 +652,7 @@ function runSchtasks(args, options) {
   }
   // Bytes, not "utf8": schtasks writes in the console code page or UTF-16
   // depending on build and redirection, and decodeSchtasksOutput decides.
-  return run(options.schtasksPath || "schtasks.exe", args, {
+  return run(program, args, {
     windowsHide: true,
     shell: false,
     env: environment,
@@ -599,24 +694,110 @@ export function installWindowsScheduler(manifestPath, options = {}) {
   return { ...plan, installed: true, output: decodeSchtasksOutput(result.stdout).trim() };
 }
 
-/**
- * Presence is an exact name in the CSV task listing: the first column is the
- * task path in every display language, so absence never depends on reading a
- * localized error sentence. A listing that fails proves nothing either way.
- */
-function taskIsListed(plan, options) {
-  const result = runSchtasks(plan.listArgs, options);
-  if (result?.error || result?.status !== 0) {
-    throw new Error(
-      `schtasks could not list this user's tasks, so ${plan.taskName} cannot be proven present or absent: ` +
-      `${failureText(result) || "unknown error"}`
-    );
+/** Parse schtasks CSV: quoted fields, doubled quotes, one record per line. */
+export function parseSchtasksCsv(text) {
+  const rows = [];
+  for (const line of String(text).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const fields = [];
+    const pattern = /\s*(?:"((?:[^"]|"")*)"|([^,]*))\s*(,|$)/gy;
+    let match;
+    while ((match = pattern.exec(line)) !== null) {
+      fields.push(match[1] !== undefined ? match[1].replaceAll('""', '"') : match[2]);
+      if (match[3] === "" ) break;
+    }
+    rows.push(fields);
   }
-  const wanted = `\\${plan.taskName}`.toLowerCase();
-  return decodeSchtasksOutput(result.stdout).split(/\r?\n/).some((line) => {
-    const name = /^\s*"([^"]*)"/.exec(line)?.[1];
-    return typeof name === "string" && name.toLowerCase() === wanted;
-  });
+  return rows;
+}
+
+const normalizedText = (text) => String(text || "").replace(/\s+/g, " ").trim();
+
+function netCommand(options) {
+  if (options.netPath) return options.netPath;
+  const systemRoot = (options.environment || process.env).SystemRoot || options.systemRoot;
+  return systemRoot && win32.isAbsolute(String(systemRoot))
+    ? win32.join(String(systemRoot), "System32", "net.exe")
+    : "net.exe";
+}
+
+function unprovenTask(plan, detail) {
+  const error = new Error(
+    `schtasks could not read ${plan.taskName}, so it cannot be proven present or absent: ${detail || "unknown error"}`);
+  error.code = "WINDOWS_SCHEDULE_TASK_UNPROVEN";
+  return error;
+}
+
+/**
+ * Decide presence from a query of this lane's task name only.
+ *
+ * Present: the targeted query succeeds and a row carries the exact task path
+ * (`\name`). Paths are never localized, so this match reads no language.
+ *
+ * Absent: schtasks exits nonzero for every error, so the exit code alone
+ * cannot tell "no such task" from "this task is unreadable" or "the service is
+ * unavailable". Its error line is the system message for the failure in the
+ * display language, so instead of reading English text the answer is compared
+ * with the system's own rendering of ERROR_FILE_NOT_FOUND (Win32 error 2, the
+ * error Task Scheduler returns for a missing task), which `net helpmsg 2`
+ * prints from the same localized message table. Both conditions are required:
+ * a nonzero exit AND that exact message. Access denied, a corrupt copy of this
+ * task, or a stopped service each produce a different message and fail closed,
+ * as does an unreadable not-found message. The unfiltered listing is never
+ * used, because one corrupt unrelated task makes it fail for everyone.
+ */
+function queryNamedTask(plan, options) {
+  const result = runSchtasks(plan.presenceArgs, options);
+  if (result?.error) throw unprovenTask(plan, failureText(result));
+  if (result?.status === 0) {
+    const wanted = `\\${plan.taskName}`.toLowerCase();
+    const row = parseSchtasksCsv(decodeSchtasksOutput(result.stdout))
+      .find((fields) => fields.some((field) => field.trim().toLowerCase() === wanted));
+    if (!row) throw unprovenTask(plan, "the targeted query succeeded without naming the task");
+    return { present: true, row };
+  }
+  const detail = failureText(result);
+  const help = runSchtasks(["helpmsg", "2"], options, netCommand(options));
+  const notFound = help?.error ? "" : normalizedText(decodeSchtasksOutput(help?.stdout));
+  // net's exit code is not relied on; the exact message match is the evidence.
+  if (notFound.length >= 8 && normalizedText(detail).includes(notFound)) return { present: false, row: null };
+  throw unprovenTask(plan, detail);
+}
+
+// Task Scheduler result codes that are not failures of the refresh itself.
+const TASK_RESULT_MEANINGS = Object.freeze({
+  0: "success",
+  0x41300: "ready",
+  0x41301: "running now",
+  0x41302: "disabled",
+  0x41303: "has not run yet",
+  0x41306: "terminated by the owner",
+  0x8004131f: "skipped, the previous run was still running",
+  0x800710e0: "refused to start by Task Scheduler",
+});
+const NON_FAILURE_RESULTS = new Set([0, 0x41300, 0x41301, 0x41303]);
+
+/** Render schtasks' decimal Last Result the way an owner can act on it. */
+export function describeWindowsTaskResult(value) {
+  if (!Number.isInteger(value)) return { text: "unknown", failed: false };
+  const unsigned = value >>> 0;
+  const meaning = TASK_RESULT_MEANINGS[unsigned];
+  // Small values are the ingest's own exit code; the rest are HRESULTs.
+  const shown = unsigned < 0x10000 ? String(unsigned) : `0x${unsigned.toString(16).padStart(8, "0").toUpperCase()}`;
+  const failed = !NON_FAILURE_RESULTS.has(unsigned);
+  return { text: `${shown} (${meaning || (failed ? "failed; see the log" : "unknown")})`, failed };
+}
+
+/**
+ * The verbose CSV columns keep a fixed order in every display language:
+ * HostName, TaskName, Next Run Time, Status, Logon Mode, Last Run Time,
+ * Last Result. The time stays in the owner's locale format; the result is a
+ * decimal number and is only accepted as one.
+ */
+function lastRunOf(row) {
+  const time = typeof row?.[5] === "string" && row[5].trim() ? row[5].trim() : null;
+  const raw = typeof row?.[6] === "string" ? row[6].trim() : "";
+  return { lastRunTime: time, lastResult: /^-?\d+$/.test(raw) ? Number(raw) : null };
 }
 
 function storedElement(xml, element) {
@@ -645,9 +826,15 @@ function storedDefinitionDrift(storedXml, expected) {
 
 export function statusWindowsScheduler(manifestPath, options = {}) {
   const plan = options.plan || buildWindowsSchedulerPlan(manifestPath, { ...options, action: "status" });
-  if (!taskIsListed(plan, options)) {
-    return { ...plan, installed: false, definitionDrift: null, scheduleError: null, output: "" };
+  const logPath = plan.logPath || windowsLaneLogPath(plan.taskName, options);
+  const presence = queryNamedTask(plan, options);
+  if (!presence.present) {
+    return {
+      ...plan, installed: false, definitionDrift: null, scheduleError: null, output: "",
+      logPath, lastRunTime: null, lastResult: null, runnerMissing: null,
+    };
   }
+  const { lastRunTime, lastResult } = lastRunOf(presence.row);
   const result = runSchtasks(plan.queryArgs, options);
   if (result?.error || result?.status !== 0) {
     throw new Error(`schtasks could not read the definition of ${plan.taskName}: ${failureText(result) || "unknown error"}`);
@@ -658,13 +845,23 @@ export function statusWindowsScheduler(manifestPath, options = {}) {
   // been disabled or its cron can no longer be represented.
   let scheduleError = null;
   let definitionDrift = null;
+  let expected = null;
   try {
-    const expected = buildWindowsSchedulerPlan(manifestPath, { ...options, plan: undefined, action: "install" });
+    expected = buildWindowsSchedulerPlan(manifestPath, { ...options, plan: undefined, action: "install" });
     definitionDrift = storedDefinitionDrift(output, expected);
   } catch (error) {
     scheduleError = error?.message || String(error);
   }
-  return { ...plan, installed: true, definitionDrift, scheduleError, output };
+  // When the task's own brain.mjs is gone, node fails before any code of ours
+  // runs and the headless host discards its error, so the lane log cannot say
+  // so. Status is the one place that can.
+  const runnerMissing = expected?.brainCliPath
+    ? !(options.fileExists || defaultHostFileExists)(expected.brainCliPath)
+    : null;
+  return {
+    ...plan, installed: true, definitionDrift, scheduleError, output,
+    logPath: expected?.logPath || logPath, lastRunTime, lastResult, runnerMissing,
+  };
 }
 
 export function removeWindowsScheduler(manifestPath, options = {}) {
@@ -674,7 +871,14 @@ export function removeWindowsScheduler(manifestPath, options = {}) {
     return { ...plan, installed: false, removed: true, output: decodeSchtasksOutput(result.stdout).trim() };
   }
   const detail = failureText(result);
-  // A failed delete is success only when the listing proves the task is gone.
-  if (!taskIsListed(plan, options)) return { ...plan, installed: false, removed: false, output: "" };
+  // A failed delete is success only when the targeted query proves the task
+  // is gone; an unprovable answer is reported as the delete failure it is.
+  let presence;
+  try {
+    presence = queryNamedTask(plan, options);
+  } catch (error) {
+    throw new Error(`schtasks could not delete ${plan.taskName}: ${detail || "unknown error"}; ${error.message}`);
+  }
+  if (!presence.present) return { ...plan, installed: false, removed: false, output: "" };
   throw new Error(`schtasks could not delete ${plan.taskName}: ${detail || "unknown error"}`);
 }
