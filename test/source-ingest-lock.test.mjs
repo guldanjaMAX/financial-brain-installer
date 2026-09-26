@@ -11,7 +11,6 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
-  rmdirSync,
   symlinkSync,
   unlinkSync,
   utimesSync,
@@ -38,16 +37,22 @@ import {
   reconcileDocumentFamilies,
   requestIngestBatch,
 } from "../brain.mjs";
+import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, "..", "brain.mjs");
 const LOCK_MODULE = new URL("../operations/source-ingest-lock.mjs", import.meta.url).href;
 const OLD = new Date(Date.now() - 180_000);
 let ran = 0;
+let skippedLinkChecks = 0;
 const check = (name, condition, detail = "") => {
   ran++;
   assert.ok(condition, `${name}${detail ? `: ${detail}` : ""}`);
   console.log(`PASS  ${name}`);
+};
+const skipLinkCase = (name) => (reason) => {
+  skippedLinkChecks++;
+  console.log(`SKIP  ${name} # ${reason}`);
 };
 
 const fixture = () => {
@@ -73,19 +78,52 @@ const fixture = () => {
   return { root, home, manifests, manifestPath };
 };
 
-if (process.platform !== "win32") {
+{
+  const homeFixture = fixture();
+  try {
+    const target = join(homeFixture.root, "home-link-target");
+    mkdirSync(target, { mode: 0o700 });
+    rmSync(homeFixture.home, { recursive: true });
+    const linked = createTestSymlink({
+      target,
+      path: homeFixture.home,
+      type: "dir",
+      onSkip: skipLinkCase("an ingest-lock home link or junction is rejected"),
+    });
+    if (linked.created) {
+      assert.throws(
+        () => sourceIngestLockPath({
+          manifestPath: homeFixture.manifestPath,
+          sourceName: "gmail",
+          home: homeFixture.home,
+        }),
+        (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
+      );
+      check("an ingest-lock home link or junction is rejected", true);
+    }
+  } finally {
+    rmSync(homeFixture.root, { recursive: true, force: true });
+  }
+
   const f = fixture();
   try {
     const target = join(f.root, "runtime-link-target");
     mkdirSync(target, { mode: 0o755 });
-    chmodSync(target, 0o755);
-    symlinkSync(target, join(f.home, ".brain"), "dir");
-    assert.throws(
-      () => sourceIngestLockPath({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home }),
-      (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
-    );
-    check("a runtime-directory symlink is rejected without changing its target permissions",
-      (lstatSync(target).mode & 0o077) !== 0);
+    if (process.platform !== "win32") chmodSync(target, 0o755);
+    const linked = createTestSymlink({
+      target,
+      path: join(f.home, ".brain"),
+      type: "dir",
+      onSkip: skipLinkCase("a runtime-directory link or junction is rejected"),
+    });
+    if (linked.created) {
+      assert.throws(
+        () => sourceIngestLockPath({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home }),
+        (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
+      );
+      check("a runtime-directory link or junction is rejected",
+        process.platform === "win32" || (lstatSync(target).mode & 0o077) !== 0);
+    }
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
@@ -96,14 +134,21 @@ if (process.platform !== "win32") {
     const target = join(f2.root, "locks-link-target");
     mkdirSync(runtimeDir, { mode: 0o700 });
     mkdirSync(target, { mode: 0o755 });
-    chmodSync(target, 0o755);
-    symlinkSync(target, join(runtimeDir, "locks"), "dir");
-    assert.throws(
-      () => sourceIngestLockPath({ manifestPath: f2.manifestPath, sourceName: "gmail", home: f2.home }),
-      (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
-    );
-    check("an ingest-lock-directory symlink is rejected without changing its target permissions",
-      (lstatSync(target).mode & 0o077) !== 0);
+    if (process.platform !== "win32") chmodSync(target, 0o755);
+    const linked = createTestSymlink({
+      target,
+      path: join(runtimeDir, "locks"),
+      type: "dir",
+      onSkip: skipLinkCase("an ingest-lock-directory link or junction is rejected"),
+    });
+    if (linked.created) {
+      assert.throws(
+        () => sourceIngestLockPath({ manifestPath: f2.manifestPath, sourceName: "gmail", home: f2.home }),
+        (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
+      );
+      check("an ingest-lock-directory link or junction is rejected",
+        process.platform === "win32" || (lstatSync(target).mode & 0o077) !== 0);
+    }
   } finally {
     rmSync(f2.root, { recursive: true, force: true });
   }
@@ -1023,18 +1068,30 @@ if (process.platform !== "win32") {
     check("a permissive live lock directory fails closed", (lstatSync(permissive.path).mode & 0o077) !== 0);
     chmodSync(permissive.path, 0o700);
     permissive.release();
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+}
 
+{
+  const f = fixture();
+  try {
     const path = sourceIngestLockPath({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home });
     const target = join(f.root, "unsafe-target");
     mkdirSync(target, { mode: 0o700 });
-    symlinkSync(target, path, "dir");
-    assert.throws(
-      () => acquireSourceIngestLock({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home }),
-      (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
-    );
-    check("a symbolic-link lock path fails closed", lstatSync(path).isSymbolicLink());
-    unlinkSync(path);
-    rmdirSync(target);
+    const linked = createTestSymlink({
+      target,
+      path,
+      type: "dir",
+      onSkip: skipLinkCase("a linked lock path fails closed"),
+    });
+    if (linked.created) {
+      assert.throws(
+        () => acquireSourceIngestLock({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home }),
+        (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
+      );
+      check("a linked lock path fails closed", lstatSync(path).isSymbolicLink());
+    }
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
@@ -1106,4 +1163,4 @@ if (process.platform !== "win32") {
   }
 }
 
-console.log(`\n${ran} source ingest lock checks passed.`);
+console.log(`\n${ran} source ingest lock checks passed; ${skippedLinkChecks} skipped.`);

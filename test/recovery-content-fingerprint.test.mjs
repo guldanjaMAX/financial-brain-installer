@@ -3,11 +3,11 @@ import { createHash } from "node:crypto";
 import {
   chmodSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
   rmSync,
-  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -20,6 +20,10 @@ import {
   captureDirectD1ContentFingerprint,
   hashNormalizedRecoveryDataExport,
 } from "../operations/recovery-content-fingerprint.mjs";
+import {
+  SYMLINK_PRIVILEGE_UNAVAILABLE_REASON,
+  createTestSymlink,
+} from "./helpers/symlink-capability.mjs";
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "brain-content-fingerprint-"));
@@ -27,6 +31,115 @@ function fixture(t) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return realpathSync(root);
 }
+
+test("shared symlink fixture capability skips only missing privilege", () => {
+  const calls = [];
+  const skipped = [];
+  const created = createTestSymlink({
+    target: "target",
+    path: "link",
+    type: "file",
+    symlink(target, path, type) {
+      calls.push({ target, path, type });
+    },
+    onSkip: (reason) => skipped.push(reason),
+  });
+  assert.deepEqual(created, { created: true, type: "file" });
+  assert.deepEqual(calls, [{ target: "target", path: "link", type: "file" }]);
+  assert.deepEqual(skipped, []);
+
+  const unavailable = createTestSymlink({
+    target: "target",
+    path: "link",
+    type: "file",
+    platform: "win32",
+    symlink() {
+      const error = new Error("privilege not held");
+      error.code = "EPERM";
+      throw error;
+    },
+    onSkip: (reason) => skipped.push(reason),
+  });
+  assert.deepEqual(unavailable, { created: false, type: null });
+  assert.deepEqual(skipped, [SYMLINK_PRIVILEGE_UNAVAILABLE_REASON]);
+
+  let linuxAttempts = 0;
+  assert.throws(
+    () => createTestSymlink({
+      target: "target",
+      path: "link",
+      type: "file",
+      platform: "linux",
+      symlink() {
+        linuxAttempts += 1;
+        const error = new Error("privilege not held");
+        error.code = "EPERM";
+        throw error;
+      },
+      onSkip: (reason) => skipped.push(reason),
+    }),
+    (error) => error?.code === "EPERM",
+  );
+  assert.equal(linuxAttempts, 1, "the non-Windows link attempt reached the platform decision");
+  assert.deepEqual(skipped, [SYMLINK_PRIVILEGE_UNAVAILABLE_REASON]);
+
+  const directoryAttempts = [];
+  const junction = createTestSymlink({
+    target: "target-directory",
+    path: "linked-directory",
+    type: "dir",
+    platform: "win32",
+    symlink(target, path, type) {
+      directoryAttempts.push({ target, path, type });
+      if (type === "dir") {
+        const error = new Error("privilege not held");
+        error.code = "EACCES";
+        throw error;
+      }
+    },
+    onSkip: (reason) => skipped.push(reason),
+  });
+  assert.deepEqual(junction, { created: true, type: "junction" });
+  assert.deepEqual(directoryAttempts, [
+    { target: "target-directory", path: "linked-directory", type: "dir" },
+    { target: "target-directory", path: "linked-directory", type: "junction" },
+  ]);
+  assert.deepEqual(skipped, [SYMLINK_PRIVILEGE_UNAVAILABLE_REASON]);
+
+  assert.throws(
+    () => createTestSymlink({
+      target: "target",
+      path: "link",
+      type: "file",
+      symlink() {
+        const error = new Error("unexpected fixture failure");
+        error.code = "EINVAL";
+        throw error;
+      },
+      onSkip: (reason) => skipped.push(reason),
+    }),
+    (error) => error?.code === "EINVAL",
+  );
+  assert.deepEqual(skipped, [SYMLINK_PRIVILEGE_UNAVAILABLE_REASON]);
+});
+
+test("Windows directory junctions are reported as symbolic links by lstat", {
+  skip: process.platform !== "win32",
+}, (t) => {
+  const root = fixture(t);
+  const target = join(root, "target-directory");
+  const path = join(root, "directory-junction");
+  mkdirSync(target);
+  const linked = createTestSymlink({
+    target,
+    path,
+    type: "junction",
+    platform: "win32",
+    onSkip: (reason) => t.skip(reason),
+  });
+  if (!linked.created) return;
+  assert.equal(lstatSync(path).isSymbolicLink(), true);
+});
 
 test("normalized recovery fingerprint hashes the prefix and exact export bytes", (t) => {
   const root = fixture(t);
@@ -127,11 +240,10 @@ test("capture refuses a pre-existing output before transport and supports fixed 
   assert.ok(prefix.every((byte) => byte === 0));
 });
 
-test("symlink, hard-link, and non-private exports fail closed", (t) => {
+test("hard-link and non-private exports fail closed", (t) => {
   const root = fixture(t);
   const direct = join(root, "direct.sql");
   const alias = join(root, "alias.sql");
-  const symlink = join(root, "symlink.sql");
   writeFileSync(direct, "synthetic\n", { mode: 0o600 });
   linkSync(direct, alias);
   assert.throws(
@@ -140,11 +252,6 @@ test("symlink, hard-link, and non-private exports fail closed", (t) => {
       error.code === "RECOVERY_CONTENT_EXPORT_INVALID",
   );
   unlinkSync(alias);
-  symlinkSync(direct, symlink);
-  assert.throws(
-    () => hashNormalizedRecoveryDataExport(Buffer.from("prefix"), symlink, 1024),
-    (error) => error.code === "RECOVERY_CONTENT_EXPORT_INVALID",
-  );
   if (process.platform !== "win32") {
     mkdirSync(join(root, "private"), { mode: 0o700 });
     chmodSync(direct, 0o644);
@@ -153,4 +260,45 @@ test("symlink, hard-link, and non-private exports fail closed", (t) => {
       (error) => error.code === "RECOVERY_CONTENT_EXPORT_INVALID",
     );
   }
+});
+
+test("symlinked exports fail closed", (t) => {
+  const root = fixture(t);
+  const direct = join(root, "direct.sql");
+  const symlink = join(root, "symlink.sql");
+  writeFileSync(direct, "synthetic\n", { mode: 0o600 });
+  const linked = createTestSymlink({
+    target: direct,
+    path: symlink,
+    type: "file",
+    onSkip: (reason) => t.skip(reason),
+  });
+  if (!linked.created) return;
+  assert.throws(
+    () => hashNormalizedRecoveryDataExport(Buffer.from("prefix"), symlink, 1024),
+    (error) => error.code === "RECOVERY_CONTENT_EXPORT_INVALID",
+  );
+});
+
+test("an export below a directory link or junction fails closed", (t) => {
+  const root = fixture(t);
+  const target = join(root, "target");
+  const linkedDirectory = join(root, "linked");
+  mkdirSync(target, { mode: 0o700 });
+  writeFileSync(join(target, "data.sql"), "synthetic\n", { mode: 0o600 });
+  const linked = createTestSymlink({
+    target,
+    path: linkedDirectory,
+    type: "dir",
+    onSkip: (reason) => t.skip(reason),
+  });
+  if (!linked.created) return;
+  assert.throws(
+    () => hashNormalizedRecoveryDataExport(
+      Buffer.from("prefix"),
+      join(linkedDirectory, "data.sql"),
+      1024,
+    ),
+    (error) => error.code === "RECOVERY_CONTENT_EXPORT_INVALID",
+  );
 });

@@ -13,7 +13,6 @@ import {
   renameSync,
   rmSync,
   statSync,
-  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -96,6 +95,7 @@ import {
   readPrivateAggregateReceipt,
   reservePrivateAggregateReceipt,
 } from "../operations/private-aggregate-receipt.mjs";
+import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 import {
   V048_DISPOSABLE_CAMPAIGN_CORPORA,
 } from "../operations/v048-disposable-campaign-contract.mjs";
@@ -143,6 +143,8 @@ import {
 import {
   createDisposableCampaignAuthorityFixture,
 } from "./helpers/disposable-campaign-authority.mjs";
+
+let skippedLinkChecks = 0;
 
 const residuePolicyOnly =
   process.env.FINANCIAL_BRAIN_ADAPTER_RESIDUE_POLICY_TEST === "1";
@@ -3013,8 +3015,16 @@ try {
     artifactDirectory,
     ".brain-recovery-test-bootstrap-interruption-v1.json",
   );
-  if (process.platform !== "win32") {
-    symlinkSync(join(artifactDirectory, "missing-control-target"), ordinaryCheckpointPath);
+  const linkedControl = createTestSymlink({
+    target: join(artifactDirectory, "missing-control-target"),
+    path: ordinaryCheckpointPath,
+    type: "file",
+    onSkip: (reason) => {
+      skippedLinkChecks++;
+      console.log(`SKIP  dangling live-control link # ${reason}`);
+    },
+  });
+  if (linkedControl.created) {
     assert.throws(
       () => previewCloudflareRecoveryFieldGate(baseConfig, { platform: "darwin" }),
       (error) => error.code ===
@@ -7618,13 +7628,23 @@ try {
   );
 
   const unsafeWrapper = join(sandbox, "unsafe-wrapper-link");
-  symlinkSync(wrapperPath, unsafeWrapper);
-  assert.throws(
-    () => previewCloudflareRecoveryFieldGate({ ...baseConfig, wranglerWrapperPath: unsafeWrapper }, {
-      platform: "darwin",
-    }),
-    (error) => error.code === "RECOVERY_WRANGLER_WRAPPER_UNSAFE",
-  );
+  const linkedWrapper = createTestSymlink({
+    target: wrapperPath,
+    path: unsafeWrapper,
+    type: "file",
+    onSkip: (reason) => {
+      skippedLinkChecks++;
+      console.log(`SKIP  recovery refuses a linked wrapper # ${reason}`);
+    },
+  });
+  if (linkedWrapper.created) {
+    assert.throws(
+      () => previewCloudflareRecoveryFieldGate({ ...baseConfig, wranglerWrapperPath: unsafeWrapper }, {
+        platform: "darwin",
+      }),
+      (error) => error.code === "RECOVERY_WRANGLER_WRAPPER_UNSAFE",
+    );
+  }
 
   if (process.platform !== "win32" && existsSync("/usr/bin/sqlite3")) {
     const localArtifact = join(sandbox, ".brain-recovery-local-verifier.sql");
@@ -7743,7 +7763,8 @@ try {
     assert.notEqual(schema33.schema_fingerprint, local.schema_fingerprint);
   }
 
-  console.log("PASS  Cloudflare recovery adapter is disposable-only, credential-safe, redirect-safe, and resumable");
+  console.log("PASS  Cloudflare recovery adapter is disposable-only, credential-safe, redirect-safe, and " +
+    `resumable; ${skippedLinkChecks} skipped`);
 } finally {
   try { unlinkSync(join(artifactDirectory, ".brain-recovery-field-gate.lock")); } catch { /* absent */ }
   rmSync(sandbox, { recursive: true, force: true });
