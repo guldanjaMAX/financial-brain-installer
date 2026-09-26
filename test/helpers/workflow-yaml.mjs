@@ -149,3 +149,68 @@ export const topLevelPermissions = (workflow) => permissionsIn(workflow.replaceA
 
 /** Permissions of one job, given its body text from workflowJobs. */
 export const jobPermissions = (job) => permissionsIn(job.split("\n"));
+
+/**
+ * The steps of one job, given its body text from workflowJobs: each step is its
+ * own list of mapping entries, read through mappingEntries so a quoted or
+ * commented key (`"uses":`, `'uses':  # note`) is seen exactly like a plain one.
+ * A flow-style step, a nested sequence, or a line at the sequence's indent that
+ * is not an item throws.
+ */
+export function jobSteps(job) {
+  const entry = mappingEntries(job.split("\n")).find((candidate) => candidate.key === "steps");
+  if (!entry) return [];
+  if (entry.value === "[]") return [];
+  if (entry.value) fail(`inline steps value is not parsed: ${entry.value}`);
+  const content = entry.lines.filter((line) => !isSkippable(line));
+  if (content.length === 0) return [];
+  const indent = indentOf(content[0]);
+  const items = [];
+  for (const line of entry.lines) {
+    if (isSkippable(line)) {
+      if (items.length) items.at(-1).push(line);
+      continue;
+    }
+    const lineIndent = indentOf(line);
+    if (lineIndent < indent) fail(`line is indented less than its steps: ${line.trim()}`);
+    if (lineIndent > indent) {
+      if (!items.length) fail(`step content before the first item: ${line.trim()}`);
+      items.at(-1).push(line);
+      continue;
+    }
+    const item = /^(\s*)-(?:\s+(.*))?$/.exec(line);
+    if (!item) fail(`not a step item: ${line.trim()}`);
+    const rest = item[2] ?? "";
+    if (/^[{[]/.test(rest)) fail(`flow-style step is not parsed: ${rest}`);
+    // `- key: value` opens the step mapping two columns in; the dash is spacing.
+    items.push(rest && !rest.startsWith("#") ? [`${" ".repeat(indent + 2)}${rest}`] : []);
+  }
+  return items.map((lines) => mappingEntries(lines));
+}
+
+/** The `uses` reference of one step (or job) from its entries, or null when it has none. */
+export function usesOf(entries) {
+  const entry = entries.find((candidate) => candidate.key === "uses");
+  if (!entry) return null;
+  if (!entry.value || /^[|>]/.test(entry.value) || entry.lines.some((line) => !isSkippable(line))) {
+    fail("a uses reference that is not a single-line scalar is not parsed");
+  }
+  return unquote(entry.value);
+}
+
+/**
+ * Every action or reusable workflow a workflow calls, in order: each step's
+ * `uses` and each job-level `uses`, in any key spelling.
+ */
+export function workflowUses(workflow) {
+  const references = [];
+  for (const job of workflowJobs(workflow).values()) {
+    const jobUses = usesOf(mappingEntries(job.split("\n")));
+    if (jobUses !== null) references.push(jobUses);
+    for (const step of jobSteps(job)) {
+      const uses = usesOf(step);
+      if (uses !== null) references.push(uses);
+    }
+  }
+  return references;
+}

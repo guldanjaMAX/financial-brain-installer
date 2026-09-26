@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 // Shared with the signing workflow test so both see every YAML key spelling.
 import {
-  WorkflowParseError, jobPermissions, topLevelPermissions, triggerNames, workflowJobs,
+  WorkflowParseError, jobPermissions, topLevelPermissions, triggerNames, workflowJobs, workflowUses,
 } from "./helpers/workflow-yaml.mjs";
 
 /** Run a shape check; a spelling the shared parser refuses is a shape failure too. */
@@ -324,8 +324,13 @@ const assertSigningWorkflowShape = exactly((workflow) => {
   }
   assert.doesNotMatch(jobs.get("macos-sign"), /id-token/, "only the Windows job may request an OIDC token");
   assert.match(jobs.get("windows-sign"), /^      id-token: write$/m);
-  const references = [...workflow.matchAll(/^\s+(?:-\s+)?uses: ([^\s#]+)/gm)].map((match) => match[1]);
+  // Every step and job uses key, read by the shared parser in any spelling.
+  const references = workflowUses(workflow);
   assert.ok(references.length >= 5);
+  assert.ok([...workflow.matchAll(/^\s+(?:-\s+)?uses: ([^\s#]+)/gm)].every((match) => references.includes(match[1])),
+    "the parser sees every plainly spelled action");
+  assert.equal(references.filter((reference) => /^actions\/checkout@/.test(reference)).length, 0,
+    "the signing jobs check out no repository code");
   for (const reference of references) {
     assert.match(reference, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/, `${reference} is pinned to a full commit`);
   }
@@ -344,6 +349,10 @@ const assertUnsignedWorkflowShape = exactly((workflow) => {
   assert.deepEqual([...jobs.keys()].sort(), ["macos-unsigned", "windows-unsigned"]);
   assert.deepEqual(topLevelPermissions(workflow), { contents: "read" }, "the build token can only read");
   for (const [name, job] of jobs) assert.equal(jobPermissions(job), null, `${name} declares no permissions of its own`);
+  for (const reference of workflowUses(workflow)) {
+    if (reference.startsWith("./")) continue;
+    assert.match(reference, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/, `${reference} is pinned to a full commit`);
+  }
 });
 
 test("installer signing runs only by hand, in the protected environment, with every action pinned", () => {
@@ -389,10 +398,52 @@ const permissionMutations = {
     ["a quoted top-level actions: write scope", (text) => text.replace(/^  contents: read$/m, '  contents: read\n  "actions": write')],
   ],
 };
+// A step whose uses key is quoted, commented, or continued on the next line
+// must still be read: each of these calls an unpinned action, or runs
+// repository code inside the signing environment.
+const usesMutations = {
+  ".github/workflows/installer-signing.yml": [
+    ["a double-quoted uses key on an unpinned action", (text) => text.replace(
+      /^        uses: actions\/download-artifact@[0-9a-f]{40} # v8\.0\.1$/m, '        "uses": actions/download-artifact@v8')],
+    ["a single-quoted uses key with a comment on an unpinned action", (text) => text.replace(
+      /^        uses: azure\/login@[0-9a-f]{40} # v3\.1\.0$/m, "        'uses': azure/login@v3  # latest")],
+    ["a quoted, non-persisting checkout that then runs a repository script", (text) => text.replace(/^    steps:\n/m,
+      '    steps:\n      - "uses": actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n' +
+        "          persist-credentials: false\n      - run: ./machine-prep/installers/sign-helper.sh\n")],
+    ["a single-quoted local action from the repository", (text) => text.replace(/^    steps:\n/m,
+      "    steps:\n      - 'uses': ./.github/actions/sign-helper  # repository code\n")],
+    ["an unpinned uses value continued on the next line", (text) => text.replace(
+      /^        uses: actions\/upload-artifact@[0-9a-f]{40} # v7\.0\.1$/m, "        uses:\n          actions/upload-artifact@v7")],
+  ],
+  ".github/workflows/machine-prep-installers.yml": [
+    ["a double-quoted uses key on an unpinned action", (text) => text.replace(
+      /^      - uses: actions\/setup-node@[0-9a-f]{40} # v7\.0\.0$/m, '      - "uses": actions/setup-node@v7')],
+    ["a single-quoted uses key with a comment on an unpinned action", (text) => text.replace(
+      /^      - uses: actions\/setup-dotnet@[0-9a-f]{40} # v6\.0\.0$/m, "      - 'uses': actions/setup-dotnet@v6  # latest")],
+  ],
+};
+const equivalentUsesRewrite = (text) => text
+  .replace(/^(\s+- )uses:/gm, '$1"uses":')
+  .replace(/^(\s+)uses: (\S+)(.*)$/gm, "$1'uses': $2  # pinned$3");
 for (const [path, assertShape] of [
   [".github/workflows/installer-signing.yml", assertSigningWorkflowShape],
   [".github/workflows/machine-prep-installers.yml", assertUnsignedWorkflowShape],
 ]) {
+  for (const [name, mutate] of usesMutations[path]) {
+    test(`${path} uses mutation "${name}" is detected`, () => {
+      const original = read(path);
+      assertShape(original);
+      const mutated = mutate(original);
+      assert.notEqual(mutated, original, "the mutation applied to the current workflow");
+      assert.throws(() => assertShape(mutated), assert.AssertionError);
+    });
+  }
+  test(`${path} with quoted and commented uses keys still passes its shape check`, () => {
+    const original = read(path);
+    const rewritten = equivalentUsesRewrite(original);
+    assert.notEqual(rewritten, original, "the rewrite applied to the current workflow");
+    assertShape(rewritten);
+  });
   for (const [name, mutate] of permissionMutations[path]) {
     test(`${path} permissions mutation "${name}" is detected`, () => {
       const original = read(path);

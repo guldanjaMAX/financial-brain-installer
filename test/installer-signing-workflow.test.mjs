@@ -17,10 +17,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import test from "node:test";
-// Job, trigger and permission keys are read by the shared parser, which sees every key
-// spelling YAML accepts (S3-R); the rest of this file's readers are local.
+// Job, trigger, permission and step uses keys are read by the shared parser, which sees
+// every key spelling YAML accepts (S3-R, S10); the rest of this file's readers are local.
 import {
-  WorkflowParseError, jobPermissions, topLevelPermissions, triggerNames, workflowJobs,
+  WorkflowParseError, jobPermissions, jobSteps, mappingEntries, topLevelPermissions, triggerNames, unquote, usesOf,
+  workflowJobs, workflowUses,
 } from "./helpers/workflow-yaml.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -103,11 +104,31 @@ function assertWorkflowPolicyParsed(workflow, expected) {
         assert.equal(withValue(step, "persist-credentials"), "false", `${name} checkout does not persist its token`);
       }
     }
+    // S10: the same checks through the shared parser, which also sees a quoted,
+    // commented or continued uses key that the line pattern above cannot.
+    for (const step of jobSteps(job)) {
+      const uses = usesOf(step);
+      if (uses === null) continue;
+      assert.match(uses, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/, `${uses} is pinned to a full commit`);
+      if (/^actions\/checkout@/.test(uses)) {
+        const options = mappingEntries(step.find((entry) => entry.key === "with")?.lines ?? []);
+        const persist = options.find((entry) => entry.key === "persist-credentials")?.value;
+        assert.equal(persist === undefined ? null : unquote(persist), "false", `${name} checkout does not persist its token`);
+      }
+    }
   }
+  const references = workflowUses(workflow);
+  for (const reference of references) {
+    assert.match(reference, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/, `${reference} is pinned to a full commit`);
+  }
+  assert.equal(references.filter((reference) => /^actions\/checkout@/.test(reference)).length, expected.checkouts,
+    "the number of repository checkouts is exact");
 }
 
 const SIGNING_POLICY = Object.freeze({
   top: {},
+  // The signing jobs run no repository code inside the signing environment.
+  checkouts: 0,
   jobs: {
     "macos-sign": { contents: "read", actions: "read" },
     "windows-sign": { contents: "read", actions: "read", "id-token": "write" },
@@ -115,6 +136,7 @@ const SIGNING_POLICY = Object.freeze({
 });
 const UNSIGNED_POLICY = Object.freeze({
   top: { contents: "read" },
+  checkouts: 2,
   jobs: { "macos-unsigned": null, "windows-unsigned": null },
 });
 
@@ -565,6 +587,27 @@ test("S3 both workflows have exact permissions, a dispatch-only trigger and non-
     "the signing jobs run no repository code inside the signing environment");
 });
 
+// S10: a step whose uses key is quoted, commented, or continued on the next
+// line must still be read. Each of these calls an unpinned action or runs
+// repository code inside the signing environment.
+const SIGNING_USES_MUTATIONS = [
+  ["a double-quoted uses key on an unpinned action", (text) => text.replace(
+    /^        uses: actions\/download-artifact@[0-9a-f]{40} # v8\.0\.1$/m, '        "uses": actions/download-artifact@v8')],
+  ["a single-quoted uses key with a comment on an unpinned action", (text) => text.replace(
+    /^        uses: azure\/login@[0-9a-f]{40} # v3\.1\.0$/m, "        'uses': azure/login@v3  # latest")],
+  ["a quoted, non-persisting checkout that then runs a repository script", (text) => text.replace(/^    steps:\n/m,
+    '    steps:\n      - "uses": actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n' +
+      "          persist-credentials: false\n      - run: ./machine-prep/installers/sign-helper.sh\n")],
+  ["a single-quoted local action from the repository", (text) => text.replace(/^    steps:\n/m,
+    "    steps:\n      - 'uses': ./.github/actions/sign-helper  # repository code\n")],
+  ["an unpinned uses value continued on the next line", (text) => text.replace(
+    /^        uses: actions\/upload-artifact@[0-9a-f]{40} # v7\.0\.1$/m, "        uses:\n          actions/upload-artifact@v7")],
+];
+const UNSIGNED_USES_MUTATIONS = [
+  ["a double-quoted unsigned uses key on an unpinned action", (text) => text.replace(
+    /^      - uses: actions\/setup-node@[0-9a-f]{40} # v7\.0\.0$/m, '      - "uses": actions/setup-node@v7')],
+];
+
 const mutations = [
   [SIGNING_PATH, SIGNING_POLICY, "top-level write-all", (text) => text.replace(/^permissions: \{\}$/m, "permissions: write-all")],
   [SIGNING_PATH, SIGNING_POLICY, "actions: write on the macOS job", (text) => text.replace(/^      actions: read$/m, "      actions: write")],
@@ -622,6 +665,12 @@ const mutations = [
   ]),
   [UNSIGNED_PATH, UNSIGNED_POLICY, "a quoted permission scope key", (text) => text.replace(/^permissions:\n  contents: read$/m, 'permissions:\n  contents: read\n  "actions": write')],
   [SIGNING_PATH, SIGNING_POLICY, "a second, quoted permissions key on windows-sign", (text) => text.replace(/^      id-token: write$/m, '      id-token: write\n    "permissions": write-all')],
+  // S10: step uses keys in every spelling YAML accepts.
+  ...SIGNING_USES_MUTATIONS.map(([name, mutate]) => [SIGNING_PATH, SIGNING_POLICY, name, mutate]),
+  ...UNSIGNED_USES_MUTATIONS.map(([name, mutate]) => [UNSIGNED_PATH, UNSIGNED_POLICY, name, mutate]),
+  [UNSIGNED_PATH, UNSIGNED_POLICY, "a single-quoted unsigned checkout uses key that persists its token", (text) => text.replace(
+    /^      - uses: (actions\/checkout@[0-9a-f]{40}) # v7\.0\.1\n        with:\n          persist-credentials: false$/m,
+    "      - 'uses': $1 # v7.0.1\n        with:\n          persist-credentials: true")],
 ];
 for (const [path, policy, name, mutate] of mutations) {
   test(`S3 mutation "${name}" fails the policy check`, () => {
@@ -645,6 +694,9 @@ const equivalentRewrites = [
   ["single-quoted job keys", (text) => text.replace(/^  ([a-z-]+-(?:sign|unsigned)):$/gm, "  '$1':")],
   ["double-quoted job keys", (text) => text.replace(/^  ([a-z-]+-(?:sign|unsigned)):$/gm, '  "$1":')],
   ["a comment line between jobs", (text) => text.replace(/^  (windows-(?:sign|unsigned)):$/m, "# the Windows job\n  $1:")],
+  ["quoted and commented uses keys", (text) => text
+    .replace(/^(\s+- )uses:/gm, '$1"uses":')
+    .replace(/^(\s+)uses: (\S+)(.*)$/gm, "$1'uses': $2  # pinned$3")],
   ["quoted and commented permissions keys", (text) => text
     .replace(/^permissions:/m, '"permissions":')
     .replace(/^    permissions:$/gm, "    'permissions':  # exact scopes")
