@@ -33,3 +33,26 @@ export function renderCopyableCommand(command, args = [], {
   }
   return values.map(quotePosixArgument).join(" ");
 }
+
+/**
+ * Prefix a copyable command line with environment assignments for one shell.
+ *
+ * POSIX shells scope `NAME='value' command` to that one command. PowerShell,
+ * which every Windows copy in this product targets, rejects that syntax, so
+ * there the assignment is a separate `$env:` statement that lasts for the
+ * rest of that terminal window only.
+ */
+export function renderCommandWithEnvironment(assignments, commandLine, {
+  platformName = process.platform,
+} = {}) {
+  const line = displayValue(commandLine, "command line");
+  const parts = Object.entries(assignments ?? {}).map(([name, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error("environment variable name is not safe to display as a copyable command");
+    }
+    return platformName === "win32"
+      ? `$env:${name}=${quotePowerShellArgument(value)}; `
+      : `${name}=${quotePosixArgument(value)} `;
+  });
+  return `${parts.join("")}${line}`;
+}

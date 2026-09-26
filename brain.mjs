@@ -309,7 +309,9 @@ import {
   LOCAL_OWNER_AGENT_PROFILE,
   profileHas,
 } from "./worker/src/lib/agent-authority.js";
-import { readWranglerOAuthToken, refreshWranglerSession, WRANGLER_SPEC } from "./operations/wrangler-oauth.mjs";
+import {
+  legacyWranglerLoginCommand, readWranglerOAuthToken, refreshWranglerSession,
+} from "./operations/wrangler-oauth.mjs";
 import {
   adminKeyPersistencePlan,
   macKeychainUsable,
@@ -837,7 +839,7 @@ export function readHiddenCloudflareToken({ input = process.stdin, output = proc
     insecure:
       "no Cloudflare credential is available and this terminal cannot prompt securely.\n" +
       "  The simplest fix is a browser sign-in, which needs no token at all:\n" +
-      `    npx ${WRANGLER_SPEC} login\n` +
+      `    ${legacyWranglerLoginCommand()}\n` +
       "  Then run this command again. Alternatively rerun from a real terminal for hidden\n" +
       "  entry, or inject CLOUDFLARE_API_TOKEN through an approved secret manager. Never\n" +
       "  paste a token into a shell command.",
@@ -1213,7 +1215,7 @@ function token() {
     die(
       "no Cloudflare credential is available.\n" +
         "      Easiest: sign in through the browser, which needs no token at all:\n" +
-        `        npx ${WRANGLER_SPEC} login\n` +
+        `        ${legacyWranglerLoginCommand()}\n` +
         "      Or re-run the same command in a real terminal, which can offer hidden token entry.\n" +
         "      Low-level automation must inject CLOUDFLARE_API_TOKEN through an approved secret\n" +
         "      manager; never paste it\n" +
@@ -21819,7 +21821,7 @@ function crash(err) {
     if (err && err.credentialSource === "wrangler-session") {
       console.error("  This credential came from this computer's `wrangler login` session, which has");
       console.error("  expired (they last about an hour) and could not be renewed. Nobody typed a token.");
-      console.error(`  Run \`npx ${WRANGLER_SPEC} login\`, then re-run the same command; it resumes where it stopped.`);
+      console.error(`  Run \`${legacyWranglerLoginCommand()}\`, then re-run the same command; it resumes where it stopped.`);
       console.error("\n  Anything created before the refusal is still there and is reused on the re-run.");
     } else {
       sayErr("  " + CF_TOKEN_REJECTED_REMEDY.split("\n").join("\n  "));

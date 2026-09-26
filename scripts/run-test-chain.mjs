@@ -153,6 +153,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test test/custom-api-cli.test.mjs",
   "node --no-warnings --test test/custom-api-schema-compat.test.mjs",
   "node --no-warnings --test test/windows-dpapi-launch-retry.test.mjs",
+  // Legacy default-profile sign-in stays readable on a keyring-enabled machine.
+  "node test/wrangler-legacy-keyring-opt-out.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -230,6 +232,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --test test/runtime-identity-receipt.test.mjs",
   "node test/package-privacy.test.mjs",
   "node test/wrangler-oauth.test.mjs",
+  "node test/wrangler-legacy-keyring-opt-out.test.mjs",
   "node test/cloudflare-token-prompt.test.mjs",
   "node test/technician-setup.test.mjs",
   "node test/onboarding-sandbox.test.mjs",
