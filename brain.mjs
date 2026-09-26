@@ -23845,6 +23845,11 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
     delete oauthOptions[reserved];
   }
   if (!oauthOptions.workingDirectory) oauthOptions.workingDirectory = dirname(resolve(manifestPath));
+  // The same workers.dev need routine commands apply: a custom-domain Brain can
+  // record its sign-in on an account that never registered a subdomain.
+  if (oauthOptions.workersSubdomainRequired === undefined) {
+    oauthOptions.workersSubdomainRequired = brainNeedsWorkersDevSubdomain(manifestPath);
+  }
   const runner = options.withOAuthSession ?? withCloudflareOAuthSession;
   let session;
   try {

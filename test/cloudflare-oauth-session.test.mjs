@@ -1644,3 +1644,49 @@ test("adoption tells the owner the sign-in completed but could not be saved", as
     rmSync(sandbox, { recursive: true, force: true });
   }
 });
+
+// Adoption runs its own sign-in ceremony, outside withCloudflareControlCredential.
+// A custom-domain Brain on an account with no workers.dev subdomain must still
+// be able to record its browser sign-in; a workers.dev Brain keeps the refusal.
+test("adopting a browser sign-in applies the same workers.dev need as routine commands", async () => {
+  const priorLog = console.log;
+  const run = async (brain) => {
+    const root = mkdtempSync(resolve(tmpdir(), "fb-oauth-adopt-domain-"));
+    const manifestPath = resolve(root, "brain.manifest.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      brain: { worker_name: "fixture-brain", ...brain },
+      infrastructure: { cloudflare: { account_id: ACCOUNT_A } },
+    }, null, 2) + "\n");
+    const runner = processRecorder(({ args }) => args.includes("token")
+      ? okProcessResult({ stdout: tokenOutput() })
+      : okProcessResult());
+    const lines = [];
+    console.log = (line) => lines.push(String(line));
+    try {
+      const outcome = await adoptCloudflareAuthProfile(manifestPath, {
+        interactive: true,
+        env: {},
+        askFn: async () => "y",
+        oauthOptions: {
+          processRunner: runner,
+          platformName: "darwin",
+          environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+          fetchImpl: unregisteredSubdomainFetch([]),
+        },
+      });
+      const saved = JSON.parse(readFileSync(manifestPath, "utf8"));
+      return { outcome, saved, text: lines.join("\n") };
+    } finally {
+      console.log = priorLog;
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const custom = await run({ domain: "brain.example.invalid" });
+  assert.match(String(custom.outcome), /^financial-brain-/, custom.text);
+  assert.equal(custom.saved.infrastructure.cloudflare.auth_profile, custom.outcome);
+
+  const workersDev = await run({});
+  assert.equal(workersDev.outcome, null);
+  assert.equal(workersDev.saved.infrastructure.cloudflare.auth_profile, undefined);
+  assert.match(workersDev.text, /CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED|workers\.dev subdomain/);
+});
