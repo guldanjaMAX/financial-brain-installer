@@ -122,6 +122,17 @@ on macOS and a SmartScreen warning on Windows for a downloaded copy; that
 is a distribution problem for the installer work package, noted there, not
 solved here.
 
+The Windows half now has a signing lane,
+`.github/workflows/windows-daemon-signing.yml`. Every daemon pull request
+reruns this script unchanged on Linux and starts the exact Windows bytes on
+a Windows runner. A manual run from the default branch then Authenticode-signs
+and timestamps those bytes with Azure Artifact Signing and keeps nothing
+whose signature, signer, or timestamp fails to verify. The lane stays
+inactive until the publisher's signing account is configured (see the
+workflow header). Publishing a signed binary (a release asset plus a pinned
+SHA-256, per `evidence/WP-07-go-daemon.md`) and macOS notarization remain
+open.
+
 ## Running it by hand (development only)
 
 ```
