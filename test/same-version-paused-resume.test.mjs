@@ -165,7 +165,11 @@ function installation({ manifestVersion = PRODUCT_VERSION } = {}) {
     assert.equal(account, ACCOUNT_ID);
     assert.equal(database, DATABASE_ID);
     const statement = db.prepare(sql);
-    if (/^\s*(SELECT|PRAGMA|WITH)/iu.test(sql)) return { results: statement.all(...params), success: true };
+    // D1 returns the rows of a write's RETURNING clause; the paused exact-count
+    // rebase reads its persisted count back through it.
+    if (/^\s*(SELECT|PRAGMA|WITH)/iu.test(sql) || /\bRETURNING\b/iu.test(sql)) {
+      return { results: statement.all(...params), success: true };
+    }
     const result = statement.run(...params);
     return { results: [], success: true, meta: { changes: Number(result.changes || 0) } };
   };
