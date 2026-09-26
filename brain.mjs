@@ -3441,13 +3441,19 @@ export async function cmdHealth(manifestPath, {
   // is revoked at handoff. A command that proves the brain works, but only while
   // we still hold a key to the client's account, proves the wrong thing.
   if (!m.brain?.domain && !cloudflareTokenAvailable()) {
-    // `brain health` never reads the Wrangler login, so the generic "sign in
-    // through the browser" advice would loop. Name the one step that helps.
-    die(
-      "this manifest has no saved brain.domain, so health cannot find the Brain without Cloudflare account access.\n" +
-        `      Run \`brain update ${commandPath(displayPath(manifestPath))}\` once to save the deployed address, then rerun health.\n` +
-        "      No Cloudflare sign-in was read or refreshed."
+    // Only reachable when the entry point found no usable Cloudflare access
+    // (the session lookup is skipped only for a manifest WITH a saved domain).
+    // Do not advise `brain update`: it never writes brain.domain. Do not advise
+    // `brain deploy`: it is unsafe on a paused or behind Brain. Name only what
+    // actually lets health find the Brain.
+    const refusal = new Fatal(
+      "this manifest has no saved brain.domain, and no Cloudflare access is available to look up the Brain's workers.dev address.\n" +
+        "      Health finds the Brain either from brain.domain in the manifest or by a read-only lookup through the Cloudflare\n" +
+        "      sign-in saved on this computer or a CLOUDFLARE_API_TOKEN for this Brain's account. BRAIN_NO_WRANGLER_LOGIN turns\n" +
+        "      the sign-in lookup off. Make one of those available, then rerun health. Nothing was changed."
     );
+    refusal.code = "CONFIG_INVALID";
+    throw refusal;
   }
   const acct = m.brain?.domain ? null : await resolveAccount(m);
   const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
@@ -28807,15 +28813,32 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "assistant-repair",
   "ocr-preflight",
   "custom-api",
-  // Health proves the Brain over HTTPS with the admin key and must never
-  // refresh or rewrite the owner's Wrangler login. With a saved brain.domain
-  // it needs no Cloudflare access at all.
-  "health",
 ]);
+
+// Health proves the Brain over HTTPS with the admin key and must never refresh
+// or rewrite the owner's Wrangler login when it does not need one: with a saved
+// brain.domain it needs no Cloudflare access at all. Without one, the read-only
+// session lookup is the only way it finds the workers.dev address (`brain
+// update` never writes brain.domain), so that manifest keeps the entry-point
+// read. An unreadable manifest keeps it too; health then refuses on its own.
+const WRANGLER_SESSION_EXEMPT_WITH_SAVED_DOMAIN = new Set(["health"]);
+
+export function manifestHasSavedBrainDomain(manifestPath, { readFile = readFileSync } = {}) {
+  if (typeof manifestPath !== "string" || !manifestPath) return false;
+  try {
+    const domain = JSON.parse(readFile(manifestPath, "utf8"))?.brain?.domain;
+    return typeof domain === "string" && domain.trim() !== "";
+  } catch {
+    return false;
+  }
+}
 
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
   if (typeof run !== "function") throw new TypeError("a CLI command function is required");
-  if (WRANGLER_SESSION_EXEMPT_COMMANDS.has(String(command || ""))) {
+  const name = String(command || "");
+  if (WRANGLER_SESSION_EXEMPT_COMMANDS.has(name) ||
+      (WRANGLER_SESSION_EXEMPT_WITH_SAVED_DOMAIN.has(name) &&
+        (options.manifestHasSavedDomain ?? manifestHasSavedBrainDomain)(options.manifestPath))) {
     return Promise.resolve().then(run);
   }
   const withWrangler = options.withWranglerSession ?? withWranglerSessionIfNeeded;
@@ -29051,7 +29074,9 @@ if (IS_MAIN) {
 
   // Wrapped so a client who signed in with `wrangler login` never has to mint
   // or paste a token. Scoped to this one invocation.
-  runCliCommandWithCredentialBoundary(cliBoundaryCommand, () => commands[cmd](manifestPath)).catch((e) => {
+  runCliCommandWithCredentialBoundary(cliBoundaryCommand, () => commands[cmd](manifestPath), {
+    manifestPath,
+  }).catch((e) => {
     // Fatal is a failure this code ANTICIPATED and already explained: a missing
     // token, a free-tier account, a typo'd source name. A Drive removal review
     // is an intentional safety stop with the same no-crash treatment and a

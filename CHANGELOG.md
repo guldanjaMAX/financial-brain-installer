@@ -13,13 +13,16 @@ offered as a customer update; its entries below ship for the first time in
 0.4.9, and its identity is retired so its evidence cannot be confused with
 this changed candidate.
 
-- **`brain health` no longer touches your Cloudflare browser sign-in.** Health
-  checks the Brain over its own address with the admin key, so it now never
-  refreshes or rewrites a saved Wrangler login, even an expired one. With the
-  saved Brain address in the manifest it needs no Cloudflare access at all.
-  Without a saved address or an injected Cloudflare credential, health now
-  says so and names `brain update <manifest>` to save the address, instead of
-  suggesting a browser sign-in that health would not use. To check: run `brain health <manifest>`.
+- **`brain health` no longer touches your Cloudflare browser sign-in when it
+  does not need it.** Health checks the Brain over its own address with the
+  admin key. When the manifest has a saved Brain address (`brain.domain`),
+  health needs no Cloudflare access at all and never refreshes or rewrites a
+  saved Wrangler login, even an expired one. Without a saved address, health
+  still looks up the Brain's workers.dev address read-only through the
+  Cloudflare sign-in on this computer, as before. Only when there is no saved
+  address and no Cloudflare access at all does health stop, and it now says
+  exactly what lets it find the Brain instead of pointing at a command that
+  would not help. To check: run `brain health <manifest>`.
 
 - **Windows credential protection survives a Smart App Control refusal.** On
   some Windows 11 machines Smart App Control occasionally refuses to start the
