@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cmdWhatsnew } from "../brain.mjs";
@@ -18,6 +18,30 @@ const version = packageJson.version;
 const escapedVersion = version.replaceAll(".", "\\.");
 const currentEvidencePlan = read(`docs/release-evidence/v${version}-candidate-release-evidence-plan.md`);
 const retiredEvidencePlan = read("docs/release-evidence/v0.4.7-candidate-release-evidence-plan.md");
+// Every candidate plan below the current version was never shipped; each must
+// say it is superseded so its planning cannot be read as live release scope.
+{
+  const parseVersion = (value) => value.split(".").map(Number);
+  const current = parseVersion(version);
+  const below = (other) => {
+    for (let index = 0; index < 3; index++) {
+      if (other[index] !== current[index]) return other[index] < current[index];
+    }
+    return false;
+  };
+  const planDirectory = resolve(ROOT, "docs/release-evidence");
+  const olderPlans = readdirSync(planDirectory)
+    .map((name) => /^v(\d+\.\d+\.\d+)-candidate-release-evidence-plan\.md$/.exec(name))
+    .filter((match) => match && below(parseVersion(match[1])));
+  assert.ok(olderPlans.length >= 2, "the retired 0.4.7 and 0.4.8 candidate plans must still be found");
+  for (const [name, planVersion] of olderPlans) {
+    const header = read(`docs/release-evidence/${name}`).split("\n## ")[0];
+    assert.match(header, /^- Status: superseded planning record\b/m, `${name} must say it is a superseded planning record`);
+    assert.doesNotMatch(header, /planning only; held/i, `${name} must not still read as a held live plan`);
+  }
+  assert.match(currentEvidencePlan, /the superseded v0\.4\.8 plan/,
+    "the current plan must call the v0.4.8 plan superseded");
+}
 const ciWorkflow = read(".github/workflows/ci.yml");
 const windowsRehearsalWorkflow = read(".github/workflows/windows-rehearsal.yml");
 

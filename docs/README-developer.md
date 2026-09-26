@@ -111,7 +111,7 @@ node brain.mjs ingest     ./acme.manifest.json --path ~/Documents --source clien
 node brain.mjs test       ./acme.manifest.json   # full acceptance suite
 ```
 
-The held v0.4.8 existing-Brain gate is:
+The held candidate existing-Brain gate is:
 
 ```bash
 brain update [manifest] --preview --expect-runtime-sha256 <64hex> --json

@@ -85,7 +85,7 @@ Never infer `first_brain` because a local file is missing. An existing-Brain
 route with no exact manifest pauses for owner-custody recovery instead of
 searching Cloudflare by name or starting over.
 
-For the held v0.4.8 pilot, an existing Brain must pass the exact package's
+For a held candidate pilot, an existing Brain must pass the exact package's
 read-only update preview before any update is considered:
 
 ```bash

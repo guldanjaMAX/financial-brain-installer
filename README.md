@@ -626,7 +626,7 @@ First install the exact release named on `financialbrain.ai/update`. Then run
 the update command from any folder. It uses the manifest location saved by
 setup, even after Terminal has been closed and reopened.
 
-The held v0.4.8 pilot evidence plan requires this exact read-only diagnostic
+The held candidate's pilot evidence plan requires this exact read-only diagnostic
 before any internal-owner update rung:
 
 ```bash
@@ -753,7 +753,7 @@ brain will not know.
 Then drop `--dry-run` to load it for real. Large loads are resumable: if it is
 interrupted, run the same command again and it continues from where it stopped.
 
-The held v0.4.8 Windows x64 pilot does not use that general folder command. Its
+The held Windows x64 pilot does not use that general folder command. Its
 bounded contract requires a dedicated manifest source root containing exactly
 one direct native-text regular file. Subdirectories, links, junctions,
 additional files, and broader source trees stop the pilot. The architecture
