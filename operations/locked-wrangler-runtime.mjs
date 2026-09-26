@@ -35,9 +35,17 @@ import { arch as operatingSystemArch } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import { gunzipSync } from "node:zlib";
+import {
+  REVIEWED_WRANGLER_PACKAGE_NAME,
+  REVIEWED_WRANGLER_VERSION,
+} from "./wrangler-runtime-contract.mjs";
 
-export const LOCKED_WRANGLER_PACKAGE = "wrangler";
-export const LOCKED_WRANGLER_VERSION = "4.131.1";
+export const LOCKED_WRANGLER_PACKAGE = REVIEWED_WRANGLER_PACKAGE_NAME;
+export const LOCKED_WRANGLER_VERSION = REVIEWED_WRANGLER_VERSION;
+// The product lockfile's root version is part of the reviewed runtime identity.
+// It must move with package.json on every bump (test/current-version.test.mjs
+// enforces that); a stale value refuses the tree's own lockfile.
+export const LOCKED_WRANGLER_LOCK_ROOT_VERSION = "0.4.9";
 export const LOCKED_WRANGLER_RUNTIME_DIRECTORY = "wrangler-runtime-v1";
 export const LOCKED_WRANGLER_ENTRYPOINT = "node_modules/wrangler/bin/wrangler.js";
 export const LOCKED_WRANGLER_RESOLUTION_GUARD = "resolution-guard.cjs";
@@ -258,7 +266,7 @@ function validateLock(lock) {
   const rootEntry = packages?.[""];
   const first = "node_modules/wrangler";
   if (!packages || typeof packages !== "object" || Array.isArray(packages) ||
-      rootEntry?.name !== "brain-installer" || rootEntry?.version !== "0.4.8" ||
+      rootEntry?.name !== "brain-installer" || rootEntry?.version !== LOCKED_WRANGLER_LOCK_ROOT_VERSION ||
       rootEntry?.devDependencies?.wrangler !== LOCKED_WRANGLER_VERSION ||
       packages[first]?.version !== LOCKED_WRANGLER_VERSION ||
       packages[first]?.bin?.wrangler !== "bin/wrangler.js") fail();

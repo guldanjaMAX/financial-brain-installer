@@ -23,12 +23,13 @@ import { platform } from "node:os";
 import { win32 as pathWin32 } from "node:path";
 import { tokenStorageStatus, verifyTokenStorageReadable } from "./connectors/google-auth.mjs";
 import { probeWindowsDpapi } from "./operations/admin-key-file.mjs";
+import { REVIEWED_WRANGLER_SPEC } from "./operations/wrangler-runtime-contract.mjs";
 import { manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
 
 export const OK = "ok";
 export const WARN = "warn";
 export const FAIL = "fail";
-export const WRANGLER_PACKAGE = "wrangler@4.131.1";
+export const WRANGLER_PACKAGE = REVIEWED_WRANGLER_SPEC;
 export const WRANGLER_AUTH_PROFILE_PATTERN = /^financial-brain-[a-f0-9]{24}$/;
 export const MIN_INSTALL_FREE_BYTES = 2n * 1024n * 1024n * 1024n;
 

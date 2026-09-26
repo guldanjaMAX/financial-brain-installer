@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cmdWhatsnew } from "../brain.mjs";
+import { LOCKED_WRANGLER_LOCK_ROOT_VERSION } from "../operations/locked-wrangler-runtime.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path) => readFileSync(resolve(ROOT, path), "utf8");
@@ -17,6 +18,30 @@ const version = packageJson.version;
 const escapedVersion = version.replaceAll(".", "\\.");
 const currentEvidencePlan = read(`docs/release-evidence/v${version}-candidate-release-evidence-plan.md`);
 const retiredEvidencePlan = read("docs/release-evidence/v0.4.7-candidate-release-evidence-plan.md");
+// Every candidate plan below the current version was never shipped; each must
+// say it is superseded so its planning cannot be read as live release scope.
+{
+  const parseVersion = (value) => value.split(".").map(Number);
+  const current = parseVersion(version);
+  const below = (other) => {
+    for (let index = 0; index < 3; index++) {
+      if (other[index] !== current[index]) return other[index] < current[index];
+    }
+    return false;
+  };
+  const planDirectory = resolve(ROOT, "docs/release-evidence");
+  const olderPlans = readdirSync(planDirectory)
+    .map((name) => /^v(\d+\.\d+\.\d+)-candidate-release-evidence-plan\.md$/.exec(name))
+    .filter((match) => match && below(parseVersion(match[1])));
+  assert.ok(olderPlans.length >= 2, "the retired 0.4.7 and 0.4.8 candidate plans must still be found");
+  for (const [name, planVersion] of olderPlans) {
+    const header = read(`docs/release-evidence/${name}`).split("\n## ")[0];
+    assert.match(header, /^- Status: superseded planning record\b/m, `${name} must say it is a superseded planning record`);
+    assert.doesNotMatch(header, /planning only; held/i, `${name} must not still read as a held live plan`);
+  }
+  assert.match(currentEvidencePlan, /the superseded v0\.4\.8 plan/,
+    "the current plan must call the v0.4.8 plan superseded");
+}
 const ciWorkflow = read(".github/workflows/ci.yml");
 const windowsRehearsalWorkflow = read(".github/workflows/windows-rehearsal.yml");
 
@@ -24,6 +49,11 @@ assert.match(version, /^\d+\.\d+\.\d+$/, "package version must be a stable seman
 assert.equal(packageLock.version, version, "package-lock top-level version drifted");
 assert.equal(packageLock.packages?.[""]?.version, version, "package-lock root package version drifted");
 assert.equal(manifestTemplate.brain?.version, version, "manifest template version drifted");
+// The locked Wrangler runtime refuses any product lockfile whose root version
+// differs from this reviewed constant, so a bump that leaves it behind makes
+// field-prepare refuse the tree's own lockfile.
+assert.equal(LOCKED_WRANGLER_LOCK_ROOT_VERSION, version,
+  "locked Wrangler runtime lockfile root version drifted from the package");
 
 // The worker carries its own version so health cannot report a number the
 // deployed code does not have. That constant is only trustworthy while it
@@ -35,6 +65,17 @@ assert.match(currentEvidencePlan, new RegExp(`^# v${escapedVersion} candidate re
   "current candidate has no version-matched evidence plan");
 assert.match(currentEvidencePlan, /Candidate source commit: unbound[\s\S]*?Field execution: none/,
   "the current plan must not imply final-SHA or field proof before either exists");
+// The disposable update gate is only meaningful at the scale that exercises the
+// accelerated bootstrap path; a plan that drops it silently weakens the gate.
+for (const [pattern, message] of [
+  [new RegExp(`Prepare a separately reviewed ${escapedVersion} disposable-resource plan and exact\\s+teardown targets before creating anything`),
+    "the current plan must require its own reviewed disposable-resource plan"],
+  [/at least 6,001 direct-D1 documents\s+and chunks and at least 3,001 durable epoch admissions/,
+    "the current plan must keep the accelerated paused-update scale requirement"],
+  [/Interrupt the update at\s+the reviewed non-final point, resume through the supported path/,
+    "the current plan must interrupt and resume the paused update"],
+  [/restore a bookmark first/, "the current plan must forbid restoring a bookmark first"],
+]) assert.match(currentEvidencePlan, pattern, message);
 const ciTestJob = ciWorkflow.slice(
   ciWorkflow.indexOf("  test:"),
   ciWorkflow.indexOf("  preflight-traps:"),

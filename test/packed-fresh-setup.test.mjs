@@ -22,6 +22,10 @@ function minimalEnvironment(overrides = {}) {
   const allowed = [
     "PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT",
     "TEMP", "TMP", "TMPDIR", "LANG", "LANGUAGE", "SHELL", "TERM",
+    // The gate uses a verified private cache because the user cache may contain
+    // root-owned entries. This locator is non-secret and must survive the
+    // otherwise credential-free child boundary.
+    "NPM_CONFIG_CACHE", "npm_config_cache",
   ];
   const environment = {};
   for (const name of allowed) {

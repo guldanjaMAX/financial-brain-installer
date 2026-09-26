@@ -223,7 +223,7 @@ function checkedBinding(value, role) {
       !Array.isArray(value.enabledCorpora) || value.enabledCorpora.length !== 0 ||
       value.bankFeedEnabled !== false ||
       (role === "source" ? value.recoveryFieldGate !== null : !exactTargetIsolation) ||
-      value.embeddingDimensions !== 768 || value.productVersion !== "0.4.8" ||
+      value.embeddingDimensions !== 768 || value.productVersion !== "0.4.9" ||
       (role === "source" && value.recoveryArtifactKeySecret !== null) ||
       (role === "target" && typeof value.recoveryArtifactKeySecret !== "string")) {
     refuse("CF_DISPOSABLE_PROVIDER_BINDING_INVALID");
@@ -451,7 +451,7 @@ function fixedProvisionBinding(role, accountId, databaseId, domain) {
     enabledCorpora: Object.freeze([]),
     ocrEnabled: "0",
     ocrModel: "@cf/meta/llama-4-scout-17b-16e-instruct",
-    productVersion: "0.4.8",
+    productVersion: "0.4.9",
     recoveryArtifactKeySecret: role === "target" ? PROVISION_LOCATORS.targetArtifact : null,
     recoveryFieldGate: null,
     vectorizeIndex: resource,
@@ -522,7 +522,7 @@ function workerCampaignTag(role, campaignFingerprint) {
 }
 
 function bootstrapMessage(role) {
-  return `Financial Brain 0.4.8 disposable ${role} maintenance bootstrap`;
+  return `Financial Brain 0.4.9 disposable ${role} maintenance bootstrap`;
 }
 
 
@@ -1499,7 +1499,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
         `SELECT
           (SELECT COUNT(*) FROM install_state) AS install_state_total_rows,
           (SELECT COUNT(*) FROM install_state WHERE id = 1 AND schema_version = 48
-             AND client_slug = 'v048-field-proof' AND product_version = '0.4.8'
+             AND client_slug = 'v048-field-proof' AND product_version = '0.4.9'
              AND gate_version = 5 AND ring = 'stable'
              AND vector_projection_status = 'verified') AS install_state_valid_rows,
           (SELECT COUNT(*) FROM owner_financial_map_key_state) AS owner_key_total_rows,
@@ -1555,7 +1555,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
            vector_projection_bootstrap_cursor, vector_projection_bootstrap_high_water,
            source_original_retrieval_generation)
          VALUES (1,?,?,?,?,?,?,'verified',0,NULL,NULL,0)`,
-          ["v048-field-proof", "0.4.8", 48, 5, installedAt, "stable"],
+          ["v048-field-proof", "0.4.9", 48, 5, installedAt, "stable"],
         );
         state = await inspectSourcePostlude(query);
       }
@@ -1764,7 +1764,7 @@ export function prepareCloudflareDisposableProvisioningProvider(
             (SELECT COUNT(*) FROM vector_outbox) AS outbox,
             (SELECT COUNT(*) FROM install_state) AS install_state_total_rows,
             (SELECT COUNT(*) FROM install_state WHERE id = 1 AND schema_version = 48
-               AND client_slug = 'v048-field-proof' AND product_version = '0.4.8'
+               AND client_slug = 'v048-field-proof' AND product_version = '0.4.9'
                AND gate_version = 5 AND ring = 'stable'
                AND vector_projection_status = 'verified') AS install_state_valid_rows,
             (SELECT COUNT(*) FROM owner_financial_map_key_state) AS owner_key_total_rows,
@@ -2508,7 +2508,7 @@ export function prepareCloudflareDisposableDeploymentProvider(
         secret_names: secretNames(request.role),
         baseline_version_id: baselineVersionId,
         tag: request.tag,
-        message: `Financial Brain 0.4.8 disposable recovery ${request.role} ${request.mode}`,
+        message: `Financial Brain 0.4.9 disposable recovery ${request.role} ${request.mode}`,
       });
     };
 

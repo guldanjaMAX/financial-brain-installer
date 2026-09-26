@@ -21,7 +21,7 @@ export const DISPOSABLE_RECOVERY_SEED_BATCHES = Math.ceil(
   DISPOSABLE_RECOVERY_SEED_DOCUMENTS / DISPOSABLE_RECOVERY_SEED_BATCH_SIZE,
 );
 export const DISPOSABLE_RECOVERY_MINIMUM_D1_CHUNKS = 6_001;
-export const DISPOSABLE_RECOVERY_EXPECTED_WORKER_VERSION = "0.4.8";
+export const DISPOSABLE_RECOVERY_EXPECTED_WORKER_VERSION = "0.4.9";
 export const DISPOSABLE_RECOVERY_MARKER = "v048-orchid-ledger-field-marker";
 export const DISPOSABLE_RECOVERY_VECTOR_DIMENSIONS = 768;
 export const DISPOSABLE_RECOVERY_VECTOR_METRIC = "cosine";
@@ -127,7 +127,7 @@ function validateRuntimeInventory(body, {
       body.version !== DISPOSABLE_RECOVERY_EXPECTED_WORKER_VERSION ||
       body.backend !== "d1" || body.vector_drain_mode !== "active" ||
       !Array.isArray(body.rows)) {
-    fail("inventory_contract_mismatch", "The D1 inventory did not match the sealed v0.4.8 campaign contract.", errorState);
+    fail("inventory_contract_mismatch", "The D1 inventory did not match the sealed campaign release contract.", errorState);
   }
 
   if (!final) {

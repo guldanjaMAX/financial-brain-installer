@@ -6,7 +6,11 @@
  * or network connection. It validates locators, never their secret values.
  */
 
-export const V048_DISPOSABLE_CAMPAIGN_VERSION = "0.4.8";
+// The one product release this campaign may run on. It stays a reviewed
+// literal, not a package.json read, so the module remains dependency-free and a
+// version bump cannot silently re-target the campaign; the seeder test fails
+// until every campaign pin is reviewed against the shipped version.
+export const V048_DISPOSABLE_CAMPAIGN_VERSION = "0.4.9";
 export const V048_DISPOSABLE_CAMPAIGN_CLIENT_SLUG = "v048-field-proof";
 export const V048_DISPOSABLE_CAMPAIGN_DISPLAY_NAME = "Synthetic Field Gate v0.4.8";
 export const V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME =

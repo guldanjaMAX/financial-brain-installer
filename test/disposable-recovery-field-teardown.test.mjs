@@ -1658,7 +1658,7 @@ function targetEvalReceipt(teardownBinding, {
     checks: {
       health: {
         status: "pass",
-        version: "0.4.8",
+        version: "0.4.9",
         accepting_documents: true,
         before_snapshot_sha256: HASH("3"),
         after_snapshot_sha256: HASH("3"),
@@ -1864,7 +1864,7 @@ function provisioningPreparationBinding() {
     candidate_tree_sha: "b".repeat(40),
     field_receipt_run_id: SOURCE_VERSION,
     field_receipt_sha256: HASH("b"),
-    package_filename: "brain-installer-0.4.8.tgz",
+    package_filename: "brain-installer-0.4.9.tgz",
     package_bytes: 1234,
     package_sha256: HASH("a"),
     package_file_count: 100,
@@ -4703,7 +4703,7 @@ function teardownCliArguments(command, extra = []) {
     command,
     "--candidate-sha", "a".repeat(40),
     "--field-receipt", "/private/field.json",
-    "--package", "/private/brain-installer-0.4.8.tgz",
+    "--package", "/private/brain-installer-0.4.9.tgz",
     "--plan", "/private/plan.json",
     "--state", "/private/state.json",
     "--golden", "/private/golden.json",

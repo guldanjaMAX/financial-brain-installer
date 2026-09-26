@@ -274,6 +274,7 @@ import {
   cloudflareWorkersPlanUrl,
 } from "./operations/cloudflare-account-bootstrap.mjs";
 import {
+  captureCloudflareOAuthToken,
   CloudflareOAuthSessionError,
   cloudflareOAuthChildEnvironment,
   cloudflareOAuthProfileName,
@@ -309,7 +310,9 @@ import {
   LOCAL_OWNER_AGENT_PROFILE,
   profileHas,
 } from "./worker/src/lib/agent-authority.js";
-import { readWranglerOAuthToken, refreshWranglerSession, WRANGLER_SPEC } from "./operations/wrangler-oauth.mjs";
+import {
+  legacyWranglerLoginCommand, readWranglerOAuthToken, refreshWranglerSession,
+} from "./operations/wrangler-oauth.mjs";
 import {
   adminKeyPersistencePlan,
   macKeychainUsable,
@@ -604,32 +607,77 @@ function activeCloudflareToken() {
   return process.env.CLOUDFLARE_API_TOKEN || null;
 }
 
+/** Exact workers.dev subdomain proved for this account by the active OAuth preflight. */
+function activeWorkersDevSubdomainReceipt(accountId) {
+  const scoped = cloudflareTokenSession.getStore();
+  if (scoped?.source !== "wrangler-oauth") return null;
+  const expectedAccountId = String(accountId || "").toLowerCase();
+  const receiptAccountId = String(scoped.account?.id || "").toLowerCase();
+  const preflightAccountId = String(scoped.preflight?.account?.id || "").toLowerCase();
+  if (!expectedAccountId || receiptAccountId !== expectedAccountId ||
+      preflightAccountId !== expectedAccountId) return null;
+  return typeof scoped.preflight?.workersSubdomain === "string"
+    ? scoped.preflight.workersSubdomain
+    : null;
+}
+
 export function cloudflareAccessUsesBrowserProfile() {
   const source = cloudflareTokenSession.getStore()?.source;
   return source === "wrangler-oauth" || source === "wrangler-session";
 }
 
-// Cloudflare rejected the credential mid-run. If it came from this computer's
-// wrangler login session, the session has expired: wrangler renews only an
-// expired token (whoami on a still-valid one changes nothing), so this is the
-// first moment a refresh can succeed. A rehearsal on 2026-09-02 started with
-// 2m38s left on the hour and died 2.5 minutes into provisioning with
-// "403 9109 Invalid access token", blamed on a token the owner never typed.
-// Returns true when a different token is now in place.
+// Cloudflare rejected a browser credential mid-run. Wrangler refreshes only an
+// expired token, so this can be the first moment a refresh can succeed. The
+// holder supplies the correct re-read operation for either the legacy default
+// session or this Brain's named profile.
+// Returns "changed" when a different token is now in place, "unchanged" when
+// the re-read returned the very token Cloudflare just refused, and
+// "unavailable" when no re-read could be made or it produced nothing.
+//
+// The distinction matters because a 401/403 carrying 9109 or 10000 is also
+// what a VALID token without a permission receives. An unchanged token after
+// a successful re-read means nothing expired, so the refusal is a permission
+// answer, not a sign-in problem.
 function renewWranglerSessionToken() {
-  if (process.env.CLOUDFLARE_API_TOKEN) return false;
+  if (process.env.CLOUDFLARE_API_TOKEN) return "unavailable";
   const holder = cloudflareTokenSession.getStore();
-  if (!holder || holder.source !== "wrangler-session" || typeof holder.renew !== "function") return false;
+  if (!holder || !["wrangler-session", "wrangler-oauth"].includes(holder.source) ||
+      typeof holder.renew !== "function") return "unavailable";
   let next = null;
   try {
     next = holder.renew();
   } catch {
     next = null;
   }
-  if (!next || String(next) === holder.buffer.toString("ascii")) return false;
+  if (!next) return "unavailable";
+  const nextBuffer = Buffer.isBuffer(next)
+    ? next
+    : Buffer.from(String(next), "ascii");
+  if (nextBuffer === holder.buffer || nextBuffer.equals(holder.buffer)) {
+    if (nextBuffer !== holder.buffer) nextBuffer.fill(0);
+    return "unchanged";
+  }
   holder.buffer.fill(0);
-  holder.buffer = Buffer.from(String(next), "ascii");
-  return true;
+  holder.buffer = nextBuffer;
+  return "changed";
+}
+
+function namedProfileReauthorizationFailure({ retried = false } = {}) {
+  const error = new Fatal(
+    (retried
+      ? "this Brain's Cloudflare browser sign-in changed, but both attempts were rejected.\n" +
+        "      The operation was tried once more after the credential changed, then stopped. " +
+        "No further retry was made.\n"
+      : "this Brain's Cloudflare browser sign-in expired before the operation could be authorized.\n" +
+        "      The rejected operation was not repeated. ") +
+      "Rerun the same command in an interactive\n" +
+      "      terminal and authorize the browser sign-in again when prompted.",
+  );
+  error.code = "AUTH_REQUIRED";
+  // The Cloudflare 401/403 behind this message is gone from its text, so a
+  // caller with its own denied-read guidance can still recognize it.
+  error.namedProfileSessionRejected = true;
+  return error;
 }
 
 function isExpiredSessionRejection(error) {
@@ -837,7 +885,7 @@ export function readHiddenCloudflareToken({ input = process.stdin, output = proc
     insecure:
       "no Cloudflare credential is available and this terminal cannot prompt securely.\n" +
       "  The simplest fix is a browser sign-in, which needs no token at all:\n" +
-      `    npx ${WRANGLER_SPEC} login\n` +
+      `    ${legacyWranglerLoginCommand()}\n` +
       "  Then run this command again. Alternatively rerun from a real terminal for hidden\n" +
       "  entry, or inject CLOUDFLARE_API_TOKEN through an approved secret manager. Never\n" +
       "  paste a token into a shell command.",
@@ -972,10 +1020,19 @@ export async function promptForCloudflareOAuthAccount(request, options = {}) {
 }
 
 /** Human recovery copy for a bounded Wrangler OAuth failure. */
-export function cloudflareOAuthFailureMessage(error) {
+export function cloudflareOAuthFailureMessage(error, { resumeCommand = null } = {}) {
   const code = error instanceof CloudflareOAuthSessionError
     ? error.code
     : "CLOUDFLARE_OAUTH_UNAVAILABLE";
+  if (code === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED") {
+    // Sign-in worked. Neither the network nor a different credential would
+    // change this answer, so neither is suggested.
+    return "Cloudflare sign-in worked, but this Cloudflare account has no workers.dev subdomain registered yet, " +
+      "and this Brain has no custom domain, so its address lives on that subdomain. Nothing was created. In the Cloudflare dashboard, open Workers & Pages " +
+      "and register a workers.dev subdomain, then " +
+      (resumeCommand ? `resume with: ${resumeCommand}` : "rerun the same command.") +
+      ` Issue: ${code}.`;
+  }
   const recovery = {
     CLOUDFLARE_KEYRING_UNAVAILABLE:
       "Cloudflare sign-in could not use this computer's protected credential store. Close other setup windows, confirm macOS Keychain or Windows Credential Manager is available, and rerun the same command.",
@@ -998,18 +1055,20 @@ export function cloudflareOAuthFailureMessage(error) {
   return `${recovery} Issue: ${code}. If browser sign-in remains unavailable, the installer can offer a recovery-only hidden token prompt.`;
 }
 
-function throwCloudflareOAuthFailure(error) {
+function throwCloudflareOAuthFailure(error, messageOptions = {}) {
   const oauthCode = String(error?.code || "");
   const supportCode = oauthCode === "CLOUDFLARE_OAUTH_REAUTH_REQUIRED"
     ? "AUTH_EXPIRED"
     : oauthCode === "CLOUDFLARE_OAUTH_SCOPE_MISSING"
       ? "REMOTE_PERMISSION_DENIED"
+      : oauthCode === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED"
+        ? "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED"
       : /TIMEOUT|REQUEST_FAILED|FETCH_UNAVAILABLE/.test(oauthCode)
         ? "NETWORK_UNREACHABLE"
         : /PROFILE|ACCOUNT_(?:BINDING|SELECTION|ID)/.test(oauthCode)
           ? "CONFIG_INVALID"
           : "AUTH_REQUIRED";
-  const failure = new Fatal(cloudflareOAuthFailureMessage(error));
+  const failure = new Fatal(cloudflareOAuthFailureMessage(error, messageOptions));
   failure.code = supportCode;
   throw failure;
 }
@@ -1130,6 +1189,9 @@ export async function withCloudflareControlCredential(action, options = {}) {
   if (!oauthSessionOptions.workingDirectory && options.manifestPath) {
     oauthSessionOptions.workingDirectory = dirname(resolve(String(options.manifestPath)));
   }
+  if (oauthSessionOptions.workersSubdomainRequired === undefined) {
+    oauthSessionOptions.workersSubdomainRequired = brainNeedsWorkersDevSubdomain(options.manifestPath);
+  }
   const runOAuth = async (reauthorize) => oauthRunner({
     ...oauthSessionOptions,
     ...(authProfile
@@ -1138,27 +1200,45 @@ export async function withCloudflareControlCredential(action, options = {}) {
     expectedAccountId: accountId,
     reauthorize,
     prompt: accountPrompt,
-    action: async (session) => cloudflareTokenSession.run({
-      buffer: session.token,
-      source: "wrangler-oauth",
-      machineReadable: false,
-      announced: true,
-    }, async () => {
-      try {
-        return await action(Object.freeze({
-          method: "wrangler_oauth",
+    action: async (session) => {
+      const holder = {
+        buffer: session.token,
+        source: "wrangler-oauth",
+        machineReadable: false,
+        announced: true,
+        // The exact account and preflight receipt let deploy bind the
+        // workers.dev hostname to the subdomain this sign-in proved.
+        account: session.account,
+        preflight: session.preflight,
+        renew: () => captureCloudflareOAuthToken({
+          ...oauthSessionOptions,
           profile: session.profile,
-          account: session.account,
-          preflight: session.preflight,
-        }));
-      } catch (error) {
-        throw new CloudflareControlActionError(error);
-      }
-    }),
+          accountId: session.account.id,
+        }),
+      };
+      return cloudflareTokenSession.run(holder, async () => {
+        try {
+          return await action(Object.freeze({
+            method: "wrangler_oauth",
+            profile: session.profile,
+            account: session.account,
+            preflight: session.preflight,
+          }));
+        } catch (error) {
+          throw new CloudflareControlActionError(error);
+        } finally {
+          holder.buffer.fill(0);
+        }
+      });
+    },
   });
 
   const initiallyReauthorize = options.reauthorizeOAuth === true;
+  const failureOptions = { resumeCommand: options.resumeCommand || null };
   const offerTokenRecovery = async (error) => {
+    // An account setting answered by a working sign-in, whichever attempt met
+    // it: a recovery token reads the same account and cannot change it.
+    if (isUnregisteredWorkersSubdomain(error)) throw error;
     if (options.allowTokenRecovery !== true || options.interactive === false) throw error;
     const answer = String(await (options.askFn ?? ask)(
       "Cloudflare browser sign-in is still unavailable. Use the recovery-only hidden token prompt now? (y/n)",
@@ -1172,6 +1252,12 @@ export async function withCloudflareControlCredential(action, options = {}) {
     return await runOAuth(initiallyReauthorize);
   } catch (error) {
     throwOriginalCloudflareControlActionError(error);
+    if (isUnregisteredWorkersSubdomain(error)) {
+      // An account setting, answered by a working sign-in: no browser refresh
+      // or recovery token can change it, so neither is offered.
+      closePrompts();
+      throwCloudflareOAuthFailure(error, failureOptions);
+    }
     const mayRefresh = error instanceof CloudflareOAuthSessionError &&
       ["CLOUDFLARE_OAUTH_REAUTH_REQUIRED", "CLOUDFLARE_OAUTH_SCOPE_MISSING"].includes(error.code) &&
       !initiallyReauthorize && options.allowBrowserReauth === true && options.interactive !== false;
@@ -1191,7 +1277,7 @@ export async function withCloudflareControlCredential(action, options = {}) {
             throwOriginalCloudflareControlActionError(finalError);
             if (finalError instanceof Fatal) throw finalError;
             closePrompts();
-            throwCloudflareOAuthFailure(finalError);
+            throwCloudflareOAuthFailure(finalError, failureOptions);
           }
         }
       }
@@ -1202,9 +1288,33 @@ export async function withCloudflareControlCredential(action, options = {}) {
       throwOriginalCloudflareControlActionError(finalError);
       if (finalError instanceof Fatal) throw finalError;
       closePrompts();
-      throwCloudflareOAuthFailure(finalError);
+      throwCloudflareOAuthFailure(finalError, failureOptions);
     }
   }
+}
+
+function isUnregisteredWorkersSubdomain(error) {
+  return error instanceof CloudflareOAuthSessionError && error.code === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED";
+}
+
+/**
+ * Whether this Brain's address depends on the account's workers.dev subdomain.
+ *
+ * A custom brain.domain is the install URL and deploy treats a missing
+ * workers.dev route as optional, so the sign-in preflight must not refuse it.
+ * No domain yet, a saved *.workers.dev address, or a manifest that cannot be
+ * read all keep the fail-closed answer: the subdomain is required.
+ */
+function brainNeedsWorkersDevSubdomain(manifestPath) {
+  if (!manifestPath) return true;
+  let domain = "";
+  try {
+    const parsed = JSON.parse(readFileSync(resolve(String(manifestPath)), "utf8"));
+    domain = typeof parsed?.brain?.domain === "string" ? parsed.brain.domain.trim().toLowerCase() : "";
+  } catch {
+    return true;
+  }
+  return !domain || domain === "workers.dev" || domain.endsWith(".workers.dev");
 }
 
 function token() {
@@ -1213,7 +1323,7 @@ function token() {
     die(
       "no Cloudflare credential is available.\n" +
         "      Easiest: sign in through the browser, which needs no token at all:\n" +
-        `        npx ${WRANGLER_SPEC} login\n` +
+        `        ${legacyWranglerLoginCommand()}\n` +
         "      Or re-run the same command in a real terminal, which can offer hidden token entry.\n" +
         "      Low-level automation must inject CLOUDFLARE_API_TOKEN through an approved secret\n" +
         "      manager; never paste it\n" +
@@ -1227,10 +1337,26 @@ async function cf(path, options = {}) {
   try {
     return await cfOnce(path, options);
   } catch (error) {
-    if (isExpiredSessionRejection(error) && renewWranglerSessionToken()) return cfOnce(path, options);
+    const holder = cloudflareTokenSession.getStore();
+    const renewal = isExpiredSessionRejection(error) ? renewWranglerSessionToken() : null;
+    if (renewal === "changed") {
+      try {
+        return await cfOnce(path, options);
+      } catch (retryError) {
+        if (holder?.source === "wrangler-oauth" && isExpiredSessionRejection(retryError)) {
+          throw namedProfileReauthorizationFailure({ retried: true });
+        }
+        throw retryError;
+      }
+    }
+    // The profile answered with the same token it already had, so nothing
+    // expired. Keep Cloudflare's own refusal, with its method, path and status.
+    if (renewal === "unavailable" && holder?.source === "wrangler-oauth") {
+      throw namedProfileReauthorizationFailure();
+    }
     if (
       isExpiredSessionRejection(error) && !process.env.CLOUDFLARE_API_TOKEN &&
-      cloudflareTokenSession.getStore()?.source === "wrangler-session"
+      holder?.source === "wrangler-session"
     ) {
       error.credentialSource = "wrangler-session";
     }
@@ -1505,7 +1631,13 @@ async function cmdVerify(manifestPath) {
  * CLOUDFLARE_API_TOKEN must be cleared for the child process. Wrangler prefers it
  * when set and will silently authenticate as the wrong identity.
  */
-function wrangler(args, { accountId, authProfile = null } = {}) {
+export function runCloudflareWranglerCommand(args, {
+  accountId,
+  authProfile = null,
+  runCommand = run,
+  platformName = process.platform,
+  renewSessionToken = renewWranglerSessionToken,
+} = {}) {
   // Through doctor's runner, which knows that npm CLIs are .cmd shims on
   // Windows and that Node refuses to spawn those without a shell since
   // CVE-2024-27980. The previous raw spawnSync returned ENOENT there, which
@@ -1519,15 +1651,39 @@ function wrangler(args, { accountId, authProfile = null } = {}) {
     ? [...baseArgs, "--profile", authProfile]
     : wranglerProfileArgs(baseArgs, accountId);
   const exactArgs = authProfile
-    ? [...profiled, `--env-file=${process.platform === "win32" ? "NUL" : "/dev/null"}`]
+    ? [...profiled, `--env-file=${platformName === "win32" ? "NUL" : "/dev/null"}`]
     : profiled;
-  const r = run("npx", exactArgs, {
+  const invoke = () => runCommand("npx", exactArgs, {
     timeout: 180_000,
     inheritEnv: false,
     env,
   });
-  return { ok: r.ok, out: r.out, status: r.ok ? 0 : 1 };
+  let result = invoke();
+  const authRejected = (value) => {
+    const message = String(value?.out || "");
+    return /invalid access token|authentication error/i.test(message) ||
+      (/\b(9109|10000)\b/.test(message) && /auth|token/i.test(message));
+  };
+  if (authProfile && !result.ok && authRejected(result)) {
+    const renewal = renewSessionToken();
+    // An unchanged token means nothing expired: keep the command's own refusal.
+    if (renewal === "unchanged") return { ok: false, out: result.out, status: 1 };
+    if (renewal === "changed") {
+      result = invoke();
+      if (result.ok) return { ok: true, out: result.out, status: 0 };
+      if (!authRejected(result)) return { ok: false, out: result.out, status: 1 };
+      return {
+        ok: false,
+        out: namedProfileReauthorizationFailure({ retried: true }).message,
+        status: 1,
+      };
+    }
+    return { ok: false, out: namedProfileReauthorizationFailure().message, status: 1 };
+  }
+  return { ok: result.ok, out: result.out, status: result.ok ? 0 : 1 };
 }
+
+const wrangler = runCloudflareWranglerCommand;
 
 function wranglerAvailable(accountId, authProfile = null) {
   if (!accountId) return false;
@@ -2043,11 +2199,137 @@ export function workersDevRouteDisposition({ customDomain = null, workersDevEnab
   return customDomain ? "optional" : "required";
 }
 
+/** Cloudflare's workers.dev account-subdomain label shape. */
+const WORKERS_DEV_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+
+// The exact phrase token() dies with when no Cloudflare credential at all is
+// available, and the exact shape cfOnce() throws for a denied read. Matched
+// narrowly on purpose: a caller-supplied `readSubdomain` can fail for reasons
+// that have nothing to do with credentials (a plain "HTTP 403 Forbidden" from
+// an unrelated proxy, say), and those must keep dying with the message below,
+// not be swept into the recovery path meant for an auth/permission denial.
+const NO_CLOUDFLARE_CREDENTIAL_RE = /no Cloudflare credential is available/;
+const SUBDOMAIN_READ_DENIED_RE = /failed \((401|403)\)/;
+
+/**
+ * Confirm a candidate workers.dev hostname really is THIS brain before an
+ * auth/permission failure is allowed to trust it enough to persist.
+ *
+ * The two fields checked are the only identity a public, unauthenticated
+ * `/health` gives back (worker/src/index.js's handler): `brain` is
+ * `env.BRAIN_NAME`, which workerBindings sets to the client slug, and
+ * `version` is the exact code that answered. Everything else on that response
+ * either needs the admin key (not available at this point in deploy) or is
+ * not an identity fact. These are the same two fields the product records as
+ * this brain's identity once it already trusts a domain; here they are what
+ * lets an UNTRUSTED candidate earn that trust.
+ *
+ * A route enabled seconds ago routinely answers 404, an edge 5xx, a failed
+ * fetch, or the PREVIOUS build of this same brain for longer than a few
+ * seconds, so every one of those is retried within the same budget cmdHealth
+ * gives that lag (a minute, five seconds apart). An answer naming a DIFFERENT
+ * brain is not lag: it is refused on the spot and never retried, because no
+ * amount of waiting makes another brain's host this one's address.
+ *
+ * The minute is one budget, not a per-probe allowance. Each probe's fetch
+ * timeout comes out of what is left of it, so hanging fetches cannot stretch
+ * the silent wait after "workers.dev route enabled" to several minutes, and
+ * every retry says what it is waiting for, as the drain warm-up does.
+ */
+const WORKERS_DEV_PROBE_ATTEMPTS = 12;
+const WORKERS_DEV_PROBE_WAIT_MS = 5000;
+const WORKERS_DEV_PROBE_BUDGET_MS = 60_000;
+const WORKERS_DEV_PROBE_TIMEOUT_MS = 10_000;
+const WORKERS_DEV_PROBE_MIN_TIMEOUT_MS = 1_000;
+async function verifyWorkersDevCandidate(domain, {
+  expectedBrainName,
+  expectedVersion,
+  request = http,
+  attempts = WORKERS_DEV_PROBE_ATTEMPTS,
+  wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  now = Date.now,
+} = {}) {
+  const deadline = now() + WORKERS_DEV_PROBE_BUDGET_MS;
+  let reason = "no attempt was made";
+  let tried = 0;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const timeoutMs = Math.max(
+      WORKERS_DEV_PROBE_MIN_TIMEOUT_MS,
+      Math.min(WORKERS_DEV_PROBE_TIMEOUT_MS, deadline - now()),
+    );
+    const verdict = await probeWorkersDevCandidate(domain, { expectedBrainName, expectedVersion, request, timeoutMs });
+    tried = attempt;
+    if (verdict.ok || !verdict.retry) return verdict.ok ? { ok: true } : { ok: false, reason: verdict.reason };
+    reason = verdict.reason;
+    if (attempt >= attempts) break;
+    // Another probe must fit its minimum timeout after this wait, or the
+    // budget is spent and the owner hears the refusal now.
+    const delayMs = Math.min(WORKERS_DEV_PROBE_WAIT_MS, deadline - now() - WORKERS_DEV_PROBE_MIN_TIMEOUT_MS);
+    if (delayMs <= 0) break;
+    info(`${verdict.progress} Retrying ${attempt}/${attempts} in ${Math.ceil(delayMs / 1_000)} second(s).`);
+    await wait(delayMs);
+  }
+  return { ok: false, reason: `${reason} after ${tried} attempt${tried === 1 ? "" : "s"}` };
+}
+
+const WORKERS_DEV_PROPAGATION_NOTE = "This is normal just after a deploy.";
+
+/** One /health probe: accept, refuse outright, or report propagation lag. */
+async function probeWorkersDevCandidate(domain, { expectedBrainName, expectedVersion, request, timeoutMs }) {
+  let res;
+  let body;
+  try {
+    res = await request(`https://${domain}/health`, {}, { timeoutMs, what: "the health check" });
+    body = await res.text();
+  } catch (error) {
+    return {
+      ok: false,
+      retry: true,
+      reason: `/health did not answer (${String(error?.message || error).split("\n")[0].slice(0, 140)})`,
+      progress: `the brain's address is not answering yet (no response). ${WORKERS_DEV_PROPAGATION_NOTE}`,
+    };
+  }
+  if (!res.ok) {
+    return {
+      ok: false,
+      retry: res.status === 404 || res.status >= 500,
+      reason: `/health returned ${res.status}`,
+      progress: `the brain's address is not answering yet (${res.status}). ${WORKERS_DEV_PROPAGATION_NOTE}`,
+    };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { ok: false, retry: false, reason: "/health did not return JSON" };
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return { ok: false, retry: false, reason: "/health returned no readable body" };
+  }
+  if (parsed.brain !== expectedBrainName) {
+    return { ok: false, retry: false, reason: `/health identified itself as "${parsed.brain}", not "${expectedBrainName}"` };
+  }
+  if (expectedVersion && parsed.version !== expectedVersion) {
+    // Cloudflare keeps serving the replaced build for a while after a deploy.
+    // This brain answering its previous version is lag, not a wrong host.
+    return {
+      ok: false,
+      retry: true,
+      reason: `/health reported version "${parsed.version}", not "${expectedVersion}"`,
+      progress: `the brain's address is still serving the previous build. ${WORKERS_DEV_PROPAGATION_NOTE}`,
+    };
+  }
+  return { ok: true };
+}
+
 /** Save the verified workers.dev hostname so routine commands need no API token. */
 export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName, options = {}) {
   if (m.brain?.domain) return m.brain.domain;
-  const readSubdomain = options.readSubdomain ??
-    (() => cf(`/accounts/${acct.id}/workers/subdomain`));
+  const verify = options.verifyWorkersDevCandidate ?? verifyWorkersDevCandidate;
+  const carriedSubdomain = options.workersDevSubdomain;
+  let label = carriedSubdomain;
+  const usedPreflightReceipt = carriedSubdomain !== undefined && carriedSubdomain !== null;
+  const readSubdomain = options.readSubdomain ?? (() => cf(`/accounts/${acct.id}/workers/subdomain`));
   // Three different things can go wrong here and they used to print one
   // sentence. `.catch(() => null)` swallowed every failure, including the
   // credential error whose own text warns against pasting a token into a
@@ -2056,39 +2338,77 @@ export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName,
   // went to the dashboard and correctly changed nothing, and eventually pasted
   // a raw API token at a prompt to get past a message that was not true.
   //
-  // This call authenticates with an API token while the deploy around it can be
-  // running on a browser session, so "no credential for THIS call" is an
-  // ordinary outcome on the path the runbook recommends, not an exotic one.
-  let sub = null;
-  let readFailure = null;
-  try {
-    sub = await readSubdomain();
-  } catch (error) {
-    readFailure = error;
+  // The fallback call can authenticate separately from the deploy around it,
+  // so "no credential for THIS call" remains an ordinary outcome for legacy
+  // and token lanes that do not carry the named-profile preflight receipt.
+  if (!usedPreflightReceipt) {
+    let sub = null;
+    let readFailure = null;
+    try {
+      sub = await readSubdomain();
+    } catch (error) {
+      readFailure = error;
+    }
+    if (readFailure) {
+      const message = String(readFailure?.message || readFailure || "");
+      const noCredential = readFailure instanceof Fatal && NO_CLOUDFLARE_CREDENTIAL_RE.test(message);
+      // A named-profile 401/403 reaches here only after one renewal was tried
+      // (or was unavailable). For this read it is still a denied subdomain
+      // read, whose guidance also forbids changing the dashboard setting.
+      const denied = SUBDOMAIN_READ_DENIED_RE.test(message) ||
+        readFailure?.namedProfileSessionRejected === true;
+      // The no-credential Fatal already says the right thing, including browser
+      // sign-in and why a raw token must not be pasted into a shell. Preserve it.
+      if (noCredential) throw readFailure;
+      if (!denied) {
+        if (readFailure instanceof Fatal) throw readFailure;
+        const detail = message.split("\n")[0].slice(0, 200);
+        die(
+          "the workers.dev route is enabled, but reading the account subdomain failed.\n" +
+            `  Cloudflare did not answer that read: ${detail}\n` +
+            "  This is a failure to ASK, not a missing subdomain, so check the credential this\n" +
+            "  call is using and its scope before changing anything in the dashboard."
+        );
+      }
+      // A 401/403 on the browser-sign-in path is not an account-setting
+      // diagnosis. Name only the action the owner can take, and do not promise
+      // that setup can safely resume a partially completed writer cutover.
+      die(
+        "the workers.dev route is enabled and the Worker is deployed, but this run could not\n" +
+          "  confirm the brain's public address because the exact account subdomain read was denied.\n" +
+          "  Sign in again through the browser when prompted, then rerun the same command.\n" +
+          "  Do not change the Workers subdomain setting based on this failure."
+      );
+    }
+    label = sub?.subdomain;
   }
-  if (readFailure) {
-    // A credential failure already says the right thing, including how to sign
-    // in without a token. Re-raise it rather than replacing it with a guess.
-    if (readFailure instanceof Fatal) throw readFailure;
-    const detail = String(readFailure?.message || readFailure || "").split("\n")[0].slice(0, 200);
+  if (typeof label !== "string" || !WORKERS_DEV_LABEL_RE.test(label)) {
     die(
-      "the workers.dev route is enabled, but reading the account subdomain failed.\n" +
-        `  Cloudflare did not answer that read: ${detail}\n` +
-        "  This is a failure to ASK, not a missing subdomain, so check the credential this\n" +
-        "  call is using and its scope before changing anything in the dashboard."
-    );
-  }
-  const label = typeof sub?.subdomain === "string" ? sub.subdomain.trim() : "";
-  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label)) {
-    die(
-      "the workers.dev route is enabled, but Cloudflare did not return a usable account subdomain.\n" +
+      `the workers.dev route is enabled, but ${usedPreflightReceipt ? "the authenticated preflight" : "Cloudflare"} did not return a usable account subdomain.\n` +
         "  The read succeeded and carried no usable name, so the subdomain really is unset.\n" +
         "  The Worker is deployed, but its token-free URL cannot be saved. Rerun deploy after\n" +
         "  the Workers subdomain is visible in Cloudflare."
     );
   }
-  m.brain = { ...(m.brain || {}), domain: `${scriptName}.${label}.workers.dev` };
+  const candidateDomain = `${scriptName}.${label}.workers.dev`;
+  const candidateVerdict = await verify(candidateDomain, {
+    expectedBrainName: m.client?.slug || "brain",
+    expectedVersion: PRODUCT_VERSION,
+    request: options.request,
+    wait: options.wait,
+    now: options.now,
+  });
+  if (!candidateVerdict.ok) {
+    die(
+      "the workers.dev route is enabled, but its exact account hostname was not confirmed as this brain.\n" +
+        `  ${candidateVerdict.reason}. No address was saved and no admin key was sent to that host.\n` +
+        "  Once the workers.dev route finishes propagating, resume with:\n" +
+        `    brain setup ${commandPath(displayPath(manifestPath))}`
+    );
+  }
+  m.brain = { ...(m.brain || {}), domain: candidateDomain };
   saveManifest(manifestPath, m);
+  ok(`confirmed ${candidateDomain} is this brain and saved it`);
   return m.brain.domain;
 }
 
@@ -2358,7 +2678,13 @@ export async function cmdDeploy(manifestPath, options = {}) {
   // after the one-day Cloudflare control token is revoked. Persist the verified
   // workers.dev hostname once, instead of looking it up again on every command.
   if (!m.brain?.domain && options.persistDomain !== false) {
-    const domain = await persistWorkersDevDomain(manifestPath, m, acct, scriptName);
+    const domain = await persistWorkersDevDomain(manifestPath, m, acct, scriptName, {
+      workersDevSubdomain: activeWorkersDevSubdomainReceipt(acct.id),
+      verifyWorkersDevCandidate: options.verifyWorkersDevCandidate,
+      request: options.request,
+      wait: options.wait,
+      now: options.now,
+    });
     ok(`saved the live address https://${domain}`);
   }
 
@@ -3114,6 +3440,21 @@ export async function cmdHealth(manifestPath, {
   // over plain HTTPS with the admin key, so it must keep working after our token
   // is revoked at handoff. A command that proves the brain works, but only while
   // we still hold a key to the client's account, proves the wrong thing.
+  if (!m.brain?.domain && !cloudflareTokenAvailable()) {
+    // Only reachable when the entry point found no usable Cloudflare access
+    // (the session lookup is skipped only for a manifest WITH a saved domain).
+    // Do not advise `brain update`: it never writes brain.domain. Do not advise
+    // `brain deploy`: it is unsafe on a paused or behind Brain. Name only what
+    // actually lets health find the Brain.
+    const refusal = new Fatal(
+      "this manifest has no saved brain.domain, and no Cloudflare access is available to look up the Brain's workers.dev address.\n" +
+        "      Health finds the Brain either from brain.domain in the manifest or by a read-only lookup through the Cloudflare\n" +
+        "      sign-in saved on this computer or a CLOUDFLARE_API_TOKEN for this Brain's account. BRAIN_NO_WRANGLER_LOGIN turns\n" +
+        "      the sign-in lookup off. Make one of those available, then rerun health. Nothing was changed."
+    );
+    refusal.code = "CONFIG_INVALID";
+    throw refusal;
+  }
   const acct = m.brain?.domain ? null : await resolveAccount(m);
   const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
 
@@ -5755,10 +6096,45 @@ export async function cmdUpgrade(manifestPath, options = {}) {
       // paused-mode health proves the compatibility build has taken over; a
       // full invocation grace then lets every already-started old drain finish.
       if (usesD1VectorOutbox) {
-        await runStage("paused vector-drain deployment", () => deploy(executionPin.target, {
-          persistDomain: false,
-          pauseVectorDrainForUpgrade: true,
-        }));
+        const readPrePauseBacklog = options.readUpdateBacklog ?? readUpdateBacklog;
+        await runStage("paused vector-drain deployment", async ({ manifest }) => {
+          if (readPrePauseBacklog) {
+            let immediateBacklog;
+            try {
+              immediateBacklog = await readPrePauseBacklog(originalPin.target, {
+                // A manifest with no hostname is resolved read-only through the
+                // Cloudflare access this stage already proved, as health does.
+                resolveBrainDomain: async () => {
+                  const sub = await callCloudflare(`/accounts/${accountId}/workers/subdomain`);
+                  if (typeof sub?.subdomain !== "string" || !sub.subdomain) {
+                    throw new TypeError("Cloudflare returned no workers.dev subdomain");
+                  }
+                  const scriptName = manifest.brain?.worker_name || `${manifest.client?.slug || "client"}-brain`;
+                  return `${scriptName}.${sub.subdomain}.workers.dev`;
+                },
+                ...(options.updateBacklogOptions || {}),
+              });
+              if (!immediateBacklog || typeof immediateBacklog !== "object" ||
+                  Array.isArray(immediateBacklog) ||
+                  !Number.isSafeInteger(immediateBacklog.pending) ||
+                  immediateBacklog.pending < 0) {
+                throw new TypeError("the immediate pre-pause backlog receipt is invalid");
+              }
+            } catch (error) {
+              die(updateBacklogUnreadableMessage(error, "pre-pause"));
+            }
+            if (updateBacklogHasQueuedWork(immediateBacklog)) {
+              die(updateBacklogQueuedMessage(immediateBacklog, "pre-pause", options.initialUpdateBacklog ?? null));
+            }
+          }
+          // No asynchronous local stage sits between the closing queue receipt
+          // and starting the pause upload. This narrows but cannot atomically
+          // eliminate a remote ingest that begins after the receipt.
+          return deploy(executionPin.target, {
+            persistDomain: false,
+            pauseVectorDrainForUpgrade: true,
+          });
+        });
         corpusPauseMayStillBeServing = true;
         await runStage("paused vector-drain health verification", () =>
           verifyHealth(executionPin.target, {
@@ -21784,7 +22160,7 @@ function crash(err) {
     if (err && err.credentialSource === "wrangler-session") {
       console.error("  This credential came from this computer's `wrangler login` session, which has");
       console.error("  expired (they last about an hour) and could not be renewed. Nobody typed a token.");
-      console.error(`  Run \`npx ${WRANGLER_SPEC} login\`, then re-run the same command; it resumes where it stopped.`);
+      console.error(`  Run \`${legacyWranglerLoginCommand()}\`, then re-run the same command; it resumes where it stopped.`);
       console.error("\n  Anything created before the refusal is still there and is reused on the re-run.");
     } else {
       sayErr("  " + CF_TOKEN_REJECTED_REMEDY.split("\n").join("\n  "));
@@ -22149,6 +22525,537 @@ async function backlogCount(manifestPath) {
     { timeoutMs: 30_000, what: "the backlog check" });
   if (!res.ok) return 0;
   return Number((await res.json())?.vector_backlog?.pending || 0);
+}
+
+// Field evidence (2026-09-25, a 1.8M-vector Brain): the documents aggregate
+// returned HTTP 500 "D1 DB exceeded its CPU time limit and was reset", and the
+// same read 30 minutes later succeeded in 36 s. One busy moment must not look
+// like an unreadable Brain, so the read is repeated with a long per-attempt
+// timeout and a real backoff before update refuses. It is a read-only GET.
+export const UPDATE_BACKLOG_READ_TIMEOUT_MS = 90_000;
+export const UPDATE_BACKLOG_RETRY_DELAYS_MS = Object.freeze([10_000, 30_000]);
+const D1_CPU_RESET_PATTERN = /CPU time limit|\bwas reset\b/iu;
+
+function updateBacklogReadFailure(attempts, detail = {}) {
+  return Object.assign(new Error("authenticated documents backlog read failed"), { attempts, ...detail });
+}
+
+const UPDATE_BACKLOG_DRAIN_MODES = new Set(["active", "paused-for-upgrade"]);
+
+function updateBacklogSemver(value) {
+  if (typeof value !== "string") return null;
+  try {
+    parseSemver(value);
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decide which Worker generation one authenticated receipt may be bound to,
+ * then classify its queue through the same shared rules as update preview.
+ *
+ * The manifest version is written last, after every remote stage has been
+ * verified. Any failure past the paused deployment therefore leaves a Worker
+ * that reports a NEWER version than the manifest (paused, or active after the
+ * resume race), and `brain deploy` from a newer CLI leaves the same state.
+ * A Worker version above the recorded one and no newer than this CLI is that
+ * earlier attempt, so its receipt is read in whichever writer mode it reports
+ * and the rerun can finish the pause it started. A Worker paused on the version
+ * the manifest records, when that version is no newer than this CLI, is also a
+ * resume (see below). A Worker older than the manifest is a stale deploy that
+ * update replaces (see below). A Worker newer than this CLI is never bound.
+ *
+ * A manifest with no brain.version predates version recording, so it is older
+ * than every release: it accepts the v0.4.6 envelope and any versioned
+ * receipt no newer than this CLI. Worker versions older than 0.4.7 return the
+ * v0.4.6 envelope with neither version nor drain mode; that shape is read only
+ * for a manifest that records a pre-0.4.7 version (or none), exactly as
+ * update preview classifies it.
+ */
+function updateBacklogReceiptQueue(body, recordedVersion, projection) {
+  const versioned = body && typeof body === "object" && !Array.isArray(body) &&
+    (Object.hasOwn(body, "version") || Object.hasOwn(body, "vector_drain_mode"));
+  if (!versioned) {
+    if (recordedVersion !== null && !projection.isLegacyPre047Version(recordedVersion)) {
+      throw new TypeError("a v0.4.7 or later manifest received a pre-0.4.7 receipt");
+    }
+    // An unrecorded manifest is bound as pre-0.4.7; the validator only uses
+    // the version to confirm the legacy contract applies. This gate asks only
+    // whether work is queued, as the versioned path below does, so it does not
+    // take preview's readiness verdict: v0.4.6 reports an empty outbox with a
+    // required bootstrap as not ready and tells the owner to run this update.
+    const aggregate = projection.validateLegacyV046ProjectionAggregateReceipt(body, {
+      expectedVersion: recordedVersion ?? "0.0.0",
+      expectedBackend: "d1",
+    });
+    return {
+      pending: aggregate.queue.pending,
+      paused: false,
+      legacy: true,
+      projectionRecovery: legacyProjectionRecovery(aggregate),
+    };
+  }
+  const workerVersion = updateBacklogSemver(body.version);
+  const workerMode = UPDATE_BACKLOG_DRAIN_MODES.has(body.vector_drain_mode) ? body.vector_drain_mode : null;
+  let expectedVersion = recordedVersion;
+  let expectedDrainMode = "active";
+  const generationRefusal = () => Object.assign(new TypeError("the receipt is not this manifest's generation"), {
+    generation: { workerVersion, workerMode, recordedVersion },
+  });
+  if (workerVersion && workerMode && workerVersion !== recordedVersion) {
+    const resumable = (recordedVersion === null || compareSemver(recordedVersion, workerVersion) < 0) &&
+      compareSemver(workerVersion, PRODUCT_VERSION) <= 0;
+    // A Worker OLDER than the release the manifest records is a stale deploy:
+    // the manifest is written only after a verified update, so an older kit's
+    // `brain deploy` or `brain rollback --yes` put that Worker back afterwards.
+    // This CLI's update replaces it as long as this CLI is not older than the
+    // recorded release (otherwise update is a downgrade and refuses anyway).
+    // Its queue is read in the mode it reports, so an active stale Worker with
+    // queued work gets "wait", a paused one gets the paused refusal, and an
+    // empty queue proceeds. A Worker newer than this CLI never matches either,
+    // and neither does a versioned receipt claiming a pre-0.4.7 release: no
+    // shipped Worker before 0.4.7 reported its version on this route.
+    const staleDeploy = recordedVersion !== null && compareSemver(workerVersion, recordedVersion) < 0 &&
+      compareSemver(recordedVersion, PRODUCT_VERSION) <= 0 && !projection.isLegacyPre047Version(workerVersion);
+    if (!resumable && !staleDeploy) throw generationRefusal();
+    expectedVersion = workerVersion;
+    expectedDrainMode = workerMode;
+  } else if (workerVersion && workerVersion === recordedVersion &&
+      compareSemver(workerVersion, PRODUCT_VERSION) <= 0 && workerMode === "paused-for-upgrade") {
+    // A Worker paused on the version the manifest already records, no newer
+    // than this CLI: `brain rollback --yes` leaves exactly this and sends the
+    // owner to `brain update`, and a same-version update that stops inside its
+    // pause window leaves it too. Installing a newer CLI afterwards must not
+    // strand it, so an OLDER recorded release paused this way is resumable as
+    // well. Its queue is still read through the paused aggregate below, so
+    // queued or unreadable work still refuses; a Worker newer than this CLI
+    // never reaches this branch.
+    expectedDrainMode = workerMode;
+  }
+  let aggregate;
+  try {
+    aggregate = projection.validateVectorProjectionAggregateReceipt(body, {
+      expectedVersion,
+      expectedBackend: "d1",
+      expectedDrainMode,
+    });
+  } catch (error) {
+    if (workerVersion && workerMode && [
+      "UPDATE_PREVIEW_DEPLOYED_GENERATION_MISMATCH",
+      "UPDATE_PREVIEW_DEPLOYED_DRAIN_PAUSED",
+    ].includes(error?.code)) {
+      throw generationRefusal();
+    }
+    throw error;
+  }
+  // The shared validator decides every shape: a pre-summary Worker's exact
+  // receipt, a bounded exact count, or a capped count that only proves
+  // "more than 10,000" and is never zero.
+  return {
+    pending: aggregate.queue.pending,
+    pendingIsCapped: aggregate.queue.pending_is_capped === true,
+    paused: aggregate.vector_drain_mode === "paused-for-upgrade",
+  };
+}
+
+/**
+ * Whether a pre-0.4.7 projection can become query-ready by draining its queue.
+ *
+ * v0.4.6's `brain rollback --yes` restores D1, marks the projection
+ * bootstrap_required and leaves the Worker paused; its own output says a
+ * clean index must be recreated under supervised recovery before active use,
+ * because D1 cannot enumerate the vectors written after the bookmark. A
+ * provider count ABOVE the D1 count is that same signature (index-only
+ * vectors a drain can never remove), and update preview's shared verdict
+ * treats every excess as projection_excess for the same reason. For either,
+ * returning the Worker to active drains the queue but never reaches
+ * query-ready, so update must not advise it. A short count the queued
+ * upserts do not cover is left to the Worker's own count-mismatch advice once
+ * active (reindex rebuilds missing vectors), so it is not flagged here.
+ * Returns null for an intact projection.
+ */
+function legacyProjectionRecovery(aggregate) {
+  const counts = { expected_vectors: aggregate.expected_vectors, actual_vectors: aggregate.actual_vectors };
+  if (aggregate.readiness_reason === "projection_bootstrap_required") {
+    return Object.freeze({ cause: "bootstrap_required", ...counts });
+  }
+  if (aggregate.actual_vectors > aggregate.expected_vectors) {
+    return Object.freeze({ cause: "provider_excess", ...counts });
+  }
+  return null;
+}
+
+/**
+ * Which writer mode a pre-0.4.7 Worker is in, from its public /health.
+ *
+ * The v0.4.6 documents envelope carries no drain mode, and a v0.4.6 Worker
+ * paused for an upgrade never drains (its scheduled handler returns early), so
+ * "wait until query-ready" would be impossible advice for queued work there.
+ * Every pre-0.4.7 release reports the pause on public /health as both
+ * `status` and `vector_drain_mode`, beside its own version. No admin key is
+ * sent. Any unreadable, oversized, non-legacy or self-contradicting answer is
+ * null: the queued work still refuses, only the advice changes.
+ */
+async function readLegacyUpdateDrainMode(documentsUrl, { request, readAggregate, projection }) {
+  let body;
+  try {
+    const response = await request(new URL("/health", documentsUrl).href, {}, {
+      timeoutMs: UPDATE_BACKLOG_READ_TIMEOUT_MS,
+      what: "the update drain-mode check",
+    });
+    if (!response || response.ok !== true || response.status !== 200) return null;
+    body = await readAggregate(response);
+  } catch {
+    return null;
+  }
+  const version = updateBacklogSemver(body?.version);
+  if (!version || !projection.isLegacyPre047Version(version)) return null;
+  if (!UPDATE_BACKLOG_DRAIN_MODES.has(body.vector_drain_mode)) return null;
+  const paused = body.vector_drain_mode === "paused-for-upgrade";
+  if (body.status !== (paused ? "paused-for-upgrade" : "ok")) return null;
+  return { version, paused };
+}
+
+/**
+ * Read update's fail-closed queue gate from the authenticated aggregate used
+ * by health and post-ingest reporting. Public /health does not carry backlog
+ * depth, and a missing or malformed private receipt must never become zero.
+ *
+ * Only a 5xx, a D1 CPU-reset body, or a transport failure is retried. 401, 403
+ * and 404 are answers, not busy moments, and every other refusal (a partial
+ * receipt, a non-200 2xx, an oversized body) stays a single-read refusal. The
+ * thrown error carries the number of reads tried and, for a well-formed receipt
+ * from a generation this manifest cannot resume, the validated version strings
+ * and writer mode. It never carries a body, URL, key, or transport detail.
+ */
+export async function readUpdateBacklog(manifestPath, options = {}) {
+  const pinManifest = options.pinManifest ?? pinUpdateManifest;
+  const revalidateManifest = options.revalidateManifest ?? revalidateUpdateManifest;
+  const resolveDocumentsUrl = options.resolveDocumentsUrl ?? updatePreviewDocumentsUrl;
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const request = options.http ?? http;
+  const readAggregate = options.readAggregateResponse ?? readUpdatePreviewAggregateResponse;
+  const sleep = options.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
+  const retryDelays = options.retryDelaysMs ?? UPDATE_BACKLOG_RETRY_DELAYS_MS;
+  const projection = options.previewLib ?? await updatePreviewLib();
+  let pin;
+  let documentsUrl;
+  let adminKey;
+  let recordedVersion;
+  try {
+    pin = pinManifest(manifestPath);
+    const rawVersion = pin.manifest?.brain?.version;
+    recordedVersion = rawVersion === undefined || rawVersion === null ? null : updateBacklogSemver(rawVersion);
+    if (rawVersion !== undefined && rawVersion !== null && !recordedVersion) {
+      throw new TypeError("the manifest product version is invalid");
+    }
+  } catch {
+    throw updateBacklogReadFailure(0);
+  }
+  const rawDomain = pin.manifest?.brain?.domain;
+  if (rawDomain === undefined || rawDomain === null || rawDomain === "") {
+    // A legacy manifest may carry no hostname; deploy persists workers.dev
+    // only outside update. Resolve it read-only when the caller already holds
+    // Cloudflare access, as health does; otherwise say no read was sent.
+    if (typeof options.resolveBrainDomain !== "function") {
+      throw updateBacklogReadFailure(0, { missingAddress: true });
+    }
+    try {
+      const resolvedDomain = await options.resolveBrainDomain(pin.manifest);
+      documentsUrl = resolveDocumentsUrl({ brain: { domain: resolvedDomain } });
+    } catch {
+      throw updateBacklogReadFailure(0);
+    }
+  }
+  try {
+    documentsUrl ??= resolveDocumentsUrl(pin.manifest);
+    adminKey = resolveKey(pin.target, {
+      ignoreEnvironment: true,
+      read(path) {
+        if (resolve(path) !== pin.target) {
+          throw new TypeError("the pinned manifest identity changed during credential lookup");
+        }
+        return pin.raw;
+      },
+    });
+  } catch {
+    throw updateBacklogReadFailure(0);
+  }
+  if (typeof adminKey !== "string" || !adminKey) {
+    throw updateBacklogReadFailure(0);
+  }
+
+  const maxAttempts = retryDelays.length + 1;
+  let attempts = 0;
+  let generation = null;
+  try {
+    while (true) {
+      attempts += 1;
+      let response;
+      let body;
+      let responseFailed = false;
+      let transient = false;
+      try {
+        // A replacement during credential lookup or a backoff must stop before
+        // the durable key can reach a destination derived from different bytes.
+        revalidateManifest(pin, "update backlog live request");
+      } catch {
+        throw updateBacklogReadFailure(attempts - 1);
+      }
+      try {
+        response = await request(documentsUrl, {
+          headers: { "X-Admin-Key": adminKey },
+        }, { timeoutMs: UPDATE_BACKLOG_READ_TIMEOUT_MS, what: "the update backlog check" });
+      } catch {
+        // No response at all: a timeout, reset, or DNS failure.
+        responseFailed = true;
+        transient = true;
+      }
+      // A body that is oversized, truncated, or not JSON is a malformed answer,
+      // not a busy database, so it refuses on this read.
+      if (!responseFailed && (!response || response.ok !== true || response.status !== 200)) {
+        responseFailed = true;
+        const status = Number(response?.status);
+        if (status >= 500) {
+          transient = true;
+        } else if (![401, 403, 404].includes(status)) {
+          // Only the D1 error text is inspected, and it never leaves here.
+          try {
+            const refused = await readAggregate(response);
+            transient = typeof refused?.error === "string" && D1_CPU_RESET_PATTERN.test(refused.error);
+          } catch { /* an unreadable refusal is not evidence of a busy database */ }
+        }
+      } else if (!responseFailed) {
+        try {
+          body = await readAggregate(response);
+        } catch {
+          responseFailed = true;
+        }
+      }
+
+      try {
+        // Close the same local identity after every completed or refused response.
+        // Raw body details and validator codes stay behind this fixed public error.
+        revalidateManifest(pin, "update backlog live receipt");
+        if (responseFailed) throw new TypeError("the update backlog response was unreadable");
+        if (typeof body?.error === "string" && D1_CPU_RESET_PATTERN.test(body.error)) {
+          transient = true;
+          throw new TypeError("the update backlog response was a database reset");
+        }
+        let queue;
+        try {
+          queue = updateBacklogReceiptQueue(body, recordedVersion, projection);
+        } catch (error) {
+          generation = error?.generation ?? null;
+          throw error;
+        }
+        if (queue.legacy && queue.pending > 0) {
+          // Queued work refuses in either mode; the mode only decides which
+          // advice is true. An empty legacy queue proceeds paused or active,
+          // so no extra read is sent for it.
+          const legacyMode = await readLegacyUpdateDrainMode(documentsUrl, { request, readAggregate, projection });
+          revalidateManifest(pin, "update backlog drain-mode receipt");
+          // A projection a rollback left unusable changes the advice only
+          // where it would otherwise be "deploy the older release": paused, or
+          // a mode that could not be read. An active Worker keeps its advice.
+          const recovery = queue.projectionRecovery && (legacyMode === null || legacyMode.paused)
+            ? { projection_recovery: queue.projectionRecovery }
+            : {};
+          return Object.freeze({
+            pending: queue.pending,
+            ...(legacyMode === null
+              ? { drain_mode_unknown: true }
+              : legacyMode.paused
+                ? { paused_for_upgrade: true, legacy_worker_version: legacyMode.version }
+                : {}),
+            ...recovery,
+          });
+        }
+        return Object.freeze({
+          pending: queue.pending,
+          ...(queue.pendingIsCapped ? { pending_is_capped: true } : {}),
+          ...(queue.paused ? { paused_for_upgrade: true } : {}),
+        });
+      } catch {
+        if (generation) throw updateBacklogReadFailure(attempts, { generation });
+        if (!transient || attempts >= maxAttempts) throw updateBacklogReadFailure(attempts);
+      }
+      await sleep(retryDelays[attempts - 1]);
+    }
+  } finally {
+    adminKey = null;
+  }
+}
+
+/** A capped receipt is a lower bound, so it is never shown as an exact count. */
+function updateBacklogPendingLabel(backlog) {
+  return backlog?.pending_is_capped === true ? "over 10,000" : String(backlog?.pending);
+}
+
+function updateBacklogHasQueuedWork(backlog) {
+  return backlog?.pending_is_capped === true || backlog?.pending > 0;
+}
+
+// What each gate can truthfully say it left untouched.
+const UPDATE_BACKLOG_GATE_CONSEQUENCE = Object.freeze({
+  initial: "Nothing was changed.",
+  "pre-pause": "The paused deployment was not started.",
+});
+
+/** One sentence of evidence that draining cannot make a legacy projection query-ready, or null. */
+function updateBacklogProjectionRecoveryEvidence(recovery) {
+  if (!recovery || typeof recovery !== "object") return null;
+  if (recovery.cause === "bootstrap_required") {
+    return "Its database marks the semantic index for a full rebuild, as a rollback does, so draining the queue " +
+      "cannot make this Brain query-ready.";
+  }
+  if (recovery.cause === "provider_excess" && Number.isSafeInteger(recovery.expected_vectors) &&
+      Number.isSafeInteger(recovery.actual_vectors)) {
+    return `Its semantic index holds ${recovery.actual_vectors} vectors but its database expects ` +
+      `${recovery.expected_vectors}; draining cannot remove vectors that exist only in the index, so it cannot ` +
+      "make this Brain query-ready.";
+  }
+  return null;
+}
+
+/**
+ * The owner-facing refusal for queued work. A Brain still paused by an earlier
+ * attempt does not drain, so "wait" would be false advice there. At the
+ * pre-pause gate, the wording follows what the first gate saw: work it did not
+ * see was gained, work it saw (and `--force` passed) is still there.
+ */
+function updateBacklogQueuedMessage(backlog, gate, initialBacklog = null) {
+  const pending = updateBacklogPendingLabel(backlog);
+  const consequence = UPDATE_BACKLOG_GATE_CONSEQUENCE[gate];
+  const recoveryEvidence = updateBacklogProjectionRecoveryEvidence(backlog?.projection_recovery);
+  if (recoveryEvidence && backlog?.paused_for_upgrade === true &&
+      typeof backlog.legacy_worker_version === "string") {
+    // The evidence says the projection cannot become query-ready by draining,
+    // which is what a rollback leaves. Deploying the older release would
+    // un-pause a rolled-back Brain, so the advice is the same support and
+    // supervised-recovery path any other paused Brain gets. The pause is
+    // named neutrally: a rollback, not an unfinished update, may have made it.
+    const release = backlog.legacy_worker_version;
+    return renderCliCommands(
+      `This Brain's Worker is version ${release}, it is paused, and it has ${pending} queued search update(s). ` +
+        `${recoveryEvidence} ${consequence} Do not run \`brain deploy\` to return it to active: the queue would ` +
+        "drain, but this Brain would still not become query-ready. Do not run `brain rollback` or `brain drain`, " +
+        "and do not clear VECTOR_DRAIN_MODE by hand. Its semantic index must be recreated under supervised " +
+        "recovery before this Brain is used again. Run `brain health` and keep its output for support."
+    );
+  }
+  if (recoveryEvidence && backlog?.drain_mode_unknown === true) {
+    return renderCliCommands(
+      `This Brain has ${pending} queued search update(s), and its public health check could not be read to tell ` +
+        `whether its Worker is paused. ${recoveryEvidence} ${consequence} Do not run \`brain deploy\`, ` +
+        "`brain rollback` or `brain drain`, and do not clear VECTOR_DRAIN_MODE by hand. Its semantic index must " +
+        "be recreated under supervised recovery before this Brain is used again. Run `brain health` and keep its " +
+        "output for support."
+    );
+  }
+  if (backlog?.paused_for_upgrade === true && typeof backlog.legacy_worker_version === "string") {
+    // A paused pre-0.4.7 Worker never drains, and this CLI's update will not
+    // continue over its queue. Only that release's own deploy returns it to
+    // active, but that CLI runs the Wrangler runtimes UPDATE-043 retires (the
+    // legacy session's refresh and login, the older named-profile token read),
+    // and this tree cannot prove those never load the affected image decoder.
+    // So the owner is sent to supervised recovery, not to the older release. A
+    // rollback would restore D1 over the queued work instead.
+    const release = backlog.legacy_worker_version;
+    return renderCliCommands(
+      `This Brain's Worker is version ${release}, it is still paused for an update that did not finish, and it ` +
+        `has ${pending} queued search update(s). A paused ${release} Worker does not process its queue, so waiting ` +
+        `will not clear it, and this update will not continue over queued work. ${consequence} Returning it to ` +
+        `active needs the ${release} release's own tools, which use an older Wrangler runtime that this release ` +
+        "replaced for a security advisory, so it is done only under supervised recovery. Do not run `brain deploy` " +
+        "with either release, do not run `brain rollback` or `brain drain`, and do not clear VECTOR_DRAIN_MODE by " +
+        "hand. Run `brain health` and keep its output for support."
+    );
+  }
+  if (backlog?.drain_mode_unknown === true) {
+    return renderCliCommands(
+      `This Brain has ${pending} queued search update(s), and its public health check could not be read to tell ` +
+        `whether its Worker is paused for an update that did not finish. ${consequence} Run \`brain health\`. ` +
+        "If it says query-ready later, run the update again. If it reports the Worker paused for an upgrade, " +
+        "keep that output for support; do not run `brain rollback` or clear VECTOR_DRAIN_MODE by hand."
+    );
+  }
+  if (backlog?.paused_for_upgrade === true) {
+    return renderCliCommands(
+      `This Brain is still paused for an update that has not finished, and it has ${pending} queued search ` +
+        "update(s). A paused Brain does not process its queue, so waiting will not clear it, and this update will " +
+        `not continue over queued work. ${consequence} Do not run \`brain drain\` or clear VECTOR_DRAIN_MODE by hand. ` +
+        "Run `brain health` and keep its output for support."
+    );
+  }
+  if (gate === "initial") {
+    return renderCliCommands(
+      `This Brain is still processing ${pending} queued search update(s). Updating now would pause it mid-queue. ` +
+        "Nothing was changed. Wait until `brain health` says query-ready, then run the update again."
+    );
+  }
+  const change = !initialBacklog
+    ? "has"
+    : updateBacklogHasQueuedWork(initialBacklog) ? "still has" : "gained";
+  return renderCliCommands(
+    `This Brain ${change} ${pending} queued search update(s) before the paused deployment. ` +
+      "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again."
+  );
+}
+
+/**
+ * The owner-facing refusal for an unreadable backlog. It names how many reads
+ * were tried and the one safe remedy; a looping drain adds load to the same
+ * database that just refused a read. A receipt from a generation this manifest
+ * cannot resume is an answer, not a busy moment, so it gets no "wait" advice.
+ */
+function updateBacklogUnreadableMessage(error, gate = "initial") {
+  const consequence = UPDATE_BACKLOG_GATE_CONSEQUENCE[gate];
+  const generation = error?.generation;
+  if (generation) {
+    const worker = generation.workerVersion
+      ? `version ${generation.workerVersion} (${generation.workerMode})`
+      : "an unrecognized version";
+    const recorded = generation.recordedVersion ? `records ${generation.recordedVersion}` : "records no version";
+    return renderCliCommands(
+      `This Brain's Worker reports ${worker}, but this manifest ${recorded} and this CLI is ${PRODUCT_VERSION}. ` +
+        "That is not an earlier update of this CLI to resume, so its queued search updates cannot be bound to " +
+        `this manifest. ${consequence} Run \`brain health\` to see what is serving; if the Worker is newer than ` +
+        "this CLI, install that release, then run `brain update` again."
+    );
+  }
+  if (error?.attempts === 0) {
+    // The admin key or Brain address could not be loaded, so no read was sent
+    // and waiting cannot help.
+    if (gate === "initial") {
+      return renderCliCommands(
+        "The authenticated documents backlog read could not be sent: this computer's admin key or Brain address " +
+          "could not be loaded. Nothing was changed. Fix that, then run `brain update` again."
+      );
+    }
+    return renderCliCommands(
+      "The immediate pre-pause documents backlog read could not be sent: this computer's admin key or Brain " +
+        "address could not be loaded, so no read was sent. The paused deployment was not started. " +
+        "Fix that, then run `brain update` again."
+    );
+  }
+  const reads = Number.isSafeInteger(error?.attempts) && error.attempts > 0 ? error.attempts : 1;
+  if (gate === "initial") {
+    return renderCliCommands(
+      `The authenticated documents backlog read failed after ${reads} read${reads === 1 ? "" : "s"}, ` +
+        "so this Brain's queued search updates could not be read. Updating now could pause it mid-queue. " +
+        "Nothing was changed. A large Brain's database can be briefly too busy to answer: wait a few minutes, " +
+        "then run `brain update` again. Never run `brain drain` in a loop to get past this."
+    );
+  }
+  return renderCliCommands(
+    `The immediate pre-pause documents backlog read failed after ${reads} read${reads === 1 ? "" : "s"}, ` +
+      "so this Brain's queued search updates could not be read. The paused deployment was not started. " +
+      "A large Brain's database can be briefly too busy to answer: wait a few minutes, then run " +
+      "`brain update` again. Never run `brain drain` in a loop to get past this."
+  );
 }
 
 async function reportBacklog(manifestPath) {
@@ -23571,6 +24478,7 @@ export function classifyCliCredentialBoundary(command, argv = []) {
     return "update-preview";
   }
   let adoptionSeen = false;
+  let forceSeen = false;
   let positionalCount = 0;
   for (const token of argv) {
     if (!token || token.length > 4_096 || /[\u0000-\u001f\u007f]/u.test(token)) {
@@ -23579,6 +24487,11 @@ export function classifyCliCredentialBoundary(command, argv = []) {
     if (token === "--adopt-cloudflare-profile") {
       if (adoptionSeen) return "update-preview";
       adoptionSeen = true;
+      continue;
+    }
+    if (token === "--force") {
+      if (forceSeen) return "update-preview";
+      forceSeen = true;
       continue;
     }
     if (token.startsWith("-")) return "update-preview";
@@ -23601,8 +24514,10 @@ export function classifyCliCredentialBoundary(command, argv = []) {
  */
 export function updateCommandTarget(positional, flags = {}) {
   if (typeof positional === "string" && positional && !positional.startsWith("--")) return positional;
-  const swallowed = flags?.["adopt-cloudflare-profile"];
-  if (typeof swallowed === "string" && swallowed && !swallowed.startsWith("--")) return swallowed;
+  for (const name of ["adopt-cloudflare-profile", "force"]) {
+    const swallowed = flags?.[name];
+    if (typeof swallowed === "string" && swallowed && !swallowed.startsWith("--")) return swallowed;
+  }
   return undefined;
 }
 
@@ -23703,6 +24618,11 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
     delete oauthOptions[reserved];
   }
   if (!oauthOptions.workingDirectory) oauthOptions.workingDirectory = dirname(resolve(manifestPath));
+  // The same workers.dev need routine commands apply: a custom-domain Brain can
+  // record its sign-in on an account that never registered a subdomain.
+  if (oauthOptions.workersSubdomainRequired === undefined) {
+    oauthOptions.workersSubdomainRequired = brainNeedsWorkersDevSubdomain(manifestPath);
+  }
   const runner = options.withOAuthSession ?? withCloudflareOAuthSession;
   let session;
   try {
@@ -24114,6 +25034,7 @@ async function cmdSetupInteractive(manifestPath) {
     },
     {
       manifestPath: target,
+      resumeCommand: `brain setup ${commandPath(displayPath(target))}`,
       accountId,
       authProfile,
       freshOAuth: !resumed && !tokenPath,
@@ -24128,7 +25049,7 @@ async function cmdSetupInteractive(manifestPath) {
 }
 
 async function cmdUpgradeInteractive(manifestPath) {
-  return withManifestCloudflareControl(manifestPath, () => cmdUpgrade(manifestPath));
+  return withManifestCloudflareControl(manifestPath, () => cmdUpgrade(manifestPath), { command: "upgrade" });
 }
 
 /** Run a manifest-bound control-plane command through its exact saved custody. */
@@ -24136,8 +25057,14 @@ export async function withManifestCloudflareControl(manifestPath, action, option
   const binding = manifestCloudflareControlBinding(manifestPath);
   const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const automationToken = !interactive && Boolean(process.env.CLOUDFLARE_API_TOKEN);
+  const { command, ...controlOptions } = options;
   return (options.withCloudflareControl ?? withCloudflareControlCredential)(action, {
-    ...options,
+    ...controlOptions,
+    // A refusal the owner fixes outside the installer names the exact command
+    // to resume with, instead of "the same command" they may no longer see.
+    ...(command && !controlOptions.resumeCommand
+      ? { resumeCommand: `brain ${command} ${commandPath(displayPath(manifestPath))}` }
+      : {}),
     manifestPath,
     accountId: binding.accountId,
     authProfile: binding.authProfile,
@@ -25625,9 +26552,11 @@ export function dispatchUpdateCli(argv = process.argv.slice(3), options = {}) {
   const boundary = options.boundaryCommand ?? classifyCliCredentialBoundary("update", argv);
   if (boundary !== "update") return cmdUpdatePreview(argv, options.previewOptions || {});
   const flags = parseFlags(argv);
+  assertKnownFlags(flags, ["adopt-cloudflare-profile", "force"], "brain update");
   return cmdUpdate(updateCommandTarget(argv[0], flags), {
     ...(options.updateOptions || {}),
     adoptConsent: cloudflareAdoptionConsent(flags),
+    forceQueuedUpdate: flags.force !== undefined && flags.force !== false,
   });
 }
 
@@ -26304,6 +27233,52 @@ export async function cmdUpdate(manifestPath, options = {}) {
         "future updates will work from any folder."
     );
   }
+  const forceQueuedUpdate = options.forceQueuedUpdate === true;
+  let backlog = null;
+  // Replacing adoption, verification, or upgrade is a dependency-injection
+  // seam used by their existing focused tests, not an installed CLI path. A
+  // caller that replaces one may inject this read too when exercising the
+  // queue decision. The real command always takes the production reader here.
+  const readBacklog = options.readUpdateBacklog ??
+    (options.adoptCloudflareAuthProfile || options.cmdVerify || options.cmdUpgrade
+      ? null
+      : readUpdateBacklog);
+  if (readBacklog) {
+    try {
+      backlog = await readBacklog(installed.path, options.updateBacklogOptions || {});
+      if (!backlog || typeof backlog !== "object" || Array.isArray(backlog) ||
+          !Number.isSafeInteger(backlog.pending) || backlog.pending < 0) {
+        throw new Error("authenticated documents backlog read failed");
+      }
+    } catch (error) {
+      backlog = null;
+      if (error?.missingAddress === true) {
+        // Resolving workers.dev needs Cloudflare access this step does not hold
+        // yet. The pre-pause gate makes the same read with that access, before
+        // anything on the Brain changes, and refuses there if it cannot.
+        info(renderCliCommands(
+          "This manifest records no Brain address, so no queued-update read was sent yet. The same read runs once " +
+            "Cloudflare access is confirmed, immediately before the paused deployment."
+        ));
+      } else {
+        if (!forceQueuedUpdate) die(updateBacklogUnreadableMessage(error, "initial"));
+        warn(renderCliCommands(
+          "The first queued search update check could not read an empty queue. `--force` continues past this " +
+            "first check only; the final check just before the paused deployment reads the queue again and still " +
+            "refuses unless it is readable and empty."
+        ));
+      }
+    }
+  }
+  if (updateBacklogHasQueuedWork(backlog)) {
+    if (!forceQueuedUpdate) die(updateBacklogQueuedMessage(backlog, "initial"));
+    warn(renderCliCommands(
+      `This Brain ${backlog.paused_for_upgrade === true ? "has" : "is still processing"} ` +
+        `${updateBacklogPendingLabel(backlog)} queued search update(s). ` +
+        "`--force` continues past this first check only; the final check just before the paused deployment " +
+        "reads the queue again and still refuses queued work."
+    ));
+  }
   const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const automationToken = !interactive && Boolean(process.env.CLOUDFLARE_API_TOKEN);
   // An install written before the named-profile field has no saved custody, so
@@ -26344,7 +27319,7 @@ export async function cmdUpdate(manifestPath, options = {}) {
     revalidateUpdateManifest(pin, "update verification");
     const upgradeResult = await (options.cmdUpgrade ?? cmdUpgrade)(
       pin.target,
-      options.upgradeOptions || {},
+      backlog ? { ...(options.upgradeOptions || {}), initialUpdateBacklog: backlog } : options.upgradeOptions || {},
     );
     if (installed.source !== "remembered") {
       try {
@@ -26375,6 +27350,7 @@ export async function cmdUpdate(manifestPath, options = {}) {
   }, {
     ...options,
     manifestPath: pin.target,
+    resumeCommand: options.resumeCommand || `brain update ${commandPath(displayPath(pin.target))}`,
     accountId: binding.accountId,
     authProfile: binding.authProfile,
     forceToken: options.forceToken === true || automationToken,
@@ -27771,10 +28747,10 @@ const commands = {
   "financial-picture": cmdFinancialPicture,
   doctor: dispatchDoctor,
   whatsnew: cmdWhatsnew,
-  verify: (path) => withManifestCloudflareControl(path, () => cmdVerify(path)),
-  provision: (path) => withManifestCloudflareControl(path, () => cmdProvision(path)),
-  deploy: (path) => withManifestCloudflareControl(path, () => cmdDeploy(path)),
-  secrets: (path) => withManifestCloudflareControl(path, () => cmdSecrets(path)),
+  verify: (path) => withManifestCloudflareControl(path, () => cmdVerify(path), { command: "verify" }),
+  provision: (path) => withManifestCloudflareControl(path, () => cmdProvision(path), { command: "provision" }),
+  deploy: (path) => withManifestCloudflareControl(path, () => cmdDeploy(path), { command: "deploy" }),
+  secrets: (path) => withManifestCloudflareControl(path, () => cmdSecrets(path), { command: "secrets" }),
   health: cmdHealth,
   test: cmdTest,
   "mcp-config": cmdMcpConfig,
@@ -27843,9 +28819,30 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "custom-api",
 ]);
 
+// Health proves the Brain over HTTPS with the admin key and must never refresh
+// or rewrite the owner's Wrangler login when it does not need one: with a saved
+// brain.domain it needs no Cloudflare access at all. Without one, the read-only
+// session lookup is the only way it finds the workers.dev address (`brain
+// update` never writes brain.domain), so that manifest keeps the entry-point
+// read. An unreadable manifest keeps it too; health then refuses on its own.
+const WRANGLER_SESSION_EXEMPT_WITH_SAVED_DOMAIN = new Set(["health"]);
+
+export function manifestHasSavedBrainDomain(manifestPath, { readFile = readFileSync } = {}) {
+  if (typeof manifestPath !== "string" || !manifestPath) return false;
+  try {
+    const domain = JSON.parse(readFile(manifestPath, "utf8"))?.brain?.domain;
+    return typeof domain === "string" && domain.trim() !== "";
+  } catch {
+    return false;
+  }
+}
+
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
   if (typeof run !== "function") throw new TypeError("a CLI command function is required");
-  if (WRANGLER_SESSION_EXEMPT_COMMANDS.has(String(command || ""))) {
+  const name = String(command || "");
+  if (WRANGLER_SESSION_EXEMPT_COMMANDS.has(name) ||
+      (WRANGLER_SESSION_EXEMPT_WITH_SAVED_DOMAIN.has(name) &&
+        (options.manifestHasSavedDomain ?? manifestHasSavedBrainDomain)(options.manifestPath))) {
     return Promise.resolve().then(run);
   }
   const withWrangler = options.withWranglerSession ?? withWranglerSessionIfNeeded;
@@ -27998,6 +28995,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain update     [manifest] --adopt-cloudflare-profile  approve the one-time Cloudflare
                                            browser sign-in from a session with no terminal
                                            (an agent). Same as BRAIN_ADOPT_CLOUDFLARE_PROFILE=1
+    brain update     [manifest] --force     continue past the first queued search update check;
+                                           the final check before the pause still refuses queued or unreadable work
     brain whatsnew   [manifest]            what changed in this version, and are you on it
     brain status     <manifest>            versions, pending migrations, upgrade history
     brain sources    <manifest>            complete read-only D1 source inventory; --json for Optimize
@@ -28079,7 +29078,9 @@ if (IS_MAIN) {
 
   // Wrapped so a client who signed in with `wrangler login` never has to mint
   // or paste a token. Scoped to this one invocation.
-  runCliCommandWithCredentialBoundary(cliBoundaryCommand, () => commands[cmd](manifestPath)).catch((e) => {
+  runCliCommandWithCredentialBoundary(cliBoundaryCommand, () => commands[cmd](manifestPath), {
+    manifestPath,
+  }).catch((e) => {
     // Fatal is a failure this code ANTICIPATED and already explained: a missing
     // token, a free-tier account, a typo'd source name. A Drive removal review
     // is an intentional safety stop with the same no-crash treatment and a

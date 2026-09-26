@@ -915,7 +915,7 @@ export function assertDisposableRecoveryTargetEvalReceipt(value, binding) {
       ]) || !exactKeys(value.checks.health, [
         "status", "version", "accepting_documents", "before_snapshot_sha256",
         "after_snapshot_sha256", "active_version_unchanged", "projection_unchanged",
-      ]) || value.checks.health.status !== "pass" || value.checks.health.version !== "0.4.8" ||
+      ]) || value.checks.health.status !== "pass" || value.checks.health.version !== "0.4.9" ||
       value.checks.health.accepting_documents !== true ||
       !SHA256_RE.test(String(value.checks.health.before_snapshot_sha256 || "")) ||
       value.checks.health.after_snapshot_sha256 !== value.checks.health.before_snapshot_sha256 ||

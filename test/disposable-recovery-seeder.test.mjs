@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import {
   assertDisposableRecoverySeedReceipt,
+  DISPOSABLE_RECOVERY_EXPECTED_WORKER_VERSION,
   DISPOSABLE_RECOVERY_FIXTURE_SHA256,
   DISPOSABLE_RECOVERY_MARKER,
   DISPOSABLE_RECOVERY_SEED_BATCHES,
@@ -15,6 +17,8 @@ import {
   disposableRecoverySeedPlan,
   seedDisposableRecoveryFixture as seedDisposableRecoveryFixtureCore,
 } from "../operations/disposable-recovery-seeder.mjs";
+import { V048_DISPOSABLE_CAMPAIGN_VERSION } from "../operations/v048-disposable-campaign-contract.mjs";
+import { WORKER_VERSION } from "../worker/src/lib/version.js";
 import { createProductFixture } from "../worker/test/product-contract-fixture.mjs";
 
 const EXPECTED_FIXTURE_SHA256 = "7e8325d3014102e3509fd2f5dcc7ac78aded99dffac18c899e1dd2611cfba6c8";
@@ -126,12 +130,12 @@ function fakeBatchReceipt(documents, status = "created") {
 }
 
 function emptyInventory() {
-  return { version: "0.4.8", backend: "d1", vector_drain_mode: "active", rows: [] };
+  return { version: "0.4.9", backend: "d1", vector_drain_mode: "active", rows: [] };
 }
 
 function completeInventory(fixture = disposableRecoveryFixture()) {
   return {
-    version: "0.4.8",
+    version: "0.4.9",
     backend: "d1",
     vector_drain_mode: "active",
     vector_backlog: {
@@ -164,7 +168,7 @@ function completeInventory(fixture = disposableRecoveryFixture()) {
 
 function prefixInventory(documents, fixture = disposableRecoveryFixture()) {
   return {
-    version: "0.4.8",
+    version: "0.4.9",
     backend: "d1",
     vector_drain_mode: "active",
     rows: [{
@@ -708,4 +712,103 @@ test("CLI exposes a no-write aggregate plan and refuses execution-shaped argumen
   ], { cwd: new URL("../", import.meta.url), encoding: "utf8" });
   assert.equal(refused.status, 2);
   assert.match(refused.stderr, /^Usage:/u);
+});
+
+// The campaign pins one reviewed release literal per module rather than reading
+// package.json at run time. This test is what keeps those literals honest: a
+// version bump fails here, loudly, until the campaign's binding is re-reviewed.
+const SHIPPED_VERSION = JSON.parse(readFileSync(
+  new URL("../package.json", import.meta.url),
+  "utf8",
+)).version;
+const CAMPAIGN_VERSION_PIN_MODULES = Object.freeze([
+  "cloudflare-disposable-deployment-provider.mjs",
+  "cloudflare-recovery-adapter.mjs",
+  "disposable-recovery-deployment-receipt.mjs",
+  "disposable-recovery-field-acceptance.mjs",
+  "disposable-recovery-seeder.mjs",
+  "disposable-recovery-target-eval.mjs",
+  "locked-wrangler-runtime.mjs",
+  "v048-disposable-campaign-contract.mjs",
+]);
+// Dotted triples in campaign modules that are not the product release.
+const CAMPAIGN_NON_RELEASE_TRIPLES = Object.freeze({
+  "cloudflare-recovery-adapter.mjs": ["0.3.4"],
+  "locked-wrangler-runtime.mjs": ["22.15.0"],
+});
+
+test("every campaign version pin is the one version this package ships", () => {
+  const packageLock = JSON.parse(readFileSync(
+    new URL("../package-lock.json", import.meta.url),
+    "utf8",
+  ));
+  assert.equal(packageLock.version, SHIPPED_VERSION);
+  assert.equal(packageLock.packages[""].version, SHIPPED_VERSION);
+  assert.equal(WORKER_VERSION, SHIPPED_VERSION);
+  assert.equal(DISPOSABLE_RECOVERY_EXPECTED_WORKER_VERSION, SHIPPED_VERSION);
+  assert.equal(V048_DISPOSABLE_CAMPAIGN_VERSION, SHIPPED_VERSION);
+
+  // A bare dotted triple that is not part of a `v0.4.8`-style fixture name,
+  // IPv4 address, or longer dotted run. Fixture identity keeps its `v` prefix.
+  const releaseTriple = /(?<![\w.])(\d+\.\d+\.\d+)(?!\.?\d)/gu;
+  const operations = new URL("../operations/", import.meta.url);
+  const campaignModules = readdirSync(operations).filter((name) =>
+    /^(?:disposable-recovery-|v048-|cloudflare-disposable-)/u.test(name) ||
+    ["cloudflare-recovery-adapter.mjs", "locked-wrangler-runtime.mjs",
+      "verified-recovery.mjs", "private-aggregate-receipt.mjs",
+      "recovery-content-fingerprint.mjs"].includes(name)).sort();
+  const pinned = [];
+  for (const name of campaignModules) {
+    const source = readFileSync(new URL(name, operations), "utf8");
+    const triples = [...source.matchAll(releaseTriple)].map((match) => match[1]);
+    const allowed = CAMPAIGN_NON_RELEASE_TRIPLES[name] || [];
+    const releases = triples.filter((triple) => !allowed.includes(triple));
+    assert.deepEqual(
+      releases.filter((triple) => triple !== SHIPPED_VERSION),
+      [],
+      `${name} pins a release other than ${SHIPPED_VERSION}`,
+    );
+    if (releases.length > 0) pinned.push(name);
+  }
+  assert.deepEqual(pinned, [...CAMPAIGN_VERSION_PIN_MODULES]);
+});
+
+test("a Worker or receipt reporting any other version is refused under the shipped bytes", async () => {
+  const shippedEmpty = () => ({ ...emptyInventory(), version: SHIPPED_VERSION });
+  const shippedComplete = () => ({ ...completeInventory(), version: SHIPPED_VERSION });
+  const otherVersions = ["0.4.8", "0.4.10", "0.5.0", "1.0.0", `v${SHIPPED_VERSION}`, ""]
+    .filter((version) => version !== SHIPPED_VERSION);
+
+  for (const version of otherVersions) {
+    let writes = 0;
+    await assert.rejects(seedDisposableRecoveryFixture({
+      ingestBatch: async () => { writes++; },
+      readInventory: async () => ({ ...shippedEmpty(), version }),
+      now: () => FIXED_TIME,
+    }), (error) => error instanceof DisposableRecoverySeedError &&
+      error.code === "inventory_contract_mismatch" &&
+      error.may_have_written === false);
+    assert.equal(writes, 0);
+  }
+
+  let inventories = 0;
+  let batches = 0;
+  const receipt = await seedDisposableRecoveryFixture({
+    ingestBatch: async (documents) => fakeBatchReceipt(
+      documents,
+      batches++ < DISPOSABLE_RECOVERY_SEED_BATCHES ? "created" : "unchanged",
+    ),
+    readInventory: async () => (++inventories === 1 ? shippedEmpty() : shippedComplete()),
+    now: () => FIXED_TIME,
+  });
+  assert.equal(receipt.d1.worker_version, SHIPPED_VERSION);
+  assert.equal(assertDisposableRecoverySeedReceipt(receipt), true);
+  for (const version of otherVersions) {
+    const other = structuredClone(receipt);
+    other.d1.worker_version = version;
+    assert.throws(
+      () => assertDisposableRecoverySeedReceipt(other),
+      (error) => error.code === "seed_receipt_invalid",
+    );
+  }
 });

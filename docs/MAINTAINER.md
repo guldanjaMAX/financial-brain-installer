@@ -253,20 +253,27 @@ Never combine those into a broader claim than the evidence supports.
 
 ## Cut an immutable release
 
-The current 0.4.8/schema48 field candidate remains held. The earlier 0.4.7
-candidate was never tagged, published, or offered as a customer update; its
-identity is retired so its evidence cannot be mistaken for evidence from these
-changed bytes. At this freeze the current candidate's
-39-row audit has 35 unresolved incidents, no renewed deferrals, and four rows
-closed on reviewed evidence. A tag requests the release workflow; it never
+The current 0.4.9/schema48 field candidate remains held. The earlier 0.4.7
+and 0.4.8 candidates were never tagged, published, or offered as customer
+updates; their identities are retired so their evidence cannot be mistaken for
+evidence from these changed bytes. At this freeze the current candidate's
+40-row audit has 36 unresolved incidents, no renewed deferrals, and four rows
+closed on reviewed evidence. Since the held 0.4.8 candidate one clause was
+re-homed, not weakened:
+[ADR 007](./decisions/007-rehome-update-006-arm64-clause.md) moves UPDATE-006's
+Windows ARM64 clause into UPDATE-012. Against the last shipped v0.4.6, the
+UPDATE-036 and UPDATE-037 acceptance texts were also rewritten in the unshipped
+0.4.7/0.4.8 work; [UPDATE-AUDIT.md](./UPDATE-AUDIT.md) records both. A tag requests the release workflow; it never
 bypasses CI, unresolved incidents, owner acceptance, or the repository's
 immutable-release setting. Do not create or publish releases by hand to work
 around a failed workflow. The
-[0.4.8 candidate evidence plan](./release-evidence/v0.4.8-candidate-release-evidence-plan.md)
+[0.4.9 candidate evidence plan](./release-evidence/v0.4.9-candidate-release-evidence-plan.md)
 is planning only until a reviewed change binds it to the final candidate SHA.
 
 1. Keep package.json, both root lockfile versions, the manifest template, newest
-   changelog heading, README archive URLs, and current-version checks aligned.
+   changelog heading, README archive URLs, the Worker version constant,
+   `LOCKED_WRANGLER_LOCK_ROOT_VERSION` in
+   `operations/locked-wrangler-runtime.mjs`, and current-version checks aligned.
    Commit every required module, migration, test, and generated owner bundle.
    The release checkout must not contain a tracked node_modules link or depend
    on another worktree's dependencies. Run npm ci from the lockfile.
