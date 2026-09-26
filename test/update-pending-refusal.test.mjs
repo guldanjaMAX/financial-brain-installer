@@ -1288,11 +1288,25 @@ const V046_PAUSED_QUEUED_ENVELOPE = '{"backend":"d1",' + V046_ROWS + ',"vector_b
 const V046_PAUSED_QUEUED_MESSAGE = (pending, consequence) => renderCliCommands(
   `This Brain's Worker is version 0.4.6, it is still paused for an update that did not finish, and it has ${pending} ` +
     "queued search update(s). A paused 0.4.6 Worker does not process its queue, so waiting will not clear it, and " +
-    `this update will not continue over queued work. ${consequence} To let the queue drain, install the 0.4.6 ` +
-    "release and run `brain deploy` with it; that returns the 0.4.6 Worker to active. Wait until `brain health` " +
-    "says query-ready, then install this release again and run `brain update`. Do not run `brain rollback`, and do " +
-    "not clear VECTOR_DRAIN_MODE by hand.",
+    `this update will not continue over queued work. ${consequence} Returning it to active needs the 0.4.6 ` +
+    "release's own tools, which use an older Wrangler runtime that this release replaced for a security advisory, " +
+    "so it is done only under supervised recovery. Do not run `brain deploy` with either release, do not run " +
+    "`brain rollback` or `brain drain`, and do not clear VECTOR_DRAIN_MODE by hand. Run `brain health` and keep " +
+    "its output for support.",
 );
+
+// UPDATE-043 retires the Wrangler runtimes an older release's CLI would run
+// (the legacy session refresh and login, and its named-profile token read).
+// The no-sharp claim for those runtimes cannot be proved from this tree, so no
+// refusal may send the owner to them.
+function assertNoRetiredRuntimeRemedy(message) {
+  assert.doesNotMatch(message, /install the \d+\.\d+\.\d+ release|run `brain deploy` with it/u,
+    "the refusal must not send the owner to an older release's deploy");
+  assert.doesNotMatch(message, /wrangler@4\.73\.0|wrangler@4\.127\.1/u,
+    "the refusal must not name a retired Wrangler runtime");
+  assert.match(message, /supervised recovery/u, "the refusal names the supervised recovery path");
+  assert.match(message, /keep its output for support/u, "the refusal names the support evidence to keep");
+}
 
 const DRAIN_MODE_UNKNOWN_MESSAGE = (pending, consequence) => renderCliCommands(
   `This Brain has ${pending} queued search update(s), and its public health check could not be read to tell ` +
@@ -1301,11 +1315,12 @@ const DRAIN_MODE_UNKNOWN_MESSAGE = (pending, consequence) => renderCliCommands(
     "output for support; do not run `brain rollback` or clear VECTOR_DRAIN_MODE by hand.",
 );
 
-test("a paused v0.4.6 Worker with queued work refuses with advice that can drain it, never wait or rollback", async () => {
+test("a paused v0.4.6 Worker with queued work refuses to supervised recovery, never wait, rollback or old deploy", async () => {
   await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath, original }) => {
     const queued = JSON.parse(V046_PAUSED_QUEUED_ENVELOPE);
     const run = await throughBothGates(manifestPath, { first: queued, health: V046_HEALTH_PAUSED });
     assert.equal(run.error?.message, V046_PAUSED_QUEUED_MESSAGE(7, "Nothing was changed."));
+    assertNoRetiredRuntimeRemedy(run.error?.message || "");
     assert.doesNotMatch(run.error?.message || "", /mid-queue|few minutes|Updating now/u);
     assert.deepEqual(run.events, ["initial backlog read"]);
     assert.equal(run.initial.requests, 1);
@@ -1449,7 +1464,7 @@ function assertNothingDeployed(run) {
   assert.equal(run.cfPaths.some((path) => /\/workers\/scripts\//u.test(path)), false, JSON.stringify(run.cfPaths));
 }
 
-test("paused v0.4.6 with an intact projection and queued work: the decision is the older release's deploy", async () => {
+test("paused v0.4.6 with an intact projection and queued work: supervised recovery, not the older release's deploy", async () => {
   await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath, original }) => {
     for (const [envelope, pending] of [[V046_PAUSED_QUEUED_ENVELOPE, 7], [V046_PAUSED_SHORT_COVERED_ENVELOPE, 3]]) {
       const decision = await legacyDecision(manifestPath, envelope, V046_HEALTH_PAUSED);
@@ -1462,6 +1477,7 @@ test("paused v0.4.6 with an intact projection and queued work: the decision is t
 
       const run = await throughBothGates(manifestPath, { first: JSON.parse(envelope), health: V046_HEALTH_PAUSED });
       assert.equal(run.error?.message, V046_PAUSED_QUEUED_MESSAGE(pending, "Nothing was changed."));
+      assertNoRetiredRuntimeRemedy(run.error?.message || "");
       assert.deepEqual(run.events, ["initial backlog read"]);
       assertNothingDeployed(run);
     }

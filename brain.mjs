@@ -22958,16 +22958,20 @@ function updateBacklogQueuedMessage(backlog, gate, initialBacklog = null) {
   if (backlog?.paused_for_upgrade === true && typeof backlog.legacy_worker_version === "string") {
     // A paused pre-0.4.7 Worker never drains, and this CLI's update will not
     // continue over its queue. Only that release's own deploy returns it to
-    // active so the queue can drain. A rollback would restore D1 over the
-    // queued work instead.
+    // active, but that CLI runs the Wrangler runtimes UPDATE-043 retires (the
+    // legacy session's refresh and login, the older named-profile token read),
+    // and this tree cannot prove those never load the affected image decoder.
+    // So the owner is sent to supervised recovery, not to the older release. A
+    // rollback would restore D1 over the queued work instead.
     const release = backlog.legacy_worker_version;
     return renderCliCommands(
       `This Brain's Worker is version ${release}, it is still paused for an update that did not finish, and it ` +
         `has ${pending} queued search update(s). A paused ${release} Worker does not process its queue, so waiting ` +
-        `will not clear it, and this update will not continue over queued work. ${consequence} To let the queue ` +
-        `drain, install the ${release} release and run \`brain deploy\` with it; that returns the ${release} Worker ` +
-        "to active. Wait until `brain health` says query-ready, then install this release again and run " +
-        "`brain update`. Do not run `brain rollback`, and do not clear VECTOR_DRAIN_MODE by hand."
+        `will not clear it, and this update will not continue over queued work. ${consequence} Returning it to ` +
+        `active needs the ${release} release's own tools, which use an older Wrangler runtime that this release ` +
+        "replaced for a security advisory, so it is done only under supervised recovery. Do not run `brain deploy` " +
+        "with either release, do not run `brain rollback` or `brain drain`, and do not clear VECTOR_DRAIN_MODE by " +
+        "hand. Run `brain health` and keep its output for support."
     );
   }
   if (backlog?.drain_mode_unknown === true) {

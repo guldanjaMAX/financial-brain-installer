@@ -235,7 +235,11 @@ this changed candidate.
   same exact queue rule as update preview. A manifest with no Brain address
   is checked once Cloudflare access is confirmed, just before the paused
   deployment. A paused Brain with queued work is refused with the truth: it
-  does not process its queue while paused, so waiting will not clear it.
+  does not process its queue while paused, so waiting will not clear it. When
+  that paused Worker is from v0.4.6 or earlier, returning it to active needs
+  the older release's own tools, which use an older Wrangler runtime this
+  release replaced for a security advisory, so the refusal sends the owner to
+  supervised recovery and support instead of the older release's deploy.
   `--force` passes only the first check; help and its warning now say so. To
   check: after an update that stopped partway, `brain update` again reaches the
   paused deployment when `brain health` shows an empty queue.
