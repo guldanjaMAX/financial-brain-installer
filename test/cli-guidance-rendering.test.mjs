@@ -496,6 +496,9 @@ assert.match(reportHtml, /<span class="cmd">&amp; /, "the HTML report command is
 // The technician skill is copied onto the machine byte for byte and then read
 // by the owner's own assistant, which runs what it names in the owner's shell.
 const skillSource = readFileSync(new URL("skills/financial-brain-technician/SKILL.md", productRoot), "utf8");
+assert.match(skillSource, /brain folder <manifest> off.*keeps every[\s\S]{0,80}?document and removes nothing/i);
+assert.match(skillSource, /Never run `ingest --path` on a folder the Brain retired/i);
+assert.match(skillSource, /Never run `schedule[\s\S]{0,100}?--approve-removals`[\s\S]{0,50}?`forget` on that[\s\S]{0,40}?retired folder's source/i);
 /*
  * Detection here is deliberately INDEPENDENT of the alternation.
  *

@@ -468,6 +468,21 @@
             }
           }
         },
+        "upload": {
+          "type": "object",
+          "description": "Folders explicitly loaded from this machine. A folder retirement turns this block off when it exists but does not remove or rewrite any other setting.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "retired_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "The exact UTC retirement timestamp shared with corpora.local_folder. It is added only when the upload block already exists."
+            }
+          }
+        },
         "local_folder": {
           "type": "object",
           "description": "A local folder that reloads itself on a schedule, enforced by brain schedule <manifest> --install --folder and run by brain ingest <manifest> --path. This is what makes \"drop it in a folder you already ingest\" true for a folder that is not inside Google Drive. Each tick reuses the local ingest's content-hash resume state, so a new file is added, a changed file is re-sent, an unchanged file costs one read, and a file that is gone is removed through the same aggregate removal plan every other source uses. The schedule knob is operations.folder_ingest_cron (default: hourly). macOS only today: it installs as a per-user LaunchAgent.",
@@ -489,6 +504,53 @@
               "maxLength": 64,
               "default": "documents",
               "description": "The named source this folder loads under, which is also the undo: brain forget <manifest> --source <name> removes exactly what it loaded."
+            },
+            "retired_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "A non-empty UTC timestamp makes retirement active, regardless of enabled."
+            },
+            "retired_path": {
+              "type": "string",
+              "description": "The exact previous path value, preserved without normalization."
+            },
+            "retired_source": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]*$",
+              "maxLength": 64,
+              "description": "The source protected from any later folder walk. It is documents when the original declaration had no source."
+            },
+            "retired_identity": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "The direct directory identity captured at retirement, or null when the path could not be identified safely.",
+              "properties": {
+                "realpath": {
+                  "type": "string"
+                },
+                "dev": {
+                  "type": "string",
+                  "pattern": "^[0-9]+$"
+                },
+                "ino": {
+                  "type": "string",
+                  "pattern": "^[0-9]+$"
+                }
+              },
+              "required": [
+                "realpath",
+                "dev",
+                "ino"
+              ]
+            },
+            "retired_by": {
+              "enum": [
+                "brain folder off",
+                "settings-step folder-off"
+              ],
+              "description": "The writer that recorded the retirement. Readers never branch on this value."
             }
           }
         },

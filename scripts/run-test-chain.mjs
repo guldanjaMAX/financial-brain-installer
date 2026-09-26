@@ -13,6 +13,8 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node --test test/folder-off.test.mjs",
+  "node --test test/folder-retired-guard.test.mjs",
   "node --no-warnings test/d1-transient-fault.test.mjs",
   "node --no-warnings test/source-family-inventory-retry.test.mjs",
   "node --no-warnings test/d1-reset-drive-removal.test.mjs",

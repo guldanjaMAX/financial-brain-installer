@@ -13,6 +13,8 @@ offered as a customer update; its entries below ship for the first time in
 0.4.9, and its identity is retired so its evidence cannot be confused with
 this changed candidate.
 
+- **You can turn off the watched folder, and nothing you loaded is lost.** Earlier versions could re-read one folder on your computer on a schedule, which treated a moved file as a new document and a missing file as one to remove. Run `brain folder <manifest> off` once: it stops the scheduled read, keeps every document already loaded, and removes nothing. After that the folder is simply yours to keep, move or tidy. Changes to files there no longer reach your Brain, and anything that saved files into that folder for your Brain stops reaching it. Your email, calendar and other connections keep updating on their own. To check: `brain folder <manifest> status`.
+
 - **`brain health` no longer touches your Cloudflare browser sign-in when it
   does not need it.** Health checks the Brain over its own address with the
   admin key. When the manifest has a saved Brain address (`brain.domain`),
