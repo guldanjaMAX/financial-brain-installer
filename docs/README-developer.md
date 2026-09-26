@@ -6,7 +6,7 @@ Nothing runs on our infrastructure. Normal setup uses an owner-approved named
 Cloudflare browser profile in the owner's operating-system credential store; it
 does not create or copy an API token.
 
-**Status: unreleased 0.4.8/schema47 field candidate, held.** Provisioning,
+**Status: unreleased 0.4.8/schema48 field candidate, held.** Provisioning,
 retrieval, resumable ingest, guarded deletion, owner actions, exact entity
 scope, document grants, passkey observability, financial imports, provenance
 binding for eligible single-record local file ingests, bounded one-original
@@ -716,6 +716,15 @@ macOS token file is deleted only after the full credential record has been
 written to Keychain and read back exactly. Browser, Keychain, Expect, ACL, and
 DPAPI helper processes receive a small allowlisted environment rather than the
 Terminal's ambient credentials.
+On a Windows machine with Smart App Control on, Windows can intermittently
+refuse to start the freshly compiled, unsigned DPAPI helper, and a refused file
+stays refused. Both the admin key and the Google credential record share one
+retry in `operations/windows-dpapi-session.mjs`: only a launch refusal (a
+launch-class spawn error or the bridge's `launch` stage, with no output) disposes
+that helper and compiles a fresh one into a new private folder, for at most three
+launches. A DPAPI answer such as a wrong-user decrypt, and any compile failure,
+is never retried. The session metrics record `launch_refusals` and
+`max_launch_attempts`, which `brain doctor` and the release gate report.
 Planning and dry-run reads never trigger either legacy migration. A real source
 run performs migration only while holding both its source lease and the shared
 Google credential-record lease; `brain connect google` holds the shared lease
@@ -1256,6 +1265,39 @@ Read this before scoping an engagement.
   workspace, tenant, sandbox company, Plaid Item, or account receipt yet. Box
   and Airtable still have no native API connector; use a reviewed export or a
   watched folder where suitable.
+- **The custom business API source is locally proven only.** Its declarative
+  Worker path, strict HTTPS boundary, dedicated `CUSTOM_API_TOKEN_` secret
+  namespace, durable checkpointed job, exact-row-and-document verified
+  full-snapshot body-hash skip, row-level refusal counts, retries, compact
+  gap-aware D1 row history, durable active-job freshness, and platform-specific
+  secret ceremony have local mock and SQLite coverage. Sales rows require the
+  configured revenue stream; a missing stream can carry forward only prior
+  labeled rows for that exact store-month. Refused known keys retain their
+  prior verified row and last-seen time with an explicit dated not-refreshed marker, and every
+  affected document begins with the same fixed warning independently of its
+  template. A partial refusal reports ready with
+  warnings plus the refused count and keeps freshness degraded until a clean
+  pull clears it, while an all-refused pull leaves the current pointer unchanged
+  and exposes a source refusal with the current refusal count. Scheduled
+  failures preserve a closed issue code for reader-boundary owner guidance.
+  Known store, period, revenue-stream, and breed
+  identities are validated before they can authorize absence. Missing sales
+  streams are computed at the store-month boundary and named with that store
+  and month in both readable sales layouts. Inventory and
+  cost search contains only the current per-store snapshot; stored rows retain
+  every prior full value with effective dates and preserve disappearance gaps
+  before reappearance, and no daily history documents are created. Fully
+  stamped documents are validated before staging. An unchanged document version
+  is carried only after exact live readback; a missing version is regenerated,
+  and terminal map failure releases the active-job boundary for a fresh pull.
+  Owner-facing counts exclude staged and superseded versions. Promotion cleans obsolete physical
+  document versions through bounded guarded deletes before the job settles, so
+  their queued vector deletes run ahead of upserts. The public defaults allow a 30-second request, 5 MiB
+  response, and exactly 10,000 rows per endpoint. A 10,001st row refuses that
+  endpoint without staging the snapshot. The 1,612/407/1,721-row fixture stays
+  below 600 D1 statements per invocation and resumes after every slice
+  readback. No provider endpoint or deployed Brain has crossed this build.
+  Exact rows are deliberately not financial ledger or map entries yet.
 - **No official WhatsApp Business Platform connector.** Safe WhatsApp chat
   exports are supported. The separate live paired-device connector is
   unofficial, violates WhatsApp's Terms of Service, is opt-in, and is not
@@ -1699,7 +1741,7 @@ apply.
 Preview acquires the source lease before reading the private manifest, source
 file, saved credential, or Brain state. Under that lease it reads the complete
 authenticated source and observation history, prepares the exact one-file
-ingest envelope, checks the current schema-47 Brain and vector state, and seals
+ingest envelope, checks the current schema-48 Brain and vector state, and seals
 a state-bound plan. It releases the lease without changing Brain data,
 configuration, source receipts, cursors, or removals. Public output excludes the
 local root, locator, private retrieval query, content hashes, document IDs,

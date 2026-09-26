@@ -8,6 +8,8 @@
  * keyset pages and the opening/closing mutation marker must agree.
  */
 
+import { customApiVisibilitySql, readWithCustomApiVisibility } from "./custom-api-visibility.js";
+
 export const DOCUMENT_REPORT_DOCUMENT_PAGE_SIZE = 5_000;
 export const DOCUMENT_REPORT_CHUNK_PAGE_SIZE = 5_000;
 export const DOCUMENT_REPORT_MAX_DOCUMENT_PAGES = 100;
@@ -59,11 +61,14 @@ const REPORT_MARKER_SQL = `
     FROM install_state i
    WHERE i.id = 1`;
 
-const DOCUMENT_PAGE_SQL = `
+// A custom API source stages each job's physical document versions before one
+// pointer flip exposes them. Exact counts follow the same visibility as search:
+// only the current version of each logical custom API document is counted.
+const documentPageSql = (pointerTables = true) => `
   WITH page AS MATERIALIZED (
     SELECT rowid AS document_rowid, source, source_id, meta
-      FROM documents
-     WHERE rowid > ?1 AND rowid <= ?2 AND deleted_at IS NULL
+      FROM documents d
+     WHERE rowid > ?1 AND rowid <= ?2 AND deleted_at IS NULL${customApiVisibilitySql("d", pointerTables)}
      ORDER BY rowid
      LIMIT ?3
   )
@@ -72,7 +77,7 @@ const DOCUMENT_PAGE_SQL = `
     FROM page
    ORDER BY document_rowid`;
 
-const CHUNK_PAGE_SQL = `
+const chunkPageSql = (pointerTables = true) => `
   WITH page AS MATERIALIZED (
     SELECT id, chunk_uid, doc_uid
       FROM chunks
@@ -84,7 +89,7 @@ const CHUNK_PAGE_SQL = `
            CASE WHEN outbox.chunk_uid IS NULL THEN 0 ELSE 1 END AS pending
       FROM page
       CROSS JOIN documents ON documents.doc_uid = page.doc_uid
-                          AND documents.deleted_at IS NULL
+                          AND documents.deleted_at IS NULL${customApiVisibilitySql("documents", pointerTables)}
       LEFT JOIN vector_outbox outbox ON outbox.chunk_uid = page.chunk_uid
   ), page_state AS (
     SELECT COUNT(*) AS scanned, COALESCE(MAX(id), ?1) AS last_id FROM page
@@ -97,6 +102,9 @@ const CHUNK_PAGE_SQL = `
          COALESCE(SUM(pending), 0) AS pending_vectors, NULL AS last_id
     FROM live
    GROUP BY source`;
+
+const DOCUMENT_PAGE_SQL = documentPageSql();
+const CHUNK_PAGE_SQL = chunkPageSql();
 
 const safeWhole = (value, label) => {
   const number = Number(value);
@@ -243,7 +251,6 @@ export async function readExactDocumentReport(env, {
 
   const opening = normalizedMarker(await env.DB.prepare(REPORT_MARKER_SQL).first());
   const sourceRows = new Map();
-  const families = new Map();
   const sourceReceipts = await env.DB.prepare(
     `SELECT names.source AS source_type, stats.last_ingest_at
        FROM (
@@ -262,60 +269,71 @@ export async function readExactDocumentReport(env, {
     sourceRows.set(row.source_type, row);
   }
 
-  let documentCursor = 0;
-  let documentPages = 0;
-  while (documentCursor < opening.document_high_water) {
-    if (++documentPages > maxDocumentPages) {
-      throw new Error("documents report exceeded its document-page budget");
+  // Both walks read with one visibility answer. A pre-0048 schema has no
+  // pointer tables and no custom API documents; the walks restart from the
+  // opening marker if the pointer tables turn out to be missing.
+  const walk = async (pointerTables) => {
+    const rows = new Map([...sourceRows].map(([source, row]) => [source, { ...row }]));
+    const families = new Map();
+    const documentSql = pointerTables ? DOCUMENT_PAGE_SQL : documentPageSql(false);
+    const chunkSql = pointerTables ? CHUNK_PAGE_SQL : chunkPageSql(false);
+    let documentCursor = 0;
+    let documentPages = 0;
+    while (documentCursor < opening.document_high_water) {
+      if (++documentPages > maxDocumentPages) {
+        throw new Error("documents report exceeded its document-page budget");
+      }
+      const { results } = await env.DB.prepare(documentSql)
+        .bind(documentCursor, opening.document_high_water, documentPageSize).all();
+      const page = results || [];
+      if (!page.length) break;
+      for (const document of page) {
+        const source = String(document.source);
+        if (!rows.has(source)) rows.set(source, emptyReportRow(source));
+        rows.get(source).stored_documents++;
+        const family = document.part_of === null || document.part_of === undefined
+          ? document.source_id
+          : document.part_of;
+        if (!families.has(source)) families.set(source, new Set());
+        families.get(source).add(String(family));
+      }
+      const next = safeWhole(page.at(-1).document_rowid, "document cursor");
+      if (next <= documentCursor) throw new Error("documents report document cursor did not advance");
+      documentCursor = next;
+      if (page.length < documentPageSize) break;
     }
-    const { results } = await env.DB.prepare(DOCUMENT_PAGE_SQL)
-      .bind(documentCursor, opening.document_high_water, documentPageSize).all();
-    const page = results || [];
-    if (!page.length) break;
-    for (const document of page) {
-      const source = String(document.source);
-      if (!sourceRows.has(source)) sourceRows.set(source, emptyReportRow(source));
-      sourceRows.get(source).stored_documents++;
-      const family = document.part_of === null || document.part_of === undefined
-        ? document.source_id
-        : document.part_of;
-      if (!families.has(source)) families.set(source, new Set());
-      families.get(source).add(String(family));
-    }
-    const next = safeWhole(page.at(-1).document_rowid, "document cursor");
-    if (next <= documentCursor) throw new Error("documents report document cursor did not advance");
-    documentCursor = next;
-    if (page.length < documentPageSize) break;
-  }
 
-  let chunkCursor = 0;
-  let chunkPages = 0;
-  while (chunkCursor < opening.chunk_high_water) {
-    if (++chunkPages > maxChunkPages) {
-      throw new Error("documents report exceeded its chunk-page budget");
+    let chunkCursor = 0;
+    let chunkPages = 0;
+    while (chunkCursor < opening.chunk_high_water) {
+      if (++chunkPages > maxChunkPages) {
+        throw new Error("documents report exceeded its chunk-page budget");
+      }
+      const { results } = await env.DB.prepare(chunkSql)
+        .bind(chunkCursor, opening.chunk_high_water, chunkPageSize).all();
+      const page = results || [];
+      const state = page.find((row) => Number(row.page_state) === 1);
+      const scanned = safeWhole(state?.chunks, "chunk page size");
+      const next = safeWhole(state?.last_id, "chunk cursor");
+      for (const aggregate of page.filter((row) => Number(row.page_state) === 0)) {
+        const source = String(aggregate.source_type);
+        if (!rows.has(source)) rows.set(source, emptyReportRow(source));
+        const row = rows.get(source);
+        row.chunks += safeWhole(aggregate.chunks, "chunk count");
+        row.pending_vectors += safeWhole(aggregate.pending_vectors, "pending-vector count");
+      }
+      if (scanned === 0) break;
+      if (next <= chunkCursor) throw new Error("documents report chunk cursor did not advance");
+      chunkCursor = next;
+      if (scanned < chunkPageSize) break;
     }
-    const { results } = await env.DB.prepare(CHUNK_PAGE_SQL)
-      .bind(chunkCursor, opening.chunk_high_water, chunkPageSize).all();
-    const page = results || [];
-    const state = page.find((row) => Number(row.page_state) === 1);
-    const scanned = safeWhole(state?.chunks, "chunk page size");
-    const next = safeWhole(state?.last_id, "chunk cursor");
-    for (const aggregate of page.filter((row) => Number(row.page_state) === 0)) {
-      const source = String(aggregate.source_type);
-      if (!sourceRows.has(source)) sourceRows.set(source, emptyReportRow(source));
-      const row = sourceRows.get(source);
-      row.chunks += safeWhole(aggregate.chunks, "chunk count");
-      row.pending_vectors += safeWhole(aggregate.pending_vectors, "pending-vector count");
-    }
-    if (scanned === 0) break;
-    if (next <= chunkCursor) throw new Error("documents report chunk cursor did not advance");
-    chunkCursor = next;
-    if (scanned < chunkPageSize) break;
-  }
 
-  for (const [source, members] of families) {
-    sourceRows.get(source).logical_documents = members.size;
-  }
+    for (const [source, members] of families) {
+      rows.get(source).logical_documents = members.size;
+    }
+    return { rows, documentPages, chunkPages };
+  };
+  const { rows: reportRows, documentPages, chunkPages } = await readWithCustomApiVisibility(env, walk);
   const closing = normalizedMarker(await env.DB.prepare(REPORT_MARKER_SQL).first());
   if (!sameMarker(opening, closing)) {
     throw new Error("documents report overlapped a corpus change; run it again");
@@ -324,7 +342,7 @@ export async function readExactDocumentReport(env, {
   if (!Number.isSafeInteger(at) || at < 0) throw new TypeError("documents report clock is invalid");
   const pendingVectorCountsExact = opening.outbox_pending === 0 && closing.outbox_pending === 0;
   return {
-    rows: [...sourceRows.values()].sort((a, b) => a.source_type.localeCompare(b.source_type))
+    rows: [...reportRows.values()].sort((a, b) => a.source_type.localeCompare(b.source_type))
       .map((row) => publicReportRow(row, pendingVectorCountsExact)),
     summary: {
       status: "complete",

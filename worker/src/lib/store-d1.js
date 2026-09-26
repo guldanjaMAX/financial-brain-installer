@@ -71,6 +71,10 @@ import {
   scanChunkPages,
 } from "./diagnose-scan.js";
 import { sourceOriginalChunkReceiptHash } from "./source-original-chunk.js";
+import {
+  customApiLogicalSourceId, customApiOwnerMessage, customApiVisibilitySql,
+  readWithCustomApiVisibility,
+} from "./custom-api-visibility.js";
 
 const RRF_K = 60;
 const LEXICAL_CHAMPION_RATIO = 4;
@@ -100,6 +104,7 @@ const HISTORICAL_SOURCE_LABELS = Object.freeze({
   hubspot: "HubSpot",
   quickbooks: "QuickBooks Online",
   plaid: "Plaid",
+  custom_api: "custom business API",
   upload: "uploaded file",
   "iphone-backup": "iPhone backup",
   "owner-notes": "conversational owner notes",
@@ -584,7 +589,7 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
   const f = filterSql(filters, "c", 3);
   const sc = scopeSql(scope, "d", f.nextParam);
   const a = documentAccessSql(access, "c", "d", sc.nextParam);
-  const sql = (memoryClause) => `
+  const sql = (memoryClause, withCurrentPointer = true) => `
     SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
            COALESCE(src.kind, 'unregistered') AS source_kind,
            c.title, c.document_date,
@@ -600,13 +605,16 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
     JOIN chunks c ON c.id = chunks_fts.rowid
     JOIN documents d ON d.doc_uid = c.doc_uid
     LEFT JOIN sources src ON src.name = d.source
-    WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}${memoryClause}
+    WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}
     ORDER BY bm25(chunks_fts)
     LIMIT ?2`;
 
-  const run = (memoryClause) => env.DB.prepare(sql(memoryClause)).bind(
-    terms, limit, ...f.params, ...sc.params, ...a.params,
-  ).all();
+  const run = async (memoryClause) => {
+    const execute = (withCurrentPointer) => env.DB.prepare(sql(memoryClause, withCurrentPointer)).bind(
+      terms, limit, ...f.params, ...sc.params, ...a.params,
+    ).all();
+    return readWithCustomApiVisibility(env, execute);
+  };
   let response;
   try {
     response = await run(currentMemorySql("d"));
@@ -648,7 +656,7 @@ export async function unchunkedTaxDocumentCandidates(env, {
   const selectorSql = entityBound ? "AND d.entity_slug = ?1" : "";
   const limitParameter = entityBound ? "?2" : "?1";
   const binds = entityBound ? [entitySlug, pageLimit] : [pageLimit];
-  const { results } = await env.DB.prepare(
+  const sql = (withCurrentPointer) =>
     `/* unchunked-tax-document-candidates */
      SELECT d.doc_uid, d.source, COALESCE(src.kind, 'unregistered') AS source_kind,
             d.source_id, d.title, d.uri, d.document_date, d.date_source, d.date_reliable,
@@ -659,10 +667,13 @@ export async function unchunkedTaxDocumentCandidates(env, {
       WHERE d.deleted_at IS NULL
         ${selectorSql}
         AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.doc_uid = d.doc_uid)
-        ${f.clause}${sc.clause}${a.clause}
+        ${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}
       ORDER BY d.ingested_at DESC
-      LIMIT ${limitParameter}`
-  ).bind(...binds, ...f.params, ...sc.params, ...a.params).all();
+      LIMIT ${limitParameter}`;
+  const execute = (withCurrentPointer) => env.DB.prepare(sql(withCurrentPointer))
+    .bind(...binds, ...f.params, ...sc.params, ...a.params).all();
+  const response = await readWithCustomApiVisibility(env, execute);
+  const { results } = response;
   const page = (results || []).map(assessStoredProvenance);
   return {
     results: page.slice(0, boundedLimit).map((row) => ({ ...row, has_chunks: false })),
@@ -729,7 +740,7 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
     const placeholders = batch.map((_, i) => "?" + (i + 1)).join(",");
     const f = filterSql(filters, "c", batch.length + 1);
     const sc = scopeSql(scope, "d", f.nextParam);
-    const sql = (memoryClause) =>
+    const sql = (memoryClause, withCurrentPointer = true) =>
       `SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
               COALESCE(src.kind, 'unregistered') AS source_kind,
               c.title, c.document_date,
@@ -742,10 +753,13 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
                    THEN json_extract(d.meta, '$.start') END AS occurred_at
        FROM chunks c JOIN documents d ON d.doc_uid = c.doc_uid
        LEFT JOIN sources src ON src.name = d.source
-       WHERE c.chunk_uid IN (${placeholders})${f.clause}${sc.clause}${memoryClause}`;
-    const run = (memoryClause) => env.DB.prepare(sql(memoryClause))
-      .bind(...batch, ...f.params, ...sc.params)
-      .all();
+       WHERE c.chunk_uid IN (${placeholders})${f.clause}${sc.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}`;
+    const run = async (memoryClause) => {
+      const execute = (withCurrentPointer) => env.DB.prepare(sql(memoryClause, withCurrentPointer))
+        .bind(...batch, ...f.params, ...sc.params)
+        .all();
+      return readWithCustomApiVisibility(env, execute);
+    };
     let response;
     try {
       response = await run(currentMemorySql("d"));
@@ -988,8 +1002,13 @@ export async function search(env, {
       row.source,
       row.authority_meta ?? row._authority_meta,
     );
+    const publicSourceId = customApiLogicalSourceId(
+      row.authority_meta ?? row._authority_meta,
+      publicRow.source_id,
+    );
     documents.push(attachEvidenceLineage({
       ...publicRow,
+      source_id: publicSourceId,
       authority,
       lineage: lineage.lineage,
       ...(writeProvenance ? { write_provenance: writeProvenance } : {}),
@@ -2889,10 +2908,10 @@ export async function diagnose(env, {
     }
   }
 
-  const totalRow = await safe("totals", () => one(
-    `SELECT (SELECT count(*) FROM documents WHERE deleted_at IS NULL) AS documents,
+  const totalRow = await safe("totals", () => readWithCustomApiVisibility(env, (withCurrentPointer) => one(
+    `SELECT (SELECT count(*) FROM documents WHERE deleted_at IS NULL${customApiVisibilitySql("documents", withCurrentPointer)}) AS documents,
             (SELECT count(*) FROM sources) AS sources`,
-  ));
+  ), { probe: false }));
   const totalValue = (value, name) => {
     const number = Number(value);
     if (!Number.isSafeInteger(number) || number < 0) {
@@ -3460,10 +3479,10 @@ export async function diagnose(env, {
  */
 const INDEXING_STUCK_MS = 6 * 60 * 60 * 1000;
 const SOURCE_REVIEW_ISSUE_CODE = "SAFETY_REVIEW_REQUIRED";
-const AUTOMATABLE_SOURCE_KINDS = new Set(["drive", "gmail", "calendar"]);
+const AUTOMATABLE_SOURCE_KINDS = new Set(["drive", "gmail", "calendar", "custom_api"]);
 const REFRESHABLE_SOURCE_KINDS = new Set([
   "drive", "gmail", "imap", "calendar", "imessage", "whatsapp", "zoom",
-  "quickbooks", "slack", "notion", "microsoft", "dropbox", "hubspot", "plaid",
+  "quickbooks", "slack", "notion", "microsoft", "dropbox", "hubspot", "plaid", "custom_api",
 ]);
 
 function sourceOwnerRemedy(source, concern = "refresh") {
@@ -3483,6 +3502,7 @@ function sourceOwnerRemedy(source, concern = "refresh") {
     quickbooks: "Reconnect the intended QuickBooks company if access has expired, then capture every intended entity type. Deleted records remain an explicit connector limitation.",
     zoom: "Reconnect Zoom if access has expired, then run a full Zoom sync with no --limit.",
     plaid: "Reconnect the intended financial institutions, resolve any account that needs attention, then run the bank sync again.",
+    custom_api: "Check the custom API key and endpoint contract, then run the custom API pull again.",
     upload: `Re-run the whole folder for source "${source?.name}" with no --limit, then resolve every unreadable or unsupported file it reports.`,
     "iphone-backup": "Create a current, readable iPhone backup and load that whole snapshot again with no --limit. Load important attachment-only content separately when a message row has no searchable text.",
   }[kind];
@@ -3526,6 +3546,50 @@ function missingSyncRunsTable(error) {
   return /no such table|does not exist/.test(message) && message.includes("sync_runs");
 }
 
+function missingCustomApiJobsTable(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return /no such table|does not exist/.test(message) && message.includes("custom_api_jobs");
+}
+
+async function activeCustomApiJobStarts(env, rows) {
+  const needsReceipt = (rows || []).some((row) =>
+    String(row?.kind || "").toLowerCase() === "custom_api" &&
+    String(row?.status || "").toLowerCase() === "indexing" &&
+    !Number.isFinite(timestampMs(row?.indexing_started_at)));
+  if (!needsReceipt) return new Map();
+  try {
+    const result = await env.DB.prepare(
+      `SELECT source,MIN(created_at) AS started_at
+         FROM custom_api_jobs
+        WHERE status IN ('staged','applying','promoting','promoted')
+        GROUP BY source`
+    ).all();
+    return new Map((result?.results || []).map((row) => [String(row.source), row.started_at]));
+  } catch (error) {
+    if (missingCustomApiJobsTable(error)) return new Map();
+    throw error;
+  }
+}
+
+async function currentCustomApiReceipts(env, rows) {
+  if (!(rows || []).some((row) =>
+    String(row?.kind || "").toLowerCase() === "custom_api" && row?.stale_reason)) return new Map();
+  try {
+    const result = await env.DB.prepare(
+      `SELECT source,display_name,last_issue_code,last_refused_rows
+         FROM custom_api_schedule_state`
+    ).all();
+    return new Map((result?.results || []).map((row) => [String(row.source), {
+      displayName: typeof row.display_name === "string" && row.display_name ? row.display_name : null,
+      issueCode: typeof row.last_issue_code === "string" ? row.last_issue_code : null,
+      refusedRows: Number(row.last_refused_rows || 0),
+    }]));
+  } catch (error) {
+    if (missingCustomApiJobsTable(error)) return new Map();
+    throw error;
+  }
+}
+
 /**
  * The source row says what the connector last reported; sync_runs says whether
  * an `indexing` report still belongs to a live attempt. Keeping this separate
@@ -3545,7 +3609,26 @@ function operationalFreshness(s, now) {
       indexingMs,
     };
   }
+  if (String(s.stale_reason || "").trim().toUpperCase() === "INPUT_REFUSED" &&
+      Number(s.custom_api_refused_rows || 0) > 0) {
+    const count = Number(s.custom_api_refused_rows);
+    return {
+      state: "broken",
+      reason: `${count} ${count === 1 ? "row was" : "rows were"} not refreshed because the latest source response could not be read safely`,
+      indexingMs,
+    };
+  }
   if (s.stale_reason) {
+    if (String(s.kind || "").toLowerCase() === "custom_api") {
+      return {
+        state: "broken",
+        reason: customApiOwnerMessage(
+          String(s.custom_api_issue_code || s.stale_reason).trim().toUpperCase(),
+          s.custom_api_display_name || "custom business API",
+        ),
+        indexingMs,
+      };
+    }
     return { state: "broken", reason: sourceReceiptOwnerMessage(s.stale_reason), indexingMs };
   }
   if (status === "error") {
@@ -3610,6 +3693,8 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
   } catch {
     return { gaps: [], unavailable: true };
   }
+  const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
+  const customApiReceipts = await currentCustomApiReceipts(env, rows);
 
   const allowed = allowedSources === null
     ? null
@@ -3628,7 +3713,15 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
     const last = s.last_ingest_at ? Date.parse(s.last_ingest_at) : NaN;
     const ageSec = Number.isFinite(last) ? Math.floor((now - last) / 1000) : null;
     const days = ageSec === null ? null : Math.floor(ageSec / 86400);
-    const operational = operationalFreshness(s, now);
+    const customApiReceipt = customApiReceipts.get(String(s.name)) || null;
+    const customApiRefusedRows = customApiReceipt?.refusedRows || 0;
+    const operational = operationalFreshness({
+      ...s,
+      custom_api_refused_rows: customApiRefusedRows,
+      custom_api_issue_code: customApiReceipt?.issueCode || null,
+      custom_api_display_name: customApiReceipt?.displayName || null,
+      indexing_started_at: s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null,
+    }, now);
 
     if (operational.state === "broken") {
       gaps.push(gapWithRemedy(s, "refresh", {
@@ -3730,6 +3823,8 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
   } catch {
     return { sources: [], unavailable: true };
   }
+  const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
+  const customApiReceipts = await currentCustomApiReceipts(env, rows);
   const latestRuns = new Map();
   try {
     let result;
@@ -3798,7 +3893,16 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
       const days = Number.isFinite(last) ? Math.floor((now - last) / 86400000) : null;
       const expected = Number(s.expected_refresh_seconds) || null;
       const automatable = AUTOMATABLE_SOURCE_KINDS.has(String(s.kind));
-      const operational = operationalFreshness(s, now);
+      const effectiveIndexingStartedAt = s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null;
+      const customApiReceipt = customApiReceipts.get(String(s.name)) || null;
+      const customApiRefusedRows = customApiReceipt?.refusedRows || 0;
+      const operational = operationalFreshness({
+        ...s,
+        indexing_started_at: effectiveIndexingStartedAt,
+        custom_api_refused_rows: customApiRefusedRows,
+        custom_api_issue_code: customApiReceipt?.issueCode || null,
+        custom_api_display_name: customApiReceipt?.displayName || null,
+      }, now);
       let state = unregistered ? "unregistered" : "ok";
       let reason = unregistered ? "the source registry entry is missing" : operational.reason;
       if (!unregistered && operational.state) state = operational.state;
@@ -3811,13 +3915,16 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
         // Unregistered is distinguished by `state`; ownerSystemStatus converts
         // both into explicit public states without exposing this raw slug.
         zone: typeof s.zone === "string" && s.zone.trim() ? s.zone.trim() : null,
-        source_status: String(s.status || "") || null,
+        source_status: String(s.status || "").toLowerCase() === "ready" && customApiRefusedRows > 0
+          ? "ready_with_warnings"
+          : String(s.status || "") || null,
+        refused_rows: customApiRefusedRows,
         documents: Number(s.document_count || 0),
         days_since_ingest: days,
         expected_every_days: expected ? Math.max(1, Math.round(expected / 86400)) : null,
         last_complete_sweep_at: s.last_complete_sweep_at || null,
-        indexing_started_at: Number.isFinite(timestampMs(s.indexing_started_at))
-          ? new Date(timestampMs(s.indexing_started_at)).toISOString()
+        indexing_started_at: Number.isFinite(timestampMs(effectiveIndexingStartedAt))
+          ? new Date(timestampMs(effectiveIndexingStartedAt)).toISOString()
           : null,
         hours_indexing: operational.indexingMs === null
           ? null
@@ -4072,7 +4179,7 @@ THEN 1 ELSE 0 END`;
  * `sourceRecoverySql` keeps its own two for the reason documented there. Every
  * statement still returns the same rows in the same order.
  */
-const INVENTORY_DOCUMENT_CTES_SQL = `
+const inventoryDocumentCtesSql = ({ includeCurrentCustomApi = true } = {}) => `
   WITH live_documents AS MATERIALIZED (
     SELECT d.rowid AS document_rowid,
            d.doc_uid,
@@ -4102,7 +4209,7 @@ const INVENTORY_DOCUMENT_CTES_SQL = `
              OR (json_type(d.meta,'$.part_of')='text' AND length(trim(json_extract(d.meta,'$.part_of'))) > 0)
            ) THEN 1 ELSE 0 END AS family_lineage
       FROM documents d
-     WHERE d.deleted_at IS NULL
+     WHERE d.deleted_at IS NULL${customApiVisibilitySql("d", includeCurrentCustomApi)}
   ),
   attributed_documents AS (
     SELECT live_documents.document_rowid,
@@ -4181,7 +4288,10 @@ const INVENTORY_DOCUMENT_CTES_SQL = `
 
 // Exported so the scale regression can run this exact statement against a
 // synthetic corpus and diff its rows with the 0.4.8 SQL it replaced.
-export const sourceInventorySql = ({ includeFailureEvidence = true } = {}) => `${INVENTORY_DOCUMENT_CTES_SQL},
+export const sourceInventorySql = ({
+  includeFailureEvidence = true,
+  includeCurrentCustomApi = true,
+} = {}) => `${inventoryDocumentCtesSql({ includeCurrentCustomApi })},
   source_names AS (
     SELECT name FROM sources
     UNION
@@ -4374,19 +4484,32 @@ export async function sourceInventory(env, {
     throw new TypeError("source inventory row limit is invalid");
   }
 
-  let result;
-  try {
-    result = await env.DB.prepare(sourceInventorySql()).bind(maxRows + 1).all();
-  } catch (error) {
-    if (!missingFailureEvidenceColumn(error)) throw error;
-    // Schema 39 remains readable while migration 0040 is pending. Missing
-    // failure evidence is unknown; every older receipt and coverage field
-    // keeps its exact meaning, and malformed/non-schema errors never retry.
-    result = await env.DB.prepare(sourceInventorySql({ includeFailureEvidence: false }))
-      .bind(maxRows + 1)
-      .all();
-  }
+  const readInventory = async (includeCurrentCustomApi) => {
+    try {
+      return await env.DB.prepare(sourceInventorySql({ includeCurrentCustomApi })).bind(maxRows + 1).all();
+    } catch (error) {
+      if (!missingFailureEvidenceColumn(error)) throw error;
+      // Schema 39 remains readable while migration 0040 is pending. Missing
+      // failure evidence is unknown; every older receipt and coverage field
+      // keeps its exact meaning, and malformed/non-schema errors never retry.
+      return env.DB.prepare(sourceInventorySql({
+        includeFailureEvidence: false,
+        includeCurrentCustomApi,
+      })).bind(maxRows + 1).all();
+    }
+  };
+  // Custom-source version tables arrive after the v3 inventory contract. An
+  // older schema has no custom documents, so its reader stays exact without
+  // referencing tables that do not exist yet.
+  const result = await readWithCustomApiVisibility(env, readInventory, { probe: false });
   const rawRows = Array.isArray(result?.results) ? result.results : [];
+  const activeCustomJobs = await activeCustomApiJobStarts(env, rawRows.map((row) => ({
+    name: row.name,
+    kind: row.kind,
+    status: row.status,
+    indexing_started_at: row.run_finished_at === null ? row.run_started_at : null,
+  })));
+  const customApiReceipts = await currentCustomApiReceipts(env, rawRows);
   const total = rawRows.length ? inventoryCount(rawRows[0].inventory_total) : 0;
   if (total > maxRows || rawRows.length > maxRows) {
     const error = new Error("source inventory exceeds the safe row limit");
@@ -4409,9 +4532,14 @@ export async function sourceInventory(env, {
     const expectedSeconds = Number(row.expected_refresh_seconds) > 0
       ? Math.floor(Number(row.expected_refresh_seconds))
       : null;
+    const customApiReceipt = customApiReceipts.get(sourceId) || null;
     const operational = operationalFreshness({
       ...row,
-      indexing_started_at: row.run_finished_at === null ? row.run_started_at : null,
+      indexing_started_at: (row.run_finished_at === null ? row.run_started_at : null) ??
+        activeCustomJobs.get(sourceId) ?? null,
+      custom_api_refused_rows: customApiReceipt?.refusedRows || 0,
+      custom_api_issue_code: customApiReceipt?.issueCode || null,
+      custom_api_display_name: customApiReceipt?.displayName || null,
     }, now);
     const automatable = AUTOMATABLE_SOURCE_KINDS.has(String(row.kind || "").toLowerCase());
     let state = registered ? "ok" : "unregistered";
@@ -4725,7 +4853,7 @@ const sourceRecoveryMarkerSql = `
  * separate statements. Each statement scans the corpus once and remains
  * bracketed by the same opening and closing snapshot markers.
  */
-const SOURCE_RECOVERY_CANDIDATES_SQL = `${INVENTORY_DOCUMENT_CTES_SQL},
+const sourceRecoveryCandidatesSql = ({ includeCurrentCustomApi = true } = {}) => `${inventoryDocumentCtesSql({ includeCurrentCustomApi })},
   candidate_rows AS MATERIALIZED (
     SELECT f.*,
            COALESCE(s.kind,'unregistered') AS source_kind,
@@ -4760,7 +4888,7 @@ const SOURCE_RECOVERY_CANDIDATES_SQL = `${INVENTORY_DOCUMENT_CTES_SQL},
 // This prevents D1's 30-second statement clock from combining page selection,
 // global totals, source grouping, and JSON aggregation into one all-or-nothing
 // request on a large Brain.
-export const sourceRecoverySummarySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
+const sourceRecoverySummarySqlFor = (options) => `${sourceRecoveryCandidatesSql(options)}
   ,source_groups AS MATERIALIZED (
     SELECT inventory_source AS source_id,
            source_kind,
@@ -4806,8 +4934,9 @@ export const sourceRecoverySummarySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
            global_summary.*,1 AS summary_only
       FROM global_summary
      ORDER BY summary_only DESC,source_id`;
+export const sourceRecoverySummarySql = sourceRecoverySummarySqlFor();
 
-export const sourceRecoverySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
+const sourceRecoverySqlFor = (options) => `${sourceRecoveryCandidatesSql(options)}
   SELECT candidate_rows.document_rowid,
          candidate_rows.doc_uid,
          candidate_rows.physical_source,
@@ -4853,24 +4982,28 @@ export const sourceRecoverySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
    WHERE document_rowid>?2
    ORDER BY document_rowid ASC
    LIMIT ?3`;
+export const sourceRecoverySql = sourceRecoverySqlFor();
 
 export function sourceRecoveryPlan({
   source = null,
   afterRowId = 0,
   afterSourceId = null,
   limit = 100,
+  // False only on a pre-0048 schema, which has no custom API documents.
+  customApiPointerTables = true,
 } = {}) {
+  const options = { includeCurrentCustomApi: customApiPointerTables };
   return Object.freeze([
     Object.freeze({
       kind: "source_summary",
-      sql: sourceRecoverySummarySql,
+      sql: customApiPointerTables ? sourceRecoverySummarySql : sourceRecoverySummarySqlFor(options),
       // One independent global-summary row plus up to page-size + 1 source
       // groups. The extra group is the truncation probe.
       binds: Object.freeze([source, afterSourceId, SOURCE_RECOVERY_MAX_PAGE_SIZE + 2]),
     }),
     Object.freeze({
       kind: "candidate_page",
-      sql: sourceRecoverySql,
+      sql: customApiPointerTables ? sourceRecoverySql : sourceRecoverySqlFor(options),
       binds: Object.freeze([source, afterRowId, limit + 1]),
     }),
   ]);
@@ -4949,18 +5082,23 @@ export async function sourceRecoveryCandidates(env, {
   }
 
   const openingMarker = await sourceRecoveryMarker(env);
-  const [summaryStep, pageStep] = sourceRecoveryPlan({
-    source: normalizedSource,
-    afterRowId,
-    afterSourceId,
-    limit,
-  });
-  const summaryResult = await env.DB.prepare(summaryStep.sql)
-    .bind(...summaryStep.binds)
-    .all();
-  const result = await env.DB.prepare(pageStep.sql)
-    .bind(...pageStep.binds)
-    .all();
+  const { summaryResult, result } = await readWithCustomApiVisibility(env, async (customApiPointerTables) => {
+    const [summaryStep, pageStep] = sourceRecoveryPlan({
+      source: normalizedSource,
+      afterRowId,
+      afterSourceId,
+      limit,
+      customApiPointerTables,
+    });
+    return {
+      summaryResult: await env.DB.prepare(summaryStep.sql)
+        .bind(...summaryStep.binds)
+        .all(),
+      result: await env.DB.prepare(pageStep.sql)
+        .bind(...pageStep.binds)
+        .all(),
+    };
+  }, { probe: false });
   const closingMarker = await sourceRecoveryMarker(env);
   if (JSON.stringify(openingMarker) !== JSON.stringify(closingMarker)) {
     const error = new Error("source recovery inventory changed during the read");

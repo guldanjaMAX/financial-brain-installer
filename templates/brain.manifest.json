@@ -239,6 +239,81 @@
         "deals"
       ]
     },
+    "custom_api": {
+      "_comment": [
+        "Read-only JSON endpoints pulled by this Brain's Worker on its existing cron.",
+        "The bearer value is never stored here. The secret name must begin CUSTOM_API_TOKEN_.",
+        "After reviewing these mappings, deploy, run brain connect custom-api, then preview",
+        "the first pull with brain custom-api <manifest> --dry-run. The structured rows are",
+        "a future financial-map input and are not posted to the ledger. A real pull resumes",
+        "one durable slice per request and reports saved data separately from meaning search.",
+        "For inventory and costs, search contains only the current snapshot; stored rows keep",
+        "prior values as history with effective dates. No daily history documents are written."
+      ],
+      "enabled": false,
+      "display_name": "store dashboard",
+      "source": "store-dashboard",
+      "base_url": "https://dashboard.example.invalid/api/",
+      "token_secret": "CUSTOM_API_TOKEN_STORE_DASHBOARD",
+      "cadence_seconds": 86400,
+      "timeout_ms": 30000,
+      "max_response_bytes": 5242880,
+      "max_rows": 10000,
+      "max_pages": 20,
+      "retries": 3,
+      "endpoints": [
+        {
+          "name": "sales",
+          "path": "/sales",
+          "row_key": ["store", "period", "revenue_stream"],
+          "documents": [
+            {
+              "name": "monthly",
+              "group_by": ["period"],
+              "title_template": "{{period}} sales across all stores",
+              "body_template": "{{period}}: net sales {{sum.net_sales}} across {{row_count}} store and stream rows. {{missing.revenue_stream}}\n\n{{rows_table}}",
+              "aggregates": { "net_sales": "sum", "transactions": "sum", "units": "sum", "puppies_sold": "sum" },
+              "formats": { "net_sales": "currency" },
+              "fields": ["store", "revenue_stream", "net_sales", "transactions", "units", "puppies_sold"],
+              "expected_values": { "revenue_stream": ["live_animal", "supplies", "services", "other"] }
+            },
+            {
+              "name": "store-history",
+              "group_by": ["store"],
+              "title_template": "{{store}} sales by month",
+              "body_template": "{{store}} monthly sales history through {{fetched_date}}. {{missing.revenue_stream}}\n\n{{rows_table}}",
+              "aggregates": { "net_sales": "sum", "transactions": "sum", "units": "sum", "puppies_sold": "sum" },
+              "formats": { "net_sales": "currency" },
+              "fields": ["period", "net_sales", "transactions", "units", "puppies_sold"],
+              "expected_values": { "revenue_stream": ["live_animal", "supplies", "services", "other"] }
+            }
+          ]
+        },
+        {
+          "name": "inventory",
+          "path": "/inventory",
+          "row_key": ["store", "breed"],
+          "document": {
+            "group_by": ["store"],
+            "title_template": "{{store}} inventory snapshot {{fetched_date}}",
+            "body_template": "{{store}} inventory snapshot for {{fetched_date}}.\n\n{{rows_table}}",
+            "fields": ["store", "breed", "count"]
+          }
+        },
+        {
+          "name": "costs",
+          "path": "/costs",
+          "row_key": ["store", "breed"],
+          "document": {
+            "group_by": ["store"],
+            "title_template": "{{store}} cost table {{fetched_date}}",
+            "body_template": "{{store}} average costs received through {{fetched_date}}.\n\n{{rows_table}}",
+            "formats": { "avg_cost": "currency" },
+            "fields": ["store", "breed", "avg_cost", "received"]
+          }
+        }
+      ]
+    },
     "upload": {
       "_comment": "Manual drop zone. Setup enables and records it after a folder is chosen; until then there is no folder to load.",
       "enabled": false

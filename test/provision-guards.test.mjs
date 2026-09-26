@@ -928,7 +928,7 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
   check("a limited local run cannot falsely commit a scanner migration",
     /scannerPolicyChanged && limitedMissesPrior/.test(local || "") &&
       /--limit cannot be used/.test(local || ""), String(local).slice(0, 1800));
-  const localCleanupConfirmed = String(local).indexOf('const afterLocalRemoval = await listStoredSourceFamilies');
+  const localCleanupConfirmed = String(local).indexOf('const afterLocalRemoval = await listPreparedSourceFamilies');
   const localCleanupReadbackApplied = String(local).indexOf('const stillStored = plannedLocalTargets.filter', localCleanupConfirmed);
   const localScannerCommitted = String(local).indexOf('state.credential_scanner_fingerprint = scannerFingerprint');
   check("local scanner policy commits only after confirmed refusal cleanup",

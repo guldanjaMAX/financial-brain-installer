@@ -71,10 +71,17 @@ CREATE TABLE d (w INT);`);
 /* ---- every migration, applied for real, in order ---- */
 const files = readdirSync(DIR).filter((f) => f.endsWith(".sql")).sort();
 check("migration files were found", files.length > 0, DIR);
-const ocrMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) >= 47);
+const ocrMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) === 47);
 check("the unshipped OCR schema is one consolidated migration 0047",
   ocrMigrationFiles.length === 1 && ocrMigrationFiles[0] === "0047_ocr_page_idempotency.sql",
   JSON.stringify(ocrMigrationFiles));
+// 0048 is the separate custom API source lane. Pin the exact unshipped suffix
+// so a stray OCR 0048/0049 cannot hide behind it.
+const unshippedMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) >= 47);
+check("the unshipped suffix is exactly OCR 0047 then custom API 0048",
+  JSON.stringify(unshippedMigrationFiles) ===
+    JSON.stringify(["0047_ocr_page_idempotency.sql", "0048_custom_api_source.sql"]),
+  JSON.stringify(unshippedMigrationFiles));
 
 const db = new DatabaseSync(":memory:");
 let applied = 0;
@@ -116,8 +123,17 @@ check(`all ${applied} statements across ${files.length} files applied`, true);
     table: row.tbl_name,
     sql: normalizeSql(row.sql),
   }));
+  // Compare against a fresh 0001-0047 prefix: 0048 belongs to another lane
+  // and has its own migration suite.
+  const throughOcr = new DatabaseSync(":memory:");
+  for (const f of files.filter((name) => Number(name.slice(0, 4)) <= 47)) {
+    for (const statement of splitStatements(readFileSync(join(DIR, f), "utf-8"))) {
+      throughOcr.exec(statement);
+    }
+  }
   const oldRows = normalizedMaster(beforeConsolidation);
-  const currentRows = normalizedMaster(db);
+  const currentRows = normalizedMaster(throughOcr);
+  throughOcr.close();
   check("fresh 0001-0047 sqlite_master matches the old 0001-0049 schema",
     JSON.stringify(currentRows) === JSON.stringify(oldRows),
     `current=${JSON.stringify(currentRows)} old=${JSON.stringify(oldRows)}`);

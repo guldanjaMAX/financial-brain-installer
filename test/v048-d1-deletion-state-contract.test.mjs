@@ -12,7 +12,7 @@ import {
 } from "../operations/v048-d1-deletion-state-contract.mjs";
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
-const migrations = Object.freeze(Array.from({ length: 47 }, (_, index) => Object.freeze({
+const migrations = Object.freeze(Array.from({ length: 48 }, (_, index) => Object.freeze({
   version: index + 1,
   name: `${String(index + 1).padStart(4, "0")}_fixture`,
   checksum: sha256(`migration:${index + 1}`).slice(0, 16),

@@ -232,6 +232,21 @@ assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_result_family_rec
 assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_recovery_state"), false);
 assert.equal(RECOVERY_DURABLE_TABLES.includes("ocr_page_requests"), true);
 assert.equal(RECOVERY_EXPORT_TABLES.includes("ocr_page_requests"), true);
+for (const table of [
+  "custom_api_jobs", "custom_api_current_jobs", "custom_api_document_versions",
+  "custom_api_row_chunks", "custom_api_job_slices", "custom_api_fetches",
+]) {
+  assert.equal(RECOVERY_DURABLE_TABLES.includes(table), true, table);
+  assert.equal(RECOVERY_EXPORT_TABLES.includes(table), true, table);
+}
+assert.equal(RECOVERY_DURABLE_TABLES.includes("custom_api_schedule_state"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("custom_api_schedule_state"), false);
+// Restrict foreign keys: every referencing custom API table restores after jobs.
+for (const table of [
+  "custom_api_current_jobs", "custom_api_document_versions", "custom_api_job_slices", "custom_api_fetches",
+]) {
+  assert.ok(RECOVERY_EXPORT_TABLES.indexOf("custom_api_jobs") < RECOVERY_EXPORT_TABLES.indexOf(table), table);
+}
 assert.ok(
   RECOVERY_EXPORT_TABLES.indexOf("source_original_observations") <
     RECOVERY_EXPORT_TABLES.indexOf("source_original_result_bindings") &&
@@ -693,6 +708,9 @@ assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_a
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_accepted_resolution_admissions"), false);
 assert.equal(recoveryExportTables(appliedMigrations.slice(0, 46)).includes("ocr_page_requests"), false);
 assert.equal(recoveryExportTables(appliedMigrations).includes("ocr_page_requests"), true);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 47)).includes("custom_api_current_jobs"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("custom_api_current_jobs"), true);
+assert.equal(recoveryExportTables(appliedMigrations).includes("custom_api_schedule_state"), false);
 assert.equal(
   recoveryExportTables(appliedMigrations, { excludeLlmCallLog: true })
     .includes("llm_call_log"),
@@ -1924,7 +1942,8 @@ function providerHarness({
     (version >= 43 || name !== "source_original_result_bindings") &&
     (version >= 44 || !sourceOriginalResultFamilyTables.has(name)) &&
     (version >= 45 || !sourceOriginalAcceptedResolutionTables.has(name)) &&
-    (version >= 47 || name !== "ocr_page_requests"));
+    (version >= 47 || name !== "ocr_page_requests") &&
+    (version >= 48 || !name.startsWith("custom_api_")));
 
   const runWrangler = async ({ command, args, env, cwd }) => {
     wranglerCalls.push({ command, args: [...args], env: { ...env }, cwd });

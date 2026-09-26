@@ -10,6 +10,13 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Windows credential protection survives a Smart App Control refusal.** On
+  some Windows 11 machines Smart App Control occasionally refuses to start the
+  temporary helper that encrypts the admin key and the Google connection. The
+  Brain now removes that helper, builds a fresh one, and tries again, up to
+  three times. A real decryption failure is never retried. If Windows refuses
+  all three, the message says so plainly and that re-running the command
+  usually works. `brain doctor` shows any refused launches it recovered from.
 - **Health checks stay quick on large Brains.** Health, status, and assistant
   checks now get their document inventory from bounded source receipts. That
   inventory no longer joins every chunk, parses every document's metadata, or
@@ -25,6 +32,42 @@ asset publication.
   of refusing it. To check: run
   `brain health <manifest>`, then `brain report <manifest>` when you want the
   complete counts.
+
+- **A read-only business dashboard can refresh without leaving a laptop on.**
+  An operator can declare bounded HTTPS JSON endpoints in the manifest, store
+  the bearer key through a hidden macOS prompt or the masked Cloudflare
+  dashboard on Windows, and let the owner's Worker pull the source daily. A
+  complete snapshot becomes a resumable, exactly verified job instead of one
+  oversized request. Exact rows are stored compactly with correction and
+  last-seen history; missing rows leave current totals without being erased.
+  Inventory and cost search contains only the current per-store snapshot, while
+  stored rows keep prior full values with effective dates. A row that disappears
+  closes its prior interval, and a later return starts a new one instead of
+  hiding the gap. It does not create daily history documents. Monthly summaries
+  cover every store, and per-store sales, inventory, and cost documents stay
+  bounded. The preview names every endpoint's row,
+  readable-document, and refused-row counts. The 10,000-row ceiling refuses an
+  oversized endpoint without changing it. A refused known row now keeps its
+  last verified value visibly marked with the refusal date instead of disappearing.
+  Every affected document begins with the same dated warning even when its
+  template has no row table. Sales requires the configured revenue stream; an
+  unlabeled row cannot hide another store or month.
+  The source says ready with warnings and gives the refused count until a clean
+  pull succeeds. A wholly refused pull leaves the last good snapshot current and
+  prints and retains the useful refusal counts. Scheduled failures retain their
+  reviewed issue guidance instead of collapsing to a generic failure. Invalid
+  store, month, revenue-stream, and breed identities are refused before they can
+  hide a valid prior key. Superseded document versions
+  are removed in bounded cleanup passes so old vectors cannot crowd current
+  evidence out of meaning search. Clipboard entry clears copied material even
+  when inventory fails or the secret name already exists, and dashboard key
+  replacement requires an explicit post-paste confirmation. Saved data and meaning-search
+  readiness are reported separately so an owner question never races indexing.
+  To check: preview the first pull with `brain custom-api <manifest> --dry-run`,
+  run the first pull immediately, wait for meaning search to be ready, then
+  confirm the named source and its refresh time in `brain sources <manifest>`.
+  This build has local mock proof only and
+  has not contacted a provider endpoint.
 
 - **One finely reported balance no longer blocks a whole bank.** A bank can
   report more decimal places than its currency has, such as a retirement

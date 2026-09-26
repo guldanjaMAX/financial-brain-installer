@@ -25,8 +25,15 @@ function staged(stage, operation) {
   }
 }
 
+function launchRefused() {
+  const error = new Error("Windows DPAPI helper did not start");
+  error.stage = "launch";
+  return error;
+}
+
 async function stagedAsync(stage, operation) {
-  try { return await operation(); } catch {
+  try { return await operation(); } catch (caught) {
+    if (caught?.stage === "launch") throw caught;
     const error = new Error(`Windows DPAPI stage failed: ${stage}`);
     error.stage = stage;
     throw error;
@@ -108,12 +115,23 @@ function readExact(length) {
 async function invoke({ helper, helperIdentity, expected, operation, expectedLength, maxOutput, env }, input) {
   const revalidated = assertHelper(helper, expected);
   if (!sameFile(revalidated, helperIdentity)) throw new Error("DPAPI helper identity changed");
-  const child = spawn(helper, [operation, String(expectedLength)], {
-    env,
-    shell: false,
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-  });
+  let child;
+  try {
+    child = spawn(helper, [operation, String(expectedLength)], {
+      env,
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+  } catch (caught) {
+    // Node throws synchronously, before any pid exists, for every OS spawn error
+    // except EACCES/EAGAIN/EMFILE/ENFILE/ENOENT. That includes UNKNOWN, which
+    // is how libuv reports a Code Integrity (Smart App Control) refusal, and
+    // EPERM (access denied). The helper never ran, so this is a launch refusal.
+    // A programming error (no OS errno) is not, and keeps its original failure.
+    if (caught?.syscall === "spawn" || typeof caught?.errno === "number") throw launchRefused();
+    throw caught;
+  }
   const chunks = [];
   let total = 0;
   let failed = false;
@@ -131,8 +149,11 @@ async function invoke({ helper, helperIdentity, expected, operation, expectedLen
   });
   child.stderr.on("data", (chunk) => { if (Buffer.isBuffer(chunk)) chunk.fill(0); });
   const completed = new Promise((resolvePromise) => {
-    child.once("error", () => resolvePromise({ code: null, failed: true }));
-    child.once("close", (code) => resolvePromise({ code, failed }));
+    // No pid means Windows never started the image (Smart App Control reports
+    // UNKNOWN). That is a launch refusal, not a DPAPI answer, so the parent may
+    // retry with a freshly compiled helper.
+    child.once("error", () => resolvePromise({ code: null, failed: true, launched: child.pid !== undefined }));
+    child.once("close", (code) => resolvePromise({ code, failed, launched: true }));
   });
   const timer = setTimeout(() => { failed = true; child.kill(); }, 20_000);
   child.stdin.on("error", () => { failed = true; });
@@ -141,6 +162,7 @@ async function invoke({ helper, helperIdentity, expected, operation, expectedLen
   clearTimeout(timer);
   if (result.failed || result.code !== 0 || total < 1 || total > maxOutput) {
     for (const chunk of chunks) chunk.fill(0);
+    if (!result.launched && total === 0) throw launchRefused();
     throw new Error("DPAPI child failed");
   }
   const output = Buffer.concat(chunks, total);

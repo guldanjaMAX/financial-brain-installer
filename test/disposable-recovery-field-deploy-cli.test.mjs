@@ -710,7 +710,7 @@ function provisioningProvider(role, calls, collision = null, { failOnceAt = null
           commit("initialize_source_schema", () => { remote.schema = true; });
           return {
             provider_metadata: providerMetadata(),
-            result: { migration_inventory_sha256: digest("migrations"), schema_version: 47 },
+            result: { migration_inventory_sha256: digest("migrations"), schema_version: 48 },
           };
         },
         async reconcileSourceSchema() {
@@ -718,7 +718,7 @@ function provisioningProvider(role, calls, collision = null, { failOnceAt = null
           return remote.schema
             ? { outcome: "confirmed", value: {
                 provider_metadata: providerMetadata(),
-                result: { migration_inventory_sha256: digest("migrations"), schema_version: 47 },
+                result: { migration_inventory_sha256: digest("migrations"), schema_version: 48 },
               } }
             : { outcome: "resume_safe" };
         },
@@ -773,7 +773,7 @@ function provisioningProvider(role, calls, collision = null, { failOnceAt = null
                 worker_exists: true,
                 workers_dev_enabled: true,
               },
-              schema_version: source ? 47 : null,
+              schema_version: source ? 48 : null,
               user_tables: source ? null : 0,
               content_rows: 0,
               vector_count: 0,

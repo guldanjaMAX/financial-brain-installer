@@ -79,7 +79,7 @@ for (const migration of migrations) {
 database.prepare(
   `INSERT INTO install_state
      (id,client_slug,product_version,schema_version,gate_version,installed_at,ring)
-   VALUES (1,'v048-field-proof','0.4.8',47,4,'2026-09-12T00:00:00.000Z','stable')`,
+   VALUES (1,'v048-field-proof','0.4.8',48,4,'2026-09-12T00:00:00.000Z','stable')`,
 ).run();
 const insertMigration = database.prepare(
   `INSERT INTO schema_migrations (version,name,applied_at,checksum)

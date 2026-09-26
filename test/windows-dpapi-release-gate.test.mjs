@@ -36,6 +36,8 @@ test("the Windows release gate uses the production probe for exactly 25 fresh ro
   assert.match(gate, /REQUIRED_HELPER_INVOCATIONS = \(REQUIRED_ROUNDS \* 2\) \+ 11 \+ 4/);
   assert.match(gate, /metrics\.compile_count !== 1/);
   assert.match(gate, /metrics\.helper_invocations !== REQUIRED_HELPER_INVOCATIONS/);
+  assert.match(gate, /metrics\.launch_refusals !== 0/);
+  assert.match(gate, /launch_refusals=\$\{safeCount\(readWindowsDpapiSessionMetrics\(\)\.launch_refusals\)\}/);
   assert.match(gate, /function cleanupSharedSessionOnce\(\)/);
   assert.equal((gate.match(/disposeWindowsDpapiSession\(\)/g) || []).length, 1);
   assert.match(session, /let activeSession = null/);
@@ -44,6 +46,8 @@ test("the Windows release gate uses the production probe for exactly 25 fresh ro
   assert.match(session, /BRAIN_DPAPI_HYGIENE:cleanup_deferred/);
   assert.match(session, /sessionMetrics\.compile_count \+= 1/);
   assert.match(session, /sessionMetrics\.helper_invocations \+= 1/);
+  assert.match(session, /sessionMetrics\.launch_refusals \+= 1/);
+  assert.match(session, /WINDOWS_DPAPI_LAUNCH_ATTEMPTS = 3/);
   assert.match(bridge, /--helper|"helper"/);
   assert.match(bridge, /sha256/);
   assert.match(bridge, /expectedSize|"size"/);

@@ -679,15 +679,37 @@ export function checkWindowsCredentialProtection({
     return check("Windows credential protection", OK, "not applicable on this platform");
   }
   const result = probe({ platform: "win32", rounds: 25, ...probeOptions });
+  const launchRefusals = Number.isSafeInteger(result.launch_refusals) ? result.launch_refusals : 0;
   if (result.passed) {
+    // A refused launch that a fresh helper recovered is still worth seeing:
+    // it is the Smart App Control signature, not a DPAPI failure.
+    const refusalNote = launchRefusals > 0
+      ? `; Windows refused ${launchRefusals} helper launch${launchRefusals === 1 ? "" : "es"} (likely Smart App Control) and a freshly compiled helper worked`
+      : "";
     return {
       ...check(
       "Windows credential protection",
       OK,
-      `${result.rounds} in-memory DPAPI protect/decrypt round trips passed and temporary helper artifacts were cleaned`,
+      `${result.rounds} in-memory DPAPI protect/decrypt round trips passed and temporary helper artifacts were cleaned${refusalNote}`,
       ),
       rounds: result.rounds,
       issue_code: null,
+      launch_refusals: launchRefusals,
+    };
+  }
+  if (result.stage === "launch_refused") {
+    return {
+      ...check(
+        "Windows credential protection",
+        FAIL,
+        `Windows refused to run the temporary DPAPI helper after ${result.rounds || 0} completed round trips, even after compiling fresh copies`,
+        `Issue code: ${result.issue_code || "WINDOWS_DPAPI_LAUNCH_REFUSED"}. ` +
+          "This is most likely Smart App Control blocking the unsigned helper, not a DPAPI or credential failure. " +
+          "Nothing was changed; rerun `brain doctor` or the command, which usually works.",
+      ),
+      rounds: result.rounds || 0,
+      issue_code: result.issue_code || "WINDOWS_DPAPI_LAUNCH_REFUSED",
+      launch_refusals: launchRefusals,
     };
   }
   if (result.stage === "cleanup_deferred") {
