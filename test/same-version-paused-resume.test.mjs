@@ -319,7 +319,9 @@ test("rollback then update: the paused same-version Worker resumes and the updat
     assert.equal(rolledBack.result?.restored, true);
     // The state rollback promises `brain update` will fix.
     assert.equal(brain.live.mode, "paused-for-upgrade");
-    assert.ok(rolledBack.output.some((line) => line.includes("then run `brain update <manifest>`")),
+    // Rendered as the product renders it: on Windows the command names the
+    // node executable and this CLI's own brain.mjs rather than a bare `brain`.
+    assert.ok(rolledBack.output.some((line) => line.includes(renderCliCommands("then run `brain update <manifest>`"))),
       rolledBack.output.join("\n"));
     assert.equal(brain.manifestVersion(), PRODUCT_VERSION);
 

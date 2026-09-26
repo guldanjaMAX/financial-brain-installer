@@ -410,7 +410,10 @@ function assertResumedTo(brain, newer) {
   assert.equal(brain.recordedVersion(), newer.version);
 }
 
-const PAUSED_QUEUED_MESSAGE = (pending, consequence) => renderCliCommands(
+// Each release's CLI renders its own guidance: on Windows a command names the
+// node executable and that release's brain.mjs, so the expectation must go
+// through the renderer of the release that actually ran.
+const PAUSED_QUEUED_MESSAGE = (release, pending, consequence) => release.cli.renderCliCommands(
   `This Brain is still paused for an update that has not finished, and it has ${pending} queued search ` +
     "update(s). A paused Brain does not process its queue, so waiting will not clear it, and this update will " +
     `not continue over queued work. ${consequence} Do not run \`brain drain\` or clear VECTOR_DRAIN_MODE by hand. ` +
@@ -486,7 +489,7 @@ for (const [older, newer] of [[CHECKED_OUT, NEXT], [PREVIOUS, CHECKED_OUT]]) {
     try {
       queueVectorWork(brain.db, 3);
       const run = await update(brain, newer);
-      assert.equal(run.error?.message, PAUSED_QUEUED_MESSAGE(3, "Nothing was changed."));
+      assert.equal(run.error?.message, PAUSED_QUEUED_MESSAGE(newer, 3, "Nothing was changed."));
       assert.doesNotMatch(run.error?.message || "", /not an earlier update|install that release|few minutes/u);
       assert.equal(brain.reads.backlog, 1);
       assert.deepEqual(brain.events, []);
@@ -494,7 +497,7 @@ for (const [older, newer] of [[CHECKED_OUT, NEXT], [PREVIOUS, CHECKED_OUT]]) {
       brain.reads.backlog = 0;
       const forced = await update(brain, newer, { force: true });
       assert.ok(String(forced.error?.message || "").includes(
-        PAUSED_QUEUED_MESSAGE(3, "The paused deployment was not started."),
+        PAUSED_QUEUED_MESSAGE(newer, 3, "The paused deployment was not started."),
       ), forced.error?.message);
       assert.equal(brain.reads.backlog, 2);
       assert.equal(brain.events.some((event) => event.startsWith("deploy:")), false);
@@ -566,7 +569,7 @@ async function staleOlderWorker(recorded, older, mode) {
   return brain;
 }
 
-const ACTIVE_QUEUED_MESSAGE = (pending) => renderCliCommands(
+const ACTIVE_QUEUED_MESSAGE = (release, pending) => release.cli.renderCliCommands(
   `This Brain is still processing ${pending} queued search update(s). Updating now would pause it mid-queue. ` +
     "Nothing was changed. Wait until `brain health` says query-ready, then run the update again.",
 );
@@ -628,8 +631,8 @@ for (const [recorded, older] of [[CHECKED_OUT, PREVIOUS], [NEXT, CHECKED_OUT]]) 
         const run = await update(brain, recorded);
         // An active stale Worker drains its own queue; a paused one never does.
         assert.equal(run.error?.message, mode === "active"
-          ? ACTIVE_QUEUED_MESSAGE(3)
-          : PAUSED_QUEUED_MESSAGE(3, "Nothing was changed."));
+          ? ACTIVE_QUEUED_MESSAGE(recorded, 3)
+          : PAUSED_QUEUED_MESSAGE(recorded, 3, "Nothing was changed."));
         assert.doesNotMatch(run.error?.message || "", /not an earlier update|install that release|few minutes/u);
         assert.equal(brain.reads.backlog, 1);
         assert.deepEqual(brain.events, []);
@@ -643,7 +646,7 @@ for (const [recorded, older] of [[CHECKED_OUT, PREVIOUS], [NEXT, CHECKED_OUT]]) 
         const repaired = await doctorRepair(brain, recorded);
         if (mode === "paused-for-upgrade") {
           assert.ok(String(repaired.error?.message || "").includes(
-            PAUSED_QUEUED_MESSAGE(3, "The paused deployment was not started."),
+            PAUSED_QUEUED_MESSAGE(recorded, 3, "The paused deployment was not started."),
           ), repaired.error?.message);
         } else {
           assert.deepEqual(repaired.result, { paused: false });
