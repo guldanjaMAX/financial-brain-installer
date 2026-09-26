@@ -805,6 +805,11 @@ export async function preflightCloudflareOAuthAccount(token, account, options = 
   }
   const checks = ["account"];
   let workersSubdomain = null;
+  let workersSubdomainUnregistered = false;
+  // A Brain on its own custom domain never serves from workers.dev, so for it
+  // an unregistered subdomain is reported rather than refused. Anything else,
+  // including an unknown caller, keeps the fail-closed default.
+  const workersSubdomainRequired = options.workersSubdomainRequired !== false;
   for (const check of PREFLIGHT_PATHS) {
     let body;
     try {
@@ -817,6 +822,10 @@ export async function preflightCloudflareOAuthAccount(token, account, options = 
       if (check.name === "workers_subdomain" &&
           error?.code === "CLOUDFLARE_OAUTH_REQUEST_FAILED" &&
           error.cloudflareErrorCodes?.includes(WORKERS_SUBDOMAIN_UNREGISTERED_API_CODE)) {
+        if (!workersSubdomainRequired) {
+          workersSubdomainUnregistered = true;
+          continue;
+        }
         throw oauthError(
           "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED",
           "preflight",
@@ -837,6 +846,7 @@ export async function preflightCloudflareOAuthAccount(token, account, options = 
     account: reached,
     checks: Object.freeze(checks),
     ...(workersSubdomain !== null ? { workersSubdomain } : {}),
+    ...(workersSubdomainUnregistered ? { workersSubdomainUnregistered: true } : {}),
   });
 }
 

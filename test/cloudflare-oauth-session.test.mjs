@@ -628,7 +628,9 @@ test("setup with no registered workers.dev subdomain says how to register one an
       }),
       (error) => {
         const shown = renderCliCommands(error.message);
-        assert.equal(error.code, "REMOTE_NOT_FOUND");
+        // Its own issue code: REMOTE_NOT_FOUND's guidance says to wait for
+        // propagation, which can never register a workers.dev subdomain.
+        assert.equal(error.code, "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED");
         assert.match(error.message, /CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED/);
         assert.match(error.message, /workers\.dev subdomain/);
         assert.match(error.message, /Workers & Pages/);
@@ -646,6 +648,137 @@ test("setup with no registered workers.dev subdomain says how to register one an
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// A Brain on its own custom domain never serves from workers.dev, so an
+// account that never registered one is not a reason to refuse the sign-in.
+// deploy keeps main's 'optional' route disposition and only warns.
+test("preflight reports an unregistered workers.dev subdomain without refusing when the Brain does not need one", async () => {
+  const token = Buffer.from(TOKEN);
+  const paths = [];
+  const preflight = await preflightCloudflareOAuthAccount(token, { id: ACCOUNT_A, name: "Selected" }, {
+    fetchImpl: unregisteredSubdomainFetch(paths),
+    workersSubdomainRequired: false,
+  });
+  assert.equal(preflight.status, "ready");
+  assert.equal(preflight.workersSubdomainUnregistered, true);
+  assert.equal(Object.hasOwn(preflight, "workersSubdomain"), false,
+    "no hostname label may be invented for an account without one");
+  assert.ok(!preflight.checks.includes("workers_subdomain"));
+  assert.ok(paths.some((path) => path.includes("/d1/database")),
+    "the remaining read-only checks must still run");
+  token.fill(0);
+});
+
+function namedProfileManifest(root, brain) {
+  const manifestPath = resolve(root, "brain.manifest.json");
+  writeFileSync(manifestPath, JSON.stringify({
+    client: { slug: "fixture" },
+    brain: { worker_name: "fixture-brain", ...brain },
+    infrastructure: { cloudflare: { account_id: ACCOUNT_A, auth_profile: cloudflareOAuthProfileName(INSTALL_ID) } },
+  }));
+  return manifestPath;
+}
+
+async function namedProfileRoutine(manifestPath, paths) {
+  const runner = processRecorder(({ args }) => args.includes("token")
+    ? okProcessResult({ stdout: tokenOutput() })
+    : okProcessResult());
+  let actionCalls = 0;
+  const prompts = [];
+  const outcome = await withCloudflareControlCredential(() => { actionCalls += 1; return "done"; }, {
+    manifestPath,
+    accountId: ACCOUNT_A,
+    authProfile: cloudflareOAuthProfileName(INSTALL_ID),
+    interactive: true,
+    allowBrowserReauth: true,
+    allowTokenRecovery: true,
+    askFn: async (question) => { prompts.push(question); return "n"; },
+    withToken: async () => { throw new Error("token lane must not run"); },
+    oauthOptions: {
+      processRunner: runner,
+      platformName: "darwin",
+      environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+      fetchImpl: unregisteredSubdomainFetch(paths),
+    },
+  }).then((value) => ({ value }), (error) => ({ error }));
+  return { ...outcome, actionCalls, prompts };
+}
+
+test("a named-profile update of a custom-domain Brain is not refused for a missing workers.dev subdomain", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-"));
+  try {
+    const paths = [];
+    const result = await namedProfileRoutine(namedProfileManifest(root, { domain: "brain.example.invalid" }), paths);
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.value, "done");
+    assert.equal(result.actionCalls, 1);
+    assert.deepEqual(result.prompts, []);
+    assert.ok(paths.includes(`/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`),
+      "the subdomain is still read, only its absence is not fatal");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a named-profile Brain whose address is on workers.dev is still refused for a missing subdomain", async () => {
+  for (const brain of [{}, { domain: "fixture-brain.fixture-label.workers.dev" }]) {
+    const root = mkdtempSync(resolve(tmpdir(), "brain-workers-dev-"));
+    try {
+      const paths = [];
+      const result = await namedProfileRoutine(namedProfileManifest(root, brain), paths);
+      assert.equal(result.actionCalls, 0, "nothing may run on an account without the Brain's address");
+      assert.equal(result.error?.code, "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED");
+      assert.match(result.error.message, /workers\.dev subdomain/);
+      assert.deepEqual(result.prompts, [], "neither a browser refresh nor the token path may be offered");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+// An expired named profile refreshes in the browser. When that fresh sign-in
+// then meets the unregistered subdomain, the answer is the same account
+// setting, so the token prompt must not be offered and the resume command
+// must still be named.
+test("an unregistered subdomain found by the browser refresh is not routed to the token prompt", async () => {
+  const resumeCommand = "brain update /fixture/brain.manifest.json";
+  const prompts = [];
+  const reauthorizeValues = [];
+  let tokenCalls = 0;
+  let actionCalls = 0;
+  await assert.rejects(
+    withCloudflareControlCredential(() => { actionCalls += 1; }, {
+      accountId: ACCOUNT_A,
+      authProfile: cloudflareOAuthProfileName(INSTALL_ID),
+      interactive: true,
+      allowBrowserReauth: true,
+      allowTokenRecovery: true,
+      resumeCommand,
+      askFn: async (question) => { prompts.push(question); return "y"; },
+      withToken: async () => { tokenCalls += 1; throw new Error("token lane must not run"); },
+      withOAuthSession: async ({ reauthorize }) => {
+        reauthorizeValues.push(reauthorize);
+        if (!reauthorize) {
+          throw new CloudflareOAuthSessionError("CLOUDFLARE_OAUTH_REAUTH_REQUIRED", "preflight", "fixture expiry");
+        }
+        throw new CloudflareOAuthSessionError("CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED", "preflight", "fixture account");
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED");
+      assert.match(error.message, /Workers & Pages/);
+      assert.ok(renderCliCommands(error.message).includes(renderCliCommands(resumeCommand)),
+        "the refusal after a refresh must still name the resume command");
+      assert.doesNotMatch(error.message, /hidden token/i);
+      return true;
+    },
+  );
+  assert.deepEqual(reauthorizeValues, [false, true], "the browser refresh is the step that met the refusal");
+  assert.equal(prompts.length, 1, `only the browser refresh may be offered, saw ${JSON.stringify(prompts)}`);
+  assert.match(prompts[0], /refresh in the browser/);
+  assert.equal(tokenCalls, 0);
+  assert.equal(actionCalls, 0);
 });
 
 test("preflight rejects wrong-account readback and missing OAuth scope without response disclosure", async () => {

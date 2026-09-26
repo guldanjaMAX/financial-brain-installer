@@ -375,3 +375,73 @@ test("a route that never stops 404ing dies after the full propagation budget and
   const saved = JSON.parse(readFileSync(target, "utf8"));
   assert.equal(saved.brain?.domain, undefined);
 });
+
+/** Capture everything the CLI prints while `run` executes. */
+async function captureOutput(run) {
+  const lines = [];
+  const priorLog = console.log;
+  const priorError = console.error;
+  console.log = (...args) => { lines.push(args.join(" ")); };
+  console.error = (...args) => { lines.push(args.join(" ")); };
+  try {
+    await run();
+  } finally {
+    console.log = priorLog;
+    console.error = priorError;
+  }
+  // Strip ANSI styling so the assertions read the words the owner reads.
+  return lines.map((line) => line.replace(/\u001b\[[0-9;]*m/g, ""));
+}
+
+// The identity gate can sit for about a minute after "workers.dev route
+// enabled". A silent minute reads as a hang, so each retry says what it is
+// waiting for in the same words the drain warm-up already uses.
+test("each propagation retry of the identity gate prints its progress like the drain warm-up", async () => {
+  const target = writeManifest();
+  const { fetchImpl, healthHosts } = harness({ subdomainRead: "ok", health: [404, 404, 503, "fetch-error", "stale", "healthy"] });
+  const { delays, wait } = recordingWait();
+  const lines = await captureOutput(() => withFixture(fetchImpl, () => cmdDeploy(target, { wait })));
+  assert.equal(healthHosts.length, 6);
+  const progress = lines.filter((line) => /Retrying \d+\/\d+ in \d+ second\(s\)\./.test(line));
+  assert.equal(progress.length, delays.length, "every wait must be announced, and only waits");
+  assert.equal(progress.length, 5);
+  const seconds = Math.ceil(delays[0] / 1_000);
+  assert.ok(progress[0].includes(
+    `the brain's address is not answering yet (404). This is normal just after a deploy. Retrying 1/12 in ${seconds} second(s).`,
+  ), progress[0]);
+  assert.ok(progress[1].includes("Retrying 2/12 in"), progress[1]);
+  assert.ok(progress[2].includes("the brain's address is not answering yet (503)."), progress[2]);
+  assert.ok(progress[3].includes("Retrying 4/12 in"), progress[3]);
+  assert.match(progress[4], /previous build.*Retrying 5\/12 in \d+ second\(s\)\./);
+});
+
+// A probe whose fetch hangs used to be allowed 15 seconds each, so twelve
+// probes plus eleven waits could hold setup silently for about four minutes.
+// Each probe's own timeout now comes out of the same one-minute budget.
+test("hanging identity probes stay inside the propagation budget instead of multiplying it", async () => {
+  const target = writeManifest();
+  const { fetchImpl } = harness({ subdomainRead: "ok", health: "healthy" });
+  let clock = 0;
+  const timeouts = [];
+  const request = async (_url, _init, { timeoutMs } = {}) => {
+    timeouts.push(timeoutMs);
+    clock += timeoutMs;
+    throw new Error(`the health check timed out after ${timeoutMs} ms (fixture)`);
+  };
+  const wait = async (ms) => { clock += ms; };
+  await assert.rejects(
+    () => withFixture(fetchImpl, () => cmdDeploy(target, { wait, request, now: () => clock })),
+    (error) => {
+      assert.match(error.message, /exact account hostname was not confirmed as this brain/i);
+      assert.match(error.message, /did not answer/);
+      return true;
+    },
+  );
+  assert.ok(timeouts.length >= 2, `expected more than one probe inside the budget, saw ${timeouts.length}`);
+  assert.ok(timeouts.every((ms) => Number.isInteger(ms) && ms > 0 && ms <= 10_000),
+    `each probe must be bounded, saw ${JSON.stringify(timeouts)}`);
+  assert.ok(clock <= 65_000, `the gate held setup for ${clock} ms, far past its one-minute budget`);
+  assert.ok(clock >= MIN_PROPAGATION_BUDGET_MS, `the gate gave up after ${clock} ms, before the propagation budget`);
+  const saved = JSON.parse(readFileSync(target, "utf8"));
+  assert.equal(saved.brain?.domain, undefined);
+});

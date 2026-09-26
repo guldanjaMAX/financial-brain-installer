@@ -994,7 +994,7 @@ export function cloudflareOAuthFailureMessage(error, { resumeCommand = null } = 
     // Sign-in worked. Neither the network nor a different credential would
     // change this answer, so neither is suggested.
     return "Cloudflare sign-in worked, but this Cloudflare account has no workers.dev subdomain registered yet, " +
-      "and the Brain's address lives on it. Nothing was created. In the Cloudflare dashboard, open Workers & Pages " +
+      "and this Brain has no custom domain, so its address lives on that subdomain. Nothing was created. In the Cloudflare dashboard, open Workers & Pages " +
       "and register a workers.dev subdomain, then " +
       (resumeCommand ? `resume with: ${resumeCommand}` : "rerun the same command.") +
       ` Issue: ${code}.`;
@@ -1028,7 +1028,7 @@ function throwCloudflareOAuthFailure(error, messageOptions = {}) {
     : oauthCode === "CLOUDFLARE_OAUTH_SCOPE_MISSING"
       ? "REMOTE_PERMISSION_DENIED"
       : oauthCode === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED"
-        ? "REMOTE_NOT_FOUND"
+        ? "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED"
       : /TIMEOUT|REQUEST_FAILED|FETCH_UNAVAILABLE/.test(oauthCode)
         ? "NETWORK_UNREACHABLE"
         : /PROFILE|ACCOUNT_(?:BINDING|SELECTION|ID)/.test(oauthCode)
@@ -1155,6 +1155,9 @@ export async function withCloudflareControlCredential(action, options = {}) {
   if (!oauthSessionOptions.workingDirectory && options.manifestPath) {
     oauthSessionOptions.workingDirectory = dirname(resolve(String(options.manifestPath)));
   }
+  if (oauthSessionOptions.workersSubdomainRequired === undefined) {
+    oauthSessionOptions.workersSubdomainRequired = brainNeedsWorkersDevSubdomain(options.manifestPath);
+  }
   const runOAuth = async (reauthorize) => oauthRunner({
     ...oauthSessionOptions,
     ...(authProfile
@@ -1185,7 +1188,11 @@ export async function withCloudflareControlCredential(action, options = {}) {
   });
 
   const initiallyReauthorize = options.reauthorizeOAuth === true;
+  const failureOptions = { resumeCommand: options.resumeCommand || null };
   const offerTokenRecovery = async (error) => {
+    // An account setting answered by a working sign-in, whichever attempt met
+    // it: a recovery token reads the same account and cannot change it.
+    if (isUnregisteredWorkersSubdomain(error)) throw error;
     if (options.allowTokenRecovery !== true || options.interactive === false) throw error;
     const answer = String(await (options.askFn ?? ask)(
       "Cloudflare browser sign-in is still unavailable. Use the recovery-only hidden token prompt now? (y/n)",
@@ -1199,11 +1206,11 @@ export async function withCloudflareControlCredential(action, options = {}) {
     return await runOAuth(initiallyReauthorize);
   } catch (error) {
     throwOriginalCloudflareControlActionError(error);
-    if (error instanceof CloudflareOAuthSessionError && error.code === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED") {
+    if (isUnregisteredWorkersSubdomain(error)) {
       // An account setting, answered by a working sign-in: no browser refresh
       // or recovery token can change it, so neither is offered.
       closePrompts();
-      throwCloudflareOAuthFailure(error, { resumeCommand: options.resumeCommand || null });
+      throwCloudflareOAuthFailure(error, failureOptions);
     }
     const mayRefresh = error instanceof CloudflareOAuthSessionError &&
       ["CLOUDFLARE_OAUTH_REAUTH_REQUIRED", "CLOUDFLARE_OAUTH_SCOPE_MISSING"].includes(error.code) &&
@@ -1224,7 +1231,7 @@ export async function withCloudflareControlCredential(action, options = {}) {
             throwOriginalCloudflareControlActionError(finalError);
             if (finalError instanceof Fatal) throw finalError;
             closePrompts();
-            throwCloudflareOAuthFailure(finalError);
+            throwCloudflareOAuthFailure(finalError, failureOptions);
           }
         }
       }
@@ -1235,9 +1242,33 @@ export async function withCloudflareControlCredential(action, options = {}) {
       throwOriginalCloudflareControlActionError(finalError);
       if (finalError instanceof Fatal) throw finalError;
       closePrompts();
-      throwCloudflareOAuthFailure(finalError);
+      throwCloudflareOAuthFailure(finalError, failureOptions);
     }
   }
+}
+
+function isUnregisteredWorkersSubdomain(error) {
+  return error instanceof CloudflareOAuthSessionError && error.code === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED";
+}
+
+/**
+ * Whether this Brain's address depends on the account's workers.dev subdomain.
+ *
+ * A custom brain.domain is the install URL and deploy treats a missing
+ * workers.dev route as optional, so the sign-in preflight must not refuse it.
+ * No domain yet, a saved *.workers.dev address, or a manifest that cannot be
+ * read all keep the fail-closed answer: the subdomain is required.
+ */
+function brainNeedsWorkersDevSubdomain(manifestPath) {
+  if (!manifestPath) return true;
+  let domain = "";
+  try {
+    const parsed = JSON.parse(readFileSync(resolve(String(manifestPath)), "utf8"));
+    domain = typeof parsed?.brain?.domain === "string" ? parsed.brain.domain.trim().toLowerCase() : "";
+  } catch {
+    return true;
+  }
+  return !domain || domain === "workers.dev" || domain.endsWith(".workers.dev");
 }
 
 function token() {
@@ -2107,42 +2138,72 @@ const SUBDOMAIN_READ_DENIED_RE = /failed \((401|403)\)/;
  * gives that lag (a minute, five seconds apart). An answer naming a DIFFERENT
  * brain is not lag: it is refused on the spot and never retried, because no
  * amount of waiting makes another brain's host this one's address.
+ *
+ * The minute is one budget, not a per-probe allowance. Each probe's fetch
+ * timeout comes out of what is left of it, so hanging fetches cannot stretch
+ * the silent wait after "workers.dev route enabled" to several minutes, and
+ * every retry says what it is waiting for, as the drain warm-up does.
  */
 const WORKERS_DEV_PROBE_ATTEMPTS = 12;
 const WORKERS_DEV_PROBE_WAIT_MS = 5000;
+const WORKERS_DEV_PROBE_BUDGET_MS = 60_000;
+const WORKERS_DEV_PROBE_TIMEOUT_MS = 10_000;
+const WORKERS_DEV_PROBE_MIN_TIMEOUT_MS = 1_000;
 async function verifyWorkersDevCandidate(domain, {
   expectedBrainName,
   expectedVersion,
   request = http,
   attempts = WORKERS_DEV_PROBE_ATTEMPTS,
   wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  now = Date.now,
 } = {}) {
+  const deadline = now() + WORKERS_DEV_PROBE_BUDGET_MS;
   let reason = "no attempt was made";
+  let tried = 0;
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    const verdict = await probeWorkersDevCandidate(domain, { expectedBrainName, expectedVersion, request });
+    const timeoutMs = Math.max(
+      WORKERS_DEV_PROBE_MIN_TIMEOUT_MS,
+      Math.min(WORKERS_DEV_PROBE_TIMEOUT_MS, deadline - now()),
+    );
+    const verdict = await probeWorkersDevCandidate(domain, { expectedBrainName, expectedVersion, request, timeoutMs });
+    tried = attempt;
     if (verdict.ok || !verdict.retry) return verdict.ok ? { ok: true } : { ok: false, reason: verdict.reason };
     reason = verdict.reason;
-    if (attempt < attempts) await wait(WORKERS_DEV_PROBE_WAIT_MS);
+    if (attempt >= attempts) break;
+    // Another probe must fit its minimum timeout after this wait, or the
+    // budget is spent and the owner hears the refusal now.
+    const delayMs = Math.min(WORKERS_DEV_PROBE_WAIT_MS, deadline - now() - WORKERS_DEV_PROBE_MIN_TIMEOUT_MS);
+    if (delayMs <= 0) break;
+    info(`${verdict.progress} Retrying ${attempt}/${attempts} in ${Math.ceil(delayMs / 1_000)} second(s).`);
+    await wait(delayMs);
   }
-  return { ok: false, reason: `${reason} after ${attempts} attempts` };
+  return { ok: false, reason: `${reason} after ${tried} attempt${tried === 1 ? "" : "s"}` };
 }
 
+const WORKERS_DEV_PROPAGATION_NOTE = "This is normal just after a deploy.";
+
 /** One /health probe: accept, refuse outright, or report propagation lag. */
-async function probeWorkersDevCandidate(domain, { expectedBrainName, expectedVersion, request }) {
+async function probeWorkersDevCandidate(domain, { expectedBrainName, expectedVersion, request, timeoutMs }) {
   let res;
   let body;
   try {
-    res = await request(`https://${domain}/health`, {}, { timeoutMs: 15_000, what: "the health check" });
+    res = await request(`https://${domain}/health`, {}, { timeoutMs, what: "the health check" });
     body = await res.text();
   } catch (error) {
     return {
       ok: false,
       retry: true,
       reason: `/health did not answer (${String(error?.message || error).split("\n")[0].slice(0, 140)})`,
+      progress: `the brain's address is not answering yet (no response). ${WORKERS_DEV_PROPAGATION_NOTE}`,
     };
   }
   if (!res.ok) {
-    return { ok: false, retry: res.status === 404 || res.status >= 500, reason: `/health returned ${res.status}` };
+    return {
+      ok: false,
+      retry: res.status === 404 || res.status >= 500,
+      reason: `/health returned ${res.status}`,
+      progress: `the brain's address is not answering yet (${res.status}). ${WORKERS_DEV_PROPAGATION_NOTE}`,
+    };
   }
   let parsed;
   try {
@@ -2159,7 +2220,12 @@ async function probeWorkersDevCandidate(domain, { expectedBrainName, expectedVer
   if (expectedVersion && parsed.version !== expectedVersion) {
     // Cloudflare keeps serving the replaced build for a while after a deploy.
     // This brain answering its previous version is lag, not a wrong host.
-    return { ok: false, retry: true, reason: `/health reported version "${parsed.version}", not "${expectedVersion}"` };
+    return {
+      ok: false,
+      retry: true,
+      reason: `/health reported version "${parsed.version}", not "${expectedVersion}"`,
+      progress: `the brain's address is still serving the previous build. ${WORKERS_DEV_PROPAGATION_NOTE}`,
+    };
   }
   return { ok: true };
 }
@@ -2234,6 +2300,7 @@ export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName,
     expectedVersion: PRODUCT_VERSION,
     request: options.request,
     wait: options.wait,
+    now: options.now,
   });
   if (!candidateVerdict.ok) {
     die(
@@ -2520,6 +2587,7 @@ export async function cmdDeploy(manifestPath, options = {}) {
       verifyWorkersDevCandidate: options.verifyWorkersDevCandidate,
       request: options.request,
       wait: options.wait,
+      now: options.now,
     });
     ok(`saved the live address https://${domain}`);
   }
@@ -24203,7 +24271,7 @@ async function cmdSetupInteractive(manifestPath) {
 }
 
 async function cmdUpgradeInteractive(manifestPath) {
-  return withManifestCloudflareControl(manifestPath, () => cmdUpgrade(manifestPath));
+  return withManifestCloudflareControl(manifestPath, () => cmdUpgrade(manifestPath), { command: "upgrade" });
 }
 
 /** Run a manifest-bound control-plane command through its exact saved custody. */
@@ -24211,8 +24279,14 @@ export async function withManifestCloudflareControl(manifestPath, action, option
   const binding = manifestCloudflareControlBinding(manifestPath);
   const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const automationToken = !interactive && Boolean(process.env.CLOUDFLARE_API_TOKEN);
+  const { command, ...controlOptions } = options;
   return (options.withCloudflareControl ?? withCloudflareControlCredential)(action, {
-    ...options,
+    ...controlOptions,
+    // A refusal the owner fixes outside the installer names the exact command
+    // to resume with, instead of "the same command" they may no longer see.
+    ...(command && !controlOptions.resumeCommand
+      ? { resumeCommand: `brain ${command} ${commandPath(displayPath(manifestPath))}` }
+      : {}),
     manifestPath,
     accountId: binding.accountId,
     authProfile: binding.authProfile,
@@ -26450,6 +26524,7 @@ export async function cmdUpdate(manifestPath, options = {}) {
   }, {
     ...options,
     manifestPath: pin.target,
+    resumeCommand: options.resumeCommand || `brain update ${commandPath(displayPath(pin.target))}`,
     accountId: binding.accountId,
     authProfile: binding.authProfile,
     forceToken: options.forceToken === true || automationToken,
@@ -27846,10 +27921,10 @@ const commands = {
   "financial-picture": cmdFinancialPicture,
   doctor: dispatchDoctor,
   whatsnew: cmdWhatsnew,
-  verify: (path) => withManifestCloudflareControl(path, () => cmdVerify(path)),
-  provision: (path) => withManifestCloudflareControl(path, () => cmdProvision(path)),
-  deploy: (path) => withManifestCloudflareControl(path, () => cmdDeploy(path)),
-  secrets: (path) => withManifestCloudflareControl(path, () => cmdSecrets(path)),
+  verify: (path) => withManifestCloudflareControl(path, () => cmdVerify(path), { command: "verify" }),
+  provision: (path) => withManifestCloudflareControl(path, () => cmdProvision(path), { command: "provision" }),
+  deploy: (path) => withManifestCloudflareControl(path, () => cmdDeploy(path), { command: "deploy" }),
+  secrets: (path) => withManifestCloudflareControl(path, () => cmdSecrets(path), { command: "secrets" }),
   health: cmdHealth,
   test: cmdTest,
   "mcp-config": cmdMcpConfig,

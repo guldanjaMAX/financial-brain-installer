@@ -170,3 +170,20 @@ test("the hiccup runner reports a clean pass and a useful isolated failure", () 
   assert.equal(failed.results[0].diagnostic, "fixture assertion failed");
   assert.match(failed.results[0].remaining_field_gate, /real Cloudflare/i);
 });
+
+// An account with no registered workers.dev subdomain has its own code. It
+// used to be recorded as REMOTE_NOT_FOUND, whose guidance says to wait for
+// propagation, which never registers a subdomain.
+test("an unregistered workers.dev subdomain explains how to register one and rerun", () => {
+  assert.ok(SUPPORT_ERROR_CODES.includes("CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED"));
+  const recovery = supportRecovery("CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED");
+  const rendered = renderCliCommands(renderSupportRecovery(recovery));
+  assert.match(rendered, /Workers & Pages/);
+  assert.match(rendered, /register a workers\.dev subdomain/i);
+  assert.doesNotMatch(rendered, /propagation/i);
+  assert.ok(rendered.includes(renderCliCommands("brain setup")),
+    "the rerun command must go through the command renderer");
+  const error = new Error("provider wording that may change tomorrow");
+  error.code = "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED";
+  assert.equal(supportErrorCode(error, { command: "setup" }), "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED");
+});
