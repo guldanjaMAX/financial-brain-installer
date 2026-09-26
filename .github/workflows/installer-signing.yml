@@ -3,9 +3,10 @@ name: installer-signing
 # Signs artifacts that machine-prep-installers.yml already built and uploaded.
 # The dispatcher copies unsigned_run_id, unsigned_artifact_id and unsigned_sha256
 # from that run's summary. Each job's first step proves from GitHub's own run
-# and artifact records that the artifact is the named file uploaded by a
-# successful workflow_dispatch run of that workflow on main in this repository,
-# with that digest, before anything is downloaded; the download then selects it
+# and artifact records that the artifact is the named file uploaded by the
+# successful platform job of a workflow_dispatch run of that workflow that built
+# the tip of the main branch or an ancestor of it in this repository, with that
+# digest, before anything is downloaded; the download then selects it
 # by immutable ID and the bytes are hashed again before signing. An upload with
 # archive: false is named after its file, not its name: input, so the build's
 # FinancialBrainMachinePrep-macOS-unsigned and FinancialBrainMachinePrep-Windows-unsigned
@@ -96,6 +97,11 @@ jobs:
           // including a fork's pull_request run, fails one of these comparisons.
           const env = process.env;
           const WORKFLOW_PATH = ".github/workflows/machine-prep-installers.yml";
+          // The display name of the machine-prep-installers job that uploads each file.
+          const PLATFORM_JOB = {
+            "FinancialBrainMachinePrep-unsigned.pkg": "build unsigned macOS package",
+            "FinancialBrainMachinePrep-unsigned.msi": "build unsigned Windows MSI",
+          };
           class Refusal extends Error {}
           const refuse = (message) => { throw new Refusal(message); };
 
@@ -121,6 +127,20 @@ jobs:
               if (!response.ok) refuse(`GitHub answered HTTP ${response.status} for ${path}`);
               return response.json();
             };
+            // 404 is the one answer that proves absence; any other failure refuses.
+            const apiUnlessMissing = async (path) => {
+              const response = await fetch(`${env.GITHUB_API_URL || "https://api.github.com"}${path}`, {
+                headers: {
+                  accept: "application/vnd.github+json",
+                  authorization: `Bearer ${env.GH_TOKEN || ""}`,
+                  "x-github-api-version": "2022-11-28",
+                },
+              });
+              if (response.status === 404) return null;
+              if (!response.ok) refuse(`GitHub answered HTTP ${response.status} for ${path}`);
+              return response.json();
+            };
+            const jobName = PLATFORM_JOB[expectedName];
             const run = await api(`/repos/${repository}/actions/runs/${runId}`);
             if (String(run?.id) !== runId) refuse(`the API returned run ${run?.id}, not run ${runId}`);
             if (run.repository?.full_name !== repository) refuse(`run ${runId} belongs to another repository`);
@@ -128,8 +148,46 @@ jobs:
             if (run.event !== "workflow_dispatch") refuse(`run ${runId} was started by ${run.event}, not workflow_dispatch`);
             if (run.head_repository?.full_name !== repository) refuse(`run ${runId} built a head repository other than ${repository}`);
             if (run.head_branch !== "main") refuse(`run ${runId} built ${run.head_branch}, not main`);
-            if (run.status !== "completed" || run.conclusion !== "success") {
-              refuse(`run ${runId} is ${run.status} with conclusion ${run.conclusion}, not completed with success`);
+            if (run.status !== "completed") {
+              refuse(`run ${runId} is ${run.status}, not completed; the ${jobName} job must be completed with success`);
+            }
+            // head_branch is only a name: a dispatch on a tag called main also
+            // reports "main". The run record carries no ref type, so the commit
+            // it built must be the tip of the main branch or an ancestor of it,
+            // and a main tag must not exist to make the name ambiguous.
+            const headSha = String(run.head_sha || "");
+            if (!/^[0-9a-f]{40}$/.test(headSha)) refuse(`run ${runId} has no 40-character head_sha`);
+            const mainRef = await api(`/repos/${repository}/git/ref/heads/main`);
+            const mainSha = String(mainRef?.object?.sha || "");
+            if (mainRef?.ref !== "refs/heads/main" || mainRef?.object?.type !== "commit" || !/^[0-9a-f]{40}$/.test(mainSha)) {
+              refuse("refs/heads/main did not resolve to a commit");
+            }
+            if (await apiUnlessMissing(`/repos/${repository}/git/ref/tags/main`) !== null) {
+              refuse(`a tag named main exists in ${repository}, so run ${runId}'s head_branch "main" cannot be proven to be the main branch`);
+            }
+            // compare/{base}...{head} describes head relative to base: with main's
+            // tip as base, an ancestor of main is "behind" and main itself is
+            // "identical"; either way the merge base is the built commit.
+            const comparison = await api(`/repos/${repository}/compare/${mainSha}...${headSha}`);
+            if (!["behind", "identical"].includes(comparison?.status) || comparison.ahead_by !== 0 ||
+                comparison.merge_base_commit?.sha !== headSha) {
+              refuse(`run ${runId} built commit ${headSha}, which is not the tip of main or an ancestor of it (compare status ${comparison?.status})`);
+            }
+            // The default dispatch fails the Windows job on purpose (no WiX OSMF
+            // confirmation), so the run's own conclusion cannot decide. The one
+            // platform job that built this artifact must have succeeded.
+            const jobList = await api(`/repos/${repository}/actions/runs/${runId}/jobs?per_page=100`);
+            const jobs = Array.isArray(jobList?.jobs) ? jobList.jobs : [];
+            if (jobList?.total_count !== jobs.length) {
+              refuse(`run ${runId} lists ${jobList?.total_count} jobs but the API returned ${jobs.length}; an incomplete job list proves nothing`);
+            }
+            const platformJobs = jobs.filter((candidate) => candidate?.name === jobName);
+            if (platformJobs.length !== 1) refuse(`run ${runId} has ${platformJobs.length} jobs named "${jobName}", not exactly one`);
+            const [platformJob] = platformJobs;
+            if (String(platformJob.run_id) !== runId) refuse(`the ${jobName} job belongs to run ${platformJob.run_id}, not run ${runId}`);
+            if (platformJob.head_sha !== headSha) refuse(`the ${jobName} job built ${platformJob.head_sha}, not the run's head_sha ${headSha}`);
+            if (platformJob.status !== "completed" || platformJob.conclusion !== "success") {
+              refuse(`the ${jobName} job of run ${runId} is ${platformJob.status} with conclusion ${platformJob.conclusion}, not completed with success`);
             }
             const artifact = await api(`/repos/${repository}/actions/artifacts/${artifactId}`);
             if (String(artifact?.id) !== artifactId) refuse(`the API returned artifact ${artifact?.id}, not artifact ${artifactId}`);
@@ -142,7 +200,7 @@ jobs:
               refuse(`artifact ${artifactId} digest ${artifact.digest} does not match the dispatched unsigned_sha256`);
             }
             appendFileSync(env.GITHUB_OUTPUT, `run_id=${runId}\nartifact_id=${artifactId}\n`);
-            console.log(`artifact ${artifactId} (${expectedName}) is from main workflow_dispatch run ${runId}, SHA-256 ${sha256}`);
+            console.log(`artifact ${artifactId} (${expectedName}) is from the successful ${jobName} job of main workflow_dispatch run ${runId} at ${headSha}, SHA-256 ${sha256}`);
           }
 
           try {
@@ -321,6 +379,11 @@ jobs:
           // including a fork's pull_request run, fails one of these comparisons.
           const env = process.env;
           const WORKFLOW_PATH = ".github/workflows/machine-prep-installers.yml";
+          // The display name of the machine-prep-installers job that uploads each file.
+          const PLATFORM_JOB = {
+            "FinancialBrainMachinePrep-unsigned.pkg": "build unsigned macOS package",
+            "FinancialBrainMachinePrep-unsigned.msi": "build unsigned Windows MSI",
+          };
           class Refusal extends Error {}
           const refuse = (message) => { throw new Refusal(message); };
 
@@ -346,6 +409,20 @@ jobs:
               if (!response.ok) refuse(`GitHub answered HTTP ${response.status} for ${path}`);
               return response.json();
             };
+            // 404 is the one answer that proves absence; any other failure refuses.
+            const apiUnlessMissing = async (path) => {
+              const response = await fetch(`${env.GITHUB_API_URL || "https://api.github.com"}${path}`, {
+                headers: {
+                  accept: "application/vnd.github+json",
+                  authorization: `Bearer ${env.GH_TOKEN || ""}`,
+                  "x-github-api-version": "2022-11-28",
+                },
+              });
+              if (response.status === 404) return null;
+              if (!response.ok) refuse(`GitHub answered HTTP ${response.status} for ${path}`);
+              return response.json();
+            };
+            const jobName = PLATFORM_JOB[expectedName];
             const run = await api(`/repos/${repository}/actions/runs/${runId}`);
             if (String(run?.id) !== runId) refuse(`the API returned run ${run?.id}, not run ${runId}`);
             if (run.repository?.full_name !== repository) refuse(`run ${runId} belongs to another repository`);
@@ -353,8 +430,46 @@ jobs:
             if (run.event !== "workflow_dispatch") refuse(`run ${runId} was started by ${run.event}, not workflow_dispatch`);
             if (run.head_repository?.full_name !== repository) refuse(`run ${runId} built a head repository other than ${repository}`);
             if (run.head_branch !== "main") refuse(`run ${runId} built ${run.head_branch}, not main`);
-            if (run.status !== "completed" || run.conclusion !== "success") {
-              refuse(`run ${runId} is ${run.status} with conclusion ${run.conclusion}, not completed with success`);
+            if (run.status !== "completed") {
+              refuse(`run ${runId} is ${run.status}, not completed; the ${jobName} job must be completed with success`);
+            }
+            // head_branch is only a name: a dispatch on a tag called main also
+            // reports "main". The run record carries no ref type, so the commit
+            // it built must be the tip of the main branch or an ancestor of it,
+            // and a main tag must not exist to make the name ambiguous.
+            const headSha = String(run.head_sha || "");
+            if (!/^[0-9a-f]{40}$/.test(headSha)) refuse(`run ${runId} has no 40-character head_sha`);
+            const mainRef = await api(`/repos/${repository}/git/ref/heads/main`);
+            const mainSha = String(mainRef?.object?.sha || "");
+            if (mainRef?.ref !== "refs/heads/main" || mainRef?.object?.type !== "commit" || !/^[0-9a-f]{40}$/.test(mainSha)) {
+              refuse("refs/heads/main did not resolve to a commit");
+            }
+            if (await apiUnlessMissing(`/repos/${repository}/git/ref/tags/main`) !== null) {
+              refuse(`a tag named main exists in ${repository}, so run ${runId}'s head_branch "main" cannot be proven to be the main branch`);
+            }
+            // compare/{base}...{head} describes head relative to base: with main's
+            // tip as base, an ancestor of main is "behind" and main itself is
+            // "identical"; either way the merge base is the built commit.
+            const comparison = await api(`/repos/${repository}/compare/${mainSha}...${headSha}`);
+            if (!["behind", "identical"].includes(comparison?.status) || comparison.ahead_by !== 0 ||
+                comparison.merge_base_commit?.sha !== headSha) {
+              refuse(`run ${runId} built commit ${headSha}, which is not the tip of main or an ancestor of it (compare status ${comparison?.status})`);
+            }
+            // The default dispatch fails the Windows job on purpose (no WiX OSMF
+            // confirmation), so the run's own conclusion cannot decide. The one
+            // platform job that built this artifact must have succeeded.
+            const jobList = await api(`/repos/${repository}/actions/runs/${runId}/jobs?per_page=100`);
+            const jobs = Array.isArray(jobList?.jobs) ? jobList.jobs : [];
+            if (jobList?.total_count !== jobs.length) {
+              refuse(`run ${runId} lists ${jobList?.total_count} jobs but the API returned ${jobs.length}; an incomplete job list proves nothing`);
+            }
+            const platformJobs = jobs.filter((candidate) => candidate?.name === jobName);
+            if (platformJobs.length !== 1) refuse(`run ${runId} has ${platformJobs.length} jobs named "${jobName}", not exactly one`);
+            const [platformJob] = platformJobs;
+            if (String(platformJob.run_id) !== runId) refuse(`the ${jobName} job belongs to run ${platformJob.run_id}, not run ${runId}`);
+            if (platformJob.head_sha !== headSha) refuse(`the ${jobName} job built ${platformJob.head_sha}, not the run's head_sha ${headSha}`);
+            if (platformJob.status !== "completed" || platformJob.conclusion !== "success") {
+              refuse(`the ${jobName} job of run ${runId} is ${platformJob.status} with conclusion ${platformJob.conclusion}, not completed with success`);
             }
             const artifact = await api(`/repos/${repository}/actions/artifacts/${artifactId}`);
             if (String(artifact?.id) !== artifactId) refuse(`the API returned artifact ${artifact?.id}, not artifact ${artifactId}`);
@@ -367,7 +482,7 @@ jobs:
               refuse(`artifact ${artifactId} digest ${artifact.digest} does not match the dispatched unsigned_sha256`);
             }
             appendFileSync(env.GITHUB_OUTPUT, `run_id=${runId}\nartifact_id=${artifactId}\n`);
-            console.log(`artifact ${artifactId} (${expectedName}) is from main workflow_dispatch run ${runId}, SHA-256 ${sha256}`);
+            console.log(`artifact ${artifactId} (${expectedName}) is from the successful ${jobName} job of main workflow_dispatch run ${runId} at ${headSha}, SHA-256 ${sha256}`);
           }
 
           try {

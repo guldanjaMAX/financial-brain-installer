@@ -201,15 +201,44 @@ const REPOSITORY = "fixture-owner/fixture-repo";
 const RUN_ID = "1234567890";
 const ARTIFACT_ID = "987654321";
 const SHA = "a".repeat(64);
+// Synthetic commit IDs: the tip of main, an older commit on main, and a commit
+// that exists only under a tag.
+const MAIN_TIP = "1".repeat(40);
+const MAIN_ANCESTOR = "2".repeat(40);
+const TAG_ONLY_COMMIT = "3".repeat(40);
+const MAC_JOB = "build unsigned macOS package";
+const WINDOWS_JOB = "build unsigned Windows MSI";
 const goodRun = () => ({
   id: Number(RUN_ID),
   path: ".github/workflows/machine-prep-installers.yml",
   event: "workflow_dispatch",
   head_branch: "main",
+  head_sha: MAIN_TIP,
   status: "completed",
   conclusion: "success",
   repository: { full_name: REPOSITORY },
   head_repository: { full_name: REPOSITORY },
+});
+const mainRef = (sha = MAIN_TIP) => ({ ref: "refs/heads/main", object: { type: "commit", sha } });
+/** GET /compare/{main tip}...{head_sha}: how head_sha relates to the tip of main. */
+const comparison = (status, headSha = MAIN_TIP) => ({
+  status,
+  ahead_by: status === "ahead" || status === "diverged" ? 2 : 0,
+  behind_by: status === "behind" || status === "diverged" ? 3 : 0,
+  merge_base_commit: { sha: status === "behind" || status === "identical" ? headSha : MAIN_ANCESTOR },
+});
+const job = (name, conclusion, headSha = MAIN_TIP) => ({
+  id: name === MAC_JOB ? 11 : 12,
+  run_id: Number(RUN_ID),
+  name,
+  head_sha: headSha,
+  status: "completed",
+  conclusion,
+});
+/** The default dispatch: the Windows job deliberately fails without the WiX OSMF confirmation. */
+const goodJobs = (headSha = MAIN_TIP) => ({
+  total_count: 2,
+  jobs: [job(MAC_JOB, "success", headSha), job(WINDOWS_JOB, "failure", headSha)],
 });
 const goodArtifact = () => ({
   id: Number(ARTIFACT_ID),
@@ -237,7 +266,7 @@ function embeddedProvenance() {
  * Run the embedded program exactly as the gate does, with fetch answered
  * from fixtures. The fixture preload records each API path it was asked for.
  */
-function runProvenance({ run = goodRun(), artifact = goodArtifact(), env = {} } = {}) {
+function runProvenance({ run = goodRun(), artifact = goodArtifact(), env = {}, fixtures = {} } = {}) {
   const { macProgram } = embeddedProvenance();
   const directory = mkdtempSync(join(tmpdir(), "signing-provenance-"));
   try {
@@ -252,7 +281,8 @@ function runProvenance({ run = goodRun(), artifact = goodArtifact(), env = {} } 
         appendFileSync(process.env.CALLS, path + "\\n");
         if (init?.headers?.authorization !== "Bearer fixture-token") throw new Error("the API call carried no job token");
         const body = fixtures[path];
-        return { ok: body !== undefined, status: body === undefined ? 404 : 200, json: async () => body };
+        const status = body === undefined ? 404 : body.__status ?? 200;
+        return { ok: status === 200, status, json: async () => body };
       };
     `);
     const result = spawnSync(process.execPath, ["--import", pathToFileURL(preload).href, "--input-type=module", "-"], {
@@ -271,7 +301,11 @@ function runProvenance({ run = goodRun(), artifact = goodArtifact(), env = {} } 
         CALLS: calls,
         FIXTURES: JSON.stringify({
           [`/repos/${REPOSITORY}/actions/runs/${RUN_ID}`]: run,
+          [`/repos/${REPOSITORY}/git/ref/heads/main`]: mainRef(),
+          [`/repos/${REPOSITORY}/compare/${MAIN_TIP}...${MAIN_TIP}`]: comparison("identical"),
+          [`/repos/${REPOSITORY}/actions/runs/${RUN_ID}/jobs`]: goodJobs(),
           [`/repos/${REPOSITORY}/actions/artifacts/${ARTIFACT_ID}`]: artifact,
+          ...fixtures,
         }),
         ...env,
       },
@@ -289,6 +323,12 @@ function runProvenance({ run = goodRun(), artifact = goodArtifact(), env = {} } 
 
 const RUN_PATH = `/repos/${REPOSITORY}/actions/runs/${RUN_ID}`;
 const ARTIFACT_PATH = `/repos/${REPOSITORY}/actions/artifacts/${ARTIFACT_ID}`;
+const HEADS_MAIN_PATH = `/repos/${REPOSITORY}/git/ref/heads/main`;
+const TAGS_MAIN_PATH = `/repos/${REPOSITORY}/git/ref/tags/main`;
+const comparePath = (headSha = MAIN_TIP) => `/repos/${REPOSITORY}/compare/${MAIN_TIP}...${headSha}`;
+const JOBS_PATH = `/repos/${REPOSITORY}/actions/runs/${RUN_ID}/jobs`;
+/** Every record the gate reads, in order, before it reads the artifact. */
+const RUN_PROOF_CALLS = (headSha = MAIN_TIP) => [RUN_PATH, HEADS_MAIN_PATH, TAGS_MAIN_PATH, comparePath(headSha), JOBS_PATH];
 
 test("S2 both jobs run the same provenance program", () => {
   const { macProgram, windowsProgram } = embeddedProvenance();
@@ -298,7 +338,7 @@ test("S2 both jobs run the same provenance program", () => {
 test("S2 a reviewed main workflow_dispatch artifact with the declared digest is accepted", () => {
   const result = runProvenance();
   assert.equal(result.status, 0, result.text);
-  assert.deepEqual(result.calls, [RUN_PATH, ARTIFACT_PATH]);
+  assert.deepEqual(result.calls, [...RUN_PROOF_CALLS(), ARTIFACT_PATH]);
   assert.equal(result.output, `run_id=${RUN_ID}\nartifact_id=${ARTIFACT_ID}\n`);
 });
 
@@ -309,8 +349,8 @@ const runRefusals = [
   ["a fork head repository", (run) => { run.head_repository = { full_name: "someone-else/fixture-repo" }; }, /head repository/],
   ["a missing head repository", (run) => { delete run.head_repository; }, /head repository/],
   ["a non-main branch", (run) => { run.head_branch = "feature"; }, /not main/],
-  ["a failed run", (run) => { run.conclusion = "failure"; }, /success/],
   ["an unfinished run", (run) => { run.status = "in_progress"; run.conclusion = null; }, /completed with success/],
+  ["a run with no head commit", (run) => { delete run.head_sha; }, /has no 40-character head_sha/],
   ["a run from another repository", (run) => { run.repository = { full_name: "someone-else/fixture-repo" }; }, /another repository/],
 ];
 for (const [name, mutate, message] of runRefusals) {
@@ -340,10 +380,154 @@ for (const [name, mutate, message] of artifactRefusals) {
     const result = runProvenance({ artifact });
     assert.equal(result.status, 1);
     assert.match(result.text, message);
-    assert.deepEqual(result.calls, [RUN_PATH, ARTIFACT_PATH], "the refusal came from the artifact's own record");
+    assert.deepEqual(result.calls, [...RUN_PROOF_CALLS(), ARTIFACT_PATH], "the refusal came from the artifact's own record");
     assert.equal(result.output, "");
   });
 }
+
+// S2-R: head_branch "main" is only a name. A dispatch on a tag called main
+// reports head_branch "main" too, so the gate proves the built commit is the
+// tip of the main branch or an ancestor of it, and refuses while a main tag
+// exists at all.
+
+test("S2-R a run that built an older commit of main is accepted", () => {
+  const run = goodRun();
+  run.head_sha = MAIN_ANCESTOR;
+  const result = runProvenance({
+    run,
+    fixtures: { [comparePath(MAIN_ANCESTOR)]: comparison("behind", MAIN_ANCESTOR), [JOBS_PATH]: goodJobs(MAIN_ANCESTOR) },
+  });
+  assert.equal(result.status, 0, result.text);
+  assert.deepEqual(result.calls, [...RUN_PROOF_CALLS(MAIN_ANCESTOR), ARTIFACT_PATH]);
+});
+
+test("S2-R a dispatch on a tag named main is refused while that tag exists", () => {
+  const run = goodRun();
+  run.head_sha = TAG_ONLY_COMMIT;
+  const result = runProvenance({
+    run,
+    fixtures: {
+      [TAGS_MAIN_PATH]: { ref: "refs/tags/main", object: { type: "commit", sha: TAG_ONLY_COMMIT } },
+      [comparePath(TAG_ONLY_COMMIT)]: comparison("diverged", TAG_ONLY_COMMIT),
+    },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.text, /a tag named main exists in fixture-owner\/fixture-repo, so run 1234567890's head_branch "main" cannot be proven to be the main branch/);
+  assert.match(result.text, /Nothing was downloaded or signed/);
+  assert.deepEqual(result.calls, [RUN_PATH, HEADS_MAIN_PATH, TAGS_MAIN_PATH], "the refusal came from the tag lookup");
+  assert.equal(result.output, "");
+});
+
+for (const [name, status, extra] of [
+  ["a commit that main does not contain", "diverged", {}],
+  ["a commit newer than main", "ahead", {}],
+  ["a behind status whose merge base is another commit", "behind", { merge_base_commit: { sha: MAIN_ANCESTOR } }],
+  ["an identical status that reports commits ahead", "identical", { ahead_by: 1 }],
+]) {
+  test(`S2-R refuses ${name} even after its tag is gone`, () => {
+    const run = goodRun();
+    run.head_sha = TAG_ONLY_COMMIT;
+    const result = runProvenance({
+      run,
+      fixtures: { [comparePath(TAG_ONLY_COMMIT)]: { ...comparison(status, TAG_ONLY_COMMIT), ...extra } },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.text, new RegExp(`run 1234567890 built commit ${TAG_ONLY_COMMIT}, which is not the tip of main or an ancestor of it \\(compare status ${status}\\)`));
+    assert.deepEqual(result.calls, [RUN_PATH, HEADS_MAIN_PATH, TAGS_MAIN_PATH, comparePath(TAG_ONLY_COMMIT)]);
+    assert.equal(result.output, "");
+  });
+}
+
+for (const [name, ref] of [
+  ["a missing main branch", undefined],
+  ["a main ref that is not refs/heads/main", { ref: "refs/tags/main", object: { type: "commit", sha: MAIN_TIP } }],
+  ["a main ref that names a tag object", { ref: "refs/heads/main", object: { type: "tag", sha: MAIN_TIP } }],
+]) {
+  test(`S2-R refuses ${name}`, () => {
+    const result = runProvenance({ fixtures: { [HEADS_MAIN_PATH]: ref } });
+    assert.equal(result.status, 1);
+    assert.match(result.text, ref === undefined ? /HTTP 404 for \/repos\/fixture-owner\/fixture-repo\/git\/ref\/heads\/main/ : /refs\/heads\/main did not resolve to a commit/);
+    assert.deepEqual(result.calls, [RUN_PATH, HEADS_MAIN_PATH]);
+    assert.equal(result.output, "");
+  });
+}
+
+test("S2-R an error other than 404 on the tag lookup is a refusal, not an absent tag", () => {
+  const result = runProvenance({ fixtures: { [TAGS_MAIN_PATH]: { __status: 500 } } });
+  assert.equal(result.status, 1);
+  assert.match(result.text, /GitHub answered HTTP 500 for \/repos\/fixture-owner\/fixture-repo\/git\/ref\/tags\/main/);
+  assert.equal(result.output, "");
+});
+
+// S8: the default dispatch fails the Windows job on purpose, so the gate reads
+// the conclusion of the one platform job that built the artifact, not the run.
+
+test("S8 a macOS package from a run whose Windows job failed is accepted", () => {
+  const run = goodRun();
+  run.conclusion = "failure";
+  const result = runProvenance({ run });
+  assert.equal(result.status, 0, result.text);
+  assert.deepEqual(result.calls, [...RUN_PROOF_CALLS(), ARTIFACT_PATH]);
+});
+
+test("S8 a Windows MSI is gated on the Windows job, not the macOS job", () => {
+  const run = goodRun();
+  run.conclusion = "failure";
+  const msi = { EXPECTED_ARTIFACT_NAME: "FinancialBrainMachinePrep-unsigned.msi" };
+  const artifact = { ...goodArtifact(), name: "FinancialBrainMachinePrep-unsigned.msi" };
+  const accepted = runProvenance({
+    run, artifact, env: msi,
+    fixtures: { [JOBS_PATH]: { total_count: 2, jobs: [job(MAC_JOB, "failure"), job(WINDOWS_JOB, "success")] } },
+  });
+  assert.equal(accepted.status, 0, accepted.text);
+  const refused = runProvenance({ run, artifact, env: msi });
+  assert.equal(refused.status, 1);
+  assert.match(refused.text, /the build unsigned Windows MSI job of run 1234567890 is completed with conclusion failure, not completed with success/);
+  assert.deepEqual(refused.calls, RUN_PROOF_CALLS());
+  assert.equal(refused.output, "");
+});
+
+const jobRefusals = [
+  ["a failed platform job", (jobs) => { jobs.jobs[0].conclusion = "failure"; },
+    /the build unsigned macOS package job of run 1234567890 is completed with conclusion failure, not completed with success/],
+  ["a skipped platform job", (jobs) => { jobs.jobs[0].conclusion = "skipped"; }, /conclusion skipped, not completed with success/],
+  ["an unfinished platform job", (jobs) => { jobs.jobs[0].status = "in_progress"; jobs.jobs[0].conclusion = null; },
+    /is in_progress with conclusion null, not completed with success/],
+  ["a missing platform job", (jobs) => { jobs.jobs.shift(); jobs.total_count = 1; },
+    /run 1234567890 has 0 jobs named "build unsigned macOS package", not exactly one/],
+  ["a duplicated platform job name", (jobs) => { jobs.jobs.push({ ...jobs.jobs[0], id: 13 }); jobs.total_count = 3; },
+    /run 1234567890 has 2 jobs named "build unsigned macOS package", not exactly one/],
+  ["a job name that only resembles the platform job", (jobs) => { jobs.jobs[0].name = `${MAC_JOB} (copy)`; },
+    /has 0 jobs named "build unsigned macOS package"/],
+  ["a job list that is only one page of more", (jobs) => { jobs.total_count = 150; },
+    /run 1234567890 lists 150 jobs but the API returned 2; an incomplete job list proves nothing/],
+  ["a job from another run", (jobs) => { jobs.jobs[0].run_id = 1; }, /belongs to run 1, not run 1234567890/],
+  ["a job that built another commit", (jobs) => { jobs.jobs[0].head_sha = MAIN_ANCESTOR; },
+    new RegExp(`built ${MAIN_ANCESTOR}, not the run's head_sha ${MAIN_TIP}`)],
+];
+for (const [name, mutate, message] of jobRefusals) {
+  test(`S8 refuses ${name} before reading the artifact`, () => {
+    const jobs = goodJobs();
+    mutate(jobs);
+    const result = runProvenance({ fixtures: { [JOBS_PATH]: jobs } });
+    assert.equal(result.status, 1);
+    assert.match(result.text, message);
+    assert.match(result.text, /Nothing was downloaded or signed/);
+    assert.deepEqual(result.calls, RUN_PROOF_CALLS(), "the refusal came from the jobs record");
+    assert.equal(result.output, "");
+  });
+}
+
+test("S8 the gate's platform job names are the unsigned workflow's own job names", () => {
+  const unsignedJobs = workflowJobs(read(UNSIGNED_PATH));
+  const { macProgram } = embeddedProvenance();
+  for (const [buildJob, file] of [["macos-unsigned", "FinancialBrainMachinePrep-unsigned.pkg"], ["windows-unsigned", "FinancialBrainMachinePrep-unsigned.msi"]]) {
+    const displayName = /^    name: (.+)$/m.exec(unsignedJobs.get(buildJob))?.[1];
+    assert.ok(displayName, `${buildJob} has a display name`);
+    assert.ok(macProgram.includes(`"${file}": "${displayName}"`), `the gate reads the "${displayName}" job for ${file}`);
+  }
+  assert.doesNotMatch(macProgram, /run\.conclusion !== "success"/, "the whole-run conclusion no longer decides");
+});
 
 for (const [name, env] of [
   ["a non-numeric run ID", { UNSIGNED_RUN_ID: "12; rm -rf /" }],
@@ -449,6 +633,18 @@ test("S4 the signing plan names the environment branch policy, self-review and t
   for (const variable of ["ARTIFACT_SIGNING_ENDPOINT", "ARTIFACT_SIGNING_ACCOUNT_NAME", "ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME"]) {
     assert.match(plan, new RegExp(`\\b${variable}\\b[^\\n]*repository variable|repository variables?[^\\n]*\\b${variable}\\b`));
   }
+});
+
+test("S8 the owner checklist says the platform job, not the whole run, must succeed", () => {
+  const plan = read("machine-prep/SIGNING.md");
+  const step4 = /^4\. Dispatch `machine-prep-installers` on `main`.*$/m.exec(plan)?.[0];
+  assert.ok(step4, "checklist step 4 exists");
+  assert.match(step4, /`build unsigned macOS package`/);
+  assert.match(step4, /`build unsigned Windows MSI`/);
+  assert.match(step4, /wix_osmf_confirmed/);
+  assert.match(step4, /whole run[^.]*(?:fail|red)/i);
+  assert.match(step4, /tag named `main`/);
+  assert.doesNotMatch(plan, /finished with `success`/, "the plan no longer claims the whole run must succeed");
 });
 
 // ---------------------------------------------------------------------------
