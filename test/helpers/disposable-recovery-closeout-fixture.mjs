@@ -214,7 +214,7 @@ function interruptionApprovalFingerprint(plan, candidate, wrapperSha256) {
     source_resource_fingerprint: plan.source_resource_fingerprint,
     target_resource_fingerprint: plan.target_resource_fingerprint,
     client_slug: "v048-field-proof",
-    product_version: "0.4.8",
+    product_version: "0.4.9",
     data_class: "deterministic_fictional_synthetic_only",
     stage: "rebuild_vectorize",
     hook_point:
@@ -498,7 +498,7 @@ function preparationBinding(paths) {
     candidate_tree_sha: "b".repeat(40),
     field_receipt_run_id: SOURCE_VERSION,
     field_receipt_sha256: sha256(readFileSync(paths.fieldReceipt)),
-    package_filename: "brain-installer-0.4.8.tgz",
+    package_filename: "brain-installer-0.4.9.tgz",
     package_bytes: packageBytes,
     package_sha256: sha256(readFileSync(paths.package)),
     package_file_count: 1,
@@ -864,14 +864,14 @@ function seedBatchReceipt(documents, status) {
 function seedInventory(complete) {
   if (!complete) {
     return {
-      version: "0.4.8",
+      version: "0.4.9",
       backend: "d1",
       vector_drain_mode: "active",
       rows: [],
     };
   }
   return {
-    version: "0.4.8",
+    version: "0.4.9",
     backend: "d1",
     vector_drain_mode: "active",
     vector_backlog: { pending: 0, upserts: 0, deletes: 0, submitted: 0 },
@@ -1576,7 +1576,7 @@ function targetEvalReceipt(
     checks: {
       health: {
         status: "pass",
-        version: "0.4.8",
+        version: "0.4.9",
         accepting_documents: true,
         before_snapshot_sha256: HASH("3"),
         after_snapshot_sha256: HASH("3"),
@@ -1791,7 +1791,7 @@ export async function createDisposableRecoveryCloseoutFixture({
     wranglerWrapper: join(explicitDirectory, "wrangler-wrapper"),
     golden: join(explicitDirectory, "verified-recovery-golden.json"),
     fieldReceipt: join(explicitDirectory, "field-receipt.json"),
-    package: join(explicitDirectory, "brain-installer-0.4.8.tgz"),
+    package: join(explicitDirectory, "brain-installer-0.4.9.tgz"),
   });
   writePrivate(explicit.wranglerWrapper, "#!/bin/sh\nexit 1\n");
   writePrivate(explicit.golden, "{}\n");
@@ -1925,7 +1925,7 @@ export async function cloneDisposableRecoveryCloseoutFixture(
     wranglerWrapper: join(explicitDirectory, "wrangler-wrapper"),
     golden: join(explicitDirectory, "verified-recovery-golden.json"),
     fieldReceipt: join(explicitDirectory, "field-receipt.json"),
-    package: join(explicitDirectory, "brain-installer-0.4.8.tgz"),
+    package: join(explicitDirectory, "brain-installer-0.4.9.tgz"),
   });
   const readerOptions = Object.freeze({
     accountId: CLOSEOUT_FIXTURE_ACCOUNT_ID,

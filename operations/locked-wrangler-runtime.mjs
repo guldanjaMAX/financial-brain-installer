@@ -262,7 +262,7 @@ function validateLock(lock) {
   const rootEntry = packages?.[""];
   const first = "node_modules/wrangler";
   if (!packages || typeof packages !== "object" || Array.isArray(packages) ||
-      rootEntry?.name !== "brain-installer" || rootEntry?.version !== "0.4.8" ||
+      rootEntry?.name !== "brain-installer" || rootEntry?.version !== "0.4.9" ||
       rootEntry?.devDependencies?.wrangler !== LOCKED_WRANGLER_VERSION ||
       packages[first]?.version !== LOCKED_WRANGLER_VERSION ||
       packages[first]?.bin?.wrangler !== "bin/wrangler.js") fail();

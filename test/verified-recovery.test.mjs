@@ -124,7 +124,7 @@ const exactCampaignSourceManifest = {
     display_name: V048_DISPOSABLE_CAMPAIGN_DISPLAY_NAME,
   },
   brain: {
-    version: "0.4.8",
+    version: "0.4.9",
     worker_name: V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME,
     domain: `${V048_DISPOSABLE_CAMPAIGN_SOURCE_NAME}.fixture.workers.dev`,
   },
@@ -143,7 +143,7 @@ const exactCampaignSourceManifest = {
 const exactCampaignTargetManifest = {
   ...structuredClone(exactCampaignSourceManifest),
   brain: {
-    version: "0.4.8",
+    version: "0.4.9",
     worker_name: V048_DISPOSABLE_CAMPAIGN_TARGET_NAME,
     domain: `${V048_DISPOSABLE_CAMPAIGN_TARGET_NAME}.fixture.workers.dev`,
   },
