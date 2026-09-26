@@ -9,14 +9,19 @@
 import assert from "node:assert/strict";
 import {
   withWranglerSessionIfNeeded,
+  withCloudflareControlCredential,
+  runCloudflareWranglerCommand,
   cloudflareApiRequest,
   cloudflareAccessUsesBrowserProfile,
 } from "../brain.mjs";
+import { cloudflareOAuthProfileName } from "../operations/cloudflare-oauth-session.mjs";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);
 const denied = { success: false, errors: [{ code: 9109, message: "Invalid access token" }], result: null };
 const granted = { success: true, errors: [], result: [{ id: "acct" }] };
+const ACCOUNT_ID = "c".repeat(32);
+const PROFILE = cloudflareOAuthProfileName("synthetic-install-identity-0001");
 const savedFetch = globalThis.fetch;
 const savedToken = process.env.CLOUDFLARE_API_TOKEN;
 delete process.env.CLOUDFLARE_API_TOKEN;
@@ -42,6 +47,86 @@ function stubFetch(script) {
   return calls;
 }
 const session = (renew, read = () => A) => ({ env: {}, argv: ["--json"], readWranglerOAuthToken: read, renewSessionToken: renew });
+
+function oauthEnvelope(result, extra = {}) {
+  return { success: true, errors: [], messages: [], result, ...extra };
+}
+
+function namedProfileHarness({ renewal = B, rejectRenewed = false } = {}) {
+  let tokenReads = 0;
+  let mutationCalls = 0;
+  let created = 0;
+  const processRunner = (_command, args) => {
+    if (!args.includes("token")) {
+      return { status: 0, signal: null, error: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    }
+    tokenReads += 1;
+    if (tokenReads > 1 && renewal === null) {
+      return { status: 1, signal: null, error: null, stdout: Buffer.alloc(0), stderr: Buffer.from("fixture refresh refused") };
+    }
+    const token = tokenReads === 1 ? A : renewal;
+    return {
+      status: 0,
+      signal: null,
+      error: null,
+      stdout: Buffer.from(JSON.stringify({ type: "oauth", token }) + "\n"),
+      stderr: Buffer.alloc(0),
+    };
+  };
+  const fetchImpl = async (url, init = {}) => {
+    const parsed = new URL(String(url));
+    const path = parsed.pathname;
+    if (path.endsWith("/accounts") && parsed.search) {
+      return new Response(JSON.stringify(oauthEnvelope([
+        { id: ACCOUNT_ID, name: "Fixture account" },
+      ], { result_info: { page: 1, count: 1, total_count: 1, total_pages: 1 } })), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (path.endsWith(`/accounts/${ACCOUNT_ID}`)) {
+      return new Response(JSON.stringify(oauthEnvelope({ id: ACCOUNT_ID, name: "Fixture account" })), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (path.endsWith("/workers/scripts/renewal-probe") && init.method === "POST") {
+      mutationCalls += 1;
+      if (!rejectRenewed && init.headers?.Authorization === `Bearer ${B}`) {
+        created += 1;
+        return new Response(JSON.stringify(oauthEnvelope({ id: "created" })), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify(denied), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify(oauthEnvelope([])), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const run = (action) => withCloudflareControlCredential(action, {
+    accountId: ACCOUNT_ID,
+    authProfile: PROFILE,
+    interactive: false,
+    allowBrowserReauth: false,
+    allowTokenRecovery: false,
+    oauthOptions: {
+      processRunner,
+      environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+      fetchImpl,
+    },
+  });
+  return {
+    fetchImpl,
+    run,
+    counts: () => ({ tokenReads, mutationCalls, created }),
+  };
+}
 
 try {
   // Local commands may inherit the session wrapper, but they should say
@@ -119,6 +204,147 @@ try {
     );
     assert.equal(renewed, 0); assert.equal(calls.length, 1);
     delete process.env.CLOUDFLARE_API_TOKEN;
+  }
+
+  // The product's named profile is a different holder from the legacy
+  // default-profile session. Its token can expire inside the same setup run.
+  {
+    const harness = namedProfileHarness();
+    globalThis.fetch = harness.fetchImpl;
+    const out = await harness.run(() => cloudflareApiRequest(
+      `/accounts/${ACCOUNT_ID}/workers/scripts/renewal-probe`,
+      { method: "POST", body: { probe: true } },
+    ));
+    assert.equal(out.id, "created");
+    assert.deepEqual(harness.counts(), { tokenReads: 2, mutationCalls: 2, created: 1 },
+      "the named profile must re-read its refreshed token and retry the rejected call exactly once");
+  }
+
+  // If the named profile cannot refresh, stop with owner-facing reauthorization
+  // guidance. A rejected write is not retried and cannot become a half-created
+  // resource behind an error message.
+  {
+    const harness = namedProfileHarness({ renewal: null });
+    globalThis.fetch = harness.fetchImpl;
+    await assert.rejects(
+      harness.run(() => cloudflareApiRequest(
+        `/accounts/${ACCOUNT_ID}/workers/scripts/renewal-probe`,
+        { method: "POST", body: { probe: true } },
+      )),
+      (error) => {
+        assert.match(error.message, /authorize.*browser|browser.*authorize/i);
+        assert.match(error.message, /rejected operation was not repeated/i);
+        assert.doesNotMatch(error.message, /tried once more/i);
+        assert.doesNotMatch(error.message, /403|9109|Invalid access token/i);
+        return true;
+      },
+    );
+    assert.deepEqual(harness.counts(), { tokenReads: 2, mutationCalls: 1, created: 0 },
+      "failed renewal reaches the write decision once, retries nothing, and creates nothing");
+  }
+
+  // A changed named-profile token authorizes exactly one retry. If Cloudflare
+  // rejects that retry too, report both attempts instead of claiming that the
+  // rejected operation was never repeated.
+  {
+    const harness = namedProfileHarness({ rejectRenewed: true });
+    globalThis.fetch = harness.fetchImpl;
+    await assert.rejects(
+      harness.run(() => cloudflareApiRequest(
+        `/accounts/${ACCOUNT_ID}/workers/scripts/renewal-probe`,
+        { method: "POST", body: { probe: true } },
+      )),
+      (error) => {
+        assert.match(error.message, /both attempts were rejected/i);
+        assert.match(error.message, /tried once more after the credential changed, then stopped/i);
+        assert.match(error.message, /no further retry was made/i);
+        assert.doesNotMatch(error.message, /rejected operation was not repeated/i);
+        assert.doesNotMatch(error.message, /403|9109|Invalid access token/i);
+        return true;
+      },
+    );
+    assert.deepEqual(harness.counts(), { tokenReads: 2, mutationCalls: 2, created: 0 },
+      "a changed token permits one retry, then a second rejection stops without creating anything");
+  }
+
+  // Product-owned Wrangler subprocesses must share the same named-profile
+  // recovery. The first rejected command reaches its mutation decision; only
+  // a proven renewed profile may run it a second time.
+  {
+    const harness = namedProfileHarness();
+    let commandCalls = 0;
+    let created = 0;
+    const result = await harness.run(() => runCloudflareWranglerCommand(
+      ["vectorize", "create", "fixture-index", "--dimensions=768", "--metric=cosine"],
+      {
+        accountId: ACCOUNT_ID,
+        authProfile: PROFILE,
+        platformName: "darwin",
+        runCommand: () => {
+          commandCalls += 1;
+          if (commandCalls === 1) return { ok: false, out: "Authentication error [code: 10000]" };
+          created += 1;
+          return { ok: true, out: "created" };
+        },
+      },
+    ));
+    assert.equal(result.ok, true);
+    assert.equal(result.out, "created");
+    assert.equal(harness.counts().tokenReads, 2, "the real holder re-reads the named profile once");
+    assert.deepEqual({ commandCalls, created }, { commandCalls: 2, created: 1 });
+  }
+
+  // A subprocess renewal failure returns only the reauthorization action. It
+  // neither leaks the raw provider refusal nor repeats the mutation command.
+  {
+    const harness = namedProfileHarness({ renewal: null });
+    let commandCalls = 0;
+    const result = await harness.run(() => runCloudflareWranglerCommand(
+      ["vectorize", "create", "fixture-index", "--dimensions=768", "--metric=cosine"],
+      {
+        accountId: ACCOUNT_ID,
+        authProfile: PROFILE,
+        platformName: "darwin",
+        runCommand: () => {
+          commandCalls += 1;
+          return { ok: false, out: "Authentication error [code: 10000]" };
+        },
+      },
+    ));
+    assert.equal(result.ok, false);
+    assert.match(result.out, /authorize.*browser|browser.*authorize/i);
+    assert.match(result.out, /rejected operation was not repeated/i);
+    assert.doesNotMatch(result.out, /tried once more/i);
+    assert.doesNotMatch(result.out, /10000|Authentication error/i);
+    assert.equal(harness.counts().tokenReads, 2, "the real holder attempts one profile re-read");
+    assert.equal(commandCalls, 1, "failed renewal reaches the command decision once and never retries");
+  }
+
+  // A subprocess also reports the one bounded retry accurately when the
+  // refreshed credential is rejected a second time.
+  {
+    const harness = namedProfileHarness();
+    let commandCalls = 0;
+    const result = await harness.run(() => runCloudflareWranglerCommand(
+      ["vectorize", "create", "fixture-index", "--dimensions=768", "--metric=cosine"],
+      {
+        accountId: ACCOUNT_ID,
+        authProfile: PROFILE,
+        platformName: "darwin",
+        runCommand: () => {
+          commandCalls += 1;
+          return { ok: false, out: "Authentication error [code: 10000]" };
+        },
+      },
+    ));
+    assert.equal(result.ok, false);
+    assert.match(result.out, /both attempts were rejected/i);
+    assert.match(result.out, /tried once more after the credential changed, then stopped/i);
+    assert.match(result.out, /no further retry was made/i);
+    assert.doesNotMatch(result.out, /rejected operation was not repeated/i);
+    assert.doesNotMatch(result.out, /10000|Authentication error/i);
+    assert.equal(harness.counts().tokenReads, 2, "the real holder re-reads the named profile once");
+    assert.equal(commandCalls, 2, "one changed credential permits exactly one retry");
   }
 } finally {
   globalThis.fetch = savedFetch;
