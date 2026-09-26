@@ -41,6 +41,8 @@ for (const id of ["UPDATE-025", "UPDATE-026"]) {
   assert.ok(cases.some((c) => c.id === id),
     "bank freshness honesty and verified-package Windows evidence must retain a release gate");
 }
+assert.ok(cases.some((c) => c.id === "UPDATE-044"),
+  "the bank freshness account breadth re-homed from UPDATE-025 by ADR 008 must retain a release gate");
 const findings = new Set(cases.flatMap((c) => c.findings));
 for (const id of [...Array.from({ length: 16 }, (_, i) => `F${i + 1}`), ...Array.from({ length: 6 }, (_, i) => `N${i + 1}`)]) {
   assert.ok(findings.has(id), `original audit finding ${id} must retain an adjudication`);

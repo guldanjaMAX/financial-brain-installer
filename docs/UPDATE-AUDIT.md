@@ -161,7 +161,7 @@ login as a completed update. Never promise a duration without a measurement.
 
 ## Current candidate lineage
 
-The unreleased 0.4.9/schema48 field candidate carries 40 stable incident rows.
+The unreleased 0.4.9/schema48 field candidate carries 41 stable incident rows.
 The earlier held 0.4.7 and 0.4.8 candidates were never tagged, published, or
 offered as customer updates. Their identities and planning records remain
 historical and are not reused as proof for the changed 0.4.9 bytes. The
@@ -169,11 +169,14 @@ historical and are not reused as proof for the changed 0.4.9 bytes. The
 remains unbound to a final SHA and records no field execution.
 Four are `verified` on reviewed evidence: UPDATE-010, UPDATE-014, UPDATE-026,
 and UPDATE-032. Their evidence documents remain attached to the exact rows in
-`update-incidents.json`. The other 36 block release writes. No earlier
-deferral was renewed for this candidate. UPDATE-012 still needs a reviewed
-Windows ARM64 support decision or its required physical proof. UPDATE-017 through UPDATE-022
-and UPDATE-025 still need their required real-provider evidence while bank
-credential setup and general invitations remain held. Schema 43 can bind
+`update-incidents.json`. Two carry new, owner-approved exact-version 0.4.9
+deferrals and ship unproven, printed in the release note: UPDATE-012 (Windows
+ARM64, under the condition ADR 007 set) and UPDATE-044 (bank freshness account
+breadth, under [ADR 008](decisions/008-rehome-update-025-breadth-into-update-044.md),
+only while general invitations stay closed). The other 35 block release
+writes. No earlier deferral was renewed for this candidate. UPDATE-017 through
+UPDATE-022 and UPDATE-025 still need their required real-provider evidence
+while bank credential setup and general invitations remain held. Schema 43 can bind
 eligible single-record local file ingests to their exact raw originals. Schema
 45 can admit a narrowly bounded accepted-resolution proof for one exact
 original after its unresolved observation, raw binding, complete result family,
@@ -182,12 +185,19 @@ citation pass together. Other ingest producers and ambiguous multi-record
 exports remain unbound, and the legacy whole-source provenance repair remains
 unaccepted. Every narrow receipt states `whole_source_complete: false` and does
 not authorize OCR, reingest, deletion, deployment, or customer execution.
-Nothing in this candidate
-weakens the gate. The acceptance-text record depends on the reference point.
-Since the held 0.4.8 candidate, exactly one clause was re-homed, as recorded
-in [ADR 007](decisions/007-rehome-update-006-arm64-clause.md): UPDATE-006 keeps
+One owner-approved
+narrowing applies to 0.4.9 only: ADR 008 lets UPDATE-044 carry an exact-version
+deferral although 0.4.9 changes Plaid code, and that deferral prints in the
+release note. Nothing else in this candidate weakens the gate. The
+acceptance-text record depends on the reference point. Since the held 0.4.8
+candidate, two clauses were re-homed. In
+[ADR 007](decisions/007-rehome-update-006-arm64-clause.md), UPDATE-006 keeps
 every Windows x64 CLI-identity requirement and no longer carries the ARM64
-clause, and UPDATE-012 gains that ARM64 CLI-identity requirement verbatim.
+clause, and UPDATE-012 gains that ARM64 CLI-identity requirement verbatim. In
+ADR 008, UPDATE-025 keeps its real-Item freshness proof, signed webhook and
+recovered missed notification, and the new UPDATE-044 carries its
+two-institution, two-business and business-banking-login breadth in the same
+words.
 Against the last shipped release, v0.4.6, two more acceptance texts were
 rewritten during the unshipped 0.4.7/0.4.8 work and ship for the first time in
 0.4.9. UPDATE-037 (commit `41e8e30`) now requires the Windows refusal to name a
@@ -203,7 +213,7 @@ stopping, and proof of zero writes and side effects. UPDATE-043 is a new row
 since v0.4.6, not a changed text. The eight v0.4.6 deferrals (UPDATE-012,
 UPDATE-017 through UPDATE-022, and UPDATE-025) named version 0.4.6 and have
 expired; none was renewed for 0.4.7, 0.4.8, or 0.4.9. No row changed status or
-evidence with the ADR 007 re-homing, and the release workflow still
+evidence with either re-homing, and the release workflow still
 refuses to publish while any incident blocks. Earlier candidate
 rehearsals do not automatically clear changed code. Current named-profile OAuth
 uses its reviewed encrypted backend; the legacy TOML reader now refreshes with

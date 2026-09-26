@@ -2,9 +2,9 @@
 
 General invitations to connect banks are held. The reviewed source candidate
 is not a completed owner acceptance test. Track the executable regression and
-release requirements as UPDATE-017 through UPDATE-022 and UPDATE-025 in
-[`update-incidents.json`](update-incidents.json). `npm run audit:updates`
-must remain held until reviewed evidence closes them.
+release requirements as UPDATE-017 through UPDATE-022, UPDATE-025 and
+UPDATE-044 in [`update-incidents.json`](update-incidents.json).
+`npm run audit:updates` must remain held until reviewed evidence closes them.
 
 "Held" here means the bank invitations are held, not that the tag is. UPDATE-022
 is the owner journey against a deployed candidate with real institutions and a
@@ -15,6 +15,17 @@ UPDATE-021 and UPDATE-025 are code gates on this repository and are deferrable
 only when a release changes none of that code. Any release that touches the
 Plaid protocol, ledger, custody, connection review or freshness paths is held by
 them outright.
+
+UPDATE-044 carries only the account breadth UPDATE-025 used to demand: the same
+real-Item freshness proof repeated across two institutions and at least four
+accounts spanning a person and two owned businesses, including a real business
+banking login. UPDATE-025 still proves the freshness code itself and stays a
+code gate. UPDATE-044 is classed like UPDATE-022: it may carry a written
+version-scoped deferral only while invitations stay closed, and its `unproven`
+text must say so. For 0.4.9 the owner pre-registered that deferral before the
+seal ([ADR 008](decisions/008-rehome-update-025-breadth-into-update-044.md)).
+Deferring it for any later version needs a new, separately reviewed owner
+decision.
 
 ## What the product must establish
 
