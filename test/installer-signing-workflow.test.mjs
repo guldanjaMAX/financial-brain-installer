@@ -17,9 +17,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import test from "node:test";
-// Job and trigger keys are read by the shared parser, which sees every key
+// Job, trigger and permission keys are read by the shared parser, which sees every key
 // spelling YAML accepts (S3-R); the rest of this file's readers are local.
-import { beforeJobs, triggerNames, workflowJobs } from "./helpers/workflow-yaml.mjs";
+import {
+  WorkflowParseError, jobPermissions, topLevelPermissions, triggerNames, workflowJobs,
+} from "./helpers/workflow-yaml.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const read = (path) => readFileSync(join(ROOT, path), "utf8").replaceAll("\r\n", "\n");
@@ -43,29 +45,8 @@ function topLevelBlock(workflow, key) {
   return { inline, body };
 }
 
-/** A permissions value: null (undeclared), a string (read-all/write-all), or a map. */
-function permissionsAt(lines, indent) {
-  const pattern = new RegExp(`^ {${indent}}permissions:(.*)$`);
-  const start = lines.findIndex((line) => pattern.test(line));
-  if (start < 0) return null;
-  const inline = pattern.exec(lines[start])[1].trim();
-  if (inline === "{}") return {};
-  if (inline) return inline;
-  const map = {};
-  for (let index = start + 1; index < lines.length; index++) {
-    const line = lines[index];
-    if (!line.trim()) continue;
-    if (line.length - line.trimStart().length <= indent) break;
-    const match = /^\s+([a-z-]+):\s*(\S+)\s*$/.exec(line);
-    if (!match) throw new Error(`unparsed permissions line: ${line}`);
-    map[match[1]] = match[2];
-  }
-  return map;
-}
-
 const workflowSteps = (job) => job.split(/^      - /m).slice(1);
-const topPermissions = (workflow) => permissionsAt(beforeJobs(workflow).split("\n"), 0);
-const jobPermissions = (job) => permissionsAt(job.split("\n"), 4);
+const topPermissions = (workflow) => topLevelPermissions(workflow);
 
 function stepNamed(job, name) {
   const step = workflowSteps(job).find((candidate) => candidate.startsWith(`name: ${name}\n`));
@@ -98,6 +79,16 @@ function runScript(step) {
  * part must throw here; the mutation tests below prove that it does.
  */
 function assertWorkflowPolicy(workflow, expected) {
+  try {
+    assertWorkflowPolicyParsed(workflow, expected);
+  } catch (error) {
+    // A spelling the parser refuses (a duplicate or flow-style key) is a policy failure too.
+    if (error instanceof WorkflowParseError) assert.fail(`the workflow could not be read exactly: ${error.message}`);
+    throw error;
+  }
+}
+
+function assertWorkflowPolicyParsed(workflow, expected) {
   assert.deepEqual(triggerNames(workflow), ["workflow_dispatch"], "workflow_dispatch is the only trigger");
   assert.deepEqual(topPermissions(workflow), expected.top, "top-level permissions are exact");
   const jobs = workflowJobs(workflow);
@@ -612,6 +603,25 @@ const mutations = [
       [path, policy, `${label}a commented on: key with an added push`, (text) => text.replace(/^on:\n/m, "on:  # triggers\n  push:\n")],
     ];
   }),
+  // S3-R: permission keys in every spelling YAML accepts, job-level and top-level.
+  ...[
+    ['a double-quoted "permissions" key', '"permissions":'],
+    ["a single-quoted 'permissions' key", "'permissions':"],
+    ["a permissions key with a trailing comment", "permissions:  # scoped"],
+  ].flatMap(([spelling, key]) => [
+    [UNSIGNED_PATH, UNSIGNED_POLICY, `${spelling} granting contents: write to macos-unsigned`,
+      (text) => text.replace(/^    runs-on: macos-latest$/m, `    runs-on: macos-latest\n    ${key}\n      contents: write`)],
+    [UNSIGNED_PATH, UNSIGNED_POLICY, `${spelling} as an inline write-all on windows-unsigned`,
+      (text) => text.replace(/^    runs-on: windows-latest$/m, `    runs-on: windows-latest\n    ${key.replace(/:.*$/, ":")} write-all`)],
+    [UNSIGNED_PATH, UNSIGNED_POLICY, `${spelling} at top level adding actions: write`,
+      (text) => text.replace(/^permissions:\n  contents: read$/m, `${key}\n  contents: read\n  actions: write`)],
+    [SIGNING_PATH, SIGNING_POLICY, `${spelling} on macos-sign adding id-token: write`,
+      (text) => text.replace(/^    permissions:\n      contents: read\n      actions: read\n    steps:/m, `    ${key}\n      contents: read\n      actions: read\n      id-token: write\n    steps:`)],
+    [SIGNING_PATH, SIGNING_POLICY, `${spelling} at top level as write-all`,
+      (text) => text.replace(/^permissions: \{\}$/m, `${key.replace(/:.*$/, ":")} write-all`)],
+  ]),
+  [UNSIGNED_PATH, UNSIGNED_POLICY, "a quoted permission scope key", (text) => text.replace(/^permissions:\n  contents: read$/m, 'permissions:\n  contents: read\n  "actions": write')],
+  [SIGNING_PATH, SIGNING_POLICY, "a second, quoted permissions key on windows-sign", (text) => text.replace(/^      id-token: write$/m, '      id-token: write\n    "permissions": write-all')],
 ];
 for (const [path, policy, name, mutate] of mutations) {
   test(`S3 mutation "${name}" fails the policy check`, () => {
@@ -635,6 +645,10 @@ const equivalentRewrites = [
   ["single-quoted job keys", (text) => text.replace(/^  ([a-z-]+-(?:sign|unsigned)):$/gm, "  '$1':")],
   ["double-quoted job keys", (text) => text.replace(/^  ([a-z-]+-(?:sign|unsigned)):$/gm, '  "$1":')],
   ["a comment line between jobs", (text) => text.replace(/^  (windows-(?:sign|unsigned)):$/m, "# the Windows job\n  $1:")],
+  ["quoted and commented permissions keys", (text) => text
+    .replace(/^permissions:/m, '"permissions":')
+    .replace(/^    permissions:$/gm, "    'permissions':  # exact scopes")
+    .replace(/^(\s+)contents: read$/gm, '$1"contents": read  # checkout only')],
 ];
 for (const [path, policy] of [[SIGNING_PATH, SIGNING_POLICY], [UNSIGNED_PATH, UNSIGNED_POLICY]]) {
   for (const [name, rewrite] of equivalentRewrites) {
@@ -947,6 +961,8 @@ test("S9 the Windows publisher check accepts only a signer whose organization is
     `CN=${PLANNED_PUBLISHER}, O=${PLANNED_PUBLISHER}, O=Other Publisher LLC, ${SUBJECT_TAIL}`,
     `CN=${PLANNED_PUBLISHER}, O="${PLANNED_PUBLISHER}, Inc", ${SUBJECT_TAIL}`,
     `CN=Other, O=Other Publisher LLC, OU="${PLANNED_PUBLISHER}, O=${PLANNED_PUBLISHER}"`,
+    // A comma inside a quoted value does not end it: no real O= attribute here.
+    `CN=x, OU="a, O=${PLANNED_PUBLISHER}, b"`,
     "",
   ]) {
     const refused = check(subject);

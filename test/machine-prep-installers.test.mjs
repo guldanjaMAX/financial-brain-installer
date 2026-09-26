@@ -5,7 +5,21 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 // Shared with the signing workflow test so both see every YAML key spelling.
-import { triggerNames, workflowJobs } from "./helpers/workflow-yaml.mjs";
+import {
+  WorkflowParseError, jobPermissions, topLevelPermissions, triggerNames, workflowJobs,
+} from "./helpers/workflow-yaml.mjs";
+
+/** Run a shape check; a spelling the shared parser refuses is a shape failure too. */
+function exactly(check) {
+  return (workflow) => {
+    try {
+      check(workflow);
+    } catch (error) {
+      if (error instanceof WorkflowParseError) assert.fail(`the workflow could not be read exactly: ${error.message}`);
+      throw error;
+    }
+  };
+}
 
 const ROOT = resolve(import.meta.dirname, "..");
 const HANDOFF = join(ROOT, "machine-prep", "handoff");
@@ -293,14 +307,17 @@ function runScripts(workflow) {
 }
 
 /** The signing workflow's trigger, token, environment and action policy; throws on any drift. */
-function assertSigningWorkflowShape(workflow) {
+const assertSigningWorkflowShape = exactly((workflow) => {
   const triggers = triggerNames(workflow);
   assert.ok(triggers.includes("workflow_dispatch"));
   assert.deepEqual(triggers, ["workflow_dispatch"],
     "signing must never start from a push, pull request, schedule, tag, or another workflow");
   assert.match(workflow, /^permissions: \{\}$/m, "no job inherits a default token scope");
+  assert.deepEqual(topLevelPermissions(workflow), {}, "top-level permissions are exactly {} in any key spelling");
   const jobs = workflowJobs(workflow);
   assert.deepEqual([...jobs.keys()].sort(), ["macos-sign", "windows-sign"]);
+  assert.deepEqual(jobPermissions(jobs.get("macos-sign")), { contents: "read", actions: "read" });
+  assert.deepEqual(jobPermissions(jobs.get("windows-sign")), { contents: "read", actions: "read", "id-token": "write" });
   for (const [name, job] of jobs) {
     assert.match(job, new RegExp(`^    environment: ${SIGNING_ENVIRONMENT}$`, "m"), `${name} runs in the protected environment`);
     assert.doesNotMatch(job, /contents:\s*write|packages:\s*write|gh release|releases/i, `${name} cannot publish`);
@@ -318,13 +335,16 @@ function assertSigningWorkflowShape(workflow) {
   assert.match(workflow, /unsigned_run_id:/);
   assert.match(workflow, /FinancialBrainMachinePrep-macOS-unsigned/);
   assert.match(workflow, /FinancialBrainMachinePrep-Windows-unsigned/);
-}
+});
 
-/** The unsigned build's exact trigger and job set; throws on any drift. */
-function assertUnsignedWorkflowShape(workflow) {
+/** The unsigned build's exact trigger, job set and token scopes; throws on any drift. */
+const assertUnsignedWorkflowShape = exactly((workflow) => {
   assert.deepEqual(triggerNames(workflow), ["workflow_dispatch"], "the unsigned build starts only by hand");
-  assert.deepEqual([...workflowJobs(workflow).keys()].sort(), ["macos-unsigned", "windows-unsigned"]);
-}
+  const jobs = workflowJobs(workflow);
+  assert.deepEqual([...jobs.keys()].sort(), ["macos-unsigned", "windows-unsigned"]);
+  assert.deepEqual(topLevelPermissions(workflow), { contents: "read" }, "the build token can only read");
+  for (const [name, job] of jobs) assert.equal(jobPermissions(job), null, `${name} declares no permissions of its own`);
+});
 
 test("installer signing runs only by hand, in the protected environment, with every action pinned", () => {
   assertSigningWorkflowShape(read(".github/workflows/installer-signing.yml"));
@@ -354,10 +374,34 @@ const equivalentRewrites = [
   ["job keys with trailing comments", (text) => text.replace(/^  ([a-z-]+-(?:sign|unsigned)):$/gm, "  $1:  # reviewed job")],
   ["double-quoted job keys", (text) => text.replace(/^  ([a-z-]+-(?:sign|unsigned)):$/gm, '  "$1":')],
 ];
+// Permission keys and scopes in any spelling: quoted, single-quoted, commented.
+const permissionMutations = {
+  ".github/workflows/installer-signing.yml": [
+    ["a double-quoted contents: write scope on macos-sign", (text) => text.replace(/^      contents: read$/m, '      "contents": write')],
+    ["a single-quoted packages: write scope with a comment", (text) => text.replace(/^      id-token: write$/m, "      id-token: write\n      'packages': write  # publish")],
+    ["a quoted top-level permissions write-all", (text) => text.replace(/^permissions: \{\}$/m, '"permissions": write-all')],
+    ["a quoted id-token grant on macos-sign", (text) => text.replace(/^      actions: read$/m, "      actions: read\n      'id-token': write")],
+  ],
+  ".github/workflows/machine-prep-installers.yml": [
+    ['a double-quoted "permissions" block on macos-unsigned', (text) => text.replace(/^    runs-on: macos-latest$/m, '    runs-on: macos-latest\n    "permissions":\n      contents: write')],
+    ["a single-quoted permissions write-all on windows-unsigned", (text) => text.replace(/^    runs-on: windows-latest$/m, "    runs-on: windows-latest\n    'permissions': write-all")],
+    ["a commented permissions block on macos-unsigned", (text) => text.replace(/^    runs-on: macos-latest$/m, "    runs-on: macos-latest\n    permissions:  # build\n      contents: write")],
+    ["a quoted top-level actions: write scope", (text) => text.replace(/^  contents: read$/m, '  contents: read\n  "actions": write')],
+  ],
+};
 for (const [path, assertShape] of [
   [".github/workflows/installer-signing.yml", assertSigningWorkflowShape],
   [".github/workflows/machine-prep-installers.yml", assertUnsignedWorkflowShape],
 ]) {
+  for (const [name, mutate] of permissionMutations[path]) {
+    test(`${path} permissions mutation "${name}" is detected`, () => {
+      const original = read(path);
+      assertShape(original);
+      const mutated = mutate(original);
+      assert.notEqual(mutated, original, "the mutation applied to the current workflow");
+      assert.throws(() => assertShape(mutated), assert.AssertionError);
+    });
+  }
   for (const [name, mutate] of shapeMutations) {
     test(`${path} mutation "${name}" is detected`, () => {
       const original = read(path);

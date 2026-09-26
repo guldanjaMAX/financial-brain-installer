@@ -109,13 +109,6 @@ export function triggerNames(workflow) {
   return mappingEntries(on.lines).map((entry) => entry.key);
 }
 
-/** The text before the top-level `jobs:` key (where top-level permissions live). */
-export function beforeJobs(workflow) {
-  const lines = workflow.replaceAll("\r\n", "\n").split("\n");
-  const index = lines.findIndex((line) => !isSkippable(line) && indentOf(line) === 0 && parseKeyLine(line).key === "jobs");
-  return index < 0 ? workflow : lines.slice(0, index).join("\n");
-}
-
 /** Each job key under `jobs:`, unquoted, mapped to its body text. */
 export function workflowJobs(workflow) {
   const jobs = topLevel(workflow, "jobs");
@@ -128,3 +121,31 @@ export function workflowJobs(workflow) {
   }
   return map;
 }
+
+/**
+ * The `permissions` value among the mapping `lines`: null when undeclared, a
+ * string (read-all, write-all), {} for `{}`, or a map of scope to access. The
+ * key and each scope are read through mappingEntries, so a quoted or commented
+ * spelling is seen, and a duplicate key or a flow mapping throws.
+ */
+export function permissionsIn(lines) {
+  const entry = mappingEntries(lines).find((candidate) => candidate.key === "permissions");
+  if (!entry) return null;
+  if (entry.value === "{}") return {};
+  if (entry.value) {
+    if (/^[{[]/.test(entry.value)) fail(`flow-style permissions are not parsed: ${entry.value}`);
+    return unquote(entry.value);
+  }
+  const map = {};
+  for (const scope of mappingEntries(entry.lines)) {
+    if (!scope.value || scope.lines.some((line) => !isSkippable(line))) fail(`unparsed permissions scope ${scope.key}`);
+    map[scope.key] = unquote(scope.value);
+  }
+  return map;
+}
+
+/** Top-level permissions of a workflow. */
+export const topLevelPermissions = (workflow) => permissionsIn(workflow.replaceAll("\r\n", "\n").split("\n"));
+
+/** Permissions of one job, given its body text from workflowJobs. */
+export const jobPermissions = (job) => permissionsIn(job.split("\n"));
