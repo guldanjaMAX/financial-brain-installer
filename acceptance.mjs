@@ -856,25 +856,42 @@ export class Acceptance {
     if (!docs.ok) return this.record(t, "corpus summary", FAIL, `HTTP ${docs.status}`);
 
     const rows = docs.json?.rows || [];
-    const total = rows.reduce((a, r) => a + Number(r.total || 0), 0);
+    const informational = docs.json?.summary?.status === "informational";
+    const total = informational
+      ? null
+      : rows.reduce((a, r) => a + Number(r.total || 0), 0);
+    const hasDocuments = informational
+      ? rows.some((row) => row?.has_documents === true)
+      : total > 0;
     this.record(
       t,
       "corpus is not empty",
-      total > 0 ? PASS : FAIL,
-      `${total} document(s) across ${rows.length} source type(s)`
+      hasDocuments ? PASS : FAIL,
+      informational
+        ? `${rows.length} source type(s); exact size is not counted on large Brains; run \`brain report\` for the full count`
+        : `${total} document(s) across ${rows.length} source type(s)`
     );
 
-    const unembedded = rows.reduce(
-      (a, r) => a + (Number(r.total || 0) - Number(r.embedded || 0)),
-      0
-    );
+    const unembedded = informational
+      ? Number(docs.json?.vector_backlog?.pending)
+      : rows.reduce(
+        (a, r) => a + (Number(r.total || 0) - Number(r.embedded || 0)),
+        0
+      );
+    const unembeddedLabel = docs.json?.vector_backlog?.pending_is_capped === true
+      ? "10,000+"
+      : String(unembedded);
     // A backlog is normal mid-ingest; a large one means the embedder is stuck,
     // and the symptom a user sees is simply "search does not find my document".
     this.record(
       t,
       "embedding backlog is small",
-      unembedded === 0 ? PASS : unembedded < 1000 ? WARN : FAIL,
-      `${unembedded} document(s) awaiting embedding`
+      Number.isSafeInteger(unembedded) && unembedded >= 0
+        ? unembedded === 0 ? PASS : unembedded < 1000 ? WARN : FAIL
+        : FAIL,
+      Number.isSafeInteger(unembedded) && unembedded >= 0
+        ? `${unembeddedLabel} vector operation(s) awaiting visibility`
+        : "the exact vector backlog was unavailable"
     );
 
     // D1 is the product default everywhere else (setup, update, and health).
@@ -902,12 +919,15 @@ export class Acceptance {
         readiness.submitted <= readiness.pending;
       const ready = valid && readiness.ready === true && readiness.pending === 0 &&
         readiness.submitted === 0 && readiness.actual_vectors === readiness.expected_vectors;
+      const readinessPendingLabel = readiness?.pending_is_capped === true
+        ? "10,000+"
+        : String(readiness?.pending);
       this.record(
         t,
         "semantic index is query-ready",
         ready ? PASS : FAIL,
         valid
-          ? `${readiness.actual_vectors}/${readiness.expected_vectors} vector(s), ${readiness.pending} operation(s) pending` +
+          ? `${readiness.actual_vectors}/${readiness.expected_vectors} vector(s), ${readinessPendingLabel} operation(s) pending` +
             (ready ? "" : `; ${readiness.action || "run brain drain, then brain diagnose"}`)
           : "the Worker did not provide a valid Vectorize visibility receipt",
       );

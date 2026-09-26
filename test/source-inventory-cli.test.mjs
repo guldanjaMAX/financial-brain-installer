@@ -198,6 +198,158 @@ test("source inventory CLI uses only the internal durable credential and collect
   });
 });
 
+test("source inventory retries a transient post-setup read without repeating a successful write", async () => {
+  await withManifest(async (manifest) => {
+    const calls = [];
+    const waits = [];
+    const page = inventoryPage({ source: "upload", truncated: false, total: 1 });
+    const { value, output } = await captureLogs(() => cmdSources(manifest, {
+      flags: { add: "upload", kind: "upload" },
+      resolveAdminKey: () => OWNER_PROOF,
+      sourceInventorySleep: async (milliseconds) => waits.push(milliseconds),
+      fetchImpl: async (url, init) => {
+        const pathname = new URL(url).pathname;
+        const body = JSON.parse(init.body);
+        calls.push({ pathname, body });
+        if (pathname.endsWith("/source-register")) {
+          return new Response(JSON.stringify({
+            source: "upload",
+            kind: "upload",
+            registered: true,
+            registry_event_recorded: true,
+            operation_id: "fixture-registration-operation",
+          }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        if (calls.filter((call) => call.pathname.endsWith("/sources")).length === 1) {
+          return new Response(JSON.stringify({ code: "worker_starting" }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify(page), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    }));
+
+    assert.equal(calls.filter((call) => call.pathname.endsWith("/source-register")).length, 1);
+    assert.equal(calls.filter((call) => call.pathname.endsWith("/sources")).length, 2);
+    assert.deepEqual(waits, [250]);
+    assert.equal(value.sources[0].source_id, "upload");
+    assert.match(output, /registered source/);
+    assert.match(output, /complete D1 snapshot/);
+  });
+});
+
+test("a read-only source inventory commonly run after setup gets the same bounded readiness retry", async () => {
+  await withManifest(async (manifest) => {
+    let reads = 0;
+    const waits = [];
+    const value = await cmdSources(manifest, {
+      flags: { json: true },
+      silent: true,
+      resolveAdminKey: () => OWNER_PROOF,
+      sourceInventorySleep: async (milliseconds) => waits.push(milliseconds),
+      fetchImpl: async () => {
+        reads++;
+        if (reads === 1) {
+          return new Response(JSON.stringify({ code: "worker_starting" }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify(inventoryPage({ source: "upload", truncated: false, total: 1 })), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+    assert.equal(reads, 2);
+    assert.deepEqual(waits, [250]);
+    assert.equal(value.complete, true);
+  });
+});
+
+test("an accepted source write is not reported as failed when bounded inventory readback stays pending", async () => {
+  await withManifest(async (manifest) => {
+    let writes = 0;
+    let reads = 0;
+    const waits = [];
+    const { value, output } = await captureLogs(() => cmdSources(manifest, {
+      flags: { add: "upload", kind: "upload" },
+      resolveAdminKey: () => OWNER_PROOF,
+      sourceInventorySleep: async (milliseconds) => waits.push(milliseconds),
+      fetchImpl: async (url) => {
+        if (new URL(url).pathname.endsWith("/source-register")) {
+          writes++;
+          return new Response(JSON.stringify({
+            source: "upload",
+            kind: "upload",
+            registered: true,
+            registry_event_recorded: true,
+            operation_id: "fixture-registration-operation",
+          }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        reads++;
+        return new Response(JSON.stringify({ code: "worker_starting" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    }));
+
+    assert.equal(writes, 1);
+    assert.equal(reads, 4);
+    assert.deepEqual(waits, [250, 500, 1000]);
+    assert.equal(value.write_accepted, true);
+    assert.equal(value.inventory_pending, true);
+    assert.match(output, /source change was accepted/);
+    assert.match(output, /was not repeated/);
+  });
+});
+
+test("an accepted source write reports a distinct non-retryable verification failure", async () => {
+  await withManifest(async (manifest) => {
+    let writes = 0;
+    let reads = 0;
+    const waits = [];
+    const { value, output } = await captureLogs(() => cmdSources(manifest, {
+      flags: { add: "upload", kind: "upload" },
+      resolveAdminKey: () => OWNER_PROOF,
+      sourceInventorySleep: async (milliseconds) => waits.push(milliseconds),
+      fetchImpl: async (url) => {
+        if (new URL(url).pathname.endsWith("/source-register")) {
+          writes++;
+          return new Response(JSON.stringify({
+            source: "upload",
+            kind: "upload",
+            registered: true,
+            registry_event_recorded: true,
+            operation_id: "fixture-registration-operation",
+          }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        reads++;
+        return new Response(JSON.stringify({ sources: "not-an-array" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    }));
+
+    assert.equal(writes, 1);
+    assert.equal(reads, 1);
+    assert.deepEqual(waits, []);
+    assert.equal(value.kind, "source_inventory_verification_failed");
+    assert.equal(value.write_accepted, true);
+    assert.equal(value.inventory_pending, false);
+    assert.equal(value.verification_failed, true);
+    assert.equal(value.error_code, "inventory_contract_invalid");
+    assert.match(output, /accepted, but its inventory verification failed/);
+    assert.doesNotMatch(output, /still becoming available/);
+  });
+});
+
 test("source inventory CLI exposes only validated Gmail failure evidence in JSON and concise human output", async () => {
   const gmail = sourceRow("gmail", {
     kind: "gmail",

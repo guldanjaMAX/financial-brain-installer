@@ -319,9 +319,10 @@ export function ocrConfidence({ read = 0, blank = 0, unreadable = 0, judged = []
 /* -------------------------------------------------------------- cost model */
 
 /**
- * Published Workers AI price for the default OCR model, read from
- * developers.cloudflare.com/workers-ai/models/gemma-4-26b-a4b-it on 2026-08-28:
- * $0.10 per M input tokens, $0.30 per M output tokens.
+ * Reviewed Workers AI price for the default OCR model,
+ * @cf/meta/llama-4-scout-17b-16e-instruct: $0.293 per M input tokens and
+ * $2.25 per M output tokens. This is the conservative Llama rate already used
+ * by the Worker's spend guard.
  *
  * The token counts are BRACKETS, not measurements. Cloudflare does not publish
  * an image-token count for this model and this build could not measure one
@@ -330,8 +331,8 @@ export function ocrConfidence({ read = 0, blank = 0, unreadable = 0, judged = []
  * knowledge it is not.
  */
 export const OCR_PRICE = {
-  input_usd_per_m: 0.1,
-  output_usd_per_m: 0.3,
+  input_usd_per_m: 0.293,
+  output_usd_per_m: 2.25,
   input_tokens_per_page: [2000, 4000],
   output_tokens_per_page: [400, 1200],
   seconds_per_page: [1, 3],

@@ -299,7 +299,7 @@ function ingestExitCli(scenario) {
   const r = ingestExitCli("local-failed");
   const state = JSON.parse(readFileSync(r.statePath, "utf-8"));
   const receiptAt = r.out.indexOf("TEST_LOCAL_ERROR_RECEIPT_RECORDED");
-  const failureAt = r.out.indexOf("1 stored part failed, so this ingest is incomplete");
+  const failureAt = r.out.indexOf("1 file failed, so this ingest is incomplete");
   check("a local document failure exits non-zero", r.code === 1, r.out.slice(-500));
   check("local resume state records the failed document before exit",
     Object.keys(state.done || {}).length === 0 && /part status was failed/.test(state.skipped?.["fixture-note.txt"] || ""),

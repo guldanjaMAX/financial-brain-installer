@@ -56,6 +56,11 @@ import {
 
 const MACOS_PRIVATE_RECEIPT_SKIP =
   "requires private aggregate receipt ACL proof";
+// This is a fresh-process hang guard, not the test's total budget. Each child
+// repeats the full physical evidence and macOS ACL proof; the surrounding
+// suite records passing executions of that path above two minutes while this
+// test's 15-minute budget still bounds its 43 child invocations.
+const CLOSEOUT_CHILD_TIMEOUT_MS = 5 * 60 * 1000;
 function testWithMacosPrivateReceipt(name, optionsOrFn, maybeFn) {
   const options = typeof optionsOrFn === "function" ? {} : optionsOrFn;
   const fn = typeof optionsOrFn === "function" ? optionsOrFn : maybeFn;
@@ -153,7 +158,7 @@ function closeoutChildHarness(value) {
     {
       encoding: "utf8",
       env: { PATH: process.env.PATH, NODE_TEST_CONTEXT: "child-v8" },
-      timeout: 120_000,
+      timeout: CLOSEOUT_CHILD_TIMEOUT_MS,
     },
   );
   return Object.freeze({ descriptorPath, statePath, run });

@@ -328,7 +328,7 @@ try {
     const stub = Object.assign(async (image, meta) => {
       modelPages.push({ page: meta.page, bytes: image.png_base64.length });
       return { text: statementPage };
-    }, { model: "@cf/google/gemma-4-26b-a4b-it", maxPages: 40 });
+    }, { model: "@cf/meta/llama-4-scout-17b-16e-instruct", maxPages: 40 });
 
     const scanned = await extract(scanPdf(), "march-statement.pdf", { ocr: stub });
     check("fixture bank statement, scanned: OCR read it instead of refusing it",

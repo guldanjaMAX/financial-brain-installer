@@ -628,6 +628,115 @@
               }
             }
           ]
+        },
+        "custom_api": {
+          "type": "object",
+          "description": "A declarative read-only JSON API pulled by the client's Worker on its existing cron. The manifest names the bearer-token Worker secret but never contains its value. For inventory and costs, search contains only the current snapshot; stored rows keep prior values as history with effective dates. The connector does not create daily history documents.",
+          "properties": {
+            "_comment": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "array", "items": { "type": "string" } }
+              ]
+            },
+            "enabled": { "type": "boolean", "default": false },
+            "display_name": { "type": "string", "minLength": 1, "maxLength": 80 },
+            "source": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+            "base_url": { "type": "string", "format": "uri", "pattern": "^https://" },
+            "token_secret": {
+              "type": "string",
+              "pattern": "^CUSTOM_API_TOKEN_[A-Z0-9_]{1,40}$"
+            },
+            "cadence_seconds": { "type": "integer", "minimum": 3600, "maximum": 2678400, "default": 86400 },
+            "timeout_ms": { "type": "integer", "minimum": 250, "maximum": 60000, "default": 30000 },
+            "max_response_bytes": { "type": "integer", "minimum": 1024, "maximum": 10485760, "default": 5242880 },
+            "max_rows": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 10000 },
+            "max_pages": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+            "retries": { "type": "integer", "minimum": 1, "maximum": 5, "default": 3 },
+            "endpoints": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 20,
+              "items": {
+                "type": "object",
+                "required": ["name", "path", "row_key"],
+                "oneOf": [
+                  { "required": ["document"], "not": { "required": ["documents"] } },
+                  { "required": ["documents"], "not": { "required": ["document"] } }
+                ],
+                "properties": {
+                  "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+                  "path": { "type": "string", "pattern": "^/[A-Za-z0-9][A-Za-z0-9/_-]*$" },
+                  "row_key": {
+                    "type": "array", "minItems": 1, "uniqueItems": true,
+                    "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" }
+                  },
+                  "legacy_row_key": {
+                    "type": "array", "minItems": 1, "uniqueItems": true,
+                    "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" }
+                  },
+                  "document": {
+                    "type": "object",
+                    "required": ["group_by", "title_template", "body_template", "fields"],
+                    "properties": {
+                      "group_by": {
+                        "type": "array", "uniqueItems": true,
+                        "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" }
+                      },
+                      "title_template": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                      "body_template": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                      "aggregates": {
+                        "type": "object",
+                        "additionalProperties": { "enum": ["sum", "min", "max"] }
+                      },
+                      "formats": {
+                        "type": "object",
+                        "additionalProperties": { "enum": ["currency", "number", "integer", "text"] }
+                      },
+                      "fields": {
+                        "type": "array", "minItems": 1, "uniqueItems": true,
+                        "description": "Fields included in readable prose. Provider fields not listed here remain in the structured row only.",
+                        "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" }
+                      },
+                      "expected_values": {
+                        "type": "object",
+                        "description": "Expected categorical values whose absence should be stated rather than rendered as zero.",
+                        "additionalProperties": {
+                          "type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true,
+                          "items": { "type": "string", "minLength": 1, "maxLength": 120 }
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "documents": {
+                    "type": "array", "minItems": 1, "maxItems": 4,
+                    "items": {
+                      "type": "object",
+                      "required": ["name", "group_by", "title_template", "body_template", "fields"],
+                      "properties": {
+                        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+                        "group_by": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" } },
+                        "title_template": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                        "body_template": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                        "aggregates": { "type": "object", "additionalProperties": { "enum": ["sum", "min", "max"] } },
+                        "formats": { "type": "object", "additionalProperties": { "enum": ["currency", "number", "integer", "text"] } },
+                        "fields": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" } },
+                        "expected_values": { "type": "object", "additionalProperties": { "type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 120 } } }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "allOf": [{
+            "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+            "then": { "required": ["source", "base_url", "token_secret", "endpoints"] }
+          }],
+          "additionalProperties": false
         }
       }
     },
@@ -709,7 +818,7 @@
             },
             "model": {
               "type": "string",
-              "default": "@cf/google/gemma-4-26b-a4b-it",
+              "default": "@cf/meta/llama-4-scout-17b-16e-instruct",
               "description": "Must be a Cloudflare @cf/ model. OCR refuses any other, because a page of a scanned document may only reach the provider the manifest names."
             },
             "max_pages_per_document": {

@@ -134,6 +134,11 @@ const addChunk = (db, uid) => {
     `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, vector_id)
      VALUES (?, ?, 0, ?, 'drive', ?)`
   ).run(uid, doc, `text for ${uid}`, uid);
+  db.prepare(
+    `INSERT INTO corpus_stats (source, documents, chunks) VALUES ('drive', 1, 1)
+     ON CONFLICT(source) DO UPDATE SET
+       documents=documents + 1, chunks=chunks + 1`,
+  ).run();
 };
 
 /**

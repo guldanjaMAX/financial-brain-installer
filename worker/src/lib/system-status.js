@@ -52,6 +52,7 @@ const SOURCE_LABELS = {
   hubspot: "HubSpot",
   quickbooks: "QuickBooks Online",
   plaid: "Banking transactions",
+  custom_api: "Custom business API",
 };
 
 /** Kinds are a small closed set and make a better fallback than a slug. */
@@ -75,6 +76,7 @@ const KIND_LABELS = {
   hubspot: "HubSpot",
   quickbooks: "QuickBooks Online",
   plaid: "Banking transactions",
+  custom_api: "Custom business API",
 };
 
 const COVERAGE_STATES = Object.freeze({
@@ -298,6 +300,7 @@ export async function ownerSystemStatus(env, deps) {
       expected,
       visible,
       pending: Number(vectors.pending || 0),
+      pending_is_capped: vectors.pending_is_capped === true,
       // The one number an owner actually asks for on install day.
       percent_visible: expected > 0 ? Math.floor((visible / expected) * 100) : null,
     };

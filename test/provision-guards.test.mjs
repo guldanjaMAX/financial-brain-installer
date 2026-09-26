@@ -7,6 +7,7 @@
 import {
   chooseDbName, assertAdoptable, documentCountOf, ensureMetadataIndex, VECTOR_METADATA_INDEXES,
   driveExclusionIdsOf, driveConnectorConfig, completedDriveFamilyPlans, sourceCursorCanAdvance,
+  sourceReceiptHasRemoteGap,
   remoteFamilyOutcomes, assertDriveLimitSafe, assertRemoteLimitSafe, validateBatchReceipt, postSourceReceipt,
   validateForgetReceipt, validateSourceForgetPreview, validateSourceForgetReceipt,
   assertNoPendingRemovals, credentialRefusalOf, drivePolicyFingerprint,
@@ -208,8 +209,12 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   ];
   const complete = completedDriveFamilyPlans(plans, new Map([["drive:a", 1], ["drive:b", 1]]));
   check("split-family cleanup waits for every replacement part", complete.length === 1 && complete[0].stateKey === "drive:b", JSON.stringify(complete));
-  check("a document-level failure keeps the source cursor retryable", sourceCursorCanAdvance({ failed: 1 }) === false);
-  check("a fully accepted batch may advance its source cursor", sourceCursorCanAdvance({ failed: 0 }) === true);
+check("a document-level failure keeps the source cursor retryable", sourceCursorCanAdvance({ failed: 1 }) === false);
+check("a named retryable OCR skip keeps the source cursor behind the page that must be retried",
+  sourceCursorCanAdvance({ failed: 0 }, { retryableSkips: 1 }) === false);
+check("a named retryable OCR skip also makes the terminal source receipt incomplete",
+  sourceReceiptHasRemoteGap({ tally: { failed: 0 }, retryableSkips: 1 }) === true);
+check("a fully accepted batch may advance its source cursor", sourceCursorCanAdvance({ failed: 0 }) === true);
 
   const crossing = [{ stateKey: "drive:large", expectedParts: 3 }];
   let outcome = remoteFamilyOutcomes(crossing, new Map([["drive:large", 2]]), new Map([["drive:large", 2]]));
@@ -368,13 +373,18 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   }
 
   const sourcePreview = {
-    dry_run: true, documents: 1, chunks: 3, vectors: 3, targets: ["drive:one"],
+    dry_run: true, documents: 1, document_count_exact: true, chunks: null, vectors: null,
+    document_high_water: 7, corpus_mutation_generation: 11,
     source: "drive", would_unregister_source: true,
     source_unregistered: false, registry_event_recorded: false,
   };
   check("a source forget preview proves registry cleanup before destructive confirmation",
     validateSourceForgetPreview(sourcePreview, "drive") === sourcePreview);
   for (const [label, preview] of [
+    ["inexact document count", { ...sourcePreview, document_count_exact: false }],
+    ["missing document high water", { ...sourcePreview, document_high_water: undefined }],
+    ["missing corpus mutation generation", { ...sourcePreview, corpus_mutation_generation: undefined }],
+    ["enumerated target detail", { ...sourcePreview, targets: ["drive:one"] }],
     ["missing registry capability", { ...sourcePreview, would_unregister_source: undefined }],
     ["already-mutated preview", { ...sourcePreview, source_unregistered: true }],
     ["different source preview", { ...sourcePreview, source: "gmail" }],
@@ -384,12 +394,25 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   }
 
   const sourceReceipt = {
-    ...sourcePreview, dry_run: false, would_unregister_source: undefined,
+    ...sourcePreview, dry_run: false, chunks: 3, vectors: 0,
+    chunk_count_exact: true, would_unregister_source: undefined,
     source_unregistered: true, registry_event_recorded: true,
     operation_id: "fixture-forget-operation",
   };
   check("a source forget receipt binds document deletion to registry finalization",
     validateSourceForgetReceipt(sourceReceipt, "drive") === sourceReceipt);
+  const overlapReceipt = {
+    ...sourceReceipt,
+    documents: 0,
+    chunks: 1,
+    targeted_documents: 1,
+    targeted_chunks: 2,
+    document_count_exact: false,
+    chunk_count_exact: false,
+    count_note: "Another operation removed some rows before this operation reached them.",
+  };
+  check("an overlapping source forget receipt remains valid but plainly inexact",
+    validateSourceForgetReceipt(overlapReceipt, "drive") === overlapReceipt);
   for (const [label, receipt] of [
     ["missing registry deletion", { ...sourceReceipt, source_unregistered: false }],
     ["missing audit event", { ...sourceReceipt, registry_event_recorded: false }],
@@ -412,6 +435,12 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   const boundary = source.slice(start, end);
   check("brain forget performs no direct Cloudflare D1 mutation after the guarded Worker call",
     start >= 0 && end > start && !/d1Query\s*\(/.test(boundary), boundary.slice(-500));
+  check("brain forget uses its exact same-operation preview and final receipt instead of the hot summary",
+    start >= 0 && end > start && !/liveSourceCounts\s*\(/.test(boundary) &&
+      /previewSourceForget/.test(boundary) && /sourceUnregistered/.test(boundary) &&
+      /preview_documents/.test(source) && /preview_document_high_water/.test(source) &&
+      /preview_corpus_mutation_generation/.test(source),
+    boundary.slice(0, 1200));
 }
 
 /* ---- full-sweep source inventory is authenticated, complete, and paged ---- */
@@ -899,7 +928,7 @@ check("older document receipts still have a count", documentCountOf({ total: 42 
   check("a limited local run cannot falsely commit a scanner migration",
     /scannerPolicyChanged && limitedMissesPrior/.test(local || "") &&
       /--limit cannot be used/.test(local || ""), String(local).slice(0, 1800));
-  const localCleanupConfirmed = String(local).indexOf('const afterLocalRemoval = await listStoredSourceFamilies');
+  const localCleanupConfirmed = String(local).indexOf('const afterLocalRemoval = await listPreparedSourceFamilies');
   const localCleanupReadbackApplied = String(local).indexOf('const stillStored = plannedLocalTargets.filter', localCleanupConfirmed);
   const localScannerCommitted = String(local).indexOf('state.credential_scanner_fingerprint = scannerFingerprint');
   check("local scanner policy commits only after confirmed refusal cleanup",

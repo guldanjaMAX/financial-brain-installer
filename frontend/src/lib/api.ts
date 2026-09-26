@@ -258,7 +258,7 @@ export type SystemStatus = {
   sources?: SourceRow[];
   vectors?: {
     ready: boolean; expected: number; visible: number;
-    pending: number; percent_visible: number | null;
+    pending: number; pending_is_capped: boolean; percent_visible: number | null;
   };
   unavailable: string[];
 };

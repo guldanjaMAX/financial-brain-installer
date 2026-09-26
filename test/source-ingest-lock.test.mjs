@@ -622,7 +622,9 @@ const fixture = () => {
       },
     });
     await assert.rejects(
-      ocr({ png_base64: "fixture" }, { page: 1, totalPages: 1 }),
+      ocr({ png_base64: "fixture" }, {
+        page: 1, totalPages: 1, source: "upload", sourceItemId: "lock-fixture",
+      }),
       (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_lost",
     );
     check("a lost local-folder owner cannot begin an OCR mutation", ocrMutations === 0);

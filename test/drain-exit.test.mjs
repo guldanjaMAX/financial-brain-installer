@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   assertDrainComplete,
   buildCompletedDrainResult,
+  renderDrainProgress,
   renderCompletedDrainResult,
   summariseResponseBody,
   validateDrainBusyReceipt,
@@ -155,6 +156,32 @@ assert.throws(
   () => assertDrainComplete({ remaining: 9, rounds: 400, maxRounds: 400 }),
   /400-round safety limit.*9 vector operation/s
 );
+assert.throws(
+  () => assertDrainComplete({
+    remaining: 100,
+    remainingIsLowerBound: true,
+    rounds: 400,
+    maxRounds: 400,
+  }),
+  /400-round safety limit.*more than 100 vector operation/s,
+);
+const boundedProgress = renderDrainProgress({
+  actualVectors: 1_050,
+  drained: 50,
+  submitted: 100,
+  remaining: 10_001,
+  remainingIsLowerBound: true,
+  rate: 50,
+});
+assert.match(boundedProgress, /more than 10001 to go/);
+assert.doesNotMatch(boundedProgress, /min left/);
+assert.match(renderDrainProgress({
+  actualVectors: 1_050,
+  drained: 50,
+  submitted: 100,
+  remaining: 100,
+  rate: 50,
+}), /100 to go.*about 2 min left/);
 
 /* An empty outbox is not a populated index (field run A: 13,869 chunks, zero
  * vectors, and a green "query-ready (0 confirmed)"). */

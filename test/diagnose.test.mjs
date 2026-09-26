@@ -136,6 +136,40 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   check("and says the two stores agree", find(r, "store_agreement")?.severity === "ok");
 }
 
+/* ---- owner totals expose only the current mapped custom-source version ---- */
+{
+  const env = makeEnv({ vectorCount: 3 });
+  source(env._db, "custom-source");
+  const jobHash = "a".repeat(64);
+  const insertJob = env._db.prepare(
+    `INSERT INTO custom_api_jobs
+       (job_id,source,fetched_at,status,next_slice,total_slices,job_hash,response_hashes_json,stats_json,created_at,verified_at)
+     VALUES (?,?,?,?,0,0,?,'{}','{}',?,?)`,
+  );
+  insertJob.run("job-current", "custom-source", "2026-09-24T00:00:00.000Z", "verified", jobHash,
+    "2026-09-24T00:00:00.000Z", "2026-09-24T00:00:00.000Z");
+  insertJob.run("job-staged", "custom-source", "2026-09-25T00:00:00.000Z", "staged", jobHash,
+    "2026-09-25T00:00:00.000Z", null);
+  env._db.prepare(
+    "INSERT INTO custom_api_current_jobs (source,job_id,promoted_at) VALUES ('custom-source','job-current','2026-09-24T00:00:00.000Z')",
+  ).run();
+  env._db.prepare(
+    "INSERT INTO custom_api_document_versions (source,job_id,logical_source_id,document_source_id) VALUES ('custom-source','job-current','logical','current')",
+  ).run();
+  for (const [id, jobId] of [["current", "job-current"], ["staged", "job-staged"], ["superseded", "job-old"]]) {
+    doc(env._db, id, { source: "custom-source" });
+    env._db.prepare("UPDATE documents SET meta=?1 WHERE doc_uid=?2").run(JSON.stringify({
+      connector: "custom_api",
+      custom_api_job_id: jobId,
+      custom_api_source_id: "logical",
+    }), id);
+    chunk(env._db, `${id}#0`, id);
+  }
+  const report = await diagnose(env);
+  check("diagnose totals count only the current custom-source document",
+    report.totals.documents === 1, JSON.stringify(report.totals));
+}
+
 /* ---- THE ONE THAT WOULD HAVE CAUGHT THE FIELD STALL ---- */
 {
   const env = makeEnv({ vectorCount: 100 });   // Vectorize holds 100
@@ -155,6 +189,9 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   const env = makeEnv({ vectorCount: 0, drainMode: "paused-for-upgrade" });
   source(env._db, "documents");
   for (let i = 0; i < 10; i++) { doc(env._db, `paused-d${i}`); chunk(env._db, `paused-d${i}#0`, `paused-d${i}`); }
+  env._db.prepare(
+    "INSERT INTO corpus_stats (source, documents, chunks) VALUES ('documents', 10, 10)",
+  ).run();
 
   const finding = find(await diagnose(env), "store_agreement");
   check("paused diagnose names update as the only supported projection writer",
@@ -163,7 +200,12 @@ const find = (r, id) => (r.findings || []).find((f) => f.id === id);
   check("paused diagnose does not forward the active-only whole-corpus reindex remedy",
     !/Run `brain reindex <manifest>/.test(finding?.action || ""), finding?.action);
 
-  env._db.prepare("UPDATE install_state SET schema_version=36").run();
+  env._db.prepare(
+    `UPDATE install_state
+        SET schema_version=36,
+            vector_projection_status='pending',
+            vector_projection_bootstrap_base_count=10`,
+  ).run();
   const readiness = await vectorReadiness(env);
   check("paused readiness applies the same recovery contract",
     readiness.reason === "vector_count_mismatch" &&

@@ -45,6 +45,9 @@ import {
   storedProvenanceAssessment, withFirstPartySourceProvenance,
 } from "./provenance-receipt.js";
 import { memoryHistoryForDocument } from "./memory-supersession.js";
+import {
+  customApiVisibilitySql, readWithCustomApiVisibility,
+} from "./custom-api-visibility.js";
 
 const PROTOCOLS = new Set(["2025-06-18", "2025-03-26", "2024-11-05"]);
 const MAX_FETCH_CHARS = 60_000;
@@ -272,23 +275,40 @@ async function runFetch(env, args, origin) {
   const separator = id.indexOf(":");
   if (separator < 1) return toolError("id must look like source:source_id, as returned by search");
   const docUid = id;
+  const source = id.slice(0, separator);
+  const sourceId = id.slice(separator + 1);
   let doc;
   let chunks;
-  try {
-    doc = await env.DB.prepare(
-      `SELECT doc_uid, source_id, title, uri, source, content_hash, document_date, date_source, date_reliable,
-              text_source, text_reliable, meta, meta AS authority_meta,
-              COALESCE((SELECT kind FROM sources WHERE name = documents.source), 'unregistered') AS source_kind
-         FROM documents WHERE doc_uid = ?`,
+  const projection = `SELECT doc_uid, source_id, title, uri, source, content_hash, document_date, date_source, date_reliable,
+                              text_source, text_reliable, meta, meta AS authority_meta,
+                              COALESCE((SELECT kind FROM sources WHERE name = documents.source), 'unregistered') AS source_kind
+                         FROM documents`;
+  const fetchDocument = async (withCurrentPointer) => {
+    const visibility = customApiVisibilitySql("documents", withCurrentPointer);
+    const exact = await env.DB.prepare(
+      `${projection} WHERE doc_uid = ?1${visibility}`,
     ).bind(docUid).first();
+    if (exact) return exact;
+    return env.DB.prepare(
+      `${projection}
+        WHERE source=?1
+          AND CASE WHEN json_valid(meta) THEN json_extract(meta,'$.custom_api_source_id') END=?2${visibility}`,
+    ).bind(source, sourceId).first();
+  };
+  try {
+    doc = await readWithCustomApiVisibility(env, fetchDocument);
+  } catch (error) {
+    return toolError(`fetch failed: ${String(error?.message || error).slice(0, 120)}`);
+  }
+  if (!doc) return toolError("no document with that id");
+  try {
     chunks = await env.DB.prepare(
       "SELECT text FROM chunks WHERE doc_uid = ? ORDER BY chunk_ix",
-    ).bind(docUid).all();
+    ).bind(doc.doc_uid || docUid).all();
   } catch (error) {
     return toolError(`fetch failed: ${String(error?.message || error).slice(0, 120)}`);
   }
   const rows = chunks?.results || [];
-  if (!doc && !rows.length) return toolError("no document with that id");
   // Chunks overlap by design; joined text repeats a little at the seams.
   // Complete and slightly redundant beats trimmed and possibly wrong.
   let body = rows.map((row) => row.text).join("\n\n");

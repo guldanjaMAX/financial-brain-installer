@@ -47,6 +47,8 @@ function readinessInventory(overrides = {}) {
   const expected = overrides.expected ?? 10;
   const actual = overrides.actual ?? expected;
   const pending = overrides.pending ?? 0;
+  const pendingIsCapped = overrides.pendingIsCapped ?? false;
+  const componentCountsExact = overrides.componentCountsExact ?? !pendingIsCapped;
   const ready = overrides.ready ?? (pending === 0 && actual === expected);
   return {
     version: overrides.version ?? "0.4.7",
@@ -55,9 +57,12 @@ function readinessInventory(overrides = {}) {
     rows: [{ source_type: "private-source-must-not-escape" }],
     vector_backlog: {
       pending,
+      pending_is_capped: pendingIsCapped,
+      pending_display: pendingIsCapped ? "10,000+" : String(pending),
       upserts: overrides.upserts ?? pending,
       deletes: overrides.deletes ?? 0,
       submitted: overrides.submitted ?? 0,
+      component_counts_exact: componentCountsExact,
       oldest_queued_at: pending > 0 ? 1_750_000_000_000 : null,
     },
     vector_readiness: {
@@ -68,7 +73,9 @@ function readinessInventory(overrides = {}) {
       expected_vectors: expected,
       actual_vectors: actual,
       pending,
+      pending_is_capped: pendingIsCapped,
       submitted: overrides.submitted ?? 0,
+      submitted_counts_exact: componentCountsExact,
       oldest_queued_at: pending > 0 ? 1_750_000_000_000 : null,
     },
   };
@@ -1013,6 +1020,125 @@ test("queued shortfall is reported as recoverable work, never as readiness", asy
   assert.equal(receipt.plan.deployed_projection.query_ready, false);
   assert.equal(receipt.plan.deployed_projection.queue.pending, 8);
   assert.doesNotMatch(output, /private-source-must-not-escape|unit-test-admin-key/u);
+});
+
+test("the live adapter blocks a capped million-row queue as uncounted work", async () => {
+  let successWrites = 0;
+  await assert.rejects(
+    cmdUpdatePreview([
+      "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+    ], previewOptions({
+      inventory: readinessInventory({
+        expected: 1_150_274,
+        actual: 0,
+        pending: 10_001,
+        pendingIsCapped: true,
+        componentCountsExact: false,
+      }),
+      write() { successWrites += 1; },
+    })),
+    (error) => {
+      assert.equal(error.payload.error_code, "UPDATE_PREVIEW_PROJECTION_WORK_UNCOUNTED");
+      assert.equal(error.payload.plan.deployed_projection.verdict,
+        "projection_work_queued_uncounted");
+      assert.equal(error.payload.plan.deployed_projection.queue.pending_is_capped, true);
+      assert.equal(error.payload.authorizes_update, false);
+      assert.match(error.payload.owner_message,
+        /large indexing queue is still working; wait for it before updating/i);
+      assert.equal(error.payload.plan.deployed_projection.queue.pending_display, "10,000+");
+      assert.equal(Object.hasOwn(error.payload.plan.deployed_projection.queue, "count_receipt"), false);
+      assert.equal(Object.hasOwn(error.payload, "owner_note"), false);
+      return true;
+    },
+  );
+  assert.equal(successWrites, 0);
+});
+
+// Every Worker before the bounded documents summary returns this exact
+// SELECT count(*) backlog, with none of the three bounded-summary fields.
+function preSummaryInventory(overrides = {}, backlogExtras = {}) {
+  const inventory = readinessInventory(overrides);
+  for (const field of ["pending_is_capped", "pending_display", "component_counts_exact"]) {
+    delete inventory.vector_backlog[field];
+  }
+  delete inventory.vector_readiness.pending_is_capped;
+  delete inventory.vector_readiness.submitted_counts_exact;
+  Object.assign(inventory.vector_backlog, backlogExtras);
+  return inventory;
+}
+
+test("the live adapter reads a pre-summary Worker's exact 84,075-row backlog", async () => {
+  let output = "";
+  const receipt = await cmdUpdatePreview([
+    "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+  ], previewOptions({
+    inventory: preSummaryInventory({
+      expected: 84_075, actual: 0, pending: 84_075, submitted: 200,
+      reason: "accepted_mutation_needs_confirmation",
+    }),
+    write(value) { output = value; },
+  }));
+  assert.equal(receipt.status, "pre_update_check_complete");
+  assert.equal(receipt.authorizes_update, false);
+  assert.equal(receipt.projection_ready, false);
+  const projection = receipt.plan.deployed_projection;
+  assert.equal(projection.verdict, "recoverable_queued_work");
+  assert.equal(projection.queue.pending, 84_075);
+  assert.equal(projection.queue.pending_display, "84075");
+  assert.equal(projection.queue.pending_is_capped, false);
+  assert.equal(projection.queue.component_counts_exact, true);
+  assert.equal(projection.queue.count_receipt, "legacy_exact");
+  assert.match(receipt.owner_note, /older Worker.*exact count/i);
+  assert.match(output, /"pending": 84075/u);
+  assert.doesNotMatch(output, /10,000\+|private-source-must-not-escape|unit-test-admin-key/u);
+});
+
+test("the live adapter reads a pre-summary Worker's zero backlog as ready to update", async () => {
+  const receipt = await cmdUpdatePreview([
+    "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+  ], previewOptions({
+    inventory: preSummaryInventory({ expected: 10, actual: 10, pending: 0 }),
+    write() {},
+  }));
+  assert.equal(receipt.status, "pre_update_check_complete");
+  assert.equal(receipt.projection_ready, true);
+  assert.equal(receipt.plan.deployed_projection.verdict, "ready");
+  assert.equal(receipt.plan.deployed_projection.queue.pending, 0);
+  assert.equal(receipt.plan.deployed_projection.queue.pending_display, "0");
+  assert.equal(receipt.plan.deployed_projection.queue.count_receipt, "legacy_exact");
+});
+
+test("the live adapter still refuses every partial bounded-summary backlog", async () => {
+  for (const extras of [
+    { pending_is_capped: false },
+    { pending_display: "84075" },
+    { component_counts_exact: true },
+    { pending_is_capped: false, pending_display: "84075" },
+    { pending_is_capped: false, component_counts_exact: true },
+    { pending_display: "84075", component_counts_exact: true },
+    { pending_is_capped: true, pending_display: null, component_counts_exact: false },
+    { pending_is_capped: "false", pending_display: 84_075, component_counts_exact: "true" },
+  ]) {
+    let successWrites = 0;
+    await assert.rejects(
+      cmdUpdatePreview([
+        "brain.manifest.json", "--preview", "--expect-runtime-sha256", SHA, "--json",
+      ], previewOptions({
+        inventory: preSummaryInventory({
+          expected: 84_075, actual: 0, pending: 84_075, submitted: 200,
+          reason: "accepted_mutation_needs_confirmation",
+        }, extras),
+        write() { successWrites += 1; },
+      })),
+      (error) => {
+        assert.equal(error.payload.error_code, "UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID",
+          JSON.stringify(extras));
+        assert.equal(error.payload.authorizes_update, false);
+        return true;
+      },
+    );
+    assert.equal(successWrites, 0);
+  }
 });
 
 test("delete-only and undersized upsert queues emit fingerprinted insufficiency refusals", async () => {

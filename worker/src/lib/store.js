@@ -45,6 +45,9 @@ import {
 } from "./provenance-receipt.js";
 import { ingestEnvelopeValidationError } from "./ingest-envelope.js";
 import {
+  customApiLogicalSourceId,
+} from "./custom-api-visibility.js";
+import {
   deriveSourceOriginalId,
   hashSourceOriginalResultBinding,
   loadSourceOriginalSigningKey,
@@ -52,6 +55,7 @@ import {
   SOURCE_ORIGINAL_BINDING_CONTRACT_VERSION,
   SOURCE_ORIGINAL_TENANT_ID,
 } from "./source-original-binding.js";
+import { readDocumentSummary } from "./documents-summary.js";
 
 export { TEXT_SOURCES } from "./provenance-receipt.js";
 
@@ -741,7 +745,10 @@ const d1Backend = {
     };
   },
 
-  async search(env, { query, limit, filters = {}, weights = {}, rrfK = 60, access = null, scope = null }) {
+  async search(env, {
+    query, limit, filters = {}, weights = {}, rrfK = 60, access = null, scope = null,
+    projectionReadiness = null,
+  }) {
     let embedding = null;
     if (access?.kind !== "grant" && scopeIsUnrestricted(scope)) {
       try {
@@ -750,14 +757,17 @@ const d1Backend = {
         // Degrade to keyword rather than fail. store-d1 reports which side answered.
       }
     }
-    const r = await d1.search(env, { query, embedding, limit, filters, weights, rrfK, access, scope });
+    const r = await d1.search(env, {
+      query, embedding, limit, filters, weights, rrfK, access, scope, projectionReadiness,
+    });
     return {
       results: r.results.map((x) => {
-        const sourceId = x.source_id || (
+        const storedSourceId = x.source_id || (
           x.doc_uid && x.source && x.doc_uid.startsWith(`${x.source}:`)
             ? x.doc_uid.slice(x.source.length + 1)
             : x.doc_uid || x.chunk_uid
         );
+        const sourceId = customApiLogicalSourceId(x.authority_meta, storedSourceId);
         const publicRow = {
           chunk_uid: x.chunk_uid,
           doc_uid: x.doc_uid || null,
@@ -1273,63 +1283,7 @@ const d1Backend = {
   },
 
   async stats(env) {
-    const { results } = await env.DB.prepare(
-      `WITH source_names AS (
-         SELECT source FROM corpus_stats
-         UNION
-         SELECT source FROM documents WHERE deleted_at IS NULL
-       ), document_counts AS (
-         SELECT source,
-                COUNT(*) AS stored_documents,
-                COUNT(DISTINCT COALESCE(
-                  CASE WHEN json_valid(meta) THEN json_extract(meta,'$.part_of') END,
-                  source_id
-                )) AS logical_documents
-           FROM documents
-          WHERE deleted_at IS NULL
-          GROUP BY source
-       ), chunk_counts AS (
-         SELECT d.source, COUNT(c.chunk_uid) AS chunks
-           FROM documents d
-           LEFT JOIN chunks c ON c.doc_uid=d.doc_uid
-          WHERE d.deleted_at IS NULL
-          GROUP BY d.source
-       )
-       SELECT n.source AS source_type,
-              COALESCE(d.stored_documents, 0) AS stored_documents,
-              COALESCE(d.logical_documents, 0) AS logical_documents,
-              COALESCE(c.chunks, 0) AS total,
-              s.last_ingest_at,
-              COALESCE(c.chunks, 0) - COALESCE(o.pending, 0) AS embedded
-       FROM source_names n
-       LEFT JOIN corpus_stats s ON s.source = n.source
-       LEFT JOIN document_counts d ON d.source = n.source
-       LEFT JOIN chunk_counts c ON c.source = n.source
-       LEFT JOIN (SELECT c.source, count(*) AS pending
-                    FROM vector_outbox v JOIN chunks c ON c.chunk_uid = v.chunk_uid
-                   GROUP BY c.source) o ON o.source = n.source`
-    ).all();
-    return {
-      rows: (results || []).map((r) => ({
-        source_type: r.source_type,
-        // BOTH, separately. `total` is a CHUNK count, and a caller comparing it
-        // to a document count sees permanent drift that is not real. A warning
-        // that always fires is worse than no warning: it teaches people to
-        // ignore the one time it means something.
-        documents: Number(r.logical_documents || 0),
-        logical_documents: Number(r.logical_documents || 0),
-        // These two counts come from the live documents table, not the
-        // denormalized corpus_stats cache. Replay completion uses this marker to
-        // reject an older Worker that could falsely confirm a stale count.
-        stored_documents: Number(r.stored_documents || 0),
-        document_counts_exact: true,
-        chunks: Number(r.total || 0),
-        chunk_counts_exact: true,
-        total: Number(r.total || 0),
-        embedded: Number(r.embedded || 0),
-        last_ingested: r.last_ingest_at ? new Date(Number(r.last_ingest_at)).toISOString() : null,
-      })),
-    };
+    return readDocumentSummary(env);
   },
 };
 

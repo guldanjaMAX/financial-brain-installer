@@ -585,6 +585,10 @@ function SourceCoverageDetailView({
   );
 }
 
+export function pendingCountLabel(pending: number, isCapped = false): string {
+  return isCapped ? `${Math.max(0, pending - 1).toLocaleString()}+` : pending.toLocaleString();
+}
+
 function PhaseNotice({ phase, status }: { phase: BrainPhase; status: SystemStatus | null }) {
   const pct = status?.vectors?.percent_visible;
   if (phase === "unreachable" || phase === "paused" || phase === "unknown" || phase === "coverage_unknown") {
@@ -601,7 +605,7 @@ function PhaseNotice({ phase, status }: { phase: BrainPhase; status: SystemStatu
             <div className="h-full bg-accent rounded-full transition-all" style={{ width: `${pct}%` }} />
           </div>
           <p className="text-[12.5px] text-ink-soft mt-1.5">
-            {status?.vectors?.pending.toLocaleString()} still to work through. Answers may be incomplete until it finishes.
+            {pendingCountLabel(status?.vectors?.pending ?? 0, status?.vectors?.pending_is_capped)} still to work through. Answers may be incomplete until it finishes.
           </p>
         </div>
       )}

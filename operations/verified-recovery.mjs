@@ -302,7 +302,7 @@ function recoveryResourceContract(manifest, label) {
     credential_scanner: manifest.safety?.credential_scanner?.enabled === false ? "off" : "on",
     ocr_enabled: manifest.safety?.ocr?.enabled === true ? "1" : "0",
     ocr_model: String(
-      manifest.safety?.ocr?.model || "@cf/google/gemma-4-26b-a4b-it",
+      manifest.safety?.ocr?.model || "@cf/meta/llama-4-scout-17b-16e-instruct",
     ),
   });
   if (!runtime.embedding_model || runtime.embedding_model.length > 256 ||

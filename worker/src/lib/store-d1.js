@@ -71,6 +71,10 @@ import {
   scanChunkPages,
 } from "./diagnose-scan.js";
 import { sourceOriginalChunkReceiptHash } from "./source-original-chunk.js";
+import {
+  customApiLogicalSourceId, customApiOwnerMessage, customApiVisibilitySql,
+  readWithCustomApiVisibility,
+} from "./custom-api-visibility.js";
 
 const RRF_K = 60;
 const LEXICAL_CHAMPION_RATIO = 4;
@@ -100,6 +104,7 @@ const HISTORICAL_SOURCE_LABELS = Object.freeze({
   hubspot: "HubSpot",
   quickbooks: "QuickBooks Online",
   plaid: "Plaid",
+  custom_api: "custom business API",
   upload: "uploaded file",
   "iphone-backup": "iPhone backup",
   "owner-notes": "conversational owner notes",
@@ -584,7 +589,7 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
   const f = filterSql(filters, "c", 3);
   const sc = scopeSql(scope, "d", f.nextParam);
   const a = documentAccessSql(access, "c", "d", sc.nextParam);
-  const sql = (memoryClause) => `
+  const sql = (memoryClause, withCurrentPointer = true) => `
     SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
            COALESCE(src.kind, 'unregistered') AS source_kind,
            c.title, c.document_date,
@@ -600,13 +605,16 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
     JOIN chunks c ON c.id = chunks_fts.rowid
     JOIN documents d ON d.doc_uid = c.doc_uid
     LEFT JOIN sources src ON src.name = d.source
-    WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}${memoryClause}
+    WHERE chunks_fts MATCH ?1${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}
     ORDER BY bm25(chunks_fts)
     LIMIT ?2`;
 
-  const run = (memoryClause) => env.DB.prepare(sql(memoryClause)).bind(
-    terms, limit, ...f.params, ...sc.params, ...a.params,
-  ).all();
+  const run = async (memoryClause) => {
+    const execute = (withCurrentPointer) => env.DB.prepare(sql(memoryClause, withCurrentPointer)).bind(
+      terms, limit, ...f.params, ...sc.params, ...a.params,
+    ).all();
+    return readWithCustomApiVisibility(env, execute);
+  };
   let response;
   try {
     response = await run(currentMemorySql("d"));
@@ -648,7 +656,7 @@ export async function unchunkedTaxDocumentCandidates(env, {
   const selectorSql = entityBound ? "AND d.entity_slug = ?1" : "";
   const limitParameter = entityBound ? "?2" : "?1";
   const binds = entityBound ? [entitySlug, pageLimit] : [pageLimit];
-  const { results } = await env.DB.prepare(
+  const sql = (withCurrentPointer) =>
     `/* unchunked-tax-document-candidates */
      SELECT d.doc_uid, d.source, COALESCE(src.kind, 'unregistered') AS source_kind,
             d.source_id, d.title, d.uri, d.document_date, d.date_source, d.date_reliable,
@@ -659,10 +667,13 @@ export async function unchunkedTaxDocumentCandidates(env, {
       WHERE d.deleted_at IS NULL
         ${selectorSql}
         AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.doc_uid = d.doc_uid)
-        ${f.clause}${sc.clause}${a.clause}
+        ${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}
       ORDER BY d.ingested_at DESC
-      LIMIT ${limitParameter}`
-  ).bind(...binds, ...f.params, ...sc.params, ...a.params).all();
+      LIMIT ${limitParameter}`;
+  const execute = (withCurrentPointer) => env.DB.prepare(sql(withCurrentPointer))
+    .bind(...binds, ...f.params, ...sc.params, ...a.params).all();
+  const response = await readWithCustomApiVisibility(env, execute);
+  const { results } = response;
   const page = (results || []).map(assessStoredProvenance);
   return {
     results: page.slice(0, boundedLimit).map((row) => ({ ...row, has_chunks: false })),
@@ -729,7 +740,7 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
     const placeholders = batch.map((_, i) => "?" + (i + 1)).join(",");
     const f = filterSql(filters, "c", batch.length + 1);
     const sc = scopeSql(scope, "d", f.nextParam);
-    const sql = (memoryClause) =>
+    const sql = (memoryClause, withCurrentPointer = true) =>
       `SELECT c.chunk_uid, c.doc_uid, c.text, d.source AS source,
               COALESCE(src.kind, 'unregistered') AS source_kind,
               c.title, c.document_date,
@@ -742,10 +753,13 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
                    THEN json_extract(d.meta, '$.start') END AS occurred_at
        FROM chunks c JOIN documents d ON d.doc_uid = c.doc_uid
        LEFT JOIN sources src ON src.name = d.source
-       WHERE c.chunk_uid IN (${placeholders})${f.clause}${sc.clause}${memoryClause}`;
-    const run = (memoryClause) => env.DB.prepare(sql(memoryClause))
-      .bind(...batch, ...f.params, ...sc.params)
-      .all();
+       WHERE c.chunk_uid IN (${placeholders})${f.clause}${sc.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}`;
+    const run = async (memoryClause) => {
+      const execute = (withCurrentPointer) => env.DB.prepare(sql(memoryClause, withCurrentPointer))
+        .bind(...batch, ...f.params, ...sc.params)
+        .all();
+      return readWithCustomApiVisibility(env, execute);
+    };
     let response;
     try {
       response = await run(currentMemorySql("d"));
@@ -771,6 +785,7 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
  */
 export async function search(env, {
   query, embedding, limit = 10, filters = {}, weights = {}, rrfK = RRF_K, access = null, scope = null,
+  projectionReadiness = null,
 }) {
   // Refuse malformed or schema-skewed scope before the first D1 or Vectorize
   // call. If each modality caught this independently, the invalid scope could
@@ -795,7 +810,9 @@ export async function search(env, {
     // readiness contract that gates health and acceptance so every answer
     // advertises partial projection instead of looking fully healthy.
     vectorEligible
-      ? vectorReadiness(env).catch(() => ({ ready: false }))
+      ? projectionReadiness === null
+        ? vectorReadiness(env).catch(() => ({ ready: false }))
+        : Promise.resolve(projectionReadiness)
       : Promise.resolve(null),
   ]);
   // Ordinary FTS or Vectorize failures remain independent degraded modalities.
@@ -985,8 +1002,13 @@ export async function search(env, {
       row.source,
       row.authority_meta ?? row._authority_meta,
     );
+    const publicSourceId = customApiLogicalSourceId(
+      row.authority_meta ?? row._authority_meta,
+      publicRow.source_id,
+    );
     documents.push(attachEvidenceLineage({
       ...publicRow,
+      source_id: publicSourceId,
       authority,
       lineage: lineage.lineage,
       ...(writeProvenance ? { write_provenance: writeProvenance } : {}),
@@ -1570,32 +1592,10 @@ const DRAIN_LEASE_RELEASE_QUERIES = 1;
 // Fence read plus either exact-cut update, or probe renewal and receipt write.
 const DRAIN_PROJECTION_VERIFY_QUERIES = 3;
 const DRAIN_INITIAL_DEPTH_QUERIES = 1;
-const DRAIN_RETRY_STATE_QUERIES = 2;
 const DRAIN_BATCH_SIZE_MAX = 100;
 export const DRAIN_IN_FLIGHT_BATCH_WINDOW = 3;
 export const VECTOR_RETRY_MAX_ATTEMPTS = 5;
 const VECTOR_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000];
-
-/**
- * Drop retry state whose outbox row is gone. The retry table is keyed by
- * (chunk_uid, generation) and a newer ingest bumps the generation, so without
- * this a re-ingested chunk would inherit the previous generation's attempt
- * count and backoff. Bounded per call so it can never dominate the drain's
- * query budget.
- */
-async function cleanupVectorRetryState(env, limit = 500) {
-  await env.DB.prepare(
-    `DELETE FROM vector_outbox_retry_state
-      WHERE rowid IN (
-        SELECT s.rowid FROM vector_outbox_retry_state s
-         WHERE NOT EXISTS (
-           SELECT 1 FROM vector_outbox o
-            WHERE o.chunk_uid=s.chunk_uid AND o.generation=s.generation
-         )
-         LIMIT ?
-      )`
-  ).bind(limit).run();
-}
 
 function vectorRetryDelay(attempt) {
   return VECTOR_RETRY_DELAYS_MS[Math.min(Math.max(attempt - 1, 0), VECTOR_RETRY_DELAYS_MS.length - 1)];
@@ -1676,7 +1676,9 @@ export function drainBatchQueryUpperBound(batchSize = DRAIN_BATCH_SIZE_MAX) {
   const boundedBatchSize = Number.isInteger(batchSize)
     ? Math.min(DRAIN_BATCH_SIZE_MAX, Math.max(1, batchSize))
     : DRAIN_BATCH_SIZE_MAX;
-  return 12 + (3 * boundedBatchSize);
+  // One fixed set cleanup removes retry history only for rows whose exact
+  // confirmation CAS won. This replaces the old whole retry-table sweep.
+  return 13 + (3 * boundedBatchSize);
 }
 
 const drainLeaseChanges = (result) => Number(
@@ -1985,13 +1987,97 @@ async function projectionFenceProcessed(env, fence, lease) {
   return covered;
 }
 
+const OUTBOX_DISPLAY_LIMIT = 10_001;
+
+const BOUNDED_OUTBOX_SUMMARY_SQL = `
+  WITH bounded AS MATERIALIZED (
+    SELECT op, queued_at, submitted_mutation_id
+      FROM vector_outbox
+     WHERE queued_at >= -9223372036854775808
+     ORDER BY queued_at
+     LIMIT ${OUTBOX_DISPLAY_LIMIT}
+  )
+  SELECT count(*) AS n,
+         (SELECT queued_at FROM vector_outbox
+           WHERE queued_at >= -9223372036854775808 ORDER BY queued_at LIMIT 1) AS oldest,
+         sum(CASE WHEN op = 'upsert' THEN 1 ELSE 0 END) AS upserts,
+         sum(CASE WHEN op = 'delete' THEN 1 ELSE 0 END) AS deletes,
+         sum(CASE WHEN submitted_mutation_id IS NOT NULL THEN 1 ELSE 0 END) AS submitted
+    FROM bounded`;
+
+const OUTBOX_EXISTS_SQL = `
+  SELECT EXISTS(
+    SELECT 1 FROM vector_outbox
+     WHERE queued_at >= -9223372036854775808 LIMIT 1
+  ) AS has_rows`;
+
+// corpus_stats is exact for live documents. Soft-deleted documents deliberately
+// retain their chunks. Drive the exceptional add-back from the source-sized
+// statistics table so idx_documents_live can seek (source, deleted_at) for each
+// source instead of scanning every document to find the deleted minority.
+const EXACT_PROJECTED_CHUNKS_SQL = `
+  COALESCE((SELECT SUM(chunks) FROM corpus_stats), 0) +
+  COALESCE((
+    SELECT count(*)
+      FROM corpus_stats s
+      CROSS JOIN documents d INDEXED BY idx_documents_live
+        ON d.source = s.source AND d.deleted_at IS NOT NULL
+      JOIN chunks c INDEXED BY idx_chunks_doc ON c.doc_uid = d.doc_uid
+  ), 0)`;
+
+const boundedOutboxReceipt = (row) => {
+  const pending = Number(row?.n || 0);
+  if (!Number.isSafeInteger(pending) || pending < 0 || pending > OUTBOX_DISPLAY_LIMIT) {
+    throw new Error("the bounded vector backlog receipt is invalid");
+  }
+  const upserts = Number(row?.upserts || 0);
+  const deletes = Number(row?.deletes || 0);
+  const submitted = Number(row?.submitted || 0);
+  const oldest = row?.oldest === null || row?.oldest === undefined
+    ? null
+    : Number(row.oldest);
+  if (![upserts, deletes, submitted].every((value) =>
+    Number.isSafeInteger(value) && value >= 0 && value <= pending) ||
+      upserts + deletes !== pending) {
+    throw new Error("the bounded vector backlog components are invalid");
+  }
+  if (pending > 0 && (!Number.isSafeInteger(oldest) || oldest < 0)) {
+    throw new Error("the bounded vector backlog age receipt is invalid");
+  }
+  const capped = pending === OUTBOX_DISPLAY_LIMIT;
+  return {
+    pending,
+    pending_is_capped: capped,
+    pending_display: capped ? "10,000+" : String(pending),
+    upserts,
+    deletes,
+    submitted,
+    component_counts_exact: !capped,
+    oldest_queued_at: oldest,
+  };
+};
+
+async function outboxHasRows(env) {
+  const row = await env.DB.prepare(OUTBOX_EXISTS_SQL).first();
+  const hasRows = Number(row?.has_rows);
+  if (hasRows !== 0 && hasRows !== 1) {
+    throw new Error("the vector backlog existence receipt is invalid");
+  }
+  return hasRows === 1;
+}
+
 /** Mark the full projection verified only across one exact, empty-queue cut. */
-async function markProjectionVerifiedIfExact(env, lease) {
+async function markProjectionVerifiedIfExact(env, lease, {
+  expectedVectorCount = null,
+} = {}) {
   const description = await env.VECTORIZE.describe();
   const vectorCount = Number(
     description?.vectorCount ?? description?.vectorsCount ?? description?.count,
   );
   if (!Number.isSafeInteger(vectorCount) || vectorCount < 0) return false;
+  const expected = expectedVectorCount === null ? null : Number(expectedVectorCount);
+  if (expected !== null && (!Number.isSafeInteger(expected) || expected < 0)) return false;
+  if (expected !== null && vectorCount !== expected) return false;
   const fence = await projectionFenceState(env);
   const processed = fence.mutationId === null
     ? true
@@ -2006,15 +2092,25 @@ async function markProjectionVerifiedIfExact(env, lease) {
   }
   const result = await env.DB.prepare(
     `UPDATE install_state
-        SET vector_projection_status = 'verified'
+        SET vector_projection_status = 'verified',
+            vector_projection_bootstrap_base_count = ?2
       WHERE id = 1 AND schema_version >= 12
         AND vector_projection_status = 'pending'
         AND (vector_projection_bootstrap_high_water IS NULL OR
              vector_projection_bootstrap_cursor = vector_projection_bootstrap_high_water)
         AND COALESCE(vector_projection_mutation_id, '') = ?1
-        AND NOT EXISTS (SELECT 1 FROM vector_outbox)
-        AND (SELECT count(*) FROM chunks) = ?2`
-  ).bind(fence.mutationId || "", vectorCount).run();
+        AND NOT EXISTS (
+          SELECT 1 FROM vector_outbox
+           WHERE queued_at >= -9223372036854775808 LIMIT 1
+        )
+        AND ?2 = CASE WHEN ?3 = 1 THEN ?4
+          ELSE ${EXACT_PROJECTED_CHUNKS_SQL} END`
+  ).bind(
+    fence.mutationId || "",
+    vectorCount,
+    expected !== null ? 1 : 0,
+    expected ?? 0,
+  ).run();
   return drainLeaseChanges(result) === 1;
 }
 
@@ -2091,6 +2187,18 @@ async function confirmSubmittedVectors(env, rows, lease) {
       throw new Error("the vector confirmation receipts were ambiguous");
     }
     confirmed = confirmed.filter((_, index) => drainLeaseChanges(changes[index]) === 1);
+    if (confirmed.length) {
+      const confirmedIds = JSON.stringify(confirmed.map((row) => row.chunk_uid));
+      await env.DB.prepare(
+        `DELETE FROM vector_outbox_retry_state AS stale
+          WHERE stale.chunk_uid IN (SELECT value FROM json_each(?1))
+            AND NOT EXISTS (
+              SELECT 1 FROM vector_outbox current
+               WHERE current.chunk_uid=stale.chunk_uid
+                 AND current.generation=stale.generation
+            )`
+      ).bind(confirmedIds).run();
+    }
   }
   if (retrying.length) {
     const detail = "accepted Vectorize mutation was processed but the exact vector state was not query-visible; retrying";
@@ -2180,10 +2288,18 @@ async function drainOutboxBatch(env, {
   lease,
   inFlightMutationIds = new Set(),
   skipUpserts = false,
+  deletePriority = null,
 } = {}) {
+  const remainingReceipt = async (known = 0) => {
+    const hasRemaining = await outboxHasRows(env);
+    return {
+      has_remaining: hasRemaining,
+      remaining: hasRemaining ? Math.max(1, Number(known || 0)) : 0,
+      remaining_is_lower_bound: hasRemaining,
+    };
+  };
   const confirmAcceptedRows = async (rows) => {
     const confirmed = await confirmSubmittedVectors(env, rows, lease);
-    const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
     return {
       drained: confirmed.confirmed,
       deleted: confirmed.confirmedDeletes,
@@ -2191,7 +2307,7 @@ async function drainOutboxBatch(env, {
       submitted: 0,
       waiting: confirmed.waiting,
       failed: confirmed.retrying,
-      remaining: Number(rest?.n || 0),
+      ...await remainingReceipt(confirmed.waiting + confirmed.retrying),
       errors: confirmed.retrying ? ["accepted vector state was not visible and was re-queued"] : [],
       observed_mutation_ids: [...new Set(rows.map((row) => row.submitted_mutation_id))],
     };
@@ -2207,6 +2323,7 @@ async function drainOutboxBatch(env, {
        LEFT JOIN vector_outbox_retry_state s
          ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
       WHERE o.submitted_mutation_id IS NOT NULL
+        AND o.queued_at >= -9223372036854775808
       ORDER BY o.queued_at LIMIT ?1`
   ).bind(batchSize).all();
   const submittedByThisInvocation = submittedRows?.length && submittedRows.every((row) =>
@@ -2222,38 +2339,51 @@ async function drainOutboxBatch(env, {
   const fence = await projectionFenceState(env);
   const fenceWasSubmittedHere = fence.mutationId && inFlightMutationIds.has(fence.mutationId);
   if (!fenceWasSubmittedHere && !await projectionFenceProcessed(env, fence, lease)) {
-    const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
-    const remaining = Number(rest?.n || 0);
     return {
       drained: 0, deleted: 0, upserted: 0, submitted: 0,
-      waiting: remaining, failed: 0, remaining, errors: [],
+      waiting: 1, failed: 0, errors: [],
+      ...await remainingReceipt(1),
     };
   }
 
-  // Delete first. Orphans still consume Vectorize candidate slots even though
-  // D1 hydration makes them unreachable, so leaving them behind damages recall.
-  const { results: deletePending } = await env.DB.prepare(
-    `SELECT o.chunk_uid, COALESCE(o.vector_id, o.chunk_uid) AS vector_id,
-            o.queued_at, o.generation, COALESCE(s.attempts,o.attempts,0) AS attempts,
-            s.failure_code
-       FROM vector_outbox o
-       LEFT JOIN vector_outbox_retry_state s
-         ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
-      WHERE o.op = 'delete' AND o.submitted_mutation_id IS NULL
-        AND s.quarantined_at IS NULL
-        AND COALESCE(s.next_attempt_at,0) <= ?1
-      ORDER BY o.queued_at LIMIT ?2`
-  ).bind(lease.now(), batchSize).all();
+  // Delete first. Without an operation-leading index, proving that an all-upsert
+  // queue has no delete is one full ordered walk. Pay that cost at most once per
+  // invocation and reuse the negative answer for every later batch. A concurrent
+  // external enqueue is deliberately left for the next leased tick. Only a
+  // delete enqueued by this invocation may invalidate this cache; no current
+  // drain path enqueues one.
+  let deletePending = [];
+  if (!deletePriority?.checked || deletePriority.hasEligibleDeletes) {
+    const { results: deleteCandidates } = await env.DB.prepare(
+      `/* drain-delete-priority */
+       SELECT o.chunk_uid, COALESCE(o.vector_id, o.chunk_uid) AS vector_id,
+              o.queued_at, o.generation, COALESCE(s.attempts,o.attempts,0) AS attempts,
+              s.failure_code
+         FROM vector_outbox o
+         LEFT JOIN vector_outbox_retry_state s
+           ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
+        WHERE o.op = 'delete' AND o.queued_at >= -9223372036854775808
+          AND o.submitted_mutation_id IS NULL
+          AND s.quarantined_at IS NULL
+          AND COALESCE(s.next_attempt_at,0) <= ?1
+        ORDER BY o.queued_at LIMIT ?2`
+    ).bind(lease.now(), batchSize + 1).all();
+    deletePending = (deleteCandidates || []).slice(0, batchSize);
+    if (deletePriority) {
+      deletePriority.checked = true;
+      deletePriority.hasEligibleDeletes = (deleteCandidates || []).length > batchSize;
+    }
+  }
   if (deletePending?.length) {
     const selected = headRetryNeedsIsolation(deletePending[0])
       ? deletePending.slice(0, 1)
       : deletePending;
     const submission = await submitQueuedDeletes(env, selected, lease);
     const submitted = submission.submitted;
-    const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
     return {
       drained: 0, deleted: 0, upserted: 0, submitted, waiting: submitted,
-      failed: 0, remaining: Number(rest?.n || 0), errors: [],
+      failed: 0, errors: [],
+      ...await remainingReceipt(submitted),
       submission_mutation_id: submission.mutationId,
     };
   }
@@ -2262,10 +2392,10 @@ async function drainOutboxBatch(env, {
   // only clears what that walk cannot page (deletes, and rows already submitted).
   if (skipUpserts) {
     if (submittedRows?.length) return confirmAcceptedRows(submittedRows);
-    const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
     return {
       drained: 0, deleted: 0, upserted: 0, submitted: 0, waiting: 0,
-      failed: 0, remaining: Number(rest?.n || 0), errors: [],
+      failed: 0, errors: [],
+      ...await remainingReceipt(0),
     };
   }
   const { results: pending } = await env.DB.prepare(
@@ -2277,7 +2407,8 @@ async function drainOutboxBatch(env, {
      FROM vector_outbox o JOIN chunks c ON c.chunk_uid = o.chunk_uid
      LEFT JOIN vector_outbox_retry_state s
        ON s.chunk_uid=o.chunk_uid AND s.generation=o.generation
-     WHERE o.op = 'upsert' AND o.submitted_mutation_id IS NULL
+     WHERE o.op = 'upsert' AND o.queued_at >= -9223372036854775808
+       AND o.submitted_mutation_id IS NULL
        AND s.quarantined_at IS NULL
        AND COALESCE(s.next_attempt_at,0) <= ?1
      ORDER BY o.queued_at LIMIT ?2`
@@ -2287,10 +2418,10 @@ async function drainOutboxBatch(env, {
 
   if (!pending?.length) {
     if (submittedRows?.length) return confirmAcceptedRows(submittedRows);
-    const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
     return {
       drained: 0, deleted: 0, upserted: 0, submitted: 0, waiting: 0,
-      failed: 0, remaining: Number(rest?.n || 0), errors: [],
+      failed: 0, errors: [],
+      ...await remainingReceipt(0),
     };
   }
 
@@ -2418,7 +2549,6 @@ async function drainOutboxBatch(env, {
     }))).catch(() => {});
   }
 
-  const rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
   return {
     drained: 0,
     deleted: 0,
@@ -2426,7 +2556,7 @@ async function drainOutboxBatch(env, {
     submitted,
     waiting: submitted,
     failed: poisoned.length,
-    remaining: Number(rest?.n || 0),
+    ...await remainingReceipt(submitted + poisoned.length),
     errors: poisoned.slice(0, 3).map((p) => p.error),
     submission_mutation_id: submissionMutationId,
   };
@@ -2434,7 +2564,6 @@ async function drainOutboxBatch(env, {
 
 async function drainOutboxWithLease(env, options, lease) {
   await requireVectorRetryStateTable(env);
-  await cleanupVectorRetryState(env);
   const rawMaxBatches = Number(options.maxBatches ?? 1);
   const maxBatches = Number.isInteger(rawMaxBatches)
     ? Math.min(10, Math.max(1, rawMaxBatches))
@@ -2449,24 +2578,23 @@ async function drainOutboxWithLease(env, options, lease) {
     : 10 * 60 * 1_000;
   const startedAt = lease.startedAt;
 
-  const initialDepth = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
-  const initialRemaining = Number(initialDepth?.n);
-  if (!Number.isSafeInteger(initialRemaining) || initialRemaining < 0) {
-    throw new Error("vector drain initial backlog is invalid");
-  }
+  const initialHasRemaining = await outboxHasRows(env);
   let result = {
     drained: 0, deleted: 0, upserted: 0, submitted: 0, waiting: 0, failed: 0,
-    remaining: initialRemaining, errors: [], busy: false,
+    remaining: initialHasRemaining ? 1 : 0,
+    remaining_is_lower_bound: initialHasRemaining,
+    has_remaining: initialHasRemaining,
+    errors: [], busy: false,
   };
   let reservedQueries = DRAIN_LEASE_ACQUIRE_QUERIES + DRAIN_LEASE_RELEASE_QUERIES +
-    DRAIN_PROJECTION_VERIFY_QUERIES + DRAIN_INITIAL_DEPTH_QUERIES +
-    DRAIN_RETRY_STATE_QUERIES;
+    DRAIN_PROJECTION_VERIFY_QUERIES + DRAIN_INITIAL_DEPTH_QUERIES;
   const batchQueryUpperBound = drainBatchQueryUpperBound(batchSize);
   const rawQueryBudget = Number(options.d1QueryBudget ?? DRAIN_D1_QUERY_BUDGET);
   const queryBudget = Number.isInteger(rawQueryBudget)
     ? Math.min(DRAIN_D1_QUERY_BUDGET, Math.max(0, rawQueryBudget))
     : DRAIN_D1_QUERY_BUDGET;
   const inFlightMutations = new Map();
+  const deletePriority = { checked: false, hasEligibleDeletes: false };
   for (let batch = 0; batch < maxBatches; batch++) {
     if (now() - startedAt >= maxInvocationMs) break;
     // Never begin provider work unless every possible D1 receipt/remap for
@@ -2480,6 +2608,7 @@ async function drainOutboxWithLease(env, options, lease) {
       batchSize,
       inFlightMutationIds: new Set(inFlightMutations.keys()),
       lease: { ownerToken: lease.ownerToken, now },
+      deletePriority,
     });
     result.drained += Number(part.drained || 0);
     result.deleted += Number(part.deleted || 0);
@@ -2501,10 +2630,14 @@ async function drainOutboxWithLease(env, options, lease) {
     result.waiting = trackedWaiting || Number(part.waiting || 0);
     result.failed += Number(part.failed || 0);
     result.remaining = Number(part.remaining || 0);
+    result.remaining_is_lower_bound = part.remaining_is_lower_bound === true;
+    result.has_remaining = part.has_remaining === true;
     result.errors.push(...(part.errors || []).slice(0, Math.max(0, 3 - result.errors.length)));
-    if (result.remaining === 0 && options.disableBootstrapAdvance !== true) {
+    if (!result.has_remaining && options.disableBootstrapAdvance !== true) {
       const bootstrap = await bootstrapVectorProjectionPage(env, { now: now() });
       result.remaining = bootstrap.pending;
+      result.has_remaining = bootstrap.pending > 0;
+      result.remaining_is_lower_bound = bootstrap.pending > 0;
       if (bootstrap.pending > 0) {
         result.waiting = 0;
         continue;
@@ -2514,12 +2647,12 @@ async function drainOutboxWithLease(env, options, lease) {
     // already become visible. Once that check reports waiting, stop rather
     // than spinning inside one Worker invocation. A later manual/cron call
     // confirms it without another embedding bill.
-    if (!result.remaining) break;
+    if (!result.has_remaining) break;
     if (part.waiting && !part.submitted) break;
     if (!part.drained && !part.submitted) break;
   }
 
-  if (result.remaining === 0) {
+  if (!result.has_remaining) {
     result.projection_verified = await markProjectionVerifiedIfExact(env, lease);
   }
   return result;
@@ -2550,9 +2683,9 @@ export async function drainOutbox(env, options = {}) {
   const startedAt = now();
   const lease = await acquireDrainLease(env, { now: startedAt });
   if (!lease.acquired) {
-    let rest;
+    let hasRemaining;
     try {
-      rest = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
+      hasRemaining = await outboxHasRows(env);
     } catch {
       throw new Error("vector drain is busy and its remaining backlog could not be verified");
     }
@@ -2563,7 +2696,9 @@ export async function drainOutbox(env, options = {}) {
       submitted: 0,
       waiting: 0,
       failed: 0,
-      remaining: Number(rest?.n || 0),
+      remaining: hasRemaining ? 1 : 0,
+      remaining_is_lower_bound: hasRemaining,
+      has_remaining: hasRemaining,
       errors: [],
       busy: true,
       retry_after_seconds: lease.retryAfterSeconds,
@@ -2773,10 +2908,10 @@ export async function diagnose(env, {
     }
   }
 
-  const totalRow = await safe("totals", () => one(
-    `SELECT (SELECT count(*) FROM documents WHERE deleted_at IS NULL) AS documents,
+  const totalRow = await safe("totals", () => readWithCustomApiVisibility(env, (withCurrentPointer) => one(
+    `SELECT (SELECT count(*) FROM documents WHERE deleted_at IS NULL${customApiVisibilitySql("documents", withCurrentPointer)}) AS documents,
             (SELECT count(*) FROM sources) AS sources`,
-  ));
+  ), { probe: false }));
   const totalValue = (value, name) => {
     const number = Number(value);
     if (!Number.isSafeInteger(number) || number < 0) {
@@ -3344,10 +3479,10 @@ export async function diagnose(env, {
  */
 const INDEXING_STUCK_MS = 6 * 60 * 60 * 1000;
 const SOURCE_REVIEW_ISSUE_CODE = "SAFETY_REVIEW_REQUIRED";
-const AUTOMATABLE_SOURCE_KINDS = new Set(["drive", "gmail", "calendar"]);
+const AUTOMATABLE_SOURCE_KINDS = new Set(["drive", "gmail", "calendar", "custom_api"]);
 const REFRESHABLE_SOURCE_KINDS = new Set([
   "drive", "gmail", "imap", "calendar", "imessage", "whatsapp", "zoom",
-  "quickbooks", "slack", "notion", "microsoft", "dropbox", "hubspot", "plaid",
+  "quickbooks", "slack", "notion", "microsoft", "dropbox", "hubspot", "plaid", "custom_api",
 ]);
 
 function sourceOwnerRemedy(source, concern = "refresh") {
@@ -3367,6 +3502,7 @@ function sourceOwnerRemedy(source, concern = "refresh") {
     quickbooks: "Reconnect the intended QuickBooks company if access has expired, then capture every intended entity type. Deleted records remain an explicit connector limitation.",
     zoom: "Reconnect Zoom if access has expired, then run a full Zoom sync with no --limit.",
     plaid: "Reconnect the intended financial institutions, resolve any account that needs attention, then run the bank sync again.",
+    custom_api: "Check the custom API key and endpoint contract, then run the custom API pull again.",
     upload: `Re-run the whole folder for source "${source?.name}" with no --limit, then resolve every unreadable or unsupported file it reports.`,
     "iphone-backup": "Create a current, readable iPhone backup and load that whole snapshot again with no --limit. Load important attachment-only content separately when a message row has no searchable text.",
   }[kind];
@@ -3410,6 +3546,50 @@ function missingSyncRunsTable(error) {
   return /no such table|does not exist/.test(message) && message.includes("sync_runs");
 }
 
+function missingCustomApiJobsTable(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return /no such table|does not exist/.test(message) && message.includes("custom_api_jobs");
+}
+
+async function activeCustomApiJobStarts(env, rows) {
+  const needsReceipt = (rows || []).some((row) =>
+    String(row?.kind || "").toLowerCase() === "custom_api" &&
+    String(row?.status || "").toLowerCase() === "indexing" &&
+    !Number.isFinite(timestampMs(row?.indexing_started_at)));
+  if (!needsReceipt) return new Map();
+  try {
+    const result = await env.DB.prepare(
+      `SELECT source,MIN(created_at) AS started_at
+         FROM custom_api_jobs
+        WHERE status IN ('staged','applying','promoting','promoted')
+        GROUP BY source`
+    ).all();
+    return new Map((result?.results || []).map((row) => [String(row.source), row.started_at]));
+  } catch (error) {
+    if (missingCustomApiJobsTable(error)) return new Map();
+    throw error;
+  }
+}
+
+async function currentCustomApiReceipts(env, rows) {
+  if (!(rows || []).some((row) =>
+    String(row?.kind || "").toLowerCase() === "custom_api" && row?.stale_reason)) return new Map();
+  try {
+    const result = await env.DB.prepare(
+      `SELECT source,display_name,last_issue_code,last_refused_rows
+         FROM custom_api_schedule_state`
+    ).all();
+    return new Map((result?.results || []).map((row) => [String(row.source), {
+      displayName: typeof row.display_name === "string" && row.display_name ? row.display_name : null,
+      issueCode: typeof row.last_issue_code === "string" ? row.last_issue_code : null,
+      refusedRows: Number(row.last_refused_rows || 0),
+    }]));
+  } catch (error) {
+    if (missingCustomApiJobsTable(error)) return new Map();
+    throw error;
+  }
+}
+
 /**
  * The source row says what the connector last reported; sync_runs says whether
  * an `indexing` report still belongs to a live attempt. Keeping this separate
@@ -3429,7 +3609,26 @@ function operationalFreshness(s, now) {
       indexingMs,
     };
   }
+  if (String(s.stale_reason || "").trim().toUpperCase() === "INPUT_REFUSED" &&
+      Number(s.custom_api_refused_rows || 0) > 0) {
+    const count = Number(s.custom_api_refused_rows);
+    return {
+      state: "broken",
+      reason: `${count} ${count === 1 ? "row was" : "rows were"} not refreshed because the latest source response could not be read safely`,
+      indexingMs,
+    };
+  }
   if (s.stale_reason) {
+    if (String(s.kind || "").toLowerCase() === "custom_api") {
+      return {
+        state: "broken",
+        reason: customApiOwnerMessage(
+          String(s.custom_api_issue_code || s.stale_reason).trim().toUpperCase(),
+          s.custom_api_display_name || "custom business API",
+        ),
+        indexingMs,
+      };
+    }
     return { state: "broken", reason: sourceReceiptOwnerMessage(s.stale_reason), indexingMs };
   }
   if (status === "error") {
@@ -3494,6 +3693,8 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
   } catch {
     return { gaps: [], unavailable: true };
   }
+  const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
+  const customApiReceipts = await currentCustomApiReceipts(env, rows);
 
   const allowed = allowedSources === null
     ? null
@@ -3512,7 +3713,15 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
     const last = s.last_ingest_at ? Date.parse(s.last_ingest_at) : NaN;
     const ageSec = Number.isFinite(last) ? Math.floor((now - last) / 1000) : null;
     const days = ageSec === null ? null : Math.floor(ageSec / 86400);
-    const operational = operationalFreshness(s, now);
+    const customApiReceipt = customApiReceipts.get(String(s.name)) || null;
+    const customApiRefusedRows = customApiReceipt?.refusedRows || 0;
+    const operational = operationalFreshness({
+      ...s,
+      custom_api_refused_rows: customApiRefusedRows,
+      custom_api_issue_code: customApiReceipt?.issueCode || null,
+      custom_api_display_name: customApiReceipt?.displayName || null,
+      indexing_started_at: s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null,
+    }, now);
 
     if (operational.state === "broken") {
       gaps.push(gapWithRemedy(s, "refresh", {
@@ -3614,6 +3823,8 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
   } catch {
     return { sources: [], unavailable: true };
   }
+  const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
+  const customApiReceipts = await currentCustomApiReceipts(env, rows);
   const latestRuns = new Map();
   try {
     let result;
@@ -3682,7 +3893,16 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
       const days = Number.isFinite(last) ? Math.floor((now - last) / 86400000) : null;
       const expected = Number(s.expected_refresh_seconds) || null;
       const automatable = AUTOMATABLE_SOURCE_KINDS.has(String(s.kind));
-      const operational = operationalFreshness(s, now);
+      const effectiveIndexingStartedAt = s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null;
+      const customApiReceipt = customApiReceipts.get(String(s.name)) || null;
+      const customApiRefusedRows = customApiReceipt?.refusedRows || 0;
+      const operational = operationalFreshness({
+        ...s,
+        indexing_started_at: effectiveIndexingStartedAt,
+        custom_api_refused_rows: customApiRefusedRows,
+        custom_api_issue_code: customApiReceipt?.issueCode || null,
+        custom_api_display_name: customApiReceipt?.displayName || null,
+      }, now);
       let state = unregistered ? "unregistered" : "ok";
       let reason = unregistered ? "the source registry entry is missing" : operational.reason;
       if (!unregistered && operational.state) state = operational.state;
@@ -3695,13 +3915,16 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
         // Unregistered is distinguished by `state`; ownerSystemStatus converts
         // both into explicit public states without exposing this raw slug.
         zone: typeof s.zone === "string" && s.zone.trim() ? s.zone.trim() : null,
-        source_status: String(s.status || "") || null,
+        source_status: String(s.status || "").toLowerCase() === "ready" && customApiRefusedRows > 0
+          ? "ready_with_warnings"
+          : String(s.status || "") || null,
+        refused_rows: customApiRefusedRows,
         documents: Number(s.document_count || 0),
         days_since_ingest: days,
         expected_every_days: expected ? Math.max(1, Math.round(expected / 86400)) : null,
         last_complete_sweep_at: s.last_complete_sweep_at || null,
-        indexing_started_at: Number.isFinite(timestampMs(s.indexing_started_at))
-          ? new Date(timestampMs(s.indexing_started_at)).toISOString()
+        indexing_started_at: Number.isFinite(timestampMs(effectiveIndexingStartedAt))
+          ? new Date(timestampMs(effectiveIndexingStartedAt)).toISOString()
           : null,
         hours_indexing: operational.indexingMs === null
           ? null
@@ -3956,7 +4179,7 @@ THEN 1 ELSE 0 END`;
  * `sourceRecoverySql` keeps its own two for the reason documented there. Every
  * statement still returns the same rows in the same order.
  */
-const INVENTORY_DOCUMENT_CTES_SQL = `
+const inventoryDocumentCtesSql = ({ includeCurrentCustomApi = true } = {}) => `
   WITH live_documents AS MATERIALIZED (
     SELECT d.rowid AS document_rowid,
            d.doc_uid,
@@ -3986,7 +4209,7 @@ const INVENTORY_DOCUMENT_CTES_SQL = `
              OR (json_type(d.meta,'$.part_of')='text' AND length(trim(json_extract(d.meta,'$.part_of'))) > 0)
            ) THEN 1 ELSE 0 END AS family_lineage
       FROM documents d
-     WHERE d.deleted_at IS NULL
+     WHERE d.deleted_at IS NULL${customApiVisibilitySql("d", includeCurrentCustomApi)}
   ),
   attributed_documents AS (
     SELECT live_documents.document_rowid,
@@ -4065,7 +4288,10 @@ const INVENTORY_DOCUMENT_CTES_SQL = `
 
 // Exported so the scale regression can run this exact statement against a
 // synthetic corpus and diff its rows with the 0.4.8 SQL it replaced.
-export const sourceInventorySql = ({ includeFailureEvidence = true } = {}) => `${INVENTORY_DOCUMENT_CTES_SQL},
+export const sourceInventorySql = ({
+  includeFailureEvidence = true,
+  includeCurrentCustomApi = true,
+} = {}) => `${inventoryDocumentCtesSql({ includeCurrentCustomApi })},
   source_names AS (
     SELECT name FROM sources
     UNION
@@ -4258,19 +4484,32 @@ export async function sourceInventory(env, {
     throw new TypeError("source inventory row limit is invalid");
   }
 
-  let result;
-  try {
-    result = await env.DB.prepare(sourceInventorySql()).bind(maxRows + 1).all();
-  } catch (error) {
-    if (!missingFailureEvidenceColumn(error)) throw error;
-    // Schema 39 remains readable while migration 0040 is pending. Missing
-    // failure evidence is unknown; every older receipt and coverage field
-    // keeps its exact meaning, and malformed/non-schema errors never retry.
-    result = await env.DB.prepare(sourceInventorySql({ includeFailureEvidence: false }))
-      .bind(maxRows + 1)
-      .all();
-  }
+  const readInventory = async (includeCurrentCustomApi) => {
+    try {
+      return await env.DB.prepare(sourceInventorySql({ includeCurrentCustomApi })).bind(maxRows + 1).all();
+    } catch (error) {
+      if (!missingFailureEvidenceColumn(error)) throw error;
+      // Schema 39 remains readable while migration 0040 is pending. Missing
+      // failure evidence is unknown; every older receipt and coverage field
+      // keeps its exact meaning, and malformed/non-schema errors never retry.
+      return env.DB.prepare(sourceInventorySql({
+        includeFailureEvidence: false,
+        includeCurrentCustomApi,
+      })).bind(maxRows + 1).all();
+    }
+  };
+  // Custom-source version tables arrive after the v3 inventory contract. An
+  // older schema has no custom documents, so its reader stays exact without
+  // referencing tables that do not exist yet.
+  const result = await readWithCustomApiVisibility(env, readInventory, { probe: false });
   const rawRows = Array.isArray(result?.results) ? result.results : [];
+  const activeCustomJobs = await activeCustomApiJobStarts(env, rawRows.map((row) => ({
+    name: row.name,
+    kind: row.kind,
+    status: row.status,
+    indexing_started_at: row.run_finished_at === null ? row.run_started_at : null,
+  })));
+  const customApiReceipts = await currentCustomApiReceipts(env, rawRows);
   const total = rawRows.length ? inventoryCount(rawRows[0].inventory_total) : 0;
   if (total > maxRows || rawRows.length > maxRows) {
     const error = new Error("source inventory exceeds the safe row limit");
@@ -4293,9 +4532,14 @@ export async function sourceInventory(env, {
     const expectedSeconds = Number(row.expected_refresh_seconds) > 0
       ? Math.floor(Number(row.expected_refresh_seconds))
       : null;
+    const customApiReceipt = customApiReceipts.get(sourceId) || null;
     const operational = operationalFreshness({
       ...row,
-      indexing_started_at: row.run_finished_at === null ? row.run_started_at : null,
+      indexing_started_at: (row.run_finished_at === null ? row.run_started_at : null) ??
+        activeCustomJobs.get(sourceId) ?? null,
+      custom_api_refused_rows: customApiReceipt?.refusedRows || 0,
+      custom_api_issue_code: customApiReceipt?.issueCode || null,
+      custom_api_display_name: customApiReceipt?.displayName || null,
     }, now);
     const automatable = AUTOMATABLE_SOURCE_KINDS.has(String(row.kind || "").toLowerCase());
     let state = registered ? "ok" : "unregistered";
@@ -4609,7 +4853,7 @@ const sourceRecoveryMarkerSql = `
  * separate statements. Each statement scans the corpus once and remains
  * bracketed by the same opening and closing snapshot markers.
  */
-const SOURCE_RECOVERY_CANDIDATES_SQL = `${INVENTORY_DOCUMENT_CTES_SQL},
+const sourceRecoveryCandidatesSql = ({ includeCurrentCustomApi = true } = {}) => `${inventoryDocumentCtesSql({ includeCurrentCustomApi })},
   candidate_rows AS MATERIALIZED (
     SELECT f.*,
            COALESCE(s.kind,'unregistered') AS source_kind,
@@ -4644,7 +4888,7 @@ const SOURCE_RECOVERY_CANDIDATES_SQL = `${INVENTORY_DOCUMENT_CTES_SQL},
 // This prevents D1's 30-second statement clock from combining page selection,
 // global totals, source grouping, and JSON aggregation into one all-or-nothing
 // request on a large Brain.
-export const sourceRecoverySummarySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
+const sourceRecoverySummarySqlFor = (options) => `${sourceRecoveryCandidatesSql(options)}
   ,source_groups AS MATERIALIZED (
     SELECT inventory_source AS source_id,
            source_kind,
@@ -4690,8 +4934,9 @@ export const sourceRecoverySummarySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
            global_summary.*,1 AS summary_only
       FROM global_summary
      ORDER BY summary_only DESC,source_id`;
+export const sourceRecoverySummarySql = sourceRecoverySummarySqlFor();
 
-export const sourceRecoverySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
+const sourceRecoverySqlFor = (options) => `${sourceRecoveryCandidatesSql(options)}
   SELECT candidate_rows.document_rowid,
          candidate_rows.doc_uid,
          candidate_rows.physical_source,
@@ -4737,24 +4982,28 @@ export const sourceRecoverySql = `${SOURCE_RECOVERY_CANDIDATES_SQL}
    WHERE document_rowid>?2
    ORDER BY document_rowid ASC
    LIMIT ?3`;
+export const sourceRecoverySql = sourceRecoverySqlFor();
 
 export function sourceRecoveryPlan({
   source = null,
   afterRowId = 0,
   afterSourceId = null,
   limit = 100,
+  // False only on a pre-0048 schema, which has no custom API documents.
+  customApiPointerTables = true,
 } = {}) {
+  const options = { includeCurrentCustomApi: customApiPointerTables };
   return Object.freeze([
     Object.freeze({
       kind: "source_summary",
-      sql: sourceRecoverySummarySql,
+      sql: customApiPointerTables ? sourceRecoverySummarySql : sourceRecoverySummarySqlFor(options),
       // One independent global-summary row plus up to page-size + 1 source
       // groups. The extra group is the truncation probe.
       binds: Object.freeze([source, afterSourceId, SOURCE_RECOVERY_MAX_PAGE_SIZE + 2]),
     }),
     Object.freeze({
       kind: "candidate_page",
-      sql: sourceRecoverySql,
+      sql: customApiPointerTables ? sourceRecoverySql : sourceRecoverySqlFor(options),
       binds: Object.freeze([source, afterRowId, limit + 1]),
     }),
   ]);
@@ -4833,18 +5082,23 @@ export async function sourceRecoveryCandidates(env, {
   }
 
   const openingMarker = await sourceRecoveryMarker(env);
-  const [summaryStep, pageStep] = sourceRecoveryPlan({
-    source: normalizedSource,
-    afterRowId,
-    afterSourceId,
-    limit,
-  });
-  const summaryResult = await env.DB.prepare(summaryStep.sql)
-    .bind(...summaryStep.binds)
-    .all();
-  const result = await env.DB.prepare(pageStep.sql)
-    .bind(...pageStep.binds)
-    .all();
+  const { summaryResult, result } = await readWithCustomApiVisibility(env, async (customApiPointerTables) => {
+    const [summaryStep, pageStep] = sourceRecoveryPlan({
+      source: normalizedSource,
+      afterRowId,
+      afterSourceId,
+      limit,
+      customApiPointerTables,
+    });
+    return {
+      summaryResult: await env.DB.prepare(summaryStep.sql)
+        .bind(...summaryStep.binds)
+        .all(),
+      result: await env.DB.prepare(pageStep.sql)
+        .bind(...pageStep.binds)
+        .all(),
+    };
+  }, { probe: false });
   const closingMarker = await sourceRecoveryMarker(env);
   if (JSON.stringify(openingMarker) !== JSON.stringify(closingMarker)) {
     const error = new Error("source recovery inventory changed during the read");
@@ -5096,8 +5350,12 @@ export async function bootstrapVectorProjectionPage(env, {
             vector_projection_bootstrap_epoch AS epoch,
             vector_projection_bootstrap_cursor AS cursor,
             vector_projection_bootstrap_high_water AS high_water,
-            (SELECT count(*) FROM chunks) AS chunks,
-            (SELECT count(*) FROM vector_outbox) AS pending
+            (${EXACT_PROJECTED_CHUNKS_SQL}) AS chunks,
+            (SELECT count(*) FROM (
+              SELECT 1 FROM vector_outbox
+               WHERE queued_at >= -9223372036854775808
+               ORDER BY queued_at LIMIT ${OUTBOX_DISPLAY_LIMIT}
+            )) AS pending
        FROM install_state WHERE id = 1 AND schema_version >= 12`
   ).first();
   if (!state || !["verified", "pending", "bootstrap_required"].includes(String(state.status))) {
@@ -5187,7 +5445,13 @@ export async function bootstrapVectorProjectionPage(env, {
       drainLeaseChanges(results.at(-1)) !== 1) {
     throw new Error("vector bootstrap epoch changed; retry from durable state");
   }
-  const after = await env.DB.prepare("SELECT count(*) AS n FROM vector_outbox").first();
+  const after = await env.DB.prepare(
+    `SELECT count(*) AS n FROM (
+       SELECT 1 FROM vector_outbox
+        WHERE queued_at >= -9223372036854775808
+        ORDER BY queued_at LIMIT ${OUTBOX_DISPLAY_LIMIT}
+     )`
+  ).first();
   const afterPending = Number(after?.n);
   if (!Number.isSafeInteger(afterPending) || afterPending < 0) {
     throw new Error("vector bootstrap outbox receipt is invalid");
@@ -5340,7 +5604,9 @@ async function acceleratedBootstrapReceipt(env, phase, blocked = null, options =
     vectorReadiness(env),
   ]);
   const total = Number(counts?.n);
-  const historicalConfirmed = state.baseCount + Number(batches?.confirmed || 0);
+  const historicalConfirmed = state.status === "verified"
+    ? state.baseCount
+    : state.baseCount + Number(batches?.confirmed || 0);
   const pendingUpserts = Number(queue?.pending_upserts || 0);
   const queued = Number(queue?.queued || 0);
   const submitted = Number(queue?.submitted || 0);
@@ -5388,7 +5654,7 @@ async function acceleratedBootstrapReceipt(env, phase, blocked = null, options =
     retrying,
     complete,
     vector_ready: readiness.ready === true,
-    expected_vectors: readiness.expected_vectors,
+    expected_vectors: total,
     actual_vectors: readiness.actual_vectors,
     // The fields below exist only for a CLI that declared receipt contract 2.
     // A 0.4.1-kit CLI validates receipts against an exact field list, so a new
@@ -6434,7 +6700,20 @@ async function acceleratedVectorBootstrapWithLease(env, state, options, lease) {
           AND COALESCE(vector_projection_bootstrap_cursor,'')=
               COALESCE(vector_projection_bootstrap_high_water,'')`
     ).run();
-    phase = await markProjectionVerifiedIfExact(env, lease) ? "complete" : "waiting";
+    const expected = await env.DB.prepare(
+      `SELECT MAX(
+                i.vector_projection_bootstrap_base_count +
+                  COALESCE(SUM(CASE WHEN b.status='confirmed' THEN b.row_count ELSE 0 END),0),
+                COALESCE((SELECT SUM(chunks) FROM corpus_stats), 0)
+              ) AS n
+         FROM install_state i
+         LEFT JOIN vector_bootstrap_batches b
+           ON b.epoch=i.vector_projection_bootstrap_epoch
+        WHERE i.id=1`,
+    ).first();
+    phase = await markProjectionVerifiedIfExact(env, lease, {
+      expectedVectorCount: Number(expected?.n),
+    }) ? "complete" : "waiting";
     // A residue epoch's base count never counts rows the ordinary drain
     // projected after the walk closed (rows released by vector-retry), so its
     // ledger cannot certify the corpus on its own. Rebase in the verifying
@@ -6650,20 +6929,9 @@ export async function reindex(env, { source = null, dryRun = true, bootstrap = f
 }
 
 export async function outboxDepth(env) {
-  const row = await env.DB.prepare(
-    `SELECT count(*) AS n, min(queued_at) AS oldest,
-            sum(CASE WHEN op = 'upsert' THEN 1 ELSE 0 END) AS upserts,
-            sum(CASE WHEN op = 'delete' THEN 1 ELSE 0 END) AS deletes,
-            sum(CASE WHEN submitted_mutation_id IS NOT NULL THEN 1 ELSE 0 END) AS submitted
-     FROM vector_outbox`
-  ).first();
-  return {
-    pending: Number(row?.n || 0),
-    upserts: Number(row?.upserts || 0),
-    deletes: Number(row?.deletes || 0),
-    submitted: Number(row?.submitted || 0),
-    oldest_queued_at: row?.oldest ?? null,
-  };
+  return boundedOutboxReceipt(
+    await env.DB.prepare(BOUNDED_OUTBOX_SUMMARY_SQL).first(),
+  );
 }
 
 /**
@@ -6673,7 +6941,10 @@ export async function outboxDepth(env) {
  * those observations, the newer queue/fence makes this fail closed. A write
  * that starts after the D1 read simply starts after this point-in-time check.
  */
-export async function vectorReadiness(env) {
+export async function vectorReadiness(env, {
+  outbox = null,
+  expectedVectorCount = null,
+} = {}) {
   let description;
   try {
     description = await env.VECTORIZE.describe();
@@ -6687,6 +6958,9 @@ export async function vectorReadiness(env) {
     throw new Error("the vector index returned an invalid vector count");
   }
 
+  const backlog = outbox && Number.isSafeInteger(outbox.pending)
+    ? outbox
+    : await outboxDepth(env);
   const state = await env.DB.prepare(
     `SELECT schema_version,
             outbox_generation,
@@ -6696,21 +6970,32 @@ export async function vectorReadiness(env) {
             vector_projection_bootstrap_epoch AS bootstrap_epoch,
             vector_projection_bootstrap_cursor AS bootstrap_cursor,
             vector_projection_bootstrap_high_water AS bootstrap_high_water,
-            (SELECT count(*) FROM chunks) AS expected_vectors,
-            (SELECT count(*) FROM vector_outbox) AS pending,
-            (SELECT count(*) FROM vector_outbox
-              WHERE submitted_mutation_id IS NOT NULL) AS submitted,
-            (SELECT min(queued_at) FROM vector_outbox) AS oldest_queued_at
+            vector_projection_bootstrap_base_count AS expected_vectors,
+            (SELECT COALESCE(sum(chunks), 0) FROM corpus_stats) AS live_vectors
        FROM install_state WHERE id = 1`
   ).first();
   if (!state || Number(state.schema_version) < 12) {
     throw new Error("the vector visibility receipt schema is not active");
   }
-  const expected = Number(state.expected_vectors);
-  const pending = Number(state.pending);
-  const submitted = Number(state.submitted);
+  const verifiedVectors = Number(state.expected_vectors);
+  // `live_vectors` only improves the informational pending-state lower bound.
+  // Readiness is already false while pending, so an older narrow adapter that
+  // omits it may safely retain the last verified count rather than fail a read.
+  const liveVectors = Number(state.live_vectors ?? state.expected_vectors);
+  const status = String(state.projection_status || "");
+  const exactExpected = expectedVectorCount === null
+    ? null
+    : Number(expectedVectorCount);
+  if (exactExpected !== null && (!Number.isSafeInteger(exactExpected) || exactExpected < 0)) {
+    throw new Error("the exact vector readiness count is invalid");
+  }
+  const expected = exactExpected ?? (status === "verified"
+    ? verifiedVectors
+    : Math.max(verifiedVectors, liveVectors));
+  const pending = Number(backlog.pending);
+  const submitted = Number(backlog.submitted);
   const outboxGeneration = Number(state.outbox_generation ?? 0);
-  if (![expected, pending, submitted, outboxGeneration]
+  if (![expected, verifiedVectors, liveVectors, pending, submitted, outboxGeneration]
       .every((value) => Number.isSafeInteger(value) && value >= 0) ||
       submitted > pending) {
     throw new Error("the vector readiness counts are invalid");
@@ -6735,7 +7020,6 @@ export async function vectorReadiness(env) {
   }
 
   const countsMatch = vectorCount === expected;
-  const status = String(state.projection_status || "");
   const bootstrapEpoch = Number(state.bootstrap_epoch);
   if (!["verified", "pending", "bootstrap_required"].includes(status) ||
       !Number.isSafeInteger(bootstrapEpoch) || bootstrapEpoch < 0) {
@@ -6781,12 +7065,16 @@ export async function vectorReadiness(env) {
     ready,
     reason,
     expected_vectors: expected,
+    expected_vectors_exact: status === "verified",
     actual_vectors: vectorCount,
     pending,
+    pending_is_capped: backlog.pending_is_capped === true,
+    pending_display: backlog.pending_display,
     submitted,
+    submitted_counts_exact: backlog.component_counts_exact === true,
     outbox_generation: outboxGeneration,
     mutation_id: mutationId,
-    oldest_queued_at: state.oldest_queued_at ?? null,
+    oldest_queued_at: backlog.oldest_queued_at ?? null,
     mutation_submitted_at: state.mutation_submitted_at ?? null,
     projection_status: status,
     bootstrap_epoch: bootstrapEpoch,
@@ -6810,13 +7098,57 @@ export async function vectorReadiness(env) {
  * way to fail. The exclusive leased drain later removes the vectors to reclaim
  * the space.
  */
-export async function forget(env, { docUids = [], source = null, dryRun = true } = {}) {
+export async function forget(env, {
+  docUids = [],
+  source = null,
+  sourceHighWater = null,
+  corpusMutationGeneration = null,
+  dryRun = true,
+} = {}) {
   let targets = docUids;
   if (source) {
-    const { results } = await env.DB.prepare("SELECT doc_uid FROM documents WHERE source = ?1").bind(source).all();
-    targets = [...new Set([...targets, ...(results || []).map((r) => r.doc_uid)])];
+    const boundedSource = Number.isSafeInteger(sourceHighWater) && sourceHighWater >= 0;
+    const fencedSource = Number.isSafeInteger(corpusMutationGeneration) && corpusMutationGeneration >= 0;
+    const { results } = await env.DB.prepare(
+      fencedSource
+        ? `WITH fence AS (
+             SELECT outbox_generation = ?3 AS matches
+               FROM install_state WHERE id = 1
+           )
+           SELECT documents.doc_uid, fence.matches AS mutation_fence_matches
+             FROM fence
+             LEFT JOIN documents
+               ON fence.matches = 1
+              AND documents.source = ?1
+              AND documents.deleted_at IS NULL
+              ${boundedSource ? "AND documents.rowid <= ?2" : ""}`
+        : `SELECT doc_uid FROM documents
+            WHERE source = ?1 AND deleted_at IS NULL
+              ${boundedSource ? "AND rowid <= ?2" : ""}`,
+    ).bind(...(fencedSource
+      ? [source, boundedSource ? sourceHighWater : null, corpusMutationGeneration]
+      : boundedSource ? [source, sourceHighWater] : [source])).all();
+    if (fencedSource && (!(results || []).length || Number(results[0]?.mutation_fence_matches) !== 1)) {
+      const error = new Error("the source changed since the preview; preview again");
+      error.code = "source_forget_preview_changed";
+      throw error;
+    }
+    targets = [...new Set([
+      ...targets,
+      ...(results || []).map((row) => row.doc_uid).filter((docUid) => typeof docUid === "string" && docUid),
+    ])];
   }
-  if (!targets.length) return { documents: 0, chunks: 0, vectors: 0, dry_run: dryRun, targets: [] };
+  if (!targets.length) return {
+    documents: 0,
+    chunks: 0,
+    vectors: 0,
+    targeted_documents: 0,
+    targeted_chunks: 0,
+    document_count_exact: true,
+    chunk_count_exact: true,
+    dry_run: dryRun,
+    targets: [],
+  };
 
   // D1 accepts at most 100 bound variables in one statement. Source-level
   // forget routinely targets hundreds or thousands of documents, so every
@@ -6844,19 +7176,31 @@ export async function forget(env, { docUids = [], source = null, dryRun = true }
   // when the readable id was too long. Deleting by chunk_uid alone would leave
   // those vectors orphaned and still competing for retrieval slots.
   if (dryRun) {
-    return { documents: targets.length, chunks: chunkUids.length, vectors: chunkUids.length, dry_run: true, targets };
+    return {
+      documents: targets.length,
+      chunks: chunkUids.length,
+      vectors: chunkUids.length,
+      targeted_documents: targets.length,
+      targeted_chunks: chunkUids.length,
+      document_count_exact: true,
+      chunk_count_exact: true,
+      dry_run: true,
+      targets,
+    };
   }
 
   // D1 first. The FTS index follows via the delete trigger, and ON DELETE
   // CASCADE removes the chunks with their document.
   const queuedAt = Date.now();
+  let deletedDocuments = 0;
+  let deletedChunks = 0;
   for (const group of groups) {
     const marks = group.map((_, i) => "?" + (i + 1)).join(",");
     const groupSet = new Set(group);
     const groupSources = [...new Set(documentRows
       .filter((row) => groupSet.has(row.doc_uid))
       .map((row) => row.source))];
-    await env.DB.batch([
+    const receipts = await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at, attempts, last_error)
          SELECT chunk_uid, COALESCE(vector_id, chunk_uid), 'delete', ?${group.length + 1}, 0, NULL
@@ -6865,8 +7209,12 @@ export async function forget(env, { docUids = [], source = null, dryRun = true }
            vector_id=excluded.vector_id, op='delete', queued_at=excluded.queued_at,
            attempts=0, last_error=NULL`
       ).bind(...group, queuedAt),
-      env.DB.prepare(`DELETE FROM chunks WHERE doc_uid IN (${marks})`).bind(...group),
-      env.DB.prepare(`DELETE FROM documents WHERE doc_uid IN (${marks})`).bind(...group),
+      env.DB.prepare(
+        `DELETE FROM chunks WHERE doc_uid IN (${marks}) RETURNING chunk_uid`,
+      ).bind(...group),
+      env.DB.prepare(
+        `DELETE FROM documents WHERE doc_uid IN (${marks}) RETURNING doc_uid`,
+      ).bind(...group),
       ...groupSources.map((src) => env.DB.prepare(
         `INSERT INTO corpus_stats (source, documents, chunks, last_ingest_at)
          SELECT ?1, COUNT(DISTINCT documents.doc_uid), COUNT(chunks.chunk_uid),
@@ -6878,6 +7226,19 @@ export async function forget(env, { docUids = [], source = null, dryRun = true }
            documents=excluded.documents, chunks=excluded.chunks`
       ).bind(src)),
     ]);
+    if (!Array.isArray(receipts) || receipts.length < 3) {
+      throw new Error("the forget delete receipts were incomplete");
+    }
+    const exactMutationCount = (receipt) => {
+      const returned = Array.isArray(receipt?.results) ? receipt.results.length : null;
+      const changed = drainLeaseChanges(receipt);
+      // Cloudflare D1 may omit RETURNING rows from a batch receipt while still
+      // exposing the exact affected-row count. Prefer a nonempty returned set,
+      // but never turn an exact positive mutation receipt into zero.
+      return returned === null || (returned === 0 && changed > 0) ? changed : returned;
+    };
+    deletedChunks += exactMutationCount(receipts[1]);
+    deletedDocuments += exactMutationCount(receipts[2]);
   }
 
   // Physical vector deletion is deliberately enqueue-only here. `drainOutbox`
@@ -6888,9 +7249,21 @@ export async function forget(env, { docUids = [], source = null, dryRun = true }
   // retryable after crashes or a busy drain.
   const vectors = 0;
 
+  const documentCountExact = deletedDocuments === targets.length;
+  const chunkCountExact = deletedChunks === chunkUids.length;
+  const overlapped = !documentCountExact || !chunkCountExact;
   return {
-    documents: targets.length, chunks: chunkUids.length, vectors,
-    vector_cleanup_queued: chunkUids.length,
+    documents: deletedDocuments,
+    chunks: deletedChunks,
+    targeted_documents: targets.length,
+    targeted_chunks: chunkUids.length,
+    document_count_exact: documentCountExact,
+    chunk_count_exact: chunkCountExact,
+    ...(overlapped ? {
+      count_note: "Another operation removed some rows before this operation reached them.",
+    } : {}),
+    vectors,
+    vector_cleanup_queued: deletedChunks,
     dry_run: false, vector_error: null, targets,
   };
 }
