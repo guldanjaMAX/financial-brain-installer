@@ -425,6 +425,7 @@ const expected = [
   "docs/decisions/004-version-scoped-release-scope.md",
   "docs/decisions/005-phased-disposable-deployment-proof.md",
   "docs/decisions/006-pin-supervised-install-contract-v2.md",
+  "docs/decisions/007-rehome-update-006-arm64-clause.md",
   "docs/decisions/README.md",
   "doctor.mjs",
   "eval/brain-client.mjs",

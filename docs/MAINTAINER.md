@@ -253,16 +253,18 @@ Never combine those into a broader claim than the evidence supports.
 
 ## Cut an immutable release
 
-The current 0.4.8/schema48 field candidate remains held. The earlier 0.4.7
-candidate was never tagged, published, or offered as a customer update; its
-identity is retired so its evidence cannot be mistaken for evidence from these
-changed bytes. At this freeze the current candidate's
-39-row audit has 35 unresolved incidents, no renewed deferrals, and four rows
-closed on reviewed evidence. A tag requests the release workflow; it never
+The current 0.4.9/schema48 field candidate remains held. The earlier 0.4.7
+and 0.4.8 candidates were never tagged, published, or offered as customer
+updates; their identities are retired so their evidence cannot be mistaken for
+evidence from these changed bytes. At this freeze the current candidate's
+40-row audit has 36 unresolved incidents, no renewed deferrals, and four rows
+closed on reviewed evidence. One acceptance text was re-homed, not weakened:
+[ADR 007](./decisions/007-rehome-update-006-arm64-clause.md) moves UPDATE-006's
+Windows ARM64 clause into UPDATE-012. A tag requests the release workflow; it never
 bypasses CI, unresolved incidents, owner acceptance, or the repository's
 immutable-release setting. Do not create or publish releases by hand to work
 around a failed workflow. The
-[0.4.8 candidate evidence plan](./release-evidence/v0.4.8-candidate-release-evidence-plan.md)
+[0.4.9 candidate evidence plan](./release-evidence/v0.4.9-candidate-release-evidence-plan.md)
 is planning only until a reviewed change binds it to the final candidate SHA.
 
 1. Keep package.json, both root lockfile versions, the manifest template, newest
