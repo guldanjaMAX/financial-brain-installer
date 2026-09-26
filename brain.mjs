@@ -5755,10 +5755,45 @@ export async function cmdUpgrade(manifestPath, options = {}) {
       // paused-mode health proves the compatibility build has taken over; a
       // full invocation grace then lets every already-started old drain finish.
       if (usesD1VectorOutbox) {
-        await runStage("paused vector-drain deployment", () => deploy(executionPin.target, {
-          persistDomain: false,
-          pauseVectorDrainForUpgrade: true,
-        }));
+        const readPrePauseBacklog = options.readUpdateBacklog ?? readUpdateBacklog;
+        await runStage("paused vector-drain deployment", async ({ manifest }) => {
+          if (readPrePauseBacklog) {
+            let immediateBacklog;
+            try {
+              immediateBacklog = await readPrePauseBacklog(originalPin.target, {
+                // A manifest with no hostname is resolved read-only through the
+                // Cloudflare access this stage already proved, as health does.
+                resolveBrainDomain: async () => {
+                  const sub = await callCloudflare(`/accounts/${accountId}/workers/subdomain`);
+                  if (typeof sub?.subdomain !== "string" || !sub.subdomain) {
+                    throw new TypeError("Cloudflare returned no workers.dev subdomain");
+                  }
+                  const scriptName = manifest.brain?.worker_name || `${manifest.client?.slug || "client"}-brain`;
+                  return `${scriptName}.${sub.subdomain}.workers.dev`;
+                },
+                ...(options.updateBacklogOptions || {}),
+              });
+              if (!immediateBacklog || typeof immediateBacklog !== "object" ||
+                  Array.isArray(immediateBacklog) ||
+                  !Number.isSafeInteger(immediateBacklog.pending) ||
+                  immediateBacklog.pending < 0) {
+                throw new TypeError("the immediate pre-pause backlog receipt is invalid");
+              }
+            } catch (error) {
+              die(updateBacklogUnreadableMessage(error, "pre-pause"));
+            }
+            if (updateBacklogHasQueuedWork(immediateBacklog)) {
+              die(updateBacklogQueuedMessage(immediateBacklog, "pre-pause", options.initialUpdateBacklog ?? null));
+            }
+          }
+          // No asynchronous local stage sits between the closing queue receipt
+          // and starting the pause upload. This narrows but cannot atomically
+          // eliminate a remote ingest that begins after the receipt.
+          return deploy(executionPin.target, {
+            persistDomain: false,
+            pauseVectorDrainForUpgrade: true,
+          });
+        });
         corpusPauseMayStillBeServing = true;
         await runStage("paused vector-drain health verification", () =>
           verifyHealth(executionPin.target, {
@@ -22151,6 +22186,533 @@ async function backlogCount(manifestPath) {
   return Number((await res.json())?.vector_backlog?.pending || 0);
 }
 
+// Field evidence (2026-09-25, a 1.8M-vector Brain): the documents aggregate
+// returned HTTP 500 "D1 DB exceeded its CPU time limit and was reset", and the
+// same read 30 minutes later succeeded in 36 s. One busy moment must not look
+// like an unreadable Brain, so the read is repeated with a long per-attempt
+// timeout and a real backoff before update refuses. It is a read-only GET.
+export const UPDATE_BACKLOG_READ_TIMEOUT_MS = 90_000;
+export const UPDATE_BACKLOG_RETRY_DELAYS_MS = Object.freeze([10_000, 30_000]);
+const D1_CPU_RESET_PATTERN = /CPU time limit|\bwas reset\b/iu;
+
+function updateBacklogReadFailure(attempts, detail = {}) {
+  return Object.assign(new Error("authenticated documents backlog read failed"), { attempts, ...detail });
+}
+
+const UPDATE_BACKLOG_DRAIN_MODES = new Set(["active", "paused-for-upgrade"]);
+
+function updateBacklogSemver(value) {
+  if (typeof value !== "string") return null;
+  try {
+    parseSemver(value);
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decide which Worker generation one authenticated receipt may be bound to,
+ * then classify its queue through the same shared rules as update preview.
+ *
+ * The manifest version is written last, after every remote stage has been
+ * verified. Any failure past the paused deployment therefore leaves a Worker
+ * that reports a NEWER version than the manifest (paused, or active after the
+ * resume race), and `brain deploy` from a newer CLI leaves the same state.
+ * A Worker version above the recorded one and no newer than this CLI is that
+ * earlier attempt, so its receipt is read in whichever writer mode it reports
+ * and the rerun can finish the pause it started. A Worker paused on the version
+ * the manifest records, when that version is no newer than this CLI, is also a
+ * resume (see below). A Worker older than the manifest is a stale deploy that
+ * update replaces (see below). A Worker newer than this CLI is never bound.
+ *
+ * A manifest with no brain.version predates version recording, so it is older
+ * than every release: it accepts the v0.4.6 envelope and any versioned
+ * receipt no newer than this CLI. Worker versions older than 0.4.7 return the
+ * v0.4.6 envelope with neither version nor drain mode; that shape is read only
+ * for a manifest that records a pre-0.4.7 version (or none), exactly as
+ * update preview classifies it.
+ */
+function updateBacklogReceiptQueue(body, recordedVersion, projection) {
+  const versioned = body && typeof body === "object" && !Array.isArray(body) &&
+    (Object.hasOwn(body, "version") || Object.hasOwn(body, "vector_drain_mode"));
+  if (!versioned) {
+    if (recordedVersion !== null && !projection.isLegacyPre047Version(recordedVersion)) {
+      throw new TypeError("a v0.4.7 or later manifest received a pre-0.4.7 receipt");
+    }
+    // An unrecorded manifest is bound as pre-0.4.7; the validator only uses
+    // the version to confirm the legacy contract applies. This gate asks only
+    // whether work is queued, as the versioned path below does, so it does not
+    // take preview's readiness verdict: v0.4.6 reports an empty outbox with a
+    // required bootstrap as not ready and tells the owner to run this update.
+    const aggregate = projection.validateLegacyV046ProjectionAggregateReceipt(body, {
+      expectedVersion: recordedVersion ?? "0.0.0",
+      expectedBackend: "d1",
+    });
+    return {
+      pending: aggregate.queue.pending,
+      paused: false,
+      legacy: true,
+      projectionRecovery: legacyProjectionRecovery(aggregate),
+    };
+  }
+  const workerVersion = updateBacklogSemver(body.version);
+  const workerMode = UPDATE_BACKLOG_DRAIN_MODES.has(body.vector_drain_mode) ? body.vector_drain_mode : null;
+  let expectedVersion = recordedVersion;
+  let expectedDrainMode = "active";
+  const generationRefusal = () => Object.assign(new TypeError("the receipt is not this manifest's generation"), {
+    generation: { workerVersion, workerMode, recordedVersion },
+  });
+  if (workerVersion && workerMode && workerVersion !== recordedVersion) {
+    const resumable = (recordedVersion === null || compareSemver(recordedVersion, workerVersion) < 0) &&
+      compareSemver(workerVersion, PRODUCT_VERSION) <= 0;
+    // A Worker OLDER than the release the manifest records is a stale deploy:
+    // the manifest is written only after a verified update, so an older kit's
+    // `brain deploy` or `brain rollback --yes` put that Worker back afterwards.
+    // This CLI's update replaces it as long as this CLI is not older than the
+    // recorded release (otherwise update is a downgrade and refuses anyway).
+    // Its queue is read in the mode it reports, so an active stale Worker with
+    // queued work gets "wait", a paused one gets the paused refusal, and an
+    // empty queue proceeds. A Worker newer than this CLI never matches either,
+    // and neither does a versioned receipt claiming a pre-0.4.7 release: no
+    // shipped Worker before 0.4.7 reported its version on this route.
+    const staleDeploy = recordedVersion !== null && compareSemver(workerVersion, recordedVersion) < 0 &&
+      compareSemver(recordedVersion, PRODUCT_VERSION) <= 0 && !projection.isLegacyPre047Version(workerVersion);
+    if (!resumable && !staleDeploy) throw generationRefusal();
+    expectedVersion = workerVersion;
+    expectedDrainMode = workerMode;
+  } else if (workerVersion && workerVersion === recordedVersion &&
+      compareSemver(workerVersion, PRODUCT_VERSION) <= 0 && workerMode === "paused-for-upgrade") {
+    // A Worker paused on the version the manifest already records, no newer
+    // than this CLI: `brain rollback --yes` leaves exactly this and sends the
+    // owner to `brain update`, and a same-version update that stops inside its
+    // pause window leaves it too. Installing a newer CLI afterwards must not
+    // strand it, so an OLDER recorded release paused this way is resumable as
+    // well. Its queue is still read through the paused aggregate below, so
+    // queued or unreadable work still refuses; a Worker newer than this CLI
+    // never reaches this branch.
+    expectedDrainMode = workerMode;
+  }
+  let aggregate;
+  try {
+    aggregate = projection.validateVectorProjectionAggregateReceipt(body, {
+      expectedVersion,
+      expectedBackend: "d1",
+      expectedDrainMode,
+    });
+  } catch (error) {
+    if (workerVersion && workerMode && [
+      "UPDATE_PREVIEW_DEPLOYED_GENERATION_MISMATCH",
+      "UPDATE_PREVIEW_DEPLOYED_DRAIN_PAUSED",
+    ].includes(error?.code)) {
+      throw generationRefusal();
+    }
+    throw error;
+  }
+  // The shared validator decides every shape: a pre-summary Worker's exact
+  // receipt, a bounded exact count, or a capped count that only proves
+  // "more than 10,000" and is never zero.
+  return {
+    pending: aggregate.queue.pending,
+    pendingIsCapped: aggregate.queue.pending_is_capped === true,
+    paused: aggregate.vector_drain_mode === "paused-for-upgrade",
+  };
+}
+
+/**
+ * Whether a pre-0.4.7 projection can become query-ready by draining its queue.
+ *
+ * v0.4.6's `brain rollback --yes` restores D1, marks the projection
+ * bootstrap_required and leaves the Worker paused; its own output says a
+ * clean index must be recreated under supervised recovery before active use,
+ * because D1 cannot enumerate the vectors written after the bookmark. A
+ * provider count ABOVE the D1 count is that same signature (index-only
+ * vectors a drain can never remove), and update preview's shared verdict
+ * treats every excess as projection_excess for the same reason. For either,
+ * returning the Worker to active drains the queue but never reaches
+ * query-ready, so update must not advise it. A short count the queued
+ * upserts do not cover is left to the Worker's own count-mismatch advice once
+ * active (reindex rebuilds missing vectors), so it is not flagged here.
+ * Returns null for an intact projection.
+ */
+function legacyProjectionRecovery(aggregate) {
+  const counts = { expected_vectors: aggregate.expected_vectors, actual_vectors: aggregate.actual_vectors };
+  if (aggregate.readiness_reason === "projection_bootstrap_required") {
+    return Object.freeze({ cause: "bootstrap_required", ...counts });
+  }
+  if (aggregate.actual_vectors > aggregate.expected_vectors) {
+    return Object.freeze({ cause: "provider_excess", ...counts });
+  }
+  return null;
+}
+
+/**
+ * Which writer mode a pre-0.4.7 Worker is in, from its public /health.
+ *
+ * The v0.4.6 documents envelope carries no drain mode, and a v0.4.6 Worker
+ * paused for an upgrade never drains (its scheduled handler returns early), so
+ * "wait until query-ready" would be impossible advice for queued work there.
+ * Every pre-0.4.7 release reports the pause on public /health as both
+ * `status` and `vector_drain_mode`, beside its own version. No admin key is
+ * sent. Any unreadable, oversized, non-legacy or self-contradicting answer is
+ * null: the queued work still refuses, only the advice changes.
+ */
+async function readLegacyUpdateDrainMode(documentsUrl, { request, readAggregate, projection }) {
+  let body;
+  try {
+    const response = await request(new URL("/health", documentsUrl).href, {}, {
+      timeoutMs: UPDATE_BACKLOG_READ_TIMEOUT_MS,
+      what: "the update drain-mode check",
+    });
+    if (!response || response.ok !== true || response.status !== 200) return null;
+    body = await readAggregate(response);
+  } catch {
+    return null;
+  }
+  const version = updateBacklogSemver(body?.version);
+  if (!version || !projection.isLegacyPre047Version(version)) return null;
+  if (!UPDATE_BACKLOG_DRAIN_MODES.has(body.vector_drain_mode)) return null;
+  const paused = body.vector_drain_mode === "paused-for-upgrade";
+  if (body.status !== (paused ? "paused-for-upgrade" : "ok")) return null;
+  return { version, paused };
+}
+
+/**
+ * Read update's fail-closed queue gate from the authenticated aggregate used
+ * by health and post-ingest reporting. Public /health does not carry backlog
+ * depth, and a missing or malformed private receipt must never become zero.
+ *
+ * Only a 5xx, a D1 CPU-reset body, or a transport failure is retried. 401, 403
+ * and 404 are answers, not busy moments, and every other refusal (a partial
+ * receipt, a non-200 2xx, an oversized body) stays a single-read refusal. The
+ * thrown error carries the number of reads tried and, for a well-formed receipt
+ * from a generation this manifest cannot resume, the validated version strings
+ * and writer mode. It never carries a body, URL, key, or transport detail.
+ */
+export async function readUpdateBacklog(manifestPath, options = {}) {
+  const pinManifest = options.pinManifest ?? pinUpdateManifest;
+  const revalidateManifest = options.revalidateManifest ?? revalidateUpdateManifest;
+  const resolveDocumentsUrl = options.resolveDocumentsUrl ?? updatePreviewDocumentsUrl;
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const request = options.http ?? http;
+  const readAggregate = options.readAggregateResponse ?? readUpdatePreviewAggregateResponse;
+  const sleep = options.sleep ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
+  const retryDelays = options.retryDelaysMs ?? UPDATE_BACKLOG_RETRY_DELAYS_MS;
+  const projection = options.previewLib ?? await updatePreviewLib();
+  let pin;
+  let documentsUrl;
+  let adminKey;
+  let recordedVersion;
+  try {
+    pin = pinManifest(manifestPath);
+    const rawVersion = pin.manifest?.brain?.version;
+    recordedVersion = rawVersion === undefined || rawVersion === null ? null : updateBacklogSemver(rawVersion);
+    if (rawVersion !== undefined && rawVersion !== null && !recordedVersion) {
+      throw new TypeError("the manifest product version is invalid");
+    }
+  } catch {
+    throw updateBacklogReadFailure(0);
+  }
+  const rawDomain = pin.manifest?.brain?.domain;
+  if (rawDomain === undefined || rawDomain === null || rawDomain === "") {
+    // A legacy manifest may carry no hostname; deploy persists workers.dev
+    // only outside update. Resolve it read-only when the caller already holds
+    // Cloudflare access, as health does; otherwise say no read was sent.
+    if (typeof options.resolveBrainDomain !== "function") {
+      throw updateBacklogReadFailure(0, { missingAddress: true });
+    }
+    try {
+      const resolvedDomain = await options.resolveBrainDomain(pin.manifest);
+      documentsUrl = resolveDocumentsUrl({ brain: { domain: resolvedDomain } });
+    } catch {
+      throw updateBacklogReadFailure(0);
+    }
+  }
+  try {
+    documentsUrl ??= resolveDocumentsUrl(pin.manifest);
+    adminKey = resolveKey(pin.target, {
+      ignoreEnvironment: true,
+      read(path) {
+        if (resolve(path) !== pin.target) {
+          throw new TypeError("the pinned manifest identity changed during credential lookup");
+        }
+        return pin.raw;
+      },
+    });
+  } catch {
+    throw updateBacklogReadFailure(0);
+  }
+  if (typeof adminKey !== "string" || !adminKey) {
+    throw updateBacklogReadFailure(0);
+  }
+
+  const maxAttempts = retryDelays.length + 1;
+  let attempts = 0;
+  let generation = null;
+  try {
+    while (true) {
+      attempts += 1;
+      let response;
+      let body;
+      let responseFailed = false;
+      let transient = false;
+      try {
+        // A replacement during credential lookup or a backoff must stop before
+        // the durable key can reach a destination derived from different bytes.
+        revalidateManifest(pin, "update backlog live request");
+      } catch {
+        throw updateBacklogReadFailure(attempts - 1);
+      }
+      try {
+        response = await request(documentsUrl, {
+          headers: { "X-Admin-Key": adminKey },
+        }, { timeoutMs: UPDATE_BACKLOG_READ_TIMEOUT_MS, what: "the update backlog check" });
+      } catch {
+        // No response at all: a timeout, reset, or DNS failure.
+        responseFailed = true;
+        transient = true;
+      }
+      // A body that is oversized, truncated, or not JSON is a malformed answer,
+      // not a busy database, so it refuses on this read.
+      if (!responseFailed && (!response || response.ok !== true || response.status !== 200)) {
+        responseFailed = true;
+        const status = Number(response?.status);
+        if (status >= 500) {
+          transient = true;
+        } else if (![401, 403, 404].includes(status)) {
+          // Only the D1 error text is inspected, and it never leaves here.
+          try {
+            const refused = await readAggregate(response);
+            transient = typeof refused?.error === "string" && D1_CPU_RESET_PATTERN.test(refused.error);
+          } catch { /* an unreadable refusal is not evidence of a busy database */ }
+        }
+      } else if (!responseFailed) {
+        try {
+          body = await readAggregate(response);
+        } catch {
+          responseFailed = true;
+        }
+      }
+
+      try {
+        // Close the same local identity after every completed or refused response.
+        // Raw body details and validator codes stay behind this fixed public error.
+        revalidateManifest(pin, "update backlog live receipt");
+        if (responseFailed) throw new TypeError("the update backlog response was unreadable");
+        if (typeof body?.error === "string" && D1_CPU_RESET_PATTERN.test(body.error)) {
+          transient = true;
+          throw new TypeError("the update backlog response was a database reset");
+        }
+        let queue;
+        try {
+          queue = updateBacklogReceiptQueue(body, recordedVersion, projection);
+        } catch (error) {
+          generation = error?.generation ?? null;
+          throw error;
+        }
+        if (queue.legacy && queue.pending > 0) {
+          // Queued work refuses in either mode; the mode only decides which
+          // advice is true. An empty legacy queue proceeds paused or active,
+          // so no extra read is sent for it.
+          const legacyMode = await readLegacyUpdateDrainMode(documentsUrl, { request, readAggregate, projection });
+          revalidateManifest(pin, "update backlog drain-mode receipt");
+          // A projection a rollback left unusable changes the advice only
+          // where it would otherwise be "deploy the older release": paused, or
+          // a mode that could not be read. An active Worker keeps its advice.
+          const recovery = queue.projectionRecovery && (legacyMode === null || legacyMode.paused)
+            ? { projection_recovery: queue.projectionRecovery }
+            : {};
+          return Object.freeze({
+            pending: queue.pending,
+            ...(legacyMode === null
+              ? { drain_mode_unknown: true }
+              : legacyMode.paused
+                ? { paused_for_upgrade: true, legacy_worker_version: legacyMode.version }
+                : {}),
+            ...recovery,
+          });
+        }
+        return Object.freeze({
+          pending: queue.pending,
+          ...(queue.pendingIsCapped ? { pending_is_capped: true } : {}),
+          ...(queue.paused ? { paused_for_upgrade: true } : {}),
+        });
+      } catch {
+        if (generation) throw updateBacklogReadFailure(attempts, { generation });
+        if (!transient || attempts >= maxAttempts) throw updateBacklogReadFailure(attempts);
+      }
+      await sleep(retryDelays[attempts - 1]);
+    }
+  } finally {
+    adminKey = null;
+  }
+}
+
+/** A capped receipt is a lower bound, so it is never shown as an exact count. */
+function updateBacklogPendingLabel(backlog) {
+  return backlog?.pending_is_capped === true ? "over 10,000" : String(backlog?.pending);
+}
+
+function updateBacklogHasQueuedWork(backlog) {
+  return backlog?.pending_is_capped === true || backlog?.pending > 0;
+}
+
+// What each gate can truthfully say it left untouched.
+const UPDATE_BACKLOG_GATE_CONSEQUENCE = Object.freeze({
+  initial: "Nothing was changed.",
+  "pre-pause": "The paused deployment was not started.",
+});
+
+/** One sentence of evidence that draining cannot make a legacy projection query-ready, or null. */
+function updateBacklogProjectionRecoveryEvidence(recovery) {
+  if (!recovery || typeof recovery !== "object") return null;
+  if (recovery.cause === "bootstrap_required") {
+    return "Its database marks the semantic index for a full rebuild, as a rollback does, so draining the queue " +
+      "cannot make this Brain query-ready.";
+  }
+  if (recovery.cause === "provider_excess" && Number.isSafeInteger(recovery.expected_vectors) &&
+      Number.isSafeInteger(recovery.actual_vectors)) {
+    return `Its semantic index holds ${recovery.actual_vectors} vectors but its database expects ` +
+      `${recovery.expected_vectors}; draining cannot remove vectors that exist only in the index, so it cannot ` +
+      "make this Brain query-ready.";
+  }
+  return null;
+}
+
+/**
+ * The owner-facing refusal for queued work. A Brain still paused by an earlier
+ * attempt does not drain, so "wait" would be false advice there. At the
+ * pre-pause gate, the wording follows what the first gate saw: work it did not
+ * see was gained, work it saw (and `--force` passed) is still there.
+ */
+function updateBacklogQueuedMessage(backlog, gate, initialBacklog = null) {
+  const pending = updateBacklogPendingLabel(backlog);
+  const consequence = UPDATE_BACKLOG_GATE_CONSEQUENCE[gate];
+  const recoveryEvidence = updateBacklogProjectionRecoveryEvidence(backlog?.projection_recovery);
+  if (recoveryEvidence && backlog?.paused_for_upgrade === true &&
+      typeof backlog.legacy_worker_version === "string") {
+    // The evidence says the projection cannot become query-ready by draining,
+    // which is what a rollback leaves. Deploying the older release would
+    // un-pause a rolled-back Brain, so the advice is the same support and
+    // supervised-recovery path any other paused Brain gets. The pause is
+    // named neutrally: a rollback, not an unfinished update, may have made it.
+    const release = backlog.legacy_worker_version;
+    return renderCliCommands(
+      `This Brain's Worker is version ${release}, it is paused, and it has ${pending} queued search update(s). ` +
+        `${recoveryEvidence} ${consequence} Do not run \`brain deploy\` to return it to active: the queue would ` +
+        "drain, but this Brain would still not become query-ready. Do not run `brain rollback` or `brain drain`, " +
+        "and do not clear VECTOR_DRAIN_MODE by hand. Its semantic index must be recreated under supervised " +
+        "recovery before this Brain is used again. Run `brain health` and keep its output for support."
+    );
+  }
+  if (recoveryEvidence && backlog?.drain_mode_unknown === true) {
+    return renderCliCommands(
+      `This Brain has ${pending} queued search update(s), and its public health check could not be read to tell ` +
+        `whether its Worker is paused. ${recoveryEvidence} ${consequence} Do not run \`brain deploy\`, ` +
+        "`brain rollback` or `brain drain`, and do not clear VECTOR_DRAIN_MODE by hand. Its semantic index must " +
+        "be recreated under supervised recovery before this Brain is used again. Run `brain health` and keep its " +
+        "output for support."
+    );
+  }
+  if (backlog?.paused_for_upgrade === true && typeof backlog.legacy_worker_version === "string") {
+    // A paused pre-0.4.7 Worker never drains, and this CLI's update will not
+    // continue over its queue. Only that release's own deploy returns it to
+    // active so the queue can drain. A rollback would restore D1 over the
+    // queued work instead.
+    const release = backlog.legacy_worker_version;
+    return renderCliCommands(
+      `This Brain's Worker is version ${release}, it is still paused for an update that did not finish, and it ` +
+        `has ${pending} queued search update(s). A paused ${release} Worker does not process its queue, so waiting ` +
+        `will not clear it, and this update will not continue over queued work. ${consequence} To let the queue ` +
+        `drain, install the ${release} release and run \`brain deploy\` with it; that returns the ${release} Worker ` +
+        "to active. Wait until `brain health` says query-ready, then install this release again and run " +
+        "`brain update`. Do not run `brain rollback`, and do not clear VECTOR_DRAIN_MODE by hand."
+    );
+  }
+  if (backlog?.drain_mode_unknown === true) {
+    return renderCliCommands(
+      `This Brain has ${pending} queued search update(s), and its public health check could not be read to tell ` +
+        `whether its Worker is paused for an update that did not finish. ${consequence} Run \`brain health\`. ` +
+        "If it says query-ready later, run the update again. If it reports the Worker paused for an upgrade, " +
+        "keep that output for support; do not run `brain rollback` or clear VECTOR_DRAIN_MODE by hand."
+    );
+  }
+  if (backlog?.paused_for_upgrade === true) {
+    return renderCliCommands(
+      `This Brain is still paused for an update that has not finished, and it has ${pending} queued search ` +
+        "update(s). A paused Brain does not process its queue, so waiting will not clear it, and this update will " +
+        `not continue over queued work. ${consequence} Do not run \`brain drain\` or clear VECTOR_DRAIN_MODE by hand. ` +
+        "Run `brain health` and keep its output for support."
+    );
+  }
+  if (gate === "initial") {
+    return renderCliCommands(
+      `This Brain is still processing ${pending} queued search update(s). Updating now would pause it mid-queue. ` +
+        "Nothing was changed. Wait until `brain health` says query-ready, then run the update again."
+    );
+  }
+  const change = !initialBacklog
+    ? "has"
+    : updateBacklogHasQueuedWork(initialBacklog) ? "still has" : "gained";
+  return renderCliCommands(
+    `This Brain ${change} ${pending} queued search update(s) before the paused deployment. ` +
+      "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again."
+  );
+}
+
+/**
+ * The owner-facing refusal for an unreadable backlog. It names how many reads
+ * were tried and the one safe remedy; a looping drain adds load to the same
+ * database that just refused a read. A receipt from a generation this manifest
+ * cannot resume is an answer, not a busy moment, so it gets no "wait" advice.
+ */
+function updateBacklogUnreadableMessage(error, gate = "initial") {
+  const consequence = UPDATE_BACKLOG_GATE_CONSEQUENCE[gate];
+  const generation = error?.generation;
+  if (generation) {
+    const worker = generation.workerVersion
+      ? `version ${generation.workerVersion} (${generation.workerMode})`
+      : "an unrecognized version";
+    const recorded = generation.recordedVersion ? `records ${generation.recordedVersion}` : "records no version";
+    return renderCliCommands(
+      `This Brain's Worker reports ${worker}, but this manifest ${recorded} and this CLI is ${PRODUCT_VERSION}. ` +
+        "That is not an earlier update of this CLI to resume, so its queued search updates cannot be bound to " +
+        `this manifest. ${consequence} Run \`brain health\` to see what is serving; if the Worker is newer than ` +
+        "this CLI, install that release, then run `brain update` again."
+    );
+  }
+  if (error?.attempts === 0) {
+    // The admin key or Brain address could not be loaded, so no read was sent
+    // and waiting cannot help.
+    if (gate === "initial") {
+      return renderCliCommands(
+        "The authenticated documents backlog read could not be sent: this computer's admin key or Brain address " +
+          "could not be loaded. Nothing was changed. Fix that, then run `brain update` again."
+      );
+    }
+    return renderCliCommands(
+      "The immediate pre-pause documents backlog read could not be sent: this computer's admin key or Brain " +
+        "address could not be loaded, so no read was sent. The paused deployment was not started. " +
+        "Fix that, then run `brain update` again."
+    );
+  }
+  const reads = Number.isSafeInteger(error?.attempts) && error.attempts > 0 ? error.attempts : 1;
+  if (gate === "initial") {
+    return renderCliCommands(
+      `The authenticated documents backlog read failed after ${reads} read${reads === 1 ? "" : "s"}, ` +
+        "so this Brain's queued search updates could not be read. Updating now could pause it mid-queue. " +
+        "Nothing was changed. A large Brain's database can be briefly too busy to answer: wait a few minutes, " +
+        "then run `brain update` again. Never run `brain drain` in a loop to get past this."
+    );
+  }
+  return renderCliCommands(
+    `The immediate pre-pause documents backlog read failed after ${reads} read${reads === 1 ? "" : "s"}, ` +
+      "so this Brain's queued search updates could not be read. The paused deployment was not started. " +
+      "A large Brain's database can be briefly too busy to answer: wait a few minutes, then run " +
+      "`brain update` again. Never run `brain drain` in a loop to get past this."
+  );
+}
+
 async function reportBacklog(manifestPath) {
   try {
     const { m } = loadManifest(manifestPath);
@@ -23571,6 +24133,7 @@ export function classifyCliCredentialBoundary(command, argv = []) {
     return "update-preview";
   }
   let adoptionSeen = false;
+  let forceSeen = false;
   let positionalCount = 0;
   for (const token of argv) {
     if (!token || token.length > 4_096 || /[\u0000-\u001f\u007f]/u.test(token)) {
@@ -23579,6 +24142,11 @@ export function classifyCliCredentialBoundary(command, argv = []) {
     if (token === "--adopt-cloudflare-profile") {
       if (adoptionSeen) return "update-preview";
       adoptionSeen = true;
+      continue;
+    }
+    if (token === "--force") {
+      if (forceSeen) return "update-preview";
+      forceSeen = true;
       continue;
     }
     if (token.startsWith("-")) return "update-preview";
@@ -23601,8 +24169,10 @@ export function classifyCliCredentialBoundary(command, argv = []) {
  */
 export function updateCommandTarget(positional, flags = {}) {
   if (typeof positional === "string" && positional && !positional.startsWith("--")) return positional;
-  const swallowed = flags?.["adopt-cloudflare-profile"];
-  if (typeof swallowed === "string" && swallowed && !swallowed.startsWith("--")) return swallowed;
+  for (const name of ["adopt-cloudflare-profile", "force"]) {
+    const swallowed = flags?.[name];
+    if (typeof swallowed === "string" && swallowed && !swallowed.startsWith("--")) return swallowed;
+  }
   return undefined;
 }
 
@@ -25625,9 +26195,11 @@ export function dispatchUpdateCli(argv = process.argv.slice(3), options = {}) {
   const boundary = options.boundaryCommand ?? classifyCliCredentialBoundary("update", argv);
   if (boundary !== "update") return cmdUpdatePreview(argv, options.previewOptions || {});
   const flags = parseFlags(argv);
+  assertKnownFlags(flags, ["adopt-cloudflare-profile", "force"], "brain update");
   return cmdUpdate(updateCommandTarget(argv[0], flags), {
     ...(options.updateOptions || {}),
     adoptConsent: cloudflareAdoptionConsent(flags),
+    forceQueuedUpdate: flags.force !== undefined && flags.force !== false,
   });
 }
 
@@ -26304,6 +26876,52 @@ export async function cmdUpdate(manifestPath, options = {}) {
         "future updates will work from any folder."
     );
   }
+  const forceQueuedUpdate = options.forceQueuedUpdate === true;
+  let backlog = null;
+  // Replacing adoption, verification, or upgrade is a dependency-injection
+  // seam used by their existing focused tests, not an installed CLI path. A
+  // caller that replaces one may inject this read too when exercising the
+  // queue decision. The real command always takes the production reader here.
+  const readBacklog = options.readUpdateBacklog ??
+    (options.adoptCloudflareAuthProfile || options.cmdVerify || options.cmdUpgrade
+      ? null
+      : readUpdateBacklog);
+  if (readBacklog) {
+    try {
+      backlog = await readBacklog(installed.path, options.updateBacklogOptions || {});
+      if (!backlog || typeof backlog !== "object" || Array.isArray(backlog) ||
+          !Number.isSafeInteger(backlog.pending) || backlog.pending < 0) {
+        throw new Error("authenticated documents backlog read failed");
+      }
+    } catch (error) {
+      backlog = null;
+      if (error?.missingAddress === true) {
+        // Resolving workers.dev needs Cloudflare access this step does not hold
+        // yet. The pre-pause gate makes the same read with that access, before
+        // anything on the Brain changes, and refuses there if it cannot.
+        info(renderCliCommands(
+          "This manifest records no Brain address, so no queued-update read was sent yet. The same read runs once " +
+            "Cloudflare access is confirmed, immediately before the paused deployment."
+        ));
+      } else {
+        if (!forceQueuedUpdate) die(updateBacklogUnreadableMessage(error, "initial"));
+        warn(renderCliCommands(
+          "The first queued search update check could not read an empty queue. `--force` continues past this " +
+            "first check only; the final check just before the paused deployment reads the queue again and still " +
+            "refuses unless it is readable and empty."
+        ));
+      }
+    }
+  }
+  if (updateBacklogHasQueuedWork(backlog)) {
+    if (!forceQueuedUpdate) die(updateBacklogQueuedMessage(backlog, "initial"));
+    warn(renderCliCommands(
+      `This Brain ${backlog.paused_for_upgrade === true ? "has" : "is still processing"} ` +
+        `${updateBacklogPendingLabel(backlog)} queued search update(s). ` +
+        "`--force` continues past this first check only; the final check just before the paused deployment " +
+        "reads the queue again and still refuses queued work."
+    ));
+  }
   const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const automationToken = !interactive && Boolean(process.env.CLOUDFLARE_API_TOKEN);
   // An install written before the named-profile field has no saved custody, so
@@ -26344,7 +26962,7 @@ export async function cmdUpdate(manifestPath, options = {}) {
     revalidateUpdateManifest(pin, "update verification");
     const upgradeResult = await (options.cmdUpgrade ?? cmdUpgrade)(
       pin.target,
-      options.upgradeOptions || {},
+      backlog ? { ...(options.upgradeOptions || {}), initialUpdateBacklog: backlog } : options.upgradeOptions || {},
     );
     if (installed.source !== "remembered") {
       try {
@@ -27998,6 +28616,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain update     [manifest] --adopt-cloudflare-profile  approve the one-time Cloudflare
                                            browser sign-in from a session with no terminal
                                            (an agent). Same as BRAIN_ADOPT_CLOUDFLARE_PROFILE=1
+    brain update     [manifest] --force     continue past the first queued search update check;
+                                           the final check before the pause still refuses queued or unreadable work
     brain whatsnew   [manifest]            what changed in this version, and are you on it
     brain status     <manifest>            versions, pending migrations, upgrade history
     brain sources    <manifest>            complete read-only D1 source inventory; --json for Optimize

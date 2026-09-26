@@ -181,6 +181,100 @@ asset publication.
   reindex <manifest>` is the repair; it only matters for a Brain set up
   before that filter existed.
 
+- **Update checks queued search work twice before pausing the Brain.** The first
+  check runs before verification or control-plane work. A second, non-overridable
+  check runs immediately before the paused deployment. Each check requires one
+  exact HTTP 200, a bounded response, and a complete, internally consistent D1
+  queue and readiness receipt. Missing or contradictory fields stop the update.
+  Both checks read the queue exactly as `brain health` does: an older Worker's
+  exact count is accepted, and a queue reported as over 10,000 is never read
+  as empty and always stops the update.
+  `--force` can override only the first early warning. There is still a narrow
+  remote race if an ingest starts after the second receipt but before the paused
+  Worker takes over; this release does not claim a cross-process atomic lock.
+  To check: start an update while `brain health` reports queued search work and
+  confirm the paused deployment does not start, then retry after health says
+  query-ready.
+
+- **Rerunning an update that stopped partway now resumes instead of being
+  refused.** The manifest records the new version last, so an update that
+  stopped after its paused deployment leaves a Worker newer than the manifest.
+  Both queue checks now read such a Worker, paused or active, when its version
+  is newer than the manifest and no newer than this CLI, and the rerun finishes
+  the update. A Worker newer than this CLI, or older than the manifest, is
+  refused with its version named instead of a "database busy" message. A Worker
+  from v0.4.6 or earlier, which does not report its version, is read by the
+  same exact queue rule as update preview. A manifest with no Brain address
+  is checked once Cloudflare access is confirmed, just before the paused
+  deployment. A paused Brain with queued work is refused with the truth: it
+  does not process its queue while paused, so waiting will not clear it.
+  `--force` passes only the first check; help and its warning now say so. To
+  check: after an update that stopped partway, `brain update` again reaches the
+  paused deployment when `brain health` shows an empty queue.
+
+- **A Brain left paused on this same release can be updated again.** `brain
+  rollback --yes` leaves this release's Worker paused and sends the owner to
+  `brain update`, and an update of an already-current Brain that stops inside
+  its pause leaves the same state. Both queue checks, and `brain doctor
+  --repair --yes`, now resume that Worker instead of calling it "not an
+  earlier update" and asking for a release that is already installed. Its
+  queue must still read empty: queued work is refused with its count, and a
+  paused Worker newer than this CLI is still refused. A Brain on v0.4.6 or
+  earlier whose queue is empty but whose search index is not yet verified
+  (for example, it still needs the bootstrap its own status tells the owner to
+  run `brain update` for) now passes the queue checks instead of being told
+  its database is busy. To check: after a rollback, `brain update` reaches the
+  paused deployment when `brain health` shows an empty queue. A rolled-back
+  Brain that still holds documents can then stop at the paused readiness
+  check before its index is rebuilt; keep that output for support.
+  The same holds when the paused release is OLDER than this CLI: a Brain that
+  an earlier kit's `brain rollback --yes`, or its stopped update, left paused
+  on the version the manifest records is resumed by this release's `brain
+  update`, `brain update --force` and `brain doctor --repair --yes` instead of
+  being told to install a newer release. To check: after installing this
+  release over such a Brain, `brain update` reaches the paused deployment when
+  `brain health` shows an empty queue.
+
+- **A v0.4.6 or earlier Brain left paused with queued work gets advice that
+  can clear it.** Those Workers do not report their writer mode to update's
+  queue check and never process their queue while paused, so "wait until
+  query-ready" could never come true. When the queue is not empty, update now
+  reads the Brain's public health check (no admin key is sent). If that Worker
+  is paused, the refusal says to install its own release, run `brain deploy`
+  with it to return it to active, wait for query-ready, then update again;
+  never `brain rollback`. If the health check cannot be read, the refusal says
+  so rather than guessing. A paused v0.4.6 Brain with an empty queue proceeds.
+  To check: a refused update names the Worker's release and `brain deploy`.
+  That advice is given only when the Brain's semantic index is intact. If the
+  Brain's own report shows the index marked for a full rebuild (what a v0.4.6
+  `brain rollback --yes` leaves) or holding more vectors than the database
+  expects, deploying would un-pause a rolled-back Brain that can never become
+  query-ready. The refusal then says the Worker is paused, without claiming an
+  unfinished update caused it, and gives the supervised-recovery and support
+  path instead of `brain deploy`. To check: such a refusal names supervised
+  recovery and does not mention `brain deploy` as a remedy.
+
+- **A Worker older than the release your manifest records can be replaced by
+  update again.** If an earlier kit's `brain deploy` or `brain rollback --yes`
+  put its older Worker back after an update had finished, `brain update`,
+  `brain update --force` and (for a paused Worker) `brain doctor --repair --yes`
+  refused with no working remedy. Update now treats that Worker as a stale
+  deploy it replaces: an empty queue proceeds, queued work on an active Worker
+  gets "wait until query-ready", and queued work on a paused Worker gets the
+  paused-Brain refusal. A Worker newer than this CLI is still refused. To
+  check: `brain health` reports the older Worker version, and `brain update`
+  reaches the paused deployment when the queue is empty.
+
+- **A busy database no longer makes a large Brain look unreadable to update.**
+  On a very large Brain the backlog read can briefly fail while its database
+  is busy. `brain update` now tries that read up to three times, waiting 10
+  seconds and then 30 seconds, and gives each read up to 90 seconds. A Brain
+  that refuses the admin key, or a route that does not exist, is still refused
+  on the first read. If every read fails, the message says how many were tried:
+  wait a few minutes and run `brain update` again. Never run `brain drain` in a
+  loop to get past it. Queued search work still stops the update exactly as
+  before. To check: a refusal names the number of reads it tried.
+
 - **Drive review no longer downloads every stored file label on each sweep.**
   The Brain first identifies the exact absent or already-reviewed families,
   then returns names and folders only for those IDs in requests capped at 97
