@@ -312,7 +312,12 @@ jobs:
           xcrun stapler validate dist/FinancialBrainMachinePrep.pkg
           spctl -a -vv -t install dist/FinancialBrainMachinePrep.pkg
           pkgutil --check-signature dist/FinancialBrainMachinePrep.pkg | tee "$RUNNER_TEMP/final-signature.txt"
-          grep -Eq "^[[:space:]]*1\. Developer ID Installer: .* \($APPLE_TEAM_ID\)$" "$RUNNER_TEMP/final-signature.txt"
+          # Stapling rewrites the package, so the leaf is re-read from the exact
+          # bytes that ship before any receipt vouches for them.
+          if ! grep -Eq "^[[:space:]]*1\. Developer ID Installer: .* \($APPLE_TEAM_ID\)$" "$RUNNER_TEMP/final-signature.txt"; then
+            echo "::error::the distributed package's leaf certificate is not the Developer ID Installer identity of team $APPLE_TEAM_ID. No receipt was written."
+            exit 1
+          fi
           # The uploaded artifact's root is dist/, so the receipt names the bare
           # file and `shasum -a 256 -c` works where the artifact is extracted.
           (cd dist && shasum -a 256 FinancialBrainMachinePrep.pkg | tee FinancialBrainMachinePrep.pkg.sha256)
@@ -509,11 +514,29 @@ jobs:
         env:
           UNSIGNED_SHA256: ${{ inputs.unsigned_sha256 }}
         run: |
-          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath unsigned/FinancialBrainMachinePrep-unsigned.msi).Hash.ToLowerInvariant()
-          if ($actual -ne $env:UNSIGNED_SHA256) {
-            Write-Output "::error::the downloaded MSI hashes to $actual, not the dispatched unsigned_sha256. Nothing was signed."
-            exit 1
+          # node makes the decision so the test suite runs this exact program
+          # without PowerShell. The digest must equal the one the gate proved.
+          $rehash = @'
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+
+          const expected = process.env.UNSIGNED_SHA256 || "";
+          let bytes;
+          try {
+            bytes = readFileSync("unsigned/FinancialBrainMachinePrep-unsigned.msi");
+          } catch (error) {
+            console.log(`::error::the downloaded MSI could not be read (${error?.code || "unknown error"}). Nothing was signed.`);
+            process.exit(1);
           }
+          const actual = createHash("sha256").update(bytes).digest("hex");
+          if (!/^[0-9a-f]{64}$/.test(expected) || actual !== expected) {
+            console.log(`::error::the downloaded MSI hashes to ${actual}, not the dispatched unsigned_sha256. Nothing was signed.`);
+            process.exit(1);
+          }
+          console.log(`the downloaded MSI hashes to the dispatched unsigned_sha256 ${actual}`);
+          '@
+          $rehash | node --input-type=module -
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: stage the MSI under its signed name
         shell: pwsh
         run: |
@@ -553,9 +576,38 @@ jobs:
           if ($signature.Status -ne 'Valid') { throw "the MSI signature is $($signature.Status), not Valid" }
           if (-not $signature.TimeStamperCertificate) { throw "the MSI signature carries no timestamp" }
           # A valid signature from any other publisher is still the wrong one.
-          $subject = [string]$signature.SignerCertificate.Subject
-          $organization = '(^|,\s*)O="?' + [regex]::Escape($env:EXPECTED_PUBLISHER) + '"?(,|$)'
-          if ($subject -notmatch $organization) { throw "the MSI signer is $subject, not O=$($env:EXPECTED_PUBLISHER)" }
+          # node parses the distinguished name so the test suite runs this exact
+          # decision without PowerShell: exactly one O= attribute, equal to the
+          # planned publisher, with quoted values and OU= kept apart.
+          $env:SIGNER_SUBJECT = [string]$signature.SignerCertificate.Subject
+          $publisherCheck = @'
+          const subject = process.env.SIGNER_SUBJECT || "";
+          const expected = process.env.EXPECTED_PUBLISHER || "";
+          const stop = (message) => { console.log(`::error::${message}. Nothing was published.`); process.exit(1); };
+          if (!expected) stop("EXPECTED_PUBLISHER is empty");
+          // Split into attribute=value pairs at commas and plus signs outside quotes.
+          const pairs = [];
+          let current = "";
+          let quoted = false;
+          for (let index = 0; index < subject.length; index++) {
+            const char = subject[index];
+            if (char === "\\" && index + 1 < subject.length) { current += char + subject[++index]; continue; }
+            if (char === '"') quoted = !quoted;
+            if (!quoted && (char === "," || char === "+")) { pairs.push(current); current = ""; continue; }
+            current += char;
+          }
+          if (quoted) stop(`the MSI signer subject could not be parsed: ${subject}`);
+          pairs.push(current);
+          const organizations = pairs.map((pair) => pair.trim()).filter((pair) => /^O=/i.test(pair)).map((pair) => {
+            let value = pair.slice(2).trim();
+            if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1).replaceAll('""', '"');
+            return value.replace(/\\(.)/g, "$1");
+          });
+          if (organizations.length !== 1 || organizations[0] !== expected) stop(`the MSI signer is ${subject}, not O=${expected}`);
+          console.log(`the MSI signer's organization is ${expected}`);
+          '@
+          $publisherCheck | node --input-type=module -
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
             Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName | Select-Object -Last 1
           if (-not $signtool) { throw "signtool.exe was not found in the Windows SDK" }

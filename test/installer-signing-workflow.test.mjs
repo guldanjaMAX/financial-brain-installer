@@ -825,3 +825,134 @@ test("S7 the macOS SHA-256 receipt verifies from the downloaded artifact root", 
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// S9: every refusal after the provenance gate is exercised, not only matched.
+
+function withScratch(prefix, body) {
+  const cwd = mkdtempSync(join(tmpdir(), prefix));
+  try {
+    mkdirSync(join(cwd, ".runner"));
+    return body(cwd);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
+const sha256Of = (text) => createHash("sha256").update(text).digest("hex");
+
+test("S9 the macOS re-hash refuses bytes that differ from the dispatched SHA-256", { skip: !bashAvailable && "needs bash" }, () => {
+  const rehash = (declared) => withScratch("signing-rehash-", (cwd) => {
+    mkdirSync(join(cwd, "unsigned"));
+    writeFileSync(join(cwd, "unsigned", "FinancialBrainMachinePrep-unsigned.pkg"), "fixture package");
+    // The real shasum hashes the bytes; only the Apple tools are stubbed.
+    return runStep("verify the downloaded bytes against the dispatched SHA-256", { cwd, tools: {}, env: { UNSIGNED_SHA256: declared } });
+  });
+  const good = rehash(sha256Of("fixture package"));
+  assert.equal(good.status, 0, `${good.stdout}${good.stderr}`);
+  const bad = rehash(sha256Of("other bytes"));
+  assert.equal(bad.status, 1);
+  assert.match(`${bad.stdout}${bad.stderr}`,
+    new RegExp(`::error::the downloaded package hashes to ${sha256Of("fixture package")}, not the dispatched unsigned_sha256\\. Nothing was signed\\.`));
+});
+
+test("S9 the macOS final check refuses a distributed package whose leaf is another team", { skip: !bashAvailable && "needs bash" }, () => {
+  const finalCheck = (signatureLines) => withScratch("signing-final-", (cwd) => {
+    mkdirSync(join(cwd, "dist"));
+    writeFileSync(join(cwd, "dist", "FinancialBrainMachinePrep.pkg"), "signed fixture package");
+    const result = runStep("verify the exact distributed bytes", {
+      cwd,
+      tools: { xcrun: "exit 0", spctl: "exit 0", pkgutil: `cat <<'EOF'\n${signatureLines.join("\n")}\nEOF` },
+      env: { APPLE_TEAM_ID: "TEAMID1234" },
+    });
+    return { result, receipt: existsSync(join(cwd, "dist", "FinancialBrainMachinePrep.pkg.sha256")) };
+  });
+  for (const lines of [
+    [`    1. Developer ID Installer: ${PLANNED_PUBLISHER} (OTHERTEAM9)`],
+    [`    1. Developer ID Installer: ${PLANNED_PUBLISHER} (OTHERTEAM9)`, `    2. Developer ID Installer: ${PLANNED_PUBLISHER} (TEAMID1234)`],
+    [`    1. Developer ID Application: ${PLANNED_PUBLISHER} (TEAMID1234)`],
+  ]) {
+    const { result, receipt } = finalCheck(lines);
+    assert.equal(result.status, 1, lines.join("\n"));
+    assert.match(`${result.stdout}${result.stderr}`,
+      /::error::the distributed package's leaf certificate is not the Developer ID Installer identity of team TEAMID1234\. No receipt was written\./);
+    assert.equal(receipt, false, "no SHA-256 receipt vouches for a package signed by another identity");
+  }
+});
+
+/** A node program a Windows pwsh step feeds to node, extracted exactly as the step runs it. */
+function windowsProgram(stepName, variable) {
+  const script = runScript(stepNamed(workflowJobs(read(SIGNING_PATH)).get("windows-sign"), stepName));
+  const program = new RegExp(`^\\$${variable} = @'\\n([\\s\\S]*?)\\n'@$`, "m").exec(script)?.[1];
+  assert.ok(program, `"${stepName}" feeds a $${variable} program to node`);
+  assert.match(script, new RegExp(`^\\$${variable} \\| node --input-type=module -\\nif \\(\\$LASTEXITCODE -ne 0\\) \\{ exit 1 \\}$`, "m"),
+    `"${stepName}" stops when the program refuses`);
+  return { script, program };
+}
+
+function runWindowsProgram(program, { cwd, env }) {
+  return spawnSync(process.execPath, ["--input-type=module", "-"], {
+    input: program, cwd, encoding: "utf8", env: { PATH: process.env.PATH, ...env },
+  });
+}
+
+test("S9 the Windows re-hash refuses bytes that differ from the dispatched SHA-256", () => {
+  const { script, program } = windowsProgram("verify the downloaded bytes against the dispatched SHA-256", "rehash");
+  assert.match(program, /unsigned\/FinancialBrainMachinePrep-unsigned\.msi/);
+  assert.doesNotMatch(script, /Get-FileHash/, "the decision is the program the suite runs, not an untested pwsh copy");
+  const rehash = (declared, { write = true } = {}) => withScratch("signing-win-rehash-", (cwd) => {
+    if (write) {
+      mkdirSync(join(cwd, "unsigned"));
+      writeFileSync(join(cwd, "unsigned", "FinancialBrainMachinePrep-unsigned.msi"), "fixture msi");
+    }
+    return runWindowsProgram(program, { cwd, env: { UNSIGNED_SHA256: declared } });
+  });
+  const good = rehash(sha256Of("fixture msi"));
+  assert.equal(good.status, 0, `${good.stdout}${good.stderr}`);
+  const bad = rehash(sha256Of("other bytes"));
+  assert.equal(bad.status, 1);
+  assert.match(bad.stdout, new RegExp(`::error::the downloaded MSI hashes to ${sha256Of("fixture msi")}, not the dispatched unsigned_sha256\\. Nothing was signed\\.`));
+  const uppercase = rehash(sha256Of("fixture msi").toUpperCase());
+  assert.equal(uppercase.status, 1, "only the exact lowercase digest the gate proved is accepted");
+  const missing = rehash(sha256Of("fixture msi"), { write: false });
+  assert.equal(missing.status, 1);
+  assert.match(missing.stdout, /::error::the downloaded MSI could not be read \(ENOENT\)\. Nothing was signed\./);
+});
+
+const SUBJECT_TAIL = "L=Fixture City, S=Fixture State, C=US";
+test("S9 the Windows publisher check accepts only a signer whose organization is the planned publisher", () => {
+  const { script, program } = windowsProgram("verify the Authenticode signature", "publisherCheck");
+  assert.match(script, /^\$env:SIGNER_SUBJECT = \[string\]\$signature\.SignerCertificate\.Subject$/m);
+  assert.ok(script.indexOf("$publisherCheck | node") < script.indexOf("signtool"), "the publisher is decided before signtool and the receipt");
+  const check = (subject, expected = PLANNED_PUBLISHER) =>
+    runWindowsProgram(program, { cwd: ROOT, env: { SIGNER_SUBJECT: subject, EXPECTED_PUBLISHER: expected } });
+  for (const subject of [
+    `CN=${PLANNED_PUBLISHER}, O=${PLANNED_PUBLISHER}, ${SUBJECT_TAIL}`,
+    `CN=${PLANNED_PUBLISHER}, O="${PLANNED_PUBLISHER}", ${SUBJECT_TAIL}`,
+    `O=${PLANNED_PUBLISHER}`,
+  ]) {
+    const accepted = check(subject);
+    assert.equal(accepted.status, 0, `${subject}: ${accepted.stdout}${accepted.stderr}`);
+  }
+  for (const subject of [
+    `CN=${PLANNED_PUBLISHER}, O=Other Publisher LLC, ${SUBJECT_TAIL}`,
+    `CN=${PLANNED_PUBLISHER}, O=${PLANNED_PUBLISHER} Holdings, ${SUBJECT_TAIL}`,
+    `CN=${PLANNED_PUBLISHER}, O=Not ${PLANNED_PUBLISHER}, ${SUBJECT_TAIL}`,
+    `CN=${PLANNED_PUBLISHER}, OU=${PLANNED_PUBLISHER}, O=Other Publisher LLC, ${SUBJECT_TAIL}`,
+    `CN=${PLANNED_PUBLISHER}, ${SUBJECT_TAIL}`,
+    `CN=${PLANNED_PUBLISHER}, O=${PLANNED_PUBLISHER}, O=Other Publisher LLC, ${SUBJECT_TAIL}`,
+    `CN=${PLANNED_PUBLISHER}, O="${PLANNED_PUBLISHER}, Inc", ${SUBJECT_TAIL}`,
+    `CN=Other, O=Other Publisher LLC, OU="${PLANNED_PUBLISHER}, O=${PLANNED_PUBLISHER}"`,
+    "",
+  ]) {
+    const refused = check(subject);
+    assert.equal(refused.status, 1, subject);
+    assert.match(refused.stdout, /^::error::the MSI signer is .*, not O=Financial Brain LLC\. Nothing was published\.$/m, subject);
+  }
+  const unbalanced = check(`CN=${PLANNED_PUBLISHER}, O="${PLANNED_PUBLISHER}`);
+  assert.equal(unbalanced.status, 1);
+  assert.match(unbalanced.stdout, /::error::the MSI signer subject could not be parsed/);
+  const unconfigured = check(`O=${PLANNED_PUBLISHER}`, "");
+  assert.equal(unconfigured.status, 1);
+  assert.match(unconfigured.stdout, /::error::EXPECTED_PUBLISHER is empty/);
+});
