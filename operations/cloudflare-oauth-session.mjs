@@ -74,6 +74,8 @@ const PREFLIGHT_PATHS = Object.freeze([
   Object.freeze({ name: "workers_ai", suffix: "/ai/models/search?per_page=1" }),
 ]);
 
+const WORKERS_SUBDOMAIN_UNREGISTERED_API_CODE = 10007;
+
 export class CloudflareOAuthSessionError extends Error {
   constructor(code, phase, message) {
     super(message);
@@ -537,11 +539,17 @@ async function readBoundedResponse(response) {
     if (response.status < 200 || response.status >= 300 ||
         body?.success !== true || !Array.isArray(body.errors) || body.errors.length !== 0 ||
         !Object.hasOwn(body, "result")) {
-      throw oauthError(
+      const refused = oauthError(
         "CLOUDFLARE_OAUTH_REQUEST_FAILED",
         "request",
         "Cloudflare refused the read-only OAuth preflight request",
       );
+      // Only Cloudflare's numeric error codes are kept, never its message
+      // text, so a caller can recognise one exact documented refusal.
+      refused.cloudflareErrorCodes = Object.freeze(Array.isArray(body?.errors)
+        ? body.errors.map((entry) => entry?.code).filter(Number.isInteger)
+        : []);
+      throw refused;
     }
     return body;
   } finally {
@@ -798,7 +806,25 @@ export async function preflightCloudflareOAuthAccount(token, account, options = 
   const checks = ["account"];
   let workersSubdomain = null;
   for (const check of PREFLIGHT_PATHS) {
-    const body = await cloudflareGet(`/accounts/${selected.id}${check.suffix}`, token, options);
+    let body;
+    try {
+      body = await cloudflareGet(`/accounts/${selected.id}${check.suffix}`, token, options);
+    } catch (error) {
+      // Cloudflare error 10007 on exactly this read means the account never
+      // registered a workers.dev subdomain (the pinned Wrangler special-cases
+      // the same code). That is an account setting the owner can fix, not a
+      // network failure, and no other credential would read it differently.
+      if (check.name === "workers_subdomain" &&
+          error?.code === "CLOUDFLARE_OAUTH_REQUEST_FAILED" &&
+          error.cloudflareErrorCodes?.includes(WORKERS_SUBDOMAIN_UNREGISTERED_API_CODE)) {
+        throw oauthError(
+          "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED",
+          "preflight",
+          "the selected Cloudflare account has no registered workers.dev subdomain",
+        );
+      }
+      throw error;
+    }
     if (check.name === "workers_subdomain" && typeof body?.result?.subdomain === "string") {
       // Preserve the authenticated response exactly. The deploy path validates
       // the label before deriving a hostname and never substitutes account.name.

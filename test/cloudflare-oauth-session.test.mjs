@@ -10,6 +10,8 @@ import {
   cmdConnect,
   cmdDoctor,
   cmdDisconnect,
+  commandPath,
+  renderCliCommands,
   withCloudflareControlCredential,
 } from "../brain.mjs";
 
@@ -529,6 +531,121 @@ test("named-profile setup stops at a denied workers subdomain preflight before i
   assert.ok(!paths.some((path) => path.includes("/d1/database")),
     "preflight must fail closed at the missing subdomain read");
   assert.ok(runner.calls.some((call) => call.args.includes(profile)));
+});
+
+// Cloudflare answers an account that never registered a workers.dev subdomain
+// with API error 10007 on exactly this read; the pinned Wrangler special-cases
+// the same code to register one. It is an account setting the owner can fix,
+// not a network failure and not a reason to reach for a token.
+function unregisteredSubdomainFetch(paths) {
+  return async (url) => {
+    const parsed = new URL(url);
+    paths.push(parsed.pathname + parsed.search);
+    if (parsed.pathname.endsWith("/accounts")) {
+      return jsonResponse(envelope([
+        { id: ACCOUNT_A, name: "Selected" },
+      ], { result_info: { page: 1, count: 1, total_count: 1, total_pages: 1 } }));
+    }
+    if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
+      return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected" }));
+    }
+    if (parsed.pathname.endsWith("/workers/subdomain")) {
+      return jsonResponse(envelope(null, {
+        success: false,
+        errors: [{ code: 10007, message: "This account does not have a workers.dev subdomain" }],
+      }), { status: 404 });
+    }
+    return jsonResponse(envelope([]));
+  };
+}
+
+test("preflight names an account with no registered workers.dev subdomain instead of a failed request", async () => {
+  const token = Buffer.from(TOKEN);
+  const paths = [];
+  await assert.rejects(
+    preflightCloudflareOAuthAccount(token, { id: ACCOUNT_A, name: "Selected" }, {
+      fetchImpl: unregisteredSubdomainFetch(paths),
+    }),
+    errorCode("CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED"),
+  );
+  assert.equal(paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
+    "the decision must be reached on the exact subdomain read");
+  assert.ok(!paths.some((path) => path.includes("/d1/database")), "preflight still stops at that read");
+  token.fill(0);
+});
+
+test("error 10007 on any other preflight read stays an ordinary refused request", async () => {
+  const token = Buffer.from(TOKEN);
+  await assert.rejects(
+    preflightCloudflareOAuthAccount(token, { id: ACCOUNT_A, name: "Selected" }, {
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
+          return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected" }));
+        }
+        return jsonResponse(envelope(null, {
+          success: false,
+          errors: [{ code: 10007, message: "fixture not found" }],
+        }), { status: 404 });
+      },
+    }),
+    errorCode("CLOUDFLARE_OAUTH_REQUEST_FAILED"),
+  );
+  token.fill(0);
+});
+
+test("setup with no registered workers.dev subdomain says how to register one and never offers the token path", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "brain-unregistered-subdomain-"));
+  try {
+    const manifestPath = resolve(root, "brain.manifest.json");
+    const resumeCommand = `brain setup ${commandPath(manifestPath)}`;
+    const runner = processRecorder(({ args }) => args.includes("token")
+      ? okProcessResult({ stdout: tokenOutput() })
+      : okProcessResult());
+    const paths = [];
+    const prompts = [];
+    let tokenCalls = 0;
+    let actionCalls = 0;
+    await assert.rejects(
+      withCloudflareControlCredential(() => { actionCalls += 1; }, {
+        manifestPath,
+        installIdentity: INSTALL_ID,
+        accountId: ACCOUNT_A,
+        freshOAuth: true,
+        reauthorizeOAuth: true,
+        interactive: true,
+        allowBrowserReauth: true,
+        allowTokenRecovery: true,
+        resumeCommand,
+        askFn: async (question) => { prompts.push(question); return "y"; },
+        withToken: async () => { tokenCalls += 1; throw new Error("token lane must not run"); },
+        oauthOptions: {
+          processRunner: runner,
+          platformName: "darwin",
+          environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+          fetchImpl: unregisteredSubdomainFetch(paths),
+        },
+      }),
+      (error) => {
+        const shown = renderCliCommands(error.message);
+        assert.equal(error.code, "REMOTE_NOT_FOUND");
+        assert.match(error.message, /CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED/);
+        assert.match(error.message, /workers\.dev subdomain/);
+        assert.match(error.message, /Workers & Pages/);
+        assert.ok(shown.includes(renderCliCommands(resumeCommand)),
+          `the owner must be told to resume with ${renderCliCommands(resumeCommand)}`);
+        assert.doesNotMatch(error.message, /check the network|hidden token/i);
+        return true;
+      },
+    );
+    assert.equal(paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
+      "the refusal must follow the exact subdomain read");
+    assert.equal(actionCalls, 0, "nothing may be created on an account with no workers.dev subdomain");
+    assert.equal(tokenCalls, 0);
+    assert.deepEqual(prompts, [], "neither a browser refresh nor the token path may be offered");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("preflight rejects wrong-account readback and missing OAuth scope without response disclosure", async () => {

@@ -986,10 +986,19 @@ export async function promptForCloudflareOAuthAccount(request, options = {}) {
 }
 
 /** Human recovery copy for a bounded Wrangler OAuth failure. */
-export function cloudflareOAuthFailureMessage(error) {
+export function cloudflareOAuthFailureMessage(error, { resumeCommand = null } = {}) {
   const code = error instanceof CloudflareOAuthSessionError
     ? error.code
     : "CLOUDFLARE_OAUTH_UNAVAILABLE";
+  if (code === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED") {
+    // Sign-in worked. Neither the network nor a different credential would
+    // change this answer, so neither is suggested.
+    return "Cloudflare sign-in worked, but this Cloudflare account has no workers.dev subdomain registered yet, " +
+      "and the Brain's address lives on it. Nothing was created. In the Cloudflare dashboard, open Workers & Pages " +
+      "and register a workers.dev subdomain, then " +
+      (resumeCommand ? `resume with: ${resumeCommand}` : "rerun the same command.") +
+      ` Issue: ${code}.`;
+  }
   const recovery = {
     CLOUDFLARE_KEYRING_UNAVAILABLE:
       "Cloudflare sign-in could not use this computer's protected credential store. Close other setup windows, confirm macOS Keychain or Windows Credential Manager is available, and rerun the same command.",
@@ -1012,18 +1021,20 @@ export function cloudflareOAuthFailureMessage(error) {
   return `${recovery} Issue: ${code}. If browser sign-in remains unavailable, the installer can offer a recovery-only hidden token prompt.`;
 }
 
-function throwCloudflareOAuthFailure(error) {
+function throwCloudflareOAuthFailure(error, messageOptions = {}) {
   const oauthCode = String(error?.code || "");
   const supportCode = oauthCode === "CLOUDFLARE_OAUTH_REAUTH_REQUIRED"
     ? "AUTH_EXPIRED"
     : oauthCode === "CLOUDFLARE_OAUTH_SCOPE_MISSING"
       ? "REMOTE_PERMISSION_DENIED"
+      : oauthCode === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED"
+        ? "REMOTE_NOT_FOUND"
       : /TIMEOUT|REQUEST_FAILED|FETCH_UNAVAILABLE/.test(oauthCode)
         ? "NETWORK_UNREACHABLE"
         : /PROFILE|ACCOUNT_(?:BINDING|SELECTION|ID)/.test(oauthCode)
           ? "CONFIG_INVALID"
           : "AUTH_REQUIRED";
-  const failure = new Fatal(cloudflareOAuthFailureMessage(error));
+  const failure = new Fatal(cloudflareOAuthFailureMessage(error, messageOptions));
   failure.code = supportCode;
   throw failure;
 }
@@ -1188,6 +1199,12 @@ export async function withCloudflareControlCredential(action, options = {}) {
     return await runOAuth(initiallyReauthorize);
   } catch (error) {
     throwOriginalCloudflareControlActionError(error);
+    if (error instanceof CloudflareOAuthSessionError && error.code === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED") {
+      // An account setting, answered by a working sign-in: no browser refresh
+      // or recovery token can change it, so neither is offered.
+      closePrompts();
+      throwCloudflareOAuthFailure(error, { resumeCommand: options.resumeCommand || null });
+    }
     const mayRefresh = error instanceof CloudflareOAuthSessionError &&
       ["CLOUDFLARE_OAUTH_REAUTH_REQUIRED", "CLOUDFLARE_OAUTH_SCOPE_MISSING"].includes(error.code) &&
       !initiallyReauthorize && options.allowBrowserReauth === true && options.interactive !== false;
@@ -24171,6 +24188,7 @@ async function cmdSetupInteractive(manifestPath) {
     },
     {
       manifestPath: target,
+      resumeCommand: `brain setup ${commandPath(displayPath(target))}`,
       accountId,
       authProfile,
       freshOAuth: !resumed && !tokenPath,
