@@ -92,6 +92,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/healthy-v020-install-guards.test.mjs",
   "node --no-warnings test/paused-strand-upgrade-rehearsal.test.mjs",
   "node --no-warnings test/client-upgrade-rehearsal.test.mjs",
+  "node --no-warnings --test test/stale-base-count-update.test.mjs",
+  "node --no-warnings --test test/paused-projection-rebase.test.mjs",
   // Field run A: the cutover printed its success line after a probe error and
   // told the migration the drain was quiesced anyway.
   "node --no-warnings test/vector-drain-cutover-unverified.test.mjs",
@@ -242,6 +244,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/healthy-v020-install-guards.test.mjs",
   "node --no-warnings test/paused-strand-upgrade-rehearsal.test.mjs",
   "node --no-warnings test/client-upgrade-rehearsal.test.mjs",
+  "node --no-warnings --test test/stale-base-count-update.test.mjs",
+  "node --no-warnings --test test/paused-projection-rebase.test.mjs",
   "node --no-warnings test/setup-paused-brain-guard.test.mjs",
   "node test/supabase-import.test.mjs",
   "node test/message-session.test.mjs",

@@ -3104,6 +3104,7 @@ export async function cmdHealth(manifestPath, {
   durableAdminKeyOnly = false,
   reachOnly = false,
   requireProjectionReady = false,
+  prepareProjectionReadiness = null,
   request = http,
   wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   resolveKey = resolveAdminKey,
@@ -3228,6 +3229,7 @@ export async function cmdHealth(manifestPath, {
   const attempts = 15;
   const documentsUrl = `${base}/api/admin/brain/documents`;
   let documentsTransportRetryAvailable = true;
+  let projectionReadinessPrepared = false;
   const requestDocuments = async () => {
     try {
       return await request(documentsUrl, {
@@ -3339,6 +3341,22 @@ export async function cmdHealth(manifestPath, {
           "the authenticated documents endpoint is serving a different storage backend than this manifest." + "\n" +
           "      Health cannot pass because this URL may point at an old or misbound brain."
         );
+      }
+      if (requireProjectionReady && typeof prepareProjectionReadiness === "function" &&
+          !projectionReadinessPrepared) {
+        // Version, mode, authentication, and backend are now bound to one
+        // paused Worker generation. Perform the update's one exact D1 rebase
+        // only at this point, then refresh the authenticated receipt before
+        // accepting or refusing projection readiness.
+        await prepareProjectionReadiness();
+        projectionReadinessPrepared = true;
+        if (i >= receiptAttempts) {
+          die(
+            "the paused projection base was reconciled, but no authenticated readiness refresh remained." + "\n" +
+              "      Keep the update pause in place and retry this verification."
+          );
+        }
+        continue;
       }
       const expectedPausedReachability = reachOnly && expectDrainMode === "paused-for-upgrade";
       if (healthPaused && !expectedPausedReachability) {
@@ -5489,6 +5507,69 @@ export async function cmdAcceleratedBootstrap(manifestPath, options = {}) {
   });
 }
 
+/**
+ * Rebase the verified projection cut exactly once while an update is paused.
+ *
+ * Releases before C1 could finish a drain without refreshing this count. The
+ * ordinary readiness path must remain bounded for large brains, so the update
+ * control plane performs the one permitted corpus count after the paused
+ * Worker is serving and before its readiness gate. A queued projection or any
+ * non-verified state retains the existing refusal path without a corpus scan.
+ */
+export async function rebasePausedVerifiedProjection({
+  accountId,
+  databaseId,
+  queryDatabase,
+}) {
+  if (typeof queryDatabase !== "function") throw new TypeError("queryDatabase is required");
+  const candidate = await queryDatabase(
+    accountId,
+    databaseId,
+    `SELECT vector_projection_status AS status,
+            EXISTS(SELECT 1 FROM vector_outbox LIMIT 1) AS has_outbox
+       FROM install_state WHERE id = 1`,
+  );
+  if (!candidate || !Array.isArray(candidate.results) || candidate.results.length !== 1) {
+    throw new Error("the paused projection state was unreadable or ambiguous");
+  }
+  const row = candidate.results[0];
+  const hasOutbox = Number(row?.has_outbox);
+  if (!Number.isSafeInteger(hasOutbox) || (hasOutbox !== 0 && hasOutbox !== 1)) {
+    throw new Error("the paused projection queue state is invalid");
+  }
+  if (String(row?.status || "") !== "verified" || hasOutbox !== 0) {
+    return Object.freeze({ rebased: false, reason: hasOutbox ? "vector_work_queued" : "projection_not_verified" });
+  }
+
+  const counted = await queryDatabase(
+    accountId,
+    databaseId,
+    "SELECT COUNT(*) AS expected_vectors FROM chunks",
+  );
+  const expectedVectors = Number(counted?.results?.[0]?.expected_vectors);
+  if (!counted || !Array.isArray(counted.results) || counted.results.length !== 1 ||
+      !Number.isSafeInteger(expectedVectors) || expectedVectors < 0) {
+    throw new Error("the paused projection corpus count is invalid");
+  }
+
+  const persisted = await queryDatabase(
+    accountId,
+    databaseId,
+    `UPDATE install_state
+        SET vector_projection_bootstrap_base_count = ?
+      WHERE id = 1
+        AND vector_projection_status = 'verified'
+        AND NOT EXISTS (SELECT 1 FROM vector_outbox)
+      RETURNING vector_projection_bootstrap_base_count AS expected_vectors`,
+    [expectedVectors],
+  );
+  if (!persisted || !Array.isArray(persisted.results) || persisted.results.length !== 1 ||
+      Number(persisted.results[0]?.expected_vectors) !== expectedVectors) {
+    throw new Error("the paused projection changed before its exact count could be recorded");
+  }
+  return Object.freeze({ rebased: true, expectedVectors });
+}
+
 export async function cmdUpgrade(manifestPath, options = {}) {
   const resolveUpgradeAccount = options.resolveAccount ?? resolveAccount;
   const queryDatabase = options.d1Query ?? d1Query;
@@ -5685,6 +5766,13 @@ export async function cmdUpgrade(manifestPath, options = {}) {
             expectDrainMode: "paused-for-upgrade",
             reachOnly: true,
             requireProjectionReady: true,
+            prepareProjectionReadiness: Number(before?.schema_version || 0) >= 13
+              ? () => rebasePausedVerifiedProjection({
+                  accountId,
+                  databaseId: dbId,
+                  queryDatabase,
+                })
+              : null,
           }));
         // A brain on the lease schema can be asked whether its writers are
         // done instead of being made to wait the full grace. Older brains
