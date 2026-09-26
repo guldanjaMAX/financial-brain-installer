@@ -18,6 +18,7 @@ schtasks.exe /Query /TN $Task /XML > $TaskXml
 $StoredTask.Task.Principals.Principal | Format-List UserId,LogonType,RunLevel
 $StoredTask.Task.Triggers | Format-List
 $StoredTask.Task.Actions.Exec | Format-List Command,Arguments
+$StoredTask.Task.Settings | Format-List MultipleInstancesPolicy,DisallowStartIfOnBatteries,StopIfGoingOnBatteries,StartWhenAvailable
 schtasks.exe /Run /TN $Task
 do {
   Start-Sleep -Seconds 2
@@ -33,7 +34,8 @@ Remove-Item -LiteralPath $TaskXml
 Required evidence:
 
 1. Install prints the effective five-field cron and the stable task name.
-2. The XML readback shows the exact absolute `brain.cmd`, manifest, and watched-folder paths in the stored action; the expected trigger; the current-user principal; and `LeastPrivilege` run level. Backslash-quote text such as `\"` is a failure.
+2. The XML readback shows `Command` as `%SystemRoot%\System32\conhost.exe` and `Arguments` starting with `--headless`, then the absolute `node.exe`, installed `brain.mjs`, manifest, and watched-folder paths and a `--config-hash`; the expected trigger; the current-user principal with `InteractiveToken` logon and `LeastPrivilege` run level; and `IgnoreNew`, `false`, `false`, `true` for the four settings. No console window opens during the run, and the lane log under `%LOCALAPPDATA%\FinancialBrain\logs` gains the run's output. Repeat once with the watched folder set to a drive root such as `D:\` and confirm the run succeeds.
+   Repeat the install on battery power with the lid closed across a trigger time, and confirm the missed run starts after wake.
 3. The run request succeeds. The polling query shows that the task stopped and its last-run result is `0`.
 4. `brain sources` returns `contract_version: 3`; the watched-folder source's `receipt.last_successful_run_at` is later than the pre-run value recorded by the technician.
 5. Remove prints that the refresh was removed. The final direct query reports that the task does not exist.

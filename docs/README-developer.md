@@ -1017,8 +1017,12 @@ does not inherit `BRAIN_GOOGLE_TOKEN_STORE=file` from the Terminal that ran
 OAuth. Use `auto` for the normal macOS Keychain default, or `file` only when that
 fallback was chosen deliberately. Status compares the installed plist with the
 current manifest and code paths, reports definition drift, and surfaces
-launchd's run count and last exit code. Windows `--status` reads the verbose
-Task Scheduler definition, and `--remove` deletes the same stable task name.
+launchd's run count and last exit code. Windows `--status` proves presence
+from the exact task name in `schtasks /Query /FO CSV /NH`, then compares the
+stored `/Query /XML` definition's config hash, action host and power settings
+with what install would write now; `--remove` deletes the same stable task
+name and treats a failed delete as success only when the listing no longer
+shows it. None of these decisions read localized `schtasks` text.
 Windows accepts an exact one-entry translation for hourly schedules at minute
 M, every N hours when N divides 24, daily schedules, and weekly schedules on
 one or more numeric weekdays. Any other valid five-field cron is refused before

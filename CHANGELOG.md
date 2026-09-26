@@ -166,19 +166,28 @@ asset publication.
 
 - **Windows can now keep Drive, watched folders, and supported providers up to
   date without an open terminal.** `brain schedule` creates one stable
-  current-user Task Scheduler entry per Brain and source lane, using the
-  absolute installed `brain.cmd` and manifest paths with limited privileges.
+  current-user Task Scheduler entry per Brain and source lane from a reviewed
+  task definition saved under `%LOCALAPPDATA%\FinancialBrain\schedules`. The
+  task runs with limited privileges only while you are signed in, starts a
+  missed run as soon as the PC wakes, runs and keeps running on battery, never
+  starts a second copy over a running one, and opens no window; each run's
+  output goes to a private log under `%LOCALAPPDATA%\FinancialBrain\logs`.
+  Install needs `brain.domain`, as on a Mac. A drive root such as `D:\` or a
+  folder path ending in a backslash now reaches the refresh intact.
   Install is safe to repeat, while status and remove use the same task name
-  and the same lane wording. Status says plainly when no task exists, and
-  reports a stored task whose action no longer matches the manifest.
+  and the same lane wording. Status says plainly when no task exists, in any
+  Windows display language, and reports drift when the schedule, domain, admin
+  key name, token store, source settings, folder, or interpreter changed since
+  install or when a power setting was weakened. A run refuses to start in that
+  state until you reinstall.
   The task follows the manifest's effective five-field cron when one Windows
   entry can express it exactly: hourly at a chosen minute, every N hours when N
   divides 24, daily, or weekly on chosen days. Other valid cron shapes stop
   before creating anything and print the filled one-time `brain.cmd` invocation
   plus a note that this cadence needs a separate manual trigger setup. To check:
-  read the printed task's XML back with `schtasks /Query /XML`, verify the exact
-  action and trigger, run it once, confirm the source receipt advanced, then
-  remove it with `brain schedule`.
+  read the task's XML back with `schtasks /Query /XML`, verify the exact
+  action, trigger and settings, run it once, confirm the source receipt
+  advanced, then remove it with `brain schedule`.
 
 - **Re-sending unchanged files no longer rebuilds their meaning-based search.**
   When a newer kit re-sends a file whose text has not changed, for example to

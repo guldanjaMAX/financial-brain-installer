@@ -484,8 +484,19 @@ logs after the lock-holding ingest exits. The iMessage capture lane and the
 watched local folder lane are the same machinery with a different connector
 spec, so all three share that hardening rather than each re-deriving it.
 Windows uses one current-user, least-privilege Task Scheduler entry per Brain
-and lane for Drive, watched-folder, and supported provider refreshes. It uses
-the same effective cron as the macOS specification when one `schtasks` entry
+and lane for Drive, watched-folder, and supported provider refreshes. It is
+registered with `schtasks /Create /XML` from a UTF-16 definition, because the
+command-line form cannot set the power settings: the definition starts a missed
+run when the PC wakes, allows and keeps battery runs, and ignores a new trigger
+while one run is active. The principal is the owner's interactive token, never
+S4U or a stored password, because DPAPI decrypts the admin key only inside that
+logon. The action is `conhost.exe --headless` starting the pinned `node.exe` on
+the installed `brain.mjs` with no `cmd.exe` layer, so every argument follows the
+MSVC argv rules alone, and the run's output goes to a private per-lane log. The
+argv carries a config hash over the lane's reviewed fields, as the LaunchAgent
+does; each run recomputes it and refuses on mismatch, and status reports that
+drift from the stored XML rather than from localized `schtasks` text. It uses
+the same effective cron as the macOS specification when one calendar trigger
 can represent it exactly, and refuses with manual guidance otherwise.
 The refusal prints the exact one-time `brain.cmd` invocation and says that the
 cadence needs a separate manual trigger setup; it never prints an approximate

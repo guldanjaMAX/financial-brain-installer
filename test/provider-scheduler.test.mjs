@@ -173,13 +173,16 @@ try {
     }
   };
   const windowsCalls = [];
+  const windowsTask = "com.brain-installer.fixture-client.slack-ingest";
   const windowsRunner = (answers) => (command, args) => {
-    windowsCalls.push([command, args[0], args[2]]);
-    return answers(args[0]);
+    windowsCalls.push([command, ...args]);
+    return answers(args);
   };
-  const windowsAbsent = windowsRunner(() => ({
-    status: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified.",
-  }));
+  // Absence is proven by the CSV task listing, never by schtasks' error text.
+  const windowsListing = (...names) => names.map((name) => `"\\${name}","N/A","Ready"`).join("\r\n");
+  const windowsAbsent = windowsRunner((args) => args[0] === "/Query"
+    ? { status: 0, stdout: windowsListing("Other task"), stderr: "" }
+    : { status: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." });
   const windowsOptions = (action, runner, extra = {}) => ({
     platform: "win32",
     flags: { provider: "slack", [action]: true },
@@ -190,6 +193,9 @@ try {
       processRunner: runner,
       environment: {},
       localAppData: String.raw`C:\Users\Fixture\AppData\Local`,
+      systemRoot: String.raw`C:\Windows`,
+      nodePath: String.raw`C:\Program Files\nodejs\node.exe`,
+      writeTaskDefinition() {},
       windowsManifestPath: String.raw`C:\Users\Fixture\brain.manifest.json`,
       ...extra,
     },
@@ -214,24 +220,28 @@ try {
       /slack refresh installed for 15 \*\/2 \* \* \*/.test(windowsInstall.text) &&
       /client-chat freshness expectation set to 7200 seconds/.test(windowsInstall.text),
     windowsInstall.text);
-  const installedCommand = windowsInstall.result.runCommand;
+  const installedDefinition = windowsInstall.result.taskXml;
+  const windowsStored = (xml) => windowsRunner((args) => args.includes("/XML")
+    ? { status: 0, stdout: xml, stderr: "" }
+    : { status: 0, stdout: windowsListing("Other task", windowsTask), stderr: "" });
   const windowsPresent = await captureConsole(() => cmdSchedule(manifestPath, windowsOptions("status",
-    windowsRunner(() => ({ status: 0, stdout: `TaskName: fixture\nTask To Run: ${installedCommand}\n`, stderr: "" })))));
+    windowsStored(installedDefinition))));
   check("Windows status of the task install wrote reports it installed without drift",
     windowsPresent.result.installed === true && windowsPresent.result.definitionDrift === false &&
       /slack refresh is installed for 15 \*\/2 \* \* \*/.test(windowsPresent.text),
     windowsPresent.text);
   const windowsDrifted = await captureConsole(() => cmdSchedule(manifestPath, windowsOptions("status",
-    windowsRunner(() => ({ status: 0, stdout: "TaskName: fixture\nTask To Run: cmd.exe /d /s /c \"older\"\n", stderr: "" })))));
+    windowsStored(installedDefinition.replace(windowsInstall.result.configHash, "0".repeat(64))))));
   check("Windows status reports a stored action that no longer matches install as drift",
     windowsDrifted.result.definitionDrift === true &&
       /the installed slack refresh does not match the current manifest; reinstall it/.test(windowsDrifted.text),
     windowsDrifted.text);
+  const windowsListingCall = JSON.stringify(["schtasks.exe", "/Query", "/FO", "CSV", "/NH"]);
   check("Windows install, status and remove all address one task name",
-    windowsCalls.length === 5 &&
-      windowsCalls.every(([command, verb, name]) => command === "schtasks.exe" &&
-        (verb === "/Create" || name === "com.brain-installer.fixture-client.slack-ingest")) &&
-      windowsInstall.result.createArgs.includes("com.brain-installer.fixture-client.slack-ingest"),
+    windowsCalls.length === 8 &&
+      windowsCalls.every((call) => call[0] === "schtasks.exe" &&
+        (JSON.stringify(call) === windowsListingCall || call[call.indexOf("/TN") + 1] === windowsTask)) &&
+      windowsInstall.result.createArgs.includes(windowsTask),
     JSON.stringify(windowsCalls));
 
   const darwinLaunchctl = [];

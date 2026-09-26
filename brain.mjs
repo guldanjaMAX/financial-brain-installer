@@ -23199,7 +23199,13 @@ export async function cmdWindowsScheduledIngest(manifestPath, options = {}) {
   }
   if (!manifestPath) die("the Windows scheduled ingest entry needs its manifest path");
   const flags = options.flags ?? parseFlags(process.argv.slice(4));
-  assertKnownFlags(flags, ["from", "path", "source"], "windows-scheduled-ingest");
+  assertKnownFlags(flags, ["from", "path", "source", "config-hash"], "windows-scheduled-ingest");
+  // The registered action carries the hash of the configuration the owner
+  // approved. Without it a run could not prove that approval still holds.
+  const expectedConfigHash = typeof flags["config-hash"] === "string" ? flags["config-hash"] : "";
+  if (!/^[0-9a-f]{64}$/.test(expectedConfigHash)) {
+    die("the Windows scheduled ingest entry needs the --config-hash its task was installed with; reinstall it with brain schedule --install");
+  }
   const from = flags.from ? String(flags.from) : null;
   const folder = typeof flags.path === "string" && flags.path.length > 0;
   if (folder === Boolean(from) || (folder && !flags.source)) {
@@ -23217,6 +23223,7 @@ export async function cmdWindowsScheduledIngest(manifestPath, options = {}) {
     ...(options.schedulerOptions || {}),
     folder,
     provider,
+    expectedConfigHash,
     expectedChildArguments,
   });
   const status = Number.isInteger(result?.status) ? result.status : 1;
@@ -23303,6 +23310,8 @@ export async function cmdSchedule(manifestPath, options = {}) {
       ok(`${lane} refresh installed for ${result.cron}`);
       ok(`${source} freshness expectation set to ${result.expectedRefreshSeconds} seconds`);
       info(`Task Scheduler name: ${result.taskName}`);
+      if (result.definitionPath) info(`task definition: ${result.definitionPath}`);
+      if (result.logPath) info(`log: ${result.logPath}`);
       return result;
     }
     if (action === "remove") {
@@ -23324,7 +23333,6 @@ export async function cmdSchedule(manifestPath, options = {}) {
     else ok(`${lane} refresh is installed for ${result.cron}`);
     if (result.installed && result.scheduleError) warn(result.scheduleError);
     info(`Task Scheduler name: ${result.taskName}`);
-    if (result.installed && result.output) info(result.output);
     return result;
   }
   // The watched local folder is a second lane on the same command, because it

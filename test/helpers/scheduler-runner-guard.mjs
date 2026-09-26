@@ -24,8 +24,14 @@ function schedulerProgram(command) {
 
 function absentAnswer(program, args) {
   schedulerRunnerAttempts.push({ program, args: Array.isArray(args) ? [...args] : [] });
-  return program === "launchctl"
-    ? { status: 113, stdout: "", stderr: "Could not find service in domain for port", signal: null, pid: 0, output: [] }
+  if (program === "launchctl") {
+    return { status: 113, stdout: "", stderr: "Could not find service in domain for port", signal: null, pid: 0, output: [] };
+  }
+  // Task Scheduler absence is proven by an empty CSV task listing; every
+  // other schtasks verb answers as if the named task does not exist.
+  const list = Array.isArray(args) && args[0] === "/Query" && !args.includes("/TN");
+  return list
+    ? { status: 0, stdout: "", stderr: "", signal: null, pid: 0, output: [] }
     : { status: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified.", signal: null, pid: 0, output: [] };
 }
 

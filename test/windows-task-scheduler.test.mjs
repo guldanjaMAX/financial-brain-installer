@@ -13,6 +13,10 @@ import {
 const localAppData = String.raw`C:\Users\Fixture User\AppData\Local`;
 const manifestPath = String.raw`C:\Users\Fixture User\Financial Brain\brain.manifest.json`;
 const brainPath = String.raw`C:\Users\Fixture User\AppData\Local\FinancialBrain\brain.cmd`;
+const brainCliPath = String.raw`C:\Users\Fixture User\AppData\Local\FinancialBrain\node_modules\brain-installer\brain.mjs`;
+const nodePath = String.raw`C:\Program Files\nodejs\node.exe`;
+const systemRoot = String.raw`C:\Windows`;
+const definitionDirectory = String.raw`C:\Users\Fixture User\AppData\Local\FinancialBrain\schedules`;
 
 const baseManifest = {
   manifest_version: 1,
@@ -35,8 +39,14 @@ const options = (extra = {}) => ({
   manifest: baseManifest,
   windowsManifestPath: manifestPath,
   localAppData,
+  systemRoot,
+  nodePath,
+  writeTaskDefinition() {},
   ...extra,
 });
+
+const argumentsOf = (plan) => /<Arguments>([^<]*)<\/Arguments>/.exec(plan.taskXml)?.[1]
+  .replaceAll("&quot;", '"').replaceAll("&amp;", "&");
 
 assert.deepEqual(cronToSchtasks("15 * * * *"),
   ["/SC", "HOURLY", "/MO", "1", "/ST", "00:15"]);
@@ -50,12 +60,16 @@ assert.deepEqual(cronToSchtasks("30 6 * * 1-5"),
 const providerPlan = buildWindowsSchedulerPlan(manifestPath, options({ provider: "slack" }));
 assert.equal(providerPlan.taskName, "com.brain-installer.fixture-brain.slack-ingest");
 assert.equal(providerPlan.brainPath, brainPath);
+// The trigger, principal and settings live in the XML definition, which
+// test/windows-task-definition.test.mjs pins element by element.
 assert.deepEqual(providerPlan.createArgs, [
-  "/Create", "/F", "/SC", "HOURLY", "/MO", "2", "/ST", "00:45",
-  "/RL", "LIMITED",
+  "/Create", "/F",
   "/TN", "com.brain-installer.fixture-brain.slack-ingest",
-  "/TR", String.raw`cmd.exe /d /s /c ""C:\Users\Fixture User\AppData\Local\FinancialBrain\brain.cmd" windows-scheduled-ingest "C:\Users\Fixture User\Financial Brain\brain.manifest.json" --from slack"`,
+  "/XML", `${definitionDirectory}\\com.brain-installer.fixture-brain.slack-ingest.xml`,
 ]);
+assert.equal(argumentsOf(providerPlan),
+  String.raw`--headless "C:\Program Files\nodejs\node.exe" "C:\Users\Fixture User\AppData\Local\FinancialBrain\node_modules\brain-installer\brain.mjs" windows-scheduled-ingest "C:\Users\Fixture User\Financial Brain\brain.manifest.json" --from slack --config-hash ` +
+    providerPlan.configHash);
 
 // The CLI passes no environment into the plan. The installed prefix must then
 // come from the process environment, or every real install refuses.
@@ -63,7 +77,7 @@ const priorLocalAppData = process.env.LOCALAPPDATA;
 process.env.LOCALAPPDATA = localAppData;
 try {
   const ambientPlan = buildWindowsSchedulerPlan(manifestPath, {
-    manifest: baseManifest, windowsManifestPath: manifestPath, provider: "slack",
+    manifest: baseManifest, windowsManifestPath: manifestPath, provider: "slack", systemRoot, nodePath,
   });
   assert.equal(ambientPlan.brainPath, brainPath,
     "install without an injected LOCALAPPDATA reads the process environment");
@@ -78,11 +92,13 @@ assert.deepEqual(drivePlan.childArguments, ["ingest", manifestPath, "--from", "d
 
 const folderPlan = buildWindowsSchedulerPlan(manifestPath, options({ folder: true, validateExtras: false }));
 assert.deepEqual(folderPlan.createArgs, [
-  "/Create", "/F", "/SC", "WEEKLY", "/D", "MON,TUE,WED,THU,FRI", "/ST", "06:30",
-  "/RL", "LIMITED",
+  "/Create", "/F",
   "/TN", "com.brain-installer.fixture-brain.folder-ingest",
-  "/TR", String.raw`cmd.exe /d /s /c ""C:\Users\Fixture User\AppData\Local\FinancialBrain\brain.cmd" windows-scheduled-ingest "C:\Users\Fixture User\Financial Brain\brain.manifest.json" --path "C:\Source Files" --source documents"`,
+  "/XML", `${definitionDirectory}\\com.brain-installer.fixture-brain.folder-ingest.xml`,
 ]);
+assert.equal(argumentsOf(folderPlan),
+  String.raw`--headless "C:\Program Files\nodejs\node.exe" "C:\Users\Fixture User\AppData\Local\FinancialBrain\node_modules\brain-installer\brain.mjs" windows-scheduled-ingest "C:\Users\Fixture User\Financial Brain\brain.manifest.json" --path "C:\Source Files" --source documents --config-hash ` +
+    folderPlan.configHash);
 
 const unsafeCmdCharacters = ["&", "|", "<", ">", "^", "%", "!", "\""];
 const rejectedPathScenarios = unsafeCmdCharacters.flatMap((character) => [
@@ -128,8 +144,11 @@ for (const scenario of rejectedPathScenarios) {
 const scheduledChildCalls = [];
 const scheduledChild = runWindowsScheduledIngest(manifestPath, options({
   provider: "slack",
-  brainCliPath: String.raw`C:\Users\Fixture User\AppData\Local\FinancialBrain\lib\node_modules\brain-installer\brain.mjs`,
-  nodePath: String.raw`C:\Program Files\nodejs\node.exe`,
+  brainCliPath,
+  expectedConfigHash: providerPlan.configHash,
+  openLog() { return 7; },
+  appendLog() {},
+  closeLog() {},
   environment: {
     ADMIN_KEY: "must-not-pass",
     CLOUDFLARE_API_TOKEN: "must-not-pass",
@@ -162,7 +181,7 @@ const entrypointCalls = [];
 const entrypointExitCodes = [];
 await brain.cmdWindowsScheduledIngest(manifestPath, {
   platform: "win32",
-  flags: { from: "slack" },
+  flags: { from: "slack", "config-hash": providerPlan.configHash },
   scheduler: {
     runWindowsScheduledIngest(path, runOptions) {
       entrypointCalls.push({ path, runOptions });
@@ -206,28 +225,33 @@ assert.equal("PRIVATE_VALUE" in calls[0].runOptions.env, false,
 assert.deepEqual(calls[1].args, providerPlan.createArgs,
   "/Create /F makes a reinstall replace the same stable task");
 
+const listing = (...names) => names.map((name) => `"\\${name}","N/A","Ready"`).join("\r\n");
 const statusCalls = [];
 const present = statusWindowsScheduler(manifestPath, options({
   provider: "slack",
   processRunner(command, args) {
     statusCalls.push([command, args]);
-    return { status: 0, stdout: "TaskName: fixture", stderr: "" };
+    return args.includes("/XML")
+      ? { status: 0, stdout: providerPlan.taskXml, stderr: "" }
+      : { status: 0, stdout: listing("com.brain-installer.fixture-brain.slack-ingest"), stderr: "" };
   },
 }));
 assert.equal(present.installed, true);
-assert.deepEqual(statusCalls, [["schtasks.exe", [
-  "/Query", "/TN", "com.brain-installer.fixture-brain.slack-ingest", "/FO", "LIST", "/V",
-]]]);
+assert.equal(present.definitionDrift, false);
+assert.deepEqual(statusCalls, [
+  ["schtasks.exe", ["/Query", "/FO", "CSV", "/NH"]],
+  ["schtasks.exe", ["/Query", "/TN", "com.brain-installer.fixture-brain.slack-ingest", "/XML"]],
+]);
 
 let absentStatusCalls = 0;
 const missingStatus = statusWindowsScheduler(manifestPath, options({
   provider: "slack",
   processRunner() {
     absentStatusCalls++;
-    return { status: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." };
+    return { status: 0, stdout: listing("Microsoft\\Windows\\Other"), stderr: "" };
   },
 }));
-assert.equal(absentStatusCalls, 1, "the absent status reached schtasks /Query");
+assert.equal(absentStatusCalls, 1, "the absent status reached the schtasks /Query listing");
 assert.equal(missingStatus.installed, false);
 assert.equal(missingStatus.output, "",
   "an absent task is reported as absent, not by echoing schtasks' raw error line");
@@ -249,12 +273,15 @@ assert.deepEqual(deleteCalls, [["schtasks.exe", [
 let absentDeleteCalls = 0;
 const absent = removeWindowsScheduler(manifestPath, options({
   provider: "slack",
-  processRunner() {
+  processRunner(command, args) {
     absentDeleteCalls++;
-    return { status: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." };
+    return args[0] === "/Delete"
+      ? { status: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." }
+      : { status: 0, stdout: listing(), stderr: "" };
   },
 }));
-assert.equal(absentDeleteCalls, 1, "the absent-task success reached schtasks /Delete");
+assert.equal(absentDeleteCalls, 2,
+  "the absent-task success reached schtasks /Delete and then the listing that proves absence");
 assert.equal(absent.removed, false);
 
 let driftedRemoveCalls = 0;
@@ -265,12 +292,14 @@ const driftedRemove = removeWindowsScheduler(manifestPath, options({
     operations: { ...baseManifest.operations, folder_ingest_cron: null },
   },
   folder: true,
-  processRunner() {
+  processRunner(command, args) {
     driftedRemoveCalls++;
-    return { status: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." };
+    return args[0] === "/Delete"
+      ? { status: 1, stdout: "", stderr: "ERROR: The system cannot find the file specified." }
+      : { status: 0, stdout: listing(), stderr: "" };
   },
 }));
-assert.equal(driftedRemoveCalls, 1,
+assert.equal(driftedRemoveCalls, 2,
   "remove still reaches schtasks after the lane is disabled, the folder disappears, and the cron is cleared");
 assert.equal(driftedRemove.removed, false);
 
