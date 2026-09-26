@@ -268,7 +268,9 @@ around a failed workflow. The
 is planning only until a reviewed change binds it to the final candidate SHA.
 
 1. Keep package.json, both root lockfile versions, the manifest template, newest
-   changelog heading, README archive URLs, and current-version checks aligned.
+   changelog heading, README archive URLs, the Worker version constant,
+   `LOCKED_WRANGLER_LOCK_ROOT_VERSION` in
+   `operations/locked-wrangler-runtime.mjs`, and current-version checks aligned.
    Commit every required module, migration, test, and generated owner bundle.
    The release checkout must not contain a tracked node_modules link or depend
    on another worktree's dependencies. Run npm ci from the lockfile.

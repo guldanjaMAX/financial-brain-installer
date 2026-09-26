@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cmdWhatsnew } from "../brain.mjs";
+import { LOCKED_WRANGLER_LOCK_ROOT_VERSION } from "../operations/locked-wrangler-runtime.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path) => readFileSync(resolve(ROOT, path), "utf8");
@@ -24,6 +25,11 @@ assert.match(version, /^\d+\.\d+\.\d+$/, "package version must be a stable seman
 assert.equal(packageLock.version, version, "package-lock top-level version drifted");
 assert.equal(packageLock.packages?.[""]?.version, version, "package-lock root package version drifted");
 assert.equal(manifestTemplate.brain?.version, version, "manifest template version drifted");
+// The locked Wrangler runtime refuses any product lockfile whose root version
+// differs from this reviewed constant, so a bump that leaves it behind makes
+// field-prepare refuse the tree's own lockfile.
+assert.equal(LOCKED_WRANGLER_LOCK_ROOT_VERSION, version,
+  "locked Wrangler runtime lockfile root version drifted from the package");
 
 // The worker carries its own version so health cannot report a number the
 // deployed code does not have. That constant is only trustworthy while it
