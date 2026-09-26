@@ -1118,6 +1118,25 @@ export function statusScheduler(manifestPath, options = {}) {
 
 export const statusDriveScheduler = statusScheduler;
 
+/** Probe the native advisory lock without starting an ingest child. */
+export function schedulerLockHeld(plan, options = {}) {
+  if (!plan?.lockPath || !existsSync(plan.lockPath)) return false;
+  const spawn = options.lockProbeSpawn || spawnSync;
+  const result = spawn(
+    LOCKF_PATH,
+    ["-k", "-s", "-t", "0", plan.lockPath, "/usr/bin/true"],
+    {
+      cwd: dirname(plan.path),
+      env: launchctlChildEnvironment(options.environment || process.env),
+      stdio: "ignore",
+    },
+  );
+  if (result?.error) throw result.error;
+  if (result?.status === LOCK_BUSY_EXIT) return true;
+  if (result?.status === 0) return false;
+  throw new Error(`the ${plan.spec.schedulerNoun} lock could not be checked safely`);
+}
+
 export function removeScheduler(manifestPath, options = {}) {
   // Removal must remain reachable after the operator disables the connector
   // or deletes its schedule. Requiring the declaration that they are trying

@@ -338,6 +338,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/drive-scheduler.test.mjs",
   "node test/imessage-scheduler.test.mjs",
   "node test/folder-scheduler.test.mjs",
+  "node --test test/folder-off.test.mjs",
   "node --no-warnings --test test/local-folder-removal-label.test.mjs",
   "node --no-warnings --test test/local-folder-dry-run-missing-file-gate.test.mjs",
   "node test/whatsapp-daemon.test.mjs",

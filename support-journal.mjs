@@ -53,6 +53,7 @@ export const SUPPORT_COMMANDS = Object.freeze([
   "drain",
   "eval",
   "financial-picture",
+  "folder",
   "forget",
   "health",
   "ingest",
