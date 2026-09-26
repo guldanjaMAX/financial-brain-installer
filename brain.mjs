@@ -274,6 +274,7 @@ import {
   cloudflareWorkersPlanUrl,
 } from "./operations/cloudflare-account-bootstrap.mjs";
 import {
+  captureCloudflareOAuthToken,
   CloudflareOAuthSessionError,
   cloudflareOAuthChildEnvironment,
   cloudflareOAuthProfileName,
@@ -606,32 +607,77 @@ function activeCloudflareToken() {
   return process.env.CLOUDFLARE_API_TOKEN || null;
 }
 
+/** Exact workers.dev subdomain proved for this account by the active OAuth preflight. */
+function activeWorkersDevSubdomainReceipt(accountId) {
+  const scoped = cloudflareTokenSession.getStore();
+  if (scoped?.source !== "wrangler-oauth") return null;
+  const expectedAccountId = String(accountId || "").toLowerCase();
+  const receiptAccountId = String(scoped.account?.id || "").toLowerCase();
+  const preflightAccountId = String(scoped.preflight?.account?.id || "").toLowerCase();
+  if (!expectedAccountId || receiptAccountId !== expectedAccountId ||
+      preflightAccountId !== expectedAccountId) return null;
+  return typeof scoped.preflight?.workersSubdomain === "string"
+    ? scoped.preflight.workersSubdomain
+    : null;
+}
+
 export function cloudflareAccessUsesBrowserProfile() {
   const source = cloudflareTokenSession.getStore()?.source;
   return source === "wrangler-oauth" || source === "wrangler-session";
 }
 
-// Cloudflare rejected the credential mid-run. If it came from this computer's
-// wrangler login session, the session has expired: wrangler renews only an
-// expired token (whoami on a still-valid one changes nothing), so this is the
-// first moment a refresh can succeed. A rehearsal on 2026-09-02 started with
-// 2m38s left on the hour and died 2.5 minutes into provisioning with
-// "403 9109 Invalid access token", blamed on a token the owner never typed.
-// Returns true when a different token is now in place.
+// Cloudflare rejected a browser credential mid-run. Wrangler refreshes only an
+// expired token, so this can be the first moment a refresh can succeed. The
+// holder supplies the correct re-read operation for either the legacy default
+// session or this Brain's named profile.
+// Returns "changed" when a different token is now in place, "unchanged" when
+// the re-read returned the very token Cloudflare just refused, and
+// "unavailable" when no re-read could be made or it produced nothing.
+//
+// The distinction matters because a 401/403 carrying 9109 or 10000 is also
+// what a VALID token without a permission receives. An unchanged token after
+// a successful re-read means nothing expired, so the refusal is a permission
+// answer, not a sign-in problem.
 function renewWranglerSessionToken() {
-  if (process.env.CLOUDFLARE_API_TOKEN) return false;
+  if (process.env.CLOUDFLARE_API_TOKEN) return "unavailable";
   const holder = cloudflareTokenSession.getStore();
-  if (!holder || holder.source !== "wrangler-session" || typeof holder.renew !== "function") return false;
+  if (!holder || !["wrangler-session", "wrangler-oauth"].includes(holder.source) ||
+      typeof holder.renew !== "function") return "unavailable";
   let next = null;
   try {
     next = holder.renew();
   } catch {
     next = null;
   }
-  if (!next || String(next) === holder.buffer.toString("ascii")) return false;
+  if (!next) return "unavailable";
+  const nextBuffer = Buffer.isBuffer(next)
+    ? next
+    : Buffer.from(String(next), "ascii");
+  if (nextBuffer === holder.buffer || nextBuffer.equals(holder.buffer)) {
+    if (nextBuffer !== holder.buffer) nextBuffer.fill(0);
+    return "unchanged";
+  }
   holder.buffer.fill(0);
-  holder.buffer = Buffer.from(String(next), "ascii");
-  return true;
+  holder.buffer = nextBuffer;
+  return "changed";
+}
+
+function namedProfileReauthorizationFailure({ retried = false } = {}) {
+  const error = new Fatal(
+    (retried
+      ? "this Brain's Cloudflare browser sign-in changed, but both attempts were rejected.\n" +
+        "      The operation was tried once more after the credential changed, then stopped. " +
+        "No further retry was made.\n"
+      : "this Brain's Cloudflare browser sign-in expired before the operation could be authorized.\n" +
+        "      The rejected operation was not repeated. ") +
+      "Rerun the same command in an interactive\n" +
+      "      terminal and authorize the browser sign-in again when prompted.",
+  );
+  error.code = "AUTH_REQUIRED";
+  // The Cloudflare 401/403 behind this message is gone from its text, so a
+  // caller with its own denied-read guidance can still recognize it.
+  error.namedProfileSessionRejected = true;
+  return error;
 }
 
 function isExpiredSessionRejection(error) {
@@ -974,10 +1020,19 @@ export async function promptForCloudflareOAuthAccount(request, options = {}) {
 }
 
 /** Human recovery copy for a bounded Wrangler OAuth failure. */
-export function cloudflareOAuthFailureMessage(error) {
+export function cloudflareOAuthFailureMessage(error, { resumeCommand = null } = {}) {
   const code = error instanceof CloudflareOAuthSessionError
     ? error.code
     : "CLOUDFLARE_OAUTH_UNAVAILABLE";
+  if (code === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED") {
+    // Sign-in worked. Neither the network nor a different credential would
+    // change this answer, so neither is suggested.
+    return "Cloudflare sign-in worked, but this Cloudflare account has no workers.dev subdomain registered yet, " +
+      "and this Brain has no custom domain, so its address lives on that subdomain. Nothing was created. In the Cloudflare dashboard, open Workers & Pages " +
+      "and register a workers.dev subdomain, then " +
+      (resumeCommand ? `resume with: ${resumeCommand}` : "rerun the same command.") +
+      ` Issue: ${code}.`;
+  }
   const recovery = {
     CLOUDFLARE_KEYRING_UNAVAILABLE:
       "Cloudflare sign-in could not use this computer's protected credential store. Close other setup windows, confirm macOS Keychain or Windows Credential Manager is available, and rerun the same command.",
@@ -1000,18 +1055,20 @@ export function cloudflareOAuthFailureMessage(error) {
   return `${recovery} Issue: ${code}. If browser sign-in remains unavailable, the installer can offer a recovery-only hidden token prompt.`;
 }
 
-function throwCloudflareOAuthFailure(error) {
+function throwCloudflareOAuthFailure(error, messageOptions = {}) {
   const oauthCode = String(error?.code || "");
   const supportCode = oauthCode === "CLOUDFLARE_OAUTH_REAUTH_REQUIRED"
     ? "AUTH_EXPIRED"
     : oauthCode === "CLOUDFLARE_OAUTH_SCOPE_MISSING"
       ? "REMOTE_PERMISSION_DENIED"
+      : oauthCode === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED"
+        ? "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED"
       : /TIMEOUT|REQUEST_FAILED|FETCH_UNAVAILABLE/.test(oauthCode)
         ? "NETWORK_UNREACHABLE"
         : /PROFILE|ACCOUNT_(?:BINDING|SELECTION|ID)/.test(oauthCode)
           ? "CONFIG_INVALID"
           : "AUTH_REQUIRED";
-  const failure = new Fatal(cloudflareOAuthFailureMessage(error));
+  const failure = new Fatal(cloudflareOAuthFailureMessage(error, messageOptions));
   failure.code = supportCode;
   throw failure;
 }
@@ -1132,6 +1189,9 @@ export async function withCloudflareControlCredential(action, options = {}) {
   if (!oauthSessionOptions.workingDirectory && options.manifestPath) {
     oauthSessionOptions.workingDirectory = dirname(resolve(String(options.manifestPath)));
   }
+  if (oauthSessionOptions.workersSubdomainRequired === undefined) {
+    oauthSessionOptions.workersSubdomainRequired = brainNeedsWorkersDevSubdomain(options.manifestPath);
+  }
   const runOAuth = async (reauthorize) => oauthRunner({
     ...oauthSessionOptions,
     ...(authProfile
@@ -1140,27 +1200,45 @@ export async function withCloudflareControlCredential(action, options = {}) {
     expectedAccountId: accountId,
     reauthorize,
     prompt: accountPrompt,
-    action: async (session) => cloudflareTokenSession.run({
-      buffer: session.token,
-      source: "wrangler-oauth",
-      machineReadable: false,
-      announced: true,
-    }, async () => {
-      try {
-        return await action(Object.freeze({
-          method: "wrangler_oauth",
+    action: async (session) => {
+      const holder = {
+        buffer: session.token,
+        source: "wrangler-oauth",
+        machineReadable: false,
+        announced: true,
+        // The exact account and preflight receipt let deploy bind the
+        // workers.dev hostname to the subdomain this sign-in proved.
+        account: session.account,
+        preflight: session.preflight,
+        renew: () => captureCloudflareOAuthToken({
+          ...oauthSessionOptions,
           profile: session.profile,
-          account: session.account,
-          preflight: session.preflight,
-        }));
-      } catch (error) {
-        throw new CloudflareControlActionError(error);
-      }
-    }),
+          accountId: session.account.id,
+        }),
+      };
+      return cloudflareTokenSession.run(holder, async () => {
+        try {
+          return await action(Object.freeze({
+            method: "wrangler_oauth",
+            profile: session.profile,
+            account: session.account,
+            preflight: session.preflight,
+          }));
+        } catch (error) {
+          throw new CloudflareControlActionError(error);
+        } finally {
+          holder.buffer.fill(0);
+        }
+      });
+    },
   });
 
   const initiallyReauthorize = options.reauthorizeOAuth === true;
+  const failureOptions = { resumeCommand: options.resumeCommand || null };
   const offerTokenRecovery = async (error) => {
+    // An account setting answered by a working sign-in, whichever attempt met
+    // it: a recovery token reads the same account and cannot change it.
+    if (isUnregisteredWorkersSubdomain(error)) throw error;
     if (options.allowTokenRecovery !== true || options.interactive === false) throw error;
     const answer = String(await (options.askFn ?? ask)(
       "Cloudflare browser sign-in is still unavailable. Use the recovery-only hidden token prompt now? (y/n)",
@@ -1174,6 +1252,12 @@ export async function withCloudflareControlCredential(action, options = {}) {
     return await runOAuth(initiallyReauthorize);
   } catch (error) {
     throwOriginalCloudflareControlActionError(error);
+    if (isUnregisteredWorkersSubdomain(error)) {
+      // An account setting, answered by a working sign-in: no browser refresh
+      // or recovery token can change it, so neither is offered.
+      closePrompts();
+      throwCloudflareOAuthFailure(error, failureOptions);
+    }
     const mayRefresh = error instanceof CloudflareOAuthSessionError &&
       ["CLOUDFLARE_OAUTH_REAUTH_REQUIRED", "CLOUDFLARE_OAUTH_SCOPE_MISSING"].includes(error.code) &&
       !initiallyReauthorize && options.allowBrowserReauth === true && options.interactive !== false;
@@ -1193,7 +1277,7 @@ export async function withCloudflareControlCredential(action, options = {}) {
             throwOriginalCloudflareControlActionError(finalError);
             if (finalError instanceof Fatal) throw finalError;
             closePrompts();
-            throwCloudflareOAuthFailure(finalError);
+            throwCloudflareOAuthFailure(finalError, failureOptions);
           }
         }
       }
@@ -1204,9 +1288,33 @@ export async function withCloudflareControlCredential(action, options = {}) {
       throwOriginalCloudflareControlActionError(finalError);
       if (finalError instanceof Fatal) throw finalError;
       closePrompts();
-      throwCloudflareOAuthFailure(finalError);
+      throwCloudflareOAuthFailure(finalError, failureOptions);
     }
   }
+}
+
+function isUnregisteredWorkersSubdomain(error) {
+  return error instanceof CloudflareOAuthSessionError && error.code === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED";
+}
+
+/**
+ * Whether this Brain's address depends on the account's workers.dev subdomain.
+ *
+ * A custom brain.domain is the install URL and deploy treats a missing
+ * workers.dev route as optional, so the sign-in preflight must not refuse it.
+ * No domain yet, a saved *.workers.dev address, or a manifest that cannot be
+ * read all keep the fail-closed answer: the subdomain is required.
+ */
+function brainNeedsWorkersDevSubdomain(manifestPath) {
+  if (!manifestPath) return true;
+  let domain = "";
+  try {
+    const parsed = JSON.parse(readFileSync(resolve(String(manifestPath)), "utf8"));
+    domain = typeof parsed?.brain?.domain === "string" ? parsed.brain.domain.trim().toLowerCase() : "";
+  } catch {
+    return true;
+  }
+  return !domain || domain === "workers.dev" || domain.endsWith(".workers.dev");
 }
 
 function token() {
@@ -1229,10 +1337,26 @@ async function cf(path, options = {}) {
   try {
     return await cfOnce(path, options);
   } catch (error) {
-    if (isExpiredSessionRejection(error) && renewWranglerSessionToken()) return cfOnce(path, options);
+    const holder = cloudflareTokenSession.getStore();
+    const renewal = isExpiredSessionRejection(error) ? renewWranglerSessionToken() : null;
+    if (renewal === "changed") {
+      try {
+        return await cfOnce(path, options);
+      } catch (retryError) {
+        if (holder?.source === "wrangler-oauth" && isExpiredSessionRejection(retryError)) {
+          throw namedProfileReauthorizationFailure({ retried: true });
+        }
+        throw retryError;
+      }
+    }
+    // The profile answered with the same token it already had, so nothing
+    // expired. Keep Cloudflare's own refusal, with its method, path and status.
+    if (renewal === "unavailable" && holder?.source === "wrangler-oauth") {
+      throw namedProfileReauthorizationFailure();
+    }
     if (
       isExpiredSessionRejection(error) && !process.env.CLOUDFLARE_API_TOKEN &&
-      cloudflareTokenSession.getStore()?.source === "wrangler-session"
+      holder?.source === "wrangler-session"
     ) {
       error.credentialSource = "wrangler-session";
     }
@@ -1507,7 +1631,13 @@ async function cmdVerify(manifestPath) {
  * CLOUDFLARE_API_TOKEN must be cleared for the child process. Wrangler prefers it
  * when set and will silently authenticate as the wrong identity.
  */
-function wrangler(args, { accountId, authProfile = null } = {}) {
+export function runCloudflareWranglerCommand(args, {
+  accountId,
+  authProfile = null,
+  runCommand = run,
+  platformName = process.platform,
+  renewSessionToken = renewWranglerSessionToken,
+} = {}) {
   // Through doctor's runner, which knows that npm CLIs are .cmd shims on
   // Windows and that Node refuses to spawn those without a shell since
   // CVE-2024-27980. The previous raw spawnSync returned ENOENT there, which
@@ -1521,15 +1651,39 @@ function wrangler(args, { accountId, authProfile = null } = {}) {
     ? [...baseArgs, "--profile", authProfile]
     : wranglerProfileArgs(baseArgs, accountId);
   const exactArgs = authProfile
-    ? [...profiled, `--env-file=${process.platform === "win32" ? "NUL" : "/dev/null"}`]
+    ? [...profiled, `--env-file=${platformName === "win32" ? "NUL" : "/dev/null"}`]
     : profiled;
-  const r = run("npx", exactArgs, {
+  const invoke = () => runCommand("npx", exactArgs, {
     timeout: 180_000,
     inheritEnv: false,
     env,
   });
-  return { ok: r.ok, out: r.out, status: r.ok ? 0 : 1 };
+  let result = invoke();
+  const authRejected = (value) => {
+    const message = String(value?.out || "");
+    return /invalid access token|authentication error/i.test(message) ||
+      (/\b(9109|10000)\b/.test(message) && /auth|token/i.test(message));
+  };
+  if (authProfile && !result.ok && authRejected(result)) {
+    const renewal = renewSessionToken();
+    // An unchanged token means nothing expired: keep the command's own refusal.
+    if (renewal === "unchanged") return { ok: false, out: result.out, status: 1 };
+    if (renewal === "changed") {
+      result = invoke();
+      if (result.ok) return { ok: true, out: result.out, status: 0 };
+      if (!authRejected(result)) return { ok: false, out: result.out, status: 1 };
+      return {
+        ok: false,
+        out: namedProfileReauthorizationFailure({ retried: true }).message,
+        status: 1,
+      };
+    }
+    return { ok: false, out: namedProfileReauthorizationFailure().message, status: 1 };
+  }
+  return { ok: result.ok, out: result.out, status: result.ok ? 0 : 1 };
 }
+
+const wrangler = runCloudflareWranglerCommand;
 
 function wranglerAvailable(accountId, authProfile = null) {
   if (!accountId) return false;
@@ -2045,11 +2199,137 @@ export function workersDevRouteDisposition({ customDomain = null, workersDevEnab
   return customDomain ? "optional" : "required";
 }
 
+/** Cloudflare's workers.dev account-subdomain label shape. */
+const WORKERS_DEV_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+
+// The exact phrase token() dies with when no Cloudflare credential at all is
+// available, and the exact shape cfOnce() throws for a denied read. Matched
+// narrowly on purpose: a caller-supplied `readSubdomain` can fail for reasons
+// that have nothing to do with credentials (a plain "HTTP 403 Forbidden" from
+// an unrelated proxy, say), and those must keep dying with the message below,
+// not be swept into the recovery path meant for an auth/permission denial.
+const NO_CLOUDFLARE_CREDENTIAL_RE = /no Cloudflare credential is available/;
+const SUBDOMAIN_READ_DENIED_RE = /failed \((401|403)\)/;
+
+/**
+ * Confirm a candidate workers.dev hostname really is THIS brain before an
+ * auth/permission failure is allowed to trust it enough to persist.
+ *
+ * The two fields checked are the only identity a public, unauthenticated
+ * `/health` gives back (worker/src/index.js's handler): `brain` is
+ * `env.BRAIN_NAME`, which workerBindings sets to the client slug, and
+ * `version` is the exact code that answered. Everything else on that response
+ * either needs the admin key (not available at this point in deploy) or is
+ * not an identity fact. These are the same two fields the product records as
+ * this brain's identity once it already trusts a domain; here they are what
+ * lets an UNTRUSTED candidate earn that trust.
+ *
+ * A route enabled seconds ago routinely answers 404, an edge 5xx, a failed
+ * fetch, or the PREVIOUS build of this same brain for longer than a few
+ * seconds, so every one of those is retried within the same budget cmdHealth
+ * gives that lag (a minute, five seconds apart). An answer naming a DIFFERENT
+ * brain is not lag: it is refused on the spot and never retried, because no
+ * amount of waiting makes another brain's host this one's address.
+ *
+ * The minute is one budget, not a per-probe allowance. Each probe's fetch
+ * timeout comes out of what is left of it, so hanging fetches cannot stretch
+ * the silent wait after "workers.dev route enabled" to several minutes, and
+ * every retry says what it is waiting for, as the drain warm-up does.
+ */
+const WORKERS_DEV_PROBE_ATTEMPTS = 12;
+const WORKERS_DEV_PROBE_WAIT_MS = 5000;
+const WORKERS_DEV_PROBE_BUDGET_MS = 60_000;
+const WORKERS_DEV_PROBE_TIMEOUT_MS = 10_000;
+const WORKERS_DEV_PROBE_MIN_TIMEOUT_MS = 1_000;
+async function verifyWorkersDevCandidate(domain, {
+  expectedBrainName,
+  expectedVersion,
+  request = http,
+  attempts = WORKERS_DEV_PROBE_ATTEMPTS,
+  wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  now = Date.now,
+} = {}) {
+  const deadline = now() + WORKERS_DEV_PROBE_BUDGET_MS;
+  let reason = "no attempt was made";
+  let tried = 0;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const timeoutMs = Math.max(
+      WORKERS_DEV_PROBE_MIN_TIMEOUT_MS,
+      Math.min(WORKERS_DEV_PROBE_TIMEOUT_MS, deadline - now()),
+    );
+    const verdict = await probeWorkersDevCandidate(domain, { expectedBrainName, expectedVersion, request, timeoutMs });
+    tried = attempt;
+    if (verdict.ok || !verdict.retry) return verdict.ok ? { ok: true } : { ok: false, reason: verdict.reason };
+    reason = verdict.reason;
+    if (attempt >= attempts) break;
+    // Another probe must fit its minimum timeout after this wait, or the
+    // budget is spent and the owner hears the refusal now.
+    const delayMs = Math.min(WORKERS_DEV_PROBE_WAIT_MS, deadline - now() - WORKERS_DEV_PROBE_MIN_TIMEOUT_MS);
+    if (delayMs <= 0) break;
+    info(`${verdict.progress} Retrying ${attempt}/${attempts} in ${Math.ceil(delayMs / 1_000)} second(s).`);
+    await wait(delayMs);
+  }
+  return { ok: false, reason: `${reason} after ${tried} attempt${tried === 1 ? "" : "s"}` };
+}
+
+const WORKERS_DEV_PROPAGATION_NOTE = "This is normal just after a deploy.";
+
+/** One /health probe: accept, refuse outright, or report propagation lag. */
+async function probeWorkersDevCandidate(domain, { expectedBrainName, expectedVersion, request, timeoutMs }) {
+  let res;
+  let body;
+  try {
+    res = await request(`https://${domain}/health`, {}, { timeoutMs, what: "the health check" });
+    body = await res.text();
+  } catch (error) {
+    return {
+      ok: false,
+      retry: true,
+      reason: `/health did not answer (${String(error?.message || error).split("\n")[0].slice(0, 140)})`,
+      progress: `the brain's address is not answering yet (no response). ${WORKERS_DEV_PROPAGATION_NOTE}`,
+    };
+  }
+  if (!res.ok) {
+    return {
+      ok: false,
+      retry: res.status === 404 || res.status >= 500,
+      reason: `/health returned ${res.status}`,
+      progress: `the brain's address is not answering yet (${res.status}). ${WORKERS_DEV_PROPAGATION_NOTE}`,
+    };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { ok: false, retry: false, reason: "/health did not return JSON" };
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return { ok: false, retry: false, reason: "/health returned no readable body" };
+  }
+  if (parsed.brain !== expectedBrainName) {
+    return { ok: false, retry: false, reason: `/health identified itself as "${parsed.brain}", not "${expectedBrainName}"` };
+  }
+  if (expectedVersion && parsed.version !== expectedVersion) {
+    // Cloudflare keeps serving the replaced build for a while after a deploy.
+    // This brain answering its previous version is lag, not a wrong host.
+    return {
+      ok: false,
+      retry: true,
+      reason: `/health reported version "${parsed.version}", not "${expectedVersion}"`,
+      progress: `the brain's address is still serving the previous build. ${WORKERS_DEV_PROPAGATION_NOTE}`,
+    };
+  }
+  return { ok: true };
+}
+
 /** Save the verified workers.dev hostname so routine commands need no API token. */
 export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName, options = {}) {
   if (m.brain?.domain) return m.brain.domain;
-  const readSubdomain = options.readSubdomain ??
-    (() => cf(`/accounts/${acct.id}/workers/subdomain`));
+  const verify = options.verifyWorkersDevCandidate ?? verifyWorkersDevCandidate;
+  const carriedSubdomain = options.workersDevSubdomain;
+  let label = carriedSubdomain;
+  const usedPreflightReceipt = carriedSubdomain !== undefined && carriedSubdomain !== null;
+  const readSubdomain = options.readSubdomain ?? (() => cf(`/accounts/${acct.id}/workers/subdomain`));
   // Three different things can go wrong here and they used to print one
   // sentence. `.catch(() => null)` swallowed every failure, including the
   // credential error whose own text warns against pasting a token into a
@@ -2058,39 +2338,77 @@ export async function persistWorkersDevDomain(manifestPath, m, acct, scriptName,
   // went to the dashboard and correctly changed nothing, and eventually pasted
   // a raw API token at a prompt to get past a message that was not true.
   //
-  // This call authenticates with an API token while the deploy around it can be
-  // running on a browser session, so "no credential for THIS call" is an
-  // ordinary outcome on the path the runbook recommends, not an exotic one.
-  let sub = null;
-  let readFailure = null;
-  try {
-    sub = await readSubdomain();
-  } catch (error) {
-    readFailure = error;
+  // The fallback call can authenticate separately from the deploy around it,
+  // so "no credential for THIS call" remains an ordinary outcome for legacy
+  // and token lanes that do not carry the named-profile preflight receipt.
+  if (!usedPreflightReceipt) {
+    let sub = null;
+    let readFailure = null;
+    try {
+      sub = await readSubdomain();
+    } catch (error) {
+      readFailure = error;
+    }
+    if (readFailure) {
+      const message = String(readFailure?.message || readFailure || "");
+      const noCredential = readFailure instanceof Fatal && NO_CLOUDFLARE_CREDENTIAL_RE.test(message);
+      // A named-profile 401/403 reaches here only after one renewal was tried
+      // (or was unavailable). For this read it is still a denied subdomain
+      // read, whose guidance also forbids changing the dashboard setting.
+      const denied = SUBDOMAIN_READ_DENIED_RE.test(message) ||
+        readFailure?.namedProfileSessionRejected === true;
+      // The no-credential Fatal already says the right thing, including browser
+      // sign-in and why a raw token must not be pasted into a shell. Preserve it.
+      if (noCredential) throw readFailure;
+      if (!denied) {
+        if (readFailure instanceof Fatal) throw readFailure;
+        const detail = message.split("\n")[0].slice(0, 200);
+        die(
+          "the workers.dev route is enabled, but reading the account subdomain failed.\n" +
+            `  Cloudflare did not answer that read: ${detail}\n` +
+            "  This is a failure to ASK, not a missing subdomain, so check the credential this\n" +
+            "  call is using and its scope before changing anything in the dashboard."
+        );
+      }
+      // A 401/403 on the browser-sign-in path is not an account-setting
+      // diagnosis. Name only the action the owner can take, and do not promise
+      // that setup can safely resume a partially completed writer cutover.
+      die(
+        "the workers.dev route is enabled and the Worker is deployed, but this run could not\n" +
+          "  confirm the brain's public address because the exact account subdomain read was denied.\n" +
+          "  Sign in again through the browser when prompted, then rerun the same command.\n" +
+          "  Do not change the Workers subdomain setting based on this failure."
+      );
+    }
+    label = sub?.subdomain;
   }
-  if (readFailure) {
-    // A credential failure already says the right thing, including how to sign
-    // in without a token. Re-raise it rather than replacing it with a guess.
-    if (readFailure instanceof Fatal) throw readFailure;
-    const detail = String(readFailure?.message || readFailure || "").split("\n")[0].slice(0, 200);
+  if (typeof label !== "string" || !WORKERS_DEV_LABEL_RE.test(label)) {
     die(
-      "the workers.dev route is enabled, but reading the account subdomain failed.\n" +
-        `  Cloudflare did not answer that read: ${detail}\n` +
-        "  This is a failure to ASK, not a missing subdomain, so check the credential this\n" +
-        "  call is using and its scope before changing anything in the dashboard."
-    );
-  }
-  const label = typeof sub?.subdomain === "string" ? sub.subdomain.trim() : "";
-  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(label)) {
-    die(
-      "the workers.dev route is enabled, but Cloudflare did not return a usable account subdomain.\n" +
+      `the workers.dev route is enabled, but ${usedPreflightReceipt ? "the authenticated preflight" : "Cloudflare"} did not return a usable account subdomain.\n` +
         "  The read succeeded and carried no usable name, so the subdomain really is unset.\n" +
         "  The Worker is deployed, but its token-free URL cannot be saved. Rerun deploy after\n" +
         "  the Workers subdomain is visible in Cloudflare."
     );
   }
-  m.brain = { ...(m.brain || {}), domain: `${scriptName}.${label}.workers.dev` };
+  const candidateDomain = `${scriptName}.${label}.workers.dev`;
+  const candidateVerdict = await verify(candidateDomain, {
+    expectedBrainName: m.client?.slug || "brain",
+    expectedVersion: PRODUCT_VERSION,
+    request: options.request,
+    wait: options.wait,
+    now: options.now,
+  });
+  if (!candidateVerdict.ok) {
+    die(
+      "the workers.dev route is enabled, but its exact account hostname was not confirmed as this brain.\n" +
+        `  ${candidateVerdict.reason}. No address was saved and no admin key was sent to that host.\n` +
+        "  Once the workers.dev route finishes propagating, resume with:\n" +
+        `    brain setup ${commandPath(displayPath(manifestPath))}`
+    );
+  }
+  m.brain = { ...(m.brain || {}), domain: candidateDomain };
   saveManifest(manifestPath, m);
+  ok(`confirmed ${candidateDomain} is this brain and saved it`);
   return m.brain.domain;
 }
 
@@ -2360,7 +2678,13 @@ export async function cmdDeploy(manifestPath, options = {}) {
   // after the one-day Cloudflare control token is revoked. Persist the verified
   // workers.dev hostname once, instead of looking it up again on every command.
   if (!m.brain?.domain && options.persistDomain !== false) {
-    const domain = await persistWorkersDevDomain(manifestPath, m, acct, scriptName);
+    const domain = await persistWorkersDevDomain(manifestPath, m, acct, scriptName, {
+      workersDevSubdomain: activeWorkersDevSubdomainReceipt(acct.id),
+      verifyWorkersDevCandidate: options.verifyWorkersDevCandidate,
+      request: options.request,
+      wait: options.wait,
+      now: options.now,
+    });
     ok(`saved the live address https://${domain}`);
   }
 
@@ -24275,6 +24599,11 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
     delete oauthOptions[reserved];
   }
   if (!oauthOptions.workingDirectory) oauthOptions.workingDirectory = dirname(resolve(manifestPath));
+  // The same workers.dev need routine commands apply: a custom-domain Brain can
+  // record its sign-in on an account that never registered a subdomain.
+  if (oauthOptions.workersSubdomainRequired === undefined) {
+    oauthOptions.workersSubdomainRequired = brainNeedsWorkersDevSubdomain(manifestPath);
+  }
   const runner = options.withOAuthSession ?? withCloudflareOAuthSession;
   let session;
   try {
@@ -24686,6 +25015,7 @@ async function cmdSetupInteractive(manifestPath) {
     },
     {
       manifestPath: target,
+      resumeCommand: `brain setup ${commandPath(displayPath(target))}`,
       accountId,
       authProfile,
       freshOAuth: !resumed && !tokenPath,
@@ -24700,7 +25030,7 @@ async function cmdSetupInteractive(manifestPath) {
 }
 
 async function cmdUpgradeInteractive(manifestPath) {
-  return withManifestCloudflareControl(manifestPath, () => cmdUpgrade(manifestPath));
+  return withManifestCloudflareControl(manifestPath, () => cmdUpgrade(manifestPath), { command: "upgrade" });
 }
 
 /** Run a manifest-bound control-plane command through its exact saved custody. */
@@ -24708,8 +25038,14 @@ export async function withManifestCloudflareControl(manifestPath, action, option
   const binding = manifestCloudflareControlBinding(manifestPath);
   const interactive = options.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const automationToken = !interactive && Boolean(process.env.CLOUDFLARE_API_TOKEN);
+  const { command, ...controlOptions } = options;
   return (options.withCloudflareControl ?? withCloudflareControlCredential)(action, {
-    ...options,
+    ...controlOptions,
+    // A refusal the owner fixes outside the installer names the exact command
+    // to resume with, instead of "the same command" they may no longer see.
+    ...(command && !controlOptions.resumeCommand
+      ? { resumeCommand: `brain ${command} ${commandPath(displayPath(manifestPath))}` }
+      : {}),
     manifestPath,
     accountId: binding.accountId,
     authProfile: binding.authProfile,
@@ -26995,6 +27331,7 @@ export async function cmdUpdate(manifestPath, options = {}) {
   }, {
     ...options,
     manifestPath: pin.target,
+    resumeCommand: options.resumeCommand || `brain update ${commandPath(displayPath(pin.target))}`,
     accountId: binding.accountId,
     authProfile: binding.authProfile,
     forceToken: options.forceToken === true || automationToken,
@@ -28391,10 +28728,10 @@ const commands = {
   "financial-picture": cmdFinancialPicture,
   doctor: dispatchDoctor,
   whatsnew: cmdWhatsnew,
-  verify: (path) => withManifestCloudflareControl(path, () => cmdVerify(path)),
-  provision: (path) => withManifestCloudflareControl(path, () => cmdProvision(path)),
-  deploy: (path) => withManifestCloudflareControl(path, () => cmdDeploy(path)),
-  secrets: (path) => withManifestCloudflareControl(path, () => cmdSecrets(path)),
+  verify: (path) => withManifestCloudflareControl(path, () => cmdVerify(path), { command: "verify" }),
+  provision: (path) => withManifestCloudflareControl(path, () => cmdProvision(path), { command: "provision" }),
+  deploy: (path) => withManifestCloudflareControl(path, () => cmdDeploy(path), { command: "deploy" }),
+  secrets: (path) => withManifestCloudflareControl(path, () => cmdSecrets(path), { command: "secrets" }),
   health: cmdHealth,
   test: cmdTest,
   "mcp-config": cmdMcpConfig,
