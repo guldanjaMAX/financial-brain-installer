@@ -4,10 +4,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-// Shared with the signing workflow test so both see every YAML key spelling.
+// Shared with the signing workflow test: every workflow check below reads the
+// structure the YAML subset parser loads, never workflow lines (S10-R).
 import {
-  WorkflowParseError, jobPermissions, topLevelPermissions, triggerNames, workflowJobs, workflowUses,
+  WorkflowParseError, canonicalText, isCheckout, jobPermissions, jobSteps, parseWorkflow, topLevelPermissions,
+  triggerNames, usesOf, workflowJobs, workflowUses,
 } from "./helpers/workflow-yaml.mjs";
+import { SIGNING_SPELLING_MUTATIONS, UNSIGNED_SPELLING_MUTATIONS } from "./helpers/workflow-spelling-mutations.mjs";
 
 /** Run a shape check; a spelling the shared parser refuses is a shape failure too. */
 function exactly(check) {
@@ -236,9 +239,11 @@ test("machine-prep CI builds only unsigned artifacts with pinned actions and no 
   assert.match(workflow, /FinancialBrainMachinePrep-unsigned\.pkg/);
   assert.match(workflow, /FinancialBrainMachinePrep-unsigned\.msi/);
   assert.equal([...workflow.matchAll(/actions\/upload-artifact@[0-9a-f]{40}/g)].length, 2);
-  for (const match of workflow.matchAll(/^\s+(?:-\s+)?uses: ([^\s#]+)/gm)) {
-    if (match[1].startsWith("./")) continue;
-    assert.match(match[1], /@[0-9a-f]{40}$/);
+  const references = workflowUses(workflow);
+  assert.ok(references.length >= 7, "every action the build calls was read");
+  for (const reference of references) {
+    if (reference.startsWith("./")) continue;
+    assert.match(reference, /@[0-9a-f]{40}$/);
   }
   assert.doesNotMatch(workflow, /gh release|release:|contents:\s*write|id-token:\s*write|notarytool|signtool/i);
 });
@@ -283,27 +288,42 @@ const WINDOWS_SIGNING_VARIABLES = [
 ];
 
 
-/** Each step's text, in order, so gates can be checked for position. */
-function workflowSteps(job) {
-  return job.split(/^      - /m).slice(1);
-}
+/** Each parsed step, in order, so gates can be checked for position. */
+const workflowSteps = (job) => jobSteps(job);
 
-/** The literal script of every `run:` block, where expressions would be interpolated into a shell. */
+/** A parsed step or job as canonical text, for content searches in any source spelling. */
+const text = (node) => canonicalText(node);
+
+/** Every `run` value anywhere in the parsed workflow, where expressions would be interpolated into a shell. */
 function runScripts(workflow) {
   const scripts = [];
-  const lines = workflow.split("\n");
-  for (let index = 0; index < lines.length; index++) {
-    const match = /^(\s*)(?:- )?run: ?(.*)$/.exec(lines[index]);
-    if (!match) continue;
-    const indent = match[1].length;
-    const body = [match[2]];
-    while (index + 1 < lines.length &&
-      (lines[index + 1].trim() === "" || /^\s*/.exec(lines[index + 1])[0].length > indent)) {
-      body.push(lines[++index]);
+  const visit = (node) => {
+    if (Array.isArray(node)) node.forEach(visit);
+    else if (node && typeof node === "object") {
+      for (const [key, value] of Object.entries(node)) {
+        if (key === "run") {
+          assert.equal(typeof value, "string", "every run value is a script");
+          scripts.push(value);
+        } else visit(value);
+      }
     }
-    scripts.push(body.join("\n"));
-  }
+  };
+  visit(parseWorkflow(workflow));
   return scripts;
+}
+
+/** Every checkout in a parsed workflow (any letter case) must be pinned and must not persist its token. */
+function assertCheckoutsDoNotPersist(workflow) {
+  for (const [name, job] of workflowJobs(workflow)) {
+    for (const step of jobSteps(job)) {
+      const uses = usesOf(step);
+      if (uses === null || !isCheckout(uses)) continue;
+      assert.match(uses, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/, `${uses} is pinned to a full commit`);
+      const options = step.with && typeof step.with === "object" && !Array.isArray(step.with) ? step.with : {};
+      const persist = Object.hasOwn(options, "persist-credentials") ? String(options["persist-credentials"]) : null;
+      assert.equal(persist, "false", `${name} checkout does not persist its token`);
+    }
+  }
 }
 
 /** The signing workflow's trigger, token, environment and action policy; throws on any drift. */
@@ -319,18 +339,19 @@ const assertSigningWorkflowShape = exactly((workflow) => {
   assert.deepEqual(jobPermissions(jobs.get("macos-sign")), { contents: "read", actions: "read" });
   assert.deepEqual(jobPermissions(jobs.get("windows-sign")), { contents: "read", actions: "read", "id-token": "write" });
   for (const [name, job] of jobs) {
-    assert.match(job, new RegExp(`^    environment: ${SIGNING_ENVIRONMENT}$`, "m"), `${name} runs in the protected environment`);
-    assert.doesNotMatch(job, /contents:\s*write|packages:\s*write|gh release|releases/i, `${name} cannot publish`);
+    assert.equal(job.environment, SIGNING_ENVIRONMENT, `${name} runs in the protected environment`);
+    assert.doesNotMatch(text(job), /contents:\s*write|packages:\s*write|gh release|releases/i, `${name} cannot publish`);
   }
-  assert.doesNotMatch(jobs.get("macos-sign"), /id-token/, "only the Windows job may request an OIDC token");
-  assert.match(jobs.get("windows-sign"), /^      id-token: write$/m);
+  assert.doesNotMatch(text(jobs.get("macos-sign")), /id-token/, "only the Windows job may request an OIDC token");
+  assert.equal(jobPermissions(jobs.get("windows-sign"))["id-token"], "write");
   // Every step and job uses key, read by the shared parser in any spelling.
   const references = workflowUses(workflow);
   assert.ok(references.length >= 5);
   assert.ok([...workflow.matchAll(/^\s+(?:-\s+)?uses: ([^\s#]+)/gm)].every((match) => references.includes(match[1])),
     "the parser sees every plainly spelled action");
-  assert.equal(references.filter((reference) => /^actions\/checkout@/.test(reference)).length, 0,
-    "the signing jobs check out no repository code");
+  // GitHub resolves owner/repo without regard to case, so Actions/Checkout is a checkout too.
+  assert.equal(references.filter(isCheckout).length, 0, "the signing jobs check out no repository code");
+  assertCheckoutsDoNotPersist(workflow);
   for (const reference of references) {
     assert.match(reference, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/, `${reference} is pinned to a full commit`);
   }
@@ -349,10 +370,14 @@ const assertUnsignedWorkflowShape = exactly((workflow) => {
   assert.deepEqual([...jobs.keys()].sort(), ["macos-unsigned", "windows-unsigned"]);
   assert.deepEqual(topLevelPermissions(workflow), { contents: "read" }, "the build token can only read");
   for (const [name, job] of jobs) assert.equal(jobPermissions(job), null, `${name} declares no permissions of its own`);
-  for (const reference of workflowUses(workflow)) {
+  const references = workflowUses(workflow);
+  for (const reference of references) {
     if (reference.startsWith("./")) continue;
     assert.match(reference, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/, `${reference} is pinned to a full commit`);
   }
+  // Each platform job checks out reviewed source once, in any letter case, without persisting its token.
+  assert.equal(references.filter(isCheckout).length, 2, "the unsigned build checks out the repository exactly twice");
+  assertCheckoutsDoNotPersist(workflow);
 });
 
 test("installer signing runs only by hand, in the protected environment, with every action pinned", () => {
@@ -462,6 +487,17 @@ for (const [path, assertShape] of [
       assert.throws(() => assertShape(mutated), assert.AssertionError);
     });
   }
+  // S10-R: violations hidden behind multi-space dashes, quoted keys, comments and mixed-case names.
+  const spellingMutations = path.endsWith("installer-signing.yml") ? SIGNING_SPELLING_MUTATIONS : UNSIGNED_SPELLING_MUTATIONS;
+  for (const [name, mutate] of spellingMutations) {
+    test(`${path} S10-R spelling mutation "${name}" is detected`, () => {
+      const original = read(path);
+      assertShape(original);
+      const mutated = mutate(original);
+      assert.notEqual(mutated, original, "the mutation applied to the current workflow");
+      assert.throws(() => assertShape(mutated), assert.AssertionError);
+    });
+  }
   for (const [name, rewrite] of equivalentRewrites) {
     test(`${path} with ${name} still passes its shape check`, () => {
       const original = read(path);
@@ -497,23 +533,24 @@ test("installer signing carries only secret and variable names, never a value", 
 test("each signing job refuses before touching an artifact when its configuration is missing", () => {
   const jobs = workflowJobs(read(".github/workflows/installer-signing.yml"));
   const macSteps = workflowSteps(jobs.get("macos-sign"));
-  assert.match(macSteps[0], /not configured yet/);
-  for (const name of MAC_SIGNING_SECRETS) assert.match(macSteps[0], new RegExp(`\\b${name}\\b`));
-  for (const name of MAC_SIGNING_VARIABLES) assert.match(macSteps[0], new RegExp(`\\b${name}\\b`));
-  assert.match(macSteps[0], /exit 1/);
+  assert.match(text(macSteps[0]), /not configured yet/);
+  for (const name of MAC_SIGNING_SECRETS) assert.match(text(macSteps[0]), new RegExp(`\\b${name}\\b`));
+  for (const name of MAC_SIGNING_VARIABLES) assert.match(text(macSteps[0]), new RegExp(`\\b${name}\\b`));
+  assert.match(text(macSteps[0]), /exit 1/);
   const windowsSteps = workflowSteps(jobs.get("windows-sign"));
-  assert.match(windowsSteps[0], /not configured yet/);
-  for (const name of WINDOWS_SIGNING_VARIABLES) assert.match(windowsSteps[0], new RegExp(`\\b${name}\\b`));
-  assert.match(windowsSteps[0], /exit 1/);
+  assert.match(text(windowsSteps[0]), /not configured yet/);
+  for (const name of WINDOWS_SIGNING_VARIABLES) assert.match(text(windowsSteps[0]), new RegExp(`\\b${name}\\b`));
+  assert.match(text(windowsSteps[0]), /exit 1/);
   for (const steps of [macSteps, windowsSteps]) {
-    assert.match(steps[0], /unsigned_run_id must be the numeric run ID/);
-    assert.doesNotMatch(steps[0], /uses:/, "the gate is a local check, not an action");
-    assert.match(steps[1], /actions\/download-artifact@[0-9a-f]{40}/, "the first action after the gate is the download");
+    assert.match(text(steps[0]), /unsigned_run_id must be the numeric run ID/);
+    assert.equal(usesOf(steps[0]), null, "the gate is a local check, not an action");
+    assert.doesNotMatch(text(steps[0]), /uses:/, "the gate is a local check, not an action");
+    assert.match(usesOf(steps[1]) ?? "", /^actions\/download-artifact@[0-9a-f]{40}$/, "the first action after the gate is the download");
   }
 });
 
 test("macOS signing signs, notarizes, staples, verifies, and always removes its keychain", () => {
-  const job = workflowJobs(read(".github/workflows/installer-signing.yml")).get("macos-sign");
+  const job = text(workflowJobs(read(".github/workflows/installer-signing.yml")).get("macos-sign"));
   const ordered = [
     /security create-keychain/,
     /security import [^\n]*-f pkcs12/,
@@ -534,16 +571,19 @@ test("macOS signing signs, notarizes, staples, verifies, and always removes its 
   }
   assert.match(job, /--key-id "\$NOTARY_KEY_ID" --issuer "\$NOTARY_ISSUER_ID"/, "notarization uses an App Store Connect API key");
   assert.match(job, /status" != "Accepted"/, "a rejected submission stops before stapling");
-  const cleanup = workflowSteps(job).find((step) => /delete-keychain/.test(step));
+  const cleanup = workflowSteps(workflowJobs(read(".github/workflows/installer-signing.yml")).get("macos-sign"))
+    .find((step) => /delete-keychain/.test(text(step)));
   assert.ok(cleanup, "a keychain deletion step exists");
-  assert.match(cleanup, /^\s*if: always\(\)$/m, "the keychain is deleted even when signing fails");
-  assert.match(cleanup, /notary-key\.p8/);
+  assert.equal(cleanup.if, "always()", "the keychain is deleted even when signing fails");
+  assert.match(text(cleanup), /notary-key\.p8/);
 });
 
 test("Windows signing uses OIDC Artifact Signing with a SHA-256 timestamp and verifies the result", () => {
-  const job = workflowJobs(read(".github/workflows/installer-signing.yml")).get("windows-sign");
-  const signing = workflowSteps(job).find((step) => /-signing-action@/.test(step));
-  assert.ok(signing);
+  const parsedJob = workflowJobs(read(".github/workflows/installer-signing.yml")).get("windows-sign");
+  const job = text(parsedJob);
+  const parsedSigning = workflowSteps(parsedJob).find((step) => /-signing-action@/i.test(usesOf(step) ?? ""));
+  assert.ok(parsedSigning);
+  const signing = text(parsedSigning);
   assert.match(signing, /endpoint: \$\{\{ vars\.ARTIFACT_SIGNING_ENDPOINT \}\}/);
   assert.match(signing, /signing-account-name: \$\{\{ vars\.ARTIFACT_SIGNING_ACCOUNT_NAME \}\}/);
   assert.match(signing, /certificate-profile-name: \$\{\{ vars\.ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME \}\}/);
@@ -574,14 +614,14 @@ test("the WiX v7 EULA is accepted only after the OSMF decision is confirmed", ()
   const workflow = read(".github/workflows/machine-prep-installers.yml");
   const jobs = workflowJobs(workflow);
   const windowsSteps = workflowSteps(jobs.get("windows-unsigned"));
-  assert.match(windowsSteps[0], /^\s*if: \$\{\{ !inputs\.wix_osmf_confirmed \}\}$/m,
+  assert.equal(windowsSteps[0].if, "${{ !inputs.wix_osmf_confirmed }}",
     "an unconfirmed dispatch stops at the first step, before WiX is downloaded");
-  assert.match(windowsSteps[0], /Open Source Maintenance Fee/);
-  assert.match(windowsSteps[0], /exit 1/);
-  const build = windowsSteps.find((step) => /dotnet build/.test(step));
-  assert.match(build, /^\s*if: inputs\.wix_osmf_confirmed$/m);
-  assert.match(build, /WIX_OSMF_CONFIRMED: \$\{\{ inputs\.wix_osmf_confirmed \}\}/);
-  assert.match(build, /-p:WixOsmfConfirmed=true/);
+  assert.match(text(windowsSteps[0]), /Open Source Maintenance Fee/);
+  assert.match(text(windowsSteps[0]), /exit 1/);
+  const build = windowsSteps.find((step) => /dotnet build/.test(text(step)));
+  assert.equal(build.if, "inputs.wix_osmf_confirmed");
+  assert.equal(build.env?.WIX_OSMF_CONFIRMED, "${{ inputs.wix_osmf_confirmed }}");
+  assert.match(build.run, /-p:WixOsmfConfirmed=true/);
   assert.equal([...workflow.matchAll(/WixOsmfConfirmed=true/g)].length, 1, "only the gated build passes the confirmation");
 });
 

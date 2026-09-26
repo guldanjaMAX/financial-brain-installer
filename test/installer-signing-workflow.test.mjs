@@ -17,12 +17,14 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import test from "node:test";
-// Job, trigger, permission and step uses keys are read by the shared parser, which sees
-// every key spelling YAML accepts (S3-R, S10); the rest of this file's readers are local.
+// Every workflow read here goes through the shared YAML subset parser, which
+// loads the objects GitHub loads and refuses any spelling outside its subset
+// (S3-R, S10, S10-R). No policy or step lookup below reads workflow lines.
 import {
-  WorkflowParseError, jobPermissions, jobSteps, mappingEntries, topLevelPermissions, triggerNames, unquote, usesOf,
-  workflowJobs, workflowUses,
+  WorkflowParseError, callsAction, canonicalText, isCheckout, jobPermissions, jobSteps, parseWorkflow,
+  topLevelPermissions, triggerNames, usesOf, workflowJobs, workflowUses,
 } from "./helpers/workflow-yaml.mjs";
+import { SIGNING_SPELLING_MUTATIONS, UNSIGNED_SPELLING_MUTATIONS } from "./helpers/workflow-spelling-mutations.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const read = (path) => readFileSync(join(ROOT, path), "utf8").replaceAll("\r\n", "\n");
@@ -31,49 +33,39 @@ const UNSIGNED_PATH = ".github/workflows/machine-prep-installers.yml";
 const PLANNED_PUBLISHER = "Financial Brain LLC";
 
 // ---------------------------------------------------------------------------
-// Minimal, indentation-based readers for the two reviewed workflow files.
+// Readers over the parsed workflow.
 
-function topLevelBlock(workflow, key) {
-  const lines = workflow.split("\n");
-  const start = lines.findIndex((line) => new RegExp(`^(?:${key}|"${key}"|'${key}'):(.*)$`).test(line));
-  if (start < 0) return null;
-  const inline = lines[start].slice(lines[start].indexOf(":") + 1).trim();
-  const body = [];
-  for (let index = start + 1; index < lines.length; index++) {
-    if (/^\S/.test(lines[index])) break;
-    body.push(lines[index]);
-  }
-  return { inline, body };
-}
-
-const workflowSteps = (job) => job.split(/^      - /m).slice(1);
-const topPermissions = (workflow) => topLevelPermissions(workflow);
+const workflowSteps = (job) => jobSteps(job);
 
 function stepNamed(job, name) {
-  const step = workflowSteps(job).find((candidate) => candidate.startsWith(`name: ${name}\n`));
+  const step = jobSteps(job).find((candidate) => candidate.name === name);
   assert.ok(step, `step "${name}" exists`);
   return step;
 }
 
+/** The step that calls `action` (owner/repo, any letter case). */
+const stepCalling = (job, action) => jobSteps(job).find((step) => callsAction(usesOf(step) ?? "", action));
+
+/** A scalar as GitHub hands it to an action input or environment: booleans and numbers become strings. */
+const githubString = (value) => (value === null || value === undefined ? null : typeof value === "object" ? JSON.stringify(value) : String(value));
+
+/**
+ * The `with` input or `env` variable `key` of a step, as a string, or null when
+ * neither declares it. A key declared in both is ambiguous and fails.
+ */
 function withValue(step, key) {
-  return new RegExp(`^\\s+${key}: (.*)$`, "m").exec(step)?.[1]?.trim() ?? null;
+  const found = ["with", "env"].filter((block) => step[block] && typeof step[block] === "object" && Object.hasOwn(step[block], key));
+  assert.ok(found.length <= 1, `${key} is declared in both with and env`);
+  return found.length ? githubString(step[found[0]][key]) : null;
 }
 
-/** The literal script of a step's `run: |` block, dedented. */
+/** The script of a step's `run` block, exactly as the YAML block scalar loads. */
 function runScript(step) {
-  const lines = step.split("\n");
-  const start = lines.findIndex((line) => /^\s+run: \|$/.test(line));
-  assert.notEqual(start, -1, "the step has a run block");
-  const indent = /^\s*/.exec(lines[start])[0].length;
-  const body = [];
-  for (let index = start + 1; index < lines.length; index++) {
-    const line = lines[index];
-    if (line.trim() && line.length - line.trimStart().length <= indent) break;
-    body.push(line);
-  }
-  const margin = Math.min(...body.filter((line) => line.trim()).map((line) => line.length - line.trimStart().length));
-  return body.map((line) => line.slice(margin)).join("\n");
+  assert.equal(typeof step.run, "string", "the step has a run block");
+  return step.run;
 }
+
+const PINNED = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/;
 
 /**
  * The whole token and trigger policy of one workflow. A regression in any
@@ -83,46 +75,37 @@ function assertWorkflowPolicy(workflow, expected) {
   try {
     assertWorkflowPolicyParsed(workflow, expected);
   } catch (error) {
-    // A spelling the parser refuses (a duplicate or flow-style key) is a policy failure too.
+    // A spelling the parser refuses (outside its subset, or a duplicate key) is a policy failure too.
     if (error instanceof WorkflowParseError) assert.fail(`the workflow could not be read exactly: ${error.message}`);
     throw error;
   }
 }
 
-function assertWorkflowPolicyParsed(workflow, expected) {
+function assertWorkflowPolicyParsed(text, expected) {
+  const workflow = parseWorkflow(text);
   assert.deepEqual(triggerNames(workflow), ["workflow_dispatch"], "workflow_dispatch is the only trigger");
-  assert.deepEqual(topPermissions(workflow), expected.top, "top-level permissions are exact");
+  assert.deepEqual(topLevelPermissions(workflow), expected.top, "top-level permissions are exact");
   const jobs = workflowJobs(workflow);
   assert.deepEqual([...jobs.keys()].sort(), Object.keys(expected.jobs).sort(), "the job set is exact");
   for (const [name, job] of jobs) {
     assert.deepEqual(jobPermissions(job), expected.jobs[name], `${name} permissions are exact`);
-    for (const step of workflowSteps(job)) {
-      const uses = /^\s*uses: ([^\s#]+)/m.exec(step)?.[1];
-      if (!uses) continue;
-      assert.match(uses, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/, `${uses} is pinned to a full commit`);
-      if (/^actions\/checkout@/.test(uses)) {
-        assert.equal(withValue(step, "persist-credentials"), "false", `${name} checkout does not persist its token`);
-      }
-    }
-    // S10: the same checks through the shared parser, which also sees a quoted,
-    // commented or continued uses key that the line pattern above cannot.
     for (const step of jobSteps(job)) {
       const uses = usesOf(step);
       if (uses === null) continue;
-      assert.match(uses, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/, `${uses} is pinned to a full commit`);
-      if (/^actions\/checkout@/.test(uses)) {
-        const options = mappingEntries(step.find((entry) => entry.key === "with")?.lines ?? []);
-        const persist = options.find((entry) => entry.key === "persist-credentials")?.value;
-        assert.equal(persist === undefined ? null : unquote(persist), "false", `${name} checkout does not persist its token`);
+      assert.match(uses, PINNED, `${uses} is pinned to a full commit`);
+      // GitHub resolves owner/repo without regard to case, so Actions/Checkout is a checkout too.
+      if (isCheckout(uses)) {
+        const options = step.with && typeof step.with === "object" && !Array.isArray(step.with) ? step.with : {};
+        const persist = Object.hasOwn(options, "persist-credentials") ? githubString(options["persist-credentials"]) : null;
+        assert.equal(persist, "false", `${name} checkout does not persist its token`);
       }
     }
   }
   const references = workflowUses(workflow);
   for (const reference of references) {
-    assert.match(reference, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/, `${reference} is pinned to a full commit`);
+    assert.match(reference, PINNED, `${reference} is pinned to a full commit`);
   }
-  assert.equal(references.filter((reference) => /^actions\/checkout@/.test(reference)).length, expected.checkouts,
-    "the number of repository checkouts is exact");
+  assert.equal(references.filter(isCheckout).length, expected.checkouts, "the number of repository checkouts is exact");
 }
 
 const SIGNING_POLICY = Object.freeze({
@@ -147,7 +130,7 @@ function uploadedBasenames() {
   const jobs = workflowJobs(read(UNSIGNED_PATH));
   const byJob = {};
   for (const [jobName, job] of jobs) {
-    const upload = workflowSteps(job).find((step) => /actions\/upload-artifact@/.test(step));
+    const upload = stepCalling(job, "actions/upload-artifact");
     assert.ok(upload, `${jobName} uploads its artifact`);
     // upload-artifact names an unarchived upload after the file, ignoring name:.
     assert.equal(withValue(upload, "archive"), "false");
@@ -168,26 +151,26 @@ test("S1 each signing job downloads by immutable artifact ID the exact file the 
     const provenance = workflowSteps(job)[0];
     assert.equal(withValue(provenance, "EXPECTED_ARTIFACT_NAME"), uploaded[buildJob],
       `${signingJob} asks for the artifact name upload-artifact really produced`);
-    const download = workflowSteps(job).find((step) => /actions\/download-artifact@/.test(step));
+    const download = stepCalling(job, "actions/download-artifact");
     assert.equal(withValue(download, "name"), null, "the download never selects by a mutable name");
     assert.equal(withValue(download, "artifact-ids"), "${{ steps.provenance.outputs.artifact_id }}");
     assert.equal(withValue(download, "run-id"), "${{ steps.provenance.outputs.run_id }}");
     assert.equal(withValue(download, "skip-decompress"), "true");
     assert.equal(withValue(download, "digest-mismatch"), "error");
     assert.equal(withValue(download, "path"), "unsigned");
-    assert.ok(job.includes(`unsigned/${uploaded[buildJob]}`), `${signingJob} signs unsigned/${uploaded[buildJob]}`);
+    assert.ok(canonicalText(job).includes(`unsigned/${uploaded[buildJob]}`), `${signingJob} signs unsigned/${uploaded[buildJob]}`);
   }
 });
 
 test("S1 the unsigned build publishes each artifact ID and digest for the signing dispatch", () => {
   const jobs = workflowJobs(read(UNSIGNED_PATH));
   for (const job of jobs.values()) {
-    const upload = workflowSteps(job).find((step) => /actions\/upload-artifact@/.test(step));
-    assert.match(upload, /^\s+id: upload$/m);
+    const upload = stepCalling(job, "actions/upload-artifact");
+    assert.equal(upload.id, "upload");
     const receipt = stepNamed(job, "record the artifact ID and digest to sign");
     assert.equal(withValue(receipt, "ARTIFACT_ID"), "${{ steps.upload.outputs.artifact-id }}");
     assert.equal(withValue(receipt, "ARTIFACT_DIGEST"), "${{ steps.upload.outputs.artifact-digest }}");
-    assert.match(receipt, /GITHUB_STEP_SUMMARY/);
+    assert.match(canonicalText(receipt), /GITHUB_STEP_SUMMARY/);
   }
 });
 
@@ -522,8 +505,8 @@ test("S8 the gate's platform job names are the unsigned workflow's own job names
   const unsignedJobs = workflowJobs(read(UNSIGNED_PATH));
   const { macProgram } = embeddedProvenance();
   for (const [buildJob, file] of [["macos-unsigned", "FinancialBrainMachinePrep-unsigned.pkg"], ["windows-unsigned", "FinancialBrainMachinePrep-unsigned.msi"]]) {
-    const displayName = /^    name: (.+)$/m.exec(unsignedJobs.get(buildJob))?.[1];
-    assert.ok(displayName, `${buildJob} has a display name`);
+    const displayName = unsignedJobs.get(buildJob).name;
+    assert.ok(typeof displayName === "string" && displayName, `${buildJob} has a display name`);
     assert.ok(macProgram.includes(`"${file}": "${displayName}"`), `the gate reads the "${displayName}" job for ${file}`);
   }
   assert.doesNotMatch(macProgram, /run\.conclusion !== "success"/, "the whole-run conclusion no longer decides");
@@ -553,19 +536,19 @@ test("S2 an API error is a refusal, not a pass", () => {
 
 test("S2 the provenance gate precedes every download and the digest is re-checked before signing", () => {
   const workflow = read(SIGNING_PATH);
-  const inputs = topLevelBlock(workflow, "on").body.join("\n");
-  assert.match(inputs, /^      unsigned_artifact_id:$/m);
-  assert.match(inputs, /^      unsigned_sha256:$/m);
+  const inputs = parseWorkflow(workflow).on.workflow_dispatch.inputs;
+  assert.ok(Object.hasOwn(inputs, "unsigned_artifact_id"), "the dispatch takes the artifact ID");
+  assert.ok(Object.hasOwn(inputs, "unsigned_sha256"), "the dispatch takes the SHA-256");
   const jobs = workflowJobs(workflow);
   for (const [name, signingPattern] of [["macos-sign", /productsign/], ["windows-sign", /-signing-action@/]]) {
     const steps = workflowSteps(jobs.get(name));
-    const download = steps.findIndex((step) => /actions\/download-artifact@/.test(step));
-    const digest = steps.findIndex((step) => step.startsWith("name: verify the downloaded bytes against the dispatched SHA-256\n"));
-    const signing = steps.findIndex((step) => signingPattern.test(step));
+    const download = steps.findIndex((step) => callsAction(usesOf(step) ?? "", "actions/download-artifact"));
+    const digest = steps.findIndex((step) => step.name === "verify the downloaded bytes against the dispatched SHA-256");
+    const signing = steps.findIndex((step) => signingPattern.test(canonicalText(step)));
     assert.equal(download, 1, `${name} downloads right after the gate`);
     assert.ok(digest > download && digest < signing, `${name} re-hashes the download before signing`);
     const gate = steps[0];
-    assert.match(gate, /^\s+id: provenance$/m);
+    assert.equal(gate.id, "provenance");
     assert.equal(withValue(gate, "UNSIGNED_RUN_ID"), "${{ inputs.unsigned_run_id }}");
     assert.equal(withValue(gate, "UNSIGNED_ARTIFACT_ID"), "${{ inputs.unsigned_artifact_id }}");
     assert.equal(withValue(gate, "UNSIGNED_SHA256"), "${{ inputs.unsigned_sha256 }}");
@@ -671,6 +654,9 @@ const mutations = [
   [UNSIGNED_PATH, UNSIGNED_POLICY, "a single-quoted unsigned checkout uses key that persists its token", (text) => text.replace(
     /^      - uses: (actions\/checkout@[0-9a-f]{40}) # v7\.0\.1\n        with:\n          persist-credentials: false$/m,
     "      - 'uses': $1 # v7.0.1\n        with:\n          persist-credentials: true")],
+  // S10-R: multi-space step dashes, quoted keys, comments and mixed-case action names.
+  ...SIGNING_SPELLING_MUTATIONS.map(([name, mutate]) => [SIGNING_PATH, SIGNING_POLICY, `S10-R ${name}`, mutate]),
+  ...UNSIGNED_SPELLING_MUTATIONS.map(([name, mutate]) => [UNSIGNED_PATH, UNSIGNED_POLICY, `S10-R unsigned ${name}`, mutate]),
 ];
 for (const [path, policy, name, mutate] of mutations) {
   test(`S3 mutation "${name}" fails the policy check`, () => {
@@ -748,7 +734,7 @@ test("S8 the owner checklist says the platform job, not the whole run, must succ
 
 test("S5 the Artifact Signing action does not restore its tools from the shared cache", () => {
   const job = workflowJobs(read(SIGNING_PATH)).get("windows-sign");
-  const signing = workflowSteps(job).find((step) => /-signing-action@/.test(step));
+  const signing = workflowSteps(job).find((step) => /-signing-action@/i.test(usesOf(step) ?? ""));
   assert.equal(withValue(signing, "cache-dependencies"), "false");
 });
 
@@ -851,7 +837,7 @@ test("S6 the signed package's certificate chain must name the declared team", { 
 test("S6 the workflow reads the team from configuration and the Windows signer must be the planned publisher", () => {
   const workflow = read(SIGNING_PATH);
   const jobs = workflowJobs(workflow);
-  const macGate = workflowSteps(jobs.get("macos-sign"))[0];
+  const macGate = canonicalText(workflowSteps(jobs.get("macos-sign"))[0]);
   assert.match(macGate, /APPLE_TEAM_ID: \$\{\{ vars\.APPLE_TEAM_ID \}\}/);
   assert.match(macGate, /\^\[A-Z0-9\]\{10\}\$/, "the team ID is validated before anything is downloaded");
   for (const name of ["create a temporary signing keychain", "sign the package with a secure timestamp", "verify the exact distributed bytes"]) {
