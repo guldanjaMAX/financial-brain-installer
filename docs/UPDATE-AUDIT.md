@@ -183,11 +183,27 @@ exports remain unbound, and the legacy whole-source provenance repair remains
 unaccepted. Every narrow receipt states `whole_source_complete: false` and does
 not authorize OCR, reingest, deletion, deployment, or customer execution.
 Nothing in this candidate
-weakens the gate. Exactly one acceptance text changed, as a re-homing recorded
+weakens the gate. The acceptance-text record depends on the reference point.
+Since the held 0.4.8 candidate, exactly one clause was re-homed, as recorded
 in [ADR 007](decisions/007-rehome-update-006-arm64-clause.md): UPDATE-006 keeps
 every Windows x64 CLI-identity requirement and no longer carries the ARM64
-clause, and UPDATE-012 gains that ARM64 CLI-identity requirement verbatim. No
-row changed status, evidence, or deferral, and the release workflow still
+clause, and UPDATE-012 gains that ARM64 CLI-identity requirement verbatim.
+Against the last shipped release, v0.4.6, two more acceptance texts were
+rewritten during the unshipped 0.4.7/0.4.8 work and ship for the first time in
+0.4.9. UPDATE-037 (commit `41e8e30`) now requires the Windows refusal to name a
+supported route that needs no secret entry, instead of a route that masks
+entry, because this release ships no PowerShell secret-entry bridge; the
+physical PowerShell 5.1 and 7 proof stays required. UPDATE-036 (commit
+`0428346`) replaced the runbook-only requirement with a packaged preview gate:
+all local checks before any credential or network access, exactly one
+authenticated aggregate read with no Cloudflare control-plane request, a
+receipt fingerprint bound to that response, a shortfall recoverable only when
+queued upserts cover the full deficit, every other shortfall or malformed state
+stopping, and proof of zero writes and side effects. UPDATE-043 is a new row
+since v0.4.6, not a changed text. The eight v0.4.6 deferrals (UPDATE-012,
+UPDATE-017 through UPDATE-022, and UPDATE-025) named version 0.4.6 and have
+expired; none was renewed for 0.4.7, 0.4.8, or 0.4.9. No row changed status or
+evidence with the ADR 007 re-homing, and the release workflow still
 refuses to publish while any incident blocks. Earlier candidate
 rehearsals do not automatically clear changed code. Current named-profile OAuth
 uses its reviewed encrypted backend; the legacy TOML reader now refreshes with

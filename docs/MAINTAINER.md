@@ -258,9 +258,12 @@ and 0.4.8 candidates were never tagged, published, or offered as customer
 updates; their identities are retired so their evidence cannot be mistaken for
 evidence from these changed bytes. At this freeze the current candidate's
 40-row audit has 36 unresolved incidents, no renewed deferrals, and four rows
-closed on reviewed evidence. One acceptance text was re-homed, not weakened:
+closed on reviewed evidence. Since the held 0.4.8 candidate one clause was
+re-homed, not weakened:
 [ADR 007](./decisions/007-rehome-update-006-arm64-clause.md) moves UPDATE-006's
-Windows ARM64 clause into UPDATE-012. A tag requests the release workflow; it never
+Windows ARM64 clause into UPDATE-012. Against the last shipped v0.4.6, the
+UPDATE-036 and UPDATE-037 acceptance texts were also rewritten in the unshipped
+0.4.7/0.4.8 work; [UPDATE-AUDIT.md](./UPDATE-AUDIT.md) records both. A tag requests the release workflow; it never
 bypasses CI, unresolved incidents, owner acceptance, or the repository's
 immutable-release setting. Do not create or publish releases by hand to work
 around a failed workflow. The
