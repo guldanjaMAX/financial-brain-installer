@@ -24,12 +24,46 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { posix, win32 } from "node:path";
+import { renderCommandWithEnvironment } from "./command-display.mjs";
 import { REVIEWED_WRANGLER_SPEC } from "./wrangler-runtime-contract.mjs";
 
 // This parser keeps compatibility with the legacy default-profile TOML layout,
 // but every refresh runs through the same patched runtime as current named
 // profiles. A cached older npx package can therefore never be selected here.
 export const WRANGLER_SPEC = REVIEWED_WRANGLER_SPEC;
+
+/*
+ * The named-profile flow runs `wrangler auth keyring enable`, which Wrangler
+ * persists globally in preferences.json. Wrangler 4.131.1 then routes the
+ * default profile through its encrypted store too: the first read moves
+ * default.toml into default.enc and deletes the plaintext, so this parser
+ * finds nothing and "sign in again" loops. CLOUDFLARE_AUTH_USE_KEYRING=false
+ * is checked before that preference and selects the plaintext store without
+ * touching the preference or the keyring, so named profiles keep theirs.
+ * Only the legacy default-profile path uses this; named profiles force "true".
+ */
+export const LEGACY_WRANGLER_KEYRING_OPT_OUT = Object.freeze({ CLOUDFLARE_AUTH_USE_KEYRING: "false" });
+
+/** The copyable sign-in that writes the legacy plaintext session this parser reads. */
+export function legacyWranglerLoginCommand({ platformName = process.platform } = {}) {
+  return renderCommandWithEnvironment(LEGACY_WRANGLER_KEYRING_OPT_OUT, `npx ${WRANGLER_SPEC} login`, {
+    platformName,
+  });
+}
+
+const REFRESH_ENV_ALLOWLIST = Object.freeze(["PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+  "XDG_CONFIG_HOME", "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR",
+  "LANG", "LC_ALL"]);
+
+/**
+ * The refresh child's whole environment. The keyring opt-out is set after the
+ * allowlist so a parent value in either direction can never reach Wrangler.
+ */
+export function legacyWranglerRefreshEnvironment(source = process.env) {
+  const env = Object.fromEntries(REFRESH_ENV_ALLOWLIST
+    .filter((key) => typeof source?.[key] === "string").map((key) => [key, source[key]]));
+  return { ...env, ...LEGACY_WRANGLER_KEYRING_OPT_OUT };
+}
 
 /** Every place wrangler is known to keep its config, newest layout first. */
 export function wranglerConfigCandidates(env = process.env, platform = process.platform) {
@@ -86,10 +120,7 @@ export function parseWranglerSession(text) {
  */
 export function refreshWranglerSession(options = {}) {
   const run = options.run ?? spawnSync;
-  const source = options.env ?? process.env;
-  const keys = ["PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME",
-    "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL"];
-  const env = Object.fromEntries(keys.filter((key) => typeof source[key] === "string").map((key) => [key, source[key]]));
+  const env = legacyWranglerRefreshEnvironment(options.env ?? process.env);
   // Wrangler writes `.wrangler/cache` under its own working directory. A child
   // that inherits the caller's directory fails outright from an unwritable one
   // (a Windows shell starts in `C:\Windows\system32`), and the credential is

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { WRANGLER_SPEC, refreshWranglerSession } from '../operations/wrangler-oauth.mjs';
+import { WRANGLER_SPEC, legacyWranglerLoginCommand, refreshWranglerSession } from '../operations/wrangler-oauth.mjs';
 import { CLOUDFLARE_OAUTH_WRANGLER_PACKAGE } from '../operations/cloudflare-oauth-session.mjs';
 import { LOCKED_WRANGLER_VERSION } from '../operations/locked-wrangler-runtime.mjs';
 import {
@@ -66,6 +66,21 @@ assert.equal(refreshWranglerSession({ env: { HOME: '/synthetic-home', CLOUDFLARE
 assert.deepEqual(called.args, [WRANGLER_SPEC, 'whoami']);
 assert.equal(called.env.CLOUDFLARE_API_TOKEN, undefined);
 assert.equal(called.env.UNRELATED_DESKTOP_VALUE, undefined);
+// The legacy sign-in advice must write the plaintext session the legacy reader
+// parses, so it carries the same keyring opt-out as the refresh child, in a
+// form each platform's copy shell accepts. PowerShell rejects `NAME=value cmd`.
+assert.equal(called.env.CLOUDFLARE_AUTH_USE_KEYRING, 'false');
+assert.equal(legacyWranglerLoginCommand({ platformName: 'linux' }),
+  `CLOUDFLARE_AUTH_USE_KEYRING='false' npx ${REVIEWED_WRANGLER_SPEC} login`);
+assert.equal(legacyWranglerLoginCommand({ platformName: 'darwin' }),
+  `CLOUDFLARE_AUTH_USE_KEYRING='false' npx ${REVIEWED_WRANGLER_SPEC} login`);
+assert.equal(legacyWranglerLoginCommand({ platformName: 'win32' }),
+  `$env:CLOUDFLARE_AUTH_USE_KEYRING='false'; npx ${REVIEWED_WRANGLER_SPEC} login`);
+// `--no-use-keyring` would persist a global preference and silently disable
+// the named-profile flow's encrypted storage, so the advice must never use it.
+for (const platformName of ['linux', 'darwin', 'win32']) {
+  assert.doesNotMatch(legacyWranglerLoginCommand({ platformName }), /use-keyring/);
+}
 // Guides are executable too: a client runs what the guide says. An unpinned
 // `npx wrangler@4 login` in onboarding is how an install ends up on a wrangler
 // that writes an encrypted session the installer cannot read, which is the
