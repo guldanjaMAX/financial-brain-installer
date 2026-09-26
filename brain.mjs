@@ -23208,10 +23208,17 @@ export async function cmdWindowsScheduledIngest(manifestPath, options = {}) {
     try {
       const scheduler = options.scheduler ?? await import("./operations/windows-task-scheduler.mjs");
       const from = typeof flags?.from === "string" ? flags.from : null;
+      const folder = typeof flags?.path === "string" && flags.path.length > 0;
+      const validFrom = from === "drive" || PROVIDER_CONNECTOR_IDS.includes(from);
+      // Only an action naming exactly one valid lane may write to a lane log.
+      // With an invalid --from or no lane, provider null and folder false would
+      // otherwise resolve to the Drive lane and misfile the failure there.
+      const laneKnown = folder ? !from && Boolean(flags?.source) : validFrom;
       scheduler.recordWindowsScheduledFailure?.(manifestPath, error, {
         ...(options.schedulerOptions || {}),
-        folder: typeof flags?.path === "string" && flags.path.length > 0,
-        provider: from && from !== "drive" && PROVIDER_CONNECTOR_IDS.includes(from) ? from : null,
+        folder,
+        provider: validFrom && from !== "drive" ? from : null,
+        laneUnknown: !laneKnown,
       });
     } catch {
       // The original failure below is the one to report.

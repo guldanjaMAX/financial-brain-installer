@@ -552,10 +552,12 @@ export function recordWindowsScheduledFailure(manifestPath, error, options = {})
   if (error?.windowsLaneLogged) return true;
   const log = laneLog(options);
   let taskName = null;
-  try {
-    ({ taskName } = buildWindowsSchedulerPlan(manifestPath, { ...options, plan: undefined, action: "status" }));
-  } catch {
-    // The lane is unknown; the shared runner log below still records the run.
+  if (!options.laneUnknown) {
+    try {
+      ({ taskName } = buildWindowsSchedulerPlan(manifestPath, { ...options, plan: undefined, action: "status" }));
+    } catch {
+      // The lane is unknown; the shared runner log below still records the run.
+    }
   }
   const recorded = log.record(windowsLaneLogPath(taskName, options), error);
   markLogged(error, recorded);

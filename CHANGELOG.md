@@ -183,8 +183,8 @@ asset publication.
   instead of disappearing with the hidden console. Status says plainly when
   no task exists, in any Windows display language, and reports drift when the
   schedule, domain, admin key name, token store, source settings, folder, or
-  interpreter changed since install or when a power setting was weakened. A run refuses to start in that
-  state until you reinstall.
+  interpreter changed since install or when a power setting was weakened. A
+  run refuses to start in that state until you reinstall.
   The task follows the manifest's effective five-field cron when one Windows
   entry can express it exactly: hourly at a chosen minute, every N hours when N
   divides 24, daily, or weekly on chosen days. Other valid cron shapes stop

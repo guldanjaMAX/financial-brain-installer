@@ -914,6 +914,25 @@ await check("W7-R an unreadable manifest is recorded as metadata only in the run
   assert.doesNotMatch(log.appended[0][1], /fixture-private-content/);
 });
 
+await check("W7-R a tampered action with no valid lane is logged to the runner log, never the Drive lane's", async () => {
+  const runnerLog = `${localAppData}\\FinancialBrain\\logs\\windows-scheduled-ingest.log`;
+  const driveLog = `${localAppData}\\FinancialBrain\\logs\\com.brain-installer.fixture-brain.drive-ingest.log`;
+  for (const flags of [
+    { from: "not-a-provider", "config-hash": "a".repeat(64) },
+    { "config-hash": "a".repeat(64) },
+    { from: "slack", path: String.raw`C:\Source Files`, source: "documents", "config-hash": "a".repeat(64) },
+  ]) {
+    const log = recordingLog();
+    await assert.rejects(brain.cmdWindowsScheduledIngest(manifestPath, {
+      platform: "win32", flags, schedulerOptions: options({ appendLog: log.appendLog }), setExitCode() {},
+    }));
+    const label = JSON.stringify(flags);
+    assert.deepEqual(log.appended.map(([path]) => path), [runnerLog], `${label} was recorded in the runner log only`);
+    assert.ok(!log.appended.some(([path]) => path === driveLog), `${label} never touched the Drive lane log`);
+    assert.match(log.appended[0][1], /scheduled ingest failed: /);
+  }
+});
+
 rmSync(cliDirectory, { recursive: true, force: true });
 
 assert.deepEqual(schedulerRunnerAttempts, [], "no check reached a real schtasks");
