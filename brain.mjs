@@ -10425,7 +10425,7 @@ async function provenanceRepairContext(manifestPath, source, options = {}) {
   };
 }
 
-async function runApprovedProvenanceRewalk(context, flags, options = {}) {
+export async function runApprovedProvenanceRewalk(context, flags, options = {}) {
   if (options.runSourceRewalk) {
     return options.runSourceRewalk({
       manifest: context.manifest,
@@ -10442,7 +10442,8 @@ async function runApprovedProvenanceRewalk(context, flags, options = {}) {
     ...(flags["approve-removals"] ? { "approve-removals": flags["approve-removals"] } : {}),
   };
   if (context.plan.source.kind === "upload") {
-    return cmdIngestLocal(context.manifest, context.absoluteManifest, {
+    const ingestLocal = options.ingestLocal ?? cmdIngestLocal;
+    return ingestLocal(context.manifest, context.absoluteManifest, {
       ...shared,
       path: context.manifest.corpora.local_folder.path,
     });
@@ -11506,7 +11507,9 @@ function sourceIngestLockRuntimeOptions(options = {}) {
  * directly, through `brain load`, or by provenance repair. The caller resolves
  * source identity first, then this function acquires the source lease and any
  * shared credential-record lease before credentials, network, resume-state
- * reads, or receipts. Dry runs never enter either lock.
+ * reads, or receipts. Remote dry runs never enter either lock. Local-folder
+ * dry runs opt in because folder retirement must be able to observe every
+ * active filesystem walk, including a read-only one that may hydrate files.
  */
 async function runMutatingSourceIngest({
   manifestPath,
@@ -11514,10 +11517,11 @@ async function runMutatingSourceIngest({
   statePath,
   sharedRecord = null,
   dryRun,
+  lockDryRun = false,
   options = {},
 }, task) {
   if (typeof task !== "function") throw new TypeError("a source ingest task is required");
-  if (dryRun) return task(null);
+  if (dryRun && !lockDryRun) return task(null);
   const lockTask = options.withSourceIngestLock ?? withSourceIngestLock;
   const runtimeOptions = sourceIngestLockRuntimeOptions(options);
   try {
@@ -11549,7 +11553,48 @@ async function runMutatingSourceIngest({
   }
 }
 
-function localIngestContext(m, manifestPath, flags) {
+const RETIRED_FOLDER_NEXT_LINE = Object.freeze({
+  bare_path_after_retirement:
+    "To read a different folder, name the source with --source <a new name>.",
+  retired_source:
+    "Choose a new source name for a folder outside the retired folder.",
+  inside_retired:
+    "Choose a folder outside the retired folder and give it a new source name.",
+  contains_retired:
+    "Choose a folder that does not contain the retired folder and give it a new source name.",
+});
+
+function refuseRetiredLocalFolder(retired, variant) {
+  const date = String(retired?.retired_at || "").trim();
+  dieInputRefused(
+    `This folder was retired from your Brain on ${date}, so it is not read again. ` +
+      "Nothing was read, sent or removed. Your documents from it are still in your Brain.\n" +
+      `      ${RETIRED_FOLDER_NEXT_LINE[variant]}`,
+    `LOCAL_FOLDER_RETIRED:${variant}`,
+  );
+}
+
+function retiredLocalFolderVariant(m, root, flags, options = {}) {
+  const retired = retiredLocalFolderOf(m);
+  if (!retired) return { retired: null, variant: null };
+  const rawSource = flags.source;
+  const sourceMissing = rawSource === undefined || rawSource === null || rawSource === true ||
+    (typeof rawSource === "string" && rawSource.trim() === "");
+  if (sourceMissing) return { retired, variant: "bare_path_after_retirement" };
+  const source = assertSourceName(String(rawSource).trim());
+  const retiredSource = assertSourceName(String(retired.retired_source || "documents").trim());
+  if (source === retiredSource) return { retired, variant: "retired_source" };
+  if (!existsSync(root)) return { retired, variant: null };
+  return {
+    retired,
+    variant: retiredFolderLocationVariant(retired, root, {
+      platform: options.platform || process.platform,
+      ...(options.retiredFolderFs ? { fs: options.retiredFolderFs } : {}),
+    }),
+  };
+}
+
+function localIngestContext(m, manifestPath, flags, options = {}) {
   // A local folder now reconciles its own deletions, so it has the same
   // approval gate Drive does. It stays invalid on every OTHER remote source,
   // which is checked in cmdIngestRemote.
@@ -11569,6 +11614,10 @@ function localIngestContext(m, manifestPath, flags) {
         "             or \"upload\" when it declares none),\n" +
         "            --reset to ignore previous progress and re-send everything."
     );
+  }
+  const retiredDecision = retiredLocalFolderVariant(m, root, flags, options);
+  if (retiredDecision.variant) {
+    refuseRetiredLocalFolder(retiredDecision.retired, retiredDecision.variant);
   }
   if (!existsSync(root)) die(`no such folder: ${root}`);
 
@@ -11606,17 +11655,19 @@ function localIngestContext(m, manifestPath, flags) {
     declaredSource,
     sourceName,
     dry: !!flags["dry-run"],
+    retired: retiredDecision.retired,
     statePath: canonicalSourceIngestStatePath({ manifestPath, sourceName }),
   };
 }
 
 export async function cmdIngestLocal(m, manifestPath, flags, options = {}) {
-  const context = localIngestContext(m, manifestPath, flags);
+  const context = localIngestContext(m, manifestPath, flags, options);
   return runMutatingSourceIngest({
     manifestPath,
     sourceName: context.sourceName,
     statePath: context.statePath,
     dryRun: context.dry,
+    lockDryRun: true,
     options,
   }, (assertLockOwned) => cmdIngestLocalRun(
     m,
@@ -11636,6 +11687,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     declaredSource,
     sourceName,
     dry,
+    retired,
     statePath,
   } = context;
   const {
@@ -11666,6 +11718,39 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   );
   // What the content sniffer recognised, so the run can say so at the end.
   const messageExportsSeen = new Set();
+  // The complete directory walk is the last retired-folder identity defence.
+  // Keep it before resume state, credentials, and every network dependency so
+  // encountering a moved retired directory still has a truthful zero-effects
+  // refusal. `walk` returns the complete file list before preparation or send.
+  const privatePrefixes = m.safety?.private_path_prefixes || [];
+  info(`walking ${root}`);
+  let walkResult;
+  try {
+    walkResult = walk(root, {
+      privatePrefixes,
+      retiredDirectoryIdentity: retired?.retired_identity || null,
+    });
+  } catch (error) {
+    if (error?.reason === "LOCAL_FOLDER_RETIRED:contains_retired") {
+      refuseRetiredLocalFolder(retired, "contains_retired");
+    }
+    throw error;
+  }
+  const { files, skipped: walkSkips, complete: walkComplete } = walkResult;
+  info(`${files.length} candidate file(s), ${walkSkips.length} skipped during the walk`);
+  if (privatePrefixes.length) {
+    info(`private prefixes enforced: ${privatePrefixes.join(", ")}`);
+  }
+  if (!walkComplete) {
+    await reportSkips(walkSkips);
+    die(
+      "the folder could not be read completely, so nothing was sent and no prior document was removed.\n" +
+        "      Fix the reported permission or filesystem error, then re-run the same command."
+    );
+  }
+  const limited = flags.limit ? files.slice(0, parseInt(flags.limit, 10)) : files;
+  if (flags.limit) warn(`--limit ${flags.limit}: only the first ${limited.length} file(s) will be considered`);
+
   // A dry run sends nothing, so it must not demand credentials it will never
   // use. Requiring a Cloudflare token to preview what WOULD be loaded turns the
   // safest command in the tool into one of the hardest to reach.
@@ -11745,24 +11830,6 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   } else if (ocrCfg.enabled && dry) {
     info("OCR is ON, but a dry run never sends a page to a model and never spends anything.");
   }
-
-  const privatePrefixes = m.safety?.private_path_prefixes || [];
-  info(`walking ${root}`);
-  const { files, skipped: walkSkips, complete: walkComplete } = walk(root, { privatePrefixes });
-  info(`${files.length} candidate file(s), ${walkSkips.length} skipped during the walk`);
-  if (privatePrefixes.length) {
-    info(`private prefixes enforced: ${privatePrefixes.join(", ")}`);
-  }
-  if (!walkComplete) {
-    await reportSkips(walkSkips);
-    die(
-      "the folder could not be read completely, so nothing was sent and no prior document was removed.\n" +
-        "      Fix the reported permission or filesystem error, then re-run the same command."
-    );
-  }
-
-  const limited = flags.limit ? files.slice(0, parseInt(flags.limit, 10)) : files;
-  if (flags.limit) warn(`--limit ${flags.limit}: only the first ${limited.length} file(s) will be considered`);
 
   const skips = [...walkSkips];
   const notes = [];
@@ -19820,6 +19887,45 @@ async function cmdInit(manifestPath, options = {}) {
   info(`next: brain setup ${commandPath(displayPath(target))}`);
 }
 
+export async function completeSetupFolderStep({
+  manifest,
+  manifestPath,
+  folder,
+  shownManifestPath = manifestPath,
+  ingest,
+  remember,
+  log = info,
+  platform = process.platform,
+} = {}) {
+  let skippedRetiredFolder = false;
+  if (folder) {
+    const decision = retiredLocalFolderVariant(
+      manifest,
+      folder,
+      { path: folder, source: "documents" },
+      { platform },
+    );
+    if (decision.variant) {
+      skippedRetiredFolder = true;
+      log(renderCliCommands(
+        `Your watched folder was turned off on ${decision.retired.retired_at}, so setup did not load a folder. ` +
+          `To load one later: brain ingest ${shownManifestPath} --path <folder> --source <a new name>.`,
+      ));
+    } else if (existsSync(folder)) {
+      if (typeof ingest !== "function") throw new TypeError("the setup folder loader is unavailable");
+      await ingest();
+    } else {
+      closePrompts();
+      die(`no such folder: ${folder}. Nothing was loaded. Fix the path and re-run setup.`);
+    }
+  } else {
+    log(renderCliCommands(`load one later with: brain ingest ${shownManifestPath} --path <dir>`));
+  }
+  if (typeof remember !== "function") throw new TypeError("the installed-manifest writer is unavailable");
+  remember();
+  return Object.freeze({ skippedRetiredFolder });
+}
+
 export async function cmdSetup(manifestPath, options = {}) {
   const flags = options.flags ?? parseFlags(process.argv.slice(3));
   assertKnownFlags(
@@ -20222,29 +20328,31 @@ export async function cmdSetup(manifestPath, options = {}) {
     for (const line of renderCliCommands(sliceCheck.fix).split("\n")) console.log(`  ${c.dim(line.trim() ? "  " + line.trim() : "")}`);
   }
   const folder = flags.path || (await prompt("A folder to load now (blank to skip)", ""));
-  if (folder && existsSync(folder)) {
-    process.argv = [process.argv[0], process.argv[1], "ingest", target, "--path", folder, "--source", "documents"];
-    await cmdIngest(target);
-  } else if (folder) {
-    closePrompts();
-    die(`no such folder: ${folder}. Nothing was loaded. Fix the path and re-run setup.`);
-  } else {
-    info(`load one later with: brain ingest ${shownTarget} --path <dir>`);
-  }
-
-  // Setup is the one moment the installer knows the durable manifest location
-  // with certainty. Save only that location, never a credential, so a later
-  // `brain update` can start from any folder after Terminal is reopened.
-  try {
-    const rememberManifest = options.rememberInstalledManifest ?? rememberInstalledManifest;
-    rememberManifest(target, options.installedManifestOptions || {});
-  } catch (error) {
-    closePrompts();
-    die(
-      "this Brain is ready, but this computer could not safely remember where its manifest is. " +
-        "No Cloudflare work needs to be undone. Rerun setup with the same manifest path."
-    );
-  }
+  await completeSetupFolderStep({
+    manifest: m,
+    manifestPath: target,
+    folder,
+    shownManifestPath: shownTarget,
+    platform: options.platform || process.platform,
+    ingest: async () => {
+      process.argv = [process.argv[0], process.argv[1], "ingest", target, "--path", folder, "--source", "documents"];
+      return (options.cmdIngest ?? cmdIngest)(target);
+    },
+    remember: () => {
+      // Setup is the one moment the installer knows the durable manifest
+      // location with certainty. Save only that location, never a credential.
+      try {
+        const rememberManifest = options.rememberInstalledManifest ?? rememberInstalledManifest;
+        rememberManifest(target, options.installedManifestOptions || {});
+      } catch {
+        closePrompts();
+        die(
+          "this Brain is ready, but this computer could not safely remember where its manifest is. " +
+            "No Cloudflare work needs to be undone. Rerun setup with the same manifest path."
+        );
+      }
+    },
+  });
 
   closePrompts();
   const countBacklog = options.backlogCount ?? backlogCount;

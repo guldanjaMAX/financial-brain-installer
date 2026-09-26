@@ -22,7 +22,7 @@
 import {
   closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync,
   readdirSync, realpathSync, writeFileSync, existsSync, mkdirSync, renameSync,
-  chmodSync, rmSync,
+  chmodSync, rmSync, statSync,
 } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep, basename, dirname } from "node:path";
 import { createHash } from "node:crypto";
@@ -479,7 +479,21 @@ const localFileSafetyCode = (error) => error instanceof LocalFileSafetyError
   ? String(error.code || "LOCAL_FILE_UNAVAILABLE").toLowerCase()
   : "local_file_unavailable";
 
-export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, archiveBytes = MAX_ARCHIVE_BYTES } = {}) {
+export class RetiredDirectoryEncounteredError extends Error {
+  constructor() {
+    super("the walk encountered the retired folder");
+    this.name = "RetiredDirectoryEncounteredError";
+    this.code = "INPUT_REFUSED";
+    this.reason = "LOCAL_FOLDER_RETIRED:contains_retired";
+  }
+}
+
+export function walk(root, {
+  privatePrefixes = [],
+  maxBytes = MAX_FILE_BYTES,
+  archiveBytes = MAX_ARCHIVE_BYTES,
+  retiredDirectoryIdentity = null,
+} = {}) {
   const files = [];
   const skipped = [];
   let complete = true;
@@ -505,6 +519,19 @@ export function walk(root, { privatePrefixes = [], maxBytes = MAX_FILE_BYTES, ar
     rel.split(/[\\/]/).some((seg) => prefixes.some((p) => seg.toLowerCase().startsWith(p)));
 
   const visit = (dir) => {
+    if (retiredDirectoryIdentity) {
+      let identity;
+      try {
+        identity = statSync(dir, { bigint: true });
+      } catch {
+        identity = null;
+      }
+      if (identity &&
+          String(identity.dev) === String(retiredDirectoryIdentity.dev) &&
+          String(identity.ino) === String(retiredDirectoryIdentity.ino)) {
+        throw new RetiredDirectoryEncounteredError();
+      }
+    }
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
