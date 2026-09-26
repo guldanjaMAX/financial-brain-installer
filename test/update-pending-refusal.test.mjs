@@ -1023,7 +1023,7 @@ const PROCEEDED = [
 ];
 
 const RESUME_PAUSED_PENDING_MESSAGE = (pending, consequence) => renderCliCommands(
-  `This Brain is still paused by an earlier update that did not finish, and it has ${pending} queued search ` +
+  `This Brain is still paused for an update that has not finished, and it has ${pending} queued search ` +
     "update(s). A paused Brain does not process its queue, so waiting will not clear it, and this update will " +
     `not continue over queued work. ${consequence} Do not run \`brain drain\` or clear VECTOR_DRAIN_MODE by hand. ` +
     "Run `brain health` and keep its output for support.",
@@ -1127,6 +1127,130 @@ test("the exact v0.4.6 envelope with queued work refuses at both gates", async (
     ))), late.error?.message);
     assert.equal(late.events.includes("paused deployment"), false);
     assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+// Byte-for-byte what the v0.4.6 Worker router returns for a nine-chunk D1
+// Brain with an empty outbox and matching counts that is still not
+// query-ready. Generated once from `git show v0.4.6:worker/src` answering
+// over sqlite at the v0.4.6 schema; each reason is one branch of that
+// release's vectorReadiness.
+function v046NotReadyEnvelope(reason) {
+  const readiness = {
+    projection_bootstrap_required: {
+      mutation_submitted_at: null,
+      projection_status: "bootstrap_required",
+      action: "Run `brain update <manifest>` to resume the bounded legacy vector bootstrap.",
+    },
+    projection_unverified: {
+      mutation_submitted_at: null,
+      projection_status: "pending",
+      action: "Run `brain drain <manifest>` to finish the exact vector verification receipt.",
+    },
+    accepted_mutation_processing: {
+      mutation_submitted_at: 1_750_000_000_000,
+      projection_status: "verified",
+      action: "Wait for Vectorize processing, then run `brain drain <manifest>` again.",
+    },
+  }[reason];
+  return {
+    backend: "d1",
+    rows: [{
+      source_type: "drive",
+      documents: 3,
+      logical_documents: 3,
+      stored_documents: 3,
+      document_counts_exact: true,
+      chunks: 9,
+      chunk_counts_exact: true,
+      total: 9,
+      embedded: 9,
+      last_ingested: null,
+    }],
+    vector_backlog: { pending: 0, upserts: 0, deletes: 0, submitted: 0, oldest_queued_at: null },
+    vector_readiness: {
+      ready: false,
+      reason,
+      expected_vectors: 9,
+      actual_vectors: 9,
+      pending: 0,
+      submitted: 0,
+      oldest_queued_at: null,
+      mutation_submitted_at: readiness.mutation_submitted_at,
+      projection_status: readiness.projection_status,
+      bootstrap_epoch: 0,
+      action: readiness.action,
+    },
+  };
+}
+
+const V046_NOT_READY_REASONS = [
+  "projection_bootstrap_required",
+  "projection_unverified",
+  "accepted_mutation_processing",
+];
+
+for (const reason of V046_NOT_READY_REASONS) {
+  test(`the exact v0.4.6 envelope with an empty queue that is not ready (${reason}) proceeds through both gates`, async () => {
+    await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath, original }) => {
+      const run = await throughBothGates(manifestPath, { first: v046NotReadyEnvelope(reason) });
+      assert.deepEqual(run.events, PROCEEDED, run.error?.message);
+      assert.equal(run.initial.requests, 1);
+      assert.equal(run.prePause.requests, 1);
+      assert.deepEqual(run.initial.sleeps, []);
+      assert.equal(readFileSync(manifestPath, "utf8"), original);
+    });
+  });
+}
+
+test("the exact v0.4.6 not-ready envelope with queued work still refuses at both gates", async () => {
+  await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath, original }) => {
+    // Bootstrap state is reported ahead of queue state, so a queued Brain
+    // awaiting its bootstrap carries the bootstrap reason and a pending count.
+    const queued = v046NotReadyEnvelope("projection_bootstrap_required");
+    Object.assign(queued.vector_backlog, { pending: 2, upserts: 2, oldest_queued_at: 1_750_000_000_000 });
+    Object.assign(queued.vector_readiness, { pending: 2, oldest_queued_at: 1_750_000_000_000 });
+    const run = await throughBothGates(manifestPath, { first: queued });
+    assert.equal(run.error?.message, PENDING_MESSAGE(2));
+    assert.deepEqual(run.events, ["initial backlog read"]);
+    assert.equal(run.initial.requests, 1);
+
+    const late = await throughBothGates(manifestPath, {
+      first: v046NotReadyEnvelope("projection_bootstrap_required"),
+      second: queued,
+    });
+    assert.ok(late.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
+      "This Brain gained 2 queued search update(s) before the paused deployment. " +
+        "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again.",
+    ))), late.error?.message);
+    assert.equal(late.prePause.requests, 1);
+    assert.equal(late.events.includes("paused deployment"), false);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+test("a malformed v0.4.6 not-ready envelope still refuses on one read", async () => {
+  await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath }) => {
+    const incoherent = [
+      // An empty queue cannot be explained by queued work.
+      (body) => { body.vector_readiness.reason = "vector_work_queued"; },
+      // Not ready with no reason at all.
+      (body) => { body.vector_readiness.reason = null; },
+      // A mismatched count must name the mismatch, not the exactness marker.
+      (body) => { body.vector_readiness.actual_vectors = 8; },
+      // Readiness and the outbox disagree about the queue.
+      (body) => { body.vector_readiness.pending = 1; },
+      // A version field is not part of the v0.4.6 envelope.
+      (body) => { body.extra = true; },
+    ];
+    for (const mutate of incoherent) {
+      const body = v046NotReadyEnvelope("projection_unverified");
+      mutate(body);
+      const { log, read } = scriptedReader(manifestPath, [{ status: 200, body: JSON.stringify(body) }]);
+      await assert.rejects(read(), (error) => error?.attempts === 1 && !error.generation, JSON.stringify(body));
+      assert.equal(log.requests, 1);
+      assert.deepEqual(log.sleeps, []);
+    }
   });
 });
 

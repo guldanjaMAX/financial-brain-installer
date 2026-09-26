@@ -212,6 +212,22 @@ asset publication.
   check: after an update that stopped partway, `brain update` again reaches the
   paused deployment when `brain health` shows an empty queue.
 
+- **A Brain left paused on this same release can be updated again.** `brain
+  rollback --yes` leaves this release's Worker paused and sends the owner to
+  `brain update`, and an update of an already-current Brain that stops inside
+  its pause leaves the same state. Both queue checks, and `brain doctor
+  --repair --yes`, now resume that Worker instead of calling it "not an
+  earlier update" and asking for a release that is already installed. Its
+  queue must still read empty: queued work is refused with its count, and a
+  paused Worker newer than this CLI is still refused. A Brain on v0.4.6 or
+  earlier whose queue is empty but whose search index is not yet verified
+  (for example, it still needs the bootstrap its own status tells the owner to
+  run `brain update` for) now passes the queue checks instead of being told
+  its database is busy. To check: after a rollback, `brain update` reaches the
+  paused deployment when `brain health` shows an empty queue. A rolled-back
+  Brain that still holds documents can then stop at the paused readiness
+  check before its index is rebuilt; keep that output for support.
+
 - **A busy database no longer makes a large Brain look unreadable to update.**
   On a very large Brain the backlog read can briefly fail while its database
   is busy. `brain update` now tries that read up to three times, waiting 10

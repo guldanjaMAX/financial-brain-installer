@@ -22221,8 +22221,10 @@ function updateBacklogSemver(value) {
  * resume race), and `brain deploy` from a newer CLI leaves the same state.
  * A Worker version above the recorded one and no newer than this CLI is that
  * earlier attempt, so its receipt is read in whichever writer mode it reports
- * and the rerun can finish the pause it started. A Worker newer than this CLI,
- * older than the manifest, or paused on the recorded version is not a resume.
+ * and the rerun can finish the pause it started. A Worker paused on this CLI's
+ * own version when the manifest records that same version is also a resume
+ * (see below). A Worker newer than this CLI, older than the manifest, or paused
+ * on a recorded version this CLI did not produce is not a resume.
  *
  * A manifest with no brain.version predates version recording, so it is older
  * than every release: it accepts the v0.4.6 envelope and any versioned
@@ -22238,13 +22240,16 @@ function updateBacklogReceiptQueue(body, recordedVersion, projection) {
     if (recordedVersion !== null && !projection.isLegacyPre047Version(recordedVersion)) {
       throw new TypeError("a v0.4.7 or later manifest received a pre-0.4.7 receipt");
     }
-    // An unrecorded manifest is bound as pre-0.4.7; the classifier only uses
-    // the version to confirm the legacy contract applies.
-    const observation = projection.classifyLegacyV046ProjectionObservation(body, {
+    // An unrecorded manifest is bound as pre-0.4.7; the validator only uses
+    // the version to confirm the legacy contract applies. This gate asks only
+    // whether work is queued, as the versioned path below does, so it does not
+    // take preview's readiness verdict: v0.4.6 reports an empty outbox with a
+    // required bootstrap as not ready and tells the owner to run this update.
+    const aggregate = projection.validateLegacyV046ProjectionAggregateReceipt(body, {
       expectedVersion: recordedVersion ?? "0.0.0",
       expectedBackend: "d1",
     });
-    return { pending: observation.queue.pending, paused: false };
+    return { pending: aggregate.queue.pending, paused: false };
   }
   const workerVersion = updateBacklogSemver(body.version);
   const workerMode = UPDATE_BACKLOG_DRAIN_MODES.has(body.vector_drain_mode) ? body.vector_drain_mode : null;
@@ -22258,6 +22263,14 @@ function updateBacklogReceiptQueue(body, recordedVersion, projection) {
       compareSemver(workerVersion, PRODUCT_VERSION) <= 0;
     if (!resumable) throw generationRefusal();
     expectedVersion = workerVersion;
+    expectedDrainMode = workerMode;
+  } else if (workerVersion && workerVersion === recordedVersion && workerVersion === PRODUCT_VERSION &&
+      workerMode === "paused-for-upgrade") {
+    // This CLI's own Worker, paused, on the version the manifest already
+    // records: `brain rollback --yes` leaves exactly this and sends the owner
+    // to `brain update`, and a same-version update that stops inside its pause
+    // window leaves it too. It is resumable. Its queue is still read through
+    // the paused aggregate below, so queued or unreadable work still refuses.
     expectedDrainMode = workerMode;
   }
   let aggregate;
@@ -22461,7 +22474,7 @@ function updateBacklogQueuedMessage(backlog, gate, initialBacklog = null) {
   const consequence = UPDATE_BACKLOG_GATE_CONSEQUENCE[gate];
   if (backlog?.paused_for_upgrade === true) {
     return renderCliCommands(
-      `This Brain is still paused by an earlier update that did not finish, and it has ${pending} queued search ` +
+      `This Brain is still paused for an update that has not finished, and it has ${pending} queued search ` +
         "update(s). A paused Brain does not process its queue, so waiting will not clear it, and this update will " +
         `not continue over queued work. ${consequence} Do not run \`brain drain\` or clear VECTOR_DRAIN_MODE by hand. ` +
         "Run `brain health` and keep its output for support."
