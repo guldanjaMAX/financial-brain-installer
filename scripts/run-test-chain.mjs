@@ -156,6 +156,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test test/windows-dpapi-launch-retry.test.mjs",
   // Legacy default-profile sign-in stays readable on a keyring-enabled machine.
   "node test/wrangler-legacy-keyring-opt-out.test.mjs",
+  // Health never refreshes or rewrites a Wrangler login.
+  "node test/health-wrangler-session-exempt.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -305,6 +307,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/mcp-rotation.test.mjs",
   "node --test test/mcp-moved-brain.test.mjs",
   "node test/health-verify-exit.test.mjs",
+  "node test/health-wrangler-session-exempt.test.mjs",
   "node test/drain-exit.test.mjs",
   "node test/drain-query-ready-gate.test.mjs",
   "node test/report-html.test.mjs",

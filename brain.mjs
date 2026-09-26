@@ -3440,6 +3440,15 @@ export async function cmdHealth(manifestPath, {
   // over plain HTTPS with the admin key, so it must keep working after our token
   // is revoked at handoff. A command that proves the brain works, but only while
   // we still hold a key to the client's account, proves the wrong thing.
+  if (!m.brain?.domain && !cloudflareTokenAvailable()) {
+    // `brain health` never reads the Wrangler login, so the generic "sign in
+    // through the browser" advice would loop. Name the one step that helps.
+    die(
+      "this manifest has no saved brain.domain, so health cannot find the Brain without Cloudflare account access.\n" +
+        `      Run \`brain update ${commandPath(displayPath(manifestPath))}\` once to save the deployed address, then rerun health.\n` +
+        "      No Cloudflare sign-in was read or refreshed."
+    );
+  }
   const acct = m.brain?.domain ? null : await resolveAccount(m);
   const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
 
@@ -28798,6 +28807,10 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "assistant-repair",
   "ocr-preflight",
   "custom-api",
+  // Health proves the Brain over HTTPS with the admin key and must never
+  // refresh or rewrite the owner's Wrangler login. With a saved brain.domain
+  // it needs no Cloudflare access at all.
+  "health",
 ]);
 
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
