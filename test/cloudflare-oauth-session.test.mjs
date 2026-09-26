@@ -450,7 +450,7 @@ test("account selection handles zero, one, many, exact binding, cancellation, an
   );
 });
 
-test("account preflight proves the exact account plus Workers, D1, Vectorize, and Workers AI read paths", async () => {
+test("account preflight proves the exact account plus Workers subdomain, D1, Vectorize, and Workers AI read paths", async () => {
   const token = Buffer.from(TOKEN);
   const paths = [];
   const receipt = await preflightCloudflareOAuthAccount(
@@ -463,6 +463,9 @@ test("account preflight proves the exact account plus Workers, D1, Vectorize, an
         if (new URL(url).pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
           return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected account" }));
         }
+        if (new URL(url).pathname.endsWith(`/accounts/${ACCOUNT_A}/workers/subdomain`)) {
+          return jsonResponse(envelope({ subdomain: "exact-fixture-subdomain" }));
+        }
         return jsonResponse(envelope([]));
       },
     },
@@ -470,16 +473,62 @@ test("account preflight proves the exact account plus Workers, D1, Vectorize, an
   assert.deepEqual(receipt, {
     status: "ready",
     account: { id: ACCOUNT_A, name: "Selected account" },
-    checks: ["account", "workers", "d1", "vectorize", "workers_ai"],
+    checks: ["account", "workers", "workers_subdomain", "d1", "vectorize", "workers_ai"],
+    workersSubdomain: "exact-fixture-subdomain",
   });
   assert.deepEqual(paths, [
     `/client/v4/accounts/${ACCOUNT_A}`,
     `/client/v4/accounts/${ACCOUNT_A}/workers/scripts`,
+    `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
     `/client/v4/accounts/${ACCOUNT_A}/d1/database`,
     `/client/v4/accounts/${ACCOUNT_A}/vectorize/v2/indexes`,
     `/client/v4/accounts/${ACCOUNT_A}/ai/models/search?per_page=1`,
   ]);
   token.fill(0);
+});
+
+test("named-profile setup stops at a denied workers subdomain preflight before its action can create resources", async () => {
+  const profile = cloudflareOAuthProfileName(INSTALL_ID);
+  const runner = processRecorder(({ args }) => args.includes("token")
+    ? okProcessResult({ stdout: tokenOutput(), stderr: Buffer.alloc(0) })
+    : okProcessResult());
+  const paths = [];
+  let actionCalls = 0;
+  await assert.rejects(
+    withCloudflareOAuthSession({
+      installIdentity: INSTALL_ID,
+      reauthorize: true,
+      action: async () => { actionCalls += 1; },
+      processRunner: runner,
+      platformName: "darwin",
+      environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        paths.push(parsed.pathname + parsed.search);
+        if (parsed.pathname.endsWith("/accounts")) {
+          return jsonResponse(envelope([
+            { id: ACCOUNT_A, name: "Selected" },
+          ], { result_info: { page: 1, count: 1, total_count: 1, total_pages: 1 } }));
+        }
+        if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
+          return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected" }));
+        }
+        if (parsed.pathname.endsWith("/workers/subdomain")) {
+          return jsonResponse(envelope(null, {
+            success: false,
+            errors: [{ code: 10000, message: "Authentication error" }],
+          }), { status: 403 });
+        }
+        return jsonResponse(envelope([]));
+      },
+    }),
+    errorCode("CLOUDFLARE_OAUTH_SCOPE_MISSING"),
+  );
+  assert.equal(actionCalls, 0, "the resource-creating action must not start after preflight denial");
+  assert.equal(paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`);
+  assert.ok(!paths.some((path) => path.includes("/d1/database")),
+    "preflight must fail closed at the missing subdomain read");
+  assert.ok(runner.calls.some((call) => call.args.includes(profile)));
 });
 
 test("preflight rejects wrong-account readback and missing OAuth scope without response disclosure", async () => {
