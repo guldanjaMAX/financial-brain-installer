@@ -41,6 +41,17 @@ assert.match(currentEvidencePlan, new RegExp(`^# v${escapedVersion} candidate re
   "current candidate has no version-matched evidence plan");
 assert.match(currentEvidencePlan, /Candidate source commit: unbound[\s\S]*?Field execution: none/,
   "the current plan must not imply final-SHA or field proof before either exists");
+// The disposable update gate is only meaningful at the scale that exercises the
+// accelerated bootstrap path; a plan that drops it silently weakens the gate.
+for (const [pattern, message] of [
+  [new RegExp(`Prepare a separately reviewed ${escapedVersion} disposable-resource plan and exact\\s+teardown targets before creating anything`),
+    "the current plan must require its own reviewed disposable-resource plan"],
+  [/at least 6,001 direct-D1 documents\s+and chunks and at least 3,001 durable epoch admissions/,
+    "the current plan must keep the accelerated paused-update scale requirement"],
+  [/Interrupt the update at\s+the reviewed non-final point, resume through the supported path/,
+    "the current plan must interrupt and resume the paused update"],
+  [/restore a bookmark first/, "the current plan must forbid restoring a bookmark first"],
+]) assert.match(currentEvidencePlan, pattern, message);
 const ciTestJob = ciWorkflow.slice(
   ciWorkflow.indexOf("  test:"),
   ciWorkflow.indexOf("  preflight-traps:"),
