@@ -10,6 +10,65 @@ Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
 
+- **Windows credential protection survives a Smart App Control refusal.** On
+  some Windows 11 machines Smart App Control occasionally refuses to start the
+  temporary helper that encrypts the admin key and the Google connection. The
+  Brain now removes that helper, builds a fresh one, and tries again, up to
+  three times. A real decryption failure is never retried. If Windows refuses
+  all three, the message says so plainly and that re-running the command
+  usually works. `brain doctor` shows any refused launches it recovered from.
+- **Health checks stay quick on large Brains.** Health, status, and assistant
+  checks now get their document inventory from bounded source receipts. That
+  inventory no longer joins every chunk, parses every document's metadata, or
+  shows an old total as current. Those screens say "not counted on large
+  Brains; run `brain report` for the full count" when an exact size is not
+  needed. `brain report` still computes
+  exact document, family, chunk, and meaning-search totals in bounded pages and
+  refuses a mixed result if the corpus changes while it runs. Source removal
+  uses the exact guarded preview and final receipt from that removal, so a
+  delayed summary cannot falsely say removed documents remain. A Brain whose
+  Worker is still the older one reports its indexing queue as an exact count;
+  health and the update preview read that count as exact and say so, instead
+  of refusing it. To check: run
+  `brain health <manifest>`, then `brain report <manifest>` when you want the
+  complete counts.
+
+- **A read-only business dashboard can refresh without leaving a laptop on.**
+  An operator can declare bounded HTTPS JSON endpoints in the manifest, store
+  the bearer key through a hidden macOS prompt or the masked Cloudflare
+  dashboard on Windows, and let the owner's Worker pull the source daily. A
+  complete snapshot becomes a resumable, exactly verified job instead of one
+  oversized request. Exact rows are stored compactly with correction and
+  last-seen history; missing rows leave current totals without being erased.
+  Inventory and cost search contains only the current per-store snapshot, while
+  stored rows keep prior full values with effective dates. A row that disappears
+  closes its prior interval, and a later return starts a new one instead of
+  hiding the gap. It does not create daily history documents. Monthly summaries
+  cover every store, and per-store sales, inventory, and cost documents stay
+  bounded. The preview names every endpoint's row,
+  readable-document, and refused-row counts. The 10,000-row ceiling refuses an
+  oversized endpoint without changing it. A refused known row now keeps its
+  last verified value visibly marked with the refusal date instead of disappearing.
+  Every affected document begins with the same dated warning even when its
+  template has no row table. Sales requires the configured revenue stream; an
+  unlabeled row cannot hide another store or month.
+  The source says ready with warnings and gives the refused count until a clean
+  pull succeeds. A wholly refused pull leaves the last good snapshot current and
+  prints and retains the useful refusal counts. Scheduled failures retain their
+  reviewed issue guidance instead of collapsing to a generic failure. Invalid
+  store, month, revenue-stream, and breed identities are refused before they can
+  hide a valid prior key. Superseded document versions
+  are removed in bounded cleanup passes so old vectors cannot crowd current
+  evidence out of meaning search. Clipboard entry clears copied material even
+  when inventory fails or the secret name already exists, and dashboard key
+  replacement requires an explicit post-paste confirmation. Saved data and meaning-search
+  readiness are reported separately so an owner question never races indexing.
+  To check: preview the first pull with `brain custom-api <manifest> --dry-run`,
+  run the first pull immediately, wait for meaning search to be ready, then
+  confirm the named source and its refresh time in `brain sources <manifest>`.
+  This build has local mock proof only and
+  has not contacted a provider endpoint.
+
 - **One finely reported balance no longer blocks a whole bank.** A bank can
   report more decimal places than its currency has, such as a retirement
   balance of 23631.9805 dollars. That single value used to stop every account
@@ -50,6 +109,61 @@ asset publication.
   Plaid webhook registration, because the Brain sends its webhook with every
   connection request. The return address must still be on the Plaid dashboard's
   allowed list.
+
+- **Scanned-PDF OCR now defaults to the model that completed the stored-text
+  path in live testing.** Fresh installs use Llama 4 Scout, while the manifest
+  can still name another Cloudflare model. Setup also asks once whether to turn
+  paid OCR on and carries a yes answer into the first deployment, so a new
+  install no longer needs a separate update before its first scanned-PDF load.
+  To check: accept OCR during a fixture setup and confirm its initial Worker
+  bindings contain `OCR_ENABLED=1`; the captured Llama and Gemma reply shapes
+  must both remain readable through the real OCR route.
+
+- **One slow scanned page no longer ends the whole OCR pass.** The installer
+  retries that page twice with longer bounded timeouts and tells you when it is
+  doing so. An already-running call is polled within the current deadline rather
+  than counted as another attempt. The exact source document and page keep one
+  opaque durable request identity, so a late first response cannot start another
+  charged call while a different document with the same page image remains a
+  separate request. The same private page identity can reproduce its encrypted
+  handoff key on a later pass without storing that key or making it derivable
+  from the durable request ID alone. Its permanent receipt stores only hashes,
+  status, and numeric usage, never OCR text or a source locator ahead of the
+  document credential gate. Its encrypted handoff is not deleted until the
+  source confirms that the full document was stored.
+  If the Brain is healthy but the page remains slow, the document is skipped and
+  the rest of the pass continues. Transport and model failures defer the
+  document as system evidence, never as a removal candidate. Authentication,
+  malformed replies, and unknown statuses use that same boundary. A later pass
+  reclaims only an expired pre-model reservation. Only a successful, nonblank
+  transcription becomes a completed replayable result. A call with no final
+  response keeps its model-start proof for a 15-minute ambiguity window.
+  Provider errors, empty text, malformed replies, and every other definite
+  non-success keep their model-start proof, wait 60 seconds, and can never
+  replay as OCR text. Each page is capped durably at 3 started model calls in
+  any rolling 24 hours; an exhausted page is counted in the load report and
+  becomes eligible when the oldest start leaves that rolling window rather
+  than remaining held permanently. A completed result
+  keeps its encrypted handoff until the whole source document is stored and
+  acknowledged on the same receipt, so a delayed pass replays it without
+  another charge. An owner image upload uses that same private page identity,
+  so rotating the
+  Brain admin key after an ingest failure cannot strand the already-paid OCR
+  result. A completed receipt with a missing, mismatched, malformed, expired,
+  or undecryptable handoff gets one compare-and-swap-protected replacement
+  read in that seven-day replay window. An in-flight receipt also gets one
+  recorded replacement after its full 15-minute ambiguity window. Replacement
+  receipts must be acknowledged again, and owner upload does so only after exact
+  ingest and finalization readback. A result with no handoff waits for the next
+  bounded window instead of becoming a permanent hold. If the Brain health check
+  also fails, progress remains saved and the pass stops resumably. To check:
+  credential-shaped OCR text reaches the credential refusal without surviving in
+  the receipt; a call finishing after the first deadline replays through the real
+  route with one model call and one stored transcription; a result that finishes
+  after every client deadline is reused on the next pass with no second charge;
+  two documents with the same rendered page both load; and system failures
+  permit no replacement, removal, cursor, or ready receipt.
+
 - **Re-sending unchanged files no longer rebuilds their meaning-based search.**
   When a newer kit re-sends a file whose text has not changed, for example to
   add the exact-byte provenance an older kit never recorded, the Brain still

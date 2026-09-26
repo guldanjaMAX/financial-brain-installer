@@ -244,20 +244,20 @@ test("configured-cap comparison is separate from unknown shared headroom and act
   };
 
   assert.equal(build({ cap: 0 }).estimate.estimated_fits_configured_cap, false);
-  assert.equal(build({ cap: 0.0007 }).estimate.estimated_fits_configured_cap, false,
+  assert.equal(build({ cap: 0.002 }).estimate.estimated_fits_configured_cap, false,
     "a cap between the low and high estimate is not promised sufficient");
-  const estimatedFit = build({ cap: 0.0008 });
+  const estimatedFit = build({ cap: 0.003872 });
   assert.equal(estimatedFit.estimate.estimated_fits_configured_cap, true);
   assert.equal(estimatedFit.estimate.remaining_shared_daily_budget_usd, null);
   assert.equal(estimatedFit.estimate.remaining_shared_daily_budget_state, "unknown");
   assert.equal(estimatedFit.estimate.actual_affordability, "unknown");
   assert.equal(estimatedFit.pricing_basis.high_is_guaranteed_upper_bound, false);
-  const roundedEdge = build({ cap: 0.0015, observations: [scan(2)] });
-  assert.equal(roundedEdge.estimate.usd_high, 0.0015,
+  const roundedEdge = build({ cap: 0.0077, observations: [scan(2)] });
+  assert.equal(roundedEdge.estimate.usd_high, 0.0077,
     "the owner-facing estimate keeps its existing four-decimal display value");
   assert.equal(roundedEdge.estimate.estimated_fits_configured_cap, false,
-    "the cap comparison must use the unrounded $0.00152 high bracket");
-  assert.equal(build({ cap: 0.00152, observations: [scan(2)] })
+    "the cap comparison must use the unrounded $0.007744 high bracket");
+  assert.equal(build({ cap: 0.007744, observations: [scan(2)] })
     .estimate.estimated_fits_configured_cap, true);
   assert.equal(build({ cap: 100, observations: [scan(1), scan(null)] })
     .estimate.estimated_fits_configured_cap, null);

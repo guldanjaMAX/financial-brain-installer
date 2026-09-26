@@ -234,6 +234,8 @@ function projectionInventory(overrides = {}) {
   const upserts = overrides.upserts ?? pending;
   const deletes = overrides.deletes ?? 0;
   const submitted = overrides.submitted ?? 0;
+  const pendingIsCapped = overrides.pendingIsCapped ?? false;
+  const componentCountsExact = overrides.componentCountsExact ?? !pendingIsCapped;
   const ready = overrides.ready ?? (pending === 0 && actual === expected);
   const reason = Object.hasOwn(overrides, "reason")
     ? overrides.reason
@@ -245,9 +247,12 @@ function projectionInventory(overrides = {}) {
     rows: overrides.rows ?? [{ private_source: "must-not-escape" }],
     vector_backlog: {
       pending,
+      pending_is_capped: pendingIsCapped,
+      pending_display: pendingIsCapped ? "10,000+" : String(pending),
       upserts,
       deletes,
       submitted,
+      component_counts_exact: componentCountsExact,
       oldest_queued_at: Object.hasOwn(overrides, "oldestQueuedAt")
         ? overrides.oldestQueuedAt
         : pending > 0 ? 1_750_000_000_000 : null,
@@ -258,7 +263,9 @@ function projectionInventory(overrides = {}) {
       expected_vectors: expected,
       actual_vectors: actual,
       pending: overrides.readinessPending ?? pending,
+      pending_is_capped: overrides.readinessPendingIsCapped ?? pendingIsCapped,
       submitted: overrides.readinessSubmitted ?? submitted,
+      submitted_counts_exact: overrides.readinessSubmittedCountsExact ?? componentCountsExact,
       oldest_queued_at: Object.hasOwn(overrides, "readinessOldestQueuedAt")
         ? overrides.readinessOldestQueuedAt
         : Object.hasOwn(overrides, "oldestQueuedAt")
@@ -1035,6 +1042,9 @@ test("authenticated projection validation returns only one frozen aggregate cut"
     actual_vectors: 10,
     queue: {
       pending: 0,
+      pending_is_capped: false,
+      pending_display: "0",
+      component_counts_exact: true,
       upserts: 0,
       deletes: 0,
       submitted: 0,
@@ -1293,6 +1303,135 @@ test("projection classifier distinguishes ready, sufficient, insufficient, missi
     assert.equal(proof.queue.pending, fixture.pending ?? 0);
     assert.ok(Object.isFrozen(proof));
   }
+});
+
+test("a capped million-row queue is blocked as uncounted work without comparing its sample to the deficit", () => {
+  const proof = syntheticProjection({
+    expected: 1_150_274,
+    actual: 0,
+    pending: 10_001,
+    upserts: 10_001,
+    pendingIsCapped: true,
+    componentCountsExact: false,
+  });
+  assert.equal(proof.verdict, "projection_work_queued_uncounted");
+  assert.equal(proof.queue.pending_is_capped, true);
+  assert.equal(proof.queue.component_counts_exact, false);
+  assert.equal(proof.queue.pending_display, "10,000+");
+  assert.doesNotMatch(JSON.stringify(proof), /1150274-row queue/u);
+
+  const plan = syntheticPlan({ deployedProjection: proof });
+  const receipt = createUpdatePreviewProjectionFailureReceipt(plan, {
+    credential_reads: 1,
+    network_requests: 1,
+  });
+  assert.equal(receipt.status, "failed");
+  assert.equal(receipt.error_code, "UPDATE_PREVIEW_PROJECTION_WORK_UNCOUNTED");
+  assert.equal(receipt.authorizes_update, false);
+  assert.match(receipt.owner_message, /large indexing queue is still working; wait for it before updating/i);
+});
+
+// The exact SELECT count(*) receipt of every Worker before the bounded
+// documents summary: none of the three bounded-summary fields are present.
+function preSummaryInventory(overrides = {}, backlogExtras = {}) {
+  const inventory = projectionInventory(overrides);
+  for (const field of ["pending_is_capped", "pending_display", "component_counts_exact"]) {
+    delete inventory.vector_backlog[field];
+  }
+  delete inventory.vector_readiness.pending_is_capped;
+  delete inventory.vector_readiness.submitted_counts_exact;
+  Object.assign(inventory.vector_backlog, backlogExtras);
+  return inventory;
+}
+
+const PRE_SUMMARY_QUEUED = Object.freeze({
+  expected: 84_075, actual: 0, pending: 84_075, submitted: 200,
+  reason: "accepted_mutation_needs_confirmation",
+});
+
+test("a pre-summary Worker's exact backlog is a legacy exact receipt, not an invalid one", () => {
+  const inventory = preSummaryInventory(PRE_SUMMARY_QUEUED);
+  const aggregate = validateVectorProjectionAggregateReceipt(inventory, {
+    expectedVersion: inventory.version,
+  });
+  assert.equal(aggregate.queue.pending, 84_075);
+  assert.equal(aggregate.queue.pending_is_capped, false);
+  assert.equal(aggregate.queue.pending_display, "84075");
+  assert.equal(aggregate.queue.component_counts_exact, true);
+  assert.equal(aggregate.queue.count_receipt, "legacy_exact");
+
+  const proof = classifyUpdatePreviewProjectionReceipt(inventory, {
+    expectedVersion: inventory.version,
+  });
+  assert.equal(proof.verdict, "recoverable_queued_work");
+  assert.equal(proof.queue.pending, 84_075);
+  const receipt = createUpdatePreviewSuccessReceipt(syntheticPlan({ deployedProjection: proof }), {
+    credential_reads: 1,
+    network_requests: 1,
+  });
+  assert.equal(receipt.plan.deployed_projection.queue.pending, 84_075);
+  assert.match(receipt.owner_note, /older Worker.*exact count/i);
+  assert.doesNotMatch(JSON.stringify(receipt), /10,000\+/u);
+});
+
+test("a pre-summary Worker's zero backlog reads as zero and ready", () => {
+  const proof = classifyUpdatePreviewProjectionReceipt(preSummaryInventory(), {
+    expectedVersion: "0.4.7",
+  });
+  assert.equal(proof.verdict, "ready");
+  assert.equal(proof.queue.pending, 0);
+  assert.equal(proof.queue.pending_display, "0");
+  assert.equal(proof.queue.count_receipt, "legacy_exact");
+  const receipt = createUpdatePreviewSuccessReceipt(syntheticPlan({ deployedProjection: proof }), {
+    credential_reads: 1,
+    network_requests: 1,
+  });
+  assert.equal(receipt.projection_ready, true);
+});
+
+test("every partial or malformed bounded-summary backlog still refuses", () => {
+  for (const extras of [
+    { pending_is_capped: false },
+    { pending_display: "84075" },
+    { component_counts_exact: true },
+    { pending_is_capped: false, pending_display: "84075" },
+    { pending_is_capped: false, component_counts_exact: true },
+    { pending_display: "84075", component_counts_exact: true },
+    { pending_is_capped: true, pending_display: null, component_counts_exact: false },
+    { pending_is_capped: true, pending_display: undefined, component_counts_exact: false },
+    { pending_is_capped: "false", pending_display: 84_075, component_counts_exact: "true" },
+    { pending_is_capped: false, pending_display: "84075", component_counts_exact: true },
+  ]) {
+    assert.throws(
+      () => classifyUpdatePreviewProjectionReceipt(preSummaryInventory(PRE_SUMMARY_QUEUED, extras), {
+        expectedVersion: "0.4.7",
+      }),
+      expectCode("UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID"),
+      JSON.stringify(extras),
+    );
+  }
+  // A readiness receipt carrying only half of its bounded pair is not the
+  // pre-summary shape either.
+  for (const field of ["pending_is_capped", "submitted_counts_exact"]) {
+    const inventory = preSummaryInventory(PRE_SUMMARY_QUEUED);
+    inventory.vector_readiness[field] = field === "pending_is_capped" ? false : true;
+    assert.throws(
+      () => classifyUpdatePreviewProjectionReceipt(inventory, { expectedVersion: "0.4.7" }),
+      expectCode("UPDATE_PREVIEW_VECTOR_READINESS_INVALID"),
+      field,
+    );
+  }
+  // A plan cannot claim the legacy label for a capped or uncounted queue.
+  const capped = syntheticProjection({
+    expected: 20_000, actual: 0, pending: 10_001, upserts: 10_001,
+    pendingIsCapped: true, componentCountsExact: false,
+  });
+  assert.throws(
+    () => syntheticPlan({
+      deployedProjection: { ...capped, queue: { ...capped.queue, count_receipt: "legacy_exact" } },
+    }),
+    expectCode("UPDATE_PREVIEW_PLAN_INVALID"),
+  );
 });
 
 test("projection validation fails closed on mixed or incoherent same-response fields", () => {

@@ -19,7 +19,7 @@ CREDENTIAL_SCANNER = "on"
 # model request; leave it unset for the OpenAI-style content array and set it to
 # "image_field" if the model rejects that shape.
 OCR_ENABLED = "0"
-OCR_MODEL = "@cf/google/gemma-4-26b-a4b-it"
+OCR_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct"
 
 [ai]
 binding = "AI"

@@ -106,6 +106,41 @@ check("the client's rows are untouched by the upgrade",
   db.prepare("SELECT count(*) AS n FROM documents").get().n === rowsBefore.documents &&
   db.prepare("SELECT count(*) AS n FROM chunks").get().n === rowsBefore.chunks);
 
+// --- The immediate predecessor upgrade must apply the consolidated 0047 ----
+{
+  const schema46 = new DatabaseSync(":memory:");
+  schema46.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY, name TEXT NOT NULL,
+    applied_at TEXT NOT NULL, checksum TEXT NOT NULL)`);
+  for (const migration of migrations.filter((entry) => entry.version <= 46)) apply(schema46, migration);
+  schema46.prepare(
+    `INSERT INTO install_state
+       (id, client_slug, product_version, schema_version, gate_version, installed_at, ring)
+     VALUES (1, 'schema46-fixture', '0.4.8', 46, 0, '2026-09-24T00:00:00Z', 'test')`,
+  ).run();
+  schema46.prepare(
+    `INSERT INTO documents (doc_uid, source, source_id, title, ingested_at, content_hash)
+     VALUES ('upload:preserved', 'upload', 'preserved', 'Preserved', 1, 'hash:preserved')`,
+  ).run();
+  let schema46Error = null;
+  try {
+    for (const migration of migrations.filter((entry) => entry.version > 46)) apply(schema46, migration);
+  } catch (error) {
+    schema46Error = error;
+  }
+  const ocrColumns = new Set(schema46.prepare(
+    "PRAGMA table_info(ocr_page_requests)",
+  ).all().map((column) => column.name));
+  check("a populated schema-46 brain upgrades through consolidated migration 0047",
+    schema46Error === null &&
+      schema46.prepare("SELECT count(*) AS n FROM schema_migrations").get().n === migrations.length &&
+      schema46.prepare("SELECT count(*) AS n FROM documents WHERE doc_uid='upload:preserved'").get().n === 1 &&
+      ["acknowledged_at", "reread_count", "provider_failed_at", "model_call_count",
+        "model_call_window_started_at"].every((column) => ocrColumns.has(column)),
+    schema46Error && String(schema46Error.message || schema46Error));
+  schema46.close();
+}
+
 // --- Every table and column the new migrations promise actually exists ------
 const tables = new Set(
   db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name)

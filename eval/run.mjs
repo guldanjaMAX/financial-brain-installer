@@ -920,7 +920,13 @@ function canonicalInventory(docs) {
     throw new Error("inventory contains duplicate source labels");
   }
   const pending = nonNegativeInteger(docs?.vector_backlog?.pending, "vector backlog pending");
-  return { rows, pending };
+  const pendingIsCapped = docs?.vector_backlog?.pending_is_capped === true;
+  if (pendingIsCapped && (pending !== 10_001 || docs.vector_backlog.pending_display !== "10,000+")) {
+    throw new Error("capped vector backlog metadata is malformed");
+  }
+  return pendingIsCapped
+    ? { rows, pending: null, pending_is_capped: true }
+    : { rows, pending };
 }
 
 const CORPUS_PAGE_LIMIT = 1000;
@@ -1019,7 +1025,8 @@ async function collectCorpusSnapshot(client, contractBundle = null) {
       documents: familyInventory.total,
       chunks: sum("chunks"),
       embedded: sum("embedded"),
-      vector_backlog: inventory.pending,
+      vector_backlog: inventory.pending_is_capped ? "10,000+" : inventory.pending,
+      ...(inventory.pending_is_capped ? { vector_backlog_is_capped: true } : {}),
       sources: familyInventory.live_sources,
       inventory_summary_mismatches: familyInventory.inventory_mismatch_count,
       snapshot_hash: hashLabel(JSON.stringify(fingerprintMaterial)),

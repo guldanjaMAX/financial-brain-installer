@@ -169,6 +169,29 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   check("Windows doctor identifies the failed DPAPI stage with a stable code",
     dpapiFailed.status === FAIL && /compile stage/i.test(dpapiFailed.detail) && /WINDOWS_DPAPI_COMPILE/.test(dpapiFailed.fix),
     JSON.stringify(dpapiFailed));
+  const dpapiRecovered = checkWindowsCredentialProtection({
+    platformName: "win32",
+    probe: ({ rounds }) => ({ passed: true, rounds, stage: null, launch_refusals: 1 }),
+  });
+  check("Windows doctor shows a helper launch refusal that a fresh helper recovered",
+    dpapiRecovered.status === OK && /refused 1 helper launch /.test(dpapiRecovered.detail) &&
+      /Smart App Control/.test(dpapiRecovered.detail) && dpapiRecovered.launch_refusals === 1,
+    JSON.stringify(dpapiRecovered));
+  const dpapiLaunchRefused = checkWindowsCredentialProtection({
+    platformName: "win32",
+    probe: () => ({
+      passed: false,
+      rounds: 3,
+      stage: "launch_refused",
+      issue_code: "WINDOWS_DPAPI_LAUNCH_REFUSED",
+      launch_refusals: 3,
+    }),
+  });
+  check("Windows doctor names Smart App Control when the helper launch is refused every time",
+    dpapiLaunchRefused.status === FAIL && /refused to run/i.test(dpapiLaunchRefused.detail) &&
+      /Smart App Control/.test(dpapiLaunchRefused.fix) && /usually works/.test(dpapiLaunchRefused.fix) &&
+      /WINDOWS_DPAPI_LAUNCH_REFUSED/.test(dpapiLaunchRefused.fix),
+    JSON.stringify(dpapiLaunchRefused));
   const dpapiCleanupDeferred = checkWindowsCredentialProtection({
     platformName: "win32",
     probe: () => ({

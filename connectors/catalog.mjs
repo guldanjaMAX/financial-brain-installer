@@ -4,6 +4,12 @@ const row = (value) => Object.freeze({ real_boundary: "not_run", acceptance: "pe
 
 export const CONNECTOR_EXPANSION_CATALOG = Object.freeze([
   row({
+    id: "custom-api", label: "Custom business API", build: "declarative_worker_source",
+    automated_proof: "local_mock_and_sqlite", rehearsal_available: false, installed_connection: true,
+    current_boundary: "A manifest-declared read-only JSON API can run inside the owner's Worker on its existing cron. HTTPS host boundaries, paging, byte and row limits, retries, correction history, freshness, and hidden Worker-secret custody are wired. No provider or customer endpoint has crossed this build.",
+    next_acceptance: "Use an approved disposable API to prove the exact deployed host, first pull, next-day cadence, correction handling, retrieval, and plain owner-facing recovery without exposing the bearer value.",
+  }),
+  row({
     id: "quickbooks", label: "QuickBooks Online", build: "sandbox_ready_runner",
     automated_proof: "offline_scripted_provider_io", rehearsal_available: true, installed_connection: true,
     current_boundary: "Sandbox localhost OAuth, canonical company binding, rotating refresh, paginated read-only accounting snapshots, common receipts, scheduling, retry, and revoke-before-disconnect are wired. Intuit's Accounting consent is broader than runtime use. Production callback and query deletion truth remain unavailable.",

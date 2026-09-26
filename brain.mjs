@@ -56,10 +56,23 @@ import { PLAID_PROFILE, manifestBankFeedProvider } from "./worker/src/lib/bank-f
 import { ingestEnvelopeValidationError } from "./worker/src/lib/ingest-envelope.js";
 import { normalizeSourceOriginalReceipt } from "./worker/src/lib/source-original-binding.js";
 import {
+  acknowledgeOcrPageRequests,
+  createOcrCallback,
+} from "./ingest/ocr-client.mjs";
+import {
+  CUSTOM_API_RUN_PATH,
+  customApiWorkerBinding,
+  validateCustomApiConfig,
+} from "./worker/src/lib/custom-api.js";
+import {
   D1_QUERY_BIND_LIMIT,
   SOURCE_FAMILY_UID_FILTER_MAX,
 } from "./worker/src/lib/store-d1.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
+import {
+  clearCustomApiClipboard,
+  readCustomApiClipboard,
+} from "./operations/custom-api-clipboard.mjs";
 import {
   ensureBankFeedWorkerSecrets,
   validatePlaidApplicationKeys,
@@ -2186,6 +2199,7 @@ export function bankFeedWorkerVars(m) {
 
 /** Every binding this manifest puts on the worker. Exported so a test can read the artifact. */
 export function workerBindings(m, cfg, options = {}) {
+  const customApiBinding = customApiWorkerBinding(m);
   return [
       { type: "d1", name: "DB", id: cfg.d1_database_id },
       { type: "ai", name: "AI" },
@@ -2199,6 +2213,7 @@ export function workerBindings(m, cfg, options = {}) {
       { type: "plain_text", name: "BRAIN_NAME", text: m.client?.slug || "brain" },
       { type: "plain_text", name: "BRAIN_OWNER", text: m.client?.display_name || "the owner" },
       { type: "plain_text", name: "BRAIN_VERSION", text: PRODUCT_VERSION },
+      ...(customApiBinding ? [customApiBinding] : []),
       ...(options.pauseVectorDrainForUpgrade === true
         ? [{ type: "plain_text", name: "VECTOR_DRAIN_MODE", text: "paused-for-upgrade" }]
         : []),
@@ -2239,7 +2254,7 @@ export function workerBindings(m, cfg, options = {}) {
       {
         type: "plain_text",
         name: "OCR_MODEL",
-        text: String(m.safety?.ocr?.model || "@cf/google/gemma-4-26b-a4b-it"),
+        text: String(m.safety?.ocr?.model || OCR_PREFLIGHT_DEFAULT_MODEL),
       },
     ...bankFeedWorkerVars(m),
   ];
@@ -3089,6 +3104,7 @@ export async function cmdHealth(manifestPath, {
   durableAdminKeyOnly = false,
   reachOnly = false,
   requireProjectionReady = false,
+  prepareProjectionReadiness = null,
   request = http,
   wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   resolveKey = resolveAdminKey,
@@ -3213,6 +3229,7 @@ export async function cmdHealth(manifestPath, {
   const attempts = 15;
   const documentsUrl = `${base}/api/admin/brain/documents`;
   let documentsTransportRetryAvailable = true;
+  let projectionReadinessPrepared = false;
   const requestDocuments = async () => {
     try {
       return await request(documentsUrl, {
@@ -3325,6 +3342,22 @@ export async function cmdHealth(manifestPath, {
           "      Health cannot pass because this URL may point at an old or misbound brain."
         );
       }
+      if (requireProjectionReady && typeof prepareProjectionReadiness === "function" &&
+          !projectionReadinessPrepared) {
+        // Version, mode, authentication, and backend are now bound to one
+        // paused Worker generation. Perform the update's one exact D1 rebase
+        // only at this point, then refresh the authenticated receipt before
+        // accepting or refusing projection readiness.
+        await prepareProjectionReadiness();
+        projectionReadinessPrepared = true;
+        if (i >= receiptAttempts) {
+          die(
+            "the paused projection base was reconciled, but no authenticated readiness refresh remained." + "\n" +
+              "      Keep the update pause in place and retry this verification."
+          );
+        }
+        continue;
+      }
       const expectedPausedReachability = reachOnly && expectDrainMode === "paused-for-upgrade";
       if (healthPaused && !expectedPausedReachability) {
         die(
@@ -3350,13 +3383,15 @@ export async function cmdHealth(manifestPath, {
         const pausedForUpgrade = vectorDrainMode === "paused-for-upgrade";
         const backlog = inventory.vector_backlog;
         const readiness = inventory.vector_readiness;
+        let legacyExactBacklog = false;
         try {
           const projection = await updatePreviewLib();
-          projection.validateVectorProjectionAggregateReceipt(inventory, {
+          const aggregate = projection.validateVectorProjectionAggregateReceipt(inventory, {
             expectedVersion: boundVersion,
             expectedBackend,
             expectedDrainMode: boundDrainMode,
           });
+          legacyExactBacklog = aggregate.queue.count_receipt === projection.LEGACY_EXACT_COUNT_RECEIPT;
         } catch (error) {
           if (error?.code === "UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID") {
             die(
@@ -3382,12 +3417,21 @@ export async function cmdHealth(manifestPath, {
           );
         }
         if (backlog.pending > 0) {
+          const pendingLabel = backlog.pending_is_capped === true
+            ? "over 10,000 pieces"
+            : `${backlog.pending.toLocaleString("en-US")} vector operation(s)`;
+          // An older Worker has no capped summary; say why its count is exact.
+          const legacyExactNote = legacyExactBacklog
+            ? "\n      This Brain runs an older Worker, so this is its exact count, not a capped estimate."
+            : "";
+          const componentDetail = backlog.component_counts_exact !== false
+            ? ` (${backlog.upserts} upsert, ${backlog.deletes} delete, ${backlog.submitted} accepted)`
+            : "";
           const queuedAt = backlog.oldest_queued_at;
           const oldest = Math.max(0, Math.floor((Date.now() - queuedAt) / 60000));
           if (oldest > 30) {
             die(
-              `${backlog.pending} vector operation(s) are still processing` +
-                ` (${backlog.upserts} upsert, ${backlog.deletes} delete, ${backlog.submitted} accepted), oldest queued ${oldest} min ago.` + "\n" +
+              `${pendingLabel} are still processing${componentDetail}, oldest queued ${oldest} min ago.` + "\n" +
                 "      Age alone does not prove a stall. This one snapshot cannot tell whether the" + "\n" +
                 "      queue is moving. If the pending count is falling between checks, indexing is" + "\n" +
                 "      working; leave the scheduled drain running and check again later." + "\n" +
@@ -3398,14 +3442,16 @@ export async function cmdHealth(manifestPath, {
                 "      Do not start `brain update` merely to accelerate a healthy active-mode queue;" + "\n" +
                 "      an update is a version migration that pauses corpus writes." + "\n" +
                 "      Only if repeated checks show no count movement should you inspect the Worker" + "\n" +
-                "      schedule in the Cloudflare dashboard and report the unchanged receipts."
+                "      schedule in the Cloudflare dashboard and report the unchanged receipts." +
+                legacyExactNote
             );
           }
           die(
-            `${backlog.pending} vector operation(s) are not query-visible yet` +
-              ` (${backlog.submitted} accepted by Vectorize), oldest queued ${oldest} min ago.` + "\n" +
+            `${pendingLabel} are not query-visible yet` +
+              `${backlog.component_counts_exact !== false ? ` (${backlog.submitted} accepted by Vectorize)` : ""}, oldest queued ${oldest} min ago.` + "\n" +
               "      Provider acceptance is not completion. This resolves on its own, usually" + "\n" +
-              "      within a couple of minutes; re-run `brain health` rather than forcing it."
+              "      within a couple of minutes; re-run `brain health` rather than forcing it." +
+              legacyExactNote
           );
         }
         if (!readiness.ready || readiness.actual_vectors !== readiness.expected_vectors) {
@@ -5461,6 +5507,69 @@ export async function cmdAcceleratedBootstrap(manifestPath, options = {}) {
   });
 }
 
+/**
+ * Rebase the verified projection cut exactly once while an update is paused.
+ *
+ * Releases before C1 could finish a drain without refreshing this count. The
+ * ordinary readiness path must remain bounded for large brains, so the update
+ * control plane performs the one permitted corpus count after the paused
+ * Worker is serving and before its readiness gate. A queued projection or any
+ * non-verified state retains the existing refusal path without a corpus scan.
+ */
+export async function rebasePausedVerifiedProjection({
+  accountId,
+  databaseId,
+  queryDatabase,
+}) {
+  if (typeof queryDatabase !== "function") throw new TypeError("queryDatabase is required");
+  const candidate = await queryDatabase(
+    accountId,
+    databaseId,
+    `SELECT vector_projection_status AS status,
+            EXISTS(SELECT 1 FROM vector_outbox LIMIT 1) AS has_outbox
+       FROM install_state WHERE id = 1`,
+  );
+  if (!candidate || !Array.isArray(candidate.results) || candidate.results.length !== 1) {
+    throw new Error("the paused projection state was unreadable or ambiguous");
+  }
+  const row = candidate.results[0];
+  const hasOutbox = Number(row?.has_outbox);
+  if (!Number.isSafeInteger(hasOutbox) || (hasOutbox !== 0 && hasOutbox !== 1)) {
+    throw new Error("the paused projection queue state is invalid");
+  }
+  if (String(row?.status || "") !== "verified" || hasOutbox !== 0) {
+    return Object.freeze({ rebased: false, reason: hasOutbox ? "vector_work_queued" : "projection_not_verified" });
+  }
+
+  const counted = await queryDatabase(
+    accountId,
+    databaseId,
+    "SELECT COUNT(*) AS expected_vectors FROM chunks",
+  );
+  const expectedVectors = Number(counted?.results?.[0]?.expected_vectors);
+  if (!counted || !Array.isArray(counted.results) || counted.results.length !== 1 ||
+      !Number.isSafeInteger(expectedVectors) || expectedVectors < 0) {
+    throw new Error("the paused projection corpus count is invalid");
+  }
+
+  const persisted = await queryDatabase(
+    accountId,
+    databaseId,
+    `UPDATE install_state
+        SET vector_projection_bootstrap_base_count = ?
+      WHERE id = 1
+        AND vector_projection_status = 'verified'
+        AND NOT EXISTS (SELECT 1 FROM vector_outbox)
+      RETURNING vector_projection_bootstrap_base_count AS expected_vectors`,
+    [expectedVectors],
+  );
+  if (!persisted || !Array.isArray(persisted.results) || persisted.results.length !== 1 ||
+      Number(persisted.results[0]?.expected_vectors) !== expectedVectors) {
+    throw new Error("the paused projection changed before its exact count could be recorded");
+  }
+  return Object.freeze({ rebased: true, expectedVectors });
+}
+
 export async function cmdUpgrade(manifestPath, options = {}) {
   const resolveUpgradeAccount = options.resolveAccount ?? resolveAccount;
   const queryDatabase = options.d1Query ?? d1Query;
@@ -5657,6 +5766,13 @@ export async function cmdUpgrade(manifestPath, options = {}) {
             expectDrainMode: "paused-for-upgrade",
             reachOnly: true,
             requireProjectionReady: true,
+            prepareProjectionReadiness: Number(before?.schema_version || 0) >= 13
+              ? () => rebasePausedVerifiedProjection({
+                  accountId,
+                  databaseId: dbId,
+                  queryDatabase,
+                })
+              : null,
           }));
         // A brain on the lease schema can be asked whether its writers are
         // done instead of being made to wait the full grace. Older brains
@@ -7369,11 +7485,10 @@ export function ocrPolicy(manifest = {}) {
  * installer already holds. No Cloudflare control-plane token is involved in
  * routine ingest.
  *
- * A cap hit, a provider refusal or a transport failure is marked `fatal` and
- * rethrown, because none of them says anything about the DOCUMENT. Recording
- * "unreadable" for a document that was never looked at writes a permanently
- * wrong reason into resume state, and the source cursor must stay retryable
- * instead.
+ * A cap hit or provider refusal is fatal. A page timeout receives two bounded
+ * retries and then a Brain health probe. Failed health stops resumably; healthy
+ * Brain plus a still-slow page becomes a named retryable document skip. None
+ * of those outcomes records the document as unreadable.
  */
 export function makeOcrCallback({
   base,
@@ -7383,52 +7498,85 @@ export function makeOcrCallback({
   onPage = () => {},
   httpImpl = http,
   assertOwned = null,
+  onRetry = (message) => info(message),
+  onSkip = (message) => warn(message),
+  attempts,
+  sleep,
+  random,
+  now,
 }) {
-  const call = async (image, { page, totalPages } = {}) => {
-    const { OCR_SYSTEM_PROMPT } = await ingestOcrLib();
-    let res;
-    try {
-      assertOwned?.();
-      res = await httpImpl(`${base}/api/admin/brain/ocr`, {
-        method: "POST",
-        headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
-        body: JSON.stringify({ image_base64: image.png_base64, page, prompt: OCR_SYSTEM_PROMPT }),
-      }, { what: "the OCR request" });
-    } catch (error) {
-      if (error?.code === "source_ingest_lock_lost") throw error;
-      const e = new Error(`OCR could not reach the brain: ${error.message}`);
-      e.fatal = true;
-      throw e;
-    }
+  return createOcrCallback({
+    base,
+    adminKey,
+    model,
+    maxPages,
+    onPage,
+    onRetry,
+    onSkip,
+    httpImpl,
+    assertOwned,
+    attempts,
+    sleep,
+    random,
+    now,
+    loadPrompt: async () => (await ingestOcrLib()).OCR_SYSTEM_PROMPT,
+  });
+}
 
-    let body = {};
-    try { body = await res.json(); } catch { /* handled by status below */ }
+export function ocrRetryReportLines(ocrCallback) {
+  const retried = Math.max(0, Number(ocrCallback?.stats?.retriedPages || 0));
+  const skipped = Math.max(0, Number(ocrCallback?.stats?.skippedPages || 0));
+  const completed = Math.max(0, retried - skipped);
+  const rereadAfterExpiry = Math.max(0, Number(ocrCallback?.stats?.rereadAfterExpiry || 0));
+  const dailyCapHeldPages = Math.max(0, Number(ocrCallback?.stats?.dailyCapHeldPages || 0));
+  const lines = [];
+  if (completed) {
+    lines.push({ level: "info", message:
+      `${completed} OCR page${completed === 1 ? " was" : "s were"} slow; ` +
+        `${completed === 1 ? "it was" : "they were"} retried and completed.` });
+  }
+  if (skipped) {
+    lines.push({ level: "warn", message:
+      `${skipped} OCR page${skipped === 1 ? " was" : "s were"} still slow after bounded retries; ` +
+        `${skipped === 1 ? "it was" : "they were"} skipped and will be checked again on the next pass.` });
+  }
+  if (rereadAfterExpiry) {
+    lines.push({ level: "warn", message:
+      `${rereadAfterExpiry} OCR page${rereadAfterExpiry === 1 ? " was" : "s were"} re-read after its encrypted handoff was unavailable. ` +
+        "Each affected page used its one bounded replacement call." });
+  }
+  if (dailyCapHeldPages) {
+    lines.push({ level: "warn", message:
+      `${dailyCapHeldPages} OCR page${dailyCapHeldPages === 1 ? " reached" : "s reached"} 3 model calls in 24 hours; ` +
+        `${dailyCapHeldPages === 1 ? "it was" : "they were"} held until the next daily retry window.` });
+  }
+  return lines;
+}
 
-    if (res.status === 429 || body?.llm_cap_exceeded) {
-      const e = new Error(
-        `OCR stopped because the daily spend cap was reached. ${body?.detail || ""}`.trim() +
-        " No document was marked unreadable; re-run once the cap resets or raise safety.daily_llm_spend_cap_usd.",
-      );
-      e.fatal = true;
-      e.llm_cap_exceeded = true;
-      throw e;
-    }
-    if (body?.provider_mismatch || res.status === 409) {
-      const e = new Error(`OCR refused: ${body?.detail || body?.error || "the brain would not run it"}`);
-      e.fatal = true;
-      throw e;
-    }
-    if (!res.ok) {
-      // A 5xx from the model is about THIS page, not about the run, so it is a
-      // page-level error the assembler can count and report inline.
-      return { error: `page ${page}: ${String(body?.detail || body?.error || `HTTP ${res.status}`).slice(0, 160)}` };
-    }
-    onPage({ page, totalPages });
-    return { text: body?.text ?? "" };
-  };
-  call.model = model;
-  call.maxPages = maxPages;
-  return call;
+function reportOcrRetryStats(ocrCallback) {
+  for (const line of ocrRetryReportLines(ocrCallback)) {
+    (line.level === "warn" ? warn : info)(line.message);
+  }
+}
+
+async function acknowledgeStoredOcrPages({
+  base,
+  adminKey,
+  requestIds,
+  assertOwned = null,
+  httpImpl = http,
+} = {}) {
+  if (!Array.isArray(requestIds) || requestIds.length === 0) return;
+  const uniqueRequestIds = [...new Set(requestIds)];
+  for (let offset = 0; offset < uniqueRequestIds.length; offset += 100) {
+    await acknowledgeOcrPageRequests({
+      base,
+      adminKey,
+      requestIds: uniqueRequestIds.slice(offset, offset + 100),
+      assertOwned,
+      httpImpl,
+    });
+  }
 }
 
 export const DRIVE_FULL_SWEEP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -7673,8 +7821,9 @@ export function localWalkRemovalCandidates(walkSkips = [], previouslyKnownKeys =
  * refused coverage, as are envelopes the Worker itself refused.
  */
 export function localReceiptCoverage(tally = {}, skips = []) {
-  const coverageGaps = (skips || []).filter((skip) => skip?.coverage_gap !== false).length;
-  const adjudicatedSkips = (skips || []).length - coverageGaps;
+  const nonFailures = (skips || []).filter((skip) => skip?.failed !== true);
+  const coverageGaps = nonFailures.filter((skip) => skip?.coverage_gap !== false).length;
+  const adjudicatedSkips = nonFailures.length - coverageGaps;
   const workerRefused = Math.max(0, Number(tally?.refused || 0));
   return {
     coverageGaps,
@@ -7694,7 +7843,17 @@ export function recordLocalSkippedDocumentState(state, { stateKey, nativePath, r
   return state;
 }
 
-export const sourceCursorCanAdvance = (tally) => Number(tally?.failed || 0) === 0;
+export const sourceCursorCanAdvance = (tally, { retryableSkips = 0 } = {}) =>
+  Number(tally?.failed || 0) === 0 && Number(retryableSkips || 0) === 0;
+
+export const sourceReceiptHasRemoteGap = ({
+  tally,
+  totalRefused = 0,
+  coverageGaps = 0,
+  driveReviewRequired = false,
+  retryableSkips = 0,
+} = {}) => Number(tally?.failed || 0) > 0 || Number(totalRefused || 0) > 0 ||
+  Number(coverageGaps || 0) > 0 || Number(retryableSkips || 0) > 0 || driveReviewRequired === true;
 
 /**
  * Turn a durable per-document failure receipt into a machine-visible failure.
@@ -7713,6 +7872,79 @@ export function assertNoIngestFailures(tally, { noun = "stored part" } = {}) {
     `${failed} ${label} failed, so this ingest is incomplete.\n` +
       "      Progress was saved. Re-run the same command to retry only what did not finish."
   );
+}
+
+const SYSTEMIC_PREPARATION_ERROR_NAMES = new Set([
+  "ArchiveSafetyError",
+  "DriveError",
+  "ExtractorSystemError",
+  "ImapError",
+  "LocalFileSafetyError",
+  "SourceIngestLockError",
+]);
+
+const SYSTEMIC_TRANSPORT_ERROR_CODES = new Set([
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+]);
+
+/**
+ * Only an ordinary exception attributable to one document may be isolated.
+ * Existing run-level gates retain their fail-closed behavior across local,
+ * Drive, Gmail, and IMAP preparation handlers.
+ */
+export function isSystemicIngestPreparationError(error) {
+  if (!error || typeof error !== "object") return true;
+  if (error instanceof Fatal || error instanceof SourceIngestLockError) return true;
+  if (error.fatal === true || error.needsReauth === true) return true;
+  if (SYSTEMIC_PREPARATION_ERROR_NAMES.has(String(error.name || ""))) return true;
+  if (typeof error.operationClass === "string" && error.operationClass) return true;
+  if (Number.isInteger(error.providerStatus)) return true;
+  if (String(error.code || "").startsWith("source_ingest_lock_")) return true;
+  if (SYSTEMIC_TRANSPORT_ERROR_CODES.has(String(error.code || "").toUpperCase())) return true;
+  return error.cause && error.cause !== error
+    ? isSystemicIngestPreparationError(error.cause)
+    : false;
+}
+
+/**
+ * Build the one per-item recovery boundary shared by cursor-backed sources.
+ * The source-specific callback marks the observed identity as active before
+ * any later cleanup plan can interpret a preparation failure as deletion.
+ */
+export function makeRemotePreparationErrorIsolator({
+  sourceLabel,
+  state,
+  statePath,
+  dryRun,
+  saveState,
+  tally,
+  skips,
+  assertOwned = null,
+  stateKeyOf,
+  protectPriorFamily = () => {},
+}) {
+  return (error, item) => {
+    // This must precede every state, tally, or protection mutation.
+    if (isSystemicIngestPreparationError(error)) throw error;
+    const stateKey = stateKeyOf(item);
+    if (typeof stateKey !== "string" || !stateKey) throw error;
+    assertOwned?.();
+    protectPriorFamily(stateKey, item);
+    const reason = `${sourceLabel} item preparation failed unexpectedly; its prior family was retained and it was left for retry`;
+    recordLocalSkippedDocumentState(state, { stateKey, reason });
+    if (!dryRun) saveState(statePath, state);
+    skips.push({ path: `${sourceLabel} item`, reason, failed: true });
+    tally.failed++;
+    return true;
+  };
 }
 
 /**
@@ -8038,33 +8270,7 @@ async function resolveBase(m, acct) {
   return sub?.subdomain ? `https://${scriptName}.${sub.subdomain}.workers.dev` : null;
 }
 
-/**
- * What the document store actually holds, per source.
- *
- * The registry's own document_count is a receipt from the last ingest, not the
- * truth. Reading the store is what turns "the brain has 1,204 documents from
- * this source" from a claim into an observation, and the gap between the two
- * numbers is the cheapest signal available that an ingest died halfway.
- *
- * Returns null rather than throwing: a listing that works without the admin key
- * is more useful than one that refuses to print anything.
- */
-async function liveSourceCounts(base, adminKey) {
-  if (!base || !adminKey) return null;
-  try {
-    const res = await http(`${base}/api/admin/brain/documents`, {
-      headers: { "X-Admin-Key": adminKey },
-    });
-    if (!res.ok) return null;
-    const body = await res.json();
-    const map = new Map();
-    for (const r of body.rows || []) map.set(r.source_type, r);
-    return map;
-  } catch {
-    return null;
-  }
-}
-
+/** Read registered sources from the already resolved control-plane database. */
 async function readSources(acctId, dbId) {
   const r = await d1Query(acctId, dbId, "SELECT * FROM sources ORDER BY name").catch(() => null);
   if (!r) {
@@ -8082,6 +8288,7 @@ const num = (n) => Number(n || 0).toLocaleString("en-US");
 export function documentCountOf(row) {
   if (!row) return undefined;
   const value = row.documents ?? row.total;
+  if (value === null || value === undefined) return undefined;
   const count = Number(value);
   return Number.isFinite(count) ? count : undefined;
 }
@@ -8142,10 +8349,11 @@ async function reportFreshness(m, acct, manifestPath) {
 }
 
 class SourceInventoryClientError extends Error {
-  constructor(code, message) {
+  constructor(code, message, { retryable = false } = {}) {
     super(message);
     this.name = "SourceInventoryClientError";
     this.code = code;
+    this.retryable = retryable;
   }
 }
 
@@ -8348,6 +8556,7 @@ export async function collectSourceInventoryPages(requestPage, { limit = 250 } =
         response.status === 401 || response.status === 403
           ? "the Brain did not accept this computer's saved owner credential. Run `brain setup <manifest>` to repair it; do not paste a key into the command."
           : `the Brain could not provide a source inventory (HTTP ${response.status}; ${knownCode})`,
+        { retryable: response.status === 404 || isRetryableHttpStatus(response.status) },
       );
     }
     const page = validateSourceInventoryPage(body);
@@ -8397,6 +8606,23 @@ export async function collectSourceInventoryPages(requestPage, { limit = 250 } =
     cursor = page.cursor;
   }
   throw new SourceInventoryClientError("inventory_page_limit", "the source inventory exceeded its safe pagination bound");
+}
+
+/**
+ * A freshly deployed Worker can accept a source write before its next read is
+ * consistently routable. Only the inventory read is repeated; the preceding
+ * write receipt is never replayed through this boundary.
+ */
+async function collectSourceInventoryWithReadinessRetry(requestPage, options = {}) {
+  const sleep = options.sourceInventorySleep ??
+    ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
+  return retryTransient(() => collectSourceInventoryPages(requestPage), {
+    attempts: 4,
+    delayMs: 250,
+    maxDelayMs: 1_000,
+    sleep,
+    shouldRetry: (error) => error?.retryable === true || error?.code === "inventory_snapshot_changed",
+  });
 }
 
 /** Collect every opaque recovery candidate for exactly one source snapshot. */
@@ -8629,6 +8855,8 @@ export async function cmdSources(manifestPath, options = {}) {
       throw new SourceInventoryClientError("invalid_options", "--cursor and --limit are available here only with --json --recovery");
     }
     const sourceRegistryWrite = Boolean(flags.add) || flags.refresh !== undefined;
+    let writeAccepted = false;
+    const acceptedChanges = [];
     if (json && sourceRegistryWrite) {
       throw new SourceInventoryClientError(
         "read_only_json_required",
@@ -8656,6 +8884,8 @@ export async function cmdSources(manifestPath, options = {}) {
         source: name,
         kind: String(kind),
       }, managedSourceRequest);
+      writeAccepted = true;
+      acceptedChanges.push({ operation: "register", source: name, kind: String(kind) });
       if (registration.registered) ok(`registered source "${name}" (kind ${kind})`);
       else info(`source "${name}" is already registered, leaving it alone`);
     }
@@ -8674,6 +8904,8 @@ export async function cmdSources(manifestPath, options = {}) {
         source: name,
         expected_refresh_seconds: seconds[spec],
       }, managedSourceRequest);
+      writeAccepted = true;
+      acceptedChanges.push({ operation: "refresh", source: name, schedule: spec });
       if (seconds[spec] === null) ok(`"${name}" will no longer be reported as stale`);
       else ok(`"${name}" is expected to refresh ${spec}; it will be reported stale past 1.5x that`);
     }
@@ -8716,7 +8948,41 @@ export async function cmdSources(manifestPath, options = {}) {
       return preview;
     }
 
-    const inventory = await collectSourceInventoryPages(requestPage);
+    let inventory;
+    try {
+      inventory = await collectSourceInventoryWithReadinessRetry(requestPage, options);
+    } catch (error) {
+      if (!writeAccepted) throw error;
+      const pending = error?.retryable === true || error?.code === "inventory_snapshot_changed";
+      if (!pending) {
+        const errorCode = error instanceof SourceInventoryClientError
+          ? String(error.code || "source_inventory_verification_failed")
+          : "source_inventory_verification_failed";
+        warn(
+          "the source change was accepted, but its inventory verification failed. " +
+          "The write was not repeated. Run `brain sources <manifest>` to verify the current inventory; " +
+          "if the same verification error returns, run `brain diagnose <manifest>`."
+        );
+        return {
+          kind: "source_inventory_verification_failed",
+          write_accepted: true,
+          inventory_pending: false,
+          verification_failed: true,
+          error_code: errorCode,
+          changes: acceptedChanges,
+        };
+      }
+      warn(
+        "the source change was accepted, but the complete inventory is still becoming available. " +
+        "The write was not repeated. Run `brain sources <manifest>` to read it back."
+      );
+      return {
+        kind: "source_inventory_pending",
+        write_accepted: true,
+        inventory_pending: true,
+        changes: acceptedChanges,
+      };
+    }
     if (json) {
       if (!options.silent) console.log(JSON.stringify(inventory, null, 2));
       return inventory;
@@ -10294,7 +10560,53 @@ export async function cmdProvenanceRepairInteractive(manifestPath, options = {})
  * them as unregistered with no way left to remove them. A rollback that half
  * works is the specific failure this whole feature exists to prevent.
  */
-async function purgeDocuments(base, adminKey, name) {
+const requestWorkerSourceForget = (base, adminKey, name, confirm, preview = null) =>
+  http(`${base}/api/admin/brain/forget`, {
+    method: "POST",
+    headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source: name,
+      confirm,
+      ...(confirm ? {
+        preview_documents: preview?.documents,
+        preview_document_high_water: preview?.document_high_water,
+        preview_corpus_mutation_generation: preview?.corpus_mutation_generation,
+      } : {}),
+    }),
+  });
+
+/** Exact, read-only count and finalization-capability receipt for one source. */
+async function previewSourceForget(base, adminKey, name) {
+  if (!base || !adminKey) {
+    die(
+      "the guarded Worker cannot be addressed, so the exact source-forget preview is unavailable.\n" +
+        "      Nothing was removed. Repair the saved Brain URL or durable admin key, then retry."
+    );
+  }
+  const response = await requestWorkerSourceForget(base, adminKey, name, false)
+    .catch((error) => ({ ok: false, status: 0, netError: error.message }));
+  if (!response.ok) {
+    const detail = typeof response.text === "function" ? await response.text().catch(() => "") : "";
+    die(
+      `the worker's exact forget preview returned ${response.status || "a network error"}: ` +
+        `${String(detail || response.netError || "").slice(0, 200)}\n` +
+        "      Nothing was removed. Update or repair the Worker, then retry."
+    );
+  }
+  const raw = await response.text().catch(() => "");
+  let body = null;
+  try { body = JSON.parse(raw); } catch { /* validated below */ }
+  try {
+    return validateSourceForgetPreview(body, name);
+  } catch (error) {
+    die(
+      `the worker's read-only forget preview did not prove guarded registry cleanup: ${error.message}\n` +
+        "      Nothing was removed. Update the Worker, then rerun the same `brain forget` command."
+    );
+  }
+}
+
+async function purgeDocuments(base, adminKey, name, exactPreview = null) {
   const warnings = [];
 
   if (!base || !adminKey) {
@@ -10302,23 +10614,21 @@ async function purgeDocuments(base, adminKey, name) {
       "the worker could not be addressed (no URL or no ADMIN_KEY), so the store was edited directly"
     );
   } else {
-    const requestWorkerForget = (confirm) => http(`${base}/api/admin/brain/forget`, {
-      method: "POST",
-      headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
-      body: JSON.stringify({ source: name, confirm }),
-    });
-
     // Prove the deployed Worker owns BOTH halves before authorizing either one.
     // An older route can remove documents but cannot unregister the source
     // behind the pause barrier. Discovering that after confirm:true would leave
     // a half-finished destructive operation, so the read-only preview is the
     // compatibility handshake.
-    const preview = await requestWorkerForget(false)
-      .catch((e) => ({ ok: false, status: 0, netError: e.message }));
+    const preview = exactPreview
+      ? { ok: true, prepared: true }
+      : await requestWorkerSourceForget(base, adminKey, name, false)
+        .catch((e) => ({ ok: false, status: 0, netError: e.message }));
     if (preview.ok) {
-      const rawPreview = await preview.text().catch(() => "");
-      let previewBody = null;
-      try { previewBody = JSON.parse(rawPreview); } catch { /* validated below */ }
+      let previewBody = exactPreview;
+      if (!previewBody) {
+        const rawPreview = await preview.text().catch(() => "");
+        try { previewBody = JSON.parse(rawPreview); } catch { /* validated below */ }
+      }
       try {
         validateSourceForgetPreview(previewBody, name);
       } catch (error) {
@@ -10328,7 +10638,7 @@ async function purgeDocuments(base, adminKey, name) {
         );
       }
 
-      const res = await requestWorkerForget(true)
+      const res = await requestWorkerSourceForget(base, adminKey, name, true, previewBody)
         .catch((e) => ({ ok: false, status: 0, netError: e.message }));
       if (!res.ok) {
         const detail = typeof res.text === "function" ? await res.text().catch(() => "") : "";
@@ -10352,6 +10662,11 @@ async function purgeDocuments(base, adminKey, name) {
         );
       }
       const removed = Number(body.documents);
+      if (body.document_count_exact === false || body.chunk_count_exact === false) {
+        warnings.push(
+          String(body.count_note || "Another operation removed some rows before this operation reached them.")
+        );
+      }
       const queued = Number(body?.vector_cleanup_queued || 0);
       if (queued > 0) {
         warnings.push(
@@ -10490,18 +10805,13 @@ async function cmdForget(manifestPath) {
 
   const base = await resolveBase(m, acct);
   const adminKey = resolveAdminKey(manifestPath);
-  const live = await liveSourceCounts(base, adminKey);
-  const liveCount = documentCountOf(live?.get(name));
+  const exactPreview = await previewSourceForget(base, adminKey, name);
+  const liveCount = Number(exactPreview.documents);
 
   // Print the damage BEFORE anything happens, every time, --yes or not.
   console.log(`\n  ${c.bold(`forget "${name}"`)} from ${m.client?.display_name || m.client?.slug || "this install"}\n`);
   console.log("  this removes:");
-  if (liveCount !== undefined) {
-    console.log(`    ${num(liveCount).padStart(9)}  documents in the brain (source_type = "${name}")`);
-  } else {
-    console.log(`    ${num(row.document_count).padStart(9)}  documents, per the registry's last receipt`);
-    console.log(`    ${c.dim("           the live count could not be read, so this number may be stale")}`);
-  }
+  console.log(`    ${num(liveCount).padStart(9)}  documents in the brain (exact guarded preview)`);
   console.log(`    ${"1".padStart(9)}  registry row in sources`);
   if (row.sync_cursor) {
     console.log(`    ${"1".padStart(9)}  sync cursor (a later ingest of "${name}" starts from the beginning)`);
@@ -10522,7 +10832,7 @@ async function cmdForget(manifestPath) {
   }
 
   console.log("");
-  const out = await purgeDocuments(base, adminKey, name);
+  const out = await purgeDocuments(base, adminKey, name, exactPreview);
 
   // Never substitute an expectation for an observation.
   //
@@ -10541,25 +10851,9 @@ async function cmdForget(manifestPath) {
   const removed = out.removed;
   ok(`removed ${num(removed)} document(s) via ${out.channel}`);
 
-  // Confirm against the live brain before freeing the name. Freeing it while
-  // documents survive is the one outcome with no recovery: they stay in the
-  // index with no name left to address them by, which is precisely what this
-  // feature exists to prevent.
-  const post = await liveSourceCounts(base, adminKey);
-  const stillThere = documentCountOf(post?.get(name));
-  if (stillThere) {
-    die(
-      `${num(stillThere)} document(s) for "${name}" are STILL in the brain after the purge.\n` +
-        "      The registry row was left in place. Do not treat this source as removed."
-    );
-  }
-  if (post === null || post === undefined) {
-    warn(
-      "the live count could not be re-read, so removal is reported but not independently\n" +
-        "        confirmed. Run `brain sources` once the worker is reachable."
-    );
-  }
-
+  // The guarded final receipt is the exact postcondition. Its source-registry
+  // transaction can succeed only when no live source document remains, so a
+  // second hot summary read would be weaker and can lag this operation.
   if (out.sourceUnregistered !== true) {
     die(
       `the documents were removed via ${out.channel}, but that path cannot finalize the source registry\n` +
@@ -10997,6 +11291,9 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     );
   }
   const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
+  const sendPreparedBatches = options.sendBatches ?? sendBatches;
+  const reconcilePreparedFamilies = options.reconcileDocumentFamilies ?? reconcileDocumentFamilies;
+  const listPreparedSourceFamilies = options.listStoredSourceFamilies ?? listStoredSourceFamilies;
   const recordSourceReceipt = (receipt) => {
     assertLockOwned?.();
     return postReceipt(base, adminKey, receipt, undefined, { assertOwned: assertLockOwned });
@@ -11160,6 +11457,25 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   let unchanged = 0;
   let split = 0;
   let scanned = 0;
+  const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
+
+  const isolatePreparationError = (error, file) => {
+    // This classification must be the first action. A safety or systemic
+    // refusal must not write retry state or let a later file spend or mutate.
+    if (isSystemicIngestPreparationError(error)) throw error;
+    assertLockOwned?.();
+    const stateKey = String(file?.rel || file?.name || "unnamed document").split(sep).join("/");
+    const reason = "file preparation failed unexpectedly; it was left for retry";
+    recordLocalSkippedDocumentState(state, {
+      stateKey,
+      nativePath: file?.rel,
+      reason,
+    });
+    if (!dry) saveState(statePath, state);
+    skips.push({ path: safeIngestDisplay(file?.rel, file?.name), reason, failed: true });
+    tally.failed++;
+    return true;
+  };
 
   // One file at a time, sent as each batch fills. Building the whole corpus
   // first cost 584MB of live strings for 250 files, so a real folder OOMs with
@@ -11225,6 +11541,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
           keep_doc_uids: sanitized.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
           skipKeys: [key, f.rel, ...sanitized.map((envelope) => envelope.source_id)],
           legacyPartRoot: [key, f.rel],
+          ocrPageRequestIds: Array.isArray(r.ocrPageRequestIds) ? [...r.ocrPageRequestIds] : [],
         },
       };
     }
@@ -11242,6 +11559,11 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
       return { unchanged: true };
     }
     if (r.skip) {
+      // A slow OCR page is a transient extraction outcome, not a statement
+      // that the source document was removed. Clear the accepted hash so the
+      // same stable document identity is read again on the next pass while an
+      // older stored revision, if any, remains untouched.
+      if (r.skip.retryable === true) delete state.done[key];
       recordLocalSkippedDocumentState(state, {
         stateKey: key, nativePath: f.rel, reason: r.skip.reason,
       });
@@ -11273,6 +11595,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
         keep_doc_uids: envelopes.map((envelope) => `${sourceName}:${envelope.source_id}`),
         skipKeys: [key, f.rel, ...envelopes.map((envelope) => envelope.source_id)],
         legacyPartRoot: [key, f.rel],
+        ocrPageRequestIds: Array.isArray(r.ocrPageRequestIds) ? [...r.ocrPageRequestIds] : [],
       },
     };
   };
@@ -11283,6 +11606,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     const preview = [];
     for await (const group of batchStream(limited, prepareOne, {
       onSkip: (sk) => skips.push(sk),
+      onPrepareError: isolatePreparationError,
       onProgress: (n) => { if (n % 250 === 0) process.stdout.write(`\r  scanned ${n}/${limited.length}...   `); },
     })) {
       for (const item of group) if (preview.length < 5) preview.push(item);
@@ -11297,7 +11621,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
       uids: vanishedRemovalKeys.map((key) => `${sourceName}:${key}`),
       base, adminKey, state, dryRun: true, label: "Drive deletion",
     });
-    info(`${scanned} document(s) would be sent; ${unchanged} unchanged; ${skips.length} skipped`);
+    info(`${scanned} document(s) would be sent; ${unchanged} unchanged; ${skips.length} not indexed; ${tally.failed} failed`);
     reportNotes(notes);
     console.log("");
     ok("dry run, nothing was sent");
@@ -11311,7 +11635,8 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     }
     // dry_run is stated on the returned shape rather than left to be inferred
     // from a zero, so a sweep reporting this leg can never call a preview a load.
-    return { dry_run: true, would_send: scanned, unchanged, skipped: skips.length };
+    assertNoIngestFailures(tally, { noun: "file" });
+    return { dry_run: true, would_send: scanned, unchanged, skipped: skips.length, failed: 0 };
   }
 
   // Routine ingest is a data-plane operation. Once setup has saved the live
@@ -11320,7 +11645,6 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   const sourceRunId = `sync_${randomBytes(16).toString("hex")}`;
   const sourceRunStartedAt = new Date().toISOString();
   let sourceRunClosed = false;
-  const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
   await recordSourceReceipt({
     source: sourceName,
     kind: "upload",
@@ -11345,6 +11669,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   let batchNo = 0;
   for await (const group of batchStream(limited, prepareOne, {
     onSkip: (sk) => skips.push(sk),
+    onPrepareError: isolatePreparationError,
     onProgress: (n) => {
       scanned = n;
       if (n % 100 === 0) process.stdout.write(`\r  scanned ${n}/${limited.length}, sent ${tally.created + tally.updated}   `);
@@ -11354,7 +11679,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     for (const item of group) if (item.familyPlan) familyPlans.set(item.familyPlan.stateKey, item.familyPlan);
     let t;
     try {
-      t = await sendBatches({
+      t = await sendPreparedBatches({
         base, adminKey, groups: [group], state, statePath, skips, quiet: true,
         saveState, assertOwned: assertLockOwned,
         onResult: (item, result) => {
@@ -11395,10 +11720,18 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
       (plan) => ({ base_doc_uid: plan.base_doc_uid, keep_doc_uids: plan.keep_doc_uids }),
     );
     if (reconciliation.length) {
-      await reconcileDocumentFamilies({
+      await reconcilePreparedFamilies({
         families: reconciliation,
         base,
         adminKey,
+        assertOwned: assertLockOwned,
+      });
+    }
+    for (const plan of outcome.completed) {
+      await acknowledgeStoredOcrPages({
+        base,
+        adminKey,
+        requestIds: plan.ocrPageRequestIds,
         assertOwned: assertLockOwned,
       });
     }
@@ -11432,7 +11765,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // a family that exists in D1. This matters most for the unattended folder
   // lane, where a missing File Provider mount can otherwise look like the
   // owner deleted everything.
-  const storedLocalFamilies = await listStoredSourceFamilies({
+  const storedLocalFamilies = await listPreparedSourceFamilies({
     base, adminKey, source: sourceName,
   });
   const localRemovalPlan = buildDriveRemovalPlan({
@@ -11488,7 +11821,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // retry marker and fail the run instead of recording a clean source.
   const plannedLocalTargets = [...new Set([...localTruthTargets, ...vanishedTargets])];
   if (plannedLocalTargets.length) {
-    const afterLocalRemoval = await listStoredSourceFamilies({
+    const afterLocalRemoval = await listPreparedSourceFamilies({
       base, adminKey, source: sourceName,
     });
     const stillStored = plannedLocalTargets.filter((uid) => afterLocalRemoval.has(uid));
@@ -11539,12 +11872,19 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     );
   }
 
-  state.credential_scanner_fingerprint = scannerFingerprint;
+  // A file isolated as failed keeps its previously indexed revision in state.done.
+  // Committing the new scanner fingerprint now would let the next run short-circuit
+  // that revision as unchanged, so it would never meet the current scanner. The
+  // remote lanes already commit their fingerprint only on a failure-free run.
+  if (tally.failed === 0) state.credential_scanner_fingerprint = scannerFingerprint;
   saveState(statePath, state);
 
-  const finalStatus = tally.failed ? "error" : "ready";
   const localCoverageGaps = localCoverage.coverageGaps;
   const adjudicatedSkips = localCoverage.adjudicatedSkips;
+  const localRetryableOcrSkips = skips.filter(
+    (skip) => skip?.retryable === true && skip?.code === "ocr_page_timeout",
+  ).length;
+  const finalStatus = tally.failed || localRetryableOcrSkips ? "error" : "ready";
   const localWalkComplete = !flags.limit && walkComplete;
   await recordSourceReceipt({
     source: sourceName,
@@ -11561,17 +11901,19 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     docs_updated: tally.updated,
     docs_unchanged: unchanged + tally.unchanged,
     docs_refused: localCoverage.docsRefused,
-    docs_failed: tally.failed,
+    docs_failed: tally.failed + localRetryableOcrSkips,
     detail: `local folder ingest ${finalStatus === "ready" ? "completed" : "completed with document failures"}; ` +
       `coverage_gaps=${localCoverageGaps}; adjudicated_skips=${adjudicatedSkips}`,
     ...(tally.failed ? { error: `${tally.failed} document(s) failed` } : {}),
   });
   sourceRunClosed = true;
 
-  const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged`;
-  if (tally.failed) info(summary);
+  const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged` +
+    (tally.failed ? `, ${tally.failed} failed` : "");
+  if (tally.failed || localRetryableOcrSkips) info(summary);
   else ok(summary);
   if (tally.refused) warn(`${tally.refused} file(s) refused for carrying live credentials. They were NOT indexed.`);
+  reportOcrRetryStats(ocrCallback);
   if (messageExportsSeen.size) {
     // A zone is a sensitivity boundary. A file format is not. One WhatsApp
     // export routinely holds an accountant and an oncologist in the same file,
@@ -11591,7 +11933,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   await reportSkips(skips);
 
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
-  assertNoIngestFailures(tally);
+  assertNoIngestFailures(tally, { noun: "file" });
   await reportBacklog(manifestPath);
   // Returned only so a caller that ran this as one leg of a wider sweep can
   // report a real count instead of "unknown". Reached only after
@@ -11668,7 +12010,24 @@ export function validateForgetReceipt(body) {
 
 /** A whole-source preview must prove that confirmation includes registry cleanup. */
 export function validateSourceForgetPreview(body, source) {
-  validateForgetBody(body);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("the source forget preview is not a JSON object");
+  }
+  if (!Number.isSafeInteger(Number(body.documents)) || Number(body.documents) < 0 ||
+      body.document_count_exact !== true) {
+    throw new Error("the source forget preview has no exact document count");
+  }
+  if (!Number.isSafeInteger(Number(body.document_high_water)) ||
+      Number(body.document_high_water) < 0) {
+    throw new Error("the source forget preview has no document high water");
+  }
+  if (!Number.isSafeInteger(Number(body.corpus_mutation_generation)) ||
+      Number(body.corpus_mutation_generation) < 0) {
+    throw new Error("the source forget preview has no corpus mutation generation");
+  }
+  if (body.chunks !== null || body.vectors !== null || Object.hasOwn(body, "targets")) {
+    throw new Error("the source forget preview enumerated corpus-sized detail");
+  }
   if (body.dry_run !== true) throw new Error("the source forget preview is not a dry run");
   if (body.source !== source) throw new Error("the source forget preview names a different source");
   if (body.would_unregister_source !== true || body.source_unregistered !== false ||
@@ -11680,7 +12039,30 @@ export function validateSourceForgetPreview(body, source) {
 
 /** A whole-source receipt binds document removal to the exact registry finalization. */
 export function validateSourceForgetReceipt(body, source) {
-  validateForgetReceipt(body);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("the source forget receipt is not a JSON object");
+  }
+  for (const field of ["documents", "chunks", "vectors"]) {
+    if (!Number.isSafeInteger(Number(body[field])) || Number(body[field]) < 0) {
+      throw new Error(`the source forget receipt has no valid ${field} count`);
+    }
+  }
+  if (![true, false].includes(body.document_count_exact) ||
+      ![true, false].includes(body.chunk_count_exact) || Object.hasOwn(body, "targets")) {
+    throw new Error("the source forget receipt is not a bounded deletion receipt");
+  }
+  if (body.document_count_exact === false || body.chunk_count_exact === false) {
+    for (const field of ["targeted_documents", "targeted_chunks"]) {
+      if (!Number.isSafeInteger(Number(body[field])) || Number(body[field]) < 0) {
+        throw new Error(`the source forget receipt has no valid ${field} count`);
+      }
+    }
+    if (typeof body.count_note !== "string" ||
+        !/another operation removed some rows/i.test(body.count_note)) {
+      throw new Error("the source forget receipt does not explain its overlapping deletion");
+    }
+  }
+  if (body.dry_run !== false) throw new Error("the source forget receipt did not confirm a real deletion");
   if (body.source !== source) throw new Error("the source forget receipt names a different source");
   if (body.source_unregistered !== true || body.registry_event_recorded !== true ||
       typeof body.operation_id !== "string" || !body.operation_id.trim()) {
@@ -13789,6 +14171,12 @@ export function loadSourceRegistry(commands = {}) {
         run: () => ingestIphoneBackup(m, manifestPath, { ...flags, from: "iphone-backup" }),
       }],
     },
+    custom_api: {
+      order: 75,
+      label: "Custom business API",
+      scope: "the bounded JSON endpoints declared in this manifest",
+      outsideLoad: "The owner's Worker pulls this source on its own cron, so brain load has no laptop-side work to run. Preview or run it now with brain custom-api <manifest> --dry-run or brain custom-api <manifest>.",
+    },
     zoom: {
       order: 80,
       label: "Zoom cloud recordings",
@@ -13871,9 +14259,9 @@ export async function planLoad({ m, manifestPath, flags = {}, registry, probes, 
       entry.status = "unavailable";
       entry.reason = `enabled in this manifest, but brain ${PRODUCT_VERSION} has no loader for it`;
       entry.fix = "nothing was loaded from it; put its documents in a folder and load that instead";
-    } else if (descriptor.pushOnly) {
+    } else if (descriptor.pushOnly || descriptor.outsideLoad) {
       entry.status = "skipped";
-      entry.reason = descriptor.pushOnly;
+      entry.reason = descriptor.pushOnly || descriptor.outsideLoad;
     } else {
       const probe = probeTable[canonical];
       let verdict = { connected: true };
@@ -14539,6 +14927,10 @@ const cmdIngestRemoteRun = async (
     assertLockOwned?.();
     return persistState(path, value);
   };
+  const sendPreparedBatches = options.sendBatches ?? sendBatches;
+  const reconcilePreparedFamilies = options.reconcileDocumentFamilies ?? reconcileDocumentFamilies;
+  const listPreparedSourceFamilies = options.listStoredSourceFamilies ?? listStoredSourceFamilies;
+  const applyPreparedRemovals = options.applyDriveRemovals ?? applyDriveRemovals;
   // IMAP holds its own mailbox credential and never touches the Google store.
   // Resolving googleAuth unconditionally would refuse an IMAP sync on a machine
   // that has deliberately never connected Google, which is most of them.
@@ -15028,6 +15420,7 @@ const cmdIngestRemoteRun = async (
   let scanned = 0;
   let prepared = 0;
   let batchNo = 0;
+  let retryableOcrSkips = 0;
   // Held back until every batch has been accepted. See the note at its
   // assignment: advancing a sync cursor early loses documents silently.
   let pendingCursor = null;
@@ -15037,6 +15430,7 @@ const cmdIngestRemoteRun = async (
   const rejectedFamilyParts = new Map();
   const intentionalRemovalUids = [];
   const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
+  const countedPreparationErrors = new WeakSet();
 
   const addTally = (part) => {
     for (const key of Object.keys(tally)) tally[key] += Number(part?.[key] || 0);
@@ -15070,7 +15464,7 @@ const cmdIngestRemoteRun = async (
     for (const item of group) {
       if (item.familyPlan) familyPlans.set(item.familyPlan.stateKey, item.familyPlan);
     }
-    const part = await sendBatches({
+    const part = await sendPreparedBatches({
       base, adminKey, groups: [group], state, statePath, skips, quiet: true,
       saveState, assertOwned: assertLockOwned,
       onResult: (item, result) => {
@@ -15095,11 +15489,19 @@ const cmdIngestRemoteRun = async (
     const outcome = remoteFamilyOutcomes(familyPlans.values(), sentFamilyParts, acceptedFamilyParts);
     const settlement = remoteFamilySettlement(outcome, rejectedFamilyParts);
     if (settlement.reconciliations.length) {
-      const staleParts = await reconcileDocumentFamilies({
+      const staleParts = await reconcilePreparedFamilies({
         families: settlement.reconciliations, base, adminKey,
         assertOwned: assertLockOwned,
       });
       if (staleParts) ok(`${staleParts} obsolete split-document part(s) removed`);
+    }
+    for (const plan of outcome.completed) {
+      await acknowledgeStoredOcrPages({
+        base,
+        adminKey,
+        requestIds: plan.ocrPageRequestIds,
+        assertOwned: assertLockOwned,
+      });
     }
     intentionalRemovalUids.push(...settlement.intentionalRemovalUids);
     for (const plan of outcome.completed) {
@@ -15213,7 +15615,7 @@ const cmdIngestRemoteRun = async (
       Number(driveRemovalReview?.counts?.pending_source_deletions || 0) > 0
     );
     const driveInventoryBeforeProcessing = needsDrivePreInventory
-      ? await listStoredSourceFamilies({
+      ? await listPreparedSourceFamilies({
           base,
           adminKey,
           source: sourceName,
@@ -15252,7 +15654,7 @@ const cmdIngestRemoteRun = async (
     const labelCandidateUids = [...driveAbsenceCandidates].sort();
     const labelBatches = batchSourceFamilyLabelUids({ source: sourceName, uids: labelCandidateUids });
     for (const batch of labelBatches) {
-      const labelInventory = await listStoredSourceFamilies({
+      const labelInventory = await listPreparedSourceFamilies({
         base,
         adminKey,
         source: sourceName,
@@ -15463,7 +15865,17 @@ const cmdIngestRemoteRun = async (
       if (!r) return null;
       if (r.skip) {
         state.skipped[key] = r.skip.reason;
-        intentionalRemovalUids.push(key);
+        if (r.skip.retryable === true && r.skip.code === "ocr_page_timeout") {
+          // A transient OCR timeout cannot authorize deletion of a prior
+          // accepted revision. Retire its local acceptance marker so the same
+          // Drive identity is downloaded again, and keep the source cursor
+          // behind this gap until that retry succeeds.
+          delete state.done[key];
+          scannerProgressCanCommit = false;
+          retryableOcrSkips++;
+        } else {
+          intentionalRemovalUids.push(key);
+        }
         if (r.skip.code === "source_deleted") sourceResolvedSkipped++;
         else if (["shortcut_not_followed", "non_text_media"].includes(r.skip.code)) adjudicatedSkipped++;
         return { skip: r.skip };
@@ -15486,6 +15898,7 @@ const cmdIngestRemoteRun = async (
         keep_doc_uids: envelopes.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
         skipKeys: [key, ...envelopes.map((envelope) => envelope.source_id)],
         legacyPartRoot: f.id,
+        ocrPageRequestIds: Array.isArray(r.ocrPageRequestIds) ? [...r.ocrPageRequestIds] : [],
       };
       if (!assistantJson && scanned % 200 === 0) process.stdout.write(`\r  scanned ${scanned}...   `);
       return {
@@ -15494,8 +15907,22 @@ const cmdIngestRemoteRun = async (
       };
     };
 
+    const isolateDrivePreparationError = makeRemotePreparationErrorIsolator({
+      sourceLabel: "Drive",
+      state,
+      statePath,
+      dryRun: dry,
+      saveState,
+      tally,
+      skips,
+      assertOwned: assertLockOwned,
+      stateKeyOf: (file) => typeof file?.id === "string" ? `${sourceName}:${file.id}` : "",
+      protectPriorFamily: (stateKey) => seenDriveUids.add(stateKey),
+    });
+
     for await (const group of batchStream(files.slice(0, limit), prepareDrive, {
       onSkip: (skip) => skips.push(skip),
+      onPrepareError: isolateDrivePreparationError,
     })) {
       await consumeGroup(group);
     }
@@ -15504,7 +15931,7 @@ const cmdIngestRemoteRun = async (
       // A preview has no authenticated inventory, but still reports every
       // observed category. It cannot delete or advance a cursor.
       if (!assistantJson) {
-        await applyDriveRemovals({
+        await applyPreparedRemovals({
           uids: excludeProtectedDriveUids(excludedUids),
           base, adminKey, state, dryRun: true, label: "source policy",
         });
@@ -15515,7 +15942,7 @@ const cmdIngestRemoteRun = async (
               "they will be verified and are never deleted on that signal"
           );
         }
-        await applyDriveRemovals({
+        await applyPreparedRemovals({
           uids: excludeProtectedDriveUids(intentionalRemovalUids),
           base, adminKey, state, dryRun: true, label: "intentional source skip",
         });
@@ -15537,7 +15964,7 @@ const cmdIngestRemoteRun = async (
         Number(driveRemovalReview?.counts?.unresolved_absences || 0) > 0 ||
         Number(driveRemovalReview?.counts?.pending_source_deletions || 0) > 0;
       const storedUids = driveStoredBeforeProcessing || (needsStoredInventory
-        ? await listStoredSourceFamilies({ base, adminKey, source: sourceName })
+        ? await listPreparedSourceFamilies({ base, adminKey, source: sourceName })
         : new Set());
       // A valid prior forget may have reached the Worker even if its response
       // was lost. Inventory is authoritative; clear only local retry markers
@@ -15637,7 +16064,7 @@ const cmdIngestRemoteRun = async (
         ["intentional_skip", "intentional source skip", "previously-indexed document(s) removed because the source now skips them"],
       ];
       for (const [category, label, success] of categories) {
-        const result = await applyDriveRemovals({
+        const result = await applyPreparedRemovals({
           uids: excludeProtectedDriveUids(driveRemovalPlan.targets[category]),
           base, adminKey, state, dryRun: false, label,
           assertOwned: assertLockOwned,
@@ -15646,7 +16073,7 @@ const cmdIngestRemoteRun = async (
         if (driveRemovalPlan.targets[category].length) saveState(statePath, state);
       }
       if (driveRemovalPlan.total) {
-        const afterRemoval = await listStoredSourceFamilies({ base, adminKey, source: sourceName });
+        const afterRemoval = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
         const plannedTargets = Object.values(driveRemovalPlan.targets).flat();
         const stillStored = plannedTargets.filter((uid) => afterRemoval.has(uid));
         const failedAt = new Date().toISOString();
@@ -15699,7 +16126,7 @@ const cmdIngestRemoteRun = async (
       deleteKeysOnScannerCommit: ["drive_removal_safety_baseline"],
     };
   } else if (which === "gmail") {
-    const gmail = await import("./connectors/gmail.mjs");
+    const gmail = options.gmail ?? await import("./connectors/gmail.mjs");
     let nextHistory = null;
     let ids;
     let policyById = null;
@@ -15782,7 +16209,7 @@ const cmdIngestRemoteRun = async (
       Object.keys(state.removed || {}).some((uid) => uid.startsWith(`${sourceName}:`));
     let gmailRemovalSafetyCount = null;
     if (!dry && gmailLabelGaps === 0 && gmailHasPotentialRemovalWork) {
-      storedBeforeSweep = await listStoredSourceFamilies({ base, adminKey, source: sourceName });
+      storedBeforeSweep = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
       const baselineKey = JSON.stringify({
         policy_fingerprint: policyFingerprint,
       });
@@ -15807,19 +16234,23 @@ const cmdIngestRemoteRun = async (
       async (id) => {
         const policy = policyById?.get(id);
         if (policy && !policy.allowed) return { id, fetched: policy };
-        return {
-          id,
-          fetched: await gmail.toEnvelope(getToken, id, {
-            sourceName,
-            // A full-list id matched DEFAULT_QUERY. An incremental id reached
-            // this point only after its label-only preflight allowed it.
-            trustedEligible: !incremental || policy?.allowed === true,
-          }),
-        };
+        try {
+          return {
+            id,
+            fetched: await gmail.toEnvelope(getToken, id, {
+              sourceName,
+              // A full-list id matched DEFAULT_QUERY. An incremental id reached
+              // this point only after its label-only preflight allowed it.
+              trustedEligible: !incremental || policy?.allowed === true,
+            }),
+          };
+        } catch (preparationError) {
+          return { id, preparationError };
+        }
       },
       { concurrency: GMAIL_FETCH_CONCURRENCY },
     );
-    const prepareGmail = async ({ id, fetched: r }) => {
+    const prepareGmail = async ({ id, fetched: r, preparationError }) => {
       scanned++;
       // Report the scan before any unchanged or skip return. A resumed first
       // pass may recheck thousands of already-accepted messages before it
@@ -15828,6 +16259,12 @@ const cmdIngestRemoteRun = async (
       if (scanned % 200 === 0) process.stdout.write(`\r  fetched ${scanned}...   `);
       const key = `${sourceName}:${id}`;
       gmailActiveUids.add(key);
+      if (preparationError) {
+        if (preparationError && typeof preparationError === "object") {
+          countedPreparationErrors.add(preparationError);
+        }
+        throw preparationError;
+      }
       if (r.skip) {
         const previouslyAccepted = storedBeforeSweep
           ? storedBeforeSweep.has(key)
@@ -15889,8 +16326,21 @@ const cmdIngestRemoteRun = async (
         },
       };
     };
+    const isolateGmailPreparationError = makeRemotePreparationErrorIsolator({
+      sourceLabel: "Gmail",
+      state,
+      statePath,
+      dryRun: dry,
+      saveState,
+      tally,
+      skips,
+      assertOwned: assertLockOwned,
+      stateKeyOf: (item) => typeof item?.id === "string" ? `${sourceName}:${item.id}` : "",
+      protectPriorFamily: (stateKey) => gmailActiveUids.add(stateKey),
+    });
     for await (const group of batchStream(fetched, prepareGmail, {
       onSkip: (skip) => skips.push(skip),
+      onPrepareError: isolateGmailPreparationError,
     })) {
       await consumeGroup(group);
       for (const item of group) {
@@ -15941,13 +16391,13 @@ const cmdIngestRemoteRun = async (
     }
 
     if (dry) {
-      await applyDriveRemovals({
+      await applyPreparedRemovals({
         uids: gmailPolicyUids, base, adminKey, state, dryRun: true, label: "source policy",
       });
-      await applyDriveRemovals({
+      await applyPreparedRemovals({
         uids: gmailDeletedUids, base, adminKey, state, dryRun: true, label: "Gmail source deletion",
       });
-      await applyDriveRemovals({
+      await applyPreparedRemovals({
         uids: [...gmailIntentionalUids, ...intentionalRemovalUids],
         base, adminKey, state, dryRun: true, label: "intentional source skip",
       });
@@ -16015,7 +16465,7 @@ const cmdIngestRemoteRun = async (
           ["intentional_skip", "intentional Gmail skip", "message(s) removed because the current source revision is ineligible"],
         ];
         for (const [category, label, success] of categories) {
-          const result = await applyDriveRemovals({
+          const result = await applyPreparedRemovals({
             uids: gmailRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
             assertOwned: assertLockOwned,
           });
@@ -16023,7 +16473,7 @@ const cmdIngestRemoteRun = async (
           if (gmailRemovalPlan.targets[category].length) saveState(statePath, state);
         }
         if (gmailRemovalPlan.total) {
-          const afterRemoval = await listStoredSourceFamilies({ base, adminKey, source: sourceName });
+          const afterRemoval = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
           const plannedTargets = Object.values(gmailRemovalPlan.targets).flat();
           const stillStored = plannedTargets.filter((uid) => afterRemoval.has(uid));
           const failedAt = new Date().toISOString();
@@ -16058,7 +16508,7 @@ const cmdIngestRemoteRun = async (
       deleteKeysOnScannerCommit: ["gmail_removal_safety_baseline"],
     };
   } else {
-    const imap = await import("./connectors/imap.mjs");
+    const imap = options.imap ?? await import("./connectors/imap.mjs");
     const imapAuthoritativeSnapshot = !incremental;
     const imapActiveUids = new Set();
     const imapAcceptedUids = new Set();
@@ -16073,7 +16523,7 @@ const cmdIngestRemoteRun = async (
     });
     const captureImapInventory = async () => {
       if (imapStoredBeforeSweep) return imapStoredBeforeSweep;
-      imapStoredBeforeSweep = await listStoredSourceFamilies({ base, adminKey, source: sourceName });
+      imapStoredBeforeSweep = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
       imapRemovalSafetyCount = recordRemovalSafetyBaseline({
         stateKey: "imap_removal_safety_baseline",
         key: imapBaselineKey,
@@ -16233,6 +16683,20 @@ const cmdIngestRemoteRun = async (
           };
         };
 
+        const isolateImapPreparationError = makeRemotePreparationErrorIsolator({
+          sourceLabel: "IMAP",
+          state,
+          statePath,
+          dryRun: dry,
+          saveState,
+          tally,
+          skips,
+          assertOwned: assertLockOwned,
+          stateKeyOf: (message) => Number.isSafeInteger(message?.uid)
+            ? `${sourceName}:${folder.name}#${message.uid}`
+            : "",
+        });
+
         const stream = imap.streamFolder(client, folder.name, {
           criteria: decision.searchCriteria,
           floor: decision.floor,
@@ -16240,6 +16704,7 @@ const cmdIngestRemoteRun = async (
         });
         for await (const group of batchStream(stream, prepareImap, {
           onSkip: (skip) => skips.push(skip),
+          onPrepareError: isolateImapPreparationError,
         })) {
           await consumeGroup(group);
           for (const item of group) {
@@ -16303,10 +16768,10 @@ const cmdIngestRemoteRun = async (
     }
 
     if (dry) {
-      await applyDriveRemovals({
+      await applyPreparedRemovals({
         uids: imapPolicyUids, base, adminKey, state, dryRun: true, label: "IMAP source policy",
       });
-      await applyDriveRemovals({
+      await applyPreparedRemovals({
         uids: intentionalRemovalUids, base, adminKey, state, dryRun: true, label: "intentional IMAP skip",
       });
     } else {
@@ -16318,7 +16783,7 @@ const cmdIngestRemoteRun = async (
       const unmatchedStoredUids = imapAuthoritativeSnapshot
         ? [...storedImapUids].filter((uid) => !imapActiveUids.has(uid))
         : [];
-      const ambiguousSnapshot = imapUnidentifiedSkips > 0 && unmatchedStoredUids.length > 0;
+      const ambiguousSnapshot = (imapUnidentifiedSkips > 0 || tally.failed > 0) && unmatchedStoredUids.length > 0;
       const imapSnapshotGapUids = new Set([
         ...unresolvedActivePendingUids,
         ...ambiguousPendingImapUids.filter((uid) => storedImapUids.has(uid)),
@@ -16369,14 +16834,14 @@ const cmdIngestRemoteRun = async (
         ["intentional_skip", "intentional IMAP skip", "message(s) removed because the current source revision is ineligible"],
       ];
       for (const [category, label, success] of categories) {
-        const result = await applyDriveRemovals({
+        const result = await applyPreparedRemovals({
           uids: imapRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
         });
         if (result.applied) ok(`${result.applied} ${success}`);
         if (imapRemovalPlan.targets[category].length) saveState(statePath, state);
       }
       if (imapRemovalPlan.total) {
-        const afterRemoval = await listStoredSourceFamilies({ base, adminKey, source: sourceName });
+        const afterRemoval = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
         const plannedTargets = Object.values(imapRemovalPlan.targets).flat();
         const stillStored = plannedTargets.filter((uid) => afterRemoval.has(uid));
         const failedAt = new Date().toISOString();
@@ -16417,21 +16882,28 @@ const cmdIngestRemoteRun = async (
   }
   process.stdout.write("\r");
 
-  info(`${scanned} scanned; ${prepared} document(s) prepared in ${batchNo} batch(es); ${unchanged} unchanged; ${skips.length} skipped`);
+  info(
+    `${scanned} scanned; ${prepared} document(s) prepared in ${batchNo} batch(es); ` +
+      `${unchanged} unchanged; ${skips.length} skipped; ${tally.failed} failed`
+  );
 
   const coverageGaps = Math.max(0, skips.length - policySkipped - sourceResolvedSkipped - adjudicatedSkipped) +
     gmailHistoryMarkerMissing + imapSnapshotGaps;
 
   if (dry) {
-    ok("dry run, nothing was sent");
     await reportSkips(skips);
-    return { dry_run: true, would_send: prepared, unchanged, skipped: skips.length };
+    // A preview still has to be complete enough to trust. Report every isolated
+    // item first, then refuse the success-shaped receipt before printing a green
+    // dry-run result. Dry runs never persist the retry marker.
+    assertNoIngestFailures(tally);
+    ok("dry run, nothing was sent");
+    return { dry_run: true, would_send: prepared, unchanged, skipped: skips.length, failed: 0 };
   }
 
   // Every batch landed, so it is now safe to say "we have everything up to
   // here". sendBatches dies rather than returning on a failure, so reaching
   // this line is the proof.
-  const cursorCanAdvance = sourceCursorCanAdvance(tally) &&
+  const cursorCanAdvance = sourceCursorCanAdvance(tally, { retryableSkips: retryableOcrSkips }) &&
     !(which === "gmail" &&
       (gmailLabelGaps > 0 || gmailHistoryMarkerMissing > 0 || gmailPendingRemovalGaps > 0)) &&
     !(which === "imap" && imapSnapshotGaps > 0);
@@ -16451,7 +16923,9 @@ const cmdIngestRemoteRun = async (
       ? `${gmailLabelGaps} message(s) lacked label evidence, ${gmailHistoryMarkerMissing} pre-sweep history marker(s) were unavailable, and ${gmailPendingRemovalGaps} active message(s) had unresolved pending removals`
       : which === "imap" && imapSnapshotGaps
         ? `${imapSnapshotGaps} IMAP source snapshot gap(s) remained unresolved`
-        : `${tally.failed} document(s) failed`;
+        : retryableOcrSkips
+          ? `${retryableOcrSkips} document(s) had OCR pages that stayed slow after bounded retries`
+          : `${tally.failed} document(s) failed`;
     warn(`${reason}, so the source cursor was NOT advanced; the next run will retry them`);
   }
   // A non-policy skip remains visible as incomplete coverage. Gmail still
@@ -16462,7 +16936,9 @@ const cmdIngestRemoteRun = async (
   const totalRefused = tally.refused + localRefused;
   const driveReviewRequired = which === "drive" &&
     (protectedDriveUids().size > 0 || malformedDriveIdentityCount > 0);
-  const hasRemoteGap = tally.failed > 0 || totalRefused > 0 || coverageGaps > 0 || driveReviewRequired;
+  const hasRemoteGap = sourceReceiptHasRemoteGap({
+    tally, totalRefused, coverageGaps, driveReviewRequired, retryableSkips: retryableOcrSkips,
+  });
   const finalStatus = hasRemoteGap ? "error" : "ready";
   assertLockOwned?.();
   await recordSourceReceipt({
@@ -16480,7 +16956,7 @@ const cmdIngestRemoteRun = async (
     // Outcome counters measure document attempts. Deliberate source-policy and
     // adjudicated skips stay in detail; they are not ingest refusals.
     docs_refused: totalRefused,
-    docs_failed: tally.failed,
+    docs_failed: tally.failed + retryableOcrSkips,
     // One shape or the other, never both: a receipt carrying a human detail AND
     // an issue code invites a reader to believe the happier of the two.
     ...(hasRemoteGap
@@ -16502,9 +16978,10 @@ const cmdIngestRemoteRun = async (
   runClosed = true;
 
   const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged`;
-  if (tally.failed) info(summary);
+  if (tally.failed || retryableOcrSkips) info(summary);
   else ok(summary);
   if (totalRefused) warn(`${totalRefused} document(s) refused for carrying live credentials.`);
+  reportOcrRetryStats(ocrCallback);
   await reportSkips(skips);
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
   assertNoIngestFailures(tally);
@@ -16606,10 +17083,13 @@ const cmdIngestRemoteRun = async (
         // incomplete walk and closed operation evidence remain the proof.
         const connectorDocumentFailures = which === "gmail" &&
           GMAIL_DOCUMENT_FAILURE_OPERATIONS.has(error?.operationClass) ? 1 : 0;
+        const connectorUnscannedFailures = connectorDocumentFailures && countedPreparationErrors.has(error)
+          ? 0
+          : connectorDocumentFailures;
         await recordSourceReceipt({
           source: sourceName, kind: which, status: "error", run_id: runId,
           lane, started_at: runStartedAt, completed_at: new Date().toISOString(),
-          walk_complete: false, files_seen: scanned + connectorDocumentFailures,
+          walk_complete: false, files_seen: scanned + connectorUnscannedFailures,
           docs_added: tally.created,
           docs_updated: tally.updated,
           docs_unchanged: unchanged + tally.unchanged,
@@ -16796,6 +17276,15 @@ export async function cmdConnect(target, options = {}) {
   const flags = parseFlags(argv.slice(3));
   const which = (target || "").toLowerCase();
   const manifestPath = argv[4];
+  if (which === "custom-api") {
+    const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
+    const connectCustomApi = options.connectCustomApi ?? cmdConnectCustomApi;
+    return runManifestControl(
+      manifestPath,
+      () => connectCustomApi(manifestPath, flags, options.customApiOptions || {}),
+      options.controlOptions || {},
+    );
+  }
   if (which === "bank") {
     // The owner-custody secret check reads, and may write, the Worker, so it
     // runs under the manifest's saved Cloudflare custody exactly as Zoom does.
@@ -16822,8 +17311,9 @@ export async function cmdConnect(target, options = {}) {
   if (PROVIDER_CONNECTOR_IDS.includes(which)) return cmdConnectProvider(which, manifestPath, flags);
   if (which !== "google") {
     die(
-      "brain connect supports bank, google, imap, imessage, whatsapp, zoom, quickbooks, slack, notion, microsoft, dropbox and hubspot.\n" +
+      "brain connect supports bank, custom-api, google, imap, imessage, whatsapp, zoom, quickbooks, slack, notion, microsoft, dropbox and hubspot.\n" +
         "  Usage: brain connect bank <manifest>\n" +
+        "         brain connect custom-api <manifest>\n" +
         "         brain connect google --scopes drive,gmail,calendar\n" +
         "         brain connect imap <manifest> --host imap.example.com --user you@example.com\n" +
         "         brain connect imessage <manifest>\n" +
@@ -16847,6 +17337,204 @@ export async function cmdConnect(target, options = {}) {
     if (error instanceof SourceIngestLockError) die(error.message);
     throw error;
   }
+}
+
+/** Connect the declared custom API secret without exposing its value. */
+export async function cmdConnectCustomApi(manifestPath, flags = {}, options = {}) {
+  if (!manifestPath || String(manifestPath).startsWith("--")) {
+    die("usage: brain connect custom-api <manifest> [--replace-key] [--from-clipboard|--key-set-in-dashboard]");
+  }
+  const unknownFlag = Object.keys(flags).find((name) => !["replace-key", "from-clipboard", "key-set-in-dashboard"].includes(name));
+  if (unknownFlag) die(`brain connect custom-api does not recognize --${unknownFlag}`);
+  if (flags["replace-key"] !== undefined && flags["replace-key"] !== true) {
+    die("brain connect custom-api --replace-key does not take a value");
+  }
+  if (flags["from-clipboard"] !== undefined && flags["from-clipboard"] !== true) {
+    die("brain connect custom-api --from-clipboard does not take a value");
+  }
+  if (flags["key-set-in-dashboard"] !== undefined && flags["key-set-in-dashboard"] !== true) {
+    die("brain connect custom-api --key-set-in-dashboard does not take a value");
+  }
+  if (flags["from-clipboard"] === true && flags["key-set-in-dashboard"] === true) {
+    die("choose either --from-clipboard or --key-set-in-dashboard, not both. Nothing was stored.");
+  }
+  const { m } = loadManifest(manifestPath);
+  let config;
+  try { config = validateCustomApiConfig(m.corpora?.custom_api); } catch (error) {
+    die(`the manifest's custom_api source is not ready: ${String(error?.message || error)}`);
+  }
+  const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
+  let acct = null;
+  const account = async () => (acct ??= await (options.resolveAccount ?? resolveAccount)(m));
+  const listSecretNames = options.listWorkerSecretNames ?? (async () => {
+    const inventory = await cf(`/accounts/${(await account()).id}/workers/scripts/${scriptName}/secrets`);
+    if (!Array.isArray(inventory) || inventory.some((entry) => typeof entry?.name !== "string")) {
+      throw new Error("Cloudflare returned an invalid Worker secret inventory");
+    }
+    return inventory.map((entry) => entry.name);
+  });
+  const putSecret = options.putWorkerSecret ?? (async (name, text) =>
+    cf(`/accounts/${(await account()).id}/workers/scripts/${scriptName}/secrets`, {
+      method: "PUT", body: { name, text, type: "secret_text" },
+    }));
+  const replace = flags["replace-key"] === true;
+  const platform = options.platform ?? process.platform;
+  const dashboardEntry = flags["key-set-in-dashboard"] === true;
+  const clipboardEntry = flags["from-clipboard"] === true || (platform === "win32" && !dashboardEntry);
+  if (clipboardEntry && platform !== "win32" && platform !== "darwin") {
+    die("clipboard entry is available only on Windows and macOS. Use --key-set-in-dashboard instead. Nothing was stored.");
+  }
+  const readClipboard = options.readClipboard ?? (() => readCustomApiClipboard({ platform }));
+  const clearClipboard = options.clearClipboard ?? (() => clearCustomApiClipboard({ platform }));
+  let wrote = false;
+  const credentialPhase = async () => {
+    let names;
+    try { names = new Set(await listSecretNames()); } catch {
+      die("the Worker's secret names could not be inspected. No custom API key was written.");
+    }
+    if (!names.has(config.token_secret) || replace) {
+      if (dashboardEntry) {
+        info(`In Cloudflare, open Workers & Pages → ${scriptName} → Settings → Variables and Secrets → Add or edit → type Secret.`);
+        info(`Enter the exact secret NAME ${config.token_secret}, paste its value only into Cloudflare's masked field, and save it.`);
+        info("Keep the masked Cloudflare field off the shared screen. This command will verify only the secret name, never its value.");
+        if (replace) {
+          const confirmReplacement = options.confirmDashboardReplacement ?? ask;
+          const confirmation = await confirmReplacement(
+            `After saving the replacement for ${config.token_secret}, type REPLACED to confirm that you pasted a new value`,
+            "",
+          );
+          if (String(confirmation || "").trim() !== "REPLACED") {
+            die("the dashboard replacement was not confirmed. The existing secret name is not proof that its value changed.");
+          }
+          try { names = new Set(await listSecretNames()); } catch {
+            die("the Worker's secret names could not be inspected after replacement confirmation. No secret value was read.");
+          }
+          if (!names.has(config.token_secret)) {
+            die(`Cloudflare did not list ${config.token_secret} after the confirmed replacement. The command never requested or handled the key value.`);
+          }
+          ok(`Worker secret replacement for ${config.token_secret} was owner-confirmed and its name was read back`);
+        } else {
+          const wait = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+          for (let attempt = 0; attempt < 24 && !names.has(config.token_secret); attempt++) {
+            await wait(5_000);
+            try { names = new Set(await listSecretNames()); } catch {
+              die("the Worker's secret names could not be inspected while waiting. No secret value was read.");
+            }
+          }
+          if (!names.has(config.token_secret)) {
+            die(`Cloudflare did not list ${config.token_secret} within 2 minutes. The command never requested or handled the key value.`);
+          }
+          ok(`Worker secret name ${config.token_secret} is present`);
+        }
+      } else if (clipboardEntry) {
+      let clipboardText;
+      let failure = null;
+      try {
+        clipboardText = await readClipboard();
+      } catch {
+        failure = "The clipboard could not be read or was empty. Copy the key from the email and run the same command again. If needed, use --key-set-in-dashboard as the fallback. Nothing was stored.";
+      }
+      const token = typeof clipboardText === "string" ? clipboardText.trim() : "";
+      if (!failure && !token) {
+        failure = "The clipboard could not be read or was empty. Copy the key from the email and run the same command again. If needed, use --key-set-in-dashboard as the fallback. Nothing was stored.";
+      } else if (!failure && /\r|\n/.test(token)) {
+        failure = "The clipboard looks like more than one line. Copy only the key from the email and run the same command again. Nothing was stored.";
+      } else if (!failure && token.includes(" ")) {
+        failure = "The clipboard looks like prose instead of one key. Copy only the key from the email and run the same command again. Nothing was stored.";
+      } else if (!failure && (Buffer.byteLength(token, "utf8") > 2_048 || !/^[\x21-\x7e]+$/.test(token))) {
+        failure = "The clipboard did not contain a valid store key. It must be 1 to 2,048 printable ASCII bytes with no spaces. Nothing was stored.";
+      } else if (!failure) {
+        try { await putSecret(config.token_secret, token); } catch {
+          failure = "The custom API key could not be written to the Worker. The value was not printed or saved locally.";
+        }
+      }
+      if (failure) die(failure);
+      try { names = new Set(await listSecretNames()); } catch {
+        die("the custom API key write returned, but its secret name could not be read back. Do not treat the connection as ready.");
+      }
+      if (!names.has(config.token_secret)) {
+        die("Cloudflare did not list the declared custom API secret after the write. Do not treat the connection as ready.");
+      }
+      wrote = true;
+      } else {
+        const read = options.readSecret ?? readHiddenSecret;
+        let token;
+        try {
+          token = await read(`  ${config.display_name} bearer key (hidden): `, {
+            noun: "custom API key",
+            insecure: "this terminal cannot prompt securely. Rerun from an interactive terminal; the custom API key is never accepted as a flag or environment variable.",
+          });
+        } catch (error) {
+          die(String(error?.message || error));
+        }
+        if (typeof token !== "string" || token.length < 1 || token.length > 2_048 || /[\u0000-\u001f\u007f]/.test(token)) {
+          die("the custom API key was empty, too long, or contained a control character. Nothing was written.");
+        }
+        try { await putSecret(config.token_secret, token); } catch {
+          die("the custom API key could not be written to the Worker. The value was not printed or saved locally.");
+        }
+        try { names = new Set(await listSecretNames()); } catch {
+          die("the custom API key write returned, but its secret name could not be read back. Do not treat the connection as ready.");
+        }
+        if (!names.has(config.token_secret)) {
+          die("Cloudflare did not list the declared custom API secret after the write. Do not treat the connection as ready.");
+        }
+        wrote = true;
+        ok(`custom API key stored as Worker secret ${config.token_secret}`);
+      }
+    } else {
+      ok(`Worker secret ${config.token_secret} is already present; nothing was prompted or written`);
+    }
+  };
+
+  if (clipboardEntry) {
+    let credentialError = null;
+    let cleared = false;
+    try {
+      await credentialPhase();
+    } catch (error) {
+      credentialError = error;
+    } finally {
+      try {
+        await clearClipboard();
+        cleared = true;
+      } catch {
+        cleared = false;
+      }
+    }
+    if (credentialError) {
+      if (!cleared && credentialError instanceof Error) {
+        credentialError.message += " The clipboard also could not be cleared; clear it manually.";
+      }
+      throw credentialError;
+    }
+    if (!cleared) {
+      die(wrote
+        ? "The store key was written to the Brain, but the clipboard could not be cleared. Clear the clipboard manually before continuing."
+        : "The clipboard could not be cleared. Clear it manually before continuing.");
+    }
+    if (wrote) say("Store key saved in your Brain and cleared from the clipboard.");
+  } else {
+    await credentialPhase();
+  }
+
+  // Make the source visible before its first cron tick. Failure here does not
+  // erase a verified secret, but it also does not claim status registration.
+  try {
+    const adminKey = (options.resolveAdminKey ?? resolveAdminKey)(manifestPath);
+    if (!adminKey) throw new Error("admin key unavailable");
+    const base = await (options.resolveBaseUrl ?? resolveBaseUrl)(m, m.brain?.domain ? null : await account());
+    await (options.postSourceExpectation ?? postSourceExpectation)(base, adminKey, {
+      source: config.source,
+      kind: "custom_api",
+      expected_refresh_seconds: config.cadence_seconds,
+    });
+    ok(`${config.display_name} now appears in source status with its declared cadence`);
+  } catch {
+    warn("the key is stored, but source status could not be registered yet. A successful manual or scheduled pull will register it.");
+  }
+  info(`preview the first pull with: brain custom-api ${manifestPath} --dry-run`);
+  return { source: config.source, secret_name: config.token_secret, written: wrote };
 }
 
 async function cmdConnectGoogle(flags, options = {}, assertLockOwned = null) {
@@ -18834,6 +19522,14 @@ export async function cmdSetup(manifestPath, options = {}) {
       accountId: account.id,
       authProfile: options.cloudflareAuthProfile || null,
     });
+    const ocrAnswer = String(await prompt(
+      "Read scanned PDF pages with OCR in this Cloudflare account? This uses paid Workers AI once per page. (y/n)",
+      "n",
+    )).trim().toLowerCase();
+    if (!["y", "yes", "n", "no"].includes(ocrAnswer)) {
+      die("answer y or n for scanned PDF OCR. No manifest or Brain resource was created.");
+    }
+    tmpl.safety.ocr.enabled = ocrAnswer === "y" || ocrAnswer === "yes";
     ok(`Cloudflare account "${account.name}" (${account.id})`);
 
     createSetupManifest(target, tmpl);
@@ -21467,6 +22163,9 @@ async function reportBacklog(manifestPath) {
     if (!res.ok) return;
     const body = await res.json();
     const pending = Number(body?.vector_backlog?.pending || 0);
+    const pendingLabel = body?.vector_backlog?.pending_is_capped === true
+      ? "Over 10,000 chunks"
+      : `${pending} chunk(s)`;
     const readiness = body?.vector_readiness;
     if (!pending && readiness?.ready === true &&
         readiness.actual_vectors === readiness.expected_vectors) {
@@ -21482,7 +22181,7 @@ async function reportBacklog(manifestPath) {
       return;
     }
     warn(
-      `${pending} chunk(s) are queued or awaiting visibility. Until confirmed they are findable` + "\n" +
+      `${pendingLabel} are queued or awaiting visibility. Until confirmed they are findable` + "\n" +
         "        by keyword and INVISIBLE to meaning-based search, and nothing else reports that." + "\n" +
         "        The scheduled drain finishes this on its own, roughly fifty a minute, and" + "\n" +
         "        `brain health` shows it moving. Do not run `brain drain` while the cron is" + "\n" +
@@ -22013,6 +22712,7 @@ export function validateDrainReceipt(body) {
   const submitted = nonNegativeReceiptCount(body, "submitted", "the drain receipt");
   const waiting = nonNegativeReceiptCount(body, "waiting", "the drain receipt");
   const remaining = nonNegativeReceiptCount(body, "remaining", "the drain receipt");
+  const remainingIsLowerBound = body.remaining_is_lower_bound === true;
   if (typeof body.vector_ready !== "boolean") {
     die("the drain receipt did not prove Vectorize query readiness. Nothing was declared complete.");
   }
@@ -22043,11 +22743,20 @@ export function validateDrainReceipt(body) {
   }
   if (remaining > 0 && drained === 0 && submitted === 0 && waiting === 0) {
     die(
-      `the drain stopped making progress with ${remaining} vector operation(s) still queued.\n` +
+      `the drain stopped making progress with ${remainingIsLowerBound ? "more vector work" : `${remaining} vector operation(s)`} still queued.\n` +
         "      The vector index is incomplete. Run `brain diagnose <manifest>` for the exact retry reason."
     );
   }
-  return { drained, submitted, waiting, remaining, vector_ready: body.vector_ready };
+  return {
+    drained,
+    submitted,
+    waiting,
+    remaining,
+    ...(Object.hasOwn(body, "remaining_is_lower_bound")
+      ? { remaining_is_lower_bound: remainingIsLowerBound }
+      : {}),
+    vector_ready: body.vector_ready,
+  };
 }
 
 /**
@@ -22062,14 +22771,16 @@ export function validateDrainReceipt(body) {
  */
 export function assertDrainComplete({
   remaining,
+  remainingIsLowerBound = false,
   rounds,
   maxRounds = 400,
   expectedVectors = null,
   actualVectors = null,
 } = {}) {
   if (remaining !== 0) {
+    const remainingLabel = renderDrainRemaining(remaining, remainingIsLowerBound);
     die(
-      `the drain reached its ${maxRounds}-round safety limit with ${remaining} vector operation(s) still queued.\n` +
+      `the drain reached its ${maxRounds}-round safety limit with ${remainingLabel} vector operation(s) still queued.\n` +
         "      Completed chunks are safe, but the vector index is still incomplete. Re-run `brain drain` to continue."
     );
   }
@@ -22089,6 +22800,35 @@ export function assertDrainComplete({
     }
   }
   return { remaining, rounds };
+}
+
+/** Preserve bounded queue semantics in every manual-drain status sentence. */
+export function renderDrainRemaining(remaining, remainingIsLowerBound = false) {
+  return remainingIsLowerBound ? `more than ${remaining}` : String(remaining);
+}
+
+/** A lower bound cannot support a truthful ETA, even when throughput is known. */
+export function renderDrainProgress({
+  actualVectors,
+  drained,
+  submitted,
+  remaining,
+  remainingIsLowerBound = false,
+  rate = null,
+} = {}) {
+  const progress = [
+    Number.isSafeInteger(actualVectors)
+      ? `${actualVectors} total query-visible vector(s)`
+      : "total query-visible vector count unavailable",
+    `${drained} newly confirmed this run`,
+    `${submitted} accepted this run`,
+    `${renderDrainRemaining(remaining, remainingIsLowerBound)} to go`,
+  ];
+  if (rate) progress.push(`~${rate}/min`);
+  if (rate && remaining && !remainingIsLowerBound) {
+    progress.push(`about ${Math.max(1, Math.ceil(remaining / rate))} min left`);
+  }
+  return progress.join("; ");
 }
 
 /**
@@ -22188,7 +22928,13 @@ export function validateDrainBusyReceipt(body) {
   if (retryAfterSeconds < 1 || retryAfterSeconds > Math.ceil(MANUAL_DRAIN_MAX_MS / 1_000)) {
     die("the drain busy receipt included an unsafe retry delay. Nothing was declared complete.");
   }
-  return { remaining, retryAfterSeconds };
+  return {
+    remaining,
+    ...(Object.hasOwn(body, "remaining_is_lower_bound")
+      ? { remainingIsLowerBound: body.remaining_is_lower_bound === true }
+      : {}),
+    retryAfterSeconds,
+  };
 }
 
 async function cmdDrain(manifestPath, options = {}) {
@@ -22215,6 +22961,7 @@ async function cmdDrain(manifestPath, options = {}) {
   let routeWarmups = 0;
   let submitted = 0;
   let remaining = null;
+  let remainingIsLowerBound = false;
   let rounds = 0;
   let expectedVectors = null;
   let actualVectors = null;
@@ -22241,6 +22988,7 @@ async function cmdDrain(manifestPath, options = {}) {
     if (res.status === 409) {
       const busy = validateDrainBusyReceipt(body);
       remaining = busy.remaining;
+      remainingIsLowerBound = busy.remainingIsLowerBound === true;
       const delayMs = Math.min(busy.retryAfterSeconds * 1_000, Math.max(0, deadline - now()));
       if (delayMs <= 0) break;
       info(`another vector drain is finishing; retrying in ${Math.ceil(delayMs / 1_000)} second(s)`);
@@ -22301,19 +23049,17 @@ async function cmdDrain(manifestPath, options = {}) {
     drained += receipt.drained;
     submitted += receipt.submitted;
     remaining = receipt.remaining;
+    remainingIsLowerBound = receipt.remaining_is_lower_bound === true;
     const mins = (now() - started) / 60000;
     const rate = mins > 0.05 ? Math.round(drained / mins) : null;
-    const progress = [
-      Number.isSafeInteger(actualVectors)
-        ? `${actualVectors} total query-visible vector(s)`
-        : "total query-visible vector count unavailable",
-      `${drained} newly confirmed this run`,
-      `${submitted} accepted this run`,
-      `${remaining} to go`,
-    ];
-    if (rate) progress.push(`~${rate}/min`);
-    if (rate && remaining) progress.push(`about ${Math.max(1, Math.ceil(remaining / rate))} min left`);
-    info(progress.join("; "));
+    info(renderDrainProgress({
+      actualVectors,
+      drained,
+      submitted,
+      remaining,
+      remainingIsLowerBound,
+      rate,
+    }));
     if (remaining === 0) break;
     if (receipt.waiting > 0) {
       // Vectorize V2 processes changesets asynchronously. Poll slowly enough to
@@ -22325,13 +23071,23 @@ async function cmdDrain(manifestPath, options = {}) {
     }
   }
   if (remaining !== 0 && now() >= deadline) {
+    const remainingLabel = remaining === null
+      ? "unknown"
+      : renderDrainRemaining(remaining, remainingIsLowerBound);
     die(
       `the drain reached its ${Math.ceil(maxDurationMs / 60_000)}-minute wall-clock safety limit with ` +
-        `${remaining ?? "unknown"} vector operation(s) still queued.\n` +
+        `${remainingLabel} vector operation(s) still queued.\n` +
         "      Completed chunks are safe. Re-run `brain drain` to resume from the durable queue.",
     );
   }
-  assertDrainComplete({ remaining, rounds, maxRounds, expectedVectors, actualVectors });
+  assertDrainComplete({
+    remaining,
+    remainingIsLowerBound,
+    rounds,
+    maxRounds,
+    expectedVectors,
+    actualVectors,
+  });
   const result = buildCompletedDrainResult({
     drained,
     submitted,
@@ -24850,7 +25606,7 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
     });
     const projectionFailed = [
       "projection_work_insufficient", "projection_work_missing",
-      "projection_visibility_pending", "projection_excess",
+      "projection_work_queued_uncounted", "projection_visibility_pending", "projection_excess",
     ]
       .includes(deployedProjection.verdict);
     const receipt = projectionFailed
@@ -26931,6 +27687,83 @@ async function cmdImport(target) {
   return cmdImportBank(m, manifestPath, parseFlags(process.argv.slice(4)));
 }
 
+/** Ask the deployed Worker to run the same custom API path used by cron. */
+export async function cmdCustomApi(manifestPath, flags = parseFlags(process.argv.slice(3)), options = {}) {
+  if (!manifestPath || String(manifestPath).startsWith("--")) {
+    die("usage: brain custom-api <manifest> [--dry-run]");
+  }
+  const unknownFlag = Object.keys(flags).find((name) => name !== "dry-run");
+  if (unknownFlag) die(`brain custom-api does not recognize --${unknownFlag}`);
+  if (flags["dry-run"] !== undefined && flags["dry-run"] !== true) {
+    die("brain custom-api --dry-run does not take a value");
+  }
+  const { m } = loadManifest(manifestPath);
+  let customApiConfig;
+  try { customApiConfig = validateCustomApiConfig(m.corpora?.custom_api); } catch (error) {
+    die(`the manifest's custom_api source is not ready: ${String(error?.message || error)}`);
+  }
+  const adminKey = (options.resolveAdminKey ?? resolveAdminKey)(manifestPath);
+  if (!adminKey) {
+    die("no durable admin key was found. Repair the install with brain setup; do not paste a key into this command.");
+  }
+  const acct = m.brain?.domain ? null : await (options.resolveAccount ?? resolveAccount)(m);
+  const base = await (options.resolveBaseUrl ?? resolveBaseUrl)(m, acct);
+  let receipt;
+  for (let call = 0; call < 1_000; call++) {
+    const response = await http(`${base}${CUSTOM_API_RUN_PATH}`, {
+      method: "POST",
+      headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: flags["dry-run"] === true }),
+    }, { fetchImpl: options.fetchImpl ?? fetch, what: "the custom API pull" });
+    try { receipt = await response.json(); } catch {
+      die(`the Brain returned a non-JSON custom API receipt (HTTP ${response.status}). No success is claimed.`);
+    }
+    if (!response.ok) {
+      die(`${receipt?.error || "the custom API pull did not complete"}${receipt?.code ? ` (${receipt.code})` : ""}`);
+    }
+    if (receipt?.status === "completed") break;
+    if (receipt?.status === "refused") {
+      for (const endpoint of receipt.endpoint_results || []) {
+        info(`${endpoint.name}: ${endpoint.rows_received} row(s), ${endpoint.rows_accepted || 0} accepted, ${endpoint.rows_refused || 0} refused`);
+      }
+      die(`The custom API pull was refused after ${receipt.refused_rows || 0} row(s) could not be read safely. No snapshot was saved.`);
+    }
+    if (receipt?.status !== "in_progress" || flags["dry-run"] === true) {
+      die("the custom API pull returned an invalid progress receipt. No success is claimed.");
+    }
+    info(`custom API job ${receipt.job_phase}: ${receipt.slice_completed} of ${receipt.slices_total} slice(s) verified`);
+  }
+  if (receipt?.status !== "completed") {
+    die("the custom API job did not reach terminal verification within 1000 bounded requests. Rerun the same command to resume it.");
+  }
+  if (!receipt.dry_run && receipt.saved !== true) {
+    die("the custom API receipt did not prove a terminally verified saved snapshot. No success is claimed.");
+  }
+  const mode = receipt.dry_run ? "previewed" : "completed";
+  ok(`${mode} ${receipt.endpoints} custom API endpoint(s)`);
+  for (const endpoint of receipt.endpoint_results || []) {
+    const documentAction = receipt.dry_run ? "would be written" : "written";
+    info(`${endpoint.name}: ${endpoint.rows_received} row(s), ${endpoint.documents} readable document(s) ${documentAction}, ${endpoint.rows_refused} refused`);
+  }
+  if (Number(receipt.refused_rows || 0) > 0) {
+    warn(`Source ready with warnings: ${receipt.refused_rows} row(s) were refused and their last verified values are marked not refreshed.`);
+  }
+  info(`${receipt.rows.created} new row(s), ${receipt.rows.updated} corrected, ${receipt.rows.unchanged} unchanged; ${receipt.documents} document(s) ${receipt.dry_run ? "would change" : "changed"}`);
+  if (receipt.retained_missing_rows) {
+    warn(`${receipt.retained_missing_rows} previously stored row(s) were absent from this response and were retained, not deleted`);
+  }
+  if (receipt.next_pull_at) {
+    const cadence = customApiConfig.cadence_seconds === 86400 ? "daily" : "scheduled";
+    info(`${receipt.dry_run ? "If run now, the" : "The"} next ${cadence} pull will run at ${receipt.next_pull_at}`);
+  }
+  if (!receipt.dry_run) {
+    ok(`saved snapshot verified${receipt.job_id ? ` for job ${receipt.job_id}` : ""}`);
+    if (receipt.meaning_search_ready === true) ok("meaning search is ready for this source");
+    else warn("the snapshot is saved, but meaning search is still indexing this source; wait for the vector outbox to empty before the owner question");
+  }
+  return receipt;
+}
+
 const commands = {
   init: cmdInit,
   setup: cmdSetupInteractive,
@@ -26956,6 +27789,7 @@ const commands = {
     boundaryCommand: cliBoundaryCommand,
   }),
   import: cmdImport,
+  "custom-api": cmdCustomApi,
   load: cmdLoad,
   connect: cmdConnect,
   disconnect: cmdDisconnect,
@@ -27006,6 +27840,7 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "ingest-file-apply",
   "assistant-repair",
   "ocr-preflight",
+  "custom-api",
 ]);
 
 export function runCliCommandWithCredentialBoundary(command, run, options = {}) {
@@ -27093,6 +27928,11 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain connect bank     <manifest>      owner-present Plaid pilot: hidden prompt for missing Plaid keys, checked
                                            with Plaid before they are saved, then owner-only Plaid Link and masked
                                            account assignment. --replace-keys re-enters both keys
+    brain connect custom-api <manifest>   store the bearer key from the clipboard by default on Windows;
+                                           add --from-clipboard on macOS, --replace-key to replace it, or
+                                           --key-set-in-dashboard as a fallback
+    brain custom-api <manifest> --dry-run preview the Worker's custom business API pull without writes;
+                                           omit --dry-run to run it now through the same server path as cron
     brain connect <provider> <manifest>    QuickBooks, Slack, Notion, Microsoft, Dropbox or HubSpot OAuth
     brain load       <manifest>            load EVERYTHING this manifest has: one sweep of every
                                            enabled, connected source, one report at the end
@@ -27195,6 +28035,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
   --skip <a,b> to rerun one source after fixing it, and --limit <n>, which marks
   everything it touches as an incomplete load. Zoom is always skipped: it pushes
   new transcripts to the brain's webhook, so there is nothing for a sweep to pull.
+  A custom business API is also stated as a skip because the owner's Worker pulls
+  it on its own cadence; use brain custom-api <manifest> --dry-run to preview it.
 
   brain import bank reads the file on THIS machine and sends figures, never the
   file and never a full account number. A .csv is only a bank export when you say

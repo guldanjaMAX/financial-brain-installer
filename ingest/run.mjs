@@ -1721,6 +1721,7 @@ export async function prepare(file, { sourceName, ocr = null }) {
 
   // The reread callback exists for cloud-synced folders: see the PDF extractor
   // for why an empty first pass is not proof of an empty document.
+  const localSourceLocator = file.rel.split(sep).join("/");
   const got = await extract(buf, file.name, {
     reread: () => {
       try {
@@ -1739,6 +1740,9 @@ export async function prepare(file, { sourceName, ocr = null }) {
     // Null on a dry run and whenever OCR is off, so the cheapest command stays
     // the cheapest command and nothing bills the owner without being asked.
     ocr,
+    ...(ocr ? {
+      ocrDocument: { source: sourceName, sourceItemId: localSourceLocator },
+    } : {}),
   });
   // Keep the extractor's closed, content-free observation even when the
   // document itself is refused. Scanned PDFs intentionally return no text,
@@ -1750,7 +1754,12 @@ export async function prepare(file, { sourceName, ocr = null }) {
     return {
       hash,
       observation,
-      skip: { path: file.rel, reason: got.error || "extraction produced nothing" },
+      skip: {
+        path: file.rel,
+        reason: got.error || "extraction produced nothing",
+        ...(got.code ? { code: got.code } : {}),
+        ...(got.retryable === true ? { retryable: true } : {}),
+      },
     };
   }
 
@@ -1769,7 +1778,6 @@ export async function prepare(file, { sourceName, ocr = null }) {
 
   // NOT the file mtime. See ingest/doc-date.mjs for why that is refused outright.
   const dd = documentDate({ filename: file.name, relPath: dirname(file.rel), contentHead: got.text.slice(0, 1200) });
-  const localSourceLocator = file.rel.split(sep).join("/");
   let originalByteReceipt = null;
   let originalBindingUnavailableReason = null;
   try {
@@ -1790,6 +1798,9 @@ export async function prepare(file, { sourceName, ocr = null }) {
   return {
     hash,
     observation,
+    ...(Array.isArray(got.ocr_page_request_ids)
+      ? { ocrPageRequestIds: [...got.ocr_page_request_ids] }
+      : {}),
     envelope: {
       source_type: sourceName,
       source_id: localSourceLocator,
@@ -1844,7 +1855,14 @@ export async function prepare(file, { sourceName, ocr = null }) {
  * Streaming fixes both: peak memory is one batch, progress is continuous
  * instead of a long silence, and an interrupt costs at most one batch.
  */
-export async function* batchStream(files, prepareOne, { maxDocs = 50, maxBytes = 900_000, maxStatements = 810, onSkip, onProgress } = {}) {
+export async function* batchStream(files, prepareOne, {
+  maxDocs = 50,
+  maxBytes = 900_000,
+  maxStatements = 810,
+  onSkip,
+  onProgress,
+  onPrepareError,
+} = {}) {
   let cur = [];
   let bytes = 0;
   let statements = 0;
@@ -1855,7 +1873,18 @@ export async function* batchStream(files, prepareOne, { maxDocs = 50, maxBytes =
   // or Gmail id, while the local walker keeps using the exact same path.
   for await (const f of files) {
     scanned++;
-    const r = await prepareOne(f);
+    let r;
+    try {
+      r = await prepareOne(f);
+    } catch (error) {
+      // Isolation is opt-in. Remote cursor paths and callers with no explicit
+      // per-file recovery contract retain the historical fail-closed behavior.
+      // The handler must positively claim the error; returning anything else
+      // preserves the original exception and its safety semantics.
+      if (!onPrepareError || await onPrepareError(error, f) !== true) throw error;
+      if (onProgress) onProgress(scanned, f);
+      continue;
+    }
     if (onProgress) onProgress(scanned, f);
     if (!r) continue;
     if (r.skip) {

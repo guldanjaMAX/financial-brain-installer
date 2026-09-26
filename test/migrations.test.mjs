@@ -71,6 +71,17 @@ CREATE TABLE d (w INT);`);
 /* ---- every migration, applied for real, in order ---- */
 const files = readdirSync(DIR).filter((f) => f.endsWith(".sql")).sort();
 check("migration files were found", files.length > 0, DIR);
+const ocrMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) === 47);
+check("the unshipped OCR schema is one consolidated migration 0047",
+  ocrMigrationFiles.length === 1 && ocrMigrationFiles[0] === "0047_ocr_page_idempotency.sql",
+  JSON.stringify(ocrMigrationFiles));
+// 0048 is the separate custom API source lane. Pin the exact unshipped suffix
+// so a stray OCR 0048/0049 cannot hide behind it.
+const unshippedMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) >= 47);
+check("the unshipped suffix is exactly OCR 0047 then custom API 0048",
+  JSON.stringify(unshippedMigrationFiles) ===
+    JSON.stringify(["0047_ocr_page_idempotency.sql", "0048_custom_api_source.sql"]),
+  JSON.stringify(unshippedMigrationFiles));
 
 const db = new DatabaseSync(":memory:");
 let applied = 0;
@@ -82,6 +93,52 @@ for (const f of files) {
   }
 }
 check(`all ${applied} statements across ${files.length} files applied`, true);
+
+/* ---- consolidated 0047 is byte-shape equivalent to old 0047..0049 ---- */
+{
+  const beforeConsolidation = new DatabaseSync(":memory:");
+  for (const f of files.filter((name) => Number(name.slice(0, 4)) <= 46)) {
+    for (const statement of splitStatements(readFileSync(join(DIR, f), "utf-8"))) {
+      beforeConsolidation.exec(statement);
+    }
+  }
+  const oldOcrSuffix = readFileSync(
+    join(HERE, "fixtures", "ocr-page-schema-before-consolidation.sql"),
+    "utf-8",
+  );
+  for (const statement of splitStatements(oldOcrSuffix)) beforeConsolidation.exec(statement);
+
+  const normalizeSql = (sql) => sql === null ? null : sql
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/\s*([(),])\s*/g, "$1");
+  const normalizedMaster = (handle) => handle.prepare(
+    `SELECT type,name,tbl_name,sql
+       FROM sqlite_master
+      ORDER BY type,name,tbl_name`,
+  ).all().map((row) => ({
+    type: row.type,
+    name: row.name,
+    table: row.tbl_name,
+    sql: normalizeSql(row.sql),
+  }));
+  // Compare against a fresh 0001-0047 prefix: 0048 belongs to another lane
+  // and has its own migration suite.
+  const throughOcr = new DatabaseSync(":memory:");
+  for (const f of files.filter((name) => Number(name.slice(0, 4)) <= 47)) {
+    for (const statement of splitStatements(readFileSync(join(DIR, f), "utf-8"))) {
+      throughOcr.exec(statement);
+    }
+  }
+  const oldRows = normalizedMaster(beforeConsolidation);
+  const currentRows = normalizedMaster(throughOcr);
+  throughOcr.close();
+  check("fresh 0001-0047 sqlite_master matches the old 0001-0049 schema",
+    JSON.stringify(currentRows) === JSON.stringify(oldRows),
+    `current=${JSON.stringify(currentRows)} old=${JSON.stringify(oldRows)}`);
+  beforeConsolidation.close();
+}
 db.prepare(
   `INSERT INTO install_state
      (id, client_slug, product_version, schema_version, gate_version, installed_at, ring)
@@ -210,6 +267,23 @@ for (const t of [
   check("0046 adds append-only per-original authority predecessor bindings",
     observationColumns.has("authority_chain_version") &&
       observationColumns.has("predecessor_observation_hash"));
+}
+{
+  const ocrRequestColumns = new Set(db.prepare(
+    "PRAGMA table_info(ocr_page_requests)",
+  ).all().map((row) => row.name));
+  check("0047 adds the durable OCR page idempotency receipt",
+    ["request_id", "input_sha256", "status", "owner_token", "response_json",
+      "replay_key_sha256", "replay_expires_at", "replay_iv", "replay_ciphertext"]
+      .every((column) => ocrRequestColumns.has(column)));
+  check("0047 adds bounded encrypted-handoff cleanup support",
+    names.has("idx_ocr_page_requests_expiry"));
+  check("0047 records source acknowledgement and caps expiry re-reads",
+    ocrRequestColumns.has("acknowledged_at") && ocrRequestColumns.has("reread_count"));
+  check("0047 adds the durable model-call retry budget fields",
+    ocrRequestColumns.has("provider_failed_at") &&
+      ocrRequestColumns.has("model_call_count") &&
+      ocrRequestColumns.has("model_call_window_started_at"));
 }
 for (const object of [
   "idx_source_original_result_family_members_revision",

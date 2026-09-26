@@ -92,6 +92,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/healthy-v020-install-guards.test.mjs",
   "node --no-warnings test/paused-strand-upgrade-rehearsal.test.mjs",
   "node --no-warnings test/client-upgrade-rehearsal.test.mjs",
+  "node --no-warnings --test test/stale-base-count-update.test.mjs",
+  "node --no-warnings --test test/paused-projection-rebase.test.mjs",
   // Field run A: the cutover printed its success line after a probe error and
   // told the migration the drain was quiesced anyway.
   "node --no-warnings test/vector-drain-cutover-unverified.test.mjs",
@@ -134,6 +136,20 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/plaid-owner-flow.test.mjs",
   "node --no-warnings --test test/bank-feed-replace-keys.test.mjs",
   "node --no-warnings --test worker/test/owner-document-create.test.mjs",
+  "node --no-warnings --test worker/test/documents-summary-lightweight.test.mjs",
+  "node --no-warnings --test worker/test/documents-summary-scale.test.mjs",
+  "node --test test/local-ingest-isolation.test.mjs",
+  "node --test test/remote-ingest-isolation.test.mjs",
+  // Worker-hosted custom API source: migration 0048, the declarative setup
+  // commands, the owner route, the scheduled pull, and the scripted lifecycle.
+  "node --no-warnings --test test/custom-api-migration.test.mjs",
+  "node --no-warnings --test worker/test/custom-api.test.mjs",
+  "node --no-warnings --test worker/test/custom-api-route.test.mjs",
+  "node --no-warnings --test worker/test/custom-api-scheduled.test.mjs",
+  "node --no-warnings --test worker/test/custom-api-scripted.test.mjs",
+  "node --no-warnings --test test/custom-api-cli.test.mjs",
+  "node --no-warnings --test test/custom-api-schema-compat.test.mjs",
+  "node --no-warnings --test test/windows-dpapi-launch-retry.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -228,6 +244,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/healthy-v020-install-guards.test.mjs",
   "node --no-warnings test/paused-strand-upgrade-rehearsal.test.mjs",
   "node --no-warnings test/client-upgrade-rehearsal.test.mjs",
+  "node --no-warnings --test test/stale-base-count-update.test.mjs",
+  "node --no-warnings --test test/paused-projection-rebase.test.mjs",
   "node --no-warnings test/setup-paused-brain-guard.test.mjs",
   "node test/supabase-import.test.mjs",
   "node test/message-session.test.mjs",
@@ -290,6 +308,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/doc-date.test.mjs",
   "node test/quality.test.mjs",
   "node test/ingest-run.test.mjs",
+  "node --test test/local-ingest-isolation.test.mjs",
+  "node --test test/remote-ingest-isolation.test.mjs",
   "node --no-warnings test/ingest-prefetch.test.mjs",
   "node --no-warnings test/source-ingest-lock.test.mjs",
   "node test/formats-extra.test.mjs",
@@ -428,6 +448,18 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/plaid-amount-precision.test.mjs",
   "node --no-warnings --test worker/test/plaid-owner-flow.test.mjs",
   "node --no-warnings --test test/bank-feed-replace-keys.test.mjs",
+  "node --no-warnings --test worker/test/documents-summary-lightweight.test.mjs",
+  "node --no-warnings --test worker/test/documents-summary-scale.test.mjs",
+  // Worker-hosted custom API source: migration 0048, the declarative setup
+  // commands, the owner route, the scheduled pull, and the scripted lifecycle.
+  "node --no-warnings --test test/custom-api-migration.test.mjs",
+  "node --no-warnings --test worker/test/custom-api.test.mjs",
+  "node --no-warnings --test worker/test/custom-api-route.test.mjs",
+  "node --no-warnings --test worker/test/custom-api-scheduled.test.mjs",
+  "node --no-warnings --test worker/test/custom-api-scripted.test.mjs",
+  "node --no-warnings --test test/custom-api-cli.test.mjs",
+  "node --no-warnings --test test/custom-api-schema-compat.test.mjs",
+  "node --no-warnings --test test/windows-dpapi-launch-retry.test.mjs",
 ]);
 
 export function parseTestCommand(command) {

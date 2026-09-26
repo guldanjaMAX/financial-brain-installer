@@ -190,15 +190,29 @@ function makeEnv({
   return { env, db, deleted, upserted, upsertBatches, visible, d1Queries, getByIdsCalls };
 }
 
-const insertDocument = (db, uid, source = "drive") => db.prepare(
-  `INSERT INTO documents (doc_uid, source, source_id, title, ingested_at, content_hash)
-   VALUES (?, ?, ?, ?, ?, ?)`
-).run(uid, source, uid, uid, Date.now(), `hash:${uid}`);
+const insertDocument = (db, uid, source = "drive") => {
+  const result = db.prepare(
+    `INSERT INTO documents (doc_uid, source, source_id, title, ingested_at, content_hash)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(uid, source, uid, uid, Date.now(), `hash:${uid}`);
+  db.prepare(
+    `INSERT INTO corpus_stats (source, documents, chunks) VALUES (?1, 1, 0)
+     ON CONFLICT(source) DO UPDATE SET documents=documents + 1`,
+  ).run(source);
+  return result;
+};
 
-const insertChunk = (db, uid, doc, ix, vectorId = uid) => db.prepare(
-  `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, vector_id)
-   VALUES (?, ?, ?, ?, 'drive', ?)`
-).run(uid, doc, ix, `old text ${ix}`, vectorId);
+const insertChunk = (db, uid, doc, ix, vectorId = uid) => {
+  const result = db.prepare(
+    `INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, vector_id)
+     VALUES (?, ?, ?, ?, 'drive', ?)`,
+  ).run(uid, doc, ix, `old text ${ix}`, vectorId);
+  db.prepare(
+    `INSERT INTO corpus_stats (source, documents, chunks) VALUES ('drive', 0, 1)
+     ON CONFLICT(source) DO UPDATE SET chunks=chunks + 1`,
+  ).run();
+  return result;
+};
 
 async function drainFully(env, options = {}, maxRounds = 20) {
   const total = { drained: 0, deleted: 0, upserted: 0, submitted: 0, failed: 0, remaining: null };

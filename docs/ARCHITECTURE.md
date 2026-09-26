@@ -282,6 +282,80 @@ basis, policy, observations, and skip set; only that fingerprint and aggregates
 leave the boundary. It is groundwork for a later approval flow, not
 authorization to perform OCR.
 
+Live OCR is page-idempotent across the installer and Worker. The installer
+hashes the exact source, source item id, page index, model, prompt, and rendered
+page bytes into one opaque request identity and retains it across the 60, 90,
+and 120-second bounded attempts. Identical bytes in different documents remain
+independent. Migration 0047 adds `ocr_page_requests`, which the Worker claims
+before calling Workers AI. A short pre-call reservation may be reclaimed after
+exact expiry; an exact transition to `in_flight` closes that window before the
+billable call. An active duplicate returns 425 without starting another model
+call. The installer polls that state with backoff inside the active deadline;
+425 is not an attempt and carries a bounded polling wait. An in-flight receipt
+with no final response may start one recorded replacement call only after its
+full 15-minute ambiguity window. Before the first attempt, the installer
+derives one AES-GCM replay key with a domain-separated hash of the exact private
+page identity. That key is not persisted and cannot be derived from the durable
+request ID alone, but a later source pass over the same page can reproduce it.
+Owner image uploads derive their replay key from that same private page
+identity, so the same upload can recover after a later ingest failure even if
+the Brain admin key rotates. Only a verified 200 response with nonblank
+transcription text bound to the exact request ID becomes a completion. That
+completion keeps a permanent, content-free, identity-bearing tombstone with
+only a response hash, status, bounded numeric usage, source acknowledgement
+time, and bounded re-read count. It may also
+keep ciphertext that the matching replay key can open. The source acknowledges
+the page on that same receipt only after the full logical document family has
+been stored and reconciled. The consolidated migration 0047 includes that
+acknowledgement and the one-re-read bound on the original receipt. Until acknowledgement, cleanup
+never prunes the ciphertext,
+including after the former seven-day expiry, so a response that finishes after
+every client deadline remains replayable without a second model call or durable
+plaintext. After acknowledgement, expired ciphertext may be pruned. Any
+completed receipt whose ciphertext is missing, mismatched, malformed, expired
+after acknowledgement, or undecryptable can be rearmed once in that seven-day
+window. The one-call decision uses the same exact compare-and-swap for every
+unusable handoff. That replacement clears the prior acknowledgement and is
+recorded by the `ocr_reread_after_expiry` receipt field and counter, which the
+installer reports in its load summary. Its fresh ciphertext remains until a
+fresh source acknowledgement. Owner upload carries the opaque request ID in
+its private content-free intent and acknowledges only after exact ingest and
+finalization readback. It preserves active reservation, ambiguous-call,
+failure-backoff, and rolling-cap 425 receipts through the owner response with
+their bounded delay, pending flag, and rolling call count. A replacement with
+no ciphertext waits for the next bounded window instead of looping or becoming
+a permanent hold. Provider 4xx and 5xx results, terminal model errors, empty
+text, malformed replies, and all
+other definite non-successes retain the model-started receipt but record that
+the call ended. They become eligible for one compare-and-swap replacement after
+a 60-second backoff, never a replayable completion. The same consolidated
+migration 0047 durably retains the last three model-call start timestamps. A page can start at most 3
+calls in any rolling 24 hours; after that it returns a typed 425 until the
+oldest start leaves that rolling window, and the load report counts held pages
+plainly. Rows from the initial fixed-anchor implementation retain their full
+count at the latest known receipt timestamp until the next accepted start
+rewrites the exact timestamp array. Exhaustion is bounded but never a permanent hold. A legacy
+stored non-success follows
+the same compare-and-swap replacement path as an unusable handoff. Each
+ambiguity or backoff window can authorize at most one replacement call.
+Neither the key nor plaintext, plaintext source locator, file name, or
+plaintext document identity is stored, and this table is not part of a recovery
+export.
+
+Every idempotency-evidence failure, non-timeout transport failure,
+authentication failure, malformed reply, unknown HTTP status, and Worker or
+model 5xx is a system-level source stop. Only a validated transcription can
+reach the local content-quality decision that may definitively refuse an
+unreadable page. The client preserves the prior revision, sends no partial
+replacement, enters no removal plan, and withholds both the cursor and
+terminal-ready source receipt.
+
+After the last timeout, the installer probes `/health`. A failed probe stops
+the source run with its existing resumable marker. A healthy probe records the
+page and document as `ocr_page_timeout`, continues the pass, preserves any
+previously stored document revision, clears the accepted source marker, and
+withholds a remote cursor so the same document is checked again next pass.
+
 `ingest/outcome.mjs` is the shared source-level result contract. Only
 `completed` is success-shaped. `partial`, `unavailable`, `retryable`, and
 `refused` carry distinct flags, and a dry run carries no ingestion outcome.
@@ -400,6 +474,7 @@ without exposing source identifiers.
 | Microsoft 365 and Dropbox | Built behind field gates for mail and files, cursor resume, tombstones, and scheduling; no real tenant or account has completed acceptance |
 | QuickBooks Online and HubSpot CRM | Built behind field gates with owner connection, incremental read, retry, and disconnect paths; no provider sandbox or real account has completed acceptance |
 | Plaid | Native owner connection, incremental read, signed webhook, scheduled reconciliation, retry, repair, and disconnect paths are built, but general bank invitations are held. The owner enters Plaid application credentials only through `brain connect bank`, at a hidden prompt, when the Worker lacks them or with `--replace-keys` to correct them; the pair is checked with one harmless Plaid read in the manifest's environment before anything is written, and the command generates a missing wrapping key and verifies the names before Link. Generic setup preserves a complete Worker binding set and refuses a missing or partial set before mutation. Customer invitations wait for the full release-gate journey and a production pilot |
+| Custom business API | A declarative `corpora.custom_api` manifest block becomes a plain Worker binding containing only endpoint rules and a bearer-token secret name matching `CUSTOM_API_TOKEN_[A-Z0-9_]{1,40}`. Runtime, deploy, and connect validation reject every other binding name before credential inventory or provider fetch. On Windows the owner uses the CLI's clipboard entry by default; masked Cloudflare dashboard entry is the explicit fallback. macOS keeps the hidden prompt. Clipboard mode is selected before secret inventory and clears once across inventory, existing-name, validation, write, and readback exits. Dashboard replacement requires an owner confirmation after the new value is pasted; an existing name is not replacement proof. Each pull fetches and validates the complete snapshot before staging a durable D1 job, then advances at most one compact row or document slice per Worker request under a 600-statement budget. Known identity fields are validated before they can authorize presence or absence: sales requires a trimmed store, a real `YYYY-MM-01` month, and a configured revenue stream; inventory and costs allow a null store but otherwise require a trimmed store and breed. Every fully stamped document passes the shared storage-envelope validator before a job exists. A later-invalid staged document fails that job and permits a fresh provider pull. Rows and searchable documents are job-versioned; readers resolve the per-source current-job pointer through that job's exact logical-document version map. The identical-response shortcut first proves every current row chunk and mapped live document. Staging carries an unchanged document version only after exact live-document readback and regenerates a missing one; terminal mismatch durably fails the active job. A refused known key carries its last verified row and last-seen time forward with explicit not-refreshed state and cannot authorize absence. A missing sales stream affects only prior labeled rows for that exact store-month; both sales layouts name the store and month instead of inventing zero. A malformed identity with no safe scope fails absence decisions closed by carrying unmatched prior keys. A partial refusal promotes usable changes but keeps the source in ready-with-warnings freshness with a durable refused count; every readable document containing a carried value begins with the fixed dated warning even when its template has no row table. An all-refused pull leaves the pointer unchanged and keeps its current refused count in the source receipt. Scheduled failures likewise retain a closed issue code and render reviewed owner guidance only at the reader boundary. The pointer flips atomically with the terminal fetch receipt after every staged row, promoted document, and carried-forward document version reads back exactly. Owner-facing counts apply that same current-map boundary and exclude staged or superseded physical versions. Obsolete physical document versions are then handed to the normal guarded delete path in job-tracked bounded slices, which queues vector deletes; the shared drain processes deletes before upserts. Prior row chunks are collected afterward in bounded slices. Only a terminally verified job can use the whole-body fast path or mark the saved snapshot ready. A durable active job supplies the custom source's indexing start receipt. Packed rows retain per-row hashes, presence, last-seen state, and any refused refresh marker. Inventory and cost rows close their active value interval when a key disappears and open a new interval when it returns, so structured history preserves absence gaps. Search contains only the current inventory and cost snapshot, one document per store; it does not create daily history documents. Sales prose remains one cross-store document per month and one history per store. Saved state and empty-outbox meaning readiness are separate receipts. No custom API row is wired into the financial ledger or map. |
 | Box and Airtable | No native API connector. Box can use a reviewed export or locally synced watched folder. Airtable requires an approved export until a native connector is built. |
 
 The macOS Drive scheduler installs a per-user LaunchAgent. Its definition has no
@@ -443,9 +518,11 @@ The source-forget path is enqueue-only: it deletes authoritative D1 content and
 queues vector deletes, but never writes Vectorize directly. This makes the
 leased drain the only Vectorize writer. Each drain also maintains a conservative
 900-query internal budget, including lease operations, worst-case hashed-ID
-remaps, cleanup, failure bookkeeping, and final depth. `maxBatches` is a latency
+remaps, cleanup, failure bookkeeping, and indexed existence checks. `maxBatches` is a latency
 preference, not permission to cross that budget; a drain stops cleanly with
-remaining work queued and always reserves its lease-release query.
+remaining work queued and always reserves its lease-release query. It never
+counts the complete outbox before a loop or on a return path. Non-empty drain
+receipts therefore carry a truthful lower bound rather than a fake exact depth.
 
 Vectorize V2 accepts a mutation before that mutation is query-visible. A drain
 therefore has two durable phases. First it records the provider mutation ID on
@@ -456,9 +533,13 @@ for a delete. Only that confirmation deletes the outbox row. A processed receipt
 whose vector is missing or stale is requeued with an explicit failure instead
 of being counted as embedded.
 
-Readiness is similarly exact: D1 chunk count, outbox depth, submitted depth,
-the provider watermark, and Vectorize count must all agree. The documents
-inventory exposes this as `vector_readiness`; `brain health`, `brain test`, the
+Readiness is similarly exact at the decision boundary: the maintained verified
+projection-count receipt, indexed outbox emptiness, provider watermark, and
+Vectorize count must all agree. The empty-queue fence advances that receipt
+from the provider count only after exact row confirmation has preserved the
+previous verified cut. Queue displays count at most 10,001 indexed
+rows and render that cap as `10,000+`; they are not readiness evidence. The
+documents inventory exposes the decision as `vector_readiness`; `brain health`, `brain test`, the
 message-migration completion receipt, and every semantic answer fail or mark
 degradation until it is true. This prevents a non-empty but partially updated
 Vectorize result page from looking like complete semantic retrieval.
@@ -896,6 +977,25 @@ matching mutable human wording.
 | `brain eval` | Does this install retrieve the required documents, refuse unsupported questions honestly, and avoid regression? |
 | `npm test` and CI | Does shared product behavior pass offline on supported operating systems and Node versions? |
 | Live field gates | Does the real connector, scale, scheduler, or account lifecycle work outside mocks? |
+
+The authenticated documents surface has separate informational and exact
+lanes. The hot GET reads only source-sized receipt and inventory tables and
+returns exact presence plus freshness. Corpus-sized totals are explicitly
+unknown there, never zero and never a stale cache value. Monthly reporting uses
+the owner-admin POST report lane. That lane keyset-pages document metadata and
+chunk rows independently, applies a fixed chunk-row budget to every statement,
+and publishes exact totals only when its opening and closing mutation markers
+match. This removes corpus-sized metadata and chunk joins from the document
+inventory used by health, status, MCP health, meaning answers, and update
+readiness while retaining an on-demand exact count.
+Pending-vector counts are labeled approximate whenever the outbox is non-empty
+at either report fence, because confirmation deletes do not advance the enqueue
+generation. Destructive source removal binds confirmation to the dry-run count,
+source document-row high-water mark, and durable corpus mutation generation.
+The same generation fences target enumeration, so a same-row reingest
+invalidates the preview before deletion. It deletes only that previewed prefix,
+refuses a changed preview, and reports the actual D1 delete receipts when an
+overlapping operation removed some enumerated rows first.
 
 The D1 diagnostic's chunk-integrity lane is a bounded snapshot, not a collection
 of independent whole-table aggregates. It fixes one integer chunk-id high-water

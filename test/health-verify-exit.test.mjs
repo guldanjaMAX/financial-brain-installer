@@ -41,6 +41,88 @@ function json(body, status = 200) {
   });
 }
 
+function boundedDocumentsReceipt(body) {
+  const rows = (body.rows || []).map((row) => ({
+    ...row,
+    documents: null,
+    logical_documents: null,
+    stored_documents: null,
+    document_counts_exact: false,
+    chunks: null,
+    chunk_counts_exact: false,
+    total: null,
+    embedded: null,
+    pending_vectors: null,
+  }));
+  const backlog = body.vector_backlog;
+  const readiness = body.vector_readiness;
+  const capped = backlog?.pending === 10_001;
+  return {
+    ...body,
+    rows,
+    summary: {
+      status: "informational",
+      complete: false,
+      exact_counts_available_from: "brain report",
+    },
+    vector_backlog: {
+      ...backlog,
+      pending_is_capped: capped,
+      pending_display: capped ? "10,000+" : String(backlog.pending),
+      component_counts_exact: !capped,
+    },
+    vector_readiness: {
+      ...readiness,
+      pending_is_capped: capped,
+      submitted_counts_exact: !capped,
+    },
+  };
+}
+
+// The exact outbox receipt every Worker before the bounded documents summary
+// emits: SELECT count(*) totals with none of the three bounded-summary fields.
+function preSummaryDocumentsReceipt(pending, backlogExtras = {}) {
+  const oldestQueuedAt = pending > 0 ? Date.now() - 1_000 : null;
+  return {
+    backend: "d1",
+    rows: [{ source_type: "synthetic", has_documents: true }],
+    vector_backlog: {
+      pending,
+      upserts: pending,
+      deletes: 0,
+      submitted: pending > 0 ? 200 : 0,
+      oldest_queued_at: oldestQueuedAt,
+      ...backlogExtras,
+    },
+    vector_readiness: {
+      ready: pending === 0,
+      reason: pending === 0 ? null : "accepted_mutation_needs_confirmation",
+      expected_vectors: pending,
+      actual_vectors: 0,
+      pending,
+      submitted: pending > 0 ? 200 : 0,
+      oldest_queued_at: oldestQueuedAt,
+    },
+  };
+}
+
+// Every partial or malformed arrangement of the three bounded-summary fields.
+// None of these is a shape any shipped Worker emits, so each must refuse.
+const PARTIAL_BOUNDED_BACKLOGS = {
+  "health-partial-capped-only": { pending_is_capped: false },
+  "health-partial-display-only": { pending_display: "84075" },
+  "health-partial-exact-only": { component_counts_exact: true },
+  "health-partial-capped-display": { pending_is_capped: false, pending_display: "84075" },
+  "health-partial-capped-exact": { pending_is_capped: false, component_counts_exact: true },
+  "health-partial-display-exact": { pending_display: "84075", component_counts_exact: true },
+  "health-partial-capped-without-display": {
+    pending_is_capped: true, pending_display: null, component_counts_exact: false,
+  },
+  "health-partial-wrong-types": {
+    pending_is_capped: "false", pending_display: 84075, component_counts_exact: "true",
+  },
+};
+
 function requestUrl(input) {
   return new URL(typeof input === "string" || input instanceof URL ? String(input) : input.url);
 }
@@ -119,41 +201,50 @@ if (SCENARIO) {
           vector_backlog: { pending: "0", upserts: 0, deletes: 0 },
         });
       }
+      if (SCENARIO === "health-pre-summary-queued") {
+        return json(preSummaryDocumentsReceipt(84_075));
+      }
+      if (SCENARIO === "health-pre-summary-empty") {
+        return json(preSummaryDocumentsReceipt(0));
+      }
+      if (Object.hasOwn(PARTIAL_BOUNDED_BACKLOGS, SCENARIO)) {
+        return json(preSummaryDocumentsReceipt(84_075, PARTIAL_BOUNDED_BACKLOGS[SCENARIO]));
+      }
       if (SCENARIO === "health-backlog-oldest-missing") {
-        return json({
+        return json(boundedDocumentsReceipt({
           backend: "d1",
-          rows: [],
+          rows: [{ source_type: "synthetic", has_documents: true }],
           vector_backlog: { pending: 1, upserts: 1, deletes: 0, submitted: 0 },
           vector_readiness: {
             ready: false, reason: "vector_work_queued",
             expected_vectors: 1, actual_vectors: 0, pending: 1, submitted: 0,
           },
-        });
+        }));
       }
       if (SCENARIO === "health-backlog-old") {
         const oldestQueuedAt = Date.now() - 181 * 60 * 1000;
-        return json({
+        return json(boundedDocumentsReceipt({
           backend: "d1",
-          rows: [],
+          rows: [{ source_type: "synthetic", has_documents: true }],
           vector_backlog: {
-            pending: 10_240,
-            upserts: 10_240,
-            deletes: 0,
+            pending: 10_001,
+            upserts: 10_000,
+            deletes: 1,
             submitted: 0,
             oldest_queued_at: oldestQueuedAt,
           },
           vector_readiness: {
             ready: false, reason: "vector_work_queued",
-            expected_vectors: 10_240, actual_vectors: 0, pending: 10_240, submitted: 0,
+            expected_vectors: 10_240, actual_vectors: 0, pending: 10_001, submitted: 0,
             oldest_queued_at: oldestQueuedAt,
           },
-        });
+        }));
       }
       if (SCENARIO === "health-vector-processing") {
         const oldestQueuedAt = Date.now() - 1_000;
-        return json({
+        return json(boundedDocumentsReceipt({
           backend: "d1",
-          rows: [],
+          rows: [{ source_type: "synthetic", has_documents: true }],
           vector_backlog: {
             pending: 1,
             upserts: 1,
@@ -166,7 +257,7 @@ if (SCENARIO) {
             expected_vectors: 1, actual_vectors: 0, pending: 1, submitted: 1,
             oldest_queued_at: oldestQueuedAt,
           },
-        });
+        }));
       }
       if ([
         "health-vector-count-mismatch",
@@ -174,9 +265,9 @@ if (SCENARIO) {
         "health-mixed-generation-vector-count-mismatch",
         "health-documents-mode-missing",
       ].includes(SCENARIO)) {
-        return json({
+        return json(boundedDocumentsReceipt({
           backend: "d1",
-          rows: [],
+          rows: [{ source_type: "synthetic", has_documents: true }],
           vector_backlog: {
             pending: 0, upserts: 0, deletes: 0, submitted: 0, oldest_queued_at: null,
           },
@@ -185,12 +276,12 @@ if (SCENARIO) {
             expected_vectors: 10, actual_vectors: 0, pending: 0, submitted: 0,
             oldest_queued_at: null,
           },
-        });
+        }));
       }
       if (SCENARIO === "health-vector-count-excess") {
-        return json({
+        return json(boundedDocumentsReceipt({
           backend: "d1",
-          rows: [],
+          rows: [{ source_type: "synthetic", has_documents: true }],
           vector_backlog: {
             pending: 0, upserts: 0, deletes: 0, submitted: 0, oldest_queued_at: null,
           },
@@ -199,14 +290,14 @@ if (SCENARIO) {
             expected_vectors: 10, actual_vectors: 13, pending: 0, submitted: 0,
             oldest_queued_at: null,
           },
-        });
+        }));
       }
       if (SCENARIO === "health-mixed-generation-ready") {
-        return json({
+        return json(boundedDocumentsReceipt({
           backend: "d1",
           version: "0.1.8",
           vector_drain_mode: "active",
-          rows: [],
+          rows: [{ source_type: "synthetic", has_documents: true }],
           vector_backlog: {
             pending: 0, upserts: 0, deletes: 0, submitted: 0, oldest_queued_at: null,
           },
@@ -215,7 +306,7 @@ if (SCENARIO) {
             expected_vectors: 0, actual_vectors: 0, pending: 0, submitted: 0,
             oldest_queued_at: null,
           },
-        });
+        }));
       }
       if (SCENARIO === "health-backend-mismatch") {
         return json({ backend: "supabase", rows: [] });
@@ -229,9 +320,9 @@ if (SCENARIO) {
       if (SCENARIO === "health-default-backend-mismatch") {
         return json({ backend: "supabase", rows: [] });
       }
-      return json({
+      return json(boundedDocumentsReceipt({
         backend: "d1",
-        rows: [],
+        rows: [{ source_type: "synthetic", has_documents: true }],
         vector_backlog: {
           pending: 0, upserts: 0, deletes: 0, submitted: 0, oldest_queued_at: null,
         },
@@ -240,7 +331,7 @@ if (SCENARIO) {
           expected_vectors: 0, actual_vectors: 0, pending: 0, submitted: 0,
           oldest_queued_at: null,
         },
-      });
+      }));
     }
 
     if (url.hostname === "api.cloudflare.com" && url.pathname === "/client/v4/accounts") {
@@ -400,6 +491,31 @@ if (SCENARIO) {
         !/vector index is query-ready/.test(invalidBacklog.output), invalidBacklog.output);
   }
 
+  const preSummaryQueued = runScenario("health-pre-summary-queued", "health", { adminKey: true });
+  check("a pre-summary Worker's exact backlog is read, not refused as invalid",
+    preSummaryQueued.code === 1 &&
+      !/could not prove a valid D1 vector backlog/i.test(preSummaryQueued.output) &&
+      /84,075 vector operation\(s\) are not query-visible yet \(200 accepted by Vectorize\)/
+        .test(preSummaryQueued.output) &&
+      /older Worker.*exact count/is.test(preSummaryQueued.output) &&
+      !/10,000\+|over 10,000/i.test(preSummaryQueued.output) &&
+      !/vector index is query-ready/.test(preSummaryQueued.output),
+    preSummaryQueued.output);
+
+  const preSummaryEmpty = runScenario("health-pre-summary-empty", "health", { adminKey: true });
+  check("a pre-summary Worker's exact zero backlog is healthy and ready",
+    preSummaryEmpty.code === 0 && /vector index is query-ready/.test(preSummaryEmpty.output) &&
+      !/could not prove a valid D1 vector backlog/i.test(preSummaryEmpty.output),
+    preSummaryEmpty.output);
+
+  for (const scenario of Object.keys(PARTIAL_BOUNDED_BACKLOGS)) {
+    const partial = runScenario(scenario, "health", { adminKey: true });
+    check(`${scenario} still refuses as an invalid D1 vector backlog`,
+      partial.code === 1 && /could not prove a valid D1 vector backlog/i.test(partial.output) &&
+        !/vector index is query-ready|84,075/.test(partial.output),
+      partial.output);
+  }
+
   const missingOldest = runScenario("health-backlog-oldest-missing", "health", { adminKey: true });
   check("health rejects queued work whose age cannot be proven",
     missingOldest.code === 1 && /without a valid oldest timestamp/is.test(missingOldest.output),
@@ -407,7 +523,7 @@ if (SCENARIO) {
 
   const oldQueue = runScenario("health-backlog-old", "health", { adminKey: true });
   check("an old active queue stays non-green without being called stalled from one snapshot",
-    oldQueue.code === 1 && /10240 vector operation\(s\) are still processing.*oldest queued/is.test(oldQueue.output) &&
+    oldQueue.code === 1 && /over 10,000 pieces are still processing.*oldest queued/is.test(oldQueue.output) &&
       /Age alone does not prove a stall.*one snapshot cannot tell/is.test(oldQueue.output) &&
       !/vector operation\(s\) are stalled/i.test(oldQueue.output) &&
       !/vector index is caught up/.test(oldQueue.output), oldQueue.output);

@@ -876,14 +876,18 @@ export async function toEnvelope(getAccessToken, file, { sourceName = SOURCE_TYP
   // judged by different rules than a local one despite the comment above
   // promising otherwise. OCR is threaded through explicitly here, because
   // Drive is where a client's scanned filing cabinet actually lives.
-  const got = await extract(buf, name, ocr ? { ocr } : {});
+  const got = await extract(buf, name, ocr ? {
+    ocr,
+    ocrDocument: { source: sourceName, sourceItemId: String(file.id) },
+  } : {});
   if (got.error || got.text == null) {
     return {
       skip: {
         path: file.name,
         id: file.id,
         reason: got.error || "extraction produced nothing",
-        code: "extraction_refused",
+        code: got.code || "extraction_refused",
+        ...(got.retryable === true ? { retryable: true } : {}),
       },
     };
   }
@@ -903,6 +907,9 @@ export async function toEnvelope(getAccessToken, file, { sourceName = SOURCE_TYP
   const occurred = dd.value ?? (Number.isFinite(created) ? created : null);
 
   return {
+    ...(Array.isArray(got.ocr_page_request_ids)
+      ? { ocrPageRequestIds: [...got.ocr_page_request_ids] }
+      : {}),
     // The bare Drive file id, not the name and not `drive:<id>`. The store owns
     // namespacing and constructs `<source_type>:<source_id>` exactly once. This
     // is also the identity used by the Supabase migration, so the first live
