@@ -35,6 +35,9 @@ import {
   safeCuratedSchedulerEnvironment,
   statusScheduledCuratedSync,
 } from "../operations/curated-sync-scheduler.mjs";
+import { createTestSymlink } from "./helpers/symlink-capability.mjs";
+
+let skippedLinkChecks = 0;
 
 const sandbox = mkdtempSync(join(tmpdir(), "brain-curated-scheduler-"));
 const home = join(sandbox, "home");
@@ -642,21 +645,30 @@ try {
   const lockTarget = join(sandbox, "must-not-be-changed.txt");
   writeFileSync(lockTarget, "safe\n", { mode: 0o600 });
   unlinkSync(plan.lockPath);
-  symlinkSync(lockTarget, plan.lockPath);
-  let unsafeSpawned = 0;
-  assert.throws(
-    () => runScheduledCuratedSync(planPath, {
-      ...common,
-      expectedConfigHash: plan.configHash,
-      spawn: () => { unsafeSpawned++; return { status: 0 }; },
-      rotateLogs: () => {},
-    }),
-    /lock is not a private regular file/,
-  );
-  assert.equal(unsafeSpawned, 0);
-  assert.equal(readFileSync(lockTarget, "utf8"), "safe\n");
-
-  unlinkSync(plan.lockPath);
+  const symlinkedLock = createTestSymlink({
+    target: lockTarget,
+    path: plan.lockPath,
+    type: "file",
+    onSkip: (reason) => {
+      skippedLinkChecks++;
+      console.log(`SKIP  scheduler refuses a symlinked lock # ${reason}`);
+    },
+  });
+  if (symlinkedLock.created) {
+    let unsafeSpawned = 0;
+    assert.throws(
+      () => runScheduledCuratedSync(planPath, {
+        ...common,
+        expectedConfigHash: plan.configHash,
+        spawn: () => { unsafeSpawned++; return { status: 0 }; },
+        rotateLogs: () => {},
+      }),
+      /lock is not a private regular file/,
+    );
+    assert.equal(unsafeSpawned, 0);
+    assert.equal(readFileSync(lockTarget, "utf8"), "safe\n");
+    unlinkSync(plan.lockPath);
+  }
   linkSync(lockTarget, plan.lockPath);
   let hardLinkSpawned = 0;
   assert.throws(
@@ -714,7 +726,8 @@ try {
     assert.equal(eventText.includes(forbidden), false, `support event omitted ${forbidden}`);
   }
 
-  console.log("PASS  curated scheduler locks, strips credentials, tracks freshness, and records private issues");
+  console.log("PASS  curated scheduler locks, strips credentials, tracks freshness, and records private " +
+    `issues; ${skippedLinkChecks} skipped`);
 } finally {
   rmSync(sandbox, { recursive: true, force: true });
 }

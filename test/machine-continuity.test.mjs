@@ -6,7 +6,6 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -24,6 +23,7 @@ import {
   assertMachineContinuityPrivacy,
   auditMachineContinuity,
 } from "../operations/machine-continuity.mjs";
+import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 
 const PRODUCT_VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url))).version;
 const PACKAGED_CLI = resolve(dirname(fileURLToPath(new URL("../brain.mjs", import.meta.url))), "brain.mjs");
@@ -455,7 +455,7 @@ test("CLI requires the explicit read-only JSON shape before inspecting anything"
   assert.equal(remoteCalls, 0);
 });
 
-test("an npm-style global symlink runs the current package CLI without writing locally", async () => {
+test("an npm-style global symlink runs the current package CLI without writing locally", async (t) => {
   const sandbox = mkdtempSync(join(tmpdir(), "brain-machine-wrapper-"));
   try {
     const manifestPath = join(sandbox, "brain.manifest.json");
@@ -464,7 +464,13 @@ test("an npm-style global symlink runs the current package CLI without writing l
     manifest.corpora = {};
     delete manifest.operations.admin_key_secret;
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600 });
-    symlinkSync(PACKAGED_CLI, wrapperPath);
+    const linked = createTestSymlink({
+      target: PACKAGED_CLI,
+      path: wrapperPath,
+      type: "file",
+      onSkip: (reason) => t.skip(reason),
+    });
+    if (!linked.created) return;
     const before = tree(sandbox);
     const child = spawnSync(process.execPath, [wrapperPath, "machine-continuity", manifestPath, "--json"], {
       encoding: "utf8",
