@@ -22221,10 +22221,10 @@ function updateBacklogSemver(value) {
  * resume race), and `brain deploy` from a newer CLI leaves the same state.
  * A Worker version above the recorded one and no newer than this CLI is that
  * earlier attempt, so its receipt is read in whichever writer mode it reports
- * and the rerun can finish the pause it started. A Worker paused on this CLI's
- * own version when the manifest records that same version is also a resume
- * (see below). A Worker newer than this CLI, older than the manifest, or paused
- * on a recorded version this CLI did not produce is not a resume.
+ * and the rerun can finish the pause it started. A Worker paused on the version
+ * the manifest records, when that version is no newer than this CLI, is also a
+ * resume (see below). A Worker newer than this CLI or older than the manifest
+ * is not a resume.
  *
  * A manifest with no brain.version predates version recording, so it is older
  * than every release: it accepts the v0.4.6 envelope and any versioned
@@ -22264,13 +22264,16 @@ function updateBacklogReceiptQueue(body, recordedVersion, projection) {
     if (!resumable) throw generationRefusal();
     expectedVersion = workerVersion;
     expectedDrainMode = workerMode;
-  } else if (workerVersion && workerVersion === recordedVersion && workerVersion === PRODUCT_VERSION &&
-      workerMode === "paused-for-upgrade") {
-    // This CLI's own Worker, paused, on the version the manifest already
-    // records: `brain rollback --yes` leaves exactly this and sends the owner
-    // to `brain update`, and a same-version update that stops inside its pause
-    // window leaves it too. It is resumable. Its queue is still read through
-    // the paused aggregate below, so queued or unreadable work still refuses.
+  } else if (workerVersion && workerVersion === recordedVersion &&
+      compareSemver(workerVersion, PRODUCT_VERSION) <= 0 && workerMode === "paused-for-upgrade") {
+    // A Worker paused on the version the manifest already records, no newer
+    // than this CLI: `brain rollback --yes` leaves exactly this and sends the
+    // owner to `brain update`, and a same-version update that stops inside its
+    // pause window leaves it too. Installing a newer CLI afterwards must not
+    // strand it, so an OLDER recorded release paused this way is resumable as
+    // well. Its queue is still read through the paused aggregate below, so
+    // queued or unreadable work still refuses; a Worker newer than this CLI
+    // never reaches this branch.
     expectedDrainMode = workerMode;
   }
   let aggregate;
