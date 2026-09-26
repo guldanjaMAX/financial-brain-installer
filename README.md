@@ -13,16 +13,18 @@ whichever supported clients are present without placing a key in their config.
 
 ## Install it
 
-This checkout is the unreleased 0.4.8 candidate. No 0.4.8 customer release or
+This checkout is the unreleased 0.4.9 candidate. No 0.4.9 customer release or
 immutable release asset exists. The earlier held 0.4.7 candidate was never
 tagged, published, or offered as a customer update; its identity is retired so
-its evidence cannot be confused with this changed candidate. The versioned URLs
+its evidence cannot be confused with this changed candidate. The held 0.4.8
+candidate was likewise never tagged, published, or offered as a customer
+update, and its identity is retired for the same reason. The versioned URLs
 in the candidate examples below are intentionally unavailable placeholders for
 release review. Do not run or share those commands as customer installation
 instructions. Check the guided page for the current release status before
 installing anything. The held candidate's proof boundary and remaining gates
 are recorded in the
-[0.4.8 evidence plan](docs/release-evidence/v0.4.8-candidate-release-evidence-plan.md).
+[0.4.9 evidence plan](docs/release-evidence/v0.4.9-candidate-release-evidence-plan.md).
 
 The guided install path is at `financialbrain.ai/install`. It uses one immutable
 release asset and installs into a folder owned by your user account, so it needs
@@ -47,8 +49,8 @@ MCP discovery, and configuration checks instead.
 Mac or Linux:
 
 ```bash
-# Unavailable 0.4.8 candidate placeholder. Do not run until the public channel names this release.
-npm install --global --ignore-scripts --no-audit --no-fund --prefix "$HOME/.financial-brain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.8/brain-installer-0.4.8.tgz"
+# Unavailable 0.4.9 candidate placeholder. Do not run until the public channel names this release.
+npm install --global --ignore-scripts --no-audit --no-fund --prefix "$HOME/.financial-brain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.9/brain-installer-0.4.9.tgz"
 # Optional: makes the shorter `brain` examples work in this Terminal window.
 export PATH="$HOME/.financial-brain/bin:$PATH"
 ```
@@ -56,8 +58,8 @@ export PATH="$HOME/.financial-brain/bin:$PATH"
 Windows PowerShell:
 
 ```powershell
-# Unavailable 0.4.8 candidate placeholder. Do not run until the public channel names this release.
-npm.cmd install --global --ignore-scripts --no-audit --no-fund --prefix "$env:LOCALAPPDATA\FinancialBrain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.8/brain-installer-0.4.8.tgz"
+# Unavailable 0.4.9 candidate placeholder. Do not run until the public channel names this release.
+npm.cmd install --global --ignore-scripts --no-audit --no-fund --prefix "$env:LOCALAPPDATA\FinancialBrain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.9/brain-installer-0.4.9.tgz"
 # Optional: makes the shorter `brain` examples work in this PowerShell window.
 $env:Path = "$env:LOCALAPPDATA\FinancialBrain;$env:Path"
 ```
@@ -174,7 +176,7 @@ reviewed step at a time with `--run tools`, `cloudflare`, `smoke`, `google`, `zo
 `imap`, `passkey`, or `verify`. The owner still handles login, 2FA, OAuth consent,
 and the physical passkey gesture. For the supported Google, Zoom, and IMAP
 steps, tokens and app secrets go only into hidden terminal prompts or provider
-pages. The v0.4.8 Windows path refuses those three credential ceremonies until
+pages. The 0.4.9 candidate Windows path refuses those three credential ceremonies until
 its secure secret-entry bridge is physically proven. Its first owner source is
 one explicitly approved local folder, previewed first and loaded manually.
 

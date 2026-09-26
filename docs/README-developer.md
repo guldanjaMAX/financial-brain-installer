@@ -6,18 +6,18 @@ Nothing runs on our infrastructure. Normal setup uses an owner-approved named
 Cloudflare browser profile in the owner's operating-system credential store; it
 does not create or copy an API token.
 
-**Status: unreleased 0.4.8/schema48 field candidate, held.** Provisioning,
+**Status: unreleased 0.4.9/schema48 field candidate, held.** Provisioning,
 retrieval, resumable ingest, guarded deletion, owner actions, exact entity
 scope, document grants, passkey observability, financial imports, provenance
 binding for eligible single-record local file ingests, bounded one-original
 accepted-resolution evidence, and restart-safe migrations are covered by local
 product and contract suites. Local proof is not field proof. At this freeze the
-39-row release audit has 35 unresolved incidents, no renewed deferrals, and four
-rows closed on reviewed evidence. No public 0.4.8 asset or customer update
-exists. The earlier held 0.4.7 candidate was never tagged or published, and its
-identity is retired rather than reused for these changed bytes. See "What is
-not built," `CONNECTOR-BACKLOG.md`, and the
-[0.4.8 candidate evidence plan](release-evidence/v0.4.8-candidate-release-evidence-plan.md)
+40-row release audit has 36 unresolved incidents, no renewed deferrals, and four
+rows closed on reviewed evidence. No public 0.4.9 asset or customer update
+exists. The earlier held 0.4.7 and 0.4.8 candidates were never tagged or
+published, and their identities are retired rather than reused for these
+changed bytes. See "What is not built," `CONNECTOR-BACKLOG.md`, and the
+[0.4.9 candidate evidence plan](release-evidence/v0.4.9-candidate-release-evidence-plan.md)
 before promising anything to anyone.
 
 Engineering changes follow [the code, test, documentation, and tracking

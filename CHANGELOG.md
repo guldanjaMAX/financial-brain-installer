@@ -4,11 +4,14 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
-## 0.4.8
+## 0.4.9
 
 Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
-asset publication.
+asset publication. The held 0.4.8 candidate was never tagged, published, or
+offered as a customer update; its entries below ship for the first time in
+0.4.9, and its identity is retired so its evidence cannot be confused with
+this changed candidate.
 
 - **Windows credential protection survives a Smart App Control refusal.** On
   some Windows 11 machines Smart App Control occasionally refuses to start the
