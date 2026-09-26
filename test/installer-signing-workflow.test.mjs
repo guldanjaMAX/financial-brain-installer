@@ -21,13 +21,17 @@ import test from "node:test";
 // loads the objects GitHub loads and refuses any spelling outside its subset
 // (S3-R, S10, S10-R). No policy or step lookup below reads workflow lines.
 import {
-  WorkflowParseError, callsAction, canonicalText, isCheckout, jobPermissions, jobSteps, parseWorkflow,
-  topLevelPermissions, triggerNames, usesOf, workflowJobs, workflowUses,
+  WorkflowParseError, assertWorkflowCharacters, callsAction, canonicalText, isCheckout, jobPermissions, jobSteps,
+  parseWorkflow, topLevelPermissions, triggerNames, usesOf, workflowFiles, workflowJobs, workflowUses,
 } from "./helpers/workflow-yaml.mjs";
-import { SIGNING_SPELLING_MUTATIONS, UNSIGNED_SPELLING_MUTATIONS } from "./helpers/workflow-spelling-mutations.mjs";
+import {
+  CHARACTER_MUTATIONS, SIGNING_SPELLING_MUTATIONS, UNSIGNED_SPELLING_MUTATIONS,
+} from "./helpers/workflow-spelling-mutations.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const read = (path) => readFileSync(join(ROOT, path), "utf8").replaceAll("\r\n", "\n");
+// The committed bytes, with no line-ending normalization (S11).
+const readRaw = (path) => readFileSync(join(ROOT, path), "utf8");
 const SIGNING_PATH = ".github/workflows/installer-signing.yml";
 const UNSIGNED_PATH = ".github/workflows/machine-prep-installers.yml";
 const PLANNED_PUBLISHER = "Financial Brain LLC";
@@ -666,6 +670,41 @@ for (const [path, policy, name, mutate] of mutations) {
     assert.notEqual(mutated, original, "the mutation applied to the current workflow");
     assert.throws(() => assertWorkflowPolicy(mutated, policy), assert.AssertionError);
   });
+}
+
+// S11: every workflow GitHub can load is printable ASCII plus LF, read from the
+// committed bytes with no line-ending normalization.
+test("S11 every file under .github/workflows is printable ASCII plus LF", () => {
+  const files = workflowFiles(ROOT);
+  for (const reviewed of [SIGNING_PATH, UNSIGNED_PATH]) assert.ok(files.includes(reviewed), `${reviewed} is checked`);
+  for (const file of files) assertWorkflowCharacters(readFileSync(join(ROOT, file), "utf8"), file);
+});
+
+/** The refusal must name the file, the line of the first disallowed character, and its code point. */
+function characterRefusal(path, mutated, codePoint) {
+  const index = mutated.search(/[^\n\x20-\x7e]/u);
+  assert.notEqual(index, -1, "the mutation added a disallowed character");
+  assert.equal(mutated.codePointAt(index), codePoint, "the first disallowed character is the declared one");
+  const line = mutated.slice(0, index).split("\n").length;
+  const hex = codePoint.toString(16).toUpperCase().padStart(4, "0");
+  return (error) => error instanceof WorkflowParseError &&
+    error.message.startsWith(`${path} line ${line} column `) && error.message.includes(`U+${hex} `);
+}
+
+// S11: a line break other than LF, a Unicode space, or U+FEFF reads differently
+// here than in GitHub, so each must fail the character check and the policy check.
+for (const [path, policy] of [[SIGNING_PATH, SIGNING_POLICY], [UNSIGNED_PATH, UNSIGNED_POLICY]]) {
+  for (const [name, codePoint, mutate] of CHARACTER_MUTATIONS) {
+    test(`S11 ${basename(path)} mutation "${name}" fails the policy check`, () => {
+      const original = readRaw(path);
+      assertWorkflowCharacters(original, path);
+      assertWorkflowPolicy(original, policy);
+      const mutated = mutate(original);
+      assert.notEqual(mutated, original, "the mutation applied to the current workflow");
+      assert.throws(() => assertWorkflowCharacters(mutated, path), characterRefusal(path, mutated, codePoint));
+      assert.throws(() => assertWorkflowPolicy(mutated, policy), assert.AssertionError);
+    });
+  }
 }
 
 // Rewrites YAML treats as the same workflow must still pass, so the parser

@@ -37,12 +37,65 @@
  * complex (`?`) keys, flow collections used as keys or spanning lines, quoted
  * scalars spanning lines, comments inside flow collections, block scalar
  * indentation indicators, double-quoted escapes JSON does not define, any tab
- * outside block scalar content, duplicate keys, a document not starting at
+ * (see below), duplicate keys, a document not starting at
  * column 0, unexpected or inconsistent indentation, and a `key: value` nested on
  * one line where YAML forbids it.
+ *
+ * PRINTABLE ASCII PLUS LF ONLY (S11). Before any of the above, the text must
+ * hold only LF and the printable ASCII characters U+0020 to U+007E. YAML breaks
+ * lines at CR, NEL, LS and PS too, while this parser splits on LF, so any of
+ * them can hide a step after a trailing comment; and JavaScript's \s and trim()
+ * remove NBSP, U+FEFF and the other Unicode spaces that GitHub keeps as part of
+ * a key, so `permissions<NBSP>:` would read as `permissions` here only. Refusing
+ * the whole class, with the line, column and code point, keeps the parser from
+ * having to agree with YAML on any of them. Tabs, CRLF and a byte-order mark are
+ * refused the same way.
  */
 
+import { readdirSync } from "node:fs";
+import { join, relative, sep } from "node:path";
+
 export class WorkflowParseError extends Error {}
+
+/** The first character outside LF and U+0020 to U+007E, as { line, column, codePoint }, or null. */
+export function characterViolation(text) {
+  let line = 1;
+  let column = 1;
+  for (const character of text) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint === 0x0a) {
+      line++;
+      column = 1;
+      continue;
+    }
+    if (codePoint < 0x20 || codePoint > 0x7e) return { line, column, codePoint };
+    column++;
+  }
+  return null;
+}
+
+/** The code point, and for a tab the subset rule it has always broken. */
+const describeCharacter = (codePoint) => `U+${codePoint.toString(16).toUpperCase().padStart(4, "0")}` +
+  (codePoint === 0x09 ? " (tabs are outside the supported YAML subset)" : "");
+
+/** Throw a WorkflowParseError naming `file`, the line, column and code point of the first disallowed character. */
+export function assertWorkflowCharacters(text, file) {
+  if (typeof text !== "string") throw new WorkflowParseError(`${file}: workflow text must be a string`);
+  const violation = characterViolation(text);
+  if (violation) {
+    throw new WorkflowParseError(`${file} line ${violation.line} column ${violation.column}: ` +
+      `${describeCharacter(violation.codePoint)} is outside printable ASCII plus LF`);
+  }
+}
+
+/** Every file under `<root>/.github/workflows`, at any depth, as sorted repository-relative paths with `/`. */
+export function workflowFiles(root) {
+  const directory = join(root, ".github", "workflows");
+  return readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter((entry) => !entry.isDirectory())
+    .map((entry) => relative(root, join(entry.parentPath ?? entry.path, entry.name)).split(sep).join("/"))
+    .sort();
+}
 
 const INDICATORS = new Set(["-", "?", ":", ",", "[", "]", "{", "}", "#", "&", "*", "!", "|", ">", "'", '"', "%", "@", "`"]);
 
@@ -74,8 +127,13 @@ const setKey = (map, key, value) => Object.defineProperty(map, key, { value, enu
 class Parser {
   constructor(text) {
     if (typeof text !== "string") throw new WorkflowParseError("YAML input must be a string");
-    const source = text.replace(/^﻿/, "").replaceAll("\r\n", "\n");
-    this.lines = source.split("\n").map((raw, index) => ({ raw, no: index + 1 }));
+    // S11: LF is then the only line break and no character trims differently.
+    const violation = characterViolation(text);
+    if (violation) {
+      throw new WorkflowParseError(`line ${violation.line} column ${violation.column}: ` +
+        `${describeCharacter(violation.codePoint)} is outside printable ASCII plus LF`);
+    }
+    this.lines = text.split("\n").map((raw, index) => ({ raw, no: index + 1 }));
     if (this.lines.length && this.lines.at(-1).raw === "") this.lines.pop();
     this.pos = 0;
   }

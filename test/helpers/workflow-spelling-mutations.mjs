@@ -75,3 +75,32 @@ export const UNSIGNED_SPELLING_MUTATIONS = [
   ["a commented, quoted top-level permissions block widening contents", (text) => text.replace(
     /^permissions:\n  contents: read$/m, "\"permissions\":  # read only\n  # contents: read\n  'contents': write # read")],
 ];
+
+// S11: characters YAML and GitHub read differently from this suite's parser. A
+// line break other than LF (lone CR, CRLF, NEL, LS, PS) can split a line the
+// parser sees as one, hiding a step; a Unicode space or U+FEFF that JavaScript's
+// trim removes lets a spoofed key such as `permissions<NBSP>:` read as the real
+// one here while GitHub loads a different key and falls back to its default
+// token scopes. Rather than chase each spelling, every workflow file must be
+// printable ASCII plus LF, and each entry below must fail that rule.
+//
+// Each entry is [name, code point the check must name, mutate]. Every mutate
+// applies to both reviewed workflows.
+
+// A trailing comment swallows the rest of what this parser reads as one line,
+// while YAML breaks the line at the separator and loads the step after it.
+const hiddenStep = (separator) => firstStep(
+  `      - run: echo ready  # reviewed${separator}      - uses: actions/setup-node@v7\n`);
+const spoofedPermissionsKey = (character) => (text) => text.replace(/^permissions:/m, `permissions${character}:`);
+
+export const CHARACTER_MUTATIONS = [
+  ["a lone CR hiding an unpinned step", 0x0d, hiddenStep("\r")],
+  ["CRLF line endings", 0x0d, (text) => text.replaceAll("\n", "\r\n")],
+  ["a NEL (U+0085) hiding an unpinned step", 0x85, hiddenStep("\u0085")],
+  ["a line separator (U+2028) hiding an unpinned step", 0x2028, hiddenStep("\u2028")],
+  ["a paragraph separator (U+2029) hiding an unpinned step", 0x2029, hiddenStep("\u2029")],
+  ["a no-break space spoofing the top-level permissions key", 0xa0, spoofedPermissionsKey("\u00a0")],
+  ["a U+FEFF spoofing the top-level permissions key", 0xfeff, spoofedPermissionsKey("\ufeff")],
+  ["a leading byte-order mark", 0xfeff, (text) => `\ufeff${text}`],
+  ["a tab separating a step's run key from its value", 0x09, firstStep("      - run:\techo ready\n")],
+];

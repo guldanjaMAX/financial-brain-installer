@@ -7,10 +7,12 @@ import test from "node:test";
 // Shared with the signing workflow test: every workflow check below reads the
 // structure the YAML subset parser loads, never workflow lines (S10-R).
 import {
-  WorkflowParseError, canonicalText, isCheckout, jobPermissions, jobSteps, parseWorkflow, topLevelPermissions,
-  triggerNames, usesOf, workflowJobs, workflowUses,
+  WorkflowParseError, assertWorkflowCharacters, canonicalText, isCheckout, jobPermissions, jobSteps, parseWorkflow,
+  topLevelPermissions, triggerNames, usesOf, workflowFiles, workflowJobs, workflowUses,
 } from "./helpers/workflow-yaml.mjs";
-import { SIGNING_SPELLING_MUTATIONS, UNSIGNED_SPELLING_MUTATIONS } from "./helpers/workflow-spelling-mutations.mjs";
+import {
+  CHARACTER_MUTATIONS, SIGNING_SPELLING_MUTATIONS, UNSIGNED_SPELLING_MUTATIONS,
+} from "./helpers/workflow-spelling-mutations.mjs";
 
 /** Run a shape check; a spelling the shared parser refuses is a shape failure too. */
 function exactly(check) {
@@ -388,6 +390,25 @@ test("the unsigned build has exactly its two jobs and a dispatch-only trigger", 
   assertUnsignedWorkflowShape(read(".github/workflows/machine-prep-installers.yml"));
 });
 
+// S11: every workflow GitHub can load is printable ASCII plus LF, read from the
+// committed bytes with no line-ending normalization.
+test("S11 every file under .github/workflows is printable ASCII plus LF", () => {
+  const files = workflowFiles(ROOT);
+  for (const reviewed of [".github/workflows/installer-signing.yml", ".github/workflows/machine-prep-installers.yml"]) assert.ok(files.includes(reviewed), `${reviewed} is checked`);
+  for (const file of files) assertWorkflowCharacters(readFileSync(join(ROOT, file), "utf8"), file);
+});
+
+/** The refusal must name the file, the line of the first disallowed character, and its code point. */
+function characterRefusal(path, mutated, codePoint) {
+  const index = mutated.search(/[^\n\x20-\x7e]/u);
+  assert.notEqual(index, -1, "the mutation added a disallowed character");
+  assert.equal(mutated.codePointAt(index), codePoint, "the first disallowed character is the declared one");
+  const line = mutated.slice(0, index).split("\n").length;
+  const hex = codePoint.toString(16).toUpperCase().padStart(4, "0");
+  return (error) => error instanceof WorkflowParseError &&
+    error.message.startsWith(`${path} line ${line} column `) && error.message.includes(`U+${hex} `);
+}
+
 // Job and trigger keys in every spelling YAML accepts must be seen: an extra
 // job or trigger that only the parser misses is a policy hole.
 // No permissions block, so only the job-key parser can notice the job.
@@ -495,6 +516,19 @@ for (const [path, assertShape] of [
       assertShape(original);
       const mutated = mutate(original);
       assert.notEqual(mutated, original, "the mutation applied to the current workflow");
+      assert.throws(() => assertShape(mutated), assert.AssertionError);
+    });
+  }
+  // S11: a line break other than LF, a Unicode space, or U+FEFF reads
+  // differently here than in GitHub, so each must fail the shape check.
+  for (const [name, codePoint, mutate] of CHARACTER_MUTATIONS) {
+    test(`${path} S11 character mutation "${name}" is detected`, () => {
+      const original = readFileSync(join(ROOT, path), "utf8");
+      assertWorkflowCharacters(original, path);
+      assertShape(original);
+      const mutated = mutate(original);
+      assert.notEqual(mutated, original, "the mutation applied to the current workflow");
+      assert.throws(() => assertWorkflowCharacters(mutated, path), characterRefusal(path, mutated, codePoint));
       assert.throws(() => assertShape(mutated), assert.AssertionError);
     });
   }

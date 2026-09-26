@@ -47,3 +47,9 @@ test/fixtures/published-v0.4.0-brain-mcp.mjs text eol=lf
 package.json text eol=lf
 package-lock.json text eol=lf
 onboarding/start-windows-rehearsal.ps1 text eol=lf
+
+# The workflow tests require every file under .github/workflows to be
+# printable ASCII plus LF (S11), because YAML reads CR as a line break that
+# their parser does not. A CRLF checkout on a Windows runner would fail that
+# check without any change a reviewer could see.
+.github/workflows/** text eol=lf
