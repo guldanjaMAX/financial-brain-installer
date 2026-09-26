@@ -22249,7 +22249,7 @@ function updateBacklogReceiptQueue(body, recordedVersion, projection) {
       expectedVersion: recordedVersion ?? "0.0.0",
       expectedBackend: "d1",
     });
-    return { pending: aggregate.queue.pending, paused: false };
+    return { pending: aggregate.queue.pending, paused: false, legacy: true };
   }
   const workerVersion = updateBacklogSemver(body.version);
   const workerMode = UPDATE_BACKLOG_DRAIN_MODES.has(body.vector_drain_mode) ? body.vector_drain_mode : null;
@@ -22300,6 +22300,37 @@ function updateBacklogReceiptQueue(body, recordedVersion, projection) {
     pendingIsCapped: aggregate.queue.pending_is_capped === true,
     paused: aggregate.vector_drain_mode === "paused-for-upgrade",
   };
+}
+
+/**
+ * Which writer mode a pre-0.4.7 Worker is in, from its public /health.
+ *
+ * The v0.4.6 documents envelope carries no drain mode, and a v0.4.6 Worker
+ * paused for an upgrade never drains (its scheduled handler returns early), so
+ * "wait until query-ready" would be impossible advice for queued work there.
+ * Every pre-0.4.7 release reports the pause on public /health as both
+ * `status` and `vector_drain_mode`, beside its own version. No admin key is
+ * sent. Any unreadable, oversized, non-legacy or self-contradicting answer is
+ * null: the queued work still refuses, only the advice changes.
+ */
+async function readLegacyUpdateDrainMode(documentsUrl, { request, readAggregate, projection }) {
+  let body;
+  try {
+    const response = await request(new URL("/health", documentsUrl).href, {}, {
+      timeoutMs: UPDATE_BACKLOG_READ_TIMEOUT_MS,
+      what: "the update drain-mode check",
+    });
+    if (!response || response.ok !== true || response.status !== 200) return null;
+    body = await readAggregate(response);
+  } catch {
+    return null;
+  }
+  const version = updateBacklogSemver(body?.version);
+  if (!version || !projection.isLegacyPre047Version(version)) return null;
+  if (!UPDATE_BACKLOG_DRAIN_MODES.has(body.vector_drain_mode)) return null;
+  const paused = body.vector_drain_mode === "paused-for-upgrade";
+  if (body.status !== (paused ? "paused-for-upgrade" : "ok")) return null;
+  return { version, paused };
 }
 
 /**
@@ -22435,6 +22466,21 @@ export async function readUpdateBacklog(manifestPath, options = {}) {
           generation = error?.generation ?? null;
           throw error;
         }
+        if (queue.legacy && queue.pending > 0) {
+          // Queued work refuses in either mode; the mode only decides which
+          // advice is true. An empty legacy queue proceeds paused or active,
+          // so no extra read is sent for it.
+          const legacyMode = await readLegacyUpdateDrainMode(documentsUrl, { request, readAggregate, projection });
+          revalidateManifest(pin, "update backlog drain-mode receipt");
+          return Object.freeze({
+            pending: queue.pending,
+            ...(legacyMode === null
+              ? { drain_mode_unknown: true }
+              : legacyMode.paused
+                ? { paused_for_upgrade: true, legacy_worker_version: legacyMode.version }
+                : {}),
+          });
+        }
         return Object.freeze({
           pending: queue.pending,
           ...(queue.pendingIsCapped ? { pending_is_capped: true } : {}),
@@ -22475,6 +22521,29 @@ const UPDATE_BACKLOG_GATE_CONSEQUENCE = Object.freeze({
 function updateBacklogQueuedMessage(backlog, gate, initialBacklog = null) {
   const pending = updateBacklogPendingLabel(backlog);
   const consequence = UPDATE_BACKLOG_GATE_CONSEQUENCE[gate];
+  if (backlog?.paused_for_upgrade === true && typeof backlog.legacy_worker_version === "string") {
+    // A paused pre-0.4.7 Worker never drains, and this CLI's update will not
+    // continue over its queue. Only that release's own deploy returns it to
+    // active so the queue can drain. A rollback would restore D1 over the
+    // queued work instead.
+    const release = backlog.legacy_worker_version;
+    return renderCliCommands(
+      `This Brain's Worker is version ${release}, it is still paused for an update that did not finish, and it ` +
+        `has ${pending} queued search update(s). A paused ${release} Worker does not process its queue, so waiting ` +
+        `will not clear it, and this update will not continue over queued work. ${consequence} To let the queue ` +
+        `drain, install the ${release} release and run \`brain deploy\` with it; that returns the ${release} Worker ` +
+        "to active. Wait until `brain health` says query-ready, then install this release again and run " +
+        "`brain update`. Do not run `brain rollback`, and do not clear VECTOR_DRAIN_MODE by hand."
+    );
+  }
+  if (backlog?.drain_mode_unknown === true) {
+    return renderCliCommands(
+      `This Brain has ${pending} queued search update(s), and its public health check could not be read to tell ` +
+        `whether its Worker is paused for an update that did not finish. ${consequence} Run \`brain health\`. ` +
+        "If it says query-ready later, run the update again. If it reports the Worker paused for an upgrade, " +
+        "keep that output for support; do not run `brain rollback` or clear VECTOR_DRAIN_MODE by hand."
+    );
+  }
   if (backlog?.paused_for_upgrade === true) {
     return renderCliCommands(
       `This Brain is still paused for an update that has not finished, and it has ${pending} queued search ` +

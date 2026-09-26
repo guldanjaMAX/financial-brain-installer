@@ -489,15 +489,26 @@ const UNREADABLE_AFTER = (reads) => renderCliCommands(
 );
 
 // Replays one scripted response per request and records every request, sleep
-// and per-attempt timeout so no test ever waits on a real backoff.
-function scriptedReader(manifestPath, script) {
-  const log = { requests: 0, sleeps: [], timeouts: [] };
+// and per-attempt timeout so no test ever waits on a real backoff. A pre-0.4.7
+// receipt with queued work is followed by one public /health read; that read
+// is answered from `health` (a step like the script's) and logged apart.
+function scriptedReader(manifestPath, script, { health } = {}) {
+  const log = { requests: 0, sleeps: [], timeouts: [], healthReads: 0, healthInits: [] };
   const options = {
     resolveAdminKey: () => "unit-test-admin-key",
     sleep: async (ms) => {
       log.sleeps.push(ms);
     },
-    http: async (_url, _init, requestOptions) => {
+    http: async (url, init, requestOptions) => {
+      if (new URL(url).pathname === "/health") {
+        log.healthReads += 1;
+        log.healthInits.push(init);
+        if (!health) throw new Error("the scripted fixture has no /health answer");
+        if (health.network) {
+          throw Object.assign(new Error("connection reset"), { code: "ECONNRESET", retryable: true });
+        }
+        return streamedResponse(health.body, { status: health.status ?? 200 });
+      }
       log.timeouts.push(requestOptions?.timeoutMs);
       const step = script[log.requests++];
       if (!step) throw new Error("the scripted fixture ran out of responses");
@@ -951,17 +962,21 @@ async function throughBothGates(manifestPath, {
   second = first,
   force = false,
   subdomain = "owner-sub",
+  health,
 } = {}) {
   const events = [];
   const cfPaths = [];
   const urls = [];
-  const initial = scriptedReader(manifestPath, [{ status: 200, body: JSON.stringify(first) }]);
-  const prePause = scriptedReader(manifestPath, [{ status: 200, body: JSON.stringify(second) }]);
+  const initial = scriptedReader(manifestPath, [{ status: 200, body: JSON.stringify(first) }], { health });
+  const prePause = scriptedReader(manifestPath, [{ status: 200, body: JSON.stringify(second) }], { health });
   for (const [label, reader] of [["initial", initial], ["pre-pause", prePause]]) {
     const scripted = reader.options.http;
     reader.options.http = async (url, ...rest) => {
-      events.push(`${label} backlog read`);
-      urls.push(url);
+      // The public drain-mode read is logged by the reader itself.
+      if (new URL(url).pathname !== "/health") {
+        events.push(`${label} backlog read`);
+        urls.push(url);
+      }
       return scripted(url, ...rest);
     };
   }
@@ -1116,11 +1131,19 @@ test("the exact v0.4.6 envelope with an empty queue proceeds through both gates"
 test("the exact v0.4.6 envelope with queued work refuses at both gates", async () => {
   await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath, original }) => {
     const queued = v046DocumentsEnvelope(7);
-    const run = await throughBothGates(manifestPath, { first: queued });
+    const run = await throughBothGates(manifestPath, { first: queued, health: V046_HEALTH_ACTIVE });
     assert.equal(run.error?.message, PENDING_MESSAGE(7));
     assert.deepEqual(run.events, ["initial backlog read"]);
+    // The public drain mode was read once to choose truthful advice.
+    assert.equal(run.initial.healthReads, 1);
 
-    const late = await throughBothGates(manifestPath, { first: v046DocumentsEnvelope(0), second: queued });
+    const late = await throughBothGates(manifestPath, {
+      first: v046DocumentsEnvelope(0),
+      second: queued,
+      health: V046_HEALTH_ACTIVE,
+    });
+    assert.equal(late.initial.healthReads, 0, "an empty legacy queue needs no drain-mode read");
+    assert.equal(late.prePause.healthReads, 1);
     assert.ok(late.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
       "This Brain gained 7 queued search update(s) before the paused deployment. " +
         "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again.",
@@ -1210,14 +1233,16 @@ test("the exact v0.4.6 not-ready envelope with queued work still refuses at both
     const queued = v046NotReadyEnvelope("projection_bootstrap_required");
     Object.assign(queued.vector_backlog, { pending: 2, upserts: 2, oldest_queued_at: 1_750_000_000_000 });
     Object.assign(queued.vector_readiness, { pending: 2, oldest_queued_at: 1_750_000_000_000 });
-    const run = await throughBothGates(manifestPath, { first: queued });
+    const run = await throughBothGates(manifestPath, { first: queued, health: V046_HEALTH_ACTIVE });
     assert.equal(run.error?.message, PENDING_MESSAGE(2));
     assert.deepEqual(run.events, ["initial backlog read"]);
     assert.equal(run.initial.requests, 1);
+    assert.equal(run.initial.healthReads, 1);
 
     const late = await throughBothGates(manifestPath, {
       first: v046NotReadyEnvelope("projection_bootstrap_required"),
       second: queued,
+      health: V046_HEALTH_ACTIVE,
     });
     assert.ok(late.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
       "This Brain gained 2 queued search update(s) before the paused deployment. " +
@@ -1225,6 +1250,128 @@ test("the exact v0.4.6 not-ready envelope with queued work still refuses at both
     ))), late.error?.message);
     assert.equal(late.prePause.requests, 1);
     assert.equal(late.events.includes("paused deployment"), false);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+/* ---- a v0.4.6 Worker left paused for an upgrade ---- */
+
+// Byte-for-byte what the v0.4.6 Worker router returns on public /health and on
+// the authenticated documents route for a nine-chunk D1 Brain, active and
+// paused for an upgrade. Generated once from `git show v0.4.6:worker/src`
+// answering over sqlite at the v0.4.6 schema; only `ts` is a live clock.
+const V046_HEALTH_ACTIVE = {
+  body: '{"ok":true,"status":"ok","accepting_documents":true,"brain":"brain","version":"0.4.6","schema_version":46,' +
+    '"vector_writer_protocol":"lease-v1","vector_drain_mode":"active","ts":"2026-09-26T08:18:06.443Z"}',
+};
+const V046_HEALTH_PAUSED = {
+  body: '{"ok":false,"status":"paused-for-upgrade","reason":"This brain cannot accept documents right now. An update ' +
+    'paused its corpus writes and did not finish. Anything added while it is paused is refused rather than stored.",' +
+    '"accepting_documents":false,"brain":"brain","version":"0.4.6","vector_writer_protocol":"lease-v1",' +
+    '"vector_drain_mode":"paused-for-upgrade","ts":"2026-09-26T08:18:06.926Z"}',
+};
+const V046_ROWS = '"rows":[{"source_type":"drive","documents":3,"logical_documents":3,"stored_documents":3,' +
+  '"document_counts_exact":true,"chunks":9,"chunk_counts_exact":true,"total":9,"embedded":9,"last_ingested":null}]';
+const V046_PAUSED_EMPTY_ENVELOPE = '{"backend":"d1",' + V046_ROWS + ',"vector_backlog":{"pending":0,"upserts":0,' +
+  '"deletes":0,"submitted":0,"oldest_queued_at":null},"vector_readiness":{"ready":true,"reason":null,' +
+  '"expected_vectors":9,"actual_vectors":9,"pending":0,"submitted":0,"oldest_queued_at":null,' +
+  '"mutation_submitted_at":null,"projection_status":"verified","bootstrap_epoch":0,"action":null}}';
+const V046_PAUSED_QUEUED_ENVELOPE = '{"backend":"d1",' + V046_ROWS + ',"vector_backlog":{"pending":7,"upserts":7,' +
+  '"deletes":0,"submitted":0,"oldest_queued_at":1750000000000},"vector_readiness":{"ready":false,' +
+  '"reason":"vector_work_queued","expected_vectors":9,"actual_vectors":9,"pending":7,"submitted":0,' +
+  '"oldest_queued_at":1750000000000,"mutation_submitted_at":null,"projection_status":"pending","bootstrap_epoch":0,' +
+  '"action":"This brain is paused for an upgrade, so reindex and drain both return 503 until it finishes. Complete ' +
+  'or resume the update first; the pause lifts with it. Once it is running again, the remedy is: Run `brain drain ' +
+  '<manifest>`; it confirms provider visibility without re-embedding accepted rows."}}';
+
+const V046_PAUSED_QUEUED_MESSAGE = (pending, consequence) => renderCliCommands(
+  `This Brain's Worker is version 0.4.6, it is still paused for an update that did not finish, and it has ${pending} ` +
+    "queued search update(s). A paused 0.4.6 Worker does not process its queue, so waiting will not clear it, and " +
+    `this update will not continue over queued work. ${consequence} To let the queue drain, install the 0.4.6 ` +
+    "release and run `brain deploy` with it; that returns the 0.4.6 Worker to active. Wait until `brain health` " +
+    "says query-ready, then install this release again and run `brain update`. Do not run `brain rollback`, and do " +
+    "not clear VECTOR_DRAIN_MODE by hand.",
+);
+
+const DRAIN_MODE_UNKNOWN_MESSAGE = (pending, consequence) => renderCliCommands(
+  `This Brain has ${pending} queued search update(s), and its public health check could not be read to tell ` +
+    `whether its Worker is paused for an update that did not finish. ${consequence} Run \`brain health\`. If it ` +
+    "says query-ready later, run the update again. If it reports the Worker paused for an upgrade, keep that " +
+    "output for support; do not run `brain rollback` or clear VECTOR_DRAIN_MODE by hand.",
+);
+
+test("a paused v0.4.6 Worker with queued work refuses with advice that can drain it, never wait or rollback", async () => {
+  await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath, original }) => {
+    const queued = JSON.parse(V046_PAUSED_QUEUED_ENVELOPE);
+    const run = await throughBothGates(manifestPath, { first: queued, health: V046_HEALTH_PAUSED });
+    assert.equal(run.error?.message, V046_PAUSED_QUEUED_MESSAGE(7, "Nothing was changed."));
+    assert.doesNotMatch(run.error?.message || "", /mid-queue|few minutes|Updating now/u);
+    assert.deepEqual(run.events, ["initial backlog read"]);
+    assert.equal(run.initial.requests, 1);
+    assert.equal(run.initial.healthReads, 1);
+    // Public /health is read without the durable admin key.
+    assert.equal(JSON.stringify(run.initial.healthInits).includes("unit-test-admin-key"), false);
+    assert.equal(run.urls.length, 1);
+
+    const forced = await throughBothGates(manifestPath, { first: queued, health: V046_HEALTH_PAUSED, force: true });
+    assert.ok(forced.error?.message?.startsWith(prePauseRefusal(V046_PAUSED_QUEUED_MESSAGE(
+      7, "The paused deployment was not started.",
+    ))), forced.error?.message);
+    assert.deepEqual(forced.events, [
+      "initial backlog read",
+      "profile adoption",
+      "verification",
+      "pre-pause backlog read",
+    ]);
+    assert.equal(forced.prePause.healthReads, 1);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+test("a paused v0.4.6 Worker with an empty queue proceeds through both gates as a resumable paused generation", async () => {
+  await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath }) => {
+    const run = await throughBothGates(manifestPath, {
+      first: JSON.parse(V046_PAUSED_EMPTY_ENVELOPE),
+      health: V046_HEALTH_PAUSED,
+    });
+    assert.deepEqual(run.events, PROCEEDED, run.error?.message);
+    assert.equal(run.initial.requests, 1);
+    assert.equal(run.prePause.requests, 1);
+  });
+});
+
+test("an active v0.4.6 Worker with queued work keeps the wait-until-query-ready advice", async () => {
+  await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath }) => {
+    const queued = JSON.parse(V046_PAUSED_QUEUED_ENVELOPE.replace(
+      /"action":"This brain is paused[^"]*the remedy is: /u, '"action":"',
+    ));
+    const run = await throughBothGates(manifestPath, { first: queued, health: V046_HEALTH_ACTIVE });
+    assert.equal(run.error?.message, PENDING_MESSAGE(7));
+    assert.equal(run.initial.healthReads, 1);
+  });
+});
+
+test("queued v0.4.6 work with an unreadable or contradictory /health refuses without claiming either mode", async () => {
+  await withManifest((manifest) => { manifest.brain.version = "0.4.6"; }, async ({ manifestPath, original }) => {
+    const paused = JSON.parse(V046_HEALTH_PAUSED.body);
+    const unreadable = [
+      { status: 500, body: "{}" },
+      { network: true },
+      { body: "not json" },
+      // A 0.4.7 or later release reports its drain mode in the receipt itself.
+      { body: JSON.stringify({ ...paused, version: "0.4.7" }) },
+      // Status and drain mode must agree.
+      { body: JSON.stringify({ ...paused, status: "ok" }) },
+      { body: JSON.stringify({ ...paused, vector_drain_mode: "draining" }) },
+      { body: JSON.stringify({ ...paused, version: undefined }) },
+    ];
+    for (const health of unreadable) {
+      const run = await throughBothGates(manifestPath, { first: JSON.parse(V046_PAUSED_QUEUED_ENVELOPE), health });
+      assert.equal(run.error?.message, DRAIN_MODE_UNKNOWN_MESSAGE(7, "Nothing was changed."), JSON.stringify(health));
+      assert.deepEqual(run.events, ["initial backlog read"]);
+      assert.equal(run.initial.healthReads, 1);
+      assert.deepEqual(run.initial.sleeps, []);
+    }
     assert.equal(readFileSync(manifestPath, "utf8"), original);
   });
 });
@@ -1268,8 +1415,12 @@ test("a versionless manifest is older than every release: legacy envelope and re
   await withManifest((manifest) => { delete manifest.brain.version; }, async ({ manifestPath }) => {
     const legacy = await throughBothGates(manifestPath, { first: v046DocumentsEnvelope(0) });
     assert.deepEqual(legacy.events, PROCEEDED, legacy.error?.message);
-    const legacyQueued = await throughBothGates(manifestPath, { first: v046DocumentsEnvelope(2) });
+    const legacyQueued = await throughBothGates(manifestPath, {
+      first: v046DocumentsEnvelope(2),
+      health: V046_HEALTH_ACTIVE,
+    });
     assert.equal(legacyQueued.error?.message, PENDING_MESSAGE(2));
+    assert.equal(legacyQueued.initial.healthReads, 1);
     const resumed = await throughBothGates(manifestPath, {
       first: boundedInventory({ version: PRODUCT_VERSION, drainMode: "paused-for-upgrade" }),
     });

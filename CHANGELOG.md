@@ -227,6 +227,24 @@ asset publication.
   paused deployment when `brain health` shows an empty queue. A rolled-back
   Brain that still holds documents can then stop at the paused readiness
   check before its index is rebuilt; keep that output for support.
+  The same holds when the paused release is OLDER than this CLI: a Brain that
+  an earlier kit's `brain rollback --yes`, or its stopped update, left paused
+  on the version the manifest records is resumed by this release's `brain
+  update`, `brain update --force` and `brain doctor --repair --yes` instead of
+  being told to install a newer release. To check: after installing this
+  release over such a Brain, `brain update` reaches the paused deployment when
+  `brain health` shows an empty queue.
+
+- **A v0.4.6 or earlier Brain left paused with queued work gets advice that
+  can clear it.** Those Workers do not report their writer mode to update's
+  queue check and never process their queue while paused, so "wait until
+  query-ready" could never come true. When the queue is not empty, update now
+  reads the Brain's public health check (no admin key is sent). If that Worker
+  is paused, the refusal says to install its own release, run `brain deploy`
+  with it to return it to active, wait for query-ready, then update again;
+  never `brain rollback`. If the health check cannot be read, the refusal says
+  so rather than guessing. A paused v0.4.6 Brain with an empty queue proceeds.
+  To check: a refused update names the Worker's release and `brain deploy`.
 
 - **A busy database no longer makes a large Brain look unreadable to update.**
   On a very large Brain the backlog read can briefly fail while its database
