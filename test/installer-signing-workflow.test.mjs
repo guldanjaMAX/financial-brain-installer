@@ -407,6 +407,9 @@ for (const [name, status, extra] of [
   ["a commit newer than main", "ahead", {}],
   ["a behind status whose merge base is another commit", "behind", { merge_base_commit: { sha: MAIN_ANCESTOR } }],
   ["an identical status that reports commits ahead", "identical", { ahead_by: 1 }],
+  // The status alone must decide too, even when the counts look harmless.
+  ["a diverged status with harmless-looking counts", "diverged", { ahead_by: 0, merge_base_commit: { sha: TAG_ONLY_COMMIT } }],
+  ["a missing status", undefined, { ahead_by: 0, merge_base_commit: { sha: TAG_ONLY_COMMIT } }],
 ]) {
   test(`S2-R refuses ${name} even after its tag is gone`, () => {
     const run = goodRun();
@@ -665,6 +668,7 @@ test("S8 the owner checklist says the platform job, not the whole run, must succ
   const plan = read("machine-prep/SIGNING.md");
   const step4 = /^4\. Dispatch `machine-prep-installers` on `main`.*$/m.exec(plan)?.[0];
   assert.ok(step4, "checklist step 4 exists");
+  assert.match(step4, /conclusion of the one platform job/);
   assert.match(step4, /`build unsigned macOS package`/);
   assert.match(step4, /`build unsigned Windows MSI`/);
   assert.match(step4, /wix_osmf_confirmed/);
