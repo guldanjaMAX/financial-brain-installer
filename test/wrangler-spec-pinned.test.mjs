@@ -63,7 +63,7 @@ assert.ok(compareVersions(sharp.version, MINIMUM_REVIEWED_SHARP_VERSION) >= 0,
 let called;
 assert.equal(refreshWranglerSession({ env: { HOME: '/synthetic-home', CLOUDFLARE_API_TOKEN: 'synthetic-env-value', UNRELATED_DESKTOP_VALUE: 'private' },
   run: (command, args, options) => { called = { command, args, env: options.env }; return { status: 0 }; } }), true);
-assert.deepEqual(called.args, [WRANGLER_SPEC, 'whoami']);
+assert.deepEqual(called.args, [WRANGLER_SPEC, 'whoami', '--env-file=/dev/null']);
 assert.equal(called.env.CLOUDFLARE_API_TOKEN, undefined);
 assert.equal(called.env.UNRELATED_DESKTOP_VALUE, undefined);
 // The legacy sign-in advice must write the plaintext session the legacy reader

@@ -8,10 +8,20 @@
  */
 import assert from "node:assert/strict";
 import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
   findWranglerConfig,
   parseWranglerSession,
   readWranglerOAuthToken,
   refreshWranglerSession,
+  WRANGLER_SPEC,
   wranglerConfigCandidates,
 } from "../operations/wrangler-oauth.mjs";
 
@@ -104,23 +114,63 @@ assert.equal(readWranglerOAuthToken({ ...base, now, readFileSync: () => cfg("sta
   "a failed refresh must not hand back the expired token");
 assert.equal(readWranglerOAuthToken({ ...base, readFileSync: () => 'refresh_token = "r"\n' }), null);
 
-// The refresh child must never inherit an API token: wrangler prefers it and
-// would authenticate as the wrong identity, which is how an operator
-// provisions into their own account instead of the client's.
+// The refresh child must never inherit an API token or load a planted dotenv
+// file. Wrangler prefers either source over the intended saved session.
+const refreshParent = mkdtempSync(join(tmpdir(), "brain-wrangler-refresh-parent-"));
+writeFileSync(join(refreshParent, ".env"), "CLOUDFLARE_API_TOKEN=planted-value\n");
+let sawCommand = null;
+let sawArgs = null;
 let sawEnv = null;
 let sawOpts = null;
-refreshWranglerSession({
-  env: { CLOUDFLARE_API_TOKEN: "operator-token", CLOUDFLARE_API_KEY: "k", HOME: "/h" },
-  run: (_c, _a, opts) => { sawEnv = opts.env; sawOpts = opts; return { status: 0 }; },
-});
-assert.equal(sawEnv.CLOUDFLARE_API_TOKEN, undefined, "the refresh child must not inherit CLOUDFLARE_API_TOKEN");
-assert.equal(sawEnv.CLOUDFLARE_API_KEY, undefined, "nor a global API key");
+let refreshHelperCalls = 0;
+try {
+  assert.equal(refreshWranglerSession({
+    env: { CLOUDFLARE_API_TOKEN: "operator-token", CLOUDFLARE_API_KEY: "k", HOME: "/h" },
+    tmpDirectory: refreshParent,
+    platform: "darwin",
+    run: (command, args, opts) => {
+      refreshHelperCalls += 1;
+      sawCommand = command;
+      sawArgs = args;
+      sawEnv = opts.env;
+      sawOpts = opts;
+      assert.equal(existsSync(join(opts.cwd, ".env")), false,
+        "the private per-call cwd must not contain the planted parent dotenv file");
+      assert.equal(lstatSync(opts.cwd).mode & 0o077, 0,
+        "the per-call cwd must be private while the helper runs");
+      return { status: 0 };
+    },
+  }), true, "a successful guarded whoami call remains a successful refresh");
 
-// Nor the caller's directory: wrangler writes .wrangler/cache under its own
-// working directory, so a refresh started from an unwritable place fails for a
-// reason that has nothing to do with the credential.
-assert.equal(typeof sawOpts.cwd, "string", "the refresh child needs an explicit working directory");
-assert.notEqual(sawOpts.cwd, process.cwd(), "the refresh child must not inherit the caller's directory");
+  assert.equal(refreshHelperCalls, 1, "the guarded helper decision point must be reached exactly once");
+  assert.equal(sawCommand, "npx");
+  assert.deepEqual(sawArgs, [WRANGLER_SPEC, "whoami", "--env-file=/dev/null"]);
+  assert.equal(sawEnv.CLOUDFLARE_API_TOKEN, undefined,
+    "the refresh child must not inherit CLOUDFLARE_API_TOKEN");
+  assert.equal(sawEnv.CLOUDFLARE_API_KEY, undefined, "nor a global API key");
+  assert.equal(typeof sawOpts.cwd, "string", "the refresh child needs an explicit working directory");
+  assert.notEqual(sawOpts.cwd, refreshParent, "the shared temp parent must never be the child cwd");
+  assert.ok(sawOpts.cwd.startsWith(`${refreshParent}/financial-brain-wrangler-refresh-`), sawOpts.cwd);
+  assert.equal(existsSync(sawOpts.cwd), false, "the private per-call cwd must be removed after refresh");
+
+  let failedHelperCalls = 0;
+  let failedCwd = null;
+  assert.equal(refreshWranglerSession({
+    env: { HOME: "/h" },
+    tmpDirectory: refreshParent,
+    platform: "win32",
+    run: (_command, args, opts) => {
+      failedHelperCalls += 1;
+      failedCwd = opts.cwd;
+      assert.deepEqual(args, [WRANGLER_SPEC, "whoami", "--env-file=NUL"]);
+      return { status: 1 };
+    },
+  }), false, "control: a guarded helper failure remains a failed refresh");
+  assert.equal(failedHelperCalls, 1, "the failed-helper control must reach the decision point");
+  assert.equal(existsSync(failedCwd), false, "the control cwd must also be cleaned up");
+} finally {
+  rmSync(refreshParent, { recursive: true, force: true });
+}
 
 console.log("wrangler browser sign-in: config discovery, expiry refresh, quiet absence, and identity isolation");
 
