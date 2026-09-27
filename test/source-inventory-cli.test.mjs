@@ -260,6 +260,11 @@ test("domainless source guidance repeats the add, refresh, or provenance-repair 
       flags: { refresh: "daily", source: "localdocs" },
       command: "brain sources <manifest> --refresh <schedule> --source <name>",
     },
+    {
+      label: "add and refresh",
+      flags: { add: "localdocs", refresh: "daily", source: "localdocs" },
+      command: "brain sources <manifest> --add <name> --refresh <schedule> --source <name>",
+    },
   ];
   for (const variant of cases) {
     await withManifest(async (manifest) => {

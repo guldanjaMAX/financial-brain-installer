@@ -8755,10 +8755,12 @@ function sourceInventoryRetryCommand(flags) {
   if (flags.add !== undefined) {
     command += " --add <name>";
     if (flags.kind !== undefined) command += " --kind <kind>";
-  } else if (flags.refresh !== undefined) {
+  }
+  if (flags.refresh !== undefined) {
     command += " --refresh <schedule>";
     if (flags.source !== undefined) command += " --source <name>";
-  } else if (flags.recovery === true) {
+  }
+  if (flags.recovery === true) {
     command += " --json --recovery";
     if (flags.source !== undefined) command += " --source <name>";
     if (flags.limit !== undefined) command += " --limit <n>";
