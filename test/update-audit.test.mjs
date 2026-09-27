@@ -234,10 +234,19 @@ function assertOrdinaryReleaseCopyPrecedesLimitations(section) {
 }
 
 const notCoveredBlock = currentReleaseNotCoveredBlock(currentReleaseSection);
-const deferredIds = cases
-  .filter((item) => item.deferral?.version === packageVersion)
+const deferredIds = releaseAdjudication(cases, packageVersion).deferred
   .map((item) => item.id)
   .sort();
+const limitationIds = (block) => [...block.matchAll(/\bUPDATE-\d{3}\b/gu)]
+  .map((match) => match[0])
+  .sort();
+function assertExactLimitationIds(block, registry = cases) {
+  const expected = releaseAdjudication(registry, packageVersion).deferred
+    .map((item) => item.id)
+    .sort();
+  assert.deepEqual(limitationIds(block), expected,
+    "the release limitation block must exactly equal the audit's current deferral set");
+}
 assert.ok(notCoveredBlock, "the current changelog needs a This release does NOT cover block");
 assert.throws(() => assertOrdinaryReleaseCopyPrecedesLimitations(
   "### This release does NOT cover\n\n- **UPDATE-999:** Deferred fixture.\n\n" +
@@ -245,6 +254,38 @@ assert.throws(() => assertOrdinaryReleaseCopyPrecedesLimitations(
 ), /ordinary release copy must render before/,
 "the prior layout must fail because whatsnew renders ordinary changes inside the limitation block");
 assert.doesNotThrow(() => assertOrdinaryReleaseCopyPrecedesLimitations(currentReleaseSection));
+assertExactLimitationIds(notCoveredBlock);
+assert.throws(
+  () => assertExactLimitationIds(`${notCoveredBlock}\n- **UPDATE-022:** Stale fixture limitation.`),
+  (error) => {
+    assert.deepEqual(error.actual, [...deferredIds, "UPDATE-022"].sort(),
+      "the stale-line control reaches exact ID extraction");
+    assert.deepEqual(error.expected, deferredIds,
+      "the stale-line control compares against adjudicated deferrals");
+    return true;
+  },
+  "a stale limitation ID must fail even when every current deferral remains present",
+);
+const registryWithoutUpdate044Deferral = cases.map((item) => {
+  if (item.id !== "UPDATE-044") return item;
+  const copy = { ...item };
+  delete copy.deferral;
+  return copy;
+});
+assert.throws(
+  () => assertExactLimitationIds(notCoveredBlock, registryWithoutUpdate044Deferral),
+  (error) => {
+    const expected = releaseAdjudication(registryWithoutUpdate044Deferral, packageVersion).deferred
+      .map((item) => item.id)
+      .sort();
+    assert.deepEqual(error.actual, deferredIds,
+      "the removed-deferral control still reads the unchanged CHANGELOG line");
+    assert.deepEqual(error.expected, expected,
+      "the removed-deferral control reaches adjudication rather than a hard-coded expected set");
+    return true;
+  },
+  "a CHANGELOG line must fail after its registry deferral is removed",
+);
 for (const id of deferredIds) {
   assert.match(notCoveredBlock, new RegExp(`\\b${id}\\b`),
     `${id} must stay visible in the current release limitation block`);
