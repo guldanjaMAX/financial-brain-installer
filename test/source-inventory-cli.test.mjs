@@ -15,6 +15,14 @@ import {
 } from "../brain.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
+const WINDOWS_RENDER_OPTIONS = Object.freeze({
+  platform: "win32",
+  nodePath: "C:\\Program Files\\nodejs\\node.exe",
+  scriptPath: "C:\\Program Files\\Financial Brain\\brain.mjs",
+  env: { PATH: "" },
+  existsSync: () => false,
+});
+
 const SNAPSHOT = `sha256:${"a".repeat(64)}`;
 const RECOVERY_SNAPSHOT = `sha256:${"b".repeat(64)}`;
 const AS_OF = "2026-09-10T12:00:00.000Z";
@@ -201,7 +209,8 @@ test("source inventory CLI uses only the internal durable credential and collect
 });
 
 test("domainless source inventory gives an actionable exact refusal and a saved-domain control reaches the request", async () => {
-  const expectedMessage = renderCliCommands(
+  const renderWindowsCommands = (text) => renderCliCommands(text, WINDOWS_RENDER_OPTIONS);
+  const expectedMessage = renderWindowsCommands(
     "this manifest has no saved brain.domain, so the source inventory has no verified Brain address. " +
       "Restore the deployed HTTPS hostname to brain.domain from a known-good manifest backup, or run `brain health <manifest>` " +
       "from an interactive terminal with this Brain's Cloudflare access to look up and prove its workers.dev hostname before " +
@@ -213,6 +222,7 @@ test("domainless source inventory gives an actionable exact refusal and a saved-
     await assert.rejects(
       cmdSources(manifest, {
         flags: { json: true },
+        renderCliCommands: renderWindowsCommands,
         resolveAdminKey() { credentialReads++; return OWNER_PROOF; },
         fetchImpl() { requests++; throw new Error("domainless inventory must refuse before request"); },
       }),
