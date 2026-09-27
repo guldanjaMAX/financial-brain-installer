@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,7 +12,7 @@ import {
 } from "../brain.mjs";
 import { register } from "../ingest/extract.mjs";
 import { estimateOcrCost, OCR_PRICE } from "../ingest/ocr.mjs";
-import { prepare } from "../ingest/run.mjs";
+import { prepare, walk as walkLocalFolder } from "../ingest/run.mjs";
 import { scanPdf, textPdf } from "./fixtures/scan-pdf.mjs";
 import {
   assertOcrPreflightReceipt,
@@ -608,6 +608,86 @@ test("OCR preflight refuses a retired folder before dependency load or walk, whi
     assert.equal(control.status, "complete");
     assert.equal(dependencyLoads, 1);
     assert.equal(walkCalls, 1, "the active OCR control reaches the folder walk exactly once");
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("OCR preflight refuses a moved retired folder during the walk before reading its files", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "brain-ocr-moved-retired-"));
+  const retiredRoot = join(fixture, "retired-source");
+  const requestRoot = join(fixture, "requested-root");
+  const movedRetiredRoot = join(requestRoot, "moved-retired-source");
+  const manifestPath = join(fixture, "brain.manifest.json");
+  mkdirSync(retiredRoot);
+  mkdirSync(requestRoot);
+  writeFileSync(join(retiredRoot, "retired.pdf"), "synthetic retired PDF fixture");
+  const identity = statSync(realpathSync.native(retiredRoot), { bigint: true });
+  const retiredManifest = {
+    safety: {
+      private_path_prefixes: [],
+      daily_llm_spend_cap_usd: 10,
+      ocr: { enabled: false, max_pages_per_document: 40 },
+    },
+    corpora: {
+      local_folder: {
+        enabled: false,
+        path: retiredRoot,
+        source: "documents",
+        retired_at: "2026-09-28T16:36:00.000Z",
+        retired_path: retiredRoot,
+        retired_source: "documents",
+        retired_identity: {
+          realpath: realpathSync.native(retiredRoot),
+          dev: String(identity.dev),
+          ino: String(identity.ino),
+        },
+        retired_by: "brain folder off",
+      },
+    },
+  };
+  renameSync(retiredRoot, movedRetiredRoot);
+  let walkCalls = 0;
+  let fileReads = 0;
+  const ingestLib = async () => ({
+    walk(root, options) {
+      walkCalls += 1;
+      return walkLocalFolder(root, options);
+    },
+    async prepare() {
+      fileReads += 1;
+      return { hash: "e".repeat(64), observation: native() };
+    },
+  });
+  try {
+    const retiredError = await cmdOcrPreflight(manifestPath, {
+      flags: { path: requestRoot, json: true },
+      readManifest: () => retiredManifest,
+      ingestLib,
+      ocrLib: async () => ({ estimateOcrCost, OCR_PRICE }),
+      write: () => {},
+    }).then(() => null, (error) => error);
+    assert.equal(retiredError?.payload?.failure?.code, "MANIFEST_POLICY_INVALID",
+      "the moved retired-directory identity reaches the manifest-policy refusal");
+    assert.equal(walkCalls, 1, "the moved-folder refusal is reached through the real walker");
+    assert.equal(fileReads, 0, "no file inside the moved retired folder is read");
+
+    const activeManifest = structuredClone(retiredManifest);
+    activeManifest.corpora.local_folder = {
+      enabled: true,
+      path: movedRetiredRoot,
+      source: "documents",
+    };
+    const control = await cmdOcrPreflight(manifestPath, {
+      flags: { path: requestRoot, json: true },
+      readManifest: () => activeManifest,
+      ingestLib,
+      ocrLib: async () => ({ estimateOcrCost, OCR_PRICE }),
+      write: () => {},
+    });
+    assert.equal(control.status, "complete");
+    assert.equal(walkCalls, 2, "the non-retired control reaches the same real walker");
+    assert.equal(fileReads, 1, "the non-retired control reads the file in the same tree");
   } finally {
     rmSync(fixture, { recursive: true, force: true });
   }

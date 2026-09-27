@@ -11416,14 +11416,20 @@ export async function cmdOcrPreflight(manifestPath, options = {}) {
   let walkEvidence;
   let rootBefore;
   try {
-    walked = localIngest.walk(request.path, { privatePrefixes });
+    walked = localIngest.walk(request.path, {
+      privatePrefixes,
+      retiredDirectoryIdentity: retired?.retired_identity || null,
+    });
     if (!walked || !Array.isArray(walked.files) || !Array.isArray(walked.skipped) ||
         typeof walked.complete !== "boolean") {
       throw new TypeError("the local walk returned an invalid result");
     }
     walkEvidence = ocrPreflightWalkEvidence(walked.skipped);
     if (!walkEvidence.root_unavailable) rootBefore = ocrPreflightRootSnapshot(request.path);
-  } catch {
+  } catch (error) {
+    if (error?.reason === "LOCAL_FOLDER_RETIRED:contains_retired") {
+      ocrPreflightFail("MANIFEST_POLICY_INVALID");
+    }
     ocrPreflightFail("PREFLIGHT_FAILED");
   }
   if (walkEvidence.root_unavailable) ocrPreflightFail("SOURCE_UNAVAILABLE");
