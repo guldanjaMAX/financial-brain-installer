@@ -5386,6 +5386,50 @@ async function postConfirmedSourceForget(env, source = "meeting") {
   check("a partial answer never shortens an amount into a different, plausible figure",
     leading.answer === leadingDraft + NOT_COVERED, JSON.stringify(leading.answer));
 
+  const onlyProfit = "Profit was $9M [1]." + NOT_COVERED;
+  const plainBoundaryControl = await partialThink("Revenue was $5M. Profit was $9M [1].");
+  check("control: a plain full stop drops the uncited sentence on the partial path",
+    plainBoundaryControl.answer === onlyProfit, JSON.stringify(plainBoundaryControl.answer));
+  const boldBoundary = await partialThink("**Revenue was $5M.** Profit was $9M [1].");
+  check("markdown bold closing marks do not join an uncited sentence to a cited one",
+    boldBoundary.answer === onlyProfit && boldBoundary.evidence_gate?.partial === true,
+    JSON.stringify(boldBoundary.answer));
+
+  const quotedBoundaryControl = await partialThink("\"Revenue was $5M.\" Profit was $9M [1].");
+  check("control: a quote-like closing boundary drops the uncited sentence on the partial path",
+    quotedBoundaryControl.answer === onlyProfit, JSON.stringify(quotedBoundaryControl.answer));
+  const codeBoundary = await partialThink("Revenue was `$5M.` Profit was $9M [1].");
+  check("a markdown code closing mark does not join an uncited sentence to a cited one",
+    codeBoundary.answer === onlyProfit && codeBoundary.evidence_gate?.partial === true,
+    JSON.stringify(codeBoundary.answer));
+
+  const bracketBoundaryControl = await partialThink("(Revenue was $5M.) Profit was $9M [1].");
+  check("control: a bracket closing boundary drops the uncited sentence on the partial path",
+    bracketBoundaryControl.answer === onlyProfit, JSON.stringify(bracketBoundaryControl.answer));
+  const italicBoundary = await partialThink("_Revenue was $5M._ Profit was $9M [1].");
+  check("a markdown italic closing mark does not join an uncited sentence to a cited one",
+    italicBoundary.answer === onlyProfit && italicBoundary.evidence_gate?.partial === true,
+    JSON.stringify(italicBoundary.answer));
+
+  const spacedBoundaryControl = await partialThink("Revenue was $5M. Profit was $9M [1].");
+  check("control: a spaced sentence boundary drops the uncited sentence on the partial path",
+    spacedBoundaryControl.answer === onlyProfit, JSON.stringify(spacedBoundaryControl.answer));
+  const missingSpaceBoundary = await partialThink("Revenue was $5M.Profit was $9M [1].");
+  check("an uppercase sentence start needs no space to separate an uncited sentence",
+    missingSpaceBoundary.answer === onlyProfit && missingSpaceBoundary.evidence_gate?.partial === true,
+    JSON.stringify(missingSpaceBoundary.answer));
+
+  const noInitialismControlDraft = "The US total was $5M [1]. Profit was $9M [2].";
+  const noInitialismControl = await partialThink(noInitialismControlDraft);
+  check("control: an unpunctuated country abbreviation stays whole on the partial path",
+    noInitialismControl.answer === noInitialismControlDraft + NOT_COVERED,
+    JSON.stringify(noInitialismControl.answer));
+  const initialismDraft = "The U.S. total was $5M [1]. Profit was $9M [2].";
+  const initialism = await partialThink(initialismDraft);
+  check("a compact initialism stays whole under the uppercase boundary rule",
+    initialism.answer === initialismDraft + NOT_COVERED,
+    JSON.stringify(initialism.answer));
+
   // Deferred past 0.4.9 (see worker/src/lib/answer-sentences.js): a full stop
   // after an abbreviation still ends a sentence. The partial path splits
   // "Example Co. recorded" after "Co." and drops the uncited "Example Co."
