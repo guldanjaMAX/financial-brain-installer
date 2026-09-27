@@ -423,6 +423,10 @@ const sayErr = (s) => console.error(renderCliCommands(s));
  * vanish from the history.
  */
 class Fatal extends Error {}
+// A queue decision is a successful safety refusal, not a failed migration.
+// Keep it distinct so the upgrade catch cannot write a misleading history row
+// or append bookmark and rerun guidance that contradicts the refusal itself.
+class UpdateBacklogQueuedRefusal extends Fatal {}
 /** A Fatal whose message is a JSON receipt, for the --json command paths. */
 class JsonFatal extends Fatal {
   constructor(payload) {
@@ -6140,7 +6144,9 @@ export async function cmdUpgrade(manifestPath, options = {}) {
               die(updateBacklogUnreadableMessage(error, "pre-pause"));
             }
             if (updateBacklogHasQueuedWork(immediateBacklog)) {
-              die(updateBacklogQueuedMessage(immediateBacklog, "pre-pause", options.initialUpdateBacklog ?? null));
+              throw new UpdateBacklogQueuedRefusal(
+                updateBacklogQueuedMessage(immediateBacklog, "pre-pause", options.initialUpdateBacklog ?? null),
+              );
             }
           }
           // No asynchronous local stage sits between the closing queue receipt
@@ -6286,6 +6292,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
 
       await runStage("verified history commit", () => logRun("verified", null, { required: true }));
     } catch (error) {
+      if (error instanceof UpdateBacklogQueuedRefusal) throw error;
       await logRun("failed", `stage:${stage}`);
       const projectionRecovery = usesD1VectorOutbox
         ? corpusPauseMayStillBeServing
