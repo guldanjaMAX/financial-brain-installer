@@ -433,9 +433,28 @@ try {
     assert.deepEqual(readFileSync(concurrent.manifestPath), editedBytes,
       "the concurrent owner edit remains the live manifest");
     const backupPath = `${concurrent.manifestPath}.before-folder-off-20260928T163600Z`;
-    assert.match(refused.error.message, new RegExp(backupPath.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
-    assert.deepEqual(readFileSync(backupPath), editedBytes,
-      "the named backup also preserves the concurrent edit exactly");
+    assert.equal(existsSync(backupPath), false,
+      "a refused concurrent edit leaves no backup for status to misreport");
+    const statusAfterRefusal = await capture(() => cmdFolder(
+      concurrent.manifestPath,
+      ["status"],
+      folderOptions(concurrent, concurrentLaunch, { platform: "linux" }),
+    ));
+    assert.ifError(statusAfterRefusal.error);
+    assert.equal(statusAfterRefusal.result.backupPath, null,
+      "folder status reaches backup discovery and finds no refused-operation backup");
+    assert.match(statusAfterRefusal.text, /No before-folder-off settings backup was found/);
+
+    const retry = await capture(() => cmdFolder(
+      concurrent.manifestPath,
+      ["off"],
+      folderOptions(concurrent, concurrentLaunch, { platform: "linux" }),
+    ));
+    assert.ifError(retry.error);
+    assert.equal(retry.result.changed, true,
+      "a same-second retry reaches and completes the manifest replacement");
+    assert.deepEqual(readFileSync(retry.result.backupPath), editedBytes,
+      "the successful retry, not the refusal, owns the same-second backup");
 
     const control = fixture();
     const controlLaunch = launchctlHarness();
@@ -591,12 +610,10 @@ try {
     assert.equal(beforeSwapHooks, 1,
       "the race arm reaches the final pre-swap recheck exactly once");
     assert.match(beforeSwapError.message, /manifest changed/i);
-    assert.match(beforeSwapError.message,
-      new RegExp(beforeSwapBackup.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
     assert.deepEqual(readFileSync(beforeSwapRace.manifestPath), beforeSwapEdited,
       "the edit made immediately before the swap remains live");
-    assert.deepEqual(readFileSync(beforeSwapBackup), beforeSwapOriginal,
-      "the pre-swap backup keeps the bytes that the operation originally inspected");
+    assert.equal(existsSync(beforeSwapBackup), false,
+      "the pre-swap concurrent refusal removes its now-misleading backup");
 
     const postRenameControl = fixture({ mode: 0o640 });
     const controlIntended = { ...postRenameControl.manifest, post_rename_control: true };

@@ -167,8 +167,7 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
   let renamed = false;
   const concurrentEditError = () => {
     const error = new Error(
-      "The Brain manifest changed after folder off began, so nothing was replaced. " +
-        `The verified backup was kept at ${backupPath}.`,
+      "The Brain manifest changed after folder off began, so nothing was replaced.",
     );
     error.code = "FOLDER_MANIFEST_CHANGED";
     return error;
@@ -231,7 +230,11 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
     }
     try { unlinkIfPresent(io, temporaryPath); } catch { /* preserve the primary error */ }
     try { unlinkIfPresent(io, rollbackPath); } catch { /* preserve the primary error */ }
-    const keepBackup = Boolean(restorationError) || error?.code === "FOLDER_MANIFEST_CHANGED";
+    // A concurrent edit remains live and is already its own durable recovery
+    // point. Keeping this operation's older backup would make `folder status`
+    // present a refused change as the newest successful settings backup, and
+    // would make a same-second retry collide with the exclusive backup name.
+    const keepBackup = Boolean(restorationError);
     if (backupCreated && !keepBackup) {
       try { unlinkIfPresent(io, backupPath); } catch { /* preserve the primary error */ }
     }
