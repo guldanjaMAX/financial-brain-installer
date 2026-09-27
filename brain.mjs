@@ -24515,12 +24515,32 @@ export async function cmdFolder(manifestPath, argv = process.argv.slice(4), opti
     );
   } catch (error) {
     if (platform !== "darwin") throw error;
+    const schedulerRemoved = Boolean(schedulerResult?.removed || schedulerResult?.loaded);
+    const writeFailure = String(error?.message || error);
+    if (!schedulerRemoved) {
+      const retryCommand = renderCliCommands(`brain folder ${manifestPath} off`);
+      throw new Error(
+        "The watched-folder scheduled job was not installed, and the manifest could not be updated: " +
+          `${writeFailure}. The original manifest is still active. Fix the manifest write problem, then retry: ` +
+          retryCommand,
+        { cause: error },
+      );
+    }
+    if (retired) {
+      const statusCommand = renderCliCommands(`brain folder ${manifestPath} status`);
+      throw new Error(
+        "The watched-folder scheduled job was removed, but the retired manifest could not be updated: " +
+          `${writeFailure}. Do not reinstall the scheduler for this retired folder. After preserving a manual backup, ` +
+          "manually set corpora.local_folder.enabled to false, then verify the result with: " + statusCommand,
+        { cause: error },
+      );
+    }
     const recoveryCommand = renderCliCommands(
       `brain schedule ${manifestPath} --install --folder`,
     );
     throw new Error(
-      "The watched-folder scheduled job is already removed, but the manifest could not be updated: " +
-        `${String(error?.message || error)}. To restore scheduled reads before trying again, run: ` +
+      "The watched-folder scheduled job was removed, but the manifest could not be updated: " +
+        `${writeFailure}. To restore scheduled reads before trying again, run: ` +
         recoveryCommand,
       { cause: error },
     );

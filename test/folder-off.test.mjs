@@ -272,11 +272,75 @@ try {
       "the failure arm reaches scheduled-job removal before the write");
     assert.equal(existsSync(installed.plistPath), false,
       "the scheduled job remains removed after the manifest write fails");
-    assert.match(failed.error?.message || "", /scheduled job is already removed/i);
+    assert.match(failed.error?.message || "", /scheduled job was removed/i);
     assert.ok((failed.error?.message || "").includes(recoveryCommand),
       "the write failure names the rendered command that restores the scheduled job");
     assert.deepEqual(readFileSync(f.manifestPath), Buffer.from(f.original),
       "the failed write leaves the original manifest bytes live");
+  }
+
+  {
+    const f = fixture();
+    const launch = launchctlHarness();
+    let manifestWrites = 0;
+    const failed = await capture(() => cmdFolder(f.manifestPath, ["off"], folderOptions(f, launch, {
+      writeManifestAtomically: () => {
+        manifestWrites += 1;
+        throw new Error("injected manifest write failure without scheduler");
+      },
+    })));
+    const recoveryCommand = renderCliCommands(
+      `brain schedule ${f.manifestPath} --install --folder`,
+    );
+    assert.equal(manifestWrites, 1,
+      "the no-scheduler failure reaches the manifest write decision exactly once");
+    assert.equal(launch.calls.some((args) => args[0] === "bootout"), false,
+      "the no-scheduler failure removes no scheduled job");
+    assert.match(failed.error?.message || "", /scheduled job was not installed/i);
+    assert.equal((failed.error?.message || "").includes(recoveryCommand), false,
+      "a job that was not removed gets no reinstall advice");
+    assert.deepEqual(readFileSync(f.manifestPath), Buffer.from(f.original));
+  }
+
+  {
+    const f = fixture();
+    const launch = launchctlHarness();
+    const installed = installFolderScheduler(f.manifestPath, schedulerOptions(f, launch.launchctl));
+    const retired = structuredClone(f.manifest);
+    const identity = statSync(realpathSync.native(f.watched), { bigint: true });
+    Object.assign(retired.corpora.local_folder, {
+      retired_at: FIXED_NOW.toISOString(),
+      retired_path: f.watched,
+      retired_source: "documents",
+      retired_identity: {
+        realpath: realpathSync.native(f.watched),
+        dev: String(identity.dev),
+        ino: String(identity.ino),
+      },
+      retired_by: "brain folder off",
+    });
+    writeFileSync(f.manifestPath, manifestBytes(retired), { mode: f.mode });
+    let manifestWrites = 0;
+    const failed = await capture(() => cmdFolder(f.manifestPath, ["off"], folderOptions(f, launch, {
+      writeManifestAtomically: () => {
+        manifestWrites += 1;
+        throw new Error("injected retired-manifest write failure");
+      },
+    })));
+    const refusedRecoveryCommand = renderCliCommands(
+      `brain schedule ${f.manifestPath} --install --folder`,
+    );
+    assert.equal(manifestWrites, 1,
+      "the retired repair reaches the manifest write decision exactly once");
+    assert.equal(launch.calls.some((args) => args[0] === "bootout"), true,
+      "the retired repair removes the stale scheduled job before writing");
+    assert.equal(existsSync(installed.plistPath), false);
+    assert.match(failed.error?.message || "", /scheduled job was removed/i);
+    assert.equal((failed.error?.message || "").includes(refusedRecoveryCommand), false,
+      "a retired folder is never told to reinstall its refused scheduler");
+    assert.match(failed.error?.message || "", /manually set corpora\.local_folder\.enabled to false/i);
+    assert.deepEqual(JSON.parse(readFileSync(f.manifestPath, "utf8")), retired,
+      "the failed retired repair leaves the original retired manifest live");
   }
 
   {
