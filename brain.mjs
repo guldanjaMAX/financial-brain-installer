@@ -19781,6 +19781,48 @@ export async function probeExistingWorkerHealth(manifestPath, options = {}) {
   return { version: String(body.version || ""), acceptingDocuments: body.accepting_documents === true };
 }
 
+/** Resolve an existing Worker's read-only health hostname without persisting it. */
+export async function resolveExistingWorkerProbeDomain(manifestPath, options = {}) {
+  const { m } = loadManifest(manifestPath);
+  if (m.brain?.domain) return m.brain.domain;
+  const resolveSetupAccount = options.resolveAccount ?? resolveAccount;
+  const callCloudflare = options.cf ?? cf;
+  const account = await resolveSetupAccount(m);
+  let subdomain;
+  try {
+    subdomain = await callCloudflare(`/accounts/${account.id}/workers/subdomain`);
+  } catch (error) {
+    const message = String(error?.message || error || "");
+    const denied = SUBDOMAIN_READ_DENIED_RE.test(message) ||
+      error?.namedProfileSessionRejected === true;
+    if (denied) {
+      die(
+        "setup found an existing Worker, but could not determine whether it is active or paused because the exact " +
+          "account subdomain read was denied. Nothing was changed.\n" +
+          "      Sign in again through the browser when prompted, then rerun the same command.\n" +
+          "      Do not start a paused deployment or change the Workers subdomain setting while this Worker's health is unknown."
+      );
+    }
+    die(
+      "setup found an existing Worker, but the account subdomain read failed, so its health and pause state are unknown. " +
+        "Nothing was changed.\n" +
+        "      Fix the Cloudflare sign-in, then rerun the same command. Do not start a paused deployment while this " +
+        "Worker's health is unknown."
+    );
+  }
+  const label = subdomain?.subdomain;
+  if (typeof label !== "string" || !WORKERS_DEV_LABEL_RE.test(label)) {
+    die(
+      "setup found an existing Worker, but Cloudflare returned no usable account subdomain, so its health and pause " +
+        "state are unknown. Nothing was changed.\n" +
+        "      Confirm the Workers subdomain in Cloudflare, then rerun the same command. Do not start a paused " +
+        "deployment while this Worker's health is unknown."
+    );
+  }
+  const scriptName = m.brain?.worker_name || `${m.client?.slug || "client"}-brain`;
+  return `${scriptName}.${label}.workers.dev`;
+}
+
 /**
  * The live /health body of the Worker this manifest names, or null when there
  * is no body to read: no saved domain, no answer, a non-2xx, or unparseable
@@ -19793,7 +19835,7 @@ export async function probeExistingWorkerHealth(manifestPath, options = {}) {
  */
 async function readLiveWorkerHealthBody(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
-  const domain = m.brain?.domain;
+  const domain = options.domain ?? m.brain?.domain;
   if (!domain) return null;
   const fetchHealth = options.http ?? http;
   try {
@@ -20153,6 +20195,7 @@ export async function cmdSetup(manifestPath, options = {}) {
   };
   let workerAlreadyExisted;
   let liveLeaseBrain = null;
+  let existingWorkerProbeDomain = null;
   try {
     workerAlreadyExisted = await runPinnedSetupStage(
       "setup Worker inventory",
@@ -20160,10 +20203,15 @@ export async function cmdSetup(manifestPath, options = {}) {
     );
     const usesD1 = (setupExecutionPin.manifest.infrastructure?.cloudflare?.storage || "d1") === "d1";
     if (workerAlreadyExisted && usesD1) {
+      const resolveProbeDomain = options.resolveExistingWorkerProbeDomain ?? resolveExistingWorkerProbeDomain;
+      existingWorkerProbeDomain = await runPinnedSetupStage(
+        "setup existing Worker address check",
+        (pinnedPath) => resolveProbeDomain(pinnedPath),
+      );
       const probeLiveWorker = options.probeExistingWorkerHealth ?? probeExistingWorkerHealth;
       liveLeaseBrain = await runPinnedSetupStage(
         "setup live Worker check",
-        (pinnedPath) => probeLiveWorker(pinnedPath),
+        (pinnedPath) => probeLiveWorker(pinnedPath, { domain: existingWorkerProbeDomain }),
       );
     }
     if (liveLeaseBrain) {
@@ -20189,7 +20237,7 @@ export async function cmdSetup(manifestPath, options = {}) {
       const probeDrainMode = options.probeExistingWorkerDrainMode ?? probeExistingWorkerDrainMode;
       const liveDrainMode = await runPinnedSetupStage(
         "setup paused-brain check",
-        (pinnedPath) => probeDrainMode(pinnedPath),
+        (pinnedPath) => probeDrainMode(pinnedPath, { domain: existingWorkerProbeDomain }),
       );
       if (liveDrainMode === "paused-for-upgrade") {
         die(
