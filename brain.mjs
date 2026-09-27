@@ -3467,7 +3467,7 @@ export async function cmdHealth(manifestPath, {
         "      sign-in saved on this computer or a CLOUDFLARE_API_TOKEN for this Brain's account. BRAIN_NO_WRANGLER_LOGIN turns\n" +
         "      the sign-in lookup off. Make one of those available, then rerun health. Nothing was changed."
     );
-    refusal.code = "CONFIG_INVALID";
+    refusal.code = "AUTH_REQUIRED";
     throw refusal;
   }
   const acct = m.brain?.domain ? null : await resolveAccount(m);

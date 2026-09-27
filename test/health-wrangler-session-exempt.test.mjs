@@ -178,7 +178,7 @@ const npxCalls = (f) => (existsSync(f.log) ? readFileSync(f.log, "utf8").trim().
 }
 
 // In-process: with no domain and no Cloudflare access at all, the refusal is a
-// typed configuration failure whose advice is true and safe.
+// typed access-required failure whose advice is true and safe.
 {
   const scratch = mkdtempSync(join(tmpdir(), "brain-health-no-access-"));
   const savedToken = process.env.CLOUDFLARE_API_TOKEN;
@@ -197,9 +197,9 @@ const npxCalls = (f) => (existsSync(f.log) ? readFileSync(f.log, "utf8").trim().
       refusal = error;
     }
     assert.ok(refusal, "health without a domain or Cloudflare access must refuse");
-    assert.equal(refusal.code, "CONFIG_INVALID", "the refusal carries a typed configuration code");
-    assert.equal(supportErrorCode(refusal, { command: "health" }), "CONFIG_INVALID",
-      "the support journal classifies the refusal as configuration, not a missing sign-in");
+    assert.equal(refusal.code, "AUTH_REQUIRED", "the refusal carries a typed access-required code");
+    assert.equal(supportErrorCode(refusal, { command: "health" }), "AUTH_REQUIRED",
+      "the support journal classifies the refusal by the missing access that can resolve the address");
     assertTruthfulNoAccessRefusal(renderCliCommands(refusal.message));
   } finally {
     if (savedToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
@@ -297,4 +297,4 @@ try {
   }
 }
 
-console.log("health: a saved domain never touches the Wrangler session; without one the session lookup resolves the address, and no access at all is a truthful CONFIG_INVALID refusal");
+console.log("health: a saved domain never touches the Wrangler session; without one the session lookup resolves the address, and no access at all is a truthful AUTH_REQUIRED refusal");
