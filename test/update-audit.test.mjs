@@ -8,6 +8,7 @@ import { validateIncidents, releaseBlockers, releaseAdjudication, runRegressions
   DEFERRAL_CAUSES, assertSourceInventoryV3ReleaseVersion,
   SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION, DEFAULT_REGRESSION_TIMEOUT_MS,
   CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS } from "../scripts/audit-updates.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
 const cases = JSON.parse(readFileSync(new URL("../docs/update-incidents.json", import.meta.url), "utf8"));
 const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
@@ -215,13 +216,35 @@ for (const approvalCopy of [
 }
 const currentReleaseSection = changelog.split(new RegExp(`^## ${packageVersion.replaceAll(".", "\\.")}\\s*$`, "m"))[1]
   ?.split(/^## /m)[0] || "";
-const notCoveredBlock = /^### This release does NOT cover\s*\n\n([\s\S]*?)\n\n(?=- \*\*)/m
-  .exec(currentReleaseSection)?.[1] || "";
+function currentReleaseNotCoveredBlock(section) {
+  const heading = /^### This release does NOT cover\s*$/m.exec(section);
+  if (!heading) return "";
+  const bodyStart = heading.index + heading[0].length;
+  const remaining = section.slice(bodyStart);
+  const nextHeading = remaining.search(/^### /m);
+  return remaining.slice(0, nextHeading < 0 ? remaining.length : nextHeading).trim();
+}
+
+function assertOrdinaryReleaseCopyPrecedesLimitations(section) {
+  const rendered = renderCliCommands(section);
+  const ordinary = rendered.indexOf("Dollar amounts in a partly answered question are no longer cut.");
+  const limitations = rendered.indexOf("This release does NOT cover");
+  assert.ok(ordinary >= 0 && limitations >= 0 && ordinary < limitations,
+    "ordinary release copy must render before the final does-not-cover block");
+}
+
+const notCoveredBlock = currentReleaseNotCoveredBlock(currentReleaseSection);
 const deferredIds = cases
   .filter((item) => item.deferral?.version === packageVersion)
   .map((item) => item.id)
   .sort();
 assert.ok(notCoveredBlock, "the current changelog needs a This release does NOT cover block");
+assert.throws(() => assertOrdinaryReleaseCopyPrecedesLimitations(
+  "### This release does NOT cover\n\n- **UPDATE-999:** Deferred fixture.\n\n" +
+    "- **Dollar amounts in a partly answered question are no longer cut.** Fixture.",
+), /ordinary release copy must render before/,
+"the prior layout must fail because whatsnew renders ordinary changes inside the limitation block");
+assert.doesNotThrow(() => assertOrdinaryReleaseCopyPrecedesLimitations(currentReleaseSection));
 for (const id of deferredIds) {
   assert.match(notCoveredBlock, new RegExp(`\\b${id}\\b`),
     `${id} must stay visible in the current release limitation block`);
