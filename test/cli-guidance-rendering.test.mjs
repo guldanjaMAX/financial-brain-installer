@@ -177,6 +177,11 @@ assert.equal(renderCliCommands("brain update <manifest>", unusual), `${exact} up
 assert.equal(renderCliCommands(renderCliCommands("brain check <manifest>", unusual), unusual), `${exact} check <manifest>`);
 assert.equal(renderCliCommands("brain update <manifest>", { platform: "darwin" }), "brain update <manifest>");
 assert.equal(renderCliCommands("The brain stores records.", windows), "The brain stores records.");
+assert.equal(
+  renderCliCommands("The brain folder moved. Run brain folder <manifest> status.", windows),
+  `The brain folder moved. Run ${prefix} folder <manifest> status.`,
+  "a command renderer must not rewrite the product word in prose",
+);
 assert.throws(() => brainCliPrefix({ ...windows, scriptPath: "bad\npath" }), /safe to display/);
 
 const manifestWithMetacharacters = "C:\\Owner's $HOME folder\\brain.manifest.json";

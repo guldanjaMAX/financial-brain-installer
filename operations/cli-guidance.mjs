@@ -110,7 +110,13 @@ export function renderCliCommands(text, options = {}) {
   const prefix = brainCliPrefix(options);
   // The callback prevents dollar sequences in a real executable path being
   // interpreted as String.replace substitutions. A second render is inert.
-  return prefix === 'brain' ? value : value.replace(COMMAND, () => prefix);
+  return prefix === 'brain' ? value : value.replace(COMMAND, (match, offset, source) => {
+    // Product prose can contain a subcommand-shaped noun phrase, such as
+    // "the brain folder moved". Articles prove this occurrence is prose, not
+    // an invocation, so only the actual command later in the sentence moves.
+    const before = source.slice(0, offset);
+    return /\b(?:a|the|this|your)\s+$/iu.test(before) ? match : prefix;
+  });
 }
 
 /**
