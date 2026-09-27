@@ -24518,6 +24518,7 @@ export async function cmdFolder(manifestPath, argv = process.argv.slice(4), opti
       intended,
       {
         platform,
+        filesystemPlatform: options.filesystemPlatform ?? process.platform,
         now: () => writeNow,
         ...(options.manifestWriteOptions || {}),
         expectedOriginalBytes: initialManifestBytes,

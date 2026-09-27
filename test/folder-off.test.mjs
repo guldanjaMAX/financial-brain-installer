@@ -630,10 +630,25 @@ try {
     let directorySyncs = 0;
     writeManifestAtomically(win.manifestPath, { ...win.manifest, win: true }, {
       now: () => new Date(FIXED_NOW),
-      platform: "win32",
+      platform: "darwin",
+      filesystemPlatform: "win32",
       syncDirectory: () => { directorySyncs++; },
     });
-    assert.equal(directorySyncs, 0, "win32 skips only the directory fsync");
+    assert.equal(directorySyncs, 0,
+      "a win32 filesystem skips directory fsync even when the caller simulates a Darwin scheduler");
+
+    for (const filesystemPlatform of ["darwin", "linux"]) {
+      const control = fixture();
+      let controlSyncs = 0;
+      writeManifestAtomically(control.manifestPath, { ...control.manifest, filesystemPlatform }, {
+        now: () => new Date(FIXED_NOW),
+        platform: "darwin",
+        filesystemPlatform,
+        syncDirectory: () => { controlSyncs++; },
+      });
+      assert.equal(controlSyncs, 1,
+        `${filesystemPlatform} still reaches the directory durability boundary exactly once`);
+    }
   }
 
   {

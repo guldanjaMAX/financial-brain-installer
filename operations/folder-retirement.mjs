@@ -78,7 +78,10 @@ function writeExclusive(io, path, bytes, mode) {
   }
 }
 
-function defaultSyncDirectory(directory, io) {
+function defaultSyncDirectory(directory, io, platform = process.platform) {
+  // Windows does not provide the POSIX directory-fsync durability primitive.
+  // The staging file itself is still fsynced before the atomic rename.
+  if (platform === "win32") return;
   const descriptor = io.openSync(
     directory,
     fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY || 0) | (fsConstants.O_NOFOLLOW || 0),
@@ -114,7 +117,7 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
     throw new TypeError("the intended manifest must be one JSON object");
   }
   const io = fsApi(options.fs);
-  const platform = options.platform || process.platform;
+  const filesystemPlatform = options.filesystemPlatform || options.platform || process.platform;
   const now = options.now ? options.now() : new Date();
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
     throw new TypeError("the folder-off timestamp is invalid");
@@ -162,7 +165,8 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
   const nonce = (options.randomBytes || randomBytes)(12).toString("hex");
   const temporaryPath = `${directory}/.${basename(absolute)}.folder-off-${nonce}.tmp`;
   const rollbackPath = `${directory}/.${basename(absolute)}.folder-off-${nonce}.rollback.tmp`;
-  const syncDirectory = options.syncDirectory || ((path) => defaultSyncDirectory(path, io));
+  const syncDirectory = options.syncDirectory ||
+    ((path) => defaultSyncDirectory(path, io, filesystemPlatform));
   let backupCreated = false;
   let renamed = false;
   const concurrentEditError = () => {
@@ -194,7 +198,7 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
     }
     io.renameSync(temporaryPath, absolute);
     renamed = true;
-    if (platform !== "win32") syncDirectory(directory);
+    if (filesystemPlatform !== "win32") syncDirectory(directory);
 
     const readbackBytes = io.readFileSync(absolute);
     let readback;
@@ -218,7 +222,7 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
       try {
         writeExclusive(io, rollbackPath, originalBytes, mode);
         io.renameSync(rollbackPath, absolute);
-        if (platform !== "win32") {
+        if (filesystemPlatform !== "win32") {
           try { syncDirectory(directory); } catch { /* exact byte readback below remains authoritative */ }
         }
         if (!io.readFileSync(absolute).equals(originalBytes)) {
