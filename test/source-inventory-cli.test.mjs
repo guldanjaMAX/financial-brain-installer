@@ -10,6 +10,7 @@ import {
   collectSourceInventoryPages,
   runCliCommandWithCredentialBoundary,
   schedulePlatformLimitation,
+  supportErrorCode,
 } from "../brain.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
@@ -217,6 +218,8 @@ test("domainless source inventory gives an actionable exact refusal and a saved-
       (error) => {
         assert.equal(error.payload?.error?.code, "brain_domain_missing",
           "the domainless decision point must be reached");
+        assert.equal(supportErrorCode(error, { command: "sources" }), "BRAIN_DOMAIN_MISSING",
+          "the domainless refusal must retain its typed support classification");
         assert.equal(error.payload?.error?.message, expectedMessage);
         return true;
       },

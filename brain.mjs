@@ -8740,11 +8740,12 @@ async function reportFreshness(m, acct, manifestPath) {
 }
 
 class SourceInventoryClientError extends Error {
-  constructor(code, message, { retryable = false } = {}) {
+  constructor(code, message, { retryable = false, supportCode = null } = {}) {
     super(message);
     this.name = "SourceInventoryClientError";
     this.code = code;
     this.retryable = retryable;
+    this.supportCode = supportCode;
   }
 }
 
@@ -8757,6 +8758,7 @@ function sourceInventoryBaseUrl(m) {
         "Restore the deployed HTTPS hostname to brain.domain from a known-good manifest backup, or run `brain health <manifest>` " +
         "from an interactive terminal with this Brain's Cloudflare access to look up and prove its workers.dev hostname before " +
         "saving it. Then rerun `brain sources <manifest> --json`. Do not guess the address. No Cloudflare sign-in was attempted.",
+      { supportCode: "BRAIN_DOMAIN_MISSING" },
     );
   }
   let candidate;
@@ -9190,14 +9192,23 @@ function sourceInventoryFailure(json, error) {
   const message = known
     ? error.message
     : "the source inventory could not be completed. No source, credential, or Cloudflare setting was changed.";
+  const supportCode = typeof error?.supportCode === "string" &&
+      SUPPORT_ERROR_CODES.includes(error.supportCode)
+    ? error.supportCode
+    : null;
   if (json) {
-    throw new JsonFatal({
+    const failure = new JsonFatal({
       ok: false,
       kind: "source_inventory",
       error: { code, message },
     });
+    if (supportCode) failure.code = supportCode;
+    throw failure;
   }
-  die(message);
+  if (!supportCode) die(message);
+  const failure = new Fatal(message);
+  failure.code = supportCode;
+  throw failure;
 }
 
 const SOURCE_FAILURE_OPERATION_LABELS = Object.freeze({
