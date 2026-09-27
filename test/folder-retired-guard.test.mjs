@@ -301,11 +301,56 @@ try {
         statusFolderScheduler: async () => ({ installed: false, loaded: false, running: false, definitionMatches: false, interpreterPresent: true }),
       },
     });
-    assert.ok(readiness.readiness.blockers.includes("corpora.local_folder is not enabled in this manifest"));
+    assert.ok(readiness.readiness.blockers.includes("corpora.local_folder is retired in this manifest"));
   }
 
   {
     const f = fixture();
+    const retiredButEnabled = structuredClone(f.manifest);
+    retiredButEnabled.corpora.local_folder.enabled = true;
+    let pathInspections = 0;
+    let schedulerReads = 0;
+    const refused = await inspectProvenanceRepairReadiness({
+      m: retiredButEnabled,
+      manifestPath: f.manifestPath,
+      source: "documents",
+      kind: "upload",
+      options: {
+        platform: "darwin",
+        inspectLocalPath: (...args) => { pathInspections += 1; return statSync(...args); },
+        readSchedulerStatus: () => {
+          schedulerReads += 1;
+          return { installed: false, loaded: false, running: false };
+        },
+      },
+    });
+    assert.ok(refused.readiness.blockers.some((blocker) => /retired/i.test(blocker)));
+    assert.equal(pathInspections, 0,
+      "retired repair readiness reaches its retirement decision before local inspection");
+    assert.equal(schedulerReads, 0,
+      "retired repair readiness reaches no scheduler or install boundary");
+
+    const active = activeControl(f);
+    let controlInspections = 0;
+    const allowed = await inspectProvenanceRepairReadiness({
+      m: active,
+      manifestPath: f.manifestPath,
+      source: "documents",
+      kind: "upload",
+      options: {
+        platform: "linux",
+        inspectLocalPath: (...args) => { controlInspections += 1; return statSync(...args); },
+      },
+    });
+    assert.equal(controlInspections, 1,
+      "the non-retired repair control reaches local inspection once");
+    assert.equal(allowed.readiness.blockers.length, 0);
+  }
+
+  {
+    const f = fixture();
+    const retiredButEnabled = structuredClone(f.manifest);
+    retiredButEnabled.corpora.local_folder.enabled = true;
     let assessCalls = 0;
     const assessmentLib = {
       parseProvenanceSourceAssessmentArgv: () => ({ manifest: f.manifestPath, source: "documents", targets: ["fixture.txt"] }),
@@ -315,10 +360,13 @@ try {
     };
     const refused = await cmdProvenanceAssess([], {
       assessmentLib,
-      pinManifest: () => ({ manifest: f.manifest }),
+      pinManifest: () => ({ manifest: retiredButEnabled }),
+      pinRoot: () => ({ path: f.retiredPath }),
+      revalidateRoot: () => {},
     }).then(() => null, (error) => error);
     assert.equal(JSON.parse(refused.message).code, "MANIFEST_POLICY_INVALID");
-    assert.equal(assessCalls, 0, "the retired manifest policy decision is reached before assessment");
+    assert.equal(assessCalls, 0,
+      "the retired provenance assessment reaches its policy decision before the folder assessment");
 
     const active = activeControl(f);
     const allowed = await cmdProvenanceAssess([], {

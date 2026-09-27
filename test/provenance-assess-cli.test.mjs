@@ -133,6 +133,43 @@ test("manifest, root, and assessment failures remain fixed and perform no later 
   }), (error) => error?.payload?.blockers?.[0] === "assessment_failed");
 });
 
+test("a retirement timestamp refuses assessment even when enabled drifted true, while an active control assesses", async () => {
+  let rootPins = 0;
+  let assessments = 0;
+  const retired = manifestPin({
+    retired_at: "2026-09-28T16:36:00.000Z",
+    retired_path: PRIVATE_ROOT,
+    retired_source: "localdocs",
+  });
+  await assert.rejects(cmdProvenanceAssess([
+    PRIVATE_MANIFEST, "--source", "localdocs", "--target", PRIVATE_TARGET, "--json",
+  ], {
+    assessmentLib,
+    pinManifest: () => retired,
+    pinRoot: () => { rootPins += 1; return { path: PRIVATE_ROOT, stat: Object.freeze({}) }; },
+    assess: async () => { assessments += 1; return safeAssessment(); },
+    revalidateRoot: () => true,
+    write: () => {},
+  }), (error) => error?.payload?.blockers?.[0] === "manifest_policy_invalid");
+  assert.equal(rootPins, 0,
+    "the retired assessment reaches the manifest decision before pinning the folder root");
+  assert.equal(assessments, 0, "the retired assessment performs zero folder assessments");
+
+  const active = await cmdProvenanceAssess([
+    PRIVATE_MANIFEST, "--source", "localdocs", "--target", PRIVATE_TARGET, "--json",
+  ], {
+    assessmentLib,
+    pinManifest: () => manifestPin(),
+    pinRoot: () => { rootPins += 1; return { path: PRIVATE_ROOT, stat: Object.freeze({}) }; },
+    assess: async () => { assessments += 1; return safeAssessment(); },
+    revalidateRoot: () => true,
+    write: () => {},
+  });
+  assert.equal(active.assessment_complete, true);
+  assert.equal(rootPins, 1);
+  assert.equal(assessments, 1, "the active assessment control reaches the assessment exactly once");
+});
+
 test("assessment is exempt from the process-wide Wrangler credential boundary", async () => {
   let commandCalls = 0;
   let wrapperCalls = 0;

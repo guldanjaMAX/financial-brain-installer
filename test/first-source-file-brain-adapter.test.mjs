@@ -211,11 +211,11 @@ test("real adapter preview proves one direct native file without exposing privat
   }
 });
 
-test("a retired local folder reaches the dedicated-source gate after architecture, while the enabled control resolves the file", async (t) => {
+test("a retired local folder is refused even when enabled drifted true, while the active control resolves the file", async (t) => {
   const local = fixture();
   t.after(local.cleanup);
   const retired = JSON.parse(readFileSync(local.manifest, "utf8"));
-  retired.corpora.local_folder.enabled = false;
+  retired.corpora.local_folder.enabled = true;
   retired.corpora.local_folder.retired_at = "2026-09-28T16:36:00.000Z";
   retired.corpora.local_folder.retired_path = retired.corpora.local_folder.path;
   retired.corpora.local_folder.retired_source = source;
@@ -237,7 +237,7 @@ test("a retired local folder reaches the dedicated-source gate after architectur
   assert.equal(refused?.stage, "read_only_snapshot");
   assert.match(
     refused?.privateCause?.message || "",
-    /manifest does not declare the exact dedicated local source/u,
+    /retired local folder/u,
   );
   assert.equal(retiredEvents[0], "architecture");
   assert.ok(retiredEvents.includes("runtime.verify"));

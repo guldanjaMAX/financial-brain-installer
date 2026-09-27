@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -547,6 +547,69 @@ test("the plan fingerprint changes with the exact OCR model and pricing basis", 
     assert.equal(driftedPlan.pricing_basis.status, "pricing_contract_mismatch");
   } finally {
     rmSync(sourceRoot, { recursive: true, force: true });
+  }
+});
+
+test("OCR preflight refuses a retired folder before dependency load or walk, while an active control walks", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "brain-ocr-retired-guard-"));
+  const sourceRoot = join(fixture, "source");
+  const manifestPath = join(fixture, "brain.manifest.json");
+  mkdirSync(sourceRoot);
+  const manifest = {
+    safety: {
+      private_path_prefixes: [],
+      daily_llm_spend_cap_usd: 10,
+      ocr: { enabled: false, max_pages_per_document: 40 },
+    },
+    corpora: {
+      local_folder: {
+        enabled: true,
+        path: sourceRoot,
+        source: "documents",
+        retired_at: "2026-09-28T16:36:00.000Z",
+        retired_path: realpathSync(sourceRoot),
+        retired_source: "documents",
+      },
+    },
+  };
+  let dependencyLoads = 0;
+  let walkCalls = 0;
+  const ingestLib = async () => {
+    dependencyLoads += 1;
+    return {
+      walk: () => { walkCalls += 1; return { complete: true, files: [], skipped: [] }; },
+      prepare: async () => { throw new Error("an empty control must not prepare a file"); },
+    };
+  };
+  try {
+    const retiredError = await cmdOcrPreflight(manifestPath, {
+      flags: { path: sourceRoot, json: true },
+      readManifest: () => manifest,
+      ingestLib,
+      ocrLib: async () => ({ estimateOcrCost, OCR_PRICE }),
+      write: () => {},
+    }).then(() => null, (error) => error);
+    assert.equal(retiredError?.payload?.failure?.code, "MANIFEST_POLICY_INVALID", retiredError?.message);
+    assert.equal(dependencyLoads, 0,
+      "the retired OCR path reaches its policy decision before dependency loading");
+    assert.equal(walkCalls, 0, "the retired OCR path performs zero folder walks");
+
+    const active = structuredClone(manifest);
+    delete active.corpora.local_folder.retired_at;
+    delete active.corpora.local_folder.retired_path;
+    delete active.corpora.local_folder.retired_source;
+    const control = await cmdOcrPreflight(manifestPath, {
+      flags: { path: sourceRoot, json: true },
+      readManifest: () => active,
+      ingestLib,
+      ocrLib: async () => ({ estimateOcrCost, OCR_PRICE }),
+      write: () => {},
+    });
+    assert.equal(control.status, "complete");
+    assert.equal(dependencyLoads, 1);
+    assert.equal(walkCalls, 1, "the active OCR control reaches the folder walk exactly once");
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
   }
 });
 

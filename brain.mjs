@@ -10188,6 +10188,7 @@ function schedulerReadinessSummary(status) {
 
 export async function inspectProvenanceRepairReadiness({ m, manifestPath, source, kind, options = {} }) {
   const blockers = [];
+  const retired = kind === "upload" ? retiredLocalFolderOf(m) : null;
   let selectedConfig;
   let sourceStatus = "ready";
   let credentialStatus = "saved owner credential verified by the private inventory read";
@@ -10205,13 +10206,16 @@ export async function inspectProvenanceRepairReadiness({ m, manifestPath, source
       ocr: m?.safety?.ocr || null,
       private_path_prefixes: m?.safety?.private_path_prefixes || [],
     };
-    if (local.enabled !== true) blockers.push("corpora.local_folder is not enabled in this manifest");
+    if (retired) blockers.push("corpora.local_folder is retired in this manifest");
+    else if (local.enabled !== true) blockers.push("corpora.local_folder is not enabled in this manifest");
     const declaredSource = String(local.source || "documents");
     if (declaredSource !== source) {
       blockers.push(`source ${source} is not the single watched-folder source declared by this manifest`);
     }
     const path = typeof local.path === "string" ? local.path : "";
-    if (!path || !isAbsolute(path)) {
+    if (retired) {
+      sourceStatus = "blocked";
+    } else if (!path || !isAbsolute(path)) {
       blockers.push("corpora.local_folder.path is not one absolute folder");
     } else {
       try {
@@ -10300,7 +10304,7 @@ export async function inspectProvenanceRepairReadiness({ m, manifestPath, source
   }
 
   const platform = options.platform ?? process.platform;
-  if (platform === "darwin" && ["upload", "drive"].includes(kind)) {
+  if (!retired && platform === "darwin" && ["upload", "drive"].includes(kind)) {
     try {
       const readScheduler = options.readSchedulerStatus ?? (kind === "upload"
         ? (await import("./operations/folder-scheduler.mjs")).statusFolderScheduler
@@ -10318,7 +10322,7 @@ export async function inspectProvenanceRepairReadiness({ m, manifestPath, source
       scheduler = { applicable: true, status: "unavailable" };
       blockers.push("the local scheduler state could not be verified safely");
     }
-  } else if (["upload", "drive"].includes(kind)) {
+  } else if (!retired && ["upload", "drive"].includes(kind)) {
     // This release has no Windows or Linux scheduler implementation. An
     // unattended writer therefore cannot be hidden behind a healthy-looking
     // status on those platforms. The command-level cross-platform source lease
@@ -10798,6 +10802,7 @@ export async function cmdProvenanceAssess(argv = process.argv.slice(3), options 
   const local = manifestPin?.manifest?.corpora?.local_folder;
   const privatePrefixes = manifestPin?.manifest?.safety?.private_path_prefixes ?? [];
   if (!local || typeof local !== "object" || Array.isArray(local) ||
+      retiredLocalFolderOf(manifestPin.manifest) ||
       local.enabled !== true || local.source !== parsed.source ||
       typeof local.path !== "string" || !isAbsolute(local.path) ||
       !Array.isArray(privatePrefixes) ||
@@ -11329,6 +11334,12 @@ export async function cmdOcrPreflight(manifestPath, options = {}) {
   } catch {
     ocrPreflightFail("MANIFEST_UNAVAILABLE");
   }
+  const retired = retiredLocalFolderOf(manifest);
+  const retiredVariant = retiredFolderLocationVariant(retired, request.path, {
+    platform: options.platform ?? process.platform,
+    ...(options.retiredFolderFs ? { fs: options.retiredFolderFs } : {}),
+  });
+  if (retiredVariant) ocrPreflightFail("MANIFEST_POLICY_INVALID");
 
   let policy;
   let privatePrefixes;
@@ -27186,6 +27197,9 @@ export function firstSourceFileDependencies(options = {}) {
     const manifestPin = pinManifest(manifestPath);
     const local = manifestPin?.manifest?.corpora?.local_folder;
     const privatePrefixes = manifestPin?.manifest?.safety?.private_path_prefixes ?? [];
+    if (retiredLocalFolderOf(manifestPin?.manifest)) {
+      throw new TypeError("the manifest declares a retired local folder");
+    }
     if (!local || typeof local !== "object" || Array.isArray(local) ||
         local.enabled !== true || local.source !== source ||
         typeof local.path !== "string" || !isAbsolute(local.path) ||
