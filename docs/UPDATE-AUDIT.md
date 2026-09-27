@@ -190,17 +190,19 @@ narrowing applies to 0.4.9 only: ADR 008 lets UPDATE-044 carry an exact-version
 deferral although 0.4.9 changes Plaid code, and that deferral prints in the
 release note. Nothing else in this candidate weakens the gate. The
 acceptance-text record depends on the reference point. Since the held 0.4.8
-candidate, two clauses were re-homed. In
+candidate, three acceptance texts changed and one row was added, because two
+clauses were re-homed. In
 [ADR 007](decisions/007-rehome-update-006-arm64-clause.md), UPDATE-006 keeps
 every Windows x64 CLI-identity requirement and no longer carries the ARM64
 clause, and UPDATE-012 gains that ARM64 CLI-identity requirement verbatim. In
 ADR 008, UPDATE-025 keeps its real-Item freshness proof, signed webhook and
-recovered missed notification, and the new UPDATE-044 carries its
+recovered missed notification, and the new row UPDATE-044 carries its
 two-institution, two-business and business-banking-login breadth in the same
 words.
-Against the last shipped release, v0.4.6, two more acceptance texts were
-rewritten during the unshipped 0.4.7/0.4.8 work and ship for the first time in
-0.4.9. UPDATE-037 (commit `41e8e30`) now requires the Windows refusal to name a
+Against the last shipped release, v0.4.6, five acceptance texts changed and
+two rows were added: those three texts and UPDATE-044, plus two more texts
+rewritten during the unshipped 0.4.7/0.4.8 work that ship for the first time in
+0.4.9, and UPDATE-043. UPDATE-037 (commit `41e8e30`) now requires the Windows refusal to name a
 supported route that needs no secret entry, instead of a route that masks
 entry, because this release ships no PowerShell secret-entry bridge; the
 physical PowerShell 5.1 and 7 proof stays required. UPDATE-036 (commit
