@@ -120,6 +120,12 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
     throw new TypeError("the folder-off timestamp is invalid");
   }
   const absolute = resolve(manifestPath);
+  const expectedOriginalBytes = options.expectedOriginalBytes === undefined
+    ? null
+    : options.expectedOriginalBytes;
+  if (expectedOriginalBytes !== null && !Buffer.isBuffer(expectedOriginalBytes)) {
+    throw new TypeError("the expected original manifest must be a Buffer");
+  }
   const directory = dirname(absolute);
   const named = io.lstatSync(absolute);
   if (named.isSymbolicLink()) {
@@ -159,6 +165,14 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
   const syncDirectory = options.syncDirectory || ((path) => defaultSyncDirectory(path, io));
   let backupCreated = false;
   let renamed = false;
+  const concurrentEditError = () => {
+    const error = new Error(
+      "The Brain manifest changed after folder off began, so nothing was replaced. " +
+        `The verified backup was kept at ${backupPath}.`,
+    );
+    error.code = "FOLDER_MANIFEST_CHANGED";
+    return error;
+  };
 
   try {
     writeExclusive(io, backupPath, originalBytes, mode);
@@ -166,8 +180,19 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
     if (!io.readFileSync(backupPath).equals(originalBytes)) {
       throw new Error("the folder-off backup did not read back exactly");
     }
+    if (expectedOriginalBytes !== null && !originalBytes.equals(expectedOriginalBytes)) {
+      throw concurrentEditError();
+    }
     writeExclusive(io, temporaryPath, intendedBytes, mode);
     options.beforeRename?.({ manifestPath: absolute, backupPath, temporaryPath });
+    const beforeSwap = io.lstatSync(absolute);
+    const beforeSwapBytes = io.readFileSync(absolute);
+    const afterSwapRead = io.lstatSync(absolute);
+    if (!beforeSwap.isFile() || beforeSwap.isSymbolicLink() ||
+        !linkCountIsOne(beforeSwap.nlink) || !sameFile(opened, beforeSwap) ||
+        !sameFile(beforeSwap, afterSwapRead) || !beforeSwapBytes.equals(originalBytes)) {
+      throw concurrentEditError();
+    }
     io.renameSync(temporaryPath, absolute);
     renamed = true;
     if (platform !== "win32") syncDirectory(directory);
@@ -206,7 +231,8 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
     }
     try { unlinkIfPresent(io, temporaryPath); } catch { /* preserve the primary error */ }
     try { unlinkIfPresent(io, rollbackPath); } catch { /* preserve the primary error */ }
-    if (backupCreated && !restorationError) {
+    const keepBackup = Boolean(restorationError) || error?.code === "FOLDER_MANIFEST_CHANGED";
+    if (backupCreated && !keepBackup) {
       try { unlinkIfPresent(io, backupPath); } catch { /* preserve the primary error */ }
     }
     if (restorationError) {

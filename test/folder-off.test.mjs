@@ -315,6 +315,45 @@ try {
   }
 
   {
+    const concurrent = fixture();
+    const concurrentLaunch = launchctlHarness();
+    const edited = structuredClone(concurrent.manifest);
+    edited.concurrent_owner_edit = "preserve this exact edit";
+    const editedBytes = Buffer.from(manifestBytes(edited));
+    let concurrentEditWrites = 0;
+    const refused = await capture(() => cmdFolder(
+      concurrent.manifestPath,
+      ["off"],
+      folderOptions(concurrent, concurrentLaunch, {
+        platform: "linux",
+        writeManifestAtomically(path, intended, writeOptions) {
+          concurrentEditWrites += 1;
+          writeFileSync(path, editedBytes, { mode: concurrent.mode });
+          return writeManifestAtomically(path, intended, writeOptions);
+        },
+      }),
+    ));
+    assert.equal(concurrentEditWrites, 1,
+      "the concurrent-edit arm reaches the manifest write decision exactly once");
+    assert.match(refused.error?.message || "", /manifest changed/i);
+    assert.deepEqual(readFileSync(concurrent.manifestPath), editedBytes,
+      "the concurrent owner edit remains the live manifest");
+    const backupPath = `${concurrent.manifestPath}.before-folder-off-20260928T163600Z`;
+    assert.match(refused.error.message, new RegExp(backupPath.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
+    assert.deepEqual(readFileSync(backupPath), editedBytes,
+      "the named backup also preserves the concurrent edit exactly");
+
+    const control = fixture();
+    const controlLaunch = launchctlHarness();
+    const written = await cmdFolder(control.manifestPath, ["off"], folderOptions(control, controlLaunch, {
+      platform: "linux",
+    }));
+    assert.equal(written.changed, true);
+    assert.equal(JSON.parse(readFileSync(control.manifestPath, "utf8")).corpora.local_folder.enabled, false,
+      "the no-edit control reaches and completes the manifest replacement");
+  }
+
+  {
     const f = fixture();
     writeFileSync(join(f.watched, ".placeholder.icloud"), "fixture");
     writeFileSync(join(f.watched, "zero.txt"), "");
@@ -432,6 +471,38 @@ try {
     assert.equal(existsSync(restoreFailureBackup), true,
       "a failed restoration keeps the verified backup");
     assert.deepEqual(readFileSync(restoreFailureBackup), restoreFailureBytes);
+
+    const beforeSwapRace = fixture({ mode: 0o640 });
+    const beforeSwapOriginal = readFileSync(beforeSwapRace.manifestPath);
+    const beforeSwapEdited = Buffer.from(manifestBytes({
+      ...beforeSwapRace.manifest,
+      concurrent_owner_edit: "preserve the just-in-time edit",
+    }));
+    let beforeSwapHooks = 0;
+    let beforeSwapError = null;
+    try {
+      writeManifestAtomically(beforeSwapRace.manifestPath, { changed: true }, {
+        now: () => new Date(FIXED_NOW),
+        expectedOriginalBytes: beforeSwapOriginal,
+        beforeRename: () => {
+          beforeSwapHooks += 1;
+          writeFileSync(beforeSwapRace.manifestPath, beforeSwapEdited, { mode: beforeSwapRace.mode });
+        },
+      });
+      assert.fail("the just-in-time concurrent edit must stop the swap");
+    } catch (error) {
+      beforeSwapError = error;
+    }
+    const beforeSwapBackup = `${beforeSwapRace.manifestPath}.before-folder-off-20260928T163600Z`;
+    assert.equal(beforeSwapHooks, 1,
+      "the race arm reaches the final pre-swap recheck exactly once");
+    assert.match(beforeSwapError.message, /manifest changed/i);
+    assert.match(beforeSwapError.message,
+      new RegExp(beforeSwapBackup.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
+    assert.deepEqual(readFileSync(beforeSwapRace.manifestPath), beforeSwapEdited,
+      "the edit made immediately before the swap remains live");
+    assert.deepEqual(readFileSync(beforeSwapBackup), beforeSwapOriginal,
+      "the pre-swap backup keeps the bytes that the operation originally inspected");
 
     const postRenameControl = fixture({ mode: 0o640 });
     const controlIntended = { ...postRenameControl.manifest, post_rename_control: true };

@@ -24306,7 +24306,15 @@ export async function cmdFolder(manifestPath, argv = process.argv.slice(4), opti
   }
   const action = argv[0];
   const platform = options.platform ?? process.platform;
-  const { m } = loadManifest(manifestPath);
+  let initialManifestBytes;
+  let m;
+  try {
+    const readManifestBytes = options.readManifestBytes ?? readFileSync;
+    initialManifestBytes = Buffer.from(readManifestBytes(manifestPath));
+    m = JSON.parse(initialManifestBytes.toString("utf8"));
+  } catch (error) {
+    die(`could not read manifest at ${manifestPath}: ${error.message}`);
+  }
   const local = m?.corpora?.local_folder;
   const retired = retiredLocalFolderOf(m);
   const newestBackupName = newestFolderOffBackup(manifestPath);
@@ -24439,6 +24447,7 @@ export async function cmdFolder(manifestPath, argv = process.argv.slice(4), opti
       platform,
       now: () => writeNow,
       ...(options.manifestWriteOptions || {}),
+      expectedOriginalBytes: initialManifestBytes,
     },
   );
 
