@@ -828,6 +828,7 @@ const expected = [
   "templates/brain.manifest.json",
   "worker/src/index.js",
   "worker/src/lib/answer-render.js",
+  "worker/src/lib/answer-sentences.js",
   "worker/src/lib/app-assets.js",
   "worker/src/lib/app-page.js",
   "worker/src/lib/auth-store.js",

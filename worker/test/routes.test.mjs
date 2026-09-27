@@ -5299,9 +5299,6 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     diagnostic === null, String(diagnostic));
 }
 
-console.log(fail ? `\n${fail} FAILURES` : `\nroutes: all ${ran} tests passed`);
-process.exit(fail ? 1 : 0);
-
 /* ---- supported but incomplete keeps the supported part and names the gap ---- */
 {
   const rows = [{ ...ROW, chunk_uid: "lease:1#0", doc_uid: "lease:1", title: "Office lease 2026", client: null,
@@ -5338,5 +5335,77 @@ process.exit(fail ? 1 : 0);
     /another company/.test(body.evidence_gate?.reason || "") && body.evidence_gate?.partial !== true, JSON.stringify(body.evidence_gate));
 }
 
-console.log(`\n${ran} checks, ${fail} failed`);
-if (fail) process.exit(1);
+/* ---- a partial answer never cuts a sentence at a decimal point ----
+   Field report (C1, 2026-09-26): a supported-but-incomplete answer about one
+   entity's income and expenses came back as "73 [12]. 47 for rent [10]." The
+   partial path split sentences on every ".", so "$1,234.73 [12]" lost
+   everything before ".73", and a citation written before an amount turned
+   "$1,234.73" into a clean, wrong "$1,234". Whole-dollar controls run on the
+   same path so a uniform result cannot pass for the fix. */
+{
+  const ledger = (id, title, text) => ({
+    ...ROW, chunk_uid: `${id}#0`, doc_uid: id, source_id: id, uri: `drive://${id}`,
+    source: "drive", client: null, title, text,
+  });
+  const rows = [
+    ledger("ledger-a", "Example Holdings LLC March income ledger", "March income: $1,234.73 total deposits."),
+    ledger("ledger-b", "Example Holdings LLC March expense ledger", "March expenses: rent $5,678.47. Loan balance $1.2 million."),
+  ];
+  const partialThink = async (draft) => {
+    const { env } = mkEnv(rows, { extra: { AI: { run: async (model, input) => model.includes("bge-")
+      ? ({ data: [[0.1, 0.2, 0.3]] })
+      : String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+        ? ({ response: { supported: true, complete: false, evidence: [1, 2], reason: "the net figure is not stated" }, usage: {} })
+        : ({ response: draft, usage: {} }) } } });
+    return (await call(env, "/api/rag/think?q=What+were+the+March+income+and+expenses%2C+and+the+net%3F")).json();
+  };
+  const NOT_COVERED = "\n\nNot covered by the documents: the net figure is not stated.";
+  const wholeDraft = "Example Holdings LLC recorded March income of $1,234 [1]. Expenses included $5,678 for rent [2].";
+  const control = await partialThink(wholeDraft);
+  check("control: a whole-dollar partial answer keeps both sentences verbatim",
+    control.answer === wholeDraft + NOT_COVERED && control.evidence_gate?.partial === true, JSON.stringify(control.answer));
+  const decimalDraft = "Example Holdings LLC recorded March income of $1,234.73 [1]. Expenses included $5,678.47 for rent [2].";
+  const decimal = await partialThink(decimalDraft);
+  check("a partial answer keeps a cited decimal amount and the rest of its sentence",
+    decimal.answer === decimalDraft + NOT_COVERED && decimal.evidence_gate?.partial === true, JSON.stringify(decimal.answer));
+  const leadingControlDraft = "Per the March income ledger [1], income was $1,234. Per the expense ledger [2], rent was $5,678.";
+  const leadingControl = await partialThink(leadingControlDraft);
+  check("control: citations before whole-dollar amounts survive the partial path",
+    leadingControl.answer === leadingControlDraft + NOT_COVERED, JSON.stringify(leadingControl.answer));
+  const leadingDraft = "Per the March income ledger [1], income was $1,234.73. Per the expense ledger [2], the loan balance is $1.2 million.";
+  const leading = await partialThink(leadingDraft);
+  check("a partial answer never shortens an amount into a different, plausible figure",
+    leading.answer === leadingDraft + NOT_COVERED, JSON.stringify(leading.answer));
+}
+
+/* ---- a present-status sentence with a decimal amount keeps its citation ----
+   The current-status check split the draft the same way, so "still active at
+   $1,234.73 per month [1]" left the status clause with no citation and a
+   supported answer was withheld. */
+{
+  const row = {
+    ...ROW, chunk_uid: "subscription-a#0", doc_uid: "subscription-a", source_id: "subscription-a",
+    uri: "drive://subscription-a", source: "drive", client: null, document_date: 1780000000000, date_reliable: 1,
+    title: "Example Holdings LLC storage subscription",
+    text: "The Example Holdings LLC storage subscription is active at $1,234.73 per month.",
+  };
+  const currentThink = async (draft) => {
+    const { env } = mkEnv([row], { extra: { AI: { run: async (model, input) => model.includes("bge-")
+      ? ({ data: [[0.1, 0.2, 0.3]] })
+      : String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+        ? ({ response: { supported: true, complete: true, evidence: [1], reason: "direct support" }, usage: {} })
+        : ({ response: draft, usage: {} }) } } });
+    return (await call(env, "/api/rag/think?q=Is+the+Example+Holdings+LLC+storage+subscription+still+active%3F")).json();
+  };
+  const wholeDraft = "As of 2026-05-28, the Example Holdings LLC storage subscription is still active at $1,234 per month [1].";
+  const control = await currentThink(wholeDraft);
+  check("control: a whole-dollar present-status answer with an exact as-of date is approved",
+    control.answer === wholeDraft && control.evidence_gate?.supported === true, JSON.stringify(control.evidence_gate));
+  const decimalDraft = "As of 2026-05-28, the Example Holdings LLC storage subscription is still active at $1,234.73 per month [1].";
+  const decimal = await currentThink(decimalDraft);
+  check("a decimal amount does not separate a present-status claim from its citation",
+    decimal.answer === decimalDraft && decimal.evidence_gate?.supported === true, JSON.stringify(decimal.evidence_gate));
+}
+
+console.log(fail ? `\n${fail} FAILURES` : `\nroutes: all ${ran} tests passed`);
+process.exit(fail ? 1 : 0);
