@@ -19,9 +19,11 @@ this changed candidate.
   treat the decimal point in a figure such as $1,234.73 as the end of a
   sentence, so an answer could show a garbled fragment or a shorter, wrong
   figure next to its citation. Now the dot inside a figure, a web address or
-  a file name stays inside its sentence, while a full stop still ends a
-  sentence before a space, a closing quote, bracket or formatting mark, the end
-  of the answer, or a capital letter that starts the next sentence.
+  a lowercase file extension stays inside its sentence. A capital letter
+  directly after a dot still starts a new sentence, so names such as
+  `Invoice.PDF` and `Docs.Html` can lose the words before the dot in a partial
+  answer. A full stop also ends a sentence before a space, a closing quote,
+  bracket or formatting mark, or the end of the answer.
   If you asked a money question on an earlier version and the answer ended
   with "Not covered by the documents", ask it again after you update.
 

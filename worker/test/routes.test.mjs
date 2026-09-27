@@ -5443,6 +5443,28 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     initialism.answer === initialismDraft + NOT_COVERED,
     JSON.stringify(initialism.answer));
 
+  const lowercasePdfDraft = "The report is stored as Invoice.pdf [1].";
+  const lowercasePdf = await partialThink(lowercasePdfDraft);
+  check("control: a lowercase PDF extension stays whole on the partial path",
+    lowercasePdf.answer === lowercasePdfDraft + NOT_COVERED,
+    JSON.stringify(lowercasePdf.answer));
+  const uppercasePdfDraft = "The report is stored as Invoice.PDF [1].";
+  const uppercasePdf = await partialThink(uppercasePdfDraft);
+  knownLimitation("an uppercase file extension still splits Invoice.PDF and drops its prefix",
+    uppercasePdf.answer === "PDF [1]." + NOT_COVERED,
+    JSON.stringify(uppercasePdf.answer));
+
+  const lowercaseHtmlDraft = "The page is stored as Docs.html [1].";
+  const lowercaseHtml = await partialThink(lowercaseHtmlDraft);
+  check("control: a lowercase HTML extension stays whole on the partial path",
+    lowercaseHtml.answer === lowercaseHtmlDraft + NOT_COVERED,
+    JSON.stringify(lowercaseHtml.answer));
+  const capitalizedHtmlDraft = "The page is stored as Docs.Html [1].";
+  const capitalizedHtml = await partialThink(capitalizedHtmlDraft);
+  knownLimitation("a capitalized file extension still splits Docs.Html and drops its prefix",
+    capitalizedHtml.answer === "Html [1]." + NOT_COVERED,
+    JSON.stringify(capitalizedHtml.answer));
+
   // Deferred past 0.4.9 (see worker/src/lib/answer-sentences.js): a full stop
   // after an abbreviation still ends a sentence. The partial path splits
   // "Example Co. recorded" after "Co." and drops the uncited "Example Co."
