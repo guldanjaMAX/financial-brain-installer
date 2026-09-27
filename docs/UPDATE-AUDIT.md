@@ -169,11 +169,12 @@ historical and are not reused as proof for the changed 0.4.9 bytes. The
 remains unbound to a final SHA and records no field execution.
 Four are `verified` on reviewed evidence: UPDATE-010, UPDATE-014, UPDATE-026,
 and UPDATE-032. Their evidence documents remain attached to the exact rows in
-`update-incidents.json`. Two carry new, owner-approved exact-version 0.4.9
-deferrals and ship unproven, printed in the release note: UPDATE-012 (Windows
-ARM64, under the condition ADR 007 set) and UPDATE-044 (bank freshness account
-breadth, under [ADR 008](decisions/008-rehome-update-025-breadth-into-update-044.md),
-only while general invitations stay closed). The other 35 block release
+`update-incidents.json`. Two carry new exact-version 0.4.9 deferrals recorded
+on 2026-09-26 and ship unproven, printed in the release note: UPDATE-012
+(Windows ARM64, under the condition ADR 007 set) and UPDATE-044 (bank freshness
+account breadth, under
+[ADR 008](decisions/008-rehome-update-025-breadth-into-update-044.md), only while
+general invitations stay closed). The other 35 block release
 writes. No earlier deferral was renewed for this candidate. UPDATE-017 through
 UPDATE-022 and UPDATE-025 still need their required real-provider evidence
 while bank credential setup and general invitations remain held. Schema 43 can bind
@@ -185,8 +186,8 @@ citation pass together. Other ingest producers and ambiguous multi-record
 exports remain unbound, and the legacy whole-source provenance repair remains
 unaccepted. Every narrow receipt states `whole_source_complete: false` and does
 not authorize OCR, reingest, deletion, deployment, or customer execution.
-One owner-approved
-narrowing applies to 0.4.9 only: ADR 008 lets UPDATE-044 carry an exact-version
+One exact-version narrowing recorded on 2026-09-26 applies to 0.4.9 only:
+ADR 008 lets UPDATE-044 carry an exact-version
 deferral although 0.4.9 changes Plaid code, and that deferral prints in the
 release note. Nothing else in this candidate weakens the gate. The
 acceptance-text record depends on the reference point. Since the held 0.4.8

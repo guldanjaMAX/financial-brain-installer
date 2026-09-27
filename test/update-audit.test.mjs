@@ -12,6 +12,12 @@ import { validateIncidents, releaseBlockers, releaseAdjudication, runRegressions
 const cases = JSON.parse(readFileSync(new URL("../docs/update-incidents.json", import.meta.url), "utf8"));
 const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+const updateAuditDoc = readFileSync(new URL("../docs/UPDATE-AUDIT.md", import.meta.url), "utf8");
+const maintainerDoc = readFileSync(new URL("../docs/MAINTAINER.md", import.meta.url), "utf8");
+const candidatePlan = readFileSync(
+  new URL(`../docs/release-evidence/v${packageVersion}-candidate-release-evidence-plan.md`, import.meta.url),
+  "utf8",
+);
 assert.equal(SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION, "0.4.9");
 assert.equal(assertSourceInventoryV3ReleaseVersion(packageVersion), packageVersion,
   "the held candidate must use a non-colliding source-inventory identity");
@@ -187,6 +193,25 @@ validateIncidents(cases, undefined, packageVersion);
 for (const item of cases.filter((i) => i.deferral)) {
   assert.equal(item.deferral.version, packageVersion, `${item.id} defers for a version nobody is cutting`);
   assert.ok(!UNDEFERRABLE_INCIDENTS.includes(item.id));
+}
+for (const id of ["UPDATE-012", "UPDATE-044"]) {
+  const reason = cases.find((item) => item.id === id)?.deferral?.reason || "";
+  assert.doesNotMatch(reason,
+    /owner(?:'s)?\s+(?:approved|decided|confirmed|own|holds)|personal login|account holders/i,
+    `${id} deferral reason must contain neutral release facts only`);
+}
+const deferralCopies = [updateAuditDoc, maintainerDoc, candidatePlan].join("\n");
+for (const approvalCopy of [
+  /owner-approved exact-version 0\.4\.9/gi,
+  /owner-approved narrowing/gi,
+  /new owner-approved record/gi,
+  /owner approved that 0\.4\.9 may ship without/gi,
+  /owner decided on 2026-09-25 to defer Windows ARM64/gi,
+  /approved this exact deferral on 2026-09-26/gi,
+  /owner confirmed it for the 0\.4\.9 release text/gi,
+]) {
+  assert.doesNotMatch(deferralCopies, approvalCopy,
+    "deferral documentation must rely on the repository record rather than approval prose");
 }
 const currentReleaseSection = changelog.split(new RegExp(`^## ${packageVersion.replaceAll(".", "\\.")}\\s*$`, "m"))[1]
   ?.split(/^## /m)[0] || "";

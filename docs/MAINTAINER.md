@@ -259,15 +259,16 @@ updates; their identities are retired so their evidence cannot be mistaken for
 evidence from these changed bytes. At this freeze the current candidate's
 41-row audit has 37 unresolved incidents and four rows closed on reviewed
 evidence. No earlier deferral was renewed; two of the unresolved rows,
-UPDATE-012 and UPDATE-044, carry new owner-approved exact-version 0.4.9
-deferrals that print in the release note. Since the held 0.4.8 candidate,
+UPDATE-012 and UPDATE-044, carry new exact-version 0.4.9 deferrals recorded on
+2026-09-26 that print in the release note. Since the held 0.4.8 candidate,
 three acceptance texts changed and one row was added, because two clauses
 were re-homed, not weakened:
 [ADR 007](./decisions/007-rehome-update-006-arm64-clause.md) moves UPDATE-006's
 Windows ARM64 clause into UPDATE-012, and
 [ADR 008](./decisions/008-rehome-update-025-breadth-into-update-044.md) moves
 UPDATE-025's two-institution, two-business and business-banking-login breadth
-into the new UPDATE-044, whose 0.4.9 deferral is an owner-approved narrowing.
+into the new UPDATE-044, whose exact-version 0.4.9 narrowing is recorded in
+ADR 008.
 Against the last shipped release, v0.4.6, five
 acceptance texts changed and two rows were added: those three texts and
 UPDATE-044, plus UPDATE-043 and the UPDATE-036 and UPDATE-037 texts rewritten
