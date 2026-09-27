@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cmdWhatsnew } from "../brain.mjs";
+import { cmdWhatsnew, renderCliCommands } from "../brain.mjs";
 import { LOCKED_WRANGLER_LOCK_ROOT_VERSION } from "../operations/locked-wrangler-runtime.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -51,6 +51,41 @@ assert.ok(!read("test/current-version.test.mjs").includes(hardCodedIncidentCount
 }
 const ciWorkflow = read(".github/workflows/ci.yml");
 const windowsRehearsalWorkflow = read(".github/workflows/windows-rehearsal.yml");
+
+const supervisedRecoveryChangelogText = [
+  "- **A v0.4.6 or earlier Brain left paused with queued work now stops at supervised",
+  "  recovery.** Those Workers do not report their writer mode to update's queue",
+  "  check and never process their queue while paused, so \"wait until query-ready\"",
+  "  could never come true. When the queue is not empty, update reads the Brain's",
+  "  public health check without sending an admin key. If that Worker is paused,",
+  "  the refusal names its release and explains that returning it to active needs",
+  "  that release's own tools, which use an older Wrangler runtime replaced for a",
+  "  security advisory. That step is done only under supervised recovery. Do not",
+  "  run `brain deploy` with either release, `brain rollback`, or `brain drain`, and",
+  "  do not clear VECTOR_DRAIN_MODE by hand. Run `brain health` and keep its output",
+  "  for support. If the health check cannot be read, the refusal says so rather",
+  "  than guessing. A paused v0.4.6 Brain with an empty queue still proceeds.",
+  "  If the Brain's own report shows the index marked for a full rebuild (what a",
+  "  v0.4.6 `brain rollback --yes` leaves) or holding more vectors than the database",
+  "  expects, deploying would un-pause a rolled-back Brain that can never become",
+  "  query-ready. The refusal names that evidence without claiming an unfinished",
+  "  update caused the pause, and gives the same supervised-recovery and support",
+  "  path. To check: such a refusal names supervised recovery and does not mention",
+  "  `brain deploy` as a remedy.",
+].join("\n");
+
+const followingChangelogControl = [
+  "- **A Worker older than the release your manifest records can be replaced by",
+  "  update again.** If an earlier kit's `brain deploy` or `brain rollback --yes`",
+  "  put its older Worker back after an update had finished, `brain update`,",
+  "  `brain update --force` and (for a paused Worker) `brain doctor --repair --yes`",
+  "  refused with no working remedy. Update now treats that Worker as a stale",
+  "  deploy it replaces: an empty queue proceeds, queued work on an active Worker",
+  "  gets \"wait until query-ready\", and queued work on a paused Worker gets the",
+  "  paused-Brain refusal. A Worker newer than this CLI is still refused. To",
+  "  check: `brain health` reports the older Worker version, and `brain update`",
+  "  reaches the paused deployment when the queue is empty.",
+].join("\n");
 
 assert.match(version, /^\d+\.\d+\.\d+$/, "package version must be a stable semantic version");
 assert.equal(packageLock.version, version, "package-lock top-level version drifted");
@@ -235,6 +270,29 @@ assert.match(unavailableOutput, /Unavailable is not current/i,
   "an unavailable release check must not become current");
 assert.doesNotMatch(unavailableOutput, /up to date/i,
   "an unavailable release check cannot be reported as up to date");
+
+const whatsnewLines = [];
+const originalLog = console.log;
+console.log = (...values) => whatsnewLines.push(values.join(" "));
+try {
+  await cmdWhatsnew(null, { discoverManifest: () => null });
+} finally {
+  console.log = originalLog;
+}
+const renderedWhatsnew = whatsnewLines.join("\n");
+assert.ok(
+  renderedWhatsnew.includes(renderCliCommands(supervisedRecoveryChangelogText)),
+  "whatsnew must render the complete supervised-recovery replacement text",
+);
+assert.ok(
+  renderedWhatsnew.includes(renderCliCommands(followingChangelogControl)),
+  "the following older-Worker control case must remain complete and render consistently",
+);
+assert.doesNotMatch(
+  renderedWhatsnew,
+  /install its own release, run .*brain deploy.*return it to active/is,
+  "whatsnew must not retain the retired-runtime deploy remedy",
+);
 
 const stableOutput = await whatsnewStatusOutput(async () => ({
   status: "up_to_date", latest_version: version,
