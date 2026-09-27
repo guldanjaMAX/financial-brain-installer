@@ -363,6 +363,47 @@ try {
       "a failed exclusive write leaves neither a temporary file nor a partial backup",
     );
 
+    const postRenameFailure = fixture({ mode: 0o640 });
+    const postRenameBytes = readFileSync(postRenameFailure.manifestPath);
+    const postRenameMode = lstatSync(postRenameFailure.manifestPath).mode & 0o777;
+    let postRenameDirectorySyncs = 0;
+    assert.throws(() => writeManifestAtomically(postRenameFailure.manifestPath, { changed: true }, {
+      now: () => new Date(FIXED_NOW),
+      syncDirectory: () => {
+        postRenameDirectorySyncs += 1;
+        if (postRenameDirectorySyncs === 1) throw new Error("injected directory fsync failure after rename");
+      },
+    }), /injected directory fsync failure after rename/);
+    assert.equal(
+      postRenameDirectorySyncs,
+      2,
+      "the first call reaches the post-rename failpoint and the second reaches restoration durability",
+    );
+    assert.deepEqual(readFileSync(postRenameFailure.manifestPath), postRenameBytes);
+    assert.equal(lstatSync(postRenameFailure.manifestPath).mode & 0o777, postRenameMode);
+    const postRenameNames = readdirSync(dirname(postRenameFailure.manifestPath));
+    assert.equal(
+      postRenameNames.some((name) => name.includes(".folder-off-")),
+      false,
+      "post-rename restoration leaves neither temporary nor rollback residue",
+    );
+    assert.equal(
+      postRenameNames.some((name) => name.includes(".before-folder-off-")),
+      false,
+      "the backup from the failed replacement is removed",
+    );
+
+    const postRenameControl = fixture({ mode: 0o640 });
+    const controlIntended = { ...postRenameControl.manifest, post_rename_control: true };
+    let controlDirectorySyncs = 0;
+    writeManifestAtomically(postRenameControl.manifestPath, controlIntended, {
+      now: () => new Date(FIXED_NOW),
+      syncDirectory: () => { controlDirectorySyncs += 1; },
+    });
+    assert.equal(controlDirectorySyncs, 1, "the successful control reaches the directory fsync once");
+    assert.deepEqual(readFileSync(postRenameControl.manifestPath), Buffer.from(manifestBytes(controlIntended)));
+    assert.equal(lstatSync(postRenameControl.manifestPath).mode & 0o777, 0o640);
+
     const win = fixture();
     let directorySyncs = 0;
     writeManifestAtomically(win.manifestPath, { ...win.manifest, win: true }, {
