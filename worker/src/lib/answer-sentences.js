@@ -2,12 +2,12 @@
  * Split a generated answer into sentences without breaking at the dot inside
  * a figure, a URL or a file name.
  *
- * A full stop ends a sentence before whitespace, a closing quote or bracket,
- * the end of the text, or an uppercase sentence start. A run of Markdown
- * closing marks (*, _, ` or ~) also closes the sentence when whitespace, a
- * quote, a bracket or the end follows that run. Otherwise a following digit,
- * lowercase letter, slash, hyphen or underscore keeps the full stop inside a
- * figure, URL or file name. A citation written after the full stop
+ * A sentence mark ends a sentence before whitespace, a closing quote or
+ * bracket, the end of the text, or an uppercase sentence start. A run of
+ * Markdown closing marks (*, _, ` or ~) also closes the sentence when one of
+ * those boundaries follows that run. Otherwise a following digit, lowercase
+ * letter, slash, hyphen or underscore keeps a full stop inside a figure, URL
+ * or file name. A citation written after the full stop
  * ("done. [2]") still belongs to the sentence before it.
  *
  * Every step that keeps, drops or checks answer sentences must split with
@@ -40,15 +40,15 @@ export function answerSentences(text) {
       if (compactInitialism && /[a-z]/u.test(value[following] || "")) return false;
     }
     if (/[\s"'”’)\]]/u.test(value[next])) return true;
-    if (mark === "." && /[A-Z]/u.test(value[next])) {
+    if (/[A-Z]/u.test(value[next])) {
       // Keep compact initialisms such as U.S. whole. The next full stop is
       // still judged normally, so this exception cannot swallow a sentence.
-      if (/[A-Z]/u.test(value[index - 1] || "") && value[next + 1] === ".") return false;
+      if (mark === "." && /[A-Z]/u.test(value[index - 1] || "") && value[next + 1] === ".") return false;
       return true;
     }
     if (/[*_`~]/u.test(value[next])) {
       while (next < value.length && /[*_`~]/u.test(value[next])) next += 1;
-      return next >= value.length || /[\s"'”’)\]]/u.test(value[next]);
+      return next >= value.length || /[\s"'”’)\]A-Z]/u.test(value[next]);
     }
     return false;
   };

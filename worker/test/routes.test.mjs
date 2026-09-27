@@ -5419,6 +5419,19 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     missingSpaceBoundary.answer === onlyProfit && missingSpaceBoundary.evidence_gate?.partial === true,
     JSON.stringify(missingSpaceBoundary.answer));
 
+  const exclamationBoundary = await partialThink("Revenue was $5M!Profit was $9M [1].");
+  check("an exclamation mark before an uppercase start separates an uncited sentence without a space",
+    exclamationBoundary.answer === onlyProfit && exclamationBoundary.evidence_gate?.partial === true,
+    JSON.stringify(exclamationBoundary.answer));
+  const questionBoundary = await partialThink("Revenue was $5M?Profit was $9M [1].");
+  check("a question mark before an uppercase start separates an uncited sentence without a space",
+    questionBoundary.answer === onlyProfit && questionBoundary.evidence_gate?.partial === true,
+    JSON.stringify(questionBoundary.answer));
+  const markdownBoundary = await partialThink("Revenue was $5M.**Profit was $9M [1].");
+  check("markdown after a full stop cannot hide a no-space uppercase sentence start",
+    markdownBoundary.answer === onlyProfit && markdownBoundary.evidence_gate?.partial === true,
+    JSON.stringify(markdownBoundary.answer));
+
   const noInitialismControlDraft = "The US total was $5M [1]. Profit was $9M [2].";
   const noInitialismControl = await partialThink(noInitialismControlDraft);
   check("control: an unpunctuated country abbreviation stays whole on the partial path",
