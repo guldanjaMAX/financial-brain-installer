@@ -11,6 +11,13 @@
  * Every step that keeps, drops or checks answer sentences must split with
  * this. Splitting on every "." turned a supported "$1,234.73 [1]" into
  * "73 [1]" and a "[1] ... $1,234.73." into a clean, wrong "$1,234.".
+ *
+ * Known limitation, deferred past 0.4.9: an abbreviation followed by a space
+ * still ends a sentence, so "Example Co. recorded ... [1]." splits after
+ * "Co.", and the partial-answer path then drops the uncited "Example Co."
+ * fragment. worker/test/routes.test.mjs records that output as a known
+ * limitation, not a pass. Changing this rule needs its own failing-first case
+ * and control.
  */
 export function answerSentences(text) {
   return (String(text || "").match(

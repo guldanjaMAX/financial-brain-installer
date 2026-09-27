@@ -13,8 +13,17 @@ import { ANSWER_ERROR_MESSAGES } from "../src/lib/answer-render.js";
 import { DRIVE_STORED_FAMILY_UID_MAX_BYTES } from "../src/lib/stored-family-identity.js";
 import { WORKER_VERSION } from "../src/lib/version.js";
 
-let fail = 0, ran = 0;
+let fail = 0, ran = 0, known = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + d)); if (!c) fail++; };
+// A deferred defect whose current output is recorded, not approved. It is
+// never counted as a pass. If the recorded output changes, it fails, so a fix
+// has to turn it into an ordinary check with its own control.
+const knownLimitation = (n, stillRecorded, d = "") => {
+  known++;
+  console.log((stillRecorded ? "KNOWN LIMITATION  " : "FAIL  ") + n +
+    (stillRecorded ? "" : "  the recorded output changed; replace this with a real check  " + d));
+  if (!stillRecorded) fail++;
+};
 const isUnavailableRefusal = (body) =>
   body?.status === "search_unavailable" &&
   body?.answer === null &&
@@ -5376,6 +5385,22 @@ async function postConfirmedSourceForget(env, source = "meeting") {
   const leading = await partialThink(leadingDraft);
   check("a partial answer never shortens an amount into a different, plausible figure",
     leading.answer === leadingDraft + NOT_COVERED, JSON.stringify(leading.answer));
+
+  // Deferred past 0.4.9 (see worker/src/lib/answer-sentences.js): a full stop
+  // after an abbreviation still ends a sentence. The partial path splits
+  // "Example Co. recorded" after "Co." and drops the uncited "Example Co."
+  // fragment, so the kept sentence loses its subject. This records that
+  // output; it does not approve it.
+  const unabbreviatedDraft = "Example Company recorded March income of $1,234 [1]. Expenses included $5,678 for rent [2].";
+  const unabbreviated = await partialThink(unabbreviatedDraft);
+  check("control: without an abbreviation the same partial answer keeps its subject",
+    unabbreviated.answer === unabbreviatedDraft + NOT_COVERED, JSON.stringify(unabbreviated.answer));
+  const abbreviatedDraft = "Example Co. recorded March income of $1,234 [1]. Expenses included $5,678 for rent [2].";
+  const abbreviated = await partialThink(abbreviatedDraft);
+  knownLimitation("an abbreviation's full stop still splits a partial answer and drops \"Example Co.\"",
+    abbreviated.answer ===
+      "recorded March income of $1,234 [1]. Expenses included $5,678 for rent [2]." + NOT_COVERED,
+    JSON.stringify(abbreviated.answer));
 }
 
 /* ---- a present-status sentence with a decimal amount keeps its citation ----
@@ -5407,5 +5432,6 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     decimal.answer === decimalDraft && decimal.evidence_gate?.supported === true, JSON.stringify(decimal.evidence_gate));
 }
 
-console.log(fail ? `\n${fail} FAILURES` : `\nroutes: all ${ran} tests passed`);
+console.log(fail ? `\n${fail} FAILURES` :
+  `\nroutes: all ${ran} tests passed${known ? `; ${known} known limitation(s) recorded, not passed` : ""}`);
 process.exit(fail ? 1 : 0);

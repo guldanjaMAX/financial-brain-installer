@@ -837,6 +837,16 @@ this changed candidate.
   the default OCR model is unchanged. To check: with OCR enabled, a scanned
   page read by the default model is indexed instead of refused.
 
+- **Known issue, not fixed in 0.4.9: a partial answer can drop a name that
+  ends in an abbreviation.** When the documents answer only part of a
+  question, the Brain keeps the sentences its sources support and names what
+  is missing. It still reads the full stop in an abbreviation such as "Co." as
+  the end of a sentence, so from "Example Co. recorded March income of $1,234
+  [1]." it can keep only "recorded March income of $1,234 [1]." The figure and
+  its citation are unchanged; the words before the abbreviation's full stop
+  are lost. To check: open the cited source to see whom a kept figure belongs
+  to.
+
 ## 0.4.6
 
 Candidate only. This version has not been released.
