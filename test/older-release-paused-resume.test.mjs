@@ -22,7 +22,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import {
+import fs, {
   cpSync,
   existsSync,
   mkdirSync,
@@ -34,8 +34,10 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -340,8 +342,23 @@ async function quietly(run) {
   return { error, result, output };
 }
 
-async function update(brain, release, { force = false } = {}) {
-  const { upgradeOptions } = brain.kit(release);
+/**
+ * `duringAcceptance` runs inside the acceptance stand-in, a stage every
+ * completed update reaches, so a control can make something happen within a
+ * real update run without replacing any product step.
+ */
+async function update(brain, release, { force = false, duringAcceptance = null } = {}) {
+  const kit = brain.kit(release);
+  const upgradeOptions = duringAcceptance
+    ? {
+      ...kit.upgradeOptions,
+      cmdTest: async (...args) => {
+        const accepted = await kit.upgradeOptions.cmdTest(...args);
+        await duringAcceptance();
+        return accepted;
+      },
+    }
+    : kit.upgradeOptions;
   return quietly(() => release.cli.cmdUpdate(brain.manifestPath, {
     discoverInstalledManifest: () => ({ path: brain.manifestPath, source: "remembered" }),
     readUpdateBacklog: release.cli.readUpdateBacklog,
@@ -460,9 +477,54 @@ function folderLaunchctlHarness() {
   };
 }
 
+/**
+ * The folder-walk boundary itself. The real walker lists each directory through
+ * `readdirSync` imported from node:fs, and no update option reaches the ingest
+ * library, so a wrapper handed to a later command cannot see what an update
+ * does. Replacing the builtin listing calls and syncing their ESM bindings
+ * reaches every module already loaded, including each scratch release's own
+ * ingest module. Only listings of a watched root, or of a path under it, are
+ * recorded.
+ */
+function observeFolderListings(roots) {
+  const watched = roots.map((root) => realpathSync.native(root));
+  const isUnder = (path, root) => path === root || path.startsWith(`${root}${sep}`);
+  const listings = [];
+  const originals = [];
+  const wrap = (owner, name) => {
+    const original = owner[name];
+    if (typeof original !== "function") return;
+    originals.push([owner, name, original]);
+    owner[name] = function observedListing(target, ...rest) {
+      let path = null;
+      try {
+        path = target instanceof URL ? fileURLToPath(target) : resolve(String(target));
+      } catch {
+        path = null;
+      }
+      if (path && watched.some((root) => isUnder(path, root))) listings.push({ call: name, path });
+      return original.call(this, target, ...rest);
+    };
+  };
+  for (const name of ["readdirSync", "readdir", "opendirSync", "opendir"]) wrap(fs, name);
+  for (const name of ["readdir", "opendir"]) wrap(fsPromises, name);
+  syncBuiltinESMExports();
+  return {
+    under: (root) => listings.filter(({ path }) => isUnder(path, realpathSync.native(root))),
+    restore() {
+      for (const [owner, name, original] of originals.reverse()) owner[name] = original;
+      syncBuiltinESMExports();
+    },
+  };
+}
+
 test("the documented 0.4.8 active folder updates, retires, and refuses both legacy walks", async () => {
   assert.equal(PREVIOUS_VERSION, "0.4.8", "this regression is pinned to the documented 0.4.8 shape");
   const brain = installation(PREVIOUS, { activeFolder: true });
+  const walkedControl = installation(PREVIOUS, { activeFolder: true });
+  // One hook, connected before either update starts and removed only at the
+  // end, so the zero below and the control's count come from the same observer.
+  const folderListings = observeFolderListings([brain.watchedPath, walkedControl.watchedPath]);
   const home = join(brain.sandbox, "home");
   mkdirSync(home);
   const launch = folderLaunchctlHarness();
@@ -481,7 +543,6 @@ test("the documented 0.4.8 active folder updates, retires, and refuses both lega
     const installed = installFolderScheduler(brain.manifestPath, schedulerOptions);
     const schedulerBytes = readFileSync(installed.plistPath);
     const schedulerMutationsBeforeUpdate = launch.mutationCount();
-    let walks = 0;
 
     const run = await update(brain, CHECKED_OUT);
     assert.equal(run.error, null, run.error?.message);
@@ -492,7 +553,29 @@ test("the documented 0.4.8 active folder updates, retires, and refuses both lega
       "the completed update reaches every remote stage without changing the local folder scheduler",
     );
     assert.deepEqual(readFileSync(installed.plistPath), schedulerBytes);
-    assert.equal(walks, 0, "the completed update never starts a folder walk");
+    assert.deepEqual(
+      folderListings.under(brain.watchedPath),
+      [],
+      "the completed update never lists the active folder",
+    );
+
+    // Control: the same hook, across the same real update path, counts a walk
+    // that does happen inside it. Without this the zero above could come from
+    // a hook that sees nothing.
+    let controlWalk = null;
+    const walkedRun = await update(walkedControl, CHECKED_OUT, {
+      duringAcceptance: () => { controlWalk = ingestRuntime.walk(walkedControl.watchedPath); },
+    });
+    assert.equal(walkedRun.error, null, walkedRun.error?.message);
+    assertResumedTo(walkedControl, CHECKED_OUT);
+    assert.equal(controlWalk?.complete, true);
+    assert.deepEqual(controlWalk.files.map((file) => file.rel), ["fixture.txt"]);
+    assert.deepEqual(
+      folderListings.under(walkedControl.watchedPath).map(({ path }) => path),
+      [walkedControl.watchedPath],
+      "the same hook records the walk made inside the control's real update",
+    );
+    assert.deepEqual(folderListings.under(brain.watchedPath), []);
 
     let remoteExpectationCalls = 0;
     const retired = await quietly(() => checkedOutCli.cmdFolder(brain.manifestPath, ["off"], {
@@ -514,6 +597,7 @@ test("the documented 0.4.8 active folder updates, retires, and refuses both lega
     assert.equal(retiredManifest.brain.version, PRODUCT_VERSION);
     assert.equal(retiredManifest.corpora.local_folder.retired_source, "documents");
 
+    let walks = 0;
     const ingest = async (manifest, flags) => quietly(() => checkedOutCli.cmdIngestLocal(
       manifest,
       brain.manifestPath,
@@ -538,6 +622,7 @@ test("the documented 0.4.8 active folder updates, retires, and refuses both lega
     const barePath = await ingest(retiredManifest, { path: brain.watchedPath });
     assert.equal(barePath.error?.reason, "LOCAL_FOLDER_RETIRED:bare_path_after_retirement");
     assert.equal(walks, 0, "both retired-folder decisions are reached before the walker");
+    assert.deepEqual(folderListings.under(brain.watchedPath), []);
 
     const activeControl = structuredClone(retiredManifest);
     activeControl.corpora.local_folder = {
@@ -554,7 +639,14 @@ test("the documented 0.4.8 active folder updates, retires, and refuses both lega
     assert.equal(allowed.error, null, allowed.error?.message);
     assert.equal(walks, 1, "the non-retired control reaches the real walker exactly once");
     assert.ok(allowed.result?.would_send >= 1);
+    assert.deepEqual(
+      folderListings.under(brain.watchedPath).map(({ path }) => path),
+      [brain.watchedPath],
+      "the folder-walk hook agrees with the ingest wrapper: one walk, made by the non-retired control",
+    );
   } finally {
+    folderListings.restore();
+    walkedControl.close();
     brain.close();
   }
 });
