@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 as win32Path } from "node:path";
 import {
   cmdIngestLocal,
   cmdLoad,
@@ -24,6 +24,7 @@ import {
   runApprovedProvenanceRewalk,
   supportErrorCode,
 } from "../brain.mjs";
+import { retiredFolderLocationVariant } from "../operations/folder-retirement.mjs";
 import * as ingestRuntime from "../ingest/run.mjs";
 
 const ROOT = process.env.FOLDER_OFF_TEST_ROOT || tmpdir();
@@ -169,6 +170,39 @@ try {
 
     assertRefusal(await attempt(f, { path: f.unrelated, source: "documents" }), "retired_source");
     assertRefusal(await attempt(f, { path: f.retiredPath, source: "documents", reset: true, "approve-removals": "a".repeat(64) }), "retired_source");
+  }
+
+  {
+    const longRetired = "C:\\Users\\Windows Tester\\Documents\\Retired Folder";
+    const shortRetired = "C:\\Users\\WINDOW~1\\DOCUME~1\\RETIRED~1";
+    const shortChild = win32Path.join(shortRetired, "Nested");
+    const unrelated = "C:\\Users\\WINDOW~1\\DOCUME~1\\CURRENT";
+    let canonicalReads = 0;
+    const realpathNative = (value) => {
+      canonicalReads += 1;
+      const folded = String(value).toLowerCase();
+      if (folded === longRetired.toLowerCase() || folded === shortRetired.toLowerCase()) return shortRetired;
+      if (folded === shortChild.toLowerCase()) return shortChild;
+      if (folded === unrelated.toLowerCase()) return unrelated;
+      throw Object.assign(new Error("synthetic path is absent"), { code: "ENOENT" });
+    };
+    const retired = {
+      retired_at: retiredAt,
+      retired_path: longRetired,
+      retired_identity: { realpath: longRetired, dev: null, ino: null },
+    };
+    assert.equal(retiredFolderLocationVariant(retired, shortChild, {
+      platform: "win32",
+      path: win32Path,
+      fs: { realpathNative },
+    }), "inside_retired");
+    assert.ok(canonicalReads >= 2,
+      "the win32 decision canonicalizes both the requested and recorded path spellings");
+    assert.equal(retiredFolderLocationVariant(retired, unrelated, {
+      platform: "win32",
+      path: win32Path,
+      fs: { realpathNative },
+    }), null, "the unrelated win32 control remains active");
   }
 
   {

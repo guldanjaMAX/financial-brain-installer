@@ -585,6 +585,13 @@ test("OCR preflight refuses a retired folder before dependency load or walk, whi
     const retiredError = await cmdOcrPreflight(manifestPath, {
       flags: { path: sourceRoot, json: true },
       readManifest: () => manifest,
+      platform: "win32",
+      retiredFolderFs: {
+        realpathNative(path) {
+          assert.ok([sourceRoot, realpathSync(sourceRoot)].includes(path));
+          return "C:\\Users\\WINDOW~1\\DOCUME~1\\RETIRED~1";
+        },
+      },
       ingestLib,
       ocrLib: async () => ({ estimateOcrCost, OCR_PRICE }),
       write: () => {},

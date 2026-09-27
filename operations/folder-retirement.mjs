@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve, win32 as win32Path } from "node:path";
 
 const nativeRealpath = realpathSync.native || realpathSync;
 
@@ -294,11 +294,14 @@ function sameOrInside(child, parent) {
 
 export function sameRetiredDirectoryIdentity(state, retiredIdentity) {
   if (!state || !retiredIdentity || typeof retiredIdentity !== "object") return false;
+  if (state.dev === null || state.dev === undefined || state.ino === null || state.ino === undefined ||
+      retiredIdentity.dev === null || retiredIdentity.dev === undefined ||
+      retiredIdentity.ino === null || retiredIdentity.ino === undefined) return false;
   return String(state.dev) === String(retiredIdentity.dev) &&
     String(state.ino) === String(retiredIdentity.ino);
 }
 
-function ancestorHasIdentity(rootRealpath, retiredIdentity, io) {
+function ancestorHasIdentity(rootRealpath, retiredIdentity, io, pathApi) {
   if (!retiredIdentity) return false;
   let current = rootRealpath;
   while (current) {
@@ -307,7 +310,7 @@ function ancestorHasIdentity(rootRealpath, retiredIdentity, io) {
     } catch {
       return false;
     }
-    const parent = dirname(current);
+    const parent = pathApi.dirname(current);
     if (parent === current) break;
     current = parent;
   }
@@ -322,6 +325,7 @@ export function retiredFolderLocationVariant(retired, root, options = {}) {
   if (!retired || typeof root !== "string") return null;
   const io = fsApi(options.fs);
   const platform = options.platform || process.platform;
+  const pathApi = options.path || (platform === "win32" ? win32Path : { dirname });
   let rootRealpath;
   try {
     rootRealpath = io.realpathNative(root);
@@ -329,11 +333,22 @@ export function retiredFolderLocationVariant(retired, root, options = {}) {
     return null;
   }
   const rootNormalized = normalizedPath(rootRealpath, platform);
-  const retiredPaths = [retired?.retired_identity?.realpath, retired?.retired_path]
-    .map((value) => normalizedPath(value, platform))
-    .filter(Boolean);
+  const retiredPaths = [...new Set(
+    [retired?.retired_identity?.realpath, retired?.retired_path]
+      .flatMap((value) => {
+        if (!value) return [];
+        try {
+          return [io.realpathNative(value), value];
+        } catch {
+          // A moved retired folder can make its recorded path unavailable.
+          return [value];
+        }
+      })
+      .map((value) => normalizedPath(value, platform))
+      .filter(Boolean),
+  )];
 
-  if (ancestorHasIdentity(rootRealpath, retired.retired_identity, io) ||
+  if (ancestorHasIdentity(rootRealpath, retired.retired_identity, io, pathApi) ||
       retiredPaths.some((candidate) => sameOrInside(rootNormalized, candidate))) {
     return "inside_retired";
   }
