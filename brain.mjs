@@ -8753,8 +8753,10 @@ function sourceInventoryBaseUrl(m) {
   if (!declared) {
     throw new SourceInventoryClientError(
       "brain_domain_missing",
-      "this manifest has no saved brain.domain, so the source inventory cannot reach the Brain without Cloudflare account access. " +
-        "Run `brain update <manifest>` once to save the deployed address, then rerun this command. No Cloudflare sign-in was attempted.",
+      "this manifest has no saved brain.domain, so the source inventory has no verified Brain address. " +
+        "Restore the deployed HTTPS hostname to brain.domain from a known-good manifest backup, or run `brain health <manifest>` " +
+        "from an interactive terminal with this Brain's Cloudflare access to look up and prove its workers.dev hostname before " +
+        "saving it. Then rerun `brain sources <manifest> --json`. Do not guess the address. No Cloudflare sign-in was attempted.",
     );
   }
   let candidate;

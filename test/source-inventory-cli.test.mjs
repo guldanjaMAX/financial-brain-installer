@@ -143,7 +143,7 @@ function recoveryPage() {
 function withManifest(run, domain = "brain.example.invalid") {
   const directory = mkdtempSync(join(tmpdir(), "brain-source-inventory-cli-"));
   const manifest = join(directory, "brain.manifest.json");
-  writeFileSync(manifest, JSON.stringify({ brain: { domain } }));
+  writeFileSync(manifest, JSON.stringify({ brain: domain === null ? {} : { domain } }));
   return Promise.resolve()
     .then(() => run(manifest))
     .finally(() => rmSync(directory, { recursive: true, force: true }));
@@ -195,6 +195,52 @@ test("source inventory CLI uses only the internal durable credential and collect
     assert.equal(value.returned, 2);
     assert.doesNotMatch(output, new RegExp(OWNER_PROOF));
     assert.equal(JSON.parse(output).snapshot.id, SNAPSHOT);
+  });
+});
+
+test("domainless source inventory gives an actionable exact refusal and a saved-domain control reaches the request", async () => {
+  const expectedMessage = renderCliCommands(
+    "this manifest has no saved brain.domain, so the source inventory has no verified Brain address. " +
+      "Restore the deployed HTTPS hostname to brain.domain from a known-good manifest backup, or run `brain health <manifest>` " +
+      "from an interactive terminal with this Brain's Cloudflare access to look up and prove its workers.dev hostname before " +
+      "saving it. Then rerun `brain sources <manifest> --json`. Do not guess the address. No Cloudflare sign-in was attempted.",
+  );
+  await withManifest(async (manifest) => {
+    let credentialReads = 0;
+    let requests = 0;
+    await assert.rejects(
+      cmdSources(manifest, {
+        flags: { json: true },
+        resolveAdminKey() { credentialReads++; return OWNER_PROOF; },
+        fetchImpl() { requests++; throw new Error("domainless inventory must refuse before request"); },
+      }),
+      (error) => {
+        assert.equal(error.payload?.error?.code, "brain_domain_missing",
+          "the domainless decision point must be reached");
+        assert.equal(error.payload?.error?.message, expectedMessage);
+        return true;
+      },
+    );
+    assert.equal(credentialReads, 0, "the refusal happens before durable credential access");
+    assert.equal(requests, 0, "the refusal happens before a request");
+  }, null);
+
+  await withManifest(async (manifest) => {
+    let requests = 0;
+    const value = await cmdSources(manifest, {
+      flags: { json: true },
+      resolveAdminKey: () => OWNER_PROOF,
+      fetchImpl: async (url) => {
+        requests++;
+        assert.equal(url, "https://brain.example.invalid/api/admin/brain/sources");
+        return new Response(JSON.stringify(inventoryPage({ source: "control", truncated: false, total: 1 })), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+    assert.equal(requests, 1, "a saved-domain control must reach the source-inventory request");
+    assert.equal(value.sources[0].source_id, "control");
   });
 });
 
