@@ -478,7 +478,8 @@ export function supportSourceForCommand(command = "") {
 /** Classify in memory; the raw message is never passed to the journal. */
 export function supportErrorCode(error, { command = "", unexpected = false } = {}) {
   if (error instanceof DriveRemovalReviewRequired) return "SAFETY_REVIEW_REQUIRED";
-  const typedCode = typeof error?.code === "string" ? error.code.trim().toUpperCase() : "";
+  const declaredCode = typeof error?.supportCode === "string" ? error.supportCode : error?.code;
+  const typedCode = typeof declaredCode === "string" ? declaredCode.trim().toUpperCase() : "";
   if (SUPPORT_ERROR_CODES.includes(typedCode)) return typedCode;
   const message = String(error?.message || "");
   if (/PDF.*tim(?:e|ed) out/i.test(message)) return "PDF_PROCESS_TIMEOUT";
@@ -8749,7 +8750,26 @@ class SourceInventoryClientError extends Error {
   }
 }
 
-function sourceInventoryBaseUrl(m) {
+function sourceInventoryRetryCommand(flags) {
+  let command = "brain sources <manifest>";
+  if (flags.add !== undefined) {
+    command += " --add <name>";
+    if (flags.kind !== undefined) command += " --kind <kind>";
+  } else if (flags.refresh !== undefined) {
+    command += " --refresh <schedule>";
+    if (flags.source !== undefined) command += " --source <name>";
+  } else if (flags.recovery === true) {
+    command += " --json --recovery";
+    if (flags.source !== undefined) command += " --source <name>";
+    if (flags.limit !== undefined) command += " --limit <n>";
+    if (flags.cursor !== undefined) command += " --cursor <cursor>";
+  } else if (flags.json !== undefined) {
+    command += " --json";
+  }
+  return renderCliCommands(command);
+}
+
+function sourceInventoryBaseUrl(m, retryCommand) {
   const declared = String(m?.brain?.domain || "").trim();
   if (!declared) {
     throw new SourceInventoryClientError(
@@ -8757,7 +8777,8 @@ function sourceInventoryBaseUrl(m) {
       "this manifest has no saved brain.domain, so the source inventory has no verified Brain address. " +
         "Restore the deployed HTTPS hostname to brain.domain from a known-good manifest backup, or run `brain health <manifest>` " +
         "from an interactive terminal with this Brain's Cloudflare access to look up and prove its workers.dev hostname before " +
-        "saving it. Then rerun `brain sources <manifest> --json`. Do not guess the address. No Cloudflare sign-in was attempted.",
+        `saving it. Then rerun \`${retryCommand || renderCliCommands("brain sources <manifest>")}\`. ` +
+          "Do not guess the address. No Cloudflare sign-in was attempted.",
       { supportCode: "BRAIN_DOMAIN_MISSING" },
     );
   }
@@ -9111,7 +9132,7 @@ export async function collectSourceRecoveryPages(requestPage, { source, limit = 
 
 /** One command-local data-plane boundary. Credentials never cross flags. */
 function sourceInventoryAccess(manifestPath, m, options = {}) {
-  const base = sourceInventoryBaseUrl(m);
+  const base = sourceInventoryBaseUrl(m, options.retryCommand);
   const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
   const fetchImpl = options.fetchImpl ?? fetch;
   let durableKey;
@@ -9274,9 +9295,10 @@ export async function cmdSources(manifestPath, options = {}) {
       throw new SourceInventoryClientError("invalid_options", "--source is valid here only with --refresh <schedule> or --json --recovery");
     }
 
+    const retryCommand = sourceInventoryRetryCommand(flags);
     const { m } = loadManifest(manifestPath);
     const { base, authenticatedRequest, managedSourceRequest, requestPage } =
-      sourceInventoryAccess(manifestPath, m, options);
+      sourceInventoryAccess(manifestPath, m, { ...options, retryCommand });
 
     if (flags.add) {
       const name = assertSourceName(flags.add === true ? null : flags.add);
@@ -10401,7 +10423,13 @@ async function provenanceRepairContext(manifestPath, source, options = {}) {
   const absoluteManifest = resolve(manifestPath);
   const { m } = loadManifest(absoluteManifest);
   const manifestFingerprint = createHash("sha256").update(readFileSync(absoluteManifest)).digest("hex");
-  const remoteState = await readProvenanceRepairRemoteState(absoluteManifest, m, source, options);
+  const repairOptions = {
+    ...options,
+    retryCommand: options.retryCommand ?? renderCliCommands(
+      "brain provenance-repair <manifest> --source <name>",
+    ),
+  };
+  const remoteState = await readProvenanceRepairRemoteState(absoluteManifest, m, source, repairOptions);
   const sourceRow = remoteState.remote.source;
   const inspectReadiness = options.inspectReadiness ?? inspectProvenanceRepairReadiness;
   const local = await inspectReadiness({
@@ -10527,7 +10555,10 @@ export async function cmdProvenanceRepair(manifestPath, options = {}) {
     );
   }
 
-  const context = await provenanceRepairContext(manifestPath, source, options);
+  const retryCommand = renderCliCommands(
+    `brain provenance-repair <manifest> --source <name>${flags.json ? " --json" : ""}`,
+  );
+  const context = await provenanceRepairContext(manifestPath, source, { ...options, retryCommand });
   const { plan } = context;
   if (!flags.apply) {
     if (flags.json) console.log(JSON.stringify(plan, null, 2));
