@@ -39,6 +39,10 @@ import { buildImessageSchedulerPlan } from "../operations/imessage-scheduler.mjs
 import { acquireSourceIngestLock } from "../operations/source-ingest-lock.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
+// POSIX permission bits are not meaningful on Windows (Node reports 0o666/0o444 there), so mode
+// assertions run only where the platform honours them.
+const POSIX_MODES = process.platform !== "win32";
+
 const FIXED_NOW = new Date("2026-09-28T16:36:00.000Z");
 const ROOT = process.env.FOLDER_OFF_TEST_ROOT || tmpdir();
 mkdirSync(ROOT, { recursive: true });
@@ -220,8 +224,10 @@ try {
 
     const backupPath = join(dirname(f.manifestPath), "brain.manifest.json.before-folder-off-20260928T163600Z");
     assert.equal(readFileSync(backupPath, "utf8"), f.original);
-    assert.equal(lstatSync(backupPath).mode & 0o777, f.mode);
-    assert.equal(lstatSync(f.manifestPath).mode & 0o777, f.mode);
+    if (POSIX_MODES) {
+      assert.equal(lstatSync(backupPath).mode & 0o777, f.mode);
+      assert.equal(lstatSync(f.manifestPath).mode & 0o777, f.mode);
+    }
     assert.deepEqual(readFileSync(f.statePath), stateBefore);
     assert.deepEqual(dbSnapshot(f.dbPath), beforeDb);
     assert.match(off.text, /Every document already loaded from it stays in your Brain/);
@@ -489,8 +495,10 @@ try {
       const intended = structuredClone(f.manifest);
       intended.marker = mode;
       const result = writeManifestAtomically(f.manifestPath, intended, { now: () => new Date(FIXED_NOW) });
-      assert.equal(lstatSync(f.manifestPath).mode & 0o777, mode);
-      assert.equal(lstatSync(result.backupPath).mode & 0o777, mode);
+      if (POSIX_MODES) {
+        assert.equal(lstatSync(f.manifestPath).mode & 0o777, mode);
+        assert.equal(lstatSync(result.backupPath).mode & 0o777, mode);
+      }
       assert.deepEqual(JSON.parse(readFileSync(f.manifestPath, "utf8")), intended);
     }
 
@@ -624,7 +632,7 @@ try {
     });
     assert.equal(controlDirectorySyncs, 1, "the successful control reaches the directory fsync once");
     assert.deepEqual(readFileSync(postRenameControl.manifestPath), Buffer.from(manifestBytes(controlIntended)));
-    assert.equal(lstatSync(postRenameControl.manifestPath).mode & 0o777, 0o640);
+    if (POSIX_MODES) assert.equal(lstatSync(postRenameControl.manifestPath).mode & 0o777, 0o640);
 
     const win = fixture();
     let directorySyncs = 0;
