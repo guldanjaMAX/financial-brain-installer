@@ -12,7 +12,7 @@ scope, document grants, passkey observability, financial imports, provenance
 binding for eligible single-record local file ingests, bounded one-original
 accepted-resolution evidence, and restart-safe migrations are covered by local
 product and contract suites. Local proof is not field proof. At this freeze the
-40-row release audit has 36 unresolved incidents, no renewed deferrals, and four
+41-row release audit has 37 unresolved incidents, two 0.4.9 deferrals, and four
 rows closed on reviewed evidence. No public 0.4.9 asset or customer update
 exists. The earlier held 0.4.7 and 0.4.8 candidates were never tagged or
 published, and their identities are retired rather than reused for these

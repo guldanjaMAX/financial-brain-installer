@@ -19,6 +19,7 @@ const escapedVersion = version.replaceAll(".", "\\.");
 const currentEvidencePlan = read(`docs/release-evidence/v${version}-candidate-release-evidence-plan.md`);
 const updateAudit = read("docs/UPDATE-AUDIT.md");
 const maintainerGuide = read("docs/MAINTAINER.md");
+const developerReadme = read("docs/README-developer.md");
 const retiredEvidencePlan = read("docs/release-evidence/v0.4.7-candidate-release-evidence-plan.md");
 // Every candidate plan below the current version was never shipped; each must
 // say it is superseded so its planning cannot be read as live release scope.
@@ -67,6 +68,9 @@ assert.match(currentEvidencePlan, new RegExp(`^# v${escapedVersion} candidate re
   "current candidate has no version-matched evidence plan");
 assert.match(currentEvidencePlan, /Candidate source commit: unbound[\s\S]*?Field execution: none/,
   "the current plan must not imply final-SHA or field proof before either exists");
+assert.match(developerReadme,
+  /41-row release audit has 37 unresolved incidents, two 0\.4\.9 deferrals, and four\s+rows closed on reviewed evidence/,
+  "the developer status must report the current incident-registry counts");
 // Acceptance-text counts by reference point, verified against the registry at
 // each point when written. Since the held 0.4.8 candidate: UPDATE-006,
 // UPDATE-012 and UPDATE-025 changed (ADR 007 and ADR 008) and UPDATE-044 was
