@@ -235,6 +235,23 @@ the optional workers.dev route could not be enabled.
 
 **Who:** you.
 
+### 3c. `Issue: BRAIN_DOMAIN_MISSING`
+
+**You see:** a source inventory or provenance command stops before reading the
+admin key or contacting the Brain because the manifest has no saved
+`brain.domain`.
+
+**Why:** the command has no verified HTTPS address for this Brain. Guessing a
+hostname could send its admin key to the wrong place, so it refuses first.
+
+**Fix:** restore the exact deployed HTTPS hostname to `brain.domain` from a
+known-good manifest backup. If no trusted backup has it, run `brain health
+<manifest>` in an interactive terminal with this Brain's Cloudflare access,
+verify the workers.dev hostname it finds, and save that exact hostname. Then
+rerun the refused command. Do not guess the address.
+
+**Who:** you.
+
 ---
 
 ### 4. `R2 is not ready`
