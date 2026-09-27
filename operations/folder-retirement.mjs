@@ -206,12 +206,13 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
     }
     try { unlinkIfPresent(io, temporaryPath); } catch { /* preserve the primary error */ }
     try { unlinkIfPresent(io, rollbackPath); } catch { /* preserve the primary error */ }
-    if (backupCreated) {
+    if (backupCreated && !restorationError) {
       try { unlinkIfPresent(io, backupPath); } catch { /* preserve the primary error */ }
     }
     if (restorationError) {
       throw new Error(
-        `${error.message}; the original manifest could not be restored exactly: ${restorationError.message}`,
+        `${error.message}; the original manifest could not be restored exactly: ${restorationError.message}. ` +
+          `The verified backup was kept at ${backupPath}.`,
         { cause: error },
       );
     }

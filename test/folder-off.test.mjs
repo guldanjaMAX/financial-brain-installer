@@ -10,6 +10,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -392,6 +393,45 @@ try {
       false,
       "the backup from the failed replacement is removed",
     );
+
+    const restoreFailure = fixture({ mode: 0o640 });
+    const restoreFailureBytes = readFileSync(restoreFailure.manifestPath);
+    const restoreFailureBackup = `${restoreFailure.manifestPath}.before-folder-off-20260928T163600Z`;
+    let restoreFailureRenames = 0;
+    let restoreFailureDirectorySyncs = 0;
+    let restoreError = null;
+    try {
+      writeManifestAtomically(
+        restoreFailure.manifestPath,
+        { changed: true },
+        {
+          now: () => new Date(FIXED_NOW),
+          fs: {
+            renameSync(from, to) {
+              restoreFailureRenames += 1;
+              if (restoreFailureRenames === 2) throw new Error("injected restoration rename failure");
+              return renameSync(from, to);
+            },
+          },
+          syncDirectory: () => {
+            restoreFailureDirectorySyncs += 1;
+            if (restoreFailureDirectorySyncs === 1) {
+              throw new Error("injected post-replacement durability failure");
+            }
+          },
+        },
+      );
+      assert.fail("the injected restoration failure must escape");
+    } catch (error) {
+      restoreError = error;
+    }
+    assert.equal(restoreFailureRenames, 2,
+      `the failure reaches the restoration rename rather than stopping before rollback: ${restoreError.message}`);
+    assert.match(restoreError.message, /injected restoration rename failure/);
+    assert.match(restoreError.message, new RegExp(restoreFailureBackup.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
+    assert.equal(existsSync(restoreFailureBackup), true,
+      "a failed restoration keeps the verified backup");
+    assert.deepEqual(readFileSync(restoreFailureBackup), restoreFailureBytes);
 
     const postRenameControl = fixture({ mode: 0o640 });
     const controlIntended = { ...postRenameControl.manifest, post_rename_control: true };
