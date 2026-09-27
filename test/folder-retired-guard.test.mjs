@@ -17,6 +17,7 @@ import {
   cmdIngestLocal,
   cmdLoad,
   cmdProvenanceAssess,
+  cmdSchedule,
   completeSetupFolderStep,
   inspectProvenanceRepairReadiness,
   retiredLocalFolderOf,
@@ -398,6 +399,44 @@ try {
     });
     assert.equal(calls.length, 1, "a local dry run now holds the reader lease that folder off probes");
     assert.equal(lockControl.dry_run, true);
+  }
+
+  {
+    const f = fixture();
+    const counters = { adminKey: 0, base: 0, expectation: 0, install: 0 };
+    const folderScheduler = {
+      installFolderScheduler() {
+        counters.install += 1;
+        return {
+          warnings: [],
+          expectedRefreshSeconds: 3600,
+          cron: "0 * * * *",
+          folderPath: f.retiredPath,
+          plistPath: join(f.base, "fixture.plist"),
+          stdoutPath: join(f.base, "stdout.log"),
+          stderrPath: join(f.base, "stderr.log"),
+        };
+      },
+    };
+    const options = {
+      flags: { install: true, folder: true },
+      platform: "darwin",
+      resolveAdminKey() { counters.adminKey += 1; return "fixture-admin-proof"; },
+      async resolveBaseUrl() { counters.base += 1; return "https://fixture.invalid"; },
+      async postSourceExpectation() { counters.expectation += 1; return { ok: true }; },
+      folderScheduler,
+    };
+    const refused = await cmdSchedule(f.manifestPath, options).then(() => null, (error) => error);
+    assert.match(refused?.message || "", /retired.*cannot have a scheduler installed/i);
+    assert.equal(supportErrorCode(refused, { command: "schedule" }), "INPUT_REFUSED");
+    assert.deepEqual(counters, { adminKey: 0, base: 0, expectation: 0, install: 0 },
+      "the retired command reaches its refusal before credentials, Cloudflare, or scheduler installation");
+
+    writeFileSync(f.manifestPath, manifestBytes(activeControl(f)));
+    const installed = await cmdSchedule(f.manifestPath, options);
+    assert.equal(installed.folderPath, f.retiredPath);
+    assert.deepEqual(counters, { adminKey: 1, base: 1, expectation: 1, install: 1 },
+      "the non-retired control reaches each install boundary exactly once");
   }
 
   {

@@ -24273,31 +24273,36 @@ async function cmdSupport() {
  * vocabulary because the folder they are watching happens to live outside
  * Google Drive.
  */
-async function cmdScheduleFolder(m, manifestPath, action) {
+async function cmdScheduleFolder(m, manifestPath, action, options = {}) {
   const source = String(m?.corpora?.local_folder?.source || "documents");
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
+  const postExpectation = options.postSourceExpectation ?? postSourceExpectation;
   let dataPlane = null;
   if (action === "install") {
-    const adminKey = resolveAdminKey(manifestPath);
+    const adminKey = resolveKey(manifestPath);
     if (!adminKey) {
       die("no admin key found, so the watched folder schedule cannot be reflected in source freshness.");
     }
-    dataPlane = { base: await resolveBaseUrl(m, null), adminKey };
+    dataPlane = { base: await resolveBase(m, null), adminKey };
   }
+  const scheduler = options.folderScheduler ?? await import("./operations/folder-scheduler.mjs");
   const {
     installFolderScheduler,
     statusFolderScheduler,
     removeFolderScheduler,
-  } = await import("./operations/folder-scheduler.mjs");
+  } = scheduler;
+  const schedulerOptions = options.schedulerOptions || {};
 
   const result = action === "install"
-    ? installFolderScheduler(manifestPath)
+    ? installFolderScheduler(manifestPath, schedulerOptions)
     : action === "remove"
-      ? removeFolderScheduler(manifestPath)
-      : statusFolderScheduler(manifestPath);
+      ? removeFolderScheduler(manifestPath, schedulerOptions)
+      : statusFolderScheduler(manifestPath, schedulerOptions);
 
   for (const warning of result.warnings || []) warn(warning);
   if (action === "install") {
-    await postSourceExpectation(dataPlane.base, dataPlane.adminKey, {
+    await postExpectation(dataPlane.base, dataPlane.adminKey, {
       source, kind: "upload", expected_refresh_seconds: result.expectedRefreshSeconds,
     });
     ok(`watched folder refresh installed for ${result.cron}`);
@@ -24311,10 +24316,10 @@ async function cmdScheduleFolder(m, manifestPath, action) {
   if (action === "remove") {
     ok(result.removed || result.loaded ? "watched folder refresh removed" : "watched folder refresh was not installed");
     try {
-      const adminKey = resolveAdminKey(manifestPath);
+      const adminKey = resolveKey(manifestPath);
       if (!adminKey) throw new Error("no admin key is available");
-      const base = await resolveBaseUrl(m, null);
-      await postSourceExpectation(base, adminKey, { source, kind: "upload", expected_refresh_seconds: null });
+      const base = await resolveBase(m, null);
+      await postExpectation(base, adminKey, { source, kind: "upload", expected_refresh_seconds: null });
       ok(`${source} freshness expectation cleared`);
     } catch (error) {
       warn(`the local scheduler is removed, but its remote freshness expectation could not be cleared: ${String(error?.message || error).slice(0, 160)}`);
@@ -24661,7 +24666,14 @@ export async function cmdSchedule(manifestPath, options = {}) {
   // The watched local folder is a second lane on the same command, because it
   // is the same question ("what refreshes itself on this Mac") asked about a
   // different source.
-  if (flags.folder) return cmdScheduleFolder(m, manifestPath, action);
+  if (flags.folder && action === "install" && retiredLocalFolderOf(m)) {
+    dieInputRefused(
+      "The watched folder is retired and cannot have a scheduler installed. " +
+        "No admin key was read and no Cloudflare request was made.",
+      "LOCAL_FOLDER_RETIRED:retired_source",
+    );
+  }
+  if (flags.folder) return cmdScheduleFolder(m, manifestPath, action, options);
   if (provider) {
     const source = assertSourceName(m?.corpora?.[provider]?.source || provider);
     const resolveAdminKeyImpl = options.resolveAdminKey ?? resolveAdminKey;
