@@ -11,6 +11,7 @@ import { validateIncidents, releaseBlockers, releaseAdjudication, runRegressions
 
 const cases = JSON.parse(readFileSync(new URL("../docs/update-incidents.json", import.meta.url), "utf8"));
 const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
 assert.equal(SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION, "0.4.9");
 assert.equal(assertSourceInventoryV3ReleaseVersion(packageVersion), packageVersion,
   "the held candidate must use a non-colliding source-inventory identity");
@@ -187,6 +188,23 @@ for (const item of cases.filter((i) => i.deferral)) {
   assert.equal(item.deferral.version, packageVersion, `${item.id} defers for a version nobody is cutting`);
   assert.ok(!UNDEFERRABLE_INCIDENTS.includes(item.id));
 }
+const currentReleaseSection = changelog.split(new RegExp(`^## ${packageVersion.replaceAll(".", "\\.")}\\s*$`, "m"))[1]
+  ?.split(/^## /m)[0] || "";
+const notCoveredBlock = /^### This release does NOT cover\s*\n\n([\s\S]*?)\n\n(?=- \*\*)/m
+  .exec(currentReleaseSection)?.[1] || "";
+const deferredIds = cases
+  .filter((item) => item.deferral?.version === packageVersion)
+  .map((item) => item.id)
+  .sort();
+assert.ok(notCoveredBlock, "the current changelog needs a This release does NOT cover block");
+for (const id of deferredIds) {
+  assert.match(notCoveredBlock, new RegExp(`\\b${id}\\b`),
+    `${id} must stay visible in the current release limitation block`);
+}
+assert.match(notCoveredBlock,
+  /UPDATE-012[\s\S]*Windows x64 is the only supported Windows runtime[\s\S]*Windows ARM64 ships unproven/i);
+assert.match(notCoveredBlock,
+  /UPDATE-044[\s\S]*bank breadth ships unproven[\s\S]*bank invitations stay closed/i);
 assert.ok(releaseBlockers(cases, packageVersion).length > 0,
   "0.4.0 still has real blockers; scoping the gate must not be mistaken for clearing it");
 const calls = [];

@@ -13,6 +13,13 @@ offered as a customer update; its entries below ship for the first time in
 0.4.9, and its identity is retired so its evidence cannot be confused with
 this changed candidate.
 
+### This release does NOT cover
+
+- **UPDATE-012:** Windows x64 is the only supported Windows runtime in this
+  release. Windows ARM64 ships unproven.
+- **UPDATE-044:** Bank breadth ships unproven.
+  Bank invitations stay closed in this release.
+
 - **Dollar amounts in a partly answered question are no longer cut.** When an
   answer covers only part of a question, the Brain keeps the sentences your
   documents support and names what they do not cover. That trimming used to
