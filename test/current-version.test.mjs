@@ -20,7 +20,11 @@ const currentEvidencePlan = read(`docs/release-evidence/v${version}-candidate-re
 const updateAudit = read("docs/UPDATE-AUDIT.md");
 const maintainerGuide = read("docs/MAINTAINER.md");
 const developerReadme = read("docs/README-developer.md");
+const updateIncidents = json("docs/update-incidents.json");
 const retiredEvidencePlan = read("docs/release-evidence/v0.4.7-candidate-release-evidence-plan.md");
+const hardCodedIncidentCounts = ["/", "41-row release audit has 37 unresolved incidents"].join("");
+assert.ok(!read("test/current-version.test.mjs").includes(hardCodedIncidentCounts),
+  "the developer status check must derive incident counts instead of pinning number words");
 // Every candidate plan below the current version was never shipped; each must
 // say it is superseded so its planning cannot be read as live release scope.
 {
@@ -68,9 +72,38 @@ assert.match(currentEvidencePlan, new RegExp(`^# v${escapedVersion} candidate re
   "current candidate has no version-matched evidence plan");
 assert.match(currentEvidencePlan, /Candidate source commit: unbound[\s\S]*?Field execution: none/,
   "the current plan must not imply final-SHA or field proof before either exists");
-assert.match(developerReadme,
-  /41-row release audit has 37 unresolved incidents, two 0\.4\.9 deferrals, and four\s+rows closed on reviewed evidence/,
-  "the developer status must report the current incident-registry counts");
+const incidentCounts = {
+  total: updateIncidents.length,
+  unresolved: updateIncidents.filter((item) => item.status !== "verified").length,
+  deferred: updateIncidents.filter((item) => item.deferral?.version === version).length,
+  closed: updateIncidents.filter((item) => item.status === "verified").length,
+};
+const smallNumberWords = [
+  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+];
+const writtenCount = (count) => smallNumberWords[count] ?? String(count);
+let developerCountChecks = 0;
+function assertDeveloperIncidentCounts(document) {
+  developerCountChecks += 1;
+  assert.match(document, new RegExp(
+    `${incidentCounts.total}-row release audit has ${incidentCounts.unresolved} unresolved incidents, ` +
+    `${writtenCount(incidentCounts.deferred)} ${escapedVersion} deferrals, and ` +
+    `${writtenCount(incidentCounts.closed)}\\s+` +
+    "rows closed on reviewed evidence",
+  ), "the developer status must report counts derived from the incident registry");
+}
+assertDeveloperIncidentCounts(developerReadme);
+const plantedWrongCount = developerReadme.replace(
+  `${incidentCounts.total}-row release audit`,
+  `${incidentCounts.total + 1}-row release audit`,
+);
+assert.notEqual(plantedWrongCount, developerReadme,
+  "the wrong-count probe must alter the developer status line");
+assert.throws(() => assertDeveloperIncidentCounts(plantedWrongCount),
+  /counts derived from the incident registry/,
+  "a planted wrong count must fail the registry-derived check");
+assert.equal(developerCountChecks, 2,
+  "the count validator must reach both the green control and planted-wrong-count decision points");
 // Acceptance-text counts by reference point, verified against the registry at
 // each point when written. Since the held 0.4.8 candidate: UPDATE-006,
 // UPDATE-012 and UPDATE-025 changed (ADR 007 and ADR 008) and UPDATE-044 was
