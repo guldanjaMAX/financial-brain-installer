@@ -227,6 +227,9 @@ try {
     assert.match(off.text, /Every document already loaded from it stays in your Brain/);
     assert.match(off.text, /Changes you make to files there will no longer reach your Brain/);
     assert.match(off.text, /anything that saved files into this folder for your Brain/);
+    assert.ok(!off.text.includes(renderCliCommands(
+      `brain schedule ${f.manifestPath} --install --folder`,
+    )), "successful folder retirement must not print scheduler recovery guidance");
 
     const logBaseline = [installed.stdoutPath, installed.stderrPath].map((path) => {
       const state = statSync(path);
@@ -237,8 +240,8 @@ try {
     assert.throws(() => runFolderIngest(f.manifestPath, schedulerOptions(f, launch.launchctl, {
       expectedConfigHash: scheduledHash,
       spawn: (...args) => { staleLog.push(args); return { status: 0 }; },
-    })), /corpora\.local_folder\.enabled must be true/);
-    assert.equal(staleLog.length, 0, "a stale scheduled tick reaches the enabled decision but never spawn");
+    })), /watched folder is retired and cannot have a scheduler installed/);
+    assert.equal(staleLog.length, 0, "a stale scheduled tick reaches the retired-folder decision but never spawn");
     const nextDayStatus = statusFolderScheduler(f.manifestPath, schedulerOptions(f, launch.launchctl));
     assert.equal(nextDayStatus.loaded, false);
     assert.equal(existsSync(installed.plistPath), false);
@@ -247,6 +250,33 @@ try {
       return { path, size: state.size, mtimeMs: state.mtimeMs };
     }), logBaseline, "the simulated next-day tick changes neither folder log");
     assert.deepEqual(dbSnapshot(f.dbPath), afterOffDb, "the simulated next-day tick changes no document");
+  }
+
+  {
+    const f = fixture();
+    const launch = launchctlHarness();
+    const installed = installFolderScheduler(f.manifestPath, schedulerOptions(f, launch.launchctl));
+    let manifestWrites = 0;
+    const failed = await capture(() => cmdFolder(f.manifestPath, ["off"], folderOptions(f, launch, {
+      writeManifestAtomically: () => {
+        manifestWrites += 1;
+        throw new Error("injected manifest write failure");
+      },
+    })));
+    const recoveryCommand = renderCliCommands(
+      `brain schedule ${f.manifestPath} --install --folder`,
+    );
+    assert.equal(manifestWrites, 1,
+      "the failure arm reaches the manifest write after scheduler removal");
+    assert.equal(launch.calls.some((args) => args[0] === "bootout"), true,
+      "the failure arm reaches scheduled-job removal before the write");
+    assert.equal(existsSync(installed.plistPath), false,
+      "the scheduled job remains removed after the manifest write fails");
+    assert.match(failed.error?.message || "", /scheduled job is already removed/i);
+    assert.ok((failed.error?.message || "").includes(recoveryCommand),
+      "the write failure names the rendered command that restores the scheduled job");
+    assert.deepEqual(readFileSync(f.manifestPath), Buffer.from(f.original),
+      "the failed write leaves the original manifest bytes live");
   }
 
   {

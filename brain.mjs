@@ -24493,16 +24493,30 @@ export async function cmdFolder(manifestPath, argv = process.argv.slice(4), opti
     }
   }
 
-  const writeResult = (options.writeManifestAtomically ?? writeManifestAtomically)(
-    manifestPath,
-    intended,
-    {
-      platform,
-      now: () => writeNow,
-      ...(options.manifestWriteOptions || {}),
-      expectedOriginalBytes: initialManifestBytes,
-    },
-  );
+  let writeResult;
+  try {
+    writeResult = (options.writeManifestAtomically ?? writeManifestAtomically)(
+      manifestPath,
+      intended,
+      {
+        platform,
+        now: () => writeNow,
+        ...(options.manifestWriteOptions || {}),
+        expectedOriginalBytes: initialManifestBytes,
+      },
+    );
+  } catch (error) {
+    if (platform !== "darwin") throw error;
+    const recoveryCommand = renderCliCommands(
+      `brain schedule ${manifestPath} --install --folder`,
+    );
+    throw new Error(
+      "The watched-folder scheduled job is already removed, but the manifest could not be updated: " +
+        `${String(error?.message || error)}. To restore scheduled reads before trying again, run: ` +
+        recoveryCommand,
+      { cause: error },
+    );
+  }
 
   try {
     const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
