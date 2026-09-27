@@ -13,6 +13,16 @@ offered as a customer update; its entries below ship for the first time in
 0.4.9, and its identity is retired so its evidence cannot be confused with
 this changed candidate.
 
+- **Dollar amounts in a partly answered question are no longer cut.** When an
+  answer covers only part of a question, the Brain keeps the sentences your
+  documents support and names what they do not cover. That trimming used to
+  treat the decimal point in a figure such as $1,234.73 as the end of a
+  sentence, so an answer could show a garbled fragment or a shorter, wrong
+  figure next to its citation. A sentence now ends only at a full stop
+  followed by a space, a closing quote or bracket, or the end of the answer.
+  If you asked a money question on an earlier version and the answer ended
+  with "Not covered by the documents", ask it again after you update.
+
 - **You can turn off the watched folder, and nothing you loaded is lost.** Earlier versions could re-read one folder on your computer on a schedule, which treated a moved file as a new document and a missing file as one to remove. Run `brain folder <manifest> off` once: it stops the scheduled read, keeps every document already loaded, and removes nothing. After that the folder is simply yours to keep, move or tidy. Changes to files there no longer reach your Brain, and anything that saved files into that folder for your Brain stops reaching it. Your email, calendar and other connections keep updating on their own. To check: `brain folder <manifest> status`.
 
 - **`brain health` no longer touches your Cloudflare browser sign-in when it
