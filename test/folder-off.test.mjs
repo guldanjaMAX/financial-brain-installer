@@ -42,6 +42,9 @@ import { renderCliCommands } from "../operations/cli-guidance.mjs";
 // POSIX permission bits are not meaningful on Windows (Node reports 0o666/0o444 there), so mode
 // assertions run only where the platform honours them.
 const POSIX_MODES = process.platform !== "win32";
+// Directory fsync is skipped on a win32 filesystem by design, so the durability failpoints name a POSIX
+// filesystem explicitly and exercise the same path on every host (the option only gates directory sync).
+const POSIX_FILESYSTEM = process.platform === "win32" ? "linux" : process.platform;
 
 const FIXED_NOW = new Date("2026-09-28T16:36:00.000Z");
 const ROOT = process.env.FOLDER_OFF_TEST_ROOT || tmpdir();
@@ -530,6 +533,7 @@ try {
     let postRenameDirectorySyncs = 0;
     assert.throws(() => writeManifestAtomically(postRenameFailure.manifestPath, { changed: true }, {
       now: () => new Date(FIXED_NOW),
+      filesystemPlatform: POSIX_FILESYSTEM,
       syncDirectory: () => {
         postRenameDirectorySyncs += 1;
         if (postRenameDirectorySyncs === 1) throw new Error("injected directory fsync failure after rename");
@@ -566,6 +570,7 @@ try {
         { changed: true },
         {
           now: () => new Date(FIXED_NOW),
+          filesystemPlatform: POSIX_FILESYSTEM,
           fs: {
             renameSync(from, to) {
               restoreFailureRenames += 1;
@@ -628,6 +633,7 @@ try {
     let controlDirectorySyncs = 0;
     writeManifestAtomically(postRenameControl.manifestPath, controlIntended, {
       now: () => new Date(FIXED_NOW),
+      filesystemPlatform: POSIX_FILESYSTEM,
       syncDirectory: () => { controlDirectorySyncs += 1; },
     });
     assert.equal(controlDirectorySyncs, 1, "the successful control reaches the directory fsync once");
