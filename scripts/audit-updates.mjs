@@ -195,7 +195,11 @@ export function releaseAdjudication(cases, version) {
   };
 }
 
-export const SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION = "0.4.8";
+export const SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION = "0.4.9";
+// Held candidates that were never tagged, published, or offered as customer
+// updates. Their identities stay bound to their earlier evidence, so changed
+// bytes must never ship under them.
+const RETIRED_HELD_CANDIDATE_VERSIONS = new Set(["0.4.7", "0.4.8"]);
 
 /** Prevent the v3 inventory contract from reusing a published or retired candidate identity. */
 export function assertSourceInventoryV3ReleaseVersion(version) {
@@ -211,9 +215,9 @@ export function assertSourceInventoryV3ReleaseVersion(version) {
     if (candidate[index] < minimum[index]) break;
   }
   if (candidate.every((part, index) => part === minimum[index])) return version;
-  if (version === "0.4.7") {
+  if (RETIRED_HELD_CANDIDATE_VERSIONS.has(version)) {
     throw new Error(
-      "source inventory contract v3 cannot reuse retired held candidate identity 0.4.7; " +
+      `source inventory contract v3 cannot reuse retired held candidate identity ${version}; ` +
       "that candidate was never public or live, but its identity remains bound to its earlier evidence; " +
       `the package version must be ${SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION} or newer`,
     );

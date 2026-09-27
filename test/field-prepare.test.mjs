@@ -1009,6 +1009,10 @@ function makeCleanPlanFixture() {
     readFileSync(join(ROOT, "operations", "locked-wrangler-runtime.mjs")),
   );
   writeFileSync(
+    join(root, "operations", "wrangler-runtime-contract.mjs"),
+    readFileSync(join(ROOT, "operations", "wrangler-runtime-contract.mjs")),
+  );
+  writeFileSync(
     join(root, "operations", "package-bundle-verifier.mjs"),
     readFileSync(join(ROOT, "operations", "package-bundle-verifier.mjs")),
   );

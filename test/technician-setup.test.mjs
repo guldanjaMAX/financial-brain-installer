@@ -267,7 +267,12 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(optimizeRoute, /`accepted_resolution_reverification`/);
   assert.match(optimizeRoute, /does not record\s+a discovery gap, reingest the file, remove family members, or drain the shared\s+vector queue/i);
   assert.match(optimizeRoute, /Never reuse the earlier approval hash/i);
-  assert.match(optimizeRoute, /held 0\.4\.8 candidate is not a customer release/i);
+  assert.match(optimizeRoute,
+    /A held or field-test candidate is not a customer release and must not be used on a\s+customer Brain; only a release the public release feed marks stable and available\s+qualifies\./);
+  // The shipped skill outlives any one candidate, so it never names a held
+  // candidate's version.
+  assert.doesNotMatch(content, /\bheld v?\d+\.\d+\.\d+\b/i,
+    "the shared skill must not name a held candidate version");
   assert.doesNotMatch(optimizeRoute, /planned owner-facing workflow|lucky|qualif(?:y|ies|ied) for access/i);
   assert.ok(releaseManifest > updateRouteStart && releaseManifest < agentPlaybook,
     "the held release feed must be the first live update decision");

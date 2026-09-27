@@ -343,8 +343,9 @@ repair as incomplete instead of calling it fixed.
 Finish and show the read-only Optimize report first. A provenance gap in that
 report is not approval to repair it. Confirm that the exact installed stable
 release advertises the one-target provenance lane before naming or running it.
-The held 0.4.8 candidate is not a customer release and must not be used on a
-customer Brain.
+A held or field-test candidate is not a customer release and must not be used on a
+customer Brain; only a release the public release feed marks stable and available
+qualifies.
 
 When a supported release is available, offer this lane only for one exact file
 the owner chooses from the manifest's enabled local folder source:

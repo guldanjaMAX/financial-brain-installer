@@ -127,7 +127,7 @@
       "test/cli-path-persist.test.mjs",
       "test/technician-setup.test.mjs"
     ],
-    "acceptance": "Resolve actual executable and version before and after installing into one prefix; run pasted commands with restrictive PowerShell and redirected APPDATA. Verify every printed human command uses the actual installed executable; require physical Windows and ARM64 acceptance before closure.",
+    "acceptance": "Resolve actual executable and version before and after installing into one prefix; run pasted commands with restrictive PowerShell and redirected APPDATA. Verify every printed human command uses the actual installed executable; require physical Windows x64 acceptance before closure. The Windows ARM64 CLI-identity requirement is carried by UPDATE-012.",
     "findings": [
       "F15"
     ],
@@ -261,7 +261,7 @@
     "tests": [
       "scripts/windows-dpapi-release-gate.mjs"
     ],
-    "acceptance": "Run actual packaged CLI, DPAPI, login, update interruption and normal process exit on Windows ARM64 Node 24; x64 hosted CI is insufficient.",
+    "acceptance": "Run actual packaged CLI, DPAPI, login, update interruption and normal process exit on Windows ARM64 Node 24; x64 hosted CI is insufficient. On physical Windows ARM64, resolve actual executable and version before and after installing into one prefix; run pasted commands with restrictive PowerShell and redirected APPDATA. Verify every printed human command uses the actual installed executable.",
     "findings": [
       "FIELD-ARM64"
     ],

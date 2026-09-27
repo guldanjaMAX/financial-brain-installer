@@ -66,7 +66,13 @@ try {
     domainValue,
     oneAccount,
     "clean-brain",
-    { readSubdomain: async () => ({ subdomain: "owner-subdomain" }) },
+    {
+      readSubdomain: async () => ({ subdomain: "owner-subdomain" }),
+      verifyWorkersDevCandidate: async (candidate) => {
+        assert.equal(candidate, "clean-brain.owner-subdomain.workers.dev");
+        return { ok: true };
+      },
+    },
   );
   assert.equal(domain, "clean-brain.owner-subdomain.workers.dev");
   assert.equal(JSON.parse(readFileSync(domainManifest, "utf8")).brain.domain, domain);

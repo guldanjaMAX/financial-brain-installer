@@ -215,6 +215,26 @@ caught the mismatch rather than resolve which account is intended.
 
 **Who:** you.
 
+### 3b. `Issue: CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED`
+
+**You see:** Cloudflare sign-in worked, but the account has no workers.dev
+subdomain registered yet, and this Brain has no custom domain, so its address
+lives on that subdomain. Nothing was created.
+
+**Why:** a Cloudflare account that has never opened Workers & Pages has no
+workers.dev subdomain. This is an account setting. Waiting, a different network,
+or a different token reads the same account and gets the same answer, so the
+installer offers none of them.
+
+**Fix:** in the Cloudflare dashboard open Workers & Pages and register a
+workers.dev subdomain, then rerun the command the message names, usually
+`brain setup <manifest>` or `brain update <manifest>`.
+
+A Brain on its own custom domain is not stopped by this. Deploy only warns that
+the optional workers.dev route could not be enabled.
+
+**Who:** you.
+
 ---
 
 ### 4. `R2 is not ready`

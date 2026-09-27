@@ -17,6 +17,11 @@ import {
   workersDevRouteDisposition,
 } from "../brain.mjs";
 
+const PRODUCT_VERSION = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version;
+const WORKERS_DEV_HOST = "fixture-brain.fixture-account.workers.dev";
+
 const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-report-deploy-exit-")));
 
 function manifest(overrides = {}) {
@@ -86,7 +91,8 @@ function cloudflareHarness({ routePost = "ok", routeEnabled = true, schedule = "
   const calls = [];
   const workerMetadata = [];
   const fetchImpl = async (url, options = {}) => {
-    const path = new URL(String(url)).pathname;
+    const parsedUrl = new URL(String(url));
+    const path = parsedUrl.pathname;
     const method = options.method || "GET";
     // Record which secret each PUT carries. A bare count cannot tell "ADMIN_KEY
     // and the derived read-only key" apart from "the same secret written twice"
@@ -95,7 +101,12 @@ function cloudflareHarness({ routePost = "ok", routeEnabled = true, schedule = "
     if (method === "PUT" && path.endsWith("/secrets") && typeof options.body === "string") {
       try { secretName = JSON.parse(options.body)?.name; } catch { secretName = "<unparseable>"; }
     }
-    calls.push({ path, method, ...(secretName ? { secretName } : {}) });
+    calls.push({
+      path,
+      method,
+      ...(path === "/health" ? { host: parsedUrl.hostname } : {}),
+      ...(secretName ? { secretName } : {}),
+    });
     if (path === "/client/v4/accounts" && method === "GET") {
       return apiResponse([{ id: "fixture-account", name: "Fixture account" }]);
     }
@@ -125,6 +136,14 @@ function cloudflareHarness({ routePost = "ok", routeEnabled = true, schedule = "
     }
     if (path.endsWith("/workers/scripts/fixture-brain/secrets") && method === "PUT") {
       return apiResponse({});
+    }
+    // Deploy saves a workers.dev address only after that exact host's /health
+    // names this brain and version, so the fixture answers as this brain.
+    if (path === "/health" && method === "GET" && parsedUrl.hostname === WORKERS_DEV_HOST) {
+      return new Response(JSON.stringify({ brain: "fixture", version: PRODUCT_VERSION }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
     }
     throw new Error(`offline fixture has no response for ${method} ${path}`);
   };
@@ -202,6 +221,12 @@ try {
     env: { CLOUDFLARE_API_TOKEN: "fixture-cloudflare-value" },
   }, () => cmdDeploy(noRouteManifest));
   assert.equal(existingRouteHarness.calls.some((call) => call.path.endsWith("/schedules")), true);
+  assert.deepEqual(
+    existingRouteHarness.calls.filter((call) => call.path === "/health").map((call) => call.host),
+    [WORKERS_DEV_HOST],
+    "the saved workers.dev address must be proved through its own /health first",
+  );
+  assert.equal(JSON.parse(readFileSync(noRouteManifest, "utf8")).brain.domain, WORKERS_DEV_HOST);
 
   const customRouteManifest = writeManifest(
     "custom-route.manifest.json",

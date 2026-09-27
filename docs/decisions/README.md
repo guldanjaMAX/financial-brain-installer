@@ -14,3 +14,4 @@ code it governs.
 - [004: Scope the incident release gate to the version being cut](004-version-scoped-release-scope.md)
 - [005: Split disposable deployment proof across causal approval phases](005-phased-disposable-deployment-proof.md)
 - [006: Pin supervised install validation to contract version 2](006-pin-supervised-install-contract-v2.md)
+- [007: Re-home UPDATE-006's Windows ARM64 clause into UPDATE-012](007-rehome-update-006-arm64-clause.md)

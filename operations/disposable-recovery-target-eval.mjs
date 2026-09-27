@@ -147,7 +147,7 @@ function assertObservation(value, binding) {
   ]) || value.target_resource_fingerprint !== binding.target_resource_fingerprint ||
       value.worker_version_id !== binding.active_worker_version_id || value.mode !== "active" ||
       !exactKeys(value.health, ["status", "version", "accepting_documents"]) ||
-      value.health.status !== "pass" || value.health.version !== "0.4.8" ||
+      value.health.status !== "pass" || value.health.version !== "0.4.9" ||
       value.health.accepting_documents !== true ||
       !exactKeys(value.projection, [
         "documents", "d1_chunks", "fts_rows", "vectorize_vectors",

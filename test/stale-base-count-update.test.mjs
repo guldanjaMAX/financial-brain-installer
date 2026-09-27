@@ -211,8 +211,19 @@ async function runUpdate({ baseCount, vectors = 5 }) {
     brain.env,
     { waitUntil() {}, passThroughOnException() {} },
   );
+  const backlogReads = [];
   try {
     await cmdUpgrade(manifestPath, {
+      // The pre-pause queue gate reads the real Worker's authenticated
+      // documents aggregate through the same router as health.
+      updateBacklogOptions: {
+        resolveAdminKey: () => ADMIN_LABEL,
+        http: async (url, init = {}) => {
+          backlogReads.push(brain.env.VECTOR_DRAIN_MODE);
+          return request(url, init);
+        },
+        sleep: async () => { throw new Error("a readable backlog receipt must not be retried"); },
+      },
       resolveAccount: async () => ({ id: "fixture-account", name: "Fixture" }),
       d1Query,
       cf: async () => ({ bookmark: "fixture-bookmark" }),
@@ -260,9 +271,9 @@ async function runUpdate({ baseCount, vectors = 5 }) {
       cmdDrain: async () => { events.push("drain"); },
       cmdTest: async () => { events.push("acceptance"); },
     });
-    return { ...brain, sandbox, manifestPath, events, waits, migrationsApplied, bootstrapResult, error: null };
+    return { ...brain, sandbox, manifestPath, events, waits, backlogReads, migrationsApplied, bootstrapResult, error: null };
   } catch (error) {
-    return { ...brain, sandbox, manifestPath, events, waits, migrationsApplied, bootstrapResult, error };
+    return { ...brain, sandbox, manifestPath, events, waits, backlogReads, migrationsApplied, bootstrapResult, error };
   }
 }
 
@@ -288,6 +299,8 @@ for (const scenario of [
       assert.equal(state.status, "verified");
       assert.equal(state.base, state.chunks);
       assert.equal(result.env.VECTOR_DRAIN_MODE, "active");
+      assert.deepEqual(result.backlogReads, ["active"],
+        "the pre-pause queue gate must read the real active Worker exactly once");
       assert.ok(result.events.indexOf("migrate") > result.events.indexOf("health:paused-for-upgrade:true"),
         JSON.stringify(result.events));
       assert.ok(result.events.indexOf("bootstrap") > result.events.indexOf("migrate"),
@@ -310,6 +323,7 @@ test("brain update still refuses a genuine provider excess before migration", as
     assert.equal(result.migrationsApplied, null, "migration must not start after the gate refuses");
     assert.equal(result.bootstrapResult, null, "bootstrap must not start after the gate refuses");
     assert.equal(result.env.VECTOR_DRAIN_MODE, "paused-for-upgrade");
+    assert.deepEqual(result.backlogReads, ["active"]);
     assert.ok(result.statements.some((sql) =>
       /SELECT COUNT\(\*\) AS expected_vectors FROM chunks/i.test(sql)),
     "the refusal must follow the exact-count decision point");

@@ -1493,11 +1493,16 @@ export function classifyUpdatePreviewProjectionReceipt(inventory, options = {}) 
 }
 
 /**
- * Validate only the authenticated aggregate envelope shipped through v0.4.6.
- * The response does not bind Worker generation or drain mode, so this function
- * returns an observation and can never produce projection readiness.
+ * Validate the exact v0.4.6 authenticated aggregate envelope and its queue
+ * counts, without judging readiness. This is the legacy counterpart of
+ * validateVectorProjectionAggregateReceipt: the update backlog gate asks only
+ * whether anything is queued, so an empty, coherent outbox whose Worker is not
+ * yet query-ready (bootstrap required, verification pending, or a provider
+ * mutation still processing) is empty for that gate. v0.4.6 itself tells the
+ * owner to run `brain update` to resume its bootstrap. Incoherent or partial
+ * envelopes still refuse here.
  */
-export function classifyLegacyV046ProjectionObservation(inventory, options = {}) {
+export function validateLegacyV046ProjectionAggregateReceipt(inventory, options = {}) {
   const expectedVersion = options?.expectedVersion;
   const expectedBackend = options?.expectedBackend ?? "d1";
   if (!isLegacyPre047Version(expectedVersion) || expectedBackend !== "d1" ||
@@ -1505,7 +1510,16 @@ export function classifyLegacyV046ProjectionObservation(inventory, options = {})
       !Array.isArray(inventory.rows)) {
     refuse("UPDATE_PREVIEW_READINESS_RECEIPT_INVALID");
   }
-  const aggregate = validateProjectionAggregateFields(inventory, expectedBackend);
+  return immutable(validateProjectionAggregateFields(inventory, expectedBackend));
+}
+
+/**
+ * Validate only the authenticated aggregate envelope shipped through v0.4.6.
+ * The response does not bind Worker generation or drain mode, so this function
+ * returns an observation and can never produce projection readiness.
+ */
+export function classifyLegacyV046ProjectionObservation(inventory, options = {}) {
+  const aggregate = validateLegacyV046ProjectionAggregateReceipt(inventory, options);
   const verdict = projectionAggregateVerdict(aggregate);
   return immutable({
     backend: aggregate.backend,

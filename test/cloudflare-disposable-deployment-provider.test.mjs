@@ -125,7 +125,7 @@ function manifestBinding(role) {
     enabledCorpora: [],
     ocrEnabled: "0",
     ocrModel: "@cf/meta/llama-4-scout-17b-16e-instruct",
-    productVersion: "0.4.8",
+    productVersion: "0.4.9",
     recoveryArtifactKeySecret: source
       ? null
       : "keychain://brain-test-v048-field-target-recovery-gate-a48f1102/artifact-v1",
@@ -1070,7 +1070,7 @@ testWithMacosPrivateReceipt("baseline reconciliation never duplicates an orphane
             number: 1,
             tag_sha256: digest(`v048-field-target-bootstrap-${HASH}`),
             message_sha256: digest(
-              "Financial Brain 0.4.8 disposable target maintenance bootstrap",
+              "Financial Brain 0.4.9 disposable target maintenance bootstrap",
             ),
             compatibility_date: "2026-01-01",
             main_module: "field-bootstrap.mjs",
@@ -1088,7 +1088,7 @@ testWithMacosPrivateReceipt("baseline reconciliation never duplicates an orphane
           version_id: input.version_id,
           tag_sha256: digest(`v048-field-target-bootstrap-${HASH}`),
           message_sha256: digest(
-            "Financial Brain 0.4.8 disposable target maintenance bootstrap",
+            "Financial Brain 0.4.9 disposable target maintenance bootstrap",
           ),
           compatibility_date: "2026-01-01",
           main_module: "field-bootstrap.mjs",
@@ -1125,7 +1125,7 @@ testWithMacosPrivateReceipt("baseline reconciliation never duplicates an orphane
         return {
           tag_sha256: digest(`v048-field-target-bootstrap-${HASH}`),
           message_sha256: digest(
-            "Financial Brain 0.4.8 disposable target maintenance bootstrap",
+            "Financial Brain 0.4.9 disposable target maintenance bootstrap",
           ),
           behavior_exact: true,
           behavior_sha256: "c".repeat(64),
@@ -1284,7 +1284,7 @@ testWithMacosPrivateReceipt("source final read proves valid independent key-stat
           version_id: SOURCE_VERSION,
           tag_sha256: digest(`v048-field-source-bootstrap-${HASH}`),
           message_sha256: digest(
-            "Financial Brain 0.4.8 disposable source maintenance bootstrap",
+            "Financial Brain 0.4.9 disposable source maintenance bootstrap",
           ),
           compatibility_date: "2026-01-01",
           main_module: "field-bootstrap.mjs",
@@ -1320,7 +1320,7 @@ testWithMacosPrivateReceipt("source final read proves valid independent key-stat
         return {
           tag_sha256: digest(`v048-field-source-bootstrap-${HASH}`),
           message_sha256: digest(
-            "Financial Brain 0.4.8 disposable source maintenance bootstrap",
+            "Financial Brain 0.4.9 disposable source maintenance bootstrap",
           ),
           behavior_exact: true,
           behavior_sha256: "c".repeat(64),
