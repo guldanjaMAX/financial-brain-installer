@@ -39,5 +39,10 @@ export function bankFeedProfile(env, environment) {
       linkGlobal: PLAID_PROFILE.linkGlobal,
     };
   }
+  if (String(env.BANK_FEED_PROVIDER || "").toLowerCase() === "simplefin") {
+    // The only SimpleFIN endpoint is the per-owner Access URL returned by the
+    // one-time claim. It is encrypted in D1, never a manifest or Worker var.
+    return { provider: "simplefin", apiBase: null, linkSdkUrl: null, linkGlobal: null };
+  }
   return { provider: null, apiBase: null, linkSdkUrl: null, linkGlobal: null };
 }

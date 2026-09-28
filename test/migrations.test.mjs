@@ -75,12 +75,16 @@ const ocrMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) === 47
 check("the unshipped OCR schema is one consolidated migration 0047",
   ocrMigrationFiles.length === 1 && ocrMigrationFiles[0] === "0047_ocr_page_idempotency.sql",
   JSON.stringify(ocrMigrationFiles));
-// 0048 is the separate custom API source lane. Pin the exact unshipped suffix
-// so a stray OCR 0048/0049 cannot hide behind it.
+// 0048 and 0049 are separate source lanes. Pin the exact unshipped suffix so
+// a stray OCR migration cannot hide behind either one.
 const unshippedMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) >= 47);
-check("the unshipped suffix is exactly OCR 0047 then custom API 0048",
+check("the unshipped suffix is exactly OCR 0047, custom API 0048, then SimpleFIN 0049",
   JSON.stringify(unshippedMigrationFiles) ===
-    JSON.stringify(["0047_ocr_page_idempotency.sql", "0048_custom_api_source.sql"]),
+    JSON.stringify([
+      "0047_ocr_page_idempotency.sql",
+      "0048_custom_api_source.sql",
+      "0049_simplefin_bank_feed.sql",
+    ]),
   JSON.stringify(unshippedMigrationFiles));
 
 const db = new DatabaseSync(":memory:");

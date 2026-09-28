@@ -68,7 +68,10 @@ import {
   D1_QUERY_BIND_LIMIT,
   SOURCE_FAMILY_UID_FILTER_MAX,
 } from "./worker/src/lib/store-d1.js";
-import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
+import {
+  BANK_ACCESS_WRAPPING_KEY_SECRET,
+  generateBankAccessWrappingKey,
+} from "./operations/bank-access-wrapping-key.mjs";
 import {
   clearCustomApiClipboard,
   readCustomApiClipboard,
@@ -2453,13 +2456,16 @@ export function bankFeedWorkerVars(m) {
   // field and carried all three endpoint values. Preserve that shape. A new
   // manifest with neither a provider nor overrides follows the schema default.
   const provider = manifestBankFeedProvider(feed);
-  if (provider !== "plaid" && provider !== "custom") {
-    die("corpora.bank_feed.provider must be plaid or custom before the Worker can be deployed.");
+  if (provider !== "plaid" && provider !== "simplefin" && provider !== "custom") {
+    die("corpora.bank_feed.provider must be plaid, simplefin, or custom before the Worker can be deployed.");
   }
 
-  const environment = feed.environment ?? "sandbox";
+  const environment = provider === "simplefin" ? (feed.environment ?? "production") : (feed.environment ?? "sandbox");
   if (environment !== "sandbox" && environment !== "production") {
     die("corpora.bank_feed.environment must be sandbox or production before the Worker can be deployed.");
+  }
+  if (provider === "simplefin" && environment !== "production") {
+    die("corpora.bank_feed provider simplefin uses production only; remove sandbox from the manifest.");
   }
 
   let apiBase;
@@ -2475,7 +2481,7 @@ export function bankFeedWorkerVars(m) {
     apiBase = PLAID_PROFILE.apiBases[environment];
     linkSdkUrl = PLAID_PROFILE.linkSdkUrl;
     linkGlobal = PLAID_PROFILE.linkGlobal;
-  } else {
+  } else if (provider === "custom") {
     const missing = endpointFields.filter((name) =>
       typeof feed[name] !== "string" || !feed[name].trim());
     if (missing.length) {
@@ -2504,18 +2510,28 @@ export function bankFeedWorkerVars(m) {
     apiBase = feed.api_base.trim();
     linkSdkUrl = feed.link_sdk_url.trim();
     linkGlobal = feed.link_global.trim();
+  } else {
+    if (hasEndpointOverride) {
+      die(
+        "corpora.bank_feed selects SimpleFIN but also supplies an endpoint override. " +
+          "Remove api_base, link_sdk_url, and link_global; the encrypted Access URL is claimed inside the owner's Worker.",
+      );
+    }
+    apiBase = null;
+    linkSdkUrl = null;
+    linkGlobal = null;
   }
 
-  const countries = feed.country_codes ?? ["US"];
+  const countries = provider === "simplefin" ? [] : (feed.country_codes ?? ["US"]);
   if (
-    !Array.isArray(countries) || countries.length === 0 ||
+    provider !== "simplefin" && (!Array.isArray(countries) || countries.length === 0 ||
     countries.some((code) => typeof code !== "string" || !/^[A-Z]{2}$/.test(code)) ||
-    new Set(countries).size !== countries.length
+    new Set(countries).size !== countries.length)
   ) {
     die("corpora.bank_feed.country_codes must contain unique uppercase two-letter country codes.");
   }
-  const reconcileMinutes = feed.reconciliation_interval_minutes ?? 360;
-  if (!Number.isInteger(reconcileMinutes) || reconcileMinutes < 15 || reconcileMinutes > 1440) {
+  const reconcileMinutes = provider === "simplefin" ? null : (feed.reconciliation_interval_minutes ?? 360);
+  if (provider !== "simplefin" && (!Number.isInteger(reconcileMinutes) || reconcileMinutes < 15 || reconcileMinutes > 1440)) {
     die("corpora.bank_feed.reconciliation_interval_minutes must be an integer from 15 through 1440.");
   }
 
@@ -2523,13 +2539,13 @@ export function bankFeedWorkerVars(m) {
     value ? [{ type: "plain_text", name, text: String(value) }] : [];
   return [
     { type: "plain_text", name: "BANK_FEED_PROVIDER", text: provider },
-    { type: "plain_text", name: "BANK_FEED_API_BASE", text: apiBase },
     { type: "plain_text", name: "BANK_FEED_ENV", text: environment },
-    { type: "plain_text", name: "BANK_FEED_LINK_SDK_URL", text: linkSdkUrl },
-    { type: "plain_text", name: "BANK_FEED_LINK_GLOBAL", text: linkGlobal },
+    ...text("BANK_FEED_API_BASE", apiBase),
+    ...text("BANK_FEED_LINK_SDK_URL", linkSdkUrl),
+    ...text("BANK_FEED_LINK_GLOBAL", linkGlobal),
     { type: "plain_text", name: "BANK_FEED_DISPLAY_NAME", text: String(m.client?.display_name || m.client?.slug || "this brain") },
-    { type: "plain_text", name: "BANK_FEED_COUNTRIES", text: countries.join(",") },
-    { type: "plain_text", name: "BANK_FEED_RECONCILE_MINUTES", text: String(reconcileMinutes) },
+    ...text("BANK_FEED_COUNTRIES", countries.join(",")),
+    ...text("BANK_FEED_RECONCILE_MINUTES", reconcileMinutes),
   ];
 }
 
@@ -2800,6 +2816,13 @@ const HELD_BANK_FEED_SECRET_NAMES = Object.freeze([
   BANK_ACCESS_WRAPPING_KEY_SECRET,
 ]);
 
+function bankFeedRequiredSecretNames(m) {
+  if (m.corpora?.bank_feed?.enabled !== true) return [];
+  return manifestBankFeedProvider(m.corpora.bank_feed) === "simplefin"
+    ? [BANK_ACCESS_WRAPPING_KEY_SECRET]
+    : HELD_BANK_FEED_SECRET_NAMES;
+}
+
 export function optionalWorkerSecretNames(m) {
   // Never harvest unrelated credentials merely because they happen to be in
   // the operator's shell. A standard D1 + Workers AI install needs only its
@@ -2815,13 +2838,13 @@ export function optionalWorkerSecretNames(m) {
   // allowlist only: generic `brain secrets` and setup must never source or
   // replace these values from the process environment. The only writer is the
   // owner-present hidden prompt in `brain connect bank`.
-  const bankFeed = m.corpora?.bank_feed?.enabled === true;
+  const bankFeedSecrets = bankFeedRequiredSecretNames(m);
   return Object.freeze([
     ...(storage === "supabase" ? ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"] : []),
     ...(m.retrieval?.rerank === true || !answerModel.startsWith("@cf/")
       ? ["ANTHROPIC_API_KEY"]
       : []),
-    ...(bankFeed ? HELD_BANK_FEED_SECRET_NAMES : []),
+    ...bankFeedSecrets,
   ]);
 }
 
@@ -3137,9 +3160,7 @@ export async function cmdSecrets(manifestPath, options = {}) {
   // the exact Worker inventory before any local or remote mutation. A partial
   // bank setup therefore stops before ADMIN_KEY or its derived keys rotate.
   await reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
-    required: m.corpora?.bank_feed?.enabled === true
-      ? HELD_BANK_FEED_SECRET_NAMES
-      : [],
+    required: bankFeedRequiredSecretNames(m),
     timeoutMs: secretsWriteTimeout.timeoutMs,
     waitEveryMs: secretsWriteTimeout.waitEveryMs,
   });
@@ -28772,13 +28793,17 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
   const feed = m?.corpora?.bank_feed || {};
   if (feed.enabled !== true) {
     die(
-      "corpora.bank_feed.enabled is not true in this manifest. General Plaid bank invitations remain held. " +
+      "corpora.bank_feed.enabled is not true in this manifest. General bank invitations remain held. " +
       "The Brain owner may turn it on for their own owner-present connection: set corpora.bank_feed.enabled " +
-      "to true with provider plaid and environment sandbox or production, deploy, then rerun this command."
+      "to true with provider plaid or simplefin, deploy, then rerun this command."
     );
   }
-  if (manifestBankFeedProvider(feed) !== "plaid") {
-    die("brain connect bank currently opens the reviewed Plaid owner flow. Set corpora.bank_feed.provider to plaid first.");
+  const provider = manifestBankFeedProvider(feed);
+  if (!["plaid", "simplefin"].includes(provider)) {
+    die("brain connect bank opens the reviewed Plaid or SimpleFIN owner flow. Select one of those providers first.");
+  }
+  if (provider === "simplefin" && replaceKeys) {
+    die("--replace-keys applies only to Plaid. SimpleFIN's Access URL is claimed and encrypted on the owner page.");
   }
   const domainValue = String(m?.brain?.domain || "").trim();
   if (!domainValue) {
@@ -28794,12 +28819,14 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
       domainUrl.pathname !== "/" || domainUrl.search || domainUrl.hash) {
     die("brain.domain must be one HTTPS hostname with no port, path, sign-in value, query, or fragment.");
   }
-  const redirectCheck = checkBankFeedRedirect(m);
-  if (redirectCheck.status !== D_OK) {
-    die(
-      `${redirectCheck.detail}.\n` +
-      `      ${redirectCheck.fix || "Run brain doctor and finish the bank return-address setup first."}`
-    );
+  if (provider === "plaid") {
+    const redirectCheck = checkBankFeedRedirect(m);
+    if (redirectCheck.status !== D_OK) {
+      die(
+        `${redirectCheck.detail}.\n` +
+        `      ${redirectCheck.fix || "Run brain doctor and finish the bank return-address setup first."}`
+      );
+    }
   }
   const url = bankFeedRedirectUri(domainUrl.host);
 
@@ -28836,6 +28863,54 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
       body: { name, text, type: "secret_text" },
     }));
   const readSecret = options.readSecret ?? readBankFeedKeyHidden;
+  if (provider === "simplefin") {
+    const ambient = Object.hasOwn(options.env ?? process.env, BANK_ACCESS_WRAPPING_KEY_SECRET);
+    if (ambient) {
+      die(
+        `${BANK_ACCESS_WRAPPING_KEY_SECRET} is not accepted from an environment variable. ` +
+        "Unset it and rerun; no Worker secret was changed.",
+      );
+    }
+    let names = await listSecretNames();
+    let wrappingKeyWritten = false;
+    if (!names.includes(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
+      const wrappingKey = (options.generateWrappingKey ?? generateBankAccessWrappingKey)();
+      try {
+        await putSecret(BANK_ACCESS_WRAPPING_KEY_SECRET, wrappingKey);
+      } catch {
+        die(
+          `the Worker secret ${BANK_ACCESS_WRAPPING_KEY_SECRET} could not be written. ` +
+          "No Setup Token was requested. Rerun brain connect bank to try the same setup again.",
+        );
+      }
+      names = await listSecretNames();
+      if (!names.includes(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
+        die(`Cloudflare did not list ${BANK_ACCESS_WRAPPING_KEY_SECRET} after the write. Do not create a Setup Token yet.`);
+      }
+      wrappingKeyWritten = true;
+      ok(`wrote and verified ${BANK_ACCESS_WRAPPING_KEY_SECRET} on ${scriptName}`);
+    } else {
+      ok(`${BANK_ACCESS_WRAPPING_KEY_SECRET} already present on ${scriptName}; nothing was prompted or written`);
+    }
+
+    const shouldOpen = flags.print !== true && options.open !== false;
+    const opener = options.openImpl ?? openBrowser;
+    let opened = false;
+    if (shouldOpen) {
+      try { opened = opener(url) === true; } catch { opened = false; }
+    }
+    if (opened) ok("opened the owner-only SimpleFIN connection page in the browser");
+    else if (shouldOpen) warn("the browser did not open automatically. Use the link below in the owner's browser.");
+    else info("browser opening was skipped. Use the owner-only link below when the owner is ready.");
+    console.log(`\n  ${url}\n`);
+    info("The owner signs in to SimpleFIN Bridge separately, creates a one-time Setup Token, and pastes it only into this owner page.");
+    info("The Access URL is claimed by the owner's Worker and stored there encrypted; it is never returned to this CLI.");
+    return {
+      provider: "simplefin", url, opened, live_provider_proof: false,
+      secrets_written: wrappingKeyWritten ? [BANK_ACCESS_WRAPPING_KEY_SECRET] : [],
+      keys_replaced: false,
+    };
+  }
   // The typed pair is proven against this manifest's Plaid environment before
   // any Worker write, on the first entry and on every replacement.
   const validateKeys = options.validatePlaidKeys ?? ((pair) => validatePlaidApplicationKeys({

@@ -182,12 +182,15 @@ one explicitly approved local folder, previewed first and loaded manually.
 
 **Bank connections are not part of ordinary onboarding yet.** They are still
 being tested. You did nothing wrong, and there is no bank password,
-verification code, or Plaid setup key to enter here. Ordinary onboarding leaves
+verification code, Plaid setup key, or SimpleFIN Setup Token to enter here. Ordinary onboarding leaves
 bank connections off and the technician will never ask you to paste those
 values into chat or a normal command. If this Brain is an already approved
 pilot, its complete existing bank setup is left unchanged. If any saved piece
 is missing, setup stops before changing a credential and explains the
-separately reviewed next step.
+separately reviewed next step. An approved SimpleFIN pilot creates its one-time
+Setup Token in SimpleFIN Bridge and pastes it only into the owner-authenticated
+page on that Brain. The resulting Access URL stays encrypted in the owner's
+Worker and is never returned to the installer.
 
 The complete guide is
 [onboarding/09-technician-setup-and-rehearsal.md](onboarding/09-technician-setup-and-rehearsal.md).

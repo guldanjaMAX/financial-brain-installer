@@ -13,6 +13,17 @@ offered as a customer update; its entries below ship for the first time in
 0.4.9, and its identity is retired so its evidence cannot be confused with
 this changed candidate.
 
+- **An approved pilot can use SimpleFIN Bridge as a second bank provider.** The
+  owner creates a one-time Setup Token in SimpleFIN and pastes it only into the
+  owner-only page on their Brain. The Brain claims the connection itself,
+  encrypts the Access URL in the owner's Worker, pulls bounded 90-day history
+  windows on its schedule, and asks where each discovered account belongs
+  before adding transactions to the financial map. Provider issues remain
+  visible on that page. This is not part of ordinary onboarding and has only
+  synthetic offline proof so far. To check an approved pilot, confirm the page
+  reports the saved connection, every account assignment, backfill progress,
+  and no current provider issues.
+
 - **Dollar amounts in a partly answered question are no longer cut.** When an
   answer covers only part of a question, the Brain keeps the sentences your
   documents support and names what they do not cover. That trimming used to

@@ -1054,10 +1054,25 @@ export function checkBankFeedRedirect(manifest) {
   const required = bankFeedRedirectUri(domain);
   const requiredWebhook = plaidWebhookUri(domain);
   const provider = manifestBankFeedProvider(feed);
-  if (!["plaid", "custom"].includes(provider) ||
+  if (!["plaid", "simplefin", "custom"].includes(provider) ||
       (feed.environment !== undefined && !["sandbox", "production"].includes(feed.environment))) {
     return check("Bank feed", FAIL, "the bank provider or environment is invalid",
-      "  Choose provider plaid or custom and environment sandbox or production.");
+      "  Choose provider plaid, simplefin, or custom and a supported environment.");
+  }
+  if (provider === "simplefin") {
+    if (feed.environment !== undefined && feed.environment !== "production") {
+      return check("Bank feed", FAIL, "SimpleFIN has no sandbox environment",
+        "  Set corpora.bank_feed.environment to production or remove it. The saved demo fixture is used for offline rehearsal.");
+    }
+    if (["api_base", "link_sdk_url", "link_global"].some((field) => Object.hasOwn(feed, field))) {
+      return check("Bank feed", FAIL, "the SimpleFIN profile has an endpoint override",
+        "  Remove api_base, link_sdk_url, and link_global. The one-time Setup Token is claimed only inside the owner's Worker.");
+    }
+    return check(
+      "Bank feed",
+      OK,
+      `simplefin; production; owner page ${required}; no provider redirect or webhook registration is required`,
+    );
   }
   const declared = Array.isArray(feed.registered_redirect_uris) ? feed.registered_redirect_uris : [];
   const missingConfig = provider === "custom" ? [

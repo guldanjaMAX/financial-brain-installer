@@ -590,6 +590,17 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "custom_api_job_slices",
   "custom_api_fetches",
   "custom_api_schedule_state",
+  // Schema 49: SimpleFIN's one-time claim decision, encrypted-connection
+  // schedule, staged windows, and owner assignments are one recovery unit.
+  // Dropping the claim receipt could re-POST a consumed Setup Token; dropping
+  // staged rows could advance history past records that never reached ledger.
+  "simplefin_claim_operations",
+  "simplefin_connections",
+  "simplefin_sync_windows",
+  "simplefin_account_assignments",
+  "simplefin_assignment_requests",
+  "simplefin_stage_accounts",
+  "simplefin_stage_transactions",
 ]);
 
 /**
@@ -848,6 +859,15 @@ const SCHEMA_48_TABLES = Object.freeze([
   "custom_api_fetches",
   "custom_api_schedule_state",
 ]);
+const SCHEMA_49_TABLES = Object.freeze([
+  "simplefin_claim_operations",
+  "simplefin_connections",
+  "simplefin_sync_windows",
+  "simplefin_account_assignments",
+  "simplefin_assignment_requests",
+  "simplefin_stage_accounts",
+  "simplefin_stage_transactions",
+]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -870,7 +890,8 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
      ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
      ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
-     ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES, ...SCHEMA_48_TABLES].includes(table)
+     ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES, ...SCHEMA_48_TABLES,
+     ...SCHEMA_49_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -4381,7 +4402,8 @@ function expectedRecoveryTables(migrations) {
     (latest >= 44 || !SCHEMA_44_TABLES.includes(table)) &&
     (latest >= 45 || !SCHEMA_45_TABLES.includes(table)) &&
     (latest >= 47 || !SCHEMA_47_TABLES.includes(table)) &&
-    (latest >= 48 || !SCHEMA_48_TABLES.includes(table)));
+    (latest >= 48 || !SCHEMA_48_TABLES.includes(table)) &&
+    (latest >= 49 || !SCHEMA_49_TABLES.includes(table)));
 }
 
 export function recoveryExportTables(

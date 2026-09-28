@@ -354,7 +354,12 @@
         "read-only Transactions and never sees bank login credentials. Scheduled",
         "reconciliation remains active because webhooks are not a sole source of truth.",
         "After Link, assign each masked account to its owning entity. Plaid never",
-        "defaults every account at one institution to a primary entity."
+        "defaults every account at one institution to a primary entity.",
+        "SimpleFIN is the second reviewed provider. Set provider to simplefin and",
+        "environment to production. brain connect bank then opens the owner-only page",
+        "without asking for Plaid keys. The owner creates a one-time Setup Token in",
+        "SimpleFIN Bridge and pastes it only into that page. The owner's Worker claims",
+        "and encrypts the Access URL; it never enters the manifest, CLI, logs, or chat."
       ],
       "enabled": false,
       "provider": "plaid",

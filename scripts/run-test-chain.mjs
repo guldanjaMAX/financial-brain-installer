@@ -141,6 +141,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/plaid-amount-precision.test.mjs",
   "node --no-warnings --test worker/test/plaid-owner-flow.test.mjs",
   "node --no-warnings --test test/bank-feed-replace-keys.test.mjs",
+  "node --no-warnings --test worker/test/simplefin-bank-feed.test.mjs",
   "node --no-warnings --test worker/test/owner-document-create.test.mjs",
   "node --no-warnings --test worker/test/documents-summary-lightweight.test.mjs",
   "node --no-warnings --test worker/test/documents-summary-scale.test.mjs",
@@ -399,6 +400,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/plaid-bank-feed.test.mjs",
   "node --no-warnings worker/test/plaid-protocol.test.mjs",
   "node --no-warnings worker/test/plaid-scheduled.test.mjs",
+  "node --no-warnings --test worker/test/simplefin-bank-feed.test.mjs",
   "node --no-warnings worker/test/qbo-bank-reconciliation.test.mjs",
   "node --no-warnings worker/test/quickbooks-oauth-callback.test.mjs",
   "node --no-warnings worker/test/support-access.test.mjs",
@@ -466,6 +468,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/plaid-amount-precision.test.mjs",
   "node --no-warnings --test worker/test/plaid-owner-flow.test.mjs",
   "node --no-warnings --test test/bank-feed-replace-keys.test.mjs",
+  "node --no-warnings --test worker/test/simplefin-bank-feed.test.mjs",
   "node --no-warnings --test worker/test/documents-summary-lightweight.test.mjs",
   "node --no-warnings --test worker/test/documents-summary-scale.test.mjs",
   // Worker-hosted custom API source: migration 0048, the declarative setup

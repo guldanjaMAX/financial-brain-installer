@@ -1440,6 +1440,17 @@ three bank-feed credential bindings. For an approved enabled feed, a complete
 existing binding set is preserved. A missing or partial set refuses before
 provider cleanup, local key mutation, core-key rotation, or any Worker write.
 
+SimpleFIN uses the same independent bank-feed wrapping key but no Plaid client
+ID, Plaid secret, manifest endpoint, or browser SDK. `brain connect bank` may
+create a missing wrapping key and open the owner page. The one-time Setup Token
+is submitted from that page directly to the owner's Worker. The Worker records
+the claim decision before POST, encrypts the returned Access URL immediately,
+and never returns it to the CLI or browser. Scheduled pulls use at most three
+90-day windows per connection per day, with a durable 24-request hard limit.
+Provider `errlist` messages, staged owner-assignment holds, and backfill progress
+remain visible on the owner page. SimpleFIN account type is not guessed: an
+untyped account enters the financial map as `other` with balance role `neither`.
+
 Technician plan schema 5 also carries the owner briefing for every ceremony:
 what will open, why it is needed, the minimum access, the safe non-secret work
 a browser controller can do, the owner's handoff point, and the privacy
