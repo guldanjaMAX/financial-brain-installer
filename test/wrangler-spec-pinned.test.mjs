@@ -60,16 +60,45 @@ const compareVersions = (left, right) => {
 };
 assert.ok(compareVersions(sharp.version, MINIMUM_REVIEWED_SHARP_VERSION) >= 0,
   `every reviewed Wrangler runtime must resolve Sharp ${MINIMUM_REVIEWED_SHARP_VERSION} or newer, found ${sharp.version}`);
-let called;
-assert.equal(refreshWranglerSession({ env: { HOME: '/synthetic-home', CLOUDFLARE_API_TOKEN: 'synthetic-env-value', UNRELATED_DESKTOP_VALUE: 'private' },
-  run: (command, args, options) => { called = { command, args, env: options.env }; return { status: 0 }; } }), true);
-assert.deepEqual(called.args, [WRANGLER_SPEC, 'whoami']);
-assert.equal(called.env.CLOUDFLARE_API_TOKEN, undefined);
-assert.equal(called.env.UNRELATED_DESKTOP_VALUE, undefined);
+for (const platform of ['linux', 'win32']) {
+  let called;
+  let helperCalls = 0;
+  let cleanupCalls = 0;
+  const directoryStat = {
+    dev: 1,
+    ino: 2,
+    mode: 0o40700,
+    isDirectory: () => true,
+    isSymbolicLink: () => false,
+  };
+  assert.equal(refreshWranglerSession({
+    env: { HOME: '/synthetic-home', CLOUDFLARE_API_TOKEN: 'synthetic-env-value', UNRELATED_DESKTOP_VALUE: 'private' },
+    platform,
+    tmpDirectory: platform === 'win32' ? 'C:\\synthetic' : '/synthetic',
+    mkdtempSync: () => platform === 'win32' ? 'C:\\synthetic\\private' : '/synthetic/private',
+    chmodSync: () => {},
+    lstatSync: () => directoryStat,
+    rmSync: () => { cleanupCalls += 1; },
+    run: (command, args, options) => {
+      helperCalls += 1;
+      called = { command, args, env: options.env };
+      return { status: 0 };
+    },
+  }), true);
+  assert.equal(helperCalls, 1, `the ${platform} refresh must reach the guarded helper exactly once`);
+  assert.equal(cleanupCalls, 1, `the ${platform} refresh must clean its private directory exactly once`);
+  assert.deepEqual(called.args, [
+    WRANGLER_SPEC,
+    'whoami',
+    `--env-file=${platform === 'win32' ? 'NUL' : '/dev/null'}`,
+  ]);
+  assert.equal(called.env.CLOUDFLARE_API_TOKEN, undefined);
+  assert.equal(called.env.UNRELATED_DESKTOP_VALUE, undefined);
+  assert.equal(called.env.CLOUDFLARE_AUTH_USE_KEYRING, 'false');
+}
 // The legacy sign-in advice must write the plaintext session the legacy reader
 // parses, so it carries the same keyring opt-out as the refresh child, in a
 // form each platform's copy shell accepts. PowerShell rejects `NAME=value cmd`.
-assert.equal(called.env.CLOUDFLARE_AUTH_USE_KEYRING, 'false');
 assert.equal(legacyWranglerLoginCommand({ platformName: 'linux' }),
   `CLOUDFLARE_AUTH_USE_KEYRING='false' npx ${REVIEWED_WRANGLER_SPEC} login`);
 assert.equal(legacyWranglerLoginCommand({ platformName: 'darwin' }),

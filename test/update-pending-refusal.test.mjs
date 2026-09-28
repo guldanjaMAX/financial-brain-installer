@@ -310,6 +310,10 @@ test("work enqueued after the initial gate refuses at the immediate pre-pause ga
     }
 
     assert.ok(error, "the second queue decision must refuse");
+    assert.equal(error.message, renderCliCommands(
+      "This Brain gained 1 queued search update(s) before the paused deployment. " +
+        "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again.",
+    ));
     assert.deepEqual(events, [
       "initial backlog read",
       "profile adoption",
@@ -318,9 +322,87 @@ test("work enqueued after the initial gate refuses at the immediate pre-pause ga
       "install state",
       "bookmark",
       "pre-pause backlog read",
-      "history write",
     ]);
     assert.doesNotMatch(events.join(","), /deployment|migration|health/u);
+    assert.equal(readFileSync(manifestPath, "utf8"), original);
+  });
+});
+
+test("a supervised-recovery queue refusal escapes update without a bookmark, rerun advice, or history row", async () => {
+  await withFixture(async ({ manifestPath, original }) => {
+    const events = [];
+    let historyWrites = 0;
+    let error = null;
+    const expected = renderCliCommands(
+      "This Brain's Worker is version 0.4.6, it is paused, and it has 2 queued search update(s). " +
+        "Its database marks the semantic index for a full rebuild, as a rollback does, so draining the queue " +
+        "cannot make this Brain query-ready. The paused deployment was not started. Do not run `brain deploy` " +
+        "to return it to active: the queue would drain, but this Brain would still not become query-ready. " +
+        "Do not run `brain rollback` or `brain drain`, and do not clear VECTOR_DRAIN_MODE by hand. Its semantic " +
+        "index must be recreated under supervised recovery before this Brain is used again. Run `brain health` " +
+        "and keep its output for support.",
+    );
+    try {
+      await cmdUpdate(manifestPath, {
+        discoverInstalledManifest: () => ({ path: manifestPath, source: "remembered" }),
+        readUpdateBacklog: async () => {
+          events.push("initial backlog read");
+          return { pending: 0 };
+        },
+        adoptCloudflareAuthProfile: async () => events.push("profile adoption"),
+        withCloudflareControl: async (action) => action(),
+        cmdVerify: async () => events.push("verification"),
+        upgradeOptions: {
+          resolveAccount: async () => ({ id: "1".repeat(32) }),
+          d1Query: async (_account, _database, sql) => {
+            if (/sqlite_master/iu.test(sql)) return { results: [{ name: "install_state" }] };
+            if (/SELECT \* FROM install_state/iu.test(sql)) {
+              events.push("install state");
+              return {
+                results: [{ client_slug: "fixture", product_version: "0.4.7", schema_version: 46 }],
+              };
+            }
+            if (/INSERT INTO upgrade_runs/iu.test(sql)) {
+              historyWrites += 1;
+              events.push("history write");
+            }
+            return { results: [] };
+          },
+          cf: async () => {
+            events.push("bookmark");
+            return { bookmark: "fixture-bookmark" };
+          },
+          readUpdateBacklog: async () => {
+            events.push("pre-pause backlog decision");
+            return {
+              pending: 2,
+              paused_for_upgrade: true,
+              legacy_worker_version: "0.4.6",
+              projection_recovery: { cause: "bootstrap_required" },
+            };
+          },
+          cmdDeploy: async () => events.push("paused deployment"),
+          cmdHealth: async () => events.push("health"),
+          cmdMigrate: async () => events.push("migration"),
+        },
+        reconcileExistingOwnerAgents: null,
+        writeClaudeWorkspaceGuideAfterUpdate: null,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    assert.equal(error?.message, expected, "the complete owner-facing refusal must escape unchanged");
+    assert.doesNotMatch(error?.message || "", /run brain update again|D1 recovery bookmark/u);
+    assert.equal(historyWrites, 0, "a safety refusal must not become an upgrade_runs failure row");
+    assert.deepEqual(events, [
+      "initial backlog read",
+      "profile adoption",
+      "verification",
+      "install state",
+      "bookmark",
+      "pre-pause backlog decision",
+    ], "the refusal must reach the queue decision and stop before deployment");
     assert.equal(readFileSync(manifestPath, "utf8"), original);
   });
 });
@@ -788,10 +870,10 @@ test("a pre-summary Worker's exact queued backlog refuses at both gates", async 
     assert.deepEqual(events, ["authenticated documents backlog read"]);
 
     const prePause = await prePauseGate(manifestPath, legacy);
-    assert.ok(prePause.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
+    assert.equal(prePause.error?.message, renderCliCommands(
       "This Brain gained 3 queued search update(s) before the paused deployment. " +
         "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again.",
-    ))), prePause.error?.message);
+    ));
     assert.deepEqual(prePause.events, []);
     assert.equal(readFileSync(manifestPath, "utf8"), original);
   });
@@ -833,10 +915,10 @@ test("a capped backlog is never read as zero and refuses at both gates", async (
     assert.deepEqual(events, ["authenticated documents backlog read"]);
 
     const prePause = await prePauseGate(manifestPath, cappedInventory());
-    assert.ok(prePause.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
+    assert.equal(prePause.error?.message, renderCliCommands(
       "This Brain gained over 10,000 queued search update(s) before the paused deployment. " +
         "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again.",
-    ))), prePause.error?.message);
+    ));
     assert.deepEqual(prePause.events, []);
     assert.equal(readFileSync(manifestPath, "utf8"), original);
   });
@@ -1075,9 +1157,9 @@ test("a paused resume generation with queued work refuses truthfully at both gat
     assert.deepEqual(run.initial.sleeps, []);
 
     const forced = await throughBothGates(manifestPath, { first: queued, force: true });
-    assert.ok(forced.error?.message?.startsWith(prePauseRefusal(RESUME_PAUSED_PENDING_MESSAGE(
+    assert.equal(forced.error?.message, RESUME_PAUSED_PENDING_MESSAGE(
       7, "The paused deployment was not started.",
-    ))), forced.error?.message);
+    ));
     assert.deepEqual(forced.events, [
       "initial backlog read",
       "profile adoption",
@@ -1145,10 +1227,10 @@ test("the exact v0.4.6 envelope with queued work refuses at both gates", async (
     });
     assert.equal(late.initial.healthReads, 0, "an empty legacy queue needs no drain-mode read");
     assert.equal(late.prePause.healthReads, 1);
-    assert.ok(late.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
+    assert.equal(late.error?.message, renderCliCommands(
       "This Brain gained 7 queued search update(s) before the paused deployment. " +
         "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again.",
-    ))), late.error?.message);
+    ));
     assert.equal(late.events.includes("paused deployment"), false);
     assert.equal(readFileSync(manifestPath, "utf8"), original);
   });
@@ -1245,10 +1327,10 @@ test("the exact v0.4.6 not-ready envelope with queued work still refuses at both
       second: queued,
       health: V046_HEALTH_ACTIVE,
     });
-    assert.ok(late.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
+    assert.equal(late.error?.message, renderCliCommands(
       "This Brain gained 2 queued search update(s) before the paused deployment. " +
         "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again.",
-    ))), late.error?.message);
+    ));
     assert.equal(late.prePause.requests, 1);
     assert.equal(late.events.includes("paused deployment"), false);
     assert.equal(readFileSync(manifestPath, "utf8"), original);
@@ -1330,9 +1412,9 @@ test("a paused v0.4.6 Worker with queued work refuses to supervised recovery, ne
     assert.equal(run.urls.length, 1);
 
     const forced = await throughBothGates(manifestPath, { first: queued, health: V046_HEALTH_PAUSED, force: true });
-    assert.ok(forced.error?.message?.startsWith(prePauseRefusal(V046_PAUSED_QUEUED_MESSAGE(
+    assert.equal(forced.error?.message, V046_PAUSED_QUEUED_MESSAGE(
       7, "The paused deployment was not started.",
-    ))), forced.error?.message);
+    ));
     assert.deepEqual(forced.events, [
       "initial backlog read",
       "profile adoption",
@@ -1518,9 +1600,9 @@ for (const [label, envelope, pending, cause, evidence] of [
         health: V046_HEALTH_PAUSED,
         force: true,
       });
-      assert.ok(forced.error?.message?.startsWith(prePauseRefusal(V046_PAUSED_RECOVERY_MESSAGE(
+      assert.equal(forced.error?.message, V046_PAUSED_RECOVERY_MESSAGE(
         pending, evidence, "The paused deployment was not started.",
-      ))), forced.error?.message);
+      ));
       assert.deepEqual(forced.events, [
         "initial backlog read",
         "profile adoption",
@@ -1645,10 +1727,10 @@ test("force says the truth: the pre-pause gate still refuses queued work and say
     const queued = boundedInventory({ version: "0.4.7", pending: 3 });
     const run = await throughBothGates(manifestPath, { first: queued, force: true });
     assert.equal(run.output.filter((line) => line.includes(FORCE_WARNING(3))).length, 1, run.output.join("\n"));
-    assert.ok(run.error?.message?.startsWith(prePauseRefusal(renderCliCommands(
+    assert.equal(run.error?.message, renderCliCommands(
       "This Brain still has 3 queued search update(s) before the paused deployment. " +
         "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again.",
-    ))), run.error?.message);
+    ));
     assert.equal(run.events.includes("paused deployment"), false);
     assert.equal(readFileSync(manifestPath, "utf8"), original);
 
