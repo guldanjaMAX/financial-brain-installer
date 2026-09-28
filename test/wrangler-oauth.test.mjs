@@ -118,40 +118,62 @@ assert.equal(readWranglerOAuthToken({ ...base, readFileSync: () => 'refresh_toke
 // file. Wrangler prefers either source over the intended saved session.
 const refreshParent = mkdtempSync(join(tmpdir(), "brain-wrangler-refresh-parent-"));
 writeFileSync(join(refreshParent, ".env"), "CLOUDFLARE_API_TOKEN=planted-value\n");
-let sawCommand = null;
-let sawArgs = null;
-let sawEnv = null;
-let sawOpts = null;
-let refreshHelperCalls = 0;
 try {
-  assert.equal(refreshWranglerSession({
-    env: { CLOUDFLARE_API_TOKEN: "operator-token", CLOUDFLARE_API_KEY: "k", HOME: "/h" },
-    tmpDirectory: refreshParent,
-    platform: "darwin",
-    run: (command, args, opts) => {
-      refreshHelperCalls += 1;
-      sawCommand = command;
-      sawArgs = args;
-      sawEnv = opts.env;
-      sawOpts = opts;
-      assert.equal(existsSync(join(opts.cwd, ".env")), false,
-        "the private per-call cwd must not contain the planted parent dotenv file");
-      assert.equal(lstatSync(opts.cwd).mode & 0o077, 0,
-        "the per-call cwd must be private while the helper runs");
-      return { status: 0 };
-    },
-  }), true, "a successful guarded whoami call remains a successful refresh");
+  for (const platform of ["linux", "win32"]) {
+    let sawCommand = null;
+    let sawArgs = null;
+    let sawEnv = null;
+    let sawOpts = null;
+    let refreshHelperCalls = 0;
+    const inspectForPlatform = (path) => {
+      const stat = lstatSync(path);
+      return {
+        dev: stat.dev,
+        ino: stat.ino,
+        // A forced Linux arm must model the POSIX mode that chmod established,
+        // even when this suite itself is running on Windows.
+        mode: platform === "win32" ? stat.mode : stat.mode & ~0o077,
+        isDirectory: () => stat.isDirectory(),
+        isSymbolicLink: () => stat.isSymbolicLink(),
+      };
+    };
+    assert.equal(refreshWranglerSession({
+      env: { CLOUDFLARE_API_TOKEN: "operator-token", CLOUDFLARE_API_KEY: "k", HOME: "/h" },
+      tmpDirectory: refreshParent,
+      platform,
+      lstatSync: inspectForPlatform,
+      run: (command, args, opts) => {
+        refreshHelperCalls += 1;
+        sawCommand = command;
+        sawArgs = args;
+        sawEnv = opts.env;
+        sawOpts = opts;
+        assert.equal(existsSync(join(opts.cwd, ".env")), false,
+          "the private per-call cwd must not contain the planted parent dotenv file");
+        if (platform !== "win32") {
+          assert.equal(inspectForPlatform(opts.cwd).mode & 0o077, 0,
+            "the per-call cwd must be private while the helper runs");
+        }
+        return { status: 0 };
+      },
+    }), true, `a successful guarded whoami call remains a successful refresh on ${platform}`);
 
-  assert.equal(refreshHelperCalls, 1, "the guarded helper decision point must be reached exactly once");
-  assert.equal(sawCommand, "npx");
-  assert.deepEqual(sawArgs, [WRANGLER_SPEC, "whoami", "--env-file=/dev/null"]);
-  assert.equal(sawEnv.CLOUDFLARE_API_TOKEN, undefined,
-    "the refresh child must not inherit CLOUDFLARE_API_TOKEN");
-  assert.equal(sawEnv.CLOUDFLARE_API_KEY, undefined, "nor a global API key");
-  assert.equal(typeof sawOpts.cwd, "string", "the refresh child needs an explicit working directory");
-  assert.notEqual(sawOpts.cwd, refreshParent, "the shared temp parent must never be the child cwd");
-  assert.ok(sawOpts.cwd.startsWith(`${refreshParent}/financial-brain-wrangler-refresh-`), sawOpts.cwd);
-  assert.equal(existsSync(sawOpts.cwd), false, "the private per-call cwd must be removed after refresh");
+    assert.equal(refreshHelperCalls, 1,
+      `the guarded helper decision point must be reached exactly once on ${platform}`);
+    assert.equal(sawCommand, "npx");
+    assert.deepEqual(sawArgs, [
+      WRANGLER_SPEC,
+      "whoami",
+      `--env-file=${platform === "win32" ? "NUL" : "/dev/null"}`,
+    ]);
+    assert.equal(sawEnv.CLOUDFLARE_API_TOKEN, undefined,
+      "the refresh child must not inherit CLOUDFLARE_API_TOKEN");
+    assert.equal(sawEnv.CLOUDFLARE_API_KEY, undefined, "nor a global API key");
+    assert.equal(typeof sawOpts.cwd, "string", "the refresh child needs an explicit working directory");
+    assert.notEqual(sawOpts.cwd, refreshParent, "the shared temp parent must never be the child cwd");
+    assert.ok(sawOpts.cwd.startsWith(join(refreshParent, "financial-brain-wrangler-refresh-")), sawOpts.cwd);
+    assert.equal(existsSync(sawOpts.cwd), false, "the private per-call cwd must be removed after refresh");
+  }
 
   let failedHelperCalls = 0;
   let failedCwd = null;

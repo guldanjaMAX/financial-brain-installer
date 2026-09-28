@@ -271,28 +271,40 @@ assert.match(unavailableOutput, /Unavailable is not current/i,
 assert.doesNotMatch(unavailableOutput, /up to date/i,
   "an unavailable release check cannot be reported as up to date");
 
-const whatsnewLines = [];
-const originalLog = console.log;
-console.log = (...values) => whatsnewLines.push(values.join(" "));
+const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 try {
-  await cmdWhatsnew(null, { discoverManifest: () => null });
+  for (const platform of ["linux", "win32"]) {
+    Object.defineProperty(process, "platform", { value: platform, configurable: true });
+    const whatsnewLines = [];
+    const originalLog = console.log;
+    console.log = (...values) => whatsnewLines.push(values.join(" "));
+    try {
+      await cmdWhatsnew(null, { discoverManifest: () => null });
+    } finally {
+      console.log = originalLog;
+    }
+    const renderedWhatsnew = whatsnewLines.join("\n");
+    // Git's Windows checkout may present CHANGELOG.md with CRLF line endings. The
+    // complete-entry assertion is about owner-visible words and command rendering,
+    // not the repository checkout's newline convention.
+    const normalizedRenderedWhatsnew = renderedWhatsnew.replaceAll("\r\n", "\n");
+    assert.ok(
+      normalizedRenderedWhatsnew.includes(renderCliCommands(supervisedRecoveryChangelogText, { platform })),
+      `whatsnew must render the complete supervised-recovery replacement text on ${platform}`,
+    );
+    assert.ok(
+      normalizedRenderedWhatsnew.includes(renderCliCommands(followingChangelogControl, { platform })),
+      `the following older-Worker control case must remain complete and render consistently on ${platform}`,
+    );
+    assert.doesNotMatch(
+      normalizedRenderedWhatsnew,
+      /install its own release, run .*brain deploy.*return it to active/is,
+      `whatsnew must not retain the retired-runtime deploy remedy on ${platform}`,
+    );
+  }
 } finally {
-  console.log = originalLog;
+  Object.defineProperty(process, "platform", originalPlatform);
 }
-const renderedWhatsnew = whatsnewLines.join("\n");
-assert.ok(
-  renderedWhatsnew.includes(renderCliCommands(supervisedRecoveryChangelogText)),
-  "whatsnew must render the complete supervised-recovery replacement text",
-);
-assert.ok(
-  renderedWhatsnew.includes(renderCliCommands(followingChangelogControl)),
-  "the following older-Worker control case must remain complete and render consistently",
-);
-assert.doesNotMatch(
-  renderedWhatsnew,
-  /install its own release, run .*brain deploy.*return it to active/is,
-  "whatsnew must not retain the retired-runtime deploy remedy",
-);
 
 const stableOutput = await whatsnewStatusOutput(async () => ({
   status: "up_to_date", latest_version: version,
