@@ -3,6 +3,14 @@
 // the request came from this app rather than from a page that merely sits in
 // the same browser.
 const OWNER_SAFE_REQUEST_FAILURE = "Your Brain could not confirm what happened. Refresh this page to check the current state before trying again.";
+export const OWNER_SIGNED_OUT_EVENT = "financial-brain:owner-signed-out";
+
+function announceSignedOut(path: string, response: Response): void {
+  if (response.status !== 401 || !/^\/api\/(app|owner|fin|rag)(?:\/|$)/.test(path)) return;
+  if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+    window.dispatchEvent(new Event(OWNER_SIGNED_OUT_EVENT));
+  }
+}
 
 function normalizedErrorBody(body: unknown, status: number): Record<string, unknown> {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return {};
@@ -89,6 +97,7 @@ export async function api<T = unknown>(path: string, body?: unknown): Promise<T>
     headers: { "Content-Type": "application/json", "X-Brain-App": "1" },
     body: JSON.stringify(body ?? {}),
   });
+  announceSignedOut(path, response);
   return decodeApiResponse<T>(response);
 }
 
@@ -123,7 +132,10 @@ export function ownerError(error: unknown): { status: number | null; message: st
       ),
     };
     if (error.status === 403) return { status: 403, message: "This session is not allowed to do that." };
-    if (error.status === 503) return { status: 503, message: "This part of the brain is unavailable right now. Nothing was treated as empty or saved." };
+    if (error.status === 503) return {
+      status: 503,
+      message: "Your Brain couldn't answer just now. Nothing was changed. Wait a minute and ask again.",
+    };
     return {
       status: error.status,
       message: ownerSafeMessage(error.message),
@@ -711,5 +723,6 @@ export type FinDocumentsResponse = {
  *  X-Brain-App header still marks the request as coming from this app. */
 export async function apiGet<T = unknown>(path: string): Promise<T> {
   const response = await fetch(path, { headers: { "X-Brain-App": "1" } });
+  announceSignedOut(path, response);
   return decodeApiResponse<T>(response);
 }

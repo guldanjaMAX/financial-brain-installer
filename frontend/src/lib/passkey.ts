@@ -88,7 +88,7 @@ export async function enroll(code?: string, kind: EnrollmentKind = "owner"): Pro
  *  collapses three genuinely different failures into one sentence. Naming the
  *  exception matters too: which one it is decides where the bug lives, and
  *  without it every report is unfalsifiable. */
-function explainCeremonyFailure(
+export function explainCeremonyFailure(
   error: unknown,
   rpId: string,
   purpose: "enroll" | "sign_in" | "confirm_map" = "sign_in",
@@ -103,18 +103,18 @@ function explainCeremonyFailure(
     if (purpose === "enroll") {
       return new Error(
         `No passkey was created for ${rpId}. The secure window may have been canceled or timed out. ` +
-        `Nothing was enrolled. You can choose ${enrollmentAction} and try again while this private link is valid.` + suffix,
+        `Nothing was enrolled. You can choose ${enrollmentAction} and try again while this private link is valid.`,
       );
     }
     if (purpose === "confirm_map") {
       return new PasskeyCeremonyCancelledError(
-        "The secure passkey window was canceled or timed out. Nothing was confirmed or changed. You can review the map and try again when you are ready." + suffix,
+        "The secure passkey window was canceled or timed out. Nothing was confirmed or changed. You can review the map and try again when you are ready.",
       );
     }
     return new Error(
       `No passkey was offered for ${rpId}. Either this device has none saved ` +
       `for that exact address, or the prompt was dismissed before it finished. ` +
-      `A passkey saved under a different address for this brain will not work here.` + suffix,
+      `A passkey saved under a different address for this brain will not work here.`,
     );
   }
   if (name === "SecurityError") {
