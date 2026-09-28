@@ -7,11 +7,21 @@ import test from "node:test";
 
 import {
   cmdSources,
+  cmdProvenanceRepair,
   collectSourceInventoryPages,
   runCliCommandWithCredentialBoundary,
   schedulePlatformLimitation,
+  supportErrorCode,
 } from "../brain.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+
+const WINDOWS_RENDER_OPTIONS = Object.freeze({
+  platform: "win32",
+  nodePath: "C:\\Program Files\\nodejs\\node.exe",
+  scriptPath: "C:\\Program Files\\Financial Brain\\brain.mjs",
+  env: { PATH: "" },
+  existsSync: () => false,
+});
 
 const SNAPSHOT = `sha256:${"a".repeat(64)}`;
 const RECOVERY_SNAPSHOT = `sha256:${"b".repeat(64)}`;
@@ -143,7 +153,7 @@ function recoveryPage() {
 function withManifest(run, domain = "brain.example.invalid") {
   const directory = mkdtempSync(join(tmpdir(), "brain-source-inventory-cli-"));
   const manifest = join(directory, "brain.manifest.json");
-  writeFileSync(manifest, JSON.stringify({ brain: { domain } }));
+  writeFileSync(manifest, JSON.stringify({ brain: domain === null ? {} : { domain } }));
   return Promise.resolve()
     .then(() => run(manifest))
     .finally(() => rmSync(directory, { recursive: true, force: true }));
@@ -196,6 +206,112 @@ test("source inventory CLI uses only the internal durable credential and collect
     assert.doesNotMatch(output, new RegExp(OWNER_PROOF));
     assert.equal(JSON.parse(output).snapshot.id, SNAPSHOT);
   });
+});
+
+test("domainless source inventory gives an actionable exact refusal and a saved-domain control reaches the request", async () => {
+  const renderWindowsCommands = (text) => renderCliCommands(text, WINDOWS_RENDER_OPTIONS);
+  const expectedMessage = renderWindowsCommands(
+    "this manifest has no saved brain.domain, so the source inventory has no verified Brain address. " +
+      "Restore the deployed HTTPS hostname to brain.domain from a known-good manifest backup, or run `brain health <manifest>` " +
+      "from an interactive terminal with this Brain's Cloudflare access to look up and prove its workers.dev hostname before " +
+      "saving it. Then rerun `brain sources <manifest> --json`. Do not guess the address. No Cloudflare sign-in was attempted.",
+  );
+  await withManifest(async (manifest) => {
+    let credentialReads = 0;
+    let requests = 0;
+    await assert.rejects(
+      cmdSources(manifest, {
+        flags: { json: true },
+        renderCliCommands: renderWindowsCommands,
+        resolveAdminKey() { credentialReads++; return OWNER_PROOF; },
+        fetchImpl() { requests++; throw new Error("domainless inventory must refuse before request"); },
+      }),
+      (error) => {
+        assert.equal(error.payload?.error?.code, "brain_domain_missing",
+          "the domainless decision point must be reached");
+        assert.equal(supportErrorCode(error, { command: "sources" }), "BRAIN_DOMAIN_MISSING",
+          "the domainless refusal must retain its typed support classification");
+        assert.equal(error.payload?.error?.message, expectedMessage);
+        return true;
+      },
+    );
+    assert.equal(credentialReads, 0, "the refusal happens before durable credential access");
+    assert.equal(requests, 0, "the refusal happens before a request");
+  }, null);
+
+  await withManifest(async (manifest) => {
+    let requests = 0;
+    const value = await cmdSources(manifest, {
+      flags: { json: true },
+      resolveAdminKey: () => OWNER_PROOF,
+      fetchImpl: async (url) => {
+        requests++;
+        assert.equal(url, "https://brain.example.invalid/api/admin/brain/sources");
+        return new Response(JSON.stringify(inventoryPage({ source: "control", truncated: false, total: 1 })), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+    assert.equal(requests, 1, "a saved-domain control must reach the source-inventory request");
+    assert.equal(value.sources[0].source_id, "control");
+  });
+});
+
+test("domainless source guidance repeats the add, refresh, or provenance-repair command actually run", async () => {
+  const cases = [
+    {
+      label: "add",
+      flags: { add: "localdocs", kind: "upload" },
+      command: "brain sources <manifest> --add <name> --kind <kind>",
+    },
+    {
+      label: "refresh",
+      flags: { refresh: "daily", source: "localdocs" },
+      command: "brain sources <manifest> --refresh <schedule> --source <name>",
+    },
+    {
+      label: "add and refresh",
+      flags: { add: "localdocs", refresh: "daily", source: "localdocs" },
+      command: "brain sources <manifest> --add <name> --refresh <schedule> --source <name>",
+    },
+  ];
+  for (const variant of cases) {
+    await withManifest(async (manifest) => {
+      let credentialReads = 0;
+      let requests = 0;
+      const error = await cmdSources(manifest, {
+        flags: variant.flags,
+        resolveAdminKey() { credentialReads += 1; return OWNER_PROOF; },
+        fetchImpl() { requests += 1; throw new Error("domainless source command reached a request"); },
+      }).then(() => null, (caught) => caught);
+      const message = error?.payload?.error?.message || error?.message || "";
+      const renderedCommand = renderCliCommands(variant.command);
+      assert.match(message, new RegExp(escapeForRegExp(`Then rerun \`${renderedCommand}\``)),
+        `${variant.label} guidance must name its own rendered command`);
+      assert.equal(supportErrorCode(error, { command: "sources" }), "BRAIN_DOMAIN_MISSING");
+      assert.equal(credentialReads, 0,
+        `${variant.label} reaches the domain decision before durable credential access`);
+      assert.equal(requests, 0, `${variant.label} reaches no request boundary`);
+    }, null);
+  }
+  await withManifest(async (manifest) => {
+    let credentialReads = 0;
+    let requests = 0;
+    const error = await cmdProvenanceRepair(manifest, {
+      flags: { source: "localdocs", json: true },
+      resolveAdminKey() { credentialReads += 1; return OWNER_PROOF; },
+      fetchImpl() { requests += 1; throw new Error("domainless provenance repair reached a request"); },
+    }).then(() => null, (caught) => caught);
+    const renderedCommand = renderCliCommands(
+      "brain provenance-repair <manifest> --source <name> --json",
+    );
+    assert.match(error?.message || "", new RegExp(escapeForRegExp(`Then rerun \`${renderedCommand}\``)));
+    assert.equal(supportErrorCode(error, { command: "provenance-repair" }), "BRAIN_DOMAIN_MISSING");
+    assert.equal(credentialReads, 0,
+      "provenance repair reaches the domain decision before durable credential access");
+    assert.equal(requests, 0, "provenance repair reaches no request boundary");
+  }, null);
 });
 
 test("source inventory retries a transient post-setup read without repeating a successful write", async () => {

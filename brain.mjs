@@ -214,9 +214,17 @@ import { readAdminKeyFile, validateAdminKeyValue } from "./operations/admin-key-
 import {
   acquireSourceIngestLock,
   canonicalSourceIngestStatePath,
+  probeSourceIngestLock,
   SourceIngestLockError,
   withSourceIngestLock,
 } from "./operations/source-ingest-lock.mjs";
+import {
+  retiredFolderLocationVariant,
+  retiredIdentityOfPath,
+  retiredLocalFolderOf,
+  writeManifestAtomically,
+} from "./operations/folder-retirement.mjs";
+export { retiredLocalFolderOf, writeManifestAtomically } from "./operations/folder-retirement.mjs";
 import { writeClaudeWorkspaceGuide } from "./operations/claude-workspace.mjs";
 import {
   captureTechnicianSkillRepairSnapshot,
@@ -427,6 +435,13 @@ const die = (s) => {
   throw new Fatal(s);
 };
 
+function dieInputRefused(message, reason = null) {
+  const error = new Fatal(message);
+  error.code = "INPUT_REFUSED";
+  if (reason) error.reason = reason;
+  throw error;
+}
+
 const SUPPORT_REMOTE_COMMANDS = new Set([
   "check", "deploy", "diagnose", "drain", "health", "migrate", "provision",
   "reindex", "rollback", "secrets", "update", "upgrade", "verify",
@@ -437,7 +452,7 @@ export const PROVIDER_CONNECTOR_IDS = Object.freeze([
 let currentSupportCommand = "";
 
 export function supportSourceForCommand(command = "") {
-  if (command === "schedule") return "scheduler";
+  if (command === "schedule" || command === "folder") return "scheduler";
   if (command === "ocr-preflight" || command === "provenance-assess" ||
       command === "ingest-file-preview") return "local";
   if (command === "update-preview" || command === "ingest-file-apply") return "brain-data-plane";
@@ -463,7 +478,8 @@ export function supportSourceForCommand(command = "") {
 /** Classify in memory; the raw message is never passed to the journal. */
 export function supportErrorCode(error, { command = "", unexpected = false } = {}) {
   if (error instanceof DriveRemovalReviewRequired) return "SAFETY_REVIEW_REQUIRED";
-  const typedCode = typeof error?.code === "string" ? error.code.trim().toUpperCase() : "";
+  const declaredCode = typeof error?.supportCode === "string" ? error.supportCode : error?.code;
+  const typedCode = typeof declaredCode === "string" ? declaredCode.trim().toUpperCase() : "";
   if (SUPPORT_ERROR_CODES.includes(typedCode)) return typedCode;
   const message = String(error?.message || "");
   if (/PDF.*tim(?:e|ed) out/i.test(message)) return "PDF_PROCESS_TIMEOUT";
@@ -3452,7 +3468,7 @@ export async function cmdHealth(manifestPath, {
         "      sign-in saved on this computer or a CLOUDFLARE_API_TOKEN for this Brain's account. BRAIN_NO_WRANGLER_LOGIN turns\n" +
         "      the sign-in lookup off. Make one of those available, then rerun health. Nothing was changed."
     );
-    refusal.code = "CONFIG_INVALID";
+    refusal.code = "AUTH_REQUIRED";
     throw refusal;
   }
   const acct = m.brain?.domain ? null : await resolveAccount(m);
@@ -8725,21 +8741,47 @@ async function reportFreshness(m, acct, manifestPath) {
 }
 
 class SourceInventoryClientError extends Error {
-  constructor(code, message, { retryable = false } = {}) {
+  constructor(code, message, { retryable = false, supportCode = null } = {}) {
     super(message);
     this.name = "SourceInventoryClientError";
     this.code = code;
     this.retryable = retryable;
+    this.supportCode = supportCode;
   }
 }
 
-function sourceInventoryBaseUrl(m) {
+function sourceInventoryRetryCommand(flags, renderCommands = renderCliCommands) {
+  let command = "brain sources <manifest>";
+  if (flags.add !== undefined) {
+    command += " --add <name>";
+    if (flags.kind !== undefined) command += " --kind <kind>";
+  }
+  if (flags.refresh !== undefined) {
+    command += " --refresh <schedule>";
+    if (flags.source !== undefined) command += " --source <name>";
+  }
+  if (flags.recovery === true) {
+    command += " --json --recovery";
+    if (flags.source !== undefined) command += " --source <name>";
+    if (flags.limit !== undefined) command += " --limit <n>";
+    if (flags.cursor !== undefined) command += " --cursor <cursor>";
+  } else if (flags.json !== undefined) {
+    command += " --json";
+  }
+  return renderCommands(command);
+}
+
+function sourceInventoryBaseUrl(m, retryCommand, renderCommands = renderCliCommands) {
   const declared = String(m?.brain?.domain || "").trim();
   if (!declared) {
     throw new SourceInventoryClientError(
       "brain_domain_missing",
-      "this manifest has no saved brain.domain, so the source inventory cannot reach the Brain without Cloudflare account access. " +
-        "Run `brain update <manifest>` once to save the deployed address, then rerun this command. No Cloudflare sign-in was attempted.",
+      "this manifest has no saved brain.domain, so the source inventory has no verified Brain address. " +
+        `Restore the deployed HTTPS hostname to brain.domain from a known-good manifest backup, or run \`${renderCommands("brain health <manifest>")}\` ` +
+        "from an interactive terminal with this Brain's Cloudflare access to look up and prove its workers.dev hostname before " +
+        `saving it. Then rerun \`${retryCommand || renderCommands("brain sources <manifest>")}\`. ` +
+          "Do not guess the address. No Cloudflare sign-in was attempted.",
+      { supportCode: "BRAIN_DOMAIN_MISSING" },
     );
   }
   let candidate;
@@ -9092,7 +9134,11 @@ export async function collectSourceRecoveryPages(requestPage, { source, limit = 
 
 /** One command-local data-plane boundary. Credentials never cross flags. */
 function sourceInventoryAccess(manifestPath, m, options = {}) {
-  const base = sourceInventoryBaseUrl(m);
+  const base = sourceInventoryBaseUrl(
+    m,
+    options.retryCommand,
+    options.renderCliCommands ?? renderCliCommands,
+  );
   const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
   const fetchImpl = options.fetchImpl ?? fetch;
   let durableKey;
@@ -9173,14 +9219,23 @@ function sourceInventoryFailure(json, error) {
   const message = known
     ? error.message
     : "the source inventory could not be completed. No source, credential, or Cloudflare setting was changed.";
+  const supportCode = typeof error?.supportCode === "string" &&
+      SUPPORT_ERROR_CODES.includes(error.supportCode)
+    ? error.supportCode
+    : null;
   if (json) {
-    throw new JsonFatal({
+    const failure = new JsonFatal({
       ok: false,
       kind: "source_inventory",
       error: { code, message },
     });
+    if (supportCode) failure.code = supportCode;
+    throw failure;
   }
-  die(message);
+  if (!supportCode) die(message);
+  const failure = new Fatal(message);
+  failure.code = supportCode;
+  throw failure;
 }
 
 const SOURCE_FAILURE_OPERATION_LABELS = Object.freeze({
@@ -9246,9 +9301,11 @@ export async function cmdSources(manifestPath, options = {}) {
       throw new SourceInventoryClientError("invalid_options", "--source is valid here only with --refresh <schedule> or --json --recovery");
     }
 
+    const renderCommands = options.renderCliCommands ?? renderCliCommands;
+    const retryCommand = sourceInventoryRetryCommand(flags, renderCommands);
     const { m } = loadManifest(manifestPath);
     const { base, authenticatedRequest, managedSourceRequest, requestPage } =
-      sourceInventoryAccess(manifestPath, m, options);
+      sourceInventoryAccess(manifestPath, m, { ...options, retryCommand });
 
     if (flags.add) {
       const name = assertSourceName(flags.add === true ? null : flags.add);
@@ -10171,6 +10228,7 @@ function schedulerReadinessSummary(status) {
 
 export async function inspectProvenanceRepairReadiness({ m, manifestPath, source, kind, options = {} }) {
   const blockers = [];
+  const retired = kind === "upload" ? retiredLocalFolderOf(m) : null;
   let selectedConfig;
   let sourceStatus = "ready";
   let credentialStatus = "saved owner credential verified by the private inventory read";
@@ -10188,13 +10246,16 @@ export async function inspectProvenanceRepairReadiness({ m, manifestPath, source
       ocr: m?.safety?.ocr || null,
       private_path_prefixes: m?.safety?.private_path_prefixes || [],
     };
-    if (local.enabled !== true) blockers.push("corpora.local_folder is not enabled in this manifest");
+    if (retired) blockers.push("corpora.local_folder is retired in this manifest");
+    else if (local.enabled !== true) blockers.push("corpora.local_folder is not enabled in this manifest");
     const declaredSource = String(local.source || "documents");
     if (declaredSource !== source) {
       blockers.push(`source ${source} is not the single watched-folder source declared by this manifest`);
     }
     const path = typeof local.path === "string" ? local.path : "";
-    if (!path || !isAbsolute(path)) {
+    if (retired) {
+      sourceStatus = "blocked";
+    } else if (!path || !isAbsolute(path)) {
       blockers.push("corpora.local_folder.path is not one absolute folder");
     } else {
       try {
@@ -10283,7 +10344,7 @@ export async function inspectProvenanceRepairReadiness({ m, manifestPath, source
   }
 
   const platform = options.platform ?? process.platform;
-  if (platform === "darwin" && ["upload", "drive"].includes(kind)) {
+  if (!retired && platform === "darwin" && ["upload", "drive"].includes(kind)) {
     try {
       const readScheduler = options.readSchedulerStatus ?? (kind === "upload"
         ? (await import("./operations/folder-scheduler.mjs")).statusFolderScheduler
@@ -10301,7 +10362,7 @@ export async function inspectProvenanceRepairReadiness({ m, manifestPath, source
       scheduler = { applicable: true, status: "unavailable" };
       blockers.push("the local scheduler state could not be verified safely");
     }
-  } else if (["upload", "drive"].includes(kind)) {
+  } else if (!retired && ["upload", "drive"].includes(kind)) {
     // This release has no Windows or Linux scheduler implementation. An
     // unattended writer therefore cannot be hidden behind a healthy-looking
     // status on those platforms. The command-level cross-platform source lease
@@ -10369,7 +10430,13 @@ async function provenanceRepairContext(manifestPath, source, options = {}) {
   const absoluteManifest = resolve(manifestPath);
   const { m } = loadManifest(absoluteManifest);
   const manifestFingerprint = createHash("sha256").update(readFileSync(absoluteManifest)).digest("hex");
-  const remoteState = await readProvenanceRepairRemoteState(absoluteManifest, m, source, options);
+  const repairOptions = {
+    ...options,
+    retryCommand: options.retryCommand ?? renderCliCommands(
+      "brain provenance-repair <manifest> --source <name>",
+    ),
+  };
+  const remoteState = await readProvenanceRepairRemoteState(absoluteManifest, m, source, repairOptions);
   const sourceRow = remoteState.remote.source;
   const inspectReadiness = options.inspectReadiness ?? inspectProvenanceRepairReadiness;
   const local = await inspectReadiness({
@@ -10410,7 +10477,7 @@ async function provenanceRepairContext(manifestPath, source, options = {}) {
   };
 }
 
-async function runApprovedProvenanceRewalk(context, flags, options = {}) {
+export async function runApprovedProvenanceRewalk(context, flags, options = {}) {
   if (options.runSourceRewalk) {
     return options.runSourceRewalk({
       manifest: context.manifest,
@@ -10427,7 +10494,8 @@ async function runApprovedProvenanceRewalk(context, flags, options = {}) {
     ...(flags["approve-removals"] ? { "approve-removals": flags["approve-removals"] } : {}),
   };
   if (context.plan.source.kind === "upload") {
-    return cmdIngestLocal(context.manifest, context.absoluteManifest, {
+    const ingestLocal = options.ingestLocal ?? cmdIngestLocal;
+    return ingestLocal(context.manifest, context.absoluteManifest, {
       ...shared,
       path: context.manifest.corpora.local_folder.path,
     });
@@ -10494,7 +10562,10 @@ export async function cmdProvenanceRepair(manifestPath, options = {}) {
     );
   }
 
-  const context = await provenanceRepairContext(manifestPath, source, options);
+  const retryCommand = renderCliCommands(
+    `brain provenance-repair <manifest> --source <name>${flags.json ? " --json" : ""}`,
+  );
+  const context = await provenanceRepairContext(manifestPath, source, { ...options, retryCommand });
   const { plan } = context;
   if (!flags.apply) {
     if (flags.json) console.log(JSON.stringify(plan, null, 2));
@@ -10780,6 +10851,7 @@ export async function cmdProvenanceAssess(argv = process.argv.slice(3), options 
   const local = manifestPin?.manifest?.corpora?.local_folder;
   const privatePrefixes = manifestPin?.manifest?.safety?.private_path_prefixes ?? [];
   if (!local || typeof local !== "object" || Array.isArray(local) ||
+      retiredLocalFolderOf(manifestPin.manifest) ||
       local.enabled !== true || local.source !== parsed.source ||
       typeof local.path !== "string" || !isAbsolute(local.path) ||
       !Array.isArray(privatePrefixes) ||
@@ -11311,6 +11383,12 @@ export async function cmdOcrPreflight(manifestPath, options = {}) {
   } catch {
     ocrPreflightFail("MANIFEST_UNAVAILABLE");
   }
+  const retired = retiredLocalFolderOf(manifest);
+  const retiredVariant = retiredFolderLocationVariant(retired, request.path, {
+    platform: options.platform ?? process.platform,
+    ...(options.retiredFolderFs ? { fs: options.retiredFolderFs } : {}),
+  });
+  if (retiredVariant) ocrPreflightFail("MANIFEST_POLICY_INVALID");
 
   let policy;
   let privatePrefixes;
@@ -11345,14 +11423,20 @@ export async function cmdOcrPreflight(manifestPath, options = {}) {
   let walkEvidence;
   let rootBefore;
   try {
-    walked = localIngest.walk(request.path, { privatePrefixes });
+    walked = localIngest.walk(request.path, {
+      privatePrefixes,
+      retiredDirectoryIdentity: retired?.retired_identity || null,
+    });
     if (!walked || !Array.isArray(walked.files) || !Array.isArray(walked.skipped) ||
         typeof walked.complete !== "boolean") {
       throw new TypeError("the local walk returned an invalid result");
     }
     walkEvidence = ocrPreflightWalkEvidence(walked.skipped);
     if (!walkEvidence.root_unavailable) rootBefore = ocrPreflightRootSnapshot(request.path);
-  } catch {
+  } catch (error) {
+    if (error?.reason === "LOCAL_FOLDER_RETIRED:contains_retired") {
+      ocrPreflightFail("MANIFEST_POLICY_INVALID");
+    }
     ocrPreflightFail("PREFLIGHT_FAILED");
   }
   if (walkEvidence.root_unavailable) ocrPreflightFail("SOURCE_UNAVAILABLE");
@@ -11491,7 +11575,9 @@ function sourceIngestLockRuntimeOptions(options = {}) {
  * directly, through `brain load`, or by provenance repair. The caller resolves
  * source identity first, then this function acquires the source lease and any
  * shared credential-record lease before credentials, network, resume-state
- * reads, or receipts. Dry runs never enter either lock.
+ * reads, or receipts. Remote dry runs never enter either lock. Local-folder
+ * dry runs opt in because folder retirement must be able to observe every
+ * active filesystem walk, including a read-only one that may hydrate files.
  */
 async function runMutatingSourceIngest({
   manifestPath,
@@ -11499,10 +11585,11 @@ async function runMutatingSourceIngest({
   statePath,
   sharedRecord = null,
   dryRun,
+  lockDryRun = false,
   options = {},
 }, task) {
   if (typeof task !== "function") throw new TypeError("a source ingest task is required");
-  if (dryRun) return task(null);
+  if (dryRun && !lockDryRun) return task(null);
   const lockTask = options.withSourceIngestLock ?? withSourceIngestLock;
   const runtimeOptions = sourceIngestLockRuntimeOptions(options);
   try {
@@ -11534,7 +11621,48 @@ async function runMutatingSourceIngest({
   }
 }
 
-function localIngestContext(m, manifestPath, flags) {
+const RETIRED_FOLDER_NEXT_LINE = Object.freeze({
+  bare_path_after_retirement:
+    "To read a different folder, name the source with --source <a new name>.",
+  retired_source:
+    "Choose a new source name for a folder outside the retired folder.",
+  inside_retired:
+    "Choose a folder outside the retired folder and give it a new source name.",
+  contains_retired:
+    "Choose a folder that does not contain the retired folder and give it a new source name.",
+});
+
+function refuseRetiredLocalFolder(retired, variant) {
+  const date = String(retired?.retired_at || "").trim();
+  dieInputRefused(
+    `This folder was retired from your Brain on ${date}, so it is not read again. ` +
+      "Nothing was read, sent or removed. Your documents from it are still in your Brain.\n" +
+      `      ${RETIRED_FOLDER_NEXT_LINE[variant]}`,
+    `LOCAL_FOLDER_RETIRED:${variant}`,
+  );
+}
+
+function retiredLocalFolderVariant(m, root, flags, options = {}) {
+  const retired = retiredLocalFolderOf(m);
+  if (!retired) return { retired: null, variant: null };
+  const rawSource = flags.source;
+  const sourceMissing = rawSource === undefined || rawSource === null || rawSource === true ||
+    (typeof rawSource === "string" && rawSource.trim() === "");
+  if (sourceMissing) return { retired, variant: "bare_path_after_retirement" };
+  const source = assertSourceName(String(rawSource).trim());
+  const retiredSource = assertSourceName(String(retired.retired_source || "documents").trim());
+  if (source === retiredSource) return { retired, variant: "retired_source" };
+  if (!existsSync(root)) return { retired, variant: null };
+  return {
+    retired,
+    variant: retiredFolderLocationVariant(retired, root, {
+      platform: options.platform || process.platform,
+      ...(options.retiredFolderFs ? { fs: options.retiredFolderFs } : {}),
+    }),
+  };
+}
+
+function localIngestContext(m, manifestPath, flags, options = {}) {
   // A local folder now reconciles its own deletions, so it has the same
   // approval gate Drive does. It stays invalid on every OTHER remote source,
   // which is checked in cmdIngestRemote.
@@ -11554,6 +11682,10 @@ function localIngestContext(m, manifestPath, flags) {
         "             or \"upload\" when it declares none),\n" +
         "            --reset to ignore previous progress and re-send everything."
     );
+  }
+  const retiredDecision = retiredLocalFolderVariant(m, root, flags, options);
+  if (retiredDecision.variant) {
+    refuseRetiredLocalFolder(retiredDecision.retired, retiredDecision.variant);
   }
   if (!existsSync(root)) die(`no such folder: ${root}`);
 
@@ -11591,17 +11723,19 @@ function localIngestContext(m, manifestPath, flags) {
     declaredSource,
     sourceName,
     dry: !!flags["dry-run"],
+    retired: retiredDecision.retired,
     statePath: canonicalSourceIngestStatePath({ manifestPath, sourceName }),
   };
 }
 
 export async function cmdIngestLocal(m, manifestPath, flags, options = {}) {
-  const context = localIngestContext(m, manifestPath, flags);
+  const context = localIngestContext(m, manifestPath, flags, options);
   return runMutatingSourceIngest({
     manifestPath,
     sourceName: context.sourceName,
     statePath: context.statePath,
     dryRun: context.dry,
+    lockDryRun: true,
     options,
   }, (assertLockOwned) => cmdIngestLocalRun(
     m,
@@ -11621,6 +11755,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     declaredSource,
     sourceName,
     dry,
+    retired,
     statePath,
   } = context;
   const {
@@ -11651,6 +11786,39 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   );
   // What the content sniffer recognised, so the run can say so at the end.
   const messageExportsSeen = new Set();
+  // The complete directory walk is the last retired-folder identity defence.
+  // Keep it before resume state, credentials, and every network dependency so
+  // encountering a moved retired directory still has a truthful zero-effects
+  // refusal. `walk` returns the complete file list before preparation or send.
+  const privatePrefixes = m.safety?.private_path_prefixes || [];
+  info(`walking ${root}`);
+  let walkResult;
+  try {
+    walkResult = walk(root, {
+      privatePrefixes,
+      retiredDirectoryIdentity: retired?.retired_identity || null,
+    });
+  } catch (error) {
+    if (error?.reason === "LOCAL_FOLDER_RETIRED:contains_retired") {
+      refuseRetiredLocalFolder(retired, "contains_retired");
+    }
+    throw error;
+  }
+  const { files, skipped: walkSkips, complete: walkComplete } = walkResult;
+  info(`${files.length} candidate file(s), ${walkSkips.length} skipped during the walk`);
+  if (privatePrefixes.length) {
+    info(`private prefixes enforced: ${privatePrefixes.join(", ")}`);
+  }
+  if (!walkComplete) {
+    await reportSkips(walkSkips);
+    die(
+      "the folder could not be read completely, so nothing was sent and no prior document was removed.\n" +
+        "      Fix the reported permission or filesystem error, then re-run the same command."
+    );
+  }
+  const limited = flags.limit ? files.slice(0, parseInt(flags.limit, 10)) : files;
+  if (flags.limit) warn(`--limit ${flags.limit}: only the first ${limited.length} file(s) will be considered`);
+
   // A dry run sends nothing, so it must not demand credentials it will never
   // use. Requiring a Cloudflare token to preview what WOULD be loaded turns the
   // safest command in the tool into one of the hardest to reach.
@@ -11730,24 +11898,6 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   } else if (ocrCfg.enabled && dry) {
     info("OCR is ON, but a dry run never sends a page to a model and never spends anything.");
   }
-
-  const privatePrefixes = m.safety?.private_path_prefixes || [];
-  info(`walking ${root}`);
-  const { files, skipped: walkSkips, complete: walkComplete } = walk(root, { privatePrefixes });
-  info(`${files.length} candidate file(s), ${walkSkips.length} skipped during the walk`);
-  if (privatePrefixes.length) {
-    info(`private prefixes enforced: ${privatePrefixes.join(", ")}`);
-  }
-  if (!walkComplete) {
-    await reportSkips(walkSkips);
-    die(
-      "the folder could not be read completely, so nothing was sent and no prior document was removed.\n" +
-        "      Fix the reported permission or filesystem error, then re-run the same command."
-    );
-  }
-
-  const limited = flags.limit ? files.slice(0, parseInt(flags.limit, 10)) : files;
-  if (flags.limit) warn(`--limit ${flags.limit}: only the first ${limited.length} file(s) will be considered`);
 
   const skips = [...walkSkips];
   const notes = [];
@@ -19805,6 +19955,45 @@ async function cmdInit(manifestPath, options = {}) {
   info(`next: brain setup ${commandPath(displayPath(target))}`);
 }
 
+export async function completeSetupFolderStep({
+  manifest,
+  manifestPath,
+  folder,
+  shownManifestPath = manifestPath,
+  ingest,
+  remember,
+  log = info,
+  platform = process.platform,
+} = {}) {
+  let skippedRetiredFolder = false;
+  if (folder) {
+    const decision = retiredLocalFolderVariant(
+      manifest,
+      folder,
+      { path: folder, source: "documents" },
+      { platform },
+    );
+    if (decision.variant) {
+      skippedRetiredFolder = true;
+      log(renderCliCommands(
+        `Your watched folder was turned off on ${decision.retired.retired_at}, so setup did not load a folder. ` +
+          `To load one later: brain ingest ${shownManifestPath} --path <folder> --source <a new name>.`,
+      ));
+    } else if (existsSync(folder)) {
+      if (typeof ingest !== "function") throw new TypeError("the setup folder loader is unavailable");
+      await ingest();
+    } else {
+      closePrompts();
+      die(`no such folder: ${folder}. Nothing was loaded. Fix the path and re-run setup.`);
+    }
+  } else {
+    log(renderCliCommands(`load one later with: brain ingest ${shownManifestPath} --path <dir>`));
+  }
+  if (typeof remember !== "function") throw new TypeError("the installed-manifest writer is unavailable");
+  remember();
+  return Object.freeze({ skippedRetiredFolder });
+}
+
 export async function cmdSetup(manifestPath, options = {}) {
   const flags = options.flags ?? parseFlags(process.argv.slice(3));
   assertKnownFlags(
@@ -20207,29 +20396,31 @@ export async function cmdSetup(manifestPath, options = {}) {
     for (const line of renderCliCommands(sliceCheck.fix).split("\n")) console.log(`  ${c.dim(line.trim() ? "  " + line.trim() : "")}`);
   }
   const folder = flags.path || (await prompt("A folder to load now (blank to skip)", ""));
-  if (folder && existsSync(folder)) {
-    process.argv = [process.argv[0], process.argv[1], "ingest", target, "--path", folder, "--source", "documents"];
-    await cmdIngest(target);
-  } else if (folder) {
-    closePrompts();
-    die(`no such folder: ${folder}. Nothing was loaded. Fix the path and re-run setup.`);
-  } else {
-    info(`load one later with: brain ingest ${shownTarget} --path <dir>`);
-  }
-
-  // Setup is the one moment the installer knows the durable manifest location
-  // with certainty. Save only that location, never a credential, so a later
-  // `brain update` can start from any folder after Terminal is reopened.
-  try {
-    const rememberManifest = options.rememberInstalledManifest ?? rememberInstalledManifest;
-    rememberManifest(target, options.installedManifestOptions || {});
-  } catch (error) {
-    closePrompts();
-    die(
-      "this Brain is ready, but this computer could not safely remember where its manifest is. " +
-        "No Cloudflare work needs to be undone. Rerun setup with the same manifest path."
-    );
-  }
+  await completeSetupFolderStep({
+    manifest: m,
+    manifestPath: target,
+    folder,
+    shownManifestPath: shownTarget,
+    platform: options.platform || process.platform,
+    ingest: async () => {
+      process.argv = [process.argv[0], process.argv[1], "ingest", target, "--path", folder, "--source", "documents"];
+      return (options.cmdIngest ?? cmdIngest)(target);
+    },
+    remember: () => {
+      // Setup is the one moment the installer knows the durable manifest
+      // location with certainty. Save only that location, never a credential.
+      try {
+        const rememberManifest = options.rememberInstalledManifest ?? rememberInstalledManifest;
+        rememberManifest(target, options.installedManifestOptions || {});
+      } catch {
+        closePrompts();
+        die(
+          "this Brain is ready, but this computer could not safely remember where its manifest is. " +
+            "No Cloudflare work needs to be undone. Rerun setup with the same manifest path."
+        );
+      }
+    },
+  });
 
   closePrompts();
   const countBacklog = options.backlogCount ?? backlogCount;
@@ -24087,31 +24278,36 @@ async function cmdSupport() {
  * vocabulary because the folder they are watching happens to live outside
  * Google Drive.
  */
-async function cmdScheduleFolder(m, manifestPath, action) {
+async function cmdScheduleFolder(m, manifestPath, action, options = {}) {
   const source = String(m?.corpora?.local_folder?.source || "documents");
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
+  const postExpectation = options.postSourceExpectation ?? postSourceExpectation;
   let dataPlane = null;
   if (action === "install") {
-    const adminKey = resolveAdminKey(manifestPath);
+    const adminKey = resolveKey(manifestPath);
     if (!adminKey) {
       die("no admin key found, so the watched folder schedule cannot be reflected in source freshness.");
     }
-    dataPlane = { base: await resolveBaseUrl(m, null), adminKey };
+    dataPlane = { base: await resolveBase(m, null), adminKey };
   }
+  const scheduler = options.folderScheduler ?? await import("./operations/folder-scheduler.mjs");
   const {
     installFolderScheduler,
     statusFolderScheduler,
     removeFolderScheduler,
-  } = await import("./operations/folder-scheduler.mjs");
+  } = scheduler;
+  const schedulerOptions = options.schedulerOptions || {};
 
   const result = action === "install"
-    ? installFolderScheduler(manifestPath)
+    ? installFolderScheduler(manifestPath, schedulerOptions)
     : action === "remove"
-      ? removeFolderScheduler(manifestPath)
-      : statusFolderScheduler(manifestPath);
+      ? removeFolderScheduler(manifestPath, schedulerOptions)
+      : statusFolderScheduler(manifestPath, schedulerOptions);
 
   for (const warning of result.warnings || []) warn(warning);
   if (action === "install") {
-    await postSourceExpectation(dataPlane.base, dataPlane.adminKey, {
+    await postExpectation(dataPlane.base, dataPlane.adminKey, {
       source, kind: "upload", expected_refresh_seconds: result.expectedRefreshSeconds,
     });
     ok(`watched folder refresh installed for ${result.cron}`);
@@ -24125,10 +24321,10 @@ async function cmdScheduleFolder(m, manifestPath, action) {
   if (action === "remove") {
     ok(result.removed || result.loaded ? "watched folder refresh removed" : "watched folder refresh was not installed");
     try {
-      const adminKey = resolveAdminKey(manifestPath);
+      const adminKey = resolveKey(manifestPath);
       if (!adminKey) throw new Error("no admin key is available");
-      const base = await resolveBaseUrl(m, null);
-      await postSourceExpectation(base, adminKey, { source, kind: "upload", expected_refresh_seconds: null });
+      const base = await resolveBase(m, null);
+      await postExpectation(base, adminKey, { source, kind: "upload", expected_refresh_seconds: null });
       ok(`${source} freshness expectation cleared`);
     } catch (error) {
       warn(`the local scheduler is removed, but its remote freshness expectation could not be cleared: ${String(error?.message || error).slice(0, 160)}`);
@@ -24149,6 +24345,258 @@ async function cmdScheduleFolder(m, manifestPath, action) {
   info(`stdout: ${result.stdoutPath}`);
   info(`stderr: ${result.stderrPath}`);
   return result;
+}
+
+function newestFolderOffBackup(manifestPath) {
+  const directory = dirname(resolve(manifestPath));
+  const prefix = `${basename(manifestPath)}.before-folder-off-`;
+  try {
+    return readdirSync(directory)
+      .filter((name) => name.startsWith(prefix) && /^\d{8}T\d{6}Z$/u.test(name.slice(prefix.length)))
+      .sort()
+      .at(-1);
+  } catch {
+    return null;
+  }
+}
+
+function folderReaderBusy() {
+  dieInputRefused(
+    "A folder read is running now. Wait for it to end, then run this again. Nothing changed.",
+  );
+}
+
+function cloneManifest(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+/** Turn off or inspect the one watched-folder declaration without deleting data. */
+export async function cmdFolder(manifestPath, argv = process.argv.slice(4), options = {}) {
+  if (!manifestPath || !Array.isArray(argv) || argv.length !== 1 || !["off", "status"].includes(argv[0])) {
+    die("usage: brain folder <manifest> off|status");
+  }
+  const action = argv[0];
+  const platform = options.platform ?? process.platform;
+  let initialManifestBytes;
+  let m;
+  try {
+    const readManifestBytes = options.readManifestBytes ?? readFileSync;
+    initialManifestBytes = Buffer.from(readManifestBytes(manifestPath));
+    m = JSON.parse(initialManifestBytes.toString("utf8"));
+  } catch (error) {
+    die(`could not read manifest at ${manifestPath}: ${error.message}`);
+  }
+  const local = m?.corpora?.local_folder;
+  const retired = retiredLocalFolderOf(m);
+  const newestBackupName = newestFolderOffBackup(manifestPath);
+  const newestBackupPath = newestBackupName
+    ? join(dirname(resolve(manifestPath)), newestBackupName)
+    : null;
+
+  if (action === "status") {
+    let scheduler = null;
+    if (platform === "darwin" && local && typeof local === "object") {
+      const { statusFolderScheduler } = await import("./operations/folder-scheduler.mjs");
+      scheduler = statusFolderScheduler(manifestPath, options.schedulerOptions || {});
+    }
+    if (!local || typeof local !== "object") {
+      info("This Brain has no watched folder declared.");
+    } else if (retired) {
+      info(`Watched folder retired on ${retired.retired_at}: ${retired.retired_path || local.path || "path unavailable"}`);
+    } else if (local.enabled === true) {
+      info(`Watched folder active: ${local.path || "path unavailable"}`);
+    } else {
+      info(`Watched folder declared but never enabled${local.path ? `: ${local.path}` : "."}`);
+    }
+    if (platform === "darwin") {
+      if (!scheduler) info("No watched-folder LaunchAgent applies to this manifest.");
+      else if (scheduler.loaded) info(`LaunchAgent loaded${scheduler.running ? " and running" : ""}.`);
+      else if (scheduler.installed) info("LaunchAgent definition is present but not loaded.");
+      else info("LaunchAgent is not installed or loaded.");
+    } else {
+      info("There is no watched-folder scheduled job on this computer.");
+    }
+    info(newestBackupPath
+      ? `Newest settings backup: ${newestBackupPath}`
+      : "No before-folder-off settings backup was found.");
+    info(renderCliCommands(
+      "To undo this, restore the backup file as the manifest, then run: " +
+        `brain schedule ${manifestPath} --install --folder`,
+    ));
+    return Object.freeze({
+      action,
+      declared: Boolean(local && typeof local === "object"),
+      active: Boolean(local?.enabled === true && !retired),
+      retired: Boolean(retired),
+      retiredAt: retired?.retired_at || null,
+      path: retired?.retired_path || local?.path || null,
+      scheduler,
+      backupPath: newestBackupPath,
+    });
+  }
+
+  if (!local || typeof local !== "object" ||
+      (local.enabled !== true && !local.path && !retired)) {
+    info("This Brain has no watched folder; nothing to turn off.");
+    return Object.freeze({ action, changed: false, backupPath: newestBackupPath });
+  }
+  if (retired && local.enabled !== true) {
+    info(`The watched folder was turned off on ${retired.retired_at}. Nothing changed.`);
+    return Object.freeze({ action, changed: false, backupPath: newestBackupPath, retiredAt: retired.retired_at });
+  }
+
+  const source = assertSourceName(String(
+    retired?.retired_source || local.source || "documents",
+  ).trim());
+  let schedulerStatus = null;
+  let schedulerResult = null;
+  let schedulerSkipped = false;
+  if (platform === "darwin") {
+    const { statusFolderScheduler, removeFolderScheduler } = await import("./operations/folder-scheduler.mjs");
+    const { schedulerLockHeld } = await import("./operations/drive-scheduler.mjs");
+    const schedulerOptions = options.schedulerOptions || {};
+    schedulerStatus = statusFolderScheduler(manifestPath, schedulerOptions);
+    const probeSchedulerLock = schedulerOptions.probeSchedulerLock ?? schedulerLockHeld;
+    if (schedulerStatus.running || probeSchedulerLock(schedulerStatus, schedulerOptions)) folderReaderBusy();
+    const sourceProbe = (options.probeSourceIngestLock ?? probeSourceIngestLock)({
+      manifestPath,
+      sourceName: source,
+      ...(options.sourceIngestLockOptions || {}),
+    });
+    if (sourceProbe.busy) folderReaderBusy();
+    // Removal must complete before manifest retirement. A launchctl refusal
+    // therefore leaves the exact original manifest untouched.
+    schedulerResult = removeFolderScheduler(manifestPath, schedulerOptions);
+    ok(schedulerResult.removed || schedulerResult.loaded
+      ? "Watched-folder scheduled job removed."
+      : "The watched-folder scheduled job was not installed.");
+  } else {
+    const sourceProbe = (options.probeSourceIngestLock ?? probeSourceIngestLock)({
+      manifestPath,
+      sourceName: source,
+      ...(options.sourceIngestLockOptions || {}),
+    });
+    if (sourceProbe.busy) folderReaderBusy();
+    schedulerSkipped = true;
+    info("There is no watched-folder scheduled job on this computer.");
+  }
+
+  const intended = cloneManifest(m);
+  const intendedLocal = intended.corpora.local_folder;
+  let retiredAt;
+  let writeNow;
+  if (retired) {
+    retiredAt = retired.retired_at;
+    intendedLocal.enabled = false;
+    writeNow = options.now ? options.now() : new Date();
+  } else {
+    const now = options.now ? options.now() : new Date();
+    if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+      throw new TypeError("the folder retirement timestamp is invalid");
+    }
+    writeNow = now;
+    retiredAt = now.toISOString();
+    intendedLocal.enabled = false;
+    intendedLocal.retired_at = retiredAt;
+    intendedLocal.retired_path = local.path;
+    intendedLocal.retired_source = local.source || "documents";
+    intendedLocal.retired_identity = retiredIdentityOfPath(local.path, {
+      ...(options.identityFs ? { fs: options.identityFs } : {}),
+    });
+    intendedLocal.retired_by = "brain folder off";
+    if (intended.corpora.upload && typeof intended.corpora.upload === "object" &&
+        !Array.isArray(intended.corpora.upload)) {
+      intended.corpora.upload.enabled = false;
+      intended.corpora.upload.retired_at = retiredAt;
+    }
+  }
+
+  let writeResult;
+  try {
+    writeResult = (options.writeManifestAtomically ?? writeManifestAtomically)(
+      manifestPath,
+      intended,
+      {
+        platform,
+        filesystemPlatform: options.filesystemPlatform ?? process.platform,
+        now: () => writeNow,
+        ...(options.manifestWriteOptions || {}),
+        expectedOriginalBytes: initialManifestBytes,
+      },
+    );
+  } catch (error) {
+    if (platform !== "darwin") throw error;
+    const schedulerRemoved = Boolean(schedulerResult?.removed || schedulerResult?.loaded);
+    const writeFailure = String(error?.message || error);
+    if (!schedulerRemoved) {
+      const retryCommand = renderCliCommands(`brain folder ${manifestPath} off`);
+      throw new Error(
+        "The watched-folder scheduled job was not installed, and the manifest could not be updated: " +
+          `${writeFailure}. The original manifest is still active. Fix the manifest write problem, then retry: ` +
+          retryCommand,
+        { cause: error },
+      );
+    }
+    if (retired) {
+      const statusCommand = renderCliCommands(`brain folder ${manifestPath} status`);
+      throw new Error(
+        "The watched-folder scheduled job was removed, but the retired manifest could not be updated: " +
+          `${writeFailure}. Do not reinstall the scheduler for this retired folder. After preserving a manual backup, ` +
+          "manually set corpora.local_folder.enabled to false, then verify the result with: " + statusCommand,
+        { cause: error },
+      );
+    }
+    const recoveryCommand = renderCliCommands(
+      `brain schedule ${manifestPath} --install --folder`,
+    );
+    throw new Error(
+      "The watched-folder scheduled job was removed, but the manifest could not be updated: " +
+        `${writeFailure}. To restore scheduled reads before trying again, run: ` +
+        recoveryCommand,
+      { cause: error },
+    );
+  }
+
+  try {
+    const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+    const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
+    const postExpectation = options.postSourceExpectation ?? postSourceExpectation;
+    const adminKey = resolveKey(manifestPath);
+    if (!adminKey) throw new Error("no admin key is available");
+    const base = await resolveBase(intended, null);
+    await postExpectation(base, adminKey, {
+      source,
+      kind: "upload",
+      expected_refresh_seconds: null,
+    });
+    ok(`${source} freshness expectation cleared.`);
+  } catch (error) {
+    warn(
+      "The watched folder is off, but its remote freshness expectation could not be cleared: " +
+        String(error?.message || error).slice(0, 160),
+    );
+  }
+
+  if (retired) {
+    info(`The watched folder was turned off on ${retiredAt}. Its enabled setting was repaired; the retirement date was kept.`);
+  } else {
+    ok(
+      `Watched folder off. Your Brain no longer re-reads ${local.path}. ` +
+        `Every document already loaded from it stays in your Brain under "${source}". Nothing was removed. ` +
+        "That folder is now just your files: keep it, move it or tidy it as you like. " +
+        "Changes you make to files there will no longer reach your Brain, and anything that saved files into " +
+        "this folder for your Brain (for example a mail export) stops reaching it too. " +
+        `Backup of your settings: ${writeResult.backupPath}.`,
+    );
+  }
+  return Object.freeze({
+    action,
+    changed: true,
+    backupPath: writeResult.backupPath,
+    retiredAt,
+    scheduler: schedulerResult || schedulerStatus,
+    schedulerSkipped,
+  });
 }
 
 /** Install, inspect, or remove the standard per-client Drive scheduler. */
@@ -24224,7 +24672,14 @@ export async function cmdSchedule(manifestPath, options = {}) {
   // The watched local folder is a second lane on the same command, because it
   // is the same question ("what refreshes itself on this Mac") asked about a
   // different source.
-  if (flags.folder) return cmdScheduleFolder(m, manifestPath, action);
+  if (flags.folder && action === "install" && retiredLocalFolderOf(m)) {
+    dieInputRefused(
+      "The watched folder is retired and cannot have a scheduler installed. " +
+        "No admin key was read and no Cloudflare request was made.",
+      "LOCAL_FOLDER_RETIRED:retired_source",
+    );
+  }
+  if (flags.folder) return cmdScheduleFolder(m, manifestPath, action, options);
   if (provider) {
     const source = assertSourceName(m?.corpora?.[provider]?.source || provider);
     const resolveAdminKeyImpl = options.resolveAdminKey ?? resolveAdminKey;
@@ -26844,6 +27299,9 @@ export function firstSourceFileDependencies(options = {}) {
     const manifestPin = pinManifest(manifestPath);
     const local = manifestPin?.manifest?.corpora?.local_folder;
     const privatePrefixes = manifestPin?.manifest?.safety?.private_path_prefixes ?? [];
+    if (retiredLocalFolderOf(manifestPin?.manifest)) {
+      throw new TypeError("the manifest declares a retired local folder");
+    }
     if (!local || typeof local !== "object" || Array.isArray(local) ||
         local.enabled !== true || local.source !== source ||
         typeof local.path !== "string" || !isAbsolute(local.path) ||
@@ -28789,6 +29247,7 @@ const commands = {
   upgrade: cmdUpgradeInteractive,
   rollback: dispatchRollback,
   schedule: cmdSchedule,
+  folder: (path) => cmdFolder(path, process.argv.slice(4)),
   support: cmdSupport,
   tools: cmdLocalToolsInteractive,
   technician: cmdTechnicianInteractive,
@@ -28817,6 +29276,7 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "assistant-repair",
   "ocr-preflight",
   "custom-api",
+  "folder",
 ]);
 
 // Health proves the Brain over HTTPS with the admin key and must never refresh
@@ -28983,6 +29443,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            local folder declared in corpora.local_folder (macOS)
     brain schedule   <manifest> --install --provider <id>  install unattended refresh for a
                                            connected OAuth provider (macOS)
+    brain folder     <manifest> off        turn off the watched folder without removing anything
+    brain folder     <manifest> status     show whether the watched folder is active or retired
     brain support    [--preview|--export <file>]  inspect private local issue notes
     brain support    --explain <issue-code>       plain-language recovery for a typed issue
 
@@ -29011,6 +29473,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain schedule   <manifest> --remove   remove it and preserve its logs
     brain schedule   <manifest> --folder   inspect (or --install/--remove) the watched folder lane
     brain schedule   <manifest> --provider <id>  inspect (or --install/--remove) that provider lane
+    brain folder     <manifest> off|status turn off or inspect the watched folder
     brain disconnect imessage <manifest>   stop live capture, flush open sessions, remove the agent
     brain disconnect whatsapp <manifest>   stop the capture daemon and its drain, flush, remove both agents
     brain disconnect zoom     <manifest>   remove the Zoom secrets so the webhook refuses deliveries

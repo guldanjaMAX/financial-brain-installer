@@ -796,6 +796,11 @@ must stop before resource creation.
   `claude --add-dir <approved-folder>` for that exact root.
 - Preview scope with the connector's dry run before the first ingest. Finding a
   file is not permission to upload it.
+- Turn off a watched folder with `brain folder <manifest> off`; it keeps every
+  document and removes nothing.
+- Never run `ingest --path` on a folder the Brain retired. Never run `schedule
+  --install --folder`, `--reset`, `--approve-removals`, or `forget` on that
+  retired folder's source.
 - Run one connector at a time and record automated, synthetic-field,
   real-source, and production proof separately.
 - Ordinary onboarding must leave the bank feed disabled and must not run `brain

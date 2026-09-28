@@ -394,6 +394,8 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   assert.ok(content.startsWith(CLAUDE_WORKSPACE_MARKER));
   assert.ok(content.includes(`${JSON.stringify(safeNodePath)} ${JSON.stringify(safeBrainPath)}`));
   assert.match(content, /claude --add-dir <approved-folder>/);
+  assert.match(content, /folder .* off.*keeps every document and removes nothing/is);
+  assert.match(content, /Never run .*ingest --path.*folder this Brain retired/is);
   assert.match(content, /npx wrangler@4/);
   assert.match(content, /normal approval prompts enabled/i);
   assert.match(content, /owner directly asks.*brain_remember/is);

@@ -22,8 +22,10 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import {
+import fs, {
   cpSync,
+  existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -32,15 +34,19 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import * as checkedOutCli from "../brain.mjs";
 import checkedOutWorker from "../worker/src/index.js";
+import * as ingestRuntime from "../ingest/run.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { installFolderScheduler } from "../operations/folder-scheduler.mjs";
 
 const ROOT = realpathSync.native(fileURLToPath(new URL("../", import.meta.url)));
 const PRODUCT_VERSION = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
@@ -146,7 +152,7 @@ function queueVectorWork(db, count) {
   }
 }
 
-function manifestFor(version) {
+function manifestFor(version, { watchedPath = null } = {}) {
   return {
     manifest_version: 1,
     client: { slug: "harbor", display_name: "Harbor Fixture", primary_contact: "", timezone: "UTC" },
@@ -161,7 +167,16 @@ function manifestFor(version) {
         drain_cron: "* * * * *",
       },
     },
-    corpora: { upload: { enabled: true } },
+    corpora: {
+      ...(watchedPath ? {
+        local_folder: { enabled: true, path: watchedPath, source: "documents" },
+      } : {}),
+      upload: {
+        enabled: true,
+        ...(watchedPath ? { folders: [{ path: watchedPath, source: "documents" }] } : {}),
+      },
+    },
+    ...(watchedPath ? { operations: { folder_ingest_cron: "0 9 * * *" } } : {}),
   };
 }
 
@@ -182,10 +197,18 @@ function workerD1(db) {
  * One owner's installation of `installed`: the database, the deployed Worker
  * (its release, drain mode and provider vector count) and the manifest.
  */
-function installation(installed) {
+function installation(installed, { activeFolder = false } = {}) {
   const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "older-release-paused-")));
+  const watchedPath = activeFolder ? join(sandbox, "Watched Files") : null;
+  if (watchedPath) {
+    mkdirSync(watchedPath);
+    writeFileSync(
+      join(watchedPath, "fixture.txt"),
+      "synthetic watched-folder text with enough words for the real dry-run walker\n",
+    );
+  }
   const manifestPath = join(sandbox, "brain.manifest.json");
-  writeFileSync(manifestPath, `${JSON.stringify(manifestFor(installed.version), null, 2)}\n`);
+  writeFileSync(manifestPath, `${JSON.stringify(manifestFor(installed.version, { watchedPath }), null, 2)}\n`);
   const db = brainDatabase(installed.version);
   const live = { release: installed, mode: "active", vectors: 1 };
   const events = [];
@@ -293,7 +316,7 @@ function installation(installed) {
   }
 
   return {
-    manifestPath, db, live, events, reads, failures, restore, http, d1Query, cf, kit,
+    sandbox, manifestPath, watchedPath, db, live, events, reads, failures, restore, http, d1Query, cf, kit,
     manifestVersion: () => JSON.parse(readFileSync(manifestPath, "utf8")).brain.version,
     recordedVersion: () => db.prepare("SELECT product_version AS v FROM install_state WHERE id = 1").get().v,
     close() {
@@ -319,8 +342,23 @@ async function quietly(run) {
   return { error, result, output };
 }
 
-async function update(brain, release, { force = false } = {}) {
-  const { upgradeOptions } = brain.kit(release);
+/**
+ * `duringAcceptance` runs inside the acceptance stand-in, a stage every
+ * completed update reaches, so a control can make something happen within a
+ * real update run without replacing any product step.
+ */
+async function update(brain, release, { force = false, duringAcceptance = null } = {}) {
+  const kit = brain.kit(release);
+  const upgradeOptions = duringAcceptance
+    ? {
+      ...kit.upgradeOptions,
+      cmdTest: async (...args) => {
+        const accepted = await kit.upgradeOptions.cmdTest(...args);
+        await duringAcceptance();
+        return accepted;
+      },
+    }
+    : kit.upgradeOptions;
   return quietly(() => release.cli.cmdUpdate(brain.manifestPath, {
     discoverInstalledManifest: () => ({ path: brain.manifestPath, source: "remembered" }),
     readUpdateBacklog: release.cli.readUpdateBacklog,
@@ -409,6 +447,209 @@ function assertResumedTo(brain, newer) {
   assert.equal(brain.manifestVersion(), newer.version);
   assert.equal(brain.recordedVersion(), newer.version);
 }
+
+function folderLaunchctlHarness() {
+  const calls = [];
+  let loaded = false;
+  let mutations = 0;
+  return {
+    calls,
+    mutationCount: () => mutations,
+    launchctl(args) {
+      calls.push([...args]);
+      if (args[0] === "print") {
+        return loaded
+          ? { status: 0, stdout: "state = waiting\nruns = 1\nlast exit code = 0\n" }
+          : { status: 113, stdout: "", stderr: "not loaded" };
+      }
+      if (args[0] === "bootstrap") {
+        mutations += 1;
+        loaded = true;
+        return { status: 0, stdout: "" };
+      }
+      if (args[0] === "bootout") {
+        mutations += 1;
+        loaded = false;
+        return { status: 0, stdout: "" };
+      }
+      return { status: 0, stdout: "" };
+    },
+  };
+}
+
+/**
+ * The folder-walk boundary itself. The real walker lists each directory through
+ * `readdirSync` imported from node:fs, and no update option reaches the ingest
+ * library, so a wrapper handed to a later command cannot see what an update
+ * does. Replacing the builtin listing calls and syncing their ESM bindings
+ * reaches every module already loaded, including each scratch release's own
+ * ingest module. Only listings of a watched root, or of a path under it, are
+ * recorded.
+ */
+function observeFolderListings(roots) {
+  const watched = roots.map((root) => realpathSync.native(root));
+  const isUnder = (path, root) => path === root || path.startsWith(`${root}${sep}`);
+  const listings = [];
+  const originals = [];
+  const wrap = (owner, name) => {
+    const original = owner[name];
+    if (typeof original !== "function") return;
+    originals.push([owner, name, original]);
+    owner[name] = function observedListing(target, ...rest) {
+      let path = null;
+      try {
+        path = target instanceof URL ? fileURLToPath(target) : resolve(String(target));
+      } catch {
+        path = null;
+      }
+      if (path && watched.some((root) => isUnder(path, root))) listings.push({ call: name, path });
+      return original.call(this, target, ...rest);
+    };
+  };
+  for (const name of ["readdirSync", "readdir", "opendirSync", "opendir"]) wrap(fs, name);
+  for (const name of ["readdir", "opendir"]) wrap(fsPromises, name);
+  syncBuiltinESMExports();
+  return {
+    under: (root) => listings.filter(({ path }) => isUnder(path, realpathSync.native(root))),
+    restore() {
+      for (const [owner, name, original] of originals.reverse()) owner[name] = original;
+      syncBuiltinESMExports();
+    },
+  };
+}
+
+test("the documented 0.4.8 active folder updates, retires, and refuses both legacy walks", async () => {
+  assert.equal(PREVIOUS_VERSION, "0.4.8", "this regression is pinned to the documented 0.4.8 shape");
+  const brain = installation(PREVIOUS, { activeFolder: true });
+  const walkedControl = installation(PREVIOUS, { activeFolder: true });
+  // One hook, connected before either update starts and removed only at the
+  // end, so the zero below and the control's count come from the same observer.
+  const folderListings = observeFolderListings([brain.watchedPath, walkedControl.watchedPath]);
+  const home = join(brain.sandbox, "home");
+  mkdirSync(home);
+  const launch = folderLaunchctlHarness();
+  const schedulerOptions = {
+    platform: "darwin",
+    home,
+    uid: 501,
+    nodePath: "/opt/fixture/node",
+    brainPath: "/opt/fixture/brain.mjs",
+    launchctl: launch.launchctl,
+    localTimeZone: "America/Phoenix",
+    probeSchedulerLock: () => false,
+  };
+
+  try {
+    const installed = installFolderScheduler(brain.manifestPath, schedulerOptions);
+    const schedulerBytes = readFileSync(installed.plistPath);
+    const schedulerMutationsBeforeUpdate = launch.mutationCount();
+
+    const run = await update(brain, CHECKED_OUT);
+    assert.equal(run.error, null, run.error?.message);
+    assertResumedTo(brain, CHECKED_OUT);
+    assert.equal(
+      launch.mutationCount(),
+      schedulerMutationsBeforeUpdate,
+      "the completed update reaches every remote stage without changing the local folder scheduler",
+    );
+    assert.deepEqual(readFileSync(installed.plistPath), schedulerBytes);
+    assert.deepEqual(
+      folderListings.under(brain.watchedPath),
+      [],
+      "the completed update never lists the active folder",
+    );
+
+    // Control: the same hook, across the same real update path, counts a walk
+    // that does happen inside it. Without this the zero above could come from
+    // a hook that sees nothing.
+    let controlWalk = null;
+    const walkedRun = await update(walkedControl, CHECKED_OUT, {
+      duringAcceptance: () => { controlWalk = ingestRuntime.walk(walkedControl.watchedPath); },
+    });
+    assert.equal(walkedRun.error, null, walkedRun.error?.message);
+    assertResumedTo(walkedControl, CHECKED_OUT);
+    assert.equal(controlWalk?.complete, true);
+    assert.deepEqual(controlWalk.files.map((file) => file.rel), ["fixture.txt"]);
+    assert.deepEqual(
+      folderListings.under(walkedControl.watchedPath).map(({ path }) => path),
+      [walkedControl.watchedPath],
+      "the same hook records the walk made inside the control's real update",
+    );
+    assert.deepEqual(folderListings.under(brain.watchedPath), []);
+
+    let remoteExpectationCalls = 0;
+    const retired = await quietly(() => checkedOutCli.cmdFolder(brain.manifestPath, ["off"], {
+      platform: "darwin",
+      now: () => new Date("2026-09-28T16:36:00.000Z"),
+      schedulerOptions,
+      probeSourceIngestLock: () => ({ busy: false }),
+      resolveAdminKey: () => "fixture-admin-value",
+      resolveBaseUrl: async () => "https://fixture.invalid",
+      postSourceExpectation: async () => { remoteExpectationCalls += 1; return { ok: true }; },
+    }));
+    assert.equal(retired.error, null, retired.error?.message);
+    assert.equal(retired.result?.changed, true);
+    assert.equal(launch.mutationCount(), schedulerMutationsBeforeUpdate + 1);
+    assert.equal(existsSync(installed.plistPath), false);
+    assert.equal(remoteExpectationCalls, 1, "product retirement reaches the freshness decision point");
+
+    const retiredManifest = JSON.parse(readFileSync(brain.manifestPath, "utf8"));
+    assert.equal(retiredManifest.brain.version, PRODUCT_VERSION);
+    assert.equal(retiredManifest.corpora.local_folder.retired_source, "documents");
+
+    let walks = 0;
+    const ingest = async (manifest, flags) => quietly(() => checkedOutCli.cmdIngestLocal(
+      manifest,
+      brain.manifestPath,
+      { ...flags, "dry-run": true },
+      {
+        sourceIngestLockOptions: { home, platform: process.platform },
+        ingestLib: async () => ({
+          ...ingestRuntime,
+          walk(root, options) {
+            walks += 1;
+            return ingestRuntime.walk(root, options);
+          },
+        }),
+      },
+    ));
+
+    const retiredSource = await ingest(retiredManifest, {
+      path: brain.watchedPath,
+      source: "documents",
+    });
+    assert.equal(retiredSource.error?.reason, "LOCAL_FOLDER_RETIRED:retired_source");
+    const barePath = await ingest(retiredManifest, { path: brain.watchedPath });
+    assert.equal(barePath.error?.reason, "LOCAL_FOLDER_RETIRED:bare_path_after_retirement");
+    assert.equal(walks, 0, "both retired-folder decisions are reached before the walker");
+    assert.deepEqual(folderListings.under(brain.watchedPath), []);
+
+    const activeControl = structuredClone(retiredManifest);
+    activeControl.corpora.local_folder = {
+      enabled: true,
+      path: brain.watchedPath,
+      source: "documents",
+    };
+    activeControl.corpora.upload.enabled = true;
+    delete activeControl.corpora.upload.retired_at;
+    const allowed = await ingest(activeControl, {
+      path: brain.watchedPath,
+      source: "documents",
+    });
+    assert.equal(allowed.error, null, allowed.error?.message);
+    assert.equal(walks, 1, "the non-retired control reaches the real walker exactly once");
+    assert.ok(allowed.result?.would_send >= 1);
+    assert.deepEqual(
+      folderListings.under(brain.watchedPath).map(({ path }) => path),
+      [brain.watchedPath],
+      "the folder-walk hook agrees with the ingest wrapper: one walk, made by the non-retired control",
+    );
+  } finally {
+    folderListings.restore();
+    walkedControl.close();
+    brain.close();
+  }
+});
 
 // Each release's CLI renders its own guidance: on Windows a command names the
 // node executable and that release's brain.mjs, so the expectation must go

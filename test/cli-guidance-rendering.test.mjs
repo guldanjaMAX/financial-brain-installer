@@ -34,6 +34,8 @@ const windows = {
 };
 const prefix = brainCliPrefix(windows);
 const productRoot = new URL("../", import.meta.url);
+const escapeForRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const renderedCommand = (text) => escapeForRegExp(renderCliCommands(text));
 
 /*
  * The command vocabulary is READ FROM THE RENDERER, never written out here.
@@ -175,6 +177,11 @@ assert.equal(renderCliCommands("brain update <manifest>", unusual), `${exact} up
 assert.equal(renderCliCommands(renderCliCommands("brain check <manifest>", unusual), unusual), `${exact} check <manifest>`);
 assert.equal(renderCliCommands("brain update <manifest>", { platform: "darwin" }), "brain update <manifest>");
 assert.equal(renderCliCommands("The brain stores records.", windows), "The brain stores records.");
+assert.equal(
+  renderCliCommands("The brain folder moved. Run brain folder <manifest> status.", windows),
+  `The brain folder moved. Run ${prefix} folder <manifest> status.`,
+  "a command renderer must not rewrite the product word in prose",
+);
 assert.throws(() => brainCliPrefix({ ...windows, scriptPath: "bad\npath" }), /safe to display/);
 
 const manifestWithMetacharacters = "C:\\Owner's $HOME folder\\brain.manifest.json";
@@ -496,6 +503,17 @@ assert.match(reportHtml, /<span class="cmd">&amp; /, "the HTML report command is
 // The technician skill is copied onto the machine byte for byte and then read
 // by the owner's own assistant, which runs what it names in the owner's shell.
 const skillSource = readFileSync(new URL("skills/financial-brain-technician/SKILL.md", productRoot), "utf8");
+const renderedSkillSource = renderCliCommands(skillSource);
+assert.match(
+  renderedSkillSource,
+  new RegExp(
+    renderedCommand("brain folder <manifest> off") +
+      String.raw`.*keeps every[\s\S]{0,80}?document and removes nothing`,
+    "i",
+  ),
+);
+assert.match(skillSource, /Never run `ingest --path` on a folder the Brain retired/i);
+assert.match(skillSource, /Never run `schedule[\s\S]{0,100}?--approve-removals`[\s\S]{0,50}?`forget` on that[\s\S]{0,40}?retired folder's source/i);
 /*
  * Detection here is deliberately INDEPENDENT of the alternation.
  *

@@ -62,6 +62,7 @@ import {
   parseCanonicalEvidenceDate,
 } from "./lib/query-intent.js";
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
+import { answerSentences } from "./lib/answer-sentences.js";
 import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
   documentMatchesOperativeClaim, documentUsesOperativeValue,
@@ -1299,8 +1300,7 @@ async function handleThink(
           }
           if (evidenceGate.supported && explicitCurrentIntent) {
             const allowedNumbers = new Set(allowedDocs.map((doc) => doc.n));
-            const assertions = String(answer || "")
-              .match(/[^.!?\n]+[.!?]?/g) || [];
+            const assertions = answerSentences(answer);
             let temporalFailure = null;
             for (const sentence of assertions) {
               if (!PRESENT_STATUS_ASSERTION.test(sentence) || STATUS_UNCERTAINTY.test(sentence)) continue;
@@ -1370,8 +1370,9 @@ async function handleThink(
             const headsUpAt = answer.search(/\n\s*Heads up:/i);
             const bodyText = headsUpAt >= 0 ? answer.slice(0, headsUpAt) : answer;
             const headsUp = headsUpAt >= 0 ? answer.slice(headsUpAt).trim() : "";
-            const kept = (bodyText.match(/[^.!?\n]+[.!?]+(?:\s*\[\d+\])*|[^.!?\n]+$/g) || [])
-              .map((sentence) => sentence.trim())
+            // Split as answerSentences splits, so the dot inside a figure like
+            // $1,234.73 never cuts a supported sentence apart.
+            const kept = answerSentences(bodyText)
               .filter((sentence) => {
                 const cites = [...sentence.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1]));
                 return cites.length > 0 && cites.every((n) => allowed.has(n));

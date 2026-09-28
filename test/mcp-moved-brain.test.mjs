@@ -287,7 +287,7 @@ test("brain update reconciles a moved brain and names both addresses", async () 
     true,
     "the registration now points at the new location",
   );
-  assert.match(run.output, /the brain folder moved/i);
+  assert.match(run.output, /the brain\s+folder moved/i);
   assert.ok(run.output.includes(newManifest), "the new address is named");
   assert.ok(run.output.includes(oldManifest), "the old address is named");
 });
@@ -302,7 +302,7 @@ test("brain update reconciles a copied brain the same way", async () => {
     mcpRegistrationIsExact(readClaudeConfig(claudeConfigPath).mcpServers[desired.name], desired),
     true,
   );
-  assert.match(run.output, /the brain folder moved/i);
+  assert.match(run.output, /the brain\s+folder moved/i);
 });
 
 test("brain mcp-config --apply reconciles a moved brain through the same reconciler", async () => {
@@ -324,7 +324,7 @@ test("brain mcp-config --apply reconciles a moved brain through the same reconci
     ),
     true,
   );
-  assert.match(applied.output, /the brain folder moved/i);
+  assert.match(applied.output, /the brain\s+folder moved/i);
 });
 
 test("brain assistant-repair previews a moved brain as repairable and applies it", async () => {

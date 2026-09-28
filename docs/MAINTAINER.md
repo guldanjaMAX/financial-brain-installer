@@ -257,13 +257,23 @@ The current 0.4.9/schema48 field candidate remains held. The earlier 0.4.7
 and 0.4.8 candidates were never tagged, published, or offered as customer
 updates; their identities are retired so their evidence cannot be mistaken for
 evidence from these changed bytes. At this freeze the current candidate's
-40-row audit has 36 unresolved incidents, no renewed deferrals, and four rows
-closed on reviewed evidence. Since the held 0.4.8 candidate one clause was
-re-homed, not weakened:
+41-row audit has 37 unresolved incidents and four rows closed on reviewed
+evidence. No earlier deferral was renewed; two of the unresolved rows,
+UPDATE-012 and UPDATE-044, carry new exact-version 0.4.9 deferrals recorded on
+2026-09-26 that print in the release note. Since the held 0.4.8 candidate,
+three acceptance texts changed and one row was added, because two clauses
+were re-homed, not weakened:
 [ADR 007](./decisions/007-rehome-update-006-arm64-clause.md) moves UPDATE-006's
-Windows ARM64 clause into UPDATE-012. Against the last shipped v0.4.6, the
-UPDATE-036 and UPDATE-037 acceptance texts were also rewritten in the unshipped
-0.4.7/0.4.8 work; [UPDATE-AUDIT.md](./UPDATE-AUDIT.md) records both. A tag requests the release workflow; it never
+Windows ARM64 clause into UPDATE-012, and
+[ADR 008](./decisions/008-rehome-update-025-breadth-into-update-044.md) moves
+UPDATE-025's two-institution, two-business and business-banking-login breadth
+into the new UPDATE-044, whose exact-version 0.4.9 narrowing is recorded in
+ADR 008.
+Against the last shipped release, v0.4.6, five
+acceptance texts changed and two rows were added: those three texts and
+UPDATE-044, plus UPDATE-043 and the UPDATE-036 and UPDATE-037 texts rewritten
+in the unshipped 0.4.7/0.4.8 work; [UPDATE-AUDIT.md](./UPDATE-AUDIT.md) records
+all of them. A tag requests the release workflow; it never
 bypasses CI, unresolved incidents, owner acceptance, or the repository's
 immutable-release setting. Do not create or publish releases by hand to work
 around a failed workflow. The

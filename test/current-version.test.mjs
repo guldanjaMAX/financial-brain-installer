@@ -17,7 +17,14 @@ const readme = read("README.md");
 const version = packageJson.version;
 const escapedVersion = version.replaceAll(".", "\\.");
 const currentEvidencePlan = read(`docs/release-evidence/v${version}-candidate-release-evidence-plan.md`);
+const updateAudit = read("docs/UPDATE-AUDIT.md");
+const maintainerGuide = read("docs/MAINTAINER.md");
+const developerReadme = read("docs/README-developer.md");
+const updateIncidents = json("docs/update-incidents.json");
 const retiredEvidencePlan = read("docs/release-evidence/v0.4.7-candidate-release-evidence-plan.md");
+const hardCodedIncidentCounts = ["/", "41-row release audit has 37 unresolved incidents"].join("");
+assert.ok(!read("test/current-version.test.mjs").includes(hardCodedIncidentCounts),
+  "the developer status check must derive incident counts instead of pinning number words");
 // Every candidate plan below the current version was never shipped; each must
 // say it is superseded so its planning cannot be read as live release scope.
 {
@@ -65,6 +72,56 @@ assert.match(currentEvidencePlan, new RegExp(`^# v${escapedVersion} candidate re
   "current candidate has no version-matched evidence plan");
 assert.match(currentEvidencePlan, /Candidate source commit: unbound[\s\S]*?Field execution: none/,
   "the current plan must not imply final-SHA or field proof before either exists");
+const incidentCounts = {
+  total: updateIncidents.length,
+  unresolved: updateIncidents.filter((item) => item.status !== "verified").length,
+  deferred: updateIncidents.filter((item) => item.deferral?.version === version).length,
+  closed: updateIncidents.filter((item) => item.status === "verified").length,
+};
+const smallNumberWords = [
+  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+];
+const writtenCount = (count) => smallNumberWords[count] ?? String(count);
+let developerCountChecks = 0;
+function assertDeveloperIncidentCounts(document) {
+  developerCountChecks += 1;
+  assert.match(document, new RegExp(
+    `${incidentCounts.total}-row release audit has ${incidentCounts.unresolved} unresolved incidents, ` +
+    `${writtenCount(incidentCounts.deferred)} ${escapedVersion} deferrals, and ` +
+    `${writtenCount(incidentCounts.closed)}\\s+` +
+    "rows closed on reviewed evidence",
+  ), "the developer status must report counts derived from the incident registry");
+}
+assertDeveloperIncidentCounts(developerReadme);
+const plantedWrongCount = developerReadme.replace(
+  `${incidentCounts.total}-row release audit`,
+  `${incidentCounts.total + 1}-row release audit`,
+);
+assert.notEqual(plantedWrongCount, developerReadme,
+  "the wrong-count probe must alter the developer status line");
+assert.throws(() => assertDeveloperIncidentCounts(plantedWrongCount),
+  /counts derived from the incident registry/,
+  "a planted wrong count must fail the registry-derived check");
+assert.equal(developerCountChecks, 2,
+  "the count validator must reach both the green control and planted-wrong-count decision points");
+// Acceptance-text counts by reference point, verified against the registry at
+// each point when written. Since the held 0.4.8 candidate: UPDATE-006,
+// UPDATE-012 and UPDATE-025 changed (ADR 007 and ADR 008) and UPDATE-044 was
+// added. Since v0.4.6 also UPDATE-036 and UPDATE-037 changed and UPDATE-043
+// was added. A later acceptance-text change must restate these counts in all
+// three places.
+for (const [label, document] of [
+  ["update audit", updateAudit],
+  ["candidate evidence plan", currentEvidencePlan],
+  ["maintainer guide", maintainerGuide],
+]) {
+  assert.match(document,
+    /Since the held 0\.4\.8\s+candidate,\s+three\s+acceptance\s+texts\s+changed\s+and\s+one\s+row\s+was\s+added[\s\S]*?UPDATE-006[\s\S]*?UPDATE-012[\s\S]*?UPDATE-025[\s\S]*?UPDATE-044/,
+    `${label} must count three changed acceptance texts and one new row since the held 0.4.8 candidate`);
+  assert.match(document,
+    /Against the last shipped\s+release,\s+v0\.4\.6,\s+five\s+acceptance\s+texts\s+changed\s+and\s+two\s+rows\s+were\s+added[\s\S]*?UPDATE-043[\s\S]*?UPDATE-03[67][\s\S]*?UPDATE-03[67]/,
+    `${label} must count five changed acceptance texts and two new rows since v0.4.6`);
+}
 // The disposable update gate is only meaningful at the scale that exercises the
 // accelerated bootstrap path; a plan that drops it silently weakens the gate.
 for (const [pattern, message] of [

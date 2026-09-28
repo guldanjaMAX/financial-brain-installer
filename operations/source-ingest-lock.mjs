@@ -408,3 +408,23 @@ export async function withSourceIngestLock(options, task) {
     lock.release();
   }
 }
+
+/**
+ * Nonblocking ownership probe used before retiring a source. A successful
+ * probe releases its lease immediately; an existing live owner is reported as
+ * busy without disturbing its heartbeat or owner record.
+ */
+export function probeSourceIngestLock(options = {}) {
+  try {
+    const acquire = options.acquireLock ?? acquireSourceIngestLock;
+    const lock = acquire(options);
+    const path = lock.path;
+    lock.release();
+    return Object.freeze({ busy: false, path });
+  } catch (error) {
+    if (error instanceof SourceIngestLockError && error.code === "source_ingest_already_running") {
+      return Object.freeze({ busy: true, path: null });
+    }
+    throw error;
+  }
+}

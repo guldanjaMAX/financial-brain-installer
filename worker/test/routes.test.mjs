@@ -13,8 +13,17 @@ import { ANSWER_ERROR_MESSAGES } from "../src/lib/answer-render.js";
 import { DRIVE_STORED_FAMILY_UID_MAX_BYTES } from "../src/lib/stored-family-identity.js";
 import { WORKER_VERSION } from "../src/lib/version.js";
 
-let fail = 0, ran = 0;
+let fail = 0, ran = 0, known = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + d)); if (!c) fail++; };
+// A deferred defect whose current output is recorded, not approved. It is
+// never counted as a pass. If the recorded output changes, it fails, so a fix
+// has to turn it into an ordinary check with its own control.
+const knownLimitation = (n, stillRecorded, d = "") => {
+  known++;
+  console.log((stillRecorded ? "KNOWN LIMITATION  " : "FAIL  ") + n +
+    (stillRecorded ? "" : "  the recorded output changed; replace this with a real check  " + d));
+  if (!stillRecorded) fail++;
+};
 const isUnavailableRefusal = (body) =>
   body?.status === "search_unavailable" &&
   body?.answer === null &&
@@ -5299,9 +5308,6 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     diagnostic === null, String(diagnostic));
 }
 
-console.log(fail ? `\n${fail} FAILURES` : `\nroutes: all ${ran} tests passed`);
-process.exit(fail ? 1 : 0);
-
 /* ---- supported but incomplete keeps the supported part and names the gap ---- */
 {
   const rows = [{ ...ROW, chunk_uid: "lease:1#0", doc_uid: "lease:1", title: "Office lease 2026", client: null,
@@ -5338,5 +5344,173 @@ process.exit(fail ? 1 : 0);
     /another company/.test(body.evidence_gate?.reason || "") && body.evidence_gate?.partial !== true, JSON.stringify(body.evidence_gate));
 }
 
-console.log(`\n${ran} checks, ${fail} failed`);
-if (fail) process.exit(1);
+/* ---- a partial answer never cuts a sentence at a decimal point ----
+   Field report (C1, 2026-09-26): a supported-but-incomplete answer about one
+   entity's income and expenses came back as "73 [12]. 47 for rent [10]." The
+   partial path split sentences on every ".", so "$1,234.73 [12]" lost
+   everything before ".73", and a citation written before an amount turned
+   "$1,234.73" into a clean, wrong "$1,234". Whole-dollar controls run on the
+   same path so a uniform result cannot pass for the fix. */
+{
+  const ledger = (id, title, text) => ({
+    ...ROW, chunk_uid: `${id}#0`, doc_uid: id, source_id: id, uri: `drive://${id}`,
+    source: "drive", client: null, title, text,
+  });
+  const rows = [
+    ledger("ledger-a", "Example Holdings LLC March income ledger", "March income: $1,234.73 total deposits."),
+    ledger("ledger-b", "Example Holdings LLC March expense ledger", "March expenses: rent $5,678.47. Loan balance $1.2 million."),
+  ];
+  const partialThink = async (draft) => {
+    const { env } = mkEnv(rows, { extra: { AI: { run: async (model, input) => model.includes("bge-")
+      ? ({ data: [[0.1, 0.2, 0.3]] })
+      : String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+        ? ({ response: { supported: true, complete: false, evidence: [1, 2], reason: "the net figure is not stated" }, usage: {} })
+        : ({ response: draft, usage: {} }) } } });
+    return (await call(env, "/api/rag/think?q=What+were+the+March+income+and+expenses%2C+and+the+net%3F")).json();
+  };
+  const NOT_COVERED = "\n\nNot covered by the documents: the net figure is not stated.";
+  const wholeDraft = "Example Holdings LLC recorded March income of $1,234 [1]. Expenses included $5,678 for rent [2].";
+  const control = await partialThink(wholeDraft);
+  check("control: a whole-dollar partial answer keeps both sentences verbatim",
+    control.answer === wholeDraft + NOT_COVERED && control.evidence_gate?.partial === true, JSON.stringify(control.answer));
+  const decimalDraft = "Example Holdings LLC recorded March income of $1,234.73 [1]. Expenses included $5,678.47 for rent [2].";
+  const decimal = await partialThink(decimalDraft);
+  check("a partial answer keeps a cited decimal amount and the rest of its sentence",
+    decimal.answer === decimalDraft + NOT_COVERED && decimal.evidence_gate?.partial === true, JSON.stringify(decimal.answer));
+  const leadingControlDraft = "Per the March income ledger [1], income was $1,234. Per the expense ledger [2], rent was $5,678.";
+  const leadingControl = await partialThink(leadingControlDraft);
+  check("control: citations before whole-dollar amounts survive the partial path",
+    leadingControl.answer === leadingControlDraft + NOT_COVERED, JSON.stringify(leadingControl.answer));
+  const leadingDraft = "Per the March income ledger [1], income was $1,234.73. Per the expense ledger [2], the loan balance is $1.2 million.";
+  const leading = await partialThink(leadingDraft);
+  check("a partial answer never shortens an amount into a different, plausible figure",
+    leading.answer === leadingDraft + NOT_COVERED, JSON.stringify(leading.answer));
+
+  const onlyProfit = "Profit was $9M [1]." + NOT_COVERED;
+  const plainBoundaryControl = await partialThink("Revenue was $5M. Profit was $9M [1].");
+  check("control: a plain full stop drops the uncited sentence on the partial path",
+    plainBoundaryControl.answer === onlyProfit, JSON.stringify(plainBoundaryControl.answer));
+  const boldBoundary = await partialThink("**Revenue was $5M.** Profit was $9M [1].");
+  check("markdown bold closing marks do not join an uncited sentence to a cited one",
+    boldBoundary.answer === onlyProfit && boldBoundary.evidence_gate?.partial === true,
+    JSON.stringify(boldBoundary.answer));
+
+  const quotedBoundaryControl = await partialThink("\"Revenue was $5M.\" Profit was $9M [1].");
+  check("control: a quote-like closing boundary drops the uncited sentence on the partial path",
+    quotedBoundaryControl.answer === onlyProfit, JSON.stringify(quotedBoundaryControl.answer));
+  const codeBoundary = await partialThink("Revenue was `$5M.` Profit was $9M [1].");
+  check("a markdown code closing mark does not join an uncited sentence to a cited one",
+    codeBoundary.answer === onlyProfit && codeBoundary.evidence_gate?.partial === true,
+    JSON.stringify(codeBoundary.answer));
+
+  const bracketBoundaryControl = await partialThink("(Revenue was $5M.) Profit was $9M [1].");
+  check("control: a bracket closing boundary drops the uncited sentence on the partial path",
+    bracketBoundaryControl.answer === onlyProfit, JSON.stringify(bracketBoundaryControl.answer));
+  const italicBoundary = await partialThink("_Revenue was $5M._ Profit was $9M [1].");
+  check("a markdown italic closing mark does not join an uncited sentence to a cited one",
+    italicBoundary.answer === onlyProfit && italicBoundary.evidence_gate?.partial === true,
+    JSON.stringify(italicBoundary.answer));
+
+  const spacedBoundaryControl = await partialThink("Revenue was $5M. Profit was $9M [1].");
+  check("control: a spaced sentence boundary drops the uncited sentence on the partial path",
+    spacedBoundaryControl.answer === onlyProfit, JSON.stringify(spacedBoundaryControl.answer));
+  const missingSpaceBoundary = await partialThink("Revenue was $5M.Profit was $9M [1].");
+  check("an uppercase sentence start needs no space to separate an uncited sentence",
+    missingSpaceBoundary.answer === onlyProfit && missingSpaceBoundary.evidence_gate?.partial === true,
+    JSON.stringify(missingSpaceBoundary.answer));
+
+  const exclamationBoundary = await partialThink("Revenue was $5M!Profit was $9M [1].");
+  check("an exclamation mark before an uppercase start separates an uncited sentence without a space",
+    exclamationBoundary.answer === onlyProfit && exclamationBoundary.evidence_gate?.partial === true,
+    JSON.stringify(exclamationBoundary.answer));
+  const questionBoundary = await partialThink("Revenue was $5M?Profit was $9M [1].");
+  check("a question mark before an uppercase start separates an uncited sentence without a space",
+    questionBoundary.answer === onlyProfit && questionBoundary.evidence_gate?.partial === true,
+    JSON.stringify(questionBoundary.answer));
+  const markdownBoundary = await partialThink("Revenue was $5M.**Profit was $9M [1].");
+  check("markdown after a full stop cannot hide a no-space uppercase sentence start",
+    markdownBoundary.answer === onlyProfit && markdownBoundary.evidence_gate?.partial === true,
+    JSON.stringify(markdownBoundary.answer));
+
+  const noInitialismControlDraft = "The US total was $5M [1]. Profit was $9M [2].";
+  const noInitialismControl = await partialThink(noInitialismControlDraft);
+  check("control: an unpunctuated country abbreviation stays whole on the partial path",
+    noInitialismControl.answer === noInitialismControlDraft + NOT_COVERED,
+    JSON.stringify(noInitialismControl.answer));
+  const initialismDraft = "The U.S. total was $5M [1]. Profit was $9M [2].";
+  const initialism = await partialThink(initialismDraft);
+  check("a compact initialism stays whole under the uppercase boundary rule",
+    initialism.answer === initialismDraft + NOT_COVERED,
+    JSON.stringify(initialism.answer));
+
+  const lowercasePdfDraft = "The report is stored as Invoice.pdf [1].";
+  const lowercasePdf = await partialThink(lowercasePdfDraft);
+  check("control: a lowercase PDF extension stays whole on the partial path",
+    lowercasePdf.answer === lowercasePdfDraft + NOT_COVERED,
+    JSON.stringify(lowercasePdf.answer));
+  const uppercasePdfDraft = "The report is stored as Invoice.PDF [1].";
+  const uppercasePdf = await partialThink(uppercasePdfDraft);
+  knownLimitation("an uppercase file extension still splits Invoice.PDF and drops its prefix",
+    uppercasePdf.answer === "PDF [1]." + NOT_COVERED,
+    JSON.stringify(uppercasePdf.answer));
+
+  const lowercaseHtmlDraft = "The page is stored as Docs.html [1].";
+  const lowercaseHtml = await partialThink(lowercaseHtmlDraft);
+  check("control: a lowercase HTML extension stays whole on the partial path",
+    lowercaseHtml.answer === lowercaseHtmlDraft + NOT_COVERED,
+    JSON.stringify(lowercaseHtml.answer));
+  const capitalizedHtmlDraft = "The page is stored as Docs.Html [1].";
+  const capitalizedHtml = await partialThink(capitalizedHtmlDraft);
+  knownLimitation("a capitalized file extension still splits Docs.Html and drops its prefix",
+    capitalizedHtml.answer === "Html [1]." + NOT_COVERED,
+    JSON.stringify(capitalizedHtml.answer));
+
+  // Deferred past 0.4.9 (see worker/src/lib/answer-sentences.js): a full stop
+  // after an abbreviation still ends a sentence. The partial path splits
+  // "Example Co. recorded" after "Co." and drops the uncited "Example Co."
+  // fragment, so the kept sentence loses its subject. This records that
+  // output; it does not approve it.
+  const unabbreviatedDraft = "Example Company recorded March income of $1,234 [1]. Expenses included $5,678 for rent [2].";
+  const unabbreviated = await partialThink(unabbreviatedDraft);
+  check("control: without an abbreviation the same partial answer keeps its subject",
+    unabbreviated.answer === unabbreviatedDraft + NOT_COVERED, JSON.stringify(unabbreviated.answer));
+  const abbreviatedDraft = "Example Co. recorded March income of $1,234 [1]. Expenses included $5,678 for rent [2].";
+  const abbreviated = await partialThink(abbreviatedDraft);
+  knownLimitation("an abbreviation's full stop still splits a partial answer and drops \"Example Co.\"",
+    abbreviated.answer ===
+      "recorded March income of $1,234 [1]. Expenses included $5,678 for rent [2]." + NOT_COVERED,
+    JSON.stringify(abbreviated.answer));
+}
+
+/* ---- a present-status sentence with a decimal amount keeps its citation ----
+   The current-status check split the draft the same way, so "still active at
+   $1,234.73 per month [1]" left the status clause with no citation and a
+   supported answer was withheld. */
+{
+  const row = {
+    ...ROW, chunk_uid: "subscription-a#0", doc_uid: "subscription-a", source_id: "subscription-a",
+    uri: "drive://subscription-a", source: "drive", client: null, document_date: 1780000000000, date_reliable: 1,
+    title: "Example Holdings LLC storage subscription",
+    text: "The Example Holdings LLC storage subscription is active at $1,234.73 per month.",
+  };
+  const currentThink = async (draft) => {
+    const { env } = mkEnv([row], { extra: { AI: { run: async (model, input) => model.includes("bge-")
+      ? ({ data: [[0.1, 0.2, 0.3]] })
+      : String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+        ? ({ response: { supported: true, complete: true, evidence: [1], reason: "direct support" }, usage: {} })
+        : ({ response: draft, usage: {} }) } } });
+    return (await call(env, "/api/rag/think?q=Is+the+Example+Holdings+LLC+storage+subscription+still+active%3F")).json();
+  };
+  const wholeDraft = "As of 2026-05-28, the Example Holdings LLC storage subscription is still active at $1,234 per month [1].";
+  const control = await currentThink(wholeDraft);
+  check("control: a whole-dollar present-status answer with an exact as-of date is approved",
+    control.answer === wholeDraft && control.evidence_gate?.supported === true, JSON.stringify(control.evidence_gate));
+  const decimalDraft = "As of 2026-05-28, the Example Holdings LLC storage subscription is still active at $1,234.73 per month [1].";
+  const decimal = await currentThink(decimalDraft);
+  check("a decimal amount does not separate a present-status claim from its citation",
+    decimal.answer === decimalDraft && decimal.evidence_gate?.supported === true, JSON.stringify(decimal.evidence_gate));
+}
+
+console.log(fail ? `\n${fail} FAILURES` :
+  `\nroutes: all ${ran} tests passed${known ? `; ${known} known limitation(s) recorded, not passed` : ""}`);
+process.exit(fail ? 1 : 0);

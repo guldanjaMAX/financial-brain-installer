@@ -767,19 +767,32 @@ const fixture = () => {
         JSON.stringify(readdirSync(f.manifests).sort()) === JSON.stringify(beforeEntries));
 
       const drySentinel = new Error(`${item.sourceName} dry core reached`);
-      await assert.rejects(
-        item.invoke({
-          ...options,
-          ingestLib: async () => { throw drySentinel; },
-          googleCalendar: {
-            syncAll: async () => { throw drySentinel; },
-            ingestEnvelopes: async () => { throw new Error("dry run sent calendar envelopes"); },
-          },
-        }, { "dry-run": true }),
-        (error) => error === drySentinel,
-      );
-      check(`${item.sourceName} dry run remains lock-free beside a live writer`,
-        holder.assertOwned() === true && !existsSync(statePath));
+      let dryCoreCalls = 0;
+      const dryOptions = {
+        ...options,
+        ingestLib: async () => { dryCoreCalls++; throw drySentinel; },
+        googleCalendar: {
+          syncAll: async () => { dryCoreCalls++; throw drySentinel; },
+          ingestEnvelopes: async () => { throw new Error("dry run sent calendar envelopes"); },
+        },
+      };
+      if (item.sourceName === "upload") {
+        await assert.rejects(
+          item.invoke(dryOptions, { "dry-run": true }),
+          /ingest is already running/,
+        );
+        check("upload dry run shares the filesystem-reader lease and stops before the walk",
+          dryCoreCalls === 0 && holder.assertOwned() === true && !existsSync(statePath),
+          `dry core calls=${dryCoreCalls}`);
+      } else {
+        await assert.rejects(
+          item.invoke(dryOptions, { "dry-run": true }),
+          (error) => error === drySentinel,
+        );
+        check(`${item.sourceName} dry run remains lock-free beside a live writer`,
+          dryCoreCalls === 1 && holder.assertOwned() === true && !existsSync(statePath),
+          `dry core calls=${dryCoreCalls}`);
+      }
       holder.release();
     }
   } finally {

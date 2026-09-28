@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -209,6 +209,55 @@ test("real adapter preview proves one direct native file without exposing privat
   for (const privateValue of [local.manifest, local.sourceRoot, source, file, privateText]) {
     assert.equal(publicJson.includes(privateValue), false);
   }
+});
+
+test("a retired local folder is refused even when enabled drifted true, while the active control resolves the file", async (t) => {
+  const local = fixture();
+  t.after(local.cleanup);
+  const retired = JSON.parse(readFileSync(local.manifest, "utf8"));
+  retired.corpora.local_folder.enabled = true;
+  retired.corpora.local_folder.retired_at = "2026-09-28T16:36:00.000Z";
+  retired.corpora.local_folder.retired_path = retired.corpora.local_folder.path;
+  retired.corpora.local_folder.retired_source = source;
+  retired.corpora.local_folder.retired_identity = null;
+  retired.corpora.local_folder.retired_by = "settings-step folder-off";
+  writeFileSync(local.manifest, `${JSON.stringify(retired, null, 2)}\n`, { mode: 0o600 });
+
+  const input = parseFirstSourceFileArgv([
+    local.manifest,
+    "--source", source,
+    "--file", file,
+    "--expect-runtime-sha256", RUNTIME_SHA256,
+    "--json",
+  ]);
+  const retiredEvents = [];
+  const retiredDependencies = firstSourceFileDependencies(observedLocalOptions(retiredEvents));
+  const refused = await previewFirstSourceFile(input, retiredDependencies)
+    .then(() => null, (error) => error);
+  assert.equal(refused?.stage, "read_only_snapshot");
+  assert.match(
+    refused?.privateCause?.message || "",
+    /retired local folder/u,
+  );
+  assert.equal(retiredEvents[0], "architecture");
+  assert.ok(retiredEvents.includes("runtime.verify"));
+  assert.ok(retiredEvents.includes("manifest.pin"));
+  assert.equal(retiredEvents.includes("source.resolve"), false);
+
+  retired.corpora.local_folder.enabled = true;
+  delete retired.corpora.local_folder.retired_at;
+  delete retired.corpora.local_folder.retired_path;
+  delete retired.corpora.local_folder.retired_source;
+  delete retired.corpora.local_folder.retired_identity;
+  delete retired.corpora.local_folder.retired_by;
+  writeFileSync(local.manifest, `${JSON.stringify(retired, null, 2)}\n`, { mode: 0o600 });
+  const controlEvents = [];
+  const control = await previewFirstSourceFile(
+    input,
+    firstSourceFileDependencies(observedLocalOptions(controlEvents)),
+  );
+  assert.equal(control.status, "ready_for_approval");
+  assert.ok(controlEvents.includes("source.resolve"));
 });
 
 test("real adapter apply leases first and maps the exact Worker result identity", async (t) => {

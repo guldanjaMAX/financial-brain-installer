@@ -154,6 +154,33 @@ try {
       /corpora\.local_folder\.enabled must be true/.test(error?.message), error?.message);
   }
   {
+    const path = join(directory, "retired-but-enabled", "brain.manifest.json");
+    writeManifest({
+      ...baseManifest,
+      corpora: {
+        ...baseManifest.corpora,
+        local_folder: {
+          ...baseManifest.corpora.local_folder,
+          retired_at: "2026-09-28T16:36:00.000Z",
+          retired_path: watched,
+          retired_source: "documents",
+        },
+      },
+    }, path);
+    let installCalls = 0;
+    let error = null;
+    try {
+      installFolderScheduler(path, opts({
+        launchctl: () => { installCalls += 1; return { status: 0, stdout: "" }; },
+      }));
+    } catch (caught) {
+      error = caught;
+    }
+    check("a durable retirement timestamp refuses scheduler install even when enabled drifted true",
+      /retired/i.test(error?.message || "") && installCalls === 0,
+      JSON.stringify({ message: error?.message, installCalls }));
+  }
+  {
     const path = join(directory, "relative", "brain.manifest.json");
     writeManifest({
       ...baseManifest,
