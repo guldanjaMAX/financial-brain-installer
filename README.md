@@ -77,14 +77,17 @@ sign-in saved as this Brain's named local profile. The owner signs in, completes
 2FA, chooses the exact account, and approves Cloudflare's consent page. Pinned
 Wrangler 4.131.1 cannot request Vectorize permission for that browser profile.
 If the read-only preflight reaches that boundary, the installer says so and
-offers a separate, account-scoped API token from the Cloudflare dashboard with
-Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read. It never
-quietly substitutes a saved token. Before using one from protected local
-storage, it names the exact credential location and account, warns that the
-token may be old or revoked, and asks the owner to approve that credential.
-The owner can decline it and choose a different token through the hidden prompt.
-A recovery token receives a short expiry and never belongs in chat or a command
-argument.
+offers its bounded recovery path; a hidden token prompt appears only when the
+released CLI explicitly offers that path and the owner chooses it. The
+recovery-only token is a separate, account-scoped API token from the Cloudflare
+dashboard with the minimum reviewed scope: Workers Scripts Edit, D1 Edit,
+Vectorize Edit, and Workers AI Read. The installer never quietly substitutes a
+saved token. Before using one from protected local storage, it names the exact
+credential location and account, warns that the token may be old or revoked, and
+asks the owner to approve that credential. The owner can decline it and choose a
+different token through the hidden prompt. Give a recovery token a short expiry:
+leave its start date empty or set it to today, and set its end at least 7 days
+from now. It never belongs in chat or a command argument.
 
 Mac or Linux:
 

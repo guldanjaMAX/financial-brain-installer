@@ -524,7 +524,8 @@ sign-in, not the normal install. If the reviewed CLI truly requires recovery,
 inspect the selected manifest first. A D1-only Brain needs the four reviewed
 permissions. Add Workers R2 Storage Edit only when that manifest configures an
 R2 bucket. Claude may fill the token name, the applicable permissions, the
-one-account restriction, and a short expiration. Stop on the final review screen. The
+one-account restriction, a start date left empty or set to today, and an end at
+least 7 days from now. Stop on the final review screen. The
 owner checks the summary, chooses **Create Token**, privately moves the value
 into the CLI's approved owner-only input, and dismisses the secret page before
 Claude resumes browser control. On Windows, customer token recovery is not

@@ -415,10 +415,17 @@ try {
     check("CONNECT BANK, ABSENT: the typed pair is checked with Plaid once before the first write",
       run.fetchImpl.plaidCheckCount() === 1 && run.result?.keys_replaced === false,
       JSON.stringify({ checks: run.fetchImpl.plaidCheckCount(), replaced: run.result?.keys_replaced }));
-    check("CONNECT BANK, ABSENT: output names the secrets and never prints a value",
-      FEED_NAMES.every((name) => run.output.includes(name)) &&
+    check("CONNECT BANK, ABSENT: output uses owner wording and never prints a value",
+      FEED_NAMES.every((name) => !run.output.includes(name)) &&
+      /Plaid accepted both keys/.test(run.output) &&
       [PLAID_CLIENT_ID, PLAID_SECRET, wrapping].every((value) => value && !run.output.includes(value)),
       "output withheld: it would be the leak being tested");
+    check("CONNECT BANK, ABSENT: owner card explains the return address and key custody",
+      /Plaid needs to know where to send you back/.test(run.output) &&
+      /Copy this return address into Plaid\. It is not a page to open/.test(run.output) &&
+      /https:\/\/dashboard\.plaid\.com\/team\/api/.test(run.output) &&
+      /Your Brain needs your two Plaid keys: the client_id, then the Sandbox or Production secret/.test(run.output) &&
+      /saved to your Brain, not to this computer/.test(run.output), run.output);
   }
 
   {
@@ -543,14 +550,10 @@ try {
     const unregistered = checkBankFeedRedirect(manifest({ bankFeed: true }));
     check("THE CHECK THAT SAVES A SESSION: an unregistered return address is a FAILURE, found in advance",
       unregistered.status === FAIL, JSON.stringify(unregistered));
-    check("and the fix carries the exact address to register, and where to register it",
+    check("and the owner card carries the exact address, dashboard link, and copy-not-open instruction",
       unregistered.fix.includes("https://fixture-brain.example.workers.dev/app/connect/bank") &&
-      /CLIENT'S OWN/.test(unregistered.fix), unregistered.fix);
-    check("and it says what happens if it is skipped, so it is not filed as a nag",
-      /land on a dead return/.test(unregistered.fix), unregistered.fix);
-    check("and it says the address MUST be on Plaid's allowed list because every Link request sends it",
-      /Allowed redirect URIs/.test(unregistered.fix) && /MUST be on the dashboard's allowed list/.test(unregistered.fix) &&
-      /sends it as the\s+redirect_uri of every Link request/.test(unregistered.fix), unregistered.fix);
+      /dashboard\.plaid\.com\/team\/api/.test(unregistered.fix) &&
+      /Copy this return address into Plaid\. It is not a page to open/.test(unregistered.fix), unregistered.fix);
     check("and it never tells the operator to register the webhook in a dashboard",
       !/webhook/i.test(unregistered.fix), unregistered.fix);
 
@@ -562,8 +565,10 @@ try {
     });
     check("a Plaid feed with its return address registered passes with no webhook record",
       redirectOnly.status === OK &&
-      redirectOnly.detail.includes("https://fixture-brain.example.workers.dev/api/webhooks/plaid") &&
-      /sent with each Link request, so it needs no dashboard registration/.test(redirectOnly.detail) &&
+      redirectOnly.detail.startsWith("return address saved in Plaid") &&
+      !redirectOnly.detail.includes("/app/connect/bank") &&
+      !redirectOnly.detail.includes("https://fixture-brain.example.workers.dev/api/webhooks/plaid") &&
+      /included with each Link request and needs no dashboard registration/.test(redirectOnly.detail) &&
       !/register (this|the) (exact )?webhook/i.test(`${redirectOnly.detail} ${redirectOnly.fix || ""}`),
       JSON.stringify(redirectOnly));
 
@@ -575,9 +580,9 @@ try {
         registered_webhook_uris: ["https://other-brain.example.workers.dev/api/webhooks/plaid"],
       } },
     });
-    check("a stale webhook record is ignored and the check names this Brain's own webhook",
+    check("a stale webhook record is ignored and the owner line exposes no endpoint",
       staleWebhook.status === OK && !/other-brain/.test(staleWebhook.detail) &&
-      staleWebhook.detail.includes("https://fixture-brain.example.workers.dev/api/webhooks/plaid"),
+      !staleWebhook.detail.includes("/api/webhooks/plaid"),
       JSON.stringify(staleWebhook));
 
     const plaidReady = checkBankFeedRedirect({
@@ -590,7 +595,7 @@ try {
     });
     check("an older manifest that still records the webhook keeps passing",
       plaidReady.status === OK &&
-      /signed webhook https:\/\/fixture-brain\.example\.workers\.dev\/api\/webhooks\/plaid/.test(plaidReady.detail),
+      /signed webhook is included/.test(plaidReady.detail) && !/https:/.test(plaidReady.detail),
       JSON.stringify(plaidReady));
     const partialLegacy = checkBankFeedRedirect({
       ...manifest({ bankFeed: true }),

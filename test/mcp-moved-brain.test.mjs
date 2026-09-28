@@ -412,13 +412,27 @@ test("a refusal names its reason and offers a remedy that does not re-enter the 
 
   assert.match(
     run.output,
+    /Claude Code wasn't connected to your Brain automatically this time, because its settings file couldn't be updated safely/i,
+    "the warning explains the owner-visible outcome",
+  );
+  assert.match(
+    run.output,
     /another MCP server already holds this name/i,
     "the computed reason reaches the operator instead of one generic sentence",
+  );
+  assert.ok(
+    run.output.includes(claudeConfigPath),
+    "the remedy names the configuration file that holds the collision",
+  );
+  assert.match(
+    run.output,
+    /Rename or remove that .* entry yourself first/i,
+    "the remedy tells the owner how to clear the persistent collision",
   );
   assert.match(
     run.output,
     /mcp-config/,
-    "the printed remedy is the one command that does not re-enter this reconciler",
+    "the read-only manual connection command remains available",
   );
   assert.doesNotMatch(
     run.output,
@@ -427,7 +441,7 @@ test("a refusal names its reason and offers a remedy that does not re-enter the 
   );
   assert.doesNotMatch(
     run.output,
-    /rerun setup/i,
+    /run the same command again|rerun setup/i,
     "no remedy points back at the gate that produced the warning",
   );
   assert.equal(

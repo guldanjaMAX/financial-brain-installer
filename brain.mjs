@@ -184,6 +184,7 @@ import {
   runAll as doctorRunAll,
   summarize as doctorSummarize,
   bankFeedRedirectUri,
+  plaidOwnerReturnAddressCard,
   checkBankFeedRedirect,
   checkPrioritySlice,
   checkClaudeCode,
@@ -206,7 +207,7 @@ import {
   productRelativeFingerprint,
   recordSupportEvent,
 } from "./support-journal.mjs";
-import { renderSupportRecovery, supportRecovery } from "./support-recovery.mjs";
+import { SUPPORT_RECOVERY_CATALOG, renderSupportRecovery, supportRecovery } from "./support-recovery.mjs";
 import { renderCliCommands } from "./operations/cli-guidance.mjs";
 import { quotePowerShellArgument, quotePosixArgument } from "./operations/command-display.mjs";
 export { brainCliPrefix, renderCliCommands } from "./operations/cli-guidance.mjs";
@@ -397,7 +398,10 @@ const c = {
   yellow: (s) => `\x1b[33m${s}\x1b[0m`,
 };
 
-const ok = (s) => console.log(`${c.green("ok")}    ${renderCliCommands(s)}`);
+export function successMark(isTTY = process.stdout.isTTY === true) {
+  return isTTY ? c.green("ok") : "·";
+}
+const ok = (s) => console.log(`${successMark()}    ${renderCliCommands(s)}`);
 const info = (s) => console.log(`${c.dim("·")}     ${renderCliCommands(s)}`);
 const warn = (s) => console.log(`${c.yellow("warn")}  ${renderCliCommands(s)}`);
 /**
@@ -492,9 +496,13 @@ export function supportErrorCode(error, { command = "", unexpected = false } = {
   const typedCode = typeof declaredCode === "string" ? declaredCode.trim().toUpperCase() : "";
   if (SUPPORT_ERROR_CODES.includes(typedCode)) return typedCode;
   const message = String(error?.message || "");
+  if (error?.credentialSource !== "wrangler-session" &&
+      /\b9109\b/.test(message) && /(?:invalid access token|failed \((?:401|403)\))/i.test(message)) {
+    return "CLOUDFLARE_TOKEN_NOT_ACTIVE";
+  }
   if (/PDF.*tim(?:e|ed) out/i.test(message)) return "PDF_PROCESS_TIMEOUT";
   if (/PDF.*process/i.test(message)) return "PDF_PROCESS_FAILED";
-  if (/timed out|ETIMEDOUT|ECONNRESET|EAI_AGAIN|ENOTFOUND/i.test(message)) return "NETWORK_UNREACHABLE";
+  if (/timed out|ETIMEDOUT|ECONNRESET|EAI_AGAIN|ENOTFOUND/i.test(`${declaredCode} ${message}`)) return "NETWORK_UNREACHABLE";
   if (/rate.?limit|\b429\b/i.test(message)) return "RATE_LIMITED";
   if (/\b401\b|expired.*(?:auth|token)|reauthori[sz]/i.test(message)) return "AUTH_EXPIRED";
   if (/\b403\b|forbidden|permission denied|not permitted/i.test(message)) return "REMOTE_PERMISSION_DENIED";
@@ -605,11 +613,8 @@ function recordSupportFailure(error, { unexpected = false } = {}) {
 
 function printSupportReceipt(receipt, write = console.error) {
   if (!receipt?.errorCode) return;
-  write(`  Issue code: ${receipt.errorCode}`);
-  write(renderCliCommands(`  What to try next: brain support --explain ${receipt.errorCode}`));
-  if (!receipt.eventId) return;
-  write(`  Private issue note ${receipt.eventId} was saved locally. The installer did not upload or send this issue note.`);
-  write(renderCliCommands("  Review the exact safe record with: brain support --preview"));
+  if (["COMMAND_FAILED", "CONFIG_INVALID"].includes(receipt.errorCode)) return;
+  write(renderCliCommands(`  Need help with this? Run: brain support --explain ${receipt.errorCode}`));
 }
 
 const cloudflareTokenSession = new AsyncLocalStorage();
@@ -974,11 +979,12 @@ export async function withCloudflareToken(action, options = {}) {
       }
     }
     if (stored) {
-      return cloudflareTokenSession.run(stored, async () => {
+      const holder = { buffer: stored, source: "saved-token" };
+      return cloudflareTokenSession.run(holder, async () => {
         try {
           return await action();
         } finally {
-          stored.fill(0);
+          holder.buffer.fill(0);
         }
       });
     }
@@ -1031,11 +1037,12 @@ export async function withCloudflareToken(action, options = {}) {
     );
   }
 
-  return cloudflareTokenSession.run(entered, async () => {
+  const holder = { buffer: entered, source: "entered-token" };
+  return cloudflareTokenSession.run(holder, async () => {
     try {
       return await action();
     } finally {
-      entered.fill(0);
+      holder.buffer.fill(0);
     }
   });
 }
@@ -1056,11 +1063,12 @@ export async function withAvailableCloudflareToken(action, options = {}) {
     return action();
   }
   if (!stored) return action();
-  return cloudflareTokenSession.run(stored, async () => {
+  const holder = { buffer: stored, source: "saved-token" };
+  return cloudflareTokenSession.run(holder, async () => {
     try {
       return await action();
     } finally {
-      stored.fill(0);
+      holder.buffer.fill(0);
     }
   });
 }
@@ -1439,6 +1447,9 @@ async function cf(path, options = {}) {
     return await cfOnce(path, options);
   } catch (error) {
     const holder = cloudflareTokenSession.getStore();
+    if (/\b9109\b/.test(String(error?.message || "")) && !error?.credentialSource) {
+      error.credentialSource = holder?.source || (process.env.CLOUDFLARE_API_TOKEN ? "provided-token" : undefined);
+    }
     const renewal = isExpiredSessionRejection(error) ? renewWranglerSessionToken() : null;
     if (renewal === "changed") {
       try {
@@ -2859,11 +2870,7 @@ async function cmdDeployWithPrompts(manifestPath, options = {}) {
   }
   // Same reasoning as provision: suppressed when setup drives the step.
   if (options.nextSteps !== false) {
-    info(
-      "next: brain secrets <manifest>, then brain health <manifest>.\n" +
-        "        `brain secrets` applies this brain's admin key and never creates one. If this\n" +
-        "        brain has no key yet, `brain setup <manifest>` creates it and finishes the install."
-    );
+    info("next: brain health <manifest>.");
   }
 }
 
@@ -3939,7 +3946,9 @@ export async function cmdHealth(manifestPath, {
           }
           die(
             "Vectorize has accepted work that is not query-visible yet." + "\n" +
-              "      Re-run `brain drain <manifest>`; it waits without paying to re-embed accepted rows."
+              "      Search is still catching up. New documents are saved and can already be found" + "\n" +
+              "      by their exact words. Leave the Brain alone; it catches up fastest when nothing" + "\n" +
+              "      else is running. Check later with `brain health`."
           );
         }
         ok(`vector index is query-ready (${readiness.actual_vectors} confirmed vector(s))`);
@@ -3957,9 +3966,19 @@ export async function cmdHealth(manifestPath, {
       continue;
     }
     if (docs.status === 401) {
+      const mismatch = new Fatal(
+        `Your Brain didn't accept this computer's key after ${attempts} tries.` + "\n" +
+          "      Your documents are safe and nothing changed." + "\n" +
+          "      Run `brain setup <manifest>`. It puts the saved key back on your Brain without asking you to type it." + "\n" +
+          "      Then run `brain health` again."
+      );
+      mismatch.code = "ADMIN_KEY_MISMATCH";
+      throw mismatch;
+    }
+    if (docs.status === 503) {
       die(
-        `documents endpoint is still unauthorized after ${attempts} attempts.` + "\n" +
-          "      Health cannot pass until the local admin key matches the deployed secret."
+        "Your Brain is up but couldn't check its documents just now." + "\n" +
+          "      Wait a minute and run `brain health` again."
       );
     }
     die(
@@ -19708,6 +19727,11 @@ async function buildChecksumDriftCheck(manifestPath, options = {}) {
   return { name: "migration checksums", status: D_OK, detail: "every applied migration matches its file" };
 }
 
+export function doctorClosingMessage(existingBrain, warnings) {
+  const suffix = warnings ? ` (${warnings} optional item(s) not set up)` : "";
+  return `${existingBrain ? "checkup complete" : "ready to install"}${suffix}`;
+}
+
 export async function cmdDoctor(manifestPath, options = {}) {
   let accountId;
   let cloudflareAuthProfile;
@@ -19831,7 +19855,7 @@ export async function cmdDoctor(manifestPath, options = {}) {
     // Non-zero exit, so a setup script or a CI step can gate on this.
     die(`${s.fatal} blocking problem(s). Fix those and re-run \`brain doctor\`.`);
   }
-  ok(`ready to install${s.warnings ? ` (${s.warnings} optional item(s) not set up)` : ""}`);
+  ok(doctorClosingMessage(existingBrain, s.warnings));
 }
 
 
@@ -20632,7 +20656,7 @@ export async function cmdSetup(manifestPath, options = {}) {
     ok("reusing this brain's verified durable admin key");
   }
   console.log(
-    `\n    Written answers use ${c.bold("Cloudflare Workers AI")} in the client's own account.\n` +
+    `\n    Your answers are written by ${c.bold("Cloudflare Workers AI")} inside your own Cloudflare account.\n` +
       "    No Anthropic, OpenAI, Gemini, or Supabase credential is required.\n"
   );
   // Setup owns one full reconciliation in Step 5. Suppress cmdSecrets' normal
@@ -22580,7 +22604,8 @@ export async function wireAgents(m, manifestPath, options = {}) {
       skipped.push("Claude Code");
     } else {
       warn(
-        `Claude Code's "${desired.name}" registration could not be reconciled safely: ` +
+        "Claude Code wasn't connected to your Brain automatically this time, because its settings file " +
+          "couldn't be updated safely. Your Brain and your data are fine. Reason: " +
           agentReconciliationReason(result)
       );
       for (const line of agentReconciliationRemedy(desired, manifestPath, result)) info(line);
@@ -22671,37 +22696,69 @@ export function resolveAdminKey(manifestPath, {
  *
  * The stack is still one environment variable away for whoever has to fix it.
  */
+export function debugRetryHint(platformName = process.platform) {
+  return platformName === "win32"
+    ? "$env:BRAIN_DEBUG=1; <the same command>"
+    : "BRAIN_DEBUG=1 <the same command>";
+}
+
 function crash(err) {
   const msg = renderCliCommands(err && err.message ? err.message : String(err));
   const supportEventId = recordSupportFailure(err, { unexpected: true });
+  const write = (line) => console.log(line);
+  const networkCode = String(err?.cause?.code || err?.code || "");
+  if (err?.retryable === true || ["ECONNREFUSED", "ECONNRESET", "EPIPE", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND", "UND_ERR_SOCKET"].includes(networkCode)) {
+    write(`\n${c.red("fail")}  Your internet connection dropped while talking to Cloudflare.`);
+    write("  Nothing was lost: everything that finished is saved.");
+    write("  Check your Wi-Fi or VPN, then run the same command again.");
+    printSupportReceipt(supportEventId, write);
+    process.exit(1);
+  }
   // A refused credential is not a bug in this tool, and saying so is worse than
   // saying nothing: a mistyped or expired token is the single most likely
   // install-day mistake, and "not something you did wrong" is the one sentence
   // that stops the owner from fixing it (bench, 2026-08-28).
   if (isCredentialRejection(err)) {
-    console.error(`\n${c.red("fail")}  Cloudflare refused the credential: ${msg}`);
     if (err && err.credentialSource === "wrangler-session") {
-      console.error("  This credential came from this computer's `wrangler login` session, which has");
-      console.error("  expired (they last about an hour) and could not be renewed. Nobody typed a token.");
-      console.error(`  Run \`${legacyWranglerLoginCommand()}\`, then re-run the same command; it resumes where it stopped.`);
-      console.error("\n  Anything created before the refusal is still there and is reused on the re-run.");
-    } else {
-      sayErr("  " + CF_TOKEN_REJECTED_REMEDY.split("\n").join("\n  "));
-      console.error("\n  Nothing was created or half-written. Re-run once the token is right.");
+      write(`\n${c.red("fail")}  Cloudflare refused this computer's \`wrangler login\` session: ${msg}`);
+      write("  That browser sign-in expired and could not be renewed. Nobody typed a token.");
+      write(`  Run \`${legacyWranglerLoginCommand()}\`, then re-run the same command; it resumes where it stopped.`);
+      write("\n  Anything created before the refusal is still there and is reused on the re-run.");
+      printSupportReceipt(supportEventId, write);
+      process.exit(1);
     }
-    printSupportReceipt(supportEventId, (line) => console.error(line));
+    if (/\b9109\b/.test(String(err?.message || ""))) {
+      const source = err?.credentialSource === "saved-token"
+        ? "the saved key"
+        : err?.credentialSource === "entered-token"
+          ? "the key you typed"
+          : "the access key";
+      write(`\n${c.red("fail")}  Cloudflare did not accept ${source} (code 9109).`);
+      write("  The usual cause is its dates: the start is later than now, or the end has passed.");
+      write("  Anything completed before this stop is kept and reused when you retry.");
+      write("  In Cloudflare open My Profile > API Tokens, set the start to today or earlier");
+      write("  and the end at least a week away, then run the same command again.");
+      write("  You don't need to change its permissions.");
+      write(renderCliCommands("  If you made a new key, first run brain token <manifest> --forget."));
+      printSupportReceipt(supportEventId, write);
+      process.exit(1);
+    }
+    write(`\n${c.red("fail")}  Cloudflare refused the credential: ${msg}`);
+    write(renderCliCommands("  " + CF_TOKEN_REJECTED_REMEDY.split("\n").join("\n  ")));
+    write("\n  Anything created before this stop is kept and reused. Re-run once the key is right.");
+    printSupportReceipt(supportEventId, write);
     process.exit(1);
   }
-  console.error(`\n${c.red("unexpected error")}  ${msg}`);
-  console.error("  This is a bug in the installer, not something you did wrong.");
-  console.error("  Every command here is safe to run again: nothing is left half-written that");
-  console.error("  a re-run cannot finish.");
+  write(`\n${c.red("unexpected error")}  ${msg}`);
+  write("  This is a bug in the installer, not something you did wrong.");
+  write("  Every command here is safe to run again: nothing is left half-written that");
+  write("  a re-run cannot finish.");
   if (process.env.BRAIN_DEBUG) {
-    console.error("\n" + (err && err.stack ? err.stack : String(err)));
+    write("\n" + (err && err.stack ? err.stack : String(err)));
   } else {
-    console.error(`\n  For the technical detail to send on: ${c.bold("BRAIN_DEBUG=1")} <the same command>`);
+    write(`\n  For the technical detail to send on: ${c.bold(debugRetryHint())}`);
   }
-  printSupportReceipt(supportEventId, (line) => console.error(line));
+  printSupportReceipt(supportEventId, write);
   process.exit(1);
 }
 
@@ -22776,7 +22833,8 @@ function translatedHttpFailure(error, url, { timeoutMs = HTTP_TIMEOUT_MS, what =
   } else {
     message = `${what} failed talking to ${host}: ${error?.message || String(error)}`;
   }
-  const translated = new Error(message);
+  const translated = new Fatal(message);
+  translated.code = "NETWORK_UNREACHABLE";
   translated.retryable = retryable;
   return translated;
 }
@@ -24597,7 +24655,14 @@ async function cmdSupport() {
   if (flags.json && !flags.explain) die("--json pairs with --explain <issue-code>");
 
   if (flags.explain) {
-    const recovery = supportRecovery(flags.explain);
+    const code = String(flags.explain).trim().toUpperCase().replace(/[^A-Z0-9_]/g, "").slice(0, 80) || "UNKNOWN";
+    if (!SUPPORT_RECOVERY_CATALOG[code]) {
+      die(
+        `There isn't a guide for ${code} yet. Nothing changed. Run the command that printed it once more. ` +
+        "If it repeats, send the code to support."
+      );
+    }
+    const recovery = supportRecovery(code);
     process.stdout.write(flags.json
       ? `${JSON.stringify(recovery, null, 2)}\n`
       : renderCliCommands(renderSupportRecovery(recovery)));
@@ -24607,7 +24672,9 @@ async function cmdSupport() {
   if (flags.preview) {
     // These are the exact canonical bytes export writes. Do not add a heading
     // here: a user reviewing the payload must see precisely what could leave.
-    process.stdout.write(supportCommandOperation("be read", () => previewSupportJournal()));
+    const content = supportCommandOperation("be read", () => previewSupportJournal());
+    if (process.stdout.isTTY) console.log(`\n  ${c.bold("private issue note — exact shareable bytes")}\n`);
+    process.stdout.write(content);
     return;
   }
 
@@ -24630,9 +24697,13 @@ async function cmdSupport() {
 
   const content = supportCommandOperation("be read", () => previewSupportJournal());
   const events = content ? content.split("\n").length - 1 : 0;
+  const latestEventId = content
+    ? content.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)).at(-1)?.event_id
+    : null;
   const maxMiB = SUPPORT_MAX_BYTES / (1024 * 1024);
   console.log(`\n  ${c.bold("private installer issue journal")}\n`);
   console.log(`  ${events} recent shareable issue note(s) available to preview or export`);
+  if (latestEventId) console.log(`  Latest event id: ${latestEventId}`);
   console.log(`  Shareable view: last ${SUPPORT_MAX_AGE_DAYS} days, newest ${SUPPORT_MAX_EVENTS} notes, up to ${maxMiB} MiB.`);
   console.log("  Safe expired and overflow notes are cleaned up after writes.");
   console.log("  Fresh or concurrent files may remain until a later safe cleanup.");
@@ -29235,6 +29306,7 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
     );
   }
   const url = bankFeedRedirectUri(domainUrl.host);
+  info(plaidOwnerReturnAddressCard(url));
 
   // Plaid Link cannot start on a Worker without its application credentials,
   // so custody is settled before the owner is sent to the browser. The listing
@@ -29295,11 +29367,11 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
     die(String(error?.message || error));
   }
   if (custody.replaced) {
-    ok(`Plaid accepted the new keys for ${environment}; replaced and verified ${custody.written.join(", ")} on ${scriptName}. BANK_FEED_WRAPPING_KEY_V2 was not touched`);
+    ok(`Plaid accepted the new ${environment} keys. They are saved to your Brain, not to this computer.`);
   } else if (custody.written.length) {
-    ok(`wrote and verified ${custody.written.join(", ")} on ${scriptName}`);
+    ok("Plaid accepted both keys. They are saved to your Brain, not to this computer.");
   } else {
-    ok(`${custody.names.join(", ")} already present on ${scriptName}; nothing was prompted or written`);
+    ok("your Plaid keys are already saved to your Brain; nothing was prompted or written");
     info("If a Plaid key was entered wrongly, rerun this command with --replace-keys to enter both keys again.");
   }
 
