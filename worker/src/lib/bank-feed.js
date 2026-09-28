@@ -322,6 +322,8 @@ export function bankFeedOwnerErrorMessage(data, status) {
     entity_not_owned: "That business is not owner-controlled, so the account was not assigned to it.",
     request_id_conflict: "This saved retry belongs to a different choice. Refresh the page and try again.",
     plaid_duplicate_connection_review: "This bank may already be connected. Check the saved connections below and use Repair connection if you need to sign in again. We have not added another copy. If these are separate accounts, their overlap needs review first.",
+    plaid_legacy_reconnect_support_required: "This saved account needs support before it can reconnect because it predates the identity proof used to protect financial history. No replacement was exchanged and nothing was moved. Contact support before trying again.",
+    plaid_reconnect_transaction_review_required: "Replacement history is waiting for review because the Brain could not prove one exact match. Nothing uncertain was added to live totals.",
     plaid_connection_in_progress: "Another bank connection is still finishing. Check its result before starting another connection. Your saved accounts are unchanged.",
     plaid_link_handoff_rejected: "That connection link is no longer usable. Your existing accounts are unchanged. Select Connect a bank to start again.",
     BANK_WRITES_PAUSED: "Your Brain is finishing a verified update. Your bank connections and saved choices are safe. Please return to this step after the update finishes.",
@@ -329,7 +331,11 @@ export function bankFeedOwnerErrorMessage(data, status) {
   const base = (code && messages[code]) || (status === 503
     ? "This step is temporarily unavailable. Your earlier progress is safe. Please try again."
     : "That step did not finish. Your earlier progress is safe. Please try again.");
-  return code ? `${base} Reference code: ${code}.` : base;
+  if (code) return `${base} Reference code: ${code}.`;
+  const detail = typeof data?.error === "string" ? data.error.trim().slice(0, 300) : "";
+  return detail
+    ? `${base} Details: ${detail} Reference code: BANK_FEED_REQUEST_FAILED.`
+    : base;
 }
 
 /**
@@ -1383,12 +1389,12 @@ h1{font-size:1.5rem;margin-bottom:.5rem}h2{font-size:1.15rem;margin:0 0 .4rem}p{
 <h1>Connect a bank account</h1>
 <p>Sign in through ${config.provider === "plaid" ? "Plaid" : "your bank connection provider"} or your bank's secure screen. Financial Brain does not receive your bank
 password or security codes. This connection reads your accounts and transactions. It cannot move money.</p>
-<p class="note">Environment: ${config.environment}. To disconnect a bank later, open your Brain and go to Access &gt; Banks &gt; Disconnect. Disconnecting is not done on this page, and your saved history stays.</p>
+<p class="note">Environment: ${config.environment}. To disconnect a bank later, open your Brain and go to Access &gt; Banks &gt; Disconnect. Disconnecting removes the bank connection and any bank data still waiting for an owner choice. Ledger history already saved stays. A reconnect resumes only an exact saved account match. Replacement history stays waiting until each retained transaction is matched without ambiguity.</p>
 <div class="actions"><button id="start">Connect a bank</button><a href="/app">Back to your Brain</a></div>
 <p id="status" role="status" aria-live="polite"></p>
 <section class="panel" aria-labelledby="connections-heading">
   <h2 id="connections-heading">Your saved connections</h2>
-  <p class="note">If a bank is already here, use Repair connection to sign in again. Use Connect a bank for a different bank or separate accounts.</p>
+  <p class="note">If a live bank needs sign-in, use Repair connection. After a disconnect, use Connect a bank. Exact saved account and transaction matches resume in place; anything uncertain waits for review. Use Connect a bank for a different bank or truly separate accounts.</p>
   <div id="connections" aria-live="polite">Checking saved connections…</div>
 </section>
 <section class="panel" aria-labelledby="accounts-heading">
@@ -1608,6 +1614,11 @@ async function loadConnections() {
 }
 let linkBusy = false;
 function finishLink() { linkBusy = false; el("start").disabled = false; }
+function clearRefusedLink(error, retry) {
+  if (!error || !["plaid_link_handoff_rejected", "plaid_duplicate_connection_review",
+    "plaid_legacy_reconnect_support_required"].includes(error.code)) return;
+  try { sessionStorage.removeItem("bank_link_session"); sessionStorage.removeItem(retry.key); } catch (ignored) {}
+}
 async function start(existing) {
   if (linkBusy) return;
   linkBusy = true;
@@ -1624,9 +1635,7 @@ async function start(existing) {
       item_ref: requestedMode === "reauthorise" ? params.get("item_ref") : null,
     });
   } catch (error) {
-    if (error.code === "plaid_link_handoff_rejected") {
-      try { sessionStorage.removeItem("bank_link_session"); sessionStorage.removeItem(retry.key); } catch (ignored) {}
-    }
+    clearRefusedLink(error, retry);
     throw error;
   }
   const token = begun.link_token;
@@ -1643,6 +1652,7 @@ async function start(existing) {
           institution_label: meta && meta.institution && meta.institution.name,
           accounts: meta && Array.isArray(meta.accounts) ? meta.accounts.map((account) => ({
             id: account.id, name: account.name, mask: account.mask, type: account.type, subtype: account.subtype,
+            persistent_account_id: account.persistent_account_id || null,
           })) : null,
         });
         try {
@@ -1655,9 +1665,7 @@ async function start(existing) {
         loadConnections();
         waitForAccounts();
       } catch (e) {
-        if (e.code === "plaid_link_handoff_rejected") {
-          try { sessionStorage.removeItem("bank_link_session"); sessionStorage.removeItem(retry.key); } catch (ignored) {}
-        }
+        clearRefusedLink(e, retry);
         say(e.message, true);
       } finally { finishLink(); }
     },

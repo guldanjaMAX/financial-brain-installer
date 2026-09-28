@@ -477,6 +477,42 @@ without exposing source identifiers.
 | Custom business API | A declarative `corpora.custom_api` manifest block becomes a plain Worker binding containing only endpoint rules and a bearer-token secret name matching `CUSTOM_API_TOKEN_[A-Z0-9_]{1,40}`. Runtime, deploy, and connect validation reject every other binding name before credential inventory or provider fetch. On Windows the owner uses the CLI's clipboard entry by default; masked Cloudflare dashboard entry is the explicit fallback. macOS keeps the hidden prompt. Clipboard mode is selected before secret inventory and clears once across inventory, existing-name, validation, write, and readback exits. Dashboard replacement requires an owner confirmation after the new value is pasted; an existing name is not replacement proof. Each pull fetches and validates the complete snapshot before staging a durable D1 job, then advances at most one compact row or document slice per Worker request under a 600-statement budget. Known identity fields are validated before they can authorize presence or absence: sales requires a trimmed store, a real `YYYY-MM-01` month, and a configured revenue stream; inventory and costs allow a null store but otherwise require a trimmed store and breed. Every fully stamped document passes the shared storage-envelope validator before a job exists. A later-invalid staged document fails that job and permits a fresh provider pull. Rows and searchable documents are job-versioned; readers resolve the per-source current-job pointer through that job's exact logical-document version map. The identical-response shortcut first proves every current row chunk and mapped live document. Staging carries an unchanged document version only after exact live-document readback and regenerates a missing one; terminal mismatch durably fails the active job. A refused known key carries its last verified row and last-seen time forward with explicit not-refreshed state and cannot authorize absence. A missing sales stream affects only prior labeled rows for that exact store-month; both sales layouts name the store and month instead of inventing zero. A malformed identity with no safe scope fails absence decisions closed by carrying unmatched prior keys. A partial refusal promotes usable changes but keeps the source in ready-with-warnings freshness with a durable refused count; every readable document containing a carried value begins with the fixed dated warning even when its template has no row table. An all-refused pull leaves the pointer unchanged and keeps its current refused count in the source receipt. Scheduled failures likewise retain a closed issue code and render reviewed owner guidance only at the reader boundary. The pointer flips atomically with the terminal fetch receipt after every staged row, promoted document, and carried-forward document version reads back exactly. Owner-facing counts apply that same current-map boundary and exclude staged or superseded physical versions. Obsolete physical document versions are then handed to the normal guarded delete path in job-tracked bounded slices, which queues vector deletes; the shared drain processes deletes before upserts. Prior row chunks are collected afterward in bounded slices. Only a terminally verified job can use the whole-body fast path or mark the saved snapshot ready. A durable active job supplies the custom source's indexing start receipt. Packed rows retain per-row hashes, presence, last-seen state, and any refused refresh marker. Inventory and cost rows close their active value interval when a key disappears and open a new interval when it returns, so structured history preserves absence gaps. Search contains only the current inventory and cost snapshot, one document per store; it does not create daily history documents. Sales prose remains one cross-store document per month and one history per store. Saved state and empty-outbox meaning readiness are separate receipts. No custom API row is wired into the financial ledger or map. |
 | Box and Airtable | No native API connector. Box can use a reviewed export or locally synced watched folder. Airtable requires an approved export until a native connector is built. |
 
+Plaid disconnect removes the Item's unpromoted staging rows and sync window in
+the same D1 batch that makes the connection inactive. Promoted ledger history
+is retained. A later Link exchange still refuses any match against a live Item.
+When one removed Item has a complete, unambiguous account match in the same
+Plaid environment and institution, the normalized account name, mask, type,
+and subtype must also match. A saved persistent account identity is compared
+when the client supplies it before exchange. Missing required current-client
+identity or a conflict refuses the reattach before exchange. An ordinary sync
+backfills the complete authoritative identity locator on every live legacy
+account. If an already removed legacy account still lacks that locator,
+reconnect refuses before the one-time exchange, tells the owner to contact
+support, and leaves a masked-account support note without changing the ledger.
+An accepted exchange records a private candidate plan but does not copy an
+owner assignment or move an account or history row. The fresh cursor window
+stays staged until the authoritative replacement account identity and every
+retained transaction match are exact and unambiguous on the mapped account and
+stable money and merchant or name fields. A unique retained pending row is
+reidentified in place when it becomes posted even if the new Item reports a
+different transaction ID, omits the pending link, or changes the posted date.
+An unmatched row is new only when its authorization date, falling back to its
+posted date, is strictly after confirmed removal and no equal-amount retained
+pending row for that account is within ten days. Otherwise the whole window is
+held without advancing the cursor or changing live totals.
+
+A reconnect may contain both exact saved accounts and genuinely new accounts.
+Only the exact saved accounts enter the reattach plan; new authoritative
+accounts use ordinary owner assignment, and the staged window cannot promote
+until those choices are complete. An authoritative account that was absent
+from Link metadata follows that same owner-review path. If an account named by
+Link disappears from the authoritative post-exchange inventory, sync stops
+before transaction history, marks a non-retrying review, and tells the owner to
+disconnect the replacement and contact support. Only guarded reconciliation
+copies retained assignments and moves saved history. The same batch consumes
+and exactly reads back its single-use private plan, so later windows resume
+ordinary incremental refresh.
+
 The macOS Drive scheduler installs a per-user LaunchAgent. Its definition has no
 credentials. It resolves the declared durable admin key at runtime, uses Google
 OAuth from its chosen store, takes an owner-only lock, and rotates owner-only

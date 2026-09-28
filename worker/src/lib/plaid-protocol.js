@@ -259,12 +259,17 @@ export function plaidExchangeDecision(session, requestFingerprint) {
 }
 
 export function normalisePlaidAccount(account) {
+  const persistentAccountId = optionalText(account?.persistent_account_id);
+  if (persistentAccountId && persistentAccountId.length > 256) {
+    throw new PlaidProtocolError("INVALID_INPUT", "account.persistent_account_id is invalid");
+  }
   return {
     providerAccountId: requiredText(account?.account_id, "account.account_id"),
     name: requiredText(account?.official_name || account?.name, "account.name"),
     mask: optionalText(account?.mask),
     type: optionalText(account?.type) || "unknown",
     subtype: optionalText(account?.subtype),
+    persistentAccountId,
     currentBalance: account?.balances?.current == null ? null : decimalSource(account.balances.current),
     availableBalance: account?.balances?.available == null ? null : decimalSource(account.balances.available),
     isoCurrencyCode: optionalText(account?.balances?.iso_currency_code),
@@ -273,6 +278,7 @@ export function normalisePlaidAccount(account) {
       provider: PLAID_PROFILE.provider,
       endpoint: "/accounts/get",
       providerAccountId: requiredText(account?.account_id, "account.account_id"),
+      persistentAccountId,
     },
   };
 }
