@@ -7699,6 +7699,7 @@ export const VALUE_FLAGS = new Set([
   "path", "source", "limit", "from", "manifest", "scopes", "port", "host", "user", "run", "confirm-host", "kind", "add", "bookmark", "export", "explain", "backup", "provider",
   "golden", "profile", "k", "repeat", "baseline", "save", "artifacts",
   "corpus-contract", "approve-removals", "only", "skip",
+  "pace-vectors-per-minute",
   "approve", "target",
   "can", "zones", "exclude-zones", "until", "as", "subject",
   // brain import bank. `--file` with no value must die saying so rather than
@@ -8085,9 +8086,10 @@ export function remoteFamilySettlement(outcome, rejectedFamilyParts = new Map())
     return { plan, statuses };
   });
   return {
-    reconciliations: completed.map(({ base_doc_uid, keep_doc_uids }) => ({
+    reconciliations: completed.map(({ base_doc_uid, keep_doc_uids, family_kind }) => ({
       base_doc_uid,
       keep_doc_uids,
+      ...(family_kind ? { family_kind } : {}),
     })),
     incomplete,
     intentionalRemovalUids: incomplete
@@ -12072,6 +12074,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
           // declaredFamilyUid above for the options and the reasoning.
           base_doc_uid: declaredFamilyUid(sanitized, { rel: f.rel }),
           keep_doc_uids: sanitized.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
+          family_kind: "declared",
           skipKeys: [key, f.rel, ...sanitized.map((envelope) => envelope.source_id)],
           legacyPartRoot: [key, f.rel],
           ocrPageRequestIds: Array.isArray(r.ocrPageRequestIds) ? [...r.ocrPageRequestIds] : [],
@@ -12126,6 +12129,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
         expectedParts: envelopes.length,
         base_doc_uid: `${sourceName}:${key}`,
         keep_doc_uids: envelopes.map((envelope) => `${sourceName}:${envelope.source_id}`),
+        family_kind: "structural",
         skipKeys: [key, f.rel, ...envelopes.map((envelope) => envelope.source_id)],
         legacyPartRoot: [key, f.rel],
         ocrPageRequestIds: Array.isArray(r.ocrPageRequestIds) ? [...r.ocrPageRequestIds] : [],
@@ -12249,9 +12253,11 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     // An incomplete family is a storage failure, not a deletion instruction:
     // emitting an empty keep list for it would delete every part that DID
     // land. Its state key is cleared below, so the next run re-sends it.
-    const reconciliation = outcome.completed.map(
-      (plan) => ({ base_doc_uid: plan.base_doc_uid, keep_doc_uids: plan.keep_doc_uids }),
-    );
+    const reconciliation = outcome.completed.map((plan) => ({
+      base_doc_uid: plan.base_doc_uid,
+      keep_doc_uids: plan.keep_doc_uids,
+      ...(plan.family_kind ? { family_kind: plan.family_kind } : {}),
+    }));
     if (reconciliation.length) {
       await reconcilePreparedFamilies({
         families: reconciliation,
@@ -12906,6 +12912,7 @@ export async function applyDriveRemovals({
   state,
   dryRun,
   label = "Drive deletion",
+  familyKind = null,
   assertOwned = null,
   fetchImpl = fetch,
 }) {
@@ -12941,7 +12948,11 @@ export async function applyDriveRemovals({
         // A Drive file may be stored as one document or as multiple oversized
         // parts. Family deletion reaches both representations.
         body: JSON.stringify({
-          families: group.map((baseDocUid) => ({ base_doc_uid: baseDocUid, keep_doc_uids: [] })),
+          families: group.map((baseDocUid) => ({
+            base_doc_uid: baseDocUid,
+            keep_doc_uids: [],
+            ...(familyKind ? { family_kind: familyKind } : {}),
+          })),
           confirm: true,
         }),
       }, { fetchImpl });
@@ -15370,6 +15381,21 @@ export async function cmdIngestRemote(m, manifestPath, flags, options = {}) {
     }
   }
 
+  const paceRaw = flags["pace-vectors-per-minute"];
+  let paceVectorsPerMinute = null;
+  if (paceRaw !== undefined) {
+    if (which !== "gmail") {
+      die("--pace-vectors-per-minute is only valid with --from gmail.");
+    }
+    if (flags["dry-run"]) {
+      die("--pace-vectors-per-minute cannot be used with --dry-run because no vectors are queued.");
+    }
+    if (typeof paceRaw !== "string" || !/^[1-9]\d*$/.test(paceRaw) || Number(paceRaw) > 60_000) {
+      die("--pace-vectors-per-minute needs a whole number from 1 through 60000.");
+    }
+    paceVectorsPerMinute = Number(paceRaw);
+  }
+
   const sourceName = assertSourceName(flags.source === true || !flags.source ? which : flags.source);
   const dry = !!flags["dry-run"];
   const assistantJson = flags.json !== undefined;
@@ -15394,7 +15420,16 @@ export async function cmdIngestRemote(m, manifestPath, flags, options = {}) {
     manifestPath,
     flags,
     options,
-    { which, sourceName, dry, assistantJson, removalApproval, statePath, assertLockOwned },
+    {
+      which,
+      sourceName,
+      dry,
+      assistantJson,
+      removalApproval,
+      paceVectorsPerMinute,
+      statePath,
+      assertLockOwned,
+    },
   );
   // A dry run writes neither resume state nor source receipts, so it cannot
   // race the durable writer. Every real Drive or Gmail path, including brain
@@ -15430,7 +15465,16 @@ const cmdIngestRemoteRun = async (
   manifestPath,
   flags,
   options,
-  { which, sourceName, dry, assistantJson = false, removalApproval, statePath, assertLockOwned = null },
+  {
+    which,
+    sourceName,
+    dry,
+    assistantJson = false,
+    removalApproval,
+    paceVectorsPerMinute = null,
+    statePath,
+    assertLockOwned = null,
+  },
 ) => {
   // A deployed connector talks to the brain's authenticated data-plane route.
   // The Cloudflare control token is an install/deploy credential, not something
@@ -15464,6 +15508,8 @@ const cmdIngestRemoteRun = async (
   const reconcilePreparedFamilies = options.reconcileDocumentFamilies ?? reconcileDocumentFamilies;
   const listPreparedSourceFamilies = options.listStoredSourceFamilies ?? listStoredSourceFamilies;
   const applyPreparedRemovals = options.applyDriveRemovals ?? applyDriveRemovals;
+  const paceSleep = options.paceSleep ?? ((milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds)));
   // IMAP holds its own mailbox credential and never touches the Google store.
   // Resolving googleAuth unconditionally would refuse an IMAP sync on a machine
   // that has deliberately never connected Google, which is most of them.
@@ -15560,9 +15606,20 @@ const cmdIngestRemoteRun = async (
     imapPolicyChanged = state.imap_policy_fingerprint !== policyFingerprint;
   }
   let gmailPolicyChanged = false;
+  let gmailSince = null;
+  let gmailFullQuery = null;
   if (which === "gmail") {
-    const { gmailPolicyFingerprint } = await import("./connectors/gmail.mjs");
-    policyFingerprint = gmailPolicyFingerprint({ credentialScannerFingerprint: scannerFingerprint });
+    const { gmailPolicyFingerprint, gmailQuery, normalizeGmailSince } = await import("./connectors/gmail.mjs");
+    try {
+      gmailSince = normalizeGmailSince(m?.corpora?.gmail?.since);
+    } catch (error) {
+      die(error.message);
+    }
+    gmailFullQuery = gmailQuery({ since: gmailSince });
+    policyFingerprint = gmailPolicyFingerprint({
+      credentialScannerFingerprint: scannerFingerprint,
+      since: gmailSince,
+    });
     gmailPolicyChanged = state.gmail_policy_fingerprint !== policyFingerprint;
   }
   let incremental = which === "drive"
@@ -15997,10 +16054,19 @@ const cmdIngestRemoteRun = async (
     for (const item of group) {
       if (item.familyPlan) familyPlans.set(item.familyPlan.stateKey, item.familyPlan);
     }
+    let pacedChunks = 0;
+    let paceReceiptError = null;
     const part = await sendPreparedBatches({
       base, adminKey, groups: [group], state, statePath, skips, quiet: true,
       saveState, assertOwned: assertLockOwned,
       onResult: (item, result) => {
+        if (paceVectorsPerMinute !== null && ["created", "updated"].includes(result.status)) {
+          if (!Number.isSafeInteger(result.chunks) || result.chunks < 0) {
+            paceReceiptError = "a created or updated Gmail document had no valid chunk count";
+          } else {
+            pacedChunks += result.chunks;
+          }
+        }
         if (!item.familyPlan) return;
         const key = item.familyPlan.stateKey;
         if (["created", "updated", "unchanged"].includes(result.status)) {
@@ -16054,6 +16120,17 @@ const cmdIngestRemoteRun = async (
       rejectedFamilyParts.delete(plan.stateKey);
     }
     if (outcome.completed.length || outcome.incomplete.length) saveState(statePath, state);
+    if (paceReceiptError) {
+      die(
+        `${paceReceiptError}, so the requested vector pace cannot be proved.\n` +
+          "      Progress was saved. Re-run after the Brain returns complete ingest receipts."
+      );
+    }
+    if (paceVectorsPerMinute !== null && pacedChunks > 0) {
+      const delayMilliseconds = Math.ceil((pacedChunks * 60_000) / paceVectorsPerMinute);
+      await paceSleep(delayMilliseconds);
+      assertLockOwned?.();
+    }
     process.stdout.write(
       `\r  batch ${batchNo}  loaded ${tally.created + tally.updated}  refused ${tally.refused}  failed ${tally.failed}   `
     );
@@ -16429,6 +16506,7 @@ const cmdIngestRemoteRun = async (
         expectedParts: envelopes.length,
         base_doc_uid: key,
         keep_doc_uids: envelopes.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
+        family_kind: "structural",
         skipKeys: [key, ...envelopes.map((envelope) => envelope.source_id)],
         legacyPartRoot: f.id,
         ocrPageRequestIds: Array.isArray(r.ocrPageRequestIds) ? [...r.ocrPageRequestIds] : [],
@@ -16600,6 +16678,7 @@ const cmdIngestRemoteRun = async (
         const result = await applyPreparedRemovals({
           uids: excludeProtectedDriveUids(driveRemovalPlan.targets[category]),
           base, adminKey, state, dryRun: false, label,
+          familyKind: "structural",
           assertOwned: assertLockOwned,
         });
         if (result.applied) ok(`${result.applied} ${success}`);
@@ -16691,7 +16770,7 @@ const cmdIngestRemoteRun = async (
         lane = "sweep";
         authoritativeSnapshot = true;
         await capturePrewalkHistory();
-        ids = gmail.listMessages(getToken, { max: limit });
+        ids = gmail.listMessages(getToken, { max: limit, query: gmailFullQuery });
       } else {
         info(`incremental: ${h.ids.length} changed message(s), ${h.deletedIds.length} deleted message(s)`);
         gmailDeletedUids.push(...h.deletedIds.map((id) => `${sourceName}:${id}`));
@@ -16700,13 +16779,13 @@ const cmdIngestRemoteRun = async (
         ids = h.ids.slice(0, limit);
 
         // History.list cannot apply DEFAULT_QUERY. Classify the complete window
-        // using label-only reads before any document or removal is sent. This is
+        // using label/date policy reads before any document or removal is sent. This is
         // the atomicity boundary: buffering raw mail would recreate the multi-GB
         // first-sync failure that batchStream was built to avoid.
         policyById = new Map();
         for await (const item of prefetch(
           ids,
-          async (id) => ({ id, policy: await gmail.messagePolicy(getToken, id) }),
+          async (id) => ({ id, policy: await gmail.messagePolicy(getToken, id, { since: gmailSince }) }),
           { concurrency: GMAIL_FETCH_CONCURRENCY },
         )) {
           policyById.set(item.id, item.policy);
@@ -16729,7 +16808,7 @@ const cmdIngestRemoteRun = async (
       }
     } else {
       await capturePrewalkHistory();
-      ids = gmail.listMessages(getToken, { max: limit });
+      ids = gmail.listMessages(getToken, { max: limit, query: gmailFullQuery });
     }
 
     // Capture the pre-run inventory before new mail expands it. It is both the
@@ -16753,6 +16832,17 @@ const cmdIngestRemoteRun = async (
       });
     }
 
+    const resumableStoredRevision = (id) => {
+      if (!authoritativeSnapshot || !storedBeforeSweep) return null;
+      const key = `${sourceName}:${id}`;
+      const version = state.done?.[key];
+      if (typeof version !== "string" || !version || !storedBeforeSweep.has(key)) return null;
+      if (scannerPolicyChanged && !hasCredentialScannerProgress(
+        state, scannerFingerprint, key, version
+      )) return null;
+      return version;
+    };
+
     // One `messages.get` per message, about 300 ms each. Awaited one at a time
     // that is ~160 messages a minute, so a 190k-message mailbox took twenty
     // hours regardless of how fast the brain accepted batches (measured on a
@@ -16765,6 +16855,15 @@ const cmdIngestRemoteRun = async (
     const fetched = prefetch(
       ids,
       async (id) => {
+        // A full list is still repeated after an interruption because it is the
+        // authoritative deletion snapshot. Gmail message bodies are immutable,
+        // so a listed id whose accepted revision still exists in D1 does not
+        // need another expensive messages.get. Scanner migrations additionally
+        // require the exact in-progress acceptance receipt before taking this
+        // path. Label policy remains current because listMessages applied the
+        // complete source query that selected this id.
+        const resumedVersion = resumableStoredRevision(id);
+        if (resumedVersion !== null) return { id, resumedVersion };
         const policy = policyById?.get(id);
         if (policy && !policy.allowed) return { id, fetched: policy };
         try {
@@ -16773,7 +16872,7 @@ const cmdIngestRemoteRun = async (
             fetched: await gmail.toEnvelope(getToken, id, {
               sourceName,
               // A full-list id matched DEFAULT_QUERY. An incremental id reached
-              // this point only after its label-only preflight allowed it.
+              // this point only after its label/date preflight allowed it.
               trustedEligible: !incremental || policy?.allowed === true,
             }),
           };
@@ -16783,7 +16882,7 @@ const cmdIngestRemoteRun = async (
       },
       { concurrency: GMAIL_FETCH_CONCURRENCY },
     );
-    const prepareGmail = async ({ id, fetched: r, preparationError }) => {
+    const prepareGmail = async ({ id, fetched: r, preparationError, resumedVersion = null }) => {
       scanned++;
       // Report the scan before any unchanged or skip return. A resumed first
       // pass may recheck thousands of already-accepted messages before it
@@ -16792,6 +16891,14 @@ const cmdIngestRemoteRun = async (
       if (scanned % 200 === 0) process.stdout.write(`\r  fetched ${scanned}...   `);
       const key = `${sourceName}:${id}`;
       gmailActiveUids.add(key);
+      if (resumedVersion !== null) {
+        recordAcceptedDocumentState(state, {
+          stateKey: key, hash: resumedVersion, skipKeys: [id], legacyPartRoot: id,
+        });
+        gmailAcceptedUids.add(key);
+        unchanged++;
+        return { unchanged: true };
+      }
       if (preparationError) {
         if (preparationError && typeof preparationError === "object") {
           countedPreparationErrors.add(preparationError);
@@ -16854,6 +16961,7 @@ const cmdIngestRemoteRun = async (
           expectedParts: envelopes.length,
           base_doc_uid: key,
           keep_doc_uids: envelopes.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
+          family_kind: "structural",
           skipKeys: [key, ...envelopes.map((envelope) => envelope.source_id)],
           legacyPartRoot: id,
         },
@@ -17000,6 +17108,7 @@ const cmdIngestRemoteRun = async (
         for (const [category, label, success] of categories) {
           const result = await applyPreparedRemovals({
             uids: gmailRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
+            familyKind: "structural",
             assertOwned: assertLockOwned,
           });
           if (result.applied) ok(`${result.applied} ${success}`);
@@ -17210,6 +17319,7 @@ const cmdIngestRemoteRun = async (
               expectedParts: envelopes.length,
               base_doc_uid: key,
               keep_doc_uids: envelopes.map((one) => `${one.source_type}:${one.source_id}`),
+              family_kind: "structural",
               skipKeys: [key, ...envelopes.map((one) => one.source_id)],
               legacyPartRoot: r.envelope.source_id,
             },
@@ -17369,6 +17479,7 @@ const cmdIngestRemoteRun = async (
       for (const [category, label, success] of categories) {
         const result = await applyPreparedRemovals({
           uids: imapRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
+          familyKind: "structural",
         });
         if (result.applied) ok(`${result.applied} ${success}`);
         if (imapRemovalPlan.targets[category].length) saveState(statePath, state);
@@ -29463,7 +29574,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain ingest     <manifest> --from drive  load from a connected remote source
                                            add --dry-run --json for one bounded,
                                            aggregate-only assistant preview
-    brain ingest     <manifest> --from gmail  sync connected Gmail (--dry-run to preview)
+    brain ingest     <manifest> --from gmail  sync connected Gmail (--dry-run to preview;
+                                           --pace-vectors-per-minute N bounds new vector work)
     brain ingest     <manifest> --from calendar  sync Google Calendar (--dry-run to preview)
     brain ingest     <manifest> --from imap  sync a connected IMAP mailbox (--dry-run to preview)
     brain ingest     <manifest> --from imessage  one incremental Messages capture pass (Mac only)

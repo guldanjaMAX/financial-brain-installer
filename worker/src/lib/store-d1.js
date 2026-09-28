@@ -7524,40 +7524,60 @@ export async function forgetFamilies(env, { families = [], dryRun = true } = {})
   for (const family of families || []) {
     const base = String(family?.base_doc_uid || "");
     const keep = [...new Set((family?.keep_doc_uids || []).map(String))];
-    if (!base) {
+    const kind = family?.family_kind == null ? "hybrid" : String(family.family_kind);
+    if (!base || !["structural", "declared", "hybrid"].includes(kind)) {
       throw new Error("each document family needs a base_doc_uid and any keep_doc_uids must belong to it");
     }
-    normalized.push({ base, keep });
+    if (kind === "structural" && keep.some((uid) => !isStructuralFamilyMember(uid, base))) {
+      throw new Error("each document family needs a base_doc_uid and any keep_doc_uids must belong to it");
+    }
+    normalized.push({ base, keep, kind });
   }
   if (!normalized.length) return { documents: 0, chunks: 0, vectors: 0, dry_run: dryRun, targets: [] };
 
   const stale = [];
   for (let i = 0; i < normalized.length; i += 25) {
     const group = normalized.slice(i, i + 25);
-    const clauses = [];
+    const structuralClauses = [];
+    const declaredClauses = [];
     const binds = [];
     for (const family of group) {
-      const n = binds.length;
-      // D1 rejects LIKE/GLOB patterns longer than 50 bytes. Drive ids routinely
-      // exceed that before the literal "#part" suffix is added, so a pattern
-      // query cannot be used here. Comparing the exact leading substring keeps
-      // %, _ and \\ literal and cannot include a similarly prefixed base id.
-      // The declared arm is a plain equality on a fully qualified uid, so it
-      // has neither problem. Neither arm adds a scan the substr did not already
-      // force, and json_valid() guards a row whose meta is not JSON.
-      clauses.push(
-        `(doc_uid = ?${n + 1}` +
-        ` OR substr(doc_uid, 1, length(?${n + 1} || '#part')) = ?${n + 1} || '#part'` +
-        ` OR (json_valid(meta) AND json_type(meta,'$.family_of') = 'text'` +
-        `     AND json_extract(meta,'$.family_of') = ?${n + 1}))`
+      if (family.kind !== "declared") {
+        const n = binds.push(family.base);
+        // D1 rejects long LIKE/GLOB patterns. A primary-key range is exact for
+        // the structural suffix and stays indexed regardless of base length:
+        // every string beginning "#part" sorts before the next prefix "#paru".
+        structuralClauses.push(
+          `(doc_uid = ?${n}` +
+          ` OR (doc_uid >= ?${n} || '#part' AND doc_uid < ?${n} || '#paru'))`
+        );
+      }
+      if (family.kind !== "structural") {
+        const n = binds.push(family.base);
+        // Declared message-export families cannot be derived from doc_uid. They
+        // remain a separate, rare lookup so a remote Gmail batch never turns
+        // into a whole-corpus JSON scan. json_valid protects legacy bad metadata.
+        declaredClauses.push(
+          `(json_valid(meta) AND json_type(meta,'$.family_of') = 'text'` +
+          ` AND json_extract(meta,'$.family_of') = ?${n})`
+        );
+      }
+    }
+    const selects = [];
+    if (structuralClauses.length) {
+      selects.push(
+        `SELECT doc_uid, NULL AS family_of FROM documents` +
+        ` WHERE ${structuralClauses.join(" OR ")}`
       );
-      binds.push(family.base);
+    }
+    if (declaredClauses.length) {
+      selects.push(
+        `SELECT doc_uid, json_extract(meta,'$.family_of') AS family_of` +
+        ` FROM documents WHERE ${declaredClauses.join(" OR ")}`
+      );
     }
     const { results } = await env.DB.prepare(
-      `SELECT doc_uid,
-              CASE WHEN json_valid(meta) AND json_type(meta,'$.family_of') = 'text'
-                   THEN json_extract(meta,'$.family_of') END AS family_of
-         FROM documents WHERE ${clauses.join(" OR ")}`
+      selects.join(" UNION ALL ")
     ).bind(...binds).all();
     const rows = (results || []).map((row) => ({
       uid: String(row.doc_uid),

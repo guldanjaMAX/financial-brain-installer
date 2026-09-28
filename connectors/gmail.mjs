@@ -80,11 +80,30 @@ export const DEFAULT_EXCLUDED_LABEL_IDS = new Set([
   "CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS",
 ]);
 
+/** Parse the optional manifest floor without accepting normalized lookalikes. */
+export function normalizeGmailSince(value) {
+  if (value == null) return null;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new TypeError("corpora.gmail.since must be a date in YYYY-MM-DD form");
+  }
+  const timestamp = Date.parse(`${value}T00:00:00.000Z`);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== value) {
+    throw new TypeError("corpora.gmail.since must be a real date in YYYY-MM-DD form");
+  }
+  return value;
+}
+
+/** The authoritative full-list query for the declared Gmail corpus. */
+export function gmailQuery({ since = null } = {}) {
+  const floor = normalizeGmailSince(since);
+  return floor ? `${DEFAULT_QUERY} after:${floor.replaceAll("-", "/")}` : DEFAULT_QUERY;
+}
+
 /** Stable identity for every choice that can change Gmail corpus membership. */
-export function gmailPolicyFingerprint({ credentialScannerFingerprint = "" } = {}) {
+export function gmailPolicyFingerprint({ credentialScannerFingerprint = "", since = null } = {}) {
   return createHash("sha256").update(JSON.stringify({
     version: 1,
-    query: DEFAULT_QUERY,
+    query: gmailQuery({ since }),
     excludedLabelIds: [...DEFAULT_EXCLUDED_LABEL_IDS].sort(),
     extractionPolicyVersion: GMAIL_EXTRACTION_POLICY_VERSION,
     credentialScannerFingerprint: String(credentialScannerFingerprint || ""),
@@ -94,25 +113,49 @@ export function gmailPolicyFingerprint({ credentialScannerFingerprint = "" } = {
 /**
  * History.list cannot apply Gmail's search query. Recheck the labels returned
  * by messages.get so the incremental lane enforces the exact same policy as a
- * full list. Missing label evidence is a coverage gap, never permission to
- * ingest or to advance the history cursor.
+ * full list. Missing label or configured-floor date evidence is a coverage
+ * gap, never permission to ingest or to advance the history cursor.
  */
-export function gmailLabelDecision(labelIds) {
-  if (!Array.isArray(labelIds)) {
-    return {
-      allowed: false,
-      policy: false,
-      cursor_blocking: true,
-      reason: "Gmail returned no label classification, so this message was not indexed",
-    };
-  }
-  const excluded = labelIds.find((label) => DEFAULT_EXCLUDED_LABEL_IDS.has(String(label).toUpperCase()));
+export function gmailLabelDecision(labelIds, { since = null, internalDate = null } = {}) {
+  const floor = normalizeGmailSince(since);
+  const excluded = Array.isArray(labelIds)
+    ? labelIds.find((label) => DEFAULT_EXCLUDED_LABEL_IDS.has(String(label).toUpperCase()))
+    : null;
   if (excluded) {
     return {
       allowed: false,
       policy: true,
       cursor_blocking: false,
       reason: `Gmail policy excludes messages carrying ${String(excluded).toLowerCase()}`,
+    };
+  }
+  if (floor) {
+    const rawTimestamp = typeof internalDate === "string" && /^\d+$/.test(internalDate)
+      ? Number(internalDate)
+      : NaN;
+    if (Number.isSafeInteger(rawTimestamp) && rawTimestamp < Date.parse(`${floor}T00:00:00.000Z`)) {
+      return {
+        allowed: false,
+        policy: true,
+        cursor_blocking: false,
+        reason: `Gmail policy excludes messages older than ${floor}`,
+      };
+    }
+    if (!Number.isSafeInteger(rawTimestamp)) {
+      return {
+        allowed: false,
+        policy: false,
+        cursor_blocking: true,
+        reason: "Gmail returned no valid message date, so the configured date floor could not be checked",
+      };
+    }
+  }
+  if (!Array.isArray(labelIds)) {
+    return {
+      allowed: false,
+      policy: false,
+      cursor_blocking: true,
+      reason: "Gmail returned no label classification, so this message was not indexed",
     };
   }
   return { allowed: true, policy: false, cursor_blocking: false, reason: null };
@@ -306,19 +349,26 @@ export function isPermanentMessageFailure(error) {
 }
 
 /**
- * Read only the labels needed to classify one incremental-history message.
+ * Read only the policy fields needed to classify one incremental-history message.
  *
  * A history window cannot use Gmail's search query. The caller preflights the
  * complete window through this cheap shape before it sends any sibling, so one
- * response with missing label evidence can stop the window atomically without
- * retaining every raw message body in memory.
+ * response with missing label or date evidence can stop the window atomically
+ * without retaining every raw message body in memory.
  */
 export async function messagePolicy(getAccessToken, id, opts = {}) {
+  const { since: rawSince = null, ...apiOpts } = opts;
+  const since = normalizeGmailSince(rawSince);
   let msg;
   try {
     msg = await api(getAccessToken, `/users/me/messages/${id}`, {
-      search: { format: "minimal", fields: "id,labelIds" },
-      ...opts,
+      // Gmail's minimal representation does not promise internalDate. Metadata
+      // does, and the fields mask keeps the response body-only data out.
+      search: {
+        format: since ? "metadata" : "minimal",
+        fields: since ? "id,labelIds,internalDate" : "id,labelIds",
+      },
+      ...apiOpts,
     });
   } catch (e) {
     if (!isPermanentMessageFailure(e)) throw gmailOperationError(e, GMAIL_OPERATIONS.policy);
@@ -330,7 +380,7 @@ export async function messagePolicy(getAccessToken, id, opts = {}) {
       cursor_blocking: false,
     };
   }
-  const decision = gmailLabelDecision(msg?.labelIds);
+  const decision = gmailLabelDecision(msg?.labelIds, { since, internalDate: msg?.internalDate });
   if (decision.allowed) {
     return { allowed: true, labelIds: [...msg.labelIds], cursor_blocking: false };
   }

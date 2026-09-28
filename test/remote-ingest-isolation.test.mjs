@@ -29,6 +29,11 @@ async function runRemoteCase(source, {
   prefetchImpl = orderedPrefetch,
   prepareGmailItem = null,
   duringRun = null,
+  expectSuccess = false,
+  paceVectorsPerMinute = null,
+  resultChunks = 1,
+  resumedGmailIds = [],
+  proveResumedScanner = true,
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), `brain-${source}-isolation-`));
   const manifestPath = join(root, "brain.manifest.json");
@@ -51,8 +56,14 @@ async function runRemoteCase(source, {
   const priorFamily = source === "imap" ? "imap:prior-family" : `${source}:bad`;
   const state = {
     version: 1,
-    done: { [priorFamily]: "prior-version" },
+    done: {
+      ...(expectSuccess ? {} : { [priorFamily]: "prior-version" }),
+      ...Object.fromEntries(resumedGmailIds.map((id) => [`gmail:${id}`, `version-${id}`])),
+    },
     skipped: {},
+    ...(resumedGmailIds.length && proveResumedScanner
+      ? { credential_scanner_fingerprint: brain.credentialScannerFingerprint(true) }
+      : {}),
     ...priorCursor,
   };
   const savedStates = [];
@@ -63,6 +74,7 @@ async function runRemoteCase(source, {
   const removals = [];
   const removalCalls = [];
   const logs = [];
+  const paceSleeps = [];
   const systemicError = Object.assign(
     new Error(`synthetic ${source} systemic failure`),
     source === "drive"
@@ -138,7 +150,10 @@ async function runRemoteCase(source, {
   };
 
   const listStoredSourceFamilies = async (_request) => {
-    const families = new Set([priorFamily]);
+    const families = new Set([
+      ...(expectSuccess ? [] : [priorFamily]),
+      ...resumedGmailIds.map((id) => `gmail:${id}`),
+    ]);
     if (source === "drive" && _request?.includeServerObservedAt) {
       return {
         families,
@@ -178,13 +193,20 @@ async function runRemoteCase(source, {
       const items = groups.flat();
       for (const item of items) {
         sent.push(item.envelope.source_id);
-        onResult?.(item, { source_id: item.envelope.source_id, status: "created" });
+        onResult?.(item, {
+          source_id: item.envelope.source_id,
+          status: "created",
+          chunks: resultChunks,
+        });
       }
       return { created: items.length, updated: 0, unchanged: 0, refused: 0, failed: 0 };
     },
     reconcileDocumentFamilies: async ({ families }) => {
       reconciled.push(...families);
       return 0;
+    },
+    paceSleep: async (milliseconds) => {
+      paceSleeps.push(milliseconds);
     },
   };
 
@@ -194,11 +216,20 @@ async function runRemoteCase(source, {
     const run = brain.cmdIngestRemote(
       manifest,
       manifestPath,
-      { from: source, source, ...(dryRun ? { "dry-run": true } : {}) },
+      {
+        from: source,
+        source,
+        ...(dryRun ? { "dry-run": true } : {}),
+        ...(paceVectorsPerMinute === null
+          ? {}
+          : { "pace-vectors-per-minute": String(paceVectorsPerMinute) }),
+      },
       options,
     );
     await duringRun?.({ run, prepared });
-    if (systemic) {
+    if (expectSuccess) {
+      await run;
+    } else if (systemic) {
       await assert.rejects(run, (error) => error === systemicError);
     } else {
       await assert.rejects(run, /1 stored part failed, so this ingest is incomplete/);
@@ -213,6 +244,7 @@ async function runRemoteCase(source, {
       removals,
       removalCalls,
       logs,
+      paceSleeps,
       priorFamily,
       ordinaryError,
     };
@@ -221,6 +253,49 @@ async function runRemoteCase(source, {
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+test("Gmail pacing waits for accepted chunks and the unpaced control does not", async () => {
+  const paced = await runRemoteCase("gmail", {
+    ids: ["good-before", "good-after"],
+    expectSuccess: true,
+    paceVectorsPerMinute: 40,
+    resultChunks: 3,
+  });
+  assert.deepEqual(paced.sent, ["good-before", "good-after"]);
+  assert.ok(
+    paced.reconciled.length > 0 && paced.reconciled.every((family) => family.family_kind === "structural"),
+    "the paced Gmail batch must reach the indexed structural cleanup path",
+  );
+  assert.deepEqual(paced.paceSleeps, [9_000]);
+
+  const control = await runRemoteCase("gmail", {
+    ids: ["good-before", "good-after"],
+    expectSuccess: true,
+    resultChunks: 3,
+  });
+  assert.deepEqual(control.sent, ["good-before", "good-after"]);
+  assert.deepEqual(control.paceSleeps, []);
+});
+
+test("a resumed Gmail sweep re-lists accepted mail without fetching its body again", async () => {
+  const resumed = await runRemoteCase("gmail", {
+    ids: ["already-stored", "needs-work"],
+    expectSuccess: true,
+    resumedGmailIds: ["already-stored"],
+  });
+  assert.deepEqual(resumed.prepared, ["needs-work"]);
+  assert.deepEqual(resumed.sent, ["needs-work"]);
+  assert.equal(resumed.state.done["gmail:already-stored"], "version-already-stored");
+
+  const unprovenScanner = await runRemoteCase("gmail", {
+    ids: ["already-stored", "needs-work"],
+    expectSuccess: true,
+    resumedGmailIds: ["already-stored"],
+    proveResumedScanner: false,
+  });
+  assert.deepEqual(unprovenScanner.prepared, ["already-stored", "needs-work"]);
+  assert.deepEqual(unprovenScanner.sent, ["already-stored", "needs-work"]);
+});
 
 for (const source of ["drive", "gmail", "imap"]) {
   test(`${source} isolates one ordinary bad item while good neighbors complete`, async () => {

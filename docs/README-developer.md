@@ -624,6 +624,34 @@ node brain.mjs ingest ./acme.manifest.json --from drive
 node brain.mjs ingest ./acme.manifest.json --from gmail
 ```
 
+A large first Gmail pass can keep its new embedding work within the queue's
+observed drain rate:
+
+```bash
+node brain.mjs ingest ./acme.manifest.json --from gmail --pace-vectors-per-minute 40
+```
+
+The command uses the Worker's accepted per-document chunk counts, and waits
+after each durable batch checkpoint so created and updated chunks average no
+more than the requested rate. Unchanged documents add no delay because they add
+no vector work. Forty leaves headroom under the roughly fifty vectors per minute
+observed by `brain health`; start only after any older vector backlog has
+drained. An interruption is safe: repeat the same command and the adjacent
+document checkpoint skips already accepted revisions while the source cursor
+remains at its prior complete sweep. The repeat still re-lists message ids to
+rebuild authoritative deletion truth, but it does not download an immutable
+message body again when both its D1 family and scanner receipt are proven.
+
+`corpora.gmail.since` optionally declares an inclusive `YYYY-MM-DD` corpus
+floor. Full sweeps append Gmail's `after:YYYY/MM/DD` search term. Incremental
+history cannot carry a search query, so its bounded metadata policy read also
+checks `internalDate`; older messages are deterministic policy exclusions and
+missing date evidence holds the history cursor. The floor is part of the Gmail
+policy fingerprint. Adding or changing it forces an authoritative sweep, and
+any stored family that falls outside the new floor remains subject to the
+ordinary exact removal-plan review and readback. Omitting the field preserves
+the prior query and fingerprint.
+
 The ordinary Drive dry run is for a person reviewing individual files and may
 name files or paths. An assistant must add `--json`: that path validates every
 reviewed root, reads at most 25 Drive entries by default (and refuses a limit
