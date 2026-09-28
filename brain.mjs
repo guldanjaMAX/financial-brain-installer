@@ -11591,6 +11591,11 @@ async function runMutatingSourceIngest({
   sourceName,
   statePath,
   sharedRecord = null,
+  sharedRecordWaitMs = 0,
+  sharedRecordRetryMs = 60_000,
+  sharedRecordSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  sharedRecordNow = () => Date.now(),
+  onSharedRecordWait = () => {},
   dryRun,
   lockDryRun = false,
   options = {},
@@ -11607,19 +11612,46 @@ async function runMutatingSourceIngest({
         statePath,
         ...runtimeOptions,
       },
-      ({ assertOwned: assertSourceOwned }) => {
+      async ({ assertOwned: assertSourceOwned }) => {
         if (!sharedRecord) return task(assertSourceOwned);
         // Every source writer takes its adjacent-state lease first. Google
         // sources then take the one per-user credential-record lease in the
         // same order as the generic provider writers, so different sources
-        // cannot race a legacy migration or deadlock on opposite lock orders.
-        return lockTask(
-          { sourceName, sharedRecord, ...runtimeOptions },
-          ({ assertOwned: assertRecordOwned }) => task(() => {
+        // cannot race a legacy migration, a reconnect, or deadlock on opposite
+        // lock orders. Calendar may wait behind a long Google source so its
+        // scheduled refresh is delayed rather than dropped.
+        const waitLimit = Math.max(0, Number(sharedRecordWaitMs) || 0);
+        const retryEvery = Math.max(1, Number(sharedRecordRetryMs) || 60_000);
+        const waitStarted = sharedRecordNow();
+        let waitingAnnounced = false;
+        while (true) {
+          let sharedTaskEntered = false;
+          try {
+            return await lockTask(
+              { sourceName, sharedRecord, ...runtimeOptions },
+              ({ assertOwned: assertRecordOwned }) => {
+                sharedTaskEntered = true;
+                return task(() => {
+                  assertSourceOwned();
+                  assertRecordOwned();
+                });
+              },
+            );
+          } catch (error) {
+            const elapsed = Math.max(0, sharedRecordNow() - waitStarted);
+            const sharedBusy = !sharedTaskEntered &&
+              error instanceof SourceIngestLockError &&
+              error.code === "source_ingest_already_running";
+            if (!sharedBusy || waitLimit === 0 || elapsed >= waitLimit) throw error;
             assertSourceOwned();
-            assertRecordOwned();
-          }),
-        );
+            if (!waitingAnnounced) {
+              onSharedRecordWait({ wait_limit_ms: waitLimit });
+              waitingAnnounced = true;
+            }
+            await sharedRecordSleep(Math.min(retryEvery, waitLimit - elapsed));
+            assertSourceOwned();
+          }
+        }
       },
     );
   } catch (error) {
@@ -13276,6 +13308,13 @@ export async function cmdIngestCalendar(m, manifestPath, flags, options = {}) {
     sourceName,
     statePath,
     sharedRecord: "provider:google",
+    sharedRecordWaitMs: options.calendarSharedRecordWaitMs ?? 12 * 60 * 60 * 1_000,
+    sharedRecordRetryMs: options.calendarSharedRecordRetryMs ?? 60_000,
+    sharedRecordSleep: options.calendarSharedRecordSleep,
+    sharedRecordNow: options.calendarSharedRecordNow,
+    onSharedRecordWait: options.onCalendarSharedRecordWait ?? (() => info(
+      "another Google source or connection is active; Calendar will wait for that credential-safe boundary instead of skipping this refresh",
+    )),
     dryRun: dry,
     options,
   }, (assertLockOwned) => cmdIngestCalendarRun(

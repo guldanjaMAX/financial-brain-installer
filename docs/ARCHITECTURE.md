@@ -395,9 +395,13 @@ derived. A multiply hard-linked manifest is rejected before the runtime lock,
 credentials, or network because it has no portable single adjacent state path.
 Google source writers acquire that source lease first and then one shared
 `provider:google` lease before opening the credential record. The Google OAuth
-connect ceremony uses the same shared lease. Mutating load preflight reads only
-credential-store metadata; dry-run connectors use a full-record reader that
-cannot migrate legacy Windows or macOS storage.
+connect ceremony uses the same shared lease. A Calendar writer waits up to
+twelve hours at this shared boundary when a long Google source or connection is
+active, while retaining its own source lease. The provider credential therefore
+cannot change during either run, another Calendar writer remains excluded, and
+an unattended Calendar refresh can be delayed rather than dropped. Mutating
+load preflight reads only credential-store metadata; dry-run connectors use a
+full-record reader that cannot migrate legacy Windows or macOS storage.
 
 The authenticated HTTP batch route preserves one receipt per input document.
 For D1 it reads prior rows for unique document identities in one batch preflight,
