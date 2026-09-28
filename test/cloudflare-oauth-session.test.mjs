@@ -13,6 +13,7 @@ import {
   commandPath,
   renderCliCommands,
   withCloudflareControlCredential,
+  withWranglerSessionIfNeeded,
 } from "../brain.mjs";
 
 import {
@@ -72,6 +73,17 @@ function jsonResponse(body, { status = 200 } = {}) {
 
 function errorCode(code) {
   return (error) => error instanceof CloudflareOAuthSessionError && error.code === code;
+}
+
+function vectorizeScopeError(accountId = ACCOUNT_A) {
+  const error = new CloudflareOAuthSessionError(
+    "CLOUDFLARE_OAUTH_SCOPE_MISSING",
+    "request",
+    "fixture Vectorize scope refusal",
+  );
+  error.requiredSurface = "vectorize";
+  error.selectedAccountId = accountId;
+  return error;
 }
 
 test("profile names are stable, per-install, non-identifying, and never default", () => {
@@ -227,6 +239,47 @@ test("profile authorization pins Wrangler 4.131.1, keyring, scopes, browser call
   assert.equal(JSON.stringify(runner.calls).includes(AMBIENT_SECRET), false);
   assert.equal(authorize.args.includes("--profile"), false, "auth create takes the named profile positionally");
   assert.equal(authorize.args.includes("default"), false);
+});
+
+test("pinned Wrangler cannot request Vectorize through wrangler auth create", () => {
+  const source = readFileSync(resolve("node_modules/wrangler/wrangler-dist/cli.js"), "utf8");
+  const start = source.indexOf("DefaultScopes = {");
+  const end = source.indexOf("\n    };", start);
+  assert.ok(start >= 0 && end > start, "the pinned Wrangler browser-scope allowlist must be inspectable");
+  const wranglerScopes = source.slice(start, end);
+  assert.doesNotMatch(wranglerScopes, /["']vectorize:write["']/);
+  assert.match(source, /CF_SCOPES = \[[\s\S]*?["']vectorize:write["']/,
+    "the separate cf client knows Vectorize, proving this is the Wrangler client boundary");
+  assert.deepEqual(CLOUDFLARE_OAUTH_SCOPES, [
+    "account:read",
+    "user:read",
+    "workers:write",
+    "d1:write",
+    "ai:write",
+  ]);
+});
+
+test("macOS and win32 browser sign-in request the same pinned Wrangler scopes", () => {
+  const authorizeArgs = [];
+  for (const platformName of ["darwin", "win32"]) {
+    const runner = processRecorder();
+    createCloudflareOAuthProfile({
+      installIdentity: INSTALL_ID,
+      processRunner: runner,
+      platformName,
+      environment: platformName === "win32"
+        ? { Path: "C:\\fixture\\bin", USERPROFILE: "C:\\Users\\fixture" }
+        : { PATH: "/fixture/bin", HOME: "/fixture/home" },
+    });
+    const authorize = runner.calls.find((call) => call.args.includes("create"));
+    assert.ok(authorize, `${platformName} must reach the authorization decision point`);
+    authorizeArgs.push(authorize.args.slice(0, -1));
+  }
+  assert.deepEqual(authorizeArgs[1], authorizeArgs[0]);
+  assert.deepEqual(
+    authorizeArgs[0].slice(authorizeArgs[0].indexOf("--scopes") + 1, authorizeArgs[0].indexOf("--browser")),
+    [...CLOUDFLARE_OAUTH_SCOPES],
+  );
 });
 
 test("keyring failure is a generic hard stop and captured output is wiped", () => {
@@ -486,6 +539,41 @@ test("account preflight proves the exact account plus Workers subdomain, D1, Vec
     `/client/v4/accounts/${ACCOUNT_A}/vectorize/v2/indexes`,
     `/client/v4/accounts/${ACCOUNT_A}/ai/models/search?per_page=1`,
   ]);
+  token.fill(0);
+});
+
+test("a Vectorize preflight refusal carries only its exact decision surface and selected account", async () => {
+  const token = Buffer.from(TOKEN);
+  const paths = [];
+  await assert.rejects(
+    preflightCloudflareOAuthAccount(token, { id: ACCOUNT_A, name: "Selected account" }, {
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        paths.push(parsed.pathname + parsed.search);
+        if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
+          return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected account" }));
+        }
+        if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}/workers/subdomain`)) {
+          return jsonResponse(envelope({ subdomain: "exact-fixture-subdomain" }));
+        }
+        if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}/vectorize/v2/indexes`)) {
+          return jsonResponse({ success: false, errors: [{ code: 10000 }], messages: [], result: null }, { status: 403 });
+        }
+        return jsonResponse(envelope([]));
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "CLOUDFLARE_OAUTH_SCOPE_MISSING");
+      assert.equal(error.requiredSurface, "vectorize");
+      assert.equal(error.selectedAccountId, ACCOUNT_A);
+      assert.deepEqual(Object.keys(error).sort(), ["code", "name", "phase", "requiredSurface", "selectedAccountId"]);
+      return true;
+    },
+  );
+  assert.equal(paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/vectorize/v2/indexes`,
+    "the refusal must reach the exact Vectorize decision point");
+  assert.ok(!paths.some((path) => path.includes("/ai/models/search")),
+    "no later preflight surface may run after the refusal");
   token.fill(0);
 });
 
@@ -1151,7 +1239,7 @@ test("a malformed or placeholder account can never select a generic recovery-tok
   assert.equal(selectedAccountId, null);
 });
 
-test("expired or stale-scope OAuth gets one owner-approved refresh before any action", async () => {
+test("expired OAuth gets one owner-approved refresh before any action", async () => {
   const profile = cloudflareOAuthProfileName(INSTALL_ID);
   const attempts = [];
   let actionCalls = 0;
@@ -1168,9 +1256,9 @@ test("expired or stale-scope OAuth gets one owner-approved refresh before any ac
       attempts.push(request.reauthorize);
       if (!request.reauthorize) {
         throw new CloudflareOAuthSessionError(
-          "CLOUDFLARE_OAUTH_SCOPE_MISSING",
+          "CLOUDFLARE_OAUTH_REAUTH_REQUIRED",
           "request",
-          "fixture stale scope",
+          "fixture expired session",
         );
       }
       return request.action({
@@ -1184,6 +1272,268 @@ test("expired or stale-scope OAuth gets one owner-approved refresh before any ac
   assert.equal(result, "completed");
   assert.deepEqual(attempts, [false, true]);
   assert.equal(actionCalls, 1);
+});
+
+test("a non-Vectorize scope refusal still gets one owner-approved browser refresh", async () => {
+  const profile = cloudflareOAuthProfileName(INSTALL_ID);
+  const attempts = [];
+  let tokenCalls = 0;
+  let actionCalls = 0;
+  const result = await withCloudflareControlCredential(() => {
+    actionCalls += 1;
+    return "completed";
+  }, {
+    authProfile: profile,
+    accountId: ACCOUNT_A,
+    interactive: true,
+    allowBrowserReauth: true,
+    allowTokenRecovery: true,
+    askFn: async () => "y",
+    withToken: async () => { tokenCalls += 1; throw new Error("token lane must not run"); },
+    withOAuthSession: async (request) => {
+      attempts.push(request.reauthorize);
+      if (!request.reauthorize) {
+        const error = new CloudflareOAuthSessionError(
+          "CLOUDFLARE_OAUTH_SCOPE_MISSING",
+          "request",
+          "fixture D1 scope refusal",
+        );
+        error.requiredSurface = "d1";
+        error.selectedAccountId = ACCOUNT_A;
+        throw error;
+      }
+      return request.action({
+        token: Buffer.from(TOKEN),
+        profile,
+        account: { id: ACCOUNT_A, name: "Selected" },
+        preflight: { status: "ready", checks: ["account", "workers", "d1", "vectorize", "workers_ai"] },
+      });
+    },
+  });
+  assert.equal(result, "completed");
+  assert.deepEqual(attempts, [false, true]);
+  assert.equal(actionCalls, 1, "the refreshed browser credential reaches the action once");
+  assert.equal(tokenCalls, 0, "only the pinned Vectorize gap should route directly to token recovery");
+});
+
+test("a Vectorize scope refusal skips the impossible browser refresh and explicitly approves the saved recovery credential", async () => {
+  const priorToken = process.env.CLOUDFLARE_API_TOKEN;
+  const priorLog = console.log;
+  delete process.env.CLOUDFLARE_API_TOKEN;
+  const profile = cloudflareOAuthProfileName(INSTALL_ID);
+  const attempts = [];
+  const prompts = [];
+  const lines = [];
+  const loadedAccounts = [];
+  let actionCalls = 0;
+  try {
+    console.log = (line) => lines.push(String(line));
+    const result = await withCloudflareControlCredential((session) => {
+      actionCalls += 1;
+      return session.method;
+    }, {
+      authProfile: profile,
+      accountId: ACCOUNT_A,
+      interactive: true,
+      allowBrowserReauth: true,
+      allowTokenRecovery: true,
+      askFn: async (question) => { prompts.push(question); return "y"; },
+      loadStoredCloudflareToken: (accountId) => {
+        loadedAccounts.push(accountId);
+        return Buffer.from("s".repeat(40));
+      },
+      withOAuthSession: async (request) => {
+        attempts.push(request.reauthorize);
+        throw vectorizeScopeError();
+      },
+    });
+
+    assert.equal(result, "api_token");
+    assert.deepEqual(attempts, [false], "Wrangler reauthorization cannot add its unsupported Vectorize scope");
+    assert.deepEqual(loadedAccounts, [ACCOUNT_A], "the saved token lookup must be exact-account scoped");
+    assert.equal(actionCalls, 1, "the explicitly approved recovery credential reaches the action once");
+    assert.equal(prompts.length, 2, "recovery and the saved credential each need an explicit decision");
+    assert.match(prompts[0], /Wrangler 4\.131\.1[\s\S]*Vectorize/i);
+    assert.match(prompts[0], /Workers Scripts Edit[\s\S]*D1 Edit[\s\S]*Vectorize Edit[\s\S]*Workers AI Read/i);
+    assert.match(prompts[1], /saved recovery API token[\s\S]*macOS Keychain/i);
+    assert.match(prompts[1], /old or revoked/i);
+    assert.match(prompts[1], new RegExp(ACCOUNT_A));
+    assert.doesNotMatch(lines.join("\n"), /s{20}/, "no recovery credential bytes may be shown");
+  } finally {
+    console.log = priorLog;
+    if (priorToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = priorToken;
+  }
+});
+
+// The outer CLI wrapper loads this computer's shared Wrangler session before a
+// command runs. That session must not count as an approved credential for the
+// Vectorize recovery, or the saved recovery token would be used, or skipped,
+// without the owner's second explicit decision.
+async function vectorizeRecoveryThroughCliSessionWrapper(sharedWranglerToken) {
+  const priorToken = process.env.CLOUDFLARE_API_TOKEN;
+  const priorLog = console.log;
+  delete process.env.CLOUDFLARE_API_TOKEN;
+  const profile = cloudflareOAuthProfileName(INSTALL_ID);
+  const prompts = [];
+  const lines = [];
+  const loadedAccounts = [];
+  let wranglerTokenReads = 0;
+  let oauthAttempts = 0;
+  let actionCalls = 0;
+  try {
+    console.log = (line) => lines.push(String(line));
+    const result = await withWranglerSessionIfNeeded(
+      () => withCloudflareControlCredential((session) => {
+        actionCalls += 1;
+        return session.method;
+      }, {
+        authProfile: profile,
+        accountId: ACCOUNT_A,
+        interactive: true,
+        allowBrowserReauth: true,
+        allowTokenRecovery: true,
+        askFn: async (question) => { prompts.push(question); return "y"; },
+        loadStoredCloudflareToken: (accountId) => {
+          loadedAccounts.push(accountId);
+          return Buffer.from("s".repeat(40));
+        },
+        storedTokenReference: () => "fixture protected store",
+        withOAuthSession: async () => {
+          oauthAttempts += 1;
+          throw vectorizeScopeError();
+        },
+      }),
+      {
+        env: {},
+        argv: [],
+        readWranglerOAuthToken: () => {
+          wranglerTokenReads += 1;
+          return sharedWranglerToken;
+        },
+      },
+    );
+    return { result, prompts, lines, loadedAccounts, wranglerTokenReads, oauthAttempts, actionCalls };
+  } finally {
+    console.log = priorLog;
+    if (priorToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = priorToken;
+  }
+}
+
+function assertSavedRecoveryApprovedExplicitly(run) {
+  assert.equal(run.result, "api_token");
+  assert.equal(run.oauthAttempts, 1, "the OAuth refusal decision point is reached once");
+  assert.equal(run.actionCalls, 1, "the explicitly approved saved recovery token reaches the action once");
+  assert.deepEqual(run.loadedAccounts, [ACCOUNT_A], "the saved token lookup remains exact-account scoped");
+  assert.equal(run.prompts.length, 2, "recovery and the saved credential each require approval");
+  assert.match(run.prompts[0], /Wrangler 4\.131\.1[\s\S]*Vectorize/i);
+  assert.match(run.prompts[1], /saved recovery API token[\s\S]*fixture protected store/i);
+  assert.match(run.lines.join("\n"), /about to use the saved recovery API token/i);
+  assert.doesNotMatch(run.lines.join("\n"), /s{20}|fixture-shared-wrangler/, "no credential bytes may be shown");
+}
+
+test("control: with no shared Wrangler session the CLI wrapper reaches the saved recovery approval", async () => {
+  const run = await vectorizeRecoveryThroughCliSessionWrapper(null);
+  assert.equal(run.wranglerTokenReads, 1, "the wrapper looked for a shared session and found none");
+  assertSavedRecoveryApprovedExplicitly(run);
+});
+
+test("a shared Wrangler session cannot bypass explicit saved recovery approval", async () => {
+  const run = await vectorizeRecoveryThroughCliSessionWrapper("fixture-shared-wrangler-session-not-real");
+  assert.equal(run.wranglerTokenReads, 1, "the wrapper loaded the shared session, so this arm is not vacuous");
+  assertSavedRecoveryApprovedExplicitly(run);
+});
+
+test("win32 routes the same Vectorize scope refusal to the same explicit recovery reason", async () => {
+  const profile = cloudflareOAuthProfileName(INSTALL_ID);
+  const attempts = [];
+  const prompts = [];
+  const tokenRequests = [];
+  let actionCalls = 0;
+  const result = await withCloudflareControlCredential((session) => {
+    actionCalls += 1;
+    return session.method;
+  }, {
+    authProfile: profile,
+    platform: "win32",
+    interactive: true,
+    allowBrowserReauth: true,
+    allowTokenRecovery: true,
+    askFn: async (question) => { prompts.push(question); return "y"; },
+    withToken: async (action, request) => {
+      tokenRequests.push(request);
+      return action();
+    },
+    withOAuthSession: async (request) => {
+      attempts.push(request.reauthorize);
+      throw vectorizeScopeError();
+    },
+  });
+
+  assert.equal(result, "api_token");
+  assert.equal(actionCalls, 1, "the approved Windows recovery path reaches the action once");
+  assert.deepEqual(attempts, [false]);
+  assert.equal(tokenRequests.length, 1, "the Windows token decision point is reached once");
+  assert.equal(tokenRequests[0].platform, "win32");
+  assert.equal(tokenRequests[0].accountId, ACCOUNT_A);
+  assert.equal(tokenRequests[0].recoveryReason, "wrangler_vectorize_scope_missing");
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /Wrangler 4\.131\.1[\s\S]*Vectorize/i);
+});
+
+test("declining the saved recovery credential reaches a separate hidden-entry decision without using the saved token", async () => {
+  const priorToken = process.env.CLOUDFLARE_API_TOKEN;
+  const priorLog = console.log;
+  delete process.env.CLOUDFLARE_API_TOKEN;
+  const profile = cloudflareOAuthProfileName(INSTALL_ID);
+  const prompts = [];
+  const answers = ["y", "n", "y", "n"];
+  const lines = [];
+  const stored = Buffer.from("r".repeat(40));
+  let hiddenEntries = 0;
+  let actionCalls = 0;
+  try {
+    console.log = (line) => lines.push(String(line));
+    const result = await withCloudflareControlCredential((session) => {
+      actionCalls += 1;
+      return session.method;
+    }, {
+      authProfile: profile,
+      accountId: ACCOUNT_A,
+      platform: "darwin",
+      interactive: true,
+      allowBrowserReauth: true,
+      allowTokenRecovery: true,
+      askFn: async (question) => {
+        prompts.push(question);
+        return answers.shift() ?? "n";
+      },
+      loadStoredCloudflareToken: () => stored,
+      readCloudflareToken: async () => {
+        hiddenEntries += 1;
+        return Buffer.from("n".repeat(40));
+      },
+      storeCloudflareToken: () => { throw new Error("declined storage must not run"); },
+      withOAuthSession: async () => {
+        throw vectorizeScopeError();
+      },
+    });
+
+    assert.equal(result, "api_token");
+    assert.equal(actionCalls, 1, "the green-control manual credential reaches the action once");
+    assert.equal(hiddenEntries, 1, "declining the saved credential reaches hidden entry exactly once");
+    assert.ok(stored.every((byte) => byte === 0), "the declined saved credential is wiped before hidden entry");
+    assert.match(prompts[1], /saved recovery API token/i);
+    assert.match(prompts[2], /different[\s\S]*hidden prompt/i);
+    assert.match(lines.join("\n"), /newly entered recovery API token/i);
+    assert.doesNotMatch(lines.join("\n"), /r{20}|n{20}/, "neither credential may be shown");
+  } finally {
+    console.log = priorLog;
+    stored.fill(0);
+    if (priorToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = priorToken;
+  }
 });
 
 test("an OAuth-backed action failure propagates unchanged and is never retried as authentication", async () => {

@@ -22,11 +22,13 @@ export const CLOUDFLARE_OAUTH_WRANGLER_PACKAGE = REVIEWED_WRANGLER_SPEC;
 export const CLOUDFLARE_OAUTH_CALLBACK_HOST = "localhost";
 export const CLOUDFLARE_OAUTH_CALLBACK_PORT = 8976;
 
-// These are the narrow Wrangler 4.131.1 OAuth scope keys available for the
-// current standard install: enumerate memberships, deploy/configure Workers,
-// manage D1, and configure Workers AI. Wrangler exposes no separate Vectorize
-// OAuth key, so the exact Vectorize read below is the fail-closed proof that
-// this pinned scope set reaches it before any mutation.
+// These are the narrow Wrangler 4.131.1 OAuth scope keys available to
+// `wrangler auth create`: enumerate memberships, deploy/configure Workers,
+// manage D1, and configure Workers AI. Wrangler's browser client exposes no
+// Vectorize key. The exact Vectorize read below therefore remains in preflight
+// as the fail-closed decision point that routes an owner to explicitly selected
+// recovery-token access before any mutation. Never add `vectorize:write` here:
+// this pinned Wrangler rejects it before opening the browser.
 export const CLOUDFLARE_OAUTH_SCOPES = Object.freeze([
   "account:read",
   "user:read",
@@ -647,6 +649,17 @@ function normalizeAccount(value) {
   return Object.freeze({ id, name: value.name });
 }
 
+function annotateScopeRefusal(error, accountId, requiredSurface) {
+  if (error instanceof CloudflareOAuthSessionError &&
+      error.code === "CLOUDFLARE_OAUTH_SCOPE_MISSING") {
+    // The account id and failed product surface are non-secret decision data.
+    // Carry no provider message or response body into the recovery layer.
+    error.selectedAccountId = accountId;
+    error.requiredSurface = requiredSurface;
+  }
+  return error;
+}
+
 function validateResultInfo(value, requestedPage, resultCount) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid");
   const integers = ["page", "count", "total_count", "total_pages"];
@@ -795,7 +808,12 @@ export async function selectCloudflareOAuthAccount(accounts, {
 /** Read-only proof that every current control-plane service reaches one account. */
 export async function preflightCloudflareOAuthAccount(token, account, options = {}) {
   const selected = normalizeAccount(account);
-  const accountBody = await cloudflareGet(`/accounts/${selected.id}`, token, options);
+  let accountBody;
+  try {
+    accountBody = await cloudflareGet(`/accounts/${selected.id}`, token, options);
+  } catch (error) {
+    throw annotateScopeRefusal(error, selected.id, "account");
+  }
   const reached = normalizeAccount(accountBody.result);
   if (reached.id !== selected.id) {
     throw oauthError(
@@ -816,6 +834,7 @@ export async function preflightCloudflareOAuthAccount(token, account, options = 
     try {
       body = await cloudflareGet(`/accounts/${selected.id}${check.suffix}`, token, options);
     } catch (error) {
+      annotateScopeRefusal(error, selected.id, check.name);
       // Cloudflare error 10007 on exactly this read means the account never
       // registered a workers.dev subdomain (the pinned Wrangler special-cases
       // the same code). That is an account setting the owner can fix, not a

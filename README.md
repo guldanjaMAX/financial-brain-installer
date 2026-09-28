@@ -74,15 +74,19 @@ window is ordinary PowerShell.
 The full command path below is deliberate. It keeps working after Terminal is
 closed, without `sudo`, administrator access, or a shell-profile change.
 
-Normal setup and updates use an owner-controlled Cloudflare browser sign-in
-saved as this Brain's named local profile. The owner signs in, completes 2FA,
-chooses the exact account, and approves Cloudflare's consent page. No API token
-is created, revealed, copied, or pasted during an ordinary fresh install. A
-hidden token prompt appears only when the released CLI explicitly offers its
-bounded recovery path and the owner chooses it. That recovery-only token uses
-the minimum reviewed scope: Workers Scripts Edit, D1 Edit, Vectorize Edit, and
-Workers AI Read. It receives a short expiry and never belongs in chat or a
-command argument.
+Normal setup and updates start with an owner-controlled Cloudflare browser
+sign-in saved as this Brain's named local profile. The owner signs in, completes
+2FA, chooses the exact account, and approves Cloudflare's consent page. Pinned
+Wrangler 4.131.1 cannot request Vectorize permission for that browser profile.
+If the read-only preflight reaches that boundary, the installer says so and
+offers a separate, account-scoped API token from the Cloudflare dashboard with
+Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read. It never
+quietly substitutes a saved token. Before using one from protected local
+storage, it names the exact credential location and account, warns that the
+token may be old or revoked, and asks the owner to approve that credential.
+The owner can decline it and choose a different token through the hidden prompt.
+A recovery token receives a short expiry and never belongs in chat or a command
+argument.
 
 Mac or Linux:
 
