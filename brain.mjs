@@ -2600,7 +2600,7 @@ export function workerBindings(m, cfg, options = {}) {
   ];
 }
 
-export async function cmdDeploy(manifestPath, options = {}) {
+async function cmdDeployWithPrompts(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
   // Validate the complete named/custom bank-feed profile before any account
   // lookup or Worker upload. workerBindings renders the same values below.
@@ -2768,6 +2768,18 @@ export async function cmdDeploy(manifestPath, options = {}) {
         "        `brain secrets` applies this brain's admin key and never creates one. If this\n" +
         "        brain has no key yet, `brain setup <manifest>` creates it and finishes the install."
     );
+  }
+}
+
+/**
+ * A control-plane prompt owns stdin for only this command. A completed deploy
+ * must release that handle even when the answer led to a warning or skip.
+ */
+export async function cmdDeploy(manifestPath, options = {}) {
+  try {
+    return await cmdDeployWithPrompts(manifestPath, options);
+  } finally {
+    closePrompts();
   }
 }
 
@@ -27729,7 +27741,7 @@ export async function cmdFirstSourceFile(argv = process.argv.slice(3), options =
 }
 
 /** Beginner update path: verify custody first, then run the fully gated upgrade. */
-export async function cmdUpdate(manifestPath, options = {}) {
+async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   let installed;
   try {
     const discoverManifest = options.discoverInstalledManifest ?? discoverInstalledManifest;
@@ -27914,6 +27926,16 @@ export async function cmdUpdate(manifestPath, options = {}) {
     reportUpdateSkillRefreshWarning(warn);
   }
   return upgradeResult;
+}
+
+/** Release shared prompt state after every update outcome, including local
+ * assistant refresh warnings that happen after the verified upgrade. */
+export async function cmdUpdate(manifestPath, options = {}) {
+  try {
+    return await cmdUpdateWithPrompts(manifestPath, options);
+  } finally {
+    closePrompts();
+  }
 }
 
 export async function cmdRollbackInteractive(manifestPath, bookmarkArg, options = {}) {
@@ -29598,6 +29620,11 @@ if (IS_MAIN) {
   // or paste a token. Scoped to this one invocation.
   runCliCommandWithCredentialBoundary(cliBoundaryCommand, () => commands[cmd](manifestPath), {
     manifestPath,
+  }).finally(() => {
+    // No completed command may retain terminal raw mode or an stdin listener.
+    // Command-level cleanup remains necessary for imported lifecycle runners;
+    // this boundary is the final guard for every installed CLI command.
+    closePrompts();
   }).catch((e) => {
     // Fatal is a failure this code ANTICIPATED and already explained: a missing
     // token, a free-tier account, a typo'd source name. A Drive removal review

@@ -160,6 +160,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node test/wrangler-legacy-keyring-opt-out.test.mjs",
   // Health never refreshes or rewrites a Wrangler login.
   "node test/health-wrangler-session-exempt.test.mjs",
+  // A completed update or deploy releases the shared prompt and exits.
+  "node test/cli-success-exit.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -314,6 +316,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/drain-query-ready-gate.test.mjs",
   "node test/report-html.test.mjs",
   "node test/report-deploy-exit.test.mjs",
+  "node test/cli-success-exit.test.mjs",
   "node test/errors.test.mjs",
   "node test/doctor.test.mjs",
   "node --test test/drain-cron-default.test.mjs",
