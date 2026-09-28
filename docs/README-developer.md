@@ -1364,6 +1364,23 @@ good enough. Do not move a client to another backend based on chunk count alone.
 Require a measured failure on the golden set, a diagnosed cause, and an approved
 architecture change.
 
+Questions that explicitly name calendar, meeting or Zoom, or iMessage or text
+messages add a supplemental metadata-prefiltered keyword and vector lane. The
+lane rescues matching `category` or `platform` records from beyond the ordinary
+candidate cutoff without restricting the base search or double-boosting records
+already present there. Generic decision wording gets no source hint. Natural
+language date windows remain explicit request filters until retrieval has a
+reviewed owner-timezone input.
+
+A completed hybrid search distinguishes a bounded projection catch-up from a
+failed search. The catch-up classification requires an exact pending count below
+one percent of expected vectors and no more than 50,000 rows, a vector-count
+shortfall below one percent, and an oldest queue age below 24 hours. It changes
+only answer availability: unsupported or empty results are
+`coverage_incomplete` and cannot support absence, while supported cited answers
+remain available. Exact readiness, health, and acceptance still require an empty
+outbox and the full projection fence.
+
 `brain diagnose` follows the same refusal to guess at scale. It pins the current
 maximum integer `chunks.id`, then keyset-pages through that fixed range in
 50,000-row statements. One page derives the total, blank, oversized, orphan,

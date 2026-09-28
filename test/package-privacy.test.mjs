@@ -872,6 +872,9 @@ const expected = [
   "worker/src/lib/sessions.js",
   "worker/src/lib/webauthn.js",
   "worker/src/lib/query-intent.js",
+  // Reviewed pure query classifier: dependency-free, with no I/O, secrets,
+  // owner data, or network access; it only returns supplemental search filters.
+  "worker/src/lib/retrieval-routing.js",
   "worker/src/lib/retrieval-status.js",
   "worker/src/lib/secret-scan.js",
   // Reviewed declarative Worker source: fixed HTTPS origin and path prefix,
