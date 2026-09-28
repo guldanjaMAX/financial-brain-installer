@@ -40,6 +40,7 @@ import {
   validateVectorProjectionAggregateReceipt,
   verifyUpdateRuntimePayload,
 } from "../operations/update-preview.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { inspectNpmArchiveBytes } from "../operations/package-bundle-verifier.mjs";
 import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 
@@ -1780,4 +1781,24 @@ test("pure preview core has no write, network, child-process, environment, or cr
   assert.doesNotMatch(source,
     /\b(?:writeFile|appendFile|mkdir|rename|unlink|rm|rmdir|truncate|chmod|chown|symlink|link)Sync\b/u);
   assert.doesNotMatch(source, /keychain|wrangler|cloudflare-api-token/i);
+});
+
+test("brain update help is plain text and an unknown live flag names the no-option owner route", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "brain-update-help-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const cli = fileURLToPath(new URL("../brain.mjs", import.meta.url));
+  const env = { ...process.env, HOME: home, BRAIN_NO_WRANGLER_LOGIN: "1", NO_COLOR: "1" };
+  const help = spawnSync(process.execPath, [cli, "update", "--help"], { encoding: "utf8", env });
+  assert.equal(help.status, 0);
+  assert.ok(help.stdout.includes(renderCliCommands("Usage: brain update [manifest]", { scriptPath: cli })));
+  assert.doesNotMatch(help.stdout, /"schema_version"|"error_code"/u);
+
+  const unknown = spawnSync(process.execPath, [cli, "update", "--mystery"], { encoding: "utf8", env });
+  assert.notEqual(unknown.status, 0);
+  // The refusal is rendered per platform, so the expectation is built with the
+  // same renderer: on Windows both commands are the runnable node invocation.
+  assert.ok(unknown.stdout.includes(renderCliCommands(
+    "brain update doesn't take --mystery. Run brain update with no options.",
+    { scriptPath: cli },
+  )), unknown.stdout);
 });

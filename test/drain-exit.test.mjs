@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   assertDrainComplete,
   buildCompletedDrainResult,
+  cmdDrain,
   renderDrainProgress,
   renderCompletedDrainResult,
   summariseResponseBody,
@@ -11,6 +12,31 @@ import {
   validateReindexReceipt,
   vectorCountMismatchFailure,
 } from "../brain.mjs";
+
+let propagationCalls = 0;
+const propagationSleeps = [];
+const propagationResult = await cmdDrain("fixture.manifest.json", {
+  loadManifest: () => ({ m: { brain: { domain: "brain.example.invalid" } } }),
+  resolveBaseUrl: async () => "https://brain.example.invalid",
+  resolveAdminKey: () => "fixture-key",
+  now: () => propagationSleeps.reduce((sum, value) => sum + value, 0),
+  sleep: async (milliseconds) => propagationSleeps.push(milliseconds),
+  http: async () => {
+    propagationCalls += 1;
+    const body = propagationCalls === 1
+      ? { error: "vector drain is paused for a verified upgrade", paused: true }
+      : { drained: 0, submitted: 0, waiting: 0, remaining: 0, vector_ready: true,
+          expected_vectors: 4, actual_vectors: 4 };
+    return {
+      status: propagationCalls === 1 ? 503 : 200,
+      ok: propagationCalls !== 1,
+      text: async () => JSON.stringify(body),
+    };
+  },
+});
+assert.equal(propagationCalls, 2, "the exact paused 503 must reach a second convergence request");
+assert.deepEqual(propagationSleeps, [5_000]);
+assert.equal(propagationResult.vector_ready, true);
 
 /* A paused update has a different command surface from an active Brain.
  * Preserve the useful active reindex remedy, but never send a paused operator
