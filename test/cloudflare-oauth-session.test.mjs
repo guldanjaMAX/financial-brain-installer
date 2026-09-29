@@ -647,6 +647,28 @@ function unregisteredSubdomainFetch(paths) {
   };
 }
 
+function refusedSubdomainFetch(paths) {
+  return async (url) => {
+    const parsed = new URL(url);
+    paths.push(parsed.pathname + parsed.search);
+    if (parsed.pathname.endsWith("/accounts")) {
+      return jsonResponse(envelope([
+        { id: ACCOUNT_A, name: "Selected" },
+      ], { result_info: { page: 1, count: 1, total_count: 1, total_pages: 1 } }));
+    }
+    if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
+      return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected" }));
+    }
+    if (parsed.pathname.endsWith("/workers/subdomain")) {
+      return jsonResponse(envelope(null, {
+        success: false,
+        errors: [{ code: 10000, message: "Authentication error" }],
+      }), { status: 403 });
+    }
+    return jsonResponse(envelope([]));
+  };
+}
+
 test("preflight names an account with no registered workers.dev subdomain instead of a failed request", async () => {
   const token = Buffer.from(TOKEN);
   const paths = [];
@@ -768,13 +790,18 @@ function namedProfileManifest(root, brain) {
   return manifestPath;
 }
 
-async function namedProfileRoutine(manifestPath, paths) {
+async function namedProfileRoutine(manifestPath, paths, { fetchImpl = unregisteredSubdomainFetch(paths) } = {}) {
   const runner = processRecorder(({ args }) => args.includes("token")
     ? okProcessResult({ stdout: tokenOutput() })
     : okProcessResult());
   let actionCalls = 0;
+  let actionSession = null;
   const prompts = [];
-  const outcome = await withCloudflareControlCredential(() => { actionCalls += 1; return "done"; }, {
+  const outcome = await withCloudflareControlCredential((session) => {
+    actionCalls += 1;
+    actionSession = session;
+    return "done";
+  }, {
     manifestPath,
     accountId: ACCOUNT_A,
     authProfile: cloudflareOAuthProfileName(INSTALL_ID),
@@ -787,11 +814,150 @@ async function namedProfileRoutine(manifestPath, paths) {
       processRunner: runner,
       platformName: "darwin",
       environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
-      fetchImpl: unregisteredSubdomainFetch(paths),
+      fetchImpl,
     },
   }).then((value) => ({ value }), (error) => ({ error }));
-  return { ...outcome, actionCalls, prompts };
+  return { ...outcome, actionCalls, actionSession, prompts };
 }
+
+test("a named-profile update of a custom-domain Brain continues when the subdomain read is refused", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-refused-subdomain-"));
+  try {
+    const paths = [];
+    const result = await namedProfileRoutine(
+      namedProfileManifest(root, { domain: "brain.example.invalid" }),
+      paths,
+      { fetchImpl: refusedSubdomainFetch(paths) },
+    );
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.value, "done");
+    assert.equal(result.actionCalls, 1, "the update action must run after the optional refusal");
+    assert.equal(result.actionSession.preflight.workersSubdomainUnreadable, true);
+    assert.equal(Object.hasOwn(result.actionSession.preflight, "workersSubdomain"), false,
+      "a refused read must not invent a subdomain receipt");
+    assert.ok(!result.actionSession.preflight.checks.includes("workers_subdomain"));
+    assert.ok(paths.some((path) => path.includes("/d1/database")),
+      "the remaining preflight checks must run after the optional refusal");
+    assert.deepEqual(result.prompts, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+async function requiredSubdomainScopeRefusal({ interactive }) {
+  const root = mkdtempSync(resolve(tmpdir(), "brain-required-subdomain-refusal-"));
+  const paths = [];
+  const prompts = [];
+  let actionCalls = 0;
+  let tokenCalls = 0;
+  try {
+    const manifestPath = namedProfileManifest(root, {
+      domain: "fixture-brain.fixture-label.workers.dev",
+    });
+    const runner = processRecorder(({ args }) => args.includes("token")
+      ? okProcessResult({ stdout: tokenOutput() })
+      : okProcessResult());
+    const outcome = await withCloudflareControlCredential(() => {
+      actionCalls += 1;
+      return "done";
+    }, {
+      manifestPath,
+      accountId: ACCOUNT_A,
+      authProfile: cloudflareOAuthProfileName(INSTALL_ID),
+      interactive,
+      allowBrowserReauth: true,
+      allowTokenRecovery: true,
+      askFn: async (question) => { prompts.push(question); return "n"; },
+      withToken: async () => { tokenCalls += 1; throw new Error("declined recovery must not run"); },
+      oauthOptions: {
+        processRunner: runner,
+        platformName: "darwin",
+        environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+        fetchImpl: refusedSubdomainFetch(paths),
+      },
+    }).then((value) => ({ value }), (error) => ({ error }));
+    return { ...outcome, actionCalls, tokenCalls, paths, prompts };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("a workers.dev Brain gets a specific subdomain refusal and the explicit recovery offer", async () => {
+  const result = await requiredSubdomainScopeRefusal({ interactive: true });
+  assert.equal(result.value, undefined);
+  assert.equal(result.actionCalls, 0, "the update action must not run before required access is proved");
+  assert.equal(result.tokenCalls, 0, "declining the recovery offer must not enter the token lane");
+  assert.equal(result.paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
+    "the refusal must reach the exact required subdomain read");
+  assert.equal(result.prompts.length, 1, "the exact recovery decision must be offered once");
+  assert.match(result.prompts[0], /saved browser sign-in cannot read this account's workers\.dev address/i);
+  assert.match(result.prompts[0], /Workers Scripts Edit[\s\S]*D1 Edit[\s\S]*Vectorize Edit[\s\S]*Workers AI Read/i);
+  assert.doesNotMatch(result.prompts[0], /refresh in the browser/i);
+  assert.match(result.error.message, /saved browser sign-in cannot read this account's workers\.dev address/i);
+  assert.match(result.error.message, /this Brain's address uses/i);
+  assert.match(result.error.message, /Nothing was changed/);
+});
+
+test("the workers.dev refusal enters the existing explicit recovery credential ceremony", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "brain-subdomain-recovery-control-"));
+  const paths = [];
+  const prompts = [];
+  const tokenRequests = [];
+  let actionCalls = 0;
+  try {
+    const manifestPath = namedProfileManifest(root, {
+      domain: "fixture-brain.fixture-label.workers.dev",
+    });
+    const runner = processRecorder(({ args }) => args.includes("token")
+      ? okProcessResult({ stdout: tokenOutput() })
+      : okProcessResult());
+    const result = await withCloudflareControlCredential((session) => {
+      actionCalls += 1;
+      return session.method;
+    }, {
+      manifestPath,
+      accountId: ACCOUNT_A,
+      authProfile: cloudflareOAuthProfileName(INSTALL_ID),
+      interactive: true,
+      allowBrowserReauth: true,
+      allowTokenRecovery: true,
+      askFn: async (question) => { prompts.push(question); return "y"; },
+      withToken: async (action, request) => {
+        tokenRequests.push(request);
+        return action();
+      },
+      oauthOptions: {
+        processRunner: runner,
+        platformName: "darwin",
+        environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+        fetchImpl: refusedSubdomainFetch(paths),
+      },
+    });
+    assert.equal(result, "api_token");
+    assert.equal(actionCalls, 1, "the approved recovery credential reaches the action once");
+    assert.equal(paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
+      "the recovery must originate at the exact subdomain decision point");
+    assert.equal(prompts.length, 1, "the recovery offer remains an explicit decision");
+    assert.doesNotMatch(prompts[0], /refresh in the browser/i);
+    assert.equal(tokenRequests.length, 1, "the shared recovery token runner is entered once");
+    assert.equal(tokenRequests[0].accountId, ACCOUNT_A);
+    assert.equal(tokenRequests[0].recoveryReason, "wrangler_workers_subdomain_scope_missing");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a non-interactive workers.dev Brain fails closed on a refused subdomain read", async () => {
+  const result = await requiredSubdomainScopeRefusal({ interactive: false });
+  assert.equal(result.value, undefined);
+  assert.equal(result.actionCalls, 0, "the update action must remain closed");
+  assert.equal(result.tokenCalls, 0, "non-interactive refusal must not enter the token lane");
+  assert.deepEqual(result.prompts, [], "non-interactive refusal must not ask a question");
+  assert.equal(result.paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
+    "the exact required read must be reached before refusal");
+  assert.match(result.error.message, /saved browser sign-in cannot read this account's workers\.dev address/i);
+  assert.match(result.error.message, /Nothing was changed/);
+});
 
 test("a named-profile update of a custom-domain Brain is not refused for a missing workers.dev subdomain", async () => {
   const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-"));
