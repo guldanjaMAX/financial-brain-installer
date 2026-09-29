@@ -553,6 +553,18 @@ message-migration completion receipt, and every semantic answer fail or mark
 degradation until it is true. This prevents a non-empty but partially updated
 Vectorize result page from looking like complete semantic retrieval.
 
+Answer availability makes one narrower distinction without weakening that
+readiness contract. If keyword and vector queries both complete, the exact
+pending count is under one percent of expected vectors and no more than 50,000,
+the vector-count shortfall is under one percent, and the oldest queued row is
+under 24 hours old, retrieval reports `projection-catching-up`. A categorical
+refusal in that state becomes `coverage_incomplete`, never a corpus-absence
+claim. An evidence-gated cited answer remains usable. A capped queue is counted
+only to the smaller proportional proof limit; reaching the limit, a missing age,
+an old queue, projection drift, bootstrap, or either modality failing stays
+`search_unavailable`. Exact readiness still requires the empty-queue fence and
+all parity checks above.
+
 This creates a deliberate temporary state:
 
 - keyword search can find a new chunk immediately;
@@ -580,6 +592,16 @@ from Vectorize and keyword matches from D1 FTS5. Metadata filters are applied as
 early as the backend supports. Reciprocal rank fusion combines the rankings.
 Optional reranking may reorder a bounded candidate set when explicitly enabled.
 Scaffolding files are demoted rather than silently removed.
+
+Explicit calendar, meeting or Zoom, and iMessage or text-message wording adds
+supplemental candidate lanes using the durable `category` or `platform`
+metadata. Each lane is prefiltered before Vectorize top-K and the FTS limit,
+then fused with the ordinary whole-corpus lanes. It is not a hard source filter:
+cross-source evidence remains eligible, and a document already present in an
+ordinary lane receives no duplicate hint vote. Generic decision questions get
+no guessed source. Relative date phrases are not converted into hidden date
+filters because the Worker does not currently carry the owner's timezone at
+this boundary.
 
 Retrieval first collapses multiple chunks from one document. It also collapses
 same-source, same-date documents with the same canonical content hash before the

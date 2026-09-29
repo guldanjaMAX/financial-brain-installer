@@ -75,11 +75,13 @@ import {
   customApiLogicalSourceId, customApiOwnerMessage, customApiVisibilitySql,
   readWithCustomApiVisibility,
 } from "./custom-api-visibility.js";
+import { RETRIEVAL_HINT_MAX } from "./retrieval-routing.js";
 
 const RRF_K = 60;
 const LEXICAL_CHAMPION_RATIO = 4;
 const LEXICAL_CHAMPION_TARGET_RANK = 5;
 const CURRENT_INTENT_RRF_WEIGHT = 1.25;
+const SOURCE_HINT_RRF_WEIGHT = 2;
 // An owner-confirmed operative value is an explicit decision, not another vote
 // in the historical pile. It gets its own bounded lane only after the ordinary
 // current-intent and subject-match guard has selected it.
@@ -195,6 +197,44 @@ export const D1_TRANSACTION_SLICE_STATEMENTS = 100;
 // another asked for 12. Both retrieval systems always contribute the same
 // bounded candidate depth; `limit` is applied only after fusion.
 export const RETRIEVAL_CANDIDATE_DEPTH = VECTOR_TOPK_MAX;
+
+// A completed hybrid search may stay useful while a very small, newly queued
+// slice is projecting. These limits classify that bounded catch-up state only;
+// exact semantic readiness remains the stricter empty-queue contract below.
+export const PROJECTION_CATCHUP_MAX_PENDING_RATIO = 0.01;
+export const PROJECTION_CATCHUP_MAX_PENDING = 50_000;
+export const PROJECTION_CATCHUP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+const PROJECTION_CATCHUP_REASONS = new Set([
+  "vector_work_queued",
+  "accepted_mutation_processing",
+  "accepted_mutation_needs_confirmation",
+]);
+
+/**
+ * Whether incomplete projection is a bounded coverage gap rather than a failed
+ * retrieval modality. The clock is injected so age boundaries never depend on
+ * wall time in tests.
+ */
+export function projectionCatchupEligible(projection, { now = Date.now() } = {}) {
+  if (!projection || projection.ready === true || projection.projection_status !== "pending" ||
+      !PROJECTION_CATCHUP_REASONS.has(projection.reason)) return false;
+  const expected = Number(projection.expected_vectors);
+  const actual = Number(projection.actual_vectors);
+  const pending = Number(projection.proportional_pending ?? projection.pending);
+  const pendingExact = projection.proportional_pending_exact === true ||
+    projection.pending_is_capped !== true;
+  const oldest = Number(projection.oldest_queued_at);
+  const observedAt = Number(now);
+  if (![expected, actual, pending, oldest, observedAt].every(Number.isFinite) ||
+      ![expected, actual, pending, oldest].every(Number.isSafeInteger) ||
+      expected <= 0 || actual < 0 || actual > expected || pending <= 0 ||
+      !pendingExact || pending > PROJECTION_CATCHUP_MAX_PENDING) return false;
+  const age = observedAt - oldest;
+  if (age < 0 || age >= PROJECTION_CATCHUP_MAX_AGE_MS) return false;
+  return pending / expected < PROJECTION_CATCHUP_MAX_PENDING_RATIO &&
+    (expected - actual) / expected < PROJECTION_CATCHUP_MAX_PENDING_RATIO;
+}
 
 /**
  * Reciprocal rank fusion.
@@ -785,12 +825,16 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
  */
 export async function search(env, {
   query, embedding, limit = 10, filters = {}, weights = {}, rrfK = RRF_K, access = null, scope = null,
-  projectionReadiness = null,
+  projectionReadiness = null, supplementalFilters = [], now = Date.now(),
 }) {
   // Refuse malformed or schema-skewed scope before the first D1 or Vectorize
   // call. If each modality caught this independently, the invalid scope could
   // be misreported as an ordinary provider outage instead of being rejected.
   validatedFilterDates(filters);
+  if (!Array.isArray(supplementalFilters) || supplementalFilters.length > RETRIEVAL_HINT_MAX) {
+    throw retrievalFilterError("invalid_supplemental_filters", "supplemental retrieval filters are invalid");
+  }
+  for (const hint of supplementalFilters) validatedFilterDates(hint);
   const pool = RETRIEVAL_CANDIDATE_DEPTH;
   const fusionK = Math.min(Math.max(Number(rrfK) || RRF_K, 1), 1e3);
 
@@ -799,7 +843,16 @@ export async function search(env, {
     (error) => ({ attempted: true, results: [], error }),
   );
   const vectorEligible = Boolean(embedding) && access?.kind !== "grant" && scopeIsUnrestricted(scope);
-  const [keywordAttempt, vectorAttempt, projection] = await Promise.all([
+  const hintAttemptsPromise = Promise.all(supplementalFilters.map(async (hint) => {
+    const [keyword, vector] = await Promise.all([
+      settleModality(searchKeyword(env, query, { limit: pool, filters: hint, access, scope })),
+      vectorEligible
+        ? settleModality(searchVector(env, embedding, { limit: pool, filters: hint, scope }))
+        : Promise.resolve({ attempted: false, results: [], error: null }),
+    ]);
+    return { keyword, vector };
+  }));
+  const [keywordAttempt, vectorAttempt, projection, hintAttempts] = await Promise.all([
     settleModality(searchKeyword(env, query, { limit: pool, filters, access, scope })),
     vectorEligible
       ? settleModality(searchVector(env, embedding, { limit: pool, filters, scope }))
@@ -814,11 +867,16 @@ export async function search(env, {
         ? vectorReadiness(env).catch(() => ({ ready: false }))
         : Promise.resolve(projectionReadiness)
       : Promise.resolve(null),
+    hintAttemptsPromise,
   ]);
   // Ordinary FTS or Vectorize failures remain independent degraded modalities.
   // The correction ledger is shared authority for both, so losing it on schema
   // 37 must stop the whole read instead of becoming a clean empty result.
-  const integrityFailure = [keywordAttempt.error, vectorAttempt.error]
+  const integrityFailure = [
+    keywordAttempt.error,
+    vectorAttempt.error,
+    ...hintAttempts.flatMap((attempt) => [attempt.keyword.error, attempt.vector.error]),
+  ]
     .find((error) => memorySupersessionIntegrityFailure(error));
   if (integrityFailure) throw integrityFailure;
   const kw = keywordAttempt.results.map(assessStoredProvenance);
@@ -858,7 +916,9 @@ export async function search(env, {
     degradedReason = "zone-scope-keyword-only";
   } else if (embedding && projection?.ready !== true) {
     degraded = "vector";
-    degradedReason = "projection-incomplete";
+    degradedReason = projectionCatchupEligible(projection, { now })
+      ? "projection-catching-up"
+      : "projection-incomplete";
   } else if (!embedding) {
     degraded = "no-embedding";
     degradedReason = "embedding-unavailable";
@@ -874,6 +934,21 @@ export async function search(env, {
   // with semantic evidence from another chunk in the same document.
   const kwDocuments = collapseRankedDocuments(kw);
   const vecDocuments = collapseRankedDocuments(vec);
+  // A hint is a rescue lane for source-specific evidence buried outside the
+  // ordinary pools, not another vote for documents already ranked there. If a
+  // base candidate received the hint weight again, merely saying "meeting"
+  // could undo current/latest ordering inside an otherwise healthy result set.
+  const baseDocumentKeys = new Set(
+    [...kwDocuments, ...vecDocuments].map(retrievalDocumentKey),
+  );
+  const hintedKeywordDocuments = hintAttempts.map((attempt) =>
+    collapseRankedDocuments(attempt.keyword.results.map(assessStoredProvenance))
+      .filter((row) => !baseDocumentKeys.has(retrievalDocumentKey(row)))
+  );
+  const hintedVectorDocuments = hintAttempts.map((attempt) =>
+    collapseRankedDocuments(attempt.vector.results.map(assessStoredProvenance))
+      .filter((row) => !baseDocumentKeys.has(retrievalDocumentKey(row)))
+  );
 
   const boundedWeight = (value, fallback = 1) => {
     const number = Number(value);
@@ -909,10 +984,18 @@ export async function search(env, {
   const rankLists = [
     { items: vecDocuments, weight: vectorWeight, itemWeight: sourceWeight },
     { items: kwDocuments, weight: lexicalWeight, itemWeight: sourceWeight },
+    ...hintedVectorDocuments.map((items) => ({
+      items, weight: SOURCE_HINT_RRF_WEIGHT * vectorWeight, itemWeight: sourceWeight,
+    })),
+    ...hintedKeywordDocuments.map((items) => ({
+      items, weight: SOURCE_HINT_RRF_WEIGHT * lexicalWeight, itemWeight: sourceWeight,
+    })),
   ];
   const currentInputs = [
     ...(vectorWeight > 0 ? vecDocuments : []),
     ...(lexicalWeight > 0 ? kwDocuments : []),
+    ...(vectorWeight > 0 ? hintedVectorDocuments.flat() : []),
+    ...(lexicalWeight > 0 ? hintedKeywordDocuments.flat() : []),
   ];
   const currentDocuments = collapseRankedDocuments(
     currentEvidenceCandidates(query, currentInputs, { filters, owner: env.BRAIN_OWNER }),
@@ -962,14 +1045,14 @@ export async function search(env, {
   // just as a generic vector chunk can erase an exact billing statement.
   const vectorRepresentatives = new Map();
   if (vectorWeight > 0) {
-    for (const row of vecDocuments) {
+    for (const row of [...vecDocuments, ...hintedVectorDocuments.flat()]) {
       const key = retrievalDocumentKey(row);
       if (!vectorRepresentatives.has(key)) vectorRepresentatives.set(key, row);
     }
   }
   const keywordRepresentatives = new Map();
   if (lexicalWeight > 0) {
-    for (const row of kwDocuments) {
+    for (const row of [...kwDocuments, ...hintedKeywordDocuments.flat()]) {
       const key = retrievalDocumentKey(row);
       if (!keywordRepresentatives.has(key)) keywordRepresentatives.set(key, row);
     }
@@ -1021,7 +1104,12 @@ export async function search(env, {
     degraded,
     degraded_reason: degradedReason,
     ignored_filters: unsupportedFilters(filters),
-    counts: { keyword: kw.length, vector: vec.length },
+    counts: {
+      keyword: kw.length,
+      vector: vec.length,
+      hinted_keyword: hintedKeywordDocuments.reduce((sum, rows) => sum + rows.length, 0),
+      hinted_vector: hintedVectorDocuments.reduce((sum, rows) => sum + rows.length, 0),
+    },
   };
 }
 
@@ -2010,6 +2098,15 @@ const OUTBOX_EXISTS_SQL = `
     SELECT 1 FROM vector_outbox
      WHERE queued_at >= -9223372036854775808 LIMIT 1
   ) AS has_rows`;
+
+const PROPORTIONAL_OUTBOX_COUNT_SQL = `
+  /* proportional-projection-backlog */
+  SELECT count(*) AS n
+    FROM (
+      SELECT 1 FROM vector_outbox
+       WHERE queued_at >= -9223372036854775808
+       LIMIT ?1
+    )`;
 
 // corpus_stats is exact for live documents. Soft-deleted documents deliberately
 // retain their chunks. Drive the exceptional add-back from the source-sized
@@ -7027,6 +7124,28 @@ export async function vectorReadiness(env, {
   }
   const ready = pending === 0 && mutationProcessed && countsMatch &&
     (expected === 0 || status === "verified");
+  // The normal queue receipt intentionally caps display work at 10,001 rows.
+  // When one percent of this corpus is larger than that cap, read only far
+  // enough to prove whether the queue is below both proportional limits. A row
+  // count that reaches the proof limit remains ineligible and never pretends to
+  // be exact.
+  let proportionalPending = pending;
+  let proportionalPendingExact = backlog.pending_is_capped !== true;
+  if (!ready && pending > 0 && backlog.pending_is_capped === true && expected > 0) {
+    const proofLimit = Math.min(
+      Math.ceil(expected * PROJECTION_CATCHUP_MAX_PENDING_RATIO),
+      PROJECTION_CATCHUP_MAX_PENDING + 1,
+    );
+    if (proofLimit > pending) {
+      const proof = await env.DB.prepare(PROPORTIONAL_OUTBOX_COUNT_SQL).bind(proofLimit).first();
+      const observed = Number(proof?.n);
+      if (!Number.isSafeInteger(observed) || observed < pending || observed > proofLimit) {
+        throw new Error("the proportional vector backlog receipt is invalid");
+      }
+      proportionalPending = observed;
+      proportionalPendingExact = observed < proofLimit;
+    }
+  }
   let reason = null;
   let action = null;
   if (!ready) {
@@ -7061,7 +7180,7 @@ export async function vectorReadiness(env, {
       action = remedyForState(env, "This finishes on its own on the next scheduled background drain; running `brain drain` by hand does not speed it up.");
     }
   }
-  return {
+  const receipt = {
     ready,
     reason,
     expected_vectors: expected,
@@ -7080,6 +7199,14 @@ export async function vectorReadiness(env, {
     bootstrap_epoch: bootstrapEpoch,
     action,
   };
+  // Search needs this bounded proof, but inventory intentionally caps queue
+  // display at 10,000+. Keep the proof non-enumerable so JSON responses cannot
+  // turn it into a second public backlog count with a different contract.
+  Object.defineProperties(receipt, {
+    proportional_pending: { value: proportionalPending },
+    proportional_pending_exact: { value: proportionalPendingExact },
+  });
+  return receipt;
 }
 
 /**

@@ -747,7 +747,7 @@ const d1Backend = {
 
   async search(env, {
     query, limit, filters = {}, weights = {}, rrfK = 60, access = null, scope = null,
-    projectionReadiness = null,
+    projectionReadiness = null, supplementalFilters = [],
   }) {
     let embedding = null;
     if (access?.kind !== "grant" && scopeIsUnrestricted(scope)) {
@@ -759,6 +759,7 @@ const d1Backend = {
     }
     const r = await d1.search(env, {
       query, embedding, limit, filters, weights, rrfK, access, scope, projectionReadiness,
+      supplementalFilters,
     });
     return {
       results: r.results.map((x) => {

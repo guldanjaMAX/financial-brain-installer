@@ -25,6 +25,25 @@ this changed candidate.
   same scope and decision path; its existing visible-entry protection still
   requires an approved secret-manager path instead of risking an echoed token.
 
+- **A small fresh search backlog no longer looks like a search outage.** When
+  keyword and meaning-based search both complete while less than one percent
+  of the index is catching up from the last 24 hours, a missing answer is now
+  marked as incomplete coverage instead of unavailable search. The Brain still
+  refuses to say that nothing is recorded until the queue is empty. A cited
+  answer that passes the evidence check is still shown. A larger or older
+  backlog, or either search method actually failing, stays unavailable. To
+  check: ask one question with a known cited answer and one absence question
+  while a small recent load finishes.
+
+- **Calendar, meeting, and iMessage questions get a source-aware search lane.**
+  When a question explicitly says calendar, meeting, Zoom, iMessage, or text
+  message, the Brain now searches that category or platform before the normal
+  candidate cutoff, then combines those records with the ordinary whole-Brain
+  results. It does not restrict the answer to one source, and generic decision
+  questions still search everywhere without guessing where a decision lives.
+  To check: repeat a calendar, meeting, or iMessage question that previously
+  returned only file or email candidates and inspect the cited source.
+
 - **Dollar amounts in a partly answered question are no longer cut.** When an
   answer covers only part of a question, the Brain keeps the sentences your
   documents support and names what they do not cover. That trimming used to

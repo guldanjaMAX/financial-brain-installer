@@ -44,6 +44,8 @@ function mkEnv(rows, {
   sourceRegistrationEventThrows = false,
   unchunkedRows = [],
   ownedEntity = null,
+  rowsForQuery = null,
+  vectorMatchesForQuery = null,
   extra = {},
 } = {}) {
   const seen = { sql: [], binds: [], vectorQueries: [] };
@@ -74,7 +76,7 @@ function mkEnv(rows, {
               if (/zone NOT IN/.test(sql)) scoped = scoped.filter((row) => !bound.includes(row.zone));
               return { results: scoped.map((row) => ({ name: row.name })) };
             }
-            return { results: rows };
+            return { results: rowsForQuery ? rowsForQuery({ sql, bound, rows }) : rows };
           },
           first: async () => {
             if (/ON CONFLICT\(name\) DO NOTHING[\s\S]*RETURNING name, lower\(trim\(kind\)\) AS kind/.test(sql)) {
@@ -155,7 +157,8 @@ function mkEnv(rows, {
       query: async (_embedding, options) => {
         seen.vectorQueries.push(options);
         if (vectorThrows) throw new Error("no metadata index");
-        return { matches: vectorIds.map((id) => ({ id })) };
+        const ids = vectorMatchesForQuery ? vectorMatchesForQuery(options) : vectorIds;
+        return { matches: ids.map((id) => ({ id })) };
       },
       upsert: async () => {},
       describe: async () => ({ vectorCount: vectorIds.length, processedUpToMutation: null }),
@@ -365,6 +368,94 @@ const call = (env, path) => {
   check("date filter is in the SQL", /c\.document_date >= \?/.test(kw), kw);
   const bind = seen.binds.find((b) => b.includes("Acme"));
   check("and its value is bound", !!bind && bind.includes(Date.parse("2025-01-01")), JSON.stringify(bind));
+}
+
+/* ---- explicit source wording gets a supplemental pre-filtered candidate lane ---- */
+{
+  const distractors = Array.from({ length: 100 }, (_, index) => ({
+    ...ROW,
+    chunk_uid: `distractor-${index}#0`, doc_uid: `distractor-${index}`,
+    source_id: `distractor-${index}`, source: index % 2 ? "drive" : "gmail",
+    category: "general", platform: null, title: `Synthetic distractor ${index}`,
+    text: `Synthetic project update ${index}`,
+  }));
+  const calendar = {
+    ...ROW,
+    chunk_uid: "calendar-target#0", doc_uid: "calendar-target", source_id: "calendar-target",
+    source: "calendar-source", source_kind: "calendar", category: "calendar", platform: null,
+    title: "Synthetic calendar event", text: "Synthetic event in the next seven days.",
+  };
+  const rows = [...distractors, calendar];
+  const rowsById = new Map(rows.map((row) => [row.chunk_uid, row]));
+  const rowsForQuery = ({ sql, bound }) => {
+    if (/chunks_fts MATCH/.test(sql)) {
+      return /c\.category = \?/.test(sql) && bound.includes("calendar") ? [calendar] : distractors;
+    }
+    if (/c\.chunk_uid IN/.test(sql)) return bound.map((id) => rowsById.get(id)).filter(Boolean);
+    return rows;
+  };
+  const vectorMatchesForQuery = (options) => options.filter?.category?.$eq === "calendar"
+    ? [calendar.chunk_uid]
+    : distractors.map((row) => row.chunk_uid);
+
+  const controlFixture = mkEnv(rows, {
+    vectorIds: distractors.map((row) => row.chunk_uid), rowsForQuery, vectorMatchesForQuery,
+  });
+  const control = await (await call(controlFixture.env, "/api/rag/unified?q=project+status&limit=10")).json();
+  check("control: an unhinted query proves the target is buried outside both candidate pools",
+    !control.results.some((row) => row.ref_key === calendar.source_id) &&
+      controlFixture.seen.vectorQueries.length === 1,
+    JSON.stringify({ results: control.results.map((row) => row.ref_key), queries: controlFixture.seen.vectorQueries }));
+
+  const hintedFixture = mkEnv(rows, {
+    vectorIds: distractors.map((row) => row.chunk_uid), rowsForQuery, vectorMatchesForQuery,
+  });
+  const hinted = await (await call(
+    hintedFixture.env,
+    "/api/rag/unified?q=what+is+on+my+calendar+in+the+next+seven+days&limit=10",
+  )).json();
+  const filteredVector = hintedFixture.seen.vectorQueries.find(
+    (query) => query.filter?.category?.$eq === "calendar",
+  );
+  const filteredKeyword = hintedFixture.seen.sql.find(
+    (sql) => /chunks_fts MATCH/.test(sql) && /c\.category = \?/.test(sql),
+  );
+  check("probe: explicit calendar wording reaches both supplemental decision points",
+    Boolean(filteredVector) && Boolean(filteredKeyword),
+    JSON.stringify({ vectorQueries: hintedFixture.seen.vectorQueries, filteredKeyword }));
+  check("a calendar candidate buried outside the ordinary 100-row pools reaches the route",
+    hinted.results.some((row) => row.ref_key === calendar.source_id),
+    JSON.stringify(hinted.results.map((row) => row.ref_key)));
+}
+{
+  for (const [label, question, expected] of [
+    ["meeting", "what was decided in my meetings", { category: "meeting" }],
+    ["iMessage", "what follow-up did I text in iMessage", { platform: "imessage" }],
+  ]) {
+    const { env, seen } = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+    await call(env, `/api/rag/unified?q=${encodeURIComponent(question)}&limit=5`);
+    const reached = seen.vectorQueries.some((query) => Object.entries(expected).every(
+      ([key, value]) => query.filter?.[key]?.$eq === value,
+    ));
+    check(`${label} wording selects its metadata namespace before topK`, reached, JSON.stringify(seen.vectorQueries));
+  }
+
+  const decision = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+  await call(decision.env, "/api/rag/unified?q=what+decisions+did+we+make&limit=5");
+  check("a generic decision question does not guess a source namespace",
+    decision.seen.vectorQueries.length === 1, JSON.stringify(decision.seen.vectorQueries));
+
+  const explicit = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+  await call(explicit.env, "/api/rag/unified?q=calendar+references&category=meeting&limit=5");
+  check("an explicit category scope is not widened by a query hint",
+    explicit.seen.vectorQueries.length === 1 &&
+      explicit.seen.vectorQueries[0]?.filter?.category?.$eq === "meeting",
+    JSON.stringify(explicit.seen.vectorQueries));
+
+  const genericText = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+  await call(genericText.env, "/api/rag/unified?q=document+text+extraction&limit=5");
+  check("generic document text does not select the iMessage platform",
+    genericText.seen.vectorQueries.length === 1, JSON.stringify(genericText.seen.vectorQueries));
 }
 
 /* ---- every public filter must narrow BOTH Vectorize and exact D1 hydration ---- */
