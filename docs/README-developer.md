@@ -645,10 +645,15 @@ because separate parent directories cannot portably share one adjacent state.
 Drive, Gmail, and Calendar take the source lease first and then a shared
 `provider:google` credential-record lease. `brain connect google` takes that
 same shared lease, so credential migration and replacement cannot overlap a
-source run. A mutating `brain load` inspects only credential-store metadata
-during preflight; the real credential is opened after both leases are held.
-Dry-run source reads use a dedicated non-migrating loader, including for legacy
-Windows plaintext and macOS file-backed records.
+source run. A Calendar writer waits up to twelve hours when another Google
+source or connection owns that shared boundary. This keeps a scheduled refresh
+from being dropped behind an unusually long Drive walk without allowing the
+credential identity to change during either run. The Calendar source lease
+stays owned while waiting, so another Calendar writer still fails closed. A
+mutating `brain load` inspects only credential-store metadata during preflight;
+the real credential is opened after both leases are held. Dry-run source reads
+use a dedicated non-migrating loader, including for legacy Windows plaintext and
+macOS file-backed records.
 
 For a mailbox that is not Gmail:
 

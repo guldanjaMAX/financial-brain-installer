@@ -306,6 +306,7 @@ const fixture = () => {
       await assert.rejects(
         item.invoke({
           sourceIngestLockOptions: { home: f.home },
+          calendarSharedRecordWaitMs: 0,
           resolveBaseUrl: async () => { boundaryCalls++; return "https://fixture.invalid"; },
           resolveAdminKey: () => { boundaryCalls++; return "fixture-admin-key"; },
           getAccessToken: async () => { boundaryCalls++; return "fixture-access-token"; },
@@ -328,6 +329,120 @@ const fixture = () => {
     }
     sharedHolder.release();
   } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+}
+
+{
+  const f = fixture();
+  let releaseFirst;
+  try {
+    const manifest = JSON.parse(readFileSync(f.manifestPath, "utf8"));
+    let firstCoreCalls = 0;
+    let sameSourceCoreCalls = 0;
+    let calendarCoreCalls = 0;
+    let credentialReads = 0;
+    let waitNotices = 0;
+    let firstEntered;
+    const firstEnteredPromise = new Promise((resolve) => { firstEntered = resolve; });
+    const firstReleasePromise = new Promise((resolve) => { releaseFirst = resolve; });
+    const completeCalendarResult = {
+      ok: true,
+      documents: [],
+      deletions: [],
+      state: {},
+      calendars: [{ ok: true, mode: "full", authoritative_snapshot: true }],
+      summary: {
+        events_seen: 0,
+        calendars_ok: 1,
+        calendars_failed: 0,
+        skipped: 0,
+        needs_reconsent: false,
+      },
+    };
+    const calendarOptions = (syncAll, extra = {}) => ({
+      sourceIngestLockOptions: { home: f.home },
+      resolveBaseUrl: async () => "https://fixture.invalid",
+      resolveAdminKey: () => "fixture-admin-key",
+      loadGoogleTokens: () => {
+        credentialReads++;
+        return {
+          google: {
+            client_id: "fixture-client-id",
+            client_secret: null,
+            refresh_token: "fixture-refresh-token",
+            scopes: ["calendar"],
+          },
+        };
+      },
+      postSourceReceipt: async (_base, _key, receipt) => ({ ...receipt }),
+      loadCalendarState: () => ({}),
+      saveCalendarState: () => {},
+      googleCalendar: {
+        syncAll,
+        ingestEnvelopes: async () => ({ created: 0, updated: 0, unchanged: 0, refused: [], errors: [] }),
+      },
+      ...extra,
+    });
+
+    const first = cmdIngestCalendar(
+      manifest,
+      f.manifestPath,
+      { from: "calendar", source: "drive" },
+      calendarOptions(async () => {
+        firstCoreCalls++;
+        firstEntered();
+        await firstReleasePromise;
+        return completeCalendarResult;
+      }),
+    );
+    await firstEnteredPromise;
+
+    await assert.rejects(
+      cmdIngestCalendar(
+        manifest,
+        f.manifestPath,
+        { from: "calendar", source: "drive" },
+        calendarOptions(async () => {
+          sameSourceCoreCalls++;
+          return completeCalendarResult;
+        }),
+      ),
+      /drive ingest is already running/,
+    );
+
+    const calendar = cmdIngestCalendar(
+      manifest,
+      f.manifestPath,
+      { from: "calendar", source: "calendar" },
+      calendarOptions(async () => {
+        calendarCoreCalls++;
+        return completeCalendarResult;
+      }, {
+        calendarSharedRecordWaitMs: 1_000,
+        calendarSharedRecordRetryMs: 1,
+        onCalendarSharedRecordWait: () => { waitNotices++; },
+      }),
+    ).then(
+      () => ({ status: "completed" }),
+      (error) => ({ status: "failed", error }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    const waitingObserved = waitNotices === 1 && calendarCoreCalls === 0;
+    releaseFirst();
+    await first;
+    const calendarOutcome = await calendar;
+
+    check("a live source owner still blocks a second writer for that exact source",
+      firstCoreCalls === 1 && sameSourceCoreCalls === 0,
+      `first core calls=${firstCoreCalls} same-source core calls=${sameSourceCoreCalls}`);
+    check("Calendar waits at the shared credential boundary and runs after the active Google source",
+      waitingObserved && calendarOutcome.status === "completed" &&
+        calendarCoreCalls === 1 && credentialReads === 2,
+      `waiting observed=${waitingObserved} outcome=${calendarOutcome.status} ` +
+        `calendar core calls=${calendarCoreCalls} credential reads=${credentialReads}`);
+  } finally {
+    releaseFirst?.();
     rmSync(f.root, { recursive: true, force: true });
   }
 }
