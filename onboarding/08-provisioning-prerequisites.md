@@ -108,7 +108,8 @@ account. A generic yes or a different account ID must stop before provisioning.
 
 That recovery token uses only Workers Scripts Edit, D1 Edit, Vectorize Edit,
 and Workers AI Read at account scope. Add R2 Storage Edit only when the manifest
-sets an R2 bucket, and use a short expiry. The owner enters it only into the
+sets an R2 bucket. Leave the start date empty or set it to today; set the end at
+least 7 days from now. The owner enters it only into the
 Brain CLI's hidden prompt. Never email it, message it, place it in a command, or
 let an assistant read, copy, screenshot, transcribe, or store it.
 

@@ -885,7 +885,13 @@ try {
     readClaudeConfig(claudeConfigPath).mcpServers[otherDescriptor.name],
     legacyEntry(otherDescriptor, otherLegacyKey),
   );
-  assert.match(failedClaude.output, /could not be reconciled safely/i);
+  assert.match(failedClaude.output, /Claude Code wasn't connected to your Brain automatically this time/);
+  assert.match(failedClaude.output, /Your Brain and your data are fine/);
+  // A refused registration names its reason and the read-only hand
+  // connection; it never tells the owner to repeat the command that refused.
+  assert.match(failedClaude.output, /Your Brain and your data are fine\. Reason: \S/);
+  assert.match(failedClaude.output, /To connect by hand instead, run this and paste what it prints into the assistant\. It changes nothing on its own:/);
+  assert.doesNotMatch(failedClaude.output, /run the same command again/i);
   assert.equal(failedClaude.output.includes(retiredKey), false);
 
   /* Codex add failure cannot pass because a stale name remains listed. */

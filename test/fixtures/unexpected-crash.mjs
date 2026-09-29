@@ -11,7 +11,10 @@ console.log = (...args) => {
   if (!triggered) {
     triggered = true;
     console.log = originalLog;
-    throw new Error("RAW_UNEXPECTED_CRASH_SENTINEL private diagnostic text");
+    const error = new Error(process.env.BRAIN_TEST_UNEXPECTED_ERROR || "RAW_UNEXPECTED_CRASH_SENTINEL private diagnostic text");
+    if (process.env.BRAIN_TEST_CREDENTIAL_SOURCE) error.credentialSource = process.env.BRAIN_TEST_CREDENTIAL_SOURCE;
+    if (process.env.BRAIN_TEST_ERROR_CODE) error.code = process.env.BRAIN_TEST_ERROR_CODE;
+    throw error;
   }
   return originalLog(...args);
 };

@@ -6,12 +6,141 @@ import {
          checkWrangler,
          checkWranglerLogin, checkVectorize, checkVectorizeApi, checkCfToken, CF_TOKEN_SCOPES,
          resolveWranglerProfile, wranglerProfileArgs, wranglerProfileName,
-         WRANGLER_AUTH_PROFILE_PATTERN, WRANGLER_PACKAGE,
+         WRANGLER_AUTH_PROFILE_PATTERN, WRANGLER_PACKAGE, platformCommandInvocation,
          summarize, runAll, OK, WARN, FAIL } from "../doctor.mjs";
 import { readFileSync } from "node:fs";
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 220))); if (!c) fail++; };
 const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" : "--env-file=/dev/null";
+
+{
+  const invocation = platformCommandInvocation("npx", ["wrangler@4", "--version"], {
+    platformName: "win32",
+    nodePath: "C:\\Program Files\\nodejs\\node.exe",
+  });
+  check("Windows npx runs through Node without a command shell",
+    invocation.command === "C:\\Program Files\\nodejs\\node.exe" &&
+      invocation.args[0] === "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npx-cli.js" &&
+      invocation.args.slice(1).join(" ") === "wrangler@4 --version" && invocation.shell === false,
+    JSON.stringify(invocation));
+
+  // An npm-installed Claude Code or Codex is a .cmd shim that Node will not
+  // start without cmd.exe. Resolve the shim from PATH without the implicit
+  // current-directory search, and use the system copy of cmd.exe.
+  const windowsEnvironment = {
+    SystemRoot: "C:\\Windows",
+    PATH: "C:\\Fixture Tools;C:\\Other Tools",
+    PATHEXT: ".COM;.EXE;.BAT;.CMD",
+    ComSpec: "C:\\Fixture Tools\\not-cmd.exe",
+  };
+  const existingWindowsFiles = new Set([
+    "C:\\Windows\\System32\\cmd.exe",
+    "C:\\Fixture Tools\\claude.cmd",
+    "C:\\Fixture Tools\\codex.cmd",
+  ]);
+  const existsImpl = (candidate) => existingWindowsFiles.has(candidate);
+  const commandShell = "C:\\Windows\\System32\\cmd.exe";
+  const claude = platformCommandInvocation("claude", ["--version"], {
+    platformName: "win32", environment: windowsEnvironment, existsImpl,
+  });
+  check("a Windows Claude Code probe reaches a .cmd shim through cmd.exe without shell:true",
+    claude.command === commandShell &&
+      JSON.stringify(claude.args) === JSON.stringify(["/d", "/s", "/c", "\"\"C:\\Fixture Tools\\claude.cmd\" --version\""]) &&
+      claude.shell === false && claude.windowsVerbatimArguments === true,
+    JSON.stringify(claude));
+  check("ambient ComSpec cannot replace the Windows command interpreter",
+    claude.command === commandShell && claude.command !== windowsEnvironment.ComSpec,
+    JSON.stringify(claude));
+
+  for (const unsafe of ['fixture"&whoami', "%FIXTURE_VAR%", "C:\\Fixture Folder\\", "fixture\r\nsecond"]) {
+    let refused = null;
+    try {
+      platformCommandInvocation("codex", [unsafe], {
+        platformName: "win32", environment: windowsEnvironment, existsImpl,
+      });
+    } catch (error) {
+      refused = error;
+    }
+    check(`a Windows shim argument is refused before cmd.exe can reparse ${JSON.stringify(unsafe)}`,
+      refused instanceof TypeError && /safe command token/.test(refused.message), String(refused));
+  }
+
+  const checkedCandidates = [];
+  let missingShim = null;
+  try {
+    platformCommandInvocation("codex", ["--version"], {
+      platformName: "win32",
+      environment: { ...windowsEnvironment, PATH: "C:\\Empty" },
+      existsImpl: (candidate) => { checkedCandidates.push(candidate); return candidate === commandShell; },
+    });
+  } catch (error) {
+    missingShim = error;
+  }
+  check("a missing shim reaches an exact PATH decision without searching the current directory",
+    missingShim?.code === "ENOENT" && checkedCandidates.length > 0 &&
+      checkedCandidates.every((candidate) => candidate.includes("\\")) &&
+      checkedCandidates.some((candidate) => candidate === "C:\\Empty\\codex.cmd"),
+    JSON.stringify({ missingShim: String(missingShim), checkedCandidates }));
+
+  let missingLaunches = 0;
+  const missingRun = run("codex", ["--version"], {
+    platformName: "win32",
+    inheritEnv: false,
+    env: { SystemRoot: "C:\\Windows", PATH: "C:\\Empty", PATHEXT: ".CMD" },
+    existsImpl: (candidate) => candidate === commandShell,
+    processRunner: () => { missingLaunches += 1; return { status: 0, stdout: "unexpected", stderr: "" }; },
+  });
+  check("the shared runner reports a missing Windows shim without launching cmd.exe",
+    missingRun.ok === false && missingRun.missing === true && missingLaunches === 0,
+    JSON.stringify({ missingRun, missingLaunches }));
+
+  const nativeCodex = platformCommandInvocation("codex", ["--version"], {
+    platformName: "win32",
+    environment: { ...windowsEnvironment, PATH: "C:\\Native Tools", PATHEXT: ".EXE;.CMD" },
+    existsImpl: (candidate) => candidate === "C:\\Native Tools\\codex.exe",
+  });
+  check("a present native Windows executable bypasses cmd.exe",
+    nativeCodex.command === "C:\\Native Tools\\codex.exe" &&
+      JSON.stringify(nativeCodex.args) === JSON.stringify(["--version"]) &&
+      nativeCodex.shell === false && !nativeCodex.windowsVerbatimArguments,
+    JSON.stringify(nativeCodex));
+
+  const posixClaude = platformCommandInvocation("claude", ["--version"], {
+    platformName: "darwin", environment: windowsEnvironment, existsImpl,
+  });
+  check("outside Windows the same probe starts claude directly",
+    posixClaude.command === "claude" && JSON.stringify(posixClaude.args) === JSON.stringify(["--version"]) &&
+      posixClaude.shell === false && !posixClaude.windowsVerbatimArguments,
+    JSON.stringify(posixClaude));
+
+  const launches = [];
+  const probe = run("claude", ["--version"], {
+    platformName: "win32",
+    inheritEnv: false,
+    env: { SystemRoot: "C:\\Windows", PATH: "C:\\Fixture Tools", PATHEXT: ".CMD" },
+    existsImpl,
+    processRunner: (command, args, options) => {
+      launches.push({ command, args, shell: options.shell, verbatim: options.windowsVerbatimArguments });
+      return { status: 0, stdout: "2.1.63 (Claude Code)\n", stderr: "" };
+    },
+  });
+  check("the shared runner hands cmd.exe the verbatim command line and never shell:true",
+    probe.ok === true && launches.length === 1 && launches[0].shell === false &&
+      launches[0].verbatim === true &&
+      launches[0].args.at(-1) === "\"\"C:\\Fixture Tools\\claude.cmd\" --version\"",
+    JSON.stringify(launches));
+  let refusedLaunches = 0;
+  const refused = run("claude", ["mcp", "add", "%FIXTURE_VAR%"], {
+    platformName: "win32",
+    inheritEnv: false,
+    env: { SystemRoot: "C:\\Windows", PATH: "C:\\Fixture Tools", PATHEXT: ".CMD" },
+    existsImpl,
+    processRunner: () => { refusedLaunches += 1; throw new Error("a refused argument must not launch anything"); },
+  });
+  check("a refused Windows argument is a failed run, not a crash",
+    refused.ok === false && /safe command token/.test(refused.out) && refusedLaunches === 0,
+    JSON.stringify({ refused, refusedLaunches }));
+}
 
 /* ---- every non-ok check MUST carry a fix. A failure without one is half a job. ---- */
 {
@@ -209,6 +338,14 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   check("the profile-capable Wrangler release is a blocking requirement and is pinned through npx",
     checkWrangler(healthyTool).status === OK);
   check("Codex is never fatal", checkCodex().status !== FAIL);
+  const missingCodex = checkCodex({
+    runCommand: () => ({ ok: false, out: "fixture unavailable", missing: true }),
+    environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+  });
+  check("missing Codex is neutral and explains when it matters",
+    missingCodex.status === OK && missingCodex.available === false && !missingCodex.fix &&
+      missingCodex.detail === "isn't installed. That's fine unless you want to use your Brain from Codex.",
+    JSON.stringify(missingCodex));
   check("a missing Anthropic key is not a blocker", checkAnthropicKey().status !== FAIL);
   check("a missing Google connection is a warning",
     checkGoogleConnection({ exists: false, description: "fixture secure storage" }).status !== FAIL);
@@ -339,7 +476,8 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   });
   check("an existing-Brain check still stops when neither supported assistant is ready",
     noCodex.find((item) => item.name === "Claude Code")?.status === FAIL &&
-      noCodex.find((item) => item.name === "Codex")?.status === WARN &&
+      noCodex.find((item) => item.name === "Codex")?.status === OK &&
+      noCodex.find((item) => item.name === "Codex")?.available === false &&
       summarize(noCodex).fatal === 1,
     JSON.stringify(noCodex));
 
@@ -518,6 +656,27 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
       !vectorCall?.args.includes("--browser") && vectorCall?.args.at(-1) === EMPTY_WRANGLER_ENV_ARG,
     JSON.stringify(vectorCall));
 
+  const legacyCalls = [];
+  const legacyChecks = await runAll({
+    accountId,
+    cloudflareAuthProfile: undefined,
+    cloudflareToken: undefined,
+    googleStorageStatus: { exists: false, description: "fixture secure storage" },
+    localRun: (command, args, options) => {
+      legacyCalls.push({ command, args, options });
+      if (args.includes("vectorize")) return { ok: false, out: "fixture login expired" };
+      if (args.includes(WRANGLER_PACKAGE)) return { ok: true, out: "wrangler 4.131.1" };
+      return { ok: true, out: "fixture available" };
+    },
+    networkCheck,
+  });
+  const legacyVectorCall = legacyCalls.find((call) => call.args.includes("vectorize"));
+  check("runAll probes the derived legacy profile when an older manifest has no token",
+    Boolean(legacyVectorCall) &&
+      legacyVectorCall.args.includes(wranglerProfileName(accountId)) &&
+      legacyChecks.some((item) => item.name === "wrangler login" && item.status === FAIL),
+    JSON.stringify({ legacyVectorCall, legacyChecks }));
+
   calls.length = 0;
   const localOnly = await runAll({
     accountId,
@@ -547,17 +706,34 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
     /named Cloudflare browser sign-in/i.test(v.fix) &&
       !/export\s+CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_TOKEN\s*=\s*['\"]/i.test(v.fix), v.fix);
   const tokenCheck = await checkCfToken();
-  check("doctor treats a missing recovery token as non-blocking and never assigns token homework",
-    tokenCheck.status === WARN && /ordinary owner setup does not need one/i.test(tokenCheck.detail) &&
-      /named Cloudflare browser sign-in/i.test(tokenCheck.fix) && /secret manager/i.test(tokenCheck.fix) &&
-      !/export\s+CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_TOKEN\s*=\s*['\"]/i.test(tokenCheck.fix), tokenCheck.fix);
+  check("doctor presents first-run Cloudflare access as neutral information",
+    tokenCheck.status === OK && !tokenCheck.fix &&
+      tokenCheck.name === "Cloudflare:" &&
+      tokenCheck.detail === "not connected yet. Setup opens Cloudflare in your browser and asks you to sign in.",
+    JSON.stringify(tokenCheck));
   check("the normal no-token remedy never sends a fresh owner to create or reveal a token",
-    !/create (?:an?|the).*token|reveal(?:ed)? token|My Profile > API Tokens/i.test(tokenCheck.fix), tokenCheck.fix);
+    !/create (?:an?|the).*token|reveal(?:ed)? token|My Profile > API Tokens/i.test(tokenCheck.detail), tokenCheck.detail);
   // A token that has no token to recreate should never be told to recreate one.
   check("the no-token remedy does not tell you to RECREATE a token you do not have",
-    !/Recreate the account-scoped token/i.test(tokenCheck.fix), tokenCheck.fix);
+    !/Recreate the account-scoped token/i.test(tokenCheck.detail), tokenCheck.detail);
   check("and it does not call it the CLIENT's account, which the owner may be reading",
-    !/CLIENT's account/.test(tokenCheck.fix), tokenCheck.fix);
+    !/CLIENT's account/.test(tokenCheck.detail), tokenCheck.detail);
+  const firstRunChecks = await runAll({
+    cloudflareToken: undefined,
+    googleStorageStatus: { exists: false, description: "fixture secure storage" },
+    localRun: (command) => command === "node"
+      ? { ok: true, out: process.version }
+      : { ok: false, out: "fixture unavailable", missing: true },
+    networkCheck: async () => ({ name: "Network", status: OK, detail: "fixture reachable" }),
+    environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+    statfsImpl: () => ({ bavail: 3n * 1024n * 1024n, bsize: 1024n }),
+    getEffectiveUserId: () => 501,
+  });
+  const firstRunCloudflare = firstRunChecks.filter((item) =>
+    ["Cloudflare:", "Cloudflare plan:", "Cloudflare token", "Workers plan", "Vectorize"].includes(item.name));
+  check("first-run Cloudflare guidance is two informational lines with no action list",
+    firstRunCloudflare.length === 2 && firstRunCloudflare.every((item) => item.status === OK && !item.fix),
+    JSON.stringify(firstRunCloudflare));
   const accountId = "c".repeat(32);
   const active = { success: true, result: { status: "active" } };
   const rejected = { success: false, errors: [{ code: 9109, message: "Invalid access token" }] };
@@ -777,9 +953,10 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   });
 
   const missing = await checkWorkersPaidPlan(undefined, undefined, async () => { throw new Error("no fetch expected"); });
-  check("plan check without billing visibility warns and requires owner dashboard confirmation",
-    missing.status === WARN && /cannot read billing status/i.test(missing.detail) &&
-      /Workers & Pages > Plans > Paid/i.test(missing.fix), JSON.stringify(missing));
+  check("plan check without billing visibility is neutral and names the owner confirmation",
+    missing.status === OK && !missing.fix && missing.name === "Cloudflare plan:" &&
+      missing.detail === "setup asks you to confirm your plan says Paid. Doctor can't read billing.",
+    JSON.stringify(missing));
   const noAccount = await checkWorkersPaidPlan(undefined, "cf_token", async () => { throw new Error("no fetch expected"); });
   check("plan check without an account id warns instead of probing", noAccount.status === WARN, JSON.stringify(noAccount));
 
@@ -825,16 +1002,16 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   check("a failed probe warns rather than failing the install", flaky.status === WARN, JSON.stringify(flaky));
 }
 
-/* ---- the priority slice: warned about while there is still time ---- */
+/* ---- the priority slice: optional information while there is still time ---- */
 {
   const unset = checkPrioritySlice({ ingest: { priority_slice: { source: null, since: null, note: "template" } } });
-  check("a first install with no priority slice warns", unset.status === WARN, JSON.stringify(unset));
-  check("the warning names the manifest field", /priority_slice/.test(unset.detail + unset.fix), JSON.stringify(unset));
-  check("the warning says what goes wrong without one",
-    /first|chronolog|archive|impression/i.test(unset.fix), unset.fix);
+  check("a first install with no priority slice reports optional information",
+    unset.status === OK && !unset.fix && /optional/i.test(unset.detail), JSON.stringify(unset));
+  check("the optional note names the manifest field", /priority_slice/.test(unset.detail), JSON.stringify(unset));
+  check("the optional note avoids sales-room pressure", !/loses the room/i.test(unset.detail), unset.detail);
 
   const missing = checkPrioritySlice({});
-  check("a manifest with no ingest block warns the same way", missing.status === WARN, JSON.stringify(missing));
+  check("a manifest with no ingest block gives the same optional information", missing.status === OK, JSON.stringify(missing));
 
   const filled = checkPrioritySlice({ ingest: { priority_slice: { source: "client-files", since: "2025-01-01" } } });
   check("a filled slice passes", filled.status === OK, JSON.stringify(filled));
@@ -856,6 +1033,16 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   check("the template slice itself still ships unset",
     template?.ingest?.priority_slice?.source === null && template?.ingest?.priority_slice?.since === null,
     JSON.stringify(template?.ingest?.priority_slice));
+}
+
+{
+  const { doctorClosingMessage } = await import("../brain.mjs");
+  const installed = doctorClosingMessage?.(true, 2);
+  const fresh = doctorClosingMessage?.(false, 2);
+  check("an installed Brain ends with a checkup result, not install readiness",
+    /checkup complete/i.test(installed || "") && !/ready to install/i.test(installed || ""), installed);
+  check("a fresh manifest still gets the install-readiness conclusion",
+    /ready to install/i.test(fresh || "") && !/checkup complete/i.test(fresh || ""), fresh);
 }
 
 console.log(fail ? `\n${fail} FAILURES` : `\ndoctor: all ${ran} tests passed`);

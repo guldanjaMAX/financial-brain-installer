@@ -92,7 +92,14 @@ function cli(args, env = {}, options = {}) {
   });
   const journal = readSupportJournal(userRoot);
   if (!options.keepUserRoot) rmSync(userRoot, { recursive: true, force: true });
-  return { code: r.status, out: strip(`${r.stdout || ""}${r.stderr || ""}`), journal, userRoot };
+  return {
+    code: r.status,
+    stdout: strip(r.stdout || ""),
+    stderr: strip(r.stderr || ""),
+    out: strip(`${r.stdout || ""}${r.stderr || ""}`),
+    journal,
+    userRoot,
+  };
 }
 
 /* ---- an unexpected crash records exactly one sanitized internal note ---- */
@@ -102,11 +109,82 @@ function cli(args, env = {}, options = {}) {
   const events = journalEvents(r.journal);
   check("an unexpected command crash exits through the guarded failure path",
     r.code === 1 && /unexpected error|This is a bug in the installer/.test(r.out), r.out.slice(0, 260));
+  check("unexpected crash guidance is written to stdout for PowerShell",
+    /unexpected error/.test(r.stdout) && !/unexpected error/.test(r.stderr),
+    JSON.stringify({ stdout: r.stdout, stderr: r.stderr }));
   check("an unexpected crash creates exactly one INTERNAL_ERROR issue note",
     events.length === 1 && events[0]?.command === "whatsnew" && events[0]?.error_code === "INTERNAL_ERROR",
     r.journal);
   check("the unexpected crash note has a product call-site fingerprint and no raw error text",
     /^loc_[0-9a-f]{24}$/.test(events[0]?.fingerprint || "") && !r.journal.includes(rawSentinel), r.journal);
+}
+
+/* ---- Cloudflare 9109 explains token dates and names the local source ---- */
+{
+  const r = cli(["whatsnew"], {
+    BRAIN_TEST_UNEXPECTED_ERROR: "GET /accounts failed (403): 9109: Invalid access token",
+    BRAIN_TEST_CREDENTIAL_SOURCE: "saved-token",
+  }, { imports: [UNEXPECTED_CRASH] });
+  const events = journalEvents(r.journal);
+  check("a 9109 refusal reaches the dedicated inactive-token decision",
+    r.code === 1 && /CLOUDFLARE_TOKEN_NOT_ACTIVE/.test(r.out) &&
+      events.length === 1 && events[0]?.error_code === "CLOUDFLARE_TOKEN_NOT_ACTIVE", r.out);
+  check("the 9109 owner message names the saved key and its usual date cause",
+    /saved key/.test(r.out) && /start is later than now/.test(r.out) && /end has passed/.test(r.out) &&
+      /Anything completed before this stop is kept and reused/.test(r.out), r.out);
+  check("the 9109 owner message gives the reviewed recovery without raw variable names",
+    /My Profile > API Tokens/.test(r.out) && r.out.includes(shown("brain token <manifest> --forget")) &&
+      !/CLOUDFLARE_API_TOKEN/.test(r.out), r.out);
+}
+
+/* ---- Cloudflare 9109 from a Wrangler session asks for browser sign-in ---- */
+{
+  const r = cli(["whatsnew"], {
+    BRAIN_TEST_UNEXPECTED_ERROR: "GET /accounts failed (401): 9109: Invalid access token",
+    BRAIN_TEST_CREDENTIAL_SOURCE: "wrangler-session",
+  }, { imports: [UNEXPECTED_CRASH] });
+  const events = journalEvents(r.journal);
+  check("a Wrangler-session 9109 reaches the expired-session decision",
+    r.code === 1 && events.length === 1 && events[0]?.error_code === "AUTH_EXPIRED",
+    JSON.stringify({ code: r.code, journal: r.journal }));
+  check("an expired Wrangler session gives re-login guidance instead of token-date homework",
+    /wrangler.*login/i.test(r.out) && /Nobody typed a token/.test(r.out) &&
+      /resumes where it stopped/.test(r.out) &&
+      !/My Profile > API Tokens|usual cause is its dates/i.test(r.out) &&
+      !r.out.includes(shown("brain token <manifest> --forget")),
+    r.out);
+}
+
+/* ---- a network drop is retryable, not an installer bug ---- */
+{
+  const r = cli(["whatsnew"], {
+    BRAIN_TEST_UNEXPECTED_ERROR: "synthetic socket closed",
+    BRAIN_TEST_ERROR_CODE: "ECONNRESET",
+  }, { imports: [UNEXPECTED_CRASH] });
+  const events = journalEvents(r.journal);
+  check("an ECONNRESET reaches the retryable network decision",
+    r.code === 1 && events.length === 1 && events[0]?.error_code === "NETWORK_UNREACHABLE", r.journal);
+  check("a network drop gets the owner recovery and is not called a bug",
+    /internet connection dropped while talking to Cloudflare/.test(r.out) &&
+      /Nothing was lost: everything that finished is saved/.test(r.out) &&
+      /Wi-Fi or VPN/.test(r.out) && !/bug in the installer/.test(r.out), r.out);
+}
+
+{
+  const { debugRetryHint } = await import("../brain.mjs");
+  check("the Windows debug hint uses PowerShell syntax",
+    debugRetryHint("win32") === "$env:BRAIN_DEBUG=1; <the same command>", debugRetryHint("win32"));
+}
+
+{
+  const { successMark } = await import("../brain.mjs");
+  check("the ok status word is reserved for an interactive terminal",
+    successMark(false) === "·" && successMark(true).includes("ok"),
+    JSON.stringify({ piped: successMark(false), tty: successMark(true) }));
+  const source = readFileSync(CLI, "utf8");
+  check("post-deploy owner guidance goes straight to health",
+    /next: brain health <manifest>/.test(source) &&
+      !/next: brain secrets <manifest>, then brain health <manifest>/.test(source));
 }
 
 /* ---- an unsafe journal never replaces the command's original failure ---- */
@@ -252,7 +330,8 @@ function ingestExitCli(scenario) {
       /^loc_[0-9a-f]{24}$/.test(events[0]?.fingerprint || "") &&
       events[0]?.fingerprint !== observedConfigFingerprint &&
       !r.journal.includes("CLOUDFLARE_API_TOKEN") &&
-      /did not upload or send this issue note/.test(r.out), r.journal);
+      r.out.includes(shown("Need help with this? Run: brain support --explain AUTH_REQUIRED")) &&
+      !/Private issue note evt_/.test(r.out), r.journal);
 }
 
 /* ---- public remediation must never teach people to paste a secret ---- */
@@ -380,6 +459,7 @@ function ingestExitCli(scenario) {
       /safe expired and overflow notes are cleaned up after writes/i.test(status.out) &&
       /fresh or concurrent files may remain until a later safe cleanup/i.test(status.out) &&
       /links and special files are refused and require manual review/i.test(status.out) &&
+      /Latest event id: evt_[0-9a-f]{32}/.test(status.out) &&
       !status.out.includes(userRoot) && !/stored locally/i.test(status.out), status.out);
 
   const exportPath = join(userRoot, "safe-support-export.jsonl");
@@ -801,8 +881,11 @@ for (const helpArgument of ["--help", "-h", "help"]) {
       isCredentialRejection(other) === false, other.message);
   }
 
-  check("the remedy names the variable, the dashboard path and the scopes",
-    /CLOUDFLARE_API_TOKEN/.test(CF_TOKEN_REJECTED_REMEDY) &&
+  check("the remedy names the access key, dashboard path, dates and scopes",
+    /access key/.test(CF_TOKEN_REJECTED_REMEDY) &&
+      !/CLOUDFLARE_API_TOKEN/.test(CF_TOKEN_REJECTED_REMEDY) &&
+      /start date empty or set it to today/.test(CF_TOKEN_REJECTED_REMEDY) &&
+      /end at least 7 days/.test(CF_TOKEN_REJECTED_REMEDY) &&
       /My Profile > API Tokens/.test(CF_TOKEN_REJECTED_REMEDY) &&
       /Workers Scripts: Edit/.test(CF_TOKEN_REJECTED_REMEDY),
     CF_TOKEN_REJECTED_REMEDY);
