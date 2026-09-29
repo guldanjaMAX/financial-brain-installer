@@ -1,13 +1,27 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { cmdDeploy, cmdUpdate, cmdUpgrade } from "../brain.mjs";
+import { cmdDeploy, cmdDoctor, cmdUpdate, cmdUpgrade, supportErrorCode } from "../brain.mjs";
+import {
+  exportSupportJournal,
+  previewSupportJournal,
+  recordSupportEvent,
+} from "../support-journal.mjs";
+import { renderSupportRecovery, supportRecovery } from "../support-recovery.mjs";
 
 const WRAPPING_NAME = "BANK_FEED_WRAPPING_KEY_V2";
 const SENTINEL = `v2.${Buffer.alloc(32, 29).toString("base64url")}`;
+const SENTINEL_PATTERN = new RegExp(SENTINEL.replaceAll(".", "\\."));
 
 function apiResponse(result, { success = true, status = 200, message = "fixture refusal" } = {}) {
   return new Response(JSON.stringify({
@@ -46,13 +60,14 @@ function manifest({ bankFeed = true, version = "0.4.0" } = {}) {
   };
 }
 
-function cloudflareHarness({ initial = [], rejectPut = false } = {}) {
+function cloudflareHarness({ initial = [], rejectPut = false, landRejectedPut = false } = {}) {
   const secretNames = new Set(initial);
   const calls = [];
   const writtenValues = [];
   let workerUploads = 0;
   let secretLists = 0;
   let secretPuts = 0;
+  const uploadedMetadata = [];
   const fetchImpl = async (input, options = {}) => {
     const path = new URL(String(input)).pathname;
     const method = options.method || "GET";
@@ -62,6 +77,7 @@ function cloudflareHarness({ initial = [], rejectPut = false } = {}) {
     if (path.endsWith("/workers/scripts/fixture-brain") && method === "PUT") {
       workerUploads++;
       calls.push("worker-upload");
+      uploadedMetadata.push(await options.body.get("metadata").text());
       return apiResponse({});
     }
     if (path.endsWith("/workers/scripts/fixture-brain/secrets") && method === "GET") {
@@ -75,6 +91,7 @@ function cloudflareHarness({ initial = [], rejectPut = false } = {}) {
       calls.push(`secret-put:${body.name}`);
       writtenValues.push(body.text);
       if (rejectPut) {
+        if (landRejectedPut) secretNames.add(body.name);
         return apiResponse(null, {
           success: false,
           status: 503,
@@ -98,6 +115,7 @@ function cloudflareHarness({ initial = [], rejectPut = false } = {}) {
     fetchImpl,
     calls,
     writtenValues,
+    uploadedMetadata,
     secretNames,
     get workerUploads() { return workerUploads; },
     get secretLists() { return secretLists; },
@@ -149,6 +167,16 @@ const writeManifest = (name, value) => {
   return path;
 };
 
+function writtenFileContents(root) {
+  const contents = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) contents.push(...writtenFileContents(path));
+    else if (entry.isFile()) contents.push(readFileSync(path, "utf8"));
+  }
+  return contents;
+}
+
 test.after(() => rmSync(sandbox, { recursive: true, force: true }));
 
 test("deploy creates a missing wrapping key once and verifies it by name", async () => {
@@ -187,7 +215,40 @@ test("deploy leaves an existing wrapping key untouched", async () => {
   assert.equal(harness.secretPuts, 0);
 });
 
-test("a wrapping-key write failure is owner-safe and never leaks the generated value", async () => {
+for (const [label, failure] of [
+  ["rejection", new Error(`fixture inventory rejection carrying ${SENTINEL}`)],
+  ["timeout", Object.assign(new Error(`fixture inventory timed out carrying ${SENTINEL}`), { code: "ETIMEDOUT" })],
+]) {
+  test(`deploy fails closed when the wrapping-key inventory has a ${label}`, async () => {
+    const harness = cloudflareHarness();
+    const path = writeManifest(`deploy-list-${label}.json`, manifest());
+    let lists = 0;
+    let puts = 0;
+    let error;
+    try {
+      await isolatedRuntime(harness.fetchImpl, () => cmdDeploy(path, {
+        nextSteps: false,
+        listWorkerSecretNames: async () => {
+          lists += 1;
+          throw failure;
+        },
+        putWorkerSecret: async () => { puts += 1; },
+        generateBankWrappingKey: () => { throw new Error("generation must not be reached"); },
+      }));
+    } catch (caught) {
+      error = caught;
+    }
+
+    assert.equal(harness.workerUploads, 1, "the real deploy decision point must be reached");
+    assert.equal(lists, 1, "the inventory decision point must be reached");
+    assert.equal(puts, 0, "an unreadable inventory must not trigger a put");
+    assert.match(error?.message || "", /secret names could not be checked/i);
+    assert.doesNotMatch(error?.message || "", SENTINEL_PATTERN);
+    assert.doesNotMatch(error?.capturedOutput || "", SENTINEL_PATTERN);
+  });
+}
+
+test("a wrapping-key write failure reports uncertainty and never leaks the generated value", async () => {
   const harness = cloudflareHarness({ rejectPut: true });
   const path = writeManifest("deploy-put-failure.json", manifest());
   let error;
@@ -204,10 +265,88 @@ test("a wrapping-key write failure is owner-safe and never leaks the generated v
   assert.equal(harness.secretLists, 1);
   assert.equal(harness.secretPuts, 1);
   assert.match(error?.message || "", /independent bank wrapping key could not be created/i);
-  assert.match(error?.message || "", /nothing was half-written/i);
-  assert.doesNotMatch(error?.message || "", new RegExp(SENTINEL.replaceAll(".", "\\.")));
-  assert.doesNotMatch(error?.capturedOutput || "", new RegExp(SENTINEL.replaceAll(".", "\\.")));
+  assert.match(error?.message || "", /result is unknown|result could not be confirmed/i);
+  assert.doesNotMatch(error?.message || "", /nothing was half-written/i);
+  assert.doesNotMatch(error?.message || "", SENTINEL_PATTERN);
+  assert.doesNotMatch(error?.capturedOutput || "", SENTINEL_PATTERN);
   assert.equal(harness.secretNames.has(WRAPPING_NAME), false);
+});
+
+test("a landed wrapping-key write is adopted on retry and stays absent from every disclosure surface", async () => {
+  const harness = cloudflareHarness({ rejectPut: true, landRejectedPut: true });
+  const path = writeManifest("deploy-landed-put-failure.json", manifest());
+  let error;
+  try {
+    await isolatedRuntime(harness.fetchImpl, () => cmdDeploy(path, {
+      nextSteps: false,
+      generateBankWrappingKey: () => SENTINEL,
+    }));
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(harness.workerUploads, 1, "the first real deploy decision point must be reached");
+  assert.equal(harness.secretLists, 1, "the first inventory decision must be reached");
+  assert.equal(harness.secretPuts, 1, "the uncertain write must be attempted once");
+  assert.equal(harness.secretNames.has(WRAPPING_NAME), true, "the failure fixture must land the write");
+
+  const retry = await isolatedRuntime(harness.fetchImpl, () => cmdDeploy(path, {
+    nextSteps: false,
+    generateBankWrappingKey: () => { throw new Error("retry must not generate a replacement"); },
+  }));
+  assert.equal(harness.workerUploads, 2, "the retry must reach the real deploy path");
+  assert.equal(harness.secretLists, 2, "the retry must recheck the inventory");
+  assert.equal(harness.secretPuts, 1, "the landed key must not be replaced");
+
+  const issueCode = supportErrorCode(error, { command: "deploy" });
+  recordSupportEvent({ command: "deploy", source: "cloudflare", errorCode: issueCode }, {
+    root: sandbox,
+    now: () => new Date("2026-09-28T12:00:00.000Z"),
+    randomBytes: () => Buffer.alloc(16, 7),
+  });
+  const supportPreview = previewSupportJournal({
+    root: sandbox,
+    now: () => new Date("2026-09-28T12:00:00.000Z"),
+  });
+  const supportExport = join(sandbox, "support-export.jsonl");
+  const exported = exportSupportJournal(supportExport, {
+    root: sandbox,
+    now: () => new Date("2026-09-28T12:00:00.000Z"),
+  });
+  assert.equal(exported.events, 1, "the support export decision point must be reached");
+
+  const recovery = supportRecovery(issueCode);
+  const doctor = await isolatedRuntime(harness.fetchImpl, () => cmdDoctor(null, {
+    withAvailableCloudflareToken: (action) => action(),
+    doctorRunAll: async ({ onResult }) => {
+      const check = { name: "offline fixture", status: "ok", detail: "ready" };
+      onResult(check);
+      return [check];
+    },
+  }));
+  const disclosureSurfaces = [
+    error?.message || "",
+    error?.capturedOutput || "",
+    retry.output,
+    JSON.stringify(retry.result) ?? "undefined",
+    harness.uploadedMetadata.join("\n"),
+    supportPreview,
+    readFileSync(supportExport, "utf8"),
+    JSON.stringify(recovery),
+    renderSupportRecovery(recovery),
+    doctor.output,
+    JSON.stringify(doctor.result) ?? "undefined",
+    ...writtenFileContents(sandbox),
+  ];
+  for (const surface of disclosureSurfaces) assert.doesNotMatch(surface, SENTINEL_PATTERN);
+});
+
+test("the public bank-feed schema describes deploy custody and optional provider credentials", () => {
+  const schema = JSON.parse(readFileSync(new URL("../manifest.schema.json", import.meta.url), "utf8"));
+  const description = schema.properties.corpora.properties.bank_feed.description;
+  assert.match(description, /setup, update, and deploy create the independent wrapping key/i);
+  assert.match(description, /provider credentials may remain absent/i);
+  assert.doesNotMatch(description, /routine secret repair requires all three names/i);
 });
 
 test("deploy performs no secret call when the bank feed is disabled", async () => {

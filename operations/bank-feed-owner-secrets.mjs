@@ -78,9 +78,10 @@ export async function ensureBankFeedWrappingKey({
     await putSecret(BANK_ACCESS_WRAPPING_KEY_SECRET, generated);
   } catch {
     throw new Error(
-      "the independent bank wrapping key could not be created on the Worker. Nothing was half-written: " +
-        "a Worker secret write is atomic, and no wrapping-key value was saved locally. " +
-        "Rerun the same setup, update, or deploy command.",
+      "the independent bank wrapping key could not be created or confirmed on the Worker. " +
+        "The write result is unknown, and the Worker may already contain the key. " +
+        "Rerun the same setup, update, or deploy command; it will recheck the secret names before " +
+        "deciding whether a write is needed. No wrapping-key value was saved locally.",
     );
   }
 
@@ -117,6 +118,15 @@ function promptFor(name, environment) {
 function namesFromInventory(inventory) {
   if (!Array.isArray(inventory) || inventory.some((name) => typeof name !== "string")) {
     throw new Error("Cloudflare returned an invalid Worker secret inventory. No bank secret was written.");
+  }
+  const canonicalByFoldedName = new Map(BANK_FEED_OWNER_SECRET_NAMES.map((name) => [name.toLowerCase(), name]));
+  for (const name of inventory) {
+    const canonical = canonicalByFoldedName.get(name.trim().toLowerCase());
+    if (canonical && name !== canonical) {
+      throw new Error(
+        `Cloudflare returned an ambiguous spelling of ${canonical}. No bank secret was written.`,
+      );
+    }
   }
   return new Set(inventory);
 }
