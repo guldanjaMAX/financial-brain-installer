@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { credentialScannerFingerprint } from "../brain.mjs";
-import { gmailPolicyFingerprint } from "../connectors/gmail.mjs";
+import {
+  DEFAULT_QUERY,
+  gmailLabelDecision,
+  gmailPolicyFingerprint,
+  gmailQuery,
+  normalizeGmailSince,
+} from "../connectors/gmail.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -37,6 +42,21 @@ function stateFor(mode) {
   };
   if (mode === "policy-change-sweep") {
     state.gmail_policy_fingerprint = "stale-gmail-policy";
+  }
+  if (["since-safe-sweep", "since-removal-review"].includes(mode)) {
+    state.done = mode === "since-safe-sweep"
+      ? { "gmail:since-oldest": "since-oldest-v1" }
+      : {
+          "gmail:since-older": "since-older-v1",
+          "gmail:since-retained": "since-retained-v1",
+        };
+  }
+  if (mode === "since-incremental") {
+    state.done["gmail:since-incremental-older"] = "since-incremental-older-v1";
+    state.gmail_policy_fingerprint = gmailPolicyFingerprint({
+      credentialScannerFingerprint: currentScannerFingerprint,
+      since: "2022-03-01",
+    });
   }
   if (mode === "unclassified") {
     state.done["gmail:unclassified"] = "history-prior-message";
@@ -121,7 +141,7 @@ function stateFor(mode) {
 
 function runCase(mode, { approval = null, directory = null, reset = false } = {}) {
   const fresh = directory == null;
-  directory ||= mkdtempSync(join(tmpdir(), `brain-gmail-${mode}-`));
+  directory ||= mkdtempSync(join(ROOT, `.test-gmail-${mode}-`));
   const manifestPath = join(directory, "fixture.manifest.json");
   const statePath = join(directory, ".brain-ingest-gmail.json");
   const evidencePath = join(directory, "evidence.json");
@@ -134,10 +154,16 @@ function runCase(mode, { approval = null, directory = null, reset = false } = {}
       brain: { domain: "fixture.invalid" },
       infrastructure: { cloudflare: { account_id: "fixture-account", d1_database_id: "fixture-db" } },
       safety: { credential_scanner: { enabled: true }, private_path_prefixes: [] },
+      ...(["since-safe-sweep", "since-incremental"].includes(mode)
+        ? { corpora: { gmail: { since: "2022-03-01" } } }
+        : mode === "since-removal-review"
+          ? { corpora: { gmail: { since: "2022-04-01" } } }
+          : {}),
     }));
     writeFileSync(join(tokenRoot, "google-tokens.json"), JSON.stringify({
       google: { client_id: "fixture-client", client_secret: null, refresh_token: "fixture-refresh", scopes: ["gmail"] },
     }), { mode: 0o600 });
+    writeFileSync(join(directory, ".brain-admin-key"), `${SYNTHETIC_ADMIN_KEY}\n`, { mode: 0o600 });
     writeFileSync(statePath, JSON.stringify(stateFor(mode)), { mode: 0o600 });
   }
 
@@ -146,8 +172,9 @@ function runCase(mode, { approval = null, directory = null, reset = false } = {}
     if (process.env[name] !== undefined) environment[name] = process.env[name];
   }
   Object.assign(environment, {
+    HOME: userRoot,
     NO_COLOR: "1",
-    ADMIN_KEY: "fixture-admin",
+    BRAIN_NO_WRANGLER_LOGIN: "1",
     BRAIN_GOOGLE_TOKEN_STORE: "file",
     BRAIN_GMAIL_POLICY_MODE: mode,
     BRAIN_GMAIL_POLICY_EVIDENCE: evidencePath,
@@ -159,10 +186,12 @@ function runCase(mode, { approval = null, directory = null, reset = false } = {}
   const result = spawnSync(process.execPath, args, { encoding: "utf8", env: environment, timeout: 30_000 });
   assert.equal(result.error, undefined, String(result.error || ""));
   assert.equal(result.signal, null, `${mode} Gmail fixture was terminated`);
+  const output = strip(`${result.stdout || ""}${result.stderr || ""}`);
+  assert.ok(existsSync(evidencePath), `${mode} Gmail fixture wrote no evidence:\n${output}`);
   return {
     directory,
     code: result.status,
-    output: strip(`${result.stdout || ""}${result.stderr || ""}`),
+    output,
     state: JSON.parse(readFileSync(statePath, "utf8")),
     evidence: JSON.parse(readFileSync(evidencePath, "utf8")),
   };
@@ -173,6 +202,41 @@ function runApprovedCase(mode) {
   const approval = /--approve-removals ([0-9a-f]{64})/.exec(review.output)?.[1] || null;
   assert.ok(approval, `${mode} did not produce a removal approval fingerprint: ${review.output.slice(-1_200)}`);
   return runCase(mode, { directory: review.directory, approval });
+}
+
+{
+  const schema = JSON.parse(readFileSync(join(ROOT, "manifest.schema.json"), "utf8"));
+  const sinceSchema = schema.properties?.corpora?.properties?.gmail?.properties?.since;
+  check("the manifest schema declares Gmail since as an exact calendar date",
+    sinceSchema?.type === "string" && sinceSchema?.format === "date" &&
+    sinceSchema?.pattern === "^\\d{4}-\\d{2}-\\d{2}$",
+    JSON.stringify(sinceSchema));
+  check("an absent Gmail floor preserves the prior query and policy fingerprint",
+    gmailQuery() === DEFAULT_QUERY &&
+    gmailPolicyFingerprint({ credentialScannerFingerprint: "fixture-scanner" }) ===
+      "7220687d0100ae90edf4a17419811b14a1c537a0fc55bbe005b161069424385a",
+    gmailQuery());
+  check("a Gmail floor changes both the full-list query and policy fingerprint",
+    gmailQuery({ since: "2022-03-01" }) === `${DEFAULT_QUERY} after:2022/03/01` &&
+    gmailPolicyFingerprint({ credentialScannerFingerprint: "fixture-scanner", since: "2022-03-01" }) !==
+      gmailPolicyFingerprint({ credentialScannerFingerprint: "fixture-scanner" }));
+  check("Gmail since validation rejects malformed and impossible dates",
+    ["2022-3-01", "2022-02-29", " 2022-03-01", 20220301].every((value) => {
+      try { normalizeGmailSince(value); return false; } catch { return true; }
+    }));
+  const older = gmailLabelDecision(["INBOX"], {
+    since: "2022-03-01",
+    internalDate: String(Date.UTC(2022, 1, 28, 23, 59, 59)),
+  });
+  const boundary = gmailLabelDecision(["INBOX"], {
+    since: "2022-03-01",
+    internalDate: String(Date.UTC(2022, 2, 1)),
+  });
+  check("incremental policy treats pre-floor mail as a deterministic policy exclusion",
+    older.allowed === false && older.policy === true && older.cursor_blocking === false &&
+    boundary.allowed === true &&
+    gmailLabelDecision(["INBOX"], { since: "2022-03-01" }).cursor_blocking === true,
+    JSON.stringify({ older, boundary }));
 }
 
 {
@@ -274,6 +338,53 @@ function runApprovedCase(mode) {
       result.state.history_id === "history-current" &&
       result.state.gmail_policy_fingerprint === currentPolicyFingerprint,
       JSON.stringify(result.state));
+  } finally { rmSync(result.directory, { recursive: true, force: true }); }
+}
+
+{
+  const result = runCase("since-safe-sweep");
+  try {
+    check("a floor before the oldest stored Gmail message completes with zero removals",
+      result.code === 0 && result.evidence.forget_targets.length === 0 &&
+      result.state.done["gmail:since-oldest"] === "since-oldest-v1" &&
+      result.state.history_id === "history-current" &&
+      result.evidence.final_receipt?.complete_sweep === true,
+      `${result.output.slice(-1_200)}\n${JSON.stringify(result.evidence)}`);
+  } finally { rmSync(result.directory, { recursive: true, force: true }); }
+}
+
+{
+  const review = runCase("since-removal-review");
+  try {
+    const approval = /--approve-removals ([0-9a-f]{64})/.exec(review.output)?.[1] || null;
+    check("a later Gmail floor reaches the existing removal-review gate before any removal",
+      review.code === 1 && !!approval && review.evidence.forget_targets.length === 0 &&
+      review.state.history_id === "history-prior" &&
+      /Gmail cleanup would remove 1 of 2 stored documents/.test(review.output),
+      `${review.output.slice(-1_400)}\n${JSON.stringify(review.evidence)}`);
+    if (approval) {
+      const approved = runCase("since-removal-review", { directory: review.directory, approval });
+      check("the exact reviewed floor plan removes only the pre-floor stored family",
+        approved.code === 0 &&
+        approved.evidence.forget_targets.join(",") === "gmail:since-older" &&
+        !Object.hasOwn(approved.state.done, "gmail:since-older") &&
+        approved.state.done["gmail:since-retained"] === "since-retained-v1" &&
+        approved.state.history_id === "history-current",
+        `${approved.output.slice(-1_400)}\n${JSON.stringify(approved.evidence)}`);
+    }
+  } finally { rmSync(review.directory, { recursive: true, force: true }); }
+}
+
+{
+  const result = runCase("since-incremental");
+  try {
+    check("incremental Gmail applies the same date floor as the full-list query",
+      result.code === 0 && result.evidence.ingested_ids.join(",") === "since-incremental-current" &&
+      result.evidence.forget_targets.join(",") === "gmail:since-incremental-older" &&
+      !Object.hasOwn(result.state.done, "gmail:since-incremental-older") &&
+      result.state.history_id === "history-current" &&
+      /policy_skipped=1; coverage_gaps=0/.test(result.evidence.final_receipt?.detail || ""),
+      `${result.output.slice(-1_400)}\n${JSON.stringify(result.evidence)}`);
   } finally { rmSync(result.directory, { recursive: true, force: true }); }
 }
 

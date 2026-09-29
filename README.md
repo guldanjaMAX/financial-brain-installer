@@ -785,6 +785,9 @@ crossing the applicable limit stops before deleting anything or advancing the
 source cursor. It prints aggregate counts and an opaque approval fingerprint,
 never filenames or document IDs. Review the cause, then add the exact
 `--approve-removals <fingerprint>` value only when the plan is expected.
+To bound Gmail to recent mail, add `"since": "YYYY-MM-DD"` inside
+`corpora.gmail`. Changing that floor forces a full comparison; previously
+loaded older mail can leave the Brain only through the same removal-review gate.
 Drive treats access loss differently. An access-denied 403 remains in the
 review record and is excluded from deletion. A 404, or a 403 whose provider
 response says `notFound`, proves only that Drive stopped returning the item to
