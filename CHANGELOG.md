@@ -13,6 +13,18 @@ offered as a customer update; its entries below ship for the first time in
 0.4.9, and its identity is retired so its evidence cannot be confused with
 this changed candidate.
 
+- **Cloudflare setup now tells you when browser sign-in cannot reach
+  Vectorize, and it never silently switches credentials.** Wrangler 4.131.1
+  cannot request Vectorize permission for its browser profile. Reopening the
+  same browser approval cannot fix that, so setup now goes directly to a clear
+  recovery choice that names the required Workers Scripts Edit, D1 Edit,
+  Vectorize Edit, and Workers AI Read permissions. If this computer has a saved
+  recovery token, setup names its exact account and protected-store location,
+  warns that it may be old or revoked, and asks before using it. You can decline
+  it and enter a different token through the hidden prompt. Windows follows the
+  same scope and decision path; its existing visible-entry protection still
+  requires an approved secret-manager path instead of risking an echoed token.
+
 - **Dollar amounts in a partly answered question are no longer cut.** When an
   answer covers only part of a question, the Brain keeps the sentences your
   documents support and names what they do not cover. That trimming used to

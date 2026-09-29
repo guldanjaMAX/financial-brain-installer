@@ -2,9 +2,11 @@
 
 Provisions a retrieval brain into a **client's own Cloudflare account**. Text and
 keyword search live in D1, vectors live in Vectorize, and the Worker fuses them.
-Nothing runs on our infrastructure. Normal setup uses an owner-approved named
-Cloudflare browser profile in the owner's operating-system credential store; it
-does not create or copy an API token.
+Nothing runs on our infrastructure. Normal setup starts with an owner-approved
+named Cloudflare browser profile in the owner's operating-system credential
+store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
+profile, so the read-only preflight routes that exact refusal to an explicit,
+account-scoped recovery API-token choice before any mutation.
 
 **Status: unreleased 0.4.9/schema48 field candidate, held.** Provisioning,
 retrieval, resumable ingest, guarded deletion, owner actions, exact entity
@@ -52,10 +54,13 @@ the owner must confirm **Workers & Pages > Plans > Paid** there. Do not widen th
 session just to inspect billing. Prepared-manifest, recovery, and automation
 setup paths have the same account-bound prerequisite.
 
-A scoped Cloudflare token is a bounded legacy, automation, or recovery path,
-not a fresh-install prerequisite. Use it only when that exact path is explicitly
-selected and keep it inside the reviewed hidden prompt or approved no-history
-launcher.
+A scoped Cloudflare token is a bounded legacy, automation, or recovery path.
+With Wrangler 4.131.1 it is also the explicit fallback when browser OAuth cannot
+reach Vectorize. The installer names that limitation, the required Workers
+Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read permissions, and the
+exact saved credential before use. A saved token may be old or revoked, so it
+is never selected without owner approval. Keep a new value inside the reviewed
+hidden prompt or approved no-history launcher.
 
 ---
 
