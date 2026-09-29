@@ -101,6 +101,10 @@ test("the shipped enrollment screen explains the passkey window before the owner
     "This verifies that you are the owner",
     "cannot see or store your passkey, Face ID, fingerprint, or device PIN",
     "choose Cancel",
+    "Tap the button below",
+    "No password is needed",
+    "How this keeps you safe",
+    "biometric data and device PIN never go to Financial Brain",
   ]) {
     assert.ok(APP_JS.includes(phrase), `shipped app bundle is missing: ${phrase}`);
   }

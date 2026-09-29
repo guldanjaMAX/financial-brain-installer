@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ApiError, api, type Answer, type Citation, type GrantPrincipal } from "../lib/api";
+import { ApiError, api, ownerError, type Answer, type Citation, type GrantPrincipal } from "../lib/api";
 // Shared with the Worker: the rule that an incomplete search must never render
 // as an absence is a product rule, not a rendering detail, so both surfaces
 // derive it from one module instead of each writing their own.
@@ -12,6 +12,23 @@ import { sourceLabel } from "../lib/words";
 
 export const SCOPED_SEARCH_UNAVAILABLE =
   "Search is temporarily unavailable. This does not mean the shared documents have no matches. Nothing was changed. Try again, and if it keeps happening, ask the owner who shared this access to contact their Financial Brain installer.";
+const OWNER_ASK_DRAFT = "financial-brain:owner-ask-draft";
+
+export function readAskDraft(): string {
+  try {
+    return typeof sessionStorage === "undefined" ? "" : sessionStorage.getItem(OWNER_ASK_DRAFT) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function writeAskDraft(value: string): void {
+  try {
+    if (typeof sessionStorage !== "undefined") sessionStorage.setItem(OWNER_ASK_DRAFT, value);
+  } catch {
+    // A blocked storage API must not block asking a question in this session.
+  }
+}
 
 /** Citation timestamps are normalized to UTC by the retrieval API. Format the
  *  stored calendar day in UTC so a midnight value cannot move to yesterday in
@@ -141,7 +158,7 @@ function Trust({ answer }: { answer: Answer }) {
 
 export function Ask() {
   const { activeLabel, scope } = useFinanceScope();
-  const [question, setQuestion] = useState("");
+  const [question, setQuestion] = useState(readAskDraft);
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -168,7 +185,7 @@ export function Ask() {
       setAnswerLabel(label);
       setAnswer(next);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(ownerError(e).message);
     } finally {
       setBusy(false);
     }
@@ -187,7 +204,10 @@ export function Ask() {
       <div className="max-w-3xl">
       <textarea
         value={question}
-        onChange={(e) => setQuestion(e.target.value)}
+        onChange={(e) => {
+          setQuestion(e.target.value);
+          writeAskDraft(e.target.value);
+        }}
         onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) ask(); }}
         placeholder="Ask your brain anything…"
         aria-label="Ask your brain anything"

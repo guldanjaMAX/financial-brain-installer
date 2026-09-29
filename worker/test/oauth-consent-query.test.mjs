@@ -86,6 +86,55 @@ function consentQuery(html) {
   }
 }
 
+function jsonResponse(status, body) {
+  return { status, ok: status >= 200 && status < 300, json: async () => body };
+}
+
+async function runConsentApproval(html, responses) {
+  const script = html.match(/<script>([\s\S]*?)<\/script>/);
+  assert.ok(script, "the real consent page must provide the script under test");
+  const elements = new Map([
+    ["approve", { disabled: false, onclick: null }],
+    ["deny", { onclick: null }],
+    ["err", { hidden: true, textContent: "" }],
+  ]);
+  const calls = [];
+  const fetch = async (path) => {
+    calls.push(path);
+    assert.ok(responses.length > 0, `unexpected consent-page request: ${path}`);
+    return responses.shift();
+  };
+  const location = { origin: ORIGIN, href: "" };
+  const navigator = { credentials: { get: async () => ({
+    id: "fixture-passkey",
+    response: {
+      authenticatorData: new Uint8Array([1]),
+      clientDataJSON: new Uint8Array([2]),
+      signature: new Uint8Array([3]),
+    },
+  }) } };
+  const execute = new Function(
+    "document", "fetch", "navigator", "location", "URLSearchParams",
+    "Uint8Array", "atob", "btoa", "encodeURIComponent",
+    script[1],
+  );
+  execute(
+    { getElementById: (id) => elements.get(id) },
+    fetch,
+    navigator,
+    location,
+    URLSearchParams,
+    Uint8Array,
+    atob,
+    btoa,
+    encodeURIComponent,
+  );
+  const approve = elements.get("approve");
+  assert.equal(typeof approve.onclick, "function", "the approval decision point must be wired");
+  await approve.onclick();
+  return { calls, error: elements.get("err") };
+}
+
 test("the consent page hands its script a parseable query, not HTML-escaped text", async () => {
   const fixture = await createProductFixture();
   try {
@@ -99,6 +148,17 @@ test("the consent page hands its script a parseable query, not HTML-escaped text
     assert.match(html, /Answer that system prompt yourself/i);
     assert.match(html, /biometric data and device\s+PIN stay on your device/i);
     assert.doesNotMatch(html, /Approve with Face ID/i);
+    assert.match(html, /Access &gt; Connected AI/,
+      "revocation guidance must point to the owner page that contains the connection");
+    assert.match(html, /The passkey window was closed\. Nothing was connected\. Choose Approve access to try again\./);
+    assert.match(html, /This device doesn't have a passkey for this Brain\./);
+    assert.match(html, /That took longer than 5 minutes, so the sign-in expired\./);
+    assert.match(html, /This browser is signed in with shared-document access, not as the owner\./);
+    assert.match(html, /Your Brain couldn't finish this right now\. Nothing was connected\. Try again in a minute\./);
+    assert.match(html, /if \(!assertion\)/,
+      "a closed or empty credential window must stop before assertion fields are read");
+    assert.match(html, /approve\.disabled = true/);
+    assert.match(html, /approve\.disabled = false/);
 
     assert.ok(!/&(?:amp|lt|gt|quot|#39);/.test(q),
       `the script's query must not carry HTML entities: ${q}`);
@@ -121,6 +181,41 @@ test("the consent page hands its script a parseable query, not HTML-escaped text
     assert.equal(denyUrl.origin + denyUrl.pathname, REDIRECT);
     assert.equal(denyUrl.searchParams.get("error"), "access_denied");
     assert.equal(denyUrl.searchParams.get("state"), "st&ate=1");
+  } finally {
+    fixture.close();
+  }
+});
+
+test("the consent page preserves security 403s and distinguishes owner-only access", async () => {
+  const fixture = await createProductFixture();
+  try {
+    const { html } = await consentPage(fixture);
+    const cloned = "this passkey looks cloned (its counter went backwards); sign in from another device and revoke it";
+    const securityFailure = await runConsentApproval(html, [
+      jsonResponse(401, { error: "unauthorized", code: "session_required" }),
+      jsonResponse(200, { challenge: "AQ", rp_id: "brain.invalid" }),
+      jsonResponse(403, { error: cloned }),
+    ]);
+    assert.deepEqual(securityFailure.calls, [
+      `/oauth/authorize/decision?${consentQuery(html)}`,
+      "/auth/login/options",
+      "/auth/login/verify",
+    ], "the security message assertion must be reached through passkey verification");
+    assert.equal(securityFailure.error.hidden, false);
+    assert.equal(securityFailure.error.textContent, cloned);
+
+    const ownerOnly = await runConsentApproval(html, [
+      jsonResponse(403, { error: "forbidden", code: "owner_required" }),
+    ]);
+    assert.equal(ownerOnly.calls.length, 1, "the owner-only refusal must reach the approval decision endpoint");
+    assert.equal(ownerOnly.error.textContent,
+      "This browser is signed in with shared-document access, not as the owner.");
+
+    const invalidRequest = await runConsentApproval(html, [
+      jsonResponse(400, { error: "unknown client or redirect_uri" }),
+    ]);
+    assert.equal(invalidRequest.calls.length, 1, "the invalid request must reach the approval decision endpoint");
+    assert.match(invalidRequest.error.textContent, /start the connection again from Claude/i);
   } finally {
     fixture.close();
   }

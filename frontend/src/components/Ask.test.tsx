@@ -7,10 +7,25 @@ import {
 import { unavailableNotice } from "../lib/retrieval-status.js";
 import {
   CitationSources, EvidenceGateReason, SCOPED_SEARCH_UNAVAILABLE,
-  citationMeta, evidenceGateNote,
+  citationMeta, evidenceGateNote, readAskDraft, writeAskDraft,
 } from "./Ask";
 
 describe("answer messages", () => {
+  it("keeps the typed owner question across a sign-in round trip", () => {
+    const saved = new Map<string, string>();
+    Object.defineProperty(globalThis, "sessionStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => saved.get(key) || null,
+        setItem: (key: string, value: string) => saved.set(key, value),
+      },
+    });
+
+    writeAskDraft("Which invoices are still open?");
+
+    expect(readAskDraft()).toBe("Which invoices are still open?");
+  });
+
   it("replaces an older Worker's raw provider error with reviewed copy", () => {
     const raw = "provider request failed with private trace fixture-123";
     const rendered = answerText({ answer: null, answer_error: raw });

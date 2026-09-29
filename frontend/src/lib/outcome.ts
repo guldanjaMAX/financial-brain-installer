@@ -1,10 +1,10 @@
-/** The five words this product is allowed to say about a thing's state.
+/** The status words this product is allowed to say about a thing's state.
  *
  *  Adopted from the reference prototype. The value is not the words themselves, it is
  *  that the set is CLOSED and each member carries a glyph:
  *
- *   - Closed, so a screen cannot invent a sixth state that means almost the
- *     same as one that exists. Five words an owner learns once beat twenty
+ *   - Closed, so a screen cannot invent another state that means almost the
+ *     same as one that exists. A few words an owner learns once beat twenty
  *     they have to keep re-reading.
  *   - Glyphed, so status survives grayscale, colour blindness, a bad screen,
  *     and print. Colour carries NO information here; it only reinforces what
@@ -14,13 +14,14 @@
  *  Filed means the thing is done and put away, Current means it is up to date
  *  as of now. Collapsing them loses the distinction an owner actually asks
  *  about. */
-export type OutcomeKey = "WORKING" | "NEEDS" | "FILED" | "CURRENT" | "PROBLEM";
+export type OutcomeKey = "WORKING" | "NEEDS" | "FILED" | "CURRENT" | "WORTH" | "PROBLEM";
 
 export const OUTCOME: Record<OutcomeKey, { label: string; glyph: string; tone: Tone }> = {
   WORKING: { label: "Working on it", glyph: "○", tone: "wait" },
   NEEDS:   { label: "Needs you",     glyph: "△", tone: "act" },
   FILED:   { label: "Filed",         glyph: "■", tone: "done" },
   CURRENT: { label: "Current",       glyph: "●", tone: "good" },
+  WORTH:   { label: "Worth knowing", glyph: "!", tone: "act" },
   PROBLEM: { label: "Problem",       glyph: "✕", tone: "bad" },
 };
 

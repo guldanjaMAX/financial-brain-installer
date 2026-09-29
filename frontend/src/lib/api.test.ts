@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, api, apiGet, ownerError } from "./api";
+import { ApiError, OWNER_SIGNED_OUT_EVENT, api, apiGet, ownerError } from "./api";
 
 const safeFallback = "Your Brain could not confirm what happened. Refresh this page to check the current state before trying again.";
 
@@ -16,6 +16,24 @@ async function rejectedApiError(request: Promise<unknown>): Promise<ApiError> {
 }
 
 describe("owner API response decoding", () => {
+  it("announces a signed-out owner for every protected app API family", async () => {
+    const events: string[] = [];
+    const target = new EventTarget();
+    target.addEventListener(OWNER_SIGNED_OUT_EVENT, () => events.push("signed-out"));
+    vi.stubGlobal("window", target);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    for (const path of ["/api/app/system", "/api/owner/action", "/api/fin/snapshot", "/api/rag/think"]) {
+      await expect(api(path)).rejects.toBeInstanceOf(ApiError);
+    }
+    await expect(api("/auth/login/options")).rejects.toBeInstanceOf(ApiError);
+
+    expect(events).toHaveLength(4);
+  });
+
   it("keeps successful POST and GET JSON unchanged", async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ ready: true, count: 2 }), {
@@ -118,6 +136,13 @@ describe("owner API response decoding", () => {
     expect(ownerError(new ApiError(422, { code: "owner_upload_pdf_needs_ocr" }))).toEqual({
       status: 422,
       message: "This PDF appears to be scanned, but text recognition is not available. Nothing was added. Upload a searchable copy or ask your installer for help.",
+    });
+  });
+
+  it("gives an unavailable answer one calm retry message", () => {
+    expect(ownerError(new ApiError(503, {}))).toEqual({
+      status: 503,
+      message: "Your Brain couldn't answer just now. Nothing was changed. Wait a minute and ask again.",
     });
   });
 
