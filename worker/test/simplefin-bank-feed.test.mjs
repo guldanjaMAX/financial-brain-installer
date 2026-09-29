@@ -221,6 +221,131 @@ test("the demo response stages owner choices, promotes four deduplicated transac
   }
 });
 
+test("provider issues retain safe guidance without persisting access-credential fragments", async () => {
+  const shortAccessUrl = "https://u7:p8@bridge.example.invalid/data/private-reference";
+  const encodedAccessUrl = encodeURIComponent(shortAccessUrl);
+  const fixture = await createProductFixture({ env: {
+    BANK_FEED_PROVIDER: "simplefin",
+    BANK_FEED_ENV: "production",
+    BANK_FEED_WRAPPING_KEY_V2: WRAPPING_KEY,
+  } });
+  let providerPulls = 0;
+  const fetchImpl = async (input, init = {}) => {
+    if ((init.method || "GET") === "POST") {
+      return new Response(shortAccessUrl, { status: 200 });
+    }
+    providerPulls++;
+    assert.ok(String(input).startsWith(`${shortAccessUrl}/accounts?`),
+      "the pull decision point decrypted the stored access reference");
+    return json({
+      accounts: [],
+      errlist: [
+        "The connection named u7 was refused with p8.",
+        `The encoded access address was ${encodedAccessUrl}.`,
+        `The full access address was ${shortAccessUrl}.`,
+        "The institution is refreshing. Try again later.",
+      ],
+    });
+  };
+  try {
+    const claim = await ownerRequest(fixture, "/api/bank-feed/simplefin/claim", {
+      request_id: "simplefin-redaction-claim-0001",
+      setup_token: SETUP_TOKEN,
+    }, fetchImpl);
+    assert.equal(claim.status, 201, "green control: the real claim path created a connection");
+    fixture.raw("UPDATE simplefin_connections SET next_pull_at='2000-01-01T00:00:00.000Z'");
+
+    const { runSimpleFinMaintenance, simpleFinFeedStatus } =
+      await import("../src/lib/simplefin-bank-feed.js");
+    const result = await runSimpleFinMaintenance(fixture.env, {
+      fetchImpl,
+      now: "2026-09-29T12:00:00.000Z",
+      maxRequestsPerItem: 1,
+    });
+    assert.equal(providerPulls, 1, "the provider issue-text decision point ran once");
+    assert.equal(result.items[0].partial, true,
+      "green control: provider issues remain visible as a partial pull");
+
+    const navigationHeaders = await fixture.ownerHeaders();
+    const pageRequest = new Request("https://brain.invalid/app/connect/bank", {
+      headers: { Cookie: navigationHeaders.Cookie },
+    });
+    const page = await handleBankFeed(
+      fixture.env,
+      pageRequest,
+      new URL(pageRequest.url),
+      "/app/connect/bank",
+      {},
+    );
+    const surfaces = JSON.stringify({
+      stored: fixture.first("SELECT last_errlist_json FROM simplefin_connections"),
+      status: await simpleFinFeedStatus(fixture.env),
+      page: await page.text(),
+    });
+    assert.match(surfaces, /institution is refreshing/i,
+      "safe provider guidance remains available to the owner");
+    for (const forbidden of [shortAccessUrl, encodedAccessUrl, "u7", "p8", "private-reference"]) {
+      assert.equal(surfaces.includes(forbidden), false,
+        "access-reference values and components never cross the storage or owner boundary");
+    }
+  } finally {
+    fixture.close();
+  }
+});
+
+test("the durable request budget is monotonic across UTC rollback and later-day reset", async () => {
+  const fixture = await createProductFixture({ env: {
+    BANK_FEED_PROVIDER: "simplefin",
+    BANK_FEED_ENV: "production",
+    BANK_FEED_WRAPPING_KEY_V2: WRAPPING_KEY,
+  } });
+  const fake = provider({ accounts: { accounts: [], errlist: [] } });
+  try {
+    const claim = await ownerRequest(fixture, "/api/bank-feed/simplefin/claim", {
+      request_id: "simplefin-budget-claim-0001",
+      setup_token: SETUP_TOKEN,
+    }, fake.fetchImpl);
+    assert.equal(claim.status, 201, "green control: the real claim path created a connection");
+    fixture.raw(
+      "UPDATE simplefin_connections SET request_day='2026-09-29',requests_today=24,next_pull_at='2000-01-01T00:00:00.000Z'",
+    );
+
+    const { runSimpleFinMaintenance } = await import("../src/lib/simplefin-bank-feed.js");
+    const rolledBack = await runSimpleFinMaintenance(fixture.env, {
+      fetchImpl: fake.fetchImpl,
+      now: "2026-09-28T12:00:00.000Z",
+      maxRequestsPerItem: 1,
+    });
+    assert.equal(rolledBack.items[0].code, "simplefin_daily_request_limit");
+    assert.equal(fake.calls.filter((call) => call.method === "GET").length, 0,
+      "the rollback decision point refuses before provider transport");
+    const rollbackBudget = fixture.first(
+      "SELECT request_day,requests_today FROM simplefin_connections",
+    );
+    assert.equal(rollbackBudget.request_day, "2026-09-29",
+      "a backward clock cannot lower the durable day watermark");
+    assert.equal(rollbackBudget.requests_today, 24,
+      "a backward clock cannot lower the durable request count");
+
+    fixture.raw("UPDATE simplefin_connections SET next_pull_at='2000-01-01T00:00:00.000Z'");
+    const laterDay = await runSimpleFinMaintenance(fixture.env, {
+      fetchImpl: fake.fetchImpl,
+      now: "2026-09-30T12:00:00.000Z",
+      maxRequestsPerItem: 1,
+    });
+    assert.equal(laterDay.items[0].ok, true,
+      "green control: a strictly later UTC day starts a new budget bucket");
+    assert.equal(fake.calls.filter((call) => call.method === "GET").length, 1);
+    const resetBudget = fixture.first(
+      "SELECT request_day,requests_today FROM simplefin_connections",
+    );
+    assert.equal(resetBudget.request_day, "2026-09-30");
+    assert.equal(resetBudget.requests_today, 1);
+  } finally {
+    fixture.close();
+  }
+});
+
 test("manifest, deploy bindings, secret custody, and doctor agree on the SimpleFIN profile", () => {
   const manifest = {
     brain: { domain: "fixture-brain.example.invalid" },

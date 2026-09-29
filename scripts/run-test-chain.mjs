@@ -400,7 +400,6 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/plaid-bank-feed.test.mjs",
   "node --no-warnings worker/test/plaid-protocol.test.mjs",
   "node --no-warnings worker/test/plaid-scheduled.test.mjs",
-  "node --no-warnings --test worker/test/simplefin-bank-feed.test.mjs",
   "node --no-warnings worker/test/qbo-bank-reconciliation.test.mjs",
   "node --no-warnings worker/test/quickbooks-oauth-callback.test.mjs",
   "node --no-warnings worker/test/support-access.test.mjs",

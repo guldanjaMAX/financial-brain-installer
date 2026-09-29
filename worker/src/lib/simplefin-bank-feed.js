@@ -226,18 +226,51 @@ export async function claimSimpleFinAccess(env, {
   return claimReceipt({ state: "claimed", item_ref: itemRef }, false);
 }
 
-function safeErrlist(value) {
+function accessReferenceFragments(accessUrl) {
+  if (!accessUrl) return [];
+  const fragments = new Set();
+  const add = (value) => {
+    const text = String(value || "");
+    if (!text) return;
+    fragments.add(text);
+    fragments.add(encodeURIComponent(text));
+    try { fragments.add(decodeURIComponent(text)); } catch {}
+  };
+  add(accessUrl);
+  try {
+    const parsed = new URL(accessUrl);
+    add(parsed.username);
+    add(parsed.password);
+    add(`${parsed.username}:${parsed.password}`);
+    for (const segment of parsed.pathname.split("/").filter(Boolean)) add(segment);
+    for (const value of parsed.searchParams.values()) add(value);
+  } catch {
+    // Access URLs pass validateAccessUrl before this point. A closed fallback
+    // still avoids treating a malformed value as safe provider text.
+    return [String(accessUrl)];
+  }
+  return [...fragments].filter(Boolean).sort((left, right) => right.length - left.length);
+}
+
+function safeErrlist(value, { accessUrl = null } = {}) {
   if (!Array.isArray(value)) throw new SimpleFinError("simplefin_response_invalid", 502);
-  return value.slice(0, 25).map((entry) => String(entry || "")
-    .replace(/https?:\/\/\S+/gi, "[provider address removed]")
-    .replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[provider reference removed]")
-    .replace(/[\r\n\t]+/g, " ")
-    .trim()
-    .slice(0, 240))
+  const secretFragments = accessReferenceFragments(accessUrl);
+  return value.slice(0, 25).map((entry) => {
+    let safe = String(entry || "");
+    for (const fragment of secretFragments) {
+      safe = safe.replaceAll(fragment, "[access reference removed]");
+    }
+    return safe
+      .replace(/https?:\/\/\S+/gi, "[provider address removed]")
+      .replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[provider reference removed]")
+      .replace(/[\r\n\t]+/g, " ")
+      .trim()
+      .slice(0, 240);
+  })
     .filter(Boolean);
 }
 
-function validatePayload(payload) {
+function validatePayload(payload, { accessUrl = null } = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload) || !Array.isArray(payload.accounts)) {
     throw new SimpleFinError("simplefin_response_invalid", 502);
   }
@@ -251,7 +284,10 @@ function validatePayload(payload) {
     transactions += account.transactions.length;
     if (transactions > 10_000) throw new SimpleFinError("simplefin_response_too_large", 502);
   }
-  return { accounts: payload.accounts, errlist: safeErrlist(payload.errlist || []) };
+  return {
+    accounts: payload.accounts,
+    errlist: safeErrlist(payload.errlist || [], { accessUrl }),
+  };
 }
 
 function accountInstitution(payload, account) {
@@ -277,9 +313,10 @@ async function stageResponse(env, {
   windowStart,
   windowEnd,
   payload,
+  accessUrl,
   stamp,
 }) {
-  const validated = validatePayload(payload);
+  const validated = validatePayload(payload, { accessUrl });
   const statements = [env.DB.prepare(
     `INSERT INTO simplefin_sync_windows
        (tenant_id,item_ref,window_start,window_end,state,errlist_json,fetched_at)
@@ -504,11 +541,18 @@ async function reserveRequest(env, tenantId, itemRef, stamp) {
   const day = dayOf(stamp);
   const result = await env.DB.prepare(
     `UPDATE simplefin_connections SET
-       requests_today=CASE WHEN request_day=? THEN requests_today+1 ELSE 1 END,
-       request_day=?,updated_at=?
+       requests_today=CASE
+         WHEN request_day IS NULL OR request_day<? THEN 1
+         ELSE COALESCE(requests_today,0)+1
+       END,
+       request_day=CASE
+         WHEN request_day IS NULL OR request_day<? THEN ?
+         ELSE request_day
+       END,
+       updated_at=?
      WHERE tenant_id=? AND item_ref=?
-       AND (request_day IS NULL OR request_day<>? OR requests_today<?)`,
-  ).bind(day, day, stamp, tenantId, itemRef, day, DAILY_REQUEST_LIMIT).run();
+       AND (request_day IS NULL OR request_day<? OR COALESCE(requests_today,0)<?)`,
+  ).bind(day, day, day, stamp, tenantId, itemRef, day, DAILY_REQUEST_LIMIT).run();
   if (changed(result) !== 1) throw new SimpleFinError("simplefin_daily_request_limit", 429);
 }
 
@@ -540,8 +584,9 @@ async function pullWindow(env, connection, item, {
   const window = requestWindow(connection, stamp);
   await reserveRequest(env, tenantId, item.item_ref, stamp);
   let payload;
+  let accessUrl;
   try {
-    const accessUrl = await readAccessUrl(env, item);
+    accessUrl = await readAccessUrl(env, item);
     const endpoint = new URL(accessUrl);
     endpoint.pathname = `${endpoint.pathname.replace(/\/+$/, "")}/accounts`;
     endpoint.search = "";
@@ -565,6 +610,7 @@ async function pullWindow(env, connection, item, {
     windowStart: window.start,
     windowEnd: window.end,
     payload,
+    accessUrl,
     stamp,
   });
   const partial = staged.errlist.length > 0;

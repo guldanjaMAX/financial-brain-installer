@@ -685,6 +685,15 @@ function migrationRows() {
 }
 
 const appliedMigrations = migrationRows();
+const SIMPLEFIN_RECOVERY_TABLES = Object.freeze([
+  "simplefin_claim_operations",
+  "simplefin_connections",
+  "simplefin_sync_windows",
+  "simplefin_account_assignments",
+  "simplefin_assignment_requests",
+  "simplefin_stage_accounts",
+  "simplefin_stage_transactions",
+]);
 assert.equal(recoveryVectorProtocolSupported(appliedMigrations.slice(0, 35)), false);
 assert.equal(recoveryVectorProtocolSupported(appliedMigrations.slice(0, 36)), true);
 assert.equal(recoveryVectorProtocolSupported(appliedMigrations), true);
@@ -713,6 +722,11 @@ assert.equal(recoveryExportTables(appliedMigrations).includes("ocr_page_requests
 assert.equal(recoveryExportTables(appliedMigrations.slice(0, 47)).includes("custom_api_current_jobs"), false);
 assert.equal(recoveryExportTables(appliedMigrations).includes("custom_api_current_jobs"), true);
 assert.equal(recoveryExportTables(appliedMigrations).includes("custom_api_schedule_state"), false);
+for (const table of SIMPLEFIN_RECOVERY_TABLES) {
+  assert.equal(RECOVERY_DURABLE_TABLES.includes(table), true, table);
+  assert.equal(recoveryExportTables(appliedMigrations.slice(0, 48)).includes(table), false, table);
+  assert.equal(recoveryExportTables(appliedMigrations).includes(table), true, table);
+}
 assert.equal(
   recoveryExportTables(appliedMigrations, { excludeLlmCallLog: true })
     .includes("llm_call_log"),
@@ -1937,6 +1951,7 @@ function providerHarness({
     "source_original_accepted_resolutions",
     "source_original_accepted_resolution_activations",
   ]);
+  const simpleFinTables = new Set(SIMPLEFIN_RECOVERY_TABLES);
   const durableTablesForVersion = (version) => RECOVERY_DURABLE_TABLES.filter((name) =>
     (version >= 37 || name !== "memory_supersessions") &&
     (version >= 41 || !mapTables.has(name)) &&
@@ -1945,7 +1960,8 @@ function providerHarness({
     (version >= 44 || !sourceOriginalResultFamilyTables.has(name)) &&
     (version >= 45 || !sourceOriginalAcceptedResolutionTables.has(name)) &&
     (version >= 47 || name !== "ocr_page_requests") &&
-    (version >= 48 || !name.startsWith("custom_api_")));
+    (version >= 48 || !name.startsWith("custom_api_")) &&
+    (version >= 49 || !simpleFinTables.has(name)));
 
   const runWrangler = async ({ command, args, env, cwd }) => {
     wranglerCalls.push({ command, args: [...args], env: { ...env }, cwd });
@@ -2483,9 +2499,9 @@ function providerHarness({
           .sort().map((name) => ({ name }));
       } else if (/SELECT type,name,tbl_name/.test(sql)) {
         const version = migrationVersionForRole(callRole);
-        rows = schemaRows.filter((row) =>
-          (version >= 37 || (row.name !== "memory_supersessions" && row.tbl_name !== "memory_supersessions")) &&
-          (version >= 41 || (!mapTables.has(row.name) && !mapTables.has(row.tbl_name))));
+        const presentTables = new Set(durableTablesForVersion(version));
+        rows = schemaRows.filter((row) => row.name === "chunks_fts" ||
+          presentTables.has(row.name) || presentTables.has(row.tbl_name));
       } else if (/documents_ingested_max/.test(sql)) {
         assert.match(
           sql,
