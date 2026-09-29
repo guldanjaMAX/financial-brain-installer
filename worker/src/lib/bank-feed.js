@@ -42,6 +42,7 @@
  */
 
 import { jsonResponse, privateNoStore, validateAdminKey } from "./core.js";
+import { FAVICON } from "./app-page.js";
 import { ownerNavigationPrincipal, ownerSessionPrincipal } from "./owner-auth.js";
 import { importBankExport, balanceRoleFor } from "./fin-import.js";
 import { bankFeedProfile } from "./bank-feed-profiles.js";
@@ -1369,6 +1370,7 @@ export function connectPageHtml(config, { ownerEntityCount = null } = {}) {
     "default-src 'none'",
     `script-src 'unsafe-inline'${sdkOrigin ? ` ${sdkOrigin}` : ""}`,
     "style-src 'unsafe-inline'",
+    "img-src data:",
     `connect-src 'self'${connectOrigins.length ? ` ${connectOrigins.join(" ")}` : ""}`,
     `frame-src${sdkOrigin ? ` ${sdkOrigin}` : " 'none'"}`,
     "frame-ancestors 'none'",
@@ -1377,9 +1379,11 @@ export function connectPageHtml(config, { ownerEntityCount = null } = {}) {
   ].join("; ");
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect a bank</title>
+<link rel="icon" href="${FAVICON}">
+<link rel="apple-touch-icon" href="${FAVICON}">
 <style>body{font:16px/1.5 -apple-system,system-ui,sans-serif;max-width:44rem;margin:3rem auto;padding:0 1.25rem;color:#202124}
 h1{font-size:1.5rem;margin-bottom:.5rem}h2{font-size:1.15rem;margin:0 0 .4rem}p{color:#444}button,select{font:inherit;padding:.7rem 1rem;border-radius:.55rem}button{border:0;background:#1f2937;color:#fff;cursor:pointer}button.secondary{background:#e8eaed;color:#202124}button:disabled{opacity:.55;cursor:wait}
-.note{font-size:.9rem;color:#666}.err{color:#9b1c1c;white-space:pre-wrap}.ok{color:#285c35;white-space:pre-wrap}.panel{margin-top:2rem;border:1px solid #dadce0;border-radius:.8rem;padding:1rem}.account{border-top:1px solid #eee;padding:1rem 0}.account:first-child{border-top:0}.account h3{font-size:1rem;margin:0}.account p{margin:.3rem 0}.assign{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin-top:.7rem}.assign select{min-width:15rem;border:1px solid #aaa;background:#fff}.actions{display:flex;gap:.7rem;align-items:center;flex-wrap:wrap}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}</style></head><body>
+.note{font-size:.9rem;color:#666}.err{color:#9b1c1c;white-space:pre-wrap}.ok{color:#285c35;white-space:pre-wrap}.panel{margin-top:2rem;border:1px solid #dadce0;border-radius:.8rem;padding:1rem}.bank-group{border-top:2px solid #dadce0;padding-top:1rem;margin-top:1rem}.bank-group:first-child{border-top:0;margin-top:0}.account{border-top:1px solid #eee;padding:1rem}.account.waiting{background:#fff8e6;border-left:4px solid #d69e2e}.account:first-child{border-top:0}.account h3{font-size:1rem;margin:0}.account p{margin:.3rem 0}.assign{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin-top:.7rem}.assign select{min-width:15rem;border:1px solid #aaa;background:#fff}.actions{display:flex;gap:.7rem;align-items:center;flex-wrap:wrap}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}</style></head><body>
 <h1>Connect a bank account</h1>
 <p>Sign in through ${config.provider === "plaid" ? "Plaid" : "your bank connection provider"} or your bank's secure screen. Financial Brain does not receive your bank
 password or security codes. This connection reads your accounts and transactions. It cannot move money.</p>
@@ -1490,9 +1494,14 @@ async function ownedEntities() {
   if (!Array.isArray(data.entities)) throw new Error("The business list is unavailable. No account choices were changed.");
   return data.entities.filter((entity) => entity && entity.status === "active" && entity.relationship === "owned");
 }
-async function assignAccount(account, entitySlug, button) {
+const pendingAccountChoices = new Map();
+const assignmentStates = new Map();
+const assignmentQueue = [];
+const bankAssignmentStates = new Map();
+const bankAssignmentResults = new Map();
+let assignmentQueueBusy = false;
+async function saveAccountAssignment(account, entitySlug) {
   const retry = assignmentRequestId(account.account_ref, entitySlug);
-  button.disabled = true;
   accountSay("Saving that choice…");
   try {
     const result = await post("/api/bank-feed/accounts/assign", {
@@ -1501,21 +1510,87 @@ async function assignAccount(account, entitySlug, button) {
       entity_slug: entitySlug,
     });
     try { sessionStorage.removeItem(retry.key); } catch (e) {}
-    accountSay(result.changed === false
+    pendingAccountChoices.delete(account.account_ref);
+    const message = result.changed === false
       ? "That account was already assigned there. Nothing else changed."
-      : "Saved. Loading can continue once every account has a choice.");
-    await loadAccounts();
+      : "Saved. Loading can continue once every account has a choice.";
+    accountSay(message);
+    return { saved: true, message };
   } catch (error) {
     accountSay(error.message, true);
-  } finally {
-    button.disabled = false;
+    return { saved: false, message: error.message };
   }
 }
-function renderAccounts(accounts, entities) {
-  const root = el("accounts");
-  root.replaceChildren();
-  for (const account of accounts) {
-    const card = make("article", null, "account");
+async function drainAssignmentQueue() {
+  if (assignmentQueueBusy) return;
+  assignmentQueueBusy = true;
+  while (assignmentQueue.length > 0) {
+    const job = assignmentQueue.shift();
+    assignmentStates.set(job.account.account_ref, "saving");
+    if (job.button) job.button.textContent = "Saving…";
+    const result = await saveAccountAssignment(job.account, job.entitySlug);
+    assignmentStates.delete(job.account.account_ref);
+    if (!result.saved && job.button) {
+      job.button.disabled = false;
+      job.button.textContent = "Assign account";
+    }
+    if (job.reload && result.saved) await loadAccounts({ quiet: true });
+    job.resolve(result);
+  }
+  assignmentQueueBusy = false;
+}
+function enqueueAccountAssignment(account, entitySlug, { button = null, reload = false } = {}) {
+  if (assignmentStates.has(account.account_ref)) return null;
+  pendingAccountChoices.set(account.account_ref, entitySlug);
+  assignmentStates.set(account.account_ref, assignmentQueueBusy ? "queued" : "saving");
+  const result = new Promise((resolve) => assignmentQueue.push({ account, entitySlug, button, reload, resolve }));
+  if (button) {
+    button.disabled = true;
+    button.textContent = assignmentQueueBusy ? "Queued…" : "Saving…";
+  }
+  drainAssignmentQueue();
+  return result;
+}
+function queueAccountAssignment(account, entitySlug, button) {
+  if (!enqueueAccountAssignment(account, entitySlug, { button, reload: true })) {
+    accountSay("That account already has a choice waiting to save.", true);
+  }
+}
+async function assignBankAccounts(bankKey, accounts, entitySlug, button, resultsRoot) {
+  if (bankAssignmentStates.has(bankKey)) return;
+  // A whole-bank choice must never overwrite a more specific choice that the
+  // owner already queued on one account. Both paths use the same queue, and
+  // the bank path leaves every account already represented there alone.
+  const pending = accounts.filter((account) =>
+    (!account.assignment || account.assignment.state !== "assigned") &&
+    !assignmentStates.has(account.account_ref));
+  if (pending.length === 0) return;
+  bankAssignmentStates.set(bankKey, "saving");
+  bankAssignmentResults.set(bankKey, []);
+  button.disabled = true;
+  button.textContent = "Assigning…";
+  resultsRoot.replaceChildren();
+  const jobs = pending.map((account) => {
+    const label = account.masked_identifier || "Bank account";
+    const line = make("p", label + ": Saving…", "note");
+    resultsRoot.append(line);
+    return enqueueAccountAssignment(account, entitySlug).then((outcome) => {
+      const result = { label, saved: outcome.saved, message: outcome.message };
+      bankAssignmentResults.get(bankKey).push(result);
+      line.textContent = label + (outcome.saved ? ": Saved." : ": Not saved. " + outcome.message);
+      line.className = outcome.saved ? "ok" : "err";
+      return result;
+    });
+  });
+  const results = await Promise.all(jobs);
+  bankAssignmentStates.delete(bankKey);
+  await loadAccounts({ quiet: true });
+  const failures = results.filter((result) => !result.saved);
+  if (failures.length > 0) accountSay(failures[failures.length - 1].message, true);
+}
+function renderAccountCard(account, entities) {
+    const waiting = !account.assignment || account.assignment.state !== "assigned";
+    const card = make("article", null, waiting ? "account waiting" : "account");
     card.append(make("h3", account.masked_identifier || "Bank account"));
     const institution = account.institution_label ? account.institution_label + ". " : "";
     if (account.assignment && account.assignment.state === "assigned") {
@@ -1537,17 +1612,74 @@ function renderAccounts(accounts, entities) {
         option.value = entity.entity_slug;
         select.append(option);
       }
-      const button = make("button", "Assign account");
+      const pendingChoice = pendingAccountChoices.get(account.account_ref);
+      if (pendingChoice && entities.some((entity) => entity.entity_slug === pendingChoice)) select.value = pendingChoice;
+      select.onchange = () => {
+        if (select.value) pendingAccountChoices.set(account.account_ref, select.value);
+        else pendingAccountChoices.delete(account.account_ref);
+      };
+      const assignmentState = assignmentStates.get(account.account_ref);
+      const button = make("button", assignmentState === "saving" ? "Saving…" : assignmentState === "queued" ? "Queued…" : "Assign account");
       button.type = "button";
-      button.disabled = entities.length === 0;
+      button.disabled = entities.length === 0 || Boolean(assignmentState);
       button.onclick = () => {
         if (!select.value) { accountSay("Choose who owns this account first.", true); return; }
-        assignAccount(account, select.value, button);
+        queueAccountAssignment(account, select.value, button);
       };
       row.append(label, select, button);
       card.append(row);
     }
-    root.append(card);
+    return card;
+}
+function renderAccounts(accounts, entities) {
+  const root = el("accounts");
+  root.replaceChildren();
+  const groups = new Map();
+  for (const account of accounts) {
+    const bankKey = account.institution_label || "Saved bank connection";
+    if (!groups.has(bankKey)) groups.set(bankKey, []);
+    groups.get(bankKey).push(account);
+  }
+  for (const [bankKey, bankAccounts] of groups) {
+    const group = make("section", null, "bank-group");
+    group.append(make("h3", bankKey));
+    const pending = bankAccounts.filter((account) => !account.assignment || account.assignment.state !== "assigned");
+    group.append(make("p", pending.length + " of " + bankAccounts.length + " " +
+      (bankAccounts.length === 1 ? "account" : "accounts") + " still " +
+      (pending.length === 1 ? "needs" : "need") + " an owner.", "note bank-progress"));
+    if (pending.length > 0 && entities.length > 0) {
+      const controls = make("div", null, "assign bank-assign");
+      const label = make("label", "Assign every account of this bank to");
+      const select = make("select", null, "bank-owner-select");
+      select.append(make("option", "Choose an account owner"));
+      select.options[0].value = "";
+      for (const entity of entities) {
+        const option = make("option", entity.label || entity.legal_name || entity.entity_slug);
+        option.value = entity.entity_slug;
+        select.append(option);
+      }
+      const bankState = bankAssignmentStates.get(bankKey);
+      const button = make("button", bankState ? "Assigning…" : "Assign this bank");
+      button.type = "button";
+      button.disabled = Boolean(bankState);
+      const resultsRoot = make("div", null, "bank-results");
+      button.onclick = () => {
+        if (!select.value) { accountSay("Choose who owns this bank's unassigned accounts first.", true); return; }
+        assignBankAccounts(bankKey, bankAccounts, select.value, button, resultsRoot);
+      };
+      controls.append(label, select, button);
+      group.append(controls, resultsRoot);
+    }
+    const savedResults = bankAssignmentResults.get(bankKey);
+    if (savedResults && savedResults.length > 0) {
+      const results = make("div", null, "bank-results");
+      for (const result of savedResults) {
+        results.append(make("p", result.label + (result.saved ? ": Saved." : ": Not saved. " + result.message), result.saved ? "ok" : "err"));
+      }
+      group.append(results);
+    }
+    for (const account of bankAccounts) group.append(renderAccountCard(account, entities));
+    root.append(group);
   }
 }
 async function loadAccounts(options) {
@@ -1563,9 +1695,10 @@ async function loadAccounts(options) {
     if (data.accounts.length === 0) {
       accountSay("No accounts have arrived yet. If you just connected, wait a moment and check again.");
     } else if (data.summary && data.summary.assignment_required > 0) {
-      accountSay(data.summary.assignment_required + (data.summary.assignment_required === 1
-        ? " account needs an owner choice before its transactions can load."
-        : " accounts need owner choices before their transactions can load.") +
+      const pending = data.summary.assignment_required;
+      accountSay(pending + " of " + data.accounts.length + " " +
+        (data.accounts.length === 1 ? "account" : "accounts") + " still " +
+        (pending === 1 ? "needs" : "need") + " an owner." +
         (entities.length === 0 ? " " + NO_OWNER_LINE : ""));
     } else if (data.state === "current") {
       accountSay("Every account is assigned and current.");
@@ -1596,7 +1729,13 @@ async function loadConnections() {
     for (const connection of data.connections) {
       const row = make("div", null, "account");
       row.append(make("h3", connection.institution_label || "Saved bank connection"));
-      row.append(make("p", connection.status === "connected" ? "Connection saved. Account history may still be loading." : "This connection needs attention."));
+      const pending = Number(connection.accounts_needing_owner);
+      const connectedLine = Number.isSafeInteger(pending) && pending > 0
+        ? "Connected. " + pending + (pending === 1
+          ? " account needs an owner below before history can load."
+          : " accounts need an owner below before history can load.")
+        : "Connection saved. Account history may still be loading.";
+      row.append(make("p", connection.status === "connected" ? connectedLine : "This connection needs attention."));
       if (connection.status !== "removed") {
         const repair = make("a", "Repair connection");
         repair.href = "/app/connect/bank?mode=reauthorise&item_ref=" + encodeURIComponent(connection.item_ref);
@@ -1730,8 +1869,15 @@ export async function handleBankFeed(env, request, url, path, ctx) {
       };
       if (!access.authorised) {
         if (access.scoped) return new Response("Only the owner can connect a bank.", { status: 403 });
-        return new Response("Sign in first at /app, then open this page again.", {
-          status: 401, headers: { "Content-Type": "text/plain; charset=utf-8" },
+        return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in to connect a bank</title></head>
+<body><main><h1>Sign in first</h1><p>Sign in first at /app using <a href="/app">Sign in to your Brain</a>, then open the Connect a bank page again.</p></main></body></html>`, {
+          status: 401,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+          },
         });
       }
       // Only the count is read, and an unreadable count leaves the section in
