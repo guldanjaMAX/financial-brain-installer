@@ -16,7 +16,7 @@ this changed candidate.
 - **A saved browser sign-in no longer blocks a custom-domain Brain at the
   workers.dev address check.** Cloudflare can refuse that account read even
   when the sign-in can update a Brain that uses its own domain. That Brain now
-  continues without a workers.dev receipt. A Brain whose address uses
+  continues; it never used the workers.dev address. A Brain whose address uses
   workers.dev still stops, explains that its address needs the refused read,
   and offers the same explicit account-scoped recovery token choice. Nothing
   changes unless the owner accepts that recovery path. To check: run the next

@@ -1143,8 +1143,8 @@ export function cloudflareOAuthFailureMessage(error, { resumeCommand = null } = 
         ? "Cloudflare sign-in completed, but Wrangler 4.131.1 cannot request the Vectorize permission this install requires. " +
           "Nothing was changed. Continue only with a separately approved, account-scoped API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read."
         : workersSubdomainScopeMissing
-          ? "Cloudflare sign-in completed, but the saved browser sign-in cannot read this account's workers.dev address, which this Brain's address uses. " +
-            "Nothing was changed. Continue only with a Cloudflare key: a separately approved, account-scoped API token with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read."
+          ? "This browser sign-in cannot read this account's workers.dev address, which this Brain needs for its web address. " +
+            "Nothing was changed. To continue, use a separate account-scoped recovery API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read."
         : "Cloudflare sign-in completed, but the approved access could not reach every required Workers, D1, Vectorize, and Workers AI surface. Review the selected account and rerun the sign-in.",
     CLOUDFLARE_ACCOUNT_NONE:
       "That Cloudflare login does not have an account ready for installation yet. Finish creating or joining the account in Cloudflare, then rerun the same command.",
@@ -1353,8 +1353,8 @@ export async function withCloudflareControlCredential(action, options = {}) {
         "with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read. " +
         "Use recovery API-token access now? (y/n)"
       : workersSubdomainScopeMissing
-        ? "The saved browser sign-in cannot read this account's workers.dev address, which this Brain's address uses. " +
-          "Nothing was changed. Continue only with a Cloudflare key: a separate account-scoped API token " +
+        ? "This browser sign-in cannot read this account's workers.dev address, which this Brain needs for its web address. " +
+          "Nothing was changed. To continue, use a separate account-scoped recovery API token from the Cloudflare dashboard " +
           "with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read. " +
           "Use recovery API-token access now? (y/n)"
         : "Cloudflare browser sign-in is still unavailable. Use recovery API-token access now? (y/n)";

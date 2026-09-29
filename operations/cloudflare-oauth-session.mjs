@@ -842,6 +842,7 @@ export async function preflightCloudflareOAuthAccount(token, account, options = 
       if (check.name === "workers_subdomain" &&
           error?.code === "CLOUDFLARE_OAUTH_SCOPE_MISSING" &&
           !workersSubdomainRequired) {
+        // This exception keys on the 403 scope classification and exact surface, not a provider error code.
         workersSubdomainUnreadable = true;
         continue;
       }
