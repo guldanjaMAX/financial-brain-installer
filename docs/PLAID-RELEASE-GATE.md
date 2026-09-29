@@ -39,19 +39,18 @@ while present: they may set `enabled` to `true` with `provider: "plaid"` and
 these steps, not permission to invite anyone else.
 
 Application credentials are entered by the owner through `brain connect bank`.
-Before it opens the browser, the command lists the Worker's secret names
-read-only. If `BANK_FEED_CLIENT_ID`, `BANK_FEED_SECRET`, or
-`BANK_FEED_WRAPPING_KEY_V2` is missing, it asks the owner for the Plaid client
-ID and secret at a hidden prompt, generates a missing wrapping key locally,
-writes the missing values to the Worker as secrets, lists the names again to
-verify them, and prints names only. An existing wrapping key is never replaced,
-because retained encrypted connection references depend on it. No command
-accepts these values from environment variables, arguments, or chat. Generic
-`brain setup`, `brain secrets`, and technician workflows still do not accept or
-write them. Routine setup preserves a complete existing set, and all three
-names must be present before a routine core-key rotation can begin. If any is
-missing, it stops without changing a local or Worker secret and points the
-owner to `brain connect bank`.
+The preceding setup or deploy lists the Worker's secret names read-only,
+generates `BANK_FEED_WRAPPING_KEY_V2` only when its name is absent, writes it
+through the Worker secret path, and lists the names again to verify it. Update
+uses that same deploy path. An existing wrapping key is never replaced because
+retained encrypted connection references depend on it. No value is printed,
+returned, accepted from an environment variable or argument, or derived from
+the admin or session key. Before `brain connect bank` opens the browser, it
+lists names again and asks at the hidden prompt only for a missing Plaid client
+ID and secret. Its compatibility path can still create a missing wrapping key
+for an older incomplete deployment. `brain secrets` never writes a bank value;
+it permits provider credentials to remain pending but refuses an enabled feed
+whose independently generated wrapping-key name is still missing.
 Recording the return URI in a manifest is non-secret evidence that it is
 already on the matching Plaid dashboard's Allowed redirect URIs list. It does
 not perform that registration or justify automatically renewing a Plaid
@@ -64,10 +63,12 @@ optional.
 These are the steps an approved owner-present pilot actually goes through.
 Each one was missed or misread in a sandbox rehearsal.
 
-1. **Keys before setup.** When `corpora.bank_feed.enabled` is `true`, run
-   `brain connect bank <manifest>` BEFORE `brain setup` or `brain secrets`.
-   Those commands stop while any of the three bank secret names is missing
-   from the Worker, and only `brain connect bank` can write them.
+1. **Deploy establishes independent custody.** When
+   `corpora.bank_feed.enabled` is `true`, `brain setup`, `brain update`, and
+   `brain deploy` create and verify only a missing wrapping key. After the
+   Worker is deployed, run `brain connect bank <manifest>` for Plaid provider
+   credentials. No separate wrapping-key command or owner-entered wrapping
+   value is part of this journey.
 2. **Keys are checked before they are saved.** The hidden prompt asks for the
    Plaid client ID and secret for the manifest's environment. Before anything
    is written, the command makes one harmless authenticated Plaid read

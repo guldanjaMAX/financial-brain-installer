@@ -37,6 +37,71 @@ export const BANK_FEED_OWNER_SECRET_NAMES = Object.freeze([
   BANK_ACCESS_WRAPPING_KEY_SECRET,
 ]);
 
+/**
+ * Establish only the independent bank wrapping key during a Worker lifecycle.
+ *
+ * Provider credentials still belong to their owner-present setup path. This
+ * helper receives and returns names only, apart from passing the new value
+ * directly from the reviewed generator to the injected Worker secret writer.
+ * An existing key is never read, replaced, validated, or derived from another
+ * credential. Rotation therefore remains impossible from install, update, and
+ * deploy.
+ */
+export async function ensureBankFeedWrappingKey({
+  enabled = false,
+  listSecretNames,
+  putSecret,
+  generateWrappingKey = generateBankAccessWrappingKey,
+} = {}) {
+  if (enabled !== true) {
+    return Object.freeze({ created: false, name: BANK_ACCESS_WRAPPING_KEY_SECRET });
+  }
+  if (typeof listSecretNames !== "function" || typeof putSecret !== "function") {
+    throw new TypeError("bank wrapping-key custody needs Worker secret-list and secret-put operations");
+  }
+
+  let present;
+  try {
+    present = namesFromInventory(await listSecretNames());
+  } catch {
+    throw new Error(
+      "the Worker's secret names could not be checked, so the independent bank wrapping key was not changed. " +
+        "Rerun the same command after Workers Scripts access is available.",
+    );
+  }
+  if (present.has(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
+    return Object.freeze({ created: false, name: BANK_ACCESS_WRAPPING_KEY_SECRET });
+  }
+
+  const generated = generateWrappingKey();
+  try {
+    await putSecret(BANK_ACCESS_WRAPPING_KEY_SECRET, generated);
+  } catch {
+    throw new Error(
+      "the independent bank wrapping key could not be created on the Worker. Nothing was half-written: " +
+        "a Worker secret write is atomic, and no wrapping-key value was saved locally. " +
+        "Rerun the same setup, update, or deploy command.",
+    );
+  }
+
+  let verified;
+  try {
+    verified = namesFromInventory(await listSecretNames());
+  } catch {
+    throw new Error(
+      "the independent bank wrapping key write could not be verified by listing the Worker's secret names again. " +
+        "Rerun the same setup, update, or deploy command before opening bank setup.",
+    );
+  }
+  if (!verified.has(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
+    throw new Error(
+      "the independent bank wrapping key was not listed after its Worker write. " +
+        "Rerun the same setup, update, or deploy command before opening bank setup.",
+    );
+  }
+  return Object.freeze({ created: true, name: BANK_ACCESS_WRAPPING_KEY_SECRET });
+}
+
 const PROMPT_LABELS = Object.freeze({
   BANK_FEED_CLIENT_ID: "client_id",
   BANK_FEED_SECRET: "secret",

@@ -185,9 +185,11 @@ being tested. You did nothing wrong, and there is no bank password,
 verification code, or Plaid setup key to enter here. Ordinary onboarding leaves
 bank connections off and the technician will never ask you to paste those
 values into chat or a normal command. If this Brain is an already approved
-pilot, its complete existing bank setup is left unchanged. If any saved piece
-is missing, setup stops before changing a credential and explains the
-separately reviewed next step.
+pilot and its manifest enables a bank feed, setup, update, and deploy make sure
+the Worker's independent bank wrapping key exists. They create it only when its
+secret name is missing, verify the name afterward, and never print, replace, or
+derive it from another key. Provider setup remains a separate owner step, but
+there is no wrapping-key command for the owner to run.
 
 The complete guide is
 [onboarding/09-technician-setup-and-rehearsal.md](onboarding/09-technician-setup-and-rehearsal.md).

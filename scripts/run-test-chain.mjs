@@ -141,6 +141,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/plaid-amount-precision.test.mjs",
   "node --no-warnings --test worker/test/plaid-owner-flow.test.mjs",
   "node --no-warnings --test test/bank-feed-replace-keys.test.mjs",
+  "node --no-warnings --test test/bank-wrapping-key-lifecycle.test.mjs",
   "node --no-warnings --test worker/test/owner-document-create.test.mjs",
   "node --no-warnings --test worker/test/documents-summary-lightweight.test.mjs",
   "node --no-warnings --test worker/test/documents-summary-scale.test.mjs",
@@ -466,6 +467,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/plaid-amount-precision.test.mjs",
   "node --no-warnings --test worker/test/plaid-owner-flow.test.mjs",
   "node --no-warnings --test test/bank-feed-replace-keys.test.mjs",
+  "node --no-warnings --test test/bank-wrapping-key-lifecycle.test.mjs",
   "node --no-warnings --test worker/test/documents-summary-lightweight.test.mjs",
   "node --no-warnings --test worker/test/documents-summary-scale.test.mjs",
   // Worker-hosted custom API source: migration 0048, the declarative setup

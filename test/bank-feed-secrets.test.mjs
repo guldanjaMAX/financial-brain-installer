@@ -215,8 +215,8 @@ try {
       outcomes.every(({ name, events, localMutations, message }) =>
         message.includes(name) &&
         /not accepted from environment variables or by `brain secrets`/i.test(message) &&
-        /credential setup remains held/i.test(message) &&
-        /separately reviewed owner-custody process/i.test(message) &&
+        /missing wrapping key is generated only inside setup, update, or deploy/i.test(message) &&
+        /provider credentials use the reviewed owner-custody flow/i.test(message) &&
         events.length === 0 && localMutations.length === 0),
       JSON.stringify(outcomes.map(({ name, events, localMutations, message }) => ({
         name, events, localMutations, message: message.slice(0, 180),
@@ -258,11 +258,10 @@ try {
     } catch (error) {
       message = String(error?.message || error);
     }
-    check("a fresh enabled feed stops before any core-key or local mutation",
-      /BANK_FEED_CLIENT_ID/.test(message) && /BANK_FEED_SECRET/.test(message) &&
+    check("an enabled feed missing its deploy-owned wrapping key stops before any core-key or local mutation",
       /BANK_FEED_WRAPPING_KEY_V2/.test(message) &&
-      /credential setup remains held/i.test(message) &&
-      /separately reviewed owner-custody process/i.test(message) &&
+      !/BANK_FEED_CLIENT_ID/.test(message) && !/BANK_FEED_SECRET(?:\W|$)/.test(message) &&
+      /same `brain setup`, `brain update`, or `brain deploy` command/i.test(message) &&
       !/ceremony/i.test(message) && events.length === 0 && localMutations.length === 0,
       `${message.slice(0, 280)} ${JSON.stringify({ events, localMutations })}`);
   }
@@ -288,9 +287,9 @@ try {
     } catch (error) {
       message = String(error?.message || error);
     }
-    check("a partial bank inventory refuses before unrelated cleanup or core-key rotation",
+    check("a provider-only bank inventory still refuses a missing wrapping key before unrelated mutation",
       /BANK_FEED_WRAPPING_KEY_V2/.test(message) &&
-      /credential setup remains held/i.test(message) &&
+      /same `brain setup`, `brain update`, or `brain deploy` command/i.test(message) &&
       events.length === 0 && localMutations.length === 0,
       `${message.slice(0, 240)} ${JSON.stringify({ events, localMutations })}`);
   }
@@ -338,22 +337,18 @@ try {
     }, () => cmdSecrets(disabledPath, secretsOptions));
     const disabledEvents = [...events];
     const afterDisable = events.length;
-    let message = "";
-    try {
-      await isolatedRuntime({
-        fetchImpl,
-        env: { CLOUDFLARE_API_TOKEN: "fixture-token" },
-      }, () => cmdSecrets(enabledPath, secretsOptions));
-    } catch (error) {
-      message = String(error?.message || error);
-    }
+    await isolatedRuntime({
+      fetchImpl,
+      env: { CLOUDFLARE_API_TOKEN: "fixture-token" },
+    }, () => cmdSecrets(enabledPath, secretsOptions));
     const reenabledEvents = events.slice(afterDisable);
-    check("disabled to held re-enable preserves wrapping-key custody and refuses missing provider bindings",
+    check("disabled to re-enable preserves wrapping-key custody and permits provider setup to remain pending",
       disabledEvents.every((event) => event !== `delete:${WRAPPING_NAME}`) &&
       reenabledEvents.every((event) => event !== `set:${WRAPPING_NAME}`) &&
       fetchImpl.secretNames().has(WRAPPING_NAME) &&
-      /missing required Worker secrets/i.test(message) && reenabledEvents.length === 0,
-      JSON.stringify({ message, disabledEvents, reenabledEvents }));
+      ["ADMIN_KEY", "RAG_PROXY_KEY", "SESSION_SIGNING_KEY"].every((name) =>
+        reenabledEvents.includes(`set:${name}`)),
+      JSON.stringify({ disabledEvents, reenabledEvents }));
   }
 
 
