@@ -976,8 +976,12 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
     String(remote).slice(0, 2200));
 
   // And the ones that genuinely need Cloudflare should NOT have been changed.
+  // cmdDeploy is a thin wrapper that releases the shared prompt after the
+  // deploy body returns; the Cloudflare requirement lives in that body.
+  check("cmdDeploy delegates to the deploy body that resolves Cloudflare",
+    /return await cmdDeployWithPrompts\(manifestPath, options\);/.test(bodyOf("cmdDeploy") || ""));
   for (const name of ["cmdProvision", "cmdDeploy", "cmdMigrate"]) {
-    const b = bodyOf(name);
+    const b = bodyOf(name === "cmdDeploy" ? "cmdDeployWithPrompts" : name);
     const resolvesCloudflare = name === "cmdMigrate"
       ? /const resolveMigrateAccount = options\.resolveAccount \?\? resolveAccount;/.test(b || "") &&
         /const acct = await resolveMigrateAccount\(m\);/.test(b || "")
