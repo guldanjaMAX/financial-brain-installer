@@ -247,12 +247,24 @@ async function whatsnewStatusOutput(readStatus, options = {}) {
   const originalLog = console.log;
   console.log = (...values) => output.push(values.join(" "));
   try {
-    await cmdWhatsnew(manifestPath, { readStatus, discoverManifest });
+    await cmdWhatsnew(manifestPath, { readStatus, discoverManifest, all: options.all });
   } finally {
     console.log = originalLog;
   }
-  return output.join("\n").split("# What's new")[0];
+  const rendered = output.join("\n");
+  return options.full ? rendered : rendered.split("# What's new")[0];
 }
+
+const currentNotesOnly = await whatsnewStatusOutput(async () => ({
+  status: "up_to_date", latest_version: version,
+}), { full: true });
+assert.match(currentNotesOnly, /## 0\.4\.9/u);
+assert.doesNotMatch(currentNotesOnly, /## 0\.4\.6/u,
+  "whatsnew must print only the current version by default");
+const allNotes = await whatsnewStatusOutput(async () => ({
+  status: "up_to_date", latest_version: version,
+}), { full: true, all: true });
+assert.match(allNotes, /## 0\.4\.6/u, "whatsnew --all must retain the full history");
 
 let checkedInstalledVersion = null;
 const heldOutput = await whatsnewStatusOutput(async ({ installedVersion }) => {
@@ -260,8 +272,8 @@ const heldOutput = await whatsnewStatusOutput(async ({ installedVersion }) => {
   return { status: "release_held", installed_version: installedVersion };
 });
 assert.equal(checkedInstalledVersion, version, "whatsnew did not check the manifest's installed version");
-assert.match(heldOutput, /public release channel is held/i,
-  "whatsnew must name a held public channel");
+assert.match(heldOutput, new RegExp(`You're on ${escapedVersion}\\. No newer version is out yet\\. Nothing to do\\.`),
+  "whatsnew must make a held feed an informational nothing-to-do state");
 assert.doesNotMatch(heldOutput, /up to date/i,
   "a held public channel cannot be reported as up to date");
 
@@ -329,7 +341,7 @@ assert.equal(discoveredWithoutArgument, true,
   "brain whatsnew without a manifest argument did not discover the installed Brain");
 assert.equal(noArgumentCheckedVersion, version,
   "brain whatsnew without a manifest argument did not check the discovered installed version");
-assert.match(noArgumentOutput, /public release channel is held/i,
+assert.match(noArgumentOutput, /No newer version is out yet/i,
   "the documented no-argument path must report the public release state");
 assert.doesNotMatch(noArgumentOutput, /up to date/i,
   "the documented no-argument path cannot call a held release up to date");

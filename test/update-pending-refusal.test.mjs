@@ -21,8 +21,9 @@ import {
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
 const PENDING_MESSAGE = (pending) => renderCliCommands(
-  `This Brain is still processing ${pending} queued search update(s). Updating now would pause it mid-queue. ` +
-    "Nothing was changed. Wait until `brain health` says query-ready, then run the update again.",
+  `Your Brain is still indexing ${pending} recent items so they can be found by meaning. ` +
+    "Updating now would interrupt that, so nothing was changed. You can keep using your Brain. " +
+    "Run brain update again later.",
 );
 
 const UNREADABLE_MESSAGE = renderCliCommands(
@@ -180,6 +181,7 @@ test("pending vector work refuses before adoption, verification, deployment, or 
     }
 
     assert.equal(error?.message, PENDING_MESSAGE(7));
+    assert.equal(supportErrorCode(error, { command: "update" }), "UPDATE_WAITING_FOR_INDEXING");
     assert.deepEqual(events, ["authenticated documents backlog read"]);
     assert.equal(readFileSync(manifestPath, "utf8"), original);
   });
@@ -202,6 +204,7 @@ test("an unreadable backlog fails closed and names the failed read", async () =>
     }
 
     assert.equal(error?.message, UNREADABLE_MESSAGE);
+    assert.equal(supportErrorCode(error, { command: "update" }), "UPDATE_BRAIN_BUSY");
     assert.doesNotMatch(error?.message || "", /private transport detail/);
     assert.deepEqual(events, ["authenticated documents backlog read"]);
     assert.equal(readFileSync(manifestPath, "utf8"), original);
@@ -211,11 +214,15 @@ test("an unreadable backlog fails closed and names the failed read", async () =>
 test("an empty backlog reaches the paused-deployment stage", async () => {
   await withFixture(async ({ manifestPath }) => {
     const events = [];
-    const result = await cmdUpdate(manifestPath, updateHarness(
+    const finish = [];
+    const result = await cmdUpdate(manifestPath, {
+      ...updateHarness(
       manifestPath,
       async () => ({ pending: 0 }),
       events,
-    ));
+      ),
+      reportUpdateFinish: (message) => finish.push(message),
+    });
 
     assert.deepEqual(result, { updated: true });
     assert.deepEqual(events, [
@@ -224,6 +231,12 @@ test("an empty backlog reaches the paused-deployment stage", async () => {
       "control boundary",
       "verification",
       "paused vector-drain deployment",
+    ]);
+    assert.deepEqual(finish, [
+      "Done. Your Brain is now on version 0.4.9 and passed its checks.\n" +
+        "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.\n" +
+        "In Claude Code type /exit, then claude --continue.\n" +
+        "Then ask: check my Brain.",
     ]);
   });
 });
@@ -780,14 +793,15 @@ function cappedInventory() {
 }
 
 const CAPPED_PENDING_MESSAGE = renderCliCommands(
-  "This Brain is still processing over 10,000 queued search update(s). Updating now would pause it mid-queue. " +
-    "Nothing was changed. Wait until `brain health` says query-ready, then run the update again.",
+  "Your Brain is still indexing over 10,000 recent items so they can be found by meaning. " +
+    "Updating now would interrupt that, so nothing was changed. You can keep using your Brain. " +
+    "Run brain update again later.",
 );
 
-// A refusal inside an upgrade stage is wrapped with the stage name and the
-// recovery bookmark guidance; the gate's own sentence is the first line.
+// A refusal before the paused deployment is still a pre-update refusal: it is
+// not wrapped as UPGRADE_FAILED and writes no failed-upgrade history row.
 function prePauseRefusal(message) {
-  return `update stopped during paused vector-drain deployment: ${message}\n`;
+  return message;
 }
 
 // Drives the real cmdUpgrade through the immediate pre-pause gate with the
@@ -1151,6 +1165,7 @@ test("a paused resume generation with queued work refuses truthfully at both gat
     const queued = boundedInventory({ version: PRODUCT_VERSION, drainMode: "paused-for-upgrade", pending: 7 });
     const run = await throughBothGates(manifestPath, { first: queued });
     assert.equal(run.error?.message, RESUME_PAUSED_PENDING_MESSAGE(7, "Nothing was changed."));
+    assert.equal(supportErrorCode(run.error, { command: "update" }), "UPGRADE_FAILED");
     assert.doesNotMatch(run.error?.message || "", /mid-queue|busy|few minutes/u);
     // The decision point was reached: exactly one successful read, no retry.
     assert.deepEqual(run.events, ["initial backlog read"]);
@@ -1160,6 +1175,7 @@ test("a paused resume generation with queued work refuses truthfully at both gat
     assert.equal(forced.error?.message, RESUME_PAUSED_PENDING_MESSAGE(
       7, "The paused deployment was not started.",
     ));
+    assert.equal(supportErrorCode(forced.error, { command: "update" }), "UPGRADE_FAILED");
     assert.deepEqual(forced.events, [
       "initial backlog read",
       "profile adoption",
@@ -1402,6 +1418,7 @@ test("a paused v0.4.6 Worker with queued work refuses to supervised recovery, ne
     const queued = JSON.parse(V046_PAUSED_QUEUED_ENVELOPE);
     const run = await throughBothGates(manifestPath, { first: queued, health: V046_HEALTH_PAUSED });
     assert.equal(run.error?.message, V046_PAUSED_QUEUED_MESSAGE(7, "Nothing was changed."));
+    assert.equal(supportErrorCode(run.error, { command: "update" }), "UPGRADE_FAILED");
     assertNoRetiredRuntimeRemedy(run.error?.message || "");
     assert.doesNotMatch(run.error?.message || "", /mid-queue|few minutes|Updating now/u);
     assert.deepEqual(run.events, ["initial backlog read"]);
@@ -1415,6 +1432,7 @@ test("a paused v0.4.6 Worker with queued work refuses to supervised recovery, ne
     assert.equal(forced.error?.message, V046_PAUSED_QUEUED_MESSAGE(
       7, "The paused deployment was not started.",
     ));
+    assert.equal(supportErrorCode(forced.error, { command: "update" }), "UPGRADE_FAILED");
     assert.deepEqual(forced.events, [
       "initial backlog read",
       "profile adoption",
@@ -1445,6 +1463,7 @@ test("an active v0.4.6 Worker with queued work keeps the wait-until-query-ready 
     ));
     const run = await throughBothGates(manifestPath, { first: queued, health: V046_HEALTH_ACTIVE });
     assert.equal(run.error?.message, PENDING_MESSAGE(7));
+    assert.equal(supportErrorCode(run.error, { command: "update" }), "UPDATE_WAITING_FOR_INDEXING");
     assert.equal(run.initial.healthReads, 1);
   });
 });
@@ -1603,6 +1622,7 @@ for (const [label, envelope, pending, cause, evidence] of [
       assert.equal(forced.error?.message, V046_PAUSED_RECOVERY_MESSAGE(
         pending, evidence, "The paused deployment was not started.",
       ));
+      assert.equal(supportErrorCode(forced.error, { command: "update" }), "UPGRADE_FAILED");
       assert.deepEqual(forced.events, [
         "initial backlog read",
         "profile adoption",
@@ -1628,6 +1648,7 @@ test("queued v0.4.6 work over a rollback-marked projection with unreadable /heal
     assert.equal(run.error?.message, V046_UNKNOWN_RECOVERY_MESSAGE(
       2, V046_PROJECTION_EVIDENCE.bootstrap_required, "Nothing was changed.",
     ));
+    assert.equal(supportErrorCode(run.error, { command: "update" }), "UPGRADE_FAILED");
     assert.doesNotMatch(run.error?.message || "", /did not finish|has not finished/u);
     assertNothingDeployed(run);
   });

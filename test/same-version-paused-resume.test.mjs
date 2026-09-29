@@ -361,7 +361,7 @@ test("rollback with a corpus: both backlog gates resume, then the pre-migration 
     assert.equal(brain.reads.backlog, 2);
     assert.doesNotMatch(run.error?.message || "", /not an earlier update|install that release/u);
     assert.match(run.error?.message || "",
-      /^update stopped during paused vector-drain health verification: Vectorize has accepted work that is not query-visible yet while this Brain is paused for an update\./u);
+      /^The update stopped partway\. Your Brain can still answer questions but won't take new documents until the update finishes\. Nothing was lost\. Run brain update once more\.\nIf it stops again at the same step, run brain support --preview and send us that note\.\n\nFor your installer:\n\s+update stopped during paused vector-drain health verification: Vectorize has accepted work that is not query-visible yet while this Brain is paused for an update\./u);
     assert.deepEqual(upgradeStages(brain), ["deploy:paused-for-upgrade"]);
     assert.equal(brain.live.mode, "paused-for-upgrade");
     assert.equal(brain.manifestVersion(), PRODUCT_VERSION);

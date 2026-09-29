@@ -1598,7 +1598,7 @@ ChatGPT, on your phone, with nothing to install.**
   write budget — batches now pack themselves to fit it, found live when a
   two-day catch-up was refused in one over-full call.
 
-After updating, run `brain setup <manifest>` (applies migration 0017), then
+(Historic, do not run.) After updating, run `brain setup <manifest>` (applies migration 0017), then
 `brain mcp-config <manifest>` to see your connector URL and the exact
 click-path for each app.
 
@@ -1632,7 +1632,7 @@ click-path for each app.
   session-signing secret, so existing installs get all of this on their next
   setup or update, with nothing new to store.
 
-After updating, run `brain setup <manifest>` (applies migration 0014 and the
+(Historic, do not run.) After updating, run `brain setup <manifest>` (applies migration 0014 and the
 new secret), then `brain invite <manifest>` and enroll your own phone first.
 
 ## 0.1.18
@@ -1659,7 +1659,7 @@ new secret), then `brain invite <manifest>` and enroll your own phone first.
   revoked without touching the others. `CLOUDFLARE_API_TOKEN` from a secret
   manager still wins for automation, unchanged.
 
-After updating, run `brain setup <manifest>` once interactively, accept the
+(Historic, do not run.) After updating, run `brain setup <manifest>` once interactively, accept the
 offer, then run it again and watch it skip the prompt. `brain token
 <manifest>` confirms what is stored.
 
@@ -1704,7 +1704,7 @@ against your brain, in one sitting.**
   `/api/rag/think`; the answer text itself is unchanged, so existing golden
   sets, refusal scoring, and integrations keep working untouched.
 
-After updating, run `brain eval <manifest> --golden-20` sitting next to the
+(Historic, do not run.) After updating, run `brain eval <manifest> --golden-20` sitting next to the
 person who owns the brain, then `brain ask` any question and read the new
 confidence line. Existing golden sets and scoring are unchanged.
 

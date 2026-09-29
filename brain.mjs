@@ -439,6 +439,12 @@ const die = (s) => {
   throw new Fatal(s);
 };
 
+function dieWithSupportCode(message, supportCode) {
+  const error = new Fatal(message);
+  error.supportCode = supportCode;
+  throw error;
+}
+
 function dieInputRefused(message, reason = null) {
   const error = new Fatal(message);
   error.code = "INPUT_REFUSED";
@@ -1414,7 +1420,22 @@ function loadManifest(path) {
   try {
     return { path, m: JSON.parse(readFileSync(path, "utf-8")) };
   } catch (e) {
-    die(`could not read manifest at ${path}: ${e.message}`);
+    if (e instanceof SyntaxError) {
+      const match = /position\s+(\d+)/iu.exec(String(e.message || ""));
+      const bytes = readFileSync(path, "utf-8");
+      const offset = match ? Number(match[1]) : 0;
+      const before = bytes.slice(0, offset);
+      const line = before.split("\n").length;
+      const column = offset - before.lastIndexOf("\n");
+      dieWithSupportCode(
+        `The settings file has a typing mistake near line ${line}, column ${column}. Fix that spot, then run the same command again.`,
+        "CONFIG_INVALID",
+      );
+    }
+    dieWithSupportCode(
+      "I couldn't read this Brain's settings file. Check that it still exists and that this computer can open it, then run the same command again.",
+      "CONFIG_INVALID",
+    );
   }
 }
 
@@ -6088,7 +6109,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
       }
     };
 
-    info(`upgrading ${fromVersion} -> ${toVersion}`);
+    info(`Updating your Brain from ${fromVersion} to ${toVersion}. For part of this your Brain won't accept new documents; asking questions keeps working. Keep this window open.`);
     let stage = "migration";
     // True from verified paused deployment until active mode is itself verified.
     // Uploading the active Worker is not enough: during propagation the paused
@@ -6141,12 +6162,14 @@ export async function cmdUpgrade(manifestPath, options = {}) {
                 throw new TypeError("the immediate pre-pause backlog receipt is invalid");
               }
             } catch (error) {
-              die(updateBacklogUnreadableMessage(error, "pre-pause"));
+              dieWithSupportCode(updateBacklogUnreadableMessage(error, "pre-pause"), "UPDATE_BRAIN_BUSY");
             }
             if (updateBacklogHasQueuedWork(immediateBacklog)) {
-              throw new UpdateBacklogQueuedRefusal(
+              const refusal = new UpdateBacklogQueuedRefusal(
                 updateBacklogQueuedMessage(immediateBacklog, "pre-pause", options.initialUpdateBacklog ?? null),
               );
+              refusal.supportCode = updateBacklogQueuedSupportCode(immediateBacklog);
+              throw refusal;
             }
           }
           // No asynchronous local stage sits between the closing queue receipt
@@ -6293,6 +6316,10 @@ export async function cmdUpgrade(manifestPath, options = {}) {
       await runStage("verified history commit", () => logRun("verified", null, { required: true }));
     } catch (error) {
       if (error instanceof UpdateBacklogQueuedRefusal) throw error;
+      if (!corpusPauseMayStillBeServing &&
+          ["UPDATE_BRAIN_BUSY", "UPDATE_WAITING_FOR_INDEXING", "UPGRADE_FAILED"].includes(error?.supportCode)) {
+        throw error;
+      }
       await logRun("failed", `stage:${stage}`);
       const projectionRecovery = usesD1VectorOutbox
         ? corpusPauseMayStillBeServing
@@ -6304,8 +6331,14 @@ export async function cmdUpgrade(manifestPath, options = {}) {
             "      does not claim that reindex or drain are blocked by an update pause.\n"
         : "      This install does not use the D1 Vectorize outbox cutover, so no paused reindex or drain\n" +
           "      restriction is being claimed for this failure. Review this backend's restore impact.\n";
+      const ownerRecovery = corpusPauseMayStillBeServing
+        ? "The update stopped partway. Your Brain can still answer questions but won't take new documents until the update finishes. Nothing was lost. Run brain update once more."
+        : "The update stopped before its last check. Your Brain is working normally and nothing was lost. Run brain update once more; it picks up where it stopped.";
       die(
-        `update stopped during ${stage}: ${error.message}\n` +
+        `${ownerRecovery}\n` +
+          "If it stops again at the same step, run brain support --preview and send us that note.\n\n" +
+          "For your installer:\n" +
+          `      update stopped during ${stage}: ${error.message}\n` +
           `      D1 recovery bookmark: ${bookmark}\n` +
           "      Do not restore it as the first response. A D1 restore discards newer writes.\n" +
           projectionRecovery +
@@ -6800,7 +6833,7 @@ export async function cmdMcpConfig(manifestPath, options = {}) {
   };
 
   console.log(`\n${c.bold(`Connect ${owner}'s brain to your AI tools`)}\n`);
-  console.log(`Your brain lives at ${c.bold(base)}\n`);
+  console.log(`Open your Brain: ${base}/app\n`);
   console.log(
     "These local connections use Owner assistant access. They can read, add or correct\n" +
       "information from your conversation, check the connection, and review a financial map.\n" +
@@ -19113,6 +19146,7 @@ function printStuckUpgradeDiagnosis(diagnosis) {
   }
   console.log(`  ${c.red("this brain cannot accept documents right now")}`);
   console.log("  An update paused its corpus writes for a schema migration and did not finish.");
+  say("  Finish the update: run brain update.");
   if (diagnosis.stage) console.log(`    stopped at stage:     ${diagnosis.stage}`);
   if (diagnosis.lastRun?.from_version || diagnosis.lastRun?.to_version) {
     console.log(`    upgrade:              ${diagnosis.lastRun.from_version || "?"} -> ${diagnosis.lastRun.to_version || "?"}`);
@@ -20519,7 +20553,13 @@ export async function cmdSetup(manifestPath, options = {}) {
   closePrompts();
   const countBacklog = options.backlogCount ?? backlogCount;
   const outstanding = await countBacklog(target).catch(() => 0);
-  console.log(`\n  ${c.green(c.bold("Your brain is live."))}\n`);
+  const setupFinishMessage = "Your Brain is running. So far it holds only a small test note, so it can't answer questions about your business yet. Next, we'll connect Google or load one folder.";
+  console.log(`\n  ${c.green(c.bold(setupFinishMessage))}\n`);
+  if (m.brain?.domain) {
+    console.log(`  1. Copy this address: https://${m.brain.domain}/mcp`);
+    console.log("  2. In Claude, open Settings > Connectors > Add custom connector and paste it.");
+    console.log("  3. When your Brain asks, approve with your passkey.\n");
+  }
   if (outstanding > 0) {
     say(
       `  ${c.yellow("Keyword search works now.")} ${outstanding} chunk(s) are still embedding, so\n` +
@@ -22689,6 +22729,7 @@ export async function cmdWhatsnew(manifestPath, {
   readStatus = readUpdateStatus,
   discoverManifest = discoverInstalledManifest,
   installedManifestOptions = {},
+  all = false,
 } = {}) {
   console.log("");
   let installed = null;
@@ -22710,10 +22751,14 @@ export async function cmdWhatsnew(manifestPath, {
       release = { status: "unavailable" };
     }
     if (installed !== PRODUCT_VERSION) {
-      info(
-        `this brain records ${installed}; this local CLI package is ${PRODUCT_VERSION}. ` +
-          "That local mismatch does not prove a public update is approved."
-      );
+      if (compareSemver(installed, PRODUCT_VERSION) < 0) {
+        info("The new version is installed on this computer, but your Brain hasn't been updated yet. Run brain update to finish.");
+      } else {
+        info(
+          `this brain records ${installed}; this local CLI package is ${PRODUCT_VERSION}. ` +
+            "That local mismatch does not prove a public update is approved."
+        );
+      }
     }
     if (release?.status === "up_to_date" && release.latest_version === installed) {
       ok(`the public stable release channel confirms this brain is current at ${installed}`);
@@ -22729,11 +22774,7 @@ export async function cmdWhatsnew(manifestPath, {
           "        It cannot be called up to date from public release evidence. Review https://financialbrain.ai/update."
       );
     } else if (release?.status === "release_held" || release?.status === "release_candidate") {
-      warn(
-        `this brain records ${installed}, but the public release channel is ${release.status === "release_held" ? "held" : "candidate-only"}.\n` +
-          "        No update is currently approved, and this command cannot claim the brain is current.\n" +
-          "        Review https://financialbrain.ai/update for the current gate."
-      );
+      info(`You're on ${installed}. No newer version is out yet. Nothing to do.`);
     } else {
       warn(
         `this brain records ${installed}, but the public release status could not be verified.\n` +
@@ -22755,8 +22796,26 @@ export async function cmdWhatsnew(manifestPath, {
     return;
   }
   // Printed rather than paged: a client on Windows should not meet a pager.
-  console.log(renderCliCommands(readFileSync(path, "utf-8").trimEnd()));
+  const changelog = readFileSync(path, "utf-8").trimEnd();
+  let shown = changelog;
+  if (!all) {
+    const heading = `## ${PRODUCT_VERSION}`;
+    const start = changelog.indexOf(heading);
+    const next = start < 0 ? -1 : changelog.indexOf("\n## ", start + heading.length);
+    if (start >= 0) {
+      const preambleEnd = changelog.indexOf("\n## ");
+      shown = `${changelog.slice(0, preambleEnd)}\n\n${changelog.slice(start, next < 0 ? undefined : next).trimEnd()}`;
+    }
+  }
+  console.log(renderCliCommands(shown));
   console.log("");
+}
+
+function dispatchWhatsnew(argv = process.argv.slice(3)) {
+  const flags = parseFlags(argv);
+  assertKnownFlags(flags, ["all"], "brain whatsnew");
+  const target = argv.find((value) => !value.startsWith("--"));
+  return cmdWhatsnew(target, { all: flags.all === true });
 }
 
 /* ---------------------------------------------------------------- main */
@@ -23277,8 +23336,9 @@ function updateBacklogQueuedMessage(backlog, gate, initialBacklog = null) {
   }
   if (gate === "initial") {
     return renderCliCommands(
-      `This Brain is still processing ${pending} queued search update(s). Updating now would pause it mid-queue. ` +
-        "Nothing was changed. Wait until `brain health` says query-ready, then run the update again."
+      `Your Brain is still indexing ${pending} recent items so they can be found by meaning. ` +
+        "Updating now would interrupt that, so nothing was changed. You can keep using your Brain. " +
+        "Run brain update again later."
     );
   }
   const change = !initialBacklog
@@ -23288,6 +23348,15 @@ function updateBacklogQueuedMessage(backlog, gate, initialBacklog = null) {
     `This Brain ${change} ${pending} queued search update(s) before the paused deployment. ` +
       "The paused deployment was not started. Wait until `brain health` says query-ready, then run the update again."
   );
+}
+
+function updateBacklogQueuedSupportCode(backlog) {
+  if (backlog?.paused_for_upgrade === true ||
+      backlog?.drain_mode_unknown === true ||
+      backlog?.projection_recovery) {
+    return "UPGRADE_FAILED";
+  }
+  return "UPDATE_WAITING_FOR_INDEXING";
 }
 
 /**
@@ -24129,15 +24198,15 @@ export function validateDrainBusyReceipt(body) {
   };
 }
 
-async function cmdDrain(manifestPath, options = {}) {
-  const { m } = loadManifest(manifestPath);
+export async function cmdDrain(manifestPath, options = {}) {
+  const { m } = (options.loadManifest ?? loadManifest)(manifestPath);
   // Cloudflare is OPTIONAL here, deliberately. This command talks to the worker
   // over plain HTTPS with the admin key, so it must keep working after our token
   // is revoked at handoff. A command that proves the brain works, but only while
   // we still hold a key to the client's account, proves the wrong thing.
-  const acct = m.brain?.domain ? null : await resolveAccount(m);
-  const base = await resolveBaseUrl(m, acct);
-  const adminKey = resolveAdminKey(manifestPath);
+  const acct = m.brain?.domain ? null : await (options.resolveAccount ?? resolveAccount)(m);
+  const base = await (options.resolveBaseUrl ?? resolveBaseUrl)(m, acct);
+  const adminKey = (options.resolveAdminKey ?? resolveAdminKey)(manifestPath);
   if (!adminKey) die("no durable admin key was found. Repair it with `brain setup <manifest>` or `brain secrets <manifest>`.");
 
   const now = typeof options.now === "function" ? options.now : Date.now;
@@ -24151,6 +24220,7 @@ async function cmdDrain(manifestPath, options = {}) {
   const deadline = started + maxDurationMs;
   let drained = 0;
   let routeWarmups = 0;
+  let pausedPropagationRetries = 0;
   let submitted = 0;
   let remaining = null;
   let remainingIsLowerBound = false;
@@ -24177,6 +24247,16 @@ async function cmdDrain(manifestPath, options = {}) {
     const raw = await res.text();
     let body = null;
     try { body = JSON.parse(raw); } catch { /* validated below */ }
+    if (res.status === 503 && body?.paused === true &&
+        body?.error === "vector drain is paused for a verified upgrade" &&
+        pausedPropagationRetries < 24) {
+      const delayMs = Math.min(5_000, Math.max(0, deadline - now()));
+      if (delayMs <= 0) break;
+      pausedPropagationRetries += 1;
+      info("the new version is still reaching every server; retrying in 5 seconds");
+      await wait(delayMs);
+      continue;
+    }
     if (res.status === 409) {
       const busy = validateDrainBusyReceipt(body);
       remaining = busy.remaining;
@@ -24918,13 +24998,14 @@ export function manifestCloudflareControlBinding(manifestPath) {
     manifest = loadManifest(manifestPath).m;
   } catch (error) {
     const inWorktree = /[\\/]\.git[\\/]worktrees[\\/]/.test(String(manifestPath || ""));
-    die(
+    dieWithSupportCode(
       `could not read the install manifest at ${manifestPath || "brain.manifest.json"}: ${error?.message || error}\n` +
         "      Every provisioning command needs it, and nothing has been changed.\n" +
         (inWorktree
           ? "      Instance files live only in the main checkout, not in a git worktree:\n" +
             "      pass the full path to the manifest there."
-          : "      Check the path, or run `brain init <path>` to write a new manifest with no network and no token.")
+          : "      Check the path, or run `brain init <path>` to write a new manifest with no network and no token."),
+      "CONFIG_INVALID",
     );
   }
   const accountId = manifest?.infrastructure?.cloudflare?.account_id || null;
@@ -25982,7 +26063,8 @@ export async function cmdLocalTools(options = {}) {
       if (json) throw new JsonFatal(status);
       die(
         "the technician tools step is not complete because Claude Code's installation doctor needs a directly controlled interactive terminal.\n" +
-          `      Run the same technician tools step in Terminal or PowerShell with --intent ${base.setup_intent.value}, then return here.\n` +
+          "      Open Terminal, paste this line, press Return, then come back and say done:\n" +
+          `      ${renderCliCommands(`brain tools --intent ${base.setup_intent.value}`)}\n` +
           "      No Cloudflare provisioning action was started."
       );
     }
@@ -27098,10 +27180,30 @@ export async function cmdUpdatePreview(argv = process.argv.slice(3), options = {
 }
 
 export function dispatchUpdateCli(argv = process.argv.slice(3), options = {}) {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    // Rendered like every other human line: on Windows the bare word `brain`
+    // is usually not on PATH, so the usage line must be the runnable form.
+    (options.write ?? console.log)(renderCliCommands(
+      "Usage: brain update [manifest]\n\n" +
+      "Updates the installed Brain, resumes safely if interrupted, and verifies it before finishing.\n" +
+      "Run it with no options. The manifest may be omitted when this computer remembers the Brain."
+    ));
+    return { help: true };
+  }
+  const allowedFlags = new Set([
+    "--adopt-cloudflare-profile", "--force", "--preview", "--json", "--expect-runtime-sha256",
+  ]);
+  const unknownToken = argv.find((value) => value.startsWith("--") && !allowedFlags.has(value));
+  if (unknownToken) {
+    die(`brain update doesn't take ${unknownToken}. Run brain update with no options.`);
+  }
   const boundary = options.boundaryCommand ?? classifyCliCredentialBoundary("update", argv);
   if (boundary !== "update") return cmdUpdatePreview(argv, options.previewOptions || {});
   const flags = parseFlags(argv);
-  assertKnownFlags(flags, ["adopt-cloudflare-profile", "force"], "brain update");
+  const unknownFlag = Object.keys(flags).find((flag) => !["adopt-cloudflare-profile", "force"].includes(flag));
+  if (unknownFlag) {
+    die(`brain update doesn't take --${unknownFlag}. Run brain update with no options.`);
+  }
   return cmdUpdate(updateCommandTarget(argv[0], flags), {
     ...(options.updateOptions || {}),
     adoptConsent: cloudflareAdoptionConsent(flags),
@@ -27781,8 +27883,8 @@ export async function cmdUpdate(manifestPath, options = {}) {
   }
   if (!installed) {
     die(
-      "no installed Brain was found. Run brain update <full path to brain.manifest.json> once; " +
-        "future updates will work from any folder."
+      "I couldn't find your Brain on this computer. New installs keep it in your home folder, in a folder called Financial Brain. " +
+        "Run brain update <full path to brain.manifest.json> once; future updates will work from any folder."
     );
   }
   const forceQueuedUpdate = options.forceQueuedUpdate === true;
@@ -27813,7 +27915,9 @@ export async function cmdUpdate(manifestPath, options = {}) {
             "Cloudflare access is confirmed, immediately before the paused deployment."
         ));
       } else {
-        if (!forceQueuedUpdate) die(updateBacklogUnreadableMessage(error, "initial"));
+        if (!forceQueuedUpdate) {
+          dieWithSupportCode(updateBacklogUnreadableMessage(error, "initial"), "UPDATE_BRAIN_BUSY");
+        }
         warn(renderCliCommands(
           "The first queued search update check could not read an empty queue. `--force` continues past this " +
             "first check only; the final check just before the paused deployment reads the queue again and still " +
@@ -27823,7 +27927,9 @@ export async function cmdUpdate(manifestPath, options = {}) {
     }
   }
   if (updateBacklogHasQueuedWork(backlog)) {
-    if (!forceQueuedUpdate) die(updateBacklogQueuedMessage(backlog, "initial"));
+    if (!forceQueuedUpdate) {
+      dieWithSupportCode(updateBacklogQueuedMessage(backlog, "initial"), updateBacklogQueuedSupportCode(backlog));
+    }
     warn(renderCliCommands(
       `This Brain ${backlog.paused_for_upgrade === true ? "has" : "is still processing"} ` +
         `${updateBacklogPendingLabel(backlog)} queued search update(s). ` +
@@ -27865,6 +27971,7 @@ export async function cmdUpdate(manifestPath, options = {}) {
   let updatedBaseUrl = null;
   let ownerAgentPreparationFailed = false;
   let ownerAgentRefreshResult = null;
+  const updateAttention = [];
   const upgradeResult = await runControl(async () => {
     revalidateUpdateManifest(pin, "update verification");
     await (options.cmdVerify ?? cmdVerify)(pin.target);
@@ -27915,6 +28022,7 @@ export async function cmdUpdate(manifestPath, options = {}) {
   if (reconcileOwnerAgents) {
     if (ownerAgentPreparationFailed || !updatedManifest || !updatedBaseUrl) {
       safelyReportUpdateResult(options.reportAgentRefreshWarning ?? warn, UPDATE_AGENT_REFRESH_WARNING);
+      updateAttention.push("Run brain mcp-config <manifest> --apply to repair the local AI connection.");
     } else {
       ownerAgentRefreshResult = await refreshOwnerAssistantConnectionsAfterUpdate(updatedManifest, pin.target, {
         reconcileExistingOwnerAgents: reconcileOwnerAgents,
@@ -27924,13 +28032,16 @@ export async function cmdUpdate(manifestPath, options = {}) {
         reportInfo: options.reportAgentRefreshInfo,
         reportWarning: options.reportAgentRefreshWarning,
       });
+      if (ownerAgentRefreshResult.status !== "ready") {
+        updateAttention.push("Run brain mcp-config <manifest> --apply to repair the local AI connection.");
+      }
     }
   }
 
   // Write-capable guidance is refreshed only after this exact Claude Code
   // registration has passed runtime, tool-list, and config readback proof.
   if (updateWorkspaceGuide && ownerAgentRefreshResult?.wired?.includes("Claude Code")) {
-    refreshClaudeWorkspaceGuideAfterUpdate(pin.target, {
+    const workspaceGuideResult = refreshClaudeWorkspaceGuideAfterUpdate(pin.target, {
       writeClaudeWorkspaceGuide: updateWorkspaceGuide,
       brainCliPath: options.brainCliPath,
       nodePath: options.nodePath,
@@ -27938,10 +28049,14 @@ export async function cmdUpdate(manifestPath, options = {}) {
       reportInfo: options.reportWorkspaceGuideRefreshInfo,
       reportWarning: options.reportWorkspaceGuideRefreshWarning,
     });
+    if (workspaceGuideResult?.status === "warning") {
+      updateAttention.push("Review the CLAUDE.md warning above; the Brain update itself is complete.");
+    }
   }
 
+  let skillRefreshResult = null;
   try {
-    cloudflareTokenSession.run(CLOUDFLARE_CREDENTIAL_SUPPRESSED, () =>
+    skillRefreshResult = cloudflareTokenSession.run(CLOUDFLARE_CREDENTIAL_SUPPRESSED, () =>
       refreshTechnicianSkillsAfterUpdate({
         installTechnicianSkills: options.installTechnicianSkills,
         claudeSkillOptions: options.claudeSkillOptions,
@@ -27951,7 +28066,23 @@ export async function cmdUpdate(manifestPath, options = {}) {
     );
   } catch {
     reportUpdateSkillRefreshWarning(warn);
+    skillRefreshResult = { status: "warning" };
   }
+  if (skillRefreshResult?.status !== "ready") {
+    updateAttention.push("Use https://financialbrain.ai/update/agent.md for this session; do not rerun brain update.");
+  }
+  const attention = [...new Set(updateAttention)];
+  const closing = [
+    `Done. Your Brain is now on version ${PRODUCT_VERSION} and passed its checks.`,
+    ...(attention.length ? [
+      `${attention.length} ${attention.length === 1 ? "thing" : "things"} still ${attention.length === 1 ? "needs" : "need"} attention:`,
+      ...attention,
+    ] : []),
+    "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.",
+    "In Claude Code type /exit, then claude --continue.",
+    "Then ask: check my Brain.",
+  ].join("\n");
+  safelyReportUpdateResult(options.reportUpdateFinish ?? console.log, closing);
   return upgradeResult;
 }
 
@@ -29298,7 +29429,7 @@ const commands = {
   ask: cmdAsk,
   "financial-picture": cmdFinancialPicture,
   doctor: dispatchDoctor,
-  whatsnew: cmdWhatsnew,
+  whatsnew: () => dispatchWhatsnew(process.argv.slice(3)),
   verify: (path) => withManifestCloudflareControl(path, () => cmdVerify(path), { command: "verify" }),
   provision: (path) => withManifestCloudflareControl(path, () => cmdProvision(path), { command: "provision" }),
   deploy: (path) => withManifestCloudflareControl(path, () => cmdDeploy(path), { command: "deploy" }),
@@ -29544,6 +29675,13 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
 
   operate
     brain update     [manifest]            one safe update: snapshot, test, verify
+
+    brain whatsnew   [manifest]            what changed in this version, and are you on it (--all for history)
+    brain status     <manifest>            versions, pending migrations, upgrade history
+    brain sources    <manifest>            complete read-only D1 source inventory; --json for Optimize
+    brain sources    <manifest> --json --recovery  one bounded provenance and OCR recovery preview page
+    brain forget     <manifest>            remove one named source (destructive)
+  Technician only
     brain update     [manifest] --preview --expect-runtime-sha256 <sha256> --json
                                            local identity gates, then one authenticated aggregate
                                            Brain read; no control-plane request, write, deploy,
@@ -29553,16 +29691,13 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            (an agent). Same as BRAIN_ADOPT_CLOUDFLARE_PROFILE=1
     brain update     [manifest] --force     continue past the first queued search update check;
                                            the final check before the pause still refuses queued or unreadable work
-    brain whatsnew   [manifest]            what changed in this version, and are you on it
-    brain status     <manifest>            versions, pending migrations, upgrade history
-    brain sources    <manifest>            complete read-only D1 source inventory; --json for Optimize
-    brain sources    <manifest> --json --recovery  one bounded provenance and OCR recovery preview page
-    brain forget     <manifest>            remove one named source (destructive)
     brain upgrade    <manifest>            snapshot, migrate, deploy, verify
     brain doctor     <manifest> --repair   diagnose a brain stuck mid-upgrade (--yes to resume)
     brain doctor     <manifest> --rollback preview restore to the pre-migration bookmark (--yes performs it)
     brain doctor     <manifest> --repair-checksum  reconcile an applied migration whose file changed (--yes to apply)
     brain rollback   <manifest> <bookmark> preview D1-only restore (--yes performs it)
+
+  operate
     brain schedule   <manifest>            inspect unattended Drive refresh
     brain schedule   <manifest> --remove   remove it and preserve its logs
     brain schedule   <manifest> --folder   inspect (or --install/--remove) the watched folder lane

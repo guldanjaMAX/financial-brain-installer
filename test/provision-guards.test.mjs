@@ -886,7 +886,9 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
       !/^\s*const acct = await resolveAccount\(m\);/m.test(b),
       "it resolves the account unconditionally");
     check(`${name} resolves the account only as a fallback`,
-      /m\.brain\?\.domain \? null : await resolveAccount\(m\)/.test(b));
+      name === "cmdDrain"
+        ? /m\.brain\?\.domain \? null : await \(options\.resolveAccount \?\? resolveAccount\)\(m\)/.test(b)
+        : /m\.brain\?\.domain \? null : await resolveAccount\(m\)/.test(b));
   }
   const local = bodyBetween("async function cmdIngestLocalRun(", "\nasync function parseForgetResponse");
   const remote = bodyBetween("const cmdIngestRemoteRun = async (", "\nasync function sendBatches");

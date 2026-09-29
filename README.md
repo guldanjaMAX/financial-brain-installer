@@ -28,9 +28,7 @@ are recorded in the
 
 The guided install path is at `financialbrain.ai/install`. It uses one immutable
 release asset and installs into a folder owned by your user account, so it needs
-no Git, `sudo`, or administrator access. After the Brain is installed, continue
-at `financialbrain.ai/onboard`; `financialbrain.ai/onboarding` opens that same
-onboarding page.
+no Git, `sudo`, or administrator access.
 
 Before running the install command, use a normal terminal as your current user,
 not `sudo`, root, or Run as administrator. The computer needs Node.js 22 or

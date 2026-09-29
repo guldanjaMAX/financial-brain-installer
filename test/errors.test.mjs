@@ -198,7 +198,10 @@ function ingestExitCli(scenario) {
   observedConfigFingerprint = events[0]?.fingerprint || "";
   check("a missing manifest fails cleanly", r.code === 1);
   check("and shows no stack trace", !/\bat .*\.mjs:\d+/.test(r.out), r.out.slice(0, 200));
-  check("and names the file it could not read", r.out.includes("nope.json"), r.out.slice(0, 160));
+  check("and names the file it could not read in the plain settings-file guidance",
+    r.out.includes("nope.json") &&
+      r.out.includes("I couldn't read this Brain's settings file. Check that it still exists and that this computer can open it"),
+    r.out.slice(0, 240));
   check("the local issue note classifies the failure without copying its private path",
     events.length === 1 &&
       events[0]?.command === "status" &&

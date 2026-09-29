@@ -48,10 +48,10 @@ verify them, and prints names only. An existing wrapping key is never replaced,
 because retained encrypted connection references depend on it. No command
 accepts these values from environment variables, arguments, or chat. Generic
 `brain setup`, `brain secrets`, and technician workflows still do not accept or
-write them. Routine setup preserves a complete existing set, and all three
-names must be present before a routine core-key rotation can begin. If any is
-missing, it stops without changing a local or Worker secret and points the
-owner to `brain connect bank`.
+write them. Routine setup preserves a complete existing set. After setup and
+owner-passkey enrollment, `brain connect bank` is the only command that adds a
+missing bank set. Routine core-key rotation still requires all three names and
+stops without changing a local or Worker secret when any is missing.
 Recording the return URI in a manifest is non-secret evidence that it is
 already on the matching Plaid dashboard's Allowed redirect URIs list. It does
 not perform that registration or justify automatically renewing a Plaid
@@ -64,10 +64,10 @@ optional.
 These are the steps an approved owner-present pilot actually goes through.
 Each one was missed or misread in a sandbox rehearsal.
 
-1. **Keys before setup.** When `corpora.bank_feed.enabled` is `true`, run
-   `brain connect bank <manifest>` BEFORE `brain setup` or `brain secrets`.
-   Those commands stop while any of the three bank secret names is missing
-   from the Worker, and only `brain connect bank` can write them.
+1. **Setup, passkey, then bank connection.** Bank feeds are set up with the
+   owner and installer on a call. Finish `brain setup`, enroll and verify the
+   owner passkey, then run `brain connect bank <manifest>`. Only `brain connect
+   bank` can write the three bank secret names.
 2. **Keys are checked before they are saved.** The hidden prompt asks for the
    Plaid client ID and secret for the manifest's environment. Before anything
    is written, the command makes one harmless authenticated Plaid read

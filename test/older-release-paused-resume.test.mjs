@@ -811,8 +811,9 @@ async function staleOlderWorker(recorded, older, mode) {
 }
 
 const ACTIVE_QUEUED_MESSAGE = (release, pending) => release.cli.renderCliCommands(
-  `This Brain is still processing ${pending} queued search update(s). Updating now would pause it mid-queue. ` +
-    "Nothing was changed. Wait until `brain health` says query-ready, then run the update again.",
+  `Your Brain is still indexing ${pending} recent items so they can be found by meaning. ` +
+    "Updating now would interrupt that, so nothing was changed. You can keep using your Brain. " +
+    "Run brain update again later.",
 );
 
 for (const [recorded, older] of [[CHECKED_OUT, PREVIOUS], [NEXT, CHECKED_OUT]]) {
