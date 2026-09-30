@@ -61,6 +61,40 @@ on:
         description: Runtime payload SHA-256 derived from the exact package archive.
         value: ${{ jobs.package.outputs.runtime_payload_sha256 }}
 
+# A push to a branch that has an open PR used to start TWO complete matrix runs,
+# because push and pull_request both trigger this workflow and nothing cancelled
+# either one. The twins competed for runners and one of each pair failed in a
+# different place each time, which is contention rather than a flaky test: a
+# 3000ms wall-clock bound missed by 8 percent on macOS in one case, the privacy
+# gate on main in another. The expensive part is that GitHub does not supersede
+# the loser, so a commit whose twin was fully green stayed BLOCKED on the red
+# context and auto-merge could never fire.
+#
+# ref_name, NOT ref. The two runs carry different refs for the same branch:
+# refs/heads/<branch> on push, refs/pull/<n>/merge on pull_request. Grouping on
+# github.ref would put the twins in separate groups and cancel nothing, which is
+# this bug left in place while looking fixed. github.head_ref is the SHORT source
+# branch name on pull_request and empty on push, so it has to be paired with
+# github.ref_name, which is the matching short name on push. Pairing head_ref
+# with github.ref instead yields "foo" against "refs/heads/foo", two keys again.
+# Expressions have no string replace, so the short names are the only way to make
+# the two events agree.
+#
+# The ci- prefix namespaces this group away from its CALLER. release.yml runs
+# this workflow through `uses:`, so these jobs execute inside the release run and
+# carry the caller's tag context. A reusable workflow whose group matches its
+# caller's deadlocks: the caller waits for the callee while the callee queues
+# behind the caller. release.yml uses release-${{ github.ref }} and
+# windows-rehearsal.yml uses windows-ci-only-${{ github.ref }}, so this follows
+# the same house pattern and cannot collide with either.
+#
+# The tag guard is load-bearing, not defensive. A release builds on a tag, so
+# github.ref is refs/tags/vX.Y.Z there, and an unguarded cancel-in-progress would
+# let a second tag push kill a release matrix mid-flight.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 permissions:
   contents: read
 
