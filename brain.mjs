@@ -789,6 +789,15 @@ function validateCloudflareTokenBytes(value) {
  * What genuinely differs per caller is passed in: the prompt, which bytes may
  * be typed, and what the collected bytes become. Nothing else.
  */
+const CLOUDFLARE_WINDOWS_HIDDEN_ENTRY_REFUSAL =
+  "this terminal cannot be trusted to hide Cloudflare token entry.\n" +
+  "  Windows PowerShell echoed a live credential at this prompt on 2026-09-08, and\n" +
+  "  the process cannot detect when that happens, so it will not ask here.\n" +
+  "  A browser sign-in needs no token at all and is the ordinary path.\n" +
+  "  Customer token recovery is not available from this Windows command in this release.\n" +
+  "  Do not save a customer token in the user environment.\n" +
+  "  Automation may inject it only through an approved secret manager.";
+
 export function readHiddenInput({
   prompt,
   input = process.stdin,
@@ -827,19 +836,23 @@ export function readHiddenInput({
     );
   }
 
+  const wasPaused = typeof input.isPaused === "function" ? input.isPaused() : false;
+  const wasFlowing = input.readableFlowing;
+  const restoreSharedPrompts = suspendSharedPromptsForHiddenInput(input);
+
   return new Promise((resolveSecret, rejectSecret) => {
     const bytes = Buffer.alloc(maxBytes);
     let length = 0;
     let settled = false;
     const wasRaw = Boolean(input.isRaw);
-    const wasPaused = typeof input.isPaused === "function" ? input.isPaused() : false;
     const cleanup = () => {
       input.removeListener("data", onData);
       input.removeListener("end", onEnd);
       input.removeListener("error", onError);
       try { input.setRawMode(wasRaw); } catch { /* original result wins */ }
-      if (wasPaused && typeof input.pause === "function") input.pause();
+      if ((wasPaused || wasFlowing !== true) && typeof input.pause === "function") input.pause();
       output.write("\n");
+      restoreSharedPrompts();
     };
     const finish = (error = null) => {
       if (settled) return;
@@ -905,14 +918,7 @@ export function readHiddenCloudflareToken({ input = process.stdin, output = proc
     noun: "Cloudflare token",
     // This caller has browser sign-in as the ordinary path, so on Windows it
     // refuses instead of risking an echoed recovery token.
-    windowsRefusal:
-      "this terminal cannot be trusted to hide Cloudflare token entry.\n" +
-      "  Windows PowerShell echoed a live credential at this prompt on 2026-09-08, and\n" +
-      "  the process cannot detect when that happens, so it will not ask here.\n" +
-      "  A browser sign-in needs no token at all and is the ordinary path.\n" +
-      "  Customer token recovery is not available from this Windows command in this release.\n" +
-      "  Do not save a customer token in the user environment.\n" +
-      "  Automation may inject it only through an approved secret manager.",
+    windowsRefusal: CLOUDFLARE_WINDOWS_HIDDEN_ENTRY_REFUSAL,
     insecure:
       "no Cloudflare credential is available and this terminal cannot prompt securely.\n" +
       "  The simplest fix is a browser sign-in, which needs no token at all:\n" +
@@ -935,8 +941,9 @@ export async function withCloudflareToken(action, options = {}) {
   const vectorizeScopeRecovery = options.recoveryReason === "wrangler_vectorize_scope_missing";
   const workersSubdomainScopeRecovery =
     options.recoveryReason === "wrangler_workers_subdomain_scope_missing";
-  const explicitScopeRecovery = vectorizeScopeRecovery || workersSubdomainScopeRecovery;
-  if (cloudflareTokenAvailable() && !explicitScopeRecovery) return action();
+  const recoverySwitchChosen = options.recoveryReason === "explicit_recovery_switch";
+  const explicitRecovery = options.recoveryReason !== null && options.recoveryReason !== undefined;
+  if (cloudflareTokenAvailable() && !explicitRecovery) return action();
 
   const accountLabel = String(options.accountId || "");
   const askFn = options.askFn ?? ask;
@@ -954,11 +961,15 @@ export async function withCloudflareToken(action, options = {}) {
       // A broken keychain must present as itself, not as an every-run prompt.
       warn(String(error?.message || error));
     }
-    if (stored && explicitScopeRecovery) {
+    if (stored && explicitRecovery) {
       const reference = (options.storedTokenReference ?? storedTokenReference)(options.accountId);
       const reason = workersSubdomainScopeRecovery
         ? "The saved browser sign-in cannot read this account's workers.dev address, which this Brain's address uses. "
-        : "Wrangler 4.131.1 cannot request Vectorize access for the browser sign-in. ";
+        : vectorizeScopeRecovery
+          ? "Wrangler 4.131.1 cannot request Vectorize access for the browser sign-in. "
+          : recoverySwitchChosen
+            ? "Setup was started with the explicit recovery switch. "
+            : "The owner approved recovery API-token access for this run. ";
       const useSaved = String(await askFn(
         reason + `A saved recovery API token for the exact account ${accountLabel} is available in ${reference}. ` +
           "It may be old or revoked, and it has not been tested during this recovery. " +
@@ -973,7 +984,7 @@ export async function withCloudflareToken(action, options = {}) {
           "n",
         )).trim().toLowerCase();
         if (useDifferent !== "y" && useDifferent !== "yes") {
-          throw new Error("recovery API-token access was cancelled before any credential was used");
+          throw cloudflareTokenRecoveryCancelled();
         }
         approvedDifferentToken = true;
       } else {
@@ -981,7 +992,9 @@ export async function withCloudflareToken(action, options = {}) {
           `about to use the saved recovery API token for the exact account ${accountLabel} from ${reference}, ` +
             (workersSubdomainScopeRecovery
               ? "because the saved browser sign-in cannot read the workers.dev address"
-              : "because the browser sign-in cannot grant Vectorize access"),
+              : vectorizeScopeRecovery
+                ? "because the browser sign-in cannot grant Vectorize access"
+                : "because the owner chose the explicit recovery flow"),
         );
       }
     }
@@ -997,14 +1010,14 @@ export async function withCloudflareToken(action, options = {}) {
     }
   }
 
-  if (explicitScopeRecovery && !approvedDifferentToken) {
+  if (explicitRecovery && !approvedDifferentToken && !recoverySwitchChosen) {
     const useNew = String(await askFn(
       "No saved recovery API token is available for this exact account. " +
         "Enter a newly created scoped API token in the hidden prompt now? (y/n)",
       "n",
     )).trim().toLowerCase();
     if (useNew !== "y" && useNew !== "yes") {
-      throw new Error("recovery API-token access was cancelled before any credential was used");
+      throw cloudflareTokenRecoveryCancelled();
     }
   }
 
@@ -1037,12 +1050,17 @@ export async function withCloudflareToken(action, options = {}) {
     }
   }
 
-  if (explicitScopeRecovery) {
+  if (explicitRecovery) {
+    const credentialTarget = accountLabel
+      ? `for the exact account ${accountLabel}`
+      : "for setup; the exact account will be verified before any Cloudflare resource is created";
     info(
-      `about to use the newly entered recovery API token for the exact account ${accountLabel}, ` +
+      `about to use the newly entered recovery API token ${credentialTarget}, ` +
         (workersSubdomainScopeRecovery
           ? "because the saved browser sign-in cannot read the workers.dev address"
-          : "because the browser sign-in cannot grant Vectorize access"),
+          : vectorizeScopeRecovery
+            ? "because the browser sign-in cannot grant Vectorize access"
+            : "because the owner chose the explicit recovery flow"),
     );
   }
 
@@ -1116,7 +1134,10 @@ export async function promptForCloudflareOAuthAccount(request, options = {}) {
 }
 
 /** Human recovery copy for a bounded Wrangler OAuth failure. */
-export function cloudflareOAuthFailureMessage(error, { resumeCommand = null } = {}) {
+export function cloudflareOAuthFailureMessage(error, {
+  resumeCommand = null,
+  recoveryCommand = null,
+} = {}) {
   const code = error instanceof CloudflareOAuthSessionError
     ? error.code
     : "CLOUDFLARE_OAUTH_UNAVAILABLE";
@@ -1141,7 +1162,11 @@ export function cloudflareOAuthFailureMessage(error, { resumeCommand = null } = 
     CLOUDFLARE_OAUTH_SCOPE_MISSING:
       vectorizeScopeMissing
         ? "Cloudflare sign-in completed, but Wrangler 4.131.1 cannot request the Vectorize permission this install requires. " +
-          "Nothing was changed. Continue only with a separately approved, account-scoped API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read."
+          (error?.recoverySafeAfterProvisionRefusal === true ? "" : "Nothing was changed. ") +
+          "Continue only with a separately approved, account-scoped API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read. " +
+          (recoveryCommand
+            ? `Resume with ${recoveryCommand}; the switch takes no value and opens the protected recovery flow.`
+            : `${resumeCommand ? `Resume with ${resumeCommand}, or r` : "R"}erun in an interactive terminal; it asks before using any recovery key.`)
         : workersSubdomainScopeMissing
           ? "This browser sign-in cannot read this account's workers.dev address, which this Brain needs for its web address. " +
             "Nothing was changed. To continue, use a separate account-scoped recovery API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read."
@@ -1193,6 +1218,15 @@ function throwOriginalCloudflareControlActionError(error) {
   if (error instanceof CloudflareControlActionError) throw error.cause;
 }
 
+function recoverableProvisionActionError(error) {
+  if (!(error instanceof CloudflareControlActionError)) return error;
+  if (isWranglerVectorizeScopeMissing(error.cause) &&
+      error.cause?.recoverySafeAfterProvisionRefusal === true) {
+    return error.cause;
+  }
+  throw error.cause;
+}
+
 function throwCloudflareTokenFailure() {
   const failure = new Fatal(
     "Cloudflare access is not available, and this terminal cannot prompt securely for recovery access.\n" +
@@ -1207,6 +1241,12 @@ function throwCloudflareTokenFailure() {
   );
   failure.code = "AUTH_REQUIRED";
   throw failure;
+}
+
+function cloudflareTokenRecoveryCancelled() {
+  const failure = new Fatal("recovery API-token access was cancelled before any credential was used");
+  failure.code = "CLOUDFLARE_TOKEN_RECOVERY_CANCELLED";
+  return failure;
 }
 
 /**
@@ -1236,6 +1276,10 @@ export async function withCloudflareControlCredential(action, options = {}) {
       );
     } catch (error) {
       if (error instanceof CloudflareControlActionError) throw error;
+      if (error?.code === "CLOUDFLARE_TOKEN_RECOVERY_CANCELLED") throw error;
+      if (error?.message === CLOUDFLARE_WINDOWS_HIDDEN_ENTRY_REFUSAL) {
+        throw new Fatal(error.message);
+      }
       throwCloudflareTokenFailure();
     }
   };
@@ -1266,7 +1310,9 @@ export async function withCloudflareControlCredential(action, options = {}) {
       );
     }
     try {
-      return await runToken();
+      const recoveryReason = options.forceTokenRecoveryReason ||
+        (forceToken && !process.env.CLOUDFLARE_API_TOKEN ? "explicit_recovery_switch" : null);
+      return await runToken(recoveryReason);
     } catch (error) {
       throwOriginalCloudflareControlActionError(error);
       throw error;
@@ -1339,12 +1385,21 @@ export async function withCloudflareControlCredential(action, options = {}) {
   });
 
   const initiallyReauthorize = options.reauthorizeOAuth === true;
-  const failureOptions = { resumeCommand: options.resumeCommand || null };
+  const failureOptions = {
+    resumeCommand: options.resumeCommand || null,
+    recoveryCommand: options.recoveryCommand || null,
+  };
   const offerTokenRecovery = async (error) => {
     // An account setting answered by a working sign-in, whichever attempt met
     // it: a recovery token reads the same account and cannot change it.
     if (isUnregisteredWorkersSubdomain(error)) throw error;
     if (options.allowTokenRecovery !== true || options.interactive === false) throw error;
+    if ((options.platform ?? process.platform) === "win32" &&
+        !options.environment?.BRAIN_ALLOW_WINDOWS_ECHO_RISK &&
+        !process.env.BRAIN_ALLOW_WINDOWS_ECHO_RISK) {
+      if (!isKnownOAuthScopeRecovery(error)) throw error;
+      throw new Fatal(CLOUDFLARE_WINDOWS_HIDDEN_ENTRY_REFUSAL);
+    }
     const vectorizeScopeMissing = isWranglerVectorizeScopeMissing(error);
     const workersSubdomainScopeMissing = isWranglerWorkersSubdomainScopeMissing(error);
     const question = vectorizeScopeMissing
@@ -1368,15 +1423,15 @@ export async function withCloudflareControlCredential(action, options = {}) {
         ? "wrangler_vectorize_scope_missing"
         : workersSubdomainScopeMissing
           ? "wrangler_workers_subdomain_scope_missing"
-          : null,
+          : "explicit_recovery_offer",
       selectedRecoveryAccountId,
     );
   };
 
   try {
     return await runOAuth(initiallyReauthorize);
-  } catch (error) {
-    throwOriginalCloudflareControlActionError(error);
+  } catch (caught) {
+    const error = recoverableProvisionActionError(caught);
     if (isUnregisteredWorkersSubdomain(error)) {
       // An account setting, answered by a working sign-in: no browser refresh
       // or recovery token can change it, so neither is offered.
@@ -1395,8 +1450,8 @@ export async function withCloudflareControlCredential(action, options = {}) {
       if (answer === "y" || answer === "yes") {
         try {
           return await runOAuth(true);
-        } catch (refreshError) {
-          throwOriginalCloudflareControlActionError(refreshError);
+        } catch (caughtRefreshError) {
+          const refreshError = recoverableProvisionActionError(caughtRefreshError);
           try {
             return await offerTokenRecovery(refreshError);
           } catch (finalError) {
@@ -1442,10 +1497,10 @@ function isKnownOAuthScopeRecovery(error) {
 /**
  * Whether this Brain's address depends on the account's workers.dev subdomain.
  *
- * A custom brain.domain is the install URL and deploy treats a missing
- * workers.dev route as optional, so the sign-in preflight must not refuse it.
- * No domain yet, a saved *.workers.dev address, or a manifest that cannot be
- * read all keep the fail-closed answer: the subdomain is required.
+ * Any saved brain.domain is the install URL, including a full workers.dev
+ * address. Deploy reads the account subdomain only while saving an address for
+ * the first time. No domain yet, or a manifest that cannot be read, keeps the
+ * fail-closed answer: the subdomain is required.
  */
 function brainNeedsWorkersDevSubdomain(manifestPath) {
   if (!manifestPath) return true;
@@ -1456,7 +1511,7 @@ function brainNeedsWorkersDevSubdomain(manifestPath) {
   } catch {
     return true;
   }
-  return !domain || domain === "workers.dev" || domain.endsWith(".workers.dev");
+  return !domain;
 }
 
 function token() {
@@ -1794,9 +1849,10 @@ async function cmdVerify(manifestPath) {
 export function runCloudflareWranglerCommand(args, {
   accountId,
   authProfile = null,
-  runCommand = run,
+  runCommand,
   platformName = process.platform,
   renewSessionToken = renewWranglerSessionToken,
+  environment = process.env,
 } = {}) {
   // Through doctor's runner, which knows that npm CLIs are .cmd shims on
   // Windows and that Node refuses to spawn those without a shell since
@@ -1813,12 +1869,26 @@ export function runCloudflareWranglerCommand(args, {
   const exactArgs = authProfile
     ? [...profiled, `--env-file=${platformName === "win32" ? "NUL" : "/dev/null"}`]
     : profiled;
-  const invoke = () => runCommand("npx", exactArgs, {
+  if (!runCommand && (
+    environment?.BRAIN_TEST_CHAIN === "1" || process.env.BRAIN_TEST_CHAIN === "1"
+  )) {
+    throw new Error(
+      "BRAIN_TEST_CHAIN refused a real Wrangler command without an injected process runner",
+    );
+  }
+  const commandRunner = runCommand ?? run;
+  const invoke = () => commandRunner("npx", exactArgs, {
     timeout: 180_000,
     inheritEnv: false,
     env,
   });
-  let result = invoke();
+  const normalizeResult = (value) => ({
+    ok: value?.ok === true,
+    out: String(value?.out || ""),
+    stdout: String(value?.stdout ?? value?.out ?? ""),
+    stderr: String(value?.stderr || ""),
+  });
+  let result = normalizeResult(invoke());
   const authRejected = (value) => {
     const message = String(value?.out || "");
     return /invalid access token|authentication error/i.test(message) ||
@@ -1827,27 +1897,35 @@ export function runCloudflareWranglerCommand(args, {
   if (authProfile && !result.ok && authRejected(result)) {
     const renewal = renewSessionToken();
     // An unchanged token means nothing expired: keep the command's own refusal.
-    if (renewal === "unchanged") return { ok: false, out: result.out, status: 1 };
+    if (renewal === "unchanged") return { ...result, ok: false, status: 1 };
     if (renewal === "changed") {
-      result = invoke();
-      if (result.ok) return { ok: true, out: result.out, status: 0 };
-      if (!authRejected(result)) return { ok: false, out: result.out, status: 1 };
+      result = normalizeResult(invoke());
+      if (result.ok) return { ...result, status: 0 };
+      if (!authRejected(result)) return { ...result, ok: false, status: 1 };
       return {
         ok: false,
         out: namedProfileReauthorizationFailure({ retried: true }).message,
+        stdout: "",
+        stderr: "",
         status: 1,
       };
     }
-    return { ok: false, out: namedProfileReauthorizationFailure().message, status: 1 };
+    return {
+      ok: false,
+      out: namedProfileReauthorizationFailure().message,
+      stdout: "",
+      stderr: "",
+      status: 1,
+    };
   }
-  return { ok: result.ok, out: result.out, status: result.ok ? 0 : 1 };
+  return { ...result, status: result.ok ? 0 : 1 };
 }
 
 const wrangler = runCloudflareWranglerCommand;
 
-function wranglerAvailable(accountId, authProfile = null) {
+function wranglerAvailable(accountId, authProfile = null, wranglerCommand = wrangler) {
   if (!accountId) return false;
-  const r = wrangler(["vectorize", "list", "--json"], { accountId, authProfile });
+  const r = wranglerCommand(["vectorize", "list", "--json"], { accountId, authProfile });
   return r.ok;
 }
 
@@ -1870,6 +1948,42 @@ export const VECTOR_METADATA_INDEXES = Object.freeze([
   { propertyName: "platform", indexType: "string" },
   { propertyName: "document_date", indexType: "number" },
 ]);
+
+export function recoverableVectorizeProvisionRefusal(error, accountId) {
+  const holder = cloudflareTokenSession.getStore();
+  const message = String(error?.message || error || "");
+  const definiteScopeRefusal = /failed \((401|403)\)/.test(message) &&
+    /\b(9109|10000)\b/.test(message);
+  if (holder?.source !== "wrangler-oauth" || !definiteScopeRefusal) {
+    return error;
+  }
+  const refusal = new CloudflareOAuthSessionError(
+    "CLOUDFLARE_OAUTH_SCOPE_MISSING",
+    "provision",
+    "the browser sign-in was refused while creating the Vectorize search index",
+  );
+  refusal.requiredSurface = "vectorize";
+  refusal.selectedAccountId = String(accountId || "").toLowerCase();
+  // A definite permission refusal means this create did not run. The setup
+  // action may safely resume through the existing explicit recovery ceremony.
+  refusal.recoverySafeAfterProvisionRefusal = true;
+  return refusal;
+}
+
+export function parseWranglerMetadataIndexList(result) {
+  if (!result?.ok) throw new Error(String(result?.out || "Wrangler metadata-index list failed"));
+  let parsed;
+  try {
+    parsed = JSON.parse(String(result.stdout || ""));
+  } catch (error) {
+    throw new Error(`Wrangler did not return usable metadata-index JSON: ${error.message}`);
+  }
+  const rows = parsed?.metadataIndexes || parsed;
+  if (!Array.isArray(rows)) {
+    throw new Error("Wrangler did not return usable metadata-index JSON: response has no index list");
+  }
+  return rows;
+}
 
 /**
  * Create one Vectorize metadata index and refuse to continue until it is active.
@@ -1907,8 +2021,23 @@ export async function ensureMetadataIndex({
   verifyAttempts = 100,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   log = ok,
+  warnLog = warn,
   onFatal = die,
 }) {
+  if (exists) {
+    try {
+      if (await exists()) {
+        log(`metadata index on "${propertyName}" already active`);
+        return true;
+      }
+    } catch (error) {
+      if (error?.recoverySafeAfterProvisionRefusal === true) throw error;
+      warnLog(
+        `could not check whether the search filter on "${propertyName}" already exists; ` +
+          "trying to create it safely"
+      );
+    }
+  }
   let requested = false;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
@@ -1916,14 +2045,17 @@ export async function ensureMetadataIndex({
       requested = true;
       break;
     } catch (e) {
+      if (e?.recoverySafeAfterProvisionRefusal === true) throw e;
       const msg = e?.message || String(e);
       if (/already|exists|conflict/i.test(msg)) {
         requested = true;
         break;
       }
       if (attempt === attempts) {
+        const finalLines = String(msg).trim().split(/\r?\n/).filter(Boolean).slice(-4).join("\n");
+        const ownerDetail = finalLines.length > 600 ? finalLines.slice(-600) : finalLines;
         return onFatal(
-          `the ${indexType} metadata index on "${propertyName}" could not be created: ${msg.slice(0, 120)}` + "\n" +
+          `the ${indexType} metadata index on "${propertyName}" could not be created: ${ownerDetail}` + "\n" +
             "  This CANNOT be added later. Vectorize applies a metadata index only to" + "\n" +
             `  vectors written after it exists, so continuing would leave ${propertyName} filtering` + "\n" +
             "  permanently broken for everything ingested from here on." + "\n" +
@@ -2071,7 +2203,7 @@ export async function assertAdoptable(acctId, db, dbName, slug, query = d1Query,
   }
 }
 
-async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
+export async function cmdProvision(manifestPath, { nextSteps = true, wranglerCommand = wrangler } = {}) {
   const { path, m } = loadManifest(manifestPath);
   const acct = await resolveAccount(m);
   info(`provisioning into "${acct.name}" (${acct.id})`);
@@ -2158,7 +2290,7 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
       // named browser session rather than stopping an install that can complete.
       viaApi = false;
       info("the recovery credential cannot reach Vectorize, trying this Brain's named browser session");
-      if (!wranglerAvailable(acct.id, cfg.auth_profile || null)) {
+      if (!wranglerAvailable(acct.id, cfg.auth_profile || null, wranglerCommand)) {
         die(
           `Vectorize is unreachable both ways, so the install cannot continue.\n` +
             `  recovery credential: ${e.message.slice(0, 100)}\n` +
@@ -2166,7 +2298,7 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
             VECTORIZE_REMEDY + "\n  Then re-run provision."
         );
       }
-      const r = wrangler(["vectorize", "list"], {
+      const r = wranglerCommand(["vectorize", "list"], {
         accountId: acct.id,
         authProfile: cfg.auth_profile || null,
       });
@@ -2223,14 +2355,18 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
         saveManifest(path, m);
         ok(`Vectorize "${idxName}" already exists and this manifest names it, adopting it`);
       } else if (viaApi) {
-        await cf(`/accounts/${acct.id}/vectorize/v2/indexes`, {
-          method: "POST",
-          body: {
-            name: idxName,
-            description: `retrieval index for ${m.client?.display_name || "brain"}`,
-            config: { dimensions: 768, metric: "cosine" },
-          },
-        });
+        try {
+          await cf(`/accounts/${acct.id}/vectorize/v2/indexes`, {
+            method: "POST",
+            body: {
+              name: idxName,
+              description: `retrieval index for ${m.client?.display_name || "brain"}`,
+              config: { dimensions: 768, metric: "cosine" },
+            },
+          });
+        } catch (error) {
+          throw recoverableVectorizeProvisionRefusal(error, acct.id);
+        }
         ok(`Vectorize "${idxName}" created (768-dim, cosine)`);
         // Persist ownership the instant the index exists, BEFORE the metadata
         // index wait below. That loop is deliberately patient, up to a hundred
@@ -2246,11 +2382,13 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
         // 768 and cosine are the output shape of @cf/baai/bge-base-en-v1.5, the
         // model the worker embeds with. Any other values reject every vector or
         // rank wrongly, so they are not configurable.
-        const r = wrangler(
+        const r = wranglerCommand(
           ["vectorize", "create", idxName, "--dimensions=768", "--metric=cosine"],
           { accountId: acct.id, authProfile: cfg.auth_profile || null }
         );
-        if (!r.ok) die(`wrangler could not create the Vectorize index: ${r.out.slice(-400)}`);
+        if (!r.ok) {
+          throw new Fatal(`wrangler could not create the Vectorize index: ${String(r.out || "").trim()}`);
+        }
         ok(`Vectorize "${idxName}" created via wrangler (768-dim, cosine)`);
         // Same reason as the API branch above, and this is the branch that
         // matters more: wrangler is the ordinary browser sign-in lane, the API
@@ -2267,46 +2405,52 @@ async function cmdProvision(manifestPath, { nextSteps = true } = {}) {
           propertyName,
           indexType,
           create: viaApi
-            ? () => cf(`/accounts/${acct.id}/vectorize/v2/indexes/${idxName}/metadata_index/create`, {
-                method: "POST",
-                body: { propertyName, indexType },
-              })
+            ? async () => {
+                try {
+                  return await cf(`/accounts/${acct.id}/vectorize/v2/indexes/${idxName}/metadata_index/create`, {
+                    method: "POST",
+                    body: { propertyName, indexType },
+                  });
+                } catch (error) {
+                  throw recoverableVectorizeProvisionRefusal(error, acct.id);
+                }
+              }
             : async () => {
-                const r = wrangler(
+                const r = wranglerCommand(
                   ["vectorize", "create-metadata-index", idxName, `--property-name=${propertyName}`, `--type=${indexType}`],
                   { accountId: acct.id, authProfile: cfg.auth_profile || null }
                 );
-                if (!r.ok && !/already|exists/i.test(r.out)) throw new Error(r.out.slice(-200));
+                if (!r.ok && !/already|exists/i.test(r.out)) {
+                  throw new Error(String(r.out || ""));
+                }
               },
           exists: viaApi
             ? async () => {
-                const found = await cf(`/accounts/${acct.id}/vectorize/v2/indexes/${idxName}/metadata_index/list`);
-                return (found?.metadataIndexes || []).some(
-                  (x) => x.propertyName === propertyName && String(x.indexType).toLowerCase() === indexType
-                );
+                try {
+                  const found = await cf(`/accounts/${acct.id}/vectorize/v2/indexes/${idxName}/metadata_index/list`);
+                  return (found?.metadataIndexes || []).some(
+                    (x) => x.propertyName === propertyName && String(x.indexType).toLowerCase() === indexType
+                  );
+                } catch (error) {
+                  throw recoverableVectorizeProvisionRefusal(error, acct.id);
+                }
               }
             : async () => {
-                const r = wrangler(
+                const r = wranglerCommand(
                   ["vectorize", "list-metadata-index", idxName, "--json"],
                   { accountId: acct.id, authProfile: cfg.auth_profile || null }
                 );
-                if (!r.ok) throw new Error(r.out.slice(-200));
-                try {
-                  const parsed = JSON.parse(r.out);
-                  const rows = parsed?.metadataIndexes || parsed;
-                  if (Array.isArray(rows)) {
-                    return rows.some((x) =>
-                      x.propertyName === propertyName && String(x.indexType || x.type).toLowerCase() === indexType
-                    );
-                  }
-                } catch { /* fall through to the human-readable output */ }
-                return new RegExp(`\\b${propertyName.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\b`, "i").test(r.out);
+                const rows = parseWranglerMetadataIndexList(r);
+                return rows.some((x) =>
+                  x.propertyName === propertyName && String(x.indexType || x.type).toLowerCase() === indexType
+                );
               },
         });
       }
 
       cfg.vectorize_index = idxName;
     } catch (e) {
+      if (e?.recoverySafeAfterProvisionRefusal === true) throw e;
       if (e instanceof Fatal) throw e;
       die(
         `Vectorize could not be provisioned: ${e.message.slice(0, 140)}\n` +
@@ -2835,7 +2979,7 @@ async function cmdDeployWithPrompts(manifestPath, options = {}) {
   }
 
   // Routine ingest, drain, health, diagnose, and evaluation must keep working
-  // after the one-day Cloudflare control token is revoked. Persist the verified
+  // while the owner's long-lived Cloudflare recovery key remains saved. Persist the verified
   // workers.dev hostname once, instead of looking it up again on every command.
   if (!m.brain?.domain && options.persistDomain !== false) {
     const domain = await persistWorkersDevDomain(manifestPath, m, acct, scriptName, {
@@ -6412,7 +6556,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
         // steady-state outbox work that arrived before the paused boundary and
         // independently verifies normal post-upgrade operation.
         await runStage("vector projection convergence", () =>
-          drainProjection(executionPin.target));
+          drainProjection(executionPin.target, { retryPausedCorpusPropagation: true }));
       }
       await runStage("exact-version health verification", () =>
         verifyHealth(executionPin.target, {
@@ -19906,10 +20050,45 @@ export async function cmdDoctor(manifestPath, options = {}) {
  */
 let _rl = null;
 let _lines = null;
-function prompts() {
+let _promptInput = null;
+let _promptOutput = null;
+let _promptTerminal = false;
+
+function drainBufferedInput(input) {
+  if (!input || typeof input.read !== "function") return;
+  while (input.read() !== null) { /* discard only bytes Node has already buffered */ }
+}
+
+function suspendSharedPromptsForHiddenInput(input) {
+  if (!_rl || _promptInput !== input) {
+    drainBufferedInput(input);
+    return () => drainBufferedInput(input);
+  }
+  const previous = { input: _promptInput, output: _promptOutput, terminal: _promptTerminal };
+  closePrompts();
+  drainBufferedInput(input);
+  let restored = false;
+  return () => {
+    if (restored) return;
+    restored = true;
+    drainBufferedInput(input);
+    if (!input.destroyed) prompts(previous);
+  };
+}
+
+function prompts({
+  input = process.stdin,
+  output = process.stdout,
+  terminal = input.isTTY,
+} = {}) {
   if (!_rl) {
-    _rl = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY });
+    _promptInput = input;
+    _promptOutput = output;
+    _promptTerminal = terminal;
+    _rl = createInterface({ input, output, terminal: _promptTerminal });
     _lines = _rl[Symbol.asyncIterator]();
+  } else if (_promptInput !== input || _promptOutput !== output) {
+    throw new Error("the shared prompt interface is already attached to another terminal");
   }
   return _lines;
 }
@@ -19918,21 +20097,26 @@ function closePrompts() {
     _rl.close();
     _rl = null;
     _lines = null;
+    _promptInput = null;
+    _promptOutput = null;
+    _promptTerminal = false;
   }
 }
 /** Test seams: open the shared ask() readline, and report whether one is still attached. */
-export function openPromptsForTesting() { prompts(); }
+export function openPromptsForTesting(options = {}) { prompts(options); }
 export function promptsOpenForTesting() { return _rl !== null; }
+export function closePromptsForTesting() { closePrompts(); }
+export function askForTesting(question, fallback = "") { return ask(question, fallback); }
 
 /** Ask a question. Returns the trimmed answer, or the default when blank or absent. */
 async function ask(question, fallback = "") {
-  const lines = prompts();
-  process.stdout.write(`  ${question}${fallback ? c.dim(` [${fallback}]`) : ""}: `);
+  const lines = _rl ? _lines : prompts();
+  (_promptOutput ?? process.stdout).write(`  ${question}${fallback ? c.dim(` [${fallback}]`) : ""}: `);
   const { value, done } = await lines.next();
   if (done) {
     // stdin ended. Taking the default is right: an unattended run should
     // complete on defaults rather than hang waiting for a person.
-    process.stdout.write(`${c.dim(fallback || "(none)")}\n`);
+    (_promptOutput ?? process.stdout).write(`${c.dim(fallback || "(none)")}\n`);
     return fallback;
   }
   return (String(value || "").trim()) || fallback;
@@ -24536,13 +24720,20 @@ export async function cmdDrain(manifestPath, options = {}) {
     const raw = await res.text();
     let body = null;
     try { body = JSON.parse(raw); } catch { /* validated below */ }
-    if (res.status === 503 && body?.paused === true &&
-        body?.error === "vector drain is paused for a verified upgrade" &&
+    const stalePausedGeneration = res.status === 503 && body?.paused === true &&
+      (body?.error === "vector drain is paused for a verified upgrade" ||
+        (options.retryPausedCorpusPropagation === true &&
+          (body?.code === undefined || body?.code === "corpus_writes_paused") &&
+          body?.error === "brain corpus writes are paused for a verified upgrade or rollback"));
+    if (stalePausedGeneration &&
         pausedPropagationRetries < 24) {
       const delayMs = Math.min(5_000, Math.max(0, deadline - now()));
       if (delayMs <= 0) break;
       pausedPropagationRetries += 1;
-      info("the new version is still reaching every server; retrying in 5 seconds");
+      info(
+        `the new version is still reaching every server; ` +
+          `retrying ${pausedPropagationRetries}/24 in ${Math.ceil(delayMs / 1_000)} second(s).`
+      );
       await wait(delayMs);
       continue;
     }
@@ -25794,6 +25985,41 @@ export async function confirmWorkersPaidForSetup(account, options = {}) {
   return Object.freeze({ account_id: accountId, confirmed: true, source: "owner_prompt" });
 }
 
+export function createSetupControlAction({
+  readCurrentManifest,
+  resolveSavedAccount,
+  chooseAccount,
+  confirmWorkersPaid,
+  runSetup,
+} = {}) {
+  for (const [name, fn] of Object.entries({
+    readCurrentManifest,
+    resolveSavedAccount,
+    chooseAccount,
+    confirmWorkersPaid,
+    runSetup,
+  })) {
+    if (typeof fn !== "function") throw new TypeError(`${name} must be a function`);
+  }
+  let workersPaidAccountId = null;
+  return async (session) => {
+    const currentManifest = readCurrentManifest();
+    const selectedAccount = session?.account || (currentManifest
+      ? await resolveSavedAccount(currentManifest)
+      : await chooseAccount());
+    const selectedAccountId = String(selectedAccount?.id || "").toLowerCase();
+    // A same-process credential recovery reruns this action after setup has
+    // saved its manifest. Re-read that account, and reuse only the confirmation
+    // this action already obtained for that exact id. A different account or a
+    // new process must confirm again before setup resumes.
+    if (!workersPaidAccountId || workersPaidAccountId !== selectedAccountId) {
+      await confirmWorkersPaid(selectedAccount);
+      workersPaidAccountId = selectedAccountId;
+    }
+    return runSetup(selectedAccount, session, currentManifest);
+  };
+}
+
 async function cmdSetupInteractive(manifestPath) {
   const flags = parseFlags(process.argv.slice(3));
   assertKnownFlags(
@@ -25923,20 +26149,16 @@ async function cmdSetupInteractive(manifestPath) {
     const ceremony = await prepareCloudflareAccountCeremony({ accountPath, askFn: ask });
     accountPath = ceremony.path;
   }
-  return withCloudflareControlCredential(
-    async (session) => {
-      // OAuth returns the exact selected account. The token lane must resolve
-      // the same account from the manifest, or choose it before any setup write.
-      // Only then can the separate owner-visible billing proof be meaningful.
-      const selectedAccount = session.account || (manifest
-        ? await resolveAccount(manifest)
-        : await chooseSetupAccount(ask));
-      await confirmCloudflareWorkersPaidAccount(selectedAccount, {
+  const setupAction = createSetupControlAction({
+    readCurrentManifest: () => existsSync(target) ? loadManifest(target).m : null,
+    resolveSavedAccount: current => resolveAccount(current),
+    chooseAccount: () => chooseSetupAccount(ask),
+    confirmWorkersPaid: selectedAccount => confirmCloudflareWorkersPaidAccount(selectedAccount, {
         interactive,
         askFn: ask,
         environment: process.env,
-      });
-      return cmdSetup(manifestPath, {
+      }),
+    runSetup: (selectedAccount, session) => cmdSetup(manifestPath, {
         flags,
         cloudflareAccountPath: accountPath,
         cloudflareAuthProfile: session.profile || authProfile,
@@ -25962,11 +26184,14 @@ async function cmdSetupInteractive(manifestPath) {
           ],
         } : {}),
         listCloudflareAccounts: async () => [selectedAccount],
-      });
-    },
+      }),
+  });
+  return withCloudflareControlCredential(
+    setupAction,
     {
       manifestPath: target,
       resumeCommand: `brain setup ${commandPath(displayPath(target))}`,
+      recoveryCommand: `brain setup ${commandPath(displayPath(target))} --cloudflare-token`,
       accountId,
       authProfile,
       freshOAuth: !resumed && !tokenPath,

@@ -24,6 +24,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   cmdDeploy,
+  cmdProvision,
+  cmdSetup,
   commandPath,
   displayPathForTesting,
   persistWorkersDevDomain,
@@ -174,6 +176,259 @@ async function withFixture(fetchImpl, run, { workersSubdomain = SUBDOMAIN_LABEL 
     else process.env.CLOUDFLARE_API_TOKEN = priorToken;
   }
 }
+
+function writeProvisionRecoveryManifest(label) {
+  const path = join(sandbox, `provision-${label}-${manifestCounter++}.manifest.json`);
+  writeFileSync(path, JSON.stringify({
+    client: { slug: "fixture", display_name: "Fixture Owner" },
+    brain: { worker_name: "fixture-brain" },
+    infrastructure: {
+      cloudflare: {
+        account_id: ACCOUNT_ID,
+        auth_profile: AUTH_PROFILE,
+        d1_database_name: "fixture-brain",
+        storage: "d1",
+        vectorize_index: "fixture-403-index",
+        drain_cron: "* * * * *",
+      },
+    },
+    safety: { ocr: { enabled: false } },
+    sources: [],
+    testing: { probe_questions: [] },
+  }));
+  return path;
+}
+
+async function runProvisionRecoveryScenario(mode) {
+  const manifestPath = writeProvisionRecoveryManifest(mode);
+  const calls = [];
+  const metadata = new Map();
+  let databaseCreated = false;
+  let indexCreated = false;
+  let refusalIssued = false;
+  let verifyCalls = 0;
+  let storedLoads = 0;
+  const wranglerCalls = [];
+  const prompts = [];
+  const oauthToken = "o".repeat(40);
+  const recoveryToken = "t".repeat(40);
+  const fetchImpl = async (input, init = {}) => {
+    const url = new URL(String(input));
+    const path = url.pathname;
+    const method = init.method || "GET";
+    const authorization = String(init.headers?.Authorization || init.headers?.authorization || "");
+    const recovery = authorization.includes(recoveryToken);
+    calls.push({ method, path, recovery });
+
+    if (path === "/client/v4/accounts" && method === "GET") {
+      return apiResponse([{ id: ACCOUNT_ID, name: "Fixture Account" }]);
+    }
+    if (path === `/client/v4/accounts/${ACCOUNT_ID}/d1/database` && method === "GET") {
+      return apiResponse(databaseCreated ? [{ name: "fixture-brain", uuid: "fixture-database" }] : []);
+    }
+    if (path === `/client/v4/accounts/${ACCOUNT_ID}/d1/database` && method === "POST") {
+      databaseCreated = true;
+      return apiResponse({ name: "fixture-brain", uuid: "fixture-database" });
+    }
+    if (path === `/client/v4/accounts/${ACCOUNT_ID}/d1/database/fixture-database/query` && method === "POST") {
+      return apiResponse({ results: [] });
+    }
+    if (path === `/client/v4/accounts/${ACCOUNT_ID}/vectorize/v2/indexes` && method === "GET") {
+      if (["wrangler-create-refusal", "wrangler-metadata-refusal"].includes(mode)) {
+        return apiResponse(null, { success: false, status: 500, code: 1000, message: "fixture API fallback" });
+      }
+      return apiResponse(indexCreated ? [{ name: "fixture-403-index", config: { dimensions: 768, metric: "cosine" } }] : []);
+    }
+    if (path === `/client/v4/accounts/${ACCOUNT_ID}/vectorize/v2/indexes` && method === "POST") {
+      if (!recovery && !refusalIssued && ["server", "network", "already-exists", "forbidden-no-code", "recovery-refusal"].includes(mode)) {
+        refusalIssued = true;
+        if (mode === "network") throw new Error("network unavailable for fixture-403-index");
+        if (mode === "server") {
+          return apiResponse(null, { success: false, status: 500, code: 1000, message: "fixture-403-index temporary failure" });
+        }
+        if (mode === "already-exists") {
+          return apiResponse(null, { success: false, status: 409, code: 1000, message: "fixture-403-index already exists" });
+        }
+        if (mode === "forbidden-no-code") {
+          return apiResponse(null, { success: false, status: 403, code: 1000, message: "fixture permission refusal" });
+        }
+        return apiResponse(null, { success: false, status: 403, code: 10000, message: "Authentication error" });
+      }
+      if (mode === "recovery-refusal" && recovery) {
+        return apiResponse(null, { success: false, status: 403, code: 10000, message: "Authentication error" });
+      }
+      indexCreated = true;
+      return apiResponse({ name: "fixture-403-index" });
+    }
+    const metadataList = new RegExp(`/vectorize/v2/indexes/fixture-403-index/metadata_index/list$`).test(path);
+    if (metadataList && method === "GET") {
+      if (mode === "metadata-list-refusal" && !recovery && !refusalIssued) {
+        refusalIssued = true;
+        return apiResponse(null, { success: false, status: 403, code: 10000, message: "Authentication error" });
+      }
+      return apiResponse({
+        metadataIndexes: [...metadata].map(([propertyName, indexType]) => ({ propertyName, indexType })),
+      });
+    }
+    const metadataCreate = new RegExp(`/vectorize/v2/indexes/fixture-403-index/metadata_index/create$`).test(path);
+    if (metadataCreate && method === "POST") {
+      const body = JSON.parse(String(init.body || "{}"));
+      metadata.set(body.propertyName, body.indexType);
+      return apiResponse({ mutationId: `fixture-${body.propertyName}` });
+    }
+    throw new Error(`offline provision fixture has no response for ${method} ${path}`);
+  };
+
+  const priorFetch = globalThis.fetch;
+  const priorLog = console.log;
+  const priorError = console.error;
+  const longWranglerRefusal =
+    `${"fixture diagnostic ".repeat(12)}A request to the Cloudflare API failed. ` +
+    "Vectorize permission was refused [code: 10000]";
+  const wranglerCommand = (args) => {
+    wranglerCalls.push([...args]);
+    if (mode === "wrangler-metadata-refusal" && args.includes("list-metadata-index")) {
+      return { ok: true, out: "[]", stdout: "[]", stderr: "" };
+    }
+    if (mode === "wrangler-metadata-refusal" && args.includes("create-metadata-index")) {
+      return { ok: false, out: longWranglerRefusal, stdout: "", stderr: longWranglerRefusal };
+    }
+    if (args.includes("create")) {
+      return mode === "wrangler-create-refusal"
+        ? { ok: false, out: longWranglerRefusal, stdout: "", stderr: longWranglerRefusal }
+        : { ok: true, out: "", stdout: "", stderr: "" };
+    }
+    return { ok: true, out: "", stdout: "", stderr: "" };
+  };
+  let outcome;
+  try {
+    globalThis.fetch = fetchImpl;
+    console.log = () => {};
+    console.error = () => {};
+    outcome = await withCloudflareControlCredential(() => cmdSetup(manifestPath, {
+      flags: { "no-connect": true },
+      preflightChecks: [],
+      ask: async () => "",
+      configureStandardAdminKeyStorage: () => ({ changed: false }),
+      prepareSetupAdminKey: async () => ({ source: "durable", value: "fixture-admin-key" }),
+      cmdVerify: async () => { verifyCalls += 1; },
+      ...(["wrangler-create-refusal", "wrangler-metadata-refusal"].includes(mode) ? {
+        cmdProvision: (path, options) => cmdProvision(path, { ...options, wranglerCommand }),
+      } : {}),
+      cmdMigrate: async () => {},
+      cmdDeploy: async () => {},
+      setupWorkerScriptExists: async () => false,
+      cmdSecrets: async () => {},
+      cmdDrain: async () => {},
+      cmdHealth: async () => {},
+      rememberInstalledManifest: () => {},
+      backlogCount: async () => 0,
+      connectAgents: false,
+    }), {
+      manifestPath,
+      accountId: ACCOUNT_ID,
+      authProfile: AUTH_PROFILE,
+      interactive: true,
+      allowBrowserReauth: true,
+      allowTokenRecovery: true,
+      resumeCommand: `brain setup ${commandPath(manifestPath)}`,
+      recoveryCommand: `brain setup ${commandPath(manifestPath)} --cloudflare-token`,
+      askFn: async (question) => { prompts.push(question); return "y"; },
+      loadStoredCloudflareToken: () => { storedLoads += 1; return Buffer.from(recoveryToken); },
+      storedTokenReference: () => "fixture protected store",
+      oauthOptions: {
+        processRunner: () => ({
+          status: 0,
+          signal: null,
+          error: null,
+          stdout: Buffer.from(JSON.stringify({ type: "oauth", token: oauthToken })),
+          stderr: Buffer.alloc(0),
+        }),
+      },
+      withOAuthSession: async (request) => request.action({
+        token: Buffer.from(oauthToken),
+        profile: AUTH_PROFILE,
+        account: { id: ACCOUNT_ID, name: "Fixture Account" },
+        preflight: { status: "ready", checks: ["account", "workers", "d1", "vectorize", "workers_ai"] },
+      }),
+    }).then((value) => ({ value }), (error) => ({ error }));
+  } finally {
+    globalThis.fetch = priorFetch;
+    console.log = priorLog;
+    console.error = priorError;
+  }
+  return {
+    ...outcome,
+    manifestPath,
+    calls,
+    databaseCreated,
+    indexCreated,
+    metadata,
+    verifyCalls,
+    storedLoads,
+    prompts,
+    wranglerCalls,
+    longWranglerRefusal,
+  };
+}
+
+test("setup recovers a real metadata-list refusal and adopts the D1 it already created", async () => {
+  const run = await runProvisionRecoveryScenario("metadata-list-refusal");
+  assert.equal(run.error, undefined, run.error?.message);
+  assert.equal(run.verifyCalls, 2, "both the refused setup and its approved recovery rerun must reach verification");
+  assert.equal(run.storedLoads, 1, "the recovery credential decision point must be reached once");
+  assert.equal(run.prompts.length, 2, "the recovery offer and saved credential each require approval");
+  assert.equal(run.calls.filter((call) => call.method === "POST" && call.path.endsWith("/d1/database")).length, 1,
+    "the rerun must adopt the first D1 instead of creating another");
+  assert.ok(run.calls.some((call) => call.recovery && call.path.endsWith("/d1/database/fixture-database/query")),
+    "the recovery rerun must reach the D1 adoption proof");
+  assert.equal(run.metadata.size, 6, "all search filters must be active after the recovery rerun");
+  const saved = JSON.parse(readFileSync(run.manifestPath, "utf8"));
+  assert.equal(saved.infrastructure.cloudflare.d1_database_id, "fixture-database");
+  assert.equal(saved.infrastructure.cloudflare.vectorize_index, "fixture-403-index");
+});
+
+for (const mode of ["server", "network", "already-exists", "forbidden-no-code"]) {
+  test(`setup does not convert a ${mode} Vectorize failure into credential recovery`, async () => {
+    const run = await runProvisionRecoveryScenario(mode);
+    assert.ok(run.error, "the control failure must remain a failure");
+    assert.equal(run.verifyCalls, 1, "the setup action must reach the real provision path once");
+    assert.equal(run.storedLoads, 0, "the recovery credential path must not run");
+    assert.deepEqual(run.prompts, [], "the owner must not receive a credential offer for this failure");
+  });
+}
+
+test("a scope refusal on the recovery token is not converted into another recovery", async () => {
+  const run = await runProvisionRecoveryScenario("recovery-refusal");
+  assert.ok(run.error, "the second credential refusal must remain a failure");
+  assert.equal(run.verifyCalls, 2, "the original and recovery actions must each reach real provision once");
+  assert.equal(run.storedLoads, 1, "only one recovery credential decision is allowed");
+  assert.equal(run.prompts.length, 2, "only the initial recovery offer and saved-token approval may be asked");
+  assert.equal(run.error?.constructor?.name, "Fatal",
+    "the recovery token's own refusal must keep the provision failure type");
+  assert.match(run.error?.message || "", /Vectorize could not be provisioned/i);
+  assert.doesNotMatch(run.error?.message || "", /browser sign-in was refused/i,
+    "a recovery-token refusal must not be relabeled as a browser-session refusal");
+});
+
+test("a failed Wrangler index create keeps Cloudflare's complete refusal", async () => {
+  const run = await runProvisionRecoveryScenario("wrangler-create-refusal");
+  assert.ok(run.error, "the injected Wrangler create refusal must remain a failure");
+  assert.ok(run.wranglerCalls.some((args) => args.includes("create")),
+    "the real Wrangler create decision point must be reached");
+  assert.ok((run.error?.message || "").includes(run.longWranglerRefusal),
+    "the owner must receive the complete Wrangler and Cloudflare refusal");
+  assert.match(run.error?.message || "", /code: 10000/i);
+});
+
+test("a failed Wrangler search-filter create keeps Cloudflare's final reason", async () => {
+  const run = await runProvisionRecoveryScenario("wrangler-metadata-refusal");
+  assert.ok(run.error, "the injected Wrangler search-filter refusal must remain a failure");
+  assert.ok(run.wranglerCalls.some((args) => args.includes("create-metadata-index")),
+    "the real Wrangler search-filter create decision point must be reached");
+  assert.match(run.error?.message || "", /code: 10000/i,
+    "the final Cloudflare reason must survive owner-facing truncation");
+});
 
 test("the named-profile lane probes and persists only the exact preflight subdomain", async () => {
   const target = writeManifest();

@@ -5,7 +5,8 @@
 // the source. A source assertion cannot tell a working guard from a deleted one.
 
 import {
-  chooseDbName, assertAdoptable, documentCountOf, ensureMetadataIndex, VECTOR_METADATA_INDEXES,
+  chooseDbName, assertAdoptable, documentCountOf, ensureMetadataIndex, parseWranglerMetadataIndexList,
+  VECTOR_METADATA_INDEXES,
   driveExclusionIdsOf, driveConnectorConfig, completedDriveFamilyPlans, sourceCursorCanAdvance,
   sourceReceiptHasRemoteGap,
   remoteFamilyOutcomes, assertDriveLimitSafe, assertRemoteLimitSafe, validateBatchReceipt, postSourceReceipt,
@@ -736,6 +737,85 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
   const okRes = await ensureMetadataIndex({ create: async () => { created++; }, sleep: noSleep, log: () => {} });
   check("a clean create succeeds on the first attempt", okRes === true && created === 1, `created=${created}`);
 
+  let resumeChecks = 0, resumeCreates = 0;
+  const resumed = await ensureMetadataIndex({
+    create: async () => { resumeCreates++; },
+    exists: async () => { resumeChecks++; return true; },
+    sleep: noSleep,
+    log: () => {},
+  });
+  check("a resumed setup checks for an active metadata index before creating it",
+    resumed === true && resumeChecks === 1 && resumeCreates === 0,
+    `checks=${resumeChecks} creates=${resumeCreates}`);
+
+  let unreadableChecks = 0, fallbackCreates = 0;
+  const precheckLogs = [];
+  const precheckWarnings = [];
+  const unreadablePrecheck = await ensureMetadataIndex({
+    create: async () => { fallbackCreates++; },
+    exists: async () => {
+      unreadableChecks++;
+      if (unreadableChecks === 1) throw new Error("500 temporary list failure");
+      return true;
+    },
+    sleep: noSleep,
+    log: (message) => precheckLogs.push(message),
+    warnLog: (message) => precheckWarnings.push(message),
+  });
+  check("a non-refusal pre-check error falls through to the safe create path",
+    unreadablePrecheck === true && unreadableChecks === 2 && fallbackCreates === 1,
+    JSON.stringify({ unreadableChecks, fallbackCreates, precheckLogs }));
+  check("the owner is told that the pre-check fell through to create",
+    precheckWarnings.some((message) => /could not check[\s\S]*trying to create it safely/i.test(message)) &&
+      precheckLogs.every((message) => !/could not check/i.test(message)),
+    JSON.stringify({ precheckLogs, precheckWarnings }));
+
+  const metadataRows = [{ propertyName: "source", indexType: "string" }];
+  const metadataStdout = JSON.stringify({ metadataIndexes: metadataRows });
+  check("Wrangler metadata JSON is parsed from stdout without stderr warnings",
+    JSON.stringify(parseWranglerMetadataIndexList({
+      ok: true,
+      stdout: metadataStdout,
+      stderr: "npm warning: fixture-only diagnostic",
+      out: `${metadataStdout}npm warning: fixture-only diagnostic`,
+    })) === JSON.stringify(metadataRows));
+
+  const precheckRefusal = new Error("GET metadata list failed (403): 10000 authentication error");
+  precheckRefusal.recoverySafeAfterProvisionRefusal = true;
+  let refusedPrecheckCreates = 0;
+  let caughtPrecheckRefusal = null;
+  try {
+    await ensureMetadataIndex({
+      create: async () => { refusedPrecheckCreates++; },
+      exists: async () => { throw precheckRefusal; },
+      sleep: noSleep,
+      log: () => {},
+    });
+  } catch (error) {
+    caughtPrecheckRefusal = error;
+  }
+  check("a recoverable refusal from the pre-check is rethrown without creating",
+    caughtPrecheckRefusal === precheckRefusal && refusedPrecheckCreates === 0,
+    JSON.stringify({ caught: caughtPrecheckRefusal?.message, refusedPrecheckCreates }));
+
+  const createRefusal = new Error("POST metadata create failed (403): 10000 authentication error");
+  createRefusal.recoverySafeAfterProvisionRefusal = true;
+  let refusalCreateCalls = 0;
+  let caughtCreateRefusal = null;
+  try {
+    await ensureMetadataIndex({
+      create: async () => { refusalCreateCalls++; throw createRefusal; },
+      exists: async () => false,
+      sleep: noSleep,
+      log: () => {},
+    });
+  } catch (error) {
+    caughtCreateRefusal = error;
+  }
+  check("a recoverable refusal from create is rethrown after reaching create once",
+    caughtCreateRefusal === createRefusal && refusalCreateCalls === 1,
+    JSON.stringify({ caught: caughtCreateRefusal?.message, refusalCreateCalls }));
+
   let n = 0;
   const flaky = await ensureMetadataIndex({
     create: async () => { if (++n < 3) throw new Error("500 upstream"); }, sleep: noSleep, log: () => {},
@@ -751,6 +831,24 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
   check("and only after exhausting the retries", tries === 3, `tries=${tries}`);
   check("and the message says it cannot be added later", /CANNOT be added later/.test(fatal || ""), fatal);
   check("and tells the operator re-running provision is free", /costs nothing/.test(fatal || ""), fatal);
+
+  let detailedFatal = null, detailedCreateCalls = 0;
+  const finalReason = "Authentication error [code: 10000]";
+  await ensureMetadataIndex({
+    propertyName: "source",
+    indexType: "string",
+    attempts: 1,
+    create: async () => {
+      detailedCreateCalls += 1;
+      throw new Error(`${"Wrangler preamble ".repeat(20)}\n${finalReason}`);
+    },
+    sleep: noSleep,
+    log: () => {},
+    onFatal: (message) => { detailedFatal = message; },
+  });
+  check("a long search-filter refusal keeps Cloudflare's final reason",
+    detailedCreateCalls === 1 && detailedFatal?.includes(finalReason),
+    JSON.stringify({ detailedCreateCalls, detailedFatal }));
 
   let f2 = null;
   const already = await ensureMetadataIndex({

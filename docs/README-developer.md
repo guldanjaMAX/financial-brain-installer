@@ -58,9 +58,10 @@ A scoped Cloudflare token is a bounded legacy, automation, or recovery path.
 With Wrangler 4.131.1 it is also the explicit fallback when browser OAuth cannot
 reach Vectorize. The installer names that limitation, the required Workers
 Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read permissions, and the
-exact saved credential before use. A saved token may be old or revoked, so it
-is never selected without owner approval. Keep a new value inside the reviewed
-hidden prompt or approved no-history launcher.
+exact saved credential before use. A saved token may be old or revoked, but it
+is kept as the owner's long-lived key and reused for update, deploy, and verify.
+Only an interactive recovery choice asks before using it. Keep a new value
+inside the reviewed hidden prompt or approved no-history launcher.
 
 ---
 
