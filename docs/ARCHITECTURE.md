@@ -32,8 +32,9 @@ Wrangler 4.131.1 cannot request Vectorize permission for that profile. Its
 read-only preflight therefore fails closed at the Vectorize read and may offer
 an explicitly selected, account-scoped API token before any mutation. A saved
 token is named by account and protected-store location, described as possibly
-old or revoked, and never selected without owner approval. Scoped API tokens
-otherwise remain limited to explicit automation, recovery, and older manifests.
+old or revoked, and reused for update, deploy, and verify. Only an interactive
+recovery choice asks before using it. Scoped API tokens otherwise remain
+limited to explicit automation, recovery, and older manifests.
 Routine use goes through the deployed Worker with the Brain's own admin key.
 Removing the control-plane profile or revoking a recovery token does not disable
 retrieval, health, ingest through a configured domain, evaluation, drain, or

@@ -81,13 +81,14 @@ offers its bounded recovery path; a hidden token prompt appears only when the
 released CLI explicitly offers that path and the owner chooses it. The
 recovery-only token is a separate, account-scoped API token from the Cloudflare
 dashboard with the minimum reviewed scope: Workers Scripts Edit, D1 Edit,
-Vectorize Edit, and Workers AI Read. The installer never quietly substitutes a
-saved token. Before using one from protected local storage, it names the exact
-credential location and account, warns that the token may be old or revoked, and
-asks the owner to approve that credential. The owner can decline it and choose a
-different token through the hidden prompt. Give a recovery token a short expiry:
-leave its start date empty or set it to today, and set its end at least 7 days
-from now. It never belongs in chat or a command argument.
+Vectorize Edit, and Workers AI Read. Give it an expiry of about one year. On a
+Mac, the installer offers to keep the key in the login Keychain; other platforms
+keep no copy in this release. When a copy exists, updates, deploys, and
+verification reuse that account-bound key without asking the owner to enter it
+again. Only an explicit recovery choice asks before using a saved key; it names
+the exact credential location and account and warns that the key may be old or
+revoked. The owner can decline it and choose a different key through the hidden
+prompt. It never belongs in chat or a command argument.
 
 Mac or Linux:
 

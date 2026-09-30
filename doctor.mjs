@@ -87,7 +87,8 @@ export const CF_TOKEN_REJECTED_REMEDY =
   "  If the reviewed automation or recovery plan specifically requires a token, the\n" +
   "  owner can review that bounded credential in My Profile > API Tokens without\n" +
   `  revealing it to the assistant. Leave the start date empty or set it to today; set\n` +
-  `  the end at least 7 days from now. Minimum scopes: ${CF_TOKEN_SCOPES.join(", ")}.`;
+  `  the end at least 7 days from now, with about one year recommended for the owner's saved key. ` +
+  `Minimum scopes: ${CF_TOKEN_SCOPES.join(", ")}.`;
 
 /** Does this failure mean the credential was refused, rather than the tool misbehaving? */
 export function isCredentialRejection(error) {

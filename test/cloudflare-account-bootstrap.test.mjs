@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   confirmCloudflareWorkersPaidAccount,
+  createSetupControlAction,
   prepareCloudflareAccountCeremony,
   setupLocalPreflightChecks,
 } from "../brain.mjs";
@@ -124,12 +125,64 @@ test("unattended setup requires an account-bound Workers Paid confirmation", asy
 
 test("every public setup lane confirms the verified account before setup can write", () => {
   const source = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
+  const helper = source.indexOf("export function createSetupControlAction");
   const wrapper = source.indexOf("async function cmdSetupInteractive");
-  const selected = source.indexOf("const selectedAccount = session.account", wrapper);
-  const paid = source.indexOf("await confirmCloudflareWorkersPaidAccount(selectedAccount", selected);
-  const setup = source.indexOf("return cmdSetup(manifestPath", paid);
-  assert.ok(wrapper > 0 && selected > wrapper && paid > selected && setup > paid);
-  assert.match(source.slice(selected, paid), /manifest[\s\S]*resolveAccount[\s\S]*chooseSetupAccount/);
+  const selected = source.indexOf("const selectedAccount = session?.account", helper);
+  const paid = source.indexOf("await confirmWorkersPaid(selectedAccount", selected);
+  const setup = source.indexOf("return runSetup(selectedAccount", paid);
+  const wrapperUsesHelper = source.indexOf("const setupAction = createSetupControlAction", wrapper);
+  assert.ok(helper > 0 && selected > helper && paid > selected && setup > paid && wrapperUsesHelper > wrapper);
+  assert.match(source.slice(selected, paid), /currentManifest[\s\S]*resolveSavedAccount[\s\S]*chooseAccount/);
+  const wrapperWiring = source.slice(wrapperUsesHelper, source.indexOf("return withCloudflareControlCredential", wrapperUsesHelper));
+  assert.match(
+    wrapperWiring,
+    /readCurrentManifest:\s*\(\)\s*=>\s*existsSync\(target\)\s*\?\s*loadManifest\(target\)\.m\s*:\s*null/,
+    "the real setup wrapper must reread the manifest written by the first recovery attempt",
+  );
+  assert.doesNotMatch(
+    wrapperWiring,
+    /readCurrentManifest:\s*\(\)\s*=>\s*manifest\b/,
+    "the setup wrapper must not close over its stale pre-recovery manifest",
+  );
+});
+
+test("fresh setup recovery rereads its saved account and does not repeat account or Workers Paid questions", async () => {
+  const account = { id: "d".repeat(32), name: "Fixture Account" };
+  let manifest = null;
+  let accountChoices = 0;
+  let paidChecks = 0;
+  let setupRuns = 0;
+  const action = createSetupControlAction({
+    initialManifest: null,
+    readCurrentManifest: () => manifest,
+    resolveSavedAccount: async current => {
+      assert.equal(current, manifest);
+      return account;
+    },
+    chooseAccount: async () => { accountChoices += 1; return account; },
+    confirmWorkersPaid: async selected => {
+      paidChecks += 1;
+      assert.equal(selected, account);
+    },
+    runSetup: async selected => {
+      setupRuns += 1;
+      assert.equal(selected, account);
+      if (setupRuns === 1) {
+        manifest = { infrastructure: { cloudflare: { account_id: account.id } } };
+        throw new Error("fixture recoverable setup refusal");
+      }
+      return "resumed";
+    },
+  });
+
+  await assert.rejects(
+    action({ account }),
+    /fixture recoverable setup refusal/,
+  );
+  assert.equal(await action({ account: null }), "resumed");
+  assert.equal(setupRuns, 2, "both the original action and recovery rerun must reach setup");
+  assert.equal(accountChoices, 0, "the recovery rerun must use the account saved by setup");
+  assert.equal(paidChecks, 1, "the same-process recovery rerun must not reopen or reconfirm Workers Paid");
 });
 
 test("the automation and recovery token lane cannot bypass machine prerequisites", async () => {

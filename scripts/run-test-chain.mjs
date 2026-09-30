@@ -635,7 +635,7 @@ export function exitDisposition(result, { continueOnFailure = false } = {}) {
  * because `npm test` was launched from an authenticated workstation.
  */
 export function isolatedTestEnvironment(env = process.env) {
-  return Object.freeze({ ...env, BRAIN_NO_WRANGLER_LOGIN: "1" });
+  return Object.freeze({ ...env, BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_TEST_CHAIN: "1" });
 }
 
 function runFromCli() {

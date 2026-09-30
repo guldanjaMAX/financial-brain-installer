@@ -13,26 +13,46 @@ offered as a customer update; its entries below ship for the first time in
 0.4.9, and its identity is retired so its evidence cannot be confused with
 this changed candidate.
 
-- **A saved browser sign-in no longer blocks a custom-domain Brain at the
-  workers.dev address check.** Cloudflare can refuse that account read even
-  when the sign-in can update a Brain that uses its own domain. That Brain now
-  continues; it never used the workers.dev address. A Brain whose address uses
-  workers.dev still stops, explains that its address needs the refused read,
-  and offers the same explicit account-scoped recovery token choice. Nothing
-  changes unless the owner accepts that recovery path. To check: run the next
-  update with the Brain's saved browser sign-in.
+- **SECURITY: hidden entry now owns the terminal after a yes/no question.** A
+  key pasted at a hidden prompt that followed a yes/no question could be shown
+  on screen. If you did that while sharing your screen, roll that key. The
+  prompt now closes the visible question reader before accepting hidden input,
+  restores it afterward, and lets the command finish on its own.
 
-- **Cloudflare setup now tells you when browser sign-in cannot reach
-  Vectorize, and it never silently switches credentials.** Wrangler 4.131.1
-  cannot request Vectorize permission for its browser profile. Reopening the
-  same browser approval cannot fix that, so setup now goes directly to a clear
-  recovery choice that names the required Workers Scripts Edit, D1 Edit,
-  Vectorize Edit, and Workers AI Read permissions. If this computer has a saved
-  recovery token, setup names its exact account and protected-store location,
-  warns that it may be old or revoked, and asks before using it. You can decline
-  it and enter a different token through the hidden prompt. Windows follows the
-  same scope and decision path; its existing visible-entry protection still
-  requires an approved secret-manager path instead of risking an echoed token.
+- **A Brain with a saved address no longer needs the account's workers.dev
+  address read during an update.** Cloudflare can refuse that account read even
+  when the saved browser sign-in can update the Brain. The full saved address,
+  including a saved workers.dev address, is already enough, so the update now
+  continues. A first setup with no saved address still stops and offers the
+  explicit account-scoped recovery token choice. To check: run the next update
+  with the Brain's saved browser sign-in.
+
+- **Cloudflare setup now gives you a recovery route if browser sign-in cannot
+  create the search index, and it never silently switches credentials.** Setup
+  now goes directly to a clear recovery choice that names the required Workers
+  Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read permissions. If
+  this computer has a saved recovery token, setup names its exact account and
+  protected-store location, warns that it may be old or revoked, and asks
+  before using it. You can decline it and enter a different token through the
+  hidden prompt. The saved account-bound key is also reused by later updates,
+  deploys, and verification without asking you to enter it again; only the
+  recovery path asks before choosing a saved key. On Windows, the recovery
+  offer is skipped because this release cannot prove that the prompt will hide
+  the key; approved automation can still use its reviewed secret-manager path.
+  A refused create now makes the same
+  recovery offer instead of stopping without a next step. A resumed setup
+  checks for each existing search filter before trying to create it again. A
+  non-interactive setup refusal names setup's existing `--cloudflare-token`
+  switch and all four required permissions. Updates keep using the saved
+  browser sign-in and never ask the owner to add that switch.
+
+- **An update now retries the last search-index check when an older paused
+  server answers briefly.** The active version can take a few seconds to reach
+  every server after deployment. If the final convergence step reaches the
+  older paused version, update now says it is retrying and waits for up to about
+  two minutes. Only that exact paused response is retried; other errors still
+  stop. A successful retry continues through the final health, acceptance, and
+  version readback checks.
 
 - **A small fresh search backlog no longer looks like a search outage.** When
   keyword and meaning-based search both complete while less than one percent

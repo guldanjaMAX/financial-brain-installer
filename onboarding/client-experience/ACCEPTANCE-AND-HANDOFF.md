@@ -119,8 +119,8 @@ Before closing the session, the owner should be able to:
 6. identify the manifest and any private local evaluation suite without sharing
    their paths publicly;
 7. confirm the named Cloudflare browser profile is bound to the exact owner
-   account and, if a fallback API token was used, revoke that token and verify
-   the Brain still works;
+   account and, if a fallback API token was used, confirm its protected copy is
+   kept for reuse; roll it and remove the old copy only if the key was exposed;
 8. explain who can access the Brain, which source zones a named grant includes,
    and how to remove that access;
 9. find the approved support profile and update page;
