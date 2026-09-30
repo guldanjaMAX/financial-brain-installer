@@ -13,6 +13,15 @@ offered as a customer update; its entries below ship for the first time in
 0.4.9, and its identity is retired so its evidence cannot be confused with
 this changed candidate.
 
+- **A saved browser sign-in no longer blocks a custom-domain Brain at the
+  workers.dev address check.** Cloudflare can refuse that account read even
+  when the sign-in can update a Brain that uses its own domain. That Brain now
+  continues; it never used the workers.dev address. A Brain whose address uses
+  workers.dev still stops, explains that its address needs the refused read,
+  and offers the same explicit account-scoped recovery token choice. Nothing
+  changes unless the owner accepts that recovery path. To check: run the next
+  update with the Brain's saved browser sign-in.
+
 - **Cloudflare setup now tells you when browser sign-in cannot reach
   Vectorize, and it never silently switches credentials.** Wrangler 4.131.1
   cannot request Vectorize permission for its browser profile. Reopening the

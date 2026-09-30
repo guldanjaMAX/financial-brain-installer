@@ -825,6 +825,7 @@ export async function preflightCloudflareOAuthAccount(token, account, options = 
   const checks = ["account"];
   let workersSubdomain = null;
   let workersSubdomainUnregistered = false;
+  let workersSubdomainUnreadable = false;
   // A Brain on its own custom domain never serves from workers.dev, so for it
   // an unregistered subdomain is reported rather than refused. Anything else,
   // including an unknown caller, keeps the fail-closed default.
@@ -835,6 +836,16 @@ export async function preflightCloudflareOAuthAccount(token, account, options = 
       body = await cloudflareGet(`/accounts/${selected.id}${check.suffix}`, token, options);
     } catch (error) {
       annotateScopeRefusal(error, selected.id, check.name);
+      // A custom-domain Brain never consumes this account setting. Keep the
+      // refusal visible in the receipt and continue proving every surface it
+      // does use. A workers.dev Brain still fails closed on the same response.
+      if (check.name === "workers_subdomain" &&
+          error?.code === "CLOUDFLARE_OAUTH_SCOPE_MISSING" &&
+          !workersSubdomainRequired) {
+        // This exception keys on the 403 scope classification and exact surface, not a provider error code.
+        workersSubdomainUnreadable = true;
+        continue;
+      }
       // Cloudflare error 10007 on exactly this read means the account never
       // registered a workers.dev subdomain (the pinned Wrangler special-cases
       // the same code). That is an account setting the owner can fix, not a
@@ -867,6 +878,7 @@ export async function preflightCloudflareOAuthAccount(token, account, options = 
     checks: Object.freeze(checks),
     ...(workersSubdomain !== null ? { workersSubdomain } : {}),
     ...(workersSubdomainUnregistered ? { workersSubdomainUnregistered: true } : {}),
+    ...(workersSubdomainUnreadable ? { workersSubdomainUnreadable: true } : {}),
   });
 }
 

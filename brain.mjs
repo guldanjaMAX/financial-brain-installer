@@ -930,10 +930,13 @@ export function readHiddenCloudflareToken({ input = process.stdin, output = proc
 export async function withCloudflareToken(action, options = {}) {
   // Decided before the early return: an active credential (for example the
   // shared Wrangler session the CLI loads for the whole invocation) is used
-  // directly only outside the Vectorize recovery, which always needs its own
-  // explicit credential decision.
+  // directly only outside a known OAuth scope recovery, which always needs
+  // its own explicit credential decision.
   const vectorizeScopeRecovery = options.recoveryReason === "wrangler_vectorize_scope_missing";
-  if (cloudflareTokenAvailable() && !vectorizeScopeRecovery) return action();
+  const workersSubdomainScopeRecovery =
+    options.recoveryReason === "wrangler_workers_subdomain_scope_missing";
+  const explicitScopeRecovery = vectorizeScopeRecovery || workersSubdomainScopeRecovery;
+  if (cloudflareTokenAvailable() && !explicitScopeRecovery) return action();
 
   const accountLabel = String(options.accountId || "");
   const askFn = options.askFn ?? ask;
@@ -951,11 +954,13 @@ export async function withCloudflareToken(action, options = {}) {
       // A broken keychain must present as itself, not as an every-run prompt.
       warn(String(error?.message || error));
     }
-    if (stored && vectorizeScopeRecovery) {
+    if (stored && explicitScopeRecovery) {
       const reference = (options.storedTokenReference ?? storedTokenReference)(options.accountId);
+      const reason = workersSubdomainScopeRecovery
+        ? "The saved browser sign-in cannot read this account's workers.dev address, which this Brain's address uses. "
+        : "Wrangler 4.131.1 cannot request Vectorize access for the browser sign-in. ";
       const useSaved = String(await askFn(
-        "Wrangler 4.131.1 cannot request Vectorize access for the browser sign-in. " +
-          `A saved recovery API token for the exact account ${accountLabel} is available in ${reference}. ` +
+        reason + `A saved recovery API token for the exact account ${accountLabel} is available in ${reference}. ` +
           "It may be old or revoked, and it has not been tested during this recovery. " +
           "Use this saved credential now? (y/n)",
         "n",
@@ -974,7 +979,9 @@ export async function withCloudflareToken(action, options = {}) {
       } else {
         info(
           `about to use the saved recovery API token for the exact account ${accountLabel} from ${reference}, ` +
-            "because the browser sign-in cannot grant Vectorize access",
+            (workersSubdomainScopeRecovery
+              ? "because the saved browser sign-in cannot read the workers.dev address"
+              : "because the browser sign-in cannot grant Vectorize access"),
         );
       }
     }
@@ -990,7 +997,7 @@ export async function withCloudflareToken(action, options = {}) {
     }
   }
 
-  if (vectorizeScopeRecovery && !approvedDifferentToken) {
+  if (explicitScopeRecovery && !approvedDifferentToken) {
     const useNew = String(await askFn(
       "No saved recovery API token is available for this exact account. " +
         "Enter a newly created scoped API token in the hidden prompt now? (y/n)",
@@ -1030,10 +1037,12 @@ export async function withCloudflareToken(action, options = {}) {
     }
   }
 
-  if (vectorizeScopeRecovery) {
+  if (explicitScopeRecovery) {
     info(
       `about to use the newly entered recovery API token for the exact account ${accountLabel}, ` +
-        "because the browser sign-in cannot grant Vectorize access",
+        (workersSubdomainScopeRecovery
+          ? "because the saved browser sign-in cannot read the workers.dev address"
+          : "because the browser sign-in cannot grant Vectorize access"),
     );
   }
 
@@ -1112,6 +1121,7 @@ export function cloudflareOAuthFailureMessage(error, { resumeCommand = null } = 
     ? error.code
     : "CLOUDFLARE_OAUTH_UNAVAILABLE";
   const vectorizeScopeMissing = isWranglerVectorizeScopeMissing(error);
+  const workersSubdomainScopeMissing = isWranglerWorkersSubdomainScopeMissing(error);
   if (code === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED") {
     // Sign-in worked. Neither the network nor a different credential would
     // change this answer, so neither is suggested.
@@ -1132,6 +1142,9 @@ export function cloudflareOAuthFailureMessage(error, { resumeCommand = null } = 
       vectorizeScopeMissing
         ? "Cloudflare sign-in completed, but Wrangler 4.131.1 cannot request the Vectorize permission this install requires. " +
           "Nothing was changed. Continue only with a separately approved, account-scoped API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read."
+        : workersSubdomainScopeMissing
+          ? "This browser sign-in cannot read this account's workers.dev address, which this Brain needs for its web address. " +
+            "Nothing was changed. To continue, use a separate account-scoped recovery API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read."
         : "Cloudflare sign-in completed, but the approved access could not reach every required Workers, D1, Vectorize, and Workers AI surface. Review the selected account and rerun the sign-in.",
     CLOUDFLARE_ACCOUNT_NONE:
       "That Cloudflare login does not have an account ready for installation yet. Finish creating or joining the account in Cloudflare, then rerun the same command.",
@@ -1143,7 +1156,7 @@ export function cloudflareOAuthFailureMessage(error, { resumeCommand = null } = 
       "The saved local Cloudflare sign-in profile does not belong to this Brain. Nothing was changed. Use the original manifest or begin a separate install folder.",
   }[code] ||
     "Cloudflare sign-in could not be verified safely. Nothing was changed. Check the network and the selected Cloudflare account, then rerun the same command.";
-  if (vectorizeScopeMissing) return `${recovery} Issue: ${code}.`;
+  if (vectorizeScopeMissing || workersSubdomainScopeMissing) return `${recovery} Issue: ${code}.`;
   return `${recovery} Issue: ${code}. If browser sign-in remains unavailable, the installer can offer recovery API-token access.`;
 }
 
@@ -1332,20 +1345,30 @@ export async function withCloudflareControlCredential(action, options = {}) {
     // it: a recovery token reads the same account and cannot change it.
     if (isUnregisteredWorkersSubdomain(error)) throw error;
     if (options.allowTokenRecovery !== true || options.interactive === false) throw error;
-    const scopeMissing = isWranglerVectorizeScopeMissing(error);
-    const question = scopeMissing
+    const vectorizeScopeMissing = isWranglerVectorizeScopeMissing(error);
+    const workersSubdomainScopeMissing = isWranglerWorkersSubdomainScopeMissing(error);
+    const question = vectorizeScopeMissing
       ? "Cloudflare browser sign-in cannot request Vectorize access with Wrangler 4.131.1. " +
         "Continuing requires a separate account-scoped API token created in the Cloudflare dashboard " +
         "with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read. " +
         "Use recovery API-token access now? (y/n)"
-      : "Cloudflare browser sign-in is still unavailable. Use recovery API-token access now? (y/n)";
+      : workersSubdomainScopeMissing
+        ? "This browser sign-in cannot read this account's workers.dev address, which this Brain needs for its web address. " +
+          "Nothing was changed. To continue, use a separate account-scoped recovery API token from the Cloudflare dashboard " +
+          "with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read. " +
+          "Use recovery API-token access now? (y/n)"
+        : "Cloudflare browser sign-in is still unavailable. Use recovery API-token access now? (y/n)";
     const answer = String(await (options.askFn ?? ask)(question, "n")).trim().toLowerCase();
     if (answer !== "y" && answer !== "yes") throw error;
     const selectedRecoveryAccountId = /^[a-f0-9]{32}$/i.test(String(error?.selectedAccountId || ""))
       ? String(error.selectedAccountId).toLowerCase()
       : recoveryAccountId;
     return runToken(
-      scopeMissing ? "wrangler_vectorize_scope_missing" : null,
+      vectorizeScopeMissing
+        ? "wrangler_vectorize_scope_missing"
+        : workersSubdomainScopeMissing
+          ? "wrangler_workers_subdomain_scope_missing"
+          : null,
       selectedRecoveryAccountId,
     );
   };
@@ -1362,7 +1385,7 @@ export async function withCloudflareControlCredential(action, options = {}) {
     }
     const mayRefresh = error instanceof CloudflareOAuthSessionError &&
       (error.code === "CLOUDFLARE_OAUTH_REAUTH_REQUIRED" ||
-        (error.code === "CLOUDFLARE_OAUTH_SCOPE_MISSING" && !isWranglerVectorizeScopeMissing(error))) &&
+        (error.code === "CLOUDFLARE_OAUTH_SCOPE_MISSING" && !isKnownOAuthScopeRecovery(error))) &&
       !initiallyReauthorize && options.allowBrowserReauth === true && options.interactive !== false;
     if (mayRefresh) {
       const answer = String(await (options.askFn ?? ask)(
@@ -1404,6 +1427,16 @@ function isWranglerVectorizeScopeMissing(error) {
   return error instanceof CloudflareOAuthSessionError &&
     error.code === "CLOUDFLARE_OAUTH_SCOPE_MISSING" &&
     error.requiredSurface === "vectorize";
+}
+
+function isWranglerWorkersSubdomainScopeMissing(error) {
+  return error instanceof CloudflareOAuthSessionError &&
+    error.code === "CLOUDFLARE_OAUTH_SCOPE_MISSING" &&
+    error.requiredSurface === "workers_subdomain";
+}
+
+function isKnownOAuthScopeRecovery(error) {
+  return isWranglerVectorizeScopeMissing(error) || isWranglerWorkersSubdomainScopeMissing(error);
 }
 
 /**
