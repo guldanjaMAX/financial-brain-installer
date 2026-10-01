@@ -676,8 +676,57 @@ export async function completePlaidLink(env, {
   return receipt;
 }
 
+// One account whose currency or balance cannot be stored exactly used to throw
+// here, which set the WHOLE connection to error and stopped every other account
+// at that bank. Only these two refusals are per-account facts; anything else
+// (identity, protocol) still fails the connection closed.
+const HELD_ACCOUNT_CODES = Object.freeze({
+  plaid_currency_unsupported: "Its currency is not one this Brain stores exactly, so no converted or USD value was assumed.",
+  plaid_amount_not_representable: "Its balance is too large to store exactly.",
+});
+
+/**
+ * The durable per-connection hold area. Held accounts and their activity are
+ * staged under this window_ref, which no plaid_sync_windows row ever owns, so
+ * no promotion, readiness or assignment query can read them into the ledger.
+ * Rows here keep the provider's exact decimal text and survive cursor advance,
+ * so nothing is dropped: a later release that can store them replays from here.
+ */
+function heldWindowRef(itemRef) {
+  return `plaid-held:${itemRef}`;
+}
+
+async function heldAccountCount(env, tenantId, itemRef) {
+  const row = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM plaid_sync_stage_accounts WHERE tenant_id=? AND window_ref=?",
+  ).bind(tenantId, heldWindowRef(itemRef)).first();
+  return Number(row?.n || 0);
+}
+
 function stagedAccount(account, observedAt) {
   const normalized = normalisePlaidAccount(account);
+  try {
+    return supportedStagedAccount(normalized, observedAt);
+  } catch (error) {
+    if (!Object.hasOwn(HELD_ACCOUNT_CODES, error?.code)) throw error;
+    const kind = accountKindFor(normalized.type, normalized.subtype);
+    const held = {
+      ...normalized,
+      accountKind: kind,
+      balanceRole: balanceRoleFor(kind),
+      // Descriptive only: a held row is never promoted, so this is never money.
+      currency: normalized.isoCurrencyCode || normalized.unofficialCurrencyCode || "XXX",
+      currentBalanceMinor: null,
+      availableBalanceMinor: null,
+      heldReason: error.code,
+      provenance: { ...normalized.provenance, observedAt, held_reason: error.code },
+    };
+    // Not enumerable, so it never reaches a staged JSON row.
+    return Object.defineProperty(held, "heldError", { value: error });
+  }
+}
+
+function supportedStagedAccount(normalized, observedAt) {
   const currency = supportedCurrency(normalized.isoCurrencyCode);
   const kind = accountKindFor(normalized.type, normalized.subtype);
   const current = providerMinorUnits(normalized.currentBalance, currency);
@@ -699,8 +748,38 @@ function stagedAccount(account, observedAt) {
   };
 }
 
-function transactionStageRows(accountMappings, page) {
-  const map = (operation, values) => values.map((transaction) => {
+/** Activity of a held account, kept with its exact decimal and no minor units. */
+function heldTransactionStageRows(accountMappings, page, heldAccounts) {
+  const map = (operation, values) => values
+    .filter(transaction => heldAccounts.has(transaction.providerAccountId))
+    .map(transaction => ({
+      operation,
+      pageIndex: page.pageIndex,
+      providerTransactionId: transaction.providerTransactionId,
+      pendingTransactionId: transaction.pendingTransactionId,
+      providerAccountId: transaction.providerAccountId,
+      accountSlug: accountMappings.get(transaction.providerAccountId) || null,
+      amountDecimal: transaction.amount,
+      amountMinor: null,
+      direction: null,
+      isoCurrencyCode: transaction.isoCurrencyCode,
+      unofficialCurrencyCode: transaction.unofficialCurrencyCode,
+      date: transaction.date,
+      authorizedDate: transaction.authorizedDate,
+      pending: transaction.pending ? 1 : 0,
+      name: transaction.name,
+      merchantName: transaction.merchantName,
+      categoryPrimary: transaction.categoryPrimary,
+      categoryDetailed: transaction.categoryDetailed,
+      provenance: { ...transaction.provenance, held_reason: heldAccounts.get(transaction.providerAccountId) },
+    }));
+  return [...map("added", page.added), ...map("modified", page.modified)];
+}
+
+function transactionStageRows(accountMappings, page, heldAccounts = new Map()) {
+  const map = (operation, values) => values
+    .filter(transaction => !heldAccounts.has(transaction.providerAccountId))
+    .map((transaction) => {
     const currency = supportedCurrency(transaction.isoCurrencyCode);
     const money = providerMinorUnits(transaction.amount, currency);
     return {
@@ -1140,6 +1219,19 @@ function promotionStatements(env, {
           finished_at=CASE WHEN ?3 AND NOT (${pendingItem}) THEN ?5 ELSE NULL END,last_error=NULL
         WHERE tenant_id=?1 AND item_ref=?2`,
     ).bind(tenantId, itemRef, historicalComplete ? 1 : 0, historyState, observedAt, windowRef),
+    // A removal names no account, so it stays in the window until here. One
+    // that withdraws held activity is recorded beside it in the hold area
+    // before the window is cleared, rather than lost with the window.
+    env.DB.prepare(
+      `INSERT OR REPLACE INTO plaid_sync_stage_transactions
+         (tenant_id,window_ref,page_index,operation,provider_transaction_id)
+       SELECT r.tenant_id,?3,r.page_index,'removed',r.provider_transaction_id
+         FROM plaid_sync_stage_transactions r
+        WHERE r.tenant_id=?1 AND r.window_ref=?2 AND r.operation='removed'
+          AND EXISTS (SELECT 1 FROM plaid_sync_stage_transactions h
+            WHERE h.tenant_id=r.tenant_id AND h.window_ref=?3
+              AND h.provider_transaction_id=r.provider_transaction_id AND h.operation IN ('added','modified'))`,
+    ).bind(tenantId, windowRef, heldWindowRef(itemRef)),
     env.DB.prepare("DELETE FROM plaid_sync_stage_transactions WHERE tenant_id=? AND window_ref=?")
       .bind(tenantId, windowRef),
     env.DB.prepare("DELETE FROM plaid_sync_stage_accounts WHERE tenant_id=? AND window_ref=?")
@@ -1304,12 +1396,14 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
       });
       if (!promoted.promoted) return await deferIncomplete(promoted);
       const historicalComplete = window.provider_history_state === PLAID_HISTORY_STATE.HISTORICAL && !promoted.refresh_pending;
+      const heldCount = await heldAccountCount(env, tenantId, itemRef);
+      const complete = historicalComplete && heldCount === 0;
       return {
         item_ref: itemRef,
         refresh_pending: promoted.refresh_pending,
-        ok: historicalComplete,
-        partial: !historicalComplete,
-        status: historicalComplete ? "complete" : "partial",
+        ok: complete,
+        partial: !complete,
+        status: complete ? "complete" : "partial",
         history_state: historicalComplete ? "complete" : "running",
         provider_history_state: window.provider_history_state,
         finalCursor: window.resume_cursor,
@@ -1321,6 +1415,7 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
           removed: Number(window.removed_count || 0),
         },
         resumed_promotion: true,
+        ...(heldCount ? { held_accounts: heldCount } : {}),
         has_more: false,
       };
     }
@@ -1339,9 +1434,35 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
     await renewPlaidSyncLease(env, lease);
     const normalizedAccounts = (Array.isArray(accountPayload.accounts) ? accountPayload.accounts : [])
       .map(account => stagedAccount(account, stamp));
+    // Identity is resolved over the whole inventory, held accounts included,
+    // so a held account can never take or collide with another's slug.
     const mappings = await resolveAccountMappings(env, { tenantId, itemRef, accounts: normalizedAccounts });
     const accountMappings = new Map(mappings.map(row => [row.providerAccountId, row.accountSlug]));
-    const accounts = normalizedAccounts.map(account => ({ ...account, accountSlug: accountMappings.get(account.providerAccountId) }));
+    const inventory = normalizedAccounts.map(account => ({ ...account, accountSlug: accountMappings.get(account.providerAccountId) }));
+    const heldAccounts = new Map(inventory.filter(account => account.heldReason)
+      .map(account => [account.providerAccountId, account.heldReason]));
+    const accounts = inventory.filter(account => !account.heldReason);
+    const held = inventory.filter(account => account.heldReason);
+    const heldRef = heldWindowRef(itemRef);
+    // With no supported account left there is nothing to sync, so the whole
+    // connection still fails closed exactly as before: its error names the
+    // reason, and nothing is staged or held for it.
+    if (accounts.length === 0 && held.length > 0) {
+      throw normalizedAccounts.find(account => account.heldError).heldError;
+    }
+    // Refresh the hold inventory. An account that is no longer held leaves it
+    // only once none of its kept activity remains there.
+    await runPlaidSyncBatch(env, lease, [
+      env.DB.prepare(
+        `DELETE FROM plaid_sync_stage_accounts
+          WHERE tenant_id=?1 AND window_ref=?2
+            AND provider_account_id NOT IN (SELECT value FROM json_each(?3))
+            AND NOT EXISTS (SELECT 1 FROM plaid_sync_stage_transactions t
+              WHERE t.tenant_id=?1 AND t.window_ref=?2
+                AND t.provider_account_id=plaid_sync_stage_accounts.provider_account_id)`,
+      ).bind(tenantId, heldRef, JSON.stringify([...heldAccounts.keys()])),
+      ...(held.length ? [stageAccountsStatement(env, tenantId, heldRef, held)] : []),
+    ]);
     await discoverPlaidAccountAssignments(env, {
       tenantId, itemRef, accounts, at: stamp,
       runBatch: statements => runPlaidSyncBatch(env, lease, statements),
@@ -1384,9 +1505,11 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
         ]);
       },
       stagePage: async (page) => {
-        const rows = transactionStageRows(accountMappings, page);
+        const rows = transactionStageRows(accountMappings, page, heldAccounts);
+        const heldRows = heldTransactionStageRows(accountMappings, page, heldAccounts);
         await runPlaidSyncBatch(env, lease, [
           stageTransactionsStatement(env, tenantId, window.window_ref, rows),
+          ...(heldRows.length ? [stageTransactionsStatement(env, tenantId, heldRef, heldRows)] : []),
           env.DB.prepare(
             `UPDATE plaid_sync_windows SET resume_cursor=?,next_page_index=?,
                 added_count=added_count+?,modified_count=modified_count+?,removed_count=removed_count+?,
@@ -1412,14 +1535,18 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
     if (result.promoted !== true) return await deferIncomplete(result);
     const { historyState: providerHistoryState, ...syncResult } = result;
     const historicalComplete = providerHistoryState === PLAID_HISTORY_STATE.HISTORICAL && !result.refresh_pending;
+    // A held account is work the ledger does not have, so it is never complete.
+    const heldCount = await heldAccountCount(env, tenantId, itemRef);
+    const complete = historicalComplete && heldCount === 0;
     return {
       item_ref: itemRef,
-      ok: historicalComplete,
-      partial: !historicalComplete,
-      status: historicalComplete ? "complete" : "partial",
+      ok: complete,
+      partial: !complete,
+      status: complete ? "complete" : "partial",
       history_state: historicalComplete ? "complete" : "running",
       provider_history_state: providerHistoryState,
       ...syncResult,
+      ...(heldCount ? { held_accounts: heldCount } : {}),
       has_more: false,
     };
   } catch (error) {
@@ -1844,6 +1971,38 @@ export async function plaidFeedStatus(env) {
       stage: "in_ledger",
     });
   }
+  // Accounts held out of the ledger, per connection, each with its named reason
+  // and how much of its activity is kept aside. Masked labels only.
+  const heldAccounts = new Map();
+  const heldRows = (await env.DB.prepare(
+    `SELECT s.window_ref,s.name,s.mask,s.account_kind,s.iso_currency_code,s.unofficial_currency_code,
+            json_extract(s.provenance_json,'$.held_reason') AS held_reason,
+            (SELECT COUNT(DISTINCT h.provider_transaction_id) FROM plaid_sync_stage_transactions h
+              WHERE h.tenant_id=s.tenant_id AND h.window_ref=s.window_ref
+                AND h.provider_account_id=s.provider_account_id AND h.operation IN ('added','modified')
+                AND NOT EXISTS (SELECT 1 FROM plaid_sync_stage_transactions x
+                  WHERE x.tenant_id=h.tenant_id AND x.window_ref=h.window_ref
+                    AND x.operation='removed' AND x.provider_transaction_id=h.provider_transaction_id)
+            ) AS held_transactions
+       FROM plaid_sync_stage_accounts s
+      WHERE s.tenant_id=? AND s.window_ref LIKE 'plaid-held:%'
+      ORDER BY s.window_ref,s.name,s.mask`,
+  ).bind(tenantId).all())?.results || [];
+  for (const row of heldRows) {
+    const itemRef = String(row.window_ref).slice(heldWindowRef("").length);
+    const code = Object.hasOwn(HELD_ACCOUNT_CODES, row.held_reason) ? row.held_reason : "plaid_currency_unsupported";
+    if (!heldAccounts.has(itemRef)) heldAccounts.set(itemRef, []);
+    heldAccounts.get(itemRef).push({
+      masked_identifier: maskedIdentifier(row.name, row.mask),
+      account_kind: row.account_kind,
+      code,
+      source_currency: row.iso_currency_code || row.unofficial_currency_code || null,
+      held_transactions: Number(row.held_transactions || 0),
+      detail: `This account is held. ${HELD_ACCOUNT_CODES[code]} Its activity is kept aside and is not in any total. ` +
+        "The other accounts at this bank keep syncing.",
+    });
+  }
+  const heldFor = (row) => heldAccounts.get(row.item_ref) || [];
   return {
     configured: true,
     provider: PROVIDER,
@@ -1871,6 +2030,7 @@ export async function plaidFeedStatus(env) {
         staged_transactions: Number(row.staged_transactions || 0),
       },
       accounts_needing_owner: accountsNeedingOwner(row),
+      held_accounts: heldFor(row),
       rounded_balances: roundedBalances.get(row.item_ref) || [],
       reconciliation: {
         state: row.reconciliation_state || "none", due_at: row.due_at || null,
@@ -1886,20 +2046,29 @@ export async function plaidFeedStatus(env) {
     needs_attention: rows.filter((row) => row.status !== "connected" ||
       ["retryable", "unavailable", "refused"].includes(row.reconciliation_state) ||
       row.revocation_state === "retryable" || row.revocation_outcome_state === "unknown" ||
-      accountsNeedingOwner(row) > 0).map((row) => {
+      accountsNeedingOwner(row) > 0 || heldFor(row).length > 0).map((row) => {
       // A sync held for owner choices is healthy at the provider and would
       // otherwise read as nothing to do. Say what is needed, with the count.
       // A connection that is also failing keeps its failure as the headline.
       const waiting = ["connected", "error"].includes(row.status) ? accountsNeedingOwner(row) : 0;
       const onlyWaiting = waitingOnly(row);
+      const held = heldFor(row);
+      // Held accounts never mask a failure or an owner choice; they only name
+      // the entry when the connection is otherwise healthy.
+      const onlyHeld = !onlyWaiting && row.status === "connected" && held.length > 0;
       return {
         item_ref: row.item_ref,
         status: row.status,
-        detail: statusDetail(row),
+        detail: onlyHeld && !statusDetail(row) ? held[0].detail : statusDetail(row),
         reconciliation_state: row.reconciliation_state || null,
         revocation_state: row.revocation_state || null,
         revocation_outcome_state: row.revocation_outcome_state || null,
         ...(onlyWaiting ? { code: "plaid_account_assignment_required" } : {}),
+        ...(onlyHeld ? { code: "plaid_account_held" } : {}),
+        ...(held.length ? {
+          held_accounts: held,
+          held_transactions: held.reduce((sum, account) => sum + account.held_transactions, 0),
+        } : {}),
         ...(waiting > 0 ? {
           accounts_needing_owner: waiting,
           staged_transactions: Number(row.staged_transactions || 0),
