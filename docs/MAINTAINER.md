@@ -328,10 +328,12 @@ is planning only until a reviewed change binds it to the final candidate SHA.
    promotion is allowed.
 
 Public doorway monitoring uses the schema-2 /update/manifest.json and matching
-/update/agent.md. The unlisted /install/agent.md separately pins its supervised
-Windows field kit; it may intentionally be older than the public release.
-Changing that runbook's contract requires coordinated review, not substitution
-of releases/latest. Do not rewrite or resync a sealed field kit casually.
+/update/agent.md. The manifest also binds the unlisted platform install routes.
+A held release must return the exact closed-door document and select no
+artifact. A candidate or stable release must return the version-2 supervised
+field-kit contract. That kit may intentionally be older than the public release. Changing
+either doorway contract requires coordinated review, not substitution of
+releases/latest. Do not rewrite or resync a sealed field kit casually.
 
 Run `node scripts/check-install-page-version.mjs` to check the current public
 contracts. `--require-stable` additionally refuses held/candidate states. In

@@ -47,12 +47,16 @@ assert.match(installMatrix, /^  workflow_call:$/m);
 assert.match(installMatrix, /^  schedule:$/m);
 assert.doesNotMatch(installMatrix, /^  push:$/m,
   "release.yml must call the public-contract matrix rather than racing an independent tag run");
-assert.match(installMatrix, /verify and install from the published package contract/);
+assert.match(installMatrix, /verify the held doorway or install from the candidate or stable package contract/);
 assert.match(installMatrix, /node scripts\/install-from-public-contract\.mjs/);
 assert.doesNotMatch(installMatrix, /brain (?:setup|provision|drain|ask)/,
   "the package-only public-contract gate must not claim or start live provisioning");
-assert.match(installRunner, /readSupervisedInstallContract\(\{ platform: guideArg \}\)/,
-  "the install runner must reuse the strict live doorway validator before download");
+assert.match(installRunner, /readInstallDoorwayContract\(\{ platform: guideArg \}\)/,
+  "the install runner must bind the release state to the strict live doorway validator before download");
+const heldDoorwayIndex = installRunner.indexOf('if (publicContract.state === "held")');
+const installWorkdirIndex = installRunner.indexOf('mkdirSync(workdir, { recursive: true });');
+assert.ok(heldDoorwayIndex > 0 && installWorkdirIndex > heldDoorwayIndex,
+  "a held doorway must stop before the install runner creates its work directory");
 assert.match(installRunner, /if \(process\.platform === "win32"\)[\s\S]*buildWindowsNpmPowerShellInvocation/,
   "the Windows path must enter the parsed npm.cmd contract through PowerShell");
 assert.match(windowsNpmHelper, /Get-Command -Name \$contract\.executable -CommandType Application/);
