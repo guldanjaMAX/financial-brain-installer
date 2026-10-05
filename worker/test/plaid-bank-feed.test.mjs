@@ -12,6 +12,7 @@ import {
   runPlaidFeedSlice,
   syncPlaidItem,
 } from "../src/lib/plaid-bank-feed.js";
+import { reassignPlaidAccountEntity } from "../src/lib/plaid-account-entities.js";
 
 const encoder = new TextEncoder();
 
@@ -1639,6 +1640,272 @@ test("Plaid account reassignment cannot silently move balance-only history", asy
     assert.equal(fixture.first("SELECT entity_slug FROM fin_accounts").entity_slug, "household");
     assert.equal(fixture.first("SELECT entity_slug FROM plaid_account_entity_assignments").entity_slug, "household");
     assert.equal(fixture.first("SELECT COUNT(*) AS n FROM owner_action_requests WHERE request_id='balance-history-reassignment-0001'").n, 0);
+  } finally { fixture.close(); }
+});
+
+test("reviewed Plaid reassignment previews counts, replays one atomic move, and permits later promotion", async () => {
+  const { fixture, state, run, assignAll } = await containmentFixture(["reviewed-move-account"]);
+  try {
+    assert.equal((await run()).status, "assignment_required");
+    await assignAll();
+    assertReadyPromotion(await run());
+    const account = fixture.first(
+      `SELECT a.account_ref,f.account_slug
+         FROM plaid_account_entity_assignments a
+         JOIN fin_accounts f ON f.tenant_id=a.tenant_id
+          AND f.external_ref=a.provider_account_id
+          AND f.source_feed=('bank-feed:'||a.item_ref)
+          AND f.superseded_by_id IS NULL`,
+    );
+
+    const ownerHeaders = await fixture.ownerHeaders();
+    const routeUrl = new URL("https://brain.invalid/api/bank-feed/accounts/reassign");
+    const route = async (body, headers = ownerHeaders) => {
+      const response = await handleBankFeed(fixture.env, new Request(routeUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify(body),
+      }), routeUrl, routeUrl.pathname, {});
+      return { status: response.status, body: await response.json() };
+    };
+    const scopedHeaders = await fixture.ownerHeaders({ grantId: "grant-review-fixture" });
+    const scoped = await route({
+      mode: "preview",
+      account_ref: account.account_ref,
+      from_entity_slug: "household",
+      to_entity_slug: "business",
+    }, scopedHeaders);
+    assert.equal(scoped.status, 403);
+    assert.equal(scoped.body.code, "owner_required");
+
+    const preview = await route({
+      mode: "preview",
+      account_ref: account.account_ref,
+      from_entity_slug: "household",
+      to_entity_slug: "business",
+    });
+    assert.equal(preview.status, 200);
+    assert.deepEqual(preview.body.from_owner, { entity_slug: "household", label: "Household" });
+    assert.deepEqual(preview.body.to_owner, { entity_slug: "business", label: "Business" });
+    assert.deepEqual(preview.body.history, { transactions: 1, balance_snapshots: 1 });
+    assert.equal(preview.body.can_apply, true);
+
+    let batches = 0;
+    const originalDb = fixture.env.DB;
+    fixture.env.DB = { ...originalDb, async batch(statements) {
+      batches += 1;
+      assert.equal(statements.length, 6, "the apply decision reaches one closed D1 batch");
+      return originalDb.batch(statements);
+    } };
+    let applied;
+    try {
+      applied = await route({
+        mode: "apply",
+        request_id: "reviewed-reassignment-0001",
+        account_ref: account.account_ref,
+        from_entity_slug: "household",
+        to_entity_slug: "business",
+      });
+    } finally {
+      fixture.env.DB = originalDb;
+    }
+    assert.equal(batches, 1);
+    assert.equal(applied.status, 201);
+    assert.equal(applied.body.changed, true);
+    assert.deepEqual(applied.body.entity_scope, { entity_slug: "business" });
+    assert.equal(fixture.first("SELECT entity_slug FROM fin_accounts WHERE account_slug=?", account.account_slug).entity_slug, "business");
+    assert.equal(fixture.first("SELECT entity_slug FROM plaid_account_entity_assignments WHERE account_ref=?", account.account_ref).entity_slug, "business");
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM owner_activity_events WHERE request_id='reviewed-reassignment-0001'").n, 1);
+    assert.equal(fixture.first("SELECT reason FROM plaid_reconciliation WHERE item_ref='item-sandbox-1'").reason, "owner_assignment");
+
+    const replay = await route({
+      mode: "apply",
+      request_id: "reviewed-reassignment-0001",
+      account_ref: account.account_ref,
+      from_entity_slug: "household",
+      to_entity_slug: "business",
+    });
+    assert.equal(replay.status, 200);
+    assert.equal(replay.body.replayed, true);
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM owner_activity_events WHERE request_id='reviewed-reassignment-0001'").n, 1);
+
+    state.page = {
+      ...state.page,
+      next_cursor: "after-reviewed-move",
+      added: [{
+        transaction_id: "after-reviewed-move-transaction",
+        account_id: "reviewed-move-account",
+        amount: "7.00",
+        iso_currency_code: "USD",
+        date: "2026-08-31",
+        pending: false,
+        name: "Synthetic post-move fixture",
+      }],
+    };
+    state.now = "2026-08-31T14:00:00.000Z";
+    const later = await run();
+    assert.equal(later.ok, true, `later sync promotion passes the account containment guard: ${JSON.stringify(later)}`);
+    assert.equal(fixture.first(
+      "SELECT f.entity_slug FROM fin_transactions t JOIN fin_accounts f ON f.tenant_id=t.tenant_id AND f.account_slug=t.account_slug WHERE t.external_id='after-reviewed-move-transaction'",
+    ).entity_slug, "business");
+  } finally { fixture.close(); }
+});
+
+test("reviewed Plaid reassignment refuses invalid target, changed scope, period closes, and QBO reconciliation", async () => {
+  for (const blocker of ["target-closed", "target-unowned", "scope", "period-close", "reconciliation"]) {
+    const { fixture, run, assignAll } = await containmentFixture([`reviewed-refusal-${blocker}`]);
+    try {
+      await run();
+      await assignAll();
+      assertReadyPromotion(await run());
+      const account = fixture.first(
+        "SELECT a.account_ref,f.account_slug FROM plaid_account_entity_assignments a JOIN fin_accounts f ON f.external_ref=a.provider_account_id AND f.source_feed=('bank-feed:'||a.item_ref)",
+      );
+      if (blocker === "target-closed") {
+        fixture.raw("UPDATE fin_entities SET status='closed' WHERE entity_slug='business'");
+      } else if (blocker === "target-unowned") {
+        fixture.raw("UPDATE fin_entities SET relationship='counterparty' WHERE entity_slug='business'");
+      } else if (blocker === "scope") {
+        fixture.raw("UPDATE fin_accounts SET entity_slug='business' WHERE account_slug=?", account.account_slug);
+      } else if (blocker === "period-close") {
+        fixture.raw(
+          `INSERT INTO fin_period_closes
+             (close_id,tenant_id,entity_slug,period_start,period_end,status,evidence_state,
+              acknowledged_incomplete,evidence_json,accepted_at,updated_at)
+           VALUES ('close-fixture','primary','business','2026-08-01','2026-08-31','accepted',
+                   'complete',0,'{}','2026-09-01','2026-09-01')`,
+        );
+      } else {
+        fixture.raw(
+          `INSERT INTO fin_reconciliations
+             (tenant_id,reconciliation_uid,entity_slug,account_slug,measure,state,delta_minor,
+              tolerance_minor,currency,computed_at,recorded_at)
+           VALUES ('primary','reconciliation-fixture','household',?,'closing_balance','matched',
+                   0,0,'USD','2026-09-01','2026-09-01')`,
+          account.account_slug,
+        );
+        fixture.raw(
+          `INSERT INTO fin_reconciliation_claims
+             (tenant_id,claim_uid,reconciliation_uid,label,amount_minor,currency,as_of,
+              provenance,source_feed,basis_state,recorded_at)
+           VALUES ('primary','qbo-claim-fixture','reconciliation-fixture','QuickBooks present-record reference',
+                   100,'USD','2026-08-31','derived','quickbooks','proposed','2026-09-01')`,
+        );
+      }
+      const expectedCode = blocker === "target-closed"
+        ? "entity_not_found"
+        : blocker === "target-unowned"
+          ? "entity_not_owned"
+          : blocker === "scope"
+        ? "bank_account_reassignment_scope_changed"
+        : blocker === "period-close"
+          ? "bank_account_reassignment_period_closed"
+          : "bank_account_reassignment_reconciled";
+      const sqlBefore = fixture.seen.sql.length;
+      await assert.rejects(reassignPlaidAccountEntity(fixture.env, {
+        mode: "preview",
+        account_ref: account.account_ref,
+        from_entity_slug: "household",
+        to_entity_slug: "business",
+      }), (error) => error.code === expectedCode);
+      assert.ok(fixture.seen.sql.length > sqlBefore, `${blocker} reached the database decision point`);
+      assert.equal(fixture.first("SELECT COUNT(*) AS n FROM owner_action_requests WHERE action_type='plaid_account_entity_reassignment'").n, 0);
+    } finally { fixture.close(); }
+  }
+});
+
+test("reviewed Plaid reassignment remains atomic when sync promotion wins the race", async () => {
+  const { fixture, state, run, assignAll } = await containmentFixture(["reviewed-promotion-race"]);
+  try {
+    await run();
+    await assignAll();
+    assertReadyPromotion(await run());
+    const account = fixture.first(
+      "SELECT a.account_ref,f.account_slug FROM plaid_account_entity_assignments a JOIN fin_accounts f ON f.external_ref=a.provider_account_id AND f.source_feed=('bank-feed:'||a.item_ref)",
+    );
+    state.now = "2026-08-31T14:00:00.000Z";
+    state.page = {
+      ...state.page,
+      next_cursor: "promotion-race-complete",
+      added: [{
+        transaction_id: "promotion-race-transaction",
+        account_id: "reviewed-promotion-race",
+        amount: "9.00",
+        iso_currency_code: "USD",
+        date: "2026-08-31",
+        pending: false,
+        name: "Synthetic promotion race fixture",
+      }],
+    };
+    const originalDb = fixture.env.DB;
+    let promoted = false;
+    const wrapper = { ...originalDb, async batch(statements) {
+      const isReassignment = statements.some((statement) => statement.sql.includes("reassignment_guard"));
+      if (isReassignment && !promoted) {
+        fixture.env.DB = originalDb;
+        try {
+          const result = await run();
+          assert.equal(result.ok, true);
+          promoted = true;
+        } finally {
+          fixture.env.DB = wrapper;
+        }
+      }
+      return originalDb.batch(statements);
+    } };
+    fixture.env.DB = wrapper;
+    try {
+      const applied = await reassignPlaidAccountEntity(fixture.env, {
+        mode: "apply",
+        request_id: "reviewed-promotion-race-0001",
+        account_ref: account.account_ref,
+        from_entity_slug: "household",
+        to_entity_slug: "business",
+      }, { now: "2026-08-31T14:01:00.000Z" });
+      assert.equal(applied.status, 201);
+    } finally {
+      fixture.env.DB = originalDb;
+    }
+    assert.equal(promoted, true, "the sync promotion reached its transactional decision before the move batch");
+    assert.equal(fixture.first("SELECT entity_slug FROM fin_accounts WHERE account_slug=?", account.account_slug).entity_slug, "business");
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_transactions WHERE external_id='promotion-race-transaction'").n, 1);
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM owner_action_requests WHERE request_id='reviewed-promotion-race-0001'").n, 1);
+  } finally { fixture.close(); }
+});
+
+test("reviewed Plaid reassignment apply closes a promotion race instead of partially moving history", async () => {
+  const { fixture, run, assignAll } = await containmentFixture(["reviewed-race-account"]);
+  try {
+    await run();
+    await assignAll();
+    assertReadyPromotion(await run());
+    const account = fixture.first(
+      "SELECT a.account_ref,f.account_slug FROM plaid_account_entity_assignments a JOIN fin_accounts f ON f.external_ref=a.provider_account_id AND f.source_feed=('bank-feed:'||a.item_ref)",
+    );
+    const originalDb = fixture.env.DB;
+    let raced = false;
+    fixture.env.DB = { ...originalDb, async batch(statements) {
+      if (!raced) {
+        raced = true;
+        fixture.raw("UPDATE plaid_account_entity_assignments SET entity_slug='business' WHERE account_ref=?", account.account_ref);
+      }
+      return originalDb.batch(statements);
+    } };
+    try {
+      await assert.rejects(reassignPlaidAccountEntity(fixture.env, {
+        mode: "apply",
+        request_id: "reviewed-race-request-0001",
+        account_ref: account.account_ref,
+        from_entity_slug: "household",
+        to_entity_slug: "business",
+      }), (error) => error.code === "bank_account_reassignment_scope_changed");
+    } finally {
+      fixture.env.DB = originalDb;
+    }
+    assert.equal(raced, true, "the negative test reached the in-batch race guard");
+    assert.equal(fixture.first("SELECT entity_slug FROM fin_accounts WHERE account_slug=?", account.account_slug).entity_slug, "household");
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM owner_action_requests WHERE request_id='reviewed-race-request-0001'").n, 0);
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM owner_activity_events WHERE request_id='reviewed-race-request-0001'").n, 0);
   } finally { fixture.close(); }
 });
 

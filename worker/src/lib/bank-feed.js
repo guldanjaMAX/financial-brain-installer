@@ -50,6 +50,7 @@ import {
   assignPlaidAccountEntity,
   PlaidAccountEntityError,
   plaidOwnerAccountStatus,
+  reassignPlaidAccountEntity,
 } from "./plaid-account-entities.js";
 
 /**
@@ -319,6 +320,10 @@ export function bankFeedOwnerErrorMessage(data, status) {
     bank_account_status_unavailable: "We could not safely read the account list. Your connection is unchanged. Please check again.",
     bank_account_assignment_unavailable: "We could not safely save that choice. Nothing was moved. Please try the same choice again.",
     bank_account_reassignment_requires_review: "This account already has financial history under another business. A technician should review it before anything moves.",
+    bank_account_reassignment_scope_changed: "The account owner changed since this move was reviewed. Refresh the account list and review it again.",
+    bank_account_reassignment_period_closed: "A closed financial period protects one of these owners. Nothing was moved.",
+    bank_account_reassignment_reconciled: "This account has a saved reconciliation that must be reviewed before its owner can change.",
+    bank_account_reassignment_unavailable: "We could not safely finish that reviewed move. Nothing was moved. Retry the same request.",
     entity_not_found: "That business is no longer available. Refresh the list and choose an active business.",
     entity_not_owned: "That business is not owner-controlled, so the account was not assigned to it.",
     request_id_conflict: "This saved retry belongs to a different choice. Refresh the page and try again.",
@@ -1453,6 +1458,16 @@ function assignmentRequestId(accountRef, entitySlug) {
   }
   return { key, value };
 }
+function reassignmentRequestId(accountRef, fromEntitySlug, toEntitySlug) {
+  const key = "bank_reassignment_request:" + accountRef + ":" + fromEntitySlug + ":" + toEntitySlug;
+  let value = null;
+  try { value = sessionStorage.getItem(key); } catch (e) {}
+  if (!value) {
+    value = crypto.randomUUID();
+    try { sessionStorage.setItem(key, value); } catch (e) {}
+  }
+  return { key, value };
+}
 function make(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined && text !== null) node.textContent = String(text);
@@ -1588,6 +1603,92 @@ async function assignBankAccounts(bankKey, accounts, entitySlug, button, results
   const failures = results.filter((result) => !result.saved);
   if (failures.length > 0) accountSay(failures[failures.length - 1].message, true);
 }
+function appendReassignmentControl(card, account, entities) {
+  const fromEntitySlug = account.assignment && account.assignment.entity_scope
+    ? account.assignment.entity_scope.entity_slug
+    : null;
+  if (!fromEntitySlug) return;
+  const alternatives = entities.filter((entity) => entity.entity_slug !== fromEntitySlug);
+  if (alternatives.length === 0) return;
+  const start = make("button", "Move to another owner");
+  start.type = "button";
+  start.className = "secondary";
+  start.onclick = () => {
+    start.disabled = true;
+    const panel = make("div", null, "assign");
+    const label = make("label", "Move this account to");
+    const select = make("select");
+    select.append(make("option", "Choose a different owner"));
+    select.options[0].value = "";
+    for (const entity of alternatives) {
+      const option = make("option", entity.label || entity.legal_name || entity.entity_slug);
+      option.value = entity.entity_slug;
+      select.append(option);
+    }
+    const review = make("button", "Review move");
+    review.type = "button";
+    const result = make("div", null, "note");
+    review.onclick = async () => {
+      if (!select.value) { result.textContent = "Choose a different owner first."; return; }
+      review.disabled = true;
+      result.textContent = "Checking the account history and review locks…";
+      try {
+        const preview = await post("/api/bank-feed/accounts/reassign", {
+          mode: "preview",
+          account_ref: account.account_ref,
+          from_entity_slug: fromEntitySlug,
+          to_entity_slug: select.value,
+        });
+        if (preview.account_ref !== account.account_ref || preview.can_apply !== true ||
+            preview.from_owner?.entity_slug !== fromEntitySlug ||
+            preview.to_owner?.entity_slug !== select.value ||
+            !Number.isSafeInteger(preview.history?.transactions) || preview.history.transactions < 0 ||
+            !Number.isSafeInteger(preview.history?.balance_snapshots) || preview.history.balance_snapshots < 0) {
+          throw new Error("The reviewed move preview was incomplete. Nothing was moved.");
+        }
+        const transactions = preview.history.transactions;
+        const balances = preview.history.balance_snapshots;
+        result.replaceChildren();
+        result.append(make("p", "Move from " + preview.from_owner.label + " to " + preview.to_owner.label +
+          ". This keeps " + transactions + " " + (transactions === 1 ? "transaction" : "transactions") +
+          " and " + balances + " " + (balances === 1 ? "balance snapshot" : "balance snapshots") +
+          " with the account."));
+        const apply = make("button", "Move account history");
+        apply.type = "button";
+        apply.onclick = async () => {
+          if (apply.disabled) return;
+          apply.disabled = true;
+          apply.textContent = "Moving…";
+          const retry = reassignmentRequestId(account.account_ref, fromEntitySlug, select.value);
+          try {
+            await post("/api/bank-feed/accounts/reassign", {
+              mode: "apply",
+              request_id: retry.value,
+              account_ref: account.account_ref,
+              from_entity_slug: fromEntitySlug,
+              to_entity_slug: select.value,
+            });
+            try { sessionStorage.removeItem(retry.key); } catch (e) {}
+            accountSay("The account and its saved history now belong to " + preview.to_owner.label + ".");
+            await loadAccounts({ quiet: true });
+          } catch (error) {
+            accountSay(error.message, true);
+            apply.disabled = false;
+            apply.textContent = "Move account history";
+          }
+        };
+        result.append(apply);
+      } catch (error) {
+        result.textContent = error.message;
+        result.className = "err";
+        review.disabled = false;
+      }
+    };
+    panel.append(label, select, review);
+    card.append(panel, result);
+  };
+  card.append(start);
+}
 function renderAccountCard(account, entities) {
     const waiting = !account.assignment || account.assignment.state !== "assigned";
     const card = make("article", null, waiting ? "account waiting" : "account");
@@ -1595,6 +1696,7 @@ function renderAccountCard(account, entities) {
     const institution = account.institution_label ? account.institution_label + ". " : "";
     if (account.assignment && account.assignment.state === "assigned") {
       card.append(make("p", institution + "Assigned to " + (account.assignment.entity_label || "the selected owner") + "."));
+      appendReassignmentControl(card, account, entities);
     } else if (entities.length === 0) {
       // An empty list with a disabled button is a dead end. Point to the one
       // thing that unblocks every account instead.
@@ -2002,6 +2104,22 @@ export async function handleBankFeed(env, request, url, path, ctx) {
         }
       }
       return ownerJson(assigned.body, assigned.status);
+    }
+
+    if (path === "/api/bank-feed/accounts/reassign" && request.method === "POST") {
+      const access = await ownerAccess();
+      if (!access.authorised) return privateNoStore(ownerRefusal(access));
+      const runtime = bankFeedConfig(env);
+      if (runtime.provider !== "plaid") {
+        return ownerJson({
+          error: "unavailable",
+          code: "bank_account_reassignment_unavailable",
+          unavailable: true,
+        }, 503);
+      }
+      const body = await readJson(request);
+      const reassigned = await reassignPlaidAccountEntity(env, body);
+      return ownerJson(reassigned.body, reassigned.status);
     }
 
     if (path === "/api/bank-feed/sync" && request.method === "POST") {
