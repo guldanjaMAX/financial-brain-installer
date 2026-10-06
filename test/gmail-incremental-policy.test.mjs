@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -19,6 +19,7 @@ import {
   gmailQuery,
   normalizeGmailSince,
 } from "../connectors/gmail.mjs";
+import { readAdminKeyFile } from "../operations/admin-key-file.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -153,7 +154,7 @@ function stateFor(mode) {
 
 function runCase(mode, { approval = null, directory = null, reset = false } = {}) {
   const fresh = directory == null;
-  directory ||= mkdtempSync(join(tmpdir(), `brain-test-gmail-${mode}-`));
+  directory ||= realpathSync.native(mkdtempSync(join(tmpdir(), `brain-test-gmail-${mode}-`)));
   const manifestPath = join(directory, "fixture.manifest.json");
   const statePath = join(directory, ".brain-ingest-gmail.json");
   const evidencePath = join(directory, "evidence.json");
@@ -220,6 +221,34 @@ function runApprovedCase(mode) {
   const approval = /--approve-removals ([0-9a-f]{64})/.exec(review.output)?.[1] || null;
   assert.ok(approval, `${mode} did not produce a removal approval fingerprint: ${review.output.slice(-1_200)}`);
   return runCase(mode, { directory: review.directory, approval });
+}
+
+if (process.platform !== "win32") {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-test-admin-key-link-")));
+  try {
+    const target = join(root, "target");
+    const linked = join(root, "linked");
+    mkdirSync(target, { mode: 0o700 });
+    writeFileSync(join(target, ".brain-admin-key"), `${SYNTHETIC_ADMIN_KEY}\n`, { mode: 0o600 });
+    symlinkSync(target, linked, "dir");
+
+    check("the admin-key reader accepts the same fixture through its canonical path",
+      readAdminKeyFile(join(target, ".brain-admin-key")) === SYNTHETIC_ADMIN_KEY);
+
+    let parentChecks = 0;
+    assert.throws(
+      () => readAdminKeyFile(join(linked, ".brain-admin-key"), {
+        realpath(path) {
+          parentChecks++;
+          return realpathSync.native(path);
+        },
+      }),
+      /must not pass through a linked directory/,
+    );
+    check("the admin-key reader still reaches and enforces its linked-parent refusal", parentChecks === 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 {

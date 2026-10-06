@@ -9763,15 +9763,15 @@ export async function cmdSources(manifestPath, options = {}) {
         source: retirementSource,
       });
       if (retired) {
-        console.log(`${successMark()}    ${renderCommands(
+        ok(renderCommands(
           `"${retirementSource}" is retired: its ${result.documents} record(s) stay searchable and it will no longer be reported as stopped. ` +
           `Undo: brain sources ${manifestPath} --unretire ${retirementSource}.`,
-        )}`);
+        ));
       } else {
-        console.log(`${successMark()}    ${renderCommands(
+        ok(renderCommands(
           `"${retirementSource}" is active again and will be reported from its current source state. ` +
           `Undo: brain sources ${manifestPath} --retire ${retirementSource}.`,
-        )}`);
+        ));
       }
     }
 
