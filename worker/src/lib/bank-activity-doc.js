@@ -60,12 +60,23 @@ function monthEnd(month) {
   return new Date(Date.UTC(year, rawMonth, 0)).toISOString().slice(0, 10);
 }
 
+function compareCodePoints(left, right) {
+  const leftPoints = Array.from(String(left), (character) => character.codePointAt(0));
+  const rightPoints = Array.from(String(right), (character) => character.codePointAt(0));
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index += 1) {
+    if (leftPoints[index] !== rightPoints[index]) return leftPoints[index] - rightPoints[index];
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
 function compareRows(a, b) {
-  return String(b.posted_on || "").localeCompare(String(a.posted_on || "")) ||
-    safeText(a.payee || a.description, "Unlabelled activity").localeCompare(
+  return compareCodePoints(String(b.posted_on || ""), String(a.posted_on || "")) ||
+    compareCodePoints(
+      safeText(a.payee || a.description, "Unlabelled activity"),
       safeText(b.payee || b.description, "Unlabelled activity"),
     ) ||
-    String(a.direction || "").localeCompare(String(b.direction || "")) ||
+    compareCodePoints(String(a.direction || ""), String(b.direction || "")) ||
     Number(a.amount_minor || 0) - Number(b.amount_minor || 0) ||
     Number(a.id || 0) - Number(b.id || 0);
 }
@@ -117,7 +128,7 @@ function renderCurrencySection(currency, rows) {
   }
   const top = [...payees.entries()].sort((a, b) => {
     if (a[1] !== b[1]) return a[1] > b[1] ? -1 : 1;
-    return a[0].localeCompare(b[0]);
+    return compareCodePoints(a[0], b[0]);
   }).slice(0, 5);
   const latest = rows.slice(0, 25);
   const lines = [
@@ -212,7 +223,12 @@ function parseCursor(value) {
 
 async function plaidLedgerMarker(env, tenantId) {
   const rows = (await env.DB.prepare(
-    `SELECT i.item_ref,i.cursor,i.cursor_updated_at,i.last_synced_at,
+    `SELECT i.item_ref,i.cursor,i.cursor_updated_at,i.last_synced_at,i.institution_label,
+            a.id AS account_id,a.account_slug,a.entity_slug,a.label AS account_label,
+            a.mask AS account_mask,a.currency AS account_currency,
+            a.external_ref AS provider_account_id,a.source_feed,a.feed_mode,
+            e.legal_name AS entity_legal_name,e.display_label AS entity_display_label,
+            e.status AS entity_status,e.relationship AS entity_relationship,
             (SELECT COUNT(*) FROM fin_accounts a
               WHERE a.tenant_id=i.tenant_id AND a.source_feed='bank-feed:'||i.item_ref
                 AND a.superseded_by_id IS NULL) AS account_count,
@@ -223,10 +239,14 @@ async function plaidLedgerMarker(env, tenantId) {
                 AND t.source_provider='plaid') AS transaction_count,
             (SELECT COALESCE(MAX(COALESCE(t.removed_at,t.recorded_at)),'') FROM fin_transactions t
               WHERE t.tenant_id=i.tenant_id AND t.source_feed='bank-feed:'||i.item_ref
-                AND t.source_provider='plaid') AS transaction_recorded_at
+               AND t.source_provider='plaid') AS transaction_recorded_at
        FROM bank_feed_items i
+       LEFT JOIN fin_accounts a ON a.tenant_id=i.tenant_id
+        AND a.source_feed='bank-feed:'||i.item_ref AND a.superseded_by_id IS NULL
+       LEFT JOIN fin_entities e ON e.tenant_id=a.tenant_id AND e.entity_slug=a.entity_slug
+        AND e.superseded_by_id IS NULL
       WHERE i.tenant_id=?1 AND i.removed_at IS NULL
-      ORDER BY i.item_ref`,
+      ORDER BY i.item_ref,a.id`,
   ).bind(tenantId).all())?.results || [];
   const bytes = new TextEncoder().encode(JSON.stringify(rows));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -320,11 +340,12 @@ async function recordSourcePass(env, {
 
 /**
  * Advance one bounded ledger-to-document sweep after a committed Plaid
- * promotion. Refusals and storage failures stay in this receipt and never
- * change the bank sync receipt that caused the pass.
+ * promotion or rendered-metadata change. Refusals and storage failures stay in
+ * this receipt and never change the bank sync receipt that caused the pass.
  */
 export async function writeBankActivityDocuments(env, {
   committedPromotions = 0,
+  metadataChanges = 0,
   at = null,
 } = {}) {
   const base = {
@@ -342,7 +363,9 @@ export async function writeBankActivityDocuments(env, {
   if (env.VECTOR_DRAIN_MODE === "paused-for-upgrade") return { ...base, outcome: "paused" };
   if (backendOf(env) !== D1 || !env.DB) return { ...base, outcome: "not_d1" };
   if (env.BANK_FEED_PROVIDER !== "plaid") return { ...base, outcome: "not_plaid" };
-  if (!Number.isSafeInteger(committedPromotions) || committedPromotions < 1) {
+  const promotionTriggered = Number.isSafeInteger(committedPromotions) && committedPromotions > 0;
+  const metadataTriggered = Number.isSafeInteger(metadataChanges) && metadataChanges > 0;
+  if (!promotionTriggered && !metadataTriggered) {
     return { ...base, outcome: "no_committed_promotion" };
   }
 

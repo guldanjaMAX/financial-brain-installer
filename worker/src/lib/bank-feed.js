@@ -1256,6 +1256,32 @@ export async function runFeedSlice(env, { maxItems = 3, maxPages = MAX_PAGES_PER
 }
 
 /**
+ * A committed owner assignment changes rendered bank metadata even when the
+ * provider has no new ledger page. Reuse the provider-triggered writer when it
+ * ran, and otherwise start one bounded metadata generation directly.
+ */
+export async function refreshBankActivityAfterAccountAssignment(env, {
+  fetchImpl = fetch,
+  now = null,
+  runFeedSliceImpl = runFeedSlice,
+  writeBankActivityDocumentsImpl = null,
+} = {}) {
+  let sync;
+  let syncError = null;
+  try {
+    sync = await runFeedSliceImpl(env, { fetchImpl, now });
+    if (sync?.bank_activity?.outcome !== "no_committed_promotion") return sync;
+  } catch (error) {
+    syncError = error;
+  }
+  const writer = writeBankActivityDocumentsImpl ||
+    (await import("./bank-activity-doc.js")).writeBankActivityDocuments;
+  const bankActivity = await writer(env, { metadataChanges: 1, at: now });
+  if (syncError) throw syncError;
+  return { ...sync, bank_activity: bankActivity };
+}
+
+/**
  * What the operator and the owner both need to see: which banks are connected,
  * which need attention, and how far the history load has got. No reference, no
  * ciphertext, no provider payload.
@@ -1996,7 +2022,7 @@ export async function handleBankFeed(env, request, url, path, ctx) {
           readyToResume = !status.unavailable && status.summary?.assignment_required === 0;
         } catch {}
         if (readyToResume) {
-          ctx.waitUntil(runFeedSlice(env, {
+          ctx.waitUntil(refreshBankActivityAfterAccountAssignment(env, {
             fetchImpl: ctx?.bankFeedFetchImpl || fetch,
           }).catch(() => {}));
         }

@@ -146,3 +146,38 @@ test("an ordinary settled row remains a green rendering control", () => {
   assert.equal(result.stats.removed, 0);
   assert.match(result.envelope.content, /Money in: USD 43\.21/);
 });
+
+test("non-ASCII tie ordering is independent of the host locale comparator", () => {
+  const tiedRows = [
+    transaction({ id: 301, payee: "Ångström Market", amount_minor: 2500 }),
+    transaction({ id: 302, payee: "Éclair Market", amount_minor: 2500 }),
+    transaction({ id: 303, payee: "𐐀 Archive", amount_minor: 2500 }),
+  ];
+  const control = renderBankActivityDocument({
+    account,
+    month: "2026-09",
+    transactions: tiedRows,
+  });
+  assert.match(control.envelope.content, /Top money out payees:/);
+  assert.equal(control.stats.settled, 3, "the deterministic control reached the payee tie break");
+
+  const originalLocaleCompare = String.prototype.localeCompare;
+  let comparatorCalls = 0;
+  String.prototype.localeCompare = function reversedLocaleCompare(other, ...options) {
+    comparatorCalls += 1;
+    return -originalLocaleCompare.call(this, other, ...options);
+  };
+  let underMutatedLocale;
+  try {
+    underMutatedLocale = renderBankActivityDocument({
+      account,
+      month: "2026-09",
+      transactions: tiedRows,
+    });
+  } finally {
+    String.prototype.localeCompare = originalLocaleCompare;
+  }
+
+  assert.equal(comparatorCalls, 0, "rendering must not consult the host locale comparator");
+  assert.deepEqual(underMutatedLocale, control);
+});

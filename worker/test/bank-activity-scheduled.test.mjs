@@ -10,6 +10,7 @@ import {
   createPlaidLinkToken,
   runPlaidFeedSlice,
 } from "../src/lib/plaid-bank-feed.js";
+import { refreshBankActivityAfterAccountAssignment } from "../src/lib/bank-feed.js";
 import {
   BANK_ACTIVITY_DOCUMENT_CAP,
   writeBankActivityDocuments,
@@ -301,6 +302,30 @@ async function promotedFixture() {
   return { fixture, provider };
 }
 
+function addHistoricalMonths(fixture) {
+  const accounts = fixture.rows(
+    "SELECT account_slug,source_feed FROM fin_accounts WHERE feed_mode='live' ORDER BY account_slug",
+  );
+  for (const [accountIndex, account] of accounts.entries()) {
+    for (const [monthIndex, month] of ["2026-07", "2026-06", "2026-05"].entries()) {
+      fixture.raw(
+        `INSERT INTO fin_transactions
+           (tenant_id,txn_uid,account_slug,posted_on,amount_minor,direction,currency,pending,
+            provenance,source_locator,source_feed,basis_state,recorded_at,source_provider)
+         VALUES ('primary',?,?,?,?,?,'USD',0,'feed',?,?, 'confirmed',?,'plaid')`,
+        `historical-${accountIndex}-${monthIndex}`,
+        account.account_slug,
+        `${month}-15`,
+        1000 + accountIndex + monthIndex,
+        monthIndex % 2 ? "inflow" : "outflow",
+        "plaid/transactions/historical-fixture",
+        account.source_feed,
+        "2026-10-05T17:00:00.000Z",
+      );
+    }
+  }
+}
+
 test("cron promotion writes dated searchable account-month documents and both negative controls reach their gates", async () => {
   const fixture = await newFixture();
   const provider = new BankActivityPlaidFake();
@@ -377,6 +402,41 @@ test("the final owner assignment waitUntil path writes the same documents", asyn
     globalThis.fetch = previousFetch;
     fixture.close();
   }
+});
+
+test("an assignment refresh falls back to the writer when provider sync has no promotion", async () => {
+  const calls = [];
+  const writer = async (_env, options) => {
+    calls.push({ kind: "writer", options });
+    return { ran: true, outcome: "ran", complete_sweep: false };
+  };
+  const control = await refreshBankActivityAfterAccountAssignment({}, {
+    runFeedSliceImpl: async () => {
+      calls.push({ kind: "sync-control" });
+      return { ran: 1, bank_activity: { ran: true, outcome: "ran" } };
+    },
+    writeBankActivityDocumentsImpl: writer,
+    now: "2026-10-05T12:10:00.000Z",
+  });
+  assert.equal(control.bank_activity.ran, true);
+  assert.deepEqual(calls.map((call) => call.kind), ["sync-control"],
+    "the promotion control must not invoke a duplicate writer pass");
+
+  const fallback = await refreshBankActivityAfterAccountAssignment({}, {
+    runFeedSliceImpl: async () => {
+      calls.push({ kind: "sync-no-promotion" });
+      return { ran: 0, bank_activity: { ran: false, outcome: "no_committed_promotion" } };
+    },
+    writeBankActivityDocumentsImpl: writer,
+    now: "2026-10-05T12:11:00.000Z",
+  });
+  assert.equal(fallback.bank_activity.ran, true);
+  assert.deepEqual(calls.map((call) => call.kind), ["sync-control", "sync-no-promotion", "writer"],
+    "the no-promotion mutation must reach the metadata writer decision point");
+  assert.deepEqual(calls.at(-1).options, {
+    metadataChanges: 1,
+    at: "2026-10-05T12:11:00.000Z",
+  });
 });
 
 test("unchanged and one-row promotions are deterministic, while a removal rewrites zero activity", async () => {
@@ -482,6 +542,86 @@ test("paused mode and a settled no-promotion pass write nothing and prove their 
   }
 });
 
+test("mutable rendered metadata restarts a bounded sweep before completion", async () => {
+  const control = await promotedFixture();
+  const mutated = await promotedFixture();
+  try {
+    addHistoricalMonths(control.fixture);
+    addHistoricalMonths(mutated.fixture);
+
+    const [controlPartial, mutatedPartial] = await Promise.all([
+      writeBankActivityDocuments(control.fixture.env, {
+        committedPromotions: 1,
+        at: "2026-10-05T17:01:00.000Z",
+      }),
+      writeBankActivityDocuments(mutated.fixture.env, {
+        committedPromotions: 1,
+        at: "2026-10-05T17:01:00.000Z",
+      }),
+    ]);
+    assert.equal(controlPartial.ran, true, "the unchanged control reached the writer decision point");
+    assert.equal(mutatedPartial.ran, true, "the metadata mutation arm reached the writer decision point");
+    assert.equal(controlPartial.complete_sweep, false);
+    assert.equal(mutatedPartial.complete_sweep, false);
+    assert.equal(controlPartial.ingest_calls, BANK_ACTIVITY_DOCUMENT_CAP);
+    assert.equal(mutatedPartial.ingest_calls, BANK_ACTIVITY_DOCUMENT_CAP);
+
+    const markerBefore = JSON.parse(mutated.fixture.first(
+      "SELECT sync_cursor FROM sources WHERE name='bank_activity'",
+    ).sync_cursor).ledger_marker;
+    mutated.fixture.raw(
+      `UPDATE fin_accounts SET label='Revised fixture account',mask='2468',currency='EUR'
+        WHERE external_ref='account-checking-fixture' AND superseded_by_id IS NULL`,
+    );
+    mutated.fixture.raw(
+      `UPDATE fin_entities SET display_label='Revised fixture entity'
+        WHERE entity_slug=? AND superseded_by_id IS NULL`,
+      PRIMARY_ENTITY,
+    );
+    mutated.fixture.raw(
+      `UPDATE bank_feed_items SET institution_label='Revised fixture institution'
+        WHERE item_ref='item-bank-activity'`,
+    );
+
+    const [controlComplete, restarted] = await Promise.all([
+      writeBankActivityDocuments(control.fixture.env, {
+        committedPromotions: 1,
+        at: "2026-10-05T17:02:00.000Z",
+      }),
+      writeBankActivityDocuments(mutated.fixture.env, {
+        metadataChanges: 1,
+        at: "2026-10-05T17:02:00.000Z",
+      }),
+    ]);
+    assert.equal(controlComplete.complete_sweep, true, "an unchanged generation completes on its second pass");
+    assert.equal(restarted.complete_sweep, false, "metadata changed between passes, so the sweep must restart");
+    assert.equal(restarted.ingest_calls, BANK_ACTIVITY_DOCUMENT_CAP);
+    const restartedCursor = JSON.parse(mutated.fixture.first(
+      "SELECT sync_cursor FROM sources WHERE name='bank_activity'",
+    ).sync_cursor);
+    assert.notEqual(restartedCursor.ledger_marker, markerBefore);
+
+    const completed = await writeBankActivityDocuments(mutated.fixture.env, {
+      metadataChanges: 1,
+      at: "2026-10-05T17:03:00.000Z",
+    });
+    assert.equal(completed.complete_sweep, true);
+    assert.equal(mutated.fixture.first(
+      "SELECT COUNT(*) AS n FROM documents WHERE source='bank_activity' AND title LIKE '%Everyday checking%'",
+    ).n, 0);
+    assert.equal(mutated.fixture.first(
+      "SELECT COUNT(*) AS n FROM documents WHERE source='bank_activity' AND title LIKE '%Synthetic Fixture Bank%'",
+    ).n, 0);
+    assert.equal(mutated.fixture.first(
+      `SELECT COUNT(*) AS n FROM documents d JOIN chunks c ON c.doc_uid=d.doc_uid AND c.chunk_ix=0
+        WHERE d.source='bank_activity' AND c.text LIKE '%Primary fixture entity%'`,
+    ).n, 0);
+  } finally {
+    control.fixture.close();
+    mutated.fixture.close();
+  }
+});
+
 test("coverage, freshness, health inventory, and entity scope remain honest through backfill", async () => {
   const fixture = await newFixture();
   const provider = new BankActivityPlaidFake();
@@ -496,27 +636,7 @@ test("coverage, freshness, health inventory, and entity scope remain honest thro
     globalThis.fetch = provider.fetch.bind(provider);
     try { await runScheduled(fixture); } finally { globalThis.fetch = previousFetch; }
 
-    const accounts = fixture.rows(
-      "SELECT account_slug,source_feed FROM fin_accounts WHERE feed_mode='live' ORDER BY account_slug",
-    );
-    for (const [accountIndex, account] of accounts.entries()) {
-      for (const [monthIndex, month] of ["2026-07", "2026-06", "2026-05"].entries()) {
-        fixture.raw(
-          `INSERT INTO fin_transactions
-             (tenant_id,txn_uid,account_slug,posted_on,amount_minor,direction,currency,pending,
-              provenance,source_locator,source_feed,basis_state,recorded_at,source_provider)
-           VALUES ('primary',?,?,?,?,?,'USD',0,'feed',?,?, 'confirmed',?,'plaid')`,
-          `historical-${accountIndex}-${monthIndex}`,
-          account.account_slug,
-          `${month}-15`,
-          1000 + accountIndex + monthIndex,
-          monthIndex % 2 ? "inflow" : "outflow",
-          "plaid/transactions/historical-fixture",
-          account.source_feed,
-          "2026-10-05T17:00:00.000Z",
-        );
-      }
-    }
+    addHistoricalMonths(fixture);
     const partial = await writeBankActivityDocuments(fixture.env, {
       committedPromotions: 1,
       at: "2026-10-05T17:01:00.000Z",
