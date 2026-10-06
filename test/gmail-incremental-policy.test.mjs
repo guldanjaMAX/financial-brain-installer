@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { credentialScannerFingerprint } from "../brain.mjs";
+import {
+  credentialScannerFingerprint,
+  gmailRetryMessageIds,
+  sourceCursorCanAdvance,
+} from "../brain.mjs";
 import {
   DEFAULT_QUERY,
   gmailLabelDecision,
@@ -16,6 +21,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const CLI = join(ROOT, "brain.mjs");
 const FIXTURE = pathToFileURL(join(HERE, "fixtures", "gmail-incremental-policy-fetch.mjs")).href;
+const CURSOR_MUTANT = pathToFileURL(join(HERE, "fixtures", "gmail-cursor-old-behavior-mutant.mjs")).href;
 const SYNTHETIC_OPENAI_KEY = `sk-proj-${"A7".repeat(16)}`;
 const SYNTHETIC_ADMIN_KEY = "01234567".repeat(8);
 const massRefusalIds = Array.from({ length: 101 }, (_, i) => `mass-sensitive-${String(i + 1).padStart(3, "0")}`);
@@ -90,6 +96,7 @@ function stateFor(mode) {
   if (["sweep-query-evidence", "sweep-marker-missing"].includes(mode)) {
     delete state.history_id;
   }
+  if (mode === "recoverable-worker-failure") delete state.history_id;
   if (mode === "resume-precondition-failure") {
     delete state.history_id;
     state.done = Object.fromEntries(
@@ -141,7 +148,7 @@ function stateFor(mode) {
 
 function runCase(mode, { approval = null, directory = null, reset = false } = {}) {
   const fresh = directory == null;
-  directory ||= mkdtempSync(join(ROOT, `.test-gmail-${mode}-`));
+  directory ||= mkdtempSync(join(tmpdir(), `brain-test-gmail-${mode}-`));
   const manifestPath = join(directory, "fixture.manifest.json");
   const statePath = join(directory, ".brain-ingest-gmail.json");
   const evidencePath = join(directory, "evidence.json");
@@ -180,7 +187,10 @@ function runCase(mode, { approval = null, directory = null, reset = false } = {}
     BRAIN_GMAIL_POLICY_EVIDENCE: evidencePath,
     BRAIN_GMAIL_POLICY_USER_ROOT: userRoot,
   });
-  const args = ["--import", FIXTURE, CLI, "ingest", manifestPath, "--from", "gmail"];
+  const args = [
+    ...(process.env.BRAIN_GMAIL_CURSOR_MUTANT === "1" ? ["--import", CURSOR_MUTANT] : []),
+    "--import", FIXTURE, CLI, "ingest", manifestPath, "--from", "gmail",
+  ];
   if (reset) args.push("--reset");
   if (approval) args.push("--approve-removals", approval);
   const result = spawnSync(process.execPath, args, { encoding: "utf8", env: environment, timeout: 30_000 });
@@ -205,6 +215,15 @@ function runApprovedCase(mode) {
 }
 
 {
+  check("Gmail advances past failed parts only when every failure has a durable retry identity",
+    sourceCursorCanAdvance({ failed: 2 }, { durableRetryFailures: 2 }) === true &&
+    sourceCursorCanAdvance({ failed: 2 }, { durableRetryFailures: 1 }) === false);
+  assert.throws(
+    () => gmailRetryMessageIds({ gmail_retry: { "gmail:bad id": "revision" } }),
+    /saved Gmail retry list is invalid/,
+  );
+  check("a malformed Gmail retry list fails closed before cursor settlement", true);
+
   const schema = JSON.parse(readFileSync(join(ROOT, "manifest.schema.json"), "utf8"));
   const sinceSchema = schema.properties?.corpora?.properties?.gmail?.properties?.since;
   check("the manifest schema declares Gmail since as an exact calendar date",
@@ -307,6 +326,36 @@ function runApprovedCase(mode) {
       result.evidence.final_receipt?.issue_code === "INPUT_REFUSED",
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.evidence.final_receipt)}`);
   } finally { rmSync(result.directory, { recursive: true, force: true }); }
+}
+
+{
+  const first = runCase("recoverable-worker-failure");
+  try {
+    check("a recoverable Worker failure reaches the batch decision and advances Gmail history only with a durable retry",
+      first.code === 1 &&
+      first.evidence.batch_attempts?.["retry-failed"] === 1 &&
+      first.evidence.batch_attempts?.["retry-clean"] === 1 &&
+      first.state.history_id === "history-current" &&
+      first.state.gmail_retry?.["gmail:retry-failed"] === "history-current" &&
+      first.state.done["gmail:retry-clean"] === "history-current" &&
+      !Object.hasOwn(first.state.done, "gmail:retry-failed") &&
+      first.evidence.final_receipt?.status === "error" &&
+      first.evidence.final_receipt?.docs_failed === 1,
+      `${first.output.slice(-1_400)}\n${JSON.stringify(first.state)}\n${JSON.stringify(first.evidence)}`);
+
+    const retry = runCase("recoverable-worker-failure", { directory: first.directory });
+    check("the next incremental run retries the durable identity after an empty history window and converges",
+      retry.code === 0 &&
+      retry.evidence.batch_attempts?.["retry-failed"] === 2 &&
+      retry.evidence.batch_attempts?.["retry-clean"] === 1 &&
+      retry.evidence.ingested_ids.join(",") === "retry-failed,retry-clean,retry-failed" &&
+      retry.state.history_id === "history-current" &&
+      retry.state.done["gmail:retry-failed"] === "history-current" &&
+      !Object.hasOwn(retry.state, "gmail_retry") &&
+      retry.evidence.final_receipt?.status === "ready" &&
+      retry.evidence.final_receipt?.docs_failed === 0,
+      `${retry.output.slice(-1_400)}\n${JSON.stringify(retry.state)}\n${JSON.stringify(retry.evidence)}`);
+  } finally { rmSync(first.directory, { recursive: true, force: true }); }
 }
 
 {

@@ -858,6 +858,12 @@ expired. Every planned Gmail removal is read back before its history cursor or
 credential-scanner version is marked complete. Scanner v5 makes local folders,
 Drive, Gmail, and IMAP recheck previously accepted documents with the corrected
 credential rules.
+If the Worker returns a recoverable failure for only some Gmail document parts,
+the adjacent private checkpoint keeps each exact logical message for retry
+before the history cursor advances. The run still reports an error. The next
+incremental run retries those messages even when the new Gmail history window
+is empty, and clears each retry only after acceptance or a current typed source
+decision.
 Promotions, Social, and Forums are excluded by default. Updates stays included
 so statements, confirmations, and reminders are not silently missed.
 

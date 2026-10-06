@@ -648,6 +648,15 @@ remains at its prior complete sweep. The repeat still re-lists message ids to
 rebuild authoritative deletion truth, but it does not download an immutable
 message body again when both its D1 family and scanner receipt are proven.
 
+A per-document Worker `failed` result is different from a provider or policy
+gap. Gmail first saves the exact logical message identity in `gmail_retry`, then
+may commit the observed history marker while the source receipt and process
+remain failed. The next incremental pass prepends those identities to the
+history changes, deduplicates them, and removes a retry only after full family
+acceptance or a current typed source decision. The cursor gate requires the
+failed-part count to match the durable retry count, and malformed retry state
+fails closed.
+
 `corpora.gmail.since` optionally declares an inclusive `YYYY-MM-DD` corpus
 floor. Full sweeps append Gmail's `after:YYYY/MM/DD` search term. Incremental
 history cannot carry a search query, so its bounded metadata policy read also

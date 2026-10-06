@@ -13,6 +13,16 @@ offered as a customer update; its entries below ship for the first time in
 0.4.9, and its identity is retired so its evidence cannot be confused with
 this changed candidate.
 
+- **A Gmail sync can now move forward after a recoverable document storage
+  failure without losing that message.** The exact message is saved for retry
+  before the Gmail history marker advances, while the run still reports the
+  failure instead of claiming success. The next scheduled sync retries that
+  saved message even when Gmail reports no new changes, then clears it only
+  after the complete document family is accepted or Gmail supplies a current
+  typed exclusion. To check after updating: the first affected run may remain
+  red, but later runs should stop replaying the oldest mail and the saved retry
+  count should converge to zero.
+
 - **SECURITY: hidden entry now owns the terminal after a yes/no question.** A
   key pasted at a hidden prompt that followed a yes/no question could be shown
   on screen. If you did that while sharing your screen, roll that key. The
