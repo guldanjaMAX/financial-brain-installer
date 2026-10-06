@@ -15,6 +15,8 @@ const ACCOUNT_REF = /^acct_[0-9a-f]{32}$/;
 const ENTITY_SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const ACTION_TYPE = "plaid_account_entity_assignment";
 const EVENT_TYPE = "bank_account_entity_assigned";
+const REASSIGN_ACTION_TYPE = "plaid_account_entity_reassignment";
+const REASSIGN_EVENT_TYPE = "bank_account_entity_reassigned";
 const DEFAULT_RECONCILE_MINUTES = 360;
 
 /**
@@ -336,6 +338,278 @@ export async function plaidOwnerAccountStatus(env, { now = null } = {}) {
 
 function replayBody(row) {
   try { return JSON.parse(row.response_json); } catch { return null; }
+}
+
+async function savedOwnerAction(env, tenantId, requestId, actionType, requestHash) {
+  let replay;
+  try {
+    replay = await env.DB.prepare(
+      `SELECT action_type,request_hash,response_json FROM owner_action_requests
+        WHERE tenant_id=? AND request_id=?`,
+    ).bind(tenantId, requestId).first();
+  } catch {
+    throw new PlaidAccountEntityError(
+      "bank_account_reassignment_unavailable",
+      "The reviewed account move could not be read safely.",
+      503,
+    );
+  }
+  if (!replay) return null;
+  if (replay.action_type !== actionType || replay.request_hash !== requestHash) {
+    throw new PlaidAccountEntityError("request_id_conflict", "That request_id belongs to a different action.", 409);
+  }
+  const stored = replayBody(replay);
+  if (!stored) {
+    throw new PlaidAccountEntityError(
+      "bank_account_reassignment_unavailable",
+      "The saved reviewed account move could not be read safely.",
+      503,
+    );
+  }
+  return { status: 200, body: { ...stored, replayed: true } };
+}
+
+async function plaidAccountReassignmentReview(env, {
+  tenantId, accountRef, fromEntitySlug, toEntitySlug,
+}) {
+  let row;
+  try {
+    row = await env.DB.prepare(
+      `SELECT a.item_ref,a.provider_account_id,a.entity_slug AS assignment_entity_slug,
+              f.account_slug,f.entity_slug AS ledger_entity_slug,
+              COALESCE(f.label,s.name) AS account_label,COALESCE(f.mask,s.mask) AS account_mask,
+              source.display_label AS from_display_label,source.legal_name AS from_legal_name,
+              source.status AS from_status,source.relationship AS from_relationship,
+              target.display_label AS to_display_label,target.legal_name AS to_legal_name,
+              target.status AS to_status,target.relationship AS to_relationship,
+              (SELECT COUNT(*) FROM fin_transactions t
+                WHERE t.tenant_id=f.tenant_id AND t.account_slug=f.account_slug) AS transaction_count,
+              (SELECT COUNT(*) FROM fin_balance_snapshots b
+                WHERE b.tenant_id=f.tenant_id AND b.account_slug=f.account_slug) AS balance_count,
+              EXISTS (SELECT 1 FROM fin_period_closes c
+                WHERE c.tenant_id=a.tenant_id AND c.entity_slug IN (?3,?4)) AS has_period_close,
+              EXISTS (SELECT 1 FROM fin_reconciliations r
+                WHERE r.tenant_id=f.tenant_id AND r.account_slug=f.account_slug) AS has_reconciliation
+         FROM plaid_account_entity_assignments a
+         JOIN bank_feed_items i
+           ON i.tenant_id=a.tenant_id AND i.item_ref=a.item_ref AND i.removed_at IS NULL
+         LEFT JOIN plaid_sync_windows w
+           ON w.tenant_id=a.tenant_id AND w.item_ref=a.item_ref
+         LEFT JOIN plaid_sync_stage_accounts s
+           ON s.tenant_id=a.tenant_id AND s.window_ref=w.window_ref
+          AND s.provider_account_id=a.provider_account_id
+         JOIN fin_accounts f
+           ON f.tenant_id=a.tenant_id AND f.external_ref=a.provider_account_id
+          AND f.source_feed=('bank-feed:'||a.item_ref) AND f.superseded_by_id IS NULL
+         LEFT JOIN fin_entities source
+           ON source.tenant_id=a.tenant_id AND source.entity_slug=?3 AND source.superseded_by_id IS NULL
+         LEFT JOIN fin_entities target
+           ON target.tenant_id=a.tenant_id AND target.entity_slug=?4 AND target.superseded_by_id IS NULL
+        WHERE a.tenant_id=?1 AND a.account_ref=?2`,
+    ).bind(tenantId, accountRef, fromEntitySlug, toEntitySlug).first();
+  } catch {
+    throw new PlaidAccountEntityError(
+      "bank_account_reassignment_unavailable",
+      "The reviewed account move could not be verified safely.",
+      503,
+    );
+  }
+  if (!row) {
+    throw new PlaidAccountEntityError(
+      "bank_account_not_found",
+      "That bank account is not available for a reviewed move.",
+      404,
+    );
+  }
+  if (row.to_status !== "active") {
+    throw new PlaidAccountEntityError("entity_not_found", "That active entity is not available.", 404);
+  }
+  if (row.to_relationship !== "owned") {
+    throw new PlaidAccountEntityError("entity_not_owned", "Bank accounts can be moved only to an owned entity.", 403);
+  }
+  if (row.from_status !== "active" || row.from_relationship !== "owned" ||
+      row.assignment_entity_slug !== fromEntitySlug || row.ledger_entity_slug !== fromEntitySlug) {
+    throw new PlaidAccountEntityError(
+      "bank_account_reassignment_scope_changed",
+      "The account owner changed since this move was reviewed. Refresh and review it again.",
+      409,
+    );
+  }
+  if (Number(row.has_period_close || 0) !== 0) {
+    throw new PlaidAccountEntityError(
+      "bank_account_reassignment_period_closed",
+      "A closed financial period protects one of these owners. Reopen and review that period before moving the account.",
+      409,
+    );
+  }
+  if (Number(row.has_reconciliation || 0) !== 0) {
+    throw new PlaidAccountEntityError(
+      "bank_account_reassignment_reconciled",
+      "This account has a saved reconciliation. Review that reconciliation before moving the account.",
+      409,
+    );
+  }
+  return row;
+}
+
+/**
+ * Preview or apply one owner-reviewed historical Plaid account move.
+ *
+ * Transactions and balance snapshots inherit scope through fin_accounts, so
+ * the move changes exactly the assignment authority and its one live ledger
+ * account. Closed periods and reconciliations deliberately stop the move
+ * rather than silently reclassifying already-reviewed financial evidence.
+ */
+export async function reassignPlaidAccountEntity(env, body, { now = null } = {}) {
+  const tenantId = tenantIdOf(env);
+  const mode = body?.mode === "preview" || body?.mode === "apply" ? body.mode : null;
+  const requestId = typeof body?.request_id === "string" && REQUEST_ID.test(body.request_id)
+    ? body.request_id
+    : null;
+  const accountRef = typeof body?.account_ref === "string" && ACCOUNT_REF.test(body.account_ref)
+    ? body.account_ref
+    : null;
+  const fromEntitySlug = typeof body?.from_entity_slug === "string" && ENTITY_SLUG.test(body.from_entity_slug)
+    ? body.from_entity_slug
+    : null;
+  const toEntitySlug = typeof body?.to_entity_slug === "string" && ENTITY_SLUG.test(body.to_entity_slug)
+    ? body.to_entity_slug
+    : null;
+  if (!mode) throw new PlaidAccountEntityError("invalid_reassignment_mode", "Choose preview or apply.", 400);
+  if (!accountRef) throw new PlaidAccountEntityError("invalid_account_ref", "Choose one account from the current account list.", 400);
+  if (!fromEntitySlug) throw new PlaidAccountEntityError("invalid_from_entity_slug", "Review the account's current owner.", 400);
+  if (!toEntitySlug) throw new PlaidAccountEntityError("invalid_entity_slug", "Choose one active owned entity.", 400);
+  if (fromEntitySlug === toEntitySlug) {
+    throw new PlaidAccountEntityError("bank_account_reassignment_same_owner", "Choose a different owner for this account.", 400);
+  }
+  if (mode === "apply" && !requestId) {
+    throw new PlaidAccountEntityError("request_id_required", "A stable request_id is required.", 400);
+  }
+
+  const requestHash = mode === "apply"
+    ? await sha256Hex(canonical({
+      account_ref: accountRef,
+      from_entity_slug: fromEntitySlug,
+      to_entity_slug: toEntitySlug,
+    }))
+    : null;
+  if (mode === "apply") {
+    const replay = await savedOwnerAction(env, tenantId, requestId, REASSIGN_ACTION_TYPE, requestHash);
+    if (replay) return replay;
+  }
+
+  const reviewed = await plaidAccountReassignmentReview(env, {
+    tenantId, accountRef, fromEntitySlug, toEntitySlug,
+  });
+  const displayLabel = maskedIdentifier(reviewed.account_label, reviewed.account_mask);
+  const preview = {
+    account_ref: accountRef,
+    masked_identifier: displayLabel,
+    from_owner: {
+      entity_slug: fromEntitySlug,
+      label: reviewed.from_display_label || reviewed.from_legal_name || fromEntitySlug,
+    },
+    to_owner: {
+      entity_slug: toEntitySlug,
+      label: reviewed.to_display_label || reviewed.to_legal_name || toEntitySlug,
+    },
+    history: {
+      transactions: Number(reviewed.transaction_count || 0),
+      balance_snapshots: Number(reviewed.balance_count || 0),
+    },
+    can_apply: true,
+  };
+  if (mode === "preview") return { status: 200, body: preview };
+
+  const stamp = now || new Date().toISOString();
+  const eventId = `evt_${REASSIGN_EVENT_TYPE}_${requestId}`;
+  const response = {
+    moved: true,
+    request_id: requestId,
+    account_ref: accountRef,
+    masked_identifier: displayLabel,
+    from_owner: preview.from_owner,
+    to_owner: preview.to_owner,
+    entity_scope: { entity_slug: toEntitySlug },
+    history: preview.history,
+    changed: true,
+    activity_event_id: eventId,
+    replayed: false,
+  };
+  const statements = [
+    env.DB.prepare(
+      `SELECT CASE WHEN
+          EXISTS (SELECT 1 FROM fin_entities e
+            WHERE e.tenant_id=?1 AND e.entity_slug=?4 AND e.superseded_by_id IS NULL
+              AND e.status='active' AND e.relationship='owned')
+          AND EXISTS (
+            SELECT 1 FROM plaid_account_entity_assignments a
+            JOIN bank_feed_items i
+              ON i.tenant_id=a.tenant_id AND i.item_ref=a.item_ref AND i.removed_at IS NULL
+            JOIN fin_accounts f
+              ON f.tenant_id=a.tenant_id AND f.external_ref=a.provider_account_id
+             AND f.source_feed=('bank-feed:'||a.item_ref) AND f.superseded_by_id IS NULL
+            WHERE a.tenant_id=?1 AND a.account_ref=?2
+              AND a.entity_slug=?3 AND f.entity_slug=?3)
+          AND NOT EXISTS (SELECT 1 FROM fin_period_closes c
+            WHERE c.tenant_id=?1 AND c.entity_slug IN (?3,?4))
+          AND NOT EXISTS (
+            SELECT 1 FROM plaid_account_entity_assignments a
+            JOIN fin_accounts f
+              ON f.tenant_id=a.tenant_id AND f.external_ref=a.provider_account_id
+             AND f.source_feed=('bank-feed:'||a.item_ref) AND f.superseded_by_id IS NULL
+            JOIN fin_reconciliations r
+              ON r.tenant_id=f.tenant_id AND r.account_slug=f.account_slug
+            WHERE a.tenant_id=?1 AND a.account_ref=?2)
+        THEN 1 ELSE json_extract('bank account reassignment authority changed','$') END AS reassignment_guard`,
+    ).bind(tenantId, accountRef, fromEntitySlug, toEntitySlug),
+    env.DB.prepare(
+      `UPDATE plaid_account_entity_assignments
+          SET entity_slug=?,assigned_at=?,updated_at=?
+        WHERE tenant_id=? AND item_ref=? AND provider_account_id=? AND account_ref=? AND entity_slug=?`,
+    ).bind(toEntitySlug, stamp, stamp, tenantId, reviewed.item_ref, reviewed.provider_account_id, accountRef, fromEntitySlug),
+    env.DB.prepare(
+      `UPDATE fin_accounts SET entity_slug=?,recorded_at=?
+        WHERE tenant_id=? AND account_slug=? AND entity_slug=?
+          AND external_ref=? AND source_feed=('bank-feed:'||?) AND superseded_by_id IS NULL`,
+    ).bind(toEntitySlug, stamp, tenantId, reviewed.account_slug, fromEntitySlug, reviewed.provider_account_id, reviewed.item_ref),
+    env.DB.prepare(
+      `INSERT INTO plaid_reconciliation
+         (tenant_id,item_ref,reason,state,due_at,attempts,updated_at)
+       VALUES (?,?,'owner_assignment','pending',?,0,?)
+       ON CONFLICT(tenant_id,item_ref) DO UPDATE SET
+         reason='owner_assignment',state='pending',due_at=excluded.due_at,
+         attempts=0,last_error_code=NULL,updated_at=excluded.updated_at`,
+    ).bind(tenantId, reviewed.item_ref, stamp, stamp),
+    env.DB.prepare(
+      `INSERT INTO owner_activity_events
+         (event_id,tenant_id,request_id,event_type,entity_slug,
+          subject_kind,subject_id,display_label,occurred_at)
+       VALUES (?,?,?,?,?,'bank_account',?,?,?)`,
+    ).bind(eventId, tenantId, requestId, REASSIGN_EVENT_TYPE, toEntitySlug, accountRef, displayLabel, stamp),
+    env.DB.prepare(
+      `INSERT INTO owner_action_requests
+         (tenant_id,request_id,action_type,request_hash,response_json,response_status,created_at)
+       VALUES (?,?,?,?,?,201,?)`,
+    ).bind(tenantId, requestId, REASSIGN_ACTION_TYPE, requestHash, JSON.stringify(response), stamp),
+  ];
+  try {
+    await env.DB.batch(statements);
+  } catch {
+    const replay = await savedOwnerAction(env, tenantId, requestId, REASSIGN_ACTION_TYPE, requestHash);
+    if (replay) return replay;
+    // Turn a state race into the same stable refusal preview would return. If
+    // the reviewed state still holds, the batch itself was unavailable.
+    await plaidAccountReassignmentReview(env, {
+      tenantId, accountRef, fromEntitySlug, toEntitySlug,
+    });
+    throw new PlaidAccountEntityError(
+      "bank_account_reassignment_unavailable",
+      "The reviewed account move was not committed. Retry with the same request_id.",
+      503,
+    );
+  }
+  return { status: 201, body: response };
 }
 
 export async function assignPlaidAccountEntity(env, body, { now = null } = {}) {
