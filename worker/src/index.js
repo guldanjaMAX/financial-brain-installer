@@ -3554,7 +3554,12 @@ export default {
         ? runPlaidMaintenance(env).then((result) => {
           const synced = Number(result?.sync?.ran || 0);
           const revoked = Number(result?.revocations?.ran || 0);
-          if (synced || revoked) console.log(`plaid maintenance: ${synced} synced, ${revoked} revocations`);
+          const activity = result?.sync?.bank_activity || {};
+          if (synced || revoked || activity.ran) console.log(
+            `plaid maintenance: ${synced} synced, ${revoked} revocations, bank activity ` +
+            `${Number(activity.created || 0)} created, ${Number(activity.updated || 0)} updated, ` +
+            `${Number(activity.unchanged || 0)} unchanged, ${Number(activity.failed || 0)} failed`,
+          );
         })
         : Promise.resolve(),
       env.CUSTOM_API_CONFIG

@@ -1,4 +1,5 @@
 import { providerJson, ProviderSyncError } from "./provider-sync.js";
+import { writeBankActivityDocuments } from "./bank-activity-doc.js";
 import { assertPlaidConnectionDistinct } from "./plaid-connection-review.js";
 import { PlaidAccountEntityError, reconciliationRefreshPending } from "./plaid-account-entities.js";
 import {
@@ -1496,7 +1497,36 @@ export async function runPlaidFeedSlice(env, {
     items.push(result);
     if (result.code === "PLAID_SYNC_DEADLINE") break;
   }
-  return { ran: items.length, items };
+  if (items.some((item) => item.code === "PLAID_SYNC_DEADLINE")) {
+    return {
+      ran: items.length,
+      items,
+      bank_activity: {
+        decision: "promotion_gate_checked",
+        ran: false,
+        outcome: "sync_deadline",
+        failed: 0,
+      },
+    };
+  }
+  const committedPromotions = items.filter((item) => ["complete", "partial"].includes(item.status)).length;
+  let bankActivity;
+  try {
+    bankActivity = await writeBankActivityDocuments(env, {
+      committedPromotions,
+      at: stamp,
+    });
+  } catch {
+    // The ledger promotion is already committed and its lease is released.
+    // Projection failures are visible by count but cannot rewrite that result.
+    bankActivity = {
+      decision: "promotion_gate_checked",
+      ran: true,
+      outcome: "writer_failed",
+      failed: 1,
+    };
+  }
+  return { ran: items.length, items, bank_activity: bankActivity };
 }
 
 async function plaidJwk(env, keyId, fetchImpl, stamp) {
