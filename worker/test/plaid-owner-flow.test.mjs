@@ -189,7 +189,13 @@ async function runPage(html, { entities, accounts, connections = [], onAssign = 
           };
         }
         return { ok: true, status: body.mode === "apply" ? 201 : 200, json: async () => body.mode === "apply"
-          ? { changed: true, replayed: false, entity_scope: { entity_slug: body.to_entity_slug } }
+          ? {
+              moved: true, changed: true, replayed: false,
+              request_id: body.request_id, account_ref: body.account_ref,
+              from_owner: { entity_slug: body.from_entity_slug, label: from?.label || body.from_entity_slug },
+              to_owner: { entity_slug: body.to_entity_slug, label: to?.label || body.to_entity_slug },
+              entity_scope: { entity_slug: body.to_entity_slug },
+            }
           : {
               account_ref: body.account_ref,
               from_owner: { entity_slug: body.from_entity_slug, label: from?.label || body.from_entity_slug },

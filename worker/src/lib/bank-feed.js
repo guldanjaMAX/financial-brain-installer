@@ -1515,6 +1515,7 @@ const assignmentQueue = [];
 const bankAssignmentStates = new Map();
 const bankAssignmentResults = new Map();
 let assignmentQueueBusy = false;
+let accountRenderVersion = 0;
 async function saveAccountAssignment(account, entitySlug) {
   const retry = assignmentRequestId(account.account_ref, entitySlug);
   accountSay("Saving that choice…");
@@ -1604,6 +1605,8 @@ async function assignBankAccounts(bankKey, accounts, entitySlug, button, results
   if (failures.length > 0) accountSay(failures[failures.length - 1].message, true);
 }
 function appendReassignmentControl(card, account, entities) {
+  const accountRef = account.account_ref;
+  const renderVersion = accountRenderVersion;
   const fromEntitySlug = account.assignment && account.assignment.entity_scope
     ? account.assignment.entity_scope.entity_slug
     : null;
@@ -1628,24 +1631,70 @@ function appendReassignmentControl(card, account, entities) {
     const review = make("button", "Review move");
     review.type = "button";
     const result = make("div", null, "note");
+    let reviewVersion = 0;
+    let reviewedMove = null;
+    let currentApply = null;
+    let applying = false;
+    const currentSource = () => account.assignment && account.assignment.state === "assigned" &&
+      account.assignment.entity_scope ? account.assignment.entity_scope.entity_slug : null;
+    const currentAccount = () => accountRenderVersion === renderVersion &&
+      account.account_ref === accountRef && currentSource() === fromEntitySlug;
+    const staleAccountMessage = () => currentSource() !== fromEntitySlug
+      ? "The account owner changed. Refresh the account list and review it again."
+      : "The account list changed. Refresh the account list and review it again.";
+    const invalidateReview = (message) => {
+      reviewVersion += 1;
+      reviewedMove = null;
+      if (currentApply) currentApply.disabled = true;
+      currentApply = null;
+      result.replaceChildren(make("p", message));
+      result.className = "note";
+      review.disabled = false;
+    };
+    select.onchange = () => {
+      if (!applying) invalidateReview("The choice changed. Review this move again before applying it.");
+    };
     review.onclick = async () => {
+      if (applying || review.disabled) return;
+      if (!currentAccount()) { invalidateReview(staleAccountMessage()); return; }
       if (!select.value) { result.textContent = "Choose a different owner first."; return; }
+      const toEntitySlug = select.value;
+      const version = ++reviewVersion;
+      reviewedMove = null;
+      if (currentApply) currentApply.disabled = true;
+      currentApply = null;
       review.disabled = true;
+      result.replaceChildren();
+      result.className = "note";
       result.textContent = "Checking the account history and review locks…";
       try {
         const preview = await post("/api/bank-feed/accounts/reassign", {
           mode: "preview",
-          account_ref: account.account_ref,
+          account_ref: accountRef,
           from_entity_slug: fromEntitySlug,
-          to_entity_slug: select.value,
+          to_entity_slug: toEntitySlug,
         });
-        if (preview.account_ref !== account.account_ref || preview.can_apply !== true ||
+        // An older response cannot revive approval after a selection change or
+        // account-list refresh, even when the choice changes away and back.
+        if (version !== reviewVersion) return;
+        if (!currentAccount()) { invalidateReview(staleAccountMessage()); return; }
+        if (select.value !== toEntitySlug) {
+          invalidateReview("The choice changed. Review this move again before applying it.");
+          return;
+        }
+        if (preview?.account_ref !== accountRef || preview.can_apply !== true ||
             preview.from_owner?.entity_slug !== fromEntitySlug ||
-            preview.to_owner?.entity_slug !== select.value ||
+            preview.to_owner?.entity_slug !== toEntitySlug ||
             !Number.isSafeInteger(preview.history?.transactions) || preview.history.transactions < 0 ||
             !Number.isSafeInteger(preview.history?.balance_snapshots) || preview.history.balance_snapshots < 0) {
           throw new Error("The reviewed move preview was incomplete. Nothing was moved.");
         }
+        const approvedMove = Object.freeze({
+          account_ref: accountRef,
+          from_entity_slug: fromEntitySlug,
+          to_entity_slug: toEntitySlug,
+        });
+        reviewedMove = approvedMove;
         const transactions = preview.history.transactions;
         const balances = preview.history.balance_snapshots;
         result.replaceChildren();
@@ -1655,30 +1704,67 @@ function appendReassignmentControl(card, account, entities) {
           " with the account."));
         const apply = make("button", "Move account history");
         apply.type = "button";
+        currentApply = apply;
         apply.onclick = async () => {
-          if (apply.disabled) return;
+          if (apply.disabled || applying) return;
+          if (!currentAccount()) { invalidateReview(staleAccountMessage()); return; }
+          if (reviewedMove !== approvedMove || version !== reviewVersion ||
+              select.value !== approvedMove.to_entity_slug) {
+            invalidateReview("The choice changed. Review this move again before applying it.");
+            return;
+          }
+          applying = true;
+          select.disabled = true;
+          review.disabled = true;
           apply.disabled = true;
           apply.textContent = "Moving…";
-          const retry = reassignmentRequestId(account.account_ref, fromEntitySlug, select.value);
+          const retry = reassignmentRequestId(approvedMove.account_ref,
+            approvedMove.from_entity_slug, approvedMove.to_entity_slug);
           try {
-            await post("/api/bank-feed/accounts/reassign", {
+            const moved = await post("/api/bank-feed/accounts/reassign", {
               mode: "apply",
               request_id: retry.value,
-              account_ref: account.account_ref,
-              from_entity_slug: fromEntitySlug,
-              to_entity_slug: select.value,
+              ...approvedMove,
             });
+            if (moved?.moved !== true || moved.changed !== true ||
+                moved.request_id !== retry.value || moved.account_ref !== approvedMove.account_ref ||
+                moved.from_owner?.entity_slug !== approvedMove.from_entity_slug ||
+                moved.to_owner?.entity_slug !== approvedMove.to_entity_slug ||
+                moved.entity_scope?.entity_slug !== approvedMove.to_entity_slug ||
+                typeof moved.to_owner.label !== "string" || !moved.to_owner.label.trim()) {
+              const message = "The move response could not be verified. Check the account list before trying again.";
+              invalidateReview(message);
+              accountSay(message, true);
+              return;
+            }
             try { sessionStorage.removeItem(retry.key); } catch (e) {}
-            accountSay("The account and its saved history now belong to " + preview.to_owner.label + ".");
-            await loadAccounts({ quiet: true });
+            reviewedMove = null;
+            const refreshed = await loadAccounts({ quiet: true });
+            accountSay("The account and its saved history now belong to " + moved.to_owner.label + "." +
+              (refreshed < 0 ? " The account list could not refresh. Check again." : ""), refreshed < 0);
           } catch (error) {
             accountSay(error.message, true);
-            apply.disabled = false;
-            apply.textContent = "Move account history";
+            if (error.code === "bank_account_reassignment_scope_changed" ||
+                error.code === "request_id_conflict" || !currentAccount()) {
+              invalidateReview(error.message);
+            } else if (reviewedMove === approvedMove && version === reviewVersion &&
+                select.value === approvedMove.to_entity_slug) {
+              // A lost response may have committed. Retain the exact receipt
+              // identity and let only the same reviewed choice be retried.
+              apply.disabled = false;
+              apply.textContent = "Move account history";
+            } else {
+              invalidateReview("The choice changed. Review this move again before applying it.");
+            }
+          } finally {
+            applying = false;
+            select.disabled = false;
+            if (!reviewedMove) review.disabled = false;
           }
         };
         result.append(apply);
       } catch (error) {
+        if (version !== reviewVersion) return;
         result.textContent = error.message;
         result.className = "err";
         review.disabled = false;
@@ -1734,6 +1820,7 @@ function renderAccountCard(account, entities) {
     return card;
 }
 function renderAccounts(accounts, entities) {
+  accountRenderVersion += 1;
   const root = el("accounts");
   root.replaceChildren();
   const groups = new Map();
