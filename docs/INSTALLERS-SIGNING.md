@@ -1,6 +1,6 @@
 # Signing the double-click installers
 
-The manual `installer-signing` workflow builds signed review artifacts. It does not publish a release, create a tag, or make an artifact customer-ready. Both jobs run in the protected `artifact-signing` environment. If any required setting is absent, the matching job skips cleanly.
+The manual `installer-signing` workflow builds signed review artifacts. It does not publish a release, create a tag, or make an artifact customer-ready. Set the repository variable `SIGNING_REPOSITORY` to the exact `owner/repository` slug. The workflow refuses a wrong-repository or non-default-branch dispatch before either signing job enters the protected `artifact-signing` environment. If any required setting is absent, the matching job skips cleanly.
 
 ## Apple setup
 

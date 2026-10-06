@@ -5,7 +5,7 @@
     Manufacturer="Financial Brain LLC"
     Version="0.2.0"
     UpgradeCode="A49C8F6E-AD20-4C23-89B7-0E2A5B63C02D"
-    Scope="perMachine"
+    Scope="perUser"
     InstallerVersion="500"
     Compressed="yes">
 
@@ -16,7 +16,7 @@
       Condition="Installed OR VersionNT64 &gt;= 1000"
       Message="Windows 10 or newer is required. No machine preparation was started." />
 
-    <StandardDirectory Id="ProgramFiles64Folder">
+    <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="INSTALLFOLDER" Name="Financial Brain Machine Prep">
         <Component Id="MachinePrepScripts" Guid="2A7B7F2E-02E5-4D01-8498-06E7ED27347E">
           <File Id="PrepWindowsScript" Source="..\..\prep-windows.ps1" Name="prep-windows.ps1" KeyPath="yes" />
@@ -33,27 +33,26 @@
         </Directory>
       </Directory>
     </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Financial Brain Machine Prep">
+        <Component Id="MachinePrepShortcut" Guid="8C61DEEB-2749-4F62-9446-B5DA941E4DBF">
+          <Shortcut
+            Id="RunMachinePrepShortcut"
+            Name="Run Financial Brain Machine Prep"
+            Description="Check prerequisites and open Financial Brain setup"
+            Target="[SystemFolder]WindowsPowerShell\v1.0\powershell.exe"
+            Arguments="-NoLogo -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]run-machine-prep.ps1&quot;"
+            WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\FinancialBrain\MachinePrep" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
 
     <Feature Id="Complete" Title="Financial Brain Machine Prep" Level="1">
       <ComponentRef Id="MachinePrepScripts" />
       <ComponentRef Id="ClaudeHandoff" />
+      <ComponentRef Id="MachinePrepShortcut" />
     </Feature>
-
-    <!-- Windows Installer owns the one UAC prompt. The real prep is still
-         impersonated as the signed-in user, preserving the per-user contract. -->
-    <CustomAction
-      Id="RunMachinePrep"
-      Directory="INSTALLFOLDER"
-      ExeCommand="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[#RunMachinePrepScript]&quot;"
-      Execute="deferred"
-      Impersonate="yes"
-      Return="check" />
-    <InstallExecuteSequence>
-      <Custom Action="RunMachinePrep" After="InstallFiles" Condition="NOT Installed" />
-    </InstallExecuteSequence>
-    <ActionText
-      Action="RunMachinePrep"
-      Description="Preparing tools, installing Financial Brain, and opening setup..."
-      Template="This can take 8 to 20 minutes. Progress is also written to the support log." />
   </Package>
 </Wix>

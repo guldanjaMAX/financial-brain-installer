@@ -38,9 +38,13 @@ if ($files.Count -ne $expected.Count) {
   throw "MSI payload has $($files.Count) files; expected exactly $($expected.Count)"
 }
 
-$customTargets = @(Read-Column 'SELECT `Target` FROM `CustomAction`')
-if (-not ($customTargets | Where-Object { $_ -like "*ExecutionPolicy Bypass*run-machine-prep.ps1*" })) {
-  throw "MSI custom action does not use the reviewed process-only policy bypass"
+$shortcutArguments = @(Read-Column 'SELECT `Arguments` FROM `Shortcut`')
+if (-not ($shortcutArguments | Where-Object { $_ -like "*ExecutionPolicy Bypass*run-machine-prep.ps1*" })) {
+  throw "MSI Start Menu launcher does not use the reviewed process-only policy bypass"
+}
+$directories = @(Read-Column 'SELECT `Directory` FROM `Directory`')
+if ($directories -notcontains "LocalAppDataFolder" -or $directories -contains "ProgramFiles64Folder") {
+  throw "MSI is not confined to the current user's LocalAppData"
 }
 $launchConditions = @(Read-Column 'SELECT `Condition` FROM `LaunchCondition`')
 if (-not ($launchConditions -contains "Installed OR VersionNT64 >= 1000")) {
@@ -50,3 +54,5 @@ if (-not ($launchConditions -contains "Installed OR VersionNT64 >= 1000")) {
 Write-Output "MSI_CONTENTS_VERIFIED=$($files.Count)"
 Write-Output "MSI_OS_GATE_VERIFIED=1"
 Write-Output "MSI_POLICY_SCOPE_VERIFIED=process_only"
+Write-Output "MSI_SCOPE_VERIFIED=per_user"
+Write-Output "MSI_VISIBLE_LAUNCHER_VERIFIED=1"

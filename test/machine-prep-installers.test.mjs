@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -84,6 +84,22 @@ test("macOS installer refuses an unsupported release after reaching its OS gate"
   assert.match(out, /OS_DECISION_REACHED=1/);
   assert.match(out, /REFUSED macOS 13\.5 or newer is required/);
   assert.doesNotMatch(out, /PREP_STARTED/);
+
+  const control = spawnSync("bash", [preinstall], {
+    cwd: ROOT,
+    env: {
+      PATH: "/usr/bin:/bin",
+      HOME: join(ROOT, ".installers-fix-test-home"),
+      BRAIN_NO_WRANGLER_LOGIN: "1",
+      BRAIN_TEST_LAUNCHCTL: join(ROOT, ".installers-fix-test-home", "injected-launchctl"),
+      MACHINE_PREP_OS_VERSION_OVERRIDE: "13.5",
+      MACHINE_PREP_INSTALLER_TEST_MODE: "1",
+    },
+    encoding: "utf8",
+  });
+  assert.equal(control.status, 0, `${control.stdout}${control.stderr}`);
+  assert.match(control.stdout, /OS_DECISION_REACHED=1/);
+  assert.match(control.stdout, /OS_SUPPORTED=1/);
 });
 
 test("macOS staging contains the real prep, handoff, support log wrapper, and uninstall notes", () => {
@@ -94,10 +110,10 @@ test("macOS staging contains the real prep, handoff, support log wrapper, and un
       encoding: "utf8",
     });
     assert.equal(build.status, 0, `${build.stdout}${build.stderr}`);
-    const installed = join(staging, "payload", "Library", "Application Support", "FinancialBrainMachinePrep");
+    const installed = join(staging, "payload", "Applications", "Financial Brain Machine Prep");
     const expected = [
       "prep-mac.sh",
-      "run-machine-prep-mac.sh",
+      "Run Financial Brain Machine Prep.command",
       "handoff/handoff-mac.sh",
       "handoff/handoff-macos.url",
       "handoff/message-macos.txt",
@@ -108,25 +124,25 @@ test("macOS staging contains the real prep, handoff, support log wrapper, and un
       assert.equal(existsSync(join(installed, relativePath)), true, `missing ${relativePath}`);
     }
     assert.notEqual(statSync(join(installed, "prep-mac.sh")).mode & 0o111, 0);
-    const wrapper = readFileSync(join(installed, "run-machine-prep-mac.sh"), "utf8");
-    assert.match(wrapper, /prep-mac\.sh" --real/);
+    const wrapper = readFileSync(join(installed, "Run Financial Brain Machine Prep.command"), "utf8");
+    assert.match(wrapper, /"\$PREP_RUNNER" --real/);
     assert.match(wrapper, /installer\.log/);
     assert.match(wrapper, /handoff-mac\.sh/);
     assert.match(wrapper, /start-brain-setup\.command/);
     assert.match(wrapper, /SETUP_LAUNCH_DECISION_REACHED=1/);
-    assert.match(wrapper, /set -o pipefail/);
+    assert.match(wrapper, /LOG_SCHEMA_DECISION_REACHED=1/);
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
 });
 
-test("macOS package scripts keep root plumbing separate from the console user prep", () => {
-  const postinstall = read("machine-prep/installers/macos/scripts/postinstall");
-  assert.match(postinstall, /\/dev\/console/);
-  assert.match(postinstall, /launchctl asuser/);
-  assert.match(postinstall, /sudo -u/);
-  assert.match(postinstall, /run-machine-prep-mac\.sh/);
-  assert.doesNotMatch(postinstall, /prep-mac\.sh[^\n]*--real/);
+test("macOS package has no privileged script phase and targets only the current user", () => {
+  const build = read("machine-prep/installers/macos/build-pkg.sh");
+  const distribution = read("machine-prep/installers/macos/Distribution.xml");
+  assert.doesNotMatch(build, /--scripts|scripts\/postinstall/);
+  assert.match(distribution, /enable_currentUserHome="true"/);
+  assert.match(distribution, /enable_localSystem="false"/);
+  assert.match(distribution, /require-scripts="false"/);
 });
 
 test("macOS native tools build the reviewed unsigned package contents", { skip: process.platform !== "darwin" }, () => {
@@ -140,7 +156,7 @@ test("macOS native tools build the reviewed unsigned package contents", { skip: 
     assert.equal(build.status, 0, `${build.stdout}${build.stderr}`);
     const contents = spawnSync("pkgutil", ["--payload-files", pkg], { encoding: "utf8" });
     assert.equal(contents.status, 0, `${contents.stdout}${contents.stderr}`);
-    assert.match(contents.stdout, /FinancialBrainMachinePrep\/prep-mac\.sh/);
+    assert.match(contents.stdout, /Financial Brain Machine Prep\/prep-mac\.sh/);
     // PackageKit can serialize protected host provenance xattrs as AppleDouble
     // entries. Ignore those metadata carriers and pin every functional path.
     const functionalPaths = contents.stdout.trim().split("\n")
@@ -148,18 +164,17 @@ test("macOS native tools build the reviewed unsigned package contents", { skip: 
       .sort();
     assert.deepEqual(functionalPaths, [
       ".",
-      "./Library",
-      "./Library/Application Support",
-      "./Library/Application Support/FinancialBrainMachinePrep",
-      "./Library/Application Support/FinancialBrainMachinePrep/UNINSTALL.md",
-      "./Library/Application Support/FinancialBrainMachinePrep/handoff",
-      "./Library/Application Support/FinancialBrainMachinePrep/handoff/continue-in-claude.command",
-      "./Library/Application Support/FinancialBrainMachinePrep/handoff/handoff-mac.sh",
-      "./Library/Application Support/FinancialBrainMachinePrep/handoff/handoff-macos.url",
-      "./Library/Application Support/FinancialBrainMachinePrep/handoff/message-macos.txt",
-      "./Library/Application Support/FinancialBrainMachinePrep/prep-mac.sh",
-      "./Library/Application Support/FinancialBrainMachinePrep/run-machine-prep-mac.sh",
-      "./Library/Application Support/FinancialBrainMachinePrep/start-brain-setup.command",
+      "./Applications",
+      "./Applications/Financial Brain Machine Prep",
+      "./Applications/Financial Brain Machine Prep/UNINSTALL.md",
+      "./Applications/Financial Brain Machine Prep/handoff",
+      "./Applications/Financial Brain Machine Prep/handoff/continue-in-claude.command",
+      "./Applications/Financial Brain Machine Prep/handoff/handoff-mac.sh",
+      "./Applications/Financial Brain Machine Prep/handoff/handoff-macos.url",
+      "./Applications/Financial Brain Machine Prep/handoff/message-macos.txt",
+      "./Applications/Financial Brain Machine Prep/prep-mac.sh",
+      "./Applications/Financial Brain Machine Prep/Run Financial Brain Machine Prep.command",
+      "./Applications/Financial Brain Machine Prep/start-brain-setup.command",
     ].sort());
     const signature = spawnSync("pkgutil", ["--check-signature", pkg], { encoding: "utf8" });
     assert.equal(signature.status, 1, `${signature.stdout}${signature.stderr}`);
@@ -169,15 +184,21 @@ test("macOS native tools build the reviewed unsigned package contents", { skip: 
   }
 });
 
-test("Windows MSI is per-machine, Windows 10+, one-prompt plumbing with process-only policy bypass", () => {
+test("Windows MSI is per-user, Windows 10+, and uses process-only policy bypass", () => {
   const project = read("machine-prep/installers/windows/FinancialBrainMachinePrep.wixproj");
   const wix = read("machine-prep/installers/windows/Package.wxs");
   assert.match(project, /WixToolset\.Sdk\/7\.0\.0/);
-  assert.match(wix, /Scope="perMachine"/);
+  assert.match(wix, /Scope="perUser"/);
+  assert.match(wix, /LocalAppDataFolder/);
+  assert.match(wix, /<Shortcut/);
+  assert.doesNotMatch(wix, /<CustomAction|InstallExecuteSequence/);
+  assert.doesNotMatch(wix, /ProgramFiles64Folder|UAC prompt/);
   assert.match(wix, /VersionNT64 &gt;= 1000/);
   assert.match(wix, /macOS 13\.5 and Windows 10 are the supported minimums|Windows 10 or newer is required/);
   assert.match(wix, /ExecutionPolicy Bypass/);
-  assert.match(wix, /Impersonate="yes"/);
+  assert.match(wix, /ProgramMenuFolder/);
+  assert.match(wix, /<Shortcut/);
+  assert.doesNotMatch(wix, /<CustomAction|InstallExecuteSequence/);
   assert.match(wix, /prep-windows\.ps1/);
   assert.match(wix, /run-machine-prep\.ps1/);
   assert.match(wix, /message-windows\.txt/);
@@ -196,6 +217,27 @@ test("Windows wrapper has an unsupported-OS decision gate, shareable log, real p
   assert.match(wrapper, /start-brain-setup\.ps1/);
   assert.match(wrapper, /SETUP_LAUNCH_DECISION_REACHED=1/);
   assert.doesNotMatch(wrapper, /Set-ExecutionPolicy/);
+});
+
+test("Windows pinned download and child processes use PowerShell 5.1-compatible bounded primitives", () => {
+  const prep = read("machine-prep/prep-windows.ps1");
+  const wrapper = read("machine-prep/installers/windows/run-machine-prep.ps1");
+  const assertPrimitives = ({ prepSource, wrapperSource }) => {
+    assert.match(prepSource, /\[IO\.File\]::Open\(\$Destination, \[IO\.FileMode\]::CreateNew, \[IO\.FileAccess\]::Write, \[IO\.FileShare\]::None\)/);
+    assert.doesNotMatch(prepSource, /\[IO\.File\]::OpenNew/);
+    for (const source of [prepSource, wrapperSource]) {
+      assert.match(source, /StandardOutput\.ReadToEndAsync\(\)/);
+      assert.match(source, /StandardError\.ReadToEndAsync\(\)/);
+      assert.match(source, /\[Threading\.Tasks\.Task\]::WaitAll/);
+    }
+  };
+  assert.doesNotThrow(() => assertPrimitives({ prepSource: prep, wrapperSource: wrapper }));
+  const mutants = [
+    { prepSource: prep.replace("[IO.File]::Open($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)", "[IO.File]::OpenNew($Destination)"), wrapperSource: wrapper },
+    { prepSource: prep.replace("StandardOutput.ReadToEndAsync()", "StandardOutput.ReadToEnd()"), wrapperSource: wrapper },
+    { prepSource: prep, wrapperSource: wrapper.replace("StandardError.ReadToEndAsync()", "StandardError.ReadToEnd()") },
+  ];
+  for (const mutant of mutants) assert.throws(() => assertPrimitives(mutant));
 });
 
 test("visible setup launchers use the installed CLI and the standard fresh manifest path", () => {
@@ -222,6 +264,10 @@ test("Windows package project names every reviewed payload file", () => {
   for (const name of expected) {
     assert.equal(existsSync(join(WINDOWS_INSTALLER, name)), true, `missing ${name}`);
   }
+  const verifier = read("machine-prep/installers/windows/verify-msi.ps1");
+  assert.match(verifier, /LocalAppDataFolder/);
+  assert.match(verifier, /MSI_SCOPE_VERIFIED=per_user/);
+  assert.match(verifier, /MSI_VISIBLE_LAUNCHER_VERIFIED=1/);
 });
 
 test("Windows wrapper refuses an unsupported release before prep", { skip: process.platform !== "win32" }, () => {
@@ -321,6 +367,107 @@ test("signing workflow performs the required Apple and Artifact Signing ceremoni
   assert.doesNotMatch(workflow, /contents:\s*write|gh release|releases:/i);
 });
 
+function runSigningCleanup({ owned, deleteFails = false, scriptPath = join(MAC_INSTALLER, "cleanup-signing-material.sh") }) {
+  const directory = mkdtempSync(join(ROOT, ".signing-cleanup-test-"));
+  const keychain = join(directory, "installer-signing.keychain-db");
+  const marker = join(directory, "installer-signing.keychain-owner");
+  const calls = join(directory, "security-calls.log");
+  const security = join(directory, "security-fixture");
+  const attempt = "synthetic-attempt-1";
+  writeFileSync(keychain, "synthetic keychain\n");
+  if (owned) writeFileSync(marker, `${attempt}\n`);
+  for (const name of ["application.p12", "application.pem", "installer.p12", "installer.pem", "notary-key.p8"]) {
+    writeFileSync(join(directory, name), "synthetic material\n");
+  }
+  writeFileSync(security, `#!/bin/sh
+printf '%s\\n' "$1" >> "${calls}"
+case "$1" in
+  delete-keychain)
+    ${deleteFails ? "exit 9" : "rm -f \"$2\"; exit 0"}
+    ;;
+  show-keychain-info) exit 7 ;;
+  *) exit 8 ;;
+esac
+`);
+  chmodSync(security, 0o755);
+  const result = spawnSync("bash", [scriptPath], {
+    cwd: ROOT,
+    env: {
+      PATH: "/usr/bin:/bin",
+      HOME: directory,
+      RUNNER_TEMP: directory,
+      SIGNING_KEYCHAIN: keychain,
+      SIGNING_KEYCHAIN_MARKER: marker,
+      SIGNING_ATTEMPT_ID: attempt,
+      SIGNING_SECURITY_COMMAND: security,
+      BRAIN_NO_WRANGLER_LOGIN: "1",
+      BRAIN_TEST_LAUNCHCTL: join(directory, "injected-launchctl"),
+    },
+    encoding: "utf8",
+  });
+  return {
+    directory,
+    keychain,
+    marker,
+    calls,
+    result,
+    cleanup() { rmSync(directory, { recursive: true, force: true }); },
+  };
+}
+
+test("signing cleanup deletes only its marked keychain and fails loudly when deletion is unproven", () => {
+  const owned = runSigningCleanup({ owned: true });
+  try {
+    assert.equal(owned.result.status, 0, `${owned.result.stdout}${owned.result.stderr}`);
+    assert.match(owned.result.stdout, /KEYCHAIN_CLEANUP_DECISION_REACHED=1/);
+    assert.match(readFileSync(owned.calls, "utf8"), /^delete-keychain$/m);
+    assert.equal(existsSync(owned.keychain), false);
+    assert.equal(existsSync(owned.marker), false);
+  } finally {
+    owned.cleanup();
+  }
+
+  const failed = runSigningCleanup({ owned: true, deleteFails: true });
+  try {
+    assert.notEqual(failed.result.status, 0);
+    assert.match(`${failed.result.stdout}${failed.result.stderr}`, /KEYCHAIN_CLEANUP_FAILED=1/);
+    assert.equal(existsSync(failed.keychain), true);
+  } finally {
+    failed.cleanup();
+  }
+
+  const foreign = runSigningCleanup({ owned: false });
+  try {
+    assert.notEqual(foreign.result.status, 0);
+    assert.match(`${foreign.result.stdout}${foreign.result.stderr}`, /KEYCHAIN_CLEANUP_STOP_UNOWNED=1/);
+    assert.equal(existsSync(foreign.keychain), true);
+    assert.equal(existsSync(foreign.calls), false, "foreign keychain must not reach delete");
+  } finally {
+    foreign.cleanup();
+  }
+});
+
+test("signing cleanup ownership mutation turns the foreign-keychain control red", () => {
+  const sourcePath = join(MAC_INSTALLER, "cleanup-signing-material.sh");
+  const source = readFileSync(sourcePath, "utf8");
+  const from = 'if [ "$marker_value" != "$attempt_id" ]; then';
+  assert.equal(source.includes(from), true, "missing cleanup ownership decision");
+  const directory = mkdtempSync(join(ROOT, ".signing-cleanup-mutant-"));
+  const mutant = join(directory, "cleanup-signing-material.sh");
+  writeFileSync(mutant, source.replace(from, "if false; then"));
+  const probe = runSigningCleanup({ owned: false, scriptPath: mutant });
+  try {
+    assert.throws(() => {
+      assert.notEqual(probe.result.status, 0);
+      assert.equal(existsSync(probe.keychain), true);
+      assert.equal(existsSync(probe.calls), false);
+    }, undefined, "cleanup ownership mutation survived");
+  } finally {
+    probe.cleanup();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("installer signing guide names the exact owner ceremonies and settings", () => {
   const guide = read("docs/INSTALLERS-SIGNING.md");
   assert.match(guide, /Keychain Access/);
@@ -350,4 +497,233 @@ test("signing plan names owner purchases, warning behavior, and secretless repos
   assert.match(plan, /Open Source Maintenance Fee/);
   assert.match(plan, /GitHub OIDC/);
   assert.match(plan, /No signing credential belongs in the repository/);
+});
+
+function assertSecurityContracts({ macPrep, windowsPrep, distribution, buildPkg, wix, macRunner, windowsRunner, signing, signingCleanup }) {
+  for (const source of [macPrep, windowsPrep]) {
+    assert.doesNotMatch(source, /claude\.ai\/install|nodejs\.org\/dist|winget(?:\.Source)?\s+install|@openai\/codex@/i);
+    assert.match(source, /PREREQUISITE_DECISION_REACHED/);
+    assert.match(source, /OWNER ACTION/);
+    assert.match(source, /REUSE_ATTEMPTED=0/);
+    assert.match(source, /INSTALL_LOCK_ACQUIRED/);
+    assert.match(source, /STAGED_PREFIX_VERIFIED/);
+    assert.match(source, /ATOMIC_PROMOTION_VERIFIED/);
+    assert.match(source, /NO_REDIRECTS/);
+    assert.match(source, /NPM_ENVIRONMENT_ISOLATED/);
+  }
+  assert.doesNotMatch(macPrep, /grep -Fq "\$BRAIN_VERSION"/);
+  assert.doesNotMatch(windowsPrep, /\.Contains\(\$BrainVersion\)/);
+  assert.match(macPrep, /if ! \/bin\/mkdir "\$lock"/);
+  assert.match(macPrep, /if ! owns_attempt_dir "\$owned_path"/);
+  assert.match(macPrep, /renamex_np[\s\S]*renamex_np\(argv\[0\], argv\[1\], 4\)/);
+  assert.match(macPrep, /\/usr\/bin\/env -i HOME=/);
+  assert.match(windowsPrep, /\$handler\.AllowAutoRedirect = \$false/);
+  assert.match(windowsPrep, /\[IO\.Directory\]::Move\(\$stage, \$BrainPrefix\)/);
+  assert.match(windowsPrep, /Test-InstallAttemptOwnership \$Directory \$AttemptId/);
+  assert.match(windowsPrep, /StandardOutput\.ReadToEndAsync\(\)/);
+  assert.match(windowsPrep, /StandardError\.ReadToEndAsync\(\)/);
+  assert.match(windowsPrep, /\[Console\]::Out\.WriteLine\("NPM_ENVIRONMENT_ISOLATED=1"\)/);
+  assert.match(distribution, /enable_currentUserHome="true"/);
+  assert.match(distribution, /enable_localSystem="false"/);
+  assert.match(buildPkg, /Applications\/Financial Brain Machine Prep/);
+  assert.doesNotMatch(buildPkg, /--scripts|scripts\/postinstall/);
+  assert.match(wix, /Scope="perUser"/);
+  assert.match(wix, /LocalAppDataFolder/);
+  assert.doesNotMatch(wix, /ProgramFiles64Folder|UAC prompt/);
+  assert.match(wix, /<Shortcut/);
+  assert.doesNotMatch(wix, /<CustomAction|InstallExecuteSequence/);
+  assert.match(macRunner, /LOG_SCHEMA_DECISION_REACHED/);
+  assert.doesNotMatch(macRunner, /sanitize_log|2>&1\s*\|/);
+  assert.match(macRunner, /\/usr\/bin\/env -i/);
+  assert.match(macRunner, /exit "\$prep_status"/);
+  assert.match(macRunner, /exit "\$setup_status"/);
+  assert.match(windowsRunner, /\[IO\.File\]::AppendAllText/);
+  assert.match(windowsRunner, /\.ExitCode/);
+  assert.match(windowsRunner, /EnvironmentVariables\.Clear\(\)/);
+  assert.match(windowsRunner, /StandardOutput\.ReadToEndAsync\(\)/);
+  assert.match(windowsRunner, /StandardError\.ReadToEndAsync\(\)/);
+  assert.match(windowsRunner, /\[Threading\.Tasks\.Task\]::WaitAll/);
+  assert.match(windowsRunner, /exit \$prepResult\.ExitCode/);
+  assert.doesNotMatch(windowsRunner, /Tee-Object|RedirectStandardOutput\s+\$stdout/);
+  assert.match(signing, /github\.event_name == 'workflow_dispatch'/);
+  assert.match(signing, /github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/);
+  assert.match(signing, /vars\.SIGNING_REPOSITORY != ''/);
+  assert.ok(signing.indexOf("SIGNING_KEYCHAIN=$keychain") < signing.indexOf("security create-keychain"));
+  assert.match(signing, /trap cleanup_signing_material EXIT/);
+  assert.match(signing, /if \[ "\$mac_missing" -eq 0 \]; then/);
+  assert.doesNotMatch(signing, /security delete-keychain[^\n]*\|\| true/);
+  assert.match(signingCleanup, /if \[ "\$marker_value" != "\$attempt_id" \]; then/);
+  assert.match(signingCleanup, /"\$security_command" delete-keychain "\$keychain"/);
+}
+
+test("installer security contracts detect one mutation per reviewed boundary", () => {
+  const sources = {
+    macPrep: read("machine-prep/prep-mac.sh"),
+    windowsPrep: read("machine-prep/prep-windows.ps1"),
+    distribution: read("machine-prep/installers/macos/Distribution.xml"),
+    buildPkg: read("machine-prep/installers/macos/build-pkg.sh"),
+    wix: read("machine-prep/installers/windows/Package.wxs"),
+    macRunner: read("machine-prep/installers/macos/run-machine-prep-mac.sh"),
+    windowsRunner: read("machine-prep/installers/windows/run-machine-prep.ps1"),
+    signing: read(".github/workflows/installer-signing.yml"),
+    signingCleanup: read("machine-prep/installers/macos/cleanup-signing-material.sh"),
+  };
+  assert.doesNotThrow(() => assertSecurityContracts(sources));
+  const mutations = [
+    ["macPrep", 'if ! /bin/mkdir "$lock"', "if false"],
+    ["macPrep", "/usr/bin/env -i HOME=", "/usr/bin/env HOME="],
+    ["windowsPrep", "$handler.AllowAutoRedirect = $false", "$handler.AllowAutoRedirect = $true"],
+    ["windowsPrep", ".StandardOutput.ReadToEndAsync()", ".StandardOutput.ReadToEnd()"],
+    ["signing", 'if [ "$mac_missing" -eq 0 ]; then', 'if [ "$mac_missing" -ne 0 ]; then'],
+    ["signingCleanup", 'if [ "$marker_value" != "$attempt_id" ]; then', "if false; then"],
+    ["distribution", 'enable_localSystem="false"', 'enable_localSystem="true"'],
+    ["buildPkg", "Applications/Financial Brain Machine Prep", "Library/Application Support/FinancialBrainMachinePrep"],
+    ["wix", 'Scope="perUser"', 'Scope="perMachine"'],
+    ["wix", "<Shortcut", "<CustomAction"],
+    ["macRunner", 'exit "$setup_status"', 'exit 0 # setup failure swallowed'],
+    ["windowsRunner", ".StandardError.ReadToEndAsync()", ".StandardError.ReadToEnd()"],
+    ["signing", "vars.SIGNING_REPOSITORY != ''", "github.repository != ''"],
+  ];
+  for (const [key, from, to] of mutations) {
+    const mutant = { ...sources, [key]: sources[key].replaceAll(from, to) };
+    assert.throws(() => assertSecurityContracts(mutant), `mutation survived for ${key}: ${from}`);
+  }
+});
+
+function runMacWrapper({ prepExit, openExit, handoffExit }) {
+  const directory = mkdtempSync(join(ROOT, ".machine-prep-wrapper-test-"));
+  const counter = join(directory, "counter.log");
+  const helper = (name, exitCode) => {
+    const path = join(directory, name);
+    writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' ${name} >> "${counter}"\nexit ${exitCode}\n`);
+    chmodSync(path, 0o755);
+    return path;
+  };
+  const result = spawnSync("bash", [join(MAC_INSTALLER, "run-machine-prep-mac.sh")], {
+    cwd: ROOT,
+    env: {
+      PATH: "/usr/bin:/bin",
+      HOME: directory,
+      BRAIN_NO_WRANGLER_LOGIN: "1",
+      BRAIN_TEST_LAUNCHCTL: join(directory, "injected-launchctl"),
+      MACHINE_PREP_RUNNER: helper("prep", prepExit),
+      MACHINE_PREP_OPEN: helper("open", openExit),
+      MACHINE_PREP_HANDOFF: helper("handoff", handoffExit),
+      MACHINE_PREP_LOG_DIR: join(directory, "log"),
+    },
+    encoding: "utf8",
+  });
+  const calls = existsSync(counter) ? readFileSync(counter, "utf8").trim().split("\n").filter(Boolean) : [];
+  rmSync(directory, { recursive: true, force: true });
+  return { ...result, calls };
+}
+
+test("Mac launcher reaches prep and setup decisions, propagates failures, and hands off only after success", () => {
+  const prepFailure = runMacWrapper({ prepExit: 7, openExit: 0, handoffExit: 0 });
+  assert.equal(prepFailure.status, 7, prepFailure.stderr);
+  assert.deepEqual(prepFailure.calls, ["prep"]);
+  assert.match(prepFailure.stdout, /SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed/);
+
+  const launchFailure = runMacWrapper({ prepExit: 0, openExit: 9, handoffExit: 0 });
+  assert.equal(launchFailure.status, 9, launchFailure.stderr);
+  assert.deepEqual(launchFailure.calls, ["prep", "open"]);
+  assert.match(launchFailure.stdout, /SETUP_WINDOW_STARTED=0/);
+
+  const control = runMacWrapper({ prepExit: 0, openExit: 0, handoffExit: 0 });
+  assert.equal(control.status, 0, control.stderr);
+  assert.deepEqual(control.calls, ["prep", "open", "handoff"]);
+  assert.match(control.stdout, /INSTALLER_HANDOFF_STARTED=1/);
+});
+
+test("Windows launcher reaches one typed exit decision and starts setup only after prep succeeds", { skip: process.platform !== "win32" }, () => {
+  const powerShell = process.env.SystemRoot
+    ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    : "powershell.exe";
+  const run = ({ prep, setup, handoff }) => {
+    const home = mkdtempSync(join(ROOT, ".machine-prep-windows-wrapper-"));
+    try {
+      return spawnSync(powerShell, [
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", join(WINDOWS_INSTALLER, "run-machine-prep.ps1"),
+      ], {
+        cwd: ROOT,
+        env: {
+          SystemRoot: process.env.SystemRoot,
+          SYSTEMROOT: process.env.SystemRoot,
+          WINDIR: process.env.WINDIR,
+          COMSPEC: process.env.COMSPEC,
+          PATH: process.env.PATH,
+          PATHEXT: process.env.PATHEXT,
+          TEMP: join(home, "temp"), TMP: join(home, "temp"), HOME: home,
+          USERPROFILE: home, LOCALAPPDATA: join(home, "local"), APPDATA: join(home, "roaming"),
+          BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_TEST_LAUNCHCTL: join(home, "injected-launchctl"),
+          MACHINE_PREP_OS_VERSION_OVERRIDE: "10.0",
+          MACHINE_PREP_INSTALLER_TEST_MODE: "1",
+          MACHINE_PREP_TEST_PREP_EXIT: String(prep),
+          MACHINE_PREP_TEST_SETUP_EXIT: String(setup),
+          MACHINE_PREP_TEST_HANDOFF_EXIT: String(handoff),
+        },
+        encoding: "utf8",
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  };
+
+  const refused = run({ prep: 7, setup: 0, handoff: 0 });
+  assert.equal(refused.status, 7, `${refused.stdout}${refused.stderr}`);
+  assert.match(refused.stdout, /PREP_EXIT_CODE=7/);
+  assert.match(refused.stdout, /TEST_SETUP_ATTEMPTS=0/);
+  assert.match(refused.stdout, /OWNER ACTION: install any missing prerequisite/);
+
+  const setupFailure = run({ prep: 0, setup: 9, handoff: 0 });
+  assert.equal(setupFailure.status, 9, `${setupFailure.stdout}${setupFailure.stderr}`);
+  assert.match(setupFailure.stdout, /TEST_SETUP_ATTEMPTS=1/);
+  assert.match(setupFailure.stdout, /SETUP_WINDOW_STARTED=0/);
+
+  const control = run({ prep: 0, setup: 0, handoff: 0 });
+  assert.equal(control.status, 0, `${control.stdout}${control.stderr}`);
+  assert.match(control.stdout, /PREP_EXIT_CODE=0/);
+  assert.match(control.stdout, /SETUP_WINDOW_STARTED=1/);
+  assert.match(control.stdout, /INSTALLER_HANDOFF_STARTED=1/);
+});
+
+test("Windows launcher concurrently drains oversized child output for zero and nonzero exits", { skip: process.platform !== "win32", timeout: 30_000 }, () => {
+  const powerShell = process.env.SystemRoot
+    ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    : "powershell.exe";
+  for (const exitCode of [0, 7]) {
+    const directory = mkdtempSync(join(ROOT, ".machine-prep-windows-runner-pipes-"));
+    const child = join(directory, "large-output.ps1");
+    mkdirSync(join(directory, "temp"), { recursive: true });
+    writeFileSync(child, `$chunk = "x" * 1024\n1..256 | ForEach-Object { [Console]::Error.WriteLine($chunk) }\n1..256 | ForEach-Object { [Console]::Out.WriteLine($chunk) }\nexit ${exitCode}\n`);
+    try {
+      const result = spawnSync(powerShell, [
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", join(WINDOWS_INSTALLER, "run-machine-prep.ps1"), "-TestChildPath", child,
+      ], {
+        cwd: ROOT,
+        env: {
+          SystemRoot: process.env.SystemRoot,
+          SYSTEMROOT: process.env.SystemRoot,
+          WINDIR: process.env.WINDIR,
+          COMSPEC: process.env.COMSPEC,
+          PATH: process.env.PATH,
+          PATHEXT: process.env.PATHEXT,
+          TEMP: join(directory, "temp"), TMP: join(directory, "temp"), HOME: directory,
+          USERPROFILE: directory, LOCALAPPDATA: join(directory, "local"), APPDATA: join(directory, "roaming"),
+          BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_TEST_LAUNCHCTL: join(directory, "injected-launchctl"),
+          MACHINE_PREP_OS_VERSION_OVERRIDE: "10.0",
+          MACHINE_PREP_INSTALLER_TEST_MODE: "1",
+        },
+        encoding: "utf8",
+        timeout: 15_000,
+      });
+      assert.equal(result.error, undefined, String(result.error));
+      assert.equal(result.status, exitCode, `${result.stdout}${result.stderr}`);
+      assert.match(result.stdout, new RegExp(`REDIRECTED_PROCESS_DECISION_REACHED=1 exit=${exitCode}`));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
 });

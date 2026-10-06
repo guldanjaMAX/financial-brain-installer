@@ -12,6 +12,11 @@ BRAIN_KIT_SIZE="6668013"
 BRAIN_KIT_SHA256="0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2"
 WRANGLER_VERSION="4.131.1"
 MODE="${1:---real}"
+if [ "$MODE" = "--test-install-brain" ]; then
+  [ "${MACHINE_PREP_TEST_MODE:-}" = "1" ] || { printf 'REFUSED test install seam outside test mode\n' >&2; exit 2; }
+  BRAIN_KIT_SIZE="${MACHINE_PREP_TEST_KIT_SIZE:?test kit size required}"
+  BRAIN_KIT_SHA256="${MACHINE_PREP_TEST_KIT_SHA256:?test kit checksum required}"
+fi
 FIXTURE_DIR="${MACHINE_PREP_FIXTURE_DIR:-}"
 PREP_HOME="${MACHINE_PREP_HOME:-${HOME:-}}"
 TOOLS_ROOT="$PREP_HOME/.local/share/financial-brain-tools"
@@ -114,18 +119,18 @@ collect_checks() {
   node_version=$(tool_version node 2>/dev/null || true)
   if [ -z "$node_version" ]; then
     NODE_STATE="MISSING"
-    status_line "$NODE_STATE" "Node.js" "install pinned v$NODE_VERSION; fix: run --real"
+    status_line "$NODE_STATE" "Node.js" "OWNER ACTION: install supported Node.js from its official signed installer"
   elif printf '%s' "$node_version" | /usr/bin/grep -Eq '^v(22|24)\.'; then
     NODE_STATE="READY"
     status_line "$NODE_STATE" "Node.js" "$node_version"
   else
     NODE_STATE="WRONG_VERSION"
-    status_line "$NODE_STATE" "Node.js" "$node_version; supported majors are 22 and 24; fix: run --real"
+    status_line "$NODE_STATE" "Node.js" "$node_version; OWNER ACTION: install supported major 22 or 24"
   fi
 
   npm_version=$(tool_version npm 2>/dev/null || true)
   if [ -n "$npm_version" ]; then status_line "READY" "npm" "$npm_version"
-  else status_line "MISSING" "npm" "install with Node.js; fix: run --real"; fi
+  else status_line "MISSING" "npm" "OWNER ACTION: install it with supported Node.js"; fi
 
   git_path=$(tool_paths git | /usr/bin/head -n 1)
   if [ -z "$FIXTURE_DIR" ] && [ "$git_path" = "/usr/bin/git" ] && [ "$xcode_status" != "ready" ]; then
@@ -138,7 +143,7 @@ collect_checks() {
     status_line "$GIT_STATE" "Git" "$git_version"
   else
     GIT_STATE="MISSING"
-    status_line "$GIT_STATE" "Git" "install Apple's Command Line Tools; fix: run --real and approve the OS dialog"
+    status_line "$GIT_STATE" "Git" "OWNER ACTION: install Apple's signed Command Line Tools"
   fi
 
   claude_paths=$(tool_paths claude)
@@ -152,8 +157,8 @@ collect_checks() {
     status_line "$CLAUDE_STATE" "Claude Code" "$claude_paths resolves first; fix: put $BIN_DIR/claude first on PATH"
   elif [ -z "$claude_version" ]; then
     CLAUDE_STATE="MISSING"
-    status_line "$CLAUDE_STATE" "Claude Code" "install pinned $CLAUDE_VERSION; fix: run --real"
-  elif printf '%s' "$claude_version" | /usr/bin/grep -Fq "$CLAUDE_VERSION"; then
+    status_line "$CLAUDE_STATE" "Claude Code" "OWNER ACTION: install pinned $CLAUDE_VERSION from the official signed installer"
+  elif [ "$claude_version" = "$CLAUDE_VERSION (Claude Code)" ]; then
     CLAUDE_STATE="READY"
     status_line "$CLAUDE_STATE" "Claude Code" "$claude_version"
   else
@@ -172,8 +177,8 @@ collect_checks() {
     status_line "$CODEX_STATE" "Codex CLI" "$codex_paths resolves first; fix: put $BIN_DIR/codex first on PATH"
   elif [ -z "$codex_version" ]; then
     CODEX_STATE="MISSING"
-    status_line "$CODEX_STATE" "Codex CLI" "install pinned $CODEX_VERSION; fix: run --real"
-  elif printf '%s' "$codex_version" | /usr/bin/grep -Fq "$CODEX_VERSION"; then
+    status_line "$CODEX_STATE" "Codex CLI" "OWNER ACTION: install pinned $CODEX_VERSION from the official package"
+  elif [ "$codex_version" = "codex-cli $CODEX_VERSION" ]; then
     CODEX_STATE="READY"
     status_line "$CODEX_STATE" "Codex CLI" "$codex_version"
   else
@@ -194,7 +199,7 @@ collect_checks() {
   elif [ "$brain_paths" != "$canonical_brain" ]; then
     BRAIN_STATE="SHADOWED"
     status_line "$BRAIN_STATE" "Financial Brain CLI" "$brain_paths resolves first; fix: put $canonical_brain first on PATH"
-  elif ! printf '%s' "$brain_version" | /usr/bin/grep -Fq "$BRAIN_VERSION"; then
+  elif [ "$brain_version" != "$BRAIN_VERSION" ]; then
     BRAIN_STATE="WRONG_VERSION"
     status_line "$BRAIN_STATE" "Financial Brain CLI" "${brain_version:-unknown}; expected $BRAIN_VERSION; fix: use the signed installer for a clean prefix"
   else
@@ -213,7 +218,7 @@ collect_checks() {
     status_line "$XCODE_STATE" "Xcode Command Line Tools" "not required because Git is already available"
   else
     XCODE_STATE="MISSING"
-    status_line "$XCODE_STATE" "Xcode Command Line Tools" "required only to supply Git; fix: run --real and approve the OS dialog"
+    status_line "$XCODE_STATE" "Xcode Command Line Tools" "OWNER ACTION: install Apple's signed tools to supply Git"
   fi
 
   if [ -n "$FIXTURE_DIR" ]; then
@@ -255,17 +260,13 @@ print_plan() {
   if [ "$CHECK_FAILURES" -eq 0 ]; then printf 'READINESS GREEN\n'; else printf 'READINESS RED\n'; fi
   printf '\nPLAN\n'
   printf "%s\n" \
-    "1. CLIENT CLICK: approve Apple's Command Line Tools dialog once, only because Git/Xcode readiness is incomplete." \
-    "2. DOWNLOAD: Node.js v$NODE_VERSION from nodejs.org into the per-user tool directory." \
-    "3. VERIFY: match the Node archive against the pinned release's official SHASUMS256.txt before extraction." \
-    "4. INSTALL: Anthropic Claude Code $CLAUDE_VERSION from a saved official installer file; never pipe a download into a shell." \
-    "5. INSTALL: OpenAI Codex CLI $CODEX_VERSION from the exact official npm package into the per-user prefix." \
-    "6. PATH: add one managed per-user bin directory without replacing existing PATH entries." \
-    "7. SKIP: do not install global Wrangler; Financial Brain owns wrangler@$WRANGLER_VERSION." \
-    "8. DOWNLOAD: Financial Brain $BRAIN_VERSION from the one pinned HTTPS kit URL." \
-    "9. VERIFY: require exactly $BRAIN_KIT_SIZE bytes and SHA-256 $BRAIN_KIT_SHA256 before npm sees the local file." \
-    "10. INSTALL: place the verified kit in the clean per-user $BRAIN_PREFIX prefix with package scripts disabled." \
-    "11. VERIFY: rerun --check and show the operator the green/red list."
+    "1. OWNER ACTION: install any missing Node.js, Git, Claude Code, or Codex prerequisite from its official signed installer, then rerun this launcher." \
+    "2. REFUSE: the launcher does not download or execute prerequisite installers whose bytes it cannot authenticate before execution." \
+    "3. SKIP: do not install global Wrangler; Financial Brain owns wrangler@$WRANGLER_VERSION." \
+    "4. DOWNLOAD: Financial Brain $BRAIN_VERSION from the one pinned HTTPS kit URL without following redirects." \
+    "5. VERIFY: require exactly $BRAIN_KIT_SIZE bytes and SHA-256 $BRAIN_KIT_SHA256 before npm sees the local file." \
+    "6. INSTALL: use an isolated npm environment and private staging prefix, then atomically promote to clean per-user $BRAIN_PREFIX." \
+    "7. VERIFY: rerun --check and show the operator the green/red list."
   printf '\nNo command was executed, no directory was created, and no log was written.\n'
 }
 
@@ -302,15 +303,10 @@ verify_prefix() {
 verify_installed_brain() {
   prefix=${2:-}
   printf 'INSTALLED_BRAIN_DECISION_REACHED=1\n'
-  package_json="$prefix/lib/node_modules/brain-installer/package.json"
-  executable="$prefix/bin/brain"
-  version=$(/usr/bin/sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$package_json" 2>/dev/null | /usr/bin/head -n 1)
-  if [ "$version" = "$BRAIN_VERSION" ] && [ -x "$executable" ]; then
-    printf 'READY installed Brain %s\n' "$version"
-    return 0
-  fi
-  printf 'NOT_READY installed Brain\n'
-  return 1
+  printf 'REUSE_ATTEMPTED=0\n'
+  [ -n "$prefix" ] || { printf 'REFUSED existing prefix input invalid\n' >&2; return 2; }
+  printf 'REFUSED existing prefix cannot be authenticated against reviewed release bytes; move it aside and rerun\n' >&2
+  return 2
 }
 
 verify_brain_kit() {
@@ -344,90 +340,136 @@ ensure_path() {
   fi
 }
 
-install_node() {
-  arch=$(uname -m)
-  case "$arch" in arm64) node_arch="arm64" ;; x86_64) node_arch="x64" ;; *) printf 'Unsupported Mac architecture: %s\n' "$arch" >&2; return 1 ;; esac
-  archive="node-v$NODE_VERSION-darwin-$node_arch.tar.gz"
-  base="https://nodejs.org/dist/v$NODE_VERSION"
-  target="$TOOLS_ROOT/node-v$NODE_VERSION-darwin-$node_arch"
-  [ ! -e "$target" ] || { printf 'Existing managed Node target is not ready; refusing to overwrite %s\n' "$target" >&2; return 1; }
-  for name in node npm npx; do
-    [ ! -e "$BIN_DIR/$name" ] && [ ! -L "$BIN_DIR/$name" ] || { printf 'Refusing to replace existing %s\n' "$BIN_DIR/$name" >&2; return 1; }
-  done
-  temp=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/financial-brain-machine-prep.XXXXXX") || return 1
-  /usr/bin/curl --fail --location --silent --show-error --output "$temp/$archive" "$base/$archive" || { /bin/rm -rf "$temp"; return 1; }
-  /usr/bin/curl --fail --location --silent --show-error --output "$temp/SHASUMS256.txt" "$base/SHASUMS256.txt" || { /bin/rm -rf "$temp"; return 1; }
-  expected=$(/usr/bin/awk -v file="$archive" '$2 == file { print $1 }' "$temp/SHASUMS256.txt")
-  verify_checksum --verify-checksum "$temp/$archive" "$expected" || { /bin/rm -rf "$temp"; return 1; }
-  /bin/mkdir -p "$TOOLS_ROOT" "$BIN_DIR"
-  /usr/bin/tar -xzf "$temp/$archive" -C "$temp" || { /bin/rm -rf "$temp"; return 1; }
-  /bin/mv "$temp/node-v$NODE_VERSION-darwin-$node_arch" "$target" || { /bin/rm -rf "$temp"; return 1; }
-  for name in node npm npx; do
-    /bin/ln -s "$target/bin/$name" "$BIN_DIR/$name"
-  done
-  /bin/rm -rf "$temp"
-  export PATH="$BIN_DIR:$PATH"
-  log_event "installed Node.js v$NODE_VERSION after SHA-256 verification"
-}
-
-install_claude() {
-  temp=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/financial-brain-machine-prep.XXXXXX") || return 1
-  installer="$temp/claude-install.sh"
-  /usr/bin/curl --fail --location --silent --show-error --output "$installer" "https://claude.ai/install.sh" || { /bin/rm -rf "$temp"; return 1; }
-  /bin/sh "$installer" "$CLAUDE_VERSION" || { /bin/rm -rf "$temp"; return 1; }
-  claude_path="$PREP_HOME/.local/bin/claude"
-  [ -x "$claude_path" ] || { printf 'Claude installer did not create the official per-user executable\n' >&2; /bin/rm -rf "$temp"; return 1; }
-  claude_target=$(/usr/bin/readlink "$claude_path" 2>/dev/null || printf '%s' "$claude_path")
-  case "$claude_target" in /*) : ;; *) claude_target="$(/usr/bin/dirname "$claude_path")/$claude_target" ;; esac
-  /usr/bin/codesign --verify --deep --strict "$claude_target" >/dev/null 2>&1 || {
-    printf 'Claude executable signature verification failed\n' >&2
-    /bin/rm -rf "$temp"
-    return 1
-  }
-  "$claude_path" --version 2>/dev/null | /usr/bin/grep -Fq "$CLAUDE_VERSION" || {
-    printf 'Claude executable version readback failed\n' >&2
-    /bin/rm -rf "$temp"
-    return 1
-  }
-  /bin/rm -rf "$temp"
-  log_event "installed Claude Code $CLAUDE_VERSION and verified its code signature and version"
-}
-
-install_codex() {
-  npm_path=$(tool_paths npm | /usr/bin/head -n 1)
-  [ -n "$npm_path" ] || { printf 'npm is unavailable after Node preparation\n' >&2; return 1; }
-  "$npm_path" install --global --prefix "$USER_PREFIX" --no-audit --no-fund "@openai/codex@$CODEX_VERSION" || return 1
-  log_event "installed OpenAI Codex CLI $CODEX_VERSION through npm integrity verification"
-}
-
 install_brain() {
   verify_prefix --verify-prefix "$BRAIN_PREFIX" || return 1
-  npm_path=$(tool_paths npm | /usr/bin/head -n 1)
-  [ -n "$npm_path" ] || { printf 'npm is unavailable after Node preparation\n' >&2; return 1; }
+  npm_path="${MACHINE_PREP_TEST_NPM_PATH:-$(tool_paths npm | /usr/bin/head -n 1)}"
+  [ -n "$npm_path" ] || { printf 'npm is unavailable\n' >&2; return 1; }
   temp=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/financial-brain-installer.XXXXXX") || return 1
+  stage=""
+  lock=""
+  prefix_published=0
+  install_complete=0
+  attempt_id="attempt-$(/usr/bin/uuidgen)"
+  marker_name=".financial-brain-install-attempt"
+
+  owns_attempt_dir() {
+    owned_path=$1
+    [ ! -L "$owned_path" ] && [ -d "$owned_path" ] && [ -f "$owned_path/$marker_name" ] &&
+      [ "$(/bin/cat "$owned_path/$marker_name" 2>/dev/null || true)" = "$attempt_id" ]
+  }
+  mark_attempt_dir() {
+    owned_path=$1
+    printf '%s\n' "$attempt_id" > "$owned_path/$marker_name" || return 1
+    owns_attempt_dir "$owned_path"
+  }
+  remove_owned_dir() {
+    owned_path=$1
+    printf 'CLEANUP_OWNERSHIP_DECISION_REACHED=1\n'
+    if ! owns_attempt_dir "$owned_path"; then
+      printf 'CLEANUP_STOP_UNOWNED=1 path_role=installer_material\n' >&2
+      return 1
+    fi
+    /bin/rm -rf "$owned_path"
+  }
+  cleanup_brain_install() {
+    cleanup_failed=0
+    if [ "$prefix_published" -eq 1 ] && [ "$install_complete" -eq 0 ] && { [ -e "$BRAIN_PREFIX" ] || [ -L "$BRAIN_PREFIX" ]; }; then
+      remove_owned_dir "$BRAIN_PREFIX" || cleanup_failed=1
+    fi
+    if [ "$install_complete" -eq 0 ] && [ -n "$stage" ] && { [ -e "$stage" ] || [ -L "$stage" ]; }; then
+      remove_owned_dir "$stage" || cleanup_failed=1
+    fi
+    if [ -n "$lock" ] && { [ -e "$lock" ] || [ -L "$lock" ]; }; then
+      remove_owned_dir "$lock" || cleanup_failed=1
+    fi
+    if [ -n "$temp" ] && { [ -e "$temp" ] || [ -L "$temp" ]; }; then
+      remove_owned_dir "$temp" || cleanup_failed=1
+    fi
+    [ "$cleanup_failed" -eq 0 ] || {
+      printf 'REFUSED cleanup could not prove ownership of every target\n' >&2
+      return 1
+    }
+  }
+  trap cleanup_brain_install EXIT
+  trap 'exit 1' HUP INT TERM
+  mark_attempt_dir "$temp" || { printf 'REFUSED temporary directory ownership marker failed\n' >&2; return 1; }
   archive="$temp/brain-installer-$BRAIN_VERSION.tgz"
   printf 'DOWNLOAD_STARTED=1 kit_version=%s\n' "$BRAIN_VERSION"
-  /usr/bin/curl --fail --location --silent --show-error --output "$archive" "$BRAIN_KIT_URL" || {
-    /bin/rm -rf "$temp"
-    return 1
-  }
-  verify_brain_kit "$archive" || { /bin/rm -rf "$temp"; return 1; }
-  printf 'INSTALL_STARTED=1 kit_version=%s\n' "$BRAIN_VERSION"
-  "$npm_path" install --global --ignore-scripts --no-audit --no-fund --prefix "$BRAIN_PREFIX" "$archive" || {
-    /bin/rm -rf "$temp"
-    return 1
-  }
-  package_json="$BRAIN_PREFIX/lib/node_modules/brain-installer/package.json"
-  installed_brain="$BRAIN_PREFIX/bin/brain"
-  installed_version=$(/usr/bin/sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$package_json" 2>/dev/null | /usr/bin/head -n 1)
-  if [ "$installed_version" != "$BRAIN_VERSION" ] || [ ! -x "$installed_brain" ]; then
-    printf 'REFUSED installed Financial Brain readback failed\n' >&2
-    /bin/rm -rf "$temp"
+  printf 'NO_REDIRECTS=1\n'
+  if [ "${MACHINE_PREP_TEST_MODE:-}" = "1" ] && [ -n "${MACHINE_PREP_TEST_KIT_SOURCE:-}" ]; then
+    /bin/cp "$MACHINE_PREP_TEST_KIT_SOURCE" "$archive" || return 1
+  else
+    /usr/bin/curl --fail --silent --show-error --proto '=https' --proto-redir '=https' --max-redirs 0 --max-filesize "$BRAIN_KIT_SIZE" --output "$archive" "$BRAIN_KIT_URL" || return 1
+  fi
+  verify_brain_kit "$archive" || return 1
+  lock="$PREP_HOME/.financial-brain.install.lock"
+  printf 'INSTALL_LOCK_DECISION_REACHED=1\n'
+  if ! /bin/mkdir "$lock" 2>/dev/null; then
+    printf 'REFUSED another install owns the per-user install lock\n' >&2
     return 1
   fi
-  /bin/rm -rf "$temp"
+  mark_attempt_dir "$lock" || { printf 'REFUSED install lock ownership marker failed\n' >&2; return 1; }
+  printf 'INSTALL_LOCK_ACQUIRED=1\n'
+  printf 'STAGE_ALLOCATION_DECISION_REACHED=1\n'
+  if [ -n "${MACHINE_PREP_TEST_STAGE_PATH:-}" ]; then
+    stage="$MACHINE_PREP_TEST_STAGE_PATH"
+    if ! /bin/mkdir "$stage" 2>/dev/null; then
+      printf 'REFUSED staging prefix collision\n' >&2
+      return 1
+    fi
+  else
+    stage=$(/usr/bin/mktemp -d "$PREP_HOME/.financial-brain.stage.XXXXXX") || {
+      printf 'REFUSED staging prefix allocation failed\n' >&2
+      return 1
+    }
+  fi
+  if ! mark_attempt_dir "$stage"; then
+    printf 'REFUSED staging prefix collision\n' >&2
+    return 1
+  fi
+  : > "$temp/npmrc"
+  printf 'INSTALL_STARTED=1 kit_version=%s\n' "$BRAIN_VERSION"
+  printf 'NPM_ENVIRONMENT_ISOLATED=1\n'
+  npm_bin_dir=$(/usr/bin/dirname "$npm_path")
+  /usr/bin/env -i HOME="$PREP_HOME" PATH="$npm_bin_dir:/usr/bin:/bin" BRAIN_NO_WRANGLER_LOGIN=1 \
+    npm_config_userconfig="$temp/npmrc" npm_config_cache="$temp/npm-cache" npm_config_update_notifier=false \
+    "$npm_path" install --global --ignore-scripts --no-audit --no-fund --prefix "$stage" "$archive" || return 1
+  package_json="$stage/lib/node_modules/brain-installer/package.json"
+  installed_brain="$stage/bin/brain"
+  expected_brain_link="../lib/node_modules/brain-installer/brain.mjs"
+  installed_version=$(/usr/bin/sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$package_json" 2>/dev/null | /usr/bin/head -n 1)
+  installed_link=$(/usr/bin/readlink "$installed_brain" 2>/dev/null || true)
+  if [ "$installed_version" != "$BRAIN_VERSION" ] || [ ! -L "$installed_brain" ] || \
+     [ "$installed_link" != "$expected_brain_link" ] || [ ! -f "$stage/lib/node_modules/brain-installer/brain.mjs" ]; then
+    printf 'REFUSED staged Financial Brain readback failed\n' >&2
+    return 1
+  fi
+  printf 'STAGED_PREFIX_VERIFIED=1\n'
+  printf 'ATOMIC_PROMOTION_DECISION_REACHED=1\n'
+  # macOS renamex_np(RENAME_EXCL) is an atomic same-volume rename that returns
+  # EEXIST rather than replacing or moving inside a destination that appeared.
+  if ! /usr/bin/osascript -l JavaScript -e \
+    'ObjC.bindFunction("renamex_np", ["int", ["char *", "char *", "unsigned int"]]); function run(argv) { if (Number($.renamex_np(argv[0], argv[1], 4)) !== 0) throw new Error("exclusive rename failed"); return "promoted"; }' \
+    "$stage" "$BRAIN_PREFIX" >/dev/null 2>&1; then
+    printf 'REFUSED destination appeared before atomic promotion\n' >&2
+    return 1
+  fi
+  prefix_published=1
+  promoted_version=$(/usr/bin/sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$BRAIN_PREFIX/lib/node_modules/brain-installer/package.json" 2>/dev/null | /usr/bin/head -n 1)
+  promoted_link=$(/usr/bin/readlink "$BRAIN_PREFIX/bin/brain" 2>/dev/null || true)
+  if [ "$promoted_version" != "$BRAIN_VERSION" ] || \
+     [ "$promoted_link" != "$expected_brain_link" ] || [ ! -f "$BRAIN_PREFIX/lib/node_modules/brain-installer/brain.mjs" ]; then
+    printf 'REFUSED atomic promotion readback failed\n' >&2
+    return 1
+  fi
+  printf 'ATOMIC_PROMOTION_VERIFIED=1\n'
+  /bin/rm "$BRAIN_PREFIX/$marker_name" || return 1
+  install_complete=1
+  cleanup_brain_install || return 1
+  lock=""
+  temp=""
+  trap - EXIT HUP INT TERM
   export PATH="$BRAIN_PREFIX/bin:$PATH"
-  log_event "installed Financial Brain $BRAIN_VERSION from the pinned kit after exact size and SHA-256 verification"
   printf 'BRAIN_INSTALL_VERIFIED=1 version=%s\n' "$installed_version"
 }
 
@@ -447,32 +489,15 @@ run_real() {
 
   printf 'Machine Prep for macOS\nMODE real\n'
   collect_checks >/dev/null
-  /bin/mkdir -p "$TOOLS_ROOT" "$BIN_DIR" "$LOG_DIR"
-  /bin/chmod 700 "$TOOLS_ROOT" "$BIN_DIR" "$LOG_DIR"
-  log_event "real mode started"
-
-  if [ "$GIT_STATE" != "READY" ]; then
-    printf "CLIENT ACTION: approve Apple's Command Line Tools dialog. Other downloads can continue while it runs.\n"
-    /usr/bin/xcode-select --install || true
-    log_event "requested Apple Command Line Tools dialog"
+  printf 'PREREQUISITE_DECISION_REACHED=1\n'
+  if [ "$NODE_STATE" != "READY" ] || [ "$GIT_STATE" != "READY" ] || [ "$CLAUDE_STATE" != "READY" ] || \
+     [ "$CODEX_STATE" != "READY" ] || [ "$SESSION_STATE" != "READY" ]; then
+    printf 'OWNER ACTION: install the missing prerequisite from its official signed installer, then rerun. No prerequisite was downloaded or executed.\n' >&2
+    return 2
   fi
-  if [ "$NODE_STATE" != "READY" ]; then install_node || return 1; fi
-  ensure_path || return 1
-  export PATH="$BIN_DIR:$PATH"
-  if [ "$CLAUDE_STATE" != "READY" ]; then install_claude || return 1; fi
-  if [ "$CODEX_STATE" != "READY" ]; then install_codex || return 1; fi
-  if [ "$BRAIN_STATE" != "READY" ]; then
-    if verify_installed_brain --verify-installed "$BRAIN_PREFIX"; then
-      export PATH="$BRAIN_PREFIX/bin:$PATH"
-      log_event "reused exact Financial Brain $BRAIN_VERSION install after local readback"
-    else
-      install_brain || return 1
-    fi
-  fi
-
-  log_event "Financial Brain CLI preparation completed"
-  printf 'Log: %s\n\n' "$LOG_FILE"
-  print_check
+  if [ -e "$BRAIN_PREFIX" ] || [ -L "$BRAIN_PREFIX" ]; then verify_installed_brain --verify-installed "$BRAIN_PREFIX"; return 2; fi
+  install_brain || return 1
+  printf 'Financial Brain CLI preparation completed\n'
 }
 
 case "$MODE" in
@@ -482,6 +507,7 @@ case "$MODE" in
   --verify-checksum) verify_checksum "$@" ;;
   --verify-prefix) verify_prefix "$@" ;;
   --verify-installed) verify_installed_brain "$@" ;;
+  --test-install-brain) install_brain ;;
   --help|-h) usage ;;
   *) usage >&2; exit 2 ;;
 esac

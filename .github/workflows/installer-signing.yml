@@ -16,8 +16,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  authorization:
+    name: authorize default-branch signing dispatch
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      vars.SIGNING_REPOSITORY != '' &&
+      github.repository == vars.SIGNING_REPOSITORY
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      authorized: ${{ steps.authorization.outputs.authorized }}
+    steps:
+      - id: authorization
+        run: echo "authorized=true" >> "$GITHUB_OUTPUT"
+
   configuration:
     name: inspect protected signing configuration
+    needs: authorization
+    if: needs.authorization.outputs.authorized == 'true'
     runs-on: ubuntu-latest
     environment: artifact-signing
     permissions:
@@ -102,9 +119,27 @@ jobs:
           set -euo pipefail
           umask 077
           keychain="$RUNNER_TEMP/installer-signing.keychain-db"
+          marker="$RUNNER_TEMP/installer-signing.keychain-owner"
+          attempt_id="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN_MARKER=$marker" >> "$GITHUB_ENV"
+          echo "SIGNING_ATTEMPT_ID=$attempt_id" >> "$GITHUB_ENV"
+          import_complete=0
+          cleanup_signing_material() {
+            if [ "$import_complete" -eq 0 ]; then
+              SIGNING_KEYCHAIN="$keychain" SIGNING_KEYCHAIN_MARKER="$marker" SIGNING_ATTEMPT_ID="$attempt_id" \
+                bash machine-prep/installers/macos/cleanup-signing-material.sh
+            fi
+          }
+          trap cleanup_signing_material EXIT
           # The keychain exists only on the ephemeral runner. An empty temporary
           # password avoids placing a credential in a process argument.
+          if [ -e "$keychain" ] || [ -L "$keychain" ] || [ -e "$marker" ] || [ -L "$marker" ]; then
+            echo "::error::Signing keychain path is already occupied"
+            exit 1
+          fi
           security create-keychain -p "" "$keychain"
+          printf '%s\n' "$attempt_id" > "$marker"
           security set-keychain-settings -lut 3600 "$keychain"
           security unlock-keychain -p "" "$keychain"
           printf '%s' "$APP_P12" | base64 --decode > "$RUNNER_TEMP/application.p12"
@@ -123,9 +158,9 @@ jobs:
           [ -n "$installer_identity" ] || { echo "::error::Developer ID Installer identity missing"; exit 1; }
           case "$application_line" in *"($APPLE_TEAM_ID)"*) : ;; *) echo "::error::Developer ID Application Team ID mismatch"; exit 1 ;; esac
           case "$installer_line" in *"($APPLE_TEAM_ID)"*) : ;; *) echo "::error::Developer ID Installer Team ID mismatch"; exit 1 ;; esac
-          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
           echo "APPLICATION_IDENTITY=$application_identity" >> "$GITHUB_ENV"
           echo "INSTALLER_IDENTITY=$installer_identity" >> "$GITHUB_ENV"
+          import_complete=1
       - name: build the package and codesign every embedded Mach-O executable
         shell: bash
         run: |
@@ -141,7 +176,7 @@ jobs:
             fi
           done < <(find "$stage/payload" -type f -perm -111 -print0)
           echo "EMBEDDED_EXECUTABLES_SIGNED=$signed"
-          pkgbuild --root "$stage/payload" --scripts "$stage/scripts" \
+          pkgbuild --root "$stage/payload" \
             --identifier com.financialbrain.machineprep --version 0.2.0 --install-location / \
             "$stage/FinancialBrainMachinePrep-component.pkg"
           productbuild --distribution "$stage/Distribution.xml" --resources "$stage/resources" \
@@ -181,9 +216,7 @@ jobs:
         if: always()
         shell: bash
         run: |
-          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then security delete-keychain "$SIGNING_KEYCHAIN" || true; fi
-          rm -f "$RUNNER_TEMP/application.p12" "$RUNNER_TEMP/application.pem" \
-            "$RUNNER_TEMP/installer.p12" "$RUNNER_TEMP/installer.pem" "$RUNNER_TEMP/notary-key.p8"
+          bash machine-prep/installers/macos/cleanup-signing-material.sh
 
   windows-sign:
     name: build and sign the Windows MSI
