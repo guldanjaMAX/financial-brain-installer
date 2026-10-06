@@ -22,6 +22,14 @@ const ROOT = resolve(import.meta.dirname, "..");
 const FIXTURES = join(ROOT, "test", "fixtures", "machine-prep");
 const MAC = join(ROOT, "machine-prep", "prep-mac.sh");
 const WINDOWS = join(ROOT, "machine-prep", "prep-windows.ps1");
+const MAC_INSTALL_ORCHESTRATION_SKIP_REASON =
+  "requires macOS because it exercises the production BSD stat and atomic rename path";
+
+function macInstallOrchestrationOptions(platform = process.platform) {
+  return {
+    skip: platform === "darwin" ? false : MAC_INSTALL_ORCHESTRATION_SKIP_REASON,
+  };
+}
 
 function cleanEnv(fixture) {
   return {
@@ -387,7 +395,13 @@ test("Mac real mode refuses fixtures before any action", () => {
   assert.doesNotMatch(out, /ACTION_EXECUTED|MODE real/);
 });
 
-test("Mac install orchestration preserves every foreign collision and cleans only owned material", () => {
+test("Mac install orchestration platform guard keeps Darwin coverage active", () => {
+  assert.deepEqual(macInstallOrchestrationOptions("darwin"), { skip: false });
+  assert.deepEqual(macInstallOrchestrationOptions("linux"), { skip: MAC_INSTALL_ORCHESTRATION_SKIP_REASON });
+  assert.deepEqual(macInstallOrchestrationOptions("win32"), { skip: MAC_INSTALL_ORCHESTRATION_SKIP_REASON });
+});
+
+test("Mac install orchestration preserves every foreign collision and cleans only owned material", macInstallOrchestrationOptions(), () => {
   for (const scenario of ["lock-collision", "stage-collision", "destination-race"]) {
     const probe = runMacInstallOrchestration({ scenario });
     try {
@@ -410,7 +424,7 @@ test("Mac install orchestration preserves every foreign collision and cleans onl
   }
 });
 
-test("Mac install orchestration removes its failed attempt and atomically publishes a passing control", () => {
+test("Mac install orchestration removes its failed attempt and atomically publishes a passing control", macInstallOrchestrationOptions(), () => {
   const failed = runMacInstallOrchestration({ scenario: "install-failure" });
   try {
     const out = combined(failed.result);
@@ -450,7 +464,7 @@ function assertInstallVerificationRefusal(probe, decisionPattern) {
   assert.equal(existsSync(probe.stage), false, "verification refusal must not start npm staging");
 }
 
-test("Mac actual install refuses bad kit size and digest before npm or promotion, with a matching control", () => {
+test("Mac actual install refuses bad kit size and digest before npm or promotion, with a matching control", macInstallOrchestrationOptions(), () => {
   const cases = [
     { name: "bad-size", options: { kitSizeOffset: 1 }, decision: /KIT_SIZE_DECISION_REACHED=1/ },
     { name: "bad-digest", options: { kitShaOverride: "0".repeat(64) }, decision: /CHECKSUM_DECISION_REACHED=1/ },
@@ -473,7 +487,7 @@ test("Mac actual install refuses bad kit size and digest before npm or promotion
   }
 });
 
-test("Mac install verification-call mutation turns both bad-kit controls red", () => {
+test("Mac install verification-call mutation turns both bad-kit controls red", macInstallOrchestrationOptions(), () => {
   const source = readFileSync(MAC, "utf8");
   const from = '  verify_brain_kit "$archive" || return 1\n';
   assert.equal(source.includes(from), true, "missing Mac install verification decision");
@@ -496,7 +510,7 @@ test("Mac install verification-call mutation turns both bad-kit controls red", (
   }
 });
 
-test("Mac installer mutations disable real ownership, promotion, and environment protections", () => {
+test("Mac installer mutations disable real ownership, promotion, and environment protections", macInstallOrchestrationOptions(), () => {
   const source = readFileSync(MAC, "utf8");
   const cases = [
     {
