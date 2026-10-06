@@ -573,11 +573,110 @@ const GMAIL_FAILURE_EVIDENCE_FIXTURE = {
     },
   };
   await sourceFreshnessCounts(costFixture, { now: NOW });
-  check("T5 public counts use one cheap registry statement",
+  check("T5 ordinary public counts use one cheap registry statement",
     costSql.length === 1 && /FROM sources s/.test(costSql[0]) &&
       /document_source_inventory/.test(costSql[0]) &&
       !/COUNT\(/.test(costSql[0]) && !/ROW_NUMBER/.test(costSql[0]),
     JSON.stringify(costSql));
+}
+
+/* ---- custom API state stays inside the one-statement public count read ---- */
+{
+  const timestamp = (hours) => new Date(NOW - hours * 3600000).toISOString();
+  const rows = [
+    {
+      name: "inventory-feed", kind: "custom_api", status: "indexing", registered: 1,
+      last_ingest_at: timestamp(1), last_complete_sweep_at: timestamp(1),
+      expected_refresh_seconds: DAILY, indexing_started_at: null,
+    },
+    {
+      name: "orders-feed", kind: "custom_api", status: "ready", registered: 1,
+      last_ingest_at: timestamp(1), last_complete_sweep_at: timestamp(1),
+      expected_refresh_seconds: DAILY, stale_reason: "INPUT_REFUSED", indexing_started_at: null,
+    },
+  ];
+  const statements = [];
+  const result = await sourceFreshnessCounts({
+    DB: {
+      prepare(sql) {
+        statements.push(sql);
+        if (/SELECT inventory\.\*/.test(sql)) {
+          const joinedActiveJobs = /FROM custom_api_jobs/.test(sql);
+          return {
+            all: async () => ({
+              results: rows.map((row) => row.name === "inventory-feed" && joinedActiveJobs
+                ? { ...row, indexing_started_at: timestamp(2) }
+                : row),
+            }),
+          };
+        }
+        if (/FROM custom_api_jobs/.test(sql)) {
+          return { all: async () => ({ results: [{ source: "inventory-feed", started_at: timestamp(2) }] }) };
+        }
+        if (/FROM custom_api_schedule_state/.test(sql)) {
+          return {
+            all: async () => ({
+              results: [{
+                source: "orders-feed", display_name: "Orders feed",
+                last_issue_code: "INPUT_REFUSED", last_refused_rows: 2,
+              }],
+            }),
+          };
+        }
+        throw new Error("unexpected SQL");
+      },
+    },
+  }, { now: NOW });
+  check("T6 custom API count control reaches active-job and refusal classification",
+    JSON.stringify(result) === JSON.stringify({ total: 2, stale: 1, unscheduled: 0 }),
+    JSON.stringify(result));
+  check("T6 custom API mutation remains one current-schema statement",
+    statements.length === 1 && /FROM sources s/.test(statements[0]) &&
+      /FROM custom_api_jobs/.test(statements[0]) &&
+      !/FROM custom_api_schedule_state/.test(statements[0]),
+    JSON.stringify(statements));
+
+  let legacyStatements = 0;
+  const legacyResult = await sourceFreshnessCounts({
+    DB: {
+      prepare(sql) {
+        legacyStatements++;
+        if (/FROM custom_api_jobs/.test(sql)) throw new Error("no such table: custom_api_jobs");
+        return { all: async () => ({ results: [] }) };
+      },
+    },
+  }, { now: NOW });
+  check("T6 pre-custom-API schema uses one bounded compatibility retry",
+    legacyStatements === 2 &&
+      JSON.stringify(legacyResult) === JSON.stringify({ total: 0, stale: 0, unscheduled: 0 }),
+    JSON.stringify({ legacyStatements, legacyResult }));
+}
+
+/* ---- retirement wins before operational and schedule count classification ---- */
+{
+  const active = {
+    name: "archive-upload", kind: "upload", status: "error", registered: 1,
+    last_ingest_at: daysAgo(4), last_complete_sweep_at: null,
+    expected_refresh_seconds: null, document_count: 4,
+  };
+  const activeCounts = await sourceFreshnessCounts(mk([active]), { now: NOW });
+  const activeGaps = await coverageGapReport(mk([active]), { now: NOW });
+  check("T7 active upload control reaches broken classification",
+    JSON.stringify(activeCounts) === JSON.stringify({ total: 1, stale: 1, unscheduled: 0 }) &&
+      activeGaps.gaps.some((gap) => gap.type === "sync_broken"),
+    JSON.stringify({ activeCounts, gaps: activeGaps.gaps }));
+
+  const retired = { ...active, retired_at: "2026-08-18T12:00:00.000Z" };
+  const retiredCounts = await sourceFreshnessCounts(mk([retired]), { now: NOW });
+  const retiredGaps = await coverageGapReport(mk([retired]), { now: NOW });
+  check("T7 retired mutation stays total but is neither stale nor unscheduled",
+    JSON.stringify(retiredCounts) === JSON.stringify({ total: 1, stale: 0, unscheduled: 0 }),
+    JSON.stringify(retiredCounts));
+  check("T7 retired mutation preserves history without a sync-broken decision",
+    retiredGaps.gaps.length === 1 && retiredGaps.gaps[0]?.type === "history_unproven" &&
+      retiredGaps.gaps[0]?.remedy === "No action needed." &&
+      !retiredGaps.gaps.some((gap) => gap.type === "sync_broken"),
+    JSON.stringify(retiredGaps.gaps));
 }
 
 /* ---- failed reads are absent while a successful empty read is a real zero ---- */

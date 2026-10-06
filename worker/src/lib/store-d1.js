@@ -3754,14 +3754,47 @@ function operationalFreshness(s, now) {
   return { state: "indexing", reason: null, indexingMs };
 }
 
-const sourceFreshnessSql = ({ ordered = false, includeUnregisteredCounts = false } = {}) => `
+/**
+ * Interpret the latest lifecycle event carried by a source read. Schedule and
+ * zone events are deliberately absent from the SQL that supplies these fields:
+ * they change operating metadata, not whether the owner retired the source.
+ */
+export function sourceRetirementState(row) {
+  const retiredAtMs = timestampMs(row?.retired_at);
+  const retiredAt = Number.isFinite(retiredAtMs)
+    ? new Date(retiredAtMs).toISOString()
+    : null;
+  return { retired: retiredAt !== null, retiredAt };
+}
+
+export const sourceFreshnessSql = ({
+  ordered = false,
+  includeUnregisteredCounts = false,
+  includeCustomApiJobs = false,
+} = {}) => `
   SELECT inventory.*
     FROM (
       SELECT s.name, s.kind, s.zone, s.status, s.last_ingest_at, s.last_complete_sweep_at,
              s.expected_refresh_seconds, s.stale_reason, s.document_count,
-             (SELECT MIN(sr.started_at)
-                FROM sync_runs sr
-               WHERE sr.source = s.name AND sr.finished_at IS NULL) AS indexing_started_at,
+             ${includeCustomApiJobs
+               ? `COALESCE(
+                   (SELECT MIN(sr.started_at)
+                      FROM sync_runs sr
+                     WHERE sr.source = s.name AND sr.finished_at IS NULL),
+                   (SELECT MIN(job.created_at)
+                      FROM custom_api_jobs job
+                     WHERE s.kind = 'custom_api'
+                       AND job.source = s.name
+                       AND job.status IN ('staged','applying','promoting','promoted'))
+                 )`
+               : `(SELECT MIN(sr.started_at)
+                    FROM sync_runs sr
+                   WHERE sr.source = s.name AND sr.finished_at IS NULL)`} AS indexing_started_at,
+             (SELECT CASE WHEN e.event='retired' THEN e.at ELSE NULL END
+                FROM source_events e
+               WHERE e.source_name = s.name
+                 AND e.event IN ('retired','unretired','ingest','error','registered','forget')
+               ORDER BY e.id DESC LIMIT 1) AS retired_at,
              1 AS registered
         FROM sources s
       UNION ALL
@@ -3775,6 +3808,7 @@ const sourceFreshnessSql = ({ ordered = false, includeUnregisteredCounts = false
                       AND live_documents.deleted_at IS NULL)`
                : "NULL"} AS document_count,
              NULL AS indexing_started_at,
+             NULL AS retired_at,
              0 AS registered
         FROM document_source_inventory source_inventory
         LEFT JOIN sources registered_source
@@ -3782,17 +3816,12 @@ const sourceFreshnessSql = ({ ordered = false, includeUnregisteredCounts = false
        WHERE registered_source.name IS NULL
     ) inventory${ordered ? " ORDER BY inventory.name" : ""}`;
 
-async function coverageGapAssessment(env, { now = Date.now(), allowedSources = null } = {}) {
-  let rows;
-  try {
-    const r = await env.DB.prepare(sourceFreshnessSql()).all();
-    rows = r?.results || [];
-  } catch {
-    return { gaps: [], unavailable: true, counts: null };
-  }
-  const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
-  const customApiReceipts = await currentCustomApiReceipts(env, rows);
-
+function assessCoverageRows(rows, {
+  now,
+  allowedSources = null,
+  activeCustomJobs = new Map(),
+  customApiReceipts = new Map(),
+} = {}) {
   const allowed = allowedSources === null
     ? null
     : new Set((Array.isArray(allowedSources) ? allowedSources : []).map((source) => String(source)));
@@ -3815,6 +3844,20 @@ async function coverageGapAssessment(env, { now = Date.now(), allowedSources = n
     const last = s.last_ingest_at ? Date.parse(s.last_ingest_at) : NaN;
     const ageSec = Number.isFinite(last) ? Math.floor((now - last) / 1000) : null;
     const days = ageSec === null ? null : Math.floor(ageSec / 86400);
+    const retirement = sourceRetirementState(s);
+    if (retirement.retired) {
+      if (!s.last_complete_sweep_at) {
+        const count = Number(s.document_count || 0);
+        const recordLabel = count === 1 ? "record" : "records";
+        gaps.push({
+          type: "history_unproven",
+          source: s.name,
+          detail: `The "${s.name}" source was retired by the owner on ${retirement.retiredAt.slice(0, 10)}. Its ${count} stored ${recordLabel} stay searchable and it is no longer refreshed; its history was never proven complete, so a missing result is not proof that those records hold no answer.`,
+          remedy: "No action needed.",
+        });
+      }
+      continue;
+    }
     const customApiReceipt = customApiReceipts.get(String(s.name)) || null;
     const customApiRefusedRows = customApiReceipt?.refusedRows || 0;
     const operational = operationalFreshness({
@@ -3915,6 +3958,19 @@ async function coverageGapAssessment(env, { now = Date.now(), allowedSources = n
   return { gaps, unavailable: false, counts: { total, stale, unscheduled } };
 }
 
+async function coverageGapAssessment(env, { now = Date.now(), allowedSources = null } = {}) {
+  let rows;
+  try {
+    const r = await env.DB.prepare(sourceFreshnessSql()).all();
+    rows = r?.results || [];
+  } catch {
+    return { gaps: [], unavailable: true, counts: null };
+  }
+  const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
+  const customApiReceipts = await currentCustomApiReceipts(env, rows);
+  return assessCoverageRows(rows, { now, allowedSources, activeCustomJobs, customApiReceipts });
+}
+
 export async function coverageGapReport(env, options = {}) {
   const report = await coverageGapAssessment(env, options);
   return { gaps: report.gaps, unavailable: report.unavailable };
@@ -3923,8 +3979,19 @@ export async function coverageGapReport(env, options = {}) {
 /** Aggregate-only freshness for the public health receipt. */
 export async function sourceFreshnessCounts(env, { now = Date.now() } = {}) {
   try {
-    const assessment = await coverageGapAssessment(env, { now });
-    if (assessment.unavailable) return { unavailable: true };
+    let result;
+    try {
+      // Counts need the active-job timestamp, not custom API receipt wording.
+      // Folding that timestamp into this registry read keeps current-schema
+      // public health at one D1 statement even on custom API decision arms.
+      result = await env.DB.prepare(sourceFreshnessSql({ includeCustomApiJobs: true })).all();
+    } catch (error) {
+      if (!missingCustomApiJobsTable(error)) return { unavailable: true };
+      // A partially migrated install has no custom API jobs to preserve. Its
+      // bounded compatibility retry keeps every older source classification.
+      result = await env.DB.prepare(sourceFreshnessSql()).all();
+    }
+    const assessment = assessCoverageRows(result?.results || [], { now });
     const { total, stale, unscheduled } = assessment.counts || {};
     if (![total, stale, unscheduled].every((value) =>
       Number.isSafeInteger(value) && value >= 0) || stale + unscheduled > total) {
