@@ -46,6 +46,7 @@ import {
   sourceRecoverySql,
   sourceRecoverySummarySql,
 } from "../src/lib/store-d1.js";
+import { fieldRecoveryMsBound } from "./source-inventory-scale-bound.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS = join(HERE, "..", "..", "migrations", "d1");
@@ -1129,18 +1130,18 @@ const SCALE_STATEMENT_BUDGET_MS_PER_DOCUMENT = 0.5;
  *
  * Measured on the machine these numbers come from (darwin, Node v24.13.1),
  * 200,000 documents, own process, fixture rebuilt immediately before: recovery
- * 2,367 ms cold and 947 / 946 / 948 ms warm. The bound is set at 3 s — a little
- * over the cold reading and about 3x the warm one — because the probe below
- * runs second on a page cache the inventory probe has already warmed, and
- * because this is a bound on a slow machine's honest work, not a tight
- * regression detector.
+ * 2,367 ms cold and 947 / 946 / 948 ms warm. Three later local runs measured
+ * 947 / 950 / 1,038 ms, while hosted macOS CI measured 3,738 and 4,269 ms for
+ * healthy SQL. The 3 s bound remains the local signal. Hosted macOS CI gets a
+ * 5 s bound, about 17 percent over the slowest observed shared-runner result
+ * and still well below the projected D1 and CLI timeout danger.
  *
  * It is deliberately NOT the guard on the `MATERIALIZED` hints. The un-hinted
  * statement measured 2,918 ms cold and 1,337 / 1,339 / 1,384 ms warm on the
  * same fixture, which this bound would not have caught. The plan assertion in
  * "the recovery statement derives its candidates once" is what catches that.
  */
-const FIELD_RECOVERY_MS_BOUND = 3_000;
+const FIELD_RECOVERY_MS_BOUND = fieldRecoveryMsBound();
 
 /**
  * Each statement is measured in its own process.
@@ -1401,6 +1402,10 @@ test(`the rewritten source statements stay bounded on ${FIELD_DOCUMENTS} documen
         if (label.startsWith("rewritten-recovery-") && documents === FIELD_DOCUMENTS) {
           // See FIELD_RECOVERY_MS_BOUND: the field failure here was a clock,
           // and this is the only place it is measured at the size that failed.
+          console.log(
+            `${TEST_PLATFORM}: ${label} measured ${probe.ms}ms against the`
+            + ` ${FIELD_RECOVERY_MS_BOUND}ms recovery bound`,
+          );
           assert.ok(
             probe.ms < FIELD_RECOVERY_MS_BOUND,
             `${label} took ${probe.ms}ms on ${documents} documents, over the`
