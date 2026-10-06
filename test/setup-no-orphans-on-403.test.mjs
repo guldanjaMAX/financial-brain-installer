@@ -199,7 +199,7 @@ function writeProvisionRecoveryManifest(label) {
   return path;
 }
 
-async function runProvisionRecoveryScenario(mode) {
+async function runProvisionRecoveryScenario(mode, { platform = "darwin" } = {}) {
   const manifestPath = writeProvisionRecoveryManifest(mode);
   const calls = [];
   const metadata = new Map();
@@ -331,6 +331,10 @@ async function runProvisionRecoveryScenario(mode) {
       interactive: true,
       allowBrowserReauth: true,
       allowTokenRecovery: true,
+      // The recovery offer and the saved recovery token below are the macOS
+      // lane. The win32 rule they stand for is proved by "on win32 a mid-setup
+      // search-index refusal keeps its real refusal and offers no recovery".
+      platform,
       resumeCommand: `brain setup ${commandPath(manifestPath)}`,
       recoveryCommand: `brain setup ${commandPath(manifestPath)} --cloudflare-token`,
       askFn: async (question) => { prompts.push(question); return "y"; },
@@ -386,6 +390,28 @@ test("setup recovers a real metadata-list refusal and adopts the D1 it already c
   const saved = JSON.parse(readFileSync(run.manifestPath, "utf8"));
   assert.equal(saved.infrastructure.cloudflare.d1_database_id, "fixture-database");
   assert.equal(saved.infrastructure.cloudflare.vectorize_index, "fixture-403-index");
+});
+
+test("on win32 a mid-setup search-index refusal keeps its real refusal and offers no recovery", async () => {
+  const run = await runProvisionRecoveryScenario("metadata-list-refusal", { platform: "win32" });
+  assert.ok(run.error, "win32 must fail closed instead of entering the recovery lane");
+  assert.equal(run.verifyCalls, 1, "the refused setup must reach the real provision path exactly once");
+  assert.ok(run.calls.some((call) => !call.recovery && call.path.endsWith("/metadata_index/list")),
+    "the browser sign-in refusal decision point must be reached");
+  assert.equal(run.storedLoads, 0, "win32 must not load a saved recovery token");
+  assert.deepEqual(run.prompts, [], "win32 must not offer a recovery its hidden prompt would refuse");
+  assert.equal(run.calls.filter((call) => call.recovery).length, 0, "no recovery credential may reach Cloudflare");
+  assert.equal(run.calls.filter((call) => call.method === "POST" && call.path.endsWith("/d1/database")).length, 1,
+    "the D1 created before the refusal must be the only one");
+  assert.equal(run.error?.code, "REMOTE_PERMISSION_DENIED", run.error?.message);
+  assert.match(run.error.message, /cannot request the Vectorize permission this install requires/);
+  assert.match(run.error.message, /Workers Scripts Edit[\s\S]*D1 Edit[\s\S]*Vectorize Edit[\s\S]*Workers AI Read/i);
+  assert.doesNotMatch(run.error.message, /Nothing was changed/, "setup made progress, so it must not claim otherwise");
+  assert.match(run.error.message,
+    /On Windows the route is the saved Cloudflare key, not a browser sign-in; this command will not ask you to type a key\./);
+  assert.match(run.error.message, /Issue: CLOUDFLARE_OAUTH_SCOPE_MISSING\./);
+  assert.doesNotMatch(run.error.message, /opens the protected recovery flow/,
+    "Windows must not be sent to a recovery switch whose hidden prompt it refuses");
 });
 
 for (const mode of ["server", "network", "already-exists", "forbidden-no-code"]) {

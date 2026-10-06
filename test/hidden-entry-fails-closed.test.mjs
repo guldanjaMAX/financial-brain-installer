@@ -173,22 +173,101 @@ console.log("PASS  hidden input owns the macOS terminal across shared-question a
 await promptOwnershipSequence("win32");
 console.log("PASS  hidden input owns the Windows terminal across shared-question and repeated-read sequences");
 
-{
-  const io = interactiveStreams();
-  let readCalls = 0;
-  const realRead = io.input.read.bind(io.input);
-  io.input.read = (...args) => {
-    readCalls += 1;
-    return realRead(...args);
-  };
-  io.input.write(`${"q".repeat(40)}\n`);
-  const secret = await hiddenRead(io.input, io.sink, "d");
-  assert.equal(secret, "d".repeat(40), "already-buffered input must not become the hidden value");
-  assert.ok(readCalls > 0, "the buffered-input drain decision point must be reached");
-  assert.equal(io.output().includes("q".repeat(12)), false, "drained input must not reach the screen");
-  io.input.destroy();
+// The Cloudflare token prompt refuses on a real Windows host unless the
+// echo-risk override is set (asserted at the top of this file), so each hidden
+// read below names the platform it models instead of inheriting the host's.
+async function onHiddenEntryPlatform(platformName, run) {
+  const originalPlatform = process.platform;
+  const priorRisk = process.env.BRAIN_ALLOW_WINDOWS_ECHO_RISK;
+  Object.defineProperty(process, "platform", { value: platformName, configurable: true });
+  if (platformName === "win32") process.env.BRAIN_ALLOW_WINDOWS_ECHO_RISK = "1";
+  try {
+    return await run();
+  } finally {
+    closePromptsForTesting();
+    if (priorRisk === undefined) delete process.env.BRAIN_ALLOW_WINDOWS_ECHO_RISK;
+    else process.env.BRAIN_ALLOW_WINDOWS_ECHO_RISK = priorRisk;
+    Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+  }
+}
+
+for (const platformName of ["darwin", "win32"]) {
+  await onHiddenEntryPlatform(platformName, async () => {
+    const io = interactiveStreams();
+    let readCalls = 0;
+    const realRead = io.input.read.bind(io.input);
+    io.input.read = (...args) => {
+      readCalls += 1;
+      return realRead(...args);
+    };
+    io.input.write(`${"q".repeat(40)}\n`);
+    const secret = await hiddenRead(io.input, io.sink, "d");
+    assert.equal(secret, "d".repeat(40), "already-buffered input must not become the hidden value");
+    assert.ok(readCalls > 0, "the buffered-input drain decision point must be reached");
+    assert.equal(io.output().includes("q".repeat(12)), false, "drained input must not reach the screen");
+    io.input.destroy();
+  });
 }
 console.log("PASS  hidden entry drains bytes already buffered inside Node before reading the secret");
+
+// A terminal echoes keystrokes itself whenever it is not in raw mode, and
+// closing the shared question reader puts it back in that mode. This models
+// that line discipline and a typist (or a paste) that answers the instant each
+// prompt appears, the same sequence the pseudo-terminal check below drives.
+// Unlike that check it does not depend on timing, and it also runs on Windows.
+async function promptShownOnlyAfterEchoIsOff() {
+  const key = `K7${"q".repeat(36)}Z9`;
+  const input = new PassThrough();
+  input.isTTY = true;
+  input.isRaw = false;
+  input.setRawMode = (value) => { input.isRaw = value === true; return input; };
+  let screen = "";
+  const steps = [
+    ["Use recovery access? (y/n)", "y\r"],
+    ["Cloudflare token (hidden):", `${key}\r`],
+    ["Continue? (y/n)", "n\r"],
+  ];
+  let decisionPoints = 0;
+  const type = (text) => {
+    if (input.isRaw !== true) screen += text;
+    input.write(text);
+  };
+  const sink = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  sink.isTTY = true;
+  sink.write = (chunk, encoding, callback) => {
+    screen += String(chunk);
+    const step = steps[0];
+    if (step && screen.includes(step[0])) {
+      steps.shift();
+      decisionPoints += 1;
+      type(step[1]);
+    }
+    const done = typeof encoding === "function" ? encoding : callback;
+    if (typeof done === "function") done();
+    return true;
+  };
+
+  openPromptsForTesting({ input, output: sink });
+  const first = await askForTesting("Use recovery access? (y/n)", "n");
+  const hidden = await readHiddenCloudflareToken({ input, output: sink });
+  const hiddenMatched = hidden.toString("ascii") === key;
+  hidden.fill(0);
+  const second = await askForTesting("Continue? (y/n)", "y");
+  closePromptsForTesting();
+  input.destroy();
+  return { decisionPoints, keyVisible: screen.includes(key), first, hiddenMatched, second };
+}
+
+for (const platformName of ["darwin", "win32"]) {
+  const receipt = await onHiddenEntryPlatform(platformName, promptShownOnlyAfterEchoIsOff);
+  assert.equal(receipt.decisionPoints, 3, JSON.stringify(receipt));
+  assert.equal(receipt.keyVisible, false,
+    `${platformName}: a key typed the instant the hidden prompt appears must not be echoed`);
+  assert.equal(receipt.first, "y", JSON.stringify(receipt));
+  assert.equal(receipt.hiddenMatched, true, JSON.stringify(receipt));
+  assert.equal(receipt.second, "n", JSON.stringify(receipt));
+}
+console.log("PASS  the hidden prompt appears only after echo is off, so an instant answer is never shown");
 
 {
   const io = interactiveStreams();

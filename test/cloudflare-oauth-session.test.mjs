@@ -808,7 +808,20 @@ function namedProfileManifest(root, brain) {
   return manifestPath;
 }
 
-async function namedProfileRoutine(manifestPath, paths, { fetchImpl = unregisteredSubdomainFetch(paths) } = {}) {
+// No platform pin by default: the recovery decision is the host's own, so a
+// Windows host runs the win32 rule here. The fail-closed tests below also
+// name win32 and darwin explicitly, so every host covers both rules.
+function failClosedPlatformArms() {
+  const arms = [{ suffix: "", platform: undefined }];
+  for (const platformName of ["win32", "darwin"]) {
+    if (platformName !== process.platform) {
+      arms.push({ suffix: ` [${platformName} decision]`, platform: platformName });
+    }
+  }
+  return arms;
+}
+
+async function namedProfileRoutine(manifestPath, paths, { fetchImpl = unregisteredSubdomainFetch(paths), platform } = {}) {
   const runner = processRecorder(({ args }) => args.includes("token")
     ? okProcessResult({ stdout: tokenOutput() })
     : okProcessResult());
@@ -826,6 +839,7 @@ async function namedProfileRoutine(manifestPath, paths, { fetchImpl = unregister
     interactive: true,
     allowBrowserReauth: true,
     allowTokenRecovery: true,
+    ...(platform ? { platform } : {}),
     askFn: async (question) => { prompts.push(question); return "n"; },
     withToken: async () => { throw new Error("token lane must not run"); },
     oauthOptions: {
@@ -928,45 +942,72 @@ test("the update command uses a saved workers.dev address without requiring the 
   }
 });
 
-test("a named-profile setup with no saved address still requires the subdomain read", async () => {
-  const root = mkdtempSync(resolve(tmpdir(), "brain-no-domain-refused-subdomain-"));
-  try {
-    const paths = [];
-    const result = await namedProfileRoutine(
-      namedProfileManifest(root, {}),
-      paths,
-      { fetchImpl: refusedSubdomainFetch(paths) },
-    );
-    assert.equal(result.value, undefined);
-    assert.equal(result.actionCalls, 0, "the mutating action must not run without an address");
-    assert.equal(paths.filter((path) => path.endsWith("/workers/subdomain")).length, 1,
-      "the required decision point must be reached exactly once");
-    assert.equal(result.error?.code, "REMOTE_PERMISSION_DENIED");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+// A known scope refusal fails closed on every platform with Cloudflare's real
+// refusal kept. Elsewhere the owner first declines the recovery offer; win32
+// never makes that offer, because it would only end at a refused hidden prompt,
+// and names the Windows route instead.
+const SUBDOMAIN_SCOPE_CAUSE = /This browser sign-in cannot read this account's workers\.dev address/;
+const VECTORIZE_SCOPE_CAUSE = /cannot request the Vectorize permission this install requires/;
+const WINDOWS_SAVED_KEY_ROUTE = /On Windows the route is the saved Cloudflare key, not a browser sign-in; this command will not ask you to type a key\./;
 
-test("an unreadable manifest still requires the subdomain read", async () => {
-  const root = mkdtempSync(resolve(tmpdir(), "brain-unreadable-domain-refused-subdomain-"));
-  try {
-    const manifestPath = resolve(root, "brain.manifest.json");
-    writeFileSync(manifestPath, "{not-json");
-    const paths = [];
-    const result = await namedProfileRoutine(
-      manifestPath,
-      paths,
-      { fetchImpl: refusedSubdomainFetch(paths) },
-    );
-    assert.equal(result.value, undefined);
-    assert.equal(result.actionCalls, 0, "the action must not run after an unreadable manifest");
-    assert.equal(paths.filter((path) => path.endsWith("/workers/subdomain")).length, 1,
-      "the fail-closed decision point must be reached exactly once");
-    assert.equal(result.error?.code, "REMOTE_PERMISSION_DENIED");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
+function assertKeptScopeRefusal(result, platform, cause) {
+  const resolved = platform ?? process.platform;
+  assert.equal(result.error?.code, "REMOTE_PERMISSION_DENIED", `${resolved}: ${result.error?.message}`);
+  assert.match(result.error.message, cause, `${resolved}: the refused access must still be named`);
+  assert.match(result.error.message, /Nothing was changed/, `${resolved}: the owner must be told nothing changed`);
+  assert.match(result.error.message, /Issue: CLOUDFLARE_OAUTH_SCOPE_MISSING\./, `${resolved}: the issue code must be kept`);
+  if (resolved === "win32") {
+    assert.deepEqual(result.prompts, [], "win32 must not offer a recovery its hidden prompt would refuse");
+    assert.match(result.error.message, WINDOWS_SAVED_KEY_ROUTE, "win32 must name its own route");
+  } else {
+    assert.equal(result.prompts.length, 1, `${resolved}: the declined recovery offer must be made once`);
+    assert.doesNotMatch(result.error.message, /On Windows/, `${resolved}: the Windows route is Windows-only`);
   }
-});
+}
+
+for (const { suffix, platform } of failClosedPlatformArms()) {
+  test(`a named-profile setup with no saved address still requires the subdomain read${suffix}`, async () => {
+    const root = mkdtempSync(resolve(tmpdir(), "brain-no-domain-refused-subdomain-"));
+    try {
+      const paths = [];
+      const result = await namedProfileRoutine(
+        namedProfileManifest(root, {}),
+        paths,
+        { fetchImpl: refusedSubdomainFetch(paths), platform },
+      );
+      assert.equal(result.value, undefined);
+      assert.equal(result.actionCalls, 0, "the mutating action must not run without an address");
+      assert.equal(paths.filter((path) => path.endsWith("/workers/subdomain")).length, 1,
+        "the required decision point must be reached exactly once");
+      assert.equal(result.error?.code, "REMOTE_PERMISSION_DENIED");
+      assertKeptScopeRefusal(result, platform, SUBDOMAIN_SCOPE_CAUSE);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test(`an unreadable manifest still requires the subdomain read${suffix}`, async () => {
+    const root = mkdtempSync(resolve(tmpdir(), "brain-unreadable-domain-refused-subdomain-"));
+    try {
+      const manifestPath = resolve(root, "brain.manifest.json");
+      writeFileSync(manifestPath, "{not-json");
+      const paths = [];
+      const result = await namedProfileRoutine(
+        manifestPath,
+        paths,
+        { fetchImpl: refusedSubdomainFetch(paths), platform },
+      );
+      assert.equal(result.value, undefined);
+      assert.equal(result.actionCalls, 0, "the action must not run after an unreadable manifest");
+      assert.equal(paths.filter((path) => path.endsWith("/workers/subdomain")).length, 1,
+        "the fail-closed decision point must be reached exactly once");
+      assert.equal(result.error?.code, "REMOTE_PERMISSION_DENIED");
+      assertKeptScopeRefusal(result, platform, SUBDOMAIN_SCOPE_CAUSE);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("a custom-domain Brain treats any subdomain 403 as the same unused scope refusal", async () => {
   const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-refused-subdomain-code-"));
@@ -1098,46 +1139,50 @@ for (const failure of [
   });
 }
 
-test("a custom-domain Brain still fails closed on a Vectorize 403 after the tolerated subdomain refusal", async () => {
-  const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-vectorize-refusal-"));
-  try {
-    const paths = [];
-    const result = await namedProfileRoutine(
-      namedProfileManifest(root, { domain: "brain.example.invalid" }),
-      paths,
-      {
-        fetchImpl: async (url) => {
-          const parsed = new URL(url);
-          paths.push(parsed.pathname + parsed.search);
-          if (parsed.pathname.endsWith("/accounts")) {
-            return jsonResponse(envelope([
-              { id: ACCOUNT_A, name: "Selected" },
-            ], { result_info: { page: 1, count: 1, total_count: 1, total_pages: 1 } }));
-          }
-          if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
-            return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected" }));
-          }
-          if (parsed.pathname.endsWith("/workers/subdomain") || parsed.pathname.includes("/vectorize/")) {
-            return jsonResponse(envelope(null, {
-              success: false,
-              errors: [{ code: 10000, message: "fixture refusal" }],
-            }), { status: 403 });
-          }
-          return jsonResponse(envelope([]));
+for (const { suffix, platform } of failClosedPlatformArms()) {
+  test(`a custom-domain Brain still fails closed on a Vectorize 403 after the tolerated subdomain refusal${suffix}`, async () => {
+    const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-vectorize-refusal-"));
+    try {
+      const paths = [];
+      const result = await namedProfileRoutine(
+        namedProfileManifest(root, { domain: "brain.example.invalid" }),
+        paths,
+        {
+          fetchImpl: async (url) => {
+            const parsed = new URL(url);
+            paths.push(parsed.pathname + parsed.search);
+            if (parsed.pathname.endsWith("/accounts")) {
+              return jsonResponse(envelope([
+                { id: ACCOUNT_A, name: "Selected" },
+              ], { result_info: { page: 1, count: 1, total_count: 1, total_pages: 1 } }));
+            }
+            if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
+              return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected" }));
+            }
+            if (parsed.pathname.endsWith("/workers/subdomain") || parsed.pathname.includes("/vectorize/")) {
+              return jsonResponse(envelope(null, {
+                success: false,
+                errors: [{ code: 10000, message: "fixture refusal" }],
+              }), { status: 403 });
+            }
+            return jsonResponse(envelope([]));
+          },
+          platform,
         },
-      },
-    );
-    assert.equal(result.actionCalls, 0, "the action must not run after the Vectorize refusal");
-    assert.ok(result.error, "the Vectorize refusal must remain fatal");
-    assert.equal(result.error.code, "REMOTE_PERMISSION_DENIED");
-    assert.ok(paths.some((path) => path.includes("/vectorize/")),
-      "the Vectorize decision point must be reached after the tolerated subdomain refusal");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+      );
+      assert.equal(result.actionCalls, 0, "the action must not run after the Vectorize refusal");
+      assert.ok(result.error, "the Vectorize refusal must remain fatal");
+      assert.equal(result.error.code, "REMOTE_PERMISSION_DENIED");
+      assert.ok(paths.some((path) => path.includes("/vectorize/")),
+        "the Vectorize decision point must be reached after the tolerated subdomain refusal");
+      assertKeptScopeRefusal(result, platform, VECTORIZE_SCOPE_CAUSE);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
-async function requiredSubdomainScopeRefusal({ interactive }) {
+async function requiredSubdomainScopeRefusal({ interactive, platform }) {
   const root = mkdtempSync(resolve(tmpdir(), "brain-required-subdomain-refusal-"));
   const paths = [];
   const prompts = [];
@@ -1158,6 +1203,7 @@ async function requiredSubdomainScopeRefusal({ interactive }) {
       interactive,
       allowBrowserReauth: true,
       allowTokenRecovery: true,
+      ...(platform ? { platform } : {}),
       askFn: async (question) => { prompts.push(question); return "n"; },
       withToken: async () => { tokenCalls += 1; throw new Error("declined recovery must not run"); },
       oauthOptions: {
@@ -1173,8 +1219,28 @@ async function requiredSubdomainScopeRefusal({ interactive }) {
   }
 }
 
+// The fail-closed half of the no-address refusal holds on every platform, so
+// it runs with no pin and with each platform's decision named.
+for (const { suffix, platform } of failClosedPlatformArms()) {
+  test(`a Brain with no saved address gets a specific subdomain refusal${suffix}`, async () => {
+    const result = await requiredSubdomainScopeRefusal({ interactive: true, platform });
+    assert.equal(result.value, undefined);
+    assert.equal(result.actionCalls, 0, "the update action must not run before required access is proved");
+    assert.equal(result.tokenCalls, 0, "a refused or declined recovery must not enter the token lane");
+    assert.equal(result.paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
+      "the refusal must reach the exact required subdomain read");
+    assert.match(result.error.message, /This browser sign-in cannot read this account's workers\.dev address, which this Brain needs for its web address/i);
+    assert.match(result.error.message, /recovery API token from the Cloudflare dashboard/i);
+    assert.match(result.error.message, /Nothing was changed/);
+    assertKeptScopeRefusal(result, platform, SUBDOMAIN_SCOPE_CAUSE);
+  });
+}
+
+// The recovery offer itself is the macOS lane. The platform-gated rule it
+// models (win32 refuses before offering) is asserted by the win32 arm above:
+// no prompt, no token lane, and the same refusal kept.
 test("a Brain with no saved address gets a specific subdomain refusal and the explicit recovery offer", async () => {
-  const result = await requiredSubdomainScopeRefusal({ interactive: true });
+  const result = await requiredSubdomainScopeRefusal({ interactive: true, platform: "darwin" });
   assert.equal(result.value, undefined);
   assert.equal(result.actionCalls, 0, "the update action must not run before required access is proved");
   assert.equal(result.tokenCalls, 0, "declining the recovery offer must not enter the token lane");
@@ -1210,6 +1276,10 @@ test("the no-address refusal enters the existing explicit recovery credential ce
       interactive: true,
       allowBrowserReauth: true,
       allowTokenRecovery: true,
+      // The recovery ceremony is the macOS lane. Its win32 rule is proved by
+      // "win32 keeps a required workers.dev address refusal and never enters
+      // the recovery lane".
+      platform: "darwin",
       askFn: async (question) => { prompts.push(question); return "y"; },
       withToken: async (action, request) => {
         tokenRequests.push(request);
@@ -1236,17 +1306,19 @@ test("the no-address refusal enters the existing explicit recovery credential ce
   }
 });
 
-test("a non-interactive Brain with no saved address fails closed on a refused subdomain read", async () => {
-  const result = await requiredSubdomainScopeRefusal({ interactive: false });
-  assert.equal(result.value, undefined);
-  assert.equal(result.actionCalls, 0, "the update action must remain closed");
-  assert.equal(result.tokenCalls, 0, "non-interactive refusal must not enter the token lane");
-  assert.deepEqual(result.prompts, [], "non-interactive refusal must not ask a question");
-  assert.equal(result.paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
-    "the exact required read must be reached before refusal");
-  assert.match(result.error.message, /This browser sign-in cannot read this account's workers\.dev address, which this Brain needs for its web address/i);
-  assert.match(result.error.message, /Nothing was changed/);
-});
+for (const { suffix, platform } of failClosedPlatformArms()) {
+  test(`a non-interactive Brain with no saved address fails closed on a refused subdomain read${suffix}`, async () => {
+    const result = await requiredSubdomainScopeRefusal({ interactive: false, platform });
+    assert.equal(result.value, undefined);
+    assert.equal(result.actionCalls, 0, "the update action must remain closed");
+    assert.equal(result.tokenCalls, 0, "non-interactive refusal must not enter the token lane");
+    assert.deepEqual(result.prompts, [], "non-interactive refusal must not ask a question");
+    assert.equal(result.paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
+      "the exact required read must be reached before refusal");
+    assert.match(result.error.message, /This browser sign-in cannot read this account's workers\.dev address, which this Brain needs for its web address/i);
+    assert.match(result.error.message, /Nothing was changed/);
+  });
+}
 
 test("a named-profile update of a custom-domain Brain is not refused for a missing workers.dev subdomain", async () => {
   const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-"));
@@ -1790,6 +1862,10 @@ test("a Vectorize scope refusal skips the impossible browser refresh and explici
       interactive: true,
       allowBrowserReauth: true,
       allowTokenRecovery: true,
+      // A saved recovery token lives only in the macOS Keychain (asserted below).
+      // Its win32 rule is proved by "win32 keeps a Vectorize sign-in refusal
+      // and never enters the recovery lane".
+      platform: "darwin",
       askFn: async (question) => { prompts.push(question); return "y"; },
       loadStoredCloudflareToken: (accountId) => {
         loadedAccounts.push(accountId);
@@ -1841,6 +1917,10 @@ test("an interactive Vectorize create refusal reuses the explicit recovery-token
     interactive: true,
     allowBrowserReauth: true,
     allowTokenRecovery: true,
+    // The recovery offer is the macOS lane. Its win32 rule is proved by "win32
+    // keeps a search-index create refusal after setup made progress and never
+    // enters the recovery lane".
+    platform: "darwin",
     askFn: async (question) => { prompts.push(question); return "y"; },
     withToken: async (action, request) => {
       tokenRequests.push(request);
@@ -2199,6 +2279,10 @@ async function vectorizeRecoveryThroughCliSessionWrapper(sharedWranglerToken) {
         interactive: true,
         allowBrowserReauth: true,
         allowTokenRecovery: true,
+        // A saved recovery token exists only on macOS. The win32 rule for this
+        // wrapper is proved by the "win32 keeps ... through the CLI session
+        // wrapper" tests.
+        platform: "darwin",
         askFn: async (question) => { prompts.push(question); return "y"; },
         loadStoredCloudflareToken: (accountId) => {
           loadedAccounts.push(accountId);
@@ -2273,6 +2357,10 @@ async function subdomainRecoveryThroughCliSessionWrapper(sharedWranglerToken) {
         interactive: true,
         allowBrowserReauth: true,
         allowTokenRecovery: true,
+        // A saved recovery token exists only on macOS. The win32 rule for this
+        // wrapper is proved by the "win32 keeps ... through the CLI session
+        // wrapper" tests.
+        platform: "darwin",
         askFn: async (question) => { prompts.push(question); return "y"; },
         loadStoredCloudflareToken: (accountId) => {
           loadedAccounts.push(accountId);
@@ -2342,7 +2430,22 @@ test("win32 refuses an unusable Vectorize recovery offer before asking the owner
         throw vectorizeScopeError();
       },
     }),
-    /cannot be trusted to hide Cloudflare token entry[\s\S]*not available from this Windows command/i,
+    (error) => {
+      // Owner ruling: on Windows the real refusal is shown instead of being
+      // replaced. The earlier expectation here pinned that replacement (the
+      // bare hidden-entry refusal), which dropped the support code, the
+      // Vectorize cause and "Nothing was changed".
+      assert.equal(error?.constructor?.name, "Fatal");
+      assert.equal(error?.code, "REMOTE_PERMISSION_DENIED");
+      assert.match(error.message, VECTORIZE_SCOPE_CAUSE);
+      assert.match(error.message, /Workers Scripts Edit[\s\S]*D1 Edit[\s\S]*Vectorize Edit[\s\S]*Workers AI Read/i);
+      assert.match(error.message, /Nothing was changed/);
+      assert.match(error.message, WINDOWS_SAVED_KEY_ROUTE);
+      assert.match(error.message, /Issue: CLOUDFLARE_OAUTH_SCOPE_MISSING\./);
+      assert.doesNotMatch(error.message, /it asks before using any recovery key|opens the protected recovery flow/i,
+        "Windows must not be sent back to a hidden prompt this command refuses");
+      return true;
+    },
   );
 
   assert.equal(actionCalls, 0, "the Windows refusal must happen before any token action");
@@ -2390,6 +2493,131 @@ test("win32 keeps an ordinary browser sign-in failure's diagnosis and support co
   assert.equal(actionCalls, 0, "the control action must not run without a valid browser session");
   assert.deepEqual(prompts, [], "an ordinary failure must not ask token-recovery questions");
 });
+
+// The recovery-lane tests above name darwin because they model the recovery
+// offer, and for a saved token the macOS Keychain. This is the platform-gated
+// rule each of those pins stands for, run on every host: on win32 the same
+// refusals, with an owner who would answer yes, a saved token on hand and,
+// for the wrapper tests, a shared Wrangler session, are never offered, never
+// load the saved token, never reach hidden entry, and keep the real refusal.
+async function win32RecoveryLaneRefusal({ oauth, action, sharedWranglerToken }) {
+  const priorToken = process.env.CLOUDFLARE_API_TOKEN;
+  const priorLog = console.log;
+  delete process.env.CLOUDFLARE_API_TOKEN;
+  const prompts = [];
+  const lines = [];
+  let storedLoads = 0;
+  let hiddenReads = 0;
+  let oauthAttempts = 0;
+  let actionCalls = 0;
+  let wranglerTokenReads = 0;
+  try {
+    console.log = (line) => lines.push(String(line));
+    const run = () => withCloudflareControlCredential((session) => {
+      actionCalls += 1;
+      return action(session);
+    }, {
+      authProfile: cloudflareOAuthProfileName(INSTALL_ID),
+      accountId: ACCOUNT_A,
+      platform: "win32",
+      environment: {},
+      interactive: true,
+      allowBrowserReauth: true,
+      allowTokenRecovery: true,
+      resumeCommand: "brain setup /fixture/brain.manifest.json",
+      recoveryCommand: "brain setup /fixture/brain.manifest.json --cloudflare-token",
+      askFn: async (question) => { prompts.push(question); return "y"; },
+      loadStoredCloudflareToken: () => { storedLoads += 1; return Buffer.from("s".repeat(40)); },
+      storedTokenReference: () => "fixture protected store",
+      readCloudflareToken: async () => { hiddenReads += 1; return Buffer.from("h".repeat(40)); },
+      storeCloudflareToken: () => { throw new Error("win32 must not store a token"); },
+      withOAuthSession: async (request) => {
+        oauthAttempts += 1;
+        return oauth(request);
+      },
+    });
+    const outcome = await (sharedWranglerToken === undefined
+      ? run()
+      : withWranglerSessionIfNeeded(run, {
+        env: {},
+        argv: [],
+        readWranglerOAuthToken: () => { wranglerTokenReads += 1; return sharedWranglerToken; },
+      })).then((value) => ({ value }), (error) => ({ error }));
+    return { ...outcome, prompts, lines, storedLoads, hiddenReads, oauthAttempts, actionCalls, wranglerTokenReads };
+  } finally {
+    console.log = priorLog;
+    if (priorToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = priorToken;
+  }
+}
+
+const READY_PREFLIGHT = Object.freeze({ status: "ready", checks: ["account", "workers", "d1", "vectorize", "workers_ai"] });
+
+for (const scenario of [
+  {
+    label: "a Vectorize sign-in refusal",
+    cause: VECTORIZE_SCOPE_CAUSE,
+    nothingChanged: true,
+    actionCalls: 0,
+    oauth: () => { throw vectorizeScopeError(); },
+  },
+  {
+    label: "a required workers.dev address refusal",
+    cause: SUBDOMAIN_SCOPE_CAUSE,
+    nothingChanged: true,
+    actionCalls: 0,
+    oauth: () => { throw workersSubdomainScopeError(); },
+  },
+  {
+    label: "a search-index create refusal after setup made progress",
+    cause: VECTORIZE_SCOPE_CAUSE,
+    nothingChanged: false,
+    actionCalls: 1,
+    oauth: (request) => request.action({
+      token: Buffer.from(TOKEN),
+      profile: cloudflareOAuthProfileName(INSTALL_ID),
+      account: { id: ACCOUNT_A, name: "Selected" },
+      preflight: READY_PREFLIGHT,
+    }),
+    action: (session) => {
+      if (session.method === "wrangler_oauth") throw recoverableProvisionCreateRefusal();
+      return "recovery must not resume on win32";
+    },
+  },
+]) {
+  for (const sharedWranglerToken of [undefined, null, "fixture-shared-wrangler-session-not-real"]) {
+    const via = sharedWranglerToken === undefined
+      ? ""
+      : ` through the CLI session wrapper (shared session ${Boolean(sharedWranglerToken)})`;
+    test(`win32 keeps ${scenario.label} and never enters the recovery lane${via}`, async () => {
+      const run = await win32RecoveryLaneRefusal({
+        oauth: scenario.oauth,
+        action: scenario.action ?? (() => "unreachable"),
+        sharedWranglerToken,
+      });
+      assert.equal(run.value, undefined, "the refusal must stay closed");
+      assert.equal(run.oauthAttempts, 1, "the browser sign-in refusal decision point must be reached once");
+      assert.equal(run.actionCalls, scenario.actionCalls, "no recovery credential may reach the action");
+      if (sharedWranglerToken !== undefined) {
+        assert.equal(run.wranglerTokenReads, 1, "the wrapper arm must really load the shared-session decision");
+      }
+      assert.deepEqual(run.prompts, [], "win32 must not offer a recovery its hidden prompt would refuse");
+      assert.equal(run.storedLoads, 0, "win32 must not load a saved recovery token");
+      assert.equal(run.hiddenReads, 0, "win32 must not reach hidden token entry");
+      assert.equal(run.error?.constructor?.name, "Fatal");
+      assert.equal(run.error?.code, "REMOTE_PERMISSION_DENIED", run.error?.message);
+      assert.match(run.error.message, scenario.cause);
+      assert.match(run.error.message, /Workers Scripts Edit[\s\S]*D1 Edit[\s\S]*Vectorize Edit[\s\S]*Workers AI Read/i);
+      if (scenario.nothingChanged) assert.match(run.error.message, /Nothing was changed/);
+      else assert.doesNotMatch(run.error.message, /Nothing was changed/, "setup made progress, so it must not claim otherwise");
+      assert.match(run.error.message, WINDOWS_SAVED_KEY_ROUTE);
+      assert.match(run.error.message, /Issue: CLOUDFLARE_OAUTH_SCOPE_MISSING\./);
+      assert.doesNotMatch(run.error.message, /it asks before using any recovery key|opens the protected recovery flow/i,
+        "Windows must not be sent back to a hidden prompt this command refuses");
+      assert.doesNotMatch(run.lines.join("\n"), /s{20}|h{20}|fixture-shared-wrangler/, "no credential bytes may be shown");
+    });
+  }
+}
 
 test("win32 truthy echo-risk override reaches a known scope-recovery decision", async () => {
   const profile = cloudflareOAuthProfileName(INSTALL_ID);

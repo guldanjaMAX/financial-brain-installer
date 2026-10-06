@@ -889,22 +889,32 @@ export function readHiddenInput({
     };
     const onEnd = () => finish(new Error(`terminal input ended before a ${noun} was entered`));
     const onError = () => finish(new Error(`terminal input failed while reading the ${noun}`));
-    output.write(prompt);
     input.on("data", onData);
     input.once("end", onEnd);
     input.once("error", onError);
     try {
       input.setRawMode(true);
-      // Trust the flag the runtime reports back, not the fact that the call
-      // returned. A console that accepts setRawMode and keeps echoing is the
-      // failure this whole guard exists for.
-      if (input.isRaw !== true) {
-        finish(new Error(`this terminal did not disable echo for ${noun} entry`));
-        return;
-      }
-      input.resume();
     } catch {
       finish(new Error(`this terminal could not disable echo for ${noun} entry`));
+      return;
+    }
+    // Trust the flag the runtime reports back, not the fact that the call
+    // returned. A console that accepts setRawMode and keeps echoing is the
+    // failure this whole guard exists for.
+    if (input.isRaw !== true) {
+      finish(new Error(`this terminal did not disable echo for ${noun} entry`));
+      return;
+    }
+    // The prompt appears only after echo is proven off. Closing the shared
+    // question reader just above returned the terminal to cooked mode, where
+    // the terminal itself echoes keystrokes. A prompt shown before raw mode
+    // let a key pasted or typed the moment it appeared reach the screen on a
+    // real pseudo-terminal, even though the key was then read correctly.
+    try {
+      output.write(prompt);
+      input.resume();
+    } catch {
+      finish(new Error(`terminal input failed while reading the ${noun}`));
     }
   });
 }
@@ -1133,10 +1143,18 @@ export async function promptForCloudflareOAuthAccount(request, options = {}) {
   return String(await askFn("Cloudflare account id", "")).trim();
 }
 
+// The Windows route, in one plain line. On Windows a known scope refusal is
+// never answered with a recovery offer (hidden entry cannot be trusted there),
+// so the owner is told where the route is instead of being sent back to a
+// prompt this command will refuse.
+const CLOUDFLARE_WINDOWS_SAVED_KEY_ROUTE =
+  "On Windows the route is the saved Cloudflare key, not a browser sign-in; this command will not ask you to type a key.";
+
 /** Human recovery copy for a bounded Wrangler OAuth failure. */
 export function cloudflareOAuthFailureMessage(error, {
   resumeCommand = null,
   recoveryCommand = null,
+  windowsSavedKeyRoute = false,
 } = {}) {
   const code = error instanceof CloudflareOAuthSessionError
     ? error.code
@@ -1164,12 +1182,17 @@ export function cloudflareOAuthFailureMessage(error, {
         ? "Cloudflare sign-in completed, but Wrangler 4.131.1 cannot request the Vectorize permission this install requires. " +
           (error?.recoverySafeAfterProvisionRefusal === true ? "" : "Nothing was changed. ") +
           "Continue only with a separately approved, account-scoped API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read. " +
-          (recoveryCommand
-            ? `Resume with ${recoveryCommand}; the switch takes no value and opens the protected recovery flow.`
-            : `${resumeCommand ? `Resume with ${resumeCommand}, or r` : "R"}erun in an interactive terminal; it asks before using any recovery key.`)
+          // Both ordinary routes below end at the hidden prompt, which this
+          // command refuses on Windows, so Windows names its own route instead.
+          (windowsSavedKeyRoute
+            ? CLOUDFLARE_WINDOWS_SAVED_KEY_ROUTE
+            : recoveryCommand
+              ? `Resume with ${recoveryCommand}; the switch takes no value and opens the protected recovery flow.`
+              : `${resumeCommand ? `Resume with ${resumeCommand}, or r` : "R"}erun in an interactive terminal; it asks before using any recovery key.`)
         : workersSubdomainScopeMissing
           ? "This browser sign-in cannot read this account's workers.dev address, which this Brain needs for its web address. " +
-            "Nothing was changed. To continue, use a separate account-scoped recovery API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read."
+            "Nothing was changed. To continue, use a separate account-scoped recovery API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read." +
+            (windowsSavedKeyRoute ? ` ${CLOUDFLARE_WINDOWS_SAVED_KEY_ROUTE}` : "")
         : "Cloudflare sign-in completed, but the approved access could not reach every required Workers, D1, Vectorize, and Workers AI surface. Review the selected account and rerun the sign-in.",
     CLOUDFLARE_ACCOUNT_NONE:
       "That Cloudflare login does not have an account ready for installation yet. Finish creating or joining the account in Cloudflare, then rerun the same command.",
@@ -1398,7 +1421,12 @@ export async function withCloudflareControlCredential(action, options = {}) {
         !options.environment?.BRAIN_ALLOW_WINDOWS_ECHO_RISK &&
         !process.env.BRAIN_ALLOW_WINDOWS_ECHO_RISK) {
       if (!isKnownOAuthScopeRecovery(error)) throw error;
-      throw new Fatal(CLOUDFLARE_WINDOWS_HIDDEN_ENTRY_REFUSAL);
+      // Fail closed without the offer, but keep the real refusal: its support
+      // code, which access Cloudflare refused, whether anything changed, and
+      // the Windows route. Replacing it with the hidden-entry refusal told the
+      // owner neither what failed nor where to go next.
+      closePrompts();
+      throwCloudflareOAuthFailure(error, { ...failureOptions, windowsSavedKeyRoute: true });
     }
     const vectorizeScopeMissing = isWranglerVectorizeScopeMissing(error);
     const workersSubdomainScopeMissing = isWranglerWorkersSubdomainScopeMissing(error);
