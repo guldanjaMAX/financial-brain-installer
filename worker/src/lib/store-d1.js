@@ -3782,13 +3782,13 @@ const sourceFreshnessSql = ({ ordered = false, includeUnregisteredCounts = false
        WHERE registered_source.name IS NULL
     ) inventory${ordered ? " ORDER BY inventory.name" : ""}`;
 
-export async function coverageGapReport(env, { now = Date.now(), allowedSources = null } = {}) {
+async function coverageGapAssessment(env, { now = Date.now(), allowedSources = null } = {}) {
   let rows;
   try {
     const r = await env.DB.prepare(sourceFreshnessSql()).all();
     rows = r?.results || [];
   } catch {
-    return { gaps: [], unavailable: true };
+    return { gaps: [], unavailable: true, counts: null };
   }
   const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
   const customApiReceipts = await currentCustomApiReceipts(env, rows);
@@ -3797,6 +3797,9 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
     ? null
     : new Set((Array.isArray(allowedSources) ? allowedSources : []).map((source) => String(source)));
   const gaps = [];
+  let total = 0;
+  let stale = 0;
+  let unscheduled = 0;
   for (const s of rows) {
     if (allowed && !allowed.has(String(s.name))) continue;
     if (s.registered === 0 || s.registered === false || String(s.registered) === "0") {
@@ -3807,6 +3810,8 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
       }));
       continue;
     }
+    total++;
+    if (!Number.isSafeInteger(total)) throw new Error("source count exceeds the safe integer range");
     const last = s.last_ingest_at ? Date.parse(s.last_ingest_at) : NaN;
     const ageSec = Number.isFinite(last) ? Math.floor((now - last) / 1000) : null;
     const days = ageSec === null ? null : Math.floor(ageSec / 86400);
@@ -3819,8 +3824,10 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
       custom_api_display_name: customApiReceipt?.displayName || null,
       indexing_started_at: s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null,
     }, now);
+    let sourceIsStale = false;
 
     if (operational.state === "broken") {
+      sourceIsStale = true;
       gaps.push(gapWithRemedy(s, "refresh", {
         type: "sync_broken",
         source: s.name,
@@ -3866,10 +3873,13 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
           detail: `The ${historicalSourceLabel(s.kind)} source has a complete point-in-time sweep, but no refresh schedule is recorded. Material added after${Number.isFinite(last) ? ` ${new Date(last).toISOString().slice(0, 10)}` : " that sweep"} may be missing from the brain.`,
         }));
       }
+      if (sourceIsStale) stale++;
+      else unscheduled++;
       continue; // no refresh expectation, so no staleness claim made
     }
 
     if (ageSec === null) {
+      sourceIsStale = true;
       gaps.push(gapWithRemedy(s, "refresh", {
         type: "never_synced",
         source: s.name,
@@ -3880,6 +3890,7 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
     // 1.5x before complaining: a cron that runs daily and is six hours late is
     // working. Warning at the first minute past due is how alerts get ignored.
     if (ageSec !== null && ageSec > expected * 1.5) {
+      sourceIsStale = true;
       gaps.push(gapWithRemedy(s, "refresh", {
         type: "coverage_stale",
         source: s.name,
@@ -3899,8 +3910,30 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
           : `The ${historicalSourceLabel(s.kind)} source is registered, but no complete history sweep has been confirmed. A missing result cannot be treated as proof that its declared records contain no answer.`,
       }));
     }
+    if (sourceIsStale) stale++;
   }
-  return { gaps, unavailable: false };
+  return { gaps, unavailable: false, counts: { total, stale, unscheduled } };
+}
+
+export async function coverageGapReport(env, options = {}) {
+  const report = await coverageGapAssessment(env, options);
+  return { gaps: report.gaps, unavailable: report.unavailable };
+}
+
+/** Aggregate-only freshness for the public health receipt. */
+export async function sourceFreshnessCounts(env, { now = Date.now() } = {}) {
+  try {
+    const assessment = await coverageGapAssessment(env, { now });
+    if (assessment.unavailable) return { unavailable: true };
+    const { total, stale, unscheduled } = assessment.counts || {};
+    if (![total, stale, unscheduled].every((value) =>
+      Number.isSafeInteger(value) && value >= 0) || stale + unscheduled > total) {
+      return { unavailable: true };
+    }
+    return { total, stale, unscheduled };
+  } catch {
+    return { unavailable: true };
+  }
 }
 
 /** Compatibility helper for callers that only need known gaps. */

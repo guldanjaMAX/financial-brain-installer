@@ -8,7 +8,12 @@
 
 import assert from "node:assert/strict";
 
-import { coverageGapReport, coverageGaps, freshnessReport } from "../worker/src/lib/store-d1.js";
+import {
+  coverageGapReport,
+  coverageGaps,
+  freshnessReport,
+  sourceFreshnessCounts,
+} from "../worker/src/lib/store-d1.js";
 
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 200))); if (!c) fail++; };
@@ -517,6 +522,93 @@ const GMAIL_FAILURE_EVIDENCE_FIXTURE = {
   check("and is marked as one we cannot refresh ourselves", by.documents.automatable === false);
   check("a connector with no schedule reads unscheduled, not broken", by.gmail.state === "unscheduled", JSON.stringify(by.gmail));
   check("and IS marked automatable, because it could be scheduled", by.gmail.automatable === true);
+}
+
+/* ---- public freshness counts reuse the detailed gap classification ---- */
+{
+  const timestamp = (hours) => new Date(NOW - hours * 3600000).toISOString();
+  const rows = [
+    { name: "alpha-mail", kind: "imap", status: "ready", registered: 1, last_ingest_at: timestamp(35), last_complete_sweep_at: timestamp(35), expected_refresh_seconds: DAILY, indexing_started_at: null },
+    { name: "beta-calendar", kind: "calendar", status: "ready", registered: 1, last_ingest_at: timestamp(37), last_complete_sweep_at: timestamp(37), expected_refresh_seconds: DAILY, indexing_started_at: null },
+    { name: "gamma-notes", kind: "owner_notes", status: "ready", registered: 1, last_ingest_at: timestamp(1), last_complete_sweep_at: timestamp(1), expected_refresh_seconds: 3600, indexing_started_at: null },
+    { name: "delta-drive", kind: "drive", status: "pending", registered: 1, last_ingest_at: null, last_complete_sweep_at: null, expected_refresh_seconds: DAILY, indexing_started_at: null },
+    { name: "epsilon-bank", kind: "bank", status: "error", registered: 1, last_ingest_at: timestamp(2), last_complete_sweep_at: timestamp(2), expected_refresh_seconds: null, stale_reason: "AUTH_EXPIRED", indexing_started_at: null },
+    { name: "zeta-files", kind: "upload", status: "ready", registered: 1, last_ingest_at: timestamp(40 * 24), last_complete_sweep_at: timestamp(40 * 24), expected_refresh_seconds: null, indexing_started_at: null },
+    { name: "eta-chat", kind: "chat", status: "indexing", registered: 1, last_ingest_at: timestamp(2), last_complete_sweep_at: timestamp(2), expected_refresh_seconds: DAILY, indexing_started_at: timestamp(1 / 6) },
+    { name: "omega-legacy", kind: "unregistered", status: "unregistered", registered: 0, last_ingest_at: null, last_complete_sweep_at: null, expected_refresh_seconds: null, indexing_started_at: null },
+  ];
+  const recordedSql = [];
+  const fixture = {
+    DB: {
+      prepare(sql) {
+        recordedSql.push(sql);
+        return { all: async () => ({ results: rows }) };
+      },
+    },
+  };
+  const counts = await sourceFreshnessCounts(fixture, { now: NOW });
+  check("T1 mixed registry counts registered, stale, and unscheduled sources",
+    JSON.stringify(counts) === JSON.stringify({ total: 7, stale: 3, unscheduled: 1 }),
+    JSON.stringify(counts));
+
+  const report = await coverageGapReport(fixture, { now: NOW });
+  const staleTypes = new Set(["sync_broken", "never_synced", "coverage_stale"]);
+  const staleSources = new Set(report.gaps.filter((gap) => staleTypes.has(gap.type)).map((gap) => gap.source));
+  check("T2 detailed gaps contain exactly the sources counted stale",
+    staleSources.size === counts.stale &&
+      ["beta-calendar", "delta-drive", "epsilon-bank"].every((source) => staleSources.has(source)) &&
+      ["alpha-mail", "gamma-notes", "eta-chat"].every((source) => !staleSources.has(source)),
+    JSON.stringify([...staleSources]));
+  check("T2 in-progress control reaches the classification decision",
+    report.gaps.some((gap) => gap.source === "eta-chat" && gap.type === "sync_in_progress"),
+    JSON.stringify(report.gaps));
+
+  const costSql = [];
+  const costFixture = {
+    DB: {
+      prepare(sql) {
+        costSql.push(sql);
+        return { all: async () => ({ results: rows }) };
+      },
+    },
+  };
+  await sourceFreshnessCounts(costFixture, { now: NOW });
+  check("T5 public counts use one cheap registry statement",
+    costSql.length === 1 && /FROM sources s/.test(costSql[0]) &&
+      /document_source_inventory/.test(costSql[0]) &&
+      !/COUNT\(/.test(costSql[0]) && !/ROW_NUMBER/.test(costSql[0]),
+    JSON.stringify(costSql));
+}
+
+/* ---- failed reads are absent while a successful empty read is a real zero ---- */
+{
+  const failures = [
+    { label: "prepare throws", statement: () => { throw new Error("fixture prepare failure"); } },
+    { label: "all rejects", statement: () => ({ all: async () => { throw new Error("fixture all failure"); } }) },
+    { label: "all missing", statement: () => ({ first: async () => null }) },
+  ];
+  for (const failure of failures) {
+    let prepareCalls = 0;
+    const result = await sourceFreshnessCounts({
+      DB: {
+        prepare(sql) {
+          prepareCalls++;
+          return failure.statement(sql);
+        },
+      },
+    }, { now: NOW });
+    check(`T3 ${failure.label} makes public counts unavailable`,
+      prepareCalls > 0 && result?.unavailable === true &&
+        !("total" in result) && !("stale" in result) && !("unscheduled" in result),
+      JSON.stringify({ prepareCalls, result }));
+  }
+
+  const empty = await sourceFreshnessCounts({
+    DB: { prepare: () => ({ all: async () => ({ results: [] }) }) },
+  }, { now: NOW });
+  check("T4 a successful empty registry returns exact zero counts",
+    JSON.stringify(empty) === JSON.stringify({ total: 0, stale: 0, unscheduled: 0 }),
+    JSON.stringify(empty));
 }
 
 console.log(`\nfreshness: ${ran - fail}/${ran} passed`);
