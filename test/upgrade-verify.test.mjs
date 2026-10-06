@@ -85,6 +85,11 @@ const RUNNING_VERSION = JSON.parse(
 ).version;
 const NEWER_VERSION = `${Number(RUNNING_VERSION.split(".")[0]) + 1}.0.0`;
 
+const upgradeSource = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
+if (!upgradeSource.includes("Updating your Brain from ${fromVersion} to ${toVersion}. For part of this your Brain won't accept new documents; asking questions keeps working. Keep this window open.")) {
+  throw new Error("update opening copy is missing from the real upgrade path");
+}
+
 const powershellLiteral = (value) => `'${String(value).replaceAll("'", "''")}'`;
 const expectedBrainCliPrefix = process.platform === "win32"
   ? `& ${powershellLiteral(process.execPath)} ${powershellLiteral(fileURLToPath(new URL("../brain.mjs", import.meta.url)))}`
@@ -1591,7 +1596,10 @@ const bootstrapCompletion = () => ({
   // reported ok. A failure inside the paused window has to say so.
   const pausedWarning = /CANNOT ACCEPT DOCUMENTS/i;
   check("a failure inside the paused window tells the operator the brain is not accepting documents",
-    pausedWarning.test(migrationFailure.error?.message || "") &&
+    /The update stopped partway\. Your Brain can still answer questions but won't take new documents until the update finishes\. Nothing was lost\. Run brain update once more\./i.test(migrationFailure.error?.message || "") &&
+      /If it stops again at the same step, run brain support --preview and send us that note\./i.test(migrationFailure.error?.message || "") &&
+      /For your installer:/i.test(migrationFailure.error?.message || "") &&
+      pausedWarning.test(migrationFailure.error?.message || "") &&
       /do not clear VECTOR_DRAIN_MODE by hand/i.test(migrationFailure.error?.message || "") &&
       /brain health/i.test(migrationFailure.error?.message || ""),
     migrationFailure.error?.message);
@@ -1650,6 +1658,7 @@ const bootstrapCompletion = () => ({
   check("a failure after writes resume does NOT claim the brain is paused",
     !/CANNOT ACCEPT DOCUMENTS/i.test(convergenceFailure.error?.message || "") &&
       !/reindex and drain are\s+refused|remain unavailable/i.test(convergenceFailure.error?.message || "") &&
+      /The update stopped before its last check\. Your Brain is working normally and nothing was lost\. Run brain update once more; it picks up where it stopped\./i.test(convergenceFailure.error?.message || "") &&
       /does not claim that reindex or drain are blocked/i.test(convergenceFailure.error?.message || ""),
     convergenceFailure.error?.message);
   check("an incomplete projection bootstrap blocks health, acceptance, and every version commit",
@@ -3407,8 +3416,8 @@ globalThis.fetch = async (input, init = {}) => {
         check(
           "the installed launcher refuses an update while the fake Worker reports queued vector work",
           pendingUpdate.status !== 0 &&
-            /still processing 5 queued search update/i.test(pendingOutput) &&
-            /Nothing was changed/.test(pendingOutput),
+            /still indexing 5 recent items so they can be found by meaning/i.test(pendingOutput) &&
+            /nothing was changed/i.test(pendingOutput),
           pendingOutput,
         );
         check(

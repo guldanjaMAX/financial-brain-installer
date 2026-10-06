@@ -127,6 +127,7 @@ import {
 import {
   CUSTOM_API_RUN_PATH, customApiOwnerMessage, runCustomApiWorker,
 } from "./lib/custom-api.js";
+import { supplementalRetrievalFilters } from "./lib/retrieval-routing.js";
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -328,6 +329,7 @@ async function unifiedRetrieve(env, url, {
 }) {
   const q = url.searchParams.get("q");
   const rrfK = Math.min(Math.max(parseInt(url.searchParams.get("rrf_k")) || 60, 1), 1e3);
+  const filters = filtersFrom(url);
 
   // Which store answers is isolated from the routes. D1 plus Vectorize is the
   // standard product backend; the legacy adapter remains for migration checks
@@ -339,7 +341,8 @@ async function unifiedRetrieve(env, url, {
     // for shared document/scaffolding handling before the public slice.
     limit: ROUTE_RANKING_DEPTH,
     rrfK,
-    filters: filtersFrom(url),
+    filters,
+    supplementalFilters: supplementalRetrievalFilters(q, filters),
     weights: {
       curated: requestWeight(url.searchParams.get("weight_curated")),
       drive: requestWeight(url.searchParams.get("weight_drive")),
@@ -674,13 +677,16 @@ async function handleUnified(
       }]
     : coverage.gaps;
 
-  // Zero rows out of a search that could not run is not "no hits". A healthy
-  // search is still provisional when declared source history is incomplete.
+  // Zero rows out of a search that could not run is not "no hits". A completed
+  // search is also provisional while a small recent projection backlog catches
+  // up, or when declared source history is incomplete.
   // Keep both conditions on the raw route so its UI, MCP, and check consumers
   // do not have to infer corpus coverage from a result count.
-  const disclosure = emptyRetrievalDisclosure(degraded, degradedReason);
   const searchTruth = (rows) => {
-    if (rows.length === 0 && disclosure.unavailable) {
+    const disclosure = emptyRetrievalDisclosure(degraded, degradedReason, {
+      candidatesFound: rows.length > 0,
+    });
+    if ((rows.length === 0 && disclosure.unavailable) || disclosure.incomplete) {
       return {
         status: disclosure.status,
         notice: disclosure.notice,
@@ -925,17 +931,18 @@ async function handleThink(
     // Zero results has two causes that look identical from here, and only one
     // of them licenses an absence claim. A healthy search that matched nothing
     // keeps the honest refusal below, unchanged. A search that could not run
-    // knows nothing about the corpus, so its gap must forbid the absence claim
-    // rather than issue it. See worker/src/lib/retrieval-status.js.
+    // knows nothing about the corpus; a completed search during proportional
+    // projection catch-up has incomplete coverage. Both gaps must forbid the
+    // absence claim rather than issue it. See worker/src/lib/retrieval-status.js.
     const disclosure = emptyRetrievalDisclosure(degraded, degradedReason);
-    let gaps = disclosure.unavailable
+    let gaps = disclosure.unavailable || disclosure.incomplete
       ? [...sourceCoverageGaps, ...disclosure.gaps]
       : sourceCoverageGaps.length
         ? sourceCoverageGaps
         : disclosure.gaps;
     if (documentTaxGap) gaps = [documentTaxGap, ...gaps];
-    const coverageIncomplete = !disclosure.unavailable &&
-      (sourceCoverageGaps.length > 0 || Boolean(documentTaxGap));
+    const coverageIncomplete = disclosure.incomplete || (!disclosure.unavailable &&
+      (sourceCoverageGaps.length > 0 || Boolean(documentTaxGap)));
     return jsonResponse({
       mode: "think",
       entity_scope: entityScope,
@@ -943,7 +950,7 @@ async function handleThink(
       degraded_reason: degradedReason || undefined,
       retrieval_scope: retrievalScope,
       access: accessSummary,
-      status: disclosure.unavailable
+      status: disclosure.unavailable || disclosure.incomplete
         ? disclosure.status
         : coverageIncomplete
           ? COVERAGE_INCOMPLETE
@@ -951,7 +958,7 @@ async function handleThink(
       // The sentence a human sees in place of an answer. Present only when the
       // search failed, so /app and the CLI cannot render the refusal wording by
       // reaching for a field that is always there.
-      notice: disclosure.unavailable
+      notice: disclosure.unavailable || disclosure.incomplete
         ? disclosure.notice
         : coverageIncomplete
           ? taxDocumentCoverage.unreadable
@@ -1407,8 +1414,12 @@ async function handleThink(
   const categoricalRefusal = !answerError &&
     (!answer || answer === unsupportedAnswer || !approvedDocs.length);
   const refusalSearchDisclosure = categoricalRefusal && degraded
-    ? emptyRetrievalDisclosure(degraded, degradedReason)
+    ? emptyRetrievalDisclosure(degraded, degradedReason, { candidatesFound: results.length > 0 })
     : null;
+  if (refusalSearchDisclosure?.incomplete &&
+      !gaps.some((gap) => gap?.type === COVERAGE_INCOMPLETE)) {
+    gaps.unshift(...refusalSearchDisclosure.gaps);
+  }
   const sourceCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
     sourceCoverageGaps.length > 0;
   const taxDocumentCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&

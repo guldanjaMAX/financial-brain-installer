@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cmdWhatsnew } from "../brain.mjs";
+import { cmdWhatsnew, renderCliCommands } from "../brain.mjs";
 import { LOCKED_WRANGLER_LOCK_ROOT_VERSION } from "../operations/locked-wrangler-runtime.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -51,6 +51,41 @@ assert.ok(!read("test/current-version.test.mjs").includes(hardCodedIncidentCount
 }
 const ciWorkflow = read(".github/workflows/ci.yml");
 const windowsRehearsalWorkflow = read(".github/workflows/windows-rehearsal.yml");
+
+const supervisedRecoveryChangelogText = [
+  "- **A v0.4.6 or earlier Brain left paused with queued work now stops at supervised",
+  "  recovery.** Those Workers do not report their writer mode to update's queue",
+  "  check and never process their queue while paused, so \"wait until query-ready\"",
+  "  could never come true. When the queue is not empty, update reads the Brain's",
+  "  public health check without sending an admin key. If that Worker is paused,",
+  "  the refusal names its release and explains that returning it to active needs",
+  "  that release's own tools, which use an older Wrangler runtime replaced for a",
+  "  security advisory. That step is done only under supervised recovery. Do not",
+  "  run `brain deploy` with either release, `brain rollback`, or `brain drain`, and",
+  "  do not clear VECTOR_DRAIN_MODE by hand. Run `brain health` and keep its output",
+  "  for support. If the health check cannot be read, the refusal says so rather",
+  "  than guessing. A paused v0.4.6 Brain with an empty queue still proceeds.",
+  "  If the Brain's own report shows the index marked for a full rebuild (what a",
+  "  v0.4.6 `brain rollback --yes` leaves) or holding more vectors than the database",
+  "  expects, deploying would un-pause a rolled-back Brain that can never become",
+  "  query-ready. The refusal names that evidence without claiming an unfinished",
+  "  update caused the pause, and gives the same supervised-recovery and support",
+  "  path. To check: such a refusal names supervised recovery and does not mention",
+  "  `brain deploy` as a remedy.",
+].join("\n");
+
+const followingChangelogControl = [
+  "- **A Worker older than the release your manifest records can be replaced by",
+  "  update again.** If an earlier kit's `brain deploy` or `brain rollback --yes`",
+  "  put its older Worker back after an update had finished, `brain update`,",
+  "  `brain update --force` and (for a paused Worker) `brain doctor --repair --yes`",
+  "  refused with no working remedy. Update now treats that Worker as a stale",
+  "  deploy it replaces: an empty queue proceeds, queued work on an active Worker",
+  "  gets \"wait until query-ready\", and queued work on a paused Worker gets the",
+  "  paused-Brain refusal. A Worker newer than this CLI is still refused. To",
+  "  check: `brain health` reports the older Worker version, and `brain update`",
+  "  reaches the paused deployment when the queue is empty.",
+].join("\n");
 
 assert.match(version, /^\d+\.\d+\.\d+$/, "package version must be a stable semantic version");
 assert.equal(packageLock.version, version, "package-lock top-level version drifted");
@@ -212,12 +247,24 @@ async function whatsnewStatusOutput(readStatus, options = {}) {
   const originalLog = console.log;
   console.log = (...values) => output.push(values.join(" "));
   try {
-    await cmdWhatsnew(manifestPath, { readStatus, discoverManifest });
+    await cmdWhatsnew(manifestPath, { readStatus, discoverManifest, all: options.all });
   } finally {
     console.log = originalLog;
   }
-  return output.join("\n").split("# What's new")[0];
+  const rendered = output.join("\n");
+  return options.full ? rendered : rendered.split("# What's new")[0];
 }
+
+const currentNotesOnly = await whatsnewStatusOutput(async () => ({
+  status: "up_to_date", latest_version: version,
+}), { full: true });
+assert.match(currentNotesOnly, /## 0\.4\.9/u);
+assert.doesNotMatch(currentNotesOnly, /## 0\.4\.6/u,
+  "whatsnew must print only the current version by default");
+const allNotes = await whatsnewStatusOutput(async () => ({
+  status: "up_to_date", latest_version: version,
+}), { full: true, all: true });
+assert.match(allNotes, /## 0\.4\.6/u, "whatsnew --all must retain the full history");
 
 let checkedInstalledVersion = null;
 const heldOutput = await whatsnewStatusOutput(async ({ installedVersion }) => {
@@ -225,8 +272,8 @@ const heldOutput = await whatsnewStatusOutput(async ({ installedVersion }) => {
   return { status: "release_held", installed_version: installedVersion };
 });
 assert.equal(checkedInstalledVersion, version, "whatsnew did not check the manifest's installed version");
-assert.match(heldOutput, /public release channel is held/i,
-  "whatsnew must name a held public channel");
+assert.match(heldOutput, new RegExp(`You're on ${escapedVersion}\\. No newer version is out yet\\. Nothing to do\\.`),
+  "whatsnew must make a held feed an informational nothing-to-do state");
 assert.doesNotMatch(heldOutput, /up to date/i,
   "a held public channel cannot be reported as up to date");
 
@@ -235,6 +282,41 @@ assert.match(unavailableOutput, /Unavailable is not current/i,
   "an unavailable release check must not become current");
 assert.doesNotMatch(unavailableOutput, /up to date/i,
   "an unavailable release check cannot be reported as up to date");
+
+const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+try {
+  for (const platform of ["linux", "win32"]) {
+    Object.defineProperty(process, "platform", { value: platform, configurable: true });
+    const whatsnewLines = [];
+    const originalLog = console.log;
+    console.log = (...values) => whatsnewLines.push(values.join(" "));
+    try {
+      await cmdWhatsnew(null, { discoverManifest: () => null });
+    } finally {
+      console.log = originalLog;
+    }
+    const renderedWhatsnew = whatsnewLines.join("\n");
+    // Git's Windows checkout may present CHANGELOG.md with CRLF line endings. The
+    // complete-entry assertion is about owner-visible words and command rendering,
+    // not the repository checkout's newline convention.
+    const normalizedRenderedWhatsnew = renderedWhatsnew.replaceAll("\r\n", "\n");
+    assert.ok(
+      normalizedRenderedWhatsnew.includes(renderCliCommands(supervisedRecoveryChangelogText, { platform })),
+      `whatsnew must render the complete supervised-recovery replacement text on ${platform}`,
+    );
+    assert.ok(
+      normalizedRenderedWhatsnew.includes(renderCliCommands(followingChangelogControl, { platform })),
+      `the following older-Worker control case must remain complete and render consistently on ${platform}`,
+    );
+    assert.doesNotMatch(
+      normalizedRenderedWhatsnew,
+      /install its own release, run .*brain deploy.*return it to active/is,
+      `whatsnew must not retain the retired-runtime deploy remedy on ${platform}`,
+    );
+  }
+} finally {
+  Object.defineProperty(process, "platform", originalPlatform);
+}
 
 const stableOutput = await whatsnewStatusOutput(async () => ({
   status: "up_to_date", latest_version: version,
@@ -259,7 +341,7 @@ assert.equal(discoveredWithoutArgument, true,
   "brain whatsnew without a manifest argument did not discover the installed Brain");
 assert.equal(noArgumentCheckedVersion, version,
   "brain whatsnew without a manifest argument did not check the discovered installed version");
-assert.match(noArgumentOutput, /public release channel is held/i,
+assert.match(noArgumentOutput, /No newer version is out yet/i,
   "the documented no-argument path must report the public release state");
 assert.doesNotMatch(noArgumentOutput, /up to date/i,
   "the documented no-argument path cannot call a held release up to date");

@@ -2,9 +2,11 @@
 
 Provisions a retrieval brain into a **client's own Cloudflare account**. Text and
 keyword search live in D1, vectors live in Vectorize, and the Worker fuses them.
-Nothing runs on our infrastructure. Normal setup uses an owner-approved named
-Cloudflare browser profile in the owner's operating-system credential store; it
-does not create or copy an API token.
+Nothing runs on our infrastructure. Normal setup starts with an owner-approved
+named Cloudflare browser profile in the owner's operating-system credential
+store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
+profile, so the read-only preflight routes that exact refusal to an explicit,
+account-scoped recovery API-token choice before any mutation.
 
 **Status: unreleased 0.4.9/schema48 field candidate, held.** Provisioning,
 retrieval, resumable ingest, guarded deletion, owner actions, exact entity
@@ -52,10 +54,13 @@ the owner must confirm **Workers & Pages > Plans > Paid** there. Do not widen th
 session just to inspect billing. Prepared-manifest, recovery, and automation
 setup paths have the same account-bound prerequisite.
 
-A scoped Cloudflare token is a bounded legacy, automation, or recovery path,
-not a fresh-install prerequisite. Use it only when that exact path is explicitly
-selected and keep it inside the reviewed hidden prompt or approved no-history
-launcher.
+A scoped Cloudflare token is a bounded legacy, automation, or recovery path.
+With Wrangler 4.131.1 it is also the explicit fallback when browser OAuth cannot
+reach Vectorize. The installer names that limitation, the required Workers
+Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read permissions, and the
+exact saved credential before use. A saved token may be old or revoked, so it
+is never selected without owner approval. Keep a new value inside the reviewed
+hidden prompt or approved no-history launcher.
 
 ---
 
@@ -624,6 +629,34 @@ node brain.mjs ingest ./acme.manifest.json --from drive
 node brain.mjs ingest ./acme.manifest.json --from gmail
 ```
 
+A large first Gmail pass can keep its new embedding work within the queue's
+observed drain rate:
+
+```bash
+node brain.mjs ingest ./acme.manifest.json --from gmail --pace-vectors-per-minute 40
+```
+
+The command uses the Worker's accepted per-document chunk counts, and waits
+after each durable batch checkpoint so created and updated chunks average no
+more than the requested rate. Unchanged documents add no delay because they add
+no vector work. Forty leaves headroom under the roughly fifty vectors per minute
+observed by `brain health`; start only after any older vector backlog has
+drained. An interruption is safe: repeat the same command and the adjacent
+document checkpoint skips already accepted revisions while the source cursor
+remains at its prior complete sweep. The repeat still re-lists message ids to
+rebuild authoritative deletion truth, but it does not download an immutable
+message body again when both its D1 family and scanner receipt are proven.
+
+`corpora.gmail.since` optionally declares an inclusive `YYYY-MM-DD` corpus
+floor. Full sweeps append Gmail's `after:YYYY/MM/DD` search term. Incremental
+history cannot carry a search query, so its bounded metadata policy read also
+checks `internalDate`; older messages are deterministic policy exclusions and
+missing date evidence holds the history cursor. The floor is part of the Gmail
+policy fingerprint. Adding or changing it forces an authoritative sweep, and
+any stored family that falls outside the new floor remains subject to the
+ordinary exact removal-plan review and readback. Omitting the field preserves
+the prior query and fingerprint.
+
 The ordinary Drive dry run is for a person reviewing individual files and may
 name files or paths. An assistant must add `--json`: that path validates every
 reviewed root, reads at most 25 Drive entries by default (and refuses a limit
@@ -645,10 +678,15 @@ because separate parent directories cannot portably share one adjacent state.
 Drive, Gmail, and Calendar take the source lease first and then a shared
 `provider:google` credential-record lease. `brain connect google` takes that
 same shared lease, so credential migration and replacement cannot overlap a
-source run. A mutating `brain load` inspects only credential-store metadata
-during preflight; the real credential is opened after both leases are held.
-Dry-run source reads use a dedicated non-migrating loader, including for legacy
-Windows plaintext and macOS file-backed records.
+source run. A Calendar writer waits up to twelve hours when another Google
+source or connection owns that shared boundary. This keeps a scheduled refresh
+from being dropped behind an unusually long Drive walk without allowing the
+credential identity to change during either run. The Calendar source lease
+stays owned while waiting, so another Calendar writer still fails closed. A
+mutating `brain load` inspects only credential-store metadata during preflight;
+the real credential is opened after both leases are held. Dry-run source reads
+use a dedicated non-migrating loader, including for legacy Windows plaintext and
+macOS file-backed records.
 
 For a mailbox that is not Gmail:
 
@@ -1325,6 +1363,23 @@ rank fusion combines both lists. Full-corpus evaluation decides whether that is
 good enough. Do not move a client to another backend based on chunk count alone.
 Require a measured failure on the golden set, a diagnosed cause, and an approved
 architecture change.
+
+Questions that explicitly name calendar, meeting or Zoom, or iMessage or text
+messages add a supplemental metadata-prefiltered keyword and vector lane. The
+lane rescues matching `category` or `platform` records from beyond the ordinary
+candidate cutoff without restricting the base search or double-boosting records
+already present there. Generic decision wording gets no source hint. Natural
+language date windows remain explicit request filters until retrieval has a
+reviewed owner-timezone input.
+
+A completed hybrid search distinguishes a bounded projection catch-up from a
+failed search. The catch-up classification requires an exact pending count below
+one percent of expected vectors and no more than 50,000 rows, a vector-count
+shortfall below one percent, and an oldest queue age below 24 hours. It changes
+only answer availability: unsupported or empty results are
+`coverage_incomplete` and cannot support absence, while supported cited answers
+remain available. Exact readiness, health, and acceptance still require an empty
+outbox and the full projection fence.
 
 `brain diagnose` follows the same refusal to guess at scale. It pins the current
 maximum integer `chunks.id`, then keyset-pages through that fixed range in

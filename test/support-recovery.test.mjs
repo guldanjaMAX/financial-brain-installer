@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,16 +46,28 @@ test("every stored issue code has one complete human recovery guide", () => {
   }
 });
 
-test("index recovery guidance chooses update or drain from the current Brain state", () => {
+test("index recovery guidance tells the owner to leave active catch-up alone", () => {
   for (const code of ["INDEX_WRITE_FAILED", "VECTOR_DRAIN_FAILED"]) {
     const recovery = supportRecovery(code);
     assert.equal(recovery.retry, "review_first");
     const rendered = renderCliCommands(renderSupportRecovery(recovery));
-    assert.ok(rendered.includes(renderCliCommands(
-      "Run brain health with the same manifest and read its current status.",
-    )));
-    assert.ok(rendered.includes(renderCliCommands(recovery.next_steps[1])));
+    assert.match(rendered, /Search is still catching up/);
+    assert.match(rendered, /New documents are saved and can already be found by their exact words/);
+    assert.match(rendered, /Leave the Brain alone; it catches up fastest when nothing else is running/);
+    assert.ok(rendered.includes(renderCliCommands("Check later with brain health.")));
+    assert.ok(!rendered.includes(renderCliCommands("brain drain")));
   }
+  // An update-paused Brain cannot drain on its own, so the drain guide names
+  // the one exception to leaving it alone, in the runnable command form.
+  const drain = supportRecovery("VECTOR_DRAIN_FAILED");
+  assert.deepEqual([...drain.next_steps], [
+    "Leave the Brain alone; it catches up fastest when nothing else is running.",
+    "Check later with brain health. If brain health says the Brain is paused for an update, run brain update once more.",
+  ]);
+  const renderedDrain = renderCliCommands(renderSupportRecovery(drain));
+  assert.ok(renderedDrain.includes(renderCliCommands(
+    "  2. Check later with brain health. If brain health says the Brain is paused for an update, run brain update once more.",
+  )));
 });
 
 test("a typed product issue code wins over mutable error wording", () => {
@@ -64,6 +76,13 @@ test("a typed product issue code wins over mutable error wording", () => {
   assert.equal(supportErrorCode(error, { command: "ingest", unexpected: true }), "RATE_LIMITED");
   error.code = "not-a-public-code";
   assert.equal(supportErrorCode(error, { command: "health" }), "HEALTH_CHECK_FAILED");
+});
+
+test("Cloudflare inactive-token recovery names the date fix", () => {
+  const rendered = renderCliCommands(renderSupportRecovery(supportRecovery("CLOUDFLARE_TOKEN_NOT_ACTIVE")));
+  assert.match(rendered, /start date/i);
+  assert.match(rendered, /end date/i);
+  assert.ok(rendered.includes(renderCliCommands("brain token <manifest> --forget")));
 });
 
 test("the installed CLI explains a code in calm text or agent-readable JSON", () => {
@@ -89,7 +108,7 @@ test("the installed CLI explains a code in calm text or agent-readable JSON", ()
   assert.equal(Object.hasOwn(parsed, "message"), false);
 });
 
-test("an ordinary command failure shows its stable code and recovery command", () => {
+test("a configuration failure skips the redundant support tail", () => {
   const isolatedHome = mkdtempSync(join(tmpdir(), "brain-recovery-cli-"));
   try {
     const result = spawnSync(process.execPath, [join(ROOT, "brain.mjs"), "status", join(isolatedHome, "missing.json")], {
@@ -99,14 +118,70 @@ test("an ordinary command failure shows its stable code and recovery command", (
     });
     const output = `${result.stdout || ""}${result.stderr || ""}`;
     assert.equal(result.status, 1);
-    assert.match(output, /Issue code: CONFIG_INVALID/);
-    assert.ok(output.includes(renderCliCommands("brain support --explain CONFIG_INVALID", {
-      scriptPath: fileURLToPath(new URL("../brain.mjs", import.meta.url)),
-    })), "recovery must name the executable actually running on this platform");
+    assert.doesNotMatch(output, /Issue code: CONFIG_INVALID/);
+    assert.ok(!output.includes(renderCliCommands("brain support --explain CONFIG_INVALID")));
     assert.doesNotMatch(output, /\bat .*\.mjs:\d+/);
   } finally {
     rmSync(isolatedHome, { recursive: true, force: true });
   }
+});
+
+test("COMMAND_FAILED gives one concrete owner recovery", () => {
+  const rendered = renderSupportRecovery(supportRecovery("COMMAND_FAILED"));
+  assert.match(rendered, /The command stopped before it finished/);
+  assert.match(rendered, /Something named in the red line needs fixing first/);
+  assert.match(rendered, /Nothing that already finished was undone/);
+  assert.match(rendered, /Fix that one thing, then run the same command again/);
+});
+
+test("every literal issue code printed by the CLI has a recovery guide", () => {
+  const files = [
+    join(ROOT, "brain.mjs"),
+    join(ROOT, "doctor.mjs"),
+    ...readdirSync(join(ROOT, "operations"))
+      .filter((name) => name.endsWith(".mjs"))
+      .map((name) => join(ROOT, "operations", name)),
+  ];
+  const source = files.map((file) => readFileSync(file, "utf8")).join("\n");
+  const printed = new Set();
+  for (const pattern of [
+    /issue_code\s*:\s*["']([A-Z][A-Z0-9_]+)["']/g,
+    /issue_code\s*\|\|\s*["']([A-Z][A-Z0-9_]+)["']/g,
+    /Issue code:[^\n]*["']([A-Z][A-Z0-9_]+)["']/g,
+  ]) {
+    for (const match of source.matchAll(pattern)) printed.add(match[1]);
+  }
+  assert.ok(printed.size >= 30, `only ${printed.size} printed issue codes were derived`);
+  assert.deepEqual([...printed].filter((code) => !SUPPORT_RECOVERY_CATALOG[code]), []);
+});
+
+test("Windows helper launch refusal has calm retry guidance", () => {
+  const rendered = renderSupportRecovery(supportRecovery("WINDOWS_DPAPI_LAUNCH_REFUSED"));
+  assert.match(rendered, /Windows briefly blocked a helper/);
+  assert.match(rendered, /Your keys are safe and nothing changed/);
+  assert.match(rendered, /usually works the second time/);
+});
+
+test("admin key mismatch recovery gives the setup then health sequence", () => {
+  const rendered = renderCliCommands(renderSupportRecovery(supportRecovery("ADMIN_KEY_MISMATCH")));
+  assert.match(rendered, /didn't accept this computer's key after 15 tries/);
+  assert.match(rendered, /documents are safe and nothing changed/);
+  assert.ok(rendered.includes(renderCliCommands("brain setup <manifest>")));
+  assert.ok(rendered.includes(renderCliCommands("brain health")));
+});
+
+test("an unknown explain code is an anticipated Fatal", () => {
+  const result = spawnSync(process.execPath, [join(ROOT, "brain.mjs"), "support", "--explain", "NOT_A_REAL_CODE"], {
+    cwd: ROOT,
+    env: safeCliEnvironment(),
+    encoding: "utf8",
+  });
+  const output = `${result.stdout || ""}${result.stderr || ""}`;
+  assert.equal(result.status, 1);
+  assert.match(output, /There isn't a guide for NOT_A_REAL_CODE yet/);
+  assert.match(output, /Nothing changed/);
+  assert.match(output, /run the command that printed it once more/i);
+  assert.doesNotMatch(output, /bug in the installer|unexpected error/i);
 });
 
 test("the hiccup lab is offline, credential-scrubbed, and names every remaining field gate", () => {

@@ -449,15 +449,20 @@ other homework.
    coordinator and has no update step. Never restart setup, restore a bookmark
    first, clear paused mode manually, accept checksum drift, or improvise a
    rollback.
-6. Keep working in this conversation through documented waits and retry-safe
-   branches. The conservative old-invocation safety wait can run for twenty
+6. Start `brain update` as a background task, then read its output every few
+   minutes until it finishes. Tell the owner: "The update is running. On a
+   large Brain it can take a while; I'll keep an eye on it here. Please keep
+   this window open." Keep working in this conversation through documented
+   waits and retry-safe branches. The conservative old-invocation safety wait can run for twenty
    minutes with unchanged counts; before its deadline that is a wait, not a
    stall. Do not shorten or interrupt it. Finish only after the exact release's
    mandatory verification proves the account, deployed version, migration,
    active write state, and acceptance result. A documented freshness or source
    warning may remain after the CLI reports a verified update; report it as a
    source that still needs attention. Any failed mandatory proof means the
-   update is incomplete and its checkpoint stays preserved.
+   update is incomplete and its checkpoint stays preserved. After a verified
+   update, tell the owner to quit Claude Code (and Codex, if they use it), open
+   it again, type `/exit`, then `claude --continue`, and ask: "check my Brain."
 
 ## Offer Claude Code concierge browser help
 
@@ -519,7 +524,8 @@ sign-in, not the normal install. If the reviewed CLI truly requires recovery,
 inspect the selected manifest first. A D1-only Brain needs the four reviewed
 permissions. Add Workers R2 Storage Edit only when that manifest configures an
 R2 bucket. Claude may fill the token name, the applicable permissions, the
-one-account restriction, and a short expiration. Stop on the final review screen. The
+one-account restriction, a start date left empty or set to today, and an end at
+least 7 days from now. Stop on the final review screen. The
 owner checks the summary, chooses **Create Token**, privately moves the value
 into the CLI's approved owner-only input, and dismisses the secret page before
 Claude resumes browser control. On Windows, customer token recovery is not
@@ -820,8 +826,9 @@ must stop before resource creation.
   or statements in chat. A configured developer account or passing local test
   does not establish a working deployed connection. Follow the gate's
   owner-present journey in order:
-  - When the feed is enabled, `brain connect bank <manifest>` runs BEFORE
-    `brain setup` or `brain secrets`. Only it writes the Plaid keys.
+  - Bank feeds are set up with the owner and installer on a call. First finish
+    `brain setup`, then enroll and verify the owner passkey, and only then run
+    `brain connect bank <manifest>`. Only that command writes the Plaid keys.
   - The owner types both keys at its hidden prompt, and the command checks them
     with Plaid before saving. If a key was wrong, the owner reruns it with
     `--replace-keys`. Never ask for, paste, or relay a Plaid key yourself.

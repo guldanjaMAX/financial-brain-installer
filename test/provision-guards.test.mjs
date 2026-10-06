@@ -886,7 +886,9 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
       !/^\s*const acct = await resolveAccount\(m\);/m.test(b),
       "it resolves the account unconditionally");
     check(`${name} resolves the account only as a fallback`,
-      /m\.brain\?\.domain \? null : await resolveAccount\(m\)/.test(b));
+      name === "cmdDrain"
+        ? /m\.brain\?\.domain \? null : await \(options\.resolveAccount \?\? resolveAccount\)\(m\)/.test(b)
+        : /m\.brain\?\.domain \? null : await resolveAccount\(m\)/.test(b));
   }
   const local = bodyBetween("async function cmdIngestLocalRun(", "\nasync function parseForgetResponse");
   const remote = bodyBetween("const cmdIngestRemoteRun = async (", "\nasync function sendBatches");
@@ -974,8 +976,12 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
     String(remote).slice(0, 2200));
 
   // And the ones that genuinely need Cloudflare should NOT have been changed.
+  // cmdDeploy is a thin wrapper that releases the shared prompt after the
+  // deploy body returns; the Cloudflare requirement lives in that body.
+  check("cmdDeploy delegates to the deploy body that resolves Cloudflare",
+    /return await cmdDeployWithPrompts\(manifestPath, options\);/.test(bodyOf("cmdDeploy") || ""));
   for (const name of ["cmdProvision", "cmdDeploy", "cmdMigrate"]) {
-    const b = bodyOf(name);
+    const b = bodyOf(name === "cmdDeploy" ? "cmdDeployWithPrompts" : name);
     const resolvesCloudflare = name === "cmdMigrate"
       ? /const resolveMigrateAccount = options\.resolveAccount \?\? resolveAccount;/.test(b || "") &&
         /const acct = await resolveMigrateAccount\(m\);/.test(b || "")

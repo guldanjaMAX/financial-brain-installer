@@ -13,6 +13,46 @@ offered as a customer update; its entries below ship for the first time in
 0.4.9, and its identity is retired so its evidence cannot be confused with
 this changed candidate.
 
+- **A saved browser sign-in no longer blocks a custom-domain Brain at the
+  workers.dev address check.** Cloudflare can refuse that account read even
+  when the sign-in can update a Brain that uses its own domain. That Brain now
+  continues; it never used the workers.dev address. A Brain whose address uses
+  workers.dev still stops, explains that its address needs the refused read,
+  and offers the same explicit account-scoped recovery token choice. Nothing
+  changes unless the owner accepts that recovery path. To check: run the next
+  update with the Brain's saved browser sign-in.
+
+- **Cloudflare setup now tells you when browser sign-in cannot reach
+  Vectorize, and it never silently switches credentials.** Wrangler 4.131.1
+  cannot request Vectorize permission for its browser profile. Reopening the
+  same browser approval cannot fix that, so setup now goes directly to a clear
+  recovery choice that names the required Workers Scripts Edit, D1 Edit,
+  Vectorize Edit, and Workers AI Read permissions. If this computer has a saved
+  recovery token, setup names its exact account and protected-store location,
+  warns that it may be old or revoked, and asks before using it. You can decline
+  it and enter a different token through the hidden prompt. Windows follows the
+  same scope and decision path; its existing visible-entry protection still
+  requires an approved secret-manager path instead of risking an echoed token.
+
+- **A small fresh search backlog no longer looks like a search outage.** When
+  keyword and meaning-based search both complete while less than one percent
+  of the index is catching up from the last 24 hours, a missing answer is now
+  marked as incomplete coverage instead of unavailable search. The Brain still
+  refuses to say that nothing is recorded until the queue is empty. A cited
+  answer that passes the evidence check is still shown. A larger or older
+  backlog, or either search method actually failing, stays unavailable. To
+  check: ask one question with a known cited answer and one absence question
+  while a small recent load finishes.
+
+- **Calendar, meeting, and iMessage questions get a source-aware search lane.**
+  When a question explicitly says calendar, meeting, Zoom, iMessage, or text
+  message, the Brain now searches that category or platform before the normal
+  candidate cutoff, then combines those records with the ordinary whole-Brain
+  results. It does not restrict the answer to one source, and generic decision
+  questions still search everywhere without guessing where a decision lives.
+  To check: repeat a calendar, meeting, or iMessage question that previously
+  returned only file or email candidates and inspect the cited source.
+
 - **An approved pilot can use SimpleFIN Bridge as a second bank provider.** The
   owner creates a one-time Setup Token in SimpleFIN and pastes it only into the
   owner-only page on their Brain. The Brain claims the connection itself,
@@ -294,24 +334,25 @@ this changed candidate.
   release over such a Brain, `brain update` reaches the paused deployment when
   `brain health` shows an empty queue.
 
-- **A v0.4.6 or earlier Brain left paused with queued work gets advice that
-  can clear it.** Those Workers do not report their writer mode to update's
-  queue check and never process their queue while paused, so "wait until
-  query-ready" could never come true. When the queue is not empty, update now
-  reads the Brain's public health check (no admin key is sent). If that Worker
-  is paused, the refusal says to install its own release, run `brain deploy`
-  with it to return it to active, wait for query-ready, then update again;
-  never `brain rollback`. If the health check cannot be read, the refusal says
-  so rather than guessing. A paused v0.4.6 Brain with an empty queue proceeds.
-  To check: a refused update names the Worker's release and `brain deploy`.
-  That advice is given only when the Brain's semantic index is intact. If the
-  Brain's own report shows the index marked for a full rebuild (what a v0.4.6
-  `brain rollback --yes` leaves) or holding more vectors than the database
+- **A v0.4.6 or earlier Brain left paused with queued work now stops at supervised
+  recovery.** Those Workers do not report their writer mode to update's queue
+  check and never process their queue while paused, so "wait until query-ready"
+  could never come true. When the queue is not empty, update reads the Brain's
+  public health check without sending an admin key. If that Worker is paused,
+  the refusal names its release and explains that returning it to active needs
+  that release's own tools, which use an older Wrangler runtime replaced for a
+  security advisory. That step is done only under supervised recovery. Do not
+  run `brain deploy` with either release, `brain rollback`, or `brain drain`, and
+  do not clear VECTOR_DRAIN_MODE by hand. Run `brain health` and keep its output
+  for support. If the health check cannot be read, the refusal says so rather
+  than guessing. A paused v0.4.6 Brain with an empty queue still proceeds.
+  If the Brain's own report shows the index marked for a full rebuild (what a
+  v0.4.6 `brain rollback --yes` leaves) or holding more vectors than the database
   expects, deploying would un-pause a rolled-back Brain that can never become
-  query-ready. The refusal then says the Worker is paused, without claiming an
-  unfinished update caused it, and gives the supervised-recovery and support
-  path instead of `brain deploy`. To check: such a refusal names supervised
-  recovery and does not mention `brain deploy` as a remedy.
+  query-ready. The refusal names that evidence without claiming an unfinished
+  update caused the pause, and gives the same supervised-recovery and support
+  path. To check: such a refusal names supervised recovery and does not mention
+  `brain deploy` as a remedy.
 
 - **A Worker older than the release your manifest records can be replaced by
   update again.** If an earlier kit's `brain deploy` or `brain rollback --yes`
@@ -1608,7 +1649,7 @@ ChatGPT, on your phone, with nothing to install.**
   write budget — batches now pack themselves to fit it, found live when a
   two-day catch-up was refused in one over-full call.
 
-After updating, run `brain setup <manifest>` (applies migration 0017), then
+(Historic, do not run.) After updating, run `brain setup <manifest>` (applies migration 0017), then
 `brain mcp-config <manifest>` to see your connector URL and the exact
 click-path for each app.
 
@@ -1642,7 +1683,7 @@ click-path for each app.
   session-signing secret, so existing installs get all of this on their next
   setup or update, with nothing new to store.
 
-After updating, run `brain setup <manifest>` (applies migration 0014 and the
+(Historic, do not run.) After updating, run `brain setup <manifest>` (applies migration 0014 and the
 new secret), then `brain invite <manifest>` and enroll your own phone first.
 
 ## 0.1.18
@@ -1669,7 +1710,7 @@ new secret), then `brain invite <manifest>` and enroll your own phone first.
   revoked without touching the others. `CLOUDFLARE_API_TOKEN` from a secret
   manager still wins for automation, unchanged.
 
-After updating, run `brain setup <manifest>` once interactively, accept the
+(Historic, do not run.) After updating, run `brain setup <manifest>` once interactively, accept the
 offer, then run it again and watch it skip the prompt. `brain token
 <manifest>` confirms what is stored.
 
@@ -1714,7 +1755,7 @@ against your brain, in one sitting.**
   `/api/rag/think`; the answer text itself is unchanged, so existing golden
   sets, refusal scoring, and integrations keep working untouched.
 
-After updating, run `brain eval <manifest> --golden-20` sitting next to the
+(Historic, do not run.) After updating, run `brain eval <manifest> --golden-20` sitting next to the
 person who owns the brain, then `brain ask` any question and read the new
 confidence line. Existing golden sets and scoring are unchanged.
 

@@ -196,14 +196,15 @@ try {
     await assert.rejects(withWranglerSessionIfNeeded(() => cloudflareApiRequest("/accounts"), session(() => { renewed++; return B; })));
     assert.equal(renewed, 0); assert.equal(calls.length, 1);
   }
-  // An explicit CLOUDFLARE_API_TOKEN is never silently swapped for a session.
+  // An explicit CLOUDFLARE_API_TOKEN is never silently swapped for a session,
+  // and its refusal names the provided-token source for owner guidance.
   {
     process.env.CLOUDFLARE_API_TOKEN = "x".repeat(40);
     const calls = stubFetch([{ status: 403, body: denied }]);
     let renewed = 0;
     await assert.rejects(
       withWranglerSessionIfNeeded(() => cloudflareApiRequest("/accounts"), session(() => { renewed++; return B; })),
-      (error) => /failed \(403\)/.test(error.message) && error.credentialSource === undefined,
+      (error) => /failed \(403\)/.test(error.message) && error.credentialSource === "provided-token",
     );
     assert.equal(renewed, 0); assert.equal(calls.length, 1);
     delete process.env.CLOUDFLARE_API_TOKEN;

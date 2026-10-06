@@ -21,9 +21,16 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { posix, win32 } from "node:path";
+import { join, posix, win32 } from "node:path";
 import { renderCommandWithEnvironment } from "./command-display.mjs";
 import { REVIEWED_WRANGLER_SPEC } from "./wrangler-runtime-contract.mjs";
 
@@ -121,18 +128,56 @@ export function parseWranglerSession(text) {
 export function refreshWranglerSession(options = {}) {
   const run = options.run ?? spawnSync;
   const env = legacyWranglerRefreshEnvironment(options.env ?? process.env);
-  // Wrangler writes `.wrangler/cache` under its own working directory. A child
-  // that inherits the caller's directory fails outright from an unwritable one
-  // (a Windows shell starts in `C:\Windows\system32`), and the credential is
-  // then reported missing for a reason that has nothing to do with it.
-  const result = run("npx", [WRANGLER_SPEC, "whoami"], {
-    cwd: options.cwd ?? tmpdir(),
-    encoding: "utf8",
-    timeout: options.timeoutMs ?? 120_000,
-    env,
-    shell: (options.platform ?? process.platform) === "win32",
-  });
-  return result?.status === 0;
+  const platformName = options.platform ?? process.platform;
+  const makeDirectory = options.mkdtempSync ?? mkdtempSync;
+  const setMode = options.chmodSync ?? chmodSync;
+  const inspect = options.lstatSync ?? lstatSync;
+  const remove = options.rmSync ?? rmSync;
+  let workingDirectory = null;
+  let createdStat = null;
+  try {
+    // Wrangler writes `.wrangler/cache` and loads dotenv files relative to its
+    // cwd. A fresh private directory prevents a planted file in the shared temp
+    // root from becoming child configuration, while the explicit null-device
+    // argument disables Wrangler's default dotenv search as a second boundary.
+    workingDirectory = makeDirectory(join(
+      options.tmpDirectory ?? tmpdir(),
+      "financial-brain-wrangler-refresh-",
+    ));
+    setMode(workingDirectory, 0o700);
+    createdStat = inspect(workingDirectory);
+    if (!createdStat.isDirectory() || createdStat.isSymbolicLink() ||
+        (platformName !== "win32" && (createdStat.mode & 0o077) !== 0)) {
+      return false;
+    }
+    const result = run("npx", [
+      WRANGLER_SPEC,
+      "whoami",
+      `--env-file=${platformName === "win32" ? "NUL" : "/dev/null"}`,
+    ], {
+      cwd: workingDirectory,
+      encoding: "utf8",
+      timeout: options.timeoutMs ?? 120_000,
+      env,
+      shell: platformName === "win32",
+    });
+    return result?.status === 0;
+  } catch {
+    return false;
+  } finally {
+    if (workingDirectory && createdStat) {
+      try {
+        const current = inspect(workingDirectory);
+        if (current.isDirectory() && !current.isSymbolicLink() &&
+            current.dev === createdStat.dev && current.ino === createdStat.ino) {
+          remove(workingDirectory, { recursive: true, force: true });
+        }
+      } catch {
+        // Refresh availability remains the result. A replaced path is left
+        // untouched instead of being removed as if it were still ours.
+      }
+    }
+  }
 }
 
 /**

@@ -33,6 +33,8 @@ export const COVERAGE_INCOMPLETE = "coverage_incomplete";
 /** Wire value for `status` when the search completed and matched nothing. */
 export const NO_RESULTS = "no_results";
 
+export const PROJECTION_CATCHING_UP = "projection-catching-up";
+
 /**
  * The genuine no-match gap, verbatim.
  *
@@ -163,6 +165,21 @@ export function coverageIncompleteNotice(unavailable = false, candidatesFound = 
     : `${outcome} One or more source histories are not yet proven complete, so treat this result as provisional while records may still be loading.`;
 }
 
+/** Copy for a completed hybrid search whose small recent projection is catching up. */
+export function projectionCatchupNotice(candidatesFound = false) {
+  const outcome = candidatesFound
+    ? "The search completed and found candidate records, but they did not support an answer."
+    : "The search completed with zero matches.";
+  return `${outcome} A small recent slice of meaning-based search is still catching up, so treat this result as provisional until projection finishes.`;
+}
+
+export function projectionCatchupGap(candidatesFound = false) {
+  return {
+    type: COVERAGE_INCOMPLETE,
+    detail: `${candidatesFound ? "Candidate records were checked" : "Both keyword and meaning-based search completed"}, but a small recent projection backlog remains. Do not treat this provisional result as a complete-corpus finding.`,
+  };
+}
+
 /**
  * The instruction a consuming model follows.
  *
@@ -188,11 +205,12 @@ export function unavailableGap(degraded, degradedReason = null) {
  * One call decides status, gaps and sentence together so no surface can pick up
  * half of it.
  */
-export function emptyRetrievalDisclosure(degraded, degradedReason = null) {
+export function emptyRetrievalDisclosure(degraded, degradedReason = null, { candidatesFound = false } = {}) {
   const token = degradedToken(degraded);
   if (!token) {
     return {
       unavailable: false,
+      incomplete: false,
       status: NO_RESULTS,
       degraded: null,
       cause: null,
@@ -200,8 +218,20 @@ export function emptyRetrievalDisclosure(degraded, degradedReason = null) {
       gaps: [NO_RESULTS_GAP],
     };
   }
+  if (token === "vector" && degradedReason === PROJECTION_CATCHING_UP) {
+    return {
+      unavailable: false,
+      incomplete: true,
+      status: COVERAGE_INCOMPLETE,
+      degraded: token,
+      cause: null,
+      notice: projectionCatchupNotice(candidatesFound),
+      gaps: [projectionCatchupGap(candidatesFound)],
+    };
+  }
   return {
     unavailable: true,
+    incomplete: false,
     status: SEARCH_UNAVAILABLE,
     degraded: token,
     cause: degradedCause(token, degradedReason),
@@ -222,6 +252,7 @@ export function emptyRetrievalDisclosure(degraded, degradedReason = null) {
 export function retrievalUnavailable(body) {
   if (!body || typeof body !== "object") return false;
   if (body.status === SEARCH_UNAVAILABLE) return true;
+  if (body.status === COVERAGE_INCOMPLETE) return false;
   if (!degradedToken(body.degraded)) return false;
   const answered = typeof body.answer === "string" && body.answer.trim().length > 0;
   const cited = Array.isArray(body.citations) && body.citations.length > 0;

@@ -203,12 +203,10 @@ export async function ensureBankFeedWorkerSecrets({
   const needsWrappingKey = replaceKeys !== true && !present.has(BANK_ACCESS_WRAPPING_KEY_SECRET);
   const writes = [];
   if (needsProvider) {
-    report(replaceKeys === true
-      ? `replacing ${BANK_FEED_PROVIDER_SECRET_NAMES.join(" and ")} on the Worker. Enter both Plaid keys ` +
-        `from the owner's own dashboard${environment ? ` for the ${environment} environment` : ""}. ` +
-        `${BANK_ACCESS_WRAPPING_KEY_SECRET} is kept as it is.`
-      : `missing on the Worker: ${absent.join(", ")}. Enter the Plaid keys from the owner's own dashboard` +
-        `${environment ? ` for the ${environment} environment` : ""}.`);
+    report(
+      "Your Brain needs your two Plaid keys: the client_id, then the Sandbox or Production secret. " +
+      "They are saved to your Brain, not to this computer.",
+    );
     const pair = [];
     for (const name of BANK_FEED_PROVIDER_SECRET_NAMES) {
       pair.push([name, normalizeProviderValue(name, await readSecret(promptFor(name, environment)))]);

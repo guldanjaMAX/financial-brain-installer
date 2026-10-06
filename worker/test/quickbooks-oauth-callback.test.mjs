@@ -200,7 +200,7 @@ async function assertHonestCallbackResult(env, redirect) {
   assert.equal(result.status, 200);
   assertPrivate(result);
   const body = await result.text();
-  assert.match(body, /will show whether QuickBooks connected or whether another try is needed/i);
+  assert.match(body, /QuickBooks sent you back\. Go back to the Claude Code or Codex window on your computer\. It will tell you whether QuickBooks connected\. You can close this tab\./);
   assert.doesNotMatch(body, /connection received|connected successfully|connection complete/i);
   return body;
 }

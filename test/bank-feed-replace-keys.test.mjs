@@ -120,7 +120,8 @@ test("--replace-keys re-prompts for both keys even when all three names exist, a
   assert.equal(run.result.keys_replaced, true);
   assert.deepEqual(run.result.secrets_written, ["BANK_FEED_CLIENT_ID", "BANK_FEED_SECRET"]);
   assert.equal(run.opened.length, 1);
-  assert.match(run.output, /BANK_FEED_WRAPPING_KEY_V2 was not touched/);
+  assert.match(run.output, /Plaid accepted the new sandbox keys\. They are saved to your Brain, not to this computer\./);
+  assert.doesNotMatch(run.output, /BANK_FEED_WRAPPING_KEY_V2/, "owner output does not expose the internal wrapping-key name");
   assert.ok(noTypedValue(run.output), "no typed value is ever printed");
 });
 

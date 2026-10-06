@@ -87,7 +87,6 @@ export function OwnerPreferences() {
           </span>
         </label>
       </div>
-      <Note>Display-currency conversion and fiscal-year grouping are not offered here because this frontend does not apply them yet.</Note>
     </Section>
   );
 }

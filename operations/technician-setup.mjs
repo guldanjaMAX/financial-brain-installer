@@ -571,7 +571,7 @@ export function technicianPlan(manifestPath, deps = {}) {
       bank_connections: {
         state: "held_outside_ordinary_onboarding",
         credentials_needed_here: false,
-        owner_message: "Bank connections are not part of ordinary onboarding yet. They are still being tested. You did nothing wrong, and there is no bank password, verification code, or Plaid setup key to enter here. An already approved pilot keeps its complete existing bank setup. If any piece is missing, setup stops before changing a credential and explains the separately reviewed next step.",
+        owner_message: "Bank connections are not part of ordinary onboarding yet. They are still being tested. You did nothing wrong, and there is no bank password, verification code, or Plaid setup key to enter here. Bank feeds are set up with your installer on a call. An already approved pilot keeps its complete existing bank setup. If any piece is missing, setup stops before changing a credential and explains the separately reviewed next step.",
       },
       guided_steps: TECHNICIAN_RUN_STEPS.filter((step) => !DEFERRED_PUBLIC_CONNECTOR_STEPS.includes(step)),
       not_guided_in_this_release: [

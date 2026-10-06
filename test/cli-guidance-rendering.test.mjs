@@ -254,7 +254,9 @@ for (const command of dispatched) {
  * the CLI printers pinned below.
  */
 const SKIP_DIRECTORIES = new Set(["node_modules", ".git", "frontend", "evidence", "test", "worker"]);
-const EMITTERS = /\bconsole\.(?:log|error|warn|info)\s*\(|\bprocess\.(?:stdout|stderr)\.write\s*\(/g;
+// The second form is an injectable fallback, `(options.write ?? console.log)(...)`:
+// its argument is a live emission too, and it hid an unrendered usage line.
+const EMITTERS = /\bconsole\.(?:log|error|warn|info)\s*\(|\bconsole\.(?:log|error|warn|info)\s*\)\s*\(|\bprocess\.(?:stdout|stderr)\.write\s*\(/g;
 const RENDERED = /renderCliCommands|brainCliPrefix|renderCopyableCommand/;
 
 /** Blank comments in place, so a commented-out example is never read as code. */
@@ -358,6 +360,8 @@ assert.equal(unrenderedEmissions('console.log(renderCliCommands("Run brain docto
 assert.equal(unrenderedEmissions('// console.log("Run brain doctor <manifest> next.");').found.length, 0, "the sweep must ignore commented-out code");
 assert.equal(unrenderedEmissions('console.log("The brain is live and the brain has answers.");').found.length, 0, "the sweep must not read prose as an instruction");
 assert.equal(unrenderedEmissions('console.log(`${c.bold(`x`)}`); console.log("Run brain doctor now.");').found.length, 1, "the sweep must survive a nested template literal");
+assert.equal(unrenderedEmissions('(options.write ?? console.log)("Usage: brain update [manifest]");').found.length, 1, "the sweep must see an injectable console fallback");
+assert.equal(unrenderedEmissions('(options.write ?? console.log)(renderCliCommands("Usage: brain update [manifest]"));').found.length, 0, "the sweep must accept a rendered injectable fallback");
 
 const productDirectory = fileURLToPath(productRoot);
 const moduleFiles = [];
@@ -403,7 +407,7 @@ for (const emitter of ["ok", "info", "warn", "say", "sayErr"]) {
 // A constant from doctor.mjs, so no scan of brain.mjs string literals sees it.
 // It is the sentence that tells the owner how to re-enter a rejected token,
 // which the code's own comment calls the most common install-day mistake.
-assert.match(source, /sayErr\("  " \+ CF_TOKEN_REJECTED_REMEDY/, "the rejected-token remedy names `brain update` and an interactive terminal, so it must render");
+assert.match(source, /write\(renderCliCommands\("  " \+ CF_TOKEN_REJECTED_REMEDY/, "the rejected-token remedy names `brain update` and an interactive terminal, so it must render");
 
 /*
  * The printers that carry their command text in from somewhere else - the

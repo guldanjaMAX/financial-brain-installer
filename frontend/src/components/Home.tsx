@@ -496,23 +496,31 @@ function Blindspots({ snapshot, status, scopeName }: {
   );
 }
 
-function SystemProblems({ status }: { status: SystemStatus | null }) {
+export function SystemProblems({ status }: { status: SystemStatus | null }) {
   return (
-    <Section title="Brain status" blurb="Technical problems stay visible, but they remain your installer's responsibility.">
+    <Section title="Brain status" blurb="Things worth knowing and problems that need attention stay visible here.">
       {!status?.problems ? (
         <Note>The problem register could not be read. This is not an all-clear.</Note>
       ) : status.problems.length === 0 ? (
         <Note>No technical problem was reported by the checks that ran.</Note>
-      ) : status.problems.map((problem) => (
+      ) : status.problems.map((problem) => {
+        const undated = problem.id === "undated";
+        const title = undated
+          ? `Some documents have no date (${problem.count} of ${status.documents ?? problem.count})`
+          : problem.title;
+        const detail = undated
+          ? "Questions like 'what's the latest?' can only use dated documents. Nothing is wrong with your Brain."
+          : problem.detail;
+        return (
         <Row key={problem.id}>
           <span className="min-w-0 flex-1">
-            <span className="text-[14.5px] font-medium">{problem.title}</span>
-            {problem.detail && <span className="block text-[13px] text-ink-soft mt-0.5">{problem.detail}</span>}
-            <NextStep owner="installer">This is not an owner remedy.</NextStep>
+            <span className="text-[14.5px] font-medium">{title}</span>
+            {detail && <span className="block text-[13px] text-ink-soft mt-0.5">{detail}</span>}
           </span>
-          <Chip state="PROBLEM" />
+          <Chip state={problem.severity === "crit" ? "PROBLEM" : "WORTH"} />
         </Row>
-      ))}
+        );
+      })}
     </Section>
   );
 }
@@ -589,8 +597,15 @@ export function pendingCountLabel(pending: number, isCapped = false): string {
   return isCapped ? `${Math.max(0, pending - 1).toLocaleString()}+` : pending.toLocaleString();
 }
 
-function PhaseNotice({ phase, status }: { phase: BrainPhase; status: SystemStatus | null }) {
+export function PhaseNotice({ phase, status }: { phase: BrainPhase; status: SystemStatus | null }) {
   const pct = status?.vectors?.percent_visible;
+  if (phase === "coverage_unknown" && status?.unavailable?.includes("diagnose")) {
+    return (
+      <div className="border border-line rounded-2xl px-4 py-3.5 bg-card">
+        <p className="text-[14.5px] text-ink-soft leading-relaxed">{phraseFor(phase, status)}</p>
+      </div>
+    );
+  }
   if (phase === "unreachable" || phase === "paused" || phase === "unknown" || phase === "coverage_unknown") {
     return phase === "unreachable"
       ? <Critical>{phraseFor(phase, status)}</Critical>

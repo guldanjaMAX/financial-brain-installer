@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,10 @@ import { fileURLToPath } from "node:url";
 const CLI = resolve(dirname(fileURLToPath(import.meta.url)), "..", "brain.mjs");
 const dir = mkdtempSync(join(tmpdir(), "brain-fresh-setup-"));
 const missing = join(dir, "never-written", "brain.manifest.json");
+const source = readFileSync(CLI, "utf8");
+
+assert.match(source, /Your Brain is running\. So far it holds only a small test note, so it can't answer questions about your business yet\. Next, we'll connect Google or load one folder\./u);
+assert.match(source, /Open your Brain: \$\{base\}\/app/u);
 
 const r = spawnSync(process.execPath, [CLI, "setup", missing], {
   input: "",

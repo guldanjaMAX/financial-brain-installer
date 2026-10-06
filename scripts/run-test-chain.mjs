@@ -69,6 +69,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/owner-notes-lifecycle.test.mjs",
   "node --no-warnings --test worker/test/complete-sweep-clears-provisional.test.mjs",
   "node --no-warnings worker/test/memory-supersession.test.mjs",
+  // Split-document family cleanup uses the document identity index.
+  "node --no-warnings test/family-cleanup-query.test.mjs",
   "node --no-warnings test/assistant-repair.test.mjs",
   "node --test test/subdomain-read-names-its-cause.test.mjs",
   "node --test test/setup-no-orphans-on-403.test.mjs",
@@ -161,6 +163,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node test/wrangler-legacy-keyring-opt-out.test.mjs",
   // Health never refreshes or rewrites a Wrangler login.
   "node test/health-wrangler-session-exempt.test.mjs",
+  // A completed update or deploy releases the shared prompt and exits.
+  "node test/cli-success-exit.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -315,6 +319,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/drain-query-ready-gate.test.mjs",
   "node test/report-html.test.mjs",
   "node test/report-deploy-exit.test.mjs",
+  "node test/cli-success-exit.test.mjs",
   "node test/errors.test.mjs",
   "node test/doctor.test.mjs",
   "node --test test/drain-cron-default.test.mjs",
@@ -381,6 +386,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/field-prepare.test.mjs",
   "node --no-warnings test/full-history-privacy.test.mjs",
   "node --no-warnings test/gmail-incremental-policy.test.mjs",
+  "node --no-warnings test/family-cleanup-query.test.mjs",
   "node --no-warnings test/linkedin-export.test.mjs",
   "node --no-warnings test/migration-checksum-pin.test.mjs",
   "node --no-warnings test/migration-upgrade-path.test.mjs",

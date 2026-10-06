@@ -668,7 +668,28 @@ test("the public install caller prints a sanitized diagnosis after preserving th
     }));
     const zipPath = join(sandbox, "fixture-kit.zip");
     const guidePath = join(sandbox, "fixture-guide.md");
+    const manifestPath = join(sandbox, "fixture-manifest.json");
     writeFileSync(zipPath, zip);
+    // ADR 009: the runner reads the public release manifest before it may
+    // select an artifact. A candidate manifest is the open-door state this
+    // supervised candidate guide belongs to; a held one would exit before the
+    // helper this test exists to drive.
+    writeFileSync(manifestPath, JSON.stringify({
+      schema_version: 2,
+      release_state: "candidate",
+      available: false,
+      release: null,
+      published_at: null,
+      update_url: "https://financialbrain.ai/update",
+      installer: null,
+      changes: [],
+      held_reason: "Synthetic supervised candidate fixture.",
+      proof: {
+        archive_release_gate: "not_passed",
+        automated_release_suite: "pending",
+        live_client_acceptance: "required",
+      },
+    }));
     const artifactUrl = `https://financialbrain.ai/install/financial-brain-v${version}-field-kit-${digest(zip).slice(0, 16)}.zip`;
     writeFileSync(guidePath, [
       "AGENT_INSTALL_CONTRACT_VERSION: 2",
@@ -684,7 +705,7 @@ test("the public install caller prints a sanitized diagnosis after preserving th
       "",
     ].join("\n"));
 
-    // Only these two fixture responses are available. Any attempted network
+    // Only these three fixture responses are available. Any attempted network
     // request, including an unexpected install source, fails the child.
     //
     // A staged helper launch. The runner, its relay and its classifier are all
@@ -737,6 +758,8 @@ test("the public install caller prints a sanitized diagnosis after preserving th
       '  },',
       '});',
       'globalThis.fetch = async (url) => {',
+      '  if (url === "https://financialbrain.ai/update/manifest.json")',
+      '    return new Response(readFileSync(process.env.BRAIN_TEST_MANIFEST_PATH));',
       '  if (url === "https://financialbrain.ai/install/agent.md")',
       '    return new Response(readFileSync(process.env.BRAIN_TEST_GUIDE_PATH));',
       '  if (url === process.env.BRAIN_TEST_ARTIFACT_URL)',
@@ -772,6 +795,7 @@ test("the public install caller prints a sanitized diagnosis after preserving th
           unzipDirectory,
           process.env.PATH || process.env.Path || "",
         ].join(";"),
+        BRAIN_TEST_MANIFEST_PATH: manifestPath,
         BRAIN_TEST_GUIDE_PATH: guidePath,
         BRAIN_TEST_ZIP_PATH: zipPath,
         BRAIN_TEST_ARTIFACT_URL: artifactUrl,

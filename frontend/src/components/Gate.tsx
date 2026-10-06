@@ -18,7 +18,32 @@ export function gatePasskeyFailure(error: unknown, {
   enrolling: boolean;
   enrollmentKind?: EnrollmentKind | null;
   rehearsal: boolean;
-}): { message: string; unavailable: boolean } {
+}): { message: string; unavailable: boolean; allowSignIn?: boolean } {
+  const serverError = error instanceof ApiError && typeof error.body.error === "string"
+    ? error.body.error
+    : "";
+  const invalidEnrollment = serverError === "a valid enrollment link is required" ||
+    serverError === "the enrollment link is invalid, expired, or already used";
+  if (enrolling && enrollmentKind !== "document" && invalidEnrollment) {
+    return {
+      message: "This setup link has expired or was already used. Links work once and expire 15 minutes after they're made. If you already made a passkey on this device, choose Sign in instead. Otherwise ask for a new link.",
+      unavailable: true,
+      allowSignIn: true,
+    };
+  }
+  if (!enrolling && serverError === "unknown passkey") {
+    return {
+      message: "This Brain doesn't recognize this passkey. Try another passkey or ask for a new setup link.",
+      unavailable: false,
+    };
+  }
+  if (!enrolling && (serverError === "unknown or expired challenge" ||
+      serverError === "unknown, expired, or already used challenge")) {
+    return {
+      message: "This sign-in expired before it finished. Choose Continue with a passkey to try again.",
+      unavailable: false,
+    };
+  }
   if (!(error instanceof ApiError) || error.status !== 404) {
     return {
       message: error instanceof Error ? error.message : String(error),
@@ -65,8 +90,14 @@ export function Gate({ owner, inviteCode, enrollmentKind, notice, onIn }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(() => rehearsal ? rehearsalPasskeyNotice(enrollmentKind) : null);
   const [unavailable, setUnavailable] = useState(rehearsal);
+  const [allowSignIn, setAllowSignIn] = useState(false);
   const possessive = owner ? (/s$/i.test(owner) ? `${owner}'` : `${owner}'s`) : "Your";
   const hostname = typeof location === "undefined" ? "this Brain's address" : location.hostname;
+  // The rehearsal card describes the real setup page, so it must not name the
+  // loopback host it happens to be served from as the address to check.
+  const enrollmentAddress = rehearsal
+    ? documentEnrollment ? "that Brain's normal web address" : "your Brain's normal web address"
+    : hostname;
   // First name in the greeting: a client opening this is being welcomed, not
   // addressed formally, and "Dana, your brain is ready" reads like a person
   // wrote it where "Dana Okonkwo's brain is ready" reads like a database did.
@@ -91,6 +122,23 @@ export function Gate({ owner, inviteCode, enrollmentKind, notice, onIn }: {
       // is how someone decides the product is broken rather than that they
       // cancelled their device's passkey prompt.
       const failure = gatePasskeyFailure(e, { enrolling, enrollmentKind, rehearsal });
+      setError(failure.message);
+      setUnavailable(failure.unavailable);
+      setAllowSignIn(failure.allowSignIn === true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function signInInstead() {
+    setError(null);
+    setBusy(true);
+    try {
+      await signIn();
+      history.replaceState(null, "", "/app");
+      onIn();
+    } catch (e) {
+      const failure = gatePasskeyFailure(e, { enrolling: false, rehearsal });
       setError(failure.message);
       setUnavailable(failure.unavailable);
     } finally {
@@ -137,68 +185,66 @@ export function Gate({ owner, inviteCode, enrollmentKind, notice, onIn }: {
                   ? documentEnrollment ? "What happens on the real shared-access page" : "What happens on the real setup page"
                   : "Here is what happens next"}
               </h2>
-              <p className="mt-2 text-[13.5px] leading-relaxed text-ink-soft">
-                {rehearsal
-                  ? documentEnrollment
-                    ? "This rehearsal explains the real shared-access passkey step, but it never opens a secure device window, creates a passkey, or shares a document."
-                    : "This rehearsal explains the real passkey step, but it never opens a secure device window or creates a passkey."
-                  : "What will happen remains in your control. Nothing opens until you choose the button below."}
+              <p className="mt-2 text-[14.5px] leading-6">
+                Tap the button below. Your device will open its secure passkey window and ask for Face ID, Touch ID, or your screen lock. No password is needed.
               </p>
-              <ol className="mt-3 space-y-2.5">
-                <li className="flex gap-2.5 text-[14.5px] leading-6">
-                  <span className="text-accent font-semibold" aria-hidden="true">1</span>
-                  <span>{rehearsal ? "On the real page, choose " : "Choose "}<strong>{enrollmentButton}</strong>{rehearsal ? "." : " below."}</span>
-                </li>
-                <li className="flex gap-2.5 text-[14.5px] leading-6">
-                  <span className="text-accent font-semibold" aria-hidden="true">2</span>
-                  <span>
-                    {rehearsal ? "On the real page, your device" : "Your device"} will open its secure passkey window. Follow that window using
-                    Face ID, Touch ID, a fingerprint, a security key, your device PIN, or screen
-                    lock. First check that this page is at <strong>{hostname}</strong>.
-                  </span>
-                </li>
-              </ol>
+              {/* The scope, privacy and Cancel sentences stay in view before the
+                  device prompt, not inside the collapsed section below. */}
               <p className="mt-3 text-[13.5px] leading-relaxed text-ink-soft">
                 {documentEnrollment
-                  ? "Your passkey proves that you control the device completing this invitation. It protects only this shared-document workspace and does not make you an owner of the Brain. "
-                  : "This verifies that you are the owner and protects your private owner area without another password. "}
-                Your biometric data and device PIN never go to Financial Brain.
-                Financial Brain and your Claude or Codex guide cannot see or store your passkey,
-                Face ID, fingerprint, or device PIN. The private passkey stays with your device or
-                passkey provider. The Brain keeps only the public sign-in record needed to recognize that passkey.
+                  ? "Your passkey protects only this shared-document workspace and does not make you an owner of the Brain. It unlocks only the exact shared documents already chosen by the Brain owner. "
+                  : "This verifies that you are the owner and protects your private owner area. "}
+                Financial Brain and your Claude or Codex guide cannot see or store your passkey, Face ID, fingerprint, or device PIN.
               </p>
               <p className="mt-2 text-[13.5px] leading-relaxed text-ink-soft">
-                {documentEnrollment
-                  ? "This passkey step does not connect your files, messages, accounts, or other device data. It unlocks only the exact shared documents already chosen by the Brain owner. "
-                  : "This passkey step does not connect files, messages, accounts, or other device data. "}
-                If the address or secure window looks unexpected, choose Cancel. Nothing is enrolled.
-                Canceling the device prompt does not use it, so you can try again before this private
-                link expires.
+                Check that this page is at <strong>{enrollmentAddress}</strong>. If the address or secure window looks unexpected, choose Cancel. Nothing is enrolled.
               </p>
+              <details className="mt-3 text-[13.5px] leading-relaxed text-ink-soft">
+                <summary className="cursor-pointer font-medium text-ink">How this keeps you safe</summary>
+                <p className="mt-2">
+                  Your biometric data and device PIN never go to Financial Brain. The private passkey stays with your device or passkey provider. The Brain keeps only the public sign-in record needed to recognize that passkey.
+                </p>
+                <p className="mt-2">
+                  This passkey step does not connect your files, messages, accounts, or other device data. Canceling the device prompt does not use it, so you can try again before this private link expires.
+                </p>
+              </details>
             </div>
           ) : (
             <div role="note" className="mt-6 rounded-xl border border-line bg-paper/60 p-4 text-[14px] leading-relaxed text-ink-soft">
               Your device will open its normal passkey window only after you choose the button
               below. Check that this page is at <strong>{hostname}</strong>, then answer the system
               prompt yourself. Financial Brain never receives your biometric data or device PIN.
+              <span className="block mt-2">New computer? In the passkey window choose to use your phone, then scan the code with the phone you set up. Lost your phone? Ask for a new setup link.</span>
             </div>
           )}
 
           {passkeysSupported() ? (
-            <button
-              onClick={go}
-              disabled={busy || unavailable}
-              className="mt-7 w-full rounded-xl bg-accent px-5 py-3.5 text-white font-semibold
-                         disabled:opacity-55 transition-opacity"
-            >
-              {busy
-                ? "Waiting for your device…"
-                : unavailable
-                  ? "Passkey setup unavailable here"
-                  : enrolling
-                    ? enrollmentButton
-                    : "Continue with a passkey"}
-            </button>
+            <>
+              <button
+                onClick={go}
+                disabled={busy || unavailable}
+                className="mt-7 w-full rounded-xl bg-accent px-5 py-3.5 text-white font-semibold
+                           disabled:opacity-55 transition-opacity"
+              >
+                {busy
+                  ? "Waiting for your device…"
+                  : unavailable
+                    ? "Passkey setup unavailable here"
+                    : enrolling
+                      ? enrollmentButton
+                      : "Continue with a passkey"}
+              </button>
+              {allowSignIn && (
+                <button
+                  type="button"
+                  onClick={signInInstead}
+                  disabled={busy}
+                  className="mt-3 w-full rounded-xl border border-line bg-card px-5 py-3 text-sm font-semibold disabled:opacity-55"
+                >
+                  Sign in instead
+                </button>
+              )}
+            </>
           ) : (
             <p className="mt-7 text-sm text-ink-soft">
               This browser cannot use passkeys. Open this link in Safari or Chrome

@@ -36,7 +36,7 @@ const TENANT_ID = "primary";
 const HASH = /^[0-9a-f]{64}$/;
 const RANDOM_CAPABILITY = /^[A-Za-z0-9_-]{43,128}$/;
 const SOURCE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-const NEUTRAL_CALLBACK_HTML = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Return to Financial Brain</title><body><main><h1>Return to Financial Brain to finish.</h1><p>Financial Brain will show whether QuickBooks connected or whether another try is needed.</p></main></body></html>";
+const NEUTRAL_CALLBACK_HTML = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>QuickBooks return</title><body><main><p>QuickBooks sent you back. Go back to the Claude Code or Codex window on your computer. It will tell you whether QuickBooks connected. You can close this tab.</p></main></body></html>";
 
 class RouteError extends Error {
   constructor(code, status = 400, error = "invalid_request") {

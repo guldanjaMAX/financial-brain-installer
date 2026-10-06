@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { ApiError, api, type Me } from "./lib/api";
+import { ApiError, OWNER_SIGNED_OUT_EVENT, api, type Me } from "./lib/api";
 import { Gate, type EnrollmentKind } from "./components/Gate";
 import { Ask, ScopedAsk } from "./components/Ask";
 import { Settings } from "./components/Settings";
@@ -16,6 +16,7 @@ import { Attention } from "./components/ui";
 import { grantWorkspaceConfirmed } from "./lib/security";
 
 export type EnrollmentInvite = Readonly<{ code: string; kind: EnrollmentKind }>;
+export const SIGNED_OUT_NOTICE = "Your sign-in ended. Sign in again to pick up where you left off.";
 
 /**
  * Owner and exact-document invitations have separate, non-secret fragment
@@ -104,23 +105,38 @@ export function App() {
   const [view, setView] = useState<View>(initialOwnerView);
   const [ready, setReady] = useState(false);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const signedInRef = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
       setMe(await api<Me>("/api/app/me"));
       setAuthNotice(null);
     } catch (next) {
-      // A 401 is the ordinary signed-out case, not an error worth showing.
+      const sessionEnded = signedInRef.current && next instanceof ApiError && next.status === 401;
       setMe(null);
-      setAuthNotice(next instanceof ApiError && next.status === 403 && typeof next.body.recovery === "string"
-        ? next.body.recovery
-        : null);
+      setAuthNotice(sessionEnded
+        ? SIGNED_OUT_NOTICE
+        : next instanceof ApiError && next.status === 403 && typeof next.body.recovery === "string"
+          ? next.body.recovery
+          : null);
     } finally {
       setReady(true);
     }
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    signedInRef.current = me?.signed_in === true;
+  }, [me]);
+  useEffect(() => {
+    const signedOut = () => {
+      if (!signedInRef.current) return;
+      setMe(null);
+      setAuthNotice(SIGNED_OUT_NOTICE);
+    };
+    window.addEventListener(OWNER_SIGNED_OUT_EVENT, signedOut);
+    return () => window.removeEventListener(OWNER_SIGNED_OUT_EVENT, signedOut);
+  }, []);
 
   // Nothing until the session is known: flashing the sign-in screen at someone
   // who is already signed in reads as being logged out.

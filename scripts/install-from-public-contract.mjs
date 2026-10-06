@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * Follow the PUBLIC install contract the way a client's agent is told to, and
- * fail on the first thing that does not match.
+ * Follow the PUBLIC install state the way a client's agent is told to, and fail
+ * on the first thing that does not match. A held doorway is a successful
+ * no-install result; candidate or stable continues to an artifact.
  *
  * The point is that this reads https://financialbrain.ai/install/agent.md, not
  * the repo. Testing the repo's own idea of the install proves the repo agrees
@@ -39,7 +40,7 @@ import {
   resolveWindowsPowerShellPath,
   windowsNpmPowerShellFailureClassifier,
 } from "../operations/npm-cli-runtime.mjs";
-import { readSupervisedInstallContract } from "./check-install-page-version.mjs";
+import { readInstallDoorwayContract } from "./check-install-page-version.mjs";
 import { matchesExpectedSupervisedGuideUrl } from "./supervised-install-guide-oracle.mjs";
 
 const workdir = resolve(process.argv[2] || "./install-contract-run");
@@ -62,10 +63,16 @@ const readKitFile = (path, encoding, message) => {
   try { return readFileSync(path, encoding); } catch { die(message); }
 };
 
-// Use the same strict parser as the live install/update doorway checker. It
-// validates owner presence, exact platform target/status, unique fields, the
-// full commit, and a digest-derived bounded artifact URL before downloading it.
-const publicContract = await readSupervisedInstallContract({ platform: guideArg });
+// Use the same state-bound parser as the live install/update doorway checker.
+// Held validates the exact closed-door document. Candidate or stable validates
+// owner presence, exact platform target/status, unique fields, the full commit,
+// and a digest-derived bounded artifact URL before downloading it.
+const publicContract = await readInstallDoorwayContract({ platform: guideArg });
+if (publicContract.state === "held") {
+  ok(`held contract read from ${publicContract.guideUrl}`);
+  console.log("      install doorway is closed; no artifact was selected or executed");
+  process.exit(0);
+}
 const {
   artifactBytes,
   artifactSha256: artifactSha,

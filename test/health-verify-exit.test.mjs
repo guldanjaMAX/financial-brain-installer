@@ -259,6 +259,20 @@ if (SCENARIO) {
           },
         }));
       }
+      if (SCENARIO === "health-vector-settling-empty-queue") {
+        return json(boundedDocumentsReceipt({
+          backend: "d1",
+          rows: [{ source_type: "synthetic", has_documents: true }],
+          vector_backlog: {
+            pending: 0, upserts: 0, deletes: 0, submitted: 0, oldest_queued_at: null,
+          },
+          vector_readiness: {
+            ready: false, reason: "accepted_mutation_processing",
+            expected_vectors: 1, actual_vectors: 0, pending: 0, submitted: 0,
+            oldest_queued_at: null,
+          },
+        }));
+      }
       if ([
         "health-vector-count-mismatch",
         "health-paused-vector-count-mismatch",
@@ -432,10 +446,51 @@ if (SCENARIO) {
 
   const documentsDown = runScenario("health-documents-unreachable", "health", { adminKey: true });
   check("health exits nonzero when authenticated documents cannot be reached",
-    documentsDown.code === 1 && /documents endpoint 503.*authenticated access was not proven/is.test(documentsDown.output),
+    documentsDown.code === 1 && /Brain is up but couldn't check its documents just now/is.test(documentsDown.output) &&
+      documentsDown.output.includes(renderCliCommands("Wait a minute and run `brain health` again")),
     documentsDown.output);
   check("an unavailable documents endpoint never prints green",
     !/ok\s+documents endpoint/i.test(documentsDown.output), documentsDown.output);
+
+  {
+    const { cmdHealth } = await import("../brain.mjs");
+    const directory = mkdtempSync(join(tmpdir(), "brain-health-key-mismatch-"));
+    const manifestPath = join(directory, "fixture.manifest.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      client: { slug: "fixture" },
+      brain: { domain: "fixture.invalid", worker_name: "fixture" },
+      infrastructure: { cloudflare: { storage: "d1" } },
+    }));
+    let documentCalls = 0;
+    let failure = null;
+    try {
+      await cmdHealth(manifestPath, {
+        resolveKey: () => FIXTURE_ADMIN,
+        wait: async () => {},
+        request: async (url) => {
+          if (String(url).includes("/health")) return json({
+            ok: true, status: "ok", accepting_documents: true, version: "0.4.9",
+            vector_writer_protocol: "lease-v1", vector_drain_mode: "active",
+          });
+          documentCalls++;
+          return json({ error: "fixture unauthorized" }, 401);
+        },
+      });
+    } catch (error) {
+      failure = error;
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+    check("fifteen rejected key checks reach ADMIN_KEY_MISMATCH",
+      documentCalls === 15 && failure?.code === "ADMIN_KEY_MISMATCH" &&
+        /didn't accept this computer's key after 15 tries/.test(failure?.message || ""),
+      JSON.stringify({ documentCalls, code: failure?.code, message: failure?.message }));
+    check("key mismatch recovery preserves documents and gives the setup then health sequence",
+      /documents are safe and nothing changed/i.test(failure?.message || "") &&
+        /brain setup <manifest>/.test(failure?.message || "") &&
+        /puts the saved key back on your Brain/.test(failure?.message || "") &&
+        /`brain health` again/.test(failure?.message || ""), failure?.message);
+  }
 
   const invalidDocuments = runScenario("health-documents-invalid", "health", { adminKey: true });
   check("health rejects a 200 that is not a real documents inventory",
@@ -469,7 +524,7 @@ if (SCENARIO) {
 
   const httpFailure = runScenario("health-documents-http-then-healthy", "health", { adminKey: true });
   check("health does not retry an HTTP documents failure",
-    httpFailure.code === 1 && /documents endpoint 503/i.test(httpFailure.output) &&
+    httpFailure.code === 1 && /Brain is up but couldn't check its documents just now/i.test(httpFailure.output) &&
       !/still checking once more|documents endpoint 200|vector index is query-ready/i.test(httpFailure.output),
     httpFailure.output);
 
@@ -539,6 +594,12 @@ if (SCENARIO) {
     processing.code === 1 && /not query-visible yet.*accepted by Vectorize/is.test(processing.output) &&
       !/vector index is query-ready/.test(processing.output),
     processing.output);
+
+  const settling = runScenario("health-vector-settling-empty-queue", "health", { adminKey: true });
+  check("an active empty queue reaches the query-visibility decision without prescribing drain",
+    settling.code === 1 && /accepted work that is not query-visible yet/.test(settling.output) &&
+      /Leave the Brain alone/.test(settling.output) &&
+      !settling.output.includes(renderCliCommands("brain drain")), settling.output);
 
   // A manual drain takes the same lease the scheduled drain holds, so the two
   // exclude each other rather than adding up, and the manual runner is slower.

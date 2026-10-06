@@ -28,9 +28,7 @@ are recorded in the
 
 The guided install path is at `financialbrain.ai/install`. It uses one immutable
 release asset and installs into a folder owned by your user account, so it needs
-no Git, `sudo`, or administrator access. After the Brain is installed, continue
-at `financialbrain.ai/onboard`; `financialbrain.ai/onboarding` opens that same
-onboarding page.
+no Git, `sudo`, or administrator access.
 
 Before running the install command, use a normal terminal as your current user,
 not `sudo`, root, or Run as administrator. The computer needs Node.js 22 or
@@ -74,15 +72,22 @@ window is ordinary PowerShell.
 The full command path below is deliberate. It keeps working after Terminal is
 closed, without `sudo`, administrator access, or a shell-profile change.
 
-Normal setup and updates use an owner-controlled Cloudflare browser sign-in
-saved as this Brain's named local profile. The owner signs in, completes 2FA,
-chooses the exact account, and approves Cloudflare's consent page. No API token
-is created, revealed, copied, or pasted during an ordinary fresh install. A
-hidden token prompt appears only when the released CLI explicitly offers its
-bounded recovery path and the owner chooses it. That recovery-only token uses
-the minimum reviewed scope: Workers Scripts Edit, D1 Edit, Vectorize Edit, and
-Workers AI Read. It receives a short expiry and never belongs in chat or a
-command argument.
+Normal setup and updates start with an owner-controlled Cloudflare browser
+sign-in saved as this Brain's named local profile. The owner signs in, completes
+2FA, chooses the exact account, and approves Cloudflare's consent page. Pinned
+Wrangler 4.131.1 cannot request Vectorize permission for that browser profile.
+If the read-only preflight reaches that boundary, the installer says so and
+offers its bounded recovery path; a hidden token prompt appears only when the
+released CLI explicitly offers that path and the owner chooses it. The
+recovery-only token is a separate, account-scoped API token from the Cloudflare
+dashboard with the minimum reviewed scope: Workers Scripts Edit, D1 Edit,
+Vectorize Edit, and Workers AI Read. The installer never quietly substitutes a
+saved token. Before using one from protected local storage, it names the exact
+credential location and account, warns that the token may be old or revoked, and
+asks the owner to approve that credential. The owner can decline it and choose a
+different token through the hidden prompt. Give a recovery token a short expiry:
+leave its start date empty or set it to today, and set its end at least 7 days
+from now. It never belongs in chat or a command argument.
 
 Mac or Linux:
 
@@ -790,6 +795,9 @@ crossing the applicable limit stops before deleting anything or advancing the
 source cursor. It prints aggregate counts and an opaque approval fingerprint,
 never filenames or document IDs. Review the cause, then add the exact
 `--approve-removals <fingerprint>` value only when the plan is expected.
+To bound Gmail to recent mail, add `"since": "YYYY-MM-DD"` inside
+`corpora.gmail`. Changing that floor forces a full comparison; previously
+loaded older mail can leave the Brain only through the same removal-review gate.
 Drive treats access loss differently. An access-denied 403 remains in the
 review record and is excluded from deletion. A 404, or a 403 whose provider
 response says `notFound`, proves only that Drive stopped returning the item to

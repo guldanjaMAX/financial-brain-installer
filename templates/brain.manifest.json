@@ -100,6 +100,7 @@
       "exclude_file_ids_file": null
     },
     "gmail": {
+      "_comment": "Optional: add \"since\": \"YYYY-MM-DD\" to bound full and incremental Gmail ingestion from that date forward.",
       "enabled": false,
       "oauth_secret": "secret://GMAIL_OAUTH"
     },

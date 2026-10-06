@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GRANT_VIEWS, GrantWorkspace, OWNER_VIEWS, OwnerHeader, OwnerWorkspace,
+  SIGNED_OUT_NOTICE,
   enrollmentInviteFromHash, initialOwnerView, ownerViewRequiresEntity, ownerViewScopeGate,
   scopeGateRequiresEntity, visibleView,
 } from "./App";
@@ -42,6 +43,10 @@ const ownerMe: Me = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("principal workspace routing", () => {
+  it("explains a mid-session sign-out without losing the owner's place", () => {
+    expect(SIGNED_OUT_NOTICE).toBe("Your sign-in ended. Sign in again to pick up where you left off.");
+  });
+
   it("keeps the full owner navigation and limits a grant to Documents and Explore", () => {
     expect(OWNER_VIEWS).toEqual(["home", "year", "financial-map", "documents", "ask", "review", "access"]);
     expect(GRANT_VIEWS).toEqual(["documents", "ask"]);
@@ -200,11 +205,14 @@ describe("passkey enrollment welcome", () => {
       <Gate owner="Morgan Example" inviteCode="synthetic-invite" enrollmentKind="owner" onIn={() => undefined} />,
     );
     expect(html).toContain("Here is what happens next");
-    expect(html).toContain("Create my owner passkey");
     expect(html).toContain("secure passkey window");
     expect(html).toContain("This verifies that you are the owner");
     expect(html).toContain("cannot see or store your passkey, Face ID, fingerprint, or device PIN");
     expect(html).toContain("choose Cancel");
+    expect(html).toContain("Tap the button below");
+    expect(html).toContain("How this keeps you safe");
+    expect(html).toContain("No password is needed");
+    expect(html).toContain("biometric data and device PIN never go to Financial Brain");
     expect(html).not.toContain("Set up with Face ID");
     expect(html).not.toContain("Works on every device you own");
   });

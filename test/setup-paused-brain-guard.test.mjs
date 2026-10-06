@@ -216,7 +216,92 @@ try {
     JSON.stringify(pausedTouched));
 
   /* ------------------------------------------------------------------------
-   * 3. an ACTIVE brain takes the unchanged path
+   * 3. unknown health after a denied subdomain read never authorizes a pause
+   * --------------------------------------------------------------------- */
+
+  check("the installer exports the read-only existing-Worker address probe",
+    typeof brain.resolveExistingWorkerProbeDomain === "function",
+    typeof brain.resolveExistingWorkerProbeDomain);
+
+  if (typeof brain.resolveExistingWorkerProbeDomain === "function") {
+    const domainless = installedManifest();
+    delete domainless.brain.domain;
+    writeFileSync(manifestPath, JSON.stringify(domainless, null, 2) + "\n");
+
+    const deniedTouched = [];
+    let deniedError = null;
+    const deniedRead = new Error("fixture account subdomain read denied");
+    deniedRead.namedProfileSessionRejected = true;
+    try {
+      await quiet(() => brain.cmdSetup(manifestPath, setupOptions({
+        setupWorkerScriptExists: async () => {
+          deniedTouched.push("inventory");
+          return true;
+        },
+        resolveExistingWorkerProbeDomain: (pinned) =>
+          brain.resolveExistingWorkerProbeDomain(pinned, {
+            resolveAccount: async () => ({ id: ACCOUNT_ID }),
+            cf: async () => {
+              deniedTouched.push("subdomain probe");
+              throw deniedRead;
+            },
+          }),
+      }, deniedTouched)));
+    } catch (error) {
+      deniedError = error;
+    }
+    const deniedMessage = String(deniedError?.message || "");
+    const expectedDeniedMessage =
+      "setup found an existing Worker, but could not determine whether it is active or paused because the exact " +
+      "account subdomain read was denied. Nothing was changed.\n" +
+      "      Sign in again through the browser when prompted, then rerun the same command.\n" +
+      "      Do not start a paused deployment or change the Workers subdomain setting while this Worker's health is unknown.";
+    check("a denied subdomain read returns the complete owner-facing sign-in refusal",
+      deniedMessage === expectedDeniedMessage, deniedMessage);
+    check("the denied case reaches inventory and the address probe, then makes zero pause calls",
+      JSON.stringify(deniedTouched) === JSON.stringify([
+        "verify", "provision", "inventory", "subdomain probe",
+      ]), JSON.stringify(deniedTouched));
+
+    const readableTouched = [];
+    let readableError = null;
+    try {
+      await quiet(() => brain.cmdSetup(manifestPath, setupOptions({
+        setupWorkerScriptExists: async () => {
+          readableTouched.push("inventory");
+          return true;
+        },
+        resolveExistingWorkerProbeDomain: (pinned) =>
+          brain.resolveExistingWorkerProbeDomain(pinned, {
+            resolveAccount: async () => ({ id: ACCOUNT_ID }),
+            cf: async () => {
+              readableTouched.push("subdomain probe");
+              return { subdomain: "owner-subdomain" };
+            },
+          }),
+        probeExistingWorkerHealth: (pinned, { domain } = {}) => {
+          readableTouched.push(`health probe:${domain}`);
+          return brain.probeExistingWorkerHealth(pinned, { domain, http: liveHealth("active") });
+        },
+        probeExistingWorkerDrainMode: async () => {
+          readableTouched.push("drain-mode probe");
+          return "should-not-run";
+        },
+      }, readableTouched)));
+    } catch (error) {
+      readableError = error;
+    }
+    check("control: a readable subdomain lets the healthy Worker continue without a cutover",
+      readableError === null && JSON.stringify(readableTouched) === JSON.stringify([
+        "verify", "provision", "inventory", "subdomain probe", `health probe:${DOMAIN}`,
+        "secrets", "drain", "health", "wire",
+      ]), String(readableError?.message || JSON.stringify(readableTouched)));
+
+    writeFileSync(manifestPath, JSON.stringify(installedManifest(), null, 2) + "\n");
+  }
+
+  /* ------------------------------------------------------------------------
+   * 4. an ACTIVE brain takes the unchanged path
    * --------------------------------------------------------------------- */
 
   const activeTouched = [];
@@ -239,7 +324,7 @@ try {
     drainModeConsulted === false, String(drainModeConsulted));
 
   /* ------------------------------------------------------------------------
-   * 4. the AUTH_REQUIRED copy points at update, and at explicit consent
+   * 5. the AUTH_REQUIRED copy points at update, and at explicit consent
    * --------------------------------------------------------------------- */
 
   let authFailure = null;
@@ -265,7 +350,7 @@ try {
     /approv/i.test(authMessage), authMessage);
 
   /* ------------------------------------------------------------------------
-   * 5. doctor never sends a stuck brain to setup either
+   * 6. doctor never sends a stuck brain to setup either
    * --------------------------------------------------------------------- */
 
   // Doctor is what an operator runs against a brain that is already stuck, and

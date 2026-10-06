@@ -427,6 +427,7 @@ const expected = [
   "docs/decisions/006-pin-supervised-install-contract-v2.md",
   "docs/decisions/007-rehome-update-006-arm64-clause.md",
   "docs/decisions/008-rehome-update-025-breadth-into-update-044.md",
+  "docs/decisions/009-bind-install-doorway-to-release-state.md",
   "docs/decisions/README.md",
   "doctor.mjs",
   "eval/brain-client.mjs",
@@ -874,6 +875,9 @@ const expected = [
   "worker/src/lib/sessions.js",
   "worker/src/lib/webauthn.js",
   "worker/src/lib/query-intent.js",
+  // Reviewed pure query classifier: dependency-free, with no I/O, secrets,
+  // owner data, or network access; it only returns supplemental search filters.
+  "worker/src/lib/retrieval-routing.js",
   "worker/src/lib/retrieval-status.js",
   "worker/src/lib/secret-scan.js",
   // Reviewed declarative Worker source: fixed HTTPS origin and path prefix,

@@ -21,6 +21,12 @@ const coverage = (overrides: Partial<SourceCoverageDetail> = {}): SourceCoverage
 });
 
 describe("source coverage presentation", () => {
+  it("explains a paused update in owner terms with one recovery action", () => {
+    expect(phraseFor("paused", null)).toBe(
+      "Your Brain is in the middle of an update, so it isn't taking new documents yet. Asking questions still works. If you're not updating right now, open Claude Code and say: finish my Brain update.",
+    );
+  });
+
   it("keeps the four progress dimensions independent", () => {
     expect(coveragePresentation("ready").text).toBe("Ready");
     expect(coveragePresentation("running").text).toBe("Loading");

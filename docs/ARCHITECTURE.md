@@ -25,10 +25,15 @@ Cloudflare Worker in the owner's account
       +---- FTS5 keyword index
 ```
 
-Normal owner setup and updates use a per-install named Cloudflare browser
+Normal owner setup and updates start with a per-install named Cloudflare browser
 profile in the operating-system credential store for control-plane work such as
-verification, provisioning, deployment, migration, and Worker secrets. Scoped
-API tokens are limited to explicit automation, recovery, and older manifests.
+verification, provisioning, deployment, migration, and Worker secrets. Pinned
+Wrangler 4.131.1 cannot request Vectorize permission for that profile. Its
+read-only preflight therefore fails closed at the Vectorize read and may offer
+an explicitly selected, account-scoped API token before any mutation. A saved
+token is named by account and protected-store location, described as possibly
+old or revoked, and never selected without owner approval. Scoped API tokens
+otherwise remain limited to explicit automation, recovery, and older manifests.
 Routine use goes through the deployed Worker with the Brain's own admin key.
 Removing the control-plane profile or revoking a recovery token does not disable
 retrieval, health, ingest through a configured domain, evaluation, drain, or
@@ -395,9 +400,13 @@ derived. A multiply hard-linked manifest is rejected before the runtime lock,
 credentials, or network because it has no portable single adjacent state path.
 Google source writers acquire that source lease first and then one shared
 `provider:google` lease before opening the credential record. The Google OAuth
-connect ceremony uses the same shared lease. Mutating load preflight reads only
-credential-store metadata; dry-run connectors use a full-record reader that
-cannot migrate legacy Windows or macOS storage.
+connect ceremony uses the same shared lease. A Calendar writer waits up to
+twelve hours at this shared boundary when a long Google source or connection is
+active, while retaining its own source lease. The provider credential therefore
+cannot change during either run, another Calendar writer remains excluded, and
+an unattended Calendar refresh can be delayed rather than dropped. Mutating
+load preflight reads only credential-store metadata; dry-run connectors use a
+full-record reader that cannot migrate legacy Windows or macOS storage.
 
 The authenticated HTTP batch route preserves one receipt per input document.
 For D1 it reads prior rows for unique document identities in one batch preflight,
@@ -545,6 +554,18 @@ message-migration completion receipt, and every semantic answer fail or mark
 degradation until it is true. This prevents a non-empty but partially updated
 Vectorize result page from looking like complete semantic retrieval.
 
+Answer availability makes one narrower distinction without weakening that
+readiness contract. If keyword and vector queries both complete, the exact
+pending count is under one percent of expected vectors and no more than 50,000,
+the vector-count shortfall is under one percent, and the oldest queued row is
+under 24 hours old, retrieval reports `projection-catching-up`. A categorical
+refusal in that state becomes `coverage_incomplete`, never a corpus-absence
+claim. An evidence-gated cited answer remains usable. A capped queue is counted
+only to the smaller proportional proof limit; reaching the limit, a missing age,
+an old queue, projection drift, bootstrap, or either modality failing stays
+`search_unavailable`. Exact readiness still requires the empty-queue fence and
+all parity checks above.
+
 This creates a deliberate temporary state:
 
 - keyword search can find a new chunk immediately;
@@ -572,6 +593,16 @@ from Vectorize and keyword matches from D1 FTS5. Metadata filters are applied as
 early as the backend supports. Reciprocal rank fusion combines the rankings.
 Optional reranking may reorder a bounded candidate set when explicitly enabled.
 Scaffolding files are demoted rather than silently removed.
+
+Explicit calendar, meeting or Zoom, and iMessage or text-message wording adds
+supplemental candidate lanes using the durable `category` or `platform`
+metadata. Each lane is prefiltered before Vectorize top-K and the FTS limit,
+then fused with the ordinary whole-corpus lanes. It is not a hard source filter:
+cross-source evidence remains eligible, and a document already present in an
+ordinary lane receives no duplicate hint vote. Generic decision questions get
+no guessed source. Relative date phrases are not converted into hidden date
+filters because the Worker does not currently carry the owner's timezone at
+this boundary.
 
 Retrieval first collapses multiple chunks from one document. It also collapses
 same-source, same-date documents with the same canonical content hash before the
