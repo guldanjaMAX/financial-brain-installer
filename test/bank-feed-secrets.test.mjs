@@ -85,9 +85,18 @@ function cloudflareHarness(events, initialSecrets = [], { dropWrites = false } =
   // Written values are kept apart from `events`, which failure details print.
   const values = new Map();
   let lists = 0;
+  let plaidChecks = 0;
   const fetchImpl = async (input, options = {}) => {
     const url = new URL(String(input));
     const method = options.method || "GET";
+    // `brain connect bank` proves a typed pair with one read before writing.
+    // This offline Plaid accepts it; the refusal paths have their own suite.
+    if (url.hostname === "sandbox.plaid.com" && url.pathname === "/institutions/get" && method === "POST") {
+      plaidChecks++;
+      return new Response(JSON.stringify({ institutions: [{ institution_id: "ins_fixture", name: "Fixture Institution" }] }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    }
     if (url.pathname === "/client/v4/accounts" && method === "GET") {
       return apiResponse([{ id: "fixture-account", name: "Fixture account" }]);
     }
@@ -115,6 +124,7 @@ function cloudflareHarness(events, initialSecrets = [], { dropWrites = false } =
   fetchImpl.secretNames = () => new Set(secrets);
   fetchImpl.secretValue = (name) => values.get(name);
   fetchImpl.listCount = () => lists;
+  fetchImpl.plaidCheckCount = () => plaidChecks;
   return fetchImpl;
 }
 
@@ -402,10 +412,20 @@ try {
       run.fetchImpl.listCount() === 2 && FEED_NAMES.every((name) => run.fetchImpl.secretNames().has(name)) &&
       JSON.stringify(run.result?.secrets_written) === JSON.stringify(FEED_NAMES),
       JSON.stringify({ lists: run.fetchImpl.listCount(), written: run.result?.secrets_written }));
-    check("CONNECT BANK, ABSENT: output names the secrets and never prints a value",
-      FEED_NAMES.every((name) => run.output.includes(name)) &&
+    check("CONNECT BANK, ABSENT: the typed pair is checked with Plaid once before the first write",
+      run.fetchImpl.plaidCheckCount() === 1 && run.result?.keys_replaced === false,
+      JSON.stringify({ checks: run.fetchImpl.plaidCheckCount(), replaced: run.result?.keys_replaced }));
+    check("CONNECT BANK, ABSENT: output uses owner wording and never prints a value",
+      FEED_NAMES.every((name) => !run.output.includes(name)) &&
+      /Plaid accepted both keys/.test(run.output) &&
       [PLAID_CLIENT_ID, PLAID_SECRET, wrapping].every((value) => value && !run.output.includes(value)),
       "output withheld: it would be the leak being tested");
+    check("CONNECT BANK, ABSENT: owner card explains the return address and key custody",
+      /Plaid needs to know where to send you back/.test(run.output) &&
+      /Copy this return address into Plaid\. It is not a page to open/.test(run.output) &&
+      /https:\/\/dashboard\.plaid\.com\/team\/api/.test(run.output) &&
+      /Your Brain needs your two Plaid keys: the client_id, then the Sandbox or Production secret/.test(run.output) &&
+      /saved to your Brain, not to this computer/.test(run.output), run.output);
   }
 
   {
@@ -530,24 +550,29 @@ try {
     const unregistered = checkBankFeedRedirect(manifest({ bankFeed: true }));
     check("THE CHECK THAT SAVES A SESSION: an unregistered return address is a FAILURE, found in advance",
       unregistered.status === FAIL, JSON.stringify(unregistered));
-    check("and the fix carries the exact address to register, and where to register it",
+    check("and the owner card carries the exact address, dashboard link, and copy-not-open instruction",
       unregistered.fix.includes("https://fixture-brain.example.workers.dev/app/connect/bank") &&
-      /CLIENT'S OWN/.test(unregistered.fix), unregistered.fix);
-    check("and it says what happens if it is skipped, so it is not filed as a nag",
-      /land on a dead return/.test(unregistered.fix), unregistered.fix);
+      /dashboard\.plaid\.com\/team\/api/.test(unregistered.fix) &&
+      /Copy this return address into Plaid\. It is not a page to open/.test(unregistered.fix), unregistered.fix);
+    check("and it never tells the operator to register the webhook in a dashboard",
+      !/webhook/i.test(unregistered.fix), unregistered.fix);
 
-    const halfConfigured = checkBankFeedRedirect({
+    // The webhook travels in each Link token request (plaid-protocol.js), so a
+    // manifest webhook record is neither required nor able to fail the check.
+    const redirectOnly = checkBankFeedRedirect({
       ...manifest({ bankFeed: true }),
       corpora: { bank_feed: { enabled: true, registered_redirect_uris: ["https://fixture-brain.example.workers.dev/app/connect/bank"] } },
     });
-    check("a Plaid feed with no exact webhook record cannot report OK or claim a signed webhook",
-      halfConfigured.status === FAIL &&
-      /signed webhook destination.*not recorded as registered/i.test(halfConfigured.detail) &&
-      halfConfigured.fix.includes("https://fixture-brain.example.workers.dev/api/webhooks/plaid") &&
-      /credential setup and dashboard changes remain held/i.test(halfConfigured.fix),
-      JSON.stringify(halfConfigured));
+    check("a Plaid feed with its return address registered passes with no webhook record",
+      redirectOnly.status === OK &&
+      redirectOnly.detail.startsWith("return address saved in Plaid") &&
+      !redirectOnly.detail.includes("/app/connect/bank") &&
+      !redirectOnly.detail.includes("https://fixture-brain.example.workers.dev/api/webhooks/plaid") &&
+      /included with each Link request and needs no dashboard registration/.test(redirectOnly.detail) &&
+      !/register (this|the) (exact )?webhook/i.test(`${redirectOnly.detail} ${redirectOnly.fix || ""}`),
+      JSON.stringify(redirectOnly));
 
-    const wrongWebhook = checkBankFeedRedirect({
+    const staleWebhook = checkBankFeedRedirect({
       ...manifest({ bankFeed: true }),
       corpora: { bank_feed: {
         enabled: true,
@@ -555,9 +580,10 @@ try {
         registered_webhook_uris: ["https://other-brain.example.workers.dev/api/webhooks/plaid"],
       } },
     });
-    check("a different Brain's Plaid webhook does not satisfy the exact registration check",
-      wrongWebhook.status === FAIL && !/signed webhook https:\/\/other-brain/.test(wrongWebhook.detail),
-      JSON.stringify(wrongWebhook));
+    check("a stale webhook record is ignored and the owner line exposes no endpoint",
+      staleWebhook.status === OK && !/other-brain/.test(staleWebhook.detail) &&
+      !staleWebhook.detail.includes("/api/webhooks/plaid"),
+      JSON.stringify(staleWebhook));
 
     const plaidReady = checkBankFeedRedirect({
       ...manifest({ bankFeed: true }),
@@ -567,9 +593,9 @@ try {
         registered_webhook_uris: ["https://fixture-brain.example.workers.dev/api/webhooks/plaid"],
       } },
     });
-    check("Plaid reports its signed webhook only after the exact URI is recorded",
+    check("an older manifest that still records the webhook keeps passing",
       plaidReady.status === OK &&
-      /signed webhook https:\/\/fixture-brain\.example\.workers\.dev\/api\/webhooks\/plaid/.test(plaidReady.detail),
+      /signed webhook is included/.test(plaidReady.detail) && !/https:/.test(plaidReady.detail),
       JSON.stringify(plaidReady));
     const partialLegacy = checkBankFeedRedirect({
       ...manifest({ bankFeed: true }),

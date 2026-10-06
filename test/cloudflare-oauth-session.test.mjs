@@ -10,7 +10,10 @@ import {
   cmdConnect,
   cmdDoctor,
   cmdDisconnect,
+  commandPath,
+  renderCliCommands,
   withCloudflareControlCredential,
+  withWranglerSessionIfNeeded,
 } from "../brain.mjs";
 
 import {
@@ -70,6 +73,28 @@ function jsonResponse(body, { status = 200 } = {}) {
 
 function errorCode(code) {
   return (error) => error instanceof CloudflareOAuthSessionError && error.code === code;
+}
+
+function vectorizeScopeError(accountId = ACCOUNT_A) {
+  const error = new CloudflareOAuthSessionError(
+    "CLOUDFLARE_OAUTH_SCOPE_MISSING",
+    "request",
+    "fixture Vectorize scope refusal",
+  );
+  error.requiredSurface = "vectorize";
+  error.selectedAccountId = accountId;
+  return error;
+}
+
+function workersSubdomainScopeError(accountId = ACCOUNT_A) {
+  const error = new CloudflareOAuthSessionError(
+    "CLOUDFLARE_OAUTH_SCOPE_MISSING",
+    "request",
+    "fixture workers subdomain scope refusal",
+  );
+  error.requiredSurface = "workers_subdomain";
+  error.selectedAccountId = accountId;
+  return error;
 }
 
 test("profile names are stable, per-install, non-identifying, and never default", () => {
@@ -225,6 +250,47 @@ test("profile authorization pins Wrangler 4.131.1, keyring, scopes, browser call
   assert.equal(JSON.stringify(runner.calls).includes(AMBIENT_SECRET), false);
   assert.equal(authorize.args.includes("--profile"), false, "auth create takes the named profile positionally");
   assert.equal(authorize.args.includes("default"), false);
+});
+
+test("pinned Wrangler cannot request Vectorize through wrangler auth create", () => {
+  const source = readFileSync(resolve("node_modules/wrangler/wrangler-dist/cli.js"), "utf8");
+  const start = source.indexOf("DefaultScopes = {");
+  const end = source.indexOf("\n    };", start);
+  assert.ok(start >= 0 && end > start, "the pinned Wrangler browser-scope allowlist must be inspectable");
+  const wranglerScopes = source.slice(start, end);
+  assert.doesNotMatch(wranglerScopes, /["']vectorize:write["']/);
+  assert.match(source, /CF_SCOPES = \[[\s\S]*?["']vectorize:write["']/,
+    "the separate cf client knows Vectorize, proving this is the Wrangler client boundary");
+  assert.deepEqual(CLOUDFLARE_OAUTH_SCOPES, [
+    "account:read",
+    "user:read",
+    "workers:write",
+    "d1:write",
+    "ai:write",
+  ]);
+});
+
+test("macOS and win32 browser sign-in request the same pinned Wrangler scopes", () => {
+  const authorizeArgs = [];
+  for (const platformName of ["darwin", "win32"]) {
+    const runner = processRecorder();
+    createCloudflareOAuthProfile({
+      installIdentity: INSTALL_ID,
+      processRunner: runner,
+      platformName,
+      environment: platformName === "win32"
+        ? { Path: "C:\\fixture\\bin", USERPROFILE: "C:\\Users\\fixture" }
+        : { PATH: "/fixture/bin", HOME: "/fixture/home" },
+    });
+    const authorize = runner.calls.find((call) => call.args.includes("create"));
+    assert.ok(authorize, `${platformName} must reach the authorization decision point`);
+    authorizeArgs.push(authorize.args.slice(0, -1));
+  }
+  assert.deepEqual(authorizeArgs[1], authorizeArgs[0]);
+  assert.deepEqual(
+    authorizeArgs[0].slice(authorizeArgs[0].indexOf("--scopes") + 1, authorizeArgs[0].indexOf("--browser")),
+    [...CLOUDFLARE_OAUTH_SCOPES],
+  );
 });
 
 test("keyring failure is a generic hard stop and captured output is wiped", () => {
@@ -450,7 +516,7 @@ test("account selection handles zero, one, many, exact binding, cancellation, an
   );
 });
 
-test("account preflight proves the exact account plus Workers, D1, Vectorize, and Workers AI read paths", async () => {
+test("account preflight proves the exact account plus Workers subdomain, D1, Vectorize, and Workers AI read paths", async () => {
   const token = Buffer.from(TOKEN);
   const paths = [];
   const receipt = await preflightCloudflareOAuthAccount(
@@ -463,6 +529,9 @@ test("account preflight proves the exact account plus Workers, D1, Vectorize, an
         if (new URL(url).pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
           return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected account" }));
         }
+        if (new URL(url).pathname.endsWith(`/accounts/${ACCOUNT_A}/workers/subdomain`)) {
+          return jsonResponse(envelope({ subdomain: "exact-fixture-subdomain" }));
+        }
         return jsonResponse(envelope([]));
       },
     },
@@ -470,16 +539,680 @@ test("account preflight proves the exact account plus Workers, D1, Vectorize, an
   assert.deepEqual(receipt, {
     status: "ready",
     account: { id: ACCOUNT_A, name: "Selected account" },
-    checks: ["account", "workers", "d1", "vectorize", "workers_ai"],
+    checks: ["account", "workers", "workers_subdomain", "d1", "vectorize", "workers_ai"],
+    workersSubdomain: "exact-fixture-subdomain",
   });
   assert.deepEqual(paths, [
     `/client/v4/accounts/${ACCOUNT_A}`,
     `/client/v4/accounts/${ACCOUNT_A}/workers/scripts`,
+    `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
     `/client/v4/accounts/${ACCOUNT_A}/d1/database`,
     `/client/v4/accounts/${ACCOUNT_A}/vectorize/v2/indexes`,
     `/client/v4/accounts/${ACCOUNT_A}/ai/models/search?per_page=1`,
   ]);
   token.fill(0);
+});
+
+test("a Vectorize preflight refusal carries only its exact decision surface and selected account", async () => {
+  const token = Buffer.from(TOKEN);
+  const paths = [];
+  await assert.rejects(
+    preflightCloudflareOAuthAccount(token, { id: ACCOUNT_A, name: "Selected account" }, {
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        paths.push(parsed.pathname + parsed.search);
+        if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
+          return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected account" }));
+        }
+        if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}/workers/subdomain`)) {
+          return jsonResponse(envelope({ subdomain: "exact-fixture-subdomain" }));
+        }
+        if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}/vectorize/v2/indexes`)) {
+          return jsonResponse({ success: false, errors: [{ code: 10000 }], messages: [], result: null }, { status: 403 });
+        }
+        return jsonResponse(envelope([]));
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "CLOUDFLARE_OAUTH_SCOPE_MISSING");
+      assert.equal(error.requiredSurface, "vectorize");
+      assert.equal(error.selectedAccountId, ACCOUNT_A);
+      assert.deepEqual(Object.keys(error).sort(), ["code", "name", "phase", "requiredSurface", "selectedAccountId"]);
+      return true;
+    },
+  );
+  assert.equal(paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/vectorize/v2/indexes`,
+    "the refusal must reach the exact Vectorize decision point");
+  assert.ok(!paths.some((path) => path.includes("/ai/models/search")),
+    "no later preflight surface may run after the refusal");
+  token.fill(0);
+});
+
+test("named-profile setup stops at a denied workers subdomain preflight before its action can create resources", async () => {
+  const profile = cloudflareOAuthProfileName(INSTALL_ID);
+  const runner = processRecorder(({ args }) => args.includes("token")
+    ? okProcessResult({ stdout: tokenOutput(), stderr: Buffer.alloc(0) })
+    : okProcessResult());
+  const paths = [];
+  let actionCalls = 0;
+  await assert.rejects(
+    withCloudflareOAuthSession({
+      installIdentity: INSTALL_ID,
+      reauthorize: true,
+      action: async () => { actionCalls += 1; },
+      processRunner: runner,
+      platformName: "darwin",
+      environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        paths.push(parsed.pathname + parsed.search);
+        if (parsed.pathname.endsWith("/accounts")) {
+          return jsonResponse(envelope([
+            { id: ACCOUNT_A, name: "Selected" },
+          ], { result_info: { page: 1, count: 1, total_count: 1, total_pages: 1 } }));
+        }
+        if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
+          return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected" }));
+        }
+        if (parsed.pathname.endsWith("/workers/subdomain")) {
+          return jsonResponse(envelope(null, {
+            success: false,
+            errors: [{ code: 10000, message: "Authentication error" }],
+          }), { status: 403 });
+        }
+        return jsonResponse(envelope([]));
+      },
+    }),
+    errorCode("CLOUDFLARE_OAUTH_SCOPE_MISSING"),
+  );
+  assert.equal(actionCalls, 0, "the resource-creating action must not start after preflight denial");
+  assert.equal(paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`);
+  assert.ok(!paths.some((path) => path.includes("/d1/database")),
+    "preflight must fail closed at the missing subdomain read");
+  assert.ok(runner.calls.some((call) => call.args.includes(profile)));
+});
+
+// Cloudflare answers an account that never registered a workers.dev subdomain
+// with API error 10007 on exactly this read; the pinned Wrangler special-cases
+// the same code to register one. It is an account setting the owner can fix,
+// not a network failure and not a reason to reach for a token.
+function unregisteredSubdomainFetch(paths) {
+  return async (url) => {
+    const parsed = new URL(url);
+    paths.push(parsed.pathname + parsed.search);
+    if (parsed.pathname.endsWith("/accounts")) {
+      return jsonResponse(envelope([
+        { id: ACCOUNT_A, name: "Selected" },
+      ], { result_info: { page: 1, count: 1, total_count: 1, total_pages: 1 } }));
+    }
+    if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
+      return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected" }));
+    }
+    if (parsed.pathname.endsWith("/workers/subdomain")) {
+      return jsonResponse(envelope(null, {
+        success: false,
+        errors: [{ code: 10007, message: "This account does not have a workers.dev subdomain" }],
+      }), { status: 404 });
+    }
+    return jsonResponse(envelope([]));
+  };
+}
+
+function refusedSubdomainFetch(paths, providerCode = 10000) {
+  return async (url) => {
+    const parsed = new URL(url);
+    paths.push(parsed.pathname + parsed.search);
+    if (parsed.pathname.endsWith("/accounts")) {
+      return jsonResponse(envelope([
+        { id: ACCOUNT_A, name: "Selected" },
+      ], { result_info: { page: 1, count: 1, total_count: 1, total_pages: 1 } }));
+    }
+    if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
+      return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected" }));
+    }
+    if (parsed.pathname.endsWith("/workers/subdomain")) {
+      return jsonResponse(envelope(null, {
+        success: false,
+        errors: [{ code: providerCode, message: "Authentication error" }],
+      }), { status: 403 });
+    }
+    return jsonResponse(envelope([]));
+  };
+}
+
+test("preflight names an account with no registered workers.dev subdomain instead of a failed request", async () => {
+  const token = Buffer.from(TOKEN);
+  const paths = [];
+  await assert.rejects(
+    preflightCloudflareOAuthAccount(token, { id: ACCOUNT_A, name: "Selected" }, {
+      fetchImpl: unregisteredSubdomainFetch(paths),
+    }),
+    errorCode("CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED"),
+  );
+  assert.equal(paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
+    "the decision must be reached on the exact subdomain read");
+  assert.ok(!paths.some((path) => path.includes("/d1/database")), "preflight still stops at that read");
+  token.fill(0);
+});
+
+test("error 10007 on any other preflight read stays an ordinary refused request", async () => {
+  const token = Buffer.from(TOKEN);
+  await assert.rejects(
+    preflightCloudflareOAuthAccount(token, { id: ACCOUNT_A, name: "Selected" }, {
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
+          return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected" }));
+        }
+        return jsonResponse(envelope(null, {
+          success: false,
+          errors: [{ code: 10007, message: "fixture not found" }],
+        }), { status: 404 });
+      },
+    }),
+    errorCode("CLOUDFLARE_OAUTH_REQUEST_FAILED"),
+  );
+  token.fill(0);
+});
+
+test("setup with no registered workers.dev subdomain says how to register one and never offers the token path", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "brain-unregistered-subdomain-"));
+  try {
+    const manifestPath = resolve(root, "brain.manifest.json");
+    const resumeCommand = `brain setup ${commandPath(manifestPath)}`;
+    const runner = processRecorder(({ args }) => args.includes("token")
+      ? okProcessResult({ stdout: tokenOutput() })
+      : okProcessResult());
+    const paths = [];
+    const prompts = [];
+    let tokenCalls = 0;
+    let actionCalls = 0;
+    await assert.rejects(
+      withCloudflareControlCredential(() => { actionCalls += 1; }, {
+        manifestPath,
+        installIdentity: INSTALL_ID,
+        accountId: ACCOUNT_A,
+        freshOAuth: true,
+        reauthorizeOAuth: true,
+        interactive: true,
+        allowBrowserReauth: true,
+        allowTokenRecovery: true,
+        resumeCommand,
+        askFn: async (question) => { prompts.push(question); return "y"; },
+        withToken: async () => { tokenCalls += 1; throw new Error("token lane must not run"); },
+        oauthOptions: {
+          processRunner: runner,
+          platformName: "darwin",
+          environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+          fetchImpl: unregisteredSubdomainFetch(paths),
+        },
+      }),
+      (error) => {
+        const shown = renderCliCommands(error.message);
+        // Its own issue code: REMOTE_NOT_FOUND's guidance says to wait for
+        // propagation, which can never register a workers.dev subdomain.
+        assert.equal(error.code, "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED");
+        assert.match(error.message, /CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED/);
+        assert.match(error.message, /workers\.dev subdomain/);
+        assert.match(error.message, /Workers & Pages/);
+        assert.ok(shown.includes(renderCliCommands(resumeCommand)),
+          `the owner must be told to resume with ${renderCliCommands(resumeCommand)}`);
+        assert.doesNotMatch(error.message, /check the network|hidden token/i);
+        return true;
+      },
+    );
+    assert.equal(paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
+      "the refusal must follow the exact subdomain read");
+    assert.equal(actionCalls, 0, "nothing may be created on an account with no workers.dev subdomain");
+    assert.equal(tokenCalls, 0);
+    assert.deepEqual(prompts, [], "neither a browser refresh nor the token path may be offered");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A Brain on its own custom domain never serves from workers.dev, so an
+// account that never registered one is not a reason to refuse the sign-in.
+// deploy keeps main's 'optional' route disposition and only warns.
+test("preflight reports an unregistered workers.dev subdomain without refusing when the Brain does not need one", async () => {
+  const token = Buffer.from(TOKEN);
+  const paths = [];
+  const preflight = await preflightCloudflareOAuthAccount(token, { id: ACCOUNT_A, name: "Selected" }, {
+    fetchImpl: unregisteredSubdomainFetch(paths),
+    workersSubdomainRequired: false,
+  });
+  assert.equal(preflight.status, "ready");
+  assert.equal(preflight.workersSubdomainUnregistered, true);
+  assert.equal(Object.hasOwn(preflight, "workersSubdomain"), false,
+    "no hostname label may be invented for an account without one");
+  assert.ok(!preflight.checks.includes("workers_subdomain"));
+  assert.ok(paths.some((path) => path.includes("/d1/database")),
+    "the remaining read-only checks must still run");
+  token.fill(0);
+});
+
+function namedProfileManifest(root, brain) {
+  const manifestPath = resolve(root, "brain.manifest.json");
+  writeFileSync(manifestPath, JSON.stringify({
+    client: { slug: "fixture" },
+    brain: { worker_name: "fixture-brain", ...brain },
+    infrastructure: { cloudflare: { account_id: ACCOUNT_A, auth_profile: cloudflareOAuthProfileName(INSTALL_ID) } },
+  }));
+  return manifestPath;
+}
+
+async function namedProfileRoutine(manifestPath, paths, { fetchImpl = unregisteredSubdomainFetch(paths) } = {}) {
+  const runner = processRecorder(({ args }) => args.includes("token")
+    ? okProcessResult({ stdout: tokenOutput() })
+    : okProcessResult());
+  let actionCalls = 0;
+  let actionSession = null;
+  const prompts = [];
+  const outcome = await withCloudflareControlCredential((session) => {
+    actionCalls += 1;
+    actionSession = session;
+    return "done";
+  }, {
+    manifestPath,
+    accountId: ACCOUNT_A,
+    authProfile: cloudflareOAuthProfileName(INSTALL_ID),
+    interactive: true,
+    allowBrowserReauth: true,
+    allowTokenRecovery: true,
+    askFn: async (question) => { prompts.push(question); return "n"; },
+    withToken: async () => { throw new Error("token lane must not run"); },
+    oauthOptions: {
+      processRunner: runner,
+      platformName: "darwin",
+      environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+      fetchImpl,
+    },
+  }).then((value) => ({ value }), (error) => ({ error }));
+  return { ...outcome, actionCalls, actionSession, prompts };
+}
+
+test("a named-profile update of a custom-domain Brain continues when the subdomain read is refused", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-refused-subdomain-"));
+  try {
+    const paths = [];
+    const result = await namedProfileRoutine(
+      namedProfileManifest(root, { domain: "brain.example.invalid" }),
+      paths,
+      { fetchImpl: refusedSubdomainFetch(paths) },
+    );
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.value, "done");
+    assert.equal(result.actionCalls, 1, "the update action must run after the optional refusal");
+    assert.equal(result.actionSession.preflight.workersSubdomainUnreadable, true);
+    assert.equal(Object.hasOwn(result.actionSession.preflight, "workersSubdomain"), false,
+      "a refused read must not invent a subdomain receipt");
+    assert.ok(!result.actionSession.preflight.checks.includes("workers_subdomain"));
+    assert.ok(paths.some((path) => path.includes("/d1/database")),
+      "the remaining preflight checks must run after the optional refusal");
+    assert.deepEqual(result.prompts, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a custom-domain Brain treats any subdomain 403 as the same unused scope refusal", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-refused-subdomain-code-"));
+  try {
+    const paths = [];
+    const result = await namedProfileRoutine(
+      namedProfileManifest(root, { domain: "brain.example.invalid" }),
+      paths,
+      { fetchImpl: refusedSubdomainFetch(paths, 9109) },
+    );
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.value, "done");
+    assert.equal(result.actionCalls, 1, "the update action must run after the exact optional read is classified");
+    assert.equal(result.actionSession.preflight.workersSubdomainUnreadable, true);
+    assert.ok(!result.actionSession.preflight.checks.includes("workers_subdomain"));
+    assert.ok(paths.some((path) => path.includes("/vectorize/")),
+      "the remaining preflight reads must run after the optional refusal");
+    assert.deepEqual(result.prompts, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function subdomainFailureFetch(paths, failure) {
+  return async (url, init) => {
+    const parsed = new URL(url);
+    paths.push(parsed.pathname + parsed.search);
+    if (parsed.pathname.endsWith("/accounts")) {
+      return jsonResponse(envelope([
+        { id: ACCOUNT_A, name: "Selected" },
+      ], { result_info: { page: 1, count: 1, total_count: 1, total_pages: 1 } }));
+    }
+    if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
+      return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected" }));
+    }
+    if (parsed.pathname.endsWith("/workers/subdomain")) {
+      if (failure.kind === "network") throw new Error("fixture transport failure");
+      if (failure.kind === "timeout") {
+        return await new Promise((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => reject(new Error("fixture aborted request")), { once: true });
+        });
+      }
+      return jsonResponse(envelope(null, {
+        success: false,
+        errors: [{ code: failure.providerCode, message: "fixture refusal" }],
+      }), { status: failure.status });
+    }
+    return jsonResponse(envelope([]));
+  };
+}
+
+for (const failure of [
+  {
+    label: "401",
+    status: 401,
+    providerCode: 9109,
+    oauthCode: "CLOUDFLARE_OAUTH_REAUTH_REQUIRED",
+    publicCode: "AUTH_EXPIRED",
+  },
+  {
+    label: "5xx",
+    status: 503,
+    providerCode: 1000,
+    oauthCode: "CLOUDFLARE_OAUTH_REQUEST_FAILED",
+    publicCode: "NETWORK_UNREACHABLE",
+  },
+  {
+    label: "network error",
+    kind: "network",
+    oauthCode: "CLOUDFLARE_OAUTH_REQUEST_FAILED",
+    publicCode: "NETWORK_UNREACHABLE",
+  },
+  {
+    label: "timeout",
+    kind: "timeout",
+    oauthCode: "CLOUDFLARE_OAUTH_REQUEST_TIMEOUT",
+    publicCode: "NETWORK_UNREACHABLE",
+    requestTimeoutMs: 5,
+  },
+]) {
+  test(`a custom-domain Brain stops on a subdomain ${failure.label}`, async () => {
+    const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-subdomain-failure-"));
+    const paths = [];
+    let actionCalls = 0;
+    let observedOAuthCode = null;
+    try {
+      const manifestPath = namedProfileManifest(root, { domain: "brain.example.invalid" });
+      const runner = processRecorder(({ args }) => args.includes("token")
+        ? okProcessResult({ stdout: tokenOutput() })
+        : okProcessResult());
+      const outcome = await withCloudflareControlCredential(() => {
+        actionCalls += 1;
+        return "done";
+      }, {
+        manifestPath,
+        accountId: ACCOUNT_A,
+        authProfile: cloudflareOAuthProfileName(INSTALL_ID),
+        interactive: true,
+        allowBrowserReauth: true,
+        allowTokenRecovery: true,
+        askFn: async () => "n",
+        withToken: async () => { throw new Error("token lane must not run"); },
+        withOAuthSession: async (request) => {
+          try {
+            return await withCloudflareOAuthSession(request);
+          } catch (error) {
+            observedOAuthCode = error?.code;
+            throw error;
+          }
+        },
+        oauthOptions: {
+          processRunner: runner,
+          platformName: "darwin",
+          environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+          fetchImpl: subdomainFailureFetch(paths, failure),
+          ...(failure.requestTimeoutMs ? { requestTimeoutMs: failure.requestTimeoutMs } : {}),
+        },
+      }).then((value) => ({ value }), (error) => ({ error }));
+
+      assert.equal(outcome.value, undefined);
+      assert.equal(actionCalls, 0, "the action must not run after the exact subdomain read fails");
+      assert.equal(paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
+        "the failure must occur at the subdomain decision point");
+      assert.equal(observedOAuthCode, failure.oauthCode);
+      assert.equal(outcome.error?.code, failure.publicCode);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a custom-domain Brain still fails closed on a Vectorize 403 after the tolerated subdomain refusal", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-vectorize-refusal-"));
+  try {
+    const paths = [];
+    const result = await namedProfileRoutine(
+      namedProfileManifest(root, { domain: "brain.example.invalid" }),
+      paths,
+      {
+        fetchImpl: async (url) => {
+          const parsed = new URL(url);
+          paths.push(parsed.pathname + parsed.search);
+          if (parsed.pathname.endsWith("/accounts")) {
+            return jsonResponse(envelope([
+              { id: ACCOUNT_A, name: "Selected" },
+            ], { result_info: { page: 1, count: 1, total_count: 1, total_pages: 1 } }));
+          }
+          if (parsed.pathname.endsWith(`/accounts/${ACCOUNT_A}`)) {
+            return jsonResponse(envelope({ id: ACCOUNT_A, name: "Selected" }));
+          }
+          if (parsed.pathname.endsWith("/workers/subdomain") || parsed.pathname.includes("/vectorize/")) {
+            return jsonResponse(envelope(null, {
+              success: false,
+              errors: [{ code: 10000, message: "fixture refusal" }],
+            }), { status: 403 });
+          }
+          return jsonResponse(envelope([]));
+        },
+      },
+    );
+    assert.equal(result.actionCalls, 0, "the action must not run after the Vectorize refusal");
+    assert.ok(result.error, "the Vectorize refusal must remain fatal");
+    assert.equal(result.error.code, "REMOTE_PERMISSION_DENIED");
+    assert.ok(paths.some((path) => path.includes("/vectorize/")),
+      "the Vectorize decision point must be reached after the tolerated subdomain refusal");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+async function requiredSubdomainScopeRefusal({ interactive }) {
+  const root = mkdtempSync(resolve(tmpdir(), "brain-required-subdomain-refusal-"));
+  const paths = [];
+  const prompts = [];
+  let actionCalls = 0;
+  let tokenCalls = 0;
+  try {
+    const manifestPath = namedProfileManifest(root, {
+      domain: "fixture-brain.fixture-label.workers.dev",
+    });
+    const runner = processRecorder(({ args }) => args.includes("token")
+      ? okProcessResult({ stdout: tokenOutput() })
+      : okProcessResult());
+    const outcome = await withCloudflareControlCredential(() => {
+      actionCalls += 1;
+      return "done";
+    }, {
+      manifestPath,
+      accountId: ACCOUNT_A,
+      authProfile: cloudflareOAuthProfileName(INSTALL_ID),
+      interactive,
+      allowBrowserReauth: true,
+      allowTokenRecovery: true,
+      askFn: async (question) => { prompts.push(question); return "n"; },
+      withToken: async () => { tokenCalls += 1; throw new Error("declined recovery must not run"); },
+      oauthOptions: {
+        processRunner: runner,
+        platformName: "darwin",
+        environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+        fetchImpl: refusedSubdomainFetch(paths),
+      },
+    }).then((value) => ({ value }), (error) => ({ error }));
+    return { ...outcome, actionCalls, tokenCalls, paths, prompts };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("a workers.dev Brain gets a specific subdomain refusal and the explicit recovery offer", async () => {
+  const result = await requiredSubdomainScopeRefusal({ interactive: true });
+  assert.equal(result.value, undefined);
+  assert.equal(result.actionCalls, 0, "the update action must not run before required access is proved");
+  assert.equal(result.tokenCalls, 0, "declining the recovery offer must not enter the token lane");
+  assert.equal(result.paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
+    "the refusal must reach the exact required subdomain read");
+  assert.equal(result.prompts.length, 1, "the exact recovery decision must be offered once");
+  assert.match(result.prompts[0], /This browser sign-in cannot read this account's workers\.dev address, which this Brain needs for its web address/i);
+  assert.match(result.prompts[0], /Workers Scripts Edit[\s\S]*D1 Edit[\s\S]*Vectorize Edit[\s\S]*Workers AI Read/i);
+  assert.doesNotMatch(result.prompts[0], /refresh in the browser/i);
+  assert.match(result.error.message, /This browser sign-in cannot read this account's workers\.dev address, which this Brain needs for its web address/i);
+  assert.match(result.error.message, /recovery API token from the Cloudflare dashboard/i);
+  assert.match(result.error.message, /Nothing was changed/);
+});
+
+test("the workers.dev refusal enters the existing explicit recovery credential ceremony", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "brain-subdomain-recovery-control-"));
+  const paths = [];
+  const prompts = [];
+  const tokenRequests = [];
+  let actionCalls = 0;
+  try {
+    const manifestPath = namedProfileManifest(root, {
+      domain: "fixture-brain.fixture-label.workers.dev",
+    });
+    const runner = processRecorder(({ args }) => args.includes("token")
+      ? okProcessResult({ stdout: tokenOutput() })
+      : okProcessResult());
+    const result = await withCloudflareControlCredential((session) => {
+      actionCalls += 1;
+      return session.method;
+    }, {
+      manifestPath,
+      accountId: ACCOUNT_A,
+      authProfile: cloudflareOAuthProfileName(INSTALL_ID),
+      interactive: true,
+      allowBrowserReauth: true,
+      allowTokenRecovery: true,
+      askFn: async (question) => { prompts.push(question); return "y"; },
+      withToken: async (action, request) => {
+        tokenRequests.push(request);
+        return action();
+      },
+      oauthOptions: {
+        processRunner: runner,
+        platformName: "darwin",
+        environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+        fetchImpl: refusedSubdomainFetch(paths),
+      },
+    });
+    assert.equal(result, "api_token");
+    assert.equal(actionCalls, 1, "the approved recovery credential reaches the action once");
+    assert.equal(paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
+      "the recovery must originate at the exact subdomain decision point");
+    assert.equal(prompts.length, 1, "the recovery offer remains an explicit decision");
+    assert.doesNotMatch(prompts[0], /refresh in the browser/i);
+    assert.equal(tokenRequests.length, 1, "the shared recovery token runner is entered once");
+    assert.equal(tokenRequests[0].accountId, ACCOUNT_A);
+    assert.equal(tokenRequests[0].recoveryReason, "wrangler_workers_subdomain_scope_missing");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a non-interactive workers.dev Brain fails closed on a refused subdomain read", async () => {
+  const result = await requiredSubdomainScopeRefusal({ interactive: false });
+  assert.equal(result.value, undefined);
+  assert.equal(result.actionCalls, 0, "the update action must remain closed");
+  assert.equal(result.tokenCalls, 0, "non-interactive refusal must not enter the token lane");
+  assert.deepEqual(result.prompts, [], "non-interactive refusal must not ask a question");
+  assert.equal(result.paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
+    "the exact required read must be reached before refusal");
+  assert.match(result.error.message, /This browser sign-in cannot read this account's workers\.dev address, which this Brain needs for its web address/i);
+  assert.match(result.error.message, /Nothing was changed/);
+});
+
+test("a named-profile update of a custom-domain Brain is not refused for a missing workers.dev subdomain", async () => {
+  const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-"));
+  try {
+    const paths = [];
+    const result = await namedProfileRoutine(namedProfileManifest(root, { domain: "brain.example.invalid" }), paths);
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.value, "done");
+    assert.equal(result.actionCalls, 1);
+    assert.deepEqual(result.prompts, []);
+    assert.ok(paths.includes(`/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`),
+      "the subdomain is still read, only its absence is not fatal");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a named-profile Brain whose address is on workers.dev is still refused for a missing subdomain", async () => {
+  for (const brain of [{}, { domain: "fixture-brain.fixture-label.workers.dev" }]) {
+    const root = mkdtempSync(resolve(tmpdir(), "brain-workers-dev-"));
+    try {
+      const paths = [];
+      const result = await namedProfileRoutine(namedProfileManifest(root, brain), paths);
+      assert.equal(result.actionCalls, 0, "nothing may run on an account without the Brain's address");
+      assert.equal(result.error?.code, "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED");
+      assert.match(result.error.message, /workers\.dev subdomain/);
+      assert.deepEqual(result.prompts, [], "neither a browser refresh nor the token path may be offered");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+// An expired named profile refreshes in the browser. When that fresh sign-in
+// then meets the unregistered subdomain, the answer is the same account
+// setting, so the token prompt must not be offered and the resume command
+// must still be named.
+test("an unregistered subdomain found by the browser refresh is not routed to the token prompt", async () => {
+  const resumeCommand = "brain update /fixture/brain.manifest.json";
+  const prompts = [];
+  const reauthorizeValues = [];
+  let tokenCalls = 0;
+  let actionCalls = 0;
+  await assert.rejects(
+    withCloudflareControlCredential(() => { actionCalls += 1; }, {
+      accountId: ACCOUNT_A,
+      authProfile: cloudflareOAuthProfileName(INSTALL_ID),
+      interactive: true,
+      allowBrowserReauth: true,
+      allowTokenRecovery: true,
+      resumeCommand,
+      askFn: async (question) => { prompts.push(question); return "y"; },
+      withToken: async () => { tokenCalls += 1; throw new Error("token lane must not run"); },
+      withOAuthSession: async ({ reauthorize }) => {
+        reauthorizeValues.push(reauthorize);
+        if (!reauthorize) {
+          throw new CloudflareOAuthSessionError("CLOUDFLARE_OAUTH_REAUTH_REQUIRED", "preflight", "fixture expiry");
+        }
+        throw new CloudflareOAuthSessionError("CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED", "preflight", "fixture account");
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED");
+      assert.match(error.message, /Workers & Pages/);
+      assert.ok(renderCliCommands(error.message).includes(renderCliCommands(resumeCommand)),
+        "the refusal after a refresh must still name the resume command");
+      assert.doesNotMatch(error.message, /hidden token/i);
+      return true;
+    },
+  );
+  assert.deepEqual(reauthorizeValues, [false, true], "the browser refresh is the step that met the refusal");
+  assert.equal(prompts.length, 1, `only the browser refresh may be offered, saw ${JSON.stringify(prompts)}`);
+  assert.match(prompts[0], /refresh in the browser/);
+  assert.equal(tokenCalls, 0);
+  assert.equal(actionCalls, 0);
 });
 
 test("preflight rejects wrong-account readback and missing OAuth scope without response disclosure", async () => {
@@ -852,7 +1585,7 @@ test("a malformed or placeholder account can never select a generic recovery-tok
   assert.equal(selectedAccountId, null);
 });
 
-test("expired or stale-scope OAuth gets one owner-approved refresh before any action", async () => {
+test("expired OAuth gets one owner-approved refresh before any action", async () => {
   const profile = cloudflareOAuthProfileName(INSTALL_ID);
   const attempts = [];
   let actionCalls = 0;
@@ -869,9 +1602,9 @@ test("expired or stale-scope OAuth gets one owner-approved refresh before any ac
       attempts.push(request.reauthorize);
       if (!request.reauthorize) {
         throw new CloudflareOAuthSessionError(
-          "CLOUDFLARE_OAUTH_SCOPE_MISSING",
+          "CLOUDFLARE_OAUTH_REAUTH_REQUIRED",
           "request",
-          "fixture stale scope",
+          "fixture expired session",
         );
       }
       return request.action({
@@ -885,6 +1618,335 @@ test("expired or stale-scope OAuth gets one owner-approved refresh before any ac
   assert.equal(result, "completed");
   assert.deepEqual(attempts, [false, true]);
   assert.equal(actionCalls, 1);
+});
+
+test("a non-Vectorize scope refusal still gets one owner-approved browser refresh", async () => {
+  const profile = cloudflareOAuthProfileName(INSTALL_ID);
+  const attempts = [];
+  let tokenCalls = 0;
+  let actionCalls = 0;
+  const result = await withCloudflareControlCredential(() => {
+    actionCalls += 1;
+    return "completed";
+  }, {
+    authProfile: profile,
+    accountId: ACCOUNT_A,
+    interactive: true,
+    allowBrowserReauth: true,
+    allowTokenRecovery: true,
+    askFn: async () => "y",
+    withToken: async () => { tokenCalls += 1; throw new Error("token lane must not run"); },
+    withOAuthSession: async (request) => {
+      attempts.push(request.reauthorize);
+      if (!request.reauthorize) {
+        const error = new CloudflareOAuthSessionError(
+          "CLOUDFLARE_OAUTH_SCOPE_MISSING",
+          "request",
+          "fixture D1 scope refusal",
+        );
+        error.requiredSurface = "d1";
+        error.selectedAccountId = ACCOUNT_A;
+        throw error;
+      }
+      return request.action({
+        token: Buffer.from(TOKEN),
+        profile,
+        account: { id: ACCOUNT_A, name: "Selected" },
+        preflight: { status: "ready", checks: ["account", "workers", "d1", "vectorize", "workers_ai"] },
+      });
+    },
+  });
+  assert.equal(result, "completed");
+  assert.deepEqual(attempts, [false, true]);
+  assert.equal(actionCalls, 1, "the refreshed browser credential reaches the action once");
+  assert.equal(tokenCalls, 0, "only the pinned Vectorize gap should route directly to token recovery");
+});
+
+test("a Vectorize scope refusal skips the impossible browser refresh and explicitly approves the saved recovery credential", async () => {
+  const priorToken = process.env.CLOUDFLARE_API_TOKEN;
+  const priorLog = console.log;
+  delete process.env.CLOUDFLARE_API_TOKEN;
+  const profile = cloudflareOAuthProfileName(INSTALL_ID);
+  const attempts = [];
+  const prompts = [];
+  const lines = [];
+  const loadedAccounts = [];
+  let actionCalls = 0;
+  try {
+    console.log = (line) => lines.push(String(line));
+    const result = await withCloudflareControlCredential((session) => {
+      actionCalls += 1;
+      return session.method;
+    }, {
+      authProfile: profile,
+      accountId: ACCOUNT_A,
+      interactive: true,
+      allowBrowserReauth: true,
+      allowTokenRecovery: true,
+      askFn: async (question) => { prompts.push(question); return "y"; },
+      loadStoredCloudflareToken: (accountId) => {
+        loadedAccounts.push(accountId);
+        return Buffer.from("s".repeat(40));
+      },
+      withOAuthSession: async (request) => {
+        attempts.push(request.reauthorize);
+        throw vectorizeScopeError();
+      },
+    });
+
+    assert.equal(result, "api_token");
+    assert.deepEqual(attempts, [false], "Wrangler reauthorization cannot add its unsupported Vectorize scope");
+    assert.deepEqual(loadedAccounts, [ACCOUNT_A], "the saved token lookup must be exact-account scoped");
+    assert.equal(actionCalls, 1, "the explicitly approved recovery credential reaches the action once");
+    assert.equal(prompts.length, 2, "recovery and the saved credential each need an explicit decision");
+    assert.match(prompts[0], /Wrangler 4\.131\.1[\s\S]*Vectorize/i);
+    assert.match(prompts[0], /Workers Scripts Edit[\s\S]*D1 Edit[\s\S]*Vectorize Edit[\s\S]*Workers AI Read/i);
+    assert.match(prompts[1], /saved recovery API token[\s\S]*macOS Keychain/i);
+    assert.match(prompts[1], /old or revoked/i);
+    assert.match(prompts[1], new RegExp(ACCOUNT_A));
+    assert.doesNotMatch(lines.join("\n"), /s{20}/, "no recovery credential bytes may be shown");
+  } finally {
+    console.log = priorLog;
+    if (priorToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = priorToken;
+  }
+});
+
+// The outer CLI wrapper loads this computer's shared Wrangler session before a
+// command runs. That session must not count as an approved credential for the
+// Vectorize recovery, or the saved recovery token would be used, or skipped,
+// without the owner's second explicit decision.
+async function vectorizeRecoveryThroughCliSessionWrapper(sharedWranglerToken) {
+  const priorToken = process.env.CLOUDFLARE_API_TOKEN;
+  const priorLog = console.log;
+  delete process.env.CLOUDFLARE_API_TOKEN;
+  const profile = cloudflareOAuthProfileName(INSTALL_ID);
+  const prompts = [];
+  const lines = [];
+  const loadedAccounts = [];
+  let wranglerTokenReads = 0;
+  let oauthAttempts = 0;
+  let actionCalls = 0;
+  try {
+    console.log = (line) => lines.push(String(line));
+    const result = await withWranglerSessionIfNeeded(
+      () => withCloudflareControlCredential((session) => {
+        actionCalls += 1;
+        return session.method;
+      }, {
+        authProfile: profile,
+        accountId: ACCOUNT_A,
+        interactive: true,
+        allowBrowserReauth: true,
+        allowTokenRecovery: true,
+        askFn: async (question) => { prompts.push(question); return "y"; },
+        loadStoredCloudflareToken: (accountId) => {
+          loadedAccounts.push(accountId);
+          return Buffer.from("s".repeat(40));
+        },
+        storedTokenReference: () => "fixture protected store",
+        withOAuthSession: async () => {
+          oauthAttempts += 1;
+          throw vectorizeScopeError();
+        },
+      }),
+      {
+        env: {},
+        argv: [],
+        readWranglerOAuthToken: () => {
+          wranglerTokenReads += 1;
+          return sharedWranglerToken;
+        },
+      },
+    );
+    return { result, prompts, lines, loadedAccounts, wranglerTokenReads, oauthAttempts, actionCalls };
+  } finally {
+    console.log = priorLog;
+    if (priorToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = priorToken;
+  }
+}
+
+function assertSavedRecoveryApprovedExplicitly(run) {
+  assert.equal(run.result, "api_token");
+  assert.equal(run.oauthAttempts, 1, "the OAuth refusal decision point is reached once");
+  assert.equal(run.actionCalls, 1, "the explicitly approved saved recovery token reaches the action once");
+  assert.deepEqual(run.loadedAccounts, [ACCOUNT_A], "the saved token lookup remains exact-account scoped");
+  assert.equal(run.prompts.length, 2, "recovery and the saved credential each require approval");
+  assert.match(run.prompts[0], /Wrangler 4\.131\.1[\s\S]*Vectorize/i);
+  assert.match(run.prompts[1], /saved recovery API token[\s\S]*fixture protected store/i);
+  assert.match(run.lines.join("\n"), /about to use the saved recovery API token/i);
+  assert.doesNotMatch(run.lines.join("\n"), /s{20}|fixture-shared-wrangler/, "no credential bytes may be shown");
+}
+
+test("control: with no shared Wrangler session the CLI wrapper reaches the saved recovery approval", async () => {
+  const run = await vectorizeRecoveryThroughCliSessionWrapper(null);
+  assert.equal(run.wranglerTokenReads, 1, "the wrapper looked for a shared session and found none");
+  assertSavedRecoveryApprovedExplicitly(run);
+});
+
+test("a shared Wrangler session cannot bypass explicit saved recovery approval", async () => {
+  const run = await vectorizeRecoveryThroughCliSessionWrapper("fixture-shared-wrangler-session-not-real");
+  assert.equal(run.wranglerTokenReads, 1, "the wrapper loaded the shared session, so this arm is not vacuous");
+  assertSavedRecoveryApprovedExplicitly(run);
+});
+
+async function subdomainRecoveryThroughCliSessionWrapper(sharedWranglerToken) {
+  const priorToken = process.env.CLOUDFLARE_API_TOKEN;
+  const priorLog = console.log;
+  delete process.env.CLOUDFLARE_API_TOKEN;
+  const prompts = [];
+  const lines = [];
+  const loadedAccounts = [];
+  let wranglerTokenReads = 0;
+  let oauthAttempts = 0;
+  let actionCalls = 0;
+  try {
+    console.log = (line) => lines.push(String(line));
+    const result = await withWranglerSessionIfNeeded(
+      () => withCloudflareControlCredential((session) => {
+        actionCalls += 1;
+        return session.method;
+      }, {
+        authProfile: cloudflareOAuthProfileName(INSTALL_ID),
+        accountId: ACCOUNT_A,
+        interactive: true,
+        allowBrowserReauth: true,
+        allowTokenRecovery: true,
+        askFn: async (question) => { prompts.push(question); return "y"; },
+        loadStoredCloudflareToken: (accountId) => {
+          loadedAccounts.push(accountId);
+          return Buffer.from("s".repeat(40));
+        },
+        storedTokenReference: () => "fixture protected store",
+        withOAuthSession: async () => {
+          oauthAttempts += 1;
+          throw workersSubdomainScopeError();
+        },
+      }),
+      {
+        env: {},
+        argv: [],
+        readWranglerOAuthToken: () => {
+          wranglerTokenReads += 1;
+          return sharedWranglerToken;
+        },
+      },
+    );
+    return { result, prompts, lines, loadedAccounts, wranglerTokenReads, oauthAttempts, actionCalls };
+  } finally {
+    console.log = priorLog;
+    if (priorToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = priorToken;
+  }
+}
+
+for (const sharedWranglerToken of [null, "fixture-shared-wrangler-session-not-real"]) {
+  test(`subdomain recovery requires saved-token approval with shared session ${Boolean(sharedWranglerToken)}`, async () => {
+    const run = await subdomainRecoveryThroughCliSessionWrapper(sharedWranglerToken);
+    assert.equal(run.wranglerTokenReads, 1, "the shared-session wrapper must perform exactly one Wrangler read");
+    assert.equal(run.oauthAttempts, 1, "the subdomain refusal decision point must be reached once");
+    assert.equal(run.result, "api_token");
+    assert.equal(run.actionCalls, 1, "the approved saved recovery token must reach the action once");
+    assert.deepEqual(run.loadedAccounts, [ACCOUNT_A], "the saved token lookup must use the exact account");
+    assert.equal(run.prompts.length, 2, "recovery and the saved token must each receive approval");
+    assert.match(run.prompts[0], /workers\.dev address[\s\S]*recovery API token/i);
+    assert.match(run.prompts[1], /saved recovery API token[\s\S]*fixture protected store/i);
+    assert.match(run.lines.join("\n"), /about to use the saved recovery API token/i);
+    assert.doesNotMatch(run.lines.join("\n"), /s{20}|fixture-shared-wrangler/,
+      "no credential bytes may be shown");
+  });
+}
+
+test("win32 routes the same Vectorize scope refusal to the same explicit recovery reason", async () => {
+  const profile = cloudflareOAuthProfileName(INSTALL_ID);
+  const attempts = [];
+  const prompts = [];
+  const tokenRequests = [];
+  let actionCalls = 0;
+  const result = await withCloudflareControlCredential((session) => {
+    actionCalls += 1;
+    return session.method;
+  }, {
+    authProfile: profile,
+    platform: "win32",
+    interactive: true,
+    allowBrowserReauth: true,
+    allowTokenRecovery: true,
+    askFn: async (question) => { prompts.push(question); return "y"; },
+    withToken: async (action, request) => {
+      tokenRequests.push(request);
+      return action();
+    },
+    withOAuthSession: async (request) => {
+      attempts.push(request.reauthorize);
+      throw vectorizeScopeError();
+    },
+  });
+
+  assert.equal(result, "api_token");
+  assert.equal(actionCalls, 1, "the approved Windows recovery path reaches the action once");
+  assert.deepEqual(attempts, [false]);
+  assert.equal(tokenRequests.length, 1, "the Windows token decision point is reached once");
+  assert.equal(tokenRequests[0].platform, "win32");
+  assert.equal(tokenRequests[0].accountId, ACCOUNT_A);
+  assert.equal(tokenRequests[0].recoveryReason, "wrangler_vectorize_scope_missing");
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /Wrangler 4\.131\.1[\s\S]*Vectorize/i);
+});
+
+test("declining the saved recovery credential reaches a separate hidden-entry decision without using the saved token", async () => {
+  const priorToken = process.env.CLOUDFLARE_API_TOKEN;
+  const priorLog = console.log;
+  delete process.env.CLOUDFLARE_API_TOKEN;
+  const profile = cloudflareOAuthProfileName(INSTALL_ID);
+  const prompts = [];
+  const answers = ["y", "n", "y", "n"];
+  const lines = [];
+  const stored = Buffer.from("r".repeat(40));
+  let hiddenEntries = 0;
+  let actionCalls = 0;
+  try {
+    console.log = (line) => lines.push(String(line));
+    const result = await withCloudflareControlCredential((session) => {
+      actionCalls += 1;
+      return session.method;
+    }, {
+      authProfile: profile,
+      accountId: ACCOUNT_A,
+      platform: "darwin",
+      interactive: true,
+      allowBrowserReauth: true,
+      allowTokenRecovery: true,
+      askFn: async (question) => {
+        prompts.push(question);
+        return answers.shift() ?? "n";
+      },
+      loadStoredCloudflareToken: () => stored,
+      readCloudflareToken: async () => {
+        hiddenEntries += 1;
+        return Buffer.from("n".repeat(40));
+      },
+      storeCloudflareToken: () => { throw new Error("declined storage must not run"); },
+      withOAuthSession: async () => {
+        throw vectorizeScopeError();
+      },
+    });
+
+    assert.equal(result, "api_token");
+    assert.equal(actionCalls, 1, "the green-control manual credential reaches the action once");
+    assert.equal(hiddenEntries, 1, "declining the saved credential reaches hidden entry exactly once");
+    assert.ok(stored.every((byte) => byte === 0), "the declined saved credential is wiped before hidden entry");
+    assert.match(prompts[1], /saved recovery API token/i);
+    assert.match(prompts[2], /different[\s\S]*hidden prompt/i);
+    assert.match(lines.join("\n"), /newly entered recovery API token/i);
+    assert.doesNotMatch(lines.join("\n"), /r{20}|n{20}/, "neither credential may be shown");
+  } finally {
+    console.log = priorLog;
+    stored.fill(0);
+    if (priorToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = priorToken;
+  }
 });
 
 test("an OAuth-backed action failure propagates unchanged and is never retried as authentication", async () => {
@@ -1344,4 +2406,50 @@ test("adoption tells the owner the sign-in completed but could not be saved", as
     if (priorTty) Object.defineProperty(process.stdin, "isTTY", priorTty);
     rmSync(sandbox, { recursive: true, force: true });
   }
+});
+
+// Adoption runs its own sign-in ceremony, outside withCloudflareControlCredential.
+// A custom-domain Brain on an account with no workers.dev subdomain must still
+// be able to record its browser sign-in; a workers.dev Brain keeps the refusal.
+test("adopting a browser sign-in applies the same workers.dev need as routine commands", async () => {
+  const priorLog = console.log;
+  const run = async (brain) => {
+    const root = mkdtempSync(resolve(tmpdir(), "fb-oauth-adopt-domain-"));
+    const manifestPath = resolve(root, "brain.manifest.json");
+    writeFileSync(manifestPath, JSON.stringify({
+      brain: { worker_name: "fixture-brain", ...brain },
+      infrastructure: { cloudflare: { account_id: ACCOUNT_A } },
+    }, null, 2) + "\n");
+    const runner = processRecorder(({ args }) => args.includes("token")
+      ? okProcessResult({ stdout: tokenOutput() })
+      : okProcessResult());
+    const lines = [];
+    console.log = (line) => lines.push(String(line));
+    try {
+      const outcome = await adoptCloudflareAuthProfile(manifestPath, {
+        interactive: true,
+        env: {},
+        askFn: async () => "y",
+        oauthOptions: {
+          processRunner: runner,
+          platformName: "darwin",
+          environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
+          fetchImpl: unregisteredSubdomainFetch([]),
+        },
+      });
+      const saved = JSON.parse(readFileSync(manifestPath, "utf8"));
+      return { outcome, saved, text: lines.join("\n") };
+    } finally {
+      console.log = priorLog;
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const custom = await run({ domain: "brain.example.invalid" });
+  assert.match(String(custom.outcome), /^financial-brain-/, custom.text);
+  assert.equal(custom.saved.infrastructure.cloudflare.auth_profile, custom.outcome);
+
+  const workersDev = await run({});
+  assert.equal(workersDev.outcome, null);
+  assert.equal(workersDev.saved.infrastructure.cloudflare.auth_profile, undefined);
+  assert.match(workersDev.text, /CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED|workers\.dev subdomain/);
 });

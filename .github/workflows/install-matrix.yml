@@ -1,10 +1,10 @@
-# Package-only portion of Tier 1 in docs/INSTALL-TEST-SOP.md. This workflow reads
-# the PUBLISHED supervised-install contract and its sealed field kit, rejects a
-# malformed or mutable outer receipt, validates the platform guide's actual npm
-# command, installs into a throwaway prefix (including real PowerShell/npm.cmd on
-# Windows), and runs package-local version and doctor checks. It does not
-# provision Cloudflare, exercise the deployed browser, or complete a physical
-# owner ceremony.
+# Package-only portion of Tier 1 in docs/INSTALL-TEST-SOP.md. This workflow binds
+# the published release state to the matching install doorway. While held, it
+# proves the exact closed-door contract and stops before artifact selection. Once
+# candidate or stable, it validates the sealed field kit and platform npm command, installs
+# into a throwaway prefix (including real PowerShell/npm.cmd on Windows), and
+# runs package-local version and doctor checks. It does not provision Cloudflare,
+# exercise the deployed browser, or complete a physical owner ceremony.
 name: install-matrix
 
 on:
@@ -53,7 +53,7 @@ jobs:
           command -v brain >/dev/null && { echo "::error::a brain CLI is already on PATH"; exit 1; }
           echo "no brain, no CLI: this is a first install"
 
-      - name: verify and install from the published package contract
+      - name: verify the held doorway or install from the candidate or stable package contract
         shell: bash
         run: node scripts/install-from-public-contract.mjs "${RUNNER_TEMP}/install-run" --guide ${{ matrix.guide }}
 

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cmdWhatsnew } from "../brain.mjs";
+import { cmdWhatsnew, renderCliCommands } from "../brain.mjs";
+import { LOCKED_WRANGLER_LOCK_ROOT_VERSION } from "../operations/locked-wrangler-runtime.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path) => readFileSync(resolve(ROOT, path), "utf8");
@@ -16,14 +17,85 @@ const readme = read("README.md");
 const version = packageJson.version;
 const escapedVersion = version.replaceAll(".", "\\.");
 const currentEvidencePlan = read(`docs/release-evidence/v${version}-candidate-release-evidence-plan.md`);
+const updateAudit = read("docs/UPDATE-AUDIT.md");
+const maintainerGuide = read("docs/MAINTAINER.md");
+const developerReadme = read("docs/README-developer.md");
+const updateIncidents = json("docs/update-incidents.json");
 const retiredEvidencePlan = read("docs/release-evidence/v0.4.7-candidate-release-evidence-plan.md");
+const hardCodedIncidentCounts = ["/", "41-row release audit has 37 unresolved incidents"].join("");
+assert.ok(!read("test/current-version.test.mjs").includes(hardCodedIncidentCounts),
+  "the developer status check must derive incident counts instead of pinning number words");
+// Every candidate plan below the current version was never shipped; each must
+// say it is superseded so its planning cannot be read as live release scope.
+{
+  const parseVersion = (value) => value.split(".").map(Number);
+  const current = parseVersion(version);
+  const below = (other) => {
+    for (let index = 0; index < 3; index++) {
+      if (other[index] !== current[index]) return other[index] < current[index];
+    }
+    return false;
+  };
+  const planDirectory = resolve(ROOT, "docs/release-evidence");
+  const olderPlans = readdirSync(planDirectory)
+    .map((name) => /^v(\d+\.\d+\.\d+)-candidate-release-evidence-plan\.md$/.exec(name))
+    .filter((match) => match && below(parseVersion(match[1])));
+  assert.ok(olderPlans.length >= 2, "the retired 0.4.7 and 0.4.8 candidate plans must still be found");
+  for (const [name, planVersion] of olderPlans) {
+    const header = read(`docs/release-evidence/${name}`).split("\n## ")[0];
+    assert.match(header, /^- Status: superseded planning record\b/m, `${name} must say it is a superseded planning record`);
+    assert.doesNotMatch(header, /planning only; held/i, `${name} must not still read as a held live plan`);
+  }
+  assert.match(currentEvidencePlan, /the superseded v0\.4\.8 plan/,
+    "the current plan must call the v0.4.8 plan superseded");
+}
 const ciWorkflow = read(".github/workflows/ci.yml");
 const windowsRehearsalWorkflow = read(".github/workflows/windows-rehearsal.yml");
+
+const supervisedRecoveryChangelogText = [
+  "- **A v0.4.6 or earlier Brain left paused with queued work now stops at supervised",
+  "  recovery.** Those Workers do not report their writer mode to update's queue",
+  "  check and never process their queue while paused, so \"wait until query-ready\"",
+  "  could never come true. When the queue is not empty, update reads the Brain's",
+  "  public health check without sending an admin key. If that Worker is paused,",
+  "  the refusal names its release and explains that returning it to active needs",
+  "  that release's own tools, which use an older Wrangler runtime replaced for a",
+  "  security advisory. That step is done only under supervised recovery. Do not",
+  "  run `brain deploy` with either release, `brain rollback`, or `brain drain`, and",
+  "  do not clear VECTOR_DRAIN_MODE by hand. Run `brain health` and keep its output",
+  "  for support. If the health check cannot be read, the refusal says so rather",
+  "  than guessing. A paused v0.4.6 Brain with an empty queue still proceeds.",
+  "  If the Brain's own report shows the index marked for a full rebuild (what a",
+  "  v0.4.6 `brain rollback --yes` leaves) or holding more vectors than the database",
+  "  expects, deploying would un-pause a rolled-back Brain that can never become",
+  "  query-ready. The refusal names that evidence without claiming an unfinished",
+  "  update caused the pause, and gives the same supervised-recovery and support",
+  "  path. To check: such a refusal names supervised recovery and does not mention",
+  "  `brain deploy` as a remedy.",
+].join("\n");
+
+const followingChangelogControl = [
+  "- **A Worker older than the release your manifest records can be replaced by",
+  "  update again.** If an earlier kit's `brain deploy` or `brain rollback --yes`",
+  "  put its older Worker back after an update had finished, `brain update`,",
+  "  `brain update --force` and (for a paused Worker) `brain doctor --repair --yes`",
+  "  refused with no working remedy. Update now treats that Worker as a stale",
+  "  deploy it replaces: an empty queue proceeds, queued work on an active Worker",
+  "  gets \"wait until query-ready\", and queued work on a paused Worker gets the",
+  "  paused-Brain refusal. A Worker newer than this CLI is still refused. To",
+  "  check: `brain health` reports the older Worker version, and `brain update`",
+  "  reaches the paused deployment when the queue is empty.",
+].join("\n");
 
 assert.match(version, /^\d+\.\d+\.\d+$/, "package version must be a stable semantic version");
 assert.equal(packageLock.version, version, "package-lock top-level version drifted");
 assert.equal(packageLock.packages?.[""]?.version, version, "package-lock root package version drifted");
 assert.equal(manifestTemplate.brain?.version, version, "manifest template version drifted");
+// The locked Wrangler runtime refuses any product lockfile whose root version
+// differs from this reviewed constant, so a bump that leaves it behind makes
+// field-prepare refuse the tree's own lockfile.
+assert.equal(LOCKED_WRANGLER_LOCK_ROOT_VERSION, version,
+  "locked Wrangler runtime lockfile root version drifted from the package");
 
 // The worker carries its own version so health cannot report a number the
 // deployed code does not have. That constant is only trustworthy while it
@@ -35,6 +107,67 @@ assert.match(currentEvidencePlan, new RegExp(`^# v${escapedVersion} candidate re
   "current candidate has no version-matched evidence plan");
 assert.match(currentEvidencePlan, /Candidate source commit: unbound[\s\S]*?Field execution: none/,
   "the current plan must not imply final-SHA or field proof before either exists");
+const incidentCounts = {
+  total: updateIncidents.length,
+  unresolved: updateIncidents.filter((item) => item.status !== "verified").length,
+  deferred: updateIncidents.filter((item) => item.deferral?.version === version).length,
+  closed: updateIncidents.filter((item) => item.status === "verified").length,
+};
+const smallNumberWords = [
+  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+];
+const writtenCount = (count) => smallNumberWords[count] ?? String(count);
+let developerCountChecks = 0;
+function assertDeveloperIncidentCounts(document) {
+  developerCountChecks += 1;
+  assert.match(document, new RegExp(
+    `${incidentCounts.total}-row release audit has ${incidentCounts.unresolved} unresolved incidents, ` +
+    `${writtenCount(incidentCounts.deferred)} ${escapedVersion} deferrals, and ` +
+    `${writtenCount(incidentCounts.closed)}\\s+` +
+    "rows closed on reviewed evidence",
+  ), "the developer status must report counts derived from the incident registry");
+}
+assertDeveloperIncidentCounts(developerReadme);
+const plantedWrongCount = developerReadme.replace(
+  `${incidentCounts.total}-row release audit`,
+  `${incidentCounts.total + 1}-row release audit`,
+);
+assert.notEqual(plantedWrongCount, developerReadme,
+  "the wrong-count probe must alter the developer status line");
+assert.throws(() => assertDeveloperIncidentCounts(plantedWrongCount),
+  /counts derived from the incident registry/,
+  "a planted wrong count must fail the registry-derived check");
+assert.equal(developerCountChecks, 2,
+  "the count validator must reach both the green control and planted-wrong-count decision points");
+// Acceptance-text counts by reference point, verified against the registry at
+// each point when written. Since the held 0.4.8 candidate: UPDATE-006,
+// UPDATE-012 and UPDATE-025 changed (ADR 007 and ADR 008) and UPDATE-044 was
+// added. Since v0.4.6 also UPDATE-036 and UPDATE-037 changed and UPDATE-043
+// was added. A later acceptance-text change must restate these counts in all
+// three places.
+for (const [label, document] of [
+  ["update audit", updateAudit],
+  ["candidate evidence plan", currentEvidencePlan],
+  ["maintainer guide", maintainerGuide],
+]) {
+  assert.match(document,
+    /Since the held 0\.4\.8\s+candidate,\s+three\s+acceptance\s+texts\s+changed\s+and\s+one\s+row\s+was\s+added[\s\S]*?UPDATE-006[\s\S]*?UPDATE-012[\s\S]*?UPDATE-025[\s\S]*?UPDATE-044/,
+    `${label} must count three changed acceptance texts and one new row since the held 0.4.8 candidate`);
+  assert.match(document,
+    /Against the last shipped\s+release,\s+v0\.4\.6,\s+five\s+acceptance\s+texts\s+changed\s+and\s+two\s+rows\s+were\s+added[\s\S]*?UPDATE-043[\s\S]*?UPDATE-03[67][\s\S]*?UPDATE-03[67]/,
+    `${label} must count five changed acceptance texts and two new rows since v0.4.6`);
+}
+// The disposable update gate is only meaningful at the scale that exercises the
+// accelerated bootstrap path; a plan that drops it silently weakens the gate.
+for (const [pattern, message] of [
+  [new RegExp(`Prepare a separately reviewed ${escapedVersion} disposable-resource plan and exact\\s+teardown targets before creating anything`),
+    "the current plan must require its own reviewed disposable-resource plan"],
+  [/at least 6,001 direct-D1 documents\s+and chunks and at least 3,001 durable epoch admissions/,
+    "the current plan must keep the accelerated paused-update scale requirement"],
+  [/Interrupt the update at\s+the reviewed non-final point, resume through the supported path/,
+    "the current plan must interrupt and resume the paused update"],
+  [/restore a bookmark first/, "the current plan must forbid restoring a bookmark first"],
+]) assert.match(currentEvidencePlan, pattern, message);
 const ciTestJob = ciWorkflow.slice(
   ciWorkflow.indexOf("  test:"),
   ciWorkflow.indexOf("  preflight-traps:"),
@@ -114,12 +247,24 @@ async function whatsnewStatusOutput(readStatus, options = {}) {
   const originalLog = console.log;
   console.log = (...values) => output.push(values.join(" "));
   try {
-    await cmdWhatsnew(manifestPath, { readStatus, discoverManifest });
+    await cmdWhatsnew(manifestPath, { readStatus, discoverManifest, all: options.all });
   } finally {
     console.log = originalLog;
   }
-  return output.join("\n").split("# What's new")[0];
+  const rendered = output.join("\n");
+  return options.full ? rendered : rendered.split("# What's new")[0];
 }
+
+const currentNotesOnly = await whatsnewStatusOutput(async () => ({
+  status: "up_to_date", latest_version: version,
+}), { full: true });
+assert.match(currentNotesOnly, /## 0\.4\.9/u);
+assert.doesNotMatch(currentNotesOnly, /## 0\.4\.6/u,
+  "whatsnew must print only the current version by default");
+const allNotes = await whatsnewStatusOutput(async () => ({
+  status: "up_to_date", latest_version: version,
+}), { full: true, all: true });
+assert.match(allNotes, /## 0\.4\.6/u, "whatsnew --all must retain the full history");
 
 let checkedInstalledVersion = null;
 const heldOutput = await whatsnewStatusOutput(async ({ installedVersion }) => {
@@ -127,8 +272,8 @@ const heldOutput = await whatsnewStatusOutput(async ({ installedVersion }) => {
   return { status: "release_held", installed_version: installedVersion };
 });
 assert.equal(checkedInstalledVersion, version, "whatsnew did not check the manifest's installed version");
-assert.match(heldOutput, /public release channel is held/i,
-  "whatsnew must name a held public channel");
+assert.match(heldOutput, new RegExp(`You're on ${escapedVersion}\\. No newer version is out yet\\. Nothing to do\\.`),
+  "whatsnew must make a held feed an informational nothing-to-do state");
 assert.doesNotMatch(heldOutput, /up to date/i,
   "a held public channel cannot be reported as up to date");
 
@@ -137,6 +282,41 @@ assert.match(unavailableOutput, /Unavailable is not current/i,
   "an unavailable release check must not become current");
 assert.doesNotMatch(unavailableOutput, /up to date/i,
   "an unavailable release check cannot be reported as up to date");
+
+const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+try {
+  for (const platform of ["linux", "win32"]) {
+    Object.defineProperty(process, "platform", { value: platform, configurable: true });
+    const whatsnewLines = [];
+    const originalLog = console.log;
+    console.log = (...values) => whatsnewLines.push(values.join(" "));
+    try {
+      await cmdWhatsnew(null, { discoverManifest: () => null });
+    } finally {
+      console.log = originalLog;
+    }
+    const renderedWhatsnew = whatsnewLines.join("\n");
+    // Git's Windows checkout may present CHANGELOG.md with CRLF line endings. The
+    // complete-entry assertion is about owner-visible words and command rendering,
+    // not the repository checkout's newline convention.
+    const normalizedRenderedWhatsnew = renderedWhatsnew.replaceAll("\r\n", "\n");
+    assert.ok(
+      normalizedRenderedWhatsnew.includes(renderCliCommands(supervisedRecoveryChangelogText, { platform })),
+      `whatsnew must render the complete supervised-recovery replacement text on ${platform}`,
+    );
+    assert.ok(
+      normalizedRenderedWhatsnew.includes(renderCliCommands(followingChangelogControl, { platform })),
+      `the following older-Worker control case must remain complete and render consistently on ${platform}`,
+    );
+    assert.doesNotMatch(
+      normalizedRenderedWhatsnew,
+      /install its own release, run .*brain deploy.*return it to active/is,
+      `whatsnew must not retain the retired-runtime deploy remedy on ${platform}`,
+    );
+  }
+} finally {
+  Object.defineProperty(process, "platform", originalPlatform);
+}
 
 const stableOutput = await whatsnewStatusOutput(async () => ({
   status: "up_to_date", latest_version: version,
@@ -161,7 +341,7 @@ assert.equal(discoveredWithoutArgument, true,
   "brain whatsnew without a manifest argument did not discover the installed Brain");
 assert.equal(noArgumentCheckedVersion, version,
   "brain whatsnew without a manifest argument did not check the discovered installed version");
-assert.match(noArgumentOutput, /public release channel is held/i,
+assert.match(noArgumentOutput, /No newer version is out yet/i,
   "the documented no-argument path must report the public release state");
 assert.doesNotMatch(noArgumentOutput, /up to date/i,
   "the documented no-argument path cannot call a held release up to date");

@@ -215,6 +215,43 @@ caught the mismatch rather than resolve which account is intended.
 
 **Who:** you.
 
+### 3b. `Issue: CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED`
+
+**You see:** Cloudflare sign-in worked, but the account has no workers.dev
+subdomain registered yet, and this Brain has no custom domain, so its address
+lives on that subdomain. Nothing was created.
+
+**Why:** a Cloudflare account that has never opened Workers & Pages has no
+workers.dev subdomain. This is an account setting. Waiting, a different network,
+or a different token reads the same account and gets the same answer, so the
+installer offers none of them.
+
+**Fix:** in the Cloudflare dashboard open Workers & Pages and register a
+workers.dev subdomain, then rerun the command the message names, usually
+`brain setup <manifest>` or `brain update <manifest>`.
+
+A Brain on its own custom domain is not stopped by this. Deploy only warns that
+the optional workers.dev route could not be enabled.
+
+**Who:** you.
+
+### 3c. `Issue: BRAIN_DOMAIN_MISSING`
+
+**You see:** a source inventory or provenance command stops before reading the
+admin key or contacting the Brain because the manifest has no saved
+`brain.domain`.
+
+**Why:** the command has no verified HTTPS address for this Brain. Guessing a
+hostname could send its admin key to the wrong place, so it refuses first.
+
+**Fix:** restore the exact deployed HTTPS hostname to `brain.domain` from a
+known-good manifest backup. If no trusted backup has it, run `brain health
+<manifest>` in an interactive terminal with this Brain's Cloudflare access,
+verify the workers.dev hostname it finds, and save that exact hostname. Then
+rerun the refused command. Do not guess the address.
+
+**Who:** you.
+
 ---
 
 ### 4. `R2 is not ready`

@@ -4,7 +4,7 @@ import {
 } from "../lib/api";
 import {
   accountCoverage, accountLabel, dateLabel, entityLabel, financialRecordsEmpty,
-  moneyLabel, nextDatedDeadline, partyLabel, waitingDetail, waitingMove,
+  moneyLabel, nextDatedDeadline, partyLabel, roundedFigureNote, waitingDetail, waitingMove,
 } from "../lib/finance";
 import { Attention, Badge, Chip, NextStep, Note, Row, Section, TruthNote } from "./ui";
 import { FinanceScopeBar, useFinanceScope } from "./FinanceScope";
@@ -174,10 +174,11 @@ function DeadlineHero({ deadline, entities, count }: {
   );
 }
 
-function CashSection({ snapshot }: { snapshot: FinSnapshot }) {
+export function CashSection({ snapshot }: { snapshot: FinSnapshot }) {
   if (!("cash" in snapshot)) return null;
   const cash = snapshot.cash!;
   const total = cash.mixed_currency ? null : moneyLabel(cash.total_minor, cash.currency);
+  const rounded = roundedFigureNote(cash.rounded_accounts, "balance");
   return (
     <Section title="Cash in the records" blurb="A dated position, never a mix of balances from different days.">
       {total ? (
@@ -187,6 +188,7 @@ function CashSection({ snapshot }: { snapshot: FinSnapshot }) {
             <span className="block text-[13px] text-ink-soft mt-0.5">
               As of {dateLabel(cash.as_of) || "a date that could not be read"}. Covers {cash.accounts_covered} of {cash.accounts_considered} cash {cash.accounts_considered === 1 ? "account" : "accounts"}.
             </span>
+            {rounded && <span className="block text-[13px] text-ink-soft mt-0.5">{rounded}</span>}
           </span>
           {!cash.complete && <Chip state="PROBLEM" />}
         </Row>

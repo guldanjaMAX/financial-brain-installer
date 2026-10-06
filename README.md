@@ -13,22 +13,22 @@ whichever supported clients are present without placing a key in their config.
 
 ## Install it
 
-This checkout is the unreleased 0.4.8 candidate. No 0.4.8 customer release or
+This checkout is the unreleased 0.4.9 candidate. No 0.4.9 customer release or
 immutable release asset exists. The earlier held 0.4.7 candidate was never
 tagged, published, or offered as a customer update; its identity is retired so
-its evidence cannot be confused with this changed candidate. The versioned URLs
+its evidence cannot be confused with this changed candidate. The held 0.4.8
+candidate was likewise never tagged, published, or offered as a customer
+update, and its identity is retired for the same reason. The versioned URLs
 in the candidate examples below are intentionally unavailable placeholders for
 release review. Do not run or share those commands as customer installation
 instructions. Check the guided page for the current release status before
 installing anything. The held candidate's proof boundary and remaining gates
 are recorded in the
-[0.4.8 evidence plan](docs/release-evidence/v0.4.8-candidate-release-evidence-plan.md).
+[0.4.9 evidence plan](docs/release-evidence/v0.4.9-candidate-release-evidence-plan.md).
 
 The guided install path is at `financialbrain.ai/install`. It uses one immutable
 release asset and installs into a folder owned by your user account, so it needs
-no Git, `sudo`, or administrator access. After the Brain is installed, continue
-at `financialbrain.ai/onboard`; `financialbrain.ai/onboarding` opens that same
-onboarding page.
+no Git, `sudo`, or administrator access.
 
 Before running the install command, use a normal terminal as your current user,
 not `sudo`, root, or Run as administrator. The computer needs Node.js 22 or
@@ -47,8 +47,8 @@ MCP discovery, and configuration checks instead.
 Mac or Linux:
 
 ```bash
-# Unavailable 0.4.8 candidate placeholder. Do not run until the public channel names this release.
-npm install --global --ignore-scripts --no-audit --no-fund --prefix "$HOME/.financial-brain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.8/brain-installer-0.4.8.tgz"
+# Unavailable 0.4.9 candidate placeholder. Do not run until the public channel names this release.
+npm install --global --ignore-scripts --no-audit --no-fund --prefix "$HOME/.financial-brain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.9/brain-installer-0.4.9.tgz"
 # Optional: makes the shorter `brain` examples work in this Terminal window.
 export PATH="$HOME/.financial-brain/bin:$PATH"
 ```
@@ -56,8 +56,8 @@ export PATH="$HOME/.financial-brain/bin:$PATH"
 Windows PowerShell:
 
 ```powershell
-# Unavailable 0.4.8 candidate placeholder. Do not run until the public channel names this release.
-npm.cmd install --global --ignore-scripts --no-audit --no-fund --prefix "$env:LOCALAPPDATA\FinancialBrain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.8/brain-installer-0.4.8.tgz"
+# Unavailable 0.4.9 candidate placeholder. Do not run until the public channel names this release.
+npm.cmd install --global --ignore-scripts --no-audit --no-fund --prefix "$env:LOCALAPPDATA\FinancialBrain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.9/brain-installer-0.4.9.tgz"
 # Optional: makes the shorter `brain` examples work in this PowerShell window.
 $env:Path = "$env:LOCALAPPDATA\FinancialBrain;$env:Path"
 ```
@@ -72,15 +72,22 @@ window is ordinary PowerShell.
 The full command path below is deliberate. It keeps working after Terminal is
 closed, without `sudo`, administrator access, or a shell-profile change.
 
-Normal setup and updates use an owner-controlled Cloudflare browser sign-in
-saved as this Brain's named local profile. The owner signs in, completes 2FA,
-chooses the exact account, and approves Cloudflare's consent page. No API token
-is created, revealed, copied, or pasted during an ordinary fresh install. A
-hidden token prompt appears only when the released CLI explicitly offers its
-bounded recovery path and the owner chooses it. That recovery-only token uses
-the minimum reviewed scope: Workers Scripts Edit, D1 Edit, Vectorize Edit, and
-Workers AI Read. It receives a short expiry and never belongs in chat or a
-command argument.
+Normal setup and updates start with an owner-controlled Cloudflare browser
+sign-in saved as this Brain's named local profile. The owner signs in, completes
+2FA, chooses the exact account, and approves Cloudflare's consent page. Pinned
+Wrangler 4.131.1 cannot request Vectorize permission for that browser profile.
+If the read-only preflight reaches that boundary, the installer says so and
+offers its bounded recovery path; a hidden token prompt appears only when the
+released CLI explicitly offers that path and the owner chooses it. The
+recovery-only token is a separate, account-scoped API token from the Cloudflare
+dashboard with the minimum reviewed scope: Workers Scripts Edit, D1 Edit,
+Vectorize Edit, and Workers AI Read. The installer never quietly substitutes a
+saved token. Before using one from protected local storage, it names the exact
+credential location and account, warns that the token may be old or revoked, and
+asks the owner to approve that credential. The owner can decline it and choose a
+different token through the hidden prompt. Give a recovery token a short expiry:
+leave its start date empty or set it to today, and set its end at least 7 days
+from now. It never belongs in chat or a command argument.
 
 Mac or Linux:
 
@@ -174,7 +181,7 @@ reviewed step at a time with `--run tools`, `cloudflare`, `smoke`, `google`, `zo
 `imap`, `passkey`, or `verify`. The owner still handles login, 2FA, OAuth consent,
 and the physical passkey gesture. For the supported Google, Zoom, and IMAP
 steps, tokens and app secrets go only into hidden terminal prompts or provider
-pages. The v0.4.8 Windows path refuses those three credential ceremonies until
+pages. The 0.4.9 candidate Windows path refuses those three credential ceremonies until
 its secure secret-entry bridge is physically proven. Its first owner source is
 one explicitly approved local folder, previewed first and loaded manually.
 
@@ -239,7 +246,8 @@ Windows PowerShell:
 & "$env:LOCALAPPDATA\FinancialBrain\brain.cmd" setup "$HOME\Financial Brain\brain.manifest.json"
 ```
 
-It asks three short questions and does everything else itself: creates the
+It asks a few short questions, including whether paid OCR should read scanned
+PDF pages, and does everything else itself: creates the
 database and search index in your account, deploys the worker, generates and
 saves your key, checks it is alive, and connects the brain to Claude Code plus
 an installed Codex client. Successful Claude wiring writes an owner-only
@@ -623,7 +631,7 @@ First install the exact release named on `financialbrain.ai/update`. Then run
 the update command from any folder. It uses the manifest location saved by
 setup, even after Terminal has been closed and reopened.
 
-The held v0.4.8 pilot evidence plan requires this exact read-only diagnostic
+The held candidate's pilot evidence plan requires this exact read-only diagnostic
 before any internal-owner update rung:
 
 ```bash
@@ -750,7 +758,7 @@ brain will not know.
 Then drop `--dry-run` to load it for real. Large loads are resumable: if it is
 interrupted, run the same command again and it continues from where it stopped.
 
-The held v0.4.8 Windows x64 pilot does not use that general folder command. Its
+The held Windows x64 pilot does not use that general folder command. Its
 bounded contract requires a dedicated manifest source root containing exactly
 one direct native-text regular file. Subdirectories, links, junctions,
 additional files, and broader source trees stop the pilot. The architecture
@@ -784,6 +792,9 @@ crossing the applicable limit stops before deleting anything or advancing the
 source cursor. It prints aggregate counts and an opaque approval fingerprint,
 never filenames or document IDs. Review the cause, then add the exact
 `--approve-removals <fingerprint>` value only when the plan is expected.
+To bound Gmail to recent mail, add `"since": "YYYY-MM-DD"` inside
+`corpora.gmail`. Changing that floor forces a full comparison; previously
+loaded older mail can leave the Brain only through the same removal-review gate.
 Drive treats access loss differently. An access-denied 403 remains in the
 review record and is excluded from deletion. A 404, or a 403 whose provider
 response says `notFound`, proves only that Drive stopped returning the item to
@@ -949,10 +960,54 @@ product says all three rather than the first one:
 - **A bad reading is still refused.** If the model described the page instead
   of transcribing it, or produced too little to be a page, the file is reported
   exactly as it was before OCR existed. Refusing beats a confident wrong answer.
+- **One slow page does not end the pass.** A timed-out page is retried twice
+  with longer, bounded deadlines. An already-running call is polled without
+  consuming another attempt. Every retry for that source document and page uses
+  the same opaque durable request identity, so a late first response cannot
+  start a second charged call, while another document with the same page image
+  remains independent. The same private page identity deterministically
+  recovers the encrypted handoff key on a later pass without storing that key
+  or making it derivable from the durable request ID alone. A successful
+  receipt keeps hashes, status, and usage only, never the transcription or
+  source locator. A provider 4xx or 5xx, timeout, empty text, malformed reply,
+  or any other non-success is never replayed as a result. A call with no final
+  response keeps its model-start proof for a 15-minute ambiguity window. A
+  definite provider failure can retry after 60 seconds, with at most 3 started
+  model calls for that page in any rolling 24 hours. The oldest of those three
+  starts must leave the rolling window before another call can begin, so the
+  page is held rather than permanently abandoned. The
+  load report gives a plain count of held pages. If the Brain remains healthy
+  but the page stays slow, that
+  document is skipped
+  and the rest of the pass continues. A transport, authentication, malformed
+  reply, unknown status, or model failure defers the document as a system
+  problem and can never become removal evidence. A later pass can reclaim a
+  reservation only when the model never started. A completed result keeps its
+  encrypted handoff until the source confirms that the whole document was
+  stored, so even a much later pass can recover it with no new model call. Once
+  stored, the acknowledgement is written into the same receipt and expired
+  ciphertext may be pruned. Owner image upload uses that same private page
+  identity, so an admin-key rotation cannot strand an already-paid result. A
+  pending owner image returns a plain retry message with the bounded wait and
+  rolling call count instead of becoming a generic service failure. If a
+  completed receipt has missing, mismatched, malformed, expired-after-acknowledgement,
+  or undecryptable ciphertext, it can make one clearly counted replacement
+  call in that seven-day window. The replacement gets a fresh receipt and must
+  be acknowledged again after the full document is stored. Owner upload carries
+  only the opaque OCR request ID through its content-free intent and
+  acknowledges it after exact ingest and upload-finalization readback, so normal
+  expiry pruning can apply. A missing completion remains a bounded retry state;
+  after its 15-minute ambiguity window, one recorded replacement call can clear
+  it. No state can retry more than once in one window. If the health check also
+  fails, progress is saved and the pass stops resumably.
 
 It is **off by default**, because it spends money on your account, once per
-scanned page. Turn it on with `safety.ocr.enabled` in the manifest. Before a run
-the installer prints what the pages will cost and how long they will take.
+scanned page. Fresh setup asks once and carries a yes answer into the initial
+deployment, so it does not need a separate update. On an existing Brain, turn
+it on with `safety.ocr.enabled` in the manifest and run `brain update`. The
+reviewed default is `@cf/meta/llama-4-scout-17b-16e-instruct`; the manifest can
+still name another Cloudflare model. Before a run the installer prints what the
+pages will cost and how long they will take.
 
 Before enabling it, an owner or technician can inspect a local folder without
 spending anything:
@@ -1004,7 +1059,13 @@ brain forget ./brain.manifest.json --source documents
 Shows you exactly what would be removed. Nothing goes until you add `--yes`.
 The preview also proves that the deployed Worker can remove the source registry
 row and record the audit event behind the same write barrier. If it cannot,
-the CLI refuses before authorizing document deletion.
+the CLI refuses before authorizing document deletion. Confirmation is bound to
+that preview's exact document count, row high-water mark, and durable corpus
+mutation generation. If a document is added or reingested before confirmation,
+the command refuses and asks for a new preview.
+The final receipt reports what this operation actually removed; if another
+forget overlapped it, the receipt says the counts are not exact rather than
+claiming the original enumeration as the removal count.
 
 ---
 

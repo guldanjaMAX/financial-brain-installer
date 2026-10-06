@@ -13,8 +13,17 @@ import { ANSWER_ERROR_MESSAGES } from "../src/lib/answer-render.js";
 import { DRIVE_STORED_FAMILY_UID_MAX_BYTES } from "../src/lib/stored-family-identity.js";
 import { WORKER_VERSION } from "../src/lib/version.js";
 
-let fail = 0, ran = 0;
+let fail = 0, ran = 0, known = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + d)); if (!c) fail++; };
+// A deferred defect whose current output is recorded, not approved. It is
+// never counted as a pass. If the recorded output changes, it fails, so a fix
+// has to turn it into an ordinary check with its own control.
+const knownLimitation = (n, stillRecorded, d = "") => {
+  known++;
+  console.log((stillRecorded ? "KNOWN LIMITATION  " : "FAIL  ") + n +
+    (stillRecorded ? "" : "  the recorded output changed; replace this with a real check  " + d));
+  if (!stillRecorded) fail++;
+};
 const isUnavailableRefusal = (body) =>
   body?.status === "search_unavailable" &&
   body?.answer === null &&
@@ -35,6 +44,8 @@ function mkEnv(rows, {
   sourceRegistrationEventThrows = false,
   unchunkedRows = [],
   ownedEntity = null,
+  rowsForQuery = null,
+  vectorMatchesForQuery = null,
   extra = {},
 } = {}) {
   const seen = { sql: [], binds: [], vectorQueries: [] };
@@ -65,7 +76,7 @@ function mkEnv(rows, {
               if (/zone NOT IN/.test(sql)) scoped = scoped.filter((row) => !bound.includes(row.zone));
               return { results: scoped.map((row) => ({ name: row.name })) };
             }
-            return { results: rows };
+            return { results: rowsForQuery ? rowsForQuery({ sql, bound, rows }) : rows };
           },
           first: async () => {
             if (/ON CONFLICT\(name\) DO NOTHING[\s\S]*RETURNING name, lower\(trim\(kind\)\) AS kind/.test(sql)) {
@@ -146,7 +157,8 @@ function mkEnv(rows, {
       query: async (_embedding, options) => {
         seen.vectorQueries.push(options);
         if (vectorThrows) throw new Error("no metadata index");
-        return { matches: vectorIds.map((id) => ({ id })) };
+        const ids = vectorMatchesForQuery ? vectorMatchesForQuery(options) : vectorIds;
+        return { matches: ids.map((id) => ({ id })) };
       },
       upsert: async () => {},
       describe: async () => ({ vectorCount: vectorIds.length, processedUpToMutation: null }),
@@ -356,6 +368,94 @@ const call = (env, path) => {
   check("date filter is in the SQL", /c\.document_date >= \?/.test(kw), kw);
   const bind = seen.binds.find((b) => b.includes("Acme"));
   check("and its value is bound", !!bind && bind.includes(Date.parse("2025-01-01")), JSON.stringify(bind));
+}
+
+/* ---- explicit source wording gets a supplemental pre-filtered candidate lane ---- */
+{
+  const distractors = Array.from({ length: 100 }, (_, index) => ({
+    ...ROW,
+    chunk_uid: `distractor-${index}#0`, doc_uid: `distractor-${index}`,
+    source_id: `distractor-${index}`, source: index % 2 ? "drive" : "gmail",
+    category: "general", platform: null, title: `Synthetic distractor ${index}`,
+    text: `Synthetic project update ${index}`,
+  }));
+  const calendar = {
+    ...ROW,
+    chunk_uid: "calendar-target#0", doc_uid: "calendar-target", source_id: "calendar-target",
+    source: "calendar-source", source_kind: "calendar", category: "calendar", platform: null,
+    title: "Synthetic calendar event", text: "Synthetic event in the next seven days.",
+  };
+  const rows = [...distractors, calendar];
+  const rowsById = new Map(rows.map((row) => [row.chunk_uid, row]));
+  const rowsForQuery = ({ sql, bound }) => {
+    if (/chunks_fts MATCH/.test(sql)) {
+      return /c\.category = \?/.test(sql) && bound.includes("calendar") ? [calendar] : distractors;
+    }
+    if (/c\.chunk_uid IN/.test(sql)) return bound.map((id) => rowsById.get(id)).filter(Boolean);
+    return rows;
+  };
+  const vectorMatchesForQuery = (options) => options.filter?.category?.$eq === "calendar"
+    ? [calendar.chunk_uid]
+    : distractors.map((row) => row.chunk_uid);
+
+  const controlFixture = mkEnv(rows, {
+    vectorIds: distractors.map((row) => row.chunk_uid), rowsForQuery, vectorMatchesForQuery,
+  });
+  const control = await (await call(controlFixture.env, "/api/rag/unified?q=project+status&limit=10")).json();
+  check("control: an unhinted query proves the target is buried outside both candidate pools",
+    !control.results.some((row) => row.ref_key === calendar.source_id) &&
+      controlFixture.seen.vectorQueries.length === 1,
+    JSON.stringify({ results: control.results.map((row) => row.ref_key), queries: controlFixture.seen.vectorQueries }));
+
+  const hintedFixture = mkEnv(rows, {
+    vectorIds: distractors.map((row) => row.chunk_uid), rowsForQuery, vectorMatchesForQuery,
+  });
+  const hinted = await (await call(
+    hintedFixture.env,
+    "/api/rag/unified?q=what+is+on+my+calendar+in+the+next+seven+days&limit=10",
+  )).json();
+  const filteredVector = hintedFixture.seen.vectorQueries.find(
+    (query) => query.filter?.category?.$eq === "calendar",
+  );
+  const filteredKeyword = hintedFixture.seen.sql.find(
+    (sql) => /chunks_fts MATCH/.test(sql) && /c\.category = \?/.test(sql),
+  );
+  check("probe: explicit calendar wording reaches both supplemental decision points",
+    Boolean(filteredVector) && Boolean(filteredKeyword),
+    JSON.stringify({ vectorQueries: hintedFixture.seen.vectorQueries, filteredKeyword }));
+  check("a calendar candidate buried outside the ordinary 100-row pools reaches the route",
+    hinted.results.some((row) => row.ref_key === calendar.source_id),
+    JSON.stringify(hinted.results.map((row) => row.ref_key)));
+}
+{
+  for (const [label, question, expected] of [
+    ["meeting", "what was decided in my meetings", { category: "meeting" }],
+    ["iMessage", "what follow-up did I text in iMessage", { platform: "imessage" }],
+  ]) {
+    const { env, seen } = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+    await call(env, `/api/rag/unified?q=${encodeURIComponent(question)}&limit=5`);
+    const reached = seen.vectorQueries.some((query) => Object.entries(expected).every(
+      ([key, value]) => query.filter?.[key]?.$eq === value,
+    ));
+    check(`${label} wording selects its metadata namespace before topK`, reached, JSON.stringify(seen.vectorQueries));
+  }
+
+  const decision = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+  await call(decision.env, "/api/rag/unified?q=what+decisions+did+we+make&limit=5");
+  check("a generic decision question does not guess a source namespace",
+    decision.seen.vectorQueries.length === 1, JSON.stringify(decision.seen.vectorQueries));
+
+  const explicit = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+  await call(explicit.env, "/api/rag/unified?q=calendar+references&category=meeting&limit=5");
+  check("an explicit category scope is not widened by a query hint",
+    explicit.seen.vectorQueries.length === 1 &&
+      explicit.seen.vectorQueries[0]?.filter?.category?.$eq === "meeting",
+    JSON.stringify(explicit.seen.vectorQueries));
+
+  const genericText = mkEnv([ROW], { vectorIds: [ROW.chunk_uid] });
+  await call(genericText.env, "/api/rag/unified?q=document+text+extraction&limit=5");
+  check("generic document text does not select the iMessage platform",
+    genericText.seen.vectorQueries.length === 1, JSON.stringify(genericText.seen.vectorQueries));
 }
 
 /* ---- every public filter must narrow BOTH Vectorize and exact D1 hydration ---- */
@@ -3121,8 +3221,7 @@ const labelProjectionParityRows = [
 /* ---- documents reports the backend and the vector backlog ---- */
 {
   const { env } = mkEnv([{
-    source_type: "meeting", stored_documents: 3, logical_documents: 2,
-    total: 4, embedded: 4, last_ingest_at: 1750000000000,
+    source_type: "meeting", has_documents: 1, last_ingest_at: 1750000000000,
   }]);
   const documentsResponse = await call(env, "/api/admin/brain/documents");
   const b = await documentsResponse.json();
@@ -3131,8 +3230,10 @@ const labelProjectionParityRows = [
   check("documents names the backend", b.backend === "d1", JSON.stringify(b));
   check("documents binds active writer mode to the same receipt as readiness",
     b.vector_drain_mode === "active", JSON.stringify(b));
-  check("documents separates source files from stored split parts",
-    b.rows[0]?.documents === 2 && b.rows[0]?.logical_documents === 2 && b.rows[0]?.stored_documents === 3, JSON.stringify(b.rows[0]));
+  check("documents keeps corpus-sized counts off the hot readiness path",
+    b.rows[0]?.has_documents === true && b.rows[0]?.documents === null &&
+      b.rows[0]?.chunks === null && /not counted on large Brains/.test(b.rows[0]?.count_note || ""),
+    JSON.stringify(b.rows[0]));
   check("and reports vector backlog", b.vector_backlog && "pending" in b.vector_backlog, JSON.stringify(b.vector_backlog));
   check("and reports exact query-visible vector readiness",
     b.vector_readiness?.ready === true && b.vector_readiness.expected_vectors === 0 &&
@@ -3157,6 +3258,69 @@ const labelProjectionParityRows = [
   check("private aggregate inventory failures cannot be cached",
     failedDocuments.status === 500 && /no-store/.test(failedDocuments.headers.get("cache-control") || ""),
     `${failedDocuments.status} ${failedDocuments.headers.get("cache-control") || "missing"}`);
+}
+
+{
+  const statements = [];
+  const marker = {
+    schema_version: 48,
+    outbox_generation: 7,
+    document_high_water: 1,
+    chunk_high_water: 1,
+    latest_document_ingest: 1_750_000_000_000,
+    corpus_documents: 1,
+    corpus_chunks: 1,
+    last_ingest_at: 1_750_000_000_000,
+    source_event_high_water: 0,
+    source_count: 1,
+    vector_projection_status: "verified",
+    vector_projection_mutation_id: "",
+    vector_projection_submitted_at: 0,
+  };
+  const env = {
+    STORAGE: "d1", ADMIN_KEY: "k",
+    DB: {
+      prepare(sql) {
+        statements.push(sql);
+        const prepared = {
+          bind: () => prepared,
+          first: async () => /document_high_water/.test(sql) ? marker : null,
+          all: async () => ({
+            results: /SELECT names\.source AS source_type/.test(sql)
+              ? [{ source_type: "synthetic", last_ingest_at: 1_750_000_000_000 }]
+              : /document_rowid/.test(sql)
+                ? [{ document_rowid: 1, source: "synthetic", source_id: "one", part_of: null }]
+                : /page_state/.test(sql)
+                  ? [
+                    { page_state: 1, source_type: null, chunks: 1, pending_vectors: 0, last_id: 1 },
+                    { page_state: 0, source_type: "synthetic", chunks: 1, pending_vectors: 0, last_id: null },
+                  ]
+                  : [],
+          }),
+        };
+        return prepared;
+      },
+    },
+  };
+  const response = await worker.fetch(new Request(
+    "https://b.example/api/admin/brain/documents/report",
+    {
+      method: "POST",
+      headers: { "X-Admin-Key": "k", "Content-Type": "application/json" },
+      body: "{}",
+    },
+  ), env, {});
+  const body = await response.json();
+  check("the explicit documents report route returns exact paged totals",
+    response.status === 200 && body.summary?.exact === true &&
+      body.rows?.[0]?.documents === 1 && body.rows?.[0]?.chunks === 1,
+    JSON.stringify(body));
+  check("the exact report route reaches both bounded document and chunk pages",
+    statements.some((sql) => /document_rowid/.test(sql)) &&
+      statements.some((sql) => /page_state/.test(sql)), JSON.stringify(statements));
+  check("private exact report responses cannot be cached",
+    /no-store/.test(response.headers.get("cache-control") || ""),
+    response.headers.get("cache-control") || "missing");
 }
 
 {
@@ -3946,10 +4110,18 @@ function mkForgetEnv({
   registered = true,
   registryProof = true,
   documentIds = ["meeting:1", "meeting:2"],
+  overlapDeletes = false,
+  driftAfterPreviewRecheck = false,
 } = {}) {
   const sql = [];
+  const queries = [];
   const deleted = [];
-  const state = { registered, eventRecorded: false };
+  const state = {
+    registered,
+    eventRecorded: false,
+    corpusMutationGeneration: 41,
+    previewReads: 0,
+  };
   const env = {
     STORAGE: "d1", ADMIN_KEY: "k",
     VECTORIZE: {
@@ -3959,13 +4131,20 @@ function mkForgetEnv({
     AI: { run: async () => ({ data: [[0.1]] }) },
     DB: {
       prepare(q) {
+        queries.push(q);
         return {
           bind: (...b) => ({
             _sql: q,
             _args: b,
             all: async () => ({
-              results: /FROM documents WHERE source/.test(q)
-                ? documentIds.map((doc_uid) => ({ doc_uid }))
+              results: /WITH fence AS/.test(q)
+                ? Number(b[2]) === state.corpusMutationGeneration
+                  ? (documentIds.length
+                    ? documentIds.map((doc_uid) => ({ doc_uid, mutation_fence_matches: 1 }))
+                    : [{ doc_uid: null, mutation_fence_matches: 1 }])
+                  : [{ doc_uid: null, mutation_fence_matches: 0 }]
+                : /FROM documents[\s\S]*WHERE source/.test(q)
+                  ? documentIds.map((doc_uid) => ({ doc_uid }))
                 : /FROM chunks WHERE doc_uid/.test(q)
                   ? b.flatMap((docUid) => docUid === "meeting:1"
                     ? [{ chunk_uid: "meeting:1#0" }, { chunk_uid: "meeting:1#1" }]
@@ -3976,9 +4155,24 @@ function mkForgetEnv({
                     }))
                   : [],
             }),
-            first: async () => /SELECT name FROM sources WHERE name=\?1/.test(q) && state.registered
-              ? { name: b[0] }
-              : null,
+            first: async () => {
+              if (/SELECT name FROM sources WHERE name=\?1/.test(q) && state.registered) {
+                return { name: b[0] };
+              }
+              if (/COUNT\(\*\) AS documents[\s\S]*FROM documents[\s\S]*deleted_at IS NULL/.test(q)) {
+                state.previewReads++;
+                const corpusMutationGeneration = state.corpusMutationGeneration;
+                if (driftAfterPreviewRecheck && state.previewReads === 2) {
+                  state.corpusMutationGeneration++;
+                }
+                return {
+                  documents: documentIds.length,
+                  document_high_water: documentIds.length,
+                  corpus_mutation_generation: corpusMutationGeneration,
+                };
+              }
+              return null;
+            },
             run: async () => { sql.push(q); return {}; },
           }),
         };
@@ -3987,7 +4181,19 @@ function mkForgetEnv({
         sql.push("BATCH:" + stmts.length, ...stmts.map((statement) => statement?._sql || ""));
         const registryFinalization = stmts.some((statement) =>
           /source_events[\s\S]*'forget'/.test(statement?._sql || ""));
-        if (!registryFinalization) return stmts.map(() => ({ meta: { changes: 1 } }));
+        if (!registryFinalization) {
+          return stmts.map((statement) => ({
+            meta: {
+              changes: /DELETE FROM documents/.test(statement?._sql || "")
+                ? Math.max(0, statement._args.length - (overlapDeletes ? 1 : 0))
+                : /DELETE FROM chunks/.test(statement?._sql || "")
+                  ? Math.max(0, statement._args.reduce(
+                    (total, uid) => total + (uid === "meeting:1" ? 2 : 1), 0,
+                  ) - (overlapDeletes ? 1 : 0))
+                  : 1,
+            },
+          }));
+        }
         const changes = state.registered && registryProof ? 1 : 0;
         if (changes === 1) {
           state.eventRecorded = true;
@@ -3997,26 +4203,114 @@ function mkForgetEnv({
       },
     },
   };
-  return { env, sql, deleted, state };
+  return { env, sql, queries, deleted, state, documentIds };
+}
+
+async function postConfirmedSourceForget(env, source = "meeting") {
+  const preview = await (await post(env, "/api/admin/brain/forget", { source })).json();
+  return post(env, "/api/admin/brain/forget", {
+    source,
+    confirm: true,
+    preview_documents: preview.documents,
+    preview_document_high_water: preview.document_high_water,
+    preview_corpus_mutation_generation: preview.corpus_mutation_generation,
+  });
 }
 
 {
-  const { env, deleted, sql } = mkForgetEnv();
+  const { env, deleted, sql, queries } = mkForgetEnv();
   const b = await (await post(env, "/api/admin/brain/forget", { source: "meeting" })).json();
   // Irreversible, so it must be asked for explicitly rather than by default.
   check("forget DRY RUNS unless confirmed",
     b.dry_run === true && b.source === "meeting" &&
       b.would_unregister_source === true && b.source_unregistered === false,
     JSON.stringify(b));
-  check("and reports what it would remove", b.documents === 2 && b.chunks === 3, JSON.stringify(b));
+  check("and uses one exact indexed source count without enumerating the corpus",
+    b.documents === 2 && b.document_count_exact === true && b.chunks === null &&
+      b.document_high_water === 2 &&
+      b.corpus_mutation_generation === 41 &&
+      !Object.hasOwn(b, "targets") &&
+      queries.some((q) => /COUNT\(\*\) AS documents[\s\S]*source\s*=\s*\?1[\s\S]*deleted_at IS NULL/.test(q)) &&
+      !queries.some((q) => /SELECT doc_uid FROM documents WHERE source/.test(q)),
+    JSON.stringify({ body: b, queries }));
   check("without deleting any vectors", deleted.length === 0);
   check("or touching the database", !sql.some((q) => /BATCH/.test(q)), JSON.stringify(sql));
 }
 {
+  const { env, sql, queries, state } = mkForgetEnv({ driftAfterPreviewRecheck: true });
+  const preview = await (await post(env, "/api/admin/brain/forget", { source: "meeting" })).json();
+  const response = await post(env, "/api/admin/brain/forget", {
+    source: "meeting",
+    confirm: true,
+    preview_documents: preview.documents,
+    preview_document_high_water: preview.document_high_water,
+    preview_corpus_mutation_generation: preview.corpus_mutation_generation,
+  });
+  const body = await response.json();
+  check("source forget fences drift between the route recheck and target enumeration",
+    response.status === 409 && body.code === "source_forget_preview_changed" &&
+      state.previewReads === 2 && queries.some((query) => /WITH fence AS/.test(query)) &&
+      !sql.some((query) => /BATCH/.test(query)),
+    JSON.stringify({ status: response.status, body, state, queries, sql }));
+}
+{
+  const { env, sql, documentIds } = mkForgetEnv();
+  const preview = await (await post(env, "/api/admin/brain/forget", { source: "meeting" })).json();
+  documentIds.push("meeting:3");
+  const response = await post(env, "/api/admin/brain/forget", {
+    source: "meeting",
+    confirm: true,
+    preview_documents: preview.documents,
+    preview_document_high_water: preview.document_high_water,
+    preview_corpus_mutation_generation: preview.corpus_mutation_generation,
+  });
+  const body = await response.json();
+  check("source forget refuses when new documents arrived after the preview",
+    response.status === 409 && /source changed since the preview; preview again/i.test(body.error || "") &&
+      !sql.some((q) => /BATCH/.test(q)),
+    JSON.stringify({ status: response.status, body, sql }));
+}
+{
+  const { env, sql, state } = mkForgetEnv();
+  const preview = await (await post(env, "/api/admin/brain/forget", { source: "meeting" })).json();
+  state.corpusMutationGeneration++;
+  const response = await post(env, "/api/admin/brain/forget", {
+    source: "meeting",
+    confirm: true,
+    preview_documents: preview.documents,
+    preview_document_high_water: preview.document_high_water,
+    preview_corpus_mutation_generation: preview.corpus_mutation_generation,
+  });
+  const body = await response.json();
+  check("source forget refuses a same-row reingest that leaves count and row high-water unchanged",
+    response.status === 409 && body.code === "source_forget_preview_changed" &&
+      /preview again/i.test(body.error || "") && state.previewReads === 2 &&
+      !sql.some((q) => /BATCH/.test(q)),
+    JSON.stringify({ status: response.status, body, state, sql }));
+}
+{
+  const { env } = mkForgetEnv({ overlapDeletes: true });
+  const response = await post(env, "/api/admin/brain/forget", {
+    source: "meeting",
+    confirm: true,
+    preview_documents: 2,
+    preview_document_high_water: 2,
+    preview_corpus_mutation_generation: 41,
+  });
+  const body = await response.json();
+  check("an overlapping forget reports only rows deleted by this operation",
+    response.status === 200 && body.documents === 1 && body.targeted_documents === 2 &&
+      body.document_count_exact === false && body.chunk_count_exact === false &&
+      /another operation removed some rows/i.test(body.count_note || ""),
+    JSON.stringify(body));
+}
+{
   const { env, deleted, sql, state } = mkForgetEnv();
-  const b = await (await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true })).json();
+  const b = await (await postConfirmedSourceForget(env)).json();
   check("confirm actually deletes",
     b.dry_run === false && b.documents === 2 && b.source === "meeting" &&
+      b.document_count_exact === true && b.chunk_count_exact === true &&
+      !Object.hasOwn(b, "targets") &&
       b.source_unregistered === true && b.registry_event_recorded === true &&
       typeof b.operation_id === "string" && b.operation_id.length > 0,
     JSON.stringify(b));
@@ -4033,7 +4327,7 @@ function mkForgetEnv({
 }
 {
   const { env, state } = mkForgetEnv({ documentIds: [] });
-  const response = await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true });
+  const response = await postConfirmedSourceForget(env);
   const body = await response.json();
   check("an empty registered source is still unregistered by the guarded source forget",
     response.status === 200 && body.documents === 0 && body.source_unregistered === true &&
@@ -4042,7 +4336,9 @@ function mkForgetEnv({
 }
 {
   const { env, sql } = mkForgetEnv({ registered: false });
-  const response = await post(env, "/api/admin/brain/forget", { source: "typo", confirm: true });
+  const response = await post(env, "/api/admin/brain/forget", {
+    source: "typo", confirm: true, preview_documents: 0, preview_document_high_water: 0,
+  });
   const body = await response.json();
   check("a source typo is refused before any forget mutation",
     response.status === 404 && body.code === "source_not_registered" &&
@@ -4054,7 +4350,7 @@ function mkForgetEnv({
   // before the final registry transaction. Both guarded statements affect zero
   // rows, so the live source remains addressable and no audit event is forged.
   const { env, state } = mkForgetEnv({ registryProof: false });
-  const response = await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true });
+  const response = await postConfirmedSourceForget(env);
   const body = await response.json();
   check("a concurrent ingest keeps the source registered and prevents a false forget receipt",
     response.status === 500 && state.registered === true && state.eventRecorded === false &&
@@ -4080,7 +4376,7 @@ function mkForgetEnv({
   // Provider availability cannot make forget partially execute. Content is
   // already unreachable in D1 and the leased drain owns physical cleanup.
   const { env } = mkForgetEnv({ vectorThrows: true });
-  const b = await (await post(env, "/api/admin/brain/forget", { source: "meeting", confirm: true })).json();
+  const b = await (await postConfirmedSourceForget(env)).json();
   check("enqueue-only forget does not call an unavailable vector provider",
     b.vector_error === null && b.vector_cleanup_queued === 3, JSON.stringify(b));
   check("and the D1 delete still counted", b.documents === 2);
@@ -4249,6 +4545,9 @@ function mkForgetEnv({
             if (/FROM vector_bootstrap_batches WHERE epoch/.test(sql)) {
               return { confirmed: 0, in_flight: 0 };
             }
+            if (/WITH bounded AS MATERIALIZED/.test(sql)) {
+              return { n: 0, oldest: null, upserts: 0, deletes: 0, submitted: 0 };
+            }
             if (/vector_projection_mutation_id AS mutation_id/.test(sql)) {
               return {
                 schema_version: 13,
@@ -4328,6 +4627,9 @@ function mkForgetEnv({
             if (/FROM vector_bootstrap_batches WHERE epoch/.test(sql)) {
               return { confirmed: 0, in_flight: 0 };
             }
+            if (/WITH bounded AS MATERIALIZED/.test(sql)) {
+              return { n: 0, oldest: null, upserts: 0, deletes: 0, submitted: 0 };
+            }
             if (/vector_projection_mutation_id AS mutation_id/.test(sql)) {
               return {
                 schema_version: 13,
@@ -4404,7 +4706,7 @@ function mkForgetEnv({
             if (/CASE WHEN vector_drain_lease_owner IS NULL/.test(q)) {
               return { held: 1, schema_ready: 1, expires_at: Date.now() + 60_000 };
             }
-            if (/count\(\*\).*vector_outbox/i.test(q)) return { n: 7 };
+            if (/EXISTS[\s\S]*vector_outbox/i.test(q)) return { has_rows: 1 };
             return null;
           },
           all: async () => ({ results: [] }),
@@ -4421,7 +4723,8 @@ function mkForgetEnv({
     const raw = await response.text();
     const body = JSON.parse(raw);
     check("a busy manual drain returns an explicit fail-closed conflict",
-      response.status === 409 && body.busy === true && body.remaining === 7,
+      response.status === 409 && body.busy === true && body.remaining === 1 &&
+        body.remaining_is_lower_bound === true,
       raw);
     check("the busy conflict performs no embedding, vector write, or outbox mutation",
       vectorWrites === 0 && outboxMutations === 0, JSON.stringify({ vectorWrites, outboxMutations }));
@@ -5096,9 +5399,6 @@ function mkForgetEnv({
     diagnostic === null, String(diagnostic));
 }
 
-console.log(fail ? `\n${fail} FAILURES` : `\nroutes: all ${ran} tests passed`);
-process.exit(fail ? 1 : 0);
-
 /* ---- supported but incomplete keeps the supported part and names the gap ---- */
 {
   const rows = [{ ...ROW, chunk_uid: "lease:1#0", doc_uid: "lease:1", title: "Office lease 2026", client: null,
@@ -5135,5 +5435,173 @@ process.exit(fail ? 1 : 0);
     /another company/.test(body.evidence_gate?.reason || "") && body.evidence_gate?.partial !== true, JSON.stringify(body.evidence_gate));
 }
 
-console.log(`\n${ran} checks, ${fail} failed`);
-if (fail) process.exit(1);
+/* ---- a partial answer never cuts a sentence at a decimal point ----
+   Field report (C1, 2026-09-26): a supported-but-incomplete answer about one
+   entity's income and expenses came back as "73 [12]. 47 for rent [10]." The
+   partial path split sentences on every ".", so "$1,234.73 [12]" lost
+   everything before ".73", and a citation written before an amount turned
+   "$1,234.73" into a clean, wrong "$1,234". Whole-dollar controls run on the
+   same path so a uniform result cannot pass for the fix. */
+{
+  const ledger = (id, title, text) => ({
+    ...ROW, chunk_uid: `${id}#0`, doc_uid: id, source_id: id, uri: `drive://${id}`,
+    source: "drive", client: null, title, text,
+  });
+  const rows = [
+    ledger("ledger-a", "Example Holdings LLC March income ledger", "March income: $1,234.73 total deposits."),
+    ledger("ledger-b", "Example Holdings LLC March expense ledger", "March expenses: rent $5,678.47. Loan balance $1.2 million."),
+  ];
+  const partialThink = async (draft) => {
+    const { env } = mkEnv(rows, { extra: { AI: { run: async (model, input) => model.includes("bge-")
+      ? ({ data: [[0.1, 0.2, 0.3]] })
+      : String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+        ? ({ response: { supported: true, complete: false, evidence: [1, 2], reason: "the net figure is not stated" }, usage: {} })
+        : ({ response: draft, usage: {} }) } } });
+    return (await call(env, "/api/rag/think?q=What+were+the+March+income+and+expenses%2C+and+the+net%3F")).json();
+  };
+  const NOT_COVERED = "\n\nNot covered by the documents: the net figure is not stated.";
+  const wholeDraft = "Example Holdings LLC recorded March income of $1,234 [1]. Expenses included $5,678 for rent [2].";
+  const control = await partialThink(wholeDraft);
+  check("control: a whole-dollar partial answer keeps both sentences verbatim",
+    control.answer === wholeDraft + NOT_COVERED && control.evidence_gate?.partial === true, JSON.stringify(control.answer));
+  const decimalDraft = "Example Holdings LLC recorded March income of $1,234.73 [1]. Expenses included $5,678.47 for rent [2].";
+  const decimal = await partialThink(decimalDraft);
+  check("a partial answer keeps a cited decimal amount and the rest of its sentence",
+    decimal.answer === decimalDraft + NOT_COVERED && decimal.evidence_gate?.partial === true, JSON.stringify(decimal.answer));
+  const leadingControlDraft = "Per the March income ledger [1], income was $1,234. Per the expense ledger [2], rent was $5,678.";
+  const leadingControl = await partialThink(leadingControlDraft);
+  check("control: citations before whole-dollar amounts survive the partial path",
+    leadingControl.answer === leadingControlDraft + NOT_COVERED, JSON.stringify(leadingControl.answer));
+  const leadingDraft = "Per the March income ledger [1], income was $1,234.73. Per the expense ledger [2], the loan balance is $1.2 million.";
+  const leading = await partialThink(leadingDraft);
+  check("a partial answer never shortens an amount into a different, plausible figure",
+    leading.answer === leadingDraft + NOT_COVERED, JSON.stringify(leading.answer));
+
+  const onlyProfit = "Profit was $9M [1]." + NOT_COVERED;
+  const plainBoundaryControl = await partialThink("Revenue was $5M. Profit was $9M [1].");
+  check("control: a plain full stop drops the uncited sentence on the partial path",
+    plainBoundaryControl.answer === onlyProfit, JSON.stringify(plainBoundaryControl.answer));
+  const boldBoundary = await partialThink("**Revenue was $5M.** Profit was $9M [1].");
+  check("markdown bold closing marks do not join an uncited sentence to a cited one",
+    boldBoundary.answer === onlyProfit && boldBoundary.evidence_gate?.partial === true,
+    JSON.stringify(boldBoundary.answer));
+
+  const quotedBoundaryControl = await partialThink("\"Revenue was $5M.\" Profit was $9M [1].");
+  check("control: a quote-like closing boundary drops the uncited sentence on the partial path",
+    quotedBoundaryControl.answer === onlyProfit, JSON.stringify(quotedBoundaryControl.answer));
+  const codeBoundary = await partialThink("Revenue was `$5M.` Profit was $9M [1].");
+  check("a markdown code closing mark does not join an uncited sentence to a cited one",
+    codeBoundary.answer === onlyProfit && codeBoundary.evidence_gate?.partial === true,
+    JSON.stringify(codeBoundary.answer));
+
+  const bracketBoundaryControl = await partialThink("(Revenue was $5M.) Profit was $9M [1].");
+  check("control: a bracket closing boundary drops the uncited sentence on the partial path",
+    bracketBoundaryControl.answer === onlyProfit, JSON.stringify(bracketBoundaryControl.answer));
+  const italicBoundary = await partialThink("_Revenue was $5M._ Profit was $9M [1].");
+  check("a markdown italic closing mark does not join an uncited sentence to a cited one",
+    italicBoundary.answer === onlyProfit && italicBoundary.evidence_gate?.partial === true,
+    JSON.stringify(italicBoundary.answer));
+
+  const spacedBoundaryControl = await partialThink("Revenue was $5M. Profit was $9M [1].");
+  check("control: a spaced sentence boundary drops the uncited sentence on the partial path",
+    spacedBoundaryControl.answer === onlyProfit, JSON.stringify(spacedBoundaryControl.answer));
+  const missingSpaceBoundary = await partialThink("Revenue was $5M.Profit was $9M [1].");
+  check("an uppercase sentence start needs no space to separate an uncited sentence",
+    missingSpaceBoundary.answer === onlyProfit && missingSpaceBoundary.evidence_gate?.partial === true,
+    JSON.stringify(missingSpaceBoundary.answer));
+
+  const exclamationBoundary = await partialThink("Revenue was $5M!Profit was $9M [1].");
+  check("an exclamation mark before an uppercase start separates an uncited sentence without a space",
+    exclamationBoundary.answer === onlyProfit && exclamationBoundary.evidence_gate?.partial === true,
+    JSON.stringify(exclamationBoundary.answer));
+  const questionBoundary = await partialThink("Revenue was $5M?Profit was $9M [1].");
+  check("a question mark before an uppercase start separates an uncited sentence without a space",
+    questionBoundary.answer === onlyProfit && questionBoundary.evidence_gate?.partial === true,
+    JSON.stringify(questionBoundary.answer));
+  const markdownBoundary = await partialThink("Revenue was $5M.**Profit was $9M [1].");
+  check("markdown after a full stop cannot hide a no-space uppercase sentence start",
+    markdownBoundary.answer === onlyProfit && markdownBoundary.evidence_gate?.partial === true,
+    JSON.stringify(markdownBoundary.answer));
+
+  const noInitialismControlDraft = "The US total was $5M [1]. Profit was $9M [2].";
+  const noInitialismControl = await partialThink(noInitialismControlDraft);
+  check("control: an unpunctuated country abbreviation stays whole on the partial path",
+    noInitialismControl.answer === noInitialismControlDraft + NOT_COVERED,
+    JSON.stringify(noInitialismControl.answer));
+  const initialismDraft = "The U.S. total was $5M [1]. Profit was $9M [2].";
+  const initialism = await partialThink(initialismDraft);
+  check("a compact initialism stays whole under the uppercase boundary rule",
+    initialism.answer === initialismDraft + NOT_COVERED,
+    JSON.stringify(initialism.answer));
+
+  const lowercasePdfDraft = "The report is stored as Invoice.pdf [1].";
+  const lowercasePdf = await partialThink(lowercasePdfDraft);
+  check("control: a lowercase PDF extension stays whole on the partial path",
+    lowercasePdf.answer === lowercasePdfDraft + NOT_COVERED,
+    JSON.stringify(lowercasePdf.answer));
+  const uppercasePdfDraft = "The report is stored as Invoice.PDF [1].";
+  const uppercasePdf = await partialThink(uppercasePdfDraft);
+  knownLimitation("an uppercase file extension still splits Invoice.PDF and drops its prefix",
+    uppercasePdf.answer === "PDF [1]." + NOT_COVERED,
+    JSON.stringify(uppercasePdf.answer));
+
+  const lowercaseHtmlDraft = "The page is stored as Docs.html [1].";
+  const lowercaseHtml = await partialThink(lowercaseHtmlDraft);
+  check("control: a lowercase HTML extension stays whole on the partial path",
+    lowercaseHtml.answer === lowercaseHtmlDraft + NOT_COVERED,
+    JSON.stringify(lowercaseHtml.answer));
+  const capitalizedHtmlDraft = "The page is stored as Docs.Html [1].";
+  const capitalizedHtml = await partialThink(capitalizedHtmlDraft);
+  knownLimitation("a capitalized file extension still splits Docs.Html and drops its prefix",
+    capitalizedHtml.answer === "Html [1]." + NOT_COVERED,
+    JSON.stringify(capitalizedHtml.answer));
+
+  // Deferred past 0.4.9 (see worker/src/lib/answer-sentences.js): a full stop
+  // after an abbreviation still ends a sentence. The partial path splits
+  // "Example Co. recorded" after "Co." and drops the uncited "Example Co."
+  // fragment, so the kept sentence loses its subject. This records that
+  // output; it does not approve it.
+  const unabbreviatedDraft = "Example Company recorded March income of $1,234 [1]. Expenses included $5,678 for rent [2].";
+  const unabbreviated = await partialThink(unabbreviatedDraft);
+  check("control: without an abbreviation the same partial answer keeps its subject",
+    unabbreviated.answer === unabbreviatedDraft + NOT_COVERED, JSON.stringify(unabbreviated.answer));
+  const abbreviatedDraft = "Example Co. recorded March income of $1,234 [1]. Expenses included $5,678 for rent [2].";
+  const abbreviated = await partialThink(abbreviatedDraft);
+  knownLimitation("an abbreviation's full stop still splits a partial answer and drops \"Example Co.\"",
+    abbreviated.answer ===
+      "recorded March income of $1,234 [1]. Expenses included $5,678 for rent [2]." + NOT_COVERED,
+    JSON.stringify(abbreviated.answer));
+}
+
+/* ---- a present-status sentence with a decimal amount keeps its citation ----
+   The current-status check split the draft the same way, so "still active at
+   $1,234.73 per month [1]" left the status clause with no citation and a
+   supported answer was withheld. */
+{
+  const row = {
+    ...ROW, chunk_uid: "subscription-a#0", doc_uid: "subscription-a", source_id: "subscription-a",
+    uri: "drive://subscription-a", source: "drive", client: null, document_date: 1780000000000, date_reliable: 1,
+    title: "Example Holdings LLC storage subscription",
+    text: "The Example Holdings LLC storage subscription is active at $1,234.73 per month.",
+  };
+  const currentThink = async (draft) => {
+    const { env } = mkEnv([row], { extra: { AI: { run: async (model, input) => model.includes("bge-")
+      ? ({ data: [[0.1, 0.2, 0.3]] })
+      : String(input?.messages?.[0]?.content || "").includes("verify a proposed answer")
+        ? ({ response: { supported: true, complete: true, evidence: [1], reason: "direct support" }, usage: {} })
+        : ({ response: draft, usage: {} }) } } });
+    return (await call(env, "/api/rag/think?q=Is+the+Example+Holdings+LLC+storage+subscription+still+active%3F")).json();
+  };
+  const wholeDraft = "As of 2026-05-28, the Example Holdings LLC storage subscription is still active at $1,234 per month [1].";
+  const control = await currentThink(wholeDraft);
+  check("control: a whole-dollar present-status answer with an exact as-of date is approved",
+    control.answer === wholeDraft && control.evidence_gate?.supported === true, JSON.stringify(control.evidence_gate));
+  const decimalDraft = "As of 2026-05-28, the Example Holdings LLC storage subscription is still active at $1,234.73 per month [1].";
+  const decimal = await currentThink(decimalDraft);
+  check("a decimal amount does not separate a present-status claim from its citation",
+    decimal.answer === decimalDraft && decimal.evidence_gate?.supported === true, JSON.stringify(decimal.evidence_gate));
+}
+
+console.log(fail ? `\n${fail} FAILURES` :
+  `\nroutes: all ${ran} tests passed${known ? `; ${known} known limitation(s) recorded, not passed` : ""}`);
+process.exit(fail ? 1 : 0);

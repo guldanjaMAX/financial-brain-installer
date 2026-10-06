@@ -82,7 +82,7 @@ function binaryCompare(left, right) {
 }
 
 function normalizedMigrations(rows) {
-  if (!Array.isArray(rows) || rows.length !== 46) fail();
+  if (!Array.isArray(rows) || rows.length !== 48) fail();
   const normalized = rows.map((row) => {
     exactKeys(row, ["version", "name", "checksum"]);
     return Object.freeze({
@@ -174,7 +174,7 @@ export function normalizeV048D1DeletionStateSequences(rows, inventory) {
 }
 
 /**
- * Produce the privacy-safe deletion identity for one complete schema-46 D1.
+ * Produce the privacy-safe deletion identity for one complete schema-48 D1.
  * Raw schema, sequence, and table-export material is consumed only to derive
  * hashes; callers persist only the returned SHA-256.
  */

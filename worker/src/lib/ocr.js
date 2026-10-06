@@ -34,11 +34,27 @@
 // refuse.
 
 import { jsonResponse, validateAdminKey, callLLM } from "./core.js";
+import {
+  OCR_REQUEST_ID,
+  OCR_REPLAY_KEY,
+  acknowledgeOcrPageRequests,
+  canonicalOcrInput,
+  claimOcrPageRequest,
+  completeOcrPageRequest,
+  recordRetryableOcrPageFailure,
+  releaseOcrPageRequest,
+  ocrPageReplayKey,
+  ocrPageRequestId,
+  sha256Hex,
+  startOcrPageRequest,
+} from "./ocr-idempotency.js";
+
+export { ocrPageReplayKey, ocrPageRequestId };
 
 export const OCR_PATH = "/api/admin/brain/ocr";
 
 /** Default model. Overridable per install by the OCR_MODEL var. */
-export const DEFAULT_OCR_MODEL = "@cf/google/gemma-4-26b-a4b-it";
+export const DEFAULT_OCR_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
 
 /**
  * One page image, base64. Larger than the ingest body limit on purpose: this
@@ -71,29 +87,46 @@ export function ocrEnabled(env) {
 /**
  * POST /api/admin/brain/ocr
  *
- * Body: { image_base64, page?, prompt }
- * Returns: { text, model, image_format, usage } or a refusal with the cause.
+ * Body: { image_base64, page?, prompt, request_id? } or the internal source
+ * acknowledgement shape { acknowledge_request_ids }.
+ * Returns transcription or acknowledgement readback, or a refusal with the cause.
  *
  * One page per request, deliberately. A 40-page statement is 40 calls, which
  * keeps every page inside the cap check, inside the log, and inside a request
  * size that cannot be argued about.
  */
-export async function handleOcr(env, request) {
+export async function handleOcr(env, request, { now = () => new Date() } = {}) {
   if (!validateAdminKey(request, env)) return jsonResponse({ error: "unauthorized" }, 401);
-
-  if (!ocrEnabled(env)) {
-    return jsonResponse({
-      error: "OCR is not enabled on this brain",
-      detail: "Set safety.ocr.enabled in the manifest and re-run `brain update`. It is off by default because it spends money on your own Cloudflare account, once per scanned page.",
-      ocr_enabled: false,
-    }, 409);
-  }
 
   let body;
   try {
     body = await request.json();
   } catch {
     return jsonResponse({ error: "invalid JSON body" }, 400);
+  }
+
+  if (Array.isArray(body?.acknowledge_request_ids)) {
+    try {
+      const receipt = await acknowledgeOcrPageRequests(env.DB, {
+        requestIds: body.acknowledge_request_ids,
+        now: now(),
+      });
+      return jsonResponse({ ocr_acknowledged: receipt.acknowledged });
+    } catch {
+      return jsonResponse({
+        error: "OCR source acknowledgement could not be confirmed",
+        detail: "The encrypted handoff was retained. Retry the same acknowledgement after D1 is available.",
+        ocr_acknowledgement_unavailable: true,
+      }, 503);
+    }
+  }
+
+  if (!ocrEnabled(env)) {
+    return jsonResponse({
+      error: "OCR is not enabled on this brain",
+      detail: "For a new install, answer yes when setup asks about scanned PDF OCR. For an existing brain, set safety.ocr.enabled in the manifest and re-run `brain update`. It is off by default because it spends money on your own Cloudflare account, once per scanned page.",
+      ocr_enabled: false,
+    }, 409);
   }
 
   const image = typeof body?.image_base64 === "string" ? body.image_base64 : "";
@@ -109,6 +142,88 @@ export async function handleOcr(env, request) {
 
   const model = ocrModelFor(env);
   const imageFormat = env.OCR_IMAGE_FORMAT === "image_field" ? "image_field" : "content_array";
+  const inputSha256 = await sha256Hex(canonicalOcrInput({ image, model, prompt }));
+  const suppliedRequestId = body?.request_id;
+  if (suppliedRequestId !== undefined && !OCR_REQUEST_ID.test(String(suppliedRequestId))) {
+    return jsonResponse({ error: "request_id must be one lowercase 64-character SHA-256 value" }, 400);
+  }
+  const requestId = suppliedRequestId || inputSha256;
+  const replayKey = body?.replay_key == null ? null : String(body.replay_key);
+  if (replayKey !== null && !OCR_REPLAY_KEY.test(replayKey)) {
+    return jsonResponse({ error: "replay_key must be one base64url-encoded 256-bit value" }, 400);
+  }
+  const ownerToken = crypto.randomUUID();
+  let claim;
+  try {
+    claim = await claimOcrPageRequest(env.DB, {
+      requestId, inputSha256, ownerToken, replayKey, now: now(),
+    });
+  } catch {
+    return jsonResponse({
+      error: "OCR could not establish its idempotency receipt",
+      detail: "No model call was started, so this page was not charged. Retry after D1 is available.",
+      ocr_idempotency_unavailable: true,
+    }, 503);
+  }
+  if (claim.state === "conflict") {
+    return jsonResponse({
+      error: "the OCR request id belongs to different page bytes",
+      detail: "Refusing to reuse one billable request identity for different input.",
+      ocr_idempotency_conflict: true,
+    }, 409);
+  }
+  if (claim.state === "pending" || claim.state === "retry_later") {
+    const waitingForRereadWindow = claim.state === "retry_later";
+    const rollingModelCallCap = claim.rollingModelCallCap === true;
+    return jsonResponse({
+      error: rollingModelCallCap
+        ? `this OCR page has used ${claim.modelCallsInWindow} model calls in the last 24 hours`
+        : waitingForRereadWindow
+        ? "the prior OCR re-read window is still active"
+        : "the first OCR attempt is still running",
+      detail: rollingModelCallCap
+        ? "The page is held until the oldest start leaves its rolling 24-hour window; no model call was started."
+        : waitingForRereadWindow
+        ? "Retry this same request id after the bounded wait; no model call was started."
+        : "Retry this same request id after the bounded wait; no second model call was started.",
+      ocr_request_pending: true,
+      model_calls_in_24_hours: claim.modelCallsInWindow,
+      ...(rollingModelCallCap ? {
+        ocr_model_call_cap_exhausted: true,
+      } : {}),
+      retry_after_ms: Number.isSafeInteger(claim.retryAfterMs) && claim.retryAfterMs > 0
+        ? claim.retryAfterMs
+        : 2_000,
+    }, 425);
+  }
+  if (claim.state === "replayable") {
+    return jsonResponse({ ...claim.replay, idempotent_replay: true }, claim.status);
+  }
+
+  try {
+    // Pending is a short pre-call reservation and may be reclaimed after its
+    // lease expires. This exact transition closes that safe-reclaim window
+    // before any billable provider work begins.
+    await startOcrPageRequest(env.DB, {
+      requestId, inputSha256, ownerToken, now: now(),
+    });
+  } catch (error) {
+    if (error?.ocrModelCallCapExhausted === true) {
+      return jsonResponse({
+        error: `this OCR page has used ${error.modelCallsInWindow} model calls in the last 24 hours`,
+        detail: "The page is held until its rolling retry window opens; no model call was started.",
+        ocr_request_pending: true,
+        ocr_model_call_cap_exhausted: true,
+        model_calls_in_24_hours: error.modelCallsInWindow,
+        retry_after_ms: error.retryAfterMs,
+      }, 425);
+    }
+    return jsonResponse({
+      error: "OCR could not confirm its model-start receipt",
+      detail: "No model call was started. Retry after D1 is available.",
+      ocr_idempotency_unavailable: true,
+    }, 503);
+  }
 
   try {
     const data = await callLLM(env, {
@@ -121,13 +236,27 @@ export async function handleOcr(env, request) {
       label: "ocr",
     });
     const text = data?.content?.[0]?.text ?? "";
-    return jsonResponse({
+    const responseBody = {
       text,
       model: data?.model || model,
       image_format: imageFormat,
       page: Number.isFinite(body?.page) ? body.page : null,
       usage: data?.usage || {},
-    });
+      request_id: requestId,
+      ...(claim.rereadAfterExpiry ? { ocr_reread_after_expiry: true } : {}),
+    };
+    try {
+      await completeOcrPageRequest(env.DB, {
+        requestId, inputSha256, ownerToken, status: 200, body: responseBody, replayKey, now: now(),
+      });
+    } catch {
+      return jsonResponse({
+        error: "OCR finished but its idempotency receipt could not be confirmed",
+        detail: "The transcription was not returned because an automatic retry must not charge for this page twice.",
+        ocr_idempotency_unavailable: true,
+      }, 503);
+    }
+    return jsonResponse(responseBody);
   } catch (error) {
     // A cap hit, a provider mismatch and an outage are all statements about the
     // SYSTEM, never about the page. Returning any of them as "this page is
@@ -135,6 +264,15 @@ export async function handleOcr(env, request) {
     // each keeps its own status and its own flag and the caller must not treat
     // them as evidence about the document.
     if (error?.llm_cap_exceeded) {
+      try {
+        await releaseOcrPageRequest(env.DB, { requestId, inputSha256, ownerToken });
+      } catch {
+        return jsonResponse({
+          error: "OCR spend was refused but its idempotency receipt could not be released",
+          detail: "No model call was started. Retry after D1 is available.",
+          ocr_idempotency_unavailable: true,
+        }, 503);
+      }
       return jsonResponse({
         error: "OCR stopped because the daily spend cap was reached",
         detail: String(error.message || error).slice(0, 300),
@@ -143,19 +281,44 @@ export async function handleOcr(env, request) {
       }, 429);
     }
     if (error?.provider_mismatch) {
+      try {
+        await releaseOcrPageRequest(env.DB, { requestId, inputSha256, ownerToken });
+      } catch {
+        return jsonResponse({
+          error: "OCR custody was refused but its idempotency receipt could not be released",
+          detail: "No model call was started. Retry after D1 is available.",
+          ocr_idempotency_unavailable: true,
+        }, 503);
+      }
       return jsonResponse({
         error: "OCR refused rather than sending a scanned page to another provider",
         detail: String(error.message || error).slice(0, 300),
         provider_mismatch: true,
       }, 409);
     }
-    return jsonResponse({
+    const responseBody = {
       error: "the OCR model call failed",
       // Verbatim, because if the image shape is wrong this sentence is the
       // whole diagnosis and paraphrasing it would cost an afternoon.
       detail: String(error?.message || error).slice(0, 400),
       model,
       image_format: imageFormat,
-    }, 502);
+      request_id: requestId,
+    };
+    try {
+      // A returned provider error proves the call ended. Keep the model-start
+      // evidence and durable call count, but use the short failure backoff and
+      // never make the response replayable or call it a transcription.
+      await recordRetryableOcrPageFailure(env.DB, {
+        requestId, inputSha256, ownerToken, now: now(),
+      });
+    } catch {
+      return jsonResponse({
+        error: "OCR failed and its idempotency receipt could not be confirmed",
+        detail: "The request remains reserved so an automatic retry cannot charge for this page twice.",
+        ocr_idempotency_unavailable: true,
+      }, 503);
+    }
+    return jsonResponse(responseBody, 502);
   }
 }

@@ -142,7 +142,7 @@ function bindingFixture(
     field_receipt_sha256: digest("field-receipt"),
     field_receipt_run_id: "50000000-0000-4000-8000-000000000005",
     keychain_binding_sha256: keychainBindingSha256,
-    package_filename: "brain-installer-0.4.8.tgz",
+    package_filename: "brain-installer-0.4.9.tgz",
     package_bytes: 123_456,
     package_sha256: digest("package"),
     package_file_count: 541,
@@ -549,8 +549,8 @@ function productionProviderManifestBinding(role) {
     embeddingModel: "@cf/baai/bge-base-en-v1.5",
     enabledCorpora: [],
     ocrEnabled: "0",
-    ocrModel: "@cf/google/gemma-4-26b-a4b-it",
-    productVersion: "0.4.8",
+    ocrModel: "@cf/meta/llama-4-scout-17b-16e-instruct",
+    productVersion: "0.4.9",
     recoveryArtifactKeySecret: source
       ? null
       : `keychain://${resourceName}/artifact-v1`,

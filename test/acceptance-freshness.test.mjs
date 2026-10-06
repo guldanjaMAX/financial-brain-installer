@@ -90,6 +90,90 @@ async function tierDataFor(rows) {
   return suite;
 }
 
+/* The hot D1 route proves presence and readiness without a corpus-sized count. */
+{
+  const sourceRows = [{
+    name: "drive", kind: "drive", status: "ready", last_ingest_at: ago(20),
+    expected_refresh_seconds: DAY, document_count: 12_400,
+  }];
+  const freshness = await reportFor(sourceRows);
+  const suite = new Acceptance({
+    base: "https://fixture.invalid",
+    adminKey: "fixture-admin-key",
+    manifest,
+    fetchImpl: async (url) => new Response(JSON.stringify(
+      String(url).includes("/freshness")
+        ? freshness
+        : {
+          backend: "d1",
+          summary: {
+            status: "informational",
+            complete: false,
+            count_note: "not counted on large Brains; run `brain report` for the full count",
+          },
+          rows: [{
+            source_type: "drive", has_documents: true, documents: null, chunks: null,
+            count_note: "not counted on large Brains; run `brain report` for the full count",
+          }],
+          vector_backlog: { pending: 0, upserts: 0, deletes: 0, submitted: 0 },
+          vector_readiness: {
+            ready: true, expected_vectors: 12_400, actual_vectors: 12_400,
+            pending: 0, submitted: 0,
+          },
+        }
+    ), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+  await suite.tierData();
+  check("the hot acceptance path proves corpus presence without normalizing unknown counts to zero",
+    suite.results.some((row) => row.name === "corpus is not empty" && row.status === "pass" &&
+      /not counted on large Brains; run `brain report`/i.test(row.detail)),
+    JSON.stringify(suite.results));
+  check("the hot acceptance path uses the exact vector backlog independently of corpus counts",
+    suite.results.some((row) => row.name === "embedding backlog is small" && row.status === "pass"),
+    JSON.stringify(suite.results));
+}
+
+/* A capped backlog is a lower bound. Owner-facing acceptance checks must never
+   turn the 10,001-row sample into an exact queue size. */
+{
+  const sourceRows = [{
+    name: "drive", kind: "drive", status: "ready", last_ingest_at: ago(20),
+    expected_refresh_seconds: DAY, document_count: 1_150_274,
+  }];
+  const freshness = await reportFor(sourceRows);
+  const suite = new Acceptance({
+    base: "https://fixture.invalid",
+    adminKey: "fixture-admin-key",
+    manifest,
+    fetchImpl: async (url) => new Response(JSON.stringify(
+      String(url).includes("/freshness")
+        ? freshness
+        : {
+          backend: "d1",
+          summary: { status: "informational" },
+          rows: [{ source_type: "drive", has_documents: true }],
+          vector_backlog: {
+            pending: 10_001, pending_is_capped: true, pending_display: "10,000+",
+            upserts: 10_001, deletes: 0, submitted: 0, component_counts_exact: false,
+          },
+          vector_readiness: {
+            ready: false, expected_vectors: 1_150_274, actual_vectors: 0,
+            pending: 10_001, pending_is_capped: true, submitted: 0,
+            submitted_counts_exact: false,
+          },
+        }
+    ), { status: 200, headers: { "content-type": "application/json" } }),
+  });
+  await suite.tierData();
+  const backlog = suite.results.find((row) => row.name === "embedding backlog is small");
+  const readiness = suite.results.find((row) => row.name === "semantic index is query-ready");
+  check("acceptance renders a capped backlog as 10,000+", /10,000\+/.test(backlog?.detail || "") &&
+    !/10001/.test(backlog?.detail || ""), backlog?.detail);
+  check("acceptance readiness also renders a capped backlog as 10,000+",
+    /10,000\+/.test(readiness?.detail || "") && !/10001/.test(readiness?.detail || ""),
+    readiness?.detail);
+}
+
 const named = (suite, needle) =>
   suite.results.filter((r) => `${r.name} ${r.detail}`.toLowerCase().includes(needle));
 

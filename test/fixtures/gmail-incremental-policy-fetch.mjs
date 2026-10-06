@@ -14,6 +14,9 @@ const MODES = [
   "worker-refusal",
   "sweep-query-evidence",
   "policy-change-sweep",
+  "since-safe-sweep",
+  "since-removal-review",
+  "since-incremental",
   "sweep-marker-missing",
   "scanner-v5",
   "scanner-v5-omitted",
@@ -65,10 +68,15 @@ const rawMail = (subject, body) => Buffer.from(
   `From: sender@example.invalid\r\nTo: owner@example.invalid\r\nSubject: ${subject}\r\n` +
   "Date: Sat, 29 Aug 2026 12:00:00 -0700\r\n\r\n" + body,
 ).toString("base64").replace(/\+/g, "-").replace(/\//g, "_");
-const requireDefaultFilteredQuery = (url) => {
+const requireDefaultFilteredQuery = (url, since = null) => {
   const query = String(url.searchParams.get("q") || "");
   for (const exclusion of ["-category:promotions", "-category:social", "-category:forums", "-in:spam", "-in:trash"]) {
     if (!query.includes(exclusion)) throw new Error(`default Gmail query omitted ${exclusion}`);
+  }
+  const expectedSuffix = since ? ` after:${since.replaceAll("-", "/")}` : "";
+  if (query !== "-in:chats -in:drafts -in:spam -in:trash " +
+      "-category:promotions -category:social -category:forums" + expectedSuffix) {
+    throw new Error("Gmail full-list query did not match the declared date floor");
   }
 };
 
@@ -112,6 +120,7 @@ globalThis.fetch = async (input, options = {}) => {
       "pending-retained": ["pending-retained"],
       "pending-absent-unreadable": ["pending-absent-unreadable"],
       "incremental-precondition-failure": ["checkpoint-provider-failure"],
+      "since-incremental": ["since-incremental-older", "since-incremental-current"],
     };
     const ids = idsByMode[mode];
     if (!ids) throw new Error("the full-sweep fixture must use Gmail messages.list");
@@ -146,6 +155,14 @@ globalThis.fetch = async (input, options = {}) => {
     if (["sweep-query-evidence", "policy-change-sweep", "sweep-marker-missing"].includes(mode)) {
       requireDefaultFilteredQuery(url);
       return json({ messages: [{ id: "sweep-inbox" }] });
+    }
+    if (mode === "since-safe-sweep") {
+      requireDefaultFilteredQuery(url, "2022-03-01");
+      return json({ messages: [{ id: "since-oldest" }] });
+    }
+    if (mode === "since-removal-review") {
+      requireDefaultFilteredQuery(url, "2022-04-01");
+      return json({ messages: [{ id: "since-retained" }] });
     }
     if (["scanner-v5", "scanner-v5-retained-untracked", "scanner-v5-progress-missing"].includes(mode)) {
       requireDefaultFilteredQuery(url);
@@ -249,6 +266,30 @@ globalThis.fetch = async (input, options = {}) => {
       return json({
         id, historyId: "history-current", internalDate: "1788030000000",
         raw: rawMail("Query-proven inbox mail", "This invented message came from the connector's default filtered Gmail query and its raw response intentionally omits label identifiers."),
+      });
+    }
+    if (id === "since-oldest") {
+      return json({
+        id, historyId: "since-oldest-v1", internalDate: "1647777600000", labelIds: ["INBOX"],
+        raw: rawMail("Oldest retained mail", "This invented message is newer than the configured Gmail date floor."),
+      });
+    }
+    if (id === "since-retained") {
+      return json({
+        id, historyId: "since-retained-v1", internalDate: "1650456000000", labelIds: ["INBOX"],
+        raw: rawMail("Retained mail", "This invented message remains inside the later Gmail date floor."),
+      });
+    }
+    if (id === "since-incremental-older") {
+      return json({
+        id, historyId: "since-incremental-older-v1", internalDate: "1646092799000", labelIds: ["INBOX"],
+        raw: rawMail("Pre-floor mail", "This invented message predates the configured Gmail date floor."),
+      });
+    }
+    if (id === "since-incremental-current") {
+      return json({
+        id, historyId: "since-incremental-current-v1", internalDate: "1650456000000", labelIds: ["INBOX"],
+        raw: rawMail("Current mail", "This invented message is newer than the configured Gmail date floor."),
       });
     }
     if (id === "migration-safe") {
@@ -366,6 +407,9 @@ globalThis.fetch = async (input, options = {}) => {
       ],
       "readback-stale": ["gmail:gone"],
       unclassified: ["gmail:pending-removal", "gmail:unclassified"],
+      "since-safe-sweep": ["gmail:since-oldest"],
+      "since-removal-review": ["gmail:since-older", "gmail:since-retained"],
+      "since-incremental": ["gmail:since-incremental-older"],
     };
     const evidence = readEvidence();
     const pendingReadbackAttempts = evidence.forget_targets.filter(

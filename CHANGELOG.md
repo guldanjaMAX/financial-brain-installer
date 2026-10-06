@@ -4,11 +4,249 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
-## 0.4.8
+## 0.4.9
 
 Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
-asset publication.
+asset publication. The held 0.4.8 candidate was never tagged, published, or
+offered as a customer update; its entries below ship for the first time in
+0.4.9, and its identity is retired so its evidence cannot be confused with
+this changed candidate.
+
+- **A saved browser sign-in no longer blocks a custom-domain Brain at the
+  workers.dev address check.** Cloudflare can refuse that account read even
+  when the sign-in can update a Brain that uses its own domain. That Brain now
+  continues; it never used the workers.dev address. A Brain whose address uses
+  workers.dev still stops, explains that its address needs the refused read,
+  and offers the same explicit account-scoped recovery token choice. Nothing
+  changes unless the owner accepts that recovery path. To check: run the next
+  update with the Brain's saved browser sign-in.
+
+- **Cloudflare setup now tells you when browser sign-in cannot reach
+  Vectorize, and it never silently switches credentials.** Wrangler 4.131.1
+  cannot request Vectorize permission for its browser profile. Reopening the
+  same browser approval cannot fix that, so setup now goes directly to a clear
+  recovery choice that names the required Workers Scripts Edit, D1 Edit,
+  Vectorize Edit, and Workers AI Read permissions. If this computer has a saved
+  recovery token, setup names its exact account and protected-store location,
+  warns that it may be old or revoked, and asks before using it. You can decline
+  it and enter a different token through the hidden prompt. Windows follows the
+  same scope and decision path; its existing visible-entry protection still
+  requires an approved secret-manager path instead of risking an echoed token.
+
+- **A small fresh search backlog no longer looks like a search outage.** When
+  keyword and meaning-based search both complete while less than one percent
+  of the index is catching up from the last 24 hours, a missing answer is now
+  marked as incomplete coverage instead of unavailable search. The Brain still
+  refuses to say that nothing is recorded until the queue is empty. A cited
+  answer that passes the evidence check is still shown. A larger or older
+  backlog, or either search method actually failing, stays unavailable. To
+  check: ask one question with a known cited answer and one absence question
+  while a small recent load finishes.
+
+- **Calendar, meeting, and iMessage questions get a source-aware search lane.**
+  When a question explicitly says calendar, meeting, Zoom, iMessage, or text
+  message, the Brain now searches that category or platform before the normal
+  candidate cutoff, then combines those records with the ordinary whole-Brain
+  results. It does not restrict the answer to one source, and generic decision
+  questions still search everywhere without guessing where a decision lives.
+  To check: repeat a calendar, meeting, or iMessage question that previously
+  returned only file or email candidates and inspect the cited source.
+
+- **Dollar amounts in a partly answered question are no longer cut.** When an
+  answer covers only part of a question, the Brain keeps the sentences your
+  documents support and names what they do not cover. That trimming used to
+  treat the decimal point in a figure such as $1,234.73 as the end of a
+  sentence, so an answer could show a garbled fragment or a shorter, wrong
+  figure next to its citation. Now the dot inside a figure, a web address or
+  a lowercase file extension stays inside its sentence. A capital letter
+  directly after a dot still starts a new sentence, so names such as
+  `Invoice.PDF` and `Docs.Html` can lose the words before the dot in a partial
+  answer. A full stop also ends a sentence before a space, a closing quote,
+  bracket or formatting mark, or the end of the answer.
+  If you asked a money question on an earlier version and the answer ended
+  with "Not covered by the documents", ask it again after you update.
+
+- **You can turn off the watched folder, and nothing you loaded is lost.** Earlier versions could re-read one folder on your computer on a schedule, which treated a moved file as a new document and a missing file as one to remove. Run `brain folder <manifest> off` once: it stops the scheduled read, keeps every document already loaded, and removes nothing. After that the folder is simply yours to keep, move or tidy. Changes to files there no longer reach your Brain, and anything that saved files into that folder for your Brain stops reaching it. Your email, calendar and other connections keep updating on their own. To check: `brain folder <manifest> status`.
+
+- **`brain health` no longer touches your Cloudflare browser sign-in when it
+  does not need it.** Health checks the Brain over its own address with the
+  admin key. When the manifest has a saved Brain address (`brain.domain`),
+  health needs no Cloudflare access at all and never refreshes or rewrites a
+  saved Wrangler login, even an expired one. Without a saved address, health
+  still looks up the Brain's workers.dev address read-only through the
+  Cloudflare sign-in on this computer, as before. Only when there is no saved
+  address and no Cloudflare access at all does health stop, and it now says
+  exactly what lets it find the Brain instead of pointing at a command that
+  would not help. To check: run `brain health <manifest>`.
+
+- **Windows credential protection survives a Smart App Control refusal.** On
+  some Windows 11 machines Smart App Control occasionally refuses to start the
+  temporary helper that encrypts the admin key and the Google connection. The
+  Brain now removes that helper, builds a fresh one, and tries again, up to
+  three times. A real decryption failure is never retried. If Windows refuses
+  all three, the message says so plainly and that re-running the command
+  usually works. `brain doctor` shows any refused launches it recovered from.
+- **Health checks stay quick on large Brains.** Health, status, and assistant
+  checks now get their document inventory from bounded source receipts. That
+  inventory no longer joins every chunk, parses every document's metadata, or
+  shows an old total as current. Those screens say "not counted on large
+  Brains; run `brain report` for the full count" when an exact size is not
+  needed. `brain report` still computes
+  exact document, family, chunk, and meaning-search totals in bounded pages and
+  refuses a mixed result if the corpus changes while it runs. Source removal
+  uses the exact guarded preview and final receipt from that removal, so a
+  delayed summary cannot falsely say removed documents remain. A Brain whose
+  Worker is still the older one reports its indexing queue as an exact count;
+  health and the update preview read that count as exact and say so, instead
+  of refusing it. To check: run
+  `brain health <manifest>`, then `brain report <manifest>` when you want the
+  complete counts.
+
+- **A read-only business dashboard can refresh without leaving a laptop on.**
+  An operator can declare bounded HTTPS JSON endpoints in the manifest, store
+  the bearer key through a hidden macOS prompt or the masked Cloudflare
+  dashboard on Windows, and let the owner's Worker pull the source daily. A
+  complete snapshot becomes a resumable, exactly verified job instead of one
+  oversized request. Exact rows are stored compactly with correction and
+  last-seen history; missing rows leave current totals without being erased.
+  Inventory and cost search contains only the current per-store snapshot, while
+  stored rows keep prior full values with effective dates. A row that disappears
+  closes its prior interval, and a later return starts a new one instead of
+  hiding the gap. It does not create daily history documents. Monthly summaries
+  cover every store, and per-store sales, inventory, and cost documents stay
+  bounded. The preview names every endpoint's row,
+  readable-document, and refused-row counts. The 10,000-row ceiling refuses an
+  oversized endpoint without changing it. A refused known row now keeps its
+  last verified value visibly marked with the refusal date instead of disappearing.
+  Every affected document begins with the same dated warning even when its
+  template has no row table. Sales requires the configured revenue stream; an
+  unlabeled row cannot hide another store or month.
+  The source says ready with warnings and gives the refused count until a clean
+  pull succeeds. A wholly refused pull leaves the last good snapshot current and
+  prints and retains the useful refusal counts. Scheduled failures retain their
+  reviewed issue guidance instead of collapsing to a generic failure. Invalid
+  store, month, revenue-stream, and breed identities are refused before they can
+  hide a valid prior key. Superseded document versions
+  are removed in bounded cleanup passes so old vectors cannot crowd current
+  evidence out of meaning search. Clipboard entry clears copied material even
+  when inventory fails or the secret name already exists, and dashboard key
+  replacement requires an explicit post-paste confirmation. Saved data and meaning-search
+  readiness are reported separately so an owner question never races indexing.
+  To check: preview the first pull with `brain custom-api <manifest> --dry-run`,
+  run the first pull immediately, wait for meaning search to be ready, then
+  confirm the named source and its refresh time in `brain sources <manifest>`.
+  This build has local mock proof only and
+  has not contacted a provider endpoint.
+
+- **One finely reported balance no longer blocks a whole bank.** A bank can
+  report more decimal places than its currency has, such as a retirement
+  balance of 23631.9805 dollars. That single value used to stop every account
+  at the institution from loading. The Brain now stores it rounded half-even
+  to the currency's smallest unit and marks it as rounded, and every
+  transaction keeps the bank's exact decimal.
+  Cash totals and uncategorized spending say when they include a rounded
+  figure, so it never reads as exact. Values that are not numbers, currencies
+  the Brain does not support, and impossibly large amounts are still refused.
+  To check: a connection that previously showed "cannot be represented
+  exactly" now loads its accounts.
+
+- **A mistyped Plaid key can be corrected.** `brain connect bank <manifest>
+  --replace-keys` asks for both Plaid keys again at the same hidden prompt and
+  leaves the wrapping key untouched. Every typed pair, including the first
+  one, is now checked with one harmless Plaid read in this Brain's environment
+  before it is saved. A secret from a different Plaid environment is refused
+  at the prompt, and nothing is written. To check: a wrong secret is refused
+  with a message naming the environment, and the Worker's keys are unchanged.
+
+- **Bank connection errors say what to fix.** When Plaid refuses to start
+  because the keys belong to another environment, the connect page says to
+  re-enter them with `--replace-keys`. When the page address is missing from
+  the Plaid dashboard's Allowed redirect URIs list, it names the exact address
+  to add. The reference code stays in the message.
+
+- **The first bank connection no longer dead-ends.** On a Brain with no person,
+  household, or business yet, the connect page opens "Add a person,
+  household, or business" by itself and tells you to add an owner first
+  instead of showing empty choices. The page now also says that disconnecting
+  happens in the Brain app at Access > Banks > Disconnect.
+
+- **Bank status tells the truth.** A connection waiting on account owner
+  choices is listed under needs attention with the number of accounts, and a
+  stale earlier error is cleared once the bank reads succeed. History progress
+  counters are now filled in for Plaid connections, and fetched history that is
+  waiting for choices is shown separately. `brain doctor` no longer asks for a
+  Plaid webhook registration, because the Brain sends its webhook with every
+  connection request. The return address must still be on the Plaid dashboard's
+  allowed list.
+
+- **Scanned-PDF OCR now defaults to the model that completed the stored-text
+  path in live testing.** Fresh installs use Llama 4 Scout, while the manifest
+  can still name another Cloudflare model. Setup also asks once whether to turn
+  paid OCR on and carries a yes answer into the first deployment, so a new
+  install no longer needs a separate update before its first scanned-PDF load.
+  To check: accept OCR during a fixture setup and confirm its initial Worker
+  bindings contain `OCR_ENABLED=1`; the captured Llama and Gemma reply shapes
+  must both remain readable through the real OCR route.
+
+- **One slow scanned page no longer ends the whole OCR pass.** The installer
+  retries that page twice with longer bounded timeouts and tells you when it is
+  doing so. An already-running call is polled within the current deadline rather
+  than counted as another attempt. The exact source document and page keep one
+  opaque durable request identity, so a late first response cannot start another
+  charged call while a different document with the same page image remains a
+  separate request. The same private page identity can reproduce its encrypted
+  handoff key on a later pass without storing that key or making it derivable
+  from the durable request ID alone. Its permanent receipt stores only hashes,
+  status, and numeric usage, never OCR text or a source locator ahead of the
+  document credential gate. Its encrypted handoff is not deleted until the
+  source confirms that the full document was stored.
+  If the Brain is healthy but the page remains slow, the document is skipped and
+  the rest of the pass continues. Transport and model failures defer the
+  document as system evidence, never as a removal candidate. Authentication,
+  malformed replies, and unknown statuses use that same boundary. A later pass
+  reclaims only an expired pre-model reservation. Only a successful, nonblank
+  transcription becomes a completed replayable result. A call with no final
+  response keeps its model-start proof for a 15-minute ambiguity window.
+  Provider errors, empty text, malformed replies, and every other definite
+  non-success keep their model-start proof, wait 60 seconds, and can never
+  replay as OCR text. Each page is capped durably at 3 started model calls in
+  any rolling 24 hours; an exhausted page is counted in the load report and
+  becomes eligible when the oldest start leaves that rolling window rather
+  than remaining held permanently. A completed result
+  keeps its encrypted handoff until the whole source document is stored and
+  acknowledged on the same receipt, so a delayed pass replays it without
+  another charge. An owner image upload uses that same private page identity,
+  so rotating the
+  Brain admin key after an ingest failure cannot strand the already-paid OCR
+  result. A completed receipt with a missing, mismatched, malformed, expired,
+  or undecryptable handoff gets one compare-and-swap-protected replacement
+  read in that seven-day replay window. An in-flight receipt also gets one
+  recorded replacement after its full 15-minute ambiguity window. Replacement
+  receipts must be acknowledged again, and owner upload does so only after exact
+  ingest and finalization readback. A result with no handoff waits for the next
+  bounded window instead of becoming a permanent hold. If the Brain health check
+  also fails, progress remains saved and the pass stops resumably. To check:
+  credential-shaped OCR text reaches the credential refusal without surviving in
+  the receipt; a call finishing after the first deadline replays through the real
+  route with one model call and one stored transcription; a result that finishes
+  after every client deadline is reused on the next pass with no second charge;
+  two documents with the same rendered page both load; and system failures
+  permit no replacement, removal, cursor, or ready receipt.
+
+- **Older Cloudflare browser sessions no longer select an older Wrangler.**
+  The legacy session reader now refreshes through the same reviewed Wrangler
+  4.131.1 package as setup, doctor, named browser profiles, and recovery. Its
+  locked dependency tree resolves Sharp 0.35.4, not the affected older image
+  decoder. After installing this candidate, run the same supported `brain
+  setup <manifest>` or `brain update <manifest>` command. If the saved legacy
+  sign-in needs renewal, the CLI names the exact safe command for your shell,
+  `npx wrangler@4.131.1 login` with `CLOUDFLARE_AUTH_USE_KEYRING` set to
+  `false`, then the original Brain command can be re-run. That setting keeps
+  the legacy sign-in in the file this tool reads on a computer where an
+  isolated Brain profile turned on keyring storage; renewal no longer moves it
+  into an encrypted file and asks you to sign in again. Isolated profiles keep
+  their keyring storage. To verify, re-run the Brain command after signing in.
 
 - **Re-sending unchanged files no longer rebuilds their meaning-based search.**
   When a newer kit re-sends a file whose text has not changed, for example to
@@ -26,6 +264,105 @@ asset publication.
   place. The full re-embed used to repair that as a side effect. `brain
   reindex <manifest>` is the repair; it only matters for a Brain set up
   before that filter existed.
+
+- **Update checks queued search work twice before pausing the Brain.** The first
+  check runs before verification or control-plane work. A second, non-overridable
+  check runs immediately before the paused deployment. Each check requires one
+  exact HTTP 200, a bounded response, and a complete, internally consistent D1
+  queue and readiness receipt. Missing or contradictory fields stop the update.
+  Both checks read the queue exactly as `brain health` does: an older Worker's
+  exact count is accepted, and a queue reported as over 10,000 is never read
+  as empty and always stops the update.
+  `--force` can override only the first early warning. There is still a narrow
+  remote race if an ingest starts after the second receipt but before the paused
+  Worker takes over; this release does not claim a cross-process atomic lock.
+  To check: start an update while `brain health` reports queued search work and
+  confirm the paused deployment does not start, then retry after health says
+  query-ready.
+
+- **Rerunning an update that stopped partway now resumes instead of being
+  refused.** The manifest records the new version last, so an update that
+  stopped after its paused deployment leaves a Worker newer than the manifest.
+  Both queue checks now read such a Worker, paused or active, when its version
+  is newer than the manifest and no newer than this CLI, and the rerun finishes
+  the update. A Worker newer than this CLI, or older than the manifest, is
+  refused with its version named instead of a "database busy" message. A Worker
+  from v0.4.6 or earlier, which does not report its version, is read by the
+  same exact queue rule as update preview. A manifest with no Brain address
+  is checked once Cloudflare access is confirmed, just before the paused
+  deployment. A paused Brain with queued work is refused with the truth: it
+  does not process its queue while paused, so waiting will not clear it. When
+  that paused Worker is from v0.4.6 or earlier, returning it to active needs
+  the older release's own tools, which use an older Wrangler runtime this
+  release replaced for a security advisory, so the refusal sends the owner to
+  supervised recovery and support instead of the older release's deploy.
+  `--force` passes only the first check; help and its warning now say so. To
+  check: after an update that stopped partway, `brain update` again reaches the
+  paused deployment when `brain health` shows an empty queue.
+
+- **A Brain left paused on this same release can be updated again.** `brain
+  rollback --yes` leaves this release's Worker paused and sends the owner to
+  `brain update`, and an update of an already-current Brain that stops inside
+  its pause leaves the same state. Both queue checks, and `brain doctor
+  --repair --yes`, now resume that Worker instead of calling it "not an
+  earlier update" and asking for a release that is already installed. Its
+  queue must still read empty: queued work is refused with its count, and a
+  paused Worker newer than this CLI is still refused. A Brain on v0.4.6 or
+  earlier whose queue is empty but whose search index is not yet verified
+  (for example, it still needs the bootstrap its own status tells the owner to
+  run `brain update` for) now passes the queue checks instead of being told
+  its database is busy. To check: after a rollback, `brain update` reaches the
+  paused deployment when `brain health` shows an empty queue. A rolled-back
+  Brain that still holds documents can then stop at the paused readiness
+  check before its index is rebuilt; keep that output for support.
+  The same holds when the paused release is OLDER than this CLI: a Brain that
+  an earlier kit's `brain rollback --yes`, or its stopped update, left paused
+  on the version the manifest records is resumed by this release's `brain
+  update`, `brain update --force` and `brain doctor --repair --yes` instead of
+  being told to install a newer release. To check: after installing this
+  release over such a Brain, `brain update` reaches the paused deployment when
+  `brain health` shows an empty queue.
+
+- **A v0.4.6 or earlier Brain left paused with queued work now stops at supervised
+  recovery.** Those Workers do not report their writer mode to update's queue
+  check and never process their queue while paused, so "wait until query-ready"
+  could never come true. When the queue is not empty, update reads the Brain's
+  public health check without sending an admin key. If that Worker is paused,
+  the refusal names its release and explains that returning it to active needs
+  that release's own tools, which use an older Wrangler runtime replaced for a
+  security advisory. That step is done only under supervised recovery. Do not
+  run `brain deploy` with either release, `brain rollback`, or `brain drain`, and
+  do not clear VECTOR_DRAIN_MODE by hand. Run `brain health` and keep its output
+  for support. If the health check cannot be read, the refusal says so rather
+  than guessing. A paused v0.4.6 Brain with an empty queue still proceeds.
+  If the Brain's own report shows the index marked for a full rebuild (what a
+  v0.4.6 `brain rollback --yes` leaves) or holding more vectors than the database
+  expects, deploying would un-pause a rolled-back Brain that can never become
+  query-ready. The refusal names that evidence without claiming an unfinished
+  update caused the pause, and gives the same supervised-recovery and support
+  path. To check: such a refusal names supervised recovery and does not mention
+  `brain deploy` as a remedy.
+
+- **A Worker older than the release your manifest records can be replaced by
+  update again.** If an earlier kit's `brain deploy` or `brain rollback --yes`
+  put its older Worker back after an update had finished, `brain update`,
+  `brain update --force` and (for a paused Worker) `brain doctor --repair --yes`
+  refused with no working remedy. Update now treats that Worker as a stale
+  deploy it replaces: an empty queue proceeds, queued work on an active Worker
+  gets "wait until query-ready", and queued work on a paused Worker gets the
+  paused-Brain refusal. A Worker newer than this CLI is still refused. To
+  check: `brain health` reports the older Worker version, and `brain update`
+  reaches the paused deployment when the queue is empty.
+
+- **A busy database no longer makes a large Brain look unreadable to update.**
+  On a very large Brain the backlog read can briefly fail while its database
+  is busy. `brain update` now tries that read up to three times, waiting 10
+  seconds and then 30 seconds, and gives each read up to 90 seconds. A Brain
+  that refuses the admin key, or a route that does not exist, is still refused
+  on the first read. If every read fails, the message says how many were tried:
+  wait a few minutes and run `brain update` again. Never run `brain drain` in a
+  loop to get past it. Queued search work still stops the update exactly as
+  before. To check: a refusal names the number of reads it tried.
 
 - **Drive review no longer downloads every stored file label on each sweep.**
   The Brain first identifies the exact absent or already-reviewed families,
@@ -554,6 +891,23 @@ asset publication.
   understood. This changes how the reply is read, not which model OCR uses:
   the default OCR model is unchanged. To check: with OCR enabled, a scanned
   page read by the default model is indexed instead of refused.
+
+- **Known issue, not fixed in 0.4.9: a partial answer can drop a name that
+  ends in an abbreviation.** When the documents answer only part of a
+  question, the Brain keeps the sentences its sources support and names what
+  is missing. It still reads the full stop in an abbreviation such as "Co." as
+  the end of a sentence, so from "Example Co. recorded March income of $1,234
+  [1]." it can keep only "recorded March income of $1,234 [1]." The figure and
+  its citation are unchanged; the words before the abbreviation's full stop
+  are lost. To check: open the cited source to see whom a kept figure belongs
+  to.
+
+### This release does NOT cover
+
+- **UPDATE-012:** Windows x64 is the only supported Windows runtime in this
+  release. Windows ARM64 ships unproven.
+- **UPDATE-044:** Bank breadth ships unproven.
+  Bank invitations stay closed in this release.
 
 ## 0.4.6
 
@@ -1284,7 +1638,7 @@ ChatGPT, on your phone, with nothing to install.**
   write budget — batches now pack themselves to fit it, found live when a
   two-day catch-up was refused in one over-full call.
 
-After updating, run `brain setup <manifest>` (applies migration 0017), then
+(Historic, do not run.) After updating, run `brain setup <manifest>` (applies migration 0017), then
 `brain mcp-config <manifest>` to see your connector URL and the exact
 click-path for each app.
 
@@ -1318,7 +1672,7 @@ click-path for each app.
   session-signing secret, so existing installs get all of this on their next
   setup or update, with nothing new to store.
 
-After updating, run `brain setup <manifest>` (applies migration 0014 and the
+(Historic, do not run.) After updating, run `brain setup <manifest>` (applies migration 0014 and the
 new secret), then `brain invite <manifest>` and enroll your own phone first.
 
 ## 0.1.18
@@ -1345,7 +1699,7 @@ new secret), then `brain invite <manifest>` and enroll your own phone first.
   revoked without touching the others. `CLOUDFLARE_API_TOKEN` from a secret
   manager still wins for automation, unchanged.
 
-After updating, run `brain setup <manifest>` once interactively, accept the
+(Historic, do not run.) After updating, run `brain setup <manifest>` once interactively, accept the
 offer, then run it again and watch it skip the prompt. `brain token
 <manifest>` confirms what is stored.
 
@@ -1390,7 +1744,7 @@ against your brain, in one sitting.**
   `/api/rag/think`; the answer text itself is unchanged, so existing golden
   sets, refusal scoring, and integrations keep working untouched.
 
-After updating, run `brain eval <manifest> --golden-20` sitting next to the
+(Historic, do not run.) After updating, run `brain eval <manifest> --golden-20` sitting next to the
 person who owns the brain, then `brain ask` any question and read the new
 confidence line. Existing golden sets and scoring are unchanged.
 

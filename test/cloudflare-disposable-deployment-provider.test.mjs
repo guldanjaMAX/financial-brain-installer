@@ -124,8 +124,8 @@ function manifestBinding(role) {
     embeddingModel: "@cf/baai/bge-base-en-v1.5",
     enabledCorpora: [],
     ocrEnabled: "0",
-    ocrModel: "@cf/google/gemma-4-26b-a4b-it",
-    productVersion: "0.4.8",
+    ocrModel: "@cf/meta/llama-4-scout-17b-16e-instruct",
+    productVersion: "0.4.9",
     recoveryArtifactKeySecret: source
       ? null
       : "keychain://brain-test-v048-field-target-recovery-gate-a48f1102/artifact-v1",
@@ -168,7 +168,7 @@ function provisioningModuleFixture() {
   const fixture = moduleFixture();
   const migrationRoot = join(fixture.root, "migrations", "d1");
   mkdirSync(migrationRoot, { recursive: true, mode: 0o700 });
-  for (let version = 1; version <= 46; version += 1) {
+  for (let version = 1; version <= 48; version += 1) {
     const filename = `${String(version).padStart(4, "0")}_fixture_${version}.sql`;
     const relative = `migrations/d1/${filename}`;
     const path = join(fixture.root, relative);
@@ -1070,7 +1070,7 @@ testWithMacosPrivateReceipt("baseline reconciliation never duplicates an orphane
             number: 1,
             tag_sha256: digest(`v048-field-target-bootstrap-${HASH}`),
             message_sha256: digest(
-              "Financial Brain 0.4.8 disposable target maintenance bootstrap",
+              "Financial Brain 0.4.9 disposable target maintenance bootstrap",
             ),
             compatibility_date: "2026-01-01",
             main_module: "field-bootstrap.mjs",
@@ -1088,7 +1088,7 @@ testWithMacosPrivateReceipt("baseline reconciliation never duplicates an orphane
           version_id: input.version_id,
           tag_sha256: digest(`v048-field-target-bootstrap-${HASH}`),
           message_sha256: digest(
-            "Financial Brain 0.4.8 disposable target maintenance bootstrap",
+            "Financial Brain 0.4.9 disposable target maintenance bootstrap",
           ),
           compatibility_date: "2026-01-01",
           main_module: "field-bootstrap.mjs",
@@ -1125,7 +1125,7 @@ testWithMacosPrivateReceipt("baseline reconciliation never duplicates an orphane
         return {
           tag_sha256: digest(`v048-field-target-bootstrap-${HASH}`),
           message_sha256: digest(
-            "Financial Brain 0.4.8 disposable target maintenance bootstrap",
+            "Financial Brain 0.4.9 disposable target maintenance bootstrap",
           ),
           behavior_exact: true,
           behavior_sha256: "c".repeat(64),
@@ -1284,7 +1284,7 @@ testWithMacosPrivateReceipt("source final read proves valid independent key-stat
           version_id: SOURCE_VERSION,
           tag_sha256: digest(`v048-field-source-bootstrap-${HASH}`),
           message_sha256: digest(
-            "Financial Brain 0.4.8 disposable source maintenance bootstrap",
+            "Financial Brain 0.4.9 disposable source maintenance bootstrap",
           ),
           compatibility_date: "2026-01-01",
           main_module: "field-bootstrap.mjs",
@@ -1320,7 +1320,7 @@ testWithMacosPrivateReceipt("source final read proves valid independent key-stat
         return {
           tag_sha256: digest(`v048-field-source-bootstrap-${HASH}`),
           message_sha256: digest(
-            "Financial Brain 0.4.8 disposable source maintenance bootstrap",
+            "Financial Brain 0.4.9 disposable source maintenance bootstrap",
           ),
           behavior_exact: true,
           behavior_sha256: "c".repeat(64),
@@ -1346,8 +1346,8 @@ testWithMacosPrivateReceipt("source final read proves valid independent key-stat
       async queryD1() {
         return {
           results: [{
-            migrations: 46,
-            schema_version: 46,
+            migrations: 48,
+            schema_version: 48,
             documents: 0,
             chunks: 0,
             fts: 0,
@@ -1385,7 +1385,7 @@ testWithMacosPrivateReceipt("source final read proves valid independent key-stat
       baselineVersionId: SOURCE_VERSION,
       campaignFingerprint: HASH,
     });
-    assert.equal(final.semantic.schema_version, 46);
+    assert.equal(final.semantic.schema_version, 48);
     assert.equal(JSON.stringify(final).includes("0123456789abcdef".repeat(4)), false);
     assert.equal(JSON.stringify(final).includes("fedcba9876543210".repeat(4)), false);
     equalPrimaryKeyRows = 1;
@@ -1487,14 +1487,14 @@ testWithMacosPrivateReceipt("source schema initialization reconciles an exact co
       outcome: "resume_safe",
     });
     const completed = await mutation.initializeSourceSchema(SOURCE_DATABASE);
-    assert.equal(completed.result.schema_version, 46);
-    assert.equal(applied.length, 46);
+    assert.equal(completed.result.schema_version, 48);
+    assert.equal(applied.length, 48);
     for (let version = 1; version <= 12; version += 1) {
       assert.equal(statementCalls.get(version), 1, `migration ${version} must not replay`);
     }
     const reconciled = await mutation.reconcileSourceSchema(SOURCE_DATABASE);
     assert.equal(reconciled.outcome, "confirmed");
-    assert.equal(reconciled.value.result.schema_version, 46);
+    assert.equal(reconciled.value.result.schema_version, 48);
     mutation.dispose();
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
@@ -1519,7 +1519,7 @@ testWithMacosPrivateReceipt("source schema resumes every committed bootstrap and
   try {
     for (const loss of [
       "create:install_state",
-      "ledger:46",
+      "ledger:46", "create:fixture_47", "ledger:47", "create:fixture_48", "ledger:48",
       "postlude:install_state",
       "postlude:owner_key",
       "postlude:source_key",
@@ -1535,13 +1535,14 @@ testWithMacosPrivateReceipt("source schema resumes every committed bootstrap and
         assert.equal(reconciliation.outcome,
           loss === "postlude:source_key" ? "confirmed" : "resume_safe");
         const completed = await mutation.initializeSourceSchema(SOURCE_DATABASE);
-        assert.equal(completed.result.schema_version, 46);
+        assert.equal(completed.result.schema_version, 48);
         assert.equal(fixtureTransport.state.installState, true);
         assert.match(fixtureTransport.state.ownerSalt, /^[a-f0-9]{64}$/u);
         assert.match(fixtureTransport.state.sourceSalt, /^[a-f0-9]{64}$/u);
         assert.notEqual(fixtureTransport.state.ownerSalt, fixtureTransport.state.sourceSalt);
         for (const label of [
-          "ledger:46", "postlude:install_state", "postlude:owner_key",
+          "ledger:46", "create:fixture_47", "ledger:47", "create:fixture_48", "ledger:48",
+          "postlude:install_state", "postlude:owner_key",
           "postlude:source_key",
         ]) {
           assert.equal(fixtureTransport.state.mutationCounts.get(label), 1,
@@ -1588,11 +1589,11 @@ testWithMacosPrivateReceipt("source schema resumes every committed bootstrap and
   }
 });
 
-testWithMacosPrivateReceipt("real schema 46 resumes every migration statement and ledger boundary exactly", {
+testWithMacosPrivateReceipt("real schema 48 resumes every migration statement and ledger boundary exactly", {
   timeout: 120_000,
 }, async () => {
   const fixture = realProvisioningExecutionFixture();
-  assert.equal(fixture.migrations.length, 46);
+  assert.equal(fixture.migrations.length, 48);
   let active;
   const transportProxy = {
     queryD1: (...args) => active.transport.queryD1(...args),
@@ -1627,20 +1628,20 @@ testWithMacosPrivateReceipt("real schema 46 resumes every migration statement an
           lossBoundary);
       }
       const result = await mutation.initializeSourceSchema(SOURCE_DATABASE);
-      assert.equal(result.result.schema_version, 46, lossBoundary || "clean");
+      assert.equal(result.result.schema_version, 48, lossBoundary || "clean");
       const firstSalts = active.salts();
       assert.match(firstSalts.owner, /^[a-f0-9]{64}$/u, lossBoundary || "clean");
       assert.match(firstSalts.source, /^[a-f0-9]{64}$/u, lossBoundary || "clean");
       assert.notEqual(firstSalts.owner, firstSalts.source, lossBoundary || "clean");
       const second = await mutation.initializeSourceSchema(SOURCE_DATABASE);
-      assert.equal(second.result.schema_version, 46, lossBoundary || "clean");
+      assert.equal(second.result.schema_version, 48, lossBoundary || "clean");
       assert.deepEqual(active.salts(), firstSalts,
         `${lossBoundary || "clean"}: identity salts must never rotate`);
       const ledger = active.ledger();
-      assert.equal(ledger.length, 46, lossBoundary || "clean");
+      assert.equal(ledger.length, 48, lossBoundary || "clean");
       assert.deepEqual(ledger.map(({ version }) => Number(version)),
-        Array.from({ length: 46 }, (_, index) => index + 1), lossBoundary || "clean");
-      for (let version = 1; version <= 46; version += 1) {
+        Array.from({ length: 48 }, (_, index) => index + 1), lossBoundary || "clean");
+      for (let version = 1; version <= 48; version += 1) {
         assert.equal(active.mutationCounts.get(`ledger:${version}`), 1,
           `${lossBoundary || "clean"}: ledger ${version} must commit once`);
       }
@@ -1654,11 +1655,11 @@ testWithMacosPrivateReceipt("real schema 46 resumes every migration statement an
   active.close();
   const statementBoundaries = fixture.migrations.flatMap(({ version, statements }) =>
     statements.map((unused, index) => `statement:${version}:${index + 1}`));
-  assert.equal(statementBoundaries.length, 422,
-    "the immutable schema-46 inventory changed; review this crash matrix before updating it");
+  assert.equal(statementBoundaries.length, 436,
+    "the immutable schema-48 inventory changed; review this crash matrix before updating it");
   const lossBoundaries = [
     ...statementBoundaries,
-    ...Array.from({ length: 46 }, (_, index) => `ledger:${index + 1}`),
+    ...Array.from({ length: 48 }, (_, index) => `ledger:${index + 1}`),
     "postlude:install_state",
     "postlude:owner_key",
     "postlude:source_key",

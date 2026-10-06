@@ -166,8 +166,10 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
 {
   const env = {
     DB: {
-      prepare: (sql) => /vector_projection_mutation_id AS mutation_id/.test(sql)
-        ? ({ first: async () => ({
+      prepare: (sql) => /WITH bounded AS MATERIALIZED/.test(sql)
+        ? ({ first: async () => ({ n: 0, oldest: null, upserts: 0, deletes: 0, submitted: 0 }) })
+        : /vector_projection_mutation_id AS mutation_id/.test(sql)
+          ? ({ first: async () => ({
           schema_version: 12,
           mutation_id: null,
           mutation_submitted_at: null,
@@ -179,8 +181,8 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
           pending: 0,
           submitted: 0,
           oldest_queued_at: null,
-        }) })
-        : ({ bind: () => ({ all: async () => ({ results: [] }) }) }),
+          }) })
+          : ({ bind: () => ({ all: async () => ({ results: [] }) }) }),
     },
     VECTORIZE: {
       query: async () => ({ matches: [] }),
@@ -988,6 +990,7 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
           maxBinds = Math.max(maxBinds, args.length);
           if (args.length > 100) throw new Error("D1 variable limit exceeded");
           return {
+            _sql: sql,
             _args: args,
             all: async () => ({
               results: /SELECT doc_uid FROM documents/.test(sql)
@@ -1010,6 +1013,13 @@ const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") +
         maxStatements = Math.max(maxStatements, statements.length);
         if (statements.length > 100) throw new Error("internal transaction slice exceeded");
         for (const statement of statements) maxBinds = Math.max(maxBinds, statement?._args?.length || 0);
+        return statements.map((statement) => ({
+          meta: {
+            changes: /DELETE FROM (?:chunks|documents)/.test(statement?._sql || "")
+              ? statement._args.length
+              : 1,
+          },
+        }));
       },
     },
     VECTORIZE: { deleteByIds: async () => { vectorDeleteCalls++; } },

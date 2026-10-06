@@ -34,6 +34,7 @@ import { existsSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { printGuidance } from "./cli-guidance.mjs";
+import { retiredLocalFolderOf } from "./folder-retirement.mjs";
 import {
   buildSchedulerPlan,
   installScheduler,
@@ -75,6 +76,9 @@ export const FOLDER_SCHEDULER_SPEC = Object.freeze({
   cronMissingError:
     "the manifest needs operations.folder_ingest_cron (or the built-in hourly default) before the watched folder scheduler can be installed",
   requireEnabled(manifest) {
+    if (retiredLocalFolderOf(manifest)) {
+      throw new Error("the watched folder is retired and cannot have a scheduler installed");
+    }
     if (folderConfigOf(manifest).enabled !== true) {
       throw new Error("corpora.local_folder.enabled must be true before its scheduler can be installed");
     }

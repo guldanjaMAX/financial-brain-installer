@@ -11,7 +11,6 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,7 +40,9 @@ import {
   validateVectorProjectionAggregateReceipt,
   verifyUpdateRuntimePayload,
 } from "../operations/update-preview.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { inspectNpmArchiveBytes } from "../operations/package-bundle-verifier.mjs";
+import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
@@ -49,6 +50,15 @@ const MODULE_PATH = join(HERE, "..", "operations", "update-preview.mjs");
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
 const nativeRealpath = realpathSync.native || realpathSync;
+
+function createLinkFixture(t, target, path, type) {
+  return createTestSymlink({
+    target,
+    path,
+    type,
+    onSkip: (reason) => t.skip(reason),
+  }).created;
+}
 
 function expectCode(code) {
   return (error) => error instanceof UpdatePreviewError && error.code === code &&
@@ -140,6 +150,7 @@ function mockWindowsNodeShims(target = MOCK_BIN_TARGET) {
 
 function bundledBinFixture(t, platform) {
   const temporary = nativeRealpath(mkdtempSync(join(nativeRealpath(tmpdir()), "brain-shim-fixture-")));
+  t.after(() => rmSync(temporary, { recursive: true, force: true }));
   const root = join(temporary, "runtime");
   const dependencyRoot = join(root, "node_modules", "@scope", "tool");
   const binDirectory = join(root, "node_modules", ".bin");
@@ -158,14 +169,13 @@ function bundledBinFixture(t, platform) {
   writeFileSync(join(dependencyRoot, "bin", "tool.mjs"),
     "#!/usr/bin/env node\nconsole.log('fixture');\n");
   if (platform === "posix") {
-    symlinkSync(MOCK_BIN_TARGET, join(binDirectory, "tool"));
+    if (!createLinkFixture(t, MOCK_BIN_TARGET, join(binDirectory, "tool"), "file")) return null;
   } else {
     const shims = mockWindowsNodeShims();
     writeFileSync(join(binDirectory, "tool"), shims.plain);
     writeFileSync(join(binDirectory, "tool.cmd"), shims.cmd);
     writeFileSync(join(binDirectory, "tool.ps1"), shims.powershell);
   }
-  t.after(() => rmSync(temporary, { recursive: true, force: true }));
   const allowlist = [
     "package.json",
     "node_modules/@scope/tool/package.json",
@@ -234,6 +244,8 @@ function projectionInventory(overrides = {}) {
   const upserts = overrides.upserts ?? pending;
   const deletes = overrides.deletes ?? 0;
   const submitted = overrides.submitted ?? 0;
+  const pendingIsCapped = overrides.pendingIsCapped ?? false;
+  const componentCountsExact = overrides.componentCountsExact ?? !pendingIsCapped;
   const ready = overrides.ready ?? (pending === 0 && actual === expected);
   const reason = Object.hasOwn(overrides, "reason")
     ? overrides.reason
@@ -245,9 +257,12 @@ function projectionInventory(overrides = {}) {
     rows: overrides.rows ?? [{ private_source: "must-not-escape" }],
     vector_backlog: {
       pending,
+      pending_is_capped: pendingIsCapped,
+      pending_display: pendingIsCapped ? "10,000+" : String(pending),
       upserts,
       deletes,
       submitted,
+      component_counts_exact: componentCountsExact,
       oldest_queued_at: Object.hasOwn(overrides, "oldestQueuedAt")
         ? overrides.oldestQueuedAt
         : pending > 0 ? 1_750_000_000_000 : null,
@@ -258,7 +273,9 @@ function projectionInventory(overrides = {}) {
       expected_vectors: expected,
       actual_vectors: actual,
       pending: overrides.readinessPending ?? pending,
+      pending_is_capped: overrides.readinessPendingIsCapped ?? pendingIsCapped,
       submitted: overrides.readinessSubmitted ?? submitted,
+      submitted_counts_exact: overrides.readinessSubmittedCountsExact ?? componentCountsExact,
       oldest_queued_at: Object.hasOwn(overrides, "readinessOldestQueuedAt")
         ? overrides.readinessOldestQueuedAt
         : Object.hasOwn(overrides, "oldestQueuedAt")
@@ -494,6 +511,7 @@ test("POSIX bundled executable shim is exact and excluded from archive-derived i
   skip: process.platform === "win32",
 }, (t) => {
   const fixture = bundledBinFixture(t, "posix");
+  if (!fixture) return;
   const proof = verifyUpdateRuntimePayload({
     root: fixture.root,
     allowlist: fixture.allowlist,
@@ -513,8 +531,14 @@ test("POSIX generated shim contract refuses wrong, external, regular, and extra 
 }, async (t) => {
   await t.test("wrong allowlisted target", (t) => {
     const fixture = bundledBinFixture(t, "posix");
+    if (!fixture) return;
     rmSync(join(fixture.binDirectory, "tool"));
-    symlinkSync("../@scope/tool/package.json", join(fixture.binDirectory, "tool"));
+    if (!createLinkFixture(
+      t,
+      "../@scope/tool/package.json",
+      join(fixture.binDirectory, "tool"),
+      "file",
+    )) return;
     assert.throws(
       () => inventoryUpdateRuntimePayload({
         root: fixture.root, allowlist: fixture.allowlist, platform: "posix",
@@ -524,8 +548,11 @@ test("POSIX generated shim contract refuses wrong, external, regular, and extra 
   });
   await t.test("external target", (t) => {
     const fixture = bundledBinFixture(t, "posix");
+    if (!fixture) return;
     rmSync(join(fixture.binDirectory, "tool"));
-    symlinkSync("../../../../outside", join(fixture.binDirectory, "tool"));
+    if (!createLinkFixture(t, "../../../../outside", join(fixture.binDirectory, "tool"), "file")) {
+      return;
+    }
     assert.throws(
       () => inventoryUpdateRuntimePayload({
         root: fixture.root, allowlist: fixture.allowlist, platform: "posix",
@@ -535,6 +562,7 @@ test("POSIX generated shim contract refuses wrong, external, regular, and extra 
   });
   await t.test("regular file substitution", (t) => {
     const fixture = bundledBinFixture(t, "posix");
+    if (!fixture) return;
     rmSync(join(fixture.binDirectory, "tool"));
     writeFileSync(join(fixture.binDirectory, "tool"), MOCK_BIN_TARGET);
     assert.throws(
@@ -546,7 +574,10 @@ test("POSIX generated shim contract refuses wrong, external, regular, and extra 
   });
   await t.test("extra generated link", (t) => {
     const fixture = bundledBinFixture(t, "posix");
-    symlinkSync(MOCK_BIN_TARGET, join(fixture.binDirectory, "tool-extra"));
+    if (!fixture) return;
+    if (!createLinkFixture(t, MOCK_BIN_TARGET, join(fixture.binDirectory, "tool-extra"), "file")) {
+      return;
+    }
     assert.throws(
       () => inventoryUpdateRuntimePayload({
         root: fixture.root, allowlist: fixture.allowlist, platform: "posix",
@@ -641,7 +672,12 @@ test("mocked Windows generated shim contract refuses drift, omission, links, and
   await t.test("linked plain shim", (t) => {
     const fixture = bundledBinFixture(t, "win32");
     rmSync(join(fixture.binDirectory, "tool"));
-    symlinkSync("../@scope/tool/bin/tool.mjs", join(fixture.binDirectory, "tool"));
+    if (!createLinkFixture(
+      t,
+      "../@scope/tool/bin/tool.mjs",
+      join(fixture.binDirectory, "tool"),
+      "file",
+    )) return;
     assert.throws(
       () => inventoryUpdateRuntimePayload({
         root: fixture.root, allowlist: fixture.allowlist, platform: "win32",
@@ -760,24 +796,36 @@ test("runtime platform selector is closed", (t) => {
 
 test("generated shim contract is rebuilt and rechecked on the second complete pass", (t) => {
   const fixture = bundledBinFixture(t, "posix");
-  assert.throws(
-    () => verifyUpdateRuntimePayload({
+  if (!fixture) return;
+  let linkCreated = true;
+  let thrown;
+  try {
+    verifyUpdateRuntimePayload({
       root: fixture.root,
       allowlist: fixture.allowlist,
       expectedRuntimeSha256: fixture.expectedRuntimeSha256,
       platform: "posix",
       betweenPasses() {
         rmSync(join(fixture.binDirectory, "tool"));
-        symlinkSync("../@scope/tool/package.json", join(fixture.binDirectory, "tool"));
+        linkCreated = createLinkFixture(
+          t,
+          "../@scope/tool/package.json",
+          join(fixture.binDirectory, "tool"),
+          "file",
+        );
       },
-    }),
-    expectCode("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID"),
-  );
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  if (!linkCreated) return;
+  assert.ok(expectCode("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID")(thrown));
 });
 
 test("generated shim metadata and count bounds fail closed", async (t) => {
   await t.test("undeclared generated entry is not inferred", (t) => {
     const fixture = bundledBinFixture(t, "posix");
+    if (!fixture) return;
     const dependencyManifest = join(
       fixture.root, "node_modules", "@scope", "tool", "package.json",
     );
@@ -798,6 +846,7 @@ test("generated shim metadata and count bounds fail closed", async (t) => {
   });
   await t.test("more generated declarations than the fixed bound", (t) => {
     const fixture = bundledBinFixture(t, "posix");
+    if (!fixture) return;
     const dependencyManifest = join(
       fixture.root, "node_modules", "@scope", "tool", "package.json",
     );
@@ -854,7 +903,7 @@ test("runtime inventory refuses missing, extra, linked, and non-allowlisted dire
   await t.test("symlink", (t) => {
     const fixture = runtimeFixture(t);
     rmSync(join(fixture.root, "empty.txt"));
-    symlinkSync("brain.mjs", join(fixture.root, "empty.txt"));
+    if (!createLinkFixture(t, "brain.mjs", join(fixture.root, "empty.txt"), "file")) return;
     assert.throws(() => inventoryUpdateRuntimePayload(fixture),
       expectCode("UPDATE_PREVIEW_RUNTIME_PAYLOAD_INVALID"));
   });
@@ -868,7 +917,7 @@ test("runtime inventory refuses missing, extra, linked, and non-allowlisted dire
   await t.test("symlinked root", (t) => {
     const fixture = runtimeFixture(t);
     const linkedRoot = join(dirname(fixture.root), "linked-runtime");
-    symlinkSync(fixture.root, linkedRoot, "dir");
+    if (!createLinkFixture(t, fixture.root, linkedRoot, "dir")) return;
     assert.throws(
       () => inventoryUpdateRuntimePayload({ ...fixture, root: linkedRoot }),
       expectCode("UPDATE_PREVIEW_RUNTIME_ROOT_INVALID"),
@@ -1035,6 +1084,9 @@ test("authenticated projection validation returns only one frozen aggregate cut"
     actual_vectors: 10,
     queue: {
       pending: 0,
+      pending_is_capped: false,
+      pending_display: "0",
+      component_counts_exact: true,
       upserts: 0,
       deletes: 0,
       submitted: 0,
@@ -1293,6 +1345,135 @@ test("projection classifier distinguishes ready, sufficient, insufficient, missi
     assert.equal(proof.queue.pending, fixture.pending ?? 0);
     assert.ok(Object.isFrozen(proof));
   }
+});
+
+test("a capped million-row queue is blocked as uncounted work without comparing its sample to the deficit", () => {
+  const proof = syntheticProjection({
+    expected: 1_150_274,
+    actual: 0,
+    pending: 10_001,
+    upserts: 10_001,
+    pendingIsCapped: true,
+    componentCountsExact: false,
+  });
+  assert.equal(proof.verdict, "projection_work_queued_uncounted");
+  assert.equal(proof.queue.pending_is_capped, true);
+  assert.equal(proof.queue.component_counts_exact, false);
+  assert.equal(proof.queue.pending_display, "10,000+");
+  assert.doesNotMatch(JSON.stringify(proof), /1150274-row queue/u);
+
+  const plan = syntheticPlan({ deployedProjection: proof });
+  const receipt = createUpdatePreviewProjectionFailureReceipt(plan, {
+    credential_reads: 1,
+    network_requests: 1,
+  });
+  assert.equal(receipt.status, "failed");
+  assert.equal(receipt.error_code, "UPDATE_PREVIEW_PROJECTION_WORK_UNCOUNTED");
+  assert.equal(receipt.authorizes_update, false);
+  assert.match(receipt.owner_message, /large indexing queue is still working; wait for it before updating/i);
+});
+
+// The exact SELECT count(*) receipt of every Worker before the bounded
+// documents summary: none of the three bounded-summary fields are present.
+function preSummaryInventory(overrides = {}, backlogExtras = {}) {
+  const inventory = projectionInventory(overrides);
+  for (const field of ["pending_is_capped", "pending_display", "component_counts_exact"]) {
+    delete inventory.vector_backlog[field];
+  }
+  delete inventory.vector_readiness.pending_is_capped;
+  delete inventory.vector_readiness.submitted_counts_exact;
+  Object.assign(inventory.vector_backlog, backlogExtras);
+  return inventory;
+}
+
+const PRE_SUMMARY_QUEUED = Object.freeze({
+  expected: 84_075, actual: 0, pending: 84_075, submitted: 200,
+  reason: "accepted_mutation_needs_confirmation",
+});
+
+test("a pre-summary Worker's exact backlog is a legacy exact receipt, not an invalid one", () => {
+  const inventory = preSummaryInventory(PRE_SUMMARY_QUEUED);
+  const aggregate = validateVectorProjectionAggregateReceipt(inventory, {
+    expectedVersion: inventory.version,
+  });
+  assert.equal(aggregate.queue.pending, 84_075);
+  assert.equal(aggregate.queue.pending_is_capped, false);
+  assert.equal(aggregate.queue.pending_display, "84075");
+  assert.equal(aggregate.queue.component_counts_exact, true);
+  assert.equal(aggregate.queue.count_receipt, "legacy_exact");
+
+  const proof = classifyUpdatePreviewProjectionReceipt(inventory, {
+    expectedVersion: inventory.version,
+  });
+  assert.equal(proof.verdict, "recoverable_queued_work");
+  assert.equal(proof.queue.pending, 84_075);
+  const receipt = createUpdatePreviewSuccessReceipt(syntheticPlan({ deployedProjection: proof }), {
+    credential_reads: 1,
+    network_requests: 1,
+  });
+  assert.equal(receipt.plan.deployed_projection.queue.pending, 84_075);
+  assert.match(receipt.owner_note, /older Worker.*exact count/i);
+  assert.doesNotMatch(JSON.stringify(receipt), /10,000\+/u);
+});
+
+test("a pre-summary Worker's zero backlog reads as zero and ready", () => {
+  const proof = classifyUpdatePreviewProjectionReceipt(preSummaryInventory(), {
+    expectedVersion: "0.4.7",
+  });
+  assert.equal(proof.verdict, "ready");
+  assert.equal(proof.queue.pending, 0);
+  assert.equal(proof.queue.pending_display, "0");
+  assert.equal(proof.queue.count_receipt, "legacy_exact");
+  const receipt = createUpdatePreviewSuccessReceipt(syntheticPlan({ deployedProjection: proof }), {
+    credential_reads: 1,
+    network_requests: 1,
+  });
+  assert.equal(receipt.projection_ready, true);
+});
+
+test("every partial or malformed bounded-summary backlog still refuses", () => {
+  for (const extras of [
+    { pending_is_capped: false },
+    { pending_display: "84075" },
+    { component_counts_exact: true },
+    { pending_is_capped: false, pending_display: "84075" },
+    { pending_is_capped: false, component_counts_exact: true },
+    { pending_display: "84075", component_counts_exact: true },
+    { pending_is_capped: true, pending_display: null, component_counts_exact: false },
+    { pending_is_capped: true, pending_display: undefined, component_counts_exact: false },
+    { pending_is_capped: "false", pending_display: 84_075, component_counts_exact: "true" },
+    { pending_is_capped: false, pending_display: "84075", component_counts_exact: true },
+  ]) {
+    assert.throws(
+      () => classifyUpdatePreviewProjectionReceipt(preSummaryInventory(PRE_SUMMARY_QUEUED, extras), {
+        expectedVersion: "0.4.7",
+      }),
+      expectCode("UPDATE_PREVIEW_VECTOR_BACKLOG_INVALID"),
+      JSON.stringify(extras),
+    );
+  }
+  // A readiness receipt carrying only half of its bounded pair is not the
+  // pre-summary shape either.
+  for (const field of ["pending_is_capped", "submitted_counts_exact"]) {
+    const inventory = preSummaryInventory(PRE_SUMMARY_QUEUED);
+    inventory.vector_readiness[field] = field === "pending_is_capped" ? false : true;
+    assert.throws(
+      () => classifyUpdatePreviewProjectionReceipt(inventory, { expectedVersion: "0.4.7" }),
+      expectCode("UPDATE_PREVIEW_VECTOR_READINESS_INVALID"),
+      field,
+    );
+  }
+  // A plan cannot claim the legacy label for a capped or uncounted queue.
+  const capped = syntheticProjection({
+    expected: 20_000, actual: 0, pending: 10_001, upserts: 10_001,
+    pendingIsCapped: true, componentCountsExact: false,
+  });
+  assert.throws(
+    () => syntheticPlan({
+      deployedProjection: { ...capped, queue: { ...capped.queue, count_receipt: "legacy_exact" } },
+    }),
+    expectCode("UPDATE_PREVIEW_PLAN_INVALID"),
+  );
 });
 
 test("projection validation fails closed on mixed or incoherent same-response fields", () => {
@@ -1600,4 +1781,24 @@ test("pure preview core has no write, network, child-process, environment, or cr
   assert.doesNotMatch(source,
     /\b(?:writeFile|appendFile|mkdir|rename|unlink|rm|rmdir|truncate|chmod|chown|symlink|link)Sync\b/u);
   assert.doesNotMatch(source, /keychain|wrangler|cloudflare-api-token/i);
+});
+
+test("brain update help is plain text and an unknown live flag names the no-option owner route", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "brain-update-help-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const cli = fileURLToPath(new URL("../brain.mjs", import.meta.url));
+  const env = { ...process.env, HOME: home, BRAIN_NO_WRANGLER_LOGIN: "1", NO_COLOR: "1" };
+  const help = spawnSync(process.execPath, [cli, "update", "--help"], { encoding: "utf8", env });
+  assert.equal(help.status, 0);
+  assert.ok(help.stdout.includes(renderCliCommands("Usage: brain update [manifest]", { scriptPath: cli })));
+  assert.doesNotMatch(help.stdout, /"schema_version"|"error_code"/u);
+
+  const unknown = spawnSync(process.execPath, [cli, "update", "--mystery"], { encoding: "utf8", env });
+  assert.notEqual(unknown.status, 0);
+  // The refusal is rendered per platform, so the expectation is built with the
+  // same renderer: on Windows both commands are the runnable node invocation.
+  assert.ok(unknown.stdout.includes(renderCliCommands(
+    "brain update doesn't take --mystery. Run brain update with no options.",
+    { scriptPath: cli },
+  )), unknown.stdout);
 });

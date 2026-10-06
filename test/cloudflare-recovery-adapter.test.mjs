@@ -13,7 +13,6 @@ import {
   renameSync,
   rmSync,
   statSync,
-  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -96,6 +95,7 @@ import {
   readPrivateAggregateReceipt,
   reservePrivateAggregateReceipt,
 } from "../operations/private-aggregate-receipt.mjs";
+import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 import {
   V048_DISPOSABLE_CAMPAIGN_CORPORA,
 } from "../operations/v048-disposable-campaign-contract.mjs";
@@ -143,6 +143,8 @@ import {
 import {
   createDisposableCampaignAuthorityFixture,
 } from "./helpers/disposable-campaign-authority.mjs";
+
+let skippedLinkChecks = 0;
 
 const residuePolicyOnly =
   process.env.FINANCIAL_BRAIN_ADAPTER_RESIDUE_POLICY_TEST === "1";
@@ -230,6 +232,23 @@ assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_accepted_resoluti
 assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolution_admissions"), false);
 assert.equal(RECOVERY_DURABLE_TABLES.includes("source_original_result_family_recovery_state"), true);
 assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_recovery_state"), false);
+assert.equal(RECOVERY_DURABLE_TABLES.includes("ocr_page_requests"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("ocr_page_requests"), true);
+for (const table of [
+  "custom_api_jobs", "custom_api_current_jobs", "custom_api_document_versions",
+  "custom_api_row_chunks", "custom_api_job_slices", "custom_api_fetches",
+]) {
+  assert.equal(RECOVERY_DURABLE_TABLES.includes(table), true, table);
+  assert.equal(RECOVERY_EXPORT_TABLES.includes(table), true, table);
+}
+assert.equal(RECOVERY_DURABLE_TABLES.includes("custom_api_schedule_state"), true);
+assert.equal(RECOVERY_EXPORT_TABLES.includes("custom_api_schedule_state"), false);
+// Restrict foreign keys: every referencing custom API table restores after jobs.
+for (const table of [
+  "custom_api_current_jobs", "custom_api_document_versions", "custom_api_job_slices", "custom_api_fetches",
+]) {
+  assert.ok(RECOVERY_EXPORT_TABLES.indexOf("custom_api_jobs") < RECOVERY_EXPORT_TABLES.indexOf(table), table);
+}
 assert.ok(
   RECOVERY_EXPORT_TABLES.indexOf("source_original_observations") <
     RECOVERY_EXPORT_TABLES.indexOf("source_original_result_bindings") &&
@@ -253,7 +272,7 @@ const wrapperPath = join(sandbox, "wrangler-owner-wrapper");
 const goldenPath = join(sandbox, "brain.golden.json");
 const fieldPreparationDirectory = join(sandbox, "private-v048-field-preparation");
 const fieldReceiptPath = join(fieldPreparationDirectory, "field-prepare-receipt.json");
-const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.8.tgz");
+const fieldPackagePath = join(fieldPreparationDirectory, "brain-installer-0.4.9.tgz");
 const fieldSourcePreflightReceiptPath = join(
   fieldPreparationDirectory,
   DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,
@@ -363,7 +382,7 @@ const syntheticFieldSourceManifest = {
   ...structuredClone(sourceManifest),
   client: { slug: "v048-field-proof", display_name: "Synthetic Field Gate v0.4.8" },
   brain: {
-    version: "0.4.8",
+    version: "0.4.9",
     worker_name: syntheticFieldSourceResource,
     domain: `${syntheticFieldSourceResource}.fixture.workers.dev`,
   },
@@ -438,7 +457,7 @@ function npmPackageFixture(destination) {
   assert.equal(packed.status, 0, "focused recovery test must build its exact local npm package");
   const metadata = JSON.parse(packed.stdout);
   assert.equal(metadata.length, 1);
-  assert.equal(metadata[0].filename, "brain-installer-0.4.8.tgz");
+  assert.equal(metadata[0].filename, "brain-installer-0.4.9.tgz");
   assert.equal(metadata[0].entryCount, metadata[0].files.length);
   return Object.freeze({
     bytes: readFileSync(join(destination, metadata[0].filename)),
@@ -595,13 +614,13 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
       head_sha: candidateSha,
       tree_sha: "b".repeat(40),
       package_name: "brain-installer",
-      package_version: "0.4.8",
+      package_version: "0.4.9",
       package_alignment: {
         aligned: true,
         package_lock_name: "brain-installer",
-        package_lock_version: "0.4.8",
+        package_lock_version: "0.4.9",
         package_lock_root_name: "brain-installer",
-        package_lock_root_version: "0.4.8",
+        package_lock_root_version: "0.4.9",
       },
       package_json_sha256: hash(readFileSync(join(process.cwd(), "package.json"))),
       package_lock_sha256: hash(readFileSync(join(process.cwd(), "package-lock.json"))),
@@ -612,7 +631,7 @@ function fullFieldPreparationReceipt(candidateSha, packageBytes, packageFileCoun
       end_clean: true,
     },
     package: {
-      filename: "brain-installer-0.4.8.tgz",
+      filename: "brain-installer-0.4.9.tgz",
       bytes: packageBytes.length,
       sha256: hash(packageBytes),
       identity_scheme: UPDATE_RUNTIME_IDENTITY_SCHEME,
@@ -689,6 +708,11 @@ assert.equal(recoveryExportTables(appliedMigrations.slice(0, 44)).includes("sour
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_accepted_resolutions"), true);
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_accepted_resolution_activations"), false);
 assert.equal(recoveryExportTables(appliedMigrations).includes("source_original_accepted_resolution_admissions"), false);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 46)).includes("ocr_page_requests"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("ocr_page_requests"), true);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 47)).includes("custom_api_current_jobs"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("custom_api_current_jobs"), true);
+assert.equal(recoveryExportTables(appliedMigrations).includes("custom_api_schedule_state"), false);
 assert.equal(
   recoveryExportTables(appliedMigrations, { excludeLlmCallLog: true })
     .includes("llm_call_log"),
@@ -1262,7 +1286,7 @@ function fullDisposableSeedReceipt(binding, {
       independently_verified_empty: true,
     },
     d1: {
-      worker_version: "0.4.8",
+      worker_version: "0.4.9",
       documents: DISPOSABLE_RECOVERY_SEED_DOCUMENTS,
       chunks,
       fts: chunks,
@@ -1919,7 +1943,9 @@ function providerHarness({
     (version >= 42 || !sourceOriginalTables.has(name)) &&
     (version >= 43 || name !== "source_original_result_bindings") &&
     (version >= 44 || !sourceOriginalResultFamilyTables.has(name)) &&
-    (version >= 45 || !sourceOriginalAcceptedResolutionTables.has(name)));
+    (version >= 45 || !sourceOriginalAcceptedResolutionTables.has(name)) &&
+    (version >= 47 || name !== "ocr_page_requests") &&
+    (version >= 48 || !name.startsWith("custom_api_")));
 
   const runWrangler = async ({ command, args, env, cwd }) => {
     wranglerCalls.push({ command, args: [...args], env: { ...env }, cwd });
@@ -2113,7 +2139,7 @@ function providerHarness({
               type: "plain_text",
               name: "OCR_MODEL",
               text: plainTextOverrides.OCR_MODEL ??
-                (manifest.safety?.ocr?.model || "@cf/google/gemma-4-26b-a4b-it"),
+                (manifest.safety?.ocr?.model || "@cf/meta/llama-4-scout-17b-16e-instruct"),
             },
             { type: "secret_text", name: "ADMIN_KEY" },
             { type: "secret_text", name: "RAG_PROXY_KEY" },
@@ -2989,8 +3015,16 @@ try {
     artifactDirectory,
     ".brain-recovery-test-bootstrap-interruption-v1.json",
   );
-  if (process.platform !== "win32") {
-    symlinkSync(join(artifactDirectory, "missing-control-target"), ordinaryCheckpointPath);
+  const linkedControl = createTestSymlink({
+    target: join(artifactDirectory, "missing-control-target"),
+    path: ordinaryCheckpointPath,
+    type: "file",
+    onSkip: (reason) => {
+      skippedLinkChecks++;
+      console.log(`SKIP  dangling live-control link # ${reason}`);
+    },
+  });
+  if (linkedControl.created) {
     assert.throws(
       () => previewCloudflareRecoveryFieldGate(baseConfig, { platform: "darwin" }),
       (error) => error.code ===
@@ -5014,7 +5048,7 @@ try {
   );
   const mismatchedRuntimePackagePath = join(
     mismatchedRuntimeDirectory,
-    "brain-installer-0.4.8.tgz",
+    "brain-installer-0.4.9.tgz",
   );
   mkdirSync(mismatchedRuntimeDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(mismatchedRuntimeDirectory, 0o700);
@@ -5058,7 +5092,7 @@ try {
   );
   const omittedRuntimePackagePath = join(
     omittedRuntimeDirectory,
-    "brain-installer-0.4.8.tgz",
+    "brain-installer-0.4.9.tgz",
   );
   mkdirSync(omittedRuntimeDirectory, { mode: 0o700 });
   if (process.platform !== "win32") chmodSync(omittedRuntimeDirectory, 0o700);
@@ -5129,7 +5163,7 @@ try {
   // field-preparation receipt. A copied approval cannot authorize a later run.
   const replayReceiptDirectory = join(sandbox, "private-v048-field-preparation-replay");
   const replayReceiptPath = join(replayReceiptDirectory, "field-prepare-receipt.json");
-  const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.8.tgz");
+  const replayPackagePath = join(replayReceiptDirectory, "brain-installer-0.4.9.tgz");
   const replaySourcePreflightReceiptPath = join(
     replayReceiptDirectory,
     DISPOSABLE_RECOVERY_SOURCE_PREFLIGHT_RECEIPT_NAME,
@@ -7594,13 +7628,23 @@ try {
   );
 
   const unsafeWrapper = join(sandbox, "unsafe-wrapper-link");
-  symlinkSync(wrapperPath, unsafeWrapper);
-  assert.throws(
-    () => previewCloudflareRecoveryFieldGate({ ...baseConfig, wranglerWrapperPath: unsafeWrapper }, {
-      platform: "darwin",
-    }),
-    (error) => error.code === "RECOVERY_WRANGLER_WRAPPER_UNSAFE",
-  );
+  const linkedWrapper = createTestSymlink({
+    target: wrapperPath,
+    path: unsafeWrapper,
+    type: "file",
+    onSkip: (reason) => {
+      skippedLinkChecks++;
+      console.log(`SKIP  recovery refuses a linked wrapper # ${reason}`);
+    },
+  });
+  if (linkedWrapper.created) {
+    assert.throws(
+      () => previewCloudflareRecoveryFieldGate({ ...baseConfig, wranglerWrapperPath: unsafeWrapper }, {
+        platform: "darwin",
+      }),
+      (error) => error.code === "RECOVERY_WRANGLER_WRAPPER_UNSAFE",
+    );
+  }
 
   if (process.platform !== "win32" && existsSync("/usr/bin/sqlite3")) {
     const localArtifact = join(sandbox, ".brain-recovery-local-verifier.sql");
@@ -7719,7 +7763,8 @@ try {
     assert.notEqual(schema33.schema_fingerprint, local.schema_fingerprint);
   }
 
-  console.log("PASS  Cloudflare recovery adapter is disposable-only, credential-safe, redirect-safe, and resumable");
+  console.log("PASS  Cloudflare recovery adapter is disposable-only, credential-safe, redirect-safe, and " +
+    `resumable; ${skippedLinkChecks} skipped`);
 } finally {
   try { unlinkSync(join(artifactDirectory, ".brain-recovery-field-gate.lock")); } catch { /* absent */ }
   rmSync(sandbox, { recursive: true, force: true });

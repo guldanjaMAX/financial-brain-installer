@@ -343,8 +343,9 @@ repair as incomplete instead of calling it fixed.
 Finish and show the read-only Optimize report first. A provenance gap in that
 report is not approval to repair it. Confirm that the exact installed stable
 release advertises the one-target provenance lane before naming or running it.
-The held 0.4.8 candidate is not a customer release and must not be used on a
-customer Brain.
+A held or field-test candidate is not a customer release and must not be used on a
+customer Brain; only a release the public release feed marks stable and available
+qualifies.
 
 When a supported release is available, offer this lane only for one exact file
 the owner chooses from the manifest's enabled local folder source:
@@ -448,15 +449,20 @@ other homework.
    coordinator and has no update step. Never restart setup, restore a bookmark
    first, clear paused mode manually, accept checksum drift, or improvise a
    rollback.
-6. Keep working in this conversation through documented waits and retry-safe
-   branches. The conservative old-invocation safety wait can run for twenty
+6. Start `brain update` as a background task, then read its output every few
+   minutes until it finishes. Tell the owner: "The update is running. On a
+   large Brain it can take a while; I'll keep an eye on it here. Please keep
+   this window open." Keep working in this conversation through documented
+   waits and retry-safe branches. The conservative old-invocation safety wait can run for twenty
    minutes with unchanged counts; before its deadline that is a wait, not a
    stall. Do not shorten or interrupt it. Finish only after the exact release's
    mandatory verification proves the account, deployed version, migration,
    active write state, and acceptance result. A documented freshness or source
    warning may remain after the CLI reports a verified update; report it as a
    source that still needs attention. Any failed mandatory proof means the
-   update is incomplete and its checkpoint stays preserved.
+   update is incomplete and its checkpoint stays preserved. After a verified
+   update, tell the owner to quit Claude Code (and Codex, if they use it), open
+   it again, type `/exit`, then `claude --continue`, and ask: "check my Brain."
 
 ## Offer Claude Code concierge browser help
 
@@ -518,7 +524,8 @@ sign-in, not the normal install. If the reviewed CLI truly requires recovery,
 inspect the selected manifest first. A D1-only Brain needs the four reviewed
 permissions. Add Workers R2 Storage Edit only when that manifest configures an
 R2 bucket. Claude may fill the token name, the applicable permissions, the
-one-account restriction, and a short expiration. Stop on the final review screen. The
+one-account restriction, a start date left empty or set to today, and an end at
+least 7 days from now. Stop on the final review screen. The
 owner checks the summary, chooses **Create Token**, privately moves the value
 into the CLI's approved owner-only input, and dismisses the secret page before
 Claude resumes browser control. On Windows, customer token recovery is not
@@ -795,6 +802,11 @@ must stop before resource creation.
   `claude --add-dir <approved-folder>` for that exact root.
 - Preview scope with the connector's dry run before the first ingest. Finding a
   file is not permission to upload it.
+- Turn off a watched folder with `brain folder <manifest> off`; it keeps every
+  document and removes nothing.
+- Never run `ingest --path` on a folder the Brain retired. Never run `schedule
+  --install --folder`, `--reset`, `--approve-removals`, or `forget` on that
+  retired folder's source.
 - Run one connector at a time and record automated, synthetic-field,
   real-source, and production proof separately.
 - Ordinary onboarding must leave the bank feed disabled and must not run `brain
@@ -812,7 +824,28 @@ must stop before resource creation.
   bank page to add any missing person or business and assign each whole account.
   Ask only about unresolved account ownership; do not request bank credentials
   or statements in chat. A configured developer account or passing local test
-  does not establish a working deployed connection.
+  does not establish a working deployed connection. Follow the gate's
+  owner-present journey in order:
+  - Bank feeds are set up with the owner and installer on a call. First finish
+    `brain setup`, then enroll and verify the owner passkey, and only then run
+    `brain connect bank <manifest>`. Only that command writes the Plaid keys.
+  - The owner types both keys at its hidden prompt, and the command checks them
+    with Plaid before saving. If a key was wrong, the owner reruns it with
+    `--replace-keys`. Never ask for, paste, or relay a Plaid key yourself.
+  - Plaid's phone-verification pane takes `123456` in sandbox, and no text
+    arrives. In production a real code goes to the owner's phone, and only the
+    owner enters it.
+  - Plaid can re-share a connection saved for the phone number entered in Link
+    instead of the bank the owner picked. Have the owner choose "Add new
+    account" or the specific bank, and check the connection's institution label
+    before assigning accounts. If it is wrong, disconnect it at Access > Banks >
+    Disconnect and connect again. In sandbox, use a fresh test phone number
+    (415-555-0011, or 415-555-0131 through 415-555-0138) with code `123456`.
+  - Setting `corpora.bank_feed.enabled` to `false` and then running
+    `brain secrets` or `brain setup` DELETES the Plaid client ID and secret
+    from the Worker. Re-enabling needs `brain connect bank` again.
+  - Disconnect is in the owner app at Access > Banks > Disconnect. It is not
+    on the connect page.
 - A partial, unavailable, stale, refused, or interrupted source is not
   complete. A healthy empty result and an unavailable result must remain visibly
   different.

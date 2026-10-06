@@ -451,14 +451,16 @@ export async function getTargetInventory({
 }) {
   if (!targetUrl) throw new Error("BRAIN_URL is missing");
   if (!adminKey) throw new Error("ADMIN_KEY is missing");
-  const endpoint = new URL(`${cleanUrl(targetUrl)}/api/admin/brain/documents`);
+  const endpoint = new URL(`${cleanUrl(targetUrl)}/api/admin/brain/documents/report`);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   let raw;
   try {
     response = await fetchBrainWithAdminKey(fetchImpl, endpoint.href, {
-      method: "GET",
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
       signal: controller.signal,
     }, () => adminKey);
     assertExactResponseUrl(response, endpoint, "target inventory");

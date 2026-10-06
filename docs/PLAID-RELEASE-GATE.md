@@ -2,9 +2,9 @@
 
 General invitations to connect banks are held. The reviewed source candidate
 is not a completed owner acceptance test. Track the executable regression and
-release requirements as UPDATE-017 through UPDATE-022 and UPDATE-025 in
-[`update-incidents.json`](update-incidents.json). `npm run audit:updates`
-must remain held until reviewed evidence closes them.
+release requirements as UPDATE-017 through UPDATE-022, UPDATE-025 and
+UPDATE-044 in [`update-incidents.json`](update-incidents.json).
+`npm run audit:updates` must remain held until reviewed evidence closes them.
 
 "Held" here means the bank invitations are held, not that the tag is. UPDATE-022
 is the owner journey against a deployed candidate with real institutions and a
@@ -15,6 +15,17 @@ UPDATE-021 and UPDATE-025 are code gates on this repository and are deferrable
 only when a release changes none of that code. Any release that touches the
 Plaid protocol, ledger, custody, connection review or freshness paths is held by
 them outright.
+
+UPDATE-044 carries only the account breadth UPDATE-025 used to demand: the same
+real-Item freshness proof repeated across two institutions and at least four
+accounts spanning a person and two owned businesses, including a real business
+banking login. UPDATE-025 still proves the freshness code itself and stays a
+code gate. UPDATE-044 is classed like UPDATE-022: it may carry a written
+version-scoped deferral only while invitations stay closed, and its `unproven`
+text must say so. For 0.4.9 the owner pre-registered that deferral before the
+seal ([ADR 008](decisions/008-rehome-update-025-breadth-into-update-044.md)).
+Deferring it for any later version needs a new, separately reviewed owner
+decision.
 
 ## What the product must establish
 
@@ -37,19 +48,84 @@ verify them, and prints names only. An existing wrapping key is never replaced,
 because retained encrypted connection references depend on it. No command
 accepts these values from environment variables, arguments, or chat. Generic
 `brain setup`, `brain secrets`, and technician workflows still do not accept or
-write them. Routine setup preserves a complete existing set, and all three
-names must be present before a routine core-key rotation can begin. If any is
-missing, it stops without changing a local or Worker secret and points the
-owner to `brain connect bank`.
-Recording return and webhook URIs in a manifest is non-secret evidence of
-registration already completed in the matching Plaid dashboard. It does not
-perform that registration or justify automatically renewing a Plaid deferral
-for a new release.
+write them. Routine setup preserves a complete existing set. After setup and
+owner-passkey enrollment, `brain connect bank` is the only command that adds a
+missing bank set. Routine core-key rotation still requires all three names and
+stops without changing a local or Worker secret when any is missing.
+Recording the return URI in a manifest is non-secret evidence that it is
+already on the matching Plaid dashboard's Allowed redirect URIs list. It does
+not perform that registration or justify automatically renewing a Plaid
+deferral for a new release. The webhook URI needs no dashboard registration,
+because the Brain sends it in every new Link token request, so recording it is
+optional.
+
+## The owner-present journey, in order
+
+These are the steps an approved owner-present pilot actually goes through.
+Each one was missed or misread in a sandbox rehearsal.
+
+1. **Setup, passkey, then bank connection.** Bank feeds are set up with the
+   owner and installer on a call. Finish `brain setup`, enroll and verify the
+   owner passkey, then run `brain connect bank <manifest>`. Only `brain connect
+   bank` can write the three bank secret names.
+2. **Keys are checked before they are saved.** The hidden prompt asks for the
+   Plaid client ID and secret for the manifest's environment. Before anything
+   is written, the command makes one harmless authenticated Plaid read
+   (`/institutions/get`, count 1) in that environment. A refused pair is
+   stopped at the prompt with the likely cause, a secret from a different Plaid
+   environment, and nothing is written. Plaid uses one client ID in every
+   environment, but each environment has its own secret.
+3. **A wrong key is corrected with `--replace-keys`.** Run
+   `brain connect bank <manifest> --replace-keys`. It asks for both keys again
+   at the same hidden prompt, checks them the same way, and never touches
+   `BANK_FEED_WRAPPING_KEY_V2`. `brain secrets` still refuses bank keys.
+4. **The redirect URI must be allowed.** `https://<brain.domain>/app/connect/bank`
+   MUST be on the Plaid dashboard's Allowed redirect URIs list for the same
+   environment, because every Link request sends it. Plaid refuses to open Link
+   otherwise, and the connect page now names that exact address.
+5. **Phone verification.** Plaid Link shows a phone-verification pane. In
+   sandbox the code is `123456`, and no text message arrives. In production,
+   Plaid sends a real code to the owner's phone, and only the owner enters it.
+6. **Pick the bank, not a saved connection.** Plaid's returning-user flow is
+   keyed to the phone number entered in Link. It can re-share a connection that
+   phone number made earlier instead of the institution the owner selected, and
+   the Brain labels the Item with what Plaid returned. In one sandbox rehearsal
+   the owner selected First Platypus Bank and the connection came back as Bank
+   of America. Choose "Add new account" or the specific bank rather than a saved
+   entry, and check that the connection's institution label matches before
+   assigning accounts. If it does not match, disconnect it in the Brain app at
+   Access > Banks > Disconnect and connect again. For sandbox testing, use a fresh
+   test phone number, 415-555-0011 or one of 415-555-0131 through
+   415-555-0138, with the code `123456`.
+7. **Add an owner first.** A new Brain has no person, household, or business
+   yet. The connect page opens "Add a person, household, or business" by
+   itself when none exists. Every account needs an owner choice before its
+   transactions enter the ledger, and `/api/bank-feed/status` lists a
+   connection waiting on those choices under `needs_attention` with the count.
+8. **Disconnect lives in the owner app.** It is not on the connect page. In the
+   Brain app, go to Access > Banks > Disconnect. Saved history stays.
+
+**Turning the feed off deletes the Plaid keys.** Setting
+`corpora.bank_feed.enabled` to `false` and then running `brain secrets` or
+`brain setup` DELETES `BANK_FEED_CLIENT_ID` and `BANK_FEED_SECRET` from the
+Worker. `BANK_FEED_WRAPPING_KEY_V2` is kept so retained connections stay
+recoverable. Turning the feed back on means the owner runs
+`brain connect bank <manifest>` again and re-enters both keys.
+
+A bank can report more decimal places than its currency has, such as a
+retirement balance of 23631.9805 USD. The Brain stores the figure rounded
+half-even to the currency's minor unit and flags it. Every transaction also
+keeps the provider's exact decimal; a balance keeps it only while staged,
+because a saved balance has no decimal column in this schema. A total that
+includes a rounded figure says so wherever the owner reads it, and
+`/api/bank-feed/status` lists each connection's rounded balances under
+`rounded_balances`, first as `staged` and then as `in_ledger`.
 
 1. Deploy the exact packaged version and named Plaid environment to an approved
    disposable Brain. Read back its version, schema, required secret names and
    configuration without exposing secret values. Verify the registered redirect
-   and webhook destinations. A Plaid developer account alone is not setup proof.
+   destination and that each Link token request carries the Brain's webhook. A
+   Plaid developer account alone is not setup proof.
 2. Through the owner page, connect two institutions with at least four accounts.
    Create any missing owner entities in the same journey. Assign accounts to a
    person and two different owned businesses. Every unassigned account remains

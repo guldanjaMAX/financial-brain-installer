@@ -425,6 +425,9 @@ const expected = [
   "docs/decisions/004-version-scoped-release-scope.md",
   "docs/decisions/005-phased-disposable-deployment-proof.md",
   "docs/decisions/006-pin-supervised-install-contract-v2.md",
+  "docs/decisions/007-rehome-update-006-arm64-clause.md",
+  "docs/decisions/008-rehome-update-025-breadth-into-update-044.md",
+  "docs/decisions/009-bind-install-doorway-to-release-state.md",
   "docs/decisions/README.md",
   "doctor.mjs",
   "eval/brain-client.mjs",
@@ -448,6 +451,7 @@ const expected = [
   "ingest/ics.mjs",
   "ingest/formats.mjs",
   "ingest/mbox.mjs",
+  "ingest/ocr-client.mjs",
   "ingest/ocr.mjs",
   "ingest/outcome.mjs",
   "ingest/message-session.mjs",
@@ -494,6 +498,7 @@ const expected = [
   "onboarding/09-technician-setup-and-rehearsal.md",
   "onboarding/10-client-onboarding-scorecard.md",
   "onboarding/11-windows-onboarding-rehearsal.md",
+  "onboarding/12-custom-api-source-setup.md",
   // Generic synthetic-only Windows rehearsal launcher. Reviewed 2026-09-11:
   // accepts only a commit SHA, refuses elevation, a different directory,
   // checkout drift, and old Node, then starts the public local fixture. It has
@@ -509,6 +514,7 @@ const expected = [
   "operations/admin-key-file.mjs",
   "operations/admin-key-persistence.mjs",
   "operations/wrangler-oauth.mjs",
+  "operations/wrangler-runtime-contract.mjs",
   "operations/claude-workspace.mjs",
   "operations/claude-skill.mjs",
   "operations/local-assistant-repair.mjs",
@@ -709,11 +715,14 @@ const expected = [
   "migrations/d1/0044_source_original_result_family_receipts.sql",
   "migrations/d1/0045_source_original_accepted_resolutions.sql",
   "migrations/d1/0046_source_original_observation_authority_chain.sql",
+  "migrations/d1/0047_ocr_page_idempotency.sql",
+  "migrations/d1/0048_custom_api_source.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values
   // and reports secret names, never values.
   "operations/bank-feed-owner-secrets.mjs",
+  "operations/custom-api-clipboard.mjs",
   "operations/bootstrap-status.mjs",
   // Generic local timing helper. It receives only injected clock/scheduler
   // callbacks and timestamps, with no filesystem, credential, network, or
@@ -795,6 +804,7 @@ const expected = [
   "operations/current-user-file.mjs",
   "operations/drive-removal-plan.mjs",
   "operations/drive-scheduler.mjs",
+  "operations/folder-retirement.mjs",
   "operations/folder-scheduler.mjs",
   "operations/imessage-scheduler.mjs",
   "operations/whatsapp-daemon.mjs",
@@ -820,6 +830,7 @@ const expected = [
   "templates/brain.manifest.json",
   "worker/src/index.js",
   "worker/src/lib/answer-render.js",
+  "worker/src/lib/answer-sentences.js",
   "worker/src/lib/app-assets.js",
   "worker/src/lib/app-page.js",
   "worker/src/lib/auth-store.js",
@@ -827,6 +838,7 @@ const expected = [
   "worker/src/lib/confidence.js",
   "worker/src/lib/connections.js",
   "worker/src/lib/core.js",
+  "worker/src/lib/custom-api-visibility.js",
   "worker/src/lib/diagnose-scan.js",
   "worker/src/lib/document-access.js",
   "worker/src/lib/evidence-authority.js",
@@ -853,6 +865,7 @@ const expected = [
   "worker/src/lib/owner-note-contract.js",
   "worker/src/lib/owner-notes.js",
   "worker/src/lib/remember-contract.js",
+  "worker/src/lib/ocr-idempotency.js",
   "worker/src/lib/ocr.js",
   "worker/src/lib/owner-auth.js",
   "worker/src/lib/owner-actions.js",
@@ -860,13 +873,23 @@ const expected = [
   "worker/src/lib/sessions.js",
   "worker/src/lib/webauthn.js",
   "worker/src/lib/query-intent.js",
+  // Reviewed pure query classifier: dependency-free, with no I/O, secrets,
+  // owner data, or network access; it only returns supplemental search filters.
+  "worker/src/lib/retrieval-routing.js",
   "worker/src/lib/retrieval-status.js",
   "worker/src/lib/secret-scan.js",
+  // Reviewed declarative Worker source: fixed HTTPS origin and path prefix,
+  // bounded response and paging, bearer value only from a named Worker secret,
+  // sanitized errors, D1 exact-row readback, and no ambient credential access.
+  "worker/src/lib/custom-api.js",
   // Reviewed pure string validator: dependency-free, with no I/O, secrets,
   // owner data, or network access.
   "worker/src/lib/stored-family-identity.js",
   "worker/src/lib/store-d1.js",
   "worker/src/lib/store.js",
+  // Hot source-sized inventory plus an owner-admin exact report. The report
+  // pages private family identities inside the Worker and emits aggregates.
+  "worker/src/lib/documents-summary.js",
   "worker/src/lib/system-status.js",
   "worker/src/lib/supabase.js",
   "worker/src/lib/vtt.js",

@@ -22,11 +22,73 @@
 /** Below this there is nothing to retrieve, and it is usually a failed extraction. */
 export const MIN_CHARS = 24;
 
-/** Long base64 runs are the signature of an embedded image or attachment. */
-const B64_RUN = /[A-Za-z0-9+/=]{200,}/g;
+/** Long encoded runs are the signature of an embedded image or attachment. */
+const B64_RUN_MIN = 200;
+const HEX_RUN_MIN = 300;
 
-/** A hex blob (data URIs, certificates, serialized binary). */
-const HEX_RUN = /[0-9a-fA-F]{300,}/g;
+const isAsciiDigit = (code) => code >= 48 && code <= 57;
+const isAsciiUpper = (code) => code >= 65 && code <= 90;
+const isAsciiLower = (code) => code >= 97 && code <= 122;
+const isBase64Code = (code) =>
+  isAsciiDigit(code) || isAsciiUpper(code) || isAsciiLower(code) ||
+  code === 43 || code === 47 || code === 61;
+const isHexCode = (code) =>
+  isAsciiDigit(code) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
+const isWordCode = (code) =>
+  isAsciiDigit(code) || isAsciiUpper(code) || isAsciiLower(code) || code === 39;
+
+/**
+ * Measure the whole-file ratios without materializing one match per run.
+ *
+ * V8's global match for one multi-megabyte quantified run can overflow its
+ * regexp stack. This loop keeps constant scanner state and deliberately adds a
+ * hex run twice when it is also base64, matching the historical two-regexp
+ * metric exactly.
+ */
+function scanQualityRuns(text) {
+  let encoded = 0;
+  let replacement = 0;
+  let base64Run = 0;
+  let hexRun = 0;
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    if (isBase64Code(code)) base64Run++;
+    else {
+      if (base64Run >= B64_RUN_MIN) encoded += base64Run;
+      base64Run = 0;
+    }
+    if (isHexCode(code)) hexRun++;
+    else {
+      if (hexRun >= HEX_RUN_MIN) encoded += hexRun;
+      hexRun = 0;
+    }
+    if (code === 0xfffd) replacement++;
+  }
+  if (base64Run >= B64_RUN_MIN) encoded += base64Run;
+  if (hexRun >= HEX_RUN_MIN) encoded += hexRun;
+  return { encoded, replacement };
+}
+
+/** Count the same ASCII word tokens as /[a-z0-9']{2,}/g without a large match array. */
+function wordDiversity(text) {
+  const normalized = text.toLowerCase();
+  const unique = new Set();
+  let words = 0;
+  let start = -1;
+  for (let index = 0; index <= normalized.length; index++) {
+    const code = index < normalized.length ? normalized.charCodeAt(index) : -1;
+    if (isWordCode(code)) {
+      if (start < 0) start = index;
+      continue;
+    }
+    if (start >= 0 && index - start >= 2) {
+      words++;
+      unique.add(normalized.slice(start, index));
+    }
+    start = -1;
+  }
+  return { words, unique: unique.size };
+}
 
 /**
  * Does this look like a binary file rather than text?
@@ -101,9 +163,8 @@ export function textQuality(text) {
 
   // Encoded blobs. Measured as a share of total length, so a document that
   // merely MENTIONS a token is unaffected while one built from them is caught.
-  let encoded = 0;
-  for (const m of s.match(B64_RUN) || []) encoded += m.length;
-  for (const m of s.match(HEX_RUN) || []) encoded += m.length;
+  const scanned = scanQualityRuns(s);
+  const encoded = scanned.encoded;
   metrics.encoded_ratio = +(encoded / len).toFixed(3);
   if (metrics.encoded_ratio > 0.35) {
     return {
@@ -115,7 +176,7 @@ export function textQuality(text) {
 
   // Replacement characters mean a decode went wrong. A few are survivable;
   // a document made of them is a mis-detected encoding.
-  const repl = (s.match(/�/g) || []).length;
+  const repl = scanned.replacement;
   metrics.replacement_ratio = +(repl / len).toFixed(3);
   if (metrics.replacement_ratio > 0.05) {
     return { ok: false, reason: "the text decoded into mostly unreadable characters (wrong or unsupported encoding)", metrics };
@@ -125,9 +186,9 @@ export function textQuality(text) {
   // and crowds out everything else. Only applied to long text, because short
   // documents are legitimately repetitive.
   if (len > 4000) {
-    const words = s.toLowerCase().match(/[a-z0-9']{2,}/g) || [];
-    if (words.length >= 200) {
-      metrics.unique_word_ratio = +(new Set(words).size / words.length).toFixed(3);
+    const words = wordDiversity(s);
+    if (words.words >= 200) {
+      metrics.unique_word_ratio = +(words.unique / words.words).toFixed(3);
       if (metrics.unique_word_ratio < 0.02) {
         return { ok: false, reason: "the file is almost entirely repeated content, with too little distinct text to be worth indexing", metrics };
       }

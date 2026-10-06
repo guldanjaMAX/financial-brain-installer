@@ -6,6 +6,8 @@
 // warning that matters, and this feature only earns its place if it stays quiet
 // when quiet is correct.
 
+import assert from "node:assert/strict";
+
 import { coverageGapReport, coverageGaps, freshnessReport } from "../worker/src/lib/store-d1.js";
 
 let fail = 0, ran = 0;
@@ -166,6 +168,33 @@ const DAILY = 86400;
   check("a live sync keeps missing answers provisional even after a prior complete sweep",
     activeGaps.some((gap) => gap.type === "sync_in_progress" && /currently updating/i.test(gap.detail || "")),
     JSON.stringify(activeGaps));
+}
+
+/* ---- a durable custom API job is the active-run receipt for that source ---- */
+{
+  const rows = [{
+    name: "store-dashboard", kind: "custom_api", status: "indexing", indexing_started_at: null,
+    last_ingest_at: daysAgo(1), expected_refresh_seconds: DAILY, registered: 1,
+  }];
+  let activeJobReads = 0;
+  const env = {
+    DB: {
+      prepare(sql) {
+        if (/SELECT inventory\.\*/.test(sql)) return { all: async () => ({ results: rows }) };
+        if (/FROM custom_api_jobs/.test(sql)) {
+          activeJobReads++;
+          return { all: async () => ({ results: [{ source: "store-dashboard", started_at: new Date(hoursAgo(2)).toISOString() }] }) };
+        }
+        if (/FROM sync_runs sr/.test(sql)) return { all: async () => ({ results: [] }) };
+        throw new Error("unexpected SQL");
+      },
+    },
+  };
+  const f = await freshnessReport(env, { now: NOW });
+  assert.equal(activeJobReads, 1, "the durable active-job decision point was reached");
+  check("an active custom API job reports indexing instead of a broken orphan",
+    f.sources[0]?.state === "indexing" && f.sources[0]?.hours_indexing === 2,
+    JSON.stringify(f.sources[0]));
 }
 
 /* ---- never synced is distinct from stale ---- */

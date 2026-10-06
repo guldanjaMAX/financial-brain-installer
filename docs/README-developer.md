@@ -2,22 +2,24 @@
 
 Provisions a retrieval brain into a **client's own Cloudflare account**. Text and
 keyword search live in D1, vectors live in Vectorize, and the Worker fuses them.
-Nothing runs on our infrastructure. Normal setup uses an owner-approved named
-Cloudflare browser profile in the owner's operating-system credential store; it
-does not create or copy an API token.
+Nothing runs on our infrastructure. Normal setup starts with an owner-approved
+named Cloudflare browser profile in the owner's operating-system credential
+store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
+profile, so the read-only preflight routes that exact refusal to an explicit,
+account-scoped recovery API-token choice before any mutation.
 
-**Status: unreleased 0.4.8/schema46 field candidate, held.** Provisioning,
+**Status: unreleased 0.4.9/schema48 field candidate, held.** Provisioning,
 retrieval, resumable ingest, guarded deletion, owner actions, exact entity
 scope, document grants, passkey observability, financial imports, provenance
 binding for eligible single-record local file ingests, bounded one-original
 accepted-resolution evidence, and restart-safe migrations are covered by local
 product and contract suites. Local proof is not field proof. At this freeze the
-39-row release audit has 35 unresolved incidents, no renewed deferrals, and four
-rows closed on reviewed evidence. No public 0.4.8 asset or customer update
-exists. The earlier held 0.4.7 candidate was never tagged or published, and its
-identity is retired rather than reused for these changed bytes. See "What is
-not built," `CONNECTOR-BACKLOG.md`, and the
-[0.4.8 candidate evidence plan](release-evidence/v0.4.8-candidate-release-evidence-plan.md)
+41-row release audit has 37 unresolved incidents, two 0.4.9 deferrals, and four
+rows closed on reviewed evidence. No public 0.4.9 asset or customer update
+exists. The earlier held 0.4.7 and 0.4.8 candidates were never tagged or
+published, and their identities are retired rather than reused for these
+changed bytes. See "What is not built," `CONNECTOR-BACKLOG.md`, and the
+[0.4.9 candidate evidence plan](release-evidence/v0.4.9-candidate-release-evidence-plan.md)
 before promising anything to anyone.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -52,10 +54,13 @@ the owner must confirm **Workers & Pages > Plans > Paid** there. Do not widen th
 session just to inspect billing. Prepared-manifest, recovery, and automation
 setup paths have the same account-bound prerequisite.
 
-A scoped Cloudflare token is a bounded legacy, automation, or recovery path,
-not a fresh-install prerequisite. Use it only when that exact path is explicitly
-selected and keep it inside the reviewed hidden prompt or approved no-history
-launcher.
+A scoped Cloudflare token is a bounded legacy, automation, or recovery path.
+With Wrangler 4.131.1 it is also the explicit fallback when browser OAuth cannot
+reach Vectorize. The installer names that limitation, the required Workers
+Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read permissions, and the
+exact saved credential before use. A saved token may be old or revoked, so it
+is never selected without owner approval. Keep a new value inside the reviewed
+hidden prompt or approved no-history launcher.
 
 ---
 
@@ -111,7 +116,7 @@ node brain.mjs ingest     ./acme.manifest.json --path ~/Documents --source clien
 node brain.mjs test       ./acme.manifest.json   # full acceptance suite
 ```
 
-The held v0.4.8 existing-Brain gate is:
+The held candidate existing-Brain gate is:
 
 ```bash
 brain update [manifest] --preview --expect-runtime-sha256 <64hex> --json
@@ -145,6 +150,28 @@ another response. This fallback performs one durable credential read and one
 authenticated network request, with zero Brain writes, Cloudflare control
 requests, deployments, or installs. Modern same-response behavior is
 unchanged.
+
+The ordinary authenticated documents response is intentionally informational
+about corpus size. It reads `corpus_stats` and the trigger-maintained
+`document_source_inventory`, so health, status, the MCP health tool, meaning
+answers, and update readiness do not join chunk rows or parse document metadata
+to produce their document inventory. Presence is exact, but logical-document
+and chunk totals are `null` with the
+owner copy "not counted on large Brains; run `brain report` for the full
+count". The explicit owner-admin `POST
+`/api/admin/brain/documents/report` path supplies those exact totals. It walks
+documents and chunks through separate fixed keyset pages, caps chunk rows per
+statement, and compares cheap opening and closing corpus, source, outbox, and
+projection markers before returning a complete result. Document and chunk
+totals remain exact under that fence. Pending-vector totals are exact only when
+the outbox is empty at both ends; while indexing, the report labels them
+approximate because a confirmed outbox row can be deleted between pages.
+Whole-source forget preview and completion use that operation's guarded
+receipts, never the informational documents rows. Confirmation carries the
+preview count, document-row high-water mark, and durable corpus mutation
+generation, and final removed counts come from the D1 delete receipts. The
+generation also guards target enumeration, so an in-place reingest cannot keep
+the same count and rowid shape while authorizing deletion of the newer revision.
 
 The diagnostic exits successfully for a coherent `ready`,
 `recoverable_queued_work`, or `queued_work_present` observation because the
@@ -404,7 +431,10 @@ counts but cannot answer from. Measured on a random sample of 70 PDFs from a
 real 4,458-file corpus: 79% had a usable text layer, 7% were thin (under 100
 characters per page, flagged and indexed anyway), and 14% had zero text.
 
-`safety.ocr.enabled` is off by default. When enabled, the existing PDF child
+`safety.ocr.enabled` is off by default. Fresh setup asks once before it writes
+and deploys the manifest, so an owner-approved yes is present in the initial
+`OCR_ENABLED` binding. On an existing install, changing the manifest still
+requires `brain update`. When enabled, the existing PDF child
 extracts page images without a native dependency and sends each page through
 `POST /api/admin/brain/ocr` to Workers AI in the owner's Cloudflare account.
 The daily spend cap applies to every page. A scan is stored only when the
@@ -413,6 +443,72 @@ inline, and a majority-unreadable or descriptive response refuses the whole
 document. `documents.text_source` and `text_reliable` carry the OCR provenance
 through retrieval and citations. Local synthetic scans prove this contract;
 real typed, fax-quality, and handwritten scans remain a private field gate.
+The reviewed default is `@cf/meta/llama-4-scout-17b-16e-instruct`, whose
+captured reply contains both `response` and `choices`; `callLLM` consumes
+`response`. An owner can still override it with another `@cf/` model, and the
+captured Gemma choices-only shape remains supported and regression-tested.
+
+`ingest/ocr-client.mjs` gives each rendered page a stable SHA-256 request
+identity derived from the exact source, source item id, page index, model,
+prompt, and image bytes. The first call uses a 60-second deadline; two retries
+use 90 and 120 seconds with bounded jitter. A 425 response is polled with
+backoff inside the current deadline and does not consume an attempt. The Worker
+reserves that opaque identity in `ocr_page_requests` before the billable model
+call, then exactly marks it in-flight before invoking the model. An active
+duplicate receives 425 with a bounded retry time. An expired pre-call
+reservation is reclaimed without a re-read marker. An in-flight row receives
+the same bounded treatment and may start one recorded replacement only after
+its 15-minute ambiguity window. Identical rendered bytes in two different
+documents produce two identities and two independent calls. Only a verified
+200 response with nonblank transcription text and the exact request identity
+becomes a completed receipt. Those successful receipts are permanent
+content-free tombstones containing only a response hash, status, and bounded
+numeric usage. The client derives a separate AES-GCM replay key
+from the exact private page identity with a domain-separated hash. The key is
+not persisted and cannot be derived from the stored request ID alone, but the
+same source pass on a later run can reproduce it while the row retains its
+ciphertext. Owner image uploads use that same private page identity, so an
+admin-key rotation after a later ingest failure cannot strand the already-paid
+result. This lets a retry recover it without another model call or durable key
+while keeping plaintext behind the complete-document credential gate. Missing,
+mismatched, malformed, expired-after-acknowledgement, and undecryptable
+handoffs all enter the same compare-and-swap replacement boundary. The
+source acknowledges the OCR page on the same receipt only after every part of
+the logical document family is stored and reconciled. Cleanup prunes expired
+ciphertext only after that acknowledgement; an unacknowledged result remains
+replayable after the former seven-day boundary. If any completed receipt has
+no usable ciphertext, whether acknowledged, pruned, or legacy, an exact
+compare-and-swap permits one replacement call in that window, clears the old
+acknowledgement, records `ocr_reread_after_expiry`, and leaves a fresh
+ciphertext until the replacement is acknowledged. Owner upload carries the
+opaque request ID in its private content-free intent and acknowledges only
+after exact ingest and finalization readback. Its active reservation,
+ambiguous-call, failure-backoff, and rolling-cap responses preserve the route's
+typed 425, bounded delay, pending flag, and rolling call count. A replacement
+receipt with no ciphertext waits for its next seven-day replay window instead
+of looping or becoming a permanent hold. Provider 4xx and 5xx results, terminal
+model errors, empty text, malformed replies, and every other definite non-success remain
+model-started retryable receipts with no replay handoff. They permit one
+compare-and-swap replacement after a 60-second backoff. Consolidated migration
+0047 records the last three model-call start timestamps and caps each page at 3 started calls
+in any rolling 24 hours. An exhausted page returns typed 425 evidence until the
+oldest start leaves that rolling window, then becomes eligible again rather
+than remaining held permanently. Rows from the initial fixed-anchor
+implementation retain their full count at the latest known receipt timestamp
+until the next accepted start rewrites the exact timestamp array. Legacy
+non-success completions also never replay and enter the same bounded
+replacement path. The source load report counts both replacements and pages
+held by the rolling cap.
+Any reservation, model-start, completion, or release evidence failure is fatal
+and retryable at source level: the prior revision remains, no partial
+replacement or removal plan runs, and the cursor and ready receipt are
+withheld. Non-timeout transport failures, authentication failures, malformed
+replies, unknown HTTP statuses, and Worker or model 5xx responses use the same
+source-level system boundary. They are never extraction refusals or removal
+evidence. Only a validated transcription reaches the local content-quality
+decision that may definitively refuse an unreadable page. A healthy Brain plus
+three expired transport deadlines remains a named `ocr_page_timeout` skip. A
+failed health probe remains fatal and resumable.
 
 `brain ocr-preflight <manifest> --path <folder> --json` is the no-model planning
 boundary for that local PDF path. `ingest/extract.mjs` forwards the PDF parser's
@@ -533,6 +629,34 @@ node brain.mjs ingest ./acme.manifest.json --from drive
 node brain.mjs ingest ./acme.manifest.json --from gmail
 ```
 
+A large first Gmail pass can keep its new embedding work within the queue's
+observed drain rate:
+
+```bash
+node brain.mjs ingest ./acme.manifest.json --from gmail --pace-vectors-per-minute 40
+```
+
+The command uses the Worker's accepted per-document chunk counts, and waits
+after each durable batch checkpoint so created and updated chunks average no
+more than the requested rate. Unchanged documents add no delay because they add
+no vector work. Forty leaves headroom under the roughly fifty vectors per minute
+observed by `brain health`; start only after any older vector backlog has
+drained. An interruption is safe: repeat the same command and the adjacent
+document checkpoint skips already accepted revisions while the source cursor
+remains at its prior complete sweep. The repeat still re-lists message ids to
+rebuild authoritative deletion truth, but it does not download an immutable
+message body again when both its D1 family and scanner receipt are proven.
+
+`corpora.gmail.since` optionally declares an inclusive `YYYY-MM-DD` corpus
+floor. Full sweeps append Gmail's `after:YYYY/MM/DD` search term. Incremental
+history cannot carry a search query, so its bounded metadata policy read also
+checks `internalDate`; older messages are deterministic policy exclusions and
+missing date evidence holds the history cursor. The floor is part of the Gmail
+policy fingerprint. Adding or changing it forces an authoritative sweep, and
+any stored family that falls outside the new floor remains subject to the
+ordinary exact removal-plan review and readback. Omitting the field preserves
+the prior query and fingerprint.
+
 The ordinary Drive dry run is for a person reviewing individual files and may
 name files or paths. An assistant must add `--json`: that path validates every
 reviewed root, reads at most 25 Drive entries by default (and refuses a limit
@@ -554,10 +678,15 @@ because separate parent directories cannot portably share one adjacent state.
 Drive, Gmail, and Calendar take the source lease first and then a shared
 `provider:google` credential-record lease. `brain connect google` takes that
 same shared lease, so credential migration and replacement cannot overlap a
-source run. A mutating `brain load` inspects only credential-store metadata
-during preflight; the real credential is opened after both leases are held.
-Dry-run source reads use a dedicated non-migrating loader, including for legacy
-Windows plaintext and macOS file-backed records.
+source run. A Calendar writer waits up to twelve hours when another Google
+source or connection owns that shared boundary. This keeps a scheduled refresh
+from being dropped behind an unusually long Drive walk without allowing the
+credential identity to change during either run. The Calendar source lease
+stays owned while waiting, so another Calendar writer still fails closed. A
+mutating `brain load` inspects only credential-store metadata during preflight;
+the real credential is opened after both leases are held. Dry-run source reads
+use a dedicated non-migrating loader, including for legacy Windows plaintext and
+macOS file-backed records.
 
 For a mailbox that is not Gmail:
 
@@ -625,6 +754,15 @@ macOS token file is deleted only after the full credential record has been
 written to Keychain and read back exactly. Browser, Keychain, Expect, ACL, and
 DPAPI helper processes receive a small allowlisted environment rather than the
 Terminal's ambient credentials.
+On a Windows machine with Smart App Control on, Windows can intermittently
+refuse to start the freshly compiled, unsigned DPAPI helper, and a refused file
+stays refused. Both the admin key and the Google credential record share one
+retry in `operations/windows-dpapi-session.mjs`: only a launch refusal (a
+launch-class spawn error or the bridge's `launch` stage, with no output) disposes
+that helper and compiles a fresh one into a new private folder, for at most three
+launches. A DPAPI answer such as a wrong-user decrypt, and any compile failure,
+is never retried. The session metrics record `launch_refusals` and
+`max_launch_attempts`, which `brain doctor` and the release gate report.
 Planning and dry-run reads never trigger either legacy migration. A real source
 run performs migration only while holding both its source lease and the shared
 Google credential-record lease; `brain connect google` holds the shared lease
@@ -1165,6 +1303,39 @@ Read this before scoping an engagement.
   workspace, tenant, sandbox company, Plaid Item, or account receipt yet. Box
   and Airtable still have no native API connector; use a reviewed export or a
   watched folder where suitable.
+- **The custom business API source is locally proven only.** Its declarative
+  Worker path, strict HTTPS boundary, dedicated `CUSTOM_API_TOKEN_` secret
+  namespace, durable checkpointed job, exact-row-and-document verified
+  full-snapshot body-hash skip, row-level refusal counts, retries, compact
+  gap-aware D1 row history, durable active-job freshness, and platform-specific
+  secret ceremony have local mock and SQLite coverage. Sales rows require the
+  configured revenue stream; a missing stream can carry forward only prior
+  labeled rows for that exact store-month. Refused known keys retain their
+  prior verified row and last-seen time with an explicit dated not-refreshed marker, and every
+  affected document begins with the same fixed warning independently of its
+  template. A partial refusal reports ready with
+  warnings plus the refused count and keeps freshness degraded until a clean
+  pull clears it, while an all-refused pull leaves the current pointer unchanged
+  and exposes a source refusal with the current refusal count. Scheduled
+  failures preserve a closed issue code for reader-boundary owner guidance.
+  Known store, period, revenue-stream, and breed
+  identities are validated before they can authorize absence. Missing sales
+  streams are computed at the store-month boundary and named with that store
+  and month in both readable sales layouts. Inventory and
+  cost search contains only the current per-store snapshot; stored rows retain
+  every prior full value with effective dates and preserve disappearance gaps
+  before reappearance, and no daily history documents are created. Fully
+  stamped documents are validated before staging. An unchanged document version
+  is carried only after exact live readback; a missing version is regenerated,
+  and terminal map failure releases the active-job boundary for a fresh pull.
+  Owner-facing counts exclude staged and superseded versions. Promotion cleans obsolete physical
+  document versions through bounded guarded deletes before the job settles, so
+  their queued vector deletes run ahead of upserts. The public defaults allow a 30-second request, 5 MiB
+  response, and exactly 10,000 rows per endpoint. A 10,001st row refuses that
+  endpoint without staging the snapshot. The 1,612/407/1,721-row fixture stays
+  below 600 D1 statements per invocation and resumes after every slice
+  readback. No provider endpoint or deployed Brain has crossed this build.
+  Exact rows are deliberately not financial ledger or map entries yet.
 - **No official WhatsApp Business Platform connector.** Safe WhatsApp chat
   exports are supported. The separate live paired-device connector is
   unofficial, violates WhatsApp's Terms of Service, is opt-in, and is not
@@ -1192,6 +1363,23 @@ rank fusion combines both lists. Full-corpus evaluation decides whether that is
 good enough. Do not move a client to another backend based on chunk count alone.
 Require a measured failure on the golden set, a diagnosed cause, and an approved
 architecture change.
+
+Questions that explicitly name calendar, meeting or Zoom, or iMessage or text
+messages add a supplemental metadata-prefiltered keyword and vector lane. The
+lane rescues matching `category` or `platform` records from beyond the ordinary
+candidate cutoff without restricting the base search or double-boosting records
+already present there. Generic decision wording gets no source hint. Natural
+language date windows remain explicit request filters until retrieval has a
+reviewed owner-timezone input.
+
+A completed hybrid search distinguishes a bounded projection catch-up from a
+failed search. The catch-up classification requires an exact pending count below
+one percent of expected vectors and no more than 50,000 rows, a vector-count
+shortfall below one percent, and an oldest queue age below 24 hours. It changes
+only answer availability: unsupported or empty results are
+`coverage_incomplete` and cannot support absence, while supported cited answers
+remain available. Exact readiness, health, and acceptance still require an empty
+outbox and the full projection fence.
 
 `brain diagnose` follows the same refusal to guess at scale. It pins the current
 maximum integer `chunks.id`, then keyset-pages through that fixed range in
@@ -1608,7 +1796,7 @@ apply.
 Preview acquires the source lease before reading the private manifest, source
 file, saved credential, or Brain state. Under that lease it reads the complete
 authenticated source and observation history, prepares the exact one-file
-ingest envelope, checks the current schema-46 Brain and vector state, and seals
+ingest envelope, checks the current schema-48 Brain and vector state, and seals
 a state-bound plan. It releases the lease without changing Brain data,
 configuration, source receipts, cursors, or removals. Public output excludes the
 local root, locator, private retrieval query, content hashes, document IDs,

@@ -2465,14 +2465,24 @@ const buildIndex = buildMatch.index;
 const assertIndex = remote.indexOf(`assertDriveRemovalPlanSafe(${planName}`, buildIndex);
 const firstTargetUseIndex = remote.indexOf(`${planName}.targets`, buildIndex);
 const targetUseIndex = remote.indexOf(`${planName}.targets[category]`, assertIndex);
-const applicationIndex = remote.lastIndexOf("applyDriveRemovals(", targetUseIndex);
+assert.match(
+  remote,
+  /const applyPreparedRemovals = options\.applyDriveRemovals \?\? applyDriveRemovals;/,
+  "the injectable removal seam must default to the guarded production operation",
+);
+assert.match(
+  remote,
+  /const listPreparedSourceFamilies = options\.listStoredSourceFamilies \?\? listStoredSourceFamilies;/,
+  "the injectable readback seam must default to the production inventory operation",
+);
+const applicationIndex = remote.lastIndexOf("applyPreparedRemovals(", targetUseIndex);
 assert.ok(assertIndex > buildIndex, "the aggregate Drive removal plan must be checked");
 assert.ok(firstTargetUseIndex > assertIndex, "plan targets must not be read before the guard passes");
 assert.ok(
   applicationIndex > assertIndex && applicationIndex < targetUseIndex,
   "only guarded plan targets may reach Drive removal",
 );
-const readbackIndex = remote.indexOf("const afterRemoval = await listStoredSourceFamilies", targetUseIndex);
+const readbackIndex = remote.indexOf("const afterRemoval = await listPreparedSourceFamilies", targetUseIndex);
 const cursorPlanIndex = remote.indexOf("pendingCursor = {", readbackIndex);
 assert.ok(
   readbackIndex > targetUseIndex,
@@ -2518,12 +2528,17 @@ assert.notEqual(localStart, -1, "local folder ingest must exist");
 assert.ok(localEnd > localStart, "local folder ingest must be inspectable");
 const local = source.slice(localStart, localEnd);
 const pendingIndex = local.indexOf("const pendingLocalUids");
-const localInventoryIndex = local.indexOf("const storedLocalFamilies = await listStoredSourceFamilies", pendingIndex);
+assert.match(
+  local,
+  /const listPreparedSourceFamilies = options\.listStoredSourceFamilies \?\? listStoredSourceFamilies;/,
+  "the local injectable inventory seam must default to the production operation",
+);
+const localInventoryIndex = local.indexOf("const storedLocalFamilies = await listPreparedSourceFamilies", pendingIndex);
 const localBuildIndex = local.indexOf("const localRemovalPlan = buildDriveRemovalPlan", localInventoryIndex);
 const localGuardIndex = local.indexOf("assertDriveRemovalPlanSafe(localRemovalPlan", localBuildIndex);
 const localTargetsIndex = local.indexOf("const localTruthTargets", localGuardIndex);
 const localApplyIndex = local.indexOf("uids: localTruthTargets", localTargetsIndex);
-const localReadbackIndex = local.indexOf("const afterLocalRemoval = await listStoredSourceFamilies", localApplyIndex);
+const localReadbackIndex = local.indexOf("const afterLocalRemoval = await listPreparedSourceFamilies", localApplyIndex);
 assert.ok(
   pendingIndex !== -1 && localInventoryIndex > pendingIndex && localBuildIndex > localInventoryIndex,
   "local removal retries must re-enter a plan built from authenticated stored families",

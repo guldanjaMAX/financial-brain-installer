@@ -117,7 +117,7 @@ function bindingFixture() {
     candidate_tree_sha: "2".repeat(40),
     field_receipt_sha256: digest("field-receipt"),
     field_receipt_run_id: "50000000-0000-4000-8000-000000000005",
-    package_filename: "brain-installer-0.4.8.tgz",
+    package_filename: "brain-installer-0.4.9.tgz",
     package_bytes: 123_456,
     package_sha256: digest("package"),
     package_file_count: 541,
@@ -530,7 +530,7 @@ function provisioningPreparation() {
       candidate_tree_sha: "2".repeat(40),
       field_receipt_run_id: "50000000-0000-4000-8000-000000000005",
       field_receipt_sha256: digest("field"),
-      package_filename: "brain-installer-0.4.8.tgz",
+      package_filename: "brain-installer-0.4.9.tgz",
       package_bytes: 123456,
       package_sha256: digest("package"),
       package_file_count: 541,
@@ -710,7 +710,7 @@ function provisioningProvider(role, calls, collision = null, { failOnceAt = null
           commit("initialize_source_schema", () => { remote.schema = true; });
           return {
             provider_metadata: providerMetadata(),
-            result: { migration_inventory_sha256: digest("migrations"), schema_version: 46 },
+            result: { migration_inventory_sha256: digest("migrations"), schema_version: 48 },
           };
         },
         async reconcileSourceSchema() {
@@ -718,7 +718,7 @@ function provisioningProvider(role, calls, collision = null, { failOnceAt = null
           return remote.schema
             ? { outcome: "confirmed", value: {
                 provider_metadata: providerMetadata(),
-                result: { migration_inventory_sha256: digest("migrations"), schema_version: 46 },
+                result: { migration_inventory_sha256: digest("migrations"), schema_version: 48 },
               } }
             : { outcome: "resume_safe" };
         },
@@ -773,7 +773,7 @@ function provisioningProvider(role, calls, collision = null, { failOnceAt = null
                 worker_exists: true,
                 workers_dev_enabled: true,
               },
-              schema_version: source ? 46 : null,
+              schema_version: source ? 48 : null,
               user_tables: source ? null : 0,
               content_rows: 0,
               vector_count: 0,

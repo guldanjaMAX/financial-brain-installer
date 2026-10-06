@@ -253,20 +253,37 @@ Never combine those into a broader claim than the evidence supports.
 
 ## Cut an immutable release
 
-The current 0.4.8/schema46 field candidate remains held. The earlier 0.4.7
-candidate was never tagged, published, or offered as a customer update; its
-identity is retired so its evidence cannot be mistaken for evidence from these
-changed bytes. At this freeze the current candidate's
-39-row audit has 35 unresolved incidents, no renewed deferrals, and four rows
-closed on reviewed evidence. A tag requests the release workflow; it never
+The current 0.4.9/schema48 field candidate remains held. The earlier 0.4.7
+and 0.4.8 candidates were never tagged, published, or offered as customer
+updates; their identities are retired so their evidence cannot be mistaken for
+evidence from these changed bytes. At this freeze the current candidate's
+41-row audit has 37 unresolved incidents and four rows closed on reviewed
+evidence. No earlier deferral was renewed; two of the unresolved rows,
+UPDATE-012 and UPDATE-044, carry new exact-version 0.4.9 deferrals recorded on
+2026-09-26 that print in the release note. Since the held 0.4.8 candidate,
+three acceptance texts changed and one row was added, because two clauses
+were re-homed, not weakened:
+[ADR 007](./decisions/007-rehome-update-006-arm64-clause.md) moves UPDATE-006's
+Windows ARM64 clause into UPDATE-012, and
+[ADR 008](./decisions/008-rehome-update-025-breadth-into-update-044.md) moves
+UPDATE-025's two-institution, two-business and business-banking-login breadth
+into the new UPDATE-044, whose exact-version 0.4.9 narrowing is recorded in
+ADR 008.
+Against the last shipped release, v0.4.6, five
+acceptance texts changed and two rows were added: those three texts and
+UPDATE-044, plus UPDATE-043 and the UPDATE-036 and UPDATE-037 texts rewritten
+in the unshipped 0.4.7/0.4.8 work; [UPDATE-AUDIT.md](./UPDATE-AUDIT.md) records
+all of them. A tag requests the release workflow; it never
 bypasses CI, unresolved incidents, owner acceptance, or the repository's
 immutable-release setting. Do not create or publish releases by hand to work
 around a failed workflow. The
-[0.4.8 candidate evidence plan](./release-evidence/v0.4.8-candidate-release-evidence-plan.md)
+[0.4.9 candidate evidence plan](./release-evidence/v0.4.9-candidate-release-evidence-plan.md)
 is planning only until a reviewed change binds it to the final candidate SHA.
 
 1. Keep package.json, both root lockfile versions, the manifest template, newest
-   changelog heading, README archive URLs, and current-version checks aligned.
+   changelog heading, README archive URLs, the Worker version constant,
+   `LOCKED_WRANGLER_LOCK_ROOT_VERSION` in
+   `operations/locked-wrangler-runtime.mjs`, and current-version checks aligned.
    Commit every required module, migration, test, and generated owner bundle.
    The release checkout must not contain a tracked node_modules link or depend
    on another worktree's dependencies. Run npm ci from the lockfile.
@@ -311,10 +328,12 @@ is planning only until a reviewed change binds it to the final candidate SHA.
    promotion is allowed.
 
 Public doorway monitoring uses the schema-2 /update/manifest.json and matching
-/update/agent.md. The unlisted /install/agent.md separately pins its supervised
-Windows field kit; it may intentionally be older than the public release.
-Changing that runbook's contract requires coordinated review, not substitution
-of releases/latest. Do not rewrite or resync a sealed field kit casually.
+/update/agent.md. The manifest also binds the unlisted platform install routes.
+A held release must return the exact closed-door document and select no
+artifact. A candidate or stable release must return the version-2 supervised
+field-kit contract. That kit may intentionally be older than the public release. Changing
+either doorway contract requires coordinated review, not substitution of
+releases/latest. Do not rewrite or resync a sealed field kit casually.
 
 Run `node scripts/check-install-page-version.mjs` to check the current public
 contracts. `--require-stable` additionally refuses held/candidate states. In

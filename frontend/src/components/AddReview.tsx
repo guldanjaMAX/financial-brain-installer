@@ -3,7 +3,7 @@ import {
   api, ownerError, type FinException, type FinReconciliation, type FinSnapshot, type OwnerWriteReceipt,
 } from "../lib/api";
 import {
-  accountLabel, dateLabel, documentDetail, entityLabel, moneyLabel,
+  accountLabel, dateLabel, documentDetail, entityLabel, moneyLabel, roundedFigureNote,
 } from "../lib/finance";
 import { Attention, Chip, NextStep, Note, Row, Section, TruthNote } from "./ui";
 import { FinanceScopeBar, useFinanceScope } from "./FinanceScope";
@@ -409,7 +409,7 @@ function AccountReview({ snapshot, entities, scopeName }: {
   );
 }
 
-function UnsortedReview({ snapshot }: { snapshot: FinSnapshot }) {
+export function UnsortedReview({ snapshot }: { snapshot: FinSnapshot }) {
   if (!("unsorted_spending" in snapshot) || !("accounts" in snapshot)) return null;
   const rows = snapshot.unsorted_spending!.filter((item) => item.counted_lines > 0 || item.unreadable_lines > 0);
   return (
@@ -423,6 +423,7 @@ function UnsortedReview({ snapshot }: { snapshot: FinSnapshot }) {
             <span className="block text-[13px] text-ink-soft mt-0.5">
               {moneyLabel(item.outflow_minor, item.currency) || "Amount unavailable"} across {item.counted_lines} readable {item.counted_lines === 1 ? "line" : "lines"}.
               {item.unreadable_lines > 0 && ` ${item.unreadable_lines} more ${item.unreadable_lines === 1 ? "line could" : "lines could"} not be read.`}
+              {roundedFigureNote(item.rounded_lines, "line") && ` ${roundedFigureNote(item.rounded_lines, "line")}`}
             </span>
           </span>
           <Chip state={item.unreadable_lines > 0 ? "PROBLEM" : "NEEDS"} />

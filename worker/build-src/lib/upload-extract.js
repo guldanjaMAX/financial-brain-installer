@@ -5,7 +5,13 @@ import * as XLSX from "@e965/xlsx";
 import PostalMime from "postal-mime";
 import { extractZipEntries, ArchiveSafetyError } from "../../../ingest/archive.mjs";
 import { isPptxSemanticEntry, renderPptxEntries } from "../../../ingest/pptx.mjs";
-import { handleOcr, MAX_IMAGE_BASE64_BYTES } from "./ocr.js";
+import {
+  handleOcr,
+  MAX_IMAGE_BASE64_BYTES,
+  ocrModelFor,
+  ocrPageReplayKey,
+  ocrPageRequestId,
+} from "./ocr.js";
 
 export const OWNER_BINARY_UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
 export const OWNER_IMAGE_UPLOAD_MAX_BYTES = Math.floor(MAX_IMAGE_BASE64_BYTES / 4) * 3;
@@ -187,30 +193,62 @@ async function email(bytes) {
   return { text: clean([...headers, "", body].join("\n")), title: mail.subject || null, occurredAt: mail.date || null };
 }
 
-async function imageOcr(env, bytes, mediaType) {
+async function imageOcr(env, bytes, mediaType, {
+  source,
+  sourceItemId,
+  now = () => new Date(),
+  handleOcrImpl = handleOcr,
+} = {}) {
   if (bytes.byteLength > OWNER_IMAGE_UPLOAD_MAX_BYTES) {
     throw extractionError("the image is over the private OCR request limit", "upload_too_large", { too_large: true });
   }
+  const imageBase64 = bytesToBase64(bytes);
+  const prompt = "Transcribe every readable word exactly. Preserve headings, line order, table labels, values, and dates. Do not summarize or infer missing text.";
+  const page = 1;
+  const pageIdentity = {
+    image: imageBase64,
+    model: ocrModelFor(env),
+    prompt,
+    source,
+    sourceItemId,
+    page,
+  };
+  const [requestId, replayKey] = await Promise.all([
+    ocrPageRequestId(pageIdentity),
+    ocrPageReplayKey(pageIdentity),
+  ]);
   const request = new Request("https://brain.invalid/api/admin/brain/ocr", {
     method: "POST",
     headers: { "content-type": "application/json", "x-admin-key": env.ADMIN_KEY || "" },
     body: JSON.stringify({
-      image_base64: bytesToBase64(bytes),
+      image_base64: imageBase64,
       image_media_type: mediaType,
-      prompt: "Transcribe every readable word exactly. Preserve headings, line order, table labels, values, and dates. Do not summarize or infer missing text.",
+      prompt,
+      page,
+      request_id: requestId,
+      replay_key: replayKey,
     }),
   });
-  const response = await handleOcr(env, request);
+  const response = await handleOcrImpl(env, request, { now });
   let result;
   try { result = await response.json(); } catch { result = {}; }
   if (!response.ok) {
+    if (response.status === 425 && result?.ocr_request_pending === true) {
+      throw extractionError("private image OCR is still pending", "owner_upload_ocr_retry_later", {
+        status: response.status,
+        retry_after_ms: result.retry_after_ms,
+        ocr_request_pending: true,
+        ocr_model_call_cap_exhausted: result.ocr_model_call_cap_exhausted === true,
+        model_calls_in_24_hours: result.model_calls_in_24_hours,
+      });
+    }
     throw extractionError("private image OCR did not complete", result?.ocr_enabled === false
       ? "owner_upload_ocr_disabled"
       : result?.llm_cap_exceeded ? "owner_upload_ocr_spend_cap" : "owner_upload_ocr_unavailable", {
       status: response.status,
     });
   }
-  return { text: clean(result.text), model: result.model || null };
+  return { text: clean(result.text), model: result.model || null, requestId };
 }
 
 function ensureTextLimit(text) {
@@ -223,12 +261,24 @@ function ensureTextLimit(text) {
   return bytes;
 }
 
-export async function extractOwnerUpload(env, { mediaType, bytes, fileName = null } = {}) {
+export async function extractOwnerUpload(
+  env,
+  {
+    mediaType,
+    bytes,
+    fileName = null,
+    source = null,
+    sourceItemId = null,
+    now = () => new Date(),
+    handleOcrImpl = handleOcr,
+  } = {},
+) {
   assertMediaSignature(mediaType, bytes);
   let text = "";
   let title = null;
   let occurredAt = null;
   let extractionMethod = "native";
+  let ocrRequestId = null;
   let note = null;
   if (mediaType === "application/pdf") {
     const { extractText } = await import("unpdf");
@@ -256,9 +306,10 @@ export async function extractOwnerUpload(env, { mediaType, bytes, fileName = nul
     title = result.title;
     occurredAt = result.occurredAt;
   } else if (mediaType === "image/png" || mediaType === "image/jpeg") {
-    const result = await imageOcr(env, bytes, mediaType);
+    const result = await imageOcr(env, bytes, mediaType, { source, sourceItemId, now, handleOcrImpl });
     text = result.text;
     extractionMethod = "ocr";
+    ocrRequestId = result.requestId;
     note = result.model ? `Transcribed by ${result.model}` : "Transcribed by the configured OCR model";
   } else {
     throw extractionError("this binary media type is not supported", "unsupported_media");
@@ -271,6 +322,7 @@ export async function extractOwnerUpload(env, { mediaType, bytes, fileName = nul
     occurredAt,
     textSource: extractionMethod === "ocr" ? "ocr" : "native",
     textReliable: extractionMethod !== "ocr",
+    ocrRequestId,
     metadata: {
       extracted_as: mediaType,
       extraction_method: extractionMethod,

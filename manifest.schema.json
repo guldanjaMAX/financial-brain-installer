@@ -213,6 +213,25 @@
             }
           }
         },
+        "gmail": {
+          "type": "object",
+          "description": "Gmail correspondence selected by the built-in category policy, optionally bounded by a manifest date floor.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "oauth_secret": {
+              "type": "string"
+            },
+            "since": {
+              "type": "string",
+              "format": "date",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "description": "Optional inclusive date floor for Gmail full and incremental ingestion. Use YYYY-MM-DD; omission preserves the unbounded default query."
+            }
+          }
+        },
         "imap": {
           "type": "object",
           "description": "Any mailbox that speaks IMAP (Yahoo, Fastmail, iCloud, a hosting provider), enforced by brain connect imap and brain ingest --from imap. Most providers require an APP PASSWORD rather than the account password; it is entered hidden at connect and stored in the client's own macOS Keychain or Windows DPAPI store under an item named for IMAP, never as a flag and never in an environment variable. Read-only at the protocol level (EXAMINE, never SELECT), so nothing is marked read. Inbox and Sent are read by default; Junk, Trash, Drafts and an All Mail folder are skipped; an Archive folder is identified and also NOT read; a folder whose role cannot be identified is NOT read. Every folder is reported with the true reason, and folder containers that hold no mail are named as such rather than as folders that went unread. Incremental through UIDVALIDITY plus a per-folder UID watermark; a UIDVALIDITY change is announced and re-reads the whole folder rather than resuming. Bulk mail is excluded LOCALLY on message headers requiring two independent signals, which is a weaker instrument than Gmail's server-side category classifier and is not equivalent to it. Deletions made in the mailbox are NOT propagated to the brain.",
@@ -468,6 +487,21 @@
             }
           }
         },
+        "upload": {
+          "type": "object",
+          "description": "Folders explicitly loaded from this machine. A folder retirement turns this block off when it exists but does not remove or rewrite any other setting.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "retired_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "The exact UTC retirement timestamp shared with corpora.local_folder. It is added only when the upload block already exists."
+            }
+          }
+        },
         "local_folder": {
           "type": "object",
           "description": "A local folder that reloads itself on a schedule, enforced by brain schedule <manifest> --install --folder and run by brain ingest <manifest> --path. This is what makes \"drop it in a folder you already ingest\" true for a folder that is not inside Google Drive. Each tick reuses the local ingest's content-hash resume state, so a new file is added, a changed file is re-sent, an unchanged file costs one read, and a file that is gone is removed through the same aggregate removal plan every other source uses. The schedule knob is operations.folder_ingest_cron (default: hourly). macOS only today: it installs as a per-user LaunchAgent.",
@@ -489,6 +523,53 @@
               "maxLength": 64,
               "default": "documents",
               "description": "The named source this folder loads under, which is also the undo: brain forget <manifest> --source <name> removes exactly what it loaded."
+            },
+            "retired_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "A non-empty UTC timestamp makes retirement active, regardless of enabled."
+            },
+            "retired_path": {
+              "type": "string",
+              "description": "The exact previous path value, preserved without normalization."
+            },
+            "retired_source": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]*$",
+              "maxLength": 64,
+              "description": "The source protected from any later folder walk. It is documents when the original declaration had no source."
+            },
+            "retired_identity": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "description": "The direct directory identity captured at retirement, or null when the path could not be identified safely.",
+              "properties": {
+                "realpath": {
+                  "type": "string"
+                },
+                "dev": {
+                  "type": "string",
+                  "pattern": "^[0-9]+$"
+                },
+                "ino": {
+                  "type": "string",
+                  "pattern": "^[0-9]+$"
+                }
+              },
+              "required": [
+                "realpath",
+                "dev",
+                "ino"
+              ]
+            },
+            "retired_by": {
+              "enum": [
+                "brain folder off",
+                "settings-step folder-off"
+              ],
+              "description": "The writer that recorded the retirement. Readers never branch on this value."
             }
           }
         },
@@ -535,7 +616,7 @@
                 "type": "string",
                 "format": "uri"
               },
-              "description": "The return addresses already registered in the client's own provider dashboard through a separately reviewed setup. Must contain https://<brain.domain>/app/connect/bank. Recording this non-secret evidence does not perform or authorize the held dashboard setup."
+              "description": "The return addresses already on the client's own provider dashboard allowed list (Plaid: Allowed redirect URIs) through a separately reviewed setup. Must contain https://<brain.domain>/app/connect/bank, which the Brain sends with every Link request. Recording this non-secret evidence does not perform or authorize the held dashboard setup."
             },
             "registered_webhook_uris": {
               "type": "array",
@@ -543,7 +624,7 @@
                 "type": "string",
                 "format": "uri"
               },
-              "description": "The webhook destinations already registered in the client's own Plaid environment through a separately reviewed setup. For Plaid, must contain https://<brain.domain>/api/webhooks/plaid before doctor can report the signed webhook ready. Recording this non-secret evidence does not perform or authorize the held dashboard setup."
+              "description": "Optional and informational. The Brain sends its webhook, https://<brain.domain>/api/webhooks/plaid, in every Plaid Link token request, so it needs no dashboard registration and doctor does not require this list. Older manifests that record it keep working."
             },
             "entity_slug": {
               "type": "string",
@@ -628,6 +709,115 @@
               }
             }
           ]
+        },
+        "custom_api": {
+          "type": "object",
+          "description": "A declarative read-only JSON API pulled by the client's Worker on its existing cron. The manifest names the bearer-token Worker secret but never contains its value. For inventory and costs, search contains only the current snapshot; stored rows keep prior values as history with effective dates. The connector does not create daily history documents.",
+          "properties": {
+            "_comment": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "array", "items": { "type": "string" } }
+              ]
+            },
+            "enabled": { "type": "boolean", "default": false },
+            "display_name": { "type": "string", "minLength": 1, "maxLength": 80 },
+            "source": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+            "base_url": { "type": "string", "format": "uri", "pattern": "^https://" },
+            "token_secret": {
+              "type": "string",
+              "pattern": "^CUSTOM_API_TOKEN_[A-Z0-9_]{1,40}$"
+            },
+            "cadence_seconds": { "type": "integer", "minimum": 3600, "maximum": 2678400, "default": 86400 },
+            "timeout_ms": { "type": "integer", "minimum": 250, "maximum": 60000, "default": 30000 },
+            "max_response_bytes": { "type": "integer", "minimum": 1024, "maximum": 10485760, "default": 5242880 },
+            "max_rows": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 10000 },
+            "max_pages": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+            "retries": { "type": "integer", "minimum": 1, "maximum": 5, "default": 3 },
+            "endpoints": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 20,
+              "items": {
+                "type": "object",
+                "required": ["name", "path", "row_key"],
+                "oneOf": [
+                  { "required": ["document"], "not": { "required": ["documents"] } },
+                  { "required": ["documents"], "not": { "required": ["document"] } }
+                ],
+                "properties": {
+                  "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+                  "path": { "type": "string", "pattern": "^/[A-Za-z0-9][A-Za-z0-9/_-]*$" },
+                  "row_key": {
+                    "type": "array", "minItems": 1, "uniqueItems": true,
+                    "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" }
+                  },
+                  "legacy_row_key": {
+                    "type": "array", "minItems": 1, "uniqueItems": true,
+                    "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" }
+                  },
+                  "document": {
+                    "type": "object",
+                    "required": ["group_by", "title_template", "body_template", "fields"],
+                    "properties": {
+                      "group_by": {
+                        "type": "array", "uniqueItems": true,
+                        "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" }
+                      },
+                      "title_template": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                      "body_template": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                      "aggregates": {
+                        "type": "object",
+                        "additionalProperties": { "enum": ["sum", "min", "max"] }
+                      },
+                      "formats": {
+                        "type": "object",
+                        "additionalProperties": { "enum": ["currency", "number", "integer", "text"] }
+                      },
+                      "fields": {
+                        "type": "array", "minItems": 1, "uniqueItems": true,
+                        "description": "Fields included in readable prose. Provider fields not listed here remain in the structured row only.",
+                        "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" }
+                      },
+                      "expected_values": {
+                        "type": "object",
+                        "description": "Expected categorical values whose absence should be stated rather than rendered as zero.",
+                        "additionalProperties": {
+                          "type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true,
+                          "items": { "type": "string", "minLength": 1, "maxLength": 120 }
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "documents": {
+                    "type": "array", "minItems": 1, "maxItems": 4,
+                    "items": {
+                      "type": "object",
+                      "required": ["name", "group_by", "title_template", "body_template", "fields"],
+                      "properties": {
+                        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+                        "group_by": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" } },
+                        "title_template": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                        "body_template": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                        "aggregates": { "type": "object", "additionalProperties": { "enum": ["sum", "min", "max"] } },
+                        "formats": { "type": "object", "additionalProperties": { "enum": ["currency", "number", "integer", "text"] } },
+                        "fields": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" } },
+                        "expected_values": { "type": "object", "additionalProperties": { "type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 120 } } }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "allOf": [{
+            "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+            "then": { "required": ["source", "base_url", "token_secret", "endpoints"] }
+          }],
+          "additionalProperties": false
         }
       }
     },
@@ -709,7 +899,7 @@
             },
             "model": {
               "type": "string",
-              "default": "@cf/google/gemma-4-26b-a4b-it",
+              "default": "@cf/meta/llama-4-scout-17b-16e-instruct",
               "description": "Must be a Cloudflare @cf/ model. OCR refuses any other, because a page of a scanned document may only reach the provider the manifest names."
             },
             "max_pages_per_document": {

@@ -299,13 +299,15 @@ try {
         .run(liveRowid, guid, text, macNs(ts), 0, 1);
       liveDb.prepare("INSERT INTO chat_message_join (chat_id, message_id) VALUES (?,?)").run(1, liveRowid);
     };
-    const minutesAgo = (n) => new Date(Date.now() - n * 60_000).toISOString();
+    const liveNow = "2026-09-25T22:00:00.000Z";
+    const liveNowMs = Date.parse(liveNow);
+    const minutesAgo = (n) => new Date(liveNowMs - n * 60_000).toISOString();
     const settledTs = "2026-05-04T12:00:00.000Z";
     addLiveRow({ guid: "LV-1", text: "Settled thread from last spring", ts: settledTs });
     addLiveRow({ guid: "LV-2", text: "still talking about the Danforth quote right now", ts: minutesAgo(10) });
 
     {
-      const fakes = makeBrainFakes();
+      const fakes = withImessageClock(makeBrainFakes(), liveNow);
       const result = await cmdIngestImessage(
         manifest, manifestPath,
         { "chat-db": liveDbPath, source: "imessage-live", reset: true },
@@ -335,7 +337,7 @@ try {
       // The normal every-minute tick: a resumed pass claims no sweep, and it
       // holds the open conversation exactly as the sweep did.
       addLiveRow({ guid: "LV-3", text: "one more thought before you send it", ts: minutesAgo(2) });
-      const fakes = makeBrainFakes();
+      const fakes = withImessageClock(makeBrainFakes(), liveNow);
       const result = await cmdIngestImessage(
         manifest, manifestPath,
         { "chat-db": liveDbPath, source: "imessage-live" },
@@ -352,7 +354,7 @@ try {
       // --flush-sessions is the deliberate early close (disconnect uses it).
       // It sends the live conversation, and it claims no sweep at all: it read
       // no chat.db row, so it can prove nothing about the database.
-      const fakes = makeBrainFakes();
+      const fakes = withImessageClock(makeBrainFakes(), liveNow);
       await cmdIngestImessage(
         manifest, manifestPath,
         { source: "imessage-live", "flush-sessions": true },
@@ -369,7 +371,7 @@ try {
     {
       // A preview must not report work it did not do, and must not invent an
       // early close to make the numbers look finished.
-      const fakes = makeBrainFakes();
+      const fakes = withImessageClock(makeBrainFakes(), liveNow);
       const chunks = [];
       const write = process.stdout.write.bind(process.stdout);
       process.stdout.write = (chunk, ...rest) => { chunks.push(String(chunk)); return true; };

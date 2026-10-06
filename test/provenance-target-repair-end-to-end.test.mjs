@@ -602,13 +602,15 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
     recoveredBrain.close();
   });
 
-  assert.match(sourceBrain.migrationFiles.at(-1), /^0046_/);
-  assert.match(recoveredBrain.migrationFiles.at(-1), /^0046_/);
+  assert.match(sourceBrain.migrationFiles.at(-1), /^0048_/);
+  assert.match(recoveredBrain.migrationFiles.at(-1), /^0048_/);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_receipts"), true);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolutions"), true);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_verifications"), false);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolution_activations"), false);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolution_admissions"), false);
+  assert.equal(RECOVERY_EXPORT_TABLES.includes("ocr_page_requests"), true,
+    "permanent OCR idempotency tombstones recover so a restored Brain cannot repeat model calls");
 
   await registerSyntheticSource(sourceBrain, sourceHarness);
 
@@ -877,6 +879,20 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
   const recoveredVectors = attachVectorIndex(recoveredBrain);
   recoveredVectors.seedCurrentChunks();
   assert.equal(recoveredVectors.vectors.size, 1);
+  // Portable recovery copies the corpus and provider projection separately
+  // from deployment-local verification state. Model the exact receipt that a
+  // completed recovery records before the repair CLI reads bounded health;
+  // otherwise the fixture advertises a verified zero-vector deployment while
+  // asking the CLI to trust one recovered vector.
+  recoveredBrain.raw(
+    `UPDATE install_state
+        SET vector_projection_status='verified',
+            vector_projection_bootstrap_base_count=(SELECT COUNT(*) FROM chunks)
+      WHERE id=1`,
+  );
+  assert.equal(recoveredBrain.first(
+    "SELECT vector_projection_bootstrap_base_count AS n FROM install_state WHERE id=1",
+  ).n, recoveredVectors.vectors.size);
   const recoveredHarness = orchestratorHarness(recoveredBrain, install);
 
   const { response: recoveredVerifyResponse, value: recoveredVerify } =

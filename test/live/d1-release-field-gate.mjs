@@ -86,9 +86,18 @@ const prior = await request("/api/admin/brain/source-families", {
   method: "POST", body: { source, limit: 1000 },
 });
 if (prior.body.families.length) {
+  const priorPreview = await request("/api/admin/brain/forget", {
+    method: "POST", body: { source },
+  });
   await request("/api/admin/brain/forget", {
     method: "POST",
-    body: { source, confirm: true },
+    body: {
+      source,
+      confirm: true,
+      preview_documents: priorPreview.body.documents,
+      preview_document_high_water: priorPreview.body.document_high_water,
+      preview_corpus_mutation_generation: priorPreview.body.corpus_mutation_generation,
+    },
   });
   for (let attempt = 0; attempt < 8; attempt++) {
     const receipt = await request("/api/admin/brain/drain", { method: "POST", body: {} });
@@ -180,7 +189,13 @@ assert.equal(preview.body.documents, 53);
 
 const removed = await request("/api/admin/brain/forget", {
   method: "POST",
-  body: { source, confirm: true },
+  body: {
+    source,
+    confirm: true,
+    preview_documents: preview.body.documents,
+    preview_document_high_water: preview.body.document_high_water,
+    preview_corpus_mutation_generation: preview.body.corpus_mutation_generation,
+  },
 });
 assert.equal(removed.body.documents, 53);
 

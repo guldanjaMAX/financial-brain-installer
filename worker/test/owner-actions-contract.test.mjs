@@ -361,9 +361,46 @@ test("upload resumes committed ingest after finalization response loss and remai
     assert.equal(preview.body.documents, 1);
     assert.equal(fixture.first("SELECT count(*) AS n FROM documents").n, 1);
 
+    const reingested = await json(await ownerPost(fixture, "/api/owner/uploads", {
+      ...body,
+      request_id: "upload-after-forget-preview",
+      envelope: { ...body.envelope, content: `${body.envelope.content} revised` },
+    }));
+    assert.equal(reingested.response.status, 200);
+    assert.equal(reingested.body.document.action, "updated");
+
+    const staleConfirmation = await json(await fixture.post(
+      "/api/admin/brain/forget", {
+        source: "upload",
+        confirm: true,
+        preview_documents: preview.body.documents,
+        preview_document_high_water: preview.body.document_high_water,
+        preview_corpus_mutation_generation: preview.body.corpus_mutation_generation,
+      }, admin,
+    ));
+    assert.equal(staleConfirmation.response.status, 409);
+    assert.equal(staleConfirmation.body.code, "source_forget_preview_changed");
+    assert.equal(fixture.first("SELECT count(*) AS n FROM documents").n, 1,
+      "a stale confirmation reaches the mutation fence but deletes nothing");
+
+    const refreshedPreview = await json(await fixture.post(
+      "/api/admin/brain/forget", { source: "upload" }, admin,
+    ));
+    assert.equal(refreshedPreview.response.status, 200);
+    assert.notEqual(
+      refreshedPreview.body.corpus_mutation_generation,
+      preview.body.corpus_mutation_generation,
+    );
+
     fixture.control.vectorDrainFails = true;
     const removed = await json(await fixture.post(
-      "/api/admin/brain/forget", { source: "upload", confirm: true }, admin,
+      "/api/admin/brain/forget", {
+        source: "upload",
+        confirm: true,
+        preview_documents: refreshedPreview.body.documents,
+        preview_document_high_water: refreshedPreview.body.document_high_water,
+        preview_corpus_mutation_generation: refreshedPreview.body.corpus_mutation_generation,
+      }, admin,
     ));
     assert.equal(removed.response.status, 200);
     assert.equal(removed.body.dry_run, false);

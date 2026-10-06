@@ -161,19 +161,23 @@ login as a completed update. Never promise a duration without a measurement.
 
 ## Current candidate lineage
 
-The unreleased 0.4.8/schema46 field candidate carries 39 stable incident rows.
-The earlier held 0.4.7 candidate was never tagged, published, or offered as a
-customer update. Its identity and planning record remain historical and are not
-reused as proof for the changed 0.4.8 bytes. The
-[current 0.4.8 evidence plan](release-evidence/v0.4.8-candidate-release-evidence-plan.md)
+The unreleased 0.4.9/schema48 field candidate carries 41 stable incident rows.
+The earlier held 0.4.7 and 0.4.8 candidates were never tagged, published, or
+offered as customer updates. Their identities and planning records remain
+historical and are not reused as proof for the changed 0.4.9 bytes. The
+[current 0.4.9 evidence plan](release-evidence/v0.4.9-candidate-release-evidence-plan.md)
 remains unbound to a final SHA and records no field execution.
 Four are `verified` on reviewed evidence: UPDATE-010, UPDATE-014, UPDATE-026,
 and UPDATE-032. Their evidence documents remain attached to the exact rows in
-`update-incidents.json`. The other 35 block release writes. No 0.4.6 deferral
-was renewed for this candidate. UPDATE-012 still needs a reviewed Windows ARM64
-support decision or its required physical proof. UPDATE-017 through UPDATE-022
-and UPDATE-025 still need their required real-provider evidence while bank
-credential setup and general invitations remain held. Schema 43 can bind
+`update-incidents.json`. Two carry new exact-version 0.4.9 deferrals recorded
+on 2026-09-26 and ship unproven, printed in the release note: UPDATE-012
+(Windows ARM64, under the condition ADR 007 set) and UPDATE-044 (bank freshness
+account breadth, under
+[ADR 008](decisions/008-rehome-update-025-breadth-into-update-044.md), only while
+general invitations stay closed). The other 35 block release
+writes. No earlier deferral was renewed for this candidate. UPDATE-017 through
+UPDATE-022 and UPDATE-025 still need their required real-provider evidence
+while bank credential setup and general invitations remain held. Schema 43 can bind
 eligible single-record local file ingests to their exact raw originals. Schema
 45 can admit a narrowly bounded accepted-resolution proof for one exact
 original after its unresolved observation, raw binding, complete result family,
@@ -182,13 +186,42 @@ citation pass together. Other ingest producers and ambiguous multi-record
 exports remain unbound, and the legacy whole-source provenance repair remains
 unaccepted. Every narrow receipt states `whole_source_complete: false` and does
 not authorize OCR, reingest, deletion, deployment, or customer execution.
-Nothing in this candidate
-weakens the gate: no acceptance criterion was rewritten, and the release
-workflow still refuses to publish while any incident blocks. Earlier candidate
+One exact-version narrowing recorded on 2026-09-26 applies to 0.4.9 only:
+ADR 008 lets UPDATE-044 carry an exact-version
+deferral although 0.4.9 changes Plaid code, and that deferral prints in the
+release note. Nothing else in this candidate weakens the gate. The
+acceptance-text record depends on the reference point. Since the held 0.4.8
+candidate, three acceptance texts changed and one row was added, because two
+clauses were re-homed. In
+[ADR 007](decisions/007-rehome-update-006-arm64-clause.md), UPDATE-006 keeps
+every Windows x64 CLI-identity requirement and no longer carries the ARM64
+clause, and UPDATE-012 gains that ARM64 CLI-identity requirement verbatim. In
+ADR 008, UPDATE-025 keeps its real-Item freshness proof, signed webhook and
+recovered missed notification, and the new row UPDATE-044 carries its
+two-institution, two-business and business-banking-login breadth in the same
+words.
+Against the last shipped release, v0.4.6, five acceptance texts changed and
+two rows were added: those three texts and UPDATE-044, plus two more texts
+rewritten during the unshipped 0.4.7/0.4.8 work that ship for the first time in
+0.4.9, and UPDATE-043. UPDATE-037 (commit `41e8e30`) now requires the Windows refusal to name a
+supported route that needs no secret entry, instead of a route that masks
+entry, because this release ships no PowerShell secret-entry bridge; the
+physical PowerShell 5.1 and 7 proof stays required. UPDATE-036 (commit
+`0428346`) replaced the runbook-only requirement with a packaged preview gate:
+all local checks before any credential or network access, exactly one
+authenticated aggregate read with no Cloudflare control-plane request, a
+receipt fingerprint bound to that response, a shortfall recoverable only when
+queued upserts cover the full deficit, every other shortfall or malformed state
+stopping, and proof of zero writes and side effects. UPDATE-043 is a new row
+since v0.4.6, not a changed text. The eight v0.4.6 deferrals (UPDATE-012,
+UPDATE-017 through UPDATE-022, and UPDATE-025) named version 0.4.6 and have
+expired; none was renewed for 0.4.7, 0.4.8, or 0.4.9. No row changed status or
+evidence with either re-homing, and the release workflow still
+refuses to publish while any incident blocks. Earlier candidate
 rehearsals do not automatically clear changed code. Current named-profile OAuth
-uses its reviewed encrypted backend; the explicit legacy TOML helper keeps its
-separate compatible pin. Preflight detects environment and executable traps but
-does not read credentials, authorize an account, or prove a current named-profile
-login.
+uses its reviewed encrypted backend; the legacy TOML reader now refreshes with
+the same exact reviewed Wrangler package. Preflight detects environment and
+executable traps but does not read credentials, authorize an account, or prove
+a current named-profile login.
 
 Source and package Windows DPAPI gates, frontend bundle parity, and zero-findings public-history scanning remain mandatory alongside the shared-package matrix. Windows hosted CI does not prove the physical Windows ARM64 owner journey.

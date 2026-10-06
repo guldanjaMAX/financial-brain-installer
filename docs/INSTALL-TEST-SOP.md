@@ -89,17 +89,19 @@ its own: none of these assertions can see a screen.
 ## Tier 1A: published package-contract matrix (CI, built)
 
 GitHub Actions workflow `install-matrix.yml` runs on fresh hosted runners. Each
-job downloads the current platform agent contract and sealed field kit from
-`financialbrain.ai`, verifies the outer and inner receipts, parses the actual
-npm install command from the downloaded platform field guide, and refuses any
-change to its executable, mode flags, safety flags, owner prefix, or archive
-reference. It then substitutes only a throwaway prefix and the already-verified
-local archive. POSIX runners invoke the selected Node runtime's verified npm
-CLI directly. The Windows runner enters the parsed `npm.cmd` through a fixed
-PowerShell bridge, proves PATH resolves that shim beside setup-node's selected
-Node runtime, and preserves spaced prefix/archive arguments without evaluating
-guide text. Every runner then runs the installed package's version and doctor
-checks.
+job first binds the public release manifest to the platform install doorway. A
+held manifest must return the exact closed-door document and stop before
+artifact selection or filesystem writes. A candidate or stable manifest must
+return the version-2 platform contract. The job then downloads its sealed field kit,
+verifies the outer and inner receipts, parses the actual npm install command
+from the downloaded platform field guide, and refuses any change to its
+executable, mode flags, safety flags, owner prefix, or archive reference. It
+substitutes only a throwaway prefix and the already-verified local archive.
+POSIX runners invoke the selected Node runtime's verified npm CLI directly. The
+Windows runner enters the parsed `npm.cmd` through a fixed PowerShell bridge,
+proves PATH resolves that shim beside setup-node's selected Node runtime, and
+preserves spaced prefix/archive arguments without evaluating guide text. Every
+stable runner then runs the installed package's version and doctor checks.
 
 | Runner | What it proves |
 |---|---|
@@ -208,7 +210,7 @@ offboarding). File defect write-ups with the gate id in the title.
 | Tier 0 suite | BUILT (`npm test`) |
 | Test account + keychain-held scoped token | BUILT 2026-08-27 (token verified; Vectorize create/delete probe passed). Identifiers in the private bench note. |
 | Disposable teardown | FIXED BROKER IMPLEMENTED LOCALLY, NOT LIVE-TESTED OR APPROVED. The installed `brain-v048-disposable-teardown` entry point provides separate A13 through A16 ceremonies with exact receipt, implementation, custody, quiescence, D1 deletion-state, source-before-target, journal, and approval gates. The retired `scripts/teardown-test-brain.mjs` path refuses before credential or provider access. |
-| `install-matrix.yml` (Tier 1A) | BUILT 2026-09-09. Required by `release.yml`; verifies the current public kit and package install on four hosted runners. It does not provision Cloudflare or prove the tagged candidate is already public. |
+| `install-matrix.yml` (Tier 1A) | BUILT 2026-09-09, state binding added 2026-10-01. Required by `release.yml`; verifies an exact closed door while held, then the current public kit and package install in candidate or stable state. It does not provision Cloudflare or prove the tagged candidate is already public. |
 | Disposable Cloudflare recovery campaign (Tier 1B) | IMPLEMENTED LOCALLY, FIELD BLOCKED. The split dispatcher, 6,001-document seed/replay, interruption/resume, exact retrieval/refusal, private receipts, and receipt-bound teardown have fixture proof. Exact-candidate Cloudflare evidence, explicit provider-action approvals, and supervised live execution remain open. |
 | Deployed test-Brain Playwright suite (Tier 2) | TODO. Local synthetic browser regressions in ordinary CI are not this live gate. |
 | Tart bench (Tier 3, Mac) | BUILT 2026-08-28. Tart 2.32.1 + `macos-tahoe-base` (26.6.2); clone boots, SSH drivable, full install verified end to end in 8s. ⚠️ Requires WARP disconnected. |

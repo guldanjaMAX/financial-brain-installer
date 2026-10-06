@@ -23,12 +23,13 @@ import { platform } from "node:os";
 import { win32 as pathWin32 } from "node:path";
 import { tokenStorageStatus, verifyTokenStorageReadable } from "./connectors/google-auth.mjs";
 import { probeWindowsDpapi } from "./operations/admin-key-file.mjs";
+import { REVIEWED_WRANGLER_SPEC } from "./operations/wrangler-runtime-contract.mjs";
 import { manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
 
 export const OK = "ok";
 export const WARN = "warn";
 export const FAIL = "fail";
-export const WRANGLER_PACKAGE = "wrangler@4.131.1";
+export const WRANGLER_PACKAGE = REVIEWED_WRANGLER_SPEC;
 export const WRANGLER_AUTH_PROFILE_PATTERN = /^financial-brain-[a-f0-9]{24}$/;
 export const MIN_INSTALL_FREE_BYTES = 2n * 1024n * 1024n * 1024n;
 
@@ -80,12 +81,13 @@ export const CF_TOKEN_SCOPES = ["Workers Scripts: Edit", "D1: Edit", "Vectorize:
  * person from fixing the most common install-day mistake there is.
  */
 export const CF_TOKEN_REJECTED_REMEDY =
-  "The explicitly selected automation or recovery value in CLOUDFLARE_API_TOKEN was rejected.\n" +
+  "Cloudflare did not accept the access key used for this automation or recovery run.\n" +
   "  Ordinary owner setup does not need a token. Rerun the supported Brain command in\n" +
   "  an interactive terminal and use its named Cloudflare browser sign-in.\n" +
   "  If the reviewed automation or recovery plan specifically requires a token, the\n" +
   "  owner can review that bounded credential in My Profile > API Tokens without\n" +
-  `  revealing it to the assistant. Minimum scopes: ${CF_TOKEN_SCOPES.join(", ")}.`;
+  `  revealing it to the assistant. Leave the start date empty or set it to today; set\n` +
+  `  the end at least 7 days from now. Minimum scopes: ${CF_TOKEN_SCOPES.join(", ")}.`;
 
 /** Does this failure mean the credential was refused, rather than the tool misbehaving? */
 export function isCredentialRejection(error) {
@@ -103,19 +105,103 @@ const IS_WIN = platform() === "win32";
  * call rather than an error anyone can read.
  *
  * 1. npm-installed CLIs are `.cmd` shims on Windows, and since CVE-2024-27980
- *    Node REFUSES to spawn a .cmd or .bat without `shell: true` (EINVAL, on
- *    every Node 22 and 24). A bare spawn also does no PATHEXT resolution, so
- *    `npx` alone is ENOENT. Both failures look identical to "not installed", so
- *    doctor would tell a client to install wrangler forever while they already
- *    have it.
- * 2. With `shell: true` on Windows the arguments are re-parsed by cmd.exe, so a
- *    path containing a space silently becomes two arguments. Anything risky is
- *    quoted before it gets there.
+ *    Node refuses to spawn them without cmd.exe. A bare spawn also resolves
+ *    only .com and .exe, so an npm-installed Claude Code or Codex looks
+ *    identical to "not installed" and doctor would send the owner to install
+ *    a tool they already have.
+ * 2. `shell: true` with an argument array is deprecated (DEP0190) and prints a
+ *    warning on the owner's screen, because cmd.exe re-parses the arguments.
+ *
+ * So npm and npx run through their JavaScript entry points with no shell at
+ * all. The other CLIs may be shims. Resolve those through absolute PATH entries
+ * so Windows cannot prefer the current directory, and use only the system
+ * cmd.exe for .cmd or .bat. Arguments crossing that shell boundary are limited
+ * to tokens cmd.exe and the shim cannot reinterpret.
  *
  * NOT YET RUN ON WINDOWS. Written from the platform behaviour and the CVE, and
  * flagged so nobody reads a green macOS run as proof.
  */
-const NEEDS_SHELL = new Set(["npx", "npm", "claude", "codex", "wrangler"]);
+const WINDOWS_SHIM_COMMANDS = new Set(["claude", "codex", "wrangler"]);
+
+function windowsCommandError(message, code) {
+  const error = new Error(message);
+  if (code) error.code = code;
+  return error;
+}
+
+function windowsPathEntries(environment) {
+  const value = environment?.PATH || environment?.Path || "";
+  return String(value).split(";").map((entry) => {
+    const trimmed = entry.trim();
+    return trimmed.startsWith('"') && trimmed.endsWith('"') ? trimmed.slice(1, -1) : trimmed;
+  }).filter((entry) => entry && pathWin32.isAbsolute(entry) && !/["%\0\r\n]/.test(entry));
+}
+
+function windowsExecutableExtensions(environment) {
+  const configured = String(environment?.PATHEXT || ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .map((extension) => extension.trim().toLowerCase())
+    .filter((extension) => [".com", ".exe", ".bat", ".cmd"].includes(extension));
+  return configured.length ? [...new Set(configured)] : [".com", ".exe", ".bat", ".cmd"];
+}
+
+function resolveWindowsShimCommand(cmd, environment, existsImpl) {
+  for (const directory of windowsPathEntries(environment)) {
+    for (const extension of windowsExecutableExtensions(environment)) {
+      const candidate = pathWin32.join(directory, `${cmd}${extension}`);
+      if (existsImpl(candidate)) return { executable: candidate, extension };
+    }
+  }
+  throw windowsCommandError(`${cmd} was not found in the Windows PATH`, "ENOENT");
+}
+
+function windowsSystemCommandShell(environment) {
+  const root = environment?.SystemRoot || environment?.SYSTEMROOT || environment?.WINDIR;
+  if (!root || !pathWin32.isAbsolute(root) || /["%!^&|<>\0\r\n]/.test(root)) {
+    throw windowsCommandError("the Windows system command interpreter is unavailable", "ENOENT");
+  }
+  return pathWin32.join(root, "System32", "cmd.exe");
+}
+
+function safeWindowsCommandToken(value) {
+  const text = String(value);
+  if (!/^[A-Za-z0-9@._:/=,+-]+$/.test(text)) {
+    throw new TypeError("a Windows shim argument must be one safe command token");
+  }
+  return text;
+}
+
+export function platformCommandInvocation(cmd, args, {
+  platformName = process.platform,
+  nodePath = process.execPath,
+  environment = process.env,
+  existsImpl = existsSync,
+} = {}) {
+  if (platformName === "win32" && ["npx", "npm"].includes(cmd)) {
+    const script = pathWin32.join(
+      pathWin32.dirname(nodePath),
+      "node_modules", "npm", "bin", cmd === "npx" ? "npx-cli.js" : "npm-cli.js",
+    );
+    return { command: nodePath, args: [script, ...args], shell: false };
+  }
+  if (platformName === "win32" && WINDOWS_SHIM_COMMANDS.has(cmd)) {
+    const resolved = resolveWindowsShimCommand(cmd, environment, existsImpl);
+    if ([".com", ".exe"].includes(resolved.extension)) {
+      return { command: resolved.executable, args: [...args], shell: false };
+    }
+    if (/["%!^&|<>\0\r\n]/.test(resolved.executable)) {
+      throw new TypeError("the Windows shim path cannot cross the command shell safely");
+    }
+    const commandLine = [`"${resolved.executable}"`, ...args.map(safeWindowsCommandToken)].join(" ");
+    return {
+      command: windowsSystemCommandShell(environment),
+      args: ["/d", "/s", "/c", `"${commandLine}"`],
+      shell: false,
+      windowsVerbatimArguments: true,
+    };
+  }
+  return { command: cmd, args: [...args], shell: false };
+}
 
 // Child CLIs do not need the desktop process's credentials. In particular,
 // doctor and wrangler used to inherit ADMIN_KEY plus every provider token just
@@ -292,16 +378,16 @@ export function wranglerProfileArgs(
     : [...args];
 }
 
-function quoteWin(a) {
-  return /[\s"^&|<>()]/.test(a) ? `"${String(a).replace(/"/g, '\\"')}"` : a;
-}
-
 export function run(cmd, args = [], {
   timeout = 20_000,
   env,
   inheritEnv = true,
   input,
   maxBuffer,
+  platformName = process.platform,
+  nodePath = process.execPath,
+  existsImpl = existsSync,
+  processRunner = spawnSync,
 } = {}) {
   // Build the environment EXPLICITLY. spawnSync drops any key whose value is
   // undefined, so spreading `{CLOUDFLARE_ACCOUNT_ID: undefined}` over process.env
@@ -314,17 +400,18 @@ export function run(cmd, args = [], {
     else finalEnv[k] = String(v);
   }
 
-  const useShell = IS_WIN && NEEDS_SHELL.has(cmd);
-  const argv = useShell ? args.map(quoteWin) : args;
-
   try {
-    const r = spawnSync(cmd, argv, {
+    const invocation = platformCommandInvocation(cmd, args, {
+      platformName, nodePath, environment: finalEnv, existsImpl,
+    });
+    const r = processRunner(invocation.command, invocation.args, {
       encoding: "utf-8",
       timeout,
-      shell: useShell,
+      shell: false,
       env: finalEnv,
       input,
       ...(maxBuffer === undefined ? {} : { maxBuffer }),
+      ...(invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       windowsHide: true,
     });
     const stdout = String(r.stdout || "");
@@ -679,15 +766,37 @@ export function checkWindowsCredentialProtection({
     return check("Windows credential protection", OK, "not applicable on this platform");
   }
   const result = probe({ platform: "win32", rounds: 25, ...probeOptions });
+  const launchRefusals = Number.isSafeInteger(result.launch_refusals) ? result.launch_refusals : 0;
   if (result.passed) {
+    // A refused launch that a fresh helper recovered is still worth seeing:
+    // it is the Smart App Control signature, not a DPAPI failure.
+    const refusalNote = launchRefusals > 0
+      ? `; Windows refused ${launchRefusals} helper launch${launchRefusals === 1 ? "" : "es"} (likely Smart App Control) and a freshly compiled helper worked`
+      : "";
     return {
       ...check(
       "Windows credential protection",
       OK,
-      `${result.rounds} in-memory DPAPI protect/decrypt round trips passed and temporary helper artifacts were cleaned`,
+      `${result.rounds} in-memory DPAPI protect/decrypt round trips passed and temporary helper artifacts were cleaned${refusalNote}`,
       ),
       rounds: result.rounds,
       issue_code: null,
+      launch_refusals: launchRefusals,
+    };
+  }
+  if (result.stage === "launch_refused") {
+    return {
+      ...check(
+        "Windows credential protection",
+        FAIL,
+        `Windows refused to run the temporary DPAPI helper after ${result.rounds || 0} completed round trips, even after compiling fresh copies`,
+        `Issue code: ${result.issue_code || "WINDOWS_DPAPI_LAUNCH_REFUSED"}. ` +
+          "This is most likely Smart App Control blocking the unsigned helper, not a DPAPI or credential failure. " +
+          "Nothing was changed; rerun `brain doctor` or the command, which usually works.",
+      ),
+      rounds: result.rounds || 0,
+      issue_code: result.issue_code || "WINDOWS_DPAPI_LAUNCH_REFUSED",
+      launch_refusals: launchRefusals,
     };
   }
   if (result.stage === "cleanup_deferred") {
@@ -728,7 +837,10 @@ export function checkCodex({
     env: childEnvironment,
   });
   if (!r.ok) {
-    return check("Codex", WARN, "not found on PATH", "Optional. Install it if the client uses Codex; setup wires up whichever is present.");
+    return {
+      ...check("Codex", OK, "isn't installed. That's fine unless you want to use your Brain from Codex."),
+      available: false,
+    };
   }
   const version = (r.out.trim().split("\n")[0] || "present").slice(0, 40);
   const auth = runCommand("codex", ["login", "status"], {
@@ -736,13 +848,16 @@ export function checkCodex({
     inheritEnv: false,
     env: childEnvironment,
   });
-  if (auth.ok) return check("Codex", OK, `${version}; signed in`);
-  return check(
+  if (auth.ok) return { ...check("Codex", OK, `${version}; signed in`), available: true };
+  return {
+    ...check(
     "Codex",
     WARN,
     `${version}; installed but not signed in`,
     "Run `codex login` in an interactive terminal, complete the official sign-in, and rerun `brain doctor`."
-  );
+    ),
+    available: true,
+  };
 }
 
 export function checkAnthropicKey() {
@@ -969,13 +1084,9 @@ export async function checkCfToken(cloudflareToken = process.env.CLOUDFLARE_API_
     );
   }
   return check(
-    "Cloudflare token",
-    WARN,
-    "no API-token recovery credential is set; ordinary owner setup does not need one",
-    "Run the supported Brain command in an interactive terminal and follow its named Cloudflare browser sign-in.\n" +
-      "  CLOUDFLARE_API_TOKEN is reserved for an explicitly selected automation or recovery path and\n" +
-      "  must come from an approved secret manager, never a pasted shell command.\n" +
-      CF_PLAN_NOTE
+    "Cloudflare:",
+    OK,
+    "not connected yet. Setup opens Cloudflare in your browser and asks you to sign in."
   );
 }
 
@@ -998,6 +1109,18 @@ export function bankFeedRedirectUri(domain) {
 export function plaidWebhookUri(domain) {
   const host = String(domain || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
   return `https://${host}${PLAID_WEBHOOK_PATH}`;
+}
+
+export const PLAID_DASHBOARD_API_URL = "https://dashboard.plaid.com/team/api";
+
+export function plaidOwnerReturnAddressCard(returnAddress) {
+  return [
+    "Plaid needs to know where to send you back after you sign in to your bank.",
+    `1. Open the Plaid dashboard: ${PLAID_DASHBOARD_API_URL}`,
+    "2. Under Developers > API, find Allowed redirect URIs and choose Add.",
+    `3. Copy this return address into Plaid. It is not a page to open: ${returnAddress}`,
+    "4. Save the change in Plaid.",
+  ].join("\n");
 }
 
 /**
@@ -1037,9 +1160,6 @@ export function checkBankFeedRedirect(manifest) {
       "  Choose provider plaid or custom and environment sandbox or production.");
   }
   const declared = Array.isArray(feed.registered_redirect_uris) ? feed.registered_redirect_uris : [];
-  const declaredWebhooks = Array.isArray(feed.registered_webhook_uris)
-    ? feed.registered_webhook_uris
-    : [];
   const missingConfig = provider === "custom" ? [
       !feed.api_base && "corpora.bank_feed.api_base",
       !feed.link_sdk_url && "corpora.bank_feed.link_sdk_url",
@@ -1050,29 +1170,16 @@ export function checkBankFeedRedirect(manifest) {
     return check(
       "Bank feed", FAIL,
       "the return address for this brain is not recorded as registered",
-      "  Register this exact address with the bank-data provider, in the CLIENT'S OWN\n" +
-      "  provider dashboard, before the session:\n\n" +
-      `      ${required}\n\n` +
+      (provider === "plaid"
+        ? `  ${plaidOwnerReturnAddressCard(required).split("\n").join("\n  ")}\n\n`
+        : `  Register this exact return address in your bank-data provider dashboard: ${required}\n\n`) +
       "  Then record it in the manifest so this check can confirm it:\n" +
-      `      corpora.bank_feed.registered_redirect_uris: ["${required}"]\n\n` +
-      "  Skip this and the client will authorise successfully at their bank and then\n" +
-      "  land on a dead return, with you sitting next to them."
+      `      corpora.bank_feed.registered_redirect_uris: ["${required}"]`
     );
   }
-  if (provider === "plaid" && !declaredWebhooks.includes(requiredWebhook)) {
-    return check(
-      "Bank feed", FAIL,
-      "the signed webhook destination for this brain is not recorded as registered",
-      "  Plaid credential setup and dashboard changes remain held outside generic\n" +
-      "  onboarding. In the separately reviewed setup, register this exact webhook\n" +
-      "  in the same Plaid environment as the existing Worker credentials:\n\n" +
-      `      ${requiredWebhook}\n\n` +
-      "  Then record only that non-secret URI in the manifest:\n" +
-      `      corpora.bank_feed.registered_webhook_uris: [\"${requiredWebhook}\"]\n\n` +
-      "  Keep scheduled reconciliation enabled. A registered webhook requests prompt\n" +
-      "  refresh, but it is never the only source of truth."
-    );
-  }
+  // The Plaid webhook needs no dashboard registration: this brain sends it as
+  // the webhook field of every new Link token request, so each Item carries it.
+  // A recorded registered_webhook_uris list is accepted and is not required.
   if (missingConfig.length) {
     return check(
       "Bank feed", FAIL,
@@ -1095,7 +1202,8 @@ export function checkBankFeedRedirect(manifest) {
   const webhook = provider === "plaid" ? requiredWebhook : null;
   return check(
     "Bank feed", OK,
-    `${provider}; ${environment}; return address registered (${required})${webhook ? `; signed webhook ${webhook}` : ""}`,
+    `return address saved in ${provider === "plaid" ? "Plaid" : "the provider"}; ${environment}` +
+      (webhook ? "; the signed webhook is included with each Link request and needs no dashboard registration" : ""),
     environment === "sandbox"
       ? "  Sandbox is right for a rehearsal, and it is what lets an install be practised\n" +
         "  the same day. Switch to production once the client's own provider approval\n" +
@@ -1144,20 +1252,18 @@ export async function checkNetwork() {
  * default_usage_model on Free and Paid accounts alike, so it carries no plan
  * signal either. There is therefore NO reliable plan read inside the install
  * scopes, and this check says so plainly rather than inventing a verdict:
- * unreadable is a WARN with the dashboard path, never a FAIL and never a
- * pretend OK. A token that CAN read subscriptions (a client's own broader
- * token) gets the definitive line automatically.
+ * A first run states that setup will ask the owner to confirm the plan. Once
+ * a token is intentionally present, unreadable billing remains a WARN with
+ * the dashboard path; a readable subscription gets the definitive line.
  */
 export async function checkWorkersPaidPlan(
   accountId,
   cloudflareToken = process.env.CLOUDFLARE_API_TOKEN,
   fetchImpl = fetch,
 ) {
-  const name = "Workers plan";
+  const name = "Cloudflare plan:";
   if (!cloudflareToken) {
-    return check(name, WARN, "not checked: the named browser session cannot read billing status",
-      "Before any resources are created, the owner confirms by eye:\n" +
-        "    Cloudflare dashboard > Workers & Pages > Plans > Paid\n" + CF_PLAN_NOTE);
+    return check(name, OK, "setup asks you to confirm your plan says Paid. Doctor can't read billing.");
   }
   if (!accountId) {
     return check(name, WARN, "not checked: Cloudflare account id is not known yet",
@@ -1216,14 +1322,9 @@ export async function checkWorkersPaidPlan(
 /**
  * The priority slice, checked while there is still time to choose one.
  *
- * ingest.priority_slice is the install-day ordering decision: the single
- * folder the owner already said would be worth it, loaded and proven FIRST,
- * with the long tail streaming in behind. Nothing enforces it mechanically —
- * it drives which `brain ingest --path` runs first — so an empty slice fails
- * silently: the first load happens in whatever order someone picks under
- * install-day pressure, usually chronological, and the first impression is
- * made by the archive instead of the working set. After handoff the ordering
- * decision is spent, so a completed install stops warning.
+ * ingest.priority_slice can improve first-load ordering, but it is not a
+ * readiness requirement. Doctor presents an unset slice as optional context;
+ * after handoff even that context is no longer relevant.
  */
 export function checkPrioritySlice(manifest) {
   const name = "priority slice";
@@ -1237,12 +1338,8 @@ export function checkPrioritySlice(manifest) {
   }
   return check(
     name,
-    WARN,
-    "ingest.priority_slice is not set, so the first load has no agreed order",
-    "Before the first load, put the folder from intake 2.4 into ingest.priority_slice\n" +
-      "  (templates/brain.manifest.json carries a filled _example to copy). Loading the\n" +
-      "  priority slice first and proving it beats chronological order: a first\n" +
-      "  impression made by the archive is how an install loses the room.",
+    OK,
+    "optional: set ingest.priority_slice if you want one useful folder loaded before the rest"
   );
 }
 
@@ -1290,9 +1387,9 @@ export async function runAll({
     } else {
       push(await checkCfToken(cloudflareToken, { accountId }));
       push(await checkWorkersPaidPlan(accountId, cloudflareToken));
-      const vectorize = await checkVectorizeApi(accountId, cloudflareToken);
-      push(vectorize);
-      if (accountId && vectorize.status !== OK) {
+      const vectorize = cloudflareToken ? await checkVectorizeApi(accountId, cloudflareToken) : null;
+      if (vectorize) push(vectorize);
+      if (accountId && (!vectorize || vectorize.status !== OK)) {
         // Older manifests have no saved auth_profile. Preserve their derived
         // per-account Wrangler fallback without ever selecting default.
         push(checkWranglerLogin(accountId, localRun));
@@ -1301,7 +1398,7 @@ export async function runAll({
   }
   push(checkAnthropicKey());
   const codex = checkCodex({ runCommand: localRun, environment });
-  const codexCanGuideExistingBrain = allowCodexForExistingBrain && codex.status === OK;
+  const codexCanGuideExistingBrain = allowCodexForExistingBrain && codex.status === OK && codex.available === true;
   let claude = checkClaudeCode({
     runCommand: localRun,
     required: requireClaudeCode && !codexCanGuideExistingBrain,

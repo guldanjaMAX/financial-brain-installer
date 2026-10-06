@@ -105,6 +105,14 @@ export const seed = (db, count) => {
       `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at) VALUES (?, ?, 'upsert', ?)`
     ).run(uid, uid, i + 1);
   }
+  db.prepare(
+    `INSERT INTO corpus_stats (source, documents, chunks)
+     SELECT 'drive', COUNT(DISTINCT documents.doc_uid), COUNT(chunks.chunk_uid)
+       FROM documents LEFT JOIN chunks ON chunks.doc_uid=documents.doc_uid
+      WHERE documents.source='drive' AND documents.deleted_at IS NULL
+     ON CONFLICT(source) DO UPDATE SET
+       documents=excluded.documents, chunks=excluded.chunks`,
+  ).run();
 };
 export const remaining = (db) => db.prepare("SELECT count(*) AS n FROM vector_outbox").get().n;
 export const embed = async () => [0.1];

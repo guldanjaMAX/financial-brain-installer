@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync, writeFileSync, symlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,6 +9,7 @@ import {
   suggestSourceName, writeGoldenPrivate,
 } from "./golden-20.mjs";
 import { validateGolden } from "./golden-validation.mjs";
+import { createTestSymlink } from "../test/helpers/symlink-capability.mjs";
 
 const sandbox = mkdtempSync(join(tmpdir(), "brain-golden20-"));
 
@@ -200,11 +201,17 @@ test("a live refusal check failure never aborts the session", async () => {
   assert.equal(summary.complete, true);
 });
 
-test("writeGoldenPrivate refuses a symlinked destination", () => {
+test("writeGoldenPrivate refuses a symlinked destination", (t) => {
   const target = join(sandbox, "real.json");
   writeFileSync(target, "{}\n");
   const link = join(sandbox, "link.golden.json");
-  symlinkSync(target, link);
+  const linked = createTestSymlink({
+    target,
+    path: link,
+    type: "file",
+    onSkip: (reason) => t.skip(reason),
+  });
+  if (!linked.created) return;
   assert.throws(
     () => writeGoldenPrivate(link, { questions: [] }),
     /private regular file/,

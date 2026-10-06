@@ -35,6 +35,7 @@ function isOwnerAccessRehearsalPage(): boolean {
 }
 
 export type BankStatusReadState = "loading" | "ready" | "unavailable";
+export const DISCONNECT_BANK_QUESTION = "Disconnect this bank? New transactions stop. Your saved history stays.";
 
 export function BankConnectionsSection({ readState, banks, busy, rehearsal = false, onDisconnect }: {
   readState: BankStatusReadState;
@@ -60,9 +61,7 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
         </Attention>
       ) : !banks?.configured ? (
         <Empty>
-          Bank connections are not enabled for this Brain. That is the expected state during ordinary
-          onboarding, not an error, and no bank login or verification code is needed. This says only
-          that a live bank feed is not configured. Imported statements or older records may still exist.
+          Bank connections aren't set up for this Brain yet. Your installer can turn them on.
         </Empty>
       ) : (
         <>
@@ -72,18 +71,17 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
               is synthetic, no real bank is connected, and no provider page will open. On a real
               approved pilot Brain, those controls appear on its normal Access page.
             </Note>
-          ) : bankRows.length > 0 && (
+          ) : (
             <p className="mb-4 text-sm">
               <a className="underline underline-offset-4" href="/app/connect/bank">
-                Review approved bank account choices
+                {bankRows.length > 0
+                  ? "Connect another bank or choose account owners"
+                  : "Connect a bank"}
               </a>
             </p>
           )}
           {bankRows.length === 0 ? (
-            <Empty>
-              No live bank connection is linked. Starting a new one remains outside ordinary
-              onboarding. Ask your installer whether this Brain has a separately reviewed pilot plan.
-            </Empty>
+            <Empty>No bank is connected yet.</Empty>
           ) : bankRows.map((bank) => (
             <Row key={bank.item_ref}>
               <span className="min-w-0">
@@ -96,7 +94,7 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
                   {attention.has(bank.item_ref) && (
                     <span className="block text-amber-800 mt-0.5">
                       {bank.status_detail
-                        ? `${bank.status_detail}. `
+                        ? `${bank.status_detail.replace(/[.\s]+$/, "")}. `
                         : "This connection stopped working. "}
                       Answers about money are missing anything that has happened here since.
                     </span>
@@ -117,7 +115,7 @@ export function BankConnectionsSection({ readState, banks, busy, rehearsal = fal
                 )}
                 <Confirm
                   label="Disconnect"
-                  question="Disconnect this bank?"
+                  question={DISCONNECT_BANK_QUESTION}
                   disabled={busy}
                   onConfirm={() => onDisconnect(bank.item_ref)}
                 />
@@ -187,10 +185,15 @@ export function Settings({ devices, connections, onChange }: {
   const [banks, setBanks] = useState<BankStatus | null>(null);
   const [bankReadState, setBankReadState] = useState<BankStatusReadState>("loading");
   const [showPasskeyContext, setShowPasskeyContext] = useState(false);
+  const [connectorCopied, setConnectorCopied] = useState(false);
   const [passkeyUnavailable, setPasskeyUnavailable] = useState<string | null>(() =>
     isLocalRehearsalPage() ? REHEARSAL_PASSKEY_NOTICE : null,
   );
   const hostname = typeof location === "undefined" ? "this Brain's address" : location.hostname;
+  const connectorOrigin = typeof location === "undefined"
+    ? ""
+    : location.origin || (location.hostname ? `https://${location.hostname}` : "");
+  const connectorAddress = `${connectorOrigin}/mcp`;
 
   // The bank feed is a separate surface with its own auth, so it is fetched
   // here rather than folded into /api/app/me: a brain with no bank configured
@@ -345,22 +348,31 @@ export function Settings({ devices, connections, onChange }: {
         ))}
       </Section>
 
-      <PasskeyDiagnostics />
-
-      <DocumentAccess />
-
-      <OwnerPreferences />
-
       <Section
         title="Connected AI"
         blurb="Remote apps you approved in a browser with your passkey. Each can search this Brain; only one explicitly approved for writing can add or correct information."
       >
-        <p className="border-b border-line px-4 py-3.5 text-[13px] leading-relaxed text-ink-soft">
-          Your local Claude Code or Codex Owner assistant is managed on that computer, so it does not
-          appear in these remote OAuth rows. When its Financial Brain Owner connection is installed and
-          verified, it includes <code className="text-ink">brain_remember</code>. It can add or correct a
-          record only after you explicitly approve the exact proposed record.
-        </p>
+        <div className="border-b border-line px-4 py-3.5 text-[13px] leading-relaxed text-ink-soft">
+          <div className="flex items-center gap-2 rounded-lg border border-line bg-paper px-3 py-2">
+            <code className="min-w-0 flex-1 break-all text-ink">{connectorAddress}</code>
+            <button
+              type="button"
+              className="shrink-0 text-accent font-medium"
+              onClick={async () => {
+                await navigator.clipboard.writeText(connectorAddress);
+                setConnectorCopied(true);
+              }}
+            >
+              {connectorCopied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <ol className="mt-3 list-decimal space-y-1 pl-5">
+            <li>In Claude on the web, open Settings, then Connectors, then Add custom connector.</li>
+            <li>Paste this address.</li>
+            <li>When your Brain asks, approve with your passkey. It then works in the Claude phone app too.</li>
+          </ol>
+          <p className="mt-3">Claude Code or Codex on your computer is connected separately and isn't listed here.</p>
+        </div>
         {connections.length === 0 ? (
           <Empty>
             No remote connector is connected yet. Add this Brain to Claude on the web or phone,
@@ -404,27 +416,9 @@ export function Settings({ devices, connections, onChange }: {
         }}
       />
 
-      <Section
-        title="Your owner administration"
-        blurb="Your owner passkeys are the normal way you administer this Brain. A separate recovery key used during installation also needs clear custody."
-      >
-        <Note>
-          You are the owner administrator. Your passkeys control normal owner
-          sign-in and the explicit owner controls on this page. The operator key
-          is a separate installation and recovery capability, not a replacement
-          owner account. Because anyone holding it can create a new owner
-          enrollment link, removing a device or signing out everywhere does not
-          cancel that key. A newly enrolled device will appear in the list above.
-        </Note>
-        <Note>
-          At owner handoff, ask your installer to rotate the operator key, tell
-          you the date, and confirm where the new key is kept under your approved
-          custody plan. Until that is verified, describe operator-key custody as
-          unconfirmed. If a device appears that you do not recognize, stop using
-          the Brain for private work and ask your installer to rotate the key and
-          review access with you.
-        </Note>
-      </Section>
+      <DocumentAccess />
+
+      <OwnerPreferences />
 
       <Section
         title="Signing out"
@@ -463,6 +457,19 @@ export function Settings({ devices, connections, onChange }: {
           />
         </Row>
       </Section>
+
+      <details className="mt-8 rounded-2xl border border-line bg-paper/50 px-4 py-3">
+        <summary className="cursor-pointer text-[14px] font-semibold">Technical details for your installer</summary>
+        <PasskeyDiagnostics />
+        <Section
+          title="Recovery key"
+          blurb="This separate installation capability is for your installer, not normal owner sign-in."
+        >
+          <Note>
+            Your installer also holds a recovery key. At handoff, ask them to replace it and tell you where the new one is kept.
+          </Note>
+        </Section>
+      </details>
     </div>
   );
 }

@@ -38,7 +38,7 @@ import { createHash } from "node:crypto";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ACCELERATED_BOOTSTRAP_MAX_MS,
   ACCELERATED_BOOTSTRAP_MAX_ROUNDS,
@@ -85,6 +85,11 @@ const RUNNING_VERSION = JSON.parse(
 ).version;
 const NEWER_VERSION = `${Number(RUNNING_VERSION.split(".")[0]) + 1}.0.0`;
 
+const upgradeSource = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
+if (!upgradeSource.includes("Updating your Brain from ${fromVersion} to ${toVersion}. For part of this your Brain won't accept new documents; asking questions keeps working. Keep this window open.")) {
+  throw new Error("update opening copy is missing from the real upgrade path");
+}
+
 const powershellLiteral = (value) => `'${String(value).replaceAll("'", "''")}'`;
 const expectedBrainCliPrefix = process.platform === "win32"
   ? `& ${powershellLiteral(process.execPath)} ${powershellLiteral(fileURLToPath(new URL("../brain.mjs", import.meta.url)))}`
@@ -98,6 +103,7 @@ const cmdUpgrade = (manifestPath, options = {}) => cmdUpgradeWithRealQuiescence(
     waitForVectorDrainQuiescence: async () => {},
     cmdBootstrap: async () => bootstrapCompletion(),
     cmdDrain: async () => {},
+    readUpdateBacklog: async () => ({ pending: 0 }),
     ...options,
   },
 );
@@ -132,9 +138,12 @@ const readyProjectionInventory = (overrides = {}) => {
     vector_drain_mode: overrides.drainMode ?? "paused-for-upgrade",
     vector_backlog: {
       pending,
+      pending_is_capped: false,
+      pending_display: String(pending),
       upserts,
       deletes,
       submitted,
+      component_counts_exact: true,
       oldest_queued_at: oldestQueuedAt,
     },
     vector_readiness: {
@@ -147,7 +156,9 @@ const readyProjectionInventory = (overrides = {}) => {
       expected_vectors: expected,
       actual_vectors: actual,
       pending,
+      pending_is_capped: false,
       submitted,
+      submitted_counts_exact: true,
       oldest_queued_at: oldestQueuedAt,
     },
   };
@@ -1585,7 +1596,10 @@ const bootstrapCompletion = () => ({
   // reported ok. A failure inside the paused window has to say so.
   const pausedWarning = /CANNOT ACCEPT DOCUMENTS/i;
   check("a failure inside the paused window tells the operator the brain is not accepting documents",
-    pausedWarning.test(migrationFailure.error?.message || "") &&
+    /The update stopped partway\. Your Brain can still answer questions but won't take new documents until the update finishes\. Nothing was lost\. Run brain update once more\./i.test(migrationFailure.error?.message || "") &&
+      /If it stops again at the same step, run brain support --preview and send us that note\./i.test(migrationFailure.error?.message || "") &&
+      /For your installer:/i.test(migrationFailure.error?.message || "") &&
+      pausedWarning.test(migrationFailure.error?.message || "") &&
       /do not clear VECTOR_DRAIN_MODE by hand/i.test(migrationFailure.error?.message || "") &&
       /brain health/i.test(migrationFailure.error?.message || ""),
     migrationFailure.error?.message);
@@ -1644,6 +1658,7 @@ const bootstrapCompletion = () => ({
   check("a failure after writes resume does NOT claim the brain is paused",
     !/CANNOT ACCEPT DOCUMENTS/i.test(convergenceFailure.error?.message || "") &&
       !/reindex and drain are\s+refused|remain unavailable/i.test(convergenceFailure.error?.message || "") &&
+      /The update stopped before its last check\. Your Brain is working normally and nothing was lost\. Run brain update once more; it picks up where it stopped\./i.test(convergenceFailure.error?.message || "") &&
       /does not claim that reindex or drain are blocked/i.test(convergenceFailure.error?.message || ""),
     convergenceFailure.error?.message);
   check("an incomplete projection bootstrap blocks health, acceptance, and every version commit",
@@ -3240,8 +3255,51 @@ function packedProcessDetail(result) {
           ? join(prefix, "brain.cmd")
           : join(prefix, "bin", "brain");
         const manifestPath = join(sandbox, "Financial Brain", "brain.manifest.json");
-        mkdirSync(join(sandbox, "Financial Brain"), { recursive: true });
-        writeFileSync(manifestPath, JSON.stringify(manifestFixture()));
+        // The admin key's folder must be owner-only, exactly as setup leaves it.
+        mkdirSync(join(sandbox, "Financial Brain"), { recursive: true, mode: 0o700 });
+        const installedFixture = manifestFixture();
+        installedFixture.brain.domain = "brain.example.invalid";
+        writeFileSync(manifestPath, JSON.stringify(installedFixture));
+        // `brain update` reads the authenticated documents backlog before any
+        // adoption, verification, or deployment. This preload is the fake
+        // Worker for that one route: every other request reaches real fetch
+        // unchanged, and every request is logged so a test can prove which
+        // stage the launcher reached.
+        const fakeWorker = join(sandbox, "fake-worker.mjs");
+        const fakeWorkerAdminKey = ["fixture-", "packed-la", "uncher-ad", "min-key-", "0001"].join("");
+        writeFileSync(fakeWorker, `
+import { appendFileSync } from "node:fs";
+const documentsRoute = "https://brain.example.invalid/api/admin/brain/documents";
+const adminKey = ${JSON.stringify(fakeWorkerAdminKey)};
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (input, init = {}) => {
+  const url = String(input?.url ?? input);
+  const authenticated = new Headers(init.headers || {}).get("x-admin-key") === adminKey;
+  appendFileSync(process.env.FAKE_WORKER_LOG, JSON.stringify({ url, authenticated }) + "\\n");
+  if (url !== documentsRoute) return realFetch(input, init);
+  if (!authenticated) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+  const pending = Number(process.env.FAKE_WORKER_PENDING || 0);
+  const ready = pending === 0;
+  return new Response(JSON.stringify({
+    version: "0.1.9",
+    backend: "d1",
+    vector_drain_mode: "active",
+    rows: [],
+    vector_backlog: {
+      pending, upserts: pending, deletes: 0, submitted: 0,
+      oldest_queued_at: ready ? null : 1750000000000,
+    },
+    vector_readiness: {
+      ready, reason: ready ? null : "vector_work_queued",
+      expected_vectors: 4, actual_vectors: 4, pending, submitted: 0,
+      oldest_queued_at: ready ? null : 1750000000000,
+    },
+  }), { status: 200, headers: { "content-type": "application/json" } });
+};
+`, "utf8");
+        const fakeWorkerRequests = (log) => existsSync(log)
+          ? readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line))
+          : [];
         const isolatedEnvironment = {
           PATH: process.env.PATH || "",
           HOME: fakeHome,
@@ -3251,19 +3309,32 @@ function packedProcessDetail(result) {
           ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
           ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
         };
+        const fakeWorkerEnvironment = (log, pending = 0) => ({
+          ...isolatedEnvironment,
+          NODE_OPTIONS: `--import=${pathToFileURL(fakeWorker).href}`,
+          FAKE_WORKER_LOG: log,
+          FAKE_WORKER_PENDING: String(pending),
+        });
         const setupReceipt = spawnSync(process.execPath, [
           "--input-type=module",
           "--eval",
           "const {pathToFileURL}=await import('node:url');" +
             "const installed=await import(pathToFileURL(process.env.INSTALLED_MODULE).href);" +
-            "installed.rememberInstalledManifest(process.env.INSTALLED_MANIFEST);",
+            "installed.rememberInstalledManifest(process.env.INSTALLED_MANIFEST);" +
+            "const keys=await import(pathToFileURL(process.env.INSTALLED_KEY_MODULE).href);" +
+            "const {dirname,join}=await import('node:path');" +
+            "keys.writeAdminKeyFile(join(dirname(process.env.INSTALLED_MANIFEST),'.brain-admin-key')," +
+            "process.env.FIXTURE_ADMIN_KEY,{username:process.env.USERNAME||process.env.USER});",
         ], {
           cwd: firstDirectory,
           encoding: "utf8",
           env: {
             ...isolatedEnvironment,
             INSTALLED_MODULE: installedModule,
+            INSTALLED_KEY_MODULE: join(installedRoot, "operations", "admin-key-file.mjs"),
             INSTALLED_MANIFEST: manifestPath,
+            FIXTURE_ADMIN_KEY: fakeWorkerAdminKey,
+            ...(process.env.USERNAME ? { USERNAME: process.env.USERNAME } : {}),
           },
           timeout: 30_000,
         });
@@ -3273,11 +3344,12 @@ function packedProcessDetail(result) {
           setupReceipt.stderr || setupReceipt.stdout,
         );
 
+        const reopenedLog = join(sandbox, "fake-worker-reopened.jsonl");
         const reopened = setupReceipt.status === 0
           ? spawnSync(installedLauncher, ["update"], {
               cwd: reopenedDirectory,
               encoding: "utf8",
-              env: isolatedEnvironment,
+              env: fakeWorkerEnvironment(reopenedLog),
               shell: process.platform === "win32",
               timeout: 30_000,
             })
@@ -3290,6 +3362,12 @@ function packedProcessDetail(result) {
             !/no installed Brain was found|no manifest found/i.test(reopenedOutput),
           reopenedOutput,
         );
+        check(
+          "the reopened launcher read an empty authenticated backlog before continuing",
+          fakeWorkerRequests(reopenedLog).some((entry) =>
+            entry.url === "https://brain.example.invalid/api/admin/brain/documents" && entry.authenticated),
+          JSON.stringify(fakeWorkerRequests(reopenedLog)),
+        );
 
         const reinstall = setupReceipt.status === 0
           ? installPacked("reinstall")
@@ -3300,11 +3378,12 @@ function packedProcessDetail(result) {
           packedProcessDetail(reinstall),
         );
 
+        const afterReinstallLog = join(sandbox, "fake-worker-reinstalled.jsonl");
         const afterReinstall = reinstall.status === 0
           ? spawnSync(installedLauncher, ["update"], {
               cwd: reinstalledDirectory,
               encoding: "utf8",
-              env: isolatedEnvironment,
+              env: fakeWorkerEnvironment(afterReinstallLog),
               shell: process.platform === "win32",
               timeout: 30_000,
             })
@@ -3316,6 +3395,38 @@ function packedProcessDetail(result) {
             /terminal cannot prompt securely/i.test(afterReinstallOutput) &&
             !/no installed Brain was found|no manifest found/i.test(afterReinstallOutput),
           afterReinstallOutput,
+        );
+
+        // Same installed launcher, same remembered manifest, but the fake
+        // Worker now reports queued vector work. The refusal must come from
+        // the backlog decision itself, before adoption and so before any
+        // verification, control-plane read, or deployment.
+        const pendingLog = join(sandbox, "fake-worker-pending.jsonl");
+        const pendingUpdate = reinstall.status === 0
+          ? spawnSync(installedLauncher, ["update"], {
+              cwd: reinstalledDirectory,
+              encoding: "utf8",
+              env: fakeWorkerEnvironment(pendingLog, 5),
+              shell: process.platform === "win32",
+              timeout: 30_000,
+            })
+          : { status: null, stdout: "", stderr: "second package install failed" };
+        const pendingOutput = `${pendingUpdate.stdout || ""}\n${pendingUpdate.stderr || ""}`;
+        const pendingRequests = fakeWorkerRequests(pendingLog);
+        check(
+          "the installed launcher refuses an update while the fake Worker reports queued vector work",
+          pendingUpdate.status !== 0 &&
+            /still indexing 5 recent items so they can be found by meaning/i.test(pendingOutput) &&
+            /nothing was changed/i.test(pendingOutput),
+          pendingOutput,
+        );
+        check(
+          "the queued-work refusal reached the backlog decision and nothing after it",
+          pendingRequests.length === 1 &&
+            pendingRequests[0].url === "https://brain.example.invalid/api/admin/brain/documents" &&
+            pendingRequests[0].authenticated === true &&
+            !/terminal cannot prompt securely|deploy/i.test(pendingOutput),
+          JSON.stringify({ pendingRequests, pendingOutput }),
         );
       }
     }

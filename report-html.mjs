@@ -792,6 +792,13 @@ function renderManifestIntent(manifest) {
 
 function renderCoverage(corpus, manifest, sourceInventory, sourceInventoryError) {
   const knownCorpus = corpus && Array.isArray(corpus.rows);
+  const snapshotAt = (corpus?.summary?.exact === true ||
+      (corpus?.summary?.document_counts_exact === true &&
+       corpus?.summary?.chunk_counts_exact === true)) &&
+    typeof corpus?.summary?.as_of === "string" &&
+    !Number.isNaN(Date.parse(corpus.summary.as_of))
+    ? new Date(corpus.summary.as_of).toISOString()
+    : null;
   const counts = corpusReportCounts(corpus);
   const rows = counts.rows.slice().sort((a, b) =>
     Number(b.chunks ?? b.total ?? 0) - Number(a.chunks ?? a.total ?? 0));
@@ -811,7 +818,7 @@ function renderCoverage(corpus, manifest, sourceInventory, sourceInventoryError)
         `<tr><td>${h(label)}</td>` +
         `<td class="n">${h(displayCount(logical === null || logical === undefined ? null : Number(logical)))}</td>` +
         `<td class="n">${h(displayCount(chunks === null || chunks === undefined ? null : Number(chunks)))}</td>` +
-        `<td class="n">${h(displayCount(visible === null || visible === undefined ? null : Number(visible)))}</td>` +
+        `<td class="n">${h(`${row.pending_vector_counts_exact === false ? "approximately " : ""}${displayCount(visible === null || visible === undefined ? null : Number(visible))}`)}</td>` +
         `<td>${h(isoDay(row.last_ingested) || "not reported")}</td></tr>`
       );
     }).join("");
@@ -819,16 +826,19 @@ function renderCoverage(corpus, manifest, sourceInventory, sourceInventoryError)
       ? Math.max(0, counts.extractedChunks - counts.semanticVisibleChunks)
       : null;
     corpusHtml = (
+      (snapshotAt
+        ? `<p class="note">Exact corpus snapshot counted at ${h(snapshotAt)}.</p>`
+        : "") +
       `<div class="stats">` +
       `<div class="stat"><b>${h(displayCount(counts.logicalDocuments))}</b><span>logical documents</span></div>` +
       `<div class="stat"><b>${h(displayCount(counts.extractedChunks))}</b><span>extracted chunks</span></div>` +
-      `<div class="stat"><b>${h(displayCount(counts.semanticVisibleChunks))}</b><span>meaning-search visible</span></div>` +
+      `<div class="stat"><b>${h(`${counts.semanticVisibleExact ? "" : "approximately "}${displayCount(counts.semanticVisibleChunks)}`)}</b><span>meaning-search visible</span></div>` +
       `</div>` +
       `<p class="note">Extracted chunks are stored for keyword search. Meaning-search visibility is a separate, confirmed projection state.</p>` +
       `<div class="table-wrap"><table><thead><tr><th>Kind</th><th class="n">Logical documents</th><th class="n">Extracted chunks</th><th class="n">Meaning-search visible</th><th>Last stored ingest receipt</th></tr></thead>` +
       `<tbody>${body}</tbody></table></div>` +
       (pending && pending > 0
-        ? `<p class="note">${h(num(pending))} extracted ${plural(pending, "chunk is", "chunks are")} not yet visibility-confirmed for meaning search. ${plural(pending, "It", "They")} may still be available to keyword search; this report does not call ${plural(pending, "it", "them")} absent.</p>`
+        ? `<p class="note">${h(`${counts.semanticVisibleExact ? "" : "Approximately "}${num(pending)}`)} extracted ${plural(pending, "chunk is", "chunks are")} not yet visibility-confirmed for meaning search. ${plural(pending, "It", "They")} may still be available to keyword search; this report does not call ${plural(pending, "it", "them")} absent.</p>`
         : "")
     );
   }
@@ -1099,7 +1109,7 @@ export function renderReportHtml(data) {
       : `<div class="stat"><b>none</b><span>optional questions saved</span></div>`) +
     `<div class="stat"><b>${h(displayCount(corpusCounts.logicalDocuments))}</b><span>logical documents</span></div>` +
     `<div class="stat"><b>${h(displayCount(corpusCounts.extractedChunks))}</b><span>extracted chunks</span></div>` +
-    `<div class="stat"><b>${h(displayCount(corpusCounts.semanticVisibleChunks))}</b><span>meaning-search visible</span></div>` +
+    `<div class="stat"><b>${h(`${corpusCounts.semanticVisibleExact ? "" : "approximately "}${displayCount(corpusCounts.semanticVisibleChunks)}`)}</b><span>meaning-search visible</span></div>` +
     `</div>`;
 
   /* section 2: optional owner-authored regression questions. */
@@ -1223,8 +1233,12 @@ export async function collectReportData({
   try {
     const res = await fetchBrainWithAdminKey(
       fetchImpl,
-      `${root}/api/admin/brain/documents`,
-      {},
+      `${root}/api/admin/brain/documents/report`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      },
       () => adminKey,
     );
     if (res.ok) corpus = await res.json();

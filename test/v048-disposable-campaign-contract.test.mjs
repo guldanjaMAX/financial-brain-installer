@@ -155,6 +155,22 @@ test("wrong role, resource name, account, locator, version, and slug are refused
     () => validateV048DisposableCampaignManifest(wrongVersion, "source"),
     "V048_CAMPAIGN_PRODUCT_VERSION_MISMATCH",
   );
+  // The campaign binds to the one version this tree ships. The prior sealed
+  // 0.4.8 release, and any other neighbour, stays refused under newer bytes.
+  const shippedVersion = JSON.parse(readFileSync(
+    new URL("../package.json", import.meta.url),
+    "utf8",
+  )).version;
+  assert.equal(V048_DISPOSABLE_CAMPAIGN.version, shippedVersion);
+  for (const version of ["0.4.8", "0.4.10", "0.5.0", "1.0.0", `v${shippedVersion}`, ""]) {
+    if (version === shippedVersion) continue;
+    const otherVersion = campaignManifest("source");
+    otherVersion.brain.version = version;
+    expectCode(
+      () => validateV048DisposableCampaignManifest(otherVersion, "source"),
+      "V048_CAMPAIGN_PRODUCT_VERSION_MISMATCH",
+    );
+  }
   const wrongSlug = campaignManifest("source");
   wrongSlug.client.slug = "another-campaign";
   expectCode(

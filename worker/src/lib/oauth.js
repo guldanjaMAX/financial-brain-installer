@@ -268,7 +268,7 @@ export async function handleAuthorizePage(env, url) {
       If you need to sign in, approving will open your device's normal passkey
       window. Answer that system prompt yourself. Your biometric data and device
       PIN stay on your device; this brain verifies only the signed passkey
-      challenge. Revoke this connection any time from Settings, or end every
+      challenge. Revoke this connection any time from Access &gt; Connected AI, or end every
       connection at once with Sign out everywhere.
     </p>
     <p id="err" class="mt-4 text-[14px] text-red-700" hidden></p>
@@ -281,12 +281,50 @@ export async function handleAuthorizePage(env, url) {
   const b64uToBytes = (s) => Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/") + "=".repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
   const bytesToB64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"");
   const api = (path, payload) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Brain-App": "1" }, body: JSON.stringify(payload || {}) })
-    .then(async (r) => { const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || ("HTTP " + r.status)); return j; });
+    .then(async (r) => {
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const error = new Error(j.error || "request_failed");
+        error.status = r.status;
+        error.code = j.code || j.error || "";
+        throw error;
+      }
+      return j;
+    });
+  const ownerMessage = (error) => {
+    const code = String(error && (error.code || error.message) || "");
+    const status = Number(error && error.status || 0);
+    if ((error && error.name === "NotAllowedError") || code === "passkey_cancelled") {
+      return "The passkey window was closed. Nothing was connected. Choose Approve access to try again.";
+    }
+    if (status === 401 || code === "unknown passkey") {
+      return "This device doesn't have a passkey for this Brain. Sign in at " + location.origin + "/app on the device you set it up on, then choose Approve access again.";
+    }
+    if (code === "unknown or expired challenge" || code === "unknown, expired, or already used challenge") {
+      return "That took longer than 5 minutes, so the sign-in expired. Choose Approve access again.";
+    }
+    if (code === "owner_required") {
+      return "This browser is signed in with shared-document access, not as the owner.";
+    }
+    if (status === 403 && code && code !== "request_failed") return code;
+    if (status === 400) {
+      return "This connection request could not be used. Start the connection again from Claude.";
+    }
+    if (status >= 500) {
+      return "Your Brain couldn't finish this right now. Nothing was connected. Try again in a minute.";
+    }
+    return "Your Brain couldn't finish this right now. Nothing was connected. Try again in a minute.";
+  };
   async function signIn() {
     const options = await api("/auth/login/options");
     const assertion = await navigator.credentials.get({ publicKey: {
       challenge: b64uToBytes(options.challenge), rpId: options.rp_id, userVerification: "required", allowCredentials: [],
     }});
+    if (!assertion) {
+      const error = new Error("passkey_cancelled");
+      error.code = "passkey_cancelled";
+      throw error;
+    }
     await api("/auth/login/verify", {
       credentialId: assertion.id,
       authenticatorData: bytesToB64u(assertion.response.authenticatorData),
@@ -294,18 +332,27 @@ export async function handleAuthorizePage(env, url) {
       signature: bytesToB64u(assertion.response.signature),
     });
   }
-  document.getElementById("approve").onclick = async () => {
+  const approve = document.getElementById("approve");
+  approve.onclick = async () => {
     document.getElementById("err").hidden = true;
+    approve.disabled = true;
     try {
       let decision = await fetch("/oauth/authorize/decision?" + q, { method: "POST", headers: { "X-Brain-App": "1" } });
       if (decision.status === 401) { await signIn(); decision = await fetch("/oauth/authorize/decision?" + q, { method: "POST", headers: { "X-Brain-App": "1" } }); }
       const body = await decision.json();
-      if (!decision.ok || !body.redirect) throw new Error(body.error || ("HTTP " + decision.status));
+      if (!decision.ok || !body.redirect) {
+        const error = new Error(body.error || "request_failed");
+        error.status = decision.status;
+        error.code = body.code || body.error || "";
+        throw error;
+      }
       location.href = body.redirect;
     } catch (error) {
       const el = document.getElementById("err");
-      el.textContent = String(error.message || error);
+      el.textContent = ownerMessage(error);
       el.hidden = false;
+    } finally {
+      approve.disabled = false;
     }
   };
   document.getElementById("deny").onclick = () => {

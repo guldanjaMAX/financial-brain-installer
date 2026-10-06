@@ -235,18 +235,16 @@ async function logCall(env, { label, model, status, micros }) {
  * Per-model Workers AI rates, in dollars per million tokens.
  *
  * A single hard-coded pair used to price every Workers AI call at the answer
- * model's rate. That is wrong in both directions, and for OCR it is wrong in
- * the direction that matters: gemma-4 costs $0.10/$0.30 against llama's
- * $0.293/$2.25, so charging OCR at llama rates overstates its spend roughly 3x
- * on input and 7.5x on output. The cap would then stop a run that had spent a
- * fraction of the budget, and the owner would be told they had hit a limit
- * they were nowhere near.
+ * model's rate. Gemma remains an owner override at $0.10/$0.30, while the
+ * reviewed Llama default uses $0.293/$2.25. A custom model falls back to the
+ * dearer known rate so the cap cannot fail quiet.
  *
  * Prefix-matched, longest first, so a family rate covers its variants. Read
  * from the published Workers AI model pages on 2026-08-28.
  */
 const WORKERS_AI_RATES = [
   ["@cf/google/gemma-4", { in: 0.1, out: 0.3 }],
+  ["@cf/meta/llama-4-scout-17b-16e-instruct", { in: 0.293, out: 2.25 }],
   ["@cf/meta/llama-3.3-70b-instruct-fp8-fast", { in: 0.293, out: 2.25 }],
 ];
 
@@ -386,11 +384,10 @@ export async function callLLM(env, { model, system, messages, max_tokens, label,
       // the branch above already covered it. Two vision models
       // (llama-4-scout-17b-16e-instruct, mistral-small-3.1-24b-instruct) send
       // BOTH `response` and the OpenAI chat-completions `choices`, so they also
-      // already worked. The default OCR model (google/gemma-4-26b-a4b-it) does
-      // not: it answers ONLY in `choices[0].message.content`, with no
-      // `response` field at all, so a perfect transcription was thrown away as
-      // "no answer text" and every scanned page came back a 502. This fallback
-      // reads that shape too, once `response` offers no text.
+      // already worked. Gemma, which remains an owner override, answered ONLY
+      // in `choices[0].message.content`, with no `response` field at all. This
+      // fallback keeps reading that captured shape once `response` offers no
+      // text. The OCR default is selected separately from reply parsing.
       if (!text) {
         const content = data?.choices?.[0]?.message?.content;
         if (typeof content === "string") {

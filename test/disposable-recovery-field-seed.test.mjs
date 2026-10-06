@@ -80,10 +80,10 @@ function privateDirectory(prefix) {
 
 function inventory({ complete = false } = {}) {
   if (!complete) {
-    return { version: "0.4.8", backend: "d1", vector_drain_mode: "active", rows: [] };
+    return { version: "0.4.9", backend: "d1", vector_drain_mode: "active", rows: [] };
   }
   return {
-    version: "0.4.8",
+    version: "0.4.9",
     backend: "d1",
     vector_drain_mode: "active",
     vector_backlog: { pending: 0, upserts: 0, deletes: 0, submitted: 0 },

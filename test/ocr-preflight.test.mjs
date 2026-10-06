@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,7 +12,7 @@ import {
 } from "../brain.mjs";
 import { register } from "../ingest/extract.mjs";
 import { estimateOcrCost, OCR_PRICE } from "../ingest/ocr.mjs";
-import { prepare } from "../ingest/run.mjs";
+import { prepare, walk as walkLocalFolder } from "../ingest/run.mjs";
 import { scanPdf, textPdf } from "./fixtures/scan-pdf.mjs";
 import {
   assertOcrPreflightReceipt,
@@ -244,20 +244,20 @@ test("configured-cap comparison is separate from unknown shared headroom and act
   };
 
   assert.equal(build({ cap: 0 }).estimate.estimated_fits_configured_cap, false);
-  assert.equal(build({ cap: 0.0007 }).estimate.estimated_fits_configured_cap, false,
+  assert.equal(build({ cap: 0.002 }).estimate.estimated_fits_configured_cap, false,
     "a cap between the low and high estimate is not promised sufficient");
-  const estimatedFit = build({ cap: 0.0008 });
+  const estimatedFit = build({ cap: 0.003872 });
   assert.equal(estimatedFit.estimate.estimated_fits_configured_cap, true);
   assert.equal(estimatedFit.estimate.remaining_shared_daily_budget_usd, null);
   assert.equal(estimatedFit.estimate.remaining_shared_daily_budget_state, "unknown");
   assert.equal(estimatedFit.estimate.actual_affordability, "unknown");
   assert.equal(estimatedFit.pricing_basis.high_is_guaranteed_upper_bound, false);
-  const roundedEdge = build({ cap: 0.0015, observations: [scan(2)] });
-  assert.equal(roundedEdge.estimate.usd_high, 0.0015,
+  const roundedEdge = build({ cap: 0.0077, observations: [scan(2)] });
+  assert.equal(roundedEdge.estimate.usd_high, 0.0077,
     "the owner-facing estimate keeps its existing four-decimal display value");
   assert.equal(roundedEdge.estimate.estimated_fits_configured_cap, false,
-    "the cap comparison must use the unrounded $0.00152 high bracket");
-  assert.equal(build({ cap: 0.00152, observations: [scan(2)] })
+    "the cap comparison must use the unrounded $0.007744 high bracket");
+  assert.equal(build({ cap: 0.007744, observations: [scan(2)] })
     .estimate.estimated_fits_configured_cap, true);
   assert.equal(build({ cap: 100, observations: [scan(1), scan(null)] })
     .estimate.estimated_fits_configured_cap, null);
@@ -547,6 +547,156 @@ test("the plan fingerprint changes with the exact OCR model and pricing basis", 
     assert.equal(driftedPlan.pricing_basis.status, "pricing_contract_mismatch");
   } finally {
     rmSync(sourceRoot, { recursive: true, force: true });
+  }
+});
+
+test("OCR preflight refuses a retired folder before dependency load or walk, while an active control walks", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "brain-ocr-retired-guard-"));
+  const sourceRoot = join(fixture, "source");
+  const manifestPath = join(fixture, "brain.manifest.json");
+  mkdirSync(sourceRoot);
+  const manifest = {
+    safety: {
+      private_path_prefixes: [],
+      daily_llm_spend_cap_usd: 10,
+      ocr: { enabled: false, max_pages_per_document: 40 },
+    },
+    corpora: {
+      local_folder: {
+        enabled: true,
+        path: sourceRoot,
+        source: "documents",
+        retired_at: "2026-09-28T16:36:00.000Z",
+        retired_path: realpathSync(sourceRoot),
+        retired_source: "documents",
+      },
+    },
+  };
+  let dependencyLoads = 0;
+  let walkCalls = 0;
+  const ingestLib = async () => {
+    dependencyLoads += 1;
+    return {
+      walk: () => { walkCalls += 1; return { complete: true, files: [], skipped: [] }; },
+      prepare: async () => { throw new Error("an empty control must not prepare a file"); },
+    };
+  };
+  try {
+    const retiredError = await cmdOcrPreflight(manifestPath, {
+      flags: { path: sourceRoot, json: true },
+      readManifest: () => manifest,
+      platform: "win32",
+      retiredFolderFs: {
+        realpathNative(path) {
+          assert.ok([sourceRoot, realpathSync(sourceRoot)].includes(path));
+          return "C:\\Users\\WINDOW~1\\DOCUME~1\\RETIRED~1";
+        },
+      },
+      ingestLib,
+      ocrLib: async () => ({ estimateOcrCost, OCR_PRICE }),
+      write: () => {},
+    }).then(() => null, (error) => error);
+    assert.equal(retiredError?.payload?.failure?.code, "MANIFEST_POLICY_INVALID", retiredError?.message);
+    assert.equal(dependencyLoads, 0,
+      "the retired OCR path reaches its policy decision before dependency loading");
+    assert.equal(walkCalls, 0, "the retired OCR path performs zero folder walks");
+
+    const active = structuredClone(manifest);
+    delete active.corpora.local_folder.retired_at;
+    delete active.corpora.local_folder.retired_path;
+    delete active.corpora.local_folder.retired_source;
+    const control = await cmdOcrPreflight(manifestPath, {
+      flags: { path: sourceRoot, json: true },
+      readManifest: () => active,
+      ingestLib,
+      ocrLib: async () => ({ estimateOcrCost, OCR_PRICE }),
+      write: () => {},
+    });
+    assert.equal(control.status, "complete");
+    assert.equal(dependencyLoads, 1);
+    assert.equal(walkCalls, 1, "the active OCR control reaches the folder walk exactly once");
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("OCR preflight refuses a moved retired folder during the walk before reading its files", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "brain-ocr-moved-retired-"));
+  const retiredRoot = join(fixture, "retired-source");
+  const requestRoot = join(fixture, "requested-root");
+  const movedRetiredRoot = join(requestRoot, "moved-retired-source");
+  const manifestPath = join(fixture, "brain.manifest.json");
+  mkdirSync(retiredRoot);
+  mkdirSync(requestRoot);
+  writeFileSync(join(retiredRoot, "retired.pdf"), "synthetic retired PDF fixture");
+  const identity = statSync(realpathSync.native(retiredRoot), { bigint: true });
+  const retiredManifest = {
+    safety: {
+      private_path_prefixes: [],
+      daily_llm_spend_cap_usd: 10,
+      ocr: { enabled: false, max_pages_per_document: 40 },
+    },
+    corpora: {
+      local_folder: {
+        enabled: false,
+        path: retiredRoot,
+        source: "documents",
+        retired_at: "2026-09-28T16:36:00.000Z",
+        retired_path: retiredRoot,
+        retired_source: "documents",
+        retired_identity: {
+          realpath: realpathSync.native(retiredRoot),
+          dev: String(identity.dev),
+          ino: String(identity.ino),
+        },
+        retired_by: "brain folder off",
+      },
+    },
+  };
+  renameSync(retiredRoot, movedRetiredRoot);
+  let walkCalls = 0;
+  let fileReads = 0;
+  const ingestLib = async () => ({
+    walk(root, options) {
+      walkCalls += 1;
+      return walkLocalFolder(root, options);
+    },
+    async prepare() {
+      fileReads += 1;
+      return { hash: "e".repeat(64), observation: native() };
+    },
+  });
+  try {
+    const retiredError = await cmdOcrPreflight(manifestPath, {
+      flags: { path: requestRoot, json: true },
+      readManifest: () => retiredManifest,
+      ingestLib,
+      ocrLib: async () => ({ estimateOcrCost, OCR_PRICE }),
+      write: () => {},
+    }).then(() => null, (error) => error);
+    assert.equal(retiredError?.payload?.failure?.code, "MANIFEST_POLICY_INVALID",
+      "the moved retired-directory identity reaches the manifest-policy refusal");
+    assert.equal(walkCalls, 1, "the moved-folder refusal is reached through the real walker");
+    assert.equal(fileReads, 0, "no file inside the moved retired folder is read");
+
+    const activeManifest = structuredClone(retiredManifest);
+    activeManifest.corpora.local_folder = {
+      enabled: true,
+      path: movedRetiredRoot,
+      source: "documents",
+    };
+    const control = await cmdOcrPreflight(manifestPath, {
+      flags: { path: requestRoot, json: true },
+      readManifest: () => activeManifest,
+      ingestLib,
+      ocrLib: async () => ({ estimateOcrCost, OCR_PRICE }),
+      write: () => {},
+    });
+    assert.equal(control.status, "complete");
+    assert.equal(walkCalls, 2, "the non-retired control reaches the same real walker");
+    assert.equal(fileReads, 1, "the non-retired control reads the file in the same tree");
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
   }
 });
 

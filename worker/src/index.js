@@ -12,7 +12,8 @@
  *   POST /api/admin/brain/source-families read-only private inventory paging
  *   POST /api/admin/brain/financial-map owner map read and compact preview
  *   POST /api/owner/financial-map       private owner-app review and ceremony
- *   GET  /api/admin/brain/documents     per-source counts and freshness
+ *   GET  /api/admin/brain/documents     bounded source presence and readiness
+ *   POST /api/admin/brain/documents/report exact paged owner report
  *
  * Everything except /health requires a route-specific credential. The source
  * inventory accepts either the full admin key or the owner's passkey session.
@@ -61,6 +62,7 @@ import {
   parseCanonicalEvidenceDate,
 } from "./lib/query-intent.js";
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
+import { answerSentences } from "./lib/answer-sentences.js";
 import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
   documentMatchesOperativeClaim, documentUsesOperativeValue,
@@ -117,6 +119,14 @@ import {
 import {
   financialMapGuidance, hasFinancialMapStatusIntent,
 } from "./lib/financial-map-question.js";
+import {
+  readExactDocumentReport,
+  readExactSourceForgetPreview,
+} from "./lib/documents-summary.js";
+import {
+  CUSTOM_API_RUN_PATH, customApiOwnerMessage, runCustomApiWorker,
+} from "./lib/custom-api.js";
+import { supplementalRetrievalFilters } from "./lib/retrieval-routing.js";
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -314,9 +324,11 @@ function citationForDocument(document) {
 
 async function unifiedRetrieve(env, url, {
   limit, access = null, scope = { all: true }, scopePrincipalKind = "owner",
+  projectionReadiness = null,
 }) {
   const q = url.searchParams.get("q");
   const rrfK = Math.min(Math.max(parseInt(url.searchParams.get("rrf_k")) || 60, 1), 1e3);
+  const filters = filtersFrom(url);
 
   // Which store answers is isolated from the routes. D1 plus Vectorize is the
   // standard product backend; the legacy adapter remains for migration checks
@@ -328,7 +340,8 @@ async function unifiedRetrieve(env, url, {
     // for shared document/scaffolding handling before the public slice.
     limit: ROUTE_RANKING_DEPTH,
     rrfK,
-    filters: filtersFrom(url),
+    filters,
+    supplementalFilters: supplementalRetrievalFilters(q, filters),
     weights: {
       curated: requestWeight(url.searchParams.get("weight_curated")),
       drive: requestWeight(url.searchParams.get("weight_drive")),
@@ -336,6 +349,7 @@ async function unifiedRetrieve(env, url, {
     },
     access,
     scope,
+    projectionReadiness,
   });
 
   const matches = normalizeRetrievedDocuments(r.results);
@@ -662,13 +676,16 @@ async function handleUnified(
       }]
     : coverage.gaps;
 
-  // Zero rows out of a search that could not run is not "no hits". A healthy
-  // search is still provisional when declared source history is incomplete.
+  // Zero rows out of a search that could not run is not "no hits". A completed
+  // search is also provisional while a small recent projection backlog catches
+  // up, or when declared source history is incomplete.
   // Keep both conditions on the raw route so its UI, MCP, and check consumers
   // do not have to infer corpus coverage from a result count.
-  const disclosure = emptyRetrievalDisclosure(degraded, degradedReason);
   const searchTruth = (rows) => {
-    if (rows.length === 0 && disclosure.unavailable) {
+    const disclosure = emptyRetrievalDisclosure(degraded, degradedReason, {
+      candidatesFound: rows.length > 0,
+    });
+    if ((rows.length === 0 && disclosure.unavailable) || disclosure.incomplete) {
       return {
         status: disclosure.status,
         notice: disclosure.notice,
@@ -913,17 +930,18 @@ async function handleThink(
     // Zero results has two causes that look identical from here, and only one
     // of them licenses an absence claim. A healthy search that matched nothing
     // keeps the honest refusal below, unchanged. A search that could not run
-    // knows nothing about the corpus, so its gap must forbid the absence claim
-    // rather than issue it. See worker/src/lib/retrieval-status.js.
+    // knows nothing about the corpus; a completed search during proportional
+    // projection catch-up has incomplete coverage. Both gaps must forbid the
+    // absence claim rather than issue it. See worker/src/lib/retrieval-status.js.
     const disclosure = emptyRetrievalDisclosure(degraded, degradedReason);
-    let gaps = disclosure.unavailable
+    let gaps = disclosure.unavailable || disclosure.incomplete
       ? [...sourceCoverageGaps, ...disclosure.gaps]
       : sourceCoverageGaps.length
         ? sourceCoverageGaps
         : disclosure.gaps;
     if (documentTaxGap) gaps = [documentTaxGap, ...gaps];
-    const coverageIncomplete = !disclosure.unavailable &&
-      (sourceCoverageGaps.length > 0 || Boolean(documentTaxGap));
+    const coverageIncomplete = disclosure.incomplete || (!disclosure.unavailable &&
+      (sourceCoverageGaps.length > 0 || Boolean(documentTaxGap)));
     return jsonResponse({
       mode: "think",
       entity_scope: entityScope,
@@ -931,7 +949,7 @@ async function handleThink(
       degraded_reason: degradedReason || undefined,
       retrieval_scope: retrievalScope,
       access: accessSummary,
-      status: disclosure.unavailable
+      status: disclosure.unavailable || disclosure.incomplete
         ? disclosure.status
         : coverageIncomplete
           ? COVERAGE_INCOMPLETE
@@ -939,7 +957,7 @@ async function handleThink(
       // The sentence a human sees in place of an answer. Present only when the
       // search failed, so /app and the CLI cannot render the refusal wording by
       // reaching for a field that is always there.
-      notice: disclosure.unavailable
+      notice: disclosure.unavailable || disclosure.incomplete
         ? disclosure.notice
         : coverageIncomplete
           ? taxDocumentCoverage.unreadable
@@ -1289,8 +1307,7 @@ async function handleThink(
           }
           if (evidenceGate.supported && explicitCurrentIntent) {
             const allowedNumbers = new Set(allowedDocs.map((doc) => doc.n));
-            const assertions = String(answer || "")
-              .match(/[^.!?\n]+[.!?]?/g) || [];
+            const assertions = answerSentences(answer);
             let temporalFailure = null;
             for (const sentence of assertions) {
               if (!PRESENT_STATUS_ASSERTION.test(sentence) || STATUS_UNCERTAINTY.test(sentence)) continue;
@@ -1360,8 +1377,9 @@ async function handleThink(
             const headsUpAt = answer.search(/\n\s*Heads up:/i);
             const bodyText = headsUpAt >= 0 ? answer.slice(0, headsUpAt) : answer;
             const headsUp = headsUpAt >= 0 ? answer.slice(headsUpAt).trim() : "";
-            const kept = (bodyText.match(/[^.!?\n]+[.!?]+(?:\s*\[\d+\])*|[^.!?\n]+$/g) || [])
-              .map((sentence) => sentence.trim())
+            // Split as answerSentences splits, so the dot inside a figure like
+            // $1,234.73 never cuts a supported sentence apart.
+            const kept = answerSentences(bodyText)
               .filter((sentence) => {
                 const cites = [...sentence.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1]));
                 return cites.length > 0 && cites.every((n) => allowed.has(n));
@@ -1395,8 +1413,12 @@ async function handleThink(
   const categoricalRefusal = !answerError &&
     (!answer || answer === unsupportedAnswer || !approvedDocs.length);
   const refusalSearchDisclosure = categoricalRefusal && degraded
-    ? emptyRetrievalDisclosure(degraded, degradedReason)
+    ? emptyRetrievalDisclosure(degraded, degradedReason, { candidatesFound: results.length > 0 })
     : null;
+  if (refusalSearchDisclosure?.incomplete &&
+      !gaps.some((gap) => gap?.type === COVERAGE_INCOMPLETE)) {
+    gaps.unshift(...refusalSearchDisclosure.gaps);
+  }
   const sourceCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
     sourceCoverageGaps.length > 0;
   const taxDocumentCoverageBlocksAbsence = categoricalRefusal && !refusalSearchDisclosure &&
@@ -1930,7 +1952,7 @@ const SOURCE_KINDS = new Set([
   // refresh expectation, and `brain sources` should never present it as a
   // live capture that has gone stale.
   "iphone-backup",
-  "upload",
+  "upload", "custom_api",
 ]);
 
 function receiptTimeMs(value, fallback = Date.now()) {
@@ -2510,7 +2532,7 @@ async function handleSourceFamilies(env, request) {
 }
 
 async function handleDocuments(env) {
-  const { rows } = await storeFor(env).stats(env);
+  const { rows, summary } = await storeFor(env).stats(env);
   // Keep the writer mode on the same authenticated response as readiness.
   // /health is a separate request and a rolling deployment can legitimately
   // route the two probes to different Worker generations. Recovery advice must
@@ -2520,26 +2542,35 @@ async function handleDocuments(env) {
     version: WORKER_VERSION,
     backend: backendOf(env),
     rows: rows || [],
+    ...(summary ? { summary } : {}),
     vector_drain_mode: upgradePauseHolds(env) ? "paused-for-upgrade" : "active",
   };
   if (backendOf(env) === D1) {
     // How far the vector index trails the text. A brain whose outbox is not
     // draining still answers keyword queries, which is exactly why the number
     // has to be visible rather than inferred from search feeling worse.
+    let backlog = null;
     try {
-      out.vector_backlog = await outboxDepth(env);
+      backlog = await outboxDepth(env);
+      out.vector_backlog = backlog;
     } catch (e) {
       out.vector_backlog = { error: e.message };
     }
     // Queue depth proves work is durable; readiness proves accepted async
     // mutations are actually visible to Vectorize queries. Both are required.
     try {
-      out.vector_readiness = await vectorReadiness(env);
+      out.vector_readiness = await vectorReadiness(env, { outbox: backlog });
     } catch (e) {
       out.vector_readiness = { ready: false, error: e.message };
     }
   }
   return jsonResponse(out);
+}
+
+async function handleExactDocumentsReport(env) {
+  const exact = await readExactDocumentReport(env);
+  const status = await (await handleDocuments(env)).json();
+  return jsonResponse({ ...status, ...exact });
 }
 
 /**
@@ -2600,6 +2631,7 @@ const PAUSED_CORPUS_MUTATION_PATHS = new Set([
   "/api/admin/brain/source-receipt",
   "/api/admin/brain/source-expectation",
   "/api/admin/brain/source-register",
+  CUSTOM_API_RUN_PATH,
   "/api/admin/brain/zones",
   "/api/admin/brain/forget",
   "/api/admin/brain/reindex",
@@ -2793,7 +2825,7 @@ export default {
         // Keep the private query inside this request while exercising the exact
         // production owner retrieval and citation projections twice. Calling
         // unifiedRetrieve directly guarantees the proof cannot enable rerank.
-        retrieve: async ({ query, limit }) => {
+        retrieve: async ({ query, limit, projectionReadiness }) => {
           const internal = new URL("https://brain.invalid/api/rag/unified");
           internal.searchParams.set("q", query);
           const retrieval = await unifiedRetrieve(env, internal, {
@@ -2801,6 +2833,7 @@ export default {
             access: null,
             scope: { all: true },
             scopePrincipalKind: "owner",
+            projectionReadiness,
           });
           const results = retrieval.matches.slice(0, limit).map((result, index) => ({
             result,
@@ -3108,6 +3141,33 @@ export default {
       if (path === "/api/admin/brain/source-register" && request.method === "POST") {
         return await handleSourceRegistration(env, request);
       }
+      if (path === CUSTOM_API_RUN_PATH && request.method === "POST") {
+        let body;
+        try { body = await request.json(); } catch { return jsonResponse({ error: "invalid JSON body" }, 400); }
+        if (!body || typeof body !== "object" || Array.isArray(body) ||
+            Object.keys(body).some((key) => key !== "dry_run") ||
+            (body.dry_run !== undefined && typeof body.dry_run !== "boolean")) {
+          return jsonResponse({ error: "custom API run accepts only dry_run" }, 400);
+        }
+        try {
+          return privateNoStore(jsonResponse(await runCustomApiWorker(env, { dryRun: body.dry_run === true })));
+        } catch (error) {
+          const code = typeof error?.code === "string" ? error.code : "INTERNAL_ERROR";
+          const configuredName = (() => {
+            try { return JSON.parse(env.CUSTOM_API_CONFIG || "{}").display_name; } catch { return null; }
+          })();
+          const status = code === "AUTH_REQUIRED" ? 401
+            : code === "RATE_LIMITED" ? 429
+              : code === "RUN_BUSY" ? 409
+                : code === "REMOTE_UNAVAILABLE" || code === "NETWORK_UNREACHABLE" ? 503
+                  : 422;
+          return privateNoStore(jsonResponse({
+            error: customApiOwnerMessage(code, configuredName),
+            code,
+            retryable: error?.retryable === true,
+          }, status));
+        }
+      }
       if (path === "/api/admin/brain/source-families" && request.method === "POST") {
         return await handleSourceFamilies(env, request);
       }
@@ -3118,6 +3178,19 @@ export default {
       }
       if (path === "/api/admin/brain/documents" && request.method === "GET") {
         return privateNoStore(await handleDocuments(env));
+      }
+      if (path === "/api/admin/brain/documents/report" && request.method === "POST") {
+        if (backendOf(env) !== D1) {
+          return privateNoStore(jsonResponse({ error: "documents report applies to the d1 backend only" }, 400));
+        }
+        if (!ownerKeyAuthorized) {
+          return privateNoStore(jsonResponse({ error: "documents report requires the owner admin key" }, 403));
+        }
+        const body = await request.json().catch(() => null);
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 0) {
+          return privateNoStore(jsonResponse({ error: "documents report accepts only an empty JSON object" }, 400));
+        }
+        return privateNoStore(await handleExactDocumentsReport(env));
       }
       if (path === "/api/admin/brain/reliability-alerts" && request.method === "GET") {
         if (backendOf(env) !== D1) return jsonResponse({ error: "reliability alerts apply to the d1 backend only" }, 400);
@@ -3234,20 +3307,66 @@ export default {
           if (registered?.name !== source) {
             return jsonResponse({ error: "source is not registered", code: "source_not_registered" }, 404);
           }
+          if (!confirm) {
+            const preview = await readExactSourceForgetPreview(env, source);
+            return jsonResponse({
+              ...preview,
+              document_count_exact: true,
+              chunks: null,
+              vectors: null,
+              dry_run: true,
+              source,
+              would_unregister_source: true,
+              source_unregistered: false,
+              registry_event_recorded: false,
+            });
+          }
+          const previewDocuments = Number(body?.preview_documents);
+          const previewHighWater = Number(body?.preview_document_high_water);
+          const previewMutationGeneration = Number(body?.preview_corpus_mutation_generation);
+          if (!Number.isSafeInteger(previewDocuments) || previewDocuments < 0 ||
+              !Number.isSafeInteger(previewHighWater) || previewHighWater < 0 ||
+              !Number.isSafeInteger(previewMutationGeneration) || previewMutationGeneration < 0) {
+            return jsonResponse({
+              error: "confirm the exact source preview before deleting",
+              code: "source_forget_preview_required",
+            }, 409);
+          }
+          const current = await readExactSourceForgetPreview(env, source);
+          if (current.documents !== previewDocuments ||
+              current.document_high_water !== previewHighWater ||
+              current.corpus_mutation_generation !== previewMutationGeneration) {
+            return jsonResponse({
+              error: "the source changed since the preview; preview again",
+              code: "source_forget_preview_changed",
+            }, 409);
+          }
         }
-        const r = await forget(env, { docUids, source, dryRun: !confirm });
-        if (!source) return jsonResponse(r);
-        if (!confirm) {
-          return jsonResponse({
-            ...r,
+        let r;
+        try {
+          r = await forget(env, {
+            docUids,
             source,
-            would_unregister_source: true,
-            source_unregistered: false,
-            registry_event_recorded: false,
+            sourceHighWater: source ? Number(body.preview_document_high_water) : null,
+            corpusMutationGeneration: source ? Number(body.preview_corpus_mutation_generation) : null,
+            dryRun: !confirm,
           });
+        } catch (error) {
+          if (error?.code === "source_forget_preview_changed") {
+            return jsonResponse({
+              error: "the source changed since the preview; preview again",
+              code: "source_forget_preview_changed",
+            }, 409);
+          }
+          throw error;
         }
+        if (!source) return jsonResponse(r);
         const registry = await finalizeForgottenSource(env, source, r.documents);
-        return jsonResponse({ ...r, ...registry });
+        const { targets: _privateTargets, ...bounded } = r;
+        return jsonResponse({
+          ...bounded,
+          ...registry,
+        });
       }
 
       // Force a drain. The cron normally does this, but when the cron is wedged
@@ -3330,6 +3449,7 @@ export default {
             error: "another vector drain is already in progress",
             busy: true,
             remaining: r.remaining,
+            remaining_is_lower_bound: r.remaining_is_lower_bound === true,
             retry_after_seconds: r.retry_after_seconds,
           }, 409);
         }
@@ -3339,6 +3459,7 @@ export default {
           submitted: r.submitted,
           waiting: r.waiting,
           remaining: r.remaining,
+          remaining_is_lower_bound: r.remaining_is_lower_bound === true,
           vector_ready: readiness.ready,
           readiness_reason: readiness.reason,
           expected_vectors: readiness.expected_vectors,
@@ -3349,7 +3470,8 @@ export default {
     } catch (e) {
       const response = jsonResponse({ error: e.message }, 500);
       if (path === "/api/admin/brain/source-families" ||
-          path === "/api/admin/brain/documents") {
+          path === "/api/admin/brain/documents" ||
+          path === "/api/admin/brain/documents/report") {
         return privateNoStore(response);
       }
       return response;
@@ -3385,7 +3507,11 @@ export default {
           drainOutbox(env, {
             embed: (text) => embedText(env, text),
             embedBatch: (texts) => embedTexts(env, texts),
-            maxBatches: 10,
+            // A configured custom-API job can stage or advance one durable
+            // slice in this same scheduled invocation. Keep the drain to one
+            // batch so the two writers stay comfortably below the shared D1
+            // invocation budget even when the source is due.
+            maxBatches: env.CUSTOM_API_CONFIG ? 1 : 10,
           }),
           cleanupPublicAuthState(env),
           cleanupQuickBooksOAuthIntents(env),
@@ -3397,7 +3523,9 @@ export default {
           // stalled fence run silent for hours. Waiting a cycle or two is
           // normal; the line exists so more than that is visible in a tail.
           else if (!r.paused && !r.busy && !r.submitted && Number(r.waiting) > 0) {
-            console.log(`vector outbox: waiting on confirmation, ${r.remaining} queued`);
+            console.log(r.remaining_is_lower_bound
+              ? "vector outbox: waiting on confirmation; queued work remains"
+              : `vector outbox: waiting on confirmation, ${r.remaining} queued`);
           }
         } else {
           console.warn("vector outbox: scheduled drain failed");
@@ -3427,6 +3555,15 @@ export default {
           const synced = Number(result?.sync?.ran || 0);
           const revoked = Number(result?.revocations?.ran || 0);
           if (synced || revoked) console.log(`plaid maintenance: ${synced} synced, ${revoked} revocations`);
+        })
+        : Promise.resolve(),
+      env.CUSTOM_API_CONFIG
+        ? runCustomApiWorker(env, { scheduled: true }).then((result) => {
+          if (result?.status === "completed") {
+            console.log(`custom API: completed ${result.endpoints} endpoint(s)`);
+          }
+        }).catch((error) => {
+          console.warn(`custom API: scheduled pull failed (${String(error?.code || "INTERNAL_ERROR")})`);
         })
         : Promise.resolve(),
     ]));

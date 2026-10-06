@@ -988,8 +988,15 @@ test("support diagnostic projection strips raw canaries and unknown identifiers"
         label: "Google Drive", kind: "drive", state: "review", documents: 3,
         days_since_ingest: 0, reason: "private review reason", automatable: true,
       },
+      {
+        label: "Custom business API", kind: "custom_api", state: "ok", documents: 2,
+        days_since_ingest: 0, reason: "private provider detail", automatable: true,
+      },
     ],
-    vectors: { ready: false, expected: 8, visible: 4, pending: 4, percent_visible: 50 },
+    vectors: {
+      ready: false, expected: 8, visible: 4, pending: 10_001,
+      pending_is_capped: true, percent_visible: 50,
+    },
     unavailable: ["diagnose", canary],
   });
   const serialized = JSON.stringify(projected);
@@ -1008,5 +1015,11 @@ test("support diagnostic projection strips raw canaries and unknown identifiers"
     waiting_on_owner_machine: true,
   });
   assert.equal(projected.sources[1].state, "review");
+  assert.equal(projected.vectors.pending, 10_001);
+  assert.equal(projected.vectors.pending_is_capped, true);
+  assert.deepEqual(projected.sources[2], {
+    label: "Custom business API", kind: "custom_api", state: "ok",
+    documents: 2, days_since_ingest: 0, automatable: true,
+  });
   assert.deepEqual(projected.unavailable, ["diagnose"]);
 });

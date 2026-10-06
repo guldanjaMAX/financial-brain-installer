@@ -3,7 +3,7 @@ import { api, type FinEntity, type FinSnapshot, type SourceCoverageDetail, type 
 import { derivePhase, phraseFor, type BrainPhase } from "../lib/phase";
 import {
   accountCoverage, dateLabel, documentOutcome, entityLabel, moneyLabel,
-  financialRecordsEmpty, nextDatedDeadline, partyLabel, waitingDetail, waitingMove,
+  financialRecordsEmpty, nextDatedDeadline, partyLabel, roundedFigureNote, waitingDetail, waitingMove,
 } from "../lib/finance";
 import { sourceOutcome } from "../lib/outcome";
 import {
@@ -313,7 +313,7 @@ export function AttentionList({ snapshot, entities, scopeName, onNavigate }: {
   );
 }
 
-function Glance({ snapshot, scopeName }: { snapshot: FinSnapshot; scopeName: string }) {
+export function Glance({ snapshot, scopeName }: { snapshot: FinSnapshot; scopeName: string }) {
   const coverage = snapshot.accounts ? accountCoverage(snapshot.accounts) : null;
   const next = snapshot.deadlines ? nextDatedDeadline(snapshot.deadlines) : null;
   const documents = snapshot.documents;
@@ -333,6 +333,11 @@ function Glance({ snapshot, scopeName }: { snapshot: FinSnapshot; scopeName: str
             <span className="block text-[12.5px] text-ink-soft mt-0.5">
               {snapshot.cash!.as_of ? `As of ${dateLabel(snapshot.cash!.as_of)}` : "No single dated position"}
             </span>
+            {roundedFigureNote(snapshot.cash!.rounded_accounts, "balance") && (
+              <span className="block text-[12.5px] text-ink-soft mt-0.5">
+                {roundedFigureNote(snapshot.cash!.rounded_accounts, "balance")}
+              </span>
+            )}
           </span>
           {!snapshot.cash!.complete && <Chip state="PROBLEM" />}
         </Row>
@@ -491,23 +496,31 @@ function Blindspots({ snapshot, status, scopeName }: {
   );
 }
 
-function SystemProblems({ status }: { status: SystemStatus | null }) {
+export function SystemProblems({ status }: { status: SystemStatus | null }) {
   return (
-    <Section title="Brain status" blurb="Technical problems stay visible, but they remain your installer's responsibility.">
+    <Section title="Brain status" blurb="Things worth knowing and problems that need attention stay visible here.">
       {!status?.problems ? (
         <Note>The problem register could not be read. This is not an all-clear.</Note>
       ) : status.problems.length === 0 ? (
         <Note>No technical problem was reported by the checks that ran.</Note>
-      ) : status.problems.map((problem) => (
+      ) : status.problems.map((problem) => {
+        const undated = problem.id === "undated";
+        const title = undated
+          ? `Some documents have no date (${problem.count} of ${status.documents ?? problem.count})`
+          : problem.title;
+        const detail = undated
+          ? "Questions like 'what's the latest?' can only use dated documents. Nothing is wrong with your Brain."
+          : problem.detail;
+        return (
         <Row key={problem.id}>
           <span className="min-w-0 flex-1">
-            <span className="text-[14.5px] font-medium">{problem.title}</span>
-            {problem.detail && <span className="block text-[13px] text-ink-soft mt-0.5">{problem.detail}</span>}
-            <NextStep owner="installer">This is not an owner remedy.</NextStep>
+            <span className="text-[14.5px] font-medium">{title}</span>
+            {detail && <span className="block text-[13px] text-ink-soft mt-0.5">{detail}</span>}
           </span>
-          <Chip state="PROBLEM" />
+          <Chip state={problem.severity === "crit" ? "PROBLEM" : "WORTH"} />
         </Row>
-      ))}
+        );
+      })}
     </Section>
   );
 }
@@ -580,8 +593,19 @@ function SourceCoverageDetailView({
   );
 }
 
-function PhaseNotice({ phase, status }: { phase: BrainPhase; status: SystemStatus | null }) {
+export function pendingCountLabel(pending: number, isCapped = false): string {
+  return isCapped ? `${Math.max(0, pending - 1).toLocaleString()}+` : pending.toLocaleString();
+}
+
+export function PhaseNotice({ phase, status }: { phase: BrainPhase; status: SystemStatus | null }) {
   const pct = status?.vectors?.percent_visible;
+  if (phase === "coverage_unknown" && status?.unavailable?.includes("diagnose")) {
+    return (
+      <div className="border border-line rounded-2xl px-4 py-3.5 bg-card">
+        <p className="text-[14.5px] text-ink-soft leading-relaxed">{phraseFor(phase, status)}</p>
+      </div>
+    );
+  }
   if (phase === "unreachable" || phase === "paused" || phase === "unknown" || phase === "coverage_unknown") {
     return phase === "unreachable"
       ? <Critical>{phraseFor(phase, status)}</Critical>
@@ -596,7 +620,7 @@ function PhaseNotice({ phase, status }: { phase: BrainPhase; status: SystemStatu
             <div className="h-full bg-accent rounded-full transition-all" style={{ width: `${pct}%` }} />
           </div>
           <p className="text-[12.5px] text-ink-soft mt-1.5">
-            {status?.vectors?.pending.toLocaleString()} still to work through. Answers may be incomplete until it finishes.
+            {pendingCountLabel(status?.vectors?.pending ?? 0, status?.vectors?.pending_is_capped)} still to work through. Answers may be incomplete until it finishes.
           </p>
         </div>
       )}

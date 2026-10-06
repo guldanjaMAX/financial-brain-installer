@@ -449,7 +449,7 @@ export function canExtract(name) {
  * inside the one function every ingest path funnels through, so a document read
  * by OCR reached the corpus looking exactly like one read from a text layer.
  *
- * @returns {Promise<{ text: string|null, how: string|null, unsupported?: true, error?: string, note?: string, incomplete?: true, provenance?: object, observation?: object }>}
+ * @returns {Promise<{ text: string|null, how: string|null, unsupported?: true, error?: string, note?: string, incomplete?: true, provenance?: object, observation?: object, code?: string, retryable?: true, ocr_page_request_ids?: string[] }>}
  */
 export async function extract(buf, name, opts = {}) {
   const ext = extensionOf(name);
@@ -463,7 +463,12 @@ export async function extract(buf, name, opts = {}) {
         how: entry.label,
         note: out.note,
         error: out.error,
+        ...(typeof out.code === "string" && out.code ? { code: out.code } : {}),
+        ...(out.retryable === true ? { retryable: true } : {}),
         provenance: out.provenance,
+        ...(Array.isArray(out.ocr_page_request_ids)
+          ? { ocr_page_request_ids: [...out.ocr_page_request_ids] }
+          : {}),
         // PDF extraction emits a closed, content-free original observation.
         // Keep it beside the human result so prepare() can retain authoritative
         // scan-only page counts without parsing error prose. Do not add an

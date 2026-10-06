@@ -263,15 +263,17 @@ export async function pdfPassIsolated(buf, {
  * Read a scanned PDF page by page, then judge the result.
  *
  * `ocr(image, { page, totalPages })` returns `{ text }` for a page it read, or
- * `{ error }` for one it could not. A `fatal` error — the spend cap, a missing
- * AI binding, an outage — is rethrown untouched, because none of those is
+ * `{ error }` for one it could not. A `fatal` error such as the spend cap, a
+ * missing AI binding, or a failed Brain health probe is rethrown untouched.
+ * An exhausted page timeout from a healthy Brain marks the document retryable
+ * after the remaining rendered pages have been assessed. None of those is
  * evidence about this document and recording them as "unreadable" would write
  * a permanently wrong reason into the corpus.
  *
  * Returns null when OCR had nothing to work with, so the caller falls back to
  * the original refusal rather than to a new one that overstates what was tried.
  */
-async function ocrPdf(ocr, r, scanned) {
+async function ocrPdf(ocr, r, scanned, ocrDocument) {
   const { assembleOcr } = await import("./ocr.mjs");
   const images = Array.isArray(r.pageImages) ? r.pageImages : [];
   const usable = images.filter(Boolean);
@@ -283,6 +285,7 @@ async function ocrPdf(ocr, r, scanned) {
   }
 
   const pages = [];
+  let retryablePageFailures = 0;
   for (const image of images) {
     if (!image) {
       pages.push({ page: pages.length + 1, error: "this page holds no image, so there was nothing to read" });
@@ -290,15 +293,32 @@ async function ocrPdf(ocr, r, scanned) {
     }
     let got;
     try {
-      got = await ocr(image, { page: image.page, totalPages: r.totalPages });
+      got = await ocr(image, { page: image.page, totalPages: r.totalPages, ...ocrDocument });
     } catch (e) {
       if (e?.fatal === true) throw e;
       got = { error: String(e?.message || e).slice(0, 160) };
     }
-    pages.push({ page: image.page, text: got?.text, error: got?.error });
+    if (got?.retry_document === true) retryablePageFailures++;
+    pages.push({
+      page: image.page,
+      text: got?.text,
+      error: got?.error,
+      reason_code: got?.reason_code,
+      retry_document: got?.retry_document === true,
+      ...(typeof got?.ocr_request_id === "string" ? { ocr_request_id: got.ocr_request_id } : {}),
+    });
   }
 
   const verdict = assembleOcr(pages, { totalPages: r.totalPages, model: ocr.model });
+  if (retryablePageFailures) {
+    return {
+      text: null,
+      error: `${scanned} ${retryablePageFailures} page${retryablePageFailures === 1 ? " was" : "s were"} ` +
+        "still slow after bounded retries. This document was skipped and will be checked again on the next pass.",
+      code: "ocr_page_timeout",
+      retryable: true,
+    };
+  }
   if (!verdict.ok) return { text: null, error: `${scanned} ${verdict.refusal}.` };
   // A configured OCR page ceiling is a cost boundary, not evidence that the
   // unrendered tail was blank. Keep the usable prefix, but name it as partial
@@ -307,6 +327,9 @@ async function ocrPdf(ocr, r, scanned) {
   const incomplete = verdict.incomplete === true || omittedPages > 0;
   return {
     text: verdict.text,
+    ocr_page_request_ids: pages
+      .map((page) => page.ocr_request_id)
+      .filter((requestId) => typeof requestId === "string"),
     note: omittedPages
       ? `${verdict.note}; ${omittedPages} page${omittedPages === 1 ? " was" : "s were"} not read because this document exceeds the configured OCR page limit`
       : verdict.note,
@@ -335,7 +358,11 @@ async function ocrPdf(ocr, r, scanned) {
  * unreadable scans. One retry costs milliseconds on a file that is genuinely
  * empty and rescues one that was merely cold.
  */
-export async function extractPdf(buf, { reread, onRereadAccepted, ocr } = {}, { pdfPassImpl = pdfPassIsolated } = {}) {
+export async function extractPdf(
+  buf,
+  { reread, onRereadAccepted, ocr, ocrDocument } = {},
+  { pdfPassImpl = pdfPassIsolated } = {},
+) {
   // Rendering is requested up front only when there is somewhere to send the
   // pixels. Without an OCR callback this is byte-for-byte the old behaviour,
   // which is the point: a PDF with a text layer must never pay for a feature
@@ -389,7 +416,7 @@ export async function extractPdf(buf, { reread, onRereadAccepted, ocr } = {}, { 
     // is still reported rather than indexed with a guessed reading.
     const scanned = `no text layer: this is a scanned PDF (${r.totalPages} page${r.totalPages === 1 ? "" : "s"} of images).`;
     if (typeof ocr === "function") {
-      const got = await ocrPdf(ocr, r, scanned);
+      const got = await ocrPdf(ocr, r, scanned, ocrDocument);
       if (got) {
         const hasOcrText = typeof got.text === "string" && got.text.trim().length > 0;
         // OCR is reliable only when the OCR result says that explicitly. Text
@@ -408,7 +435,7 @@ export async function extractPdf(buf, { reread, onRereadAccepted, ocr } = {}, { 
             reasonCode: state === "ocr_partial"
               ? "ocr_partial_review"
               : state === "scan_only_ocr_needed"
-                ? "scan_only_ocr_needed"
+                ? got.code || "scan_only_ocr_needed"
                 : "provenance_unassessed",
             textReliable: got.provenance?.text_reliable === true,
             extractionComplete: state === "ocr_reliable",

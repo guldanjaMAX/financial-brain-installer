@@ -61,6 +61,14 @@ const PUBLISHED = [
   [22, "0022_document_access_passkey_observability", "ba12fffa95c7e22e"],
 ];
 
+// These bytes have not shipped. This separate candidate pin protects the
+// reviewed merge-order consolidation without misrepresenting migration 0047
+// as applied history. A deliberate pre-release rewrite updates this pin in the
+// same change; once published, move it into PUBLISHED instead.
+const CANDIDATE = [
+  [47, "0047_ocr_page_idempotency", "1ad118544542ce66"],
+];
+
 const dir = fileURLToPath(new URL("../migrations/d1/", import.meta.url));
 const files = readdirSync(dir).filter((f) => /^\d+_.*\.sql$/.test(f)).sort();
 const onDisk = files.map((f) => ({
@@ -78,6 +86,17 @@ for (const [version, name, checksum] of PUBLISHED) {
       ? `now ${actual.name} ${actual.checksum}, clients recorded ${name} ${checksum}. ` +
         "An applied migration is history: add a new migration instead of editing this one."
       : `migration ${version} is missing; installed brains have it applied.`,
+  );
+}
+
+for (const [version, name, checksum] of CANDIDATE) {
+  const actual = onDisk.find((m) => m.version === version);
+  check(
+    `${name} matches the reviewed unshipped candidate bytes`,
+    actual && actual.name === name && actual.checksum === checksum,
+    actual
+      ? `now ${actual.name} ${actual.checksum}, candidate pin ${name} ${checksum}`
+      : `candidate migration ${version} is missing`,
   );
 }
 

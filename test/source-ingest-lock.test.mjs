@@ -11,7 +11,6 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
-  rmdirSync,
   symlinkSync,
   unlinkSync,
   utimesSync,
@@ -38,16 +37,22 @@ import {
   reconcileDocumentFamilies,
   requestIngestBatch,
 } from "../brain.mjs";
+import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, "..", "brain.mjs");
 const LOCK_MODULE = new URL("../operations/source-ingest-lock.mjs", import.meta.url).href;
 const OLD = new Date(Date.now() - 180_000);
 let ran = 0;
+let skippedLinkChecks = 0;
 const check = (name, condition, detail = "") => {
   ran++;
   assert.ok(condition, `${name}${detail ? `: ${detail}` : ""}`);
   console.log(`PASS  ${name}`);
+};
+const skipLinkCase = (name) => (reason) => {
+  skippedLinkChecks++;
+  console.log(`SKIP  ${name} # ${reason}`);
 };
 
 const fixture = () => {
@@ -73,19 +78,52 @@ const fixture = () => {
   return { root, home, manifests, manifestPath };
 };
 
-if (process.platform !== "win32") {
+{
+  const homeFixture = fixture();
+  try {
+    const target = join(homeFixture.root, "home-link-target");
+    mkdirSync(target, { mode: 0o700 });
+    rmSync(homeFixture.home, { recursive: true });
+    const linked = createTestSymlink({
+      target,
+      path: homeFixture.home,
+      type: "dir",
+      onSkip: skipLinkCase("an ingest-lock home link or junction is rejected"),
+    });
+    if (linked.created) {
+      assert.throws(
+        () => sourceIngestLockPath({
+          manifestPath: homeFixture.manifestPath,
+          sourceName: "gmail",
+          home: homeFixture.home,
+        }),
+        (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
+      );
+      check("an ingest-lock home link or junction is rejected", true);
+    }
+  } finally {
+    rmSync(homeFixture.root, { recursive: true, force: true });
+  }
+
   const f = fixture();
   try {
     const target = join(f.root, "runtime-link-target");
     mkdirSync(target, { mode: 0o755 });
-    chmodSync(target, 0o755);
-    symlinkSync(target, join(f.home, ".brain"), "dir");
-    assert.throws(
-      () => sourceIngestLockPath({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home }),
-      (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
-    );
-    check("a runtime-directory symlink is rejected without changing its target permissions",
-      (lstatSync(target).mode & 0o077) !== 0);
+    if (process.platform !== "win32") chmodSync(target, 0o755);
+    const linked = createTestSymlink({
+      target,
+      path: join(f.home, ".brain"),
+      type: "dir",
+      onSkip: skipLinkCase("a runtime-directory link or junction is rejected"),
+    });
+    if (linked.created) {
+      assert.throws(
+        () => sourceIngestLockPath({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home }),
+        (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
+      );
+      check("a runtime-directory link or junction is rejected",
+        process.platform === "win32" || (lstatSync(target).mode & 0o077) !== 0);
+    }
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
@@ -96,14 +134,21 @@ if (process.platform !== "win32") {
     const target = join(f2.root, "locks-link-target");
     mkdirSync(runtimeDir, { mode: 0o700 });
     mkdirSync(target, { mode: 0o755 });
-    chmodSync(target, 0o755);
-    symlinkSync(target, join(runtimeDir, "locks"), "dir");
-    assert.throws(
-      () => sourceIngestLockPath({ manifestPath: f2.manifestPath, sourceName: "gmail", home: f2.home }),
-      (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
-    );
-    check("an ingest-lock-directory symlink is rejected without changing its target permissions",
-      (lstatSync(target).mode & 0o077) !== 0);
+    if (process.platform !== "win32") chmodSync(target, 0o755);
+    const linked = createTestSymlink({
+      target,
+      path: join(runtimeDir, "locks"),
+      type: "dir",
+      onSkip: skipLinkCase("an ingest-lock-directory link or junction is rejected"),
+    });
+    if (linked.created) {
+      assert.throws(
+        () => sourceIngestLockPath({ manifestPath: f2.manifestPath, sourceName: "gmail", home: f2.home }),
+        (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
+      );
+      check("an ingest-lock-directory link or junction is rejected",
+        process.platform === "win32" || (lstatSync(target).mode & 0o077) !== 0);
+    }
   } finally {
     rmSync(f2.root, { recursive: true, force: true });
   }
@@ -261,6 +306,7 @@ if (process.platform !== "win32") {
       await assert.rejects(
         item.invoke({
           sourceIngestLockOptions: { home: f.home },
+          calendarSharedRecordWaitMs: 0,
           resolveBaseUrl: async () => { boundaryCalls++; return "https://fixture.invalid"; },
           resolveAdminKey: () => { boundaryCalls++; return "fixture-admin-key"; },
           getAccessToken: async () => { boundaryCalls++; return "fixture-access-token"; },
@@ -283,6 +329,120 @@ if (process.platform !== "win32") {
     }
     sharedHolder.release();
   } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+}
+
+{
+  const f = fixture();
+  let releaseFirst;
+  try {
+    const manifest = JSON.parse(readFileSync(f.manifestPath, "utf8"));
+    let firstCoreCalls = 0;
+    let sameSourceCoreCalls = 0;
+    let calendarCoreCalls = 0;
+    let credentialReads = 0;
+    let waitNotices = 0;
+    let firstEntered;
+    const firstEnteredPromise = new Promise((resolve) => { firstEntered = resolve; });
+    const firstReleasePromise = new Promise((resolve) => { releaseFirst = resolve; });
+    const completeCalendarResult = {
+      ok: true,
+      documents: [],
+      deletions: [],
+      state: {},
+      calendars: [{ ok: true, mode: "full", authoritative_snapshot: true }],
+      summary: {
+        events_seen: 0,
+        calendars_ok: 1,
+        calendars_failed: 0,
+        skipped: 0,
+        needs_reconsent: false,
+      },
+    };
+    const calendarOptions = (syncAll, extra = {}) => ({
+      sourceIngestLockOptions: { home: f.home },
+      resolveBaseUrl: async () => "https://fixture.invalid",
+      resolveAdminKey: () => "fixture-admin-key",
+      loadGoogleTokens: () => {
+        credentialReads++;
+        return {
+          google: {
+            client_id: "fixture-client-id",
+            client_secret: null,
+            refresh_token: "fixture-refresh-token",
+            scopes: ["calendar"],
+          },
+        };
+      },
+      postSourceReceipt: async (_base, _key, receipt) => ({ ...receipt }),
+      loadCalendarState: () => ({}),
+      saveCalendarState: () => {},
+      googleCalendar: {
+        syncAll,
+        ingestEnvelopes: async () => ({ created: 0, updated: 0, unchanged: 0, refused: [], errors: [] }),
+      },
+      ...extra,
+    });
+
+    const first = cmdIngestCalendar(
+      manifest,
+      f.manifestPath,
+      { from: "calendar", source: "drive" },
+      calendarOptions(async () => {
+        firstCoreCalls++;
+        firstEntered();
+        await firstReleasePromise;
+        return completeCalendarResult;
+      }),
+    );
+    await firstEnteredPromise;
+
+    await assert.rejects(
+      cmdIngestCalendar(
+        manifest,
+        f.manifestPath,
+        { from: "calendar", source: "drive" },
+        calendarOptions(async () => {
+          sameSourceCoreCalls++;
+          return completeCalendarResult;
+        }),
+      ),
+      /drive ingest is already running/,
+    );
+
+    const calendar = cmdIngestCalendar(
+      manifest,
+      f.manifestPath,
+      { from: "calendar", source: "calendar" },
+      calendarOptions(async () => {
+        calendarCoreCalls++;
+        return completeCalendarResult;
+      }, {
+        calendarSharedRecordWaitMs: 1_000,
+        calendarSharedRecordRetryMs: 1,
+        onCalendarSharedRecordWait: () => { waitNotices++; },
+      }),
+    ).then(
+      () => ({ status: "completed" }),
+      (error) => ({ status: "failed", error }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    const waitingObserved = waitNotices === 1 && calendarCoreCalls === 0;
+    releaseFirst();
+    await first;
+    const calendarOutcome = await calendar;
+
+    check("a live source owner still blocks a second writer for that exact source",
+      firstCoreCalls === 1 && sameSourceCoreCalls === 0,
+      `first core calls=${firstCoreCalls} same-source core calls=${sameSourceCoreCalls}`);
+    check("Calendar waits at the shared credential boundary and runs after the active Google source",
+      waitingObserved && calendarOutcome.status === "completed" &&
+        calendarCoreCalls === 1 && credentialReads === 2,
+      `waiting observed=${waitingObserved} outcome=${calendarOutcome.status} ` +
+        `calendar core calls=${calendarCoreCalls} credential reads=${credentialReads}`);
+  } finally {
+    releaseFirst?.();
     rmSync(f.root, { recursive: true, force: true });
   }
 }
@@ -577,7 +737,9 @@ if (process.platform !== "win32") {
       },
     });
     await assert.rejects(
-      ocr({ png_base64: "fixture" }, { page: 1, totalPages: 1 }),
+      ocr({ png_base64: "fixture" }, {
+        page: 1, totalPages: 1, source: "upload", sourceItemId: "lock-fixture",
+      }),
       (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_lost",
     );
     check("a lost local-folder owner cannot begin an OCR mutation", ocrMutations === 0);
@@ -720,19 +882,32 @@ if (process.platform !== "win32") {
         JSON.stringify(readdirSync(f.manifests).sort()) === JSON.stringify(beforeEntries));
 
       const drySentinel = new Error(`${item.sourceName} dry core reached`);
-      await assert.rejects(
-        item.invoke({
-          ...options,
-          ingestLib: async () => { throw drySentinel; },
-          googleCalendar: {
-            syncAll: async () => { throw drySentinel; },
-            ingestEnvelopes: async () => { throw new Error("dry run sent calendar envelopes"); },
-          },
-        }, { "dry-run": true }),
-        (error) => error === drySentinel,
-      );
-      check(`${item.sourceName} dry run remains lock-free beside a live writer`,
-        holder.assertOwned() === true && !existsSync(statePath));
+      let dryCoreCalls = 0;
+      const dryOptions = {
+        ...options,
+        ingestLib: async () => { dryCoreCalls++; throw drySentinel; },
+        googleCalendar: {
+          syncAll: async () => { dryCoreCalls++; throw drySentinel; },
+          ingestEnvelopes: async () => { throw new Error("dry run sent calendar envelopes"); },
+        },
+      };
+      if (item.sourceName === "upload") {
+        await assert.rejects(
+          item.invoke(dryOptions, { "dry-run": true }),
+          /ingest is already running/,
+        );
+        check("upload dry run shares the filesystem-reader lease and stops before the walk",
+          dryCoreCalls === 0 && holder.assertOwned() === true && !existsSync(statePath),
+          `dry core calls=${dryCoreCalls}`);
+      } else {
+        await assert.rejects(
+          item.invoke(dryOptions, { "dry-run": true }),
+          (error) => error === drySentinel,
+        );
+        check(`${item.sourceName} dry run remains lock-free beside a live writer`,
+          dryCoreCalls === 1 && holder.assertOwned() === true && !existsSync(statePath),
+          `dry core calls=${dryCoreCalls}`);
+      }
       holder.release();
     }
   } finally {
@@ -1021,18 +1196,30 @@ if (process.platform !== "win32") {
     check("a permissive live lock directory fails closed", (lstatSync(permissive.path).mode & 0o077) !== 0);
     chmodSync(permissive.path, 0o700);
     permissive.release();
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+}
 
+{
+  const f = fixture();
+  try {
     const path = sourceIngestLockPath({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home });
     const target = join(f.root, "unsafe-target");
     mkdirSync(target, { mode: 0o700 });
-    symlinkSync(target, path, "dir");
-    assert.throws(
-      () => acquireSourceIngestLock({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home }),
-      (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
-    );
-    check("a symbolic-link lock path fails closed", lstatSync(path).isSymbolicLink());
-    unlinkSync(path);
-    rmdirSync(target);
+    const linked = createTestSymlink({
+      target,
+      path,
+      type: "dir",
+      onSkip: skipLinkCase("a linked lock path fails closed"),
+    });
+    if (linked.created) {
+      assert.throws(
+        () => acquireSourceIngestLock({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home }),
+        (error) => error instanceof SourceIngestLockError && error.code === "source_ingest_lock_unsafe",
+      );
+      check("a linked lock path fails closed", lstatSync(path).isSymbolicLink());
+    }
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
@@ -1104,4 +1291,4 @@ if (process.platform !== "win32") {
   }
 }
 
-console.log(`\n${ran} source ingest lock checks passed.`);
+console.log(`\n${ran} source ingest lock checks passed; ${skippedLinkChecks} skipped.`);

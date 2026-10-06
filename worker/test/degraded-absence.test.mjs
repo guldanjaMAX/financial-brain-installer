@@ -31,7 +31,14 @@ import {
   coverageIncompleteNotice, degradedCause, emptyRetrievalDisclosure,
   retrievalUnavailable, unavailableNotice,
 } from "../src/lib/retrieval-status.js";
-import { search } from "../src/lib/store-d1.js";
+import {
+  PROJECTION_CATCHUP_MAX_AGE_MS,
+  PROJECTION_CATCHUP_MAX_PENDING,
+  PROJECTION_CATCHUP_MAX_PENDING_RATIO,
+  projectionCatchupEligible,
+  search,
+  vectorReadiness,
+} from "../src/lib/store-d1.js";
 import { looksLikeRefusal } from "../../eval/scorer.mjs";
 import { cmdAsk } from "../../brain.mjs";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -87,8 +94,11 @@ const proseOf = (obj) => [
 function mkEnv({
   rows = [], coverageRows = [], coverageUnavailable = false,
   vectorIds = [], projectionReady = true, embeds = true,
+  expectedVectors = vectorIds.length, actualVectors = vectorIds.length,
+  pending = 0, oldestQueuedAt = null, supportedAnswer = false,
 } = {}) {
-  return {
+  const retrievalCalls = { keyword: 0, vector: 0 };
+  const env = {
     STORAGE: "d1",
     ADMIN_KEY: "k",
     DB: {
@@ -100,9 +110,13 @@ function mkEnv({
               if (coverageUnavailable) throw new Error("coverage read unavailable");
               return { results: coverageRows };
             }
+            if (/chunks_fts MATCH/.test(sql)) retrievalCalls.keyword++;
             return { results: rows };
           },
           first: async () => {
+            if (/proportional-projection-backlog/.test(sql)) {
+              return { n: pending };
+            }
             if (/vector_projection_mutation_id AS mutation_id/.test(sql)) {
               return {
                 schema_version: 12,
@@ -114,14 +128,15 @@ function mkEnv({
                 bootstrap_epoch: 0,
                 bootstrap_cursor: null,
                 bootstrap_high_water: null,
-                expected_vectors: vectorIds.length,
+                expected_vectors: expectedVectors,
+                live_vectors: expectedVectors,
                 pending: 0,
                 submitted: 0,
                 oldest_queued_at: null,
               };
             }
             if (/FROM vector_outbox/.test(sql) && /submitted_mutation_id/.test(sql)) {
-              return { n: 0, oldest: null, upserts: 0, deletes: 0, submitted: 0 };
+              return { n: pending, oldest: oldestQueuedAt, upserts: pending, deletes: 0, submitted: 0 };
             }
             return /count\(\*\)/i.test(sql)
               ? { n: 0, stored_documents: 0, logical_documents: 0 }
@@ -133,16 +148,31 @@ function mkEnv({
       batch: async () => {},
     },
     VECTORIZE: {
-      query: async () => ({ matches: vectorIds.map((id) => ({ id })) }),
+      query: async () => {
+        retrievalCalls.vector++;
+        return { matches: vectorIds.map((id) => ({ id })) };
+      },
       upsert: async () => {},
-      describe: async () => ({ vectorCount: vectorIds.length, processedUpToMutation: null }),
+      describe: async () => ({ vectorCount: actualVectors, processedUpToMutation: null }),
     },
     AI: {
-      run: async (model) => (model.includes("bge-")
-        ? (embeds ? { data: [[0.1, 0.2, 0.3]] } : (() => { throw new Error("embedder down"); })())
-        : { response: "unused", usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      run: async (model, input) => {
+        if (model.includes("bge-")) {
+          return embeds ? { data: [[0.1, 0.2, 0.3]] } : (() => { throw new Error("embedder down"); })();
+        }
+        const system = String(input?.messages?.[0]?.content || "");
+        if (supportedAnswer && /verify a proposed answer/.test(system)) {
+          return { response: { supported: true, complete: true, evidence: [1], reason: "direct support" }, usage: {} };
+        }
+        return {
+          response: supportedAnswer ? "The retrieved record supports the answer [1]." : "unused",
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        };
+      },
     },
   };
+  env.__retrievalCalls = retrievalCalls;
+  return env;
 }
 
 const think = async (env, q = "what do my records say") => {
@@ -216,6 +246,126 @@ const unified = async (env, q = "the") => {
     body.confidence === undefined, JSON.stringify(body.confidence));
   check("no answer is fabricated", body.answer === null && (body.citations || []).length === 0,
     JSON.stringify({ a: body.answer, c: body.citations }));
+}
+
+/* ---- observed small/recent backlog: completed search is provisional, not failed ---- */
+{
+  const now = Date.parse("2026-09-28T18:00:00.000Z");
+  const realNow = Date.now;
+  Date.now = () => now;
+  try {
+    const recent = mkEnv({
+      projectionReady: false,
+      expectedVectors: 1_795_309,
+      actualVectors: 1_793_009,
+      pending: 10_001,
+      oldestQueuedAt: now - 60 * 60 * 1000,
+    });
+    const { body } = await think(recent);
+    const readiness = await vectorReadiness(recent);
+    const serializedReadiness = JSON.stringify(readiness);
+    check("the capped backlog has an exact bounded proportional proof",
+      readiness.proportional_pending === 10_001 &&
+        readiness.proportional_pending_exact === true,
+      JSON.stringify({
+        proportional_pending: readiness.proportional_pending,
+        proportional_pending_exact: readiness.proportional_pending_exact,
+      }));
+    check("the internal proportional proof does not expand the public inventory contract",
+      !serializedReadiness.includes("proportional_pending"), serializedReadiness);
+    check("probe: both keyword and vector retrieval reached their decision points",
+      recent.__retrievalCalls.keyword > 0 && recent.__retrievalCalls.vector > 0,
+      JSON.stringify(recent.__retrievalCalls));
+    check("a completed search during the observed small recent backlog is coverage-incomplete",
+      body.status === COVERAGE_INCOMPLETE && body.degraded_reason === "projection-catching-up",
+      JSON.stringify({ status: body.status, reason: body.degraded_reason }));
+    check("a provisional zero-result search still refuses an absence claim",
+      body.answer === null && body.confidence === undefined &&
+        !body.gaps?.some((gap) => gap.type === "no_results") && !assertsAbsence(proseOf(body)),
+      JSON.stringify(body));
+    const rawBody = (await unified(recent, "what do my records say")).body;
+    check("raw retrieval reports the same completed catch-up state",
+      rawBody.status === COVERAGE_INCOMPLETE &&
+        rawBody.degraded_reason === "projection-catching-up" &&
+        retrievalUnavailable(rawBody) === false,
+      JSON.stringify(rawBody));
+
+    const supportedRow = {
+      chunk_uid: "drive:fixture#0", doc_uid: "drive:fixture", source: "drive",
+      source_id: "fixture", title: "Synthetic record", text: "The synthetic fact is supported.",
+      document_date: Date.parse("2026-09-28T00:00:00.000Z"),
+      date_source: "fixture:date", date_reliable: 1, text_source: "native", text_reliable: 1,
+    };
+    const supported = mkEnv({
+      rows: [supportedRow],
+      vectorIds: [supportedRow.chunk_uid],
+      projectionReady: false,
+      expectedVectors: 1_795_309,
+      actualVectors: 1_793_009,
+      pending: 10_001,
+      oldestQueuedAt: now - 60 * 60 * 1000,
+      supportedAnswer: true,
+    });
+    const supportedBody = (await think(supported, "what does the synthetic record support")).body;
+    check("an evidence-gated answer survives proportional projection catch-up",
+      supported.__retrievalCalls.keyword > 0 && supported.__retrievalCalls.vector > 0 &&
+        supportedBody.answer === "The retrieved record supports the answer [1]." &&
+        supportedBody.evidence_gate?.supported === true && supportedBody.citations?.length === 1 &&
+        supportedBody.status === undefined && supportedBody.degraded_reason === "projection-catching-up",
+      JSON.stringify(supportedBody));
+
+    const old = mkEnv({
+      projectionReady: false,
+      expectedVectors: 1_795_309,
+      actualVectors: 1_793_009,
+      pending: 10_001,
+      oldestQueuedAt: now - 25 * 60 * 60 * 1000,
+    });
+    const oldBody = (await think(old)).body;
+    check("control: the same completed search with an old backlog stays unavailable",
+      old.__retrievalCalls.keyword > 0 && old.__retrievalCalls.vector > 0 &&
+        oldBody.status === SEARCH_UNAVAILABLE && oldBody.degraded_reason === "projection-incomplete",
+      JSON.stringify({ calls: old.__retrievalCalls, status: oldBody.status, reason: oldBody.degraded_reason }));
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+/* The strict boundaries use an injected clock. A value on either threshold is
+   not "under" it and therefore stays fail-closed. */
+{
+  const now = Date.parse("2026-09-28T18:00:00.000Z");
+  const base = {
+    ready: false,
+    reason: "vector_work_queued",
+    projection_status: "pending",
+    expected_vectors: 10_000,
+    actual_vectors: 9_999,
+    pending: 10,
+    pending_is_capped: false,
+    oldest_queued_at: now - 60_000,
+  };
+  check("the proportional readiness constants stay explicit and reviewable",
+    PROJECTION_CATCHUP_MAX_PENDING_RATIO === 0.01 &&
+      PROJECTION_CATCHUP_MAX_PENDING === 50_000 &&
+      PROJECTION_CATCHUP_MAX_AGE_MS === 24 * 60 * 60 * 1000);
+  check("a backlog strictly inside every bound is proportional catch-up",
+    projectionCatchupEligible(base, { now }) === true);
+  check("the one-percent pending boundary is not classified as small",
+    projectionCatchupEligible({ ...base, pending: 100 }, { now }) === false);
+  check("the one-percent missing-vector boundary is not classified as small",
+    projectionCatchupEligible({ ...base, actual_vectors: 9_900 }, { now }) === false);
+  check("the 24-hour boundary is not classified as recent",
+    projectionCatchupEligible({ ...base, oldest_queued_at: now - PROJECTION_CATCHUP_MAX_AGE_MS }, { now }) === false);
+  check("the absolute pending boundary fails closed above its cap",
+    projectionCatchupEligible({
+      ...base,
+      expected_vectors: 10_000_000,
+      actual_vectors: 9_999_999,
+      pending: PROJECTION_CATCHUP_MAX_PENDING + 1,
+    }, { now }) === false);
+  check("a capped display without an exact proportional proof fails closed",
+    projectionCatchupEligible({ ...base, pending: 10_001, pending_is_capped: true }, { now }) === false);
 }
 
 /* ---- the notice must not send an assistant back to a manual `brain drain`
@@ -400,6 +550,11 @@ const unified = async (env, q = "the") => {
     retrievalUnavailable({ degraded: "vector", answer: null, citations: [], results: [{ title: "x" }] }) === false);
   check("an answered degraded response is not unavailable",
     retrievalUnavailable({ degraded: "vector", answer: "Something [1].", citations: [{ n: 1 }], results: [] }) === false);
+  check("coverage-incomplete wins over the legacy degraded fallback",
+    retrievalUnavailable({
+      status: COVERAGE_INCOMPLETE, degraded: "vector", degraded_reason: "projection-catching-up",
+      answer: null, citations: [], results: [],
+    }) === false);
   check("a malformed body is not unavailable", retrievalUnavailable(null) === false);
 }
 

@@ -134,7 +134,7 @@ function observation(overrides = {}) {
     target_resource_fingerprint: binding.target_resource_fingerprint,
     worker_version_id: binding.active_worker_version_id,
     mode: "active",
-    health: { status: "pass", version: "0.4.8", accepting_documents: true },
+    health: { status: "pass", version: "0.4.9", accepting_documents: true },
     projection: {
       documents: 6_001,
       d1_chunks: 7_202,

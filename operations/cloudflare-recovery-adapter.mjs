@@ -416,7 +416,7 @@ const RECOVERY_TEST_HUMAN_FIELD_GATES = Object.freeze([
 const RECOVERY_TEST_FIELD_IDENTITY = Object.freeze({
   clientSlug: "v048-field-proof",
   clientDisplayName: "Synthetic Field Gate v0.4.8",
-  productVersion: "0.4.8",
+  productVersion: "0.4.9",
   sourceResource: "brain-test-v048-field-source-recovery-gate-a48f1101",
   targetResource: "brain-test-v048-field-target-recovery-gate-a48f1102",
   sourceAdminKeySecret:
@@ -573,6 +573,23 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   // the control table explicit, but its rows are never exported; source and
   // target probes require it empty while the artifact opens and closes it.
   "source_original_result_family_recovery_state",
+  // Schema 47: page-level OCR receipts are permanent, content-free
+  // idempotency tombstones. Recovery must preserve them so a restored Brain
+  // cannot spend the same bounded model-call budget again.
+  "ocr_page_requests",
+  // Schema 48: the custom API source. The current-job pointer and the exact
+  // logical-to-physical document version map decide which exported custom API
+  // documents are visible, so they are recovery content together with the
+  // jobs they reference (restrict foreign keys, so jobs come first), the packed
+  // structured rows, staged slices, and fetch receipts. The schedule row holds
+  // one live pull lease and is not exported; a recovered Brain pulls again.
+  "custom_api_jobs",
+  "custom_api_current_jobs",
+  "custom_api_document_versions",
+  "custom_api_row_chunks",
+  "custom_api_job_slices",
+  "custom_api_fetches",
+  "custom_api_schedule_state",
 ]);
 
 /**
@@ -601,6 +618,7 @@ export const RECOVERY_EXPORT_TABLES = Object.freeze(
       table !== "source_original_accepted_resolution_admissions" &&
       table !== "source_original_result_family_recovery_state" &&
       table !== "bank_feed_link_sessions" &&
+      table !== "custom_api_schedule_state" &&
       table !== "oauth_clients" && table !== "oauth_codes" && table !== "oauth_tokens"),
 );
 
@@ -820,6 +838,16 @@ const SCHEMA_45_TABLES = Object.freeze([
   "source_original_accepted_resolutions",
   "source_original_accepted_resolution_activations",
 ]);
+const SCHEMA_47_TABLES = Object.freeze(["ocr_page_requests"]);
+const SCHEMA_48_TABLES = Object.freeze([
+  "custom_api_jobs",
+  "custom_api_current_jobs",
+  "custom_api_document_versions",
+  "custom_api_row_chunks",
+  "custom_api_job_slices",
+  "custom_api_fetches",
+  "custom_api_schedule_state",
+]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -842,7 +870,7 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
      ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
      ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
-     ...SCHEMA_45_TABLES].includes(table)
+     ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES, ...SCHEMA_48_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -1484,7 +1512,7 @@ function inspectNpmPackedExecutionInventory(raw, code) {
       }
     }
     if (!packageJson || typeof packageJson !== "object" || Array.isArray(packageJson) ||
-        packageJson.name !== "brain-installer" || packageJson.version !== "0.4.8") refuse(code);
+        packageJson.name !== "brain-installer" || packageJson.version !== "0.4.9") refuse(code);
     return Object.freeze({
       name: packageJson.name,
       version: packageJson.version,
@@ -1726,7 +1754,7 @@ function inspectTestBootstrapCandidateEvidence(request, plan, pins) {
     "wrangler_host_platform", "wrangler_host_arch", "wrangler_host_libc",
     "node_version", "node_executable_sha256",
   ], code);
-  if (receipt.tooling.wrangler_package !== "wrangler@4.131.1" ||
+  if (receipt.tooling.wrangler_package !== `wrangler@${LOCKED_WRANGLER_VERSION}` ||
       receipt.tooling.wrangler_resolution !== "locked_local_runtime_closure" ||
       receipt.tooling.wrangler_runtime_directory !== LOCKED_WRANGLER_RUNTIME_DIRECTORY ||
       receipt.tooling.wrangler_runtime_schema_version !== wranglerRuntime.schemaVersion ||
@@ -1760,7 +1788,7 @@ function inspectTestBootstrapCandidateEvidence(request, plan, pins) {
   ], code);
   if (!/^[0-9a-f]{40}$/.test(String(source.head_sha || "")) ||
       !/^[0-9a-f]{40}$/.test(String(source.tree_sha || "")) ||
-      source.package_name !== "brain-installer" || source.package_version !== "0.4.8" ||
+      source.package_name !== "brain-installer" || source.package_version !== "0.4.9" ||
       !SHA256_RE.test(String(source.package_json_sha256 || "")) ||
       !SHA256_RE.test(String(source.package_lock_sha256 || "")) ||
       source.working_tree_clean !== true || source.shallow_repository !== false ||
@@ -2630,7 +2658,7 @@ function exactDisposableRecoveryRuntime(binding) {
     binding.chunkOverlap === "300" && binding.dailyLlmCapUsd === "10" &&
     binding.answerModel === "@cf/meta/llama-3.3-70b-instruct-fp8-fast" &&
     binding.credentialScanner === "on" && binding.ocrEnabled === "0" &&
-    binding.ocrModel === "@cf/google/gemma-4-26b-a4b-it";
+    binding.ocrModel === "@cf/meta/llama-4-scout-17b-16e-instruct";
 }
 
 function noDisposableRecoveryConnectors(binding) {
@@ -2991,7 +3019,7 @@ function readCompletedTestBootstrapCheckpoint(pins, plan) {
         candidateEvidence.seedVectorCount !== candidateEvidence.seedChunkCount ||
         candidateEvidence.seedReplayUnchangedDocuments !==
           DISPOSABLE_RECOVERY_SEED_DOCUMENTS ||
-        candidateEvidence.packageFilename !== "brain-installer-0.4.8.tgz" ||
+        candidateEvidence.packageFilename !== "brain-installer-0.4.9.tgz" ||
         candidateEvidence.wranglerRuntimeDirectory !==
           LOCKED_WRANGLER_RUNTIME_DIRECTORY ||
         candidateEvidence.wranglerRuntimeEntrypoint !== LOCKED_WRANGLER_ENTRYPOINT ||
@@ -4351,7 +4379,9 @@ function expectedRecoveryTables(migrations) {
     (latest >= 42 || !SCHEMA_42_TABLES.includes(table)) &&
     (latest >= 43 || !SCHEMA_43_TABLES.includes(table)) &&
     (latest >= 44 || !SCHEMA_44_TABLES.includes(table)) &&
-    (latest >= 45 || !SCHEMA_45_TABLES.includes(table)));
+    (latest >= 45 || !SCHEMA_45_TABLES.includes(table)) &&
+    (latest >= 47 || !SCHEMA_47_TABLES.includes(table)) &&
+    (latest >= 48 || !SCHEMA_48_TABLES.includes(table)));
 }
 
 export function recoveryExportTables(

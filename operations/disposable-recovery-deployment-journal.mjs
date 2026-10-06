@@ -734,13 +734,13 @@ function assertResult(value, effect) {
   }
   if (effect === "initialize_d1_schema") {
     if (!exactKeys(value, ["migration_inventory_sha256", "schema_version"]) ||
-        value.schema_version !== 46 ||
+        value.schema_version !== 48 ||
         !SHA256_RE.test(String(value.migration_inventory_sha256 || ""))) {
       refuse("DISPOSABLE_RECOVERY_DEPLOYMENT_JOURNAL_RESULT_INVALID");
     }
     return Object.freeze({
       migration_inventory_sha256: value.migration_inventory_sha256,
-      schema_version: 46,
+      schema_version: 48,
     });
   }
   if (effect === "create_worker_version") {

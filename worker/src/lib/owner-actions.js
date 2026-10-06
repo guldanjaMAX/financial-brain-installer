@@ -18,6 +18,7 @@ import { ownerSessionPrincipal } from "./owner-auth.js";
 import { backendOf, storeFor, D1 } from "./store.js";
 import { restampFirstPartySourceProvenance } from "./provenance-receipt.js";
 import { isSourceKindConflict, resolveSourceKind } from "./source-receipt.js";
+import { acknowledgeOcrPageRequests, OCR_REQUEST_ID } from "./ocr-idempotency.js";
 import {
   decodeUploadBase64, extractOwnerUpload, OWNER_BINARY_MEDIA,
   OWNER_BINARY_UPLOAD_MAX_BYTES, OWNER_EXTRACTED_TEXT_MAX_BYTES, OWNER_IMAGE_UPLOAD_MAX_BYTES,
@@ -929,7 +930,20 @@ async function upload(env, body, ingestEnvelope, afterIngest, extractUpload = ex
         return conflict("request_id_conflict");
       }
       const storedReceipt = JSON.parse(existing.response_json);
-      if (storedReceipt?.pending !== true) return respond({ ...storedReceipt, replayed: true }, 200);
+      if (storedReceipt?.pending !== true) {
+        if (storedReceipt?.ocr_request_id != null) {
+          if (!OCR_REQUEST_ID.test(String(storedReceipt.ocr_request_id))) {
+            return unavailable("owner_upload_finalize_unavailable");
+          }
+          try {
+            await acknowledgeOcrPageRequests(env.DB, { requestIds: [storedReceipt.ocr_request_id] });
+          } catch {
+            return unavailable("owner_upload_finalize_unavailable");
+          }
+        }
+        const { ocr_request_id: _ocrRequestId, ...publicReceipt } = storedReceipt;
+        return respond({ ...publicReceipt, replayed: true }, 200);
+      }
       intent = storedReceipt;
       resumedIntent = true;
     }
@@ -965,12 +979,19 @@ async function upload(env, body, ingestEnvelope, afterIngest, extractUpload = ex
 
   let normalized = null;
   let extraction = intent?.extraction || null;
+  let ocrRequestId = intent?.ocr_request_id || null;
   let uploadSourceClaimed = false;
   if (!stored) {
     let extracted = null;
     if (binaryUpload) {
       try {
-        extracted = await extractUpload(env, { mediaType, bytes: binaryBytes, fileName });
+        extracted = await extractUpload(env, {
+          mediaType,
+          bytes: binaryBytes,
+          fileName,
+          source: "upload",
+          sourceItemId: `owner:${entitySlug}:${documentId}`,
+        });
       } catch (error) {
         if (error?.too_large) return respond({
           uploaded: false, error: "extracted text too large", code: "extracted_text_too_large",
@@ -981,6 +1002,25 @@ async function upload(env, body, ingestEnvelope, afterIngest, extractUpload = ex
         }
         if (error?.code === "owner_upload_ocr_spend_cap") {
           return respond({ uploaded: false, error: "OCR spend limit reached", code: error.code }, 429);
+        }
+        if (error?.code === "owner_upload_ocr_retry_later") {
+          const retryAfterMs = Number.isSafeInteger(error.retry_after_ms) && error.retry_after_ms > 0
+            ? error.retry_after_ms
+            : 2_000;
+          const retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+          const modelCallsInWindow = Number.isSafeInteger(error.model_calls_in_24_hours) &&
+              error.model_calls_in_24_hours >= 0
+            ? error.model_calls_in_24_hours
+            : 0;
+          return respond({
+            uploaded: false,
+            error: `This page is not ready yet. Nothing was added. Try this upload again after ${retryAfterSeconds} seconds.`,
+            code: error.code,
+            retry_after_ms: retryAfterMs,
+            ocr_request_pending: true,
+            ocr_model_call_cap_exhausted: error.ocr_model_call_cap_exhausted === true,
+            model_calls_in_24_hours: modelCallsInWindow,
+          }, 425);
         }
         if (error?.code === "owner_upload_ocr_unavailable") {
           return unavailable(error.code);
@@ -995,6 +1035,9 @@ async function upload(env, body, ingestEnvelope, afterIngest, extractUpload = ex
         return respond({ uploaded: false, error: "file could not be read", code: error?.code || "unreadable_upload" }, 422);
       }
       normalizedContent = extracted.content;
+      ocrRequestId = OCR_REQUEST_ID.test(String(extracted.ocrRequestId || ""))
+        ? extracted.ocrRequestId
+        : null;
       extraction = {
         method: extracted.metadata.extraction_method,
         text_source: extracted.textSource,
@@ -1048,6 +1091,7 @@ async function upload(env, body, ingestEnvelope, afterIngest, extractUpload = ex
             : preflight.prepared?.prior ? "updated" : "created",
           payload_hash: payloadHash,
           extraction,
+          ...(ocrRequestId ? { ocr_request_id: ocrRequestId } : {}),
           ...(binaryHash ? { original_binary_sha256: binaryHash } : {}),
         };
         await actionReceiptStatement(env, {
@@ -1122,7 +1166,11 @@ async function upload(env, body, ingestEnvelope, afterIngest, extractUpload = ex
     document, changed, activity_event_id: eventId, replayed: resumedIntent,
   };
   const status = resumedIntent ? 200 : document.action === "created" ? 201 : 200;
-  const responseJson = JSON.stringify(response);
+  const storedResponse = {
+    ...response,
+    ...(intent.ocr_request_id ? { ocr_request_id: intent.ocr_request_id } : {}),
+  };
+  const responseJson = JSON.stringify(storedResponse);
   const statements = [
     env.DB.prepare(
       `INSERT INTO sources
@@ -1182,6 +1230,13 @@ async function upload(env, body, ingestEnvelope, afterIngest, extractUpload = ex
   const verified = batchResults?.at(-1)?.results?.[0];
   if (verified?.response_status !== status || verified?.response_json !== responseJson) {
     return unavailable("owner_upload_source_unavailable");
+  }
+  if (intent.ocr_request_id) {
+    try {
+      await acknowledgeOcrPageRequests(env.DB, { requestIds: [intent.ocr_request_id] });
+    } catch {
+      return unavailable("owner_upload_finalize_unavailable");
+    }
   }
   return respond(response, status);
 }

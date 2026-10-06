@@ -206,7 +206,7 @@ that copy does not delete the provider's original.
 
 In this order:
 
-1. **Delete the search index.** In your own Cloudflare account: `npx wrangler@4.73.0 vectorize delete [VECTORIZE_INDEX]` removes the vectors, and Workers and Pages, D1, then delete `[D1_NAME]` removes the text and the keyword index. Both live in your account, so this is yours to do and needs nothing from me.
+1. **Delete the search index.** In your own Cloudflare account: `npx wrangler@4.131.1 vectorize delete [VECTORIZE_INDEX]` removes the vectors, and Workers and Pages, D1, then delete `[D1_NAME]` removes the text and the keyword index. Both live in your account, so this is yours to do and needs nothing from me.
 2. **Delete the database.** Cloudflare dashboard, Workers and Pages, D1, `[D1_NAME]`, Delete. This removes version history and spend records, including its time travel history.
 3. **If configured, delete the R2 original-file copy.** First confirm the
    manifest actually declares bucket `[R2_BUCKET]`, then use Cloudflare

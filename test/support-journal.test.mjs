@@ -130,7 +130,7 @@ try {
 
   const publicCommands = [
     "setup", "ask", "assistant-repair", "provenance-repair", "doctor", "whatsnew", "verify", "provision", "deploy", "secrets", "financial-picture",
-    "health", "test", "mcp-config", "migrate", "ingest", "connect", "status",
+    "health", "test", "mcp-config", "migrate", "ingest", "connect", "status", "folder",
     "sources", "forget", "drain", "reindex", "diagnose", "eval", "upgrade",
     "rollback", "schedule", "support",
   ];

@@ -267,7 +267,12 @@ test("the personal Claude technician skill installs exactly, verifies on rerun, 
   assert.match(optimizeRoute, /`accepted_resolution_reverification`/);
   assert.match(optimizeRoute, /does not record\s+a discovery gap, reingest the file, remove family members, or drain the shared\s+vector queue/i);
   assert.match(optimizeRoute, /Never reuse the earlier approval hash/i);
-  assert.match(optimizeRoute, /held 0\.4\.8 candidate is not a customer release/i);
+  assert.match(optimizeRoute,
+    /A held or field-test candidate is not a customer release and must not be used on a\s+customer Brain; only a release the public release feed marks stable and available\s+qualifies\./);
+  // The shipped skill outlives any one candidate, so it never names a held
+  // candidate's version.
+  assert.doesNotMatch(content, /\bheld v?\d+\.\d+\.\d+\b/i,
+    "the shared skill must not name a held candidate version");
   assert.doesNotMatch(optimizeRoute, /planned owner-facing workflow|lucky|qualif(?:y|ies|ied) for access/i);
   assert.ok(releaseManifest > updateRouteStart && releaseManifest < agentPlaybook,
     "the held release feed must be the first live update decision");
@@ -389,6 +394,8 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   assert.ok(content.startsWith(CLAUDE_WORKSPACE_MARKER));
   assert.ok(content.includes(`${JSON.stringify(safeNodePath)} ${JSON.stringify(safeBrainPath)}`));
   assert.match(content, /claude --add-dir <approved-folder>/);
+  assert.match(content, /folder .* off.*keeps every document and removes nothing/is);
+  assert.match(content, /Never run .*ingest --path.*folder this Brain retired/is);
   assert.match(content, /npx wrangler@4/);
   assert.match(content, /normal approval prompts enabled/i);
   assert.match(content, /owner directly asks.*brain_remember/is);
@@ -552,6 +559,7 @@ test("the plan is read-only, ordered, honest about proof, and agent-readable", (
   assert.equal(plan.coverage.bank_connections.credentials_needed_here, false);
   assert.match(plan.coverage.bank_connections.owner_message, /You did nothing wrong/i);
   assert.match(plan.coverage.bank_connections.owner_message, /no bank password.*verification code.*Plaid setup key/i);
+  assert.match(plan.coverage.bank_connections.owner_message, /Bank feeds are set up with your installer on a call\./i);
   assert.match(renderTechnicianPlan(plan), /Bank connections are not part of ordinary onboarding yet/i);
   assert.match(renderTechnicianPlan(plan), /live proof arrives/i);
   assert.match(plan.rules.join("\n"), /offer browser help once/i);
@@ -654,6 +662,15 @@ test("the direct invite path renders the passkey explanation before minting a li
   const briefing = source.indexOf('console.log(renderTechnicianStepBriefing("passkey"))', inviteStart);
   const inviteWrite = source.indexOf('/api/admin/auth/invite', inviteStart);
   assert.ok(inviteStart > 0 && briefing > inviteStart && inviteWrite > briefing);
+});
+
+test("the update guide keeps watching a background update and tools prints one copyable handoff", () => {
+  const source = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
+  const skill = readFileSync(new URL("../skills/financial-brain-technician/SKILL.md", import.meta.url), "utf8");
+  assert.match(skill, /Start `brain update` as a background task, then read its output every few\s+minutes until it finishes\./u);
+  assert.match(skill, /The update is running\. On a\s+large Brain it can take a while; I'll keep an eye on it here\. Please keep\s+this window open\./u);
+  assert.match(source, /Open Terminal, paste this line, press Return, then come back and say done:/u);
+  assert.match(source, /renderCliCommands\(`brain tools --intent \$\{base\.setup_intent\.value\}`\)/u);
 });
 
 test("the first technician step verifies local tools before any manifest or account exists", async () => {

@@ -17,6 +17,7 @@ import {
 import {
   assertV048VectorizeMutationQuiescenceApproval,
 } from "./v048-vectorize-mutation-quiescence-contract.mjs";
+import { REVIEWED_WRANGLER_VERSION } from "./wrangler-runtime-contract.mjs";
 
 export const DISPOSABLE_RECOVERY_LEGACY_DEPLOYMENT_PROTOCOL =
   "v048-disposable-recovery-deployment-v1";
@@ -45,12 +46,12 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const PROVIDER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const NODE_VERSION_RE = /^v(?:22|2[3-9]|[3-9][0-9])\.[0-9]+\.[0-9]+$/u;
-const PACKAGE_NAME = "brain-installer-0.4.8.tgz";
+const PACKAGE_NAME = "brain-installer-0.4.9.tgz";
 const MAX_PACKAGE_BYTES = 64 * 1024 * 1024;
 const MAX_PACKAGE_FILES = 100_000;
 const MAX_RECEIPT_BYTES = 1024 * 1024;
-const PRODUCT_VERSION = "0.4.8";
-const WRANGLER_VERSION = "4.131.1";
+const PRODUCT_VERSION = "0.4.9";
+const WRANGLER_VERSION = REVIEWED_WRANGLER_VERSION;
 const CLIENT_SLUG = "v048-field-proof";
 const SOURCE_RESOURCE = "brain-test-v048-field-source-recovery-gate-a48f1101";
 const TARGET_RESOURCE = "brain-test-v048-field-target-recovery-gate-a48f1102";

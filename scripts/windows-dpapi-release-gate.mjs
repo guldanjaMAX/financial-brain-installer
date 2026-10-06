@@ -56,6 +56,10 @@ function safeIssueCode(value, fallback = "WINDOWS_DPAPI_PACKED_GATE") {
   return /^WINDOWS_DPAPI_[A-Z_]+$/.test(String(value || "")) ? String(value) : fallback;
 }
 
+function safeCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
 function containsUnsafePayload(bytes, values) {
   return values.some((value) =>
     bytes.includes(Buffer.from(value)) ||
@@ -113,7 +117,8 @@ try {
 
   stage = "metrics";
   const metrics = readWindowsDpapiSessionMetrics();
-  if (metrics.compile_count !== 1 || metrics.helper_invocations !== REQUIRED_HELPER_INVOCATIONS) {
+  if (metrics.compile_count !== 1 || metrics.helper_invocations !== REQUIRED_HELPER_INVOCATIONS ||
+      metrics.launch_refusals !== 0) {
     throw new Error("shared-session metrics failed");
   }
   cleanup = cleanupSharedSessionOnce();
@@ -121,14 +126,17 @@ try {
 
   console.log(
     `windows-dpapi-release-gate result=pass cleanup_status=clean rounds_completed=${REQUIRED_ROUNDS} ` +
-    `compile_count=1 helper_invocations=${REQUIRED_HELPER_INVOCATIONS} ` +
+    `compile_count=1 helper_invocations=${REQUIRED_HELPER_INVOCATIONS} launch_refusals=0 ` +
     "admin_key_create_read_rotate=pass google_storage_save_load=pass ciphertext_scan=pass",
   );
 } catch {
   cleanupSharedSessionOnce();
   console.error(
     `windows-dpapi-release-gate result=fail issue_code=${safeIssueCode(issueCode)} ` +
-    `stage=${safeStage(stage)} rounds_completed=${roundsCompleted} cleanup_status=${cleanup.status === "clean" ? "clean" : "cleanup_deferred"}`,
+    `stage=${safeStage(stage)} rounds_completed=${roundsCompleted} cleanup_status=${cleanup.status === "clean" ? "clean" : "cleanup_deferred"} ` +
+    // A launch retry recompiles, so it also breaks the exact compile_count=1
+    // contract. Printing the count tells a Smart App Control refusal apart.
+    `launch_refusals=${safeCount(readWindowsDpapiSessionMetrics().launch_refusals)}`,
   );
   process.exitCode = 1;
 } finally {

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { linkSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 
 const gate = readFileSync(new URL("../scripts/windows-dpapi-release-gate.mjs", import.meta.url), "utf8");
 // CRLF on a Windows checkout would break the exact step slice below.
@@ -36,6 +37,8 @@ test("the Windows release gate uses the production probe for exactly 25 fresh ro
   assert.match(gate, /REQUIRED_HELPER_INVOCATIONS = \(REQUIRED_ROUNDS \* 2\) \+ 11 \+ 4/);
   assert.match(gate, /metrics\.compile_count !== 1/);
   assert.match(gate, /metrics\.helper_invocations !== REQUIRED_HELPER_INVOCATIONS/);
+  assert.match(gate, /metrics\.launch_refusals !== 0/);
+  assert.match(gate, /launch_refusals=\$\{safeCount\(readWindowsDpapiSessionMetrics\(\)\.launch_refusals\)\}/);
   assert.match(gate, /function cleanupSharedSessionOnce\(\)/);
   assert.equal((gate.match(/disposeWindowsDpapiSession\(\)/g) || []).length, 1);
   assert.match(session, /let activeSession = null/);
@@ -44,6 +47,8 @@ test("the Windows release gate uses the production probe for exactly 25 fresh ro
   assert.match(session, /BRAIN_DPAPI_HYGIENE:cleanup_deferred/);
   assert.match(session, /sessionMetrics\.compile_count \+= 1/);
   assert.match(session, /sessionMetrics\.helper_invocations \+= 1/);
+  assert.match(session, /sessionMetrics\.launch_refusals \+= 1/);
+  assert.match(session, /WINDOWS_DPAPI_LAUNCH_ATTEMPTS = 3/);
   assert.match(bridge, /--helper|"helper"/);
   assert.match(bridge, /sha256/);
   assert.match(bridge, /expectedSize|"size"/);
@@ -56,7 +61,7 @@ test("the Windows release gate uses the production probe for exactly 25 fresh ro
   );
 });
 
-test("the bridge refuses a changed, hard-linked, or symlinked helper before reading input", () => {
+test("the bridge refuses a changed, hard-linked, or symlinked helper before reading input", async (t) => {
   const sandbox = realpathSync(mkdtempSync(join(tmpdir(), "brain-dpapi-bridge-contract-")));
   try {
     const childSystemRoot = process.platform === "win32"
@@ -97,13 +102,24 @@ test("the bridge refuses a changed, hard-linked, or symlinked helper before read
     assert.match(linked.stderr, /BRAIN_DPAPI_STAGE:helper_validation/);
 
     rmSync(hardlink);
-    const target = join(sandbox, "real-helper.exe");
-    writeFileSync(target, "symlink target bytes", "utf8");
-    rmSync(helper);
-    symlinkSync(target, helper, "file");
-    const symlinked = run(helper, createHash("sha256").update(readFileSync(target)).digest("hex"));
-    assert.notEqual(symlinked.status, 0);
-    assert.match(symlinked.stderr, /BRAIN_DPAPI_STAGE:helper_validation/);
+    await t.test("symlinked helper", (t) => {
+      const target = join(sandbox, "real-helper.exe");
+      writeFileSync(target, "symlink target bytes", "utf8");
+      rmSync(helper);
+      const created = createTestSymlink({
+        target,
+        path: helper,
+        type: "file",
+        onSkip: (reason) => t.skip(reason),
+      });
+      if (!created.created) return;
+      const symlinked = run(
+        helper,
+        createHash("sha256").update(readFileSync(target)).digest("hex"),
+      );
+      assert.notEqual(symlinked.status, 0);
+      assert.match(symlinked.stderr, /BRAIN_DPAPI_STAGE:helper_validation/);
+    });
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }

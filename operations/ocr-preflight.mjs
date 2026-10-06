@@ -12,12 +12,12 @@
 export const OCR_PREFLIGHT_SCHEMA_VERSION = 1;
 export const OCR_PREFLIGHT_KIND = "local_ocr_preflight";
 export const OCR_PREFLIGHT_DEFAULT_MAX_PAGES_PER_DOCUMENT = 40;
-export const OCR_PREFLIGHT_DEFAULT_MODEL = "@cf/google/gemma-4-26b-a4b-it";
+export const OCR_PREFLIGHT_DEFAULT_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
 export const OCR_PREFLIGHT_PRICING_BASIS_VERSION = 1;
 
 const OCR_PREFLIGHT_PRICED_RANGE = Object.freeze({
-  input_usd_per_m: 0.1,
-  output_usd_per_m: 0.3,
+  input_usd_per_m: 0.293,
+  output_usd_per_m: 2.25,
   input_tokens_per_page_low: 2_000,
   input_tokens_per_page_high: 4_000,
   output_tokens_per_page_low: 400,

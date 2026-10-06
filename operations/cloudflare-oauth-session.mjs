@@ -16,16 +16,19 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { REVIEWED_WRANGLER_SPEC } from "./wrangler-runtime-contract.mjs";
 
-export const CLOUDFLARE_OAUTH_WRANGLER_PACKAGE = "wrangler@4.131.1";
+export const CLOUDFLARE_OAUTH_WRANGLER_PACKAGE = REVIEWED_WRANGLER_SPEC;
 export const CLOUDFLARE_OAUTH_CALLBACK_HOST = "localhost";
 export const CLOUDFLARE_OAUTH_CALLBACK_PORT = 8976;
 
-// These are the narrow Wrangler 4.131.1 OAuth scope keys available for the
-// current standard install: enumerate memberships, deploy/configure Workers,
-// manage D1, and configure Workers AI. Wrangler exposes no separate Vectorize
-// OAuth key, so the exact Vectorize read below is the fail-closed proof that
-// this pinned scope set reaches it before any mutation.
+// These are the narrow Wrangler 4.131.1 OAuth scope keys available to
+// `wrangler auth create`: enumerate memberships, deploy/configure Workers,
+// manage D1, and configure Workers AI. Wrangler's browser client exposes no
+// Vectorize key. The exact Vectorize read below therefore remains in preflight
+// as the fail-closed decision point that routes an owner to explicitly selected
+// recovery-token access before any mutation. Never add `vectorize:write` here:
+// this pinned Wrangler rejects it before opening the browser.
 export const CLOUDFLARE_OAUTH_SCOPES = Object.freeze([
   "account:read",
   "user:read",
@@ -68,10 +71,13 @@ const CHILD_ENV_ALLOWLIST = Object.freeze([
 
 const PREFLIGHT_PATHS = Object.freeze([
   Object.freeze({ name: "workers", suffix: "/workers/scripts" }),
+  Object.freeze({ name: "workers_subdomain", suffix: "/workers/subdomain" }),
   Object.freeze({ name: "d1", suffix: "/d1/database" }),
   Object.freeze({ name: "vectorize", suffix: "/vectorize/v2/indexes" }),
   Object.freeze({ name: "workers_ai", suffix: "/ai/models/search?per_page=1" }),
 ]);
+
+const WORKERS_SUBDOMAIN_UNREGISTERED_API_CODE = 10007;
 
 export class CloudflareOAuthSessionError extends Error {
   constructor(code, phase, message) {
@@ -536,11 +542,17 @@ async function readBoundedResponse(response) {
     if (response.status < 200 || response.status >= 300 ||
         body?.success !== true || !Array.isArray(body.errors) || body.errors.length !== 0 ||
         !Object.hasOwn(body, "result")) {
-      throw oauthError(
+      const refused = oauthError(
         "CLOUDFLARE_OAUTH_REQUEST_FAILED",
         "request",
         "Cloudflare refused the read-only OAuth preflight request",
       );
+      // Only Cloudflare's numeric error codes are kept, never its message
+      // text, so a caller can recognise one exact documented refusal.
+      refused.cloudflareErrorCodes = Object.freeze(Array.isArray(body?.errors)
+        ? body.errors.map((entry) => entry?.code).filter(Number.isInteger)
+        : []);
+      throw refused;
     }
     return body;
   } finally {
@@ -635,6 +647,17 @@ function normalizeAccount(value) {
     );
   }
   return Object.freeze({ id, name: value.name });
+}
+
+function annotateScopeRefusal(error, accountId, requiredSurface) {
+  if (error instanceof CloudflareOAuthSessionError &&
+      error.code === "CLOUDFLARE_OAUTH_SCOPE_MISSING") {
+    // The account id and failed product surface are non-secret decision data.
+    // Carry no provider message or response body into the recovery layer.
+    error.selectedAccountId = accountId;
+    error.requiredSurface = requiredSurface;
+  }
+  return error;
 }
 
 function validateResultInfo(value, requestedPage, resultCount) {
@@ -785,7 +808,12 @@ export async function selectCloudflareOAuthAccount(accounts, {
 /** Read-only proof that every current control-plane service reaches one account. */
 export async function preflightCloudflareOAuthAccount(token, account, options = {}) {
   const selected = normalizeAccount(account);
-  const accountBody = await cloudflareGet(`/accounts/${selected.id}`, token, options);
+  let accountBody;
+  try {
+    accountBody = await cloudflareGet(`/accounts/${selected.id}`, token, options);
+  } catch (error) {
+    throw annotateScopeRefusal(error, selected.id, "account");
+  }
   const reached = normalizeAccount(accountBody.result);
   if (reached.id !== selected.id) {
     throw oauthError(
@@ -795,14 +823,62 @@ export async function preflightCloudflareOAuthAccount(token, account, options = 
     );
   }
   const checks = ["account"];
+  let workersSubdomain = null;
+  let workersSubdomainUnregistered = false;
+  let workersSubdomainUnreadable = false;
+  // A Brain on its own custom domain never serves from workers.dev, so for it
+  // an unregistered subdomain is reported rather than refused. Anything else,
+  // including an unknown caller, keeps the fail-closed default.
+  const workersSubdomainRequired = options.workersSubdomainRequired !== false;
   for (const check of PREFLIGHT_PATHS) {
-    await cloudflareGet(`/accounts/${selected.id}${check.suffix}`, token, options);
+    let body;
+    try {
+      body = await cloudflareGet(`/accounts/${selected.id}${check.suffix}`, token, options);
+    } catch (error) {
+      annotateScopeRefusal(error, selected.id, check.name);
+      // A custom-domain Brain never consumes this account setting. Keep the
+      // refusal visible in the receipt and continue proving every surface it
+      // does use. A workers.dev Brain still fails closed on the same response.
+      if (check.name === "workers_subdomain" &&
+          error?.code === "CLOUDFLARE_OAUTH_SCOPE_MISSING" &&
+          !workersSubdomainRequired) {
+        // This exception keys on the 403 scope classification and exact surface, not a provider error code.
+        workersSubdomainUnreadable = true;
+        continue;
+      }
+      // Cloudflare error 10007 on exactly this read means the account never
+      // registered a workers.dev subdomain (the pinned Wrangler special-cases
+      // the same code). That is an account setting the owner can fix, not a
+      // network failure, and no other credential would read it differently.
+      if (check.name === "workers_subdomain" &&
+          error?.code === "CLOUDFLARE_OAUTH_REQUEST_FAILED" &&
+          error.cloudflareErrorCodes?.includes(WORKERS_SUBDOMAIN_UNREGISTERED_API_CODE)) {
+        if (!workersSubdomainRequired) {
+          workersSubdomainUnregistered = true;
+          continue;
+        }
+        throw oauthError(
+          "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED",
+          "preflight",
+          "the selected Cloudflare account has no registered workers.dev subdomain",
+        );
+      }
+      throw error;
+    }
+    if (check.name === "workers_subdomain" && typeof body?.result?.subdomain === "string") {
+      // Preserve the authenticated response exactly. The deploy path validates
+      // the label before deriving a hostname and never substitutes account.name.
+      workersSubdomain = body.result.subdomain;
+    }
     checks.push(check.name);
   }
   return Object.freeze({
     status: "ready",
     account: reached,
     checks: Object.freeze(checks),
+    ...(workersSubdomain !== null ? { workersSubdomain } : {}),
+    ...(workersSubdomainUnregistered ? { workersSubdomainUnregistered: true } : {}),
+    ...(workersSubdomainUnreadable ? { workersSubdomainUnreadable: true } : {}),
   });
 }
 

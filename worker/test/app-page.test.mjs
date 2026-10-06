@@ -101,11 +101,21 @@ test("the shipped enrollment screen explains the passkey window before the owner
     "This verifies that you are the owner",
     "cannot see or store your passkey, Face ID, fingerprint, or device PIN",
     "choose Cancel",
+    "Tap the button below",
+    "No password is needed",
+    "How this keeps you safe",
+    "biometric data and device PIN never go to Financial Brain",
   ]) {
     assert.ok(APP_JS.includes(phrase), `shipped app bundle is missing: ${phrase}`);
   }
   assert.ok(!APP_JS.includes("Set up with Face ID"));
   assert.ok(!APP_JS.includes("Works on every device you own"));
+});
+
+test("the shipped owner app renders a capped vector backlog as a lower bound", () => {
+  // The Worker marks a sampled backlog with pending_is_capped; the served bundle
+  // (not just frontend/src) must read that flag, or a capped count shows as exact.
+  assert.ok(APP_JS.includes("pending_is_capped"), "shipped app bundle ignores pending_is_capped");
 });
 
 test("the shell is never cached, so an upgrade actually reaches the client", async () => {

@@ -21,13 +21,56 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { posix, win32 } from "node:path";
+import { join, posix, win32 } from "node:path";
+import { renderCommandWithEnvironment } from "./command-display.mjs";
+import { REVIEWED_WRANGLER_SPEC } from "./wrangler-runtime-contract.mjs";
 
-// Only the explicit legacy TOML compatibility path uses this version. Current
-// per-install encrypted browser profiles use cloudflare-oauth-session.mjs.
-export const WRANGLER_SPEC = "wrangler@4.73.0";
+// This parser keeps compatibility with the legacy default-profile TOML layout,
+// but every refresh runs through the same patched runtime as current named
+// profiles. A cached older npx package can therefore never be selected here.
+export const WRANGLER_SPEC = REVIEWED_WRANGLER_SPEC;
+
+/*
+ * The named-profile flow runs `wrangler auth keyring enable`, which Wrangler
+ * persists globally in preferences.json. Wrangler 4.131.1 then routes the
+ * default profile through its encrypted store too: the first read moves
+ * default.toml into default.enc and deletes the plaintext, so this parser
+ * finds nothing and "sign in again" loops. CLOUDFLARE_AUTH_USE_KEYRING=false
+ * is checked before that preference and selects the plaintext store without
+ * touching the preference or the keyring, so named profiles keep theirs.
+ * Only the legacy default-profile path uses this; named profiles force "true".
+ */
+export const LEGACY_WRANGLER_KEYRING_OPT_OUT = Object.freeze({ CLOUDFLARE_AUTH_USE_KEYRING: "false" });
+
+/** The copyable sign-in that writes the legacy plaintext session this parser reads. */
+export function legacyWranglerLoginCommand({ platformName = process.platform } = {}) {
+  return renderCommandWithEnvironment(LEGACY_WRANGLER_KEYRING_OPT_OUT, `npx ${WRANGLER_SPEC} login`, {
+    platformName,
+  });
+}
+
+const REFRESH_ENV_ALLOWLIST = Object.freeze(["PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+  "XDG_CONFIG_HOME", "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR",
+  "LANG", "LC_ALL"]);
+
+/**
+ * The refresh child's whole environment. The keyring opt-out is set after the
+ * allowlist so a parent value in either direction can never reach Wrangler.
+ */
+export function legacyWranglerRefreshEnvironment(source = process.env) {
+  const env = Object.fromEntries(REFRESH_ENV_ALLOWLIST
+    .filter((key) => typeof source?.[key] === "string").map((key) => [key, source[key]]));
+  return { ...env, ...LEGACY_WRANGLER_KEYRING_OPT_OUT };
+}
 
 /** Every place wrangler is known to keep its config, newest layout first. */
 export function wranglerConfigCandidates(env = process.env, platform = process.platform) {
@@ -84,22 +127,57 @@ export function parseWranglerSession(text) {
  */
 export function refreshWranglerSession(options = {}) {
   const run = options.run ?? spawnSync;
-  const source = options.env ?? process.env;
-  const keys = ["PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME",
-    "SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL"];
-  const env = Object.fromEntries(keys.filter((key) => typeof source[key] === "string").map((key) => [key, source[key]]));
-  // Wrangler writes `.wrangler/cache` under its own working directory. A child
-  // that inherits the caller's directory fails outright from an unwritable one
-  // (a Windows shell starts in `C:\Windows\system32`), and the credential is
-  // then reported missing for a reason that has nothing to do with it.
-  const result = run("npx", [WRANGLER_SPEC, "whoami"], {
-    cwd: options.cwd ?? tmpdir(),
-    encoding: "utf8",
-    timeout: options.timeoutMs ?? 120_000,
-    env,
-    shell: (options.platform ?? process.platform) === "win32",
-  });
-  return result?.status === 0;
+  const env = legacyWranglerRefreshEnvironment(options.env ?? process.env);
+  const platformName = options.platform ?? process.platform;
+  const makeDirectory = options.mkdtempSync ?? mkdtempSync;
+  const setMode = options.chmodSync ?? chmodSync;
+  const inspect = options.lstatSync ?? lstatSync;
+  const remove = options.rmSync ?? rmSync;
+  let workingDirectory = null;
+  let createdStat = null;
+  try {
+    // Wrangler writes `.wrangler/cache` and loads dotenv files relative to its
+    // cwd. A fresh private directory prevents a planted file in the shared temp
+    // root from becoming child configuration, while the explicit null-device
+    // argument disables Wrangler's default dotenv search as a second boundary.
+    workingDirectory = makeDirectory(join(
+      options.tmpDirectory ?? tmpdir(),
+      "financial-brain-wrangler-refresh-",
+    ));
+    setMode(workingDirectory, 0o700);
+    createdStat = inspect(workingDirectory);
+    if (!createdStat.isDirectory() || createdStat.isSymbolicLink() ||
+        (platformName !== "win32" && (createdStat.mode & 0o077) !== 0)) {
+      return false;
+    }
+    const result = run("npx", [
+      WRANGLER_SPEC,
+      "whoami",
+      `--env-file=${platformName === "win32" ? "NUL" : "/dev/null"}`,
+    ], {
+      cwd: workingDirectory,
+      encoding: "utf8",
+      timeout: options.timeoutMs ?? 120_000,
+      env,
+      shell: platformName === "win32",
+    });
+    return result?.status === 0;
+  } catch {
+    return false;
+  } finally {
+    if (workingDirectory && createdStat) {
+      try {
+        const current = inspect(workingDirectory);
+        if (current.isDirectory() && !current.isSymbolicLink() &&
+            current.dev === createdStat.dev && current.ino === createdStat.ino) {
+          remove(workingDirectory, { recursive: true, force: true });
+        }
+      } catch {
+        // Refresh availability remains the result. A replaced path is left
+        // untouched instead of being removed as if it were still ours.
+      }
+    }
+  }
 }
 
 /**

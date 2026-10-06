@@ -39,7 +39,8 @@ import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
 import { restrictWindowsFileToCurrentUser } from "../operations/current-user-file.mjs";
 import {
-  prepareWindowsDpapiSession, recordWindowsDpapiHelperInvocation,
+  disposeWindowsDpapiSession, prepareWindowsDpapiSession, recordWindowsDpapiHelperInvocation,
+  runWithWindowsDpapiHelper,
 } from "../operations/windows-dpapi-session.mjs";
 
 export const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -504,12 +505,11 @@ function runWindowsDpapi(input, options, operation) {
   try {
     // Production shares the process-scoped helper with admin-key operations.
     // Prepare and capture its identity before the bridge receives token bytes.
-    // The direct PowerShell runner remains an explicit unit-test seam.
-    const session = options.runPowerShell ? null
-      : (options.prepareWindowsDpapiSession ?? prepareWindowsDpapiSession)({ environment: env });
+    // The direct PowerShell runner remains an explicit unit-test seam. The
+    // shared launch retry replaces a helper Windows refused to start.
     const runner = options.runPowerShell ?? options.runDpapiBridge ?? spawnSync;
     const runnerCommand = options.runPowerShell ? command : process.execPath;
-    const runnerArgs = options.runPowerShell ? powerShellArgs : [
+    const invoke = (session) => runner(runnerCommand, options.runPowerShell ? powerShellArgs : [
       WINDOWS_DPAPI_BRIDGE,
       "--helper", session.helper,
       "--sha256", session.sha256,
@@ -519,8 +519,7 @@ function runWindowsDpapi(input, options, operation) {
       "--operation", operation,
       "--length", String(input.length),
       "--max", String(MAX_DPAPI_OUTPUT_BYTES),
-    ];
-    result = runner(runnerCommand, runnerArgs, {
+    ], {
       encoding: null,
       env,
       input,
@@ -529,6 +528,13 @@ function runWindowsDpapi(input, options, operation) {
       stdio: ["pipe", "pipe", "pipe"],
       timeout: options.timeoutMs || 30_000,
       windowsHide: true,
+    });
+    result = options.runPowerShell ? invoke(null) : runWithWindowsDpapiHelper(invoke, {
+      prepare: () => (options.prepareWindowsDpapiSession ?? prepareWindowsDpapiSession)({
+        ...(options.dpapiSessionOptions || {}),
+        environment: env,
+      }),
+      dispose: () => (options.disposeWindowsDpapiSession ?? disposeWindowsDpapiSession)(),
     });
     stdout = childResultBuffer(result?.stdout);
     stderr = childResultBuffer(result?.stderr);
@@ -540,7 +546,15 @@ function runWindowsDpapi(input, options, operation) {
       (options.recordWindowsDpapiHelperInvocation ?? recordWindowsDpapiHelperInvocation)();
     }
     return Buffer.from(stdout);
-  } catch {
+  } catch (caught) {
+    // Only the fixed launch-refusal text is safe to add; any other raw error
+    // may carry child or credential data and is replaced by the fixed message.
+    if (caught?.code === "WINDOWS_DPAPI_LAUNCH_REFUSED") {
+      throw Object.assign(new Error(`${failureMessage}. ${caught.message}`), {
+        code: caught.code,
+        stage: caught.stage,
+      });
+    }
     throw new Error(failureMessage);
   } finally {
     if (stdout) stdout.fill(0);

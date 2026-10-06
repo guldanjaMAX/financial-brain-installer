@@ -186,6 +186,7 @@ export function emptyRetrievalDisclosure(degraded) {
 export function retrievalUnavailable(body) {
   if (!body || typeof body !== "object") return false;
   if (body.status === SEARCH_UNAVAILABLE) return true;
+  if (body.status === COVERAGE_INCOMPLETE) return false;
   if (!degradedToken(body.degraded)) return false;
   const answered = typeof body.answer === "string" && body.answer.trim().length > 0;
   const cited = Array.isArray(body.citations) && body.citations.length > 0;

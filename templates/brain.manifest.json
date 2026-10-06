@@ -18,7 +18,7 @@
     "timezone": "America/Phoenix"
   },
   "brain": {
-    "version": "0.4.8",
+    "version": "0.4.9",
     "domain": "brain.acme.com",
     "worker_name": "acme-brain"
   },
@@ -100,6 +100,7 @@
       "exclude_file_ids_file": null
     },
     "gmail": {
+      "_comment": "Optional: add \"since\": \"YYYY-MM-DD\" to bound full and incremental Gmail ingestion from that date forward.",
       "enabled": false,
       "oauth_secret": "secret://GMAIL_OAUTH"
     },
@@ -239,6 +240,81 @@
         "deals"
       ]
     },
+    "custom_api": {
+      "_comment": [
+        "Read-only JSON endpoints pulled by this Brain's Worker on its existing cron.",
+        "The bearer value is never stored here. The secret name must begin CUSTOM_API_TOKEN_.",
+        "After reviewing these mappings, deploy, run brain connect custom-api, then preview",
+        "the first pull with brain custom-api <manifest> --dry-run. The structured rows are",
+        "a future financial-map input and are not posted to the ledger. A real pull resumes",
+        "one durable slice per request and reports saved data separately from meaning search.",
+        "For inventory and costs, search contains only the current snapshot; stored rows keep",
+        "prior values as history with effective dates. No daily history documents are written."
+      ],
+      "enabled": false,
+      "display_name": "store dashboard",
+      "source": "store-dashboard",
+      "base_url": "https://dashboard.example.invalid/api/",
+      "token_secret": "CUSTOM_API_TOKEN_STORE_DASHBOARD",
+      "cadence_seconds": 86400,
+      "timeout_ms": 30000,
+      "max_response_bytes": 5242880,
+      "max_rows": 10000,
+      "max_pages": 20,
+      "retries": 3,
+      "endpoints": [
+        {
+          "name": "sales",
+          "path": "/sales",
+          "row_key": ["store", "period", "revenue_stream"],
+          "documents": [
+            {
+              "name": "monthly",
+              "group_by": ["period"],
+              "title_template": "{{period}} sales across all stores",
+              "body_template": "{{period}}: net sales {{sum.net_sales}} across {{row_count}} store and stream rows. {{missing.revenue_stream}}\n\n{{rows_table}}",
+              "aggregates": { "net_sales": "sum", "transactions": "sum", "units": "sum", "puppies_sold": "sum" },
+              "formats": { "net_sales": "currency" },
+              "fields": ["store", "revenue_stream", "net_sales", "transactions", "units", "puppies_sold"],
+              "expected_values": { "revenue_stream": ["live_animal", "supplies", "services", "other"] }
+            },
+            {
+              "name": "store-history",
+              "group_by": ["store"],
+              "title_template": "{{store}} sales by month",
+              "body_template": "{{store}} monthly sales history through {{fetched_date}}. {{missing.revenue_stream}}\n\n{{rows_table}}",
+              "aggregates": { "net_sales": "sum", "transactions": "sum", "units": "sum", "puppies_sold": "sum" },
+              "formats": { "net_sales": "currency" },
+              "fields": ["period", "net_sales", "transactions", "units", "puppies_sold"],
+              "expected_values": { "revenue_stream": ["live_animal", "supplies", "services", "other"] }
+            }
+          ]
+        },
+        {
+          "name": "inventory",
+          "path": "/inventory",
+          "row_key": ["store", "breed"],
+          "document": {
+            "group_by": ["store"],
+            "title_template": "{{store}} inventory snapshot {{fetched_date}}",
+            "body_template": "{{store}} inventory snapshot for {{fetched_date}}.\n\n{{rows_table}}",
+            "fields": ["store", "breed", "count"]
+          }
+        },
+        {
+          "name": "costs",
+          "path": "/costs",
+          "row_key": ["store", "breed"],
+          "document": {
+            "group_by": ["store"],
+            "title_template": "{{store}} cost table {{fetched_date}}",
+            "body_template": "{{store}} average costs received through {{fetched_date}}.\n\n{{rows_table}}",
+            "formats": { "avg_cost": "currency" },
+            "fields": ["store", "breed", "avg_cost", "received"]
+          }
+        }
+      ]
+    },
     "upload": {
       "_comment": "Manual drop zone. Setup enables and records it after a folder is chosen; until then there is no folder to load.",
       "enabled": false
@@ -272,8 +348,9 @@
         "BANK_FEED_WRAPPING_KEY_V2 if it is missing, and verifies all three names on the",
         "Worker. brain setup, brain secrets, and technician workflows never accept or",
         "write them, and no command reads them from environment variables. Record only",
-        "the exact non-secret return and webhook URLs already saved in that Plaid",
-        "environment. Credentials never go in this manifest.",
+        "the exact non-secret return URL already on that Plaid environment's Allowed",
+        "redirect URIs list. The webhook URL travels with every Link request and needs",
+        "no dashboard registration. Credentials never go in this manifest.",
         "The account holder completes Link themselves. This brain requests only",
         "read-only Transactions and never sees bank login credentials. Scheduled",
         "reconciliation remains active because webhooks are not a sole source of truth.",
@@ -331,7 +408,7 @@
     "ocr": {
       "_comment": "Read scanned PDFs by sending each page image to a vision model through THIS brain's own Workers AI binding. OFF by default on purpose: it spends money on the client's own Cloudflare account, once per scanned page, and nobody should discover that after the fact. Every page must atomically reserve a conservative amount from the daily estimated-spend budget, and every document read this way is MARKED as OCR so an answer resting on it says so.",
       "enabled": false,
-      "model": "@cf/google/gemma-4-26b-a4b-it",
+      "model": "@cf/meta/llama-4-scout-17b-16e-instruct",
       "_model_note": "Must be a Cloudflare @cf/ model. OCR refuses anything else rather than send a picture of a client document to a provider this manifest does not name.",
       "max_pages_per_document": 40
     }

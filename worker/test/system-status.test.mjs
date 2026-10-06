@@ -43,7 +43,13 @@ const okFresh = async () => ({ sources: [
     reason: "indexing has not completed for 21 hour(s)", automatable: true },
   { name: "wildcard_slug", kind: "upload", zone: null, state: "manual", documents: 3, days_since_ingest: 1 },
 ] });
-const okVectors = async () => ({ ready: false, expected_vectors: 1000, actual_vectors: 895, pending: 105 });
+const okVectors = async () => ({
+  ready: false,
+  expected_vectors: 1000,
+  actual_vectors: 895,
+  pending: 10_001,
+  pending_is_capped: true,
+});
 const deps = { health: okHealth, diagnose: okDiagnose, freshness: okFresh, vectorReadiness: okVectors };
 
 /* --------------------------------------------------------------- happy path */
@@ -51,6 +57,9 @@ const deps = { health: okHealth, diagnose: okDiagnose, freshness: okFresh, vecto
   const s = await ownerSystemStatus({}, deps);
   check("documents come through", s.documents === 70844, String(s.documents));
   check("percent visible is computed", s.vectors.percent_visible === 89, String(s.vectors.percent_visible));
+  check("a capped queue remains explicitly lower-bounded in owner status",
+    s.vectors.pending === 10_001 && s.vectors.pending_is_capped === true,
+    JSON.stringify(s.vectors));
   check("nothing is unavailable", s.unavailable.length === 0, JSON.stringify(s.unavailable));
   check("crit and warn are surfaced as problems", s.problems.length === 1, JSON.stringify(s.problems.map(p=>p.id)));
   check("info findings are not problems", !s.problems.some((p) => p.id === "undated"));
@@ -93,11 +102,12 @@ const deps = { health: okHealth, diagnose: okDiagnose, freshness: okFresh, vecto
     { name: "box", kind: "box", zone: null, state: "manual", documents: 4, days_since_ingest: 0, automatable: false },
     { name: "client-mail", kind: "gmail", zone: "business", state: "ok", documents: 18, days_since_ingest: 0, automatable: true },
     { name: "client-calls", kind: "zoom", zone: "business", state: "ok", documents: 7, days_since_ingest: 0, automatable: true },
+    { name: "store-dashboard", kind: "custom_api", zone: "business", state: "ok", documents: 9, days_since_ingest: 0, automatable: true },
   ] });
   const s = await ownerSystemStatus({}, { ...deps, freshness: providerFresh });
   check("provider and custom Gmail or Zoom sources receive reviewed owner labels",
     s.sources.map((source) => source.label).join(",") ===
-      "Dropbox,Box,Email,Meeting recordings", JSON.stringify(s.sources));
+      "Dropbox,Box,Email,Meeting recordings,Custom business API", JSON.stringify(s.sources));
 }
 
 /* ------------------------ source-name collisions cannot rewrite provenance */

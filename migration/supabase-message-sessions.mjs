@@ -737,7 +737,10 @@ export function verifyMessageTargetInventory(lane, inventory) {
     throw new Error("message migration target readback has no valid vector backlog");
   }
   if (pending > 0) {
-    throw new Error(`message migration data is durable but ${pending} vector operations are still pending`);
+    const pendingLabel = inventory?.vector_backlog?.pending_is_capped === true
+      ? "10,000+"
+      : String(pending);
+    throw new Error(`message migration data is durable but ${pendingLabel} vector operations are still pending`);
   }
   const readiness = inventory?.vector_readiness;
   const readinessPending = Number(readiness?.pending);

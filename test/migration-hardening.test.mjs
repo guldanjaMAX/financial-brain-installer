@@ -1156,6 +1156,19 @@ await check("completion waits for exact D1 visibility and an empty vector outbox
     },
   }), /3 vector operations are still pending/);
   assert.throws(() => verifyMessageTargetInventory(state.message_sessions, {
+    backend: "d1",
+    rows: [],
+    vector_backlog: { pending: 10_001, pending_is_capped: true, pending_display: "10,000+" },
+    vector_readiness: {
+      ready: false,
+      pending: 10_001,
+      pending_is_capped: true,
+      submitted: 0,
+      expected_vectors: 1_150_274,
+      actual_vectors: 0,
+    },
+  }), /10,000\+ vector operations are still pending/);
+  assert.throws(() => verifyMessageTargetInventory(state.message_sessions, {
     backend: "supabase", rows: [], ...readyVectorInventory(),
   }), /expected D1 backend/);
 

@@ -143,6 +143,15 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
         source: "drive", title: "Filename dated", document_date: 1750000000000,
         date_source: "filename", occurred_at: "2025-06-15T23:59:59-07:00",
       },
+      {
+        chunk_uid: "store-dashboard:sales:2026-09:job:fixture#0",
+        doc_uid: "store-dashboard:sales:2026-09:job:fixture",
+        source_id: "sales:2026-09:job:fixture",
+        source: "store-dashboard", title: "Current sales", text: "body",
+        authority_meta: JSON.stringify({
+          connector: "custom_api", custom_api_source_id: "sales:2026-09",
+        }),
+      },
     ] }), first: async () => null, run: async () => ({}) }) }), batch: async () => {} },
   };
   const s = storeFor(env);
@@ -161,6 +170,10 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
   const filenameOccurrence = r.results.find((row) => row.ref_key === "z");
   check("a valid metadata.start is not exposed without Calendar event-start provenance",
     filenameOccurrence?.occurred_at === null, JSON.stringify(filenameOccurrence));
+  const customApi = r.results.find((row) => row.source === "store-dashboard");
+  check("custom API public identity stays stable across job-versioned storage",
+    customApi?.source_id === "sales:2026-09" && customApi?.ref_key === "sales:2026-09",
+    JSON.stringify(customApi));
 }
 
 /* ---- a null document date must survive as null, never as "now" ---- */
@@ -392,7 +405,7 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
       !durableSafetyFields.includes("checkout.stripe.com"), durableSafetyFields);
 }
 
-/* ---- completion inventory must recount live documents, not trust its cache ---- */
+/* ---- hot inventory reads only bounded source metadata ---- */
 {
   let statsSql = "";
   const env = {
@@ -402,10 +415,7 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
         statsSql = sql;
         return { all: async () => ({ results: [{
           source_type: "message",
-          stored_documents: 7,
-          logical_documents: 6,
-          total: 12,
-          embedded: 12,
+          has_documents: 1,
           last_ingest_at: 1750000000000,
         }] }) };
       },
@@ -413,11 +423,12 @@ check("a nonsense value does not silently pick d1", backendOf({ STORAGE: "mongo"
   };
   const inventory = await storeFor(env).stats(env);
   const row = inventory.rows[0];
-  check("D1 inventory discovers live-document sources even when corpus_stats is absent",
-    /SELECT source FROM documents WHERE deleted_at IS NULL/.test(statsSql), statsSql);
-  check("D1 inventory derives physical and logical counts from live documents",
-    /COUNT\(\*\) AS stored_documents/.test(statsSql) && /GROUP BY source/.test(statsSql) &&
-      row.stored_documents === 7 && row.logical_documents === 6 && row.document_counts_exact === true,
+  check("D1 hot inventory uses the trigger-maintained source inventory without a corpus scan",
+    /document_source_inventory/.test(statsSql) &&
+      !/FROM\s+documents\b|FROM\s+chunks\b|json_extract/i.test(statsSql), statsSql);
+  check("D1 hot inventory reports presence while leaving expensive counts explicitly unknown",
+    row.has_documents === true && row.stored_documents === null && row.logical_documents === null &&
+      row.document_counts_exact === false && /not counted on large Brains/.test(row.count_note),
     JSON.stringify(row));
 }
 

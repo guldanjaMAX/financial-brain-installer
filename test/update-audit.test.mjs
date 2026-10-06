@@ -8,18 +8,30 @@ import { validateIncidents, releaseBlockers, releaseAdjudication, runRegressions
   DEFERRAL_CAUSES, assertSourceInventoryV3ReleaseVersion,
   SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION, DEFAULT_REGRESSION_TIMEOUT_MS,
   CLOUDFLARE_RECOVERY_ADAPTER_REGRESSION_TIMEOUT_MS } from "../scripts/audit-updates.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
 const cases = JSON.parse(readFileSync(new URL("../docs/update-incidents.json", import.meta.url), "utf8"));
 const packageVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
-assert.equal(SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION, "0.4.8");
+const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+const updateAuditDoc = readFileSync(new URL("../docs/UPDATE-AUDIT.md", import.meta.url), "utf8");
+const maintainerDoc = readFileSync(new URL("../docs/MAINTAINER.md", import.meta.url), "utf8");
+const candidatePlan = readFileSync(
+  new URL(`../docs/release-evidence/v${packageVersion}-candidate-release-evidence-plan.md`, import.meta.url),
+  "utf8",
+);
+assert.equal(SOURCE_INVENTORY_V3_MINIMUM_PACKAGE_VERSION, "0.4.9");
 assert.equal(assertSourceInventoryV3ReleaseVersion(packageVersion), packageVersion,
   "the held candidate must use a non-colliding source-inventory identity");
-assert.throws(() => assertSourceInventoryV3ReleaseVersion("0.4.6"), /already-live package 0\.4\.6/);
-assert.throws(() => assertSourceInventoryV3ReleaseVersion("0.4.5"), /package version must be 0\.4\.8 or newer/);
+assert.throws(() => assertSourceInventoryV3ReleaseVersion("0.4.6"),
+  /already-live package 0\.4\.6.*package version must be 0\.4\.9 or newer/);
+assert.throws(() => assertSourceInventoryV3ReleaseVersion("0.4.5"), /package version must be 0\.4\.9 or newer/);
 assert.throws(() => assertSourceInventoryV3ReleaseVersion("0.4.7"),
-  /retired held candidate identity 0\.4\.7; that candidate was never public or live.*0\.4\.8 or newer/,
+  /retired held candidate identity 0\.4\.7; that candidate was never public or live.*0\.4\.9 or newer/,
   "changed bytes must not reuse the prior held candidate's evidence identity");
-assert.equal(assertSourceInventoryV3ReleaseVersion("0.4.8"), "0.4.8");
+assert.throws(() => assertSourceInventoryV3ReleaseVersion("0.4.8"),
+  /retired held candidate identity 0\.4\.8; that candidate was never public or live.*0\.4\.9 or newer/,
+  "changed bytes must not reuse the superseded 0.4.8 candidate's evidence identity");
+assert.equal(assertSourceInventoryV3ReleaseVersion("0.4.9"), "0.4.9");
 assert.equal(assertSourceInventoryV3ReleaseVersion("0.5.0"), "0.5.0");
 const auditSource = readFileSync(new URL("../scripts/audit-updates.mjs", import.meta.url), "utf8");
 assert.match(auditSource, /if \(mode === "--release"\) assertSourceInventoryV3ReleaseVersion\(version\)/,
@@ -37,6 +49,8 @@ for (const id of ["UPDATE-025", "UPDATE-026"]) {
   assert.ok(cases.some((c) => c.id === id),
     "bank freshness honesty and verified-package Windows evidence must retain a release gate");
 }
+assert.ok(cases.some((c) => c.id === "UPDATE-044"),
+  "the bank freshness account breadth re-homed from UPDATE-025 by ADR 008 must retain a release gate");
 const findings = new Set(cases.flatMap((c) => c.findings));
 for (const id of [...Array.from({ length: 16 }, (_, i) => `F${i + 1}`), ...Array.from({ length: 6 }, (_, i) => `N${i + 1}`)]) {
   assert.ok(findings.has(id), `original audit finding ${id} must retain an adjudication`);
@@ -181,6 +195,105 @@ for (const item of cases.filter((i) => i.deferral)) {
   assert.equal(item.deferral.version, packageVersion, `${item.id} defers for a version nobody is cutting`);
   assert.ok(!UNDEFERRABLE_INCIDENTS.includes(item.id));
 }
+for (const id of ["UPDATE-012", "UPDATE-044"]) {
+  const reason = cases.find((item) => item.id === id)?.deferral?.reason || "";
+  assert.doesNotMatch(reason,
+    /owner(?:'s)?\s+(?:approved|decided|confirmed|own|holds)|personal login|account holders/i,
+    `${id} deferral reason must contain neutral release facts only`);
+}
+const deferralCopies = [updateAuditDoc, maintainerDoc, candidatePlan].join("\n");
+for (const approvalCopy of [
+  /owner-approved exact-version 0\.4\.9/gi,
+  /owner-approved narrowing/gi,
+  /new owner-approved record/gi,
+  /owner approved that 0\.4\.9 may ship without/gi,
+  /owner decided on 2026-09-25 to defer Windows ARM64/gi,
+  /approved this exact deferral on 2026-09-26/gi,
+  /owner confirmed it for the 0\.4\.9 release text/gi,
+]) {
+  assert.doesNotMatch(deferralCopies, approvalCopy,
+    "deferral documentation must rely on the repository record rather than approval prose");
+}
+const currentReleaseSection = changelog.split(new RegExp(`^## ${packageVersion.replaceAll(".", "\\.")}\\s*$`, "m"))[1]
+  ?.split(/^## /m)[0] || "";
+function currentReleaseNotCoveredBlock(section) {
+  const heading = /^### This release does NOT cover\s*$/m.exec(section);
+  if (!heading) return "";
+  const bodyStart = heading.index + heading[0].length;
+  const remaining = section.slice(bodyStart);
+  const nextHeading = remaining.search(/^### /m);
+  return remaining.slice(0, nextHeading < 0 ? remaining.length : nextHeading).trim();
+}
+
+function assertOrdinaryReleaseCopyPrecedesLimitations(section) {
+  const rendered = renderCliCommands(section);
+  const ordinary = rendered.indexOf("Dollar amounts in a partly answered question are no longer cut.");
+  const limitations = rendered.indexOf("This release does NOT cover");
+  assert.ok(ordinary >= 0 && limitations >= 0 && ordinary < limitations,
+    "ordinary release copy must render before the final does-not-cover block");
+}
+
+const notCoveredBlock = currentReleaseNotCoveredBlock(currentReleaseSection);
+const deferredIds = releaseAdjudication(cases, packageVersion).deferred
+  .map((item) => item.id)
+  .sort();
+const limitationIds = (block) => [...block.matchAll(/\bUPDATE-\d{3}\b/gu)]
+  .map((match) => match[0])
+  .sort();
+function assertExactLimitationIds(block, registry = cases) {
+  const expected = releaseAdjudication(registry, packageVersion).deferred
+    .map((item) => item.id)
+    .sort();
+  assert.deepEqual(limitationIds(block), expected,
+    "the release limitation block must exactly equal the audit's current deferral set");
+}
+assert.ok(notCoveredBlock, "the current changelog needs a This release does NOT cover block");
+assert.throws(() => assertOrdinaryReleaseCopyPrecedesLimitations(
+  "### This release does NOT cover\n\n- **UPDATE-999:** Deferred fixture.\n\n" +
+    "- **Dollar amounts in a partly answered question are no longer cut.** Fixture.",
+), /ordinary release copy must render before/,
+"the prior layout must fail because whatsnew renders ordinary changes inside the limitation block");
+assert.doesNotThrow(() => assertOrdinaryReleaseCopyPrecedesLimitations(currentReleaseSection));
+assertExactLimitationIds(notCoveredBlock);
+assert.throws(
+  () => assertExactLimitationIds(`${notCoveredBlock}\n- **UPDATE-022:** Stale fixture limitation.`),
+  (error) => {
+    assert.deepEqual(error.actual, [...deferredIds, "UPDATE-022"].sort(),
+      "the stale-line control reaches exact ID extraction");
+    assert.deepEqual(error.expected, deferredIds,
+      "the stale-line control compares against adjudicated deferrals");
+    return true;
+  },
+  "a stale limitation ID must fail even when every current deferral remains present",
+);
+const registryWithoutUpdate044Deferral = cases.map((item) => {
+  if (item.id !== "UPDATE-044") return item;
+  const copy = { ...item };
+  delete copy.deferral;
+  return copy;
+});
+assert.throws(
+  () => assertExactLimitationIds(notCoveredBlock, registryWithoutUpdate044Deferral),
+  (error) => {
+    const expected = releaseAdjudication(registryWithoutUpdate044Deferral, packageVersion).deferred
+      .map((item) => item.id)
+      .sort();
+    assert.deepEqual(error.actual, deferredIds,
+      "the removed-deferral control still reads the unchanged CHANGELOG line");
+    assert.deepEqual(error.expected, expected,
+      "the removed-deferral control reaches adjudication rather than a hard-coded expected set");
+    return true;
+  },
+  "a CHANGELOG line must fail after its registry deferral is removed",
+);
+for (const id of deferredIds) {
+  assert.match(notCoveredBlock, new RegExp(`\\b${id}\\b`),
+    `${id} must stay visible in the current release limitation block`);
+}
+assert.match(notCoveredBlock,
+  /UPDATE-012[\s\S]*Windows x64 is the only supported Windows runtime[\s\S]*Windows ARM64 ships unproven/i);
+assert.match(notCoveredBlock,
+  /UPDATE-044[\s\S]*bank breadth ships unproven[\s\S]*bank invitations stay closed/i);
 assert.ok(releaseBlockers(cases, packageVersion).length > 0,
   "0.4.0 still has real blockers; scoping the gate must not be mistaken for clearing it");
 const calls = [];

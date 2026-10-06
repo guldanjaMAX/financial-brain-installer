@@ -3,7 +3,7 @@
   "derivation": "package-lock direct bundle integrity archives",
   "root_package": {
     "name": "brain-installer",
-    "version": "0.4.8"
+    "version": "0.4.9"
   },
   "bundles": [
     {

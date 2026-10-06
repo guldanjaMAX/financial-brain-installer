@@ -127,7 +127,7 @@
       "test/cli-path-persist.test.mjs",
       "test/technician-setup.test.mjs"
     ],
-    "acceptance": "Resolve actual executable and version before and after installing into one prefix; run pasted commands with restrictive PowerShell and redirected APPDATA. Verify every printed human command uses the actual installed executable; require physical Windows and ARM64 acceptance before closure.",
+    "acceptance": "Resolve actual executable and version before and after installing into one prefix; run pasted commands with restrictive PowerShell and redirected APPDATA. Verify every printed human command uses the actual installed executable; require physical Windows x64 acceptance before closure. The Windows ARM64 CLI-identity requirement is carried by UPDATE-012.",
     "findings": [
       "F15"
     ],
@@ -261,12 +261,19 @@
     "tests": [
       "scripts/windows-dpapi-release-gate.mjs"
     ],
-    "acceptance": "Run actual packaged CLI, DPAPI, login, update interruption and normal process exit on Windows ARM64 Node 24; x64 hosted CI is insufficient.",
+    "acceptance": "Run actual packaged CLI, DPAPI, login, update interruption and normal process exit on Windows ARM64 Node 24; x64 hosted CI is insufficient. On physical Windows ARM64, resolve actual executable and version before and after installing into one prefix; run pasted commands with restrictive PowerShell and redirected APPDATA. Verify every printed human command uses the actual installed executable.",
     "findings": [
       "FIELD-ARM64"
     ],
     "evidence": [],
-    "testPlatform": "win32"
+    "testPlatform": "win32",
+    "deferral": {
+      "version": "0.4.9",
+      "blocked_on": "physical_hardware_unavailable",
+      "reason": "The acceptance requires a physical Windows ARM64 host on Node 24 and states in its own text that x64 hosted CI is insufficient, so no CI run can close it. No physical Windows ARM64 machine is available for this cut, and 0.4.9 does not claim Windows ARM64 as a supported runtime. Since ADR 007 the row also carries the Windows ARM64 CLI-identity walk re-homed from UPDATE-006; this deferral covers that walk too and moves nothing back into UPDATE-006. The exact-version 0.4.9 deferral was recorded on 2026-09-26 in the separately reviewed ADR 007 change.",
+      "unproven": "Windows ARM64 owners get no packaged-launch, DPAPI, browser login, interrupted-update, clean-exit or printed-command identity proof in 0.4.9. The release note must name Windows x64 as the only claimed Windows runtime.",
+      "review": "docs/decisions/007-rehome-update-006-arm64-clause.md"
+    }
   },
   {
     "id": "UPDATE-013",
@@ -527,7 +534,7 @@
       "worker/test/plaid-refresh-debt-regression.test.mjs",
       "worker/test/plaid-sync-custody.test.mjs"
     ],
-    "acceptance": "With a real Item, prove the owner is never told current while a refresh is actually owed. A saved ready snapshot must not inherit a later webhook's history without fetching it, and a ready or interrupted-prefix resume must publish its exact saved data while staying partial and immediately due. A refresh that fails, including one that fails before any provider read such as an unreadable access reference, must show as refresh debt in both the owner account inventory and the feed status, not merely in needs_attention. An ordinary future scheduled poll on an actually fetched feed must still read current, and the debt must clear once a real refresh succeeds. Repeat across two institutions and at least four accounts spanning personal and two businesses, including a real business banking login, with a verified signed webhook and a deliberately missed notification recovered on schedule.",
+    "acceptance": "With a real Item, prove the owner is never told current while a refresh is actually owed. A saved ready snapshot must not inherit a later webhook's history without fetching it, and a ready or interrupted-prefix resume must publish its exact saved data while staying partial and immediately due. A refresh that fails, including one that fails before any provider read such as an unreadable access reference, must show as refresh debt in both the owner account inventory and the feed status, not merely in needs_attention. An ordinary future scheduled poll on an actually fetched feed must still read current, and the debt must clear once a real refresh succeeds. Prove it with a verified signed webhook and a deliberately missed notification recovered on schedule. The repetition across two institutions and at least four accounts spanning personal and two businesses, including a real business banking login, is carried by UPDATE-044.",
     "findings": [
       "PLAID-READY-WINDOW-FRESHNESS",
       "PLAID-REFRESH-DEBT-SCHEDULED-RETRYABLE"
@@ -780,5 +787,33 @@
     "acceptance": "Remove the affected decoder from every reviewed Wrangler runtime the product can invoke. Pin one patched Wrangler contract across package metadata, doctor, named OAuth profiles, legacy compatibility, locked recovery runtime, tests and owner instructions; prove the exact lock and runtime inventory, both OAuth/config parsers, packed setup, the full test and CI matrix, and renewed field-runtime evidence. Until that candidate is accepted, any narrow field exception must exclude Linux, wrangler dev, local Miniflare Images or cf.image, untrusted HEIF or AVIF, and the legacy wrangler@4.73.0 route.",
     "findings": "A live npm audit on 2026-09-12 at candidate aa1937a reported three high-severity nodes through the direct development pin wrangler 4.127.1, Miniflare and sharp 0.35.2 under GHSA-rgj7-g3m4-5g8c. The offline audit cache had reported zero and was not current evidence. The selected setup and locked field-runtime pin is now 4.131.1, which resolves patched sharp 0.35.4; the live installed-tree audit is clean and focused OAuth, doctor, runtime, deployment, package and privacy checks pass locally. A second dynamically fetched legacy pin, wrangler@4.73.0, remains in the compatibility path and keeps this incident open. The affected sharp decoder is dynamically loaded only by Miniflare's local Images and cf.image paths; the frozen Monday pilot uses the patched selected path for remote Cloudflare commands on macOS and Windows, no Linux, no wrangler dev or Images binding, no untrusted HEIF or AVIF, and no legacy path. Exact-SHA CI and provider behavior remain unproved.",
     "evidence": []
+  },
+  {
+    "id": "UPDATE-044",
+    "title": "Bank freshness across two institutions, two owned businesses and a business banking login",
+    "status": "open",
+    "scopes": [
+      "fresh",
+      "upgrade",
+      "recovery"
+    ],
+    "tests": [
+      "worker/test/ready-window-webhook-regression.test.mjs",
+      "worker/test/plaid-refresh-debt-regression.test.mjs",
+      "worker/test/plaid-sync-custody.test.mjs"
+    ],
+    "acceptance": "Repeat UPDATE-025's real-Item freshness proof across two institutions and at least four accounts spanning personal and two businesses, including a real business banking login, with a verified signed webhook and a deliberately missed notification recovered on schedule.",
+    "findings": [
+      "PLAID-READY-WINDOW-FRESHNESS",
+      "PLAID-REFRESH-DEBT-SCHEDULED-RETRYABLE"
+    ],
+    "evidence": [],
+    "deferral": {
+      "version": "0.4.9",
+      "blocked_on": "live_third_party_account_required",
+      "reason": "The acceptance requires real Items at two institutions and at least four real accounts spanning a person and two owned businesses, including a real business banking login, and no sandbox receipt or CI can stand in for them. No reviewed evidence meeting that breadth was available for the 0.4.9 cut on 2026-09-26. The exact-version deferral is recorded in ADR 008. It holds only while general bank invitations stay closed. If reviewed evidence for this row from the sealed package exists before the release write, the change that closes the row deletes this deferral.",
+      "unproven": "Bank freshness honesty across two institutions, at least four accounts spanning a person and two owned businesses, and a real business banking login ships unproven in 0.4.9; only UPDATE-025's real-Item proof backs the freshness claim. No owner may be invited to connect a bank while this deferral stands, and general bank invitations stay closed.",
+      "review": "docs/decisions/008-rehome-update-025-breadth-into-update-044.md"
+    }
   }
 ]
