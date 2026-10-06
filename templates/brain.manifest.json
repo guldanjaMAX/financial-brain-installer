@@ -214,9 +214,10 @@
     },
     "microsoft": {
       "_comment": [
-        "Microsoft 365 Outlook plus selected OneDrive or SharePoint drives.",
-        "Graph delta links carry exact message and file tombstones. Add exact",
-        "drive_ids or site_ids after reviewing the tenant selection."
+        "Microsoft 365 Outlook mail and calendar plus selected OneDrive or SharePoint drives.",
+        "Outlook Calendar keeps a rolling 30-day-past and 90-day-future view.",
+        "Independent Graph delta links carry exact message, event, and file tombstones.",
+        "Add exact drive_ids or site_ids after reviewing the tenant selection."
       ],
       "enabled": false,
       "mail_folder_ids": [

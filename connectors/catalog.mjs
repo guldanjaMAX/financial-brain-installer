@@ -42,8 +42,8 @@ export const CONNECTOR_EXPANSION_CATALOG = Object.freeze([
   row({
     id: "microsoft", label: "Microsoft 365", build: "sandbox_ready_runner",
     automated_proof: "offline_scripted_provider_io", rehearsal_available: true, installed_connection: true,
-    current_boundary: "OAuth refresh, Outlook immutable-ID delta, OneDrive and SharePoint body extraction, tombstones, baseline reconciliation, scheduling, and disconnect are wired.",
-    next_acceptance: "Use a test Entra tenant to prove consent, refresh, Outlook delta, file downloads, cursor expiry reset, deletions, disconnect, and retrieval.",
+    current_boundary: "OAuth refresh, Outlook immutable-ID mail delta, a rolling 30-day-past and 90-day-future calendar delta with independent cursor and guarded tombstones, OneDrive and SharePoint body extraction, baseline reconciliation, scheduling, and disconnect are wired.",
+    next_acceptance: "Use a test Entra tenant to prove delegated Calendars.Read consent, refresh, Outlook mail and calendar delta, file downloads, cursor expiry reset, edits, cancellations, deletions, disconnect, and retrieval.",
   }),
   row({
     id: "dropbox", label: "Dropbox", build: "sandbox_ready_runner",

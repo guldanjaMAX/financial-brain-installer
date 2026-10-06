@@ -3,11 +3,23 @@
 import {
   createPaginationGuard, ProviderSyncError, providerEnvelope, providerJson, providerSyncResult,
 } from "./provider-sync.mjs";
-import { downloadProviderFile } from "./provider-file.mjs";
+import {
+  buildEnvelope as buildGoogleCalendarEnvelope,
+  normalizeConfig as normalizeGoogleCalendarConfig,
+} from "./google-calendar.mjs";
 import { stripMarkup } from "../ingest/quality.mjs";
+import { restampFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
 const MAIL_PREFER = 'IdType="ImmutableId", outlook.body-content-type="text"';
+const CALENDAR_PREFER = 'outlook.body-content-type="text", outlook.timezone="UTC"';
+export const OUTLOOK_CALENDAR_PAST_DAYS = 30;
+export const OUTLOOK_CALENDAR_FUTURE_DAYS = 90;
+
+// Keep calendar and mail-only runs independent of the optional document
+// extractor bundle. A drive item loads that bundle immediately before use.
+const downloadProviderFile = async (options) =>
+  (await import("./provider-file.mjs")).downloadProviderFile(options);
 
 function cursorExpired(error) {
   if (error instanceof ProviderSyncError && error.status === 410) {
@@ -21,6 +33,7 @@ function cursorExpired(error) {
 async function deltaCollection({ provider = "microsoft", initialUrl, accessToken, fetchImpl, headers = {} }) {
   const items = [];
   const deletions = [];
+  const changes = [];
   const guard = createPaginationGuard(provider);
   let url = initialUrl;
   let deltaLink = null;
@@ -33,8 +46,13 @@ async function deltaCollection({ provider = "microsoft", initialUrl, accessToken
       throw cursorExpired(error);
     }
     for (const item of data.value || []) {
-      if (item?.["@removed"] || item?.deleted) deletions.push(item);
-      else items.push(item);
+      if (item?.["@removed"] || item?.deleted) {
+        deletions.push(item);
+        changes.push({ kind: "delete", item });
+      } else {
+        items.push(item);
+        changes.push({ kind: "upsert", item });
+      }
     }
     deltaLink = data["@odata.deltaLink"] || deltaLink;
     url = data["@odata.nextLink"] || null;
@@ -44,7 +62,7 @@ async function deltaCollection({ provider = "microsoft", initialUrl, accessToken
       kind: "retryable", code: "missing_delta_link",
     });
   }
-  return { items, deletions, deltaLink };
+  return { items, deletions, changes, deltaLink };
 }
 
 async function pagedGraphValues(url, auth) {
@@ -125,6 +143,199 @@ function resultWithSafePartialCursor(options, cursorSafe, extras = {}) {
   });
 }
 
+function calendarWindow(now) {
+  const value = typeof now === "function" ? now() : now;
+  const instant = new Date(value);
+  if (!Number.isFinite(instant.getTime())) throw new TypeError("Microsoft calendar now() returned an invalid time");
+  const midnight = Date.UTC(instant.getUTCFullYear(), instant.getUTCMonth(), instant.getUTCDate());
+  const day = 24 * 60 * 60 * 1000;
+  return {
+    start: new Date(midnight - OUTLOOK_CALENDAR_PAST_DAYS * day).toISOString(),
+    end: new Date(midnight + OUTLOOK_CALENDAR_FUTURE_DAYS * day).toISOString(),
+  };
+}
+
+function normalizedCalendarCursor(value) {
+  if (typeof value === "string" && value) {
+    return { delta_link: value, window_start: null, window_end: null, event_ids: [] };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return {
+    delta_link: typeof value.delta_link === "string" && value.delta_link ? value.delta_link : null,
+    window_start: typeof value.window_start === "string" ? value.window_start : null,
+    window_end: typeof value.window_end === "string" ? value.window_end : null,
+    event_ids: Array.isArray(value.event_ids)
+      ? [...new Set(value.event_ids.map(String).filter(Boolean))].sort()
+      : [],
+  };
+}
+
+function graphCalendarPerson(value) {
+  const address = value?.emailAddress;
+  if (!address?.address && !address?.name) return null;
+  return {
+    email: address.address || null,
+    displayName: address.name || null,
+  };
+}
+
+function graphCalendarTime(value, allDay) {
+  if (!value?.dateTime) return null;
+  return allDay
+    ? { date: String(value.dateTime).slice(0, 10), timeZone: value.timeZone || null }
+    : { dateTime: String(value.dateTime), timeZone: value.timeZone || null };
+}
+
+function googleShapedGraphEvent(event) {
+  const organizer = graphCalendarPerson(event?.organizer);
+  const attendees = (event?.attendees || []).map((attendee) => {
+    const person = graphCalendarPerson(attendee);
+    if (!person) return null;
+    return {
+      ...person,
+      resource: attendee?.type === "resource",
+      responseStatus: attendee?.status?.response || "needsAction",
+    };
+  }).filter(Boolean);
+  const joinUrl = event?.onlineMeeting?.joinUrl || null;
+  const provider = event?.onlineMeetingProvider;
+  const solution = provider === "teamsForBusiness" ? "Microsoft Teams" : provider || null;
+  return {
+    id: event?.id || null,
+    status: event?.isCancelled ? "cancelled" : "confirmed",
+    summary: event?.subject || "",
+    description: event?.body?.content || event?.bodyPreview || "",
+    start: graphCalendarTime(event?.start, event?.isAllDay === true),
+    end: graphCalendarTime(event?.end, event?.isAllDay === true),
+    organizer,
+    attendees,
+    location: event?.location?.displayName || null,
+    conferenceData: joinUrl || solution ? {
+      entryPoints: joinUrl ? [{ entryPointType: "video", uri: joinUrl }] : [],
+      conferenceSolution: solution ? { name: solution } : null,
+    } : null,
+    htmlLink: event?.webLink || null,
+    updated: event?.lastModifiedDateTime || null,
+    iCalUID: event?.iCalUId || null,
+    recurringEventId: event?.seriesMasterId || null,
+    originalStartTime: event?.originalStart ? graphCalendarTime({
+      dateTime: event.originalStart,
+      timeZone: event?.start?.timeZone || null,
+    }, event?.isAllDay === true) : null,
+    eventType: "default",
+  };
+}
+
+function outlookCalendarInstruction(event) {
+  const eventId = event?.id ? String(event.id) : null;
+  if (!eventId) return { kind: "skip" };
+  const sourceId = `outlook:event:${eventId}`;
+  const shaped = googleShapedGraphEvent(event);
+  const config = normalizeGoogleCalendarConfig({
+    calendars: [{ id: "outlook", key: "outlook", label: "Outlook Calendar" }],
+  });
+  const instruction = buildGoogleCalendarEnvelope(shaped, {
+    calendar: config.calendars[0],
+    config,
+  });
+  if (instruction.kind === "delete") {
+    return { kind: "delete", event_id: eventId, source_id: sourceId };
+  }
+  if (instruction.kind !== "upsert") return { ...instruction, event_id: eventId, source_id: sourceId };
+  const envelope = instruction.envelope;
+  return {
+    kind: "upsert",
+    event_id: eventId,
+    source_id: sourceId,
+    envelope: restampFirstPartySourceProvenance({
+      ...envelope,
+      source_type: "microsoft",
+      source_id: sourceId,
+      source_subtype: "outlook_calendar",
+      metadata: {
+        ...envelope.metadata,
+        workload: "outlook_calendar",
+        microsoft_event_id: eventId,
+      },
+    }, { sourceType: "microsoft", textSource: "native", textReliable: true }),
+  };
+}
+
+async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
+  const window = calendarWindow(now);
+  const prior = normalizedCalendarCursor(cursor);
+  const sameWindow = prior?.window_start === window.start && prior?.window_end === window.end;
+  let baseline = !prior?.delta_link || !sameWindow;
+  const initialUrl = () => {
+    const url = new URL(`${GRAPH}/me/calendarView/delta`);
+    url.searchParams.set("startDateTime", window.start);
+    url.searchParams.set("endDateTime", window.end);
+    return url.toString();
+  };
+  let page;
+  try {
+    page = await deltaCollection({
+      initialUrl: baseline ? initialUrl() : prior.delta_link,
+      accessToken,
+      fetchImpl,
+      headers: { Prefer: CALENDAR_PREFER },
+    });
+  } catch (error) {
+    if (!(!baseline && error instanceof ProviderSyncError && error.code === "cursor_expired")) throw error;
+    baseline = true;
+    page = await deltaCollection({
+      initialUrl: initialUrl(), accessToken, fetchImpl,
+      headers: { Prefer: CALENDAR_PREFER },
+    });
+  }
+
+  const inventory = new Set(baseline ? [] : prior?.event_ids || []);
+  const documents = new Map();
+  const deletions = new Map();
+  for (const change of page.changes) {
+    const eventId = change.item?.id ? String(change.item.id) : null;
+    if (!eventId) continue;
+    const sourceId = `outlook:event:${eventId}`;
+    const instruction = change.kind === "delete"
+      ? { kind: "delete", event_id: eventId, source_id: sourceId }
+      : outlookCalendarInstruction(change.item);
+    if (instruction.kind === "delete") {
+      inventory.delete(eventId);
+      documents.delete(eventId);
+      deletions.set(eventId, { source_type: "microsoft", source_id: sourceId });
+    } else if (instruction.kind === "upsert") {
+      inventory.add(eventId);
+      deletions.delete(eventId);
+      documents.set(eventId, instruction.envelope);
+    } else if (inventory.has(eventId)) {
+      // A changed event whose searchable fields were all blanked must not
+      // leave its prior document behind. The common provider runner applies
+      // the same aggregate removal cap and exact readback as a cancellation.
+      inventory.delete(eventId);
+      documents.delete(eventId);
+      deletions.set(eventId, { source_type: "microsoft", source_id: sourceId });
+    }
+  }
+  if (baseline) {
+    for (const eventId of prior?.event_ids || []) {
+      if (!inventory.has(eventId)) {
+        deletions.set(eventId, {
+          source_type: "microsoft",
+          source_id: `outlook:event:${eventId}`,
+        });
+      }
+    }
+  }
+  return {
+    documents: [...documents.values()],
+    deletions: [...deletions.values()],
+    eventIds: [...inventory].sort(),
+    deltaLink: page.deltaLink,
+    baseline,
+    window,
+  };
+}
+
 export async function syncMicrosoftGraph({
   accessToken,
   fetchImpl = fetch,
@@ -132,7 +343,9 @@ export async function syncMicrosoftGraph({
   driveIds = [],
   siteIds = [],
   includePersonalDrive = true,
+  includeCalendar = true,
   cursor = null,
+  now = Date.now,
 } = {}) {
   if (!accessToken) throw new TypeError("Microsoft Graph accessToken is required");
   const documents = [];
@@ -144,6 +357,22 @@ export async function syncMicrosoftGraph({
   const auth = { accessToken, fetchImpl };
   const prior = cursor && typeof cursor === "object" ? cursor : {};
   let authoritativeSnapshot = true;
+
+  if (includeCalendar) {
+    const calendar = await syncOutlookCalendar({
+      accessToken, fetchImpl, cursor: prior.calendar, now,
+    });
+    documents.push(...calendar.documents);
+    deletions.push(...calendar.deletions);
+    snapshotSourceIds.push(...calendar.eventIds.map((eventId) => `outlook:event:${eventId}`));
+    proposed.calendar = {
+      delta_link: calendar.deltaLink,
+      window_start: calendar.window.start,
+      window_end: calendar.window.end,
+      event_ids: calendar.eventIds,
+    };
+    if (!calendar.baseline) authoritativeSnapshot = false;
+  }
 
   for (const folderValue of mailFolderIds || []) {
     const folderId = String(folderValue);
@@ -227,7 +456,8 @@ export async function syncMicrosoftGraph({
   for (const [code, count] of gapCounts) {
     warnings.push(`${count} Microsoft drive file(s) were inventoried but not indexed because of ${code}.`);
   }
-  const cursorSafe = Object.keys(proposed.mail).length + Object.keys(proposed.drives).length > 0;
+  const cursorSafe = Object.keys(proposed.mail).length + Object.keys(proposed.drives).length > 0 ||
+    Boolean(proposed.calendar?.delta_link);
   return resultWithSafePartialCursor({
     provider: "microsoft", documents, deletions, warnings,
     proposedCursor: proposed,

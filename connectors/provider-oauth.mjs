@@ -91,8 +91,9 @@ export const PROVIDER_OAUTH = Object.freeze({
     tokenUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
     scopes: Object.freeze([
       "openid", "profile", "offline_access", "User.Read", "Mail.Read",
-      "Files.Read", "Sites.Read.All",
+      "Calendars.Read", "Files.Read", "Sites.Read.All",
     ]),
+    consentNotice: "Microsoft 365 will ask for read-only access to Outlook mail and calendar events, plus OneDrive and SharePoint files. Financial Brain cannot create, edit, send, or delete Microsoft 365 content.",
     clientAuth: "body",
     clientSecretRequired: false,
     omitClientSecret: true,
@@ -1616,6 +1617,15 @@ export async function providerAccessToken(provider, {
   assertSourceOwned?.();
   const current = connection || loadProviderCredentials(config.provider, storage);
   if (!current) throw new ProviderOAuthError(provider, "load", "this provider is not connected", { code: "not_connected" });
+  if (config.provider === "microsoft" &&
+      (!Array.isArray(current.scopes) || !current.scopes.includes("Calendars.Read"))) {
+    throw new ProviderOAuthError(
+      "microsoft",
+      "load",
+      "the saved Microsoft 365 connection predates Outlook calendar access and does not include delegated Calendars.Read. Re-run brain connect microsoft <manifest> and approve the updated read-only consent screen; the existing token cannot gain this scope through refresh.",
+      { code: "reconsent_required" },
+    );
+  }
   const expiresAt = Number(current.expires_at);
   if (clean(current.access_token) && (!Number.isFinite(expiresAt) || expiresAt - now > refreshSkewMs)) {
     return { accessToken: current.access_token, connection: current, refreshed: false };

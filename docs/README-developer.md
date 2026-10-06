@@ -1322,6 +1322,12 @@ Read this before scoping an engagement.
   workspace, tenant, sandbox company, Plaid Item, or account receipt yet. Box
   and Airtable still have no native API connector; use a reviewed export or a
   watched folder where suitable.
+  Microsoft requests delegated `Calendars.Read` in addition to its existing
+  read scopes. A connection created before that scope was added must run
+  `brain connect microsoft <manifest>` again and approve the updated consent
+  screen. Token refresh cannot add a scope. The calendar adapter then maintains
+  its own rolling 30-day-past and 90-day-future `/me/calendarView/delta`
+  cursor without changing the mail or drive cursor members.
 - **The custom business API source is locally proven only.** Its declarative
   Worker path, strict HTTPS boundary, dedicated `CUSTOM_API_TOKEN_` secret
   namespace, durable checkpointed job, exact-row-and-document verified

@@ -14930,7 +14930,7 @@ const PROVIDER_LOAD_METADATA = Object.freeze({
   }),
   microsoft: Object.freeze({
     label: "Microsoft 365",
-    scope: "authorized Outlook, OneDrive and SharePoint content",
+    scope: "authorized Outlook mail and calendar, OneDrive and SharePoint content",
   }),
   dropbox: Object.freeze({
     label: "Dropbox",
@@ -29205,6 +29205,7 @@ export async function cmdConnectProvider(provider, manifestPath, flags = {}, opt
     info(`QuickBooks environment: ${configuration.environment} (selected by corpora.quickbooks.environment)`);
     info("Intuit's Accounting scope can read and update accounting data. Financial Brain uses only read/query calls, but the consent screen grants that broader provider permission.");
   }
+  if (!options.quiet && config.consentNotice) info(config.consentNotice);
   if (!options.quiet) info(`requesting the manifest-enabled ${config.label} connection in the owner's browser`);
   const connection = await oauth.authorizeProvider(provider, {
     clientId,
