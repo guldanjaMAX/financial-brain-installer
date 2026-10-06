@@ -9,21 +9,39 @@ const ROOT = resolve(import.meta.dirname, "..");
 const HANDOFF = join(ROOT, "machine-prep", "handoff");
 const MAC_INSTALLER = join(ROOT, "machine-prep", "installers", "macos");
 const WINDOWS_INSTALLER = join(ROOT, "machine-prep", "installers", "windows");
+const KIT_URL = "https://financialbrain.ai/kit/brain-installer-0.4.9-0555ad1972d7f8d6.tgz";
+const KIT_SHA256 = "0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2";
+const KIT_SIZE = "6668013";
 
 function read(relativePath) {
   return readFileSync(join(ROOT, relativePath), "utf8").replaceAll("\r\n", "\n");
 }
 
-test("Claude handoff messages use the public OS guide and preserve owner approval", () => {
+test("Claude handoff messages are local notes with no remote instructions", () => {
   const mac = read("machine-prep/handoff/message-macos.txt");
   const windows = read("machine-prep/handoff/message-windows.txt");
-  assert.match(mac, /^Please start the Financial Brain guided setup\./);
-  assert.match(mac, /curl -fsSL https:\/\/financialbrain\.ai\/install\/agent-macos\.md/);
-  assert.match(windows, /curl -fsSL https:\/\/financialbrain\.ai\/install\/agent\.md/);
+  assert.match(mac, /^The Financial Brain installer installed the verified CLI and opened setup/);
+  assert.match(windows, /^The Financial Brain installer installed the verified CLI and opened setup/);
   for (const message of [mac, windows]) {
     assert.match(message, /Want me to do this for you\?/);
     assert.match(message, /Wait for my answer before taking that step\./);
     assert.match(message, /Never ask me to paste a command\./);
+    assert.doesNotMatch(message, /https?:\/\/|curl|Invoke-WebRequest|download/i);
+  }
+});
+
+test("both prep scripts pin, verify, and locally install the published 0.4.9 kit", () => {
+  for (const source of [read("machine-prep/prep-mac.sh"), read("machine-prep/prep-windows.ps1")]) {
+    assert.match(source, new RegExp(KIT_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(source, new RegExp(KIT_SHA256));
+    assert.match(source, new RegExp(KIT_SIZE));
+    assert.match(source, /CHECKSUM_DECISION_REACHED/);
+    assert.match(source, /PREFIX_DECISION_REACHED/);
+    assert.match(source, /--ignore-scripts/);
+    assert.match(source, /--no-audit/);
+    assert.match(source, /--no-fund/);
+    assert.doesNotMatch(source, /npm(?:\.cmd)?[^\n]*install[^\n]*https:\/\//,
+      "npm installs only the already verified local archive");
   }
 });
 
@@ -83,6 +101,7 @@ test("macOS staging contains the real prep, handoff, support log wrapper, and un
       "handoff/handoff-mac.sh",
       "handoff/handoff-macos.url",
       "handoff/message-macos.txt",
+      "start-brain-setup.command",
       "UNINSTALL.md",
     ];
     for (const relativePath of expected) {
@@ -93,6 +112,8 @@ test("macOS staging contains the real prep, handoff, support log wrapper, and un
     assert.match(wrapper, /prep-mac\.sh" --real/);
     assert.match(wrapper, /installer\.log/);
     assert.match(wrapper, /handoff-mac\.sh/);
+    assert.match(wrapper, /start-brain-setup\.command/);
+    assert.match(wrapper, /SETUP_LAUNCH_DECISION_REACHED=1/);
     assert.match(wrapper, /set -o pipefail/);
   } finally {
     rmSync(staging, { recursive: true, force: true });
@@ -138,6 +159,7 @@ test("macOS native tools build the reviewed unsigned package contents", { skip: 
       "./Library/Application Support/FinancialBrainMachinePrep/handoff/message-macos.txt",
       "./Library/Application Support/FinancialBrainMachinePrep/prep-mac.sh",
       "./Library/Application Support/FinancialBrainMachinePrep/run-machine-prep-mac.sh",
+      "./Library/Application Support/FinancialBrainMachinePrep/start-brain-setup.command",
     ].sort());
     const signature = spawnSync("pkgutil", ["--check-signature", pkg], { encoding: "utf8" });
     assert.equal(signature.status, 1, `${signature.stdout}${signature.stderr}`);
@@ -171,7 +193,21 @@ test("Windows wrapper has an unsupported-OS decision gate, shareable log, real p
   assert.match(wrapper, /Invoke-EmbeddedPowerShell \$prep @\("--real"\)/);
   assert.match(wrapper, /installer\.log/);
   assert.match(wrapper, /handoff-windows\.ps1/);
+  assert.match(wrapper, /start-brain-setup\.ps1/);
+  assert.match(wrapper, /SETUP_LAUNCH_DECISION_REACHED=1/);
   assert.doesNotMatch(wrapper, /Set-ExecutionPolicy/);
+});
+
+test("visible setup launchers use the installed CLI and the standard fresh manifest path", () => {
+  const mac = read("machine-prep/installers/macos/start-brain-setup.command");
+  assert.match(mac, /\.financial-brain\/bin\/brain/);
+  assert.match(mac, /Financial Brain\/brain\.manifest\.json/);
+  assert.match(mac, /"\$BRAIN" setup "\$MANIFEST"/);
+
+  const windows = read("machine-prep/installers/windows/start-brain-setup.ps1");
+  assert.match(windows, /FinancialBrain\\brain\.cmd/);
+  assert.match(windows, /Financial Brain\\brain\.manifest\.json/);
+  assert.match(windows, /& \$brain setup \$manifest/);
 });
 
 test("Windows package project names every reviewed payload file", () => {
@@ -179,6 +215,7 @@ test("Windows package project names every reviewed payload file", () => {
     "FinancialBrainMachinePrep.wixproj",
     "Package.wxs",
     "run-machine-prep.ps1",
+    "start-brain-setup.ps1",
     "verify-msi.ps1",
     "UNINSTALL.txt",
   ];
@@ -210,7 +247,7 @@ test("Windows wrapper refuses an unsupported release before prep", { skip: proce
   assert.doesNotMatch(out, /INSTALLER_TEST_GATE_REACHED|INSTALLER_PROGRESS/);
 });
 
-test("machine-prep CI builds only unsigned artifacts with pinned actions and no release path", () => {
+test("machine-prep CI still builds review artifacts with pinned actions and no release path", () => {
   const workflow = read(".github/workflows/machine-prep-installers.yml");
   assert.match(workflow, /^  workflow_dispatch:/m);
   assert.match(workflow, /wix_osmf_confirmed:/);
@@ -225,6 +262,78 @@ test("machine-prep CI builds only unsigned artifacts with pinned actions and no 
     assert.match(match[1], /@[0-9a-f]{40}$/);
   }
   assert.doesNotMatch(workflow, /gh release|release:|contents:\s*write|id-token:\s*write|notarytool|signtool/i);
+});
+
+const WINDOWS_SIGNING_VARIABLES = [
+  "AZURE_TENANT_ID",
+  "AZURE_CLIENT_ID",
+  "AZURE_SUBSCRIPTION_ID",
+  "ARTIFACT_SIGNING_ENDPOINT",
+  "ARTIFACT_SIGNING_ACCOUNT",
+  "ARTIFACT_SIGNING_PROFILE",
+];
+
+const MAC_SIGNING_SECRETS = [
+  "APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64",
+  "APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD",
+  "APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64",
+  "APPLE_DEVELOPER_ID_INSTALLER_P12_PASSWORD",
+  "APPLE_NOTARY_KEY_ID",
+  "APPLE_NOTARY_ISSUER_ID",
+  "APPLE_NOTARY_KEY_P8_BASE64",
+];
+
+function assertCleanSigningSkipContract(workflow) {
+  assert.match(workflow, /macos_configured=false/);
+  assert.match(workflow, /windows_configured=false/);
+  assert.match(workflow, /if: needs\.configuration\.outputs\.macos_configured == 'true'/);
+  assert.match(workflow, /if: needs\.configuration\.outputs\.windows_configured == 'true'/);
+  assert.match(workflow, /Signing skipped cleanly/);
+}
+
+test("signing workflow skips cleanly when unsigned and detects a skip-gate mutation", () => {
+  const workflow = read(".github/workflows/installer-signing.yml");
+  assert.doesNotThrow(() => assertCleanSigningSkipContract(workflow));
+  const mutant = workflow.replace("macos_configured=false", "macos_configured=true");
+  assert.throws(() => assertCleanSigningSkipContract(mutant));
+});
+
+test("signing workflow performs the required Apple and Artifact Signing ceremonies", () => {
+  const workflow = read(".github/workflows/installer-signing.yml");
+  assert.match(workflow, /^  workflow_dispatch:/m);
+  assert.match(workflow, /environment: artifact-signing/);
+  assert.match(workflow, /wix_osmf_confirmed:/);
+  assert.match(workflow, /pkgbuild/);
+  assert.match(workflow, /productbuild/);
+  assert.match(workflow, /codesign/);
+  assert.match(workflow, /productsign/);
+  assert.match(workflow, /xcrun notarytool submit[\s\S]*--wait/);
+  assert.match(workflow, /xcrun stapler staple/);
+  assert.match(workflow, /azure\/login@[0-9a-f]{40}/);
+  assert.match(workflow, /azure\/artifact-signing-action@[0-9a-f]{40}/);
+  for (const name of WINDOWS_SIGNING_VARIABLES) assert.match(workflow, new RegExp(`vars\\.${name}\\b`));
+  for (const name of MAC_SIGNING_SECRETS) assert.match(workflow, new RegExp(`secrets\\.${name}\\b`));
+  assert.match(workflow, /vars\.APPLE_TEAM_ID\b/);
+  for (const match of workflow.matchAll(/^\s+(?:-\s+)?uses: ([^\s#]+)/gm)) {
+    if (match[1].startsWith("./")) continue;
+    assert.match(match[1], /@[0-9a-f]{40}$/);
+  }
+  assert.doesNotMatch(workflow, /contents:\s*write|gh release|releases:/i);
+});
+
+test("installer signing guide names the exact owner ceremonies and settings", () => {
+  const guide = read("docs/INSTALLERS-SIGNING.md");
+  assert.match(guide, /Keychain Access/);
+  assert.match(guide, /Developer ID Application/);
+  assert.match(guide, /Developer ID Installer/);
+  assert.match(guide, /\.p12/);
+  assert.match(guide, /Team Keys/);
+  assert.match(guide, /Developer role/);
+  assert.match(guide, /Team ID/);
+  for (const name of [...MAC_SIGNING_SECRETS, ...WINDOWS_SIGNING_VARIABLES, "APPLE_TEAM_ID"]) {
+    assert.match(guide, new RegExp(`\\b${name}\\b`));
+  }
+  assert.match(guide, /docs\/WINDOWS-SIGNING\.md/);
 });
 
 test("signing plan names owner purchases, warning behavior, and secretless repository boundaries", () => {

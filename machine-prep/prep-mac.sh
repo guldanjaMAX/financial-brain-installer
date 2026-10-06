@@ -6,7 +6,10 @@ set -eu
 NODE_VERSION="24.13.1"
 CLAUDE_VERSION="2.1.261"
 CODEX_VERSION="0.155.0-alpha.16"
-BRAIN_VERSION="0.4.8"
+BRAIN_VERSION="0.4.9"
+BRAIN_KIT_URL="https://financialbrain.ai/kit/brain-installer-0.4.9-0555ad1972d7f8d6.tgz"
+BRAIN_KIT_SIZE="6668013"
+BRAIN_KIT_SHA256="0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2"
 WRANGLER_VERSION="4.131.1"
 MODE="${1:---real}"
 FIXTURE_DIR="${MACHINE_PREP_FIXTURE_DIR:-}"
@@ -14,6 +17,7 @@ PREP_HOME="${MACHINE_PREP_HOME:-${HOME:-}}"
 TOOLS_ROOT="$PREP_HOME/.local/share/financial-brain-tools"
 USER_PREFIX="$PREP_HOME/.local"
 BIN_DIR="$USER_PREFIX/bin"
+BRAIN_PREFIX="$PREP_HOME/.financial-brain"
 LOG_DIR="$PREP_HOME/.local/state/financial-brain-machine-prep"
 LOG_FILE="$LOG_DIR/prep.log"
 CHECK_FAILURES=0
@@ -28,7 +32,9 @@ SESSION_STATE="READY"
 usage() {
   printf '%s\n' \
     "Usage: prep-mac.sh --check | --dry-run | --real" \
-    "       prep-mac.sh --verify-checksum FILE EXPECTED_SHA256"
+    "       prep-mac.sh --verify-checksum FILE EXPECTED_SHA256" \
+    "       prep-mac.sh --verify-prefix DIRECTORY" \
+    "       prep-mac.sh --verify-installed DIRECTORY"
 }
 
 fixture_read() {
@@ -178,19 +184,19 @@ collect_checks() {
   brain_paths=$(tool_paths brain)
   brain_count=$(printf '%s\n' "$brain_paths" | /usr/bin/awk 'NF { n += 1 } END { print n + 0 }')
   brain_version=$(tool_version brain 2>/dev/null || true)
-  canonical_brain="$PREP_HOME/.financial-brain/bin/brain"
+  canonical_brain="$BRAIN_PREFIX/bin/brain"
   if [ "$brain_count" -gt 1 ]; then
     BRAIN_STATE="SHADOWED"
     status_line "$BRAIN_STATE" "Financial Brain CLI" "$brain_count PATH matches; fix: remove the earlier PATH entry and reopen the shell"
   elif [ "$brain_count" -eq 0 ]; then
     BRAIN_STATE="MISSING"
-    status_line "$BRAIN_STATE" "Financial Brain CLI" "held $BRAIN_VERSION candidate has no stable asset; fix: wait for the immutable release receipt"
+    status_line "$BRAIN_STATE" "Financial Brain CLI" "install pinned $BRAIN_VERSION kit; fix: run --real"
   elif [ "$brain_paths" != "$canonical_brain" ]; then
     BRAIN_STATE="SHADOWED"
     status_line "$BRAIN_STATE" "Financial Brain CLI" "$brain_paths resolves first; fix: put $canonical_brain first on PATH"
   elif ! printf '%s' "$brain_version" | /usr/bin/grep -Fq "$BRAIN_VERSION"; then
     BRAIN_STATE="WRONG_VERSION"
-    status_line "$BRAIN_STATE" "Financial Brain CLI" "${brain_version:-unknown}; expected $BRAIN_VERSION; fix: use the immutable stable installer when released"
+    status_line "$BRAIN_STATE" "Financial Brain CLI" "${brain_version:-unknown}; expected $BRAIN_VERSION; fix: use the signed installer for a clean prefix"
   else
     BRAIN_STATE="READY"
     status_line "$BRAIN_STATE" "Financial Brain CLI" "$brain_version at the canonical per-user path"
@@ -256,8 +262,10 @@ print_plan() {
     "5. INSTALL: OpenAI Codex CLI $CODEX_VERSION from the exact official npm package into the per-user prefix." \
     "6. PATH: add one managed per-user bin directory without replacing existing PATH entries." \
     "7. SKIP: do not install global Wrangler; Financial Brain owns wrangler@$WRANGLER_VERSION." \
-    "8. HOLD: do not install Financial Brain until the published stable contract provides immutable bytes and a SHA-256 receipt." \
-    "9. VERIFY: rerun --check and show the operator the green/red list."
+    "8. DOWNLOAD: Financial Brain $BRAIN_VERSION from the one pinned HTTPS kit URL." \
+    "9. VERIFY: require exactly $BRAIN_KIT_SIZE bytes and SHA-256 $BRAIN_KIT_SHA256 before npm sees the local file." \
+    "10. INSTALL: place the verified kit in the clean per-user $BRAIN_PREFIX prefix with package scripts disabled." \
+    "11. VERIFY: rerun --check and show the operator the green/red list."
   printf '\nNo command was executed, no directory was created, and no log was written.\n'
 }
 
@@ -277,6 +285,45 @@ verify_checksum() {
   printf 'VERIFIED checksum\n'
 }
 
+verify_prefix() {
+  target=${2:-}
+  printf 'PREFIX_DECISION_REACHED=1\n'
+  if [ -z "$target" ]; then
+    printf 'REFUSED prefix input invalid\n' >&2
+    return 2
+  fi
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    printf 'REFUSED prefix collision\n' >&2
+    return 2
+  fi
+  printf 'AVAILABLE prefix\n'
+}
+
+verify_installed_brain() {
+  prefix=${2:-}
+  printf 'INSTALLED_BRAIN_DECISION_REACHED=1\n'
+  package_json="$prefix/lib/node_modules/brain-installer/package.json"
+  executable="$prefix/bin/brain"
+  version=$(/usr/bin/sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$package_json" 2>/dev/null | /usr/bin/head -n 1)
+  if [ "$version" = "$BRAIN_VERSION" ] && [ -x "$executable" ]; then
+    printf 'READY installed Brain %s\n' "$version"
+    return 0
+  fi
+  printf 'NOT_READY installed Brain\n'
+  return 1
+}
+
+verify_brain_kit() {
+  file=$1
+  printf 'KIT_SIZE_DECISION_REACHED=1 expected=%s\n' "$BRAIN_KIT_SIZE"
+  actual_size=$(/usr/bin/stat -f '%z' "$file" 2>/dev/null || printf 'invalid')
+  if [ "$actual_size" != "$BRAIN_KIT_SIZE" ]; then
+    printf 'REFUSED kit size mismatch\n' >&2
+    return 2
+  fi
+  verify_checksum --verify-checksum "$file" "$BRAIN_KIT_SHA256"
+}
+
 log_event() {
   /bin/mkdir -p "$LOG_DIR"
   /usr/bin/printf '%s %s\n' "$(TZ=America/Phoenix /bin/date '+%Y-%m-%dT%H:%M:%S%z')" "$1" >> "$LOG_FILE"
@@ -287,10 +334,14 @@ ensure_path() {
   profile="$PREP_HOME/.zprofile"
   marker='# Financial Brain machine prep PATH'
   line='export PATH="$HOME/.local/bin:$PATH"'
-  if [ -f "$profile" ] && /usr/bin/grep -Fq "$marker" "$profile"; then return 0; fi
-  {
-    printf '\n%s\n%s\n' "$marker" "$line"
-  } >> "$profile"
+  if ! { [ -f "$profile" ] && /usr/bin/grep -Fq "$marker" "$profile"; }; then
+    printf '\n%s\n%s\n' "$marker" "$line" >> "$profile"
+  fi
+  brain_marker='# Financial Brain CLI PATH'
+  brain_line='export PATH="$HOME/.financial-brain/bin:$PATH"'
+  if ! { [ -f "$profile" ] && /usr/bin/grep -Fq "$brain_marker" "$profile"; }; then
+    printf '\n%s\n%s\n' "$brain_marker" "$brain_line" >> "$profile"
+  fi
 }
 
 install_node() {
@@ -349,6 +400,37 @@ install_codex() {
   log_event "installed OpenAI Codex CLI $CODEX_VERSION through npm integrity verification"
 }
 
+install_brain() {
+  verify_prefix --verify-prefix "$BRAIN_PREFIX" || return 1
+  npm_path=$(tool_paths npm | /usr/bin/head -n 1)
+  [ -n "$npm_path" ] || { printf 'npm is unavailable after Node preparation\n' >&2; return 1; }
+  temp=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/financial-brain-installer.XXXXXX") || return 1
+  archive="$temp/brain-installer-$BRAIN_VERSION.tgz"
+  printf 'DOWNLOAD_STARTED=1 kit_version=%s\n' "$BRAIN_VERSION"
+  /usr/bin/curl --fail --location --silent --show-error --output "$archive" "$BRAIN_KIT_URL" || {
+    /bin/rm -rf "$temp"
+    return 1
+  }
+  verify_brain_kit "$archive" || { /bin/rm -rf "$temp"; return 1; }
+  printf 'INSTALL_STARTED=1 kit_version=%s\n' "$BRAIN_VERSION"
+  "$npm_path" install --global --ignore-scripts --no-audit --no-fund --prefix "$BRAIN_PREFIX" "$archive" || {
+    /bin/rm -rf "$temp"
+    return 1
+  }
+  package_json="$BRAIN_PREFIX/lib/node_modules/brain-installer/package.json"
+  installed_brain="$BRAIN_PREFIX/bin/brain"
+  installed_version=$(/usr/bin/sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$package_json" 2>/dev/null | /usr/bin/head -n 1)
+  if [ "$installed_version" != "$BRAIN_VERSION" ] || [ ! -x "$installed_brain" ]; then
+    printf 'REFUSED installed Financial Brain readback failed\n' >&2
+    /bin/rm -rf "$temp"
+    return 1
+  fi
+  /bin/rm -rf "$temp"
+  export PATH="$BRAIN_PREFIX/bin:$PATH"
+  log_event "installed Financial Brain $BRAIN_VERSION from the pinned kit after exact size and SHA-256 verification"
+  printf 'BRAIN_INSTALL_VERIFIED=1 version=%s\n' "$installed_version"
+}
+
 run_real() {
   if [ "${MACHINE_PREP_TEST_MODE:-}" = "1" ] || [ -n "$FIXTURE_DIR" ]; then
     printf 'REFUSED real mode while fixture/test mode is active\n' >&2
@@ -379,9 +461,16 @@ run_real() {
   export PATH="$BIN_DIR:$PATH"
   if [ "$CLAUDE_STATE" != "READY" ]; then install_claude || return 1; fi
   if [ "$CODEX_STATE" != "READY" ]; then install_codex || return 1; fi
+  if [ "$BRAIN_STATE" != "READY" ]; then
+    if verify_installed_brain --verify-installed "$BRAIN_PREFIX"; then
+      export PATH="$BRAIN_PREFIX/bin:$PATH"
+      log_event "reused exact Financial Brain $BRAIN_VERSION install after local readback"
+    else
+      install_brain || return 1
+    fi
+  fi
 
-  log_event "Financial Brain install held pending immutable stable package receipt"
-  printf 'HOLD: Financial Brain %s has no immutable stable customer asset. No Brain install was attempted.\n' "$BRAIN_VERSION"
+  log_event "Financial Brain CLI preparation completed"
   printf 'Log: %s\n\n' "$LOG_FILE"
   print_check
 }
@@ -391,6 +480,8 @@ case "$MODE" in
   --dry-run) print_plan ;;
   --real) run_real ;;
   --verify-checksum) verify_checksum "$@" ;;
+  --verify-prefix) verify_prefix "$@" ;;
+  --verify-installed) verify_installed_brain "$@" ;;
   --help|-h) usage ;;
   *) usage >&2; exit 2 ;;
 esac

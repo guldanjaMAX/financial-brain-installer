@@ -3,7 +3,7 @@
   <title>Financial Brain Machine Prep</title>
   <organization>com.financialbrain</organization>
   <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/>
-  <options customize="never" require-scripts="true" rootVolumeOnly="true"/>
+  <options customize="never" require-scripts="true" rootVolumeOnly="true" hostArchitectures="arm64,x86_64"/>
   <allowed-os-versions>
     <os-version min="13.5"/>
   </allowed-os-versions>
@@ -15,5 +15,5 @@
   <choice id="default" visible="false">
     <pkg-ref id="com.financialbrain.machineprep"/>
   </choice>
-  <pkg-ref id="com.financialbrain.machineprep" version="0.1.0">FinancialBrainMachinePrep-component.pkg</pkg-ref>
+  <pkg-ref id="com.financialbrain.machineprep" version="0.2.0">FinancialBrainMachinePrep-component.pkg</pkg-ref>
 </installer-gui-script>

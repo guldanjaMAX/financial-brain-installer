@@ -57,20 +57,31 @@ function Invoke-EmbeddedPowerShell([string]$ScriptPath, [string[]]$ScriptArgumen
   }
 }
 
-Write-SafeLog "INSTALLER_PROGRESS=1/3 Preparing developer tools"
+Write-SafeLog "INSTALLER_PROGRESS=1/4 Preparing tools and Financial Brain"
 $prep = Join-Path $ScriptDir "prep-windows.ps1"
 $prepStatus = Invoke-EmbeddedPowerShell $prep @("--real")
 Write-SafeLog "PREP_EXIT_CODE=$prepStatus"
 if ($prepStatus -eq 0) {
-  Write-SafeLog "INSTALLER_PROGRESS=2/3 Tool checks completed"
+  Write-SafeLog "INSTALLER_PROGRESS=2/4 Tool and CLI checks completed"
+  Write-SafeLog "SETUP_LAUNCH_DECISION_REACHED=1"
+  $powerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+  $setup = Join-Path $ScriptDir "start-brain-setup.ps1"
+  $setupArguments = @(
+    "-NoLogo", "-NoProfile", "-NoExit", "-ExecutionPolicy", "Bypass",
+    "-File", ('"{0}"' -f $setup)
+  )
+  Start-Process -FilePath $powerShell -ArgumentList $setupArguments | Out-Null
+  Write-SafeLog "SETUP_WINDOW_STARTED=1"
 } else {
-  Write-SafeLog "INSTALLER_PROGRESS=2/3 Prep needs attention; Claude will guide the fix"
+  Write-SafeLog "INSTALLER_PROGRESS=2/4 Prep needs attention; setup was not opened"
+  Write-SafeLog "SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed"
 }
 
-Write-SafeLog "INSTALLER_PROGRESS=3/3 Opening Claude"
+Write-SafeLog "INSTALLER_PROGRESS=3/4 Opening the local Claude handoff"
 $handoff = Join-Path $ScriptDir "handoff\handoff-windows.ps1"
 $handoffStatus = Invoke-EmbeddedPowerShell $handoff @()
 Write-SafeLog "INSTALLER_HANDOFF_EXIT_CODE=$handoffStatus"
+Write-SafeLog "INSTALLER_PROGRESS=4/4 Installer handoff completed"
 
 # The MSI transaction installed the reviewed launcher successfully. Prep
 # readiness remains separately visible through PREP_EXIT_CODE and Claude.

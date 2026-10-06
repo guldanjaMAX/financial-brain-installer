@@ -61,7 +61,7 @@ jobs:
       - name: build and inspect unsigned Windows MSI
         shell: powershell
         run: |
-          dotnet build machine-prep/installers/windows/FinancialBrainMachinePrep.wixproj --configuration Release
+          dotnet build machine-prep/installers/windows/FinancialBrainMachinePrep.wixproj --configuration Release -p:WixOsmfConfirmed=true
           $msi = Get-ChildItem machine-prep/installers/windows/bin -Filter *.msi -Recurse | Select-Object -First 1
           if (-not $msi) { throw "WiX build did not produce an MSI" }
           New-Item -ItemType Directory -Path dist -Force | Out-Null

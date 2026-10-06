@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -127,6 +127,51 @@ test("Mac checksum match is accepted only after the decision point", () => {
   }
 });
 
+test("Mac Brain prefix gate accepts an absent target and refuses a collision after reaching the decision", () => {
+  const directory = mkdtempSync(join(tmpdir(), "machine-prep-prefix-"));
+  const prefix = join(directory, "brain-prefix");
+  try {
+    const available = runMac(["--verify-prefix", prefix]);
+    assert.equal(available.status, 0, combined(available));
+    assert.match(combined(available), /PREFIX_DECISION_REACHED=1/);
+    assert.match(combined(available), /AVAILABLE prefix/);
+
+    mkdirSync(prefix);
+    const collision = runMac(["--verify-prefix", prefix]);
+    const out = combined(collision);
+    assert.equal(collision.status, 2, out);
+    assert.match(out, /PREFIX_DECISION_REACHED=1/);
+    assert.match(out, /REFUSED prefix collision/);
+    assert.doesNotMatch(out, /INSTALL_STARTED|DOWNLOAD_STARTED/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Mac installed-Brain readback recognizes an exact existing install without relying on PATH", () => {
+  const directory = mkdtempSync(join(tmpdir(), "machine-prep-installed-brain-"));
+  const prefix = join(directory, "brain-prefix");
+  try {
+    mkdirSync(join(prefix, "lib", "node_modules", "brain-installer"), { recursive: true });
+    mkdirSync(join(prefix, "bin"), { recursive: true });
+    writeFileSync(join(prefix, "lib", "node_modules", "brain-installer", "package.json"), '{\n  "version": "0.4.9"\n}\n');
+    writeFileSync(join(prefix, "bin", "brain"), "#!/bin/sh\n");
+    chmodSync(join(prefix, "bin", "brain"), 0o755);
+    const ready = runMac(["--verify-installed", prefix]);
+    assert.equal(ready.status, 0, combined(ready));
+    assert.match(combined(ready), /INSTALLED_BRAIN_DECISION_REACHED=1/);
+    assert.match(combined(ready), /READY installed Brain 0\.4\.9/);
+
+    writeFileSync(join(prefix, "lib", "node_modules", "brain-installer", "package.json"), '{\n  "version": "0.4.8"\n}\n');
+    const wrong = runMac(["--verify-installed", prefix]);
+    assert.equal(wrong.status, 1, combined(wrong));
+    assert.match(combined(wrong), /INSTALLED_BRAIN_DECISION_REACHED=1/);
+    assert.match(combined(wrong), /NOT_READY installed Brain/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("Mac real mode refuses fixtures before any action", () => {
   const result = runMac(["--real"]);
   const out = combined(result);
@@ -188,6 +233,49 @@ test("Windows checksum mismatch reaches verification and refuses before action",
     assert.match(out, /CHECKSUM_DECISION_REACHED=1/);
     assert.match(out, /REFUSED checksum mismatch/);
     assert.doesNotMatch(out, /ACTION_EXECUTED/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Windows Brain prefix gate accepts an absent target and refuses a collision", { skip: process.platform !== "win32" }, () => {
+  const directory = mkdtempSync(join(tmpdir(), "machine-prep-prefix-"));
+  const prefix = join(directory, "brain-prefix");
+  try {
+    const available = runWindows(["--verify-prefix", prefix]);
+    assert.equal(available.status, 0, combined(available));
+    assert.match(combined(available), /PREFIX_DECISION_REACHED=1/);
+    assert.match(combined(available), /AVAILABLE prefix/);
+
+    mkdirSync(prefix);
+    const collision = runWindows(["--verify-prefix", prefix]);
+    const out = combined(collision);
+    assert.equal(collision.status, 2, out);
+    assert.match(out, /PREFIX_DECISION_REACHED=1/);
+    assert.match(out, /REFUSED prefix collision/);
+    assert.doesNotMatch(out, /INSTALL_STARTED|DOWNLOAD_STARTED/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Windows installed-Brain readback recognizes an exact existing install without relying on PATH", { skip: process.platform !== "win32" }, () => {
+  const directory = mkdtempSync(join(tmpdir(), "machine-prep-installed-brain-"));
+  const prefix = join(directory, "brain-prefix");
+  try {
+    mkdirSync(join(prefix, "node_modules", "brain-installer"), { recursive: true });
+    writeFileSync(join(prefix, "node_modules", "brain-installer", "package.json"), '{"version":"0.4.9"}\n');
+    writeFileSync(join(prefix, "brain.cmd"), "@echo off\r\n");
+    const ready = runWindows(["--verify-installed", prefix]);
+    assert.equal(ready.status, 0, combined(ready));
+    assert.match(combined(ready), /INSTALLED_BRAIN_DECISION_REACHED=1/);
+    assert.match(combined(ready), /READY installed Brain 0\.4\.9/);
+
+    writeFileSync(join(prefix, "node_modules", "brain-installer", "package.json"), '{"version":"0.4.8"}\n');
+    const wrong = runWindows(["--verify-installed", prefix]);
+    assert.equal(wrong.status, 1, combined(wrong));
+    assert.match(combined(wrong), /INSTALLED_BRAIN_DECISION_REACHED=1/);
+    assert.match(combined(wrong), /NOT_READY installed Brain/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

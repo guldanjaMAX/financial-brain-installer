@@ -23,7 +23,9 @@ PLAN
 6. INSTALL: OpenAI Codex CLI 0.155.0-alpha.16 from the exact official npm package into the per-user prefix.
 7. PATH: add only the two managed per-user directories through the User PATH API; never use setx.
 8. SKIP: do not install global Wrangler; Financial Brain owns wrangler@4.131.1.
-9. HOLD: do not install Financial Brain until the published stable contract provides immutable bytes and a SHA-256 receipt.
-10. VERIFY: rerun --check and show the operator the green/red list.
+9. DOWNLOAD: Financial Brain 0.4.9 from the one pinned HTTPS kit URL.
+10. VERIFY: require exactly 6668013 bytes and SHA-256 0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2 before npm sees the local file.
+11. INSTALL: place the verified kit in the clean per-user C:\Users\Fixture\AppData\Local\FinancialBrain prefix with package scripts disabled.
+12. VERIFY: rerun --check and show the operator the green/red list.
 
 No command was executed, no directory was created, and no log was written.

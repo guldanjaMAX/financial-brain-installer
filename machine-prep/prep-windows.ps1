@@ -6,7 +6,10 @@ $ErrorActionPreference = "Stop"
 $NodeVersion = "24.13.1"
 $ClaudeVersion = "2.1.261"
 $CodexVersion = "0.155.0-alpha.16"
-$BrainVersion = "0.4.8"
+$BrainVersion = "0.4.9"
+$BrainKitUrl = "https://financialbrain.ai/kit/brain-installer-0.4.9-0555ad1972d7f8d6.tgz"
+$BrainKitSize = 6668013
+$BrainKitSha256 = "0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2"
 $WranglerVersion = "4.131.1"
 $Mode = if ($args.Count -gt 0) { [string]$args[0] } else { "--real" }
 $FixtureDir = [string]$env:MACHINE_PREP_FIXTURE_DIR
@@ -14,6 +17,7 @@ $PrepHome = if ($env:MACHINE_PREP_HOME) { $env:MACHINE_PREP_HOME } elseif ($env:
 $LocalRoot = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $PrepHome "AppData\Local" }
 $ToolsRoot = Join-Path $LocalRoot "FinancialBrainTools"
 $NpmPrefix = Join-Path $ToolsRoot "npm"
+$BrainPrefix = Join-Path $LocalRoot "FinancialBrain"
 $LogDir = Join-Path $LocalRoot "FinancialBrainMachinePrep"
 $LogFile = Join-Path $LogDir "prep.log"
 $script:CheckFailures = 0
@@ -25,6 +29,7 @@ $script:BrainState = "MISSING"
 $script:SessionState = "READY"
 $script:ChecksumExitCode = 0
 $script:RealExitCode = 0
+$script:InstalledBrainReady = $false
 
 function Read-Fixture([string]$Name) {
   if (-not $FixtureDir) { return $null }
@@ -179,19 +184,19 @@ function Invoke-Checks {
 
   $brainPaths = @(Get-ToolPaths "brain")
   $brain = Get-ToolVersion "brain"
-  $canonicalBrain = Join-Path $LocalRoot "FinancialBrain\brain.cmd"
+  $canonicalBrain = Join-Path $BrainPrefix "brain.cmd"
   if ($brainPaths.Count -gt 1) {
     $script:BrainState = "SHADOWED"
     Write-Status $script:BrainState "Financial Brain CLI" "$($brainPaths.Count) PATH matches; fix: remove the earlier PATH entry and reopen PowerShell"
   } elseif ($brainPaths.Count -eq 0) {
     $script:BrainState = "MISSING"
-    Write-Status $script:BrainState "Financial Brain CLI" "held $BrainVersion candidate has no stable asset; fix: wait for the immutable release receipt"
+    Write-Status $script:BrainState "Financial Brain CLI" "install pinned $BrainVersion kit; fix: run --real"
   } elseif (-not [string]::Equals([IO.Path]::GetFullPath($brainPaths[0]), [IO.Path]::GetFullPath($canonicalBrain), [StringComparison]::OrdinalIgnoreCase)) {
     $script:BrainState = "SHADOWED"
     Write-Status $script:BrainState "Financial Brain CLI" "$($brainPaths[0]) resolves first; fix: put $canonicalBrain first on PATH"
   } elseif (-not $brain -or -not $brain.Contains($BrainVersion)) {
     $script:BrainState = "WRONG_VERSION"
-    Write-Status $script:BrainState "Financial Brain CLI" "$(if ($brain) { $brain } else { 'unknown' }); expected $BrainVersion; fix: use the immutable stable installer when released"
+    Write-Status $script:BrainState "Financial Brain CLI" "$(if ($brain) { $brain } else { 'unknown' }); expected $BrainVersion; fix: use the signed installer for a clean prefix"
   } else {
     $script:BrainState = "READY"
     Write-Status $script:BrainState "Financial Brain CLI" "$brain at the canonical per-user path"
@@ -238,8 +243,10 @@ function Show-Plan {
   Write-Output "6. INSTALL: OpenAI Codex CLI $CodexVersion from the exact official npm package into the per-user prefix."
   Write-Output "7. PATH: add only the two managed per-user directories through the User PATH API; never use setx."
   Write-Output "8. SKIP: do not install global Wrangler; Financial Brain owns wrangler@$WranglerVersion."
-  Write-Output "9. HOLD: do not install Financial Brain until the published stable contract provides immutable bytes and a SHA-256 receipt."
-  Write-Output "10. VERIFY: rerun --check and show the operator the green/red list."
+  Write-Output "9. DOWNLOAD: Financial Brain $BrainVersion from the one pinned HTTPS kit URL."
+  Write-Output "10. VERIFY: require exactly $BrainKitSize bytes and SHA-256 $BrainKitSha256 before npm sees the local file."
+  Write-Output "11. INSTALL: place the verified kit in the clean per-user $BrainPrefix prefix with package scripts disabled."
+  Write-Output "12. VERIFY: rerun --check and show the operator the green/red list."
   Write-Output ""
   Write-Output "No command was executed, no directory was created, and no log was written."
 }
@@ -259,6 +266,49 @@ function Test-Checksum([string]$File, [string]$Expected) {
     return
   }
   Write-Output "VERIFIED checksum"
+}
+
+function Test-Prefix([string]$Target) {
+  $script:PrefixExitCode = 0
+  Write-Output "PREFIX_DECISION_REACHED=1"
+  if ([string]::IsNullOrWhiteSpace($Target)) {
+    [Console]::Error.WriteLine("REFUSED prefix input invalid")
+    $script:PrefixExitCode = 2
+    return
+  }
+  if (Test-Path -LiteralPath $Target) {
+    [Console]::Error.WriteLine("REFUSED prefix collision")
+    $script:PrefixExitCode = 2
+    return
+  }
+  Write-Output "AVAILABLE prefix"
+}
+
+function Test-InstalledBrain([string]$Prefix) {
+  $script:InstalledBrainReady = $false
+  Write-Output "INSTALLED_BRAIN_DECISION_REACHED=1"
+  $packageJson = Join-Path $Prefix "node_modules\brain-installer\package.json"
+  $brainCmd = Join-Path $Prefix "brain.cmd"
+  if ((Test-Path -LiteralPath $packageJson -PathType Leaf) -and (Test-Path -LiteralPath $brainCmd -PathType Leaf)) {
+    try {
+      $installedVersion = [string](([IO.File]::ReadAllText($packageJson) | ConvertFrom-Json).version)
+      if ($installedVersion -ceq $BrainVersion) {
+        $script:InstalledBrainReady = $true
+        Write-Output "READY installed Brain $installedVersion"
+        return
+      }
+    } catch {}
+  }
+  Write-Output "NOT_READY installed Brain"
+}
+
+function Test-BrainKit([string]$File) {
+  Write-Output "KIT_SIZE_DECISION_REACHED=1 expected=$BrainKitSize"
+  if (-not (Test-Path -LiteralPath $File -PathType Leaf) -or (Get-Item -LiteralPath $File).Length -ne $BrainKitSize) {
+    throw "REFUSED kit size mismatch"
+  }
+  Test-Checksum $File $BrainKitSha256
+  if ($script:ChecksumExitCode -ne 0) { throw "Financial Brain kit checksum mismatch" }
 }
 
 function Write-Log([string]$Message) {
@@ -344,6 +394,36 @@ function Install-Codex {
   Write-Log "installed OpenAI Codex CLI $CodexVersion through npm integrity verification"
 }
 
+function Install-Brain {
+  Test-Prefix $BrainPrefix
+  if ($script:PrefixExitCode -ne 0) { throw "Financial Brain prefix collision" }
+  $npmPaths = @(Get-ToolPaths "npm")
+  if ($npmPaths.Count -eq 0) { throw "npm is unavailable after Node preparation" }
+  $temp = Join-Path ([IO.Path]::GetTempPath()) ("financial-brain-installer-" + [Guid]::NewGuid().ToString("N"))
+  [IO.Directory]::CreateDirectory($temp) | Out-Null
+  try {
+    $archive = Join-Path $temp "brain-installer-$BrainVersion.tgz"
+    Write-Output "DOWNLOAD_STARTED=1 kit_version=$BrainVersion"
+    Invoke-WebRequest -UseBasicParsing -Uri $BrainKitUrl -OutFile $archive
+    Test-BrainKit $archive
+    Write-Output "INSTALL_STARTED=1 kit_version=$BrainVersion"
+    & $npmPaths[0] install --global --ignore-scripts --no-audit --no-fund --prefix $BrainPrefix $archive
+    if ($LASTEXITCODE -ne 0) { throw "Financial Brain CLI install failed" }
+    $packageJson = Join-Path $BrainPrefix "node_modules\brain-installer\package.json"
+    $brainCmd = Join-Path $BrainPrefix "brain.cmd"
+    if (-not (Test-Path -LiteralPath $packageJson -PathType Leaf) -or -not (Test-Path -LiteralPath $brainCmd -PathType Leaf)) {
+      throw "installed Financial Brain readback failed"
+    }
+    $installedVersion = [string](([IO.File]::ReadAllText($packageJson) | ConvertFrom-Json).version)
+    if ($installedVersion -cne $BrainVersion) { throw "installed Financial Brain version readback failed" }
+    Add-UserPath @($BrainPrefix)
+    Write-Log "installed Financial Brain $BrainVersion from the pinned kit after exact size and SHA-256 verification"
+    Write-Output "BRAIN_INSTALL_VERIFIED=1 version=$installedVersion"
+  } finally {
+    if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }
+  }
+}
+
 function Invoke-Real {
   $script:RealExitCode = 0
   if ($env:MACHINE_PREP_TEST_MODE -eq "1" -or $FixtureDir) {
@@ -366,8 +446,16 @@ function Invoke-Real {
   if ($script:NodeState -ne "READY") { Install-Node }
   if ($script:ClaudeState -ne "READY") { Install-Claude }
   if ($script:CodexState -ne "READY") { Install-Codex }
-  Write-Log "Financial Brain install held pending immutable stable package receipt"
-  Write-Output "HOLD: Financial Brain $BrainVersion has no immutable stable customer asset. No Brain install was attempted."
+  if ($script:BrainState -ne "READY") {
+    Test-InstalledBrain $BrainPrefix
+    if ($script:InstalledBrainReady) {
+      Add-UserPath @($BrainPrefix)
+      Write-Log "reused exact Financial Brain $BrainVersion install after local readback"
+    } else {
+      Install-Brain
+    }
+  }
+  Write-Log "Financial Brain CLI preparation completed"
   Write-Output "Log: $LogFile"
   Write-Output ""
   Show-Check
@@ -382,6 +470,14 @@ switch ($Mode) {
     if ($args.Count -ne 3) { [Console]::Error.WriteLine("Usage: prep-windows.ps1 --verify-checksum FILE EXPECTED_SHA256"); exit 2 }
     Test-Checksum ([string]$args[1]) ([string]$args[2]); exit $script:ChecksumExitCode
   }
-  "--help" { Write-Output "Usage: prep-windows.ps1 --check | --dry-run | --real"; exit 0 }
-  default { [Console]::Error.WriteLine("Usage: prep-windows.ps1 --check | --dry-run | --real"); exit 2 }
+  "--verify-prefix" {
+    if ($args.Count -ne 2) { [Console]::Error.WriteLine("Usage: prep-windows.ps1 --verify-prefix DIRECTORY"); exit 2 }
+    Test-Prefix ([string]$args[1]); exit $script:PrefixExitCode
+  }
+  "--verify-installed" {
+    if ($args.Count -ne 2) { [Console]::Error.WriteLine("Usage: prep-windows.ps1 --verify-installed DIRECTORY"); exit 2 }
+    Test-InstalledBrain ([string]$args[1]); if ($script:InstalledBrainReady) { exit 0 } else { exit 1 }
+  }
+  "--help" { Write-Output "Usage: prep-windows.ps1 --check | --dry-run | --real | --verify-prefix DIRECTORY | --verify-installed DIRECTORY"; exit 0 }
+  default { [Console]::Error.WriteLine("Usage: prep-windows.ps1 --check | --dry-run | --real | --verify-prefix DIRECTORY | --verify-installed DIRECTORY"); exit 2 }
 }

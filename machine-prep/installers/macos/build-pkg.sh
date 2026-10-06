@@ -6,7 +6,7 @@ export COPYFILE_DISABLE=1
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(/usr/bin/dirname -- "$0")" && /bin/pwd)
 ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && /bin/pwd)
-VERSION="0.1.0"
+VERSION="0.2.0"
 IDENTIFIER="com.financialbrain.machineprep"
 INSTALL_ROOT="Library/Application Support/FinancialBrainMachinePrep"
 
@@ -27,6 +27,7 @@ stage_package() {
   /bin/mkdir -p "$install_dir/handoff" "$stage/scripts" "$stage/resources"
   /bin/cp "$ROOT/machine-prep/prep-mac.sh" "$install_dir/prep-mac.sh"
   /bin/cp "$SCRIPT_DIR/run-machine-prep-mac.sh" "$install_dir/run-machine-prep-mac.sh"
+  /bin/cp "$SCRIPT_DIR/start-brain-setup.command" "$install_dir/start-brain-setup.command"
   /bin/cp "$SCRIPT_DIR/UNINSTALL.md" "$install_dir/UNINSTALL.md"
   /bin/cp "$ROOT/machine-prep/handoff/handoff-mac.sh" "$install_dir/handoff/handoff-mac.sh"
   /bin/cp "$ROOT/machine-prep/handoff/continue-in-claude.command" "$install_dir/handoff/continue-in-claude.command"
@@ -41,6 +42,7 @@ stage_package() {
   /bin/chmod 755 \
     "$install_dir/prep-mac.sh" \
     "$install_dir/run-machine-prep-mac.sh" \
+    "$install_dir/start-brain-setup.command" \
     "$install_dir/handoff/handoff-mac.sh" \
     "$install_dir/handoff/continue-in-claude.command" \
     "$stage/scripts/preinstall" \

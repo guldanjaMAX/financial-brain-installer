@@ -1,6 +1,6 @@
 # Installer signing and notarization decision
 
-Prices and vendor behavior below were read on 2026-09-24. This repository builds unsigned review artifacts only. No signing account, certificate, key, or paid service has been created.
+Prices and vendor behavior below were read on 2026-09-24. The repository keeps an unsigned review build and a separate manual signed-artifact workflow. A workflow definition is not proof that any signing account, certificate, key, notarization, or physical-machine acceptance exists.
 
 ## Recommended decision
 
@@ -13,7 +13,7 @@ Before enabling the Windows CI build, also decide the WiX Toolset v7 Open Source
 Required owner actions and purchase:
 
 1. Enroll the distributing legal person or organization in the [Apple Developer Program](https://developer.apple.com/programs/). Apple listed the membership at **$99 per year** when read on 2026-09-24.
-2. Create a **Developer ID Installer** certificate. Apple says installer packages distributed outside the Mac App Store use that identity, which is distinct from a Developer ID Application identity.
+2. Create both a **Developer ID Application** certificate and a **Developer ID Installer** certificate. The first signs any embedded native executable. The second signs the final installer package.
 3. Sign the final flat package with `productsign` or `productbuild --sign`.
 4. Submit it with `xcrun notarytool submit --wait`, review the notary log, then staple the ticket with `xcrun stapler staple`. Apple documents `notarytool` as the supported replacement for `altool` and supports notarizing flat installer packages: [Apple notarization guidance](https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution) and [packaging guidance](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution).
 5. Verify the exact distributed bytes with `pkgutil --check-signature`, `spctl --assess --type install`, `stapler validate`, and a SHA-256 receipt.
@@ -25,9 +25,9 @@ Client experience:
 
 CI secret boundary:
 
-- Put the Developer ID Installer certificate and its password in a protected GitHub Environment or an external signing service, never in Git, artifacts, logs, or pull requests.
+- Put both Developer ID certificates and their passwords in the protected `artifact-signing` GitHub Environment, never in Git, artifacts, logs, or pull requests.
 - Prefer an App Store Connect API key for `notarytool`; store its issuer ID, key ID, and private key only as protected environment secrets.
-- The signing job should require environment approval, download the already reviewed unsigned artifact by immutable artifact ID, sign once, notarize once, staple, verify, and upload a separate signed artifact. It must not publish a release.
+- The signing job requires environment approval, builds the reviewed source, signs embedded native executables if present, signs once, notarizes once, staples, verifies, and uploads a separate signed artifact. It does not publish a release.
 
 ## Windows
 

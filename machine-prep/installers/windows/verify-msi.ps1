@@ -25,6 +25,7 @@ $files = @(Read-Column 'SELECT `FileName` FROM `File`' | ForEach-Object { ($_ -s
 $expected = @(
   "prep-windows.ps1",
   "run-machine-prep.ps1",
+  "start-brain-setup.ps1",
   "UNINSTALL.txt",
   "handoff-windows.ps1",
   "message-windows.txt",

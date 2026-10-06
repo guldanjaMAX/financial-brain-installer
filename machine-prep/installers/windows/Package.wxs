@@ -2,8 +2,8 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
     Name="Financial Brain Machine Prep"
-    Manufacturer="Financial Brain"
-    Version="0.1.0"
+    Manufacturer="Financial Brain LLC"
+    Version="0.2.0"
     UpgradeCode="A49C8F6E-AD20-4C23-89B7-0E2A5B63C02D"
     Scope="perMachine"
     InstallerVersion="500"
@@ -21,6 +21,7 @@
         <Component Id="MachinePrepScripts" Guid="2A7B7F2E-02E5-4D01-8498-06E7ED27347E">
           <File Id="PrepWindowsScript" Source="..\..\prep-windows.ps1" Name="prep-windows.ps1" KeyPath="yes" />
           <File Id="RunMachinePrepScript" Source="run-machine-prep.ps1" Name="run-machine-prep.ps1" />
+          <File Id="StartBrainSetupScript" Source="start-brain-setup.ps1" Name="start-brain-setup.ps1" />
           <File Id="UninstallNotes" Source="UNINSTALL.txt" Name="UNINSTALL.txt" />
         </Component>
         <Directory Id="HANDOFFFOLDER" Name="handoff">
@@ -39,7 +40,7 @@
     </Feature>
 
     <!-- Windows Installer owns the one UAC prompt. The real prep is still
-         impersonated as the signed-in user, preserving L's per-user contract. -->
+         impersonated as the signed-in user, preserving the per-user contract. -->
     <CustomAction
       Id="RunMachinePrep"
       Directory="INSTALLFOLDER"
@@ -52,7 +53,7 @@
     </InstallExecuteSequence>
     <ActionText
       Action="RunMachinePrep"
-      Description="Preparing Node.js, Git, Claude Code, Codex, and Financial Brain tools..."
+      Description="Preparing tools, installing Financial Brain, and opening setup..."
       Template="This can take 8 to 20 minutes. Progress is also written to the support log." />
   </Package>
 </Wix>
