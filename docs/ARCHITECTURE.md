@@ -384,6 +384,17 @@ Local and remote state is saved adjacent to the manifest as
 resumable. A failure stays retryable. Drive policy changes and periodic full
 sweeps compare source truth with stored families so excluded, deleted, moved,
 or no-longer-accessible files can be removed safely.
+For Gmail, a recoverable Worker part failure adds the exact logical message to
+the private `gmail_retry` map before the history cursor can advance. The source
+receipt stays failed, and the next incremental run retries that map even if the
+provider reports no new history. Acceptance or a typed current source decision
+clears the entry; malformed retry state stops cursor settlement.
+Gmail credential refusals remain measured in `docs_refused` but do not make a
+run fail when they are its only non-accepted outcome. The ready receipt records
+the count in its detail and keeps `complete_sweep` false, because the Worker
+does not credit a complete history sweep with refused documents. Failed parts,
+durable retry backlog, missing history or label proof, and other non-policy
+skips remain receipt gaps. Other connectors retain refusal-as-gap behavior.
 
 Mutating local-folder, Drive, Gmail, and Calendar runs share one cross-platform
 owner lease keyed to the canonical adjacent source-state path. The lease is

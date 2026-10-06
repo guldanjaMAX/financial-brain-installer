@@ -68,6 +68,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/public-guard-coverage.test.mjs",
   "node --no-warnings worker/test/owner-notes-lifecycle.test.mjs",
   "node --no-warnings --test worker/test/complete-sweep-clears-provisional.test.mjs",
+  "node --no-warnings --test worker/test/gmail-refusal-ready-receipt.test.mjs",
   "node --no-warnings worker/test/memory-supersession.test.mjs",
   // Split-document family cleanup uses the document identity index.
   "node --no-warnings test/family-cleanup-query.test.mjs",
@@ -438,6 +439,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings worker/test/public-guard-coverage.test.mjs",
   "node --no-warnings worker/test/owner-notes-lifecycle.test.mjs",
   "node --no-warnings --test worker/test/complete-sweep-clears-provisional.test.mjs",
+  "node --no-warnings --test worker/test/gmail-refusal-ready-receipt.test.mjs",
   "node --no-warnings worker/test/memory-supersession.test.mjs",
   "node --no-warnings test/assistant-repair.test.mjs",
   "node --test test/subdomain-read-names-its-cause.test.mjs",

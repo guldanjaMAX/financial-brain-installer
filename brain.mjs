@@ -8588,17 +8588,62 @@ export function recordLocalSkippedDocumentState(state, { stateKey, nativePath, r
   return state;
 }
 
-export const sourceCursorCanAdvance = (tally, { retryableSkips = 0 } = {}) =>
-  Number(tally?.failed || 0) === 0 && Number(retryableSkips || 0) === 0;
+/**
+ * Return exact Gmail message ids held for another ingest attempt.
+ *
+ * The adjacent source state is private, but it is still untrusted input. A
+ * malformed retry list must stop instead of being ignored because advancing a
+ * history cursor past an ignored identity would make the missing message
+ * unreachable from ordinary incremental history.
+ */
+export function gmailRetryMessageIds(state, sourceName = "gmail") {
+  const retries = state?.gmail_retry;
+  if (retries === undefined) return [];
+  if (retries === null || typeof retries !== "object" || Array.isArray(retries) ||
+      Object.getPrototypeOf(retries) !== Object.prototype) {
+    throw new Error("the saved Gmail retry list is invalid; no history cursor was advanced");
+  }
+  const prefix = `${sourceName}:`;
+  return Object.entries(retries).map(([key, version]) => {
+    const id = key.startsWith(prefix) ? key.slice(prefix.length) : "";
+    if (!id || id.length > 256 || /[\s\x00-\x1f\x7f]/.test(id) ||
+        key !== `${sourceName}:${id}` || typeof version !== "string" || !version) {
+      throw new Error("the saved Gmail retry list is invalid; no history cursor was advanced");
+    }
+    return id;
+  });
+}
+
+function recordGmailRetry(state, plan) {
+  gmailRetryMessageIds(state);
+  state.gmail_retry = { ...(state.gmail_retry || {}), [plan.stateKey]: plan.hash };
+}
+
+function clearGmailRetry(state, stateKey) {
+  if (state.gmail_retry === undefined) return;
+  gmailRetryMessageIds(state);
+  delete state.gmail_retry[stateKey];
+  if (Object.keys(state.gmail_retry).length === 0) delete state.gmail_retry;
+}
+
+export const sourceCursorCanAdvance = (
+  tally,
+  { retryableSkips = 0, durableRetryFailures = 0 } = {},
+) => Number(tally?.failed || 0) === Number(durableRetryFailures || 0) &&
+  Number(retryableSkips || 0) === 0;
 
 export const sourceReceiptHasRemoteGap = ({
+  source = null,
   tally,
   totalRefused = 0,
   coverageGaps = 0,
   driveReviewRequired = false,
   retryableSkips = 0,
-} = {}) => Number(tally?.failed || 0) > 0 || Number(totalRefused || 0) > 0 ||
-  Number(coverageGaps || 0) > 0 || Number(retryableSkips || 0) > 0 || driveReviewRequired === true;
+  durableRetries = 0,
+} = {}) => Number(tally?.failed || 0) > 0 ||
+  (source !== "gmail" && Number(totalRefused || 0) > 0) ||
+  Number(coverageGaps || 0) > 0 || Number(retryableSkips || 0) > 0 ||
+  Number(durableRetries || 0) > 0 || driveReviewRequired === true;
 
 /**
  * Turn a durable per-document failure receipt into a machine-visible failure.
@@ -15931,6 +15976,7 @@ const cmdIngestRemoteRun = async (
   }
 
   const savedState = loadState(statePath);
+  if (which === "gmail") gmailRetryMessageIds(savedState);
   // Capture only enough in-memory state to prove the post-failure file kept
   // the prior Gmail cursor. The cursor itself never crosses the process
   // boundary and the final readback reports only counts and a comparison.
@@ -15947,6 +15993,9 @@ const cmdIngestRemoteRun = async (
         // approval meaningful.
         ...(savedState.removed && Object.keys(savedState.removed).length
           ? { removed: { ...savedState.removed } }
+          : {}),
+        ...(savedState.gmail_retry && Object.keys(savedState.gmail_retry).length
+          ? { gmail_retry: { ...savedState.gmail_retry } }
           : {}),
         ...Object.fromEntries(
           ["drive_removal_safety_baseline", "drive_removal_review", "gmail_removal_safety_baseline", "imap_removal_safety_baseline"]
@@ -16394,8 +16443,9 @@ const cmdIngestRemoteRun = async (
   let prepared = 0;
   let batchNo = 0;
   let retryableOcrSkips = 0;
-  // Held back until every batch has been accepted. See the note at its
-  // assignment: advancing a sync cursor early loses documents silently.
+  let gmailDurableRetryFailures = 0;
+  // Held back until every batch receipt is settled. A failed Gmail part may
+  // cross this boundary only after its exact logical retry is durable.
   let pendingCursor = null;
   const familyPlans = new Map();
   const sentFamilyParts = new Map();
@@ -16488,6 +16538,7 @@ const cmdIngestRemoteRun = async (
     intentionalRemovalUids.push(...settlement.intentionalRemovalUids);
     for (const plan of outcome.completed) {
       recordAcceptedDocumentState(state, plan);
+      if (which === "gmail") clearGmailRetry(state, plan.stateKey);
       if (scannerPolicyChanged) {
         recordCredentialScannerProgress(state, scannerFingerprint, plan.stateKey, plan.hash);
       }
@@ -16495,6 +16546,13 @@ const cmdIngestRemoteRun = async (
     for (const { plan, statuses } of settlement.incomplete) {
       delete state.done[plan.stateKey];
       state.skipped[plan.stateKey] = `logical document was not indexed because part status was ${statuses.join(", ")}`;
+      const failedParts = statuses.filter((status) => status === "failed").length;
+      if (which === "gmail" && failedParts > 0) {
+        recordGmailRetry(state, plan);
+        gmailDurableRetryFailures += failedParts;
+      } else if (which === "gmail") {
+        clearGmailRetry(state, plan.stateKey);
+      }
     }
     for (const plan of [...outcome.completed, ...outcome.incomplete]) {
       familyPlans.delete(plan.stateKey);
@@ -17155,11 +17213,17 @@ const cmdIngestRemoteRun = async (
         await capturePrewalkHistory();
         ids = gmail.listMessages(getToken, { max: limit, query: gmailFullQuery });
       } else {
-        info(`incremental: ${h.ids.length} changed message(s), ${h.deletedIds.length} deleted message(s)`);
+        const deletedIds = new Set(h.deletedIds);
+        const retryIds = gmailRetryMessageIds(state, sourceName)
+          .filter((id) => !deletedIds.has(id));
+        info(
+          `incremental: ${h.ids.length} changed message(s), ${h.deletedIds.length} deleted message(s), ` +
+          `${retryIds.length} durable retry message(s)`,
+        );
         gmailDeletedUids.push(...h.deletedIds.map((id) => `${sourceName}:${id}`));
         nextHistory = h.historyId || nextHistory;
         gmailHistoryMarkerMissing = nextHistory ? 0 : 1;
-        ids = h.ids.slice(0, limit);
+        ids = [...new Set([...retryIds, ...h.ids])].slice(0, limit);
 
         // History.list cannot apply DEFAULT_QUERY. Classify the complete window
         // using label/date policy reads before any document or removal is sent. This is
@@ -17304,6 +17368,7 @@ const cmdIngestRemoteRun = async (
           gmailIntentionalUids.push(key);
         }
         if (r.cursor_blocking === true) gmailLabelGaps++;
+        if (r.cursor_blocking !== true) clearGmailRetry(state, key);
         if (scannerPolicyChanged && previouslyAccepted && r.retain_existing === true) {
           scannerProgressCanCommit = false;
         }
@@ -17333,6 +17398,7 @@ const cmdIngestRemoteRun = async (
         state.skipped[key] = refusal.reason;
         localRefused++;
         gmailIntentionalUids.push(key);
+        clearGmailRetry(state, key);
         return { skip };
       }
       const envelopes = splitOversized(envelope);
@@ -17509,6 +17575,7 @@ const cmdIngestRemoteRun = async (
               if (state.done) delete state.done[uid];
               if (state.removed) delete state.removed[uid];
               if (gmailRemovalPlan.targets.source_deleted.includes(uid)) delete state.skipped[uid];
+              clearGmailRetry(state, uid);
             }
           }
           saveState(statePath, state);
@@ -17914,7 +17981,9 @@ const cmdIngestRemoteRun = async (
       `${unchanged} unchanged; ${skips.length} skipped; ${tally.failed} failed`
   );
 
-  const coverageGaps = Math.max(0, skips.length - policySkipped - sourceResolvedSkipped - adjudicatedSkipped) +
+  const gmailCredentialRefusalSkips = which === "gmail" ? localRefused + tally.refused : 0;
+  const coverageGaps = Math.max(0, skips.length - policySkipped - sourceResolvedSkipped - adjudicatedSkipped -
+    gmailCredentialRefusalSkips) +
     gmailHistoryMarkerMissing + imapSnapshotGaps;
 
   if (dry) {
@@ -17927,10 +17996,13 @@ const cmdIngestRemoteRun = async (
     return { dry_run: true, would_send: prepared, unchanged, skipped: skips.length, failed: 0 };
   }
 
-  // Every batch landed, so it is now safe to say "we have everything up to
-  // here". sendBatches dies rather than returning on a failure, so reaching
-  // this line is the proof.
-  const cursorCanAdvance = sourceCursorCanAdvance(tally, { retryableSkips: retryableOcrSkips }) &&
+  // Gmail may advance past a failed Worker part only after the exact logical
+  // message identity is durable in its retry list. Other sources retain the
+  // original all-parts-accepted cursor boundary.
+  const cursorCanAdvance = sourceCursorCanAdvance(tally, {
+    retryableSkips: retryableOcrSkips,
+    durableRetryFailures: which === "gmail" ? gmailDurableRetryFailures : 0,
+  }) &&
     !(which === "gmail" &&
       (gmailLabelGaps > 0 || gmailHistoryMarkerMissing > 0 || gmailPendingRemovalGaps > 0)) &&
     !(which === "imap" && imapSnapshotGaps > 0);
@@ -17957,21 +18029,25 @@ const cmdIngestRemoteRun = async (
   }
   // A non-policy skip remains visible as incomplete coverage. Gmail still
   // advances past deterministic credential, parse and quality outcomes so one
-  // immutable message cannot poison every later history run. Only missing
-  // label evidence, an incomplete scanner sweep, or a missing history marker
-  // withholds its cursor above.
+  // immutable message cannot poison every later history run. A failed Gmail
+  // part advances only with its exact durable retry. Missing label evidence,
+  // an incomplete scanner sweep, or a missing history marker still withholds
+  // the cursor above.
   const totalRefused = tally.refused + localRefused;
+  const gmailRetryBacklog = which === "gmail" ? gmailRetryMessageIds(state, sourceName).length : 0;
   const driveReviewRequired = which === "drive" &&
     (protectedDriveUids().size > 0 || malformedDriveIdentityCount > 0);
   const hasRemoteGap = sourceReceiptHasRemoteGap({
-    tally, totalRefused, coverageGaps, driveReviewRequired, retryableSkips: retryableOcrSkips,
+    source: which, tally, totalRefused, coverageGaps, driveReviewRequired, retryableSkips: retryableOcrSkips,
+    durableRetries: gmailRetryBacklog,
   });
   const finalStatus = hasRemoteGap ? "error" : "ready";
   assertLockOwned?.();
   await recordSourceReceipt({
     source: sourceName, kind: which, status: finalStatus, run_id: runId,
     lane, started_at: runStartedAt, completed_at: new Date().toISOString(),
-    complete_sweep: ["drive", "gmail", "imap"].includes(which) && !incremental && !hasRemoteGap,
+    complete_sweep: ["drive", "gmail", "imap"].includes(which) && !incremental &&
+      !hasRemoteGap && totalRefused === 0,
     // Reaching this terminal path means the provider enumeration itself
     // finished. Refused/failed documents and unresolved coverage remain
     // separate measured outcomes and still block complete_sweep.
@@ -17983,14 +18059,14 @@ const cmdIngestRemoteRun = async (
     // Outcome counters measure document attempts. Deliberate source-policy and
     // adjudicated skips stay in detail; they are not ingest refusals.
     docs_refused: totalRefused,
-    docs_failed: tally.failed + retryableOcrSkips,
+    docs_failed: Math.max(tally.failed, gmailRetryBacklog) + retryableOcrSkips,
     // One shape or the other, never both: a receipt carrying a human detail AND
     // an issue code invites a reader to believe the happier of the two.
     ...(hasRemoteGap
       ? {
           issue_code: driveReviewRequired
             ? "SAFETY_REVIEW_REQUIRED"
-            : totalRefused > 0 ? "INPUT_REFUSED" : "INGEST_FAILED",
+            : totalRefused > 0 && which !== "gmail" ? "INPUT_REFUSED" : "INGEST_FAILED",
           ...(which === "gmail" && gmailOperationalFailure
             ? { failure_evidence: gmailFailureEvidence(gmailOperationalFailure, statePath, gmailCheckpointBefore) }
             : {}),
@@ -17999,19 +18075,29 @@ const cmdIngestRemoteRun = async (
           detail: `${which} ${lane} sync completed; skipped=${skips.length}; ` +
             `policy_skipped=${policySkipped}; coverage_gaps=${coverageGaps}; ` +
             `source_resolved=${sourceResolvedSkipped}; adjudicated_skips=${adjudicatedSkipped}` +
-            (which === "imap" ? `; folder_policy_skipped=${folderPolicySkipped}` : ""),
+            (which === "imap" ? `; folder_policy_skipped=${folderPolicySkipped}` : "") +
+            (which === "gmail" ? `; withheld_for_secrets=${totalRefused}` : ""),
         }),
   });
   runClosed = true;
 
   const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged`;
-  if (tally.failed || retryableOcrSkips) info(summary);
+  if (tally.failed || retryableOcrSkips || gmailRetryBacklog) info(summary);
   else ok(summary);
-  if (totalRefused) warn(`${totalRefused} document(s) refused for carrying live credentials.`);
+  if (totalRefused) {
+    if (which === "gmail") {
+      info(`${totalRefused} Gmail message(s) withheld for carrying live credentials by design.`);
+    } else {
+      warn(`${totalRefused} document(s) refused for carrying live credentials.`);
+    }
+  }
   reportOcrRetryStats(ocrCallback);
   await reportSkips(skips);
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
-  assertNoIngestFailures(tally);
+  assertNoIngestFailures({
+    ...tally,
+    failed: Math.max(tally.failed, gmailRetryBacklog),
+  });
   if (driveReviewRequired) {
     const count = protectedDriveUids().size + malformedDriveIdentityCount;
     const notReturned = Number(driveRemovalReview.counts.unresolved_not_returned || 0);
@@ -18073,12 +18159,8 @@ const cmdIngestRemoteRun = async (
   }
   await reportBacklog(manifestPath);
   if (which === "gmail" && hasRemoteGap) {
-    const disposition = tally.created + tally.updated + unchanged + tally.unchanged > 0
-      ? "partial coverage"
-      : "refused coverage";
     die(
-      `${disposition}: ${coverageGaps} Gmail message(s) were not indexed` +
-        (totalRefused ? `, including ${totalRefused} credential refusal(s)` : "") + ".\n" +
+      `partial coverage: ${coverageGaps} Gmail message(s) had unresolved coverage gaps.\n` +
         "      Progress was saved. The cursor advances only when every message had trustworthy policy evidence.",
     );
   }

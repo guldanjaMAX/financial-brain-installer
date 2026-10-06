@@ -9,9 +9,13 @@ const userRoot = String(process.env.BRAIN_GMAIL_POLICY_USER_ROOT || "");
 const mode = String(process.env.BRAIN_GMAIL_POLICY_MODE || "");
 const MODES = [
   "mixed",
+  "refusal-only",
+  "refusal-only-sweep",
+  "refusal-with-failure",
   "unclassified",
   "credential-refusal",
   "worker-refusal",
+  "recoverable-worker-failure",
   "sweep-query-evidence",
   "policy-change-sweep",
   "since-safe-sweep",
@@ -51,6 +55,7 @@ syncBuiltinESMExports();
 
 const blank = () => ({
   ingested_ids: [],
+  batch_attempts: {},
   forget_targets: [],
   receipts: { indexing: 0, ready: 0, error: 0 },
   final_receipt: null,
@@ -91,6 +96,10 @@ globalThis.fetch = async (input, options = {}) => {
     return json({ historyId: "history-current" });
   }
   if (url.hostname === "gmail.googleapis.com" && url.pathname === "/gmail/v1/users/me/history") {
+    if (mode === "recoverable-worker-failure" &&
+        url.searchParams.get("startHistoryId") === "history-current") {
+      return json({ historyId: "history-current", history: [] });
+    }
     if (["pending-retained", "pending-absent-unreadable"].includes(mode) &&
         url.searchParams.get("startHistoryId") === "history-current") {
       return json({ historyId: "history-current" });
@@ -112,9 +121,12 @@ globalThis.fetch = async (input, options = {}) => {
     }
     const idsByMode = {
       mixed: ["promotion", "inbox"],
+      "refusal-only": ["refusal-only-001", "refusal-only-002"],
+      "refusal-with-failure": ["refusal-failure-secret", "refusal-failure-worker"],
       unclassified: [...lateEligibleIds, "unclassified"],
       "credential-refusal": ["credential-refused", "credential-clean"],
       "worker-refusal": ["worker-refused"],
+      "recoverable-worker-failure": ["retry-failed", "retry-clean"],
       "scanner-v5": ["migration-safe", "migration-sensitive"],
       "pending-restored": ["pending-restored"],
       "pending-retained": ["pending-retained"],
@@ -155,6 +167,14 @@ globalThis.fetch = async (input, options = {}) => {
     if (["sweep-query-evidence", "policy-change-sweep", "sweep-marker-missing"].includes(mode)) {
       requireDefaultFilteredQuery(url);
       return json({ messages: [{ id: "sweep-inbox" }] });
+    }
+    if (mode === "refusal-only-sweep") {
+      requireDefaultFilteredQuery(url);
+      return json({ messages: [{ id: "refusal-sweep-001" }, { id: "refusal-sweep-002" }] });
+    }
+    if (mode === "recoverable-worker-failure") {
+      requireDefaultFilteredQuery(url);
+      return json({ messages: [{ id: "retry-failed" }, { id: "retry-clean" }] });
     }
     if (mode === "since-safe-sweep") {
       requireDefaultFilteredQuery(url, "2022-03-01");
@@ -256,10 +276,29 @@ globalThis.fetch = async (input, options = {}) => {
         raw: rawMail("Clean inbox mail", "This invented clean inbox message confirms the reviewed project owner, agreed scope, timing, price, and next milestone."),
       });
     }
+    if (["refusal-only-001", "refusal-only-002", "refusal-sweep-001", "refusal-sweep-002",
+      "refusal-failure-secret"].includes(id)) {
+      return json({
+        id, historyId: "history-current", internalDate: "1788030000000", labelIds: ["INBOX"],
+        raw: rawMail("Invented credential", `This invented message contains a fake test value. admin_key: ${SYNTHETIC_OPENAI_KEY}`),
+      });
+    }
+    if (id === "refusal-failure-worker") {
+      return json({
+        id, historyId: "history-current", internalDate: "1788030000000", labelIds: ["INBOX"],
+        raw: rawMail("Recoverable storage failure", "This invented message remains retryable after a recoverable storage failure."),
+      });
+    }
     if (id === "worker-refused") {
       return json({
         id, historyId: "history-current", internalDate: "1788030000000", labelIds: ["INBOX"],
         raw: rawMail("Worker-side refusal", "This invented ordinary inbox message passes the local scanner so the fixture Worker can refuse it at the receipt boundary."),
+      });
+    }
+    if (["retry-failed", "retry-clean"].includes(id)) {
+      return json({
+        id, historyId: "history-current", internalDate: "1788030000000", labelIds: ["INBOX"],
+        raw: rawMail("Retry fixture mail", `This invented message ${id} proves durable retry convergence after a recoverable storage failure.`),
       });
     }
     if (id === "sweep-inbox") {
@@ -349,10 +388,18 @@ globalThis.fetch = async (input, options = {}) => {
     const request = bodyOf(options);
     const evidence = readEvidence();
     evidence.ingested_ids.push(...request.docs.map((doc) => doc.source_id));
+    for (const doc of request.docs) {
+      evidence.batch_attempts[doc.source_id] = Number(evidence.batch_attempts[doc.source_id] || 0) + 1;
+    }
     saveEvidence(evidence);
     return json({
       results: request.docs.map((doc) => mode === "worker-refusal"
         ? { source_id: doc.source_id, status: "refused", labels: ["synthetic_test_label"] }
+        : mode === "refusal-with-failure" && doc.source_id === "refusal-failure-worker"
+          ? { source_id: doc.source_id, status: "failed" }
+        : mode === "recoverable-worker-failure" && doc.source_id === "retry-failed" &&
+            evidence.batch_attempts[doc.source_id] === 1
+          ? { source_id: doc.source_id, status: "failed" }
         : { source_id: doc.source_id, status: "created" }),
     });
   }
