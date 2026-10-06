@@ -273,6 +273,71 @@ test("source retirement refusals are closed, reached, and write-free", async () 
   }
 });
 
+test("the retirement write atomically refuses a sync opened after its initial read", async () => {
+  const control = await createProductFixture();
+  try {
+    await register(control, "archive-2026");
+    const sqlBefore = control.seen.sql.length;
+    const retired = await json(await control.post(
+      "/api/admin/brain/source-retire", { source: "archive-2026", retired: true }, ADMIN,
+    ));
+    assert.equal(retired.status, 200);
+    assert.equal(retired.body.changed, true, "the no-open-sync control reaches the guarded write");
+    const controlWriteIndex = control.seen.sql.findIndex((sql, index) => index >= sqlBefore &&
+      /INSERT INTO source_events/.test(sql) && /NOT EXISTS\s*\(\s*SELECT 1 FROM sync_runs/is.test(sql));
+    const controlWrite = control.seen.sql[controlWriteIndex];
+    assert.ok(controlWrite, "the control must execute the atomic open-sync guard");
+    const controlWritePlan = control.rows(
+      `EXPLAIN QUERY PLAN ${controlWrite}`,
+      ...control.seen.binds[controlWriteIndex],
+    );
+    assert.equal(
+      controlWritePlan.some((row) => /USE TEMP B-TREE/i.test(String(row.detail || ""))),
+      false,
+      controlWritePlan.map((row) => String(row.detail || "")).join("\n"),
+    );
+  } finally {
+    control.close();
+  }
+
+  const raced = await createProductFixture();
+  try {
+    await register(raced, "archive-2026");
+    const originalBatch = raced.env.DB.batch;
+    const callLog = [];
+    raced.env.DB.batch = async (statements) => {
+      callLog.push(statements.map((statement) => statement.sql));
+      raced.raw(
+        `INSERT INTO sync_runs (run_id,source,lane,started_at)
+         VALUES ('race-open-run','archive-2026','sweep','2026-10-05T12:00:00.000Z')`,
+      );
+      return originalBatch(statements);
+    };
+
+    const changesBefore = raced.first("SELECT total_changes() AS n").n;
+    const response = await json(await raced.post(
+      "/api/admin/brain/source-retire", { source: "archive-2026", retired: true }, ADMIN,
+    ));
+    assert.equal(response.status, 409);
+    assert.equal(response.body.code, "source_indexing");
+    assert.equal(callLog.length, 1, "the race must reach the retirement batch exactly once");
+    assert.ok(callLog[0].some((sql) =>
+      /INSERT INTO source_events/.test(sql) && /NOT EXISTS\s*\(\s*SELECT 1 FROM sync_runs/is.test(sql)),
+    "the refused race must reach the guarded write rather than pass vacuously");
+    assert.equal(
+      raced.first("SELECT COUNT(*) AS n FROM source_events WHERE source_name='archive-2026' AND event='retired'").n,
+      0,
+    );
+    assert.equal(
+      raced.first("SELECT total_changes() AS n").n - changesBefore,
+      1,
+      "only the injected open-run mutation may commit",
+    );
+  } finally {
+    raced.close();
+  }
+});
+
 test("only the unrestricted owner key can reach source retirement", async () => {
   const fixture = await createProductFixture();
   try {
@@ -319,14 +384,50 @@ test("only the unrestricted owner key can reach source retirement", async () => 
   }
 });
 
-test("retirement queries use the source-events index", async () => {
+test("retirement queries preserve insertion order without sorting multi-source event history", async () => {
   const fixture = await createProductFixture();
   try {
+    await register(fixture, "archive-2026");
+    await register(fixture, "archive-2025");
+    const insertEvent = fixture.sqlite.prepare(
+      "INSERT INTO source_events (source_name,event,at,detail) VALUES (?,?,?,?)",
+    );
+    fixture.sqlite.exec("BEGIN");
+    try {
+      for (let index = 0; index < 2_000; index++) {
+        insertEvent.run(
+          index % 2 === 0 ? "archive-2026" : "archive-2025",
+          index % 3 === 0 ? "error" : "ingest",
+          `2026-09-${String(30 - (index % 30)).padStart(2, "0")}T12:00:00.000Z`,
+          `invented-event-${index}`,
+        );
+      }
+      insertEvent.run("archive-2026", "retired", "2001-01-01T00:00:00.000Z", "invented-latest-a");
+      insertEvent.run("archive-2025", "unretired", "2001-01-01T00:00:00.000Z", "invented-latest-b");
+      fixture.sqlite.exec("COMMIT");
+    } catch (error) {
+      fixture.sqlite.exec("ROLLBACK");
+      throw error;
+    }
+
+    const stateRows = fixture.rows(sourceFreshnessSql({ ordered: true }));
+    assert.equal(
+      stateRows.find((row) => row.name === "archive-2026").retired_at,
+      "2001-01-01T00:00:00.000Z",
+      "the latest inserted event wins even when its timestamp is oldest",
+    );
+    assert.equal(stateRows.find((row) => row.name === "archive-2025").retired_at, null);
+
     const plan = fixture.rows(`EXPLAIN QUERY PLAN ${sourceFreshnessSql()}`);
     const eventSteps = plan.map((row) => String(row.detail || "")).filter((detail) => /source_events/.test(detail));
     assert.ok(eventSteps.length > 0, "the retirement lookup must reach source_events");
     assert.ok(eventSteps.some((detail) => /SEARCH .* USING INDEX idx_source_events_source/.test(detail)), eventSteps.join("\n"));
     assert.equal(eventSteps.some((detail) => /SCAN .*source_events/.test(detail)), false, eventSteps.join("\n"));
+    assert.equal(
+      plan.some((row) => /USE TEMP B-TREE/i.test(String(row.detail || ""))),
+      false,
+      plan.map((row) => String(row.detail || "")).join("\n"),
+    );
 
     await sourceInventory(fixture.env, { now: NOW });
     const inventoryRetirementSql = fixture.seen.sql.find((sql) =>
@@ -338,6 +439,11 @@ test("retirement queries use the source-events index", async () => {
     assert.ok(inventoryEventSteps.some((detail) =>
       /SEARCH .* USING INDEX idx_source_events_source/.test(detail)), inventoryEventSteps.join("\n"));
     assert.equal(inventoryEventSteps.some((detail) => /SCAN .*source_events/.test(detail)), false);
+    assert.equal(
+      inventoryPlan.some((row) => /USE TEMP B-TREE/i.test(String(row.detail || ""))),
+      false,
+      inventoryPlan.map((row) => String(row.detail || "")).join("\n"),
+    );
   } finally {
     fixture.close();
   }

@@ -2294,12 +2294,7 @@ async function handleSourceRetirement(env, request) {
   const sourceRow = await env.DB.prepare(
     `SELECT lower(trim(s.kind)) AS kind, s.stale_reason,
             EXISTS (SELECT 1 FROM sync_runs sr
-                     WHERE sr.source=s.name AND sr.finished_at IS NULL) AS open_sync,
-            (SELECT CASE WHEN e.event='retired' THEN e.at ELSE NULL END
-               FROM source_events e
-              WHERE e.source_name=s.name
-                AND e.event IN ('retired','unretired','ingest','error','registered','forget')
-              ORDER BY e.id DESC LIMIT 1) AS retired_at
+                     WHERE sr.source=s.name AND sr.finished_at IS NULL) AS open_sync
        FROM sources s WHERE s.name=?1`
   ).bind(source).first();
   if (!sourceRow) {
@@ -2324,29 +2319,53 @@ async function handleSourceRetirement(env, request) {
     }, 409);
   }
 
-  const current = sourceRetirementState(sourceRow);
   const documents = Number((await sourceFamilyCounts(env, { source }))?.logical_documents || 0);
-  if (current.retired === body.retired) {
-    return jsonResponse({
-      source, kind: sourceRow.kind, retired: current.retired,
-      retired_at: current.retiredAt, documents, changed: false,
-    });
-  }
 
   const at = new Date().toISOString();
   const event = body.retired ? "retired" : "unretired";
   const operationId = crypto.randomUUID();
   const detail = `owner-retire:${operationId}`;
+  // The conditional insert and both decision reads share one transaction.
+  // MAX(id) preserves lifecycle insertion order without sorting long histories.
   const receipts = await env.DB.batch([
     env.DB.prepare(
-      "INSERT INTO source_events (source_name,event,at,documents,detail) VALUES (?1,?2,?3,?4,?5)"
-    ).bind(source, event, at, documents, detail),
+      `INSERT INTO source_events (source_name,event,at,documents,detail)
+       SELECT ?1,?2,?3,?4,?5
+        WHERE NOT EXISTS (
+          SELECT 1 FROM sync_runs
+           WHERE source=?1 AND finished_at IS NULL
+        )
+          AND COALESCE((
+            SELECT CASE WHEN latest.event='retired' THEN 1 ELSE 0 END
+              FROM source_events latest
+             WHERE latest.id=(
+               SELECT MAX(candidate.id)
+                 FROM source_events candidate
+                WHERE candidate.source_name=?1
+                  AND candidate.event IN ('retired','unretired','ingest','error','registered','forget')
+             )
+          ),0)<>?6`
+    ).bind(source, event, at, documents, detail, body.retired ? 1 : 0),
     env.DB.prepare(
       `SELECT source_name,event,at,documents,detail
          FROM source_events
         WHERE source_name=?1 AND event=?2 AND detail=?3
         ORDER BY id DESC LIMIT 1`
     ).bind(source, event, detail),
+    env.DB.prepare(
+      `SELECT EXISTS (
+         SELECT 1 FROM sync_runs
+          WHERE source=?1 AND finished_at IS NULL
+       ) AS open_sync,
+       (SELECT CASE WHEN e.event='retired' THEN e.at ELSE NULL END
+          FROM source_events e
+         WHERE e.id=(
+           SELECT MAX(latest.id)
+             FROM source_events latest
+            WHERE latest.source_name=?1
+              AND latest.event IN ('retired','unretired','ingest','error','registered','forget')
+         )) AS retired_at`
+    ).bind(source),
   ]);
   const readback = receipts?.[1]?.results;
   const exact = Array.isArray(readback) && readback.length === 1 &&
@@ -2354,6 +2373,20 @@ async function handleSourceRetirement(env, request) {
     readback[0].at === at && readback[0].detail === detail &&
     Number(readback[0].documents) === documents;
   if (!exact) {
+    const guardedOpenSync = receipts?.[2]?.results?.[0]?.open_sync;
+    if (guardedOpenSync === 1 || guardedOpenSync === true) {
+      return jsonResponse({
+        error: "The source has an open sync run and cannot be retired.",
+        code: "source_indexing",
+      }, 409);
+    }
+    const guardedState = sourceRetirementState(receipts?.[2]?.results?.[0]);
+    if (guardedState.retired === body.retired) {
+      return jsonResponse({
+        source, kind: sourceRow.kind, retired: guardedState.retired,
+        retired_at: guardedState.retiredAt, documents, changed: false,
+      });
+    }
     return jsonResponse({
       error: "The source retirement event could not be verified.",
       code: "source_retirement_unverified",

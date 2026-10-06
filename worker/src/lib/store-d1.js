@@ -3766,6 +3766,8 @@ export function sourceRetirementState(row) {
   return { retired: retiredAt !== null, retiredAt };
 }
 
+// Event insertion order is the lifecycle authority. MAX(id) preserves that
+// rule without making SQLite sort every event for a long-lived source.
 export const sourceFreshnessSql = ({ ordered = false, includeUnregisteredCounts = false } = {}) => `
   SELECT inventory.*
     FROM (
@@ -3776,9 +3778,12 @@ export const sourceFreshnessSql = ({ ordered = false, includeUnregisteredCounts 
                WHERE sr.source = s.name AND sr.finished_at IS NULL) AS indexing_started_at,
              (SELECT CASE WHEN e.event='retired' THEN e.at ELSE NULL END
                 FROM source_events e
-               WHERE e.source_name = s.name
-                 AND e.event IN ('retired','unretired','ingest','error','registered','forget')
-               ORDER BY e.id DESC LIMIT 1) AS retired_at,
+               WHERE e.id = (
+                 SELECT MAX(latest.id)
+                   FROM source_events latest
+                  WHERE latest.source_name = s.name
+                    AND latest.event IN ('retired','unretired','ingest','error','registered','forget')
+               )) AS retired_at,
              1 AS registered
         FROM sources s
       UNION ALL
@@ -4643,9 +4648,12 @@ export async function sourceInventory(env, {
     `SELECT s.name AS source_name,
             (SELECT CASE WHEN e.event='retired' THEN e.at ELSE NULL END
                FROM source_events e
-              WHERE e.source_name=s.name
-                AND e.event IN ('retired','unretired','ingest','error','registered','forget')
-              ORDER BY e.id DESC LIMIT 1) AS retired_at
+              WHERE e.id=(
+                SELECT MAX(latest.id)
+                  FROM source_events latest
+                 WHERE latest.source_name=s.name
+                   AND latest.event IN ('retired','unretired','ingest','error','registered','forget')
+              )) AS retired_at
        FROM sources s`
   ).all();
   const retirements = new Map((retirementResult?.results || []).map((row) => [
