@@ -318,7 +318,7 @@ function Add-UserPath([string[]]$Directories) {
   $env:Path = (($Directories + @($env:Path)) -join ';')
 }
 
-function Copy-PinnedKitStream([IO.Stream]$Input, [string]$Destination, [long]$ExpectedSize) {
+function Copy-PinnedKitStream([IO.Stream]$SourceStream, [string]$Destination, [long]$ExpectedSize) {
   Write-Output "DOWNLOAD_WRITE_DECISION_REACHED=1"
   $output = $null
   $created = $false
@@ -327,7 +327,7 @@ function Copy-PinnedKitStream([IO.Stream]$Input, [string]$Destination, [long]$Ex
     $created = $true
     $buffer = New-Object byte[] 65536
     [long]$total = 0
-    while (($read = $Input.Read($buffer, 0, $buffer.Length)) -gt 0) {
+    while (($read = $SourceStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
       $total += $read
       if ($total -gt $ExpectedSize) { throw "kit download refused: size limit exceeded" }
       $output.Write($buffer, 0, $read)
@@ -345,7 +345,8 @@ function Copy-PinnedKitStream([IO.Stream]$Input, [string]$Destination, [long]$Ex
 function Receive-PinnedKit([string]$Destination) {
   if ($env:MACHINE_PREP_TEST_MODE -eq "1" -and $env:MACHINE_PREP_TEST_KIT_SOURCE) {
     $testInput = [IO.File]::OpenRead($env:MACHINE_PREP_TEST_KIT_SOURCE)
-    try { Copy-PinnedKitStream $testInput $Destination $BrainKitSize } finally { $testInput.Dispose() }
+    $testTransferSize = if ($env:MACHINE_PREP_TEST_TRANSFER_SIZE) { [long]$env:MACHINE_PREP_TEST_TRANSFER_SIZE } else { $BrainKitSize }
+    try { Copy-PinnedKitStream $testInput $Destination $testTransferSize } finally { $testInput.Dispose() }
     return
   }
   Add-Type -AssemblyName System.Net.Http
@@ -353,17 +354,17 @@ function Receive-PinnedKit([string]$Destination) {
   $handler.AllowAutoRedirect = $false
   $client = [Net.Http.HttpClient]::new($handler)
   $response = $null
-  $input = $null
+  $ResponseStream = $null
   try {
     $client.Timeout = [TimeSpan]::FromMinutes(5)
     Write-Output "NO_REDIRECTS=1"
     $response = $client.GetAsync($BrainKitUrl, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
     if ([int]$response.StatusCode -ne 200 -or $response.RequestMessage.RequestUri.AbsoluteUri -cne $BrainKitUrl) { throw "kit download refused: direct HTTPS 200 required" }
     if ($response.Content.Headers.ContentLength -ne $BrainKitSize) { throw "kit download refused: content length mismatch" }
-    $input = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
-    Copy-PinnedKitStream $input $Destination $BrainKitSize
+    $ResponseStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+    Copy-PinnedKitStream $ResponseStream $Destination $BrainKitSize
   } finally {
-    if ($input) { $input.Dispose() }
+    if ($ResponseStream) { $ResponseStream.Dispose() }
     if ($response) { $response.Dispose() }
     $client.Dispose()
     $handler.Dispose()

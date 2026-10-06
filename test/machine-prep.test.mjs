@@ -111,7 +111,7 @@ function runWindowsScratch(script, args, home, { extraEnv = {}, ...options } = {
   });
 }
 
-function runWindowsInstallOrchestration({ scenario, script = WINDOWS }) {
+function runWindowsInstallOrchestration({ scenario, script = WINDOWS, kitSizeOffset = 0, kitShaOverride = null }) {
   const directory = mkdtempSync(join(ROOT, ".machine-prep-windows-install-"));
   const home = join(directory, "home");
   const local = join(home, "local");
@@ -123,7 +123,8 @@ function runWindowsInstallOrchestration({ scenario, script = WINDOWS }) {
   const stage = `${prefix}.test-stage`;
   mkdirSync(temp, { recursive: true });
   writeFileSync(kit, "synthetic reviewed kit\n");
-  const kitSha = createHash("sha256").update(readFileSync(kit)).digest("hex");
+  const kitBytes = readFileSync(kit);
+  const kitSha = createHash("sha256").update(kitBytes).digest("hex");
   writeFileSync(npm, `@echo off\r
 set "target="\r
 :parse\r
@@ -151,8 +152,9 @@ exit /b 0\r
     timeout: 15_000,
     extraEnv: {
       MACHINE_PREP_TEST_KIT_SOURCE: kit,
-      MACHINE_PREP_TEST_KIT_SIZE: String(readFileSync(kit).length),
-      MACHINE_PREP_TEST_KIT_SHA256: kitSha,
+      MACHINE_PREP_TEST_KIT_SIZE: String(kitBytes.length + kitSizeOffset),
+      MACHINE_PREP_TEST_KIT_SHA256: kitShaOverride ?? kitSha,
+      MACHINE_PREP_TEST_TRANSFER_SIZE: String(kitBytes.length),
       MACHINE_PREP_TEST_NPM_PATH: npm,
       MACHINE_PREP_TEST_STAGE_PATH: stage,
     },
@@ -167,7 +169,7 @@ function combined(result) {
   return `${result.stdout || ""}${result.stderr || ""}`.replaceAll("\r\n", "\n");
 }
 
-function runMacInstallOrchestration({ scenario, script = MAC }) {
+function runMacInstallOrchestration({ scenario, script = MAC, kitSizeOffset = 0, kitShaOverride = null }) {
   const directory = mkdtempSync(join(ROOT, ".machine-prep-install-test-"));
   const home = join(directory, "home");
   const kit = join(directory, "kit.tgz");
@@ -216,8 +218,8 @@ ln -s ../lib/node_modules/brain-installer/brain.mjs "$prefix/bin/brain"
       MACHINE_PREP_HOME: home,
       MACHINE_PREP_TEST_MODE: "1",
       MACHINE_PREP_TEST_KIT_SOURCE: kit,
-      MACHINE_PREP_TEST_KIT_SIZE: String(readFileSync(kit).length),
-      MACHINE_PREP_TEST_KIT_SHA256: kitSha,
+      MACHINE_PREP_TEST_KIT_SIZE: String(readFileSync(kit).length + kitSizeOffset),
+      MACHINE_PREP_TEST_KIT_SHA256: kitShaOverride ?? kitSha,
       MACHINE_PREP_TEST_NPM_PATH: npm,
       MACHINE_PREP_TEST_STAGE_PATH: stage,
       MACHINE_PREP_AMBIENT_SENTINEL: "must-not-reach-child",
@@ -438,6 +440,62 @@ test("Mac install orchestration removes its failed attempt and atomically publis
   }
 });
 
+function assertInstallVerificationRefusal(probe, decisionPattern) {
+  const out = combined(probe.result);
+  assert.notEqual(probe.result.status, 0, out);
+  assert.match(out, /DOWNLOAD_STARTED=1/);
+  assert.match(out, decisionPattern);
+  assert.doesNotMatch(out, /INSTALL_STARTED=1|ATOMIC_PROMOTION_DECISION_REACHED=1/);
+  assert.equal(existsSync(probe.prefix), false, "verification refusal must not publish the prefix");
+  assert.equal(existsSync(probe.stage), false, "verification refusal must not start npm staging");
+}
+
+test("Mac actual install refuses bad kit size and digest before npm or promotion, with a matching control", () => {
+  const cases = [
+    { name: "bad-size", options: { kitSizeOffset: 1 }, decision: /KIT_SIZE_DECISION_REACHED=1/ },
+    { name: "bad-digest", options: { kitShaOverride: "0".repeat(64) }, decision: /CHECKSUM_DECISION_REACHED=1/ },
+  ];
+  for (const item of cases) {
+    const probe = runMacInstallOrchestration({ scenario: "success", ...item.options });
+    try {
+      assertInstallVerificationRefusal(probe, item.decision);
+    } finally {
+      probe.cleanup();
+    }
+  }
+
+  const control = runMacInstallOrchestration({ scenario: "success" });
+  try {
+    assert.equal(control.result.status, 0, combined(control.result));
+    assert.match(combined(control.result), /KIT_SIZE_DECISION_REACHED=1[\s\S]*CHECKSUM_DECISION_REACHED=1[\s\S]*ATOMIC_PROMOTION_VERIFIED=1/);
+  } finally {
+    control.cleanup();
+  }
+});
+
+test("Mac install verification-call mutation turns both bad-kit controls red", () => {
+  const source = readFileSync(MAC, "utf8");
+  const from = '  verify_brain_kit "$archive" || return 1\n';
+  assert.equal(source.includes(from), true, "missing Mac install verification decision");
+  const directory = mkdtempSync(join(ROOT, ".machine-prep-verify-mutant-"));
+  const script = join(directory, "prep-mac.sh");
+  writeFileSync(script, source.replace(from, ""));
+  chmodSync(script, 0o755);
+  try {
+    for (const options of [{ kitSizeOffset: 1 }, { kitShaOverride: "0".repeat(64) }]) {
+      const probe = runMacInstallOrchestration({ scenario: "success", script, ...options });
+      try {
+        assert.throws(() => assertInstallVerificationRefusal(probe, /(?:KIT_SIZE|CHECKSUM)_DECISION_REACHED=1/), undefined,
+          "removing verify_brain_kit survived an actual install control");
+      } finally {
+        probe.cleanup();
+      }
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("Mac installer mutations disable real ownership, promotion, and environment protections", () => {
   const source = readFileSync(MAC, "utf8");
   const cases = [
@@ -617,6 +675,51 @@ test("Windows pinned stream writer succeeds through File.Open CreateNew and pres
       assert.notEqual(refused.status, 0);
       assert.match(combined(refused), /DOWNLOAD_WRITE_DECISION_REACHED=1/);
       assert.equal(existsSync(target), false, `${name} output created by this attempt must be cleaned`);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Windows actual install refuses bad kit size and digest before npm or promotion, with a matching control", { skip: process.platform !== "win32", timeout: 60_000 }, () => {
+  const cases = [
+    { name: "bad-size", options: { kitSizeOffset: 1 }, decision: /KIT_SIZE_DECISION_REACHED=1/ },
+    { name: "bad-digest", options: { kitShaOverride: "0".repeat(64) }, decision: /CHECKSUM_DECISION_REACHED=1/ },
+  ];
+  for (const item of cases) {
+    const probe = runWindowsInstallOrchestration({ scenario: "success", ...item.options });
+    try {
+      assertInstallVerificationRefusal(probe, item.decision);
+    } finally {
+      probe.cleanup();
+    }
+  }
+
+  const control = runWindowsInstallOrchestration({ scenario: "success" });
+  try {
+    assert.equal(control.result.status, 0, combined(control.result));
+    assert.match(combined(control.result), /KIT_SIZE_DECISION_REACHED=1[\s\S]*CHECKSUM_DECISION_REACHED=1[\s\S]*ATOMIC_PROMOTION_VERIFIED=1/);
+  } finally {
+    control.cleanup();
+  }
+});
+
+test("Windows install verification-call mutation turns both bad-kit controls red", { skip: process.platform !== "win32", timeout: 60_000 }, () => {
+  const source = readFileSync(WINDOWS, "utf8");
+  const from = "    Test-BrainKit $archive\n";
+  assert.equal(source.includes(from), true, "missing Windows install verification decision");
+  const directory = mkdtempSync(join(ROOT, ".machine-prep-windows-verify-mutant-"));
+  const script = join(directory, "prep-windows.ps1");
+  writeFileSync(script, source.replace(from, ""));
+  try {
+    for (const options of [{ kitSizeOffset: 1 }, { kitShaOverride: "0".repeat(64) }]) {
+      const probe = runWindowsInstallOrchestration({ scenario: "success", script, ...options });
+      try {
+        assert.throws(() => assertInstallVerificationRefusal(probe, /(?:KIT_SIZE|CHECKSUM)_DECISION_REACHED=1/), undefined,
+          "removing Test-BrainKit survived an actual install control");
+      } finally {
+        probe.cleanup();
+      }
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });

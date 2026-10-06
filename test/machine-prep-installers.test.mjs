@@ -240,6 +240,20 @@ test("Windows pinned download and child processes use PowerShell 5.1-compatible 
   for (const mutant of mutants) assert.throws(() => assertPrimitives(mutant));
 });
 
+function assertNoReservedPowerShellLocals(source) {
+  assert.doesNotMatch(source, /\$input\b/i, "PowerShell's automatic input variable must never be shadowed or consumed as an ordinary stream");
+  const reserved = "args|this|_|psitem|error|host|matches|pid|home|profile";
+  assert.doesNotMatch(source, new RegExp(`^\\s*function\\b[^\\n]*\\([^\\n]*\\$(?:${reserved})\\b`, "im"));
+  assert.doesNotMatch(source, new RegExp(`^\\s*\\$(?:${reserved})\\s*=`, "im"));
+}
+
+test("Windows prep does not shadow PowerShell automatic variables", () => {
+  const prep = read("machine-prep/prep-windows.ps1");
+  assert.doesNotThrow(() => assertNoReservedPowerShellLocals(prep));
+  const mutant = prep.replaceAll("$SourceStream", "$Input");
+  assert.throws(() => assertNoReservedPowerShellLocals(mutant));
+});
+
 test("visible setup launchers use the installed CLI and the standard fresh manifest path", () => {
   const mac = read("machine-prep/installers/macos/start-brain-setup.command");
   assert.match(mac, /\.financial-brain\/bin\/brain/);
@@ -328,6 +342,113 @@ const MAC_SIGNING_SECRETS = [
   "APPLE_NOTARY_ISSUER_ID",
   "APPLE_NOTARY_KEY_P8_BASE64",
 ];
+
+const MAC_SIGNING_GATE_SETTINGS = [
+  "APP_P12",
+  "APP_PASSWORD",
+  "INSTALLER_P12",
+  "INSTALLER_PASSWORD",
+  "NOTARY_KEY_ID",
+  "NOTARY_ISSUER_ID",
+  "NOTARY_P8",
+  "APPLE_TEAM_ID",
+];
+
+function signingGateBody(workflow) {
+  const gate = workflow.indexOf("        id: gate\n");
+  assert.notEqual(gate, -1, "missing signing gate step");
+  const bodyStartMarker = "        run: |\n";
+  const bodyStart = workflow.indexOf(bodyStartMarker, gate);
+  assert.notEqual(bodyStart, -1, "missing signing gate body");
+  const bodyEnd = workflow.indexOf("\n  macos-sign:", bodyStart);
+  assert.notEqual(bodyEnd, -1, "missing signing gate body terminator");
+  return workflow.slice(bodyStart + bodyStartMarker.length, bodyEnd)
+    .split("\n")
+    .map((line) => line === "" ? "" : line.slice(10))
+    .join("\n");
+}
+
+function runSigningGate({ workflow = read(".github/workflows/installer-signing.yml"), missing = null, wixConfirmed = "true" } = {}) {
+  const directory = mkdtempSync(join(ROOT, ".signing-gate-test-"));
+  const output = join(directory, "output");
+  const summary = join(directory, "summary");
+  const settings = [...MAC_SIGNING_GATE_SETTINGS, ...WINDOWS_SIGNING_VARIABLES];
+  const env = {
+    PATH: "/usr/bin:/bin",
+    HOME: directory,
+    BRAIN_NO_WRANGLER_LOGIN: "1",
+    BRAIN_TEST_LAUNCHCTL: join(directory, "injected-launchctl"),
+    GITHUB_OUTPUT: output,
+    GITHUB_STEP_SUMMARY: summary,
+    WIX_OSMF_CONFIRMED: wixConfirmed,
+  };
+  for (const setting of settings) env[setting] = setting === missing ? "" : "synthetic-configured";
+  const result = spawnSync("bash", ["-c", signingGateBody(workflow)], { cwd: ROOT, env, encoding: "utf8" });
+  return {
+    result,
+    output: existsSync(output) ? readFileSync(output, "utf8") : "",
+    summary: existsSync(summary) ? readFileSync(summary, "utf8") : "",
+    cleanup() { rmSync(directory, { recursive: true, force: true }); },
+  };
+}
+
+function assertSigningGate(probe, { mac, windows }) {
+  assert.equal(probe.result.status, 0, `${probe.result.stdout}${probe.result.stderr}`);
+  const values = Object.fromEntries(probe.output.trim().split("\n").map((line) => line.split("=")));
+  assert.equal(values.macos_configured, String(mac));
+  assert.equal(values.windows_configured, String(windows));
+}
+
+test("signing configuration body authorizes only complete settings and explicit WiX confirmation", () => {
+  const complete = runSigningGate();
+  try {
+    assertSigningGate(complete, { mac: true, windows: true });
+    assert.equal(complete.summary, "");
+  } finally {
+    complete.cleanup();
+  }
+
+  for (const missing of MAC_SIGNING_GATE_SETTINGS) {
+    const probe = runSigningGate({ missing });
+    try {
+      assertSigningGate(probe, { mac: false, windows: true });
+      assert.match(probe.summary, /Signing skipped cleanly for macOS/);
+    } finally {
+      probe.cleanup();
+    }
+  }
+  for (const missing of WINDOWS_SIGNING_VARIABLES) {
+    const probe = runSigningGate({ missing });
+    try {
+      assertSigningGate(probe, { mac: true, windows: false });
+      assert.match(probe.summary, /Signing skipped cleanly for Windows/);
+    } finally {
+      probe.cleanup();
+    }
+  }
+
+  const wixRefusal = runSigningGate({ wixConfirmed: "false" });
+  try {
+    assertSigningGate(wixRefusal, { mac: true, windows: false });
+    assert.match(wixRefusal.summary, /wix_osmf_confirmed is absent/);
+  } finally {
+    wixRefusal.cleanup();
+  }
+});
+
+test("signing missing-setting mutation turns the executed gate red", () => {
+  const workflow = read(".github/workflows/installer-signing.yml");
+  const from = '[ -n "$value" ] || mac_missing=1';
+  assert.equal(workflow.includes(from), true, "missing signing configuration decision");
+  const mutant = workflow.replace(from, '[ -n "$value" ] || true');
+  const probe = runSigningGate({ workflow: mutant, missing: "APP_P12" });
+  try {
+    assert.throws(() => assertSigningGate(probe, { mac: false, windows: true }), undefined,
+      "missing-setting decision mutation survived the executable gate matrix");
+  } finally {
+    probe.cleanup();
+  }
+});
 
 function assertCleanSigningSkipContract(workflow) {
   assert.match(workflow, /macos_configured=false/);
