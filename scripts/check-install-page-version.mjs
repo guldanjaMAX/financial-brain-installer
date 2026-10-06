@@ -16,6 +16,10 @@ const UPDATE_URL = 'https://financialbrain.ai/update';
 const RELEASE_BASE = 'https://github.com/guldanjaMAX/financial-brain-installer/releases/download';
 const RUNTIME_IDENTITY_SCHEME = 'brain.runtime-payload.sha256.v1';
 const RELEASE_HEALTH_PLATFORM = 'windows';
+const HELD_INSTALL_CONTRACT =
+  "Financial Brain installs are not open yet. Do not download or run anything. " +
+  "Installs open the week of October 5. We're finishing the current owners first. " +
+  "Leave your name at https://financialbrain.ai/#section-8 and we'll reach out.\n";
 const versionPattern = /^\d+\.\d+\.\d+$/;
 const digestPattern = /^[0-9a-f]{64}$/;
 const sourceDigestPattern = /^[0-9a-f]{40}$/;
@@ -99,6 +103,10 @@ export function validateSupervisedInstallContract(installGuide, { platform } = {
     candidateCommit: install.CANDIDATE_COMMIT,
   });
 }
+export function validateHeldInstallContract(installGuide) {
+  requireValue(installGuide === HELD_INSTALL_CONTRACT, 'invalid held install contract');
+  return Object.freeze({ state: 'held' });
+}
 export function validatePublicManifest(value) {
   requireValue(value?.schema_version === 2, 'unsupported update manifest schema');
   requireValue(['held', 'candidate', 'stable'].includes(value.release_state), 'invalid release state');
@@ -146,16 +154,16 @@ export function validateDoorways({ manifest, updateGuide, installGuide }) {
   'update guide and manifest disagree');
   const permitted = manifest.release_state === 'stable' ? 'guided-update-after-release-and-owner-checks' : 'read-only-diagnosis';
   requireValue(update.PERMITTED_MODE === permitted, 'update guide permits the wrong operation');
-  // The unlisted /install doorway intentionally offers a supervised candidate.
-  // Its older exact version must never be replaced with /releases/latest.
-  const install = validateSupervisedInstallContract(installGuide, { platform: RELEASE_HEALTH_PLATFORM });
-  // The artifact must still be derivable from the setup page, the version and
-  // the digest, so it can never be swapped for a moving target like
-  // /releases/latest. What changed on 2026-09-08 is the human-readable part of
-  // the name: the kit no longer embeds the setup page's own path or a single
-  // platform, because one sealed kit carries Windows and macOS and clients other
-  // than the person the page was named for now install from it.
-  return { state: manifest.release_state, publicRelease: manifest.release, supervisedCandidate: install.candidateVersion };
+  // Held must keep the doorway closed with the exact reviewed document.
+  // Candidate and stable retain the artifact-bearing supervised contract.
+  const install = manifest.release_state === 'held'
+    ? (validateHeldInstallContract(installGuide), null)
+    : validateSupervisedInstallContract(installGuide, { platform: RELEASE_HEALTH_PLATFORM });
+  return {
+    state: manifest.release_state,
+    publicRelease: manifest.release,
+    supervisedCandidate: install?.candidateVersion ?? null,
+  };
 }
 export function verifyPublishedMetadata(manifest, release) {
   requireValue(manifest.release_state === 'stable', 'publication verification needs a stable manifest');
@@ -209,6 +217,30 @@ export async function readSupervisedInstallContract({ platform = 'windows', read
   // Return the same local URL passed to read(), so callers can independently
   // compare the fetched platform resource with their expected public guide.
   return Object.freeze({ ...contract, guideUrl, guide, artifact });
+}
+export async function readInstallDoorwayContract({ platform = 'windows', read = publicBytes } = {}) {
+  const manifestBytes = Buffer.from(await read(ENDPOINTS.manifest, 200_000));
+  requireValue(manifestBytes.length < 200_000, 'invalid public manifest');
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
+  validatePublicManifest(manifest);
+
+  if (manifest.release_state !== 'held') {
+    return Object.freeze({
+      state: manifest.release_state,
+      ...await readSupervisedInstallContract({ platform, read }),
+    });
+  }
+
+  const { guideUrl } = supervisedPlatform(platform, { exactString: true });
+  const guideBytes = Buffer.from(await read(guideUrl, 200_000));
+  requireValue(guideBytes.length < 200_000, 'invalid agent guide');
+  const guide = guideBytes.toString('utf8');
+  validateHeldInstallContract(guide);
+  return Object.freeze({
+    state: manifest.release_state,
+    guideUrl,
+    guide,
+  });
 }
 export async function checkInstallPage({ read = publicBytes, requireStable = false } = {}) {
   const { guideUrl: installGuideUrl } = supervisedPlatform(RELEASE_HEALTH_PLATFORM, { exactString: true });
