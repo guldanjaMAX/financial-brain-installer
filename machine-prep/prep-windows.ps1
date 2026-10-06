@@ -432,11 +432,13 @@ function Remove-OwnedInstallDirectory([string]$Directory, [string]$AttemptId) {
 function Install-Brain {
   Test-Prefix $BrainPrefix
   if ($script:PrefixExitCode -ne 0) { throw "Financial Brain prefix collision" }
-  $npmPaths = if ($env:MACHINE_PREP_TEST_MODE -eq "1" -and $env:MACHINE_PREP_TEST_NPM_PATH) {
-    @($env:MACHINE_PREP_TEST_NPM_PATH)
+  # Keep the array: assigning an if-expression unrolls a one-item array to a scalar,
+  # and .Count on a scalar or $null throws under Set-StrictMode -Version Latest.
+  $npmPaths = @(if ($env:MACHINE_PREP_TEST_MODE -eq "1" -and $env:MACHINE_PREP_TEST_NPM_PATH) {
+    $env:MACHINE_PREP_TEST_NPM_PATH
   } else {
-    @(Get-ToolPaths "npm")
-  }
+    Get-ToolPaths "npm"
+  })
   if ($npmPaths.Count -eq 0) { throw "npm is unavailable" }
   $attemptId = "attempt-$PID-$([Guid]::NewGuid().ToString('N'))"
   $temp = Join-Path ([IO.Path]::GetTempPath()) ("financial-brain-installer-" + [Guid]::NewGuid().ToString("N"))
