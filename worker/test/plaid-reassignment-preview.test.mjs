@@ -140,6 +140,17 @@ function changeSelection(state, value) {
   if (state.select.onchange) state.select.onchange();
 }
 
+test("the reviewed-move selector has a stable accessible label", async () => {
+  const state = await page();
+  const label = findAll(state.card, "LABEL")
+    .find((node) => node.textContent === "Move this account to");
+  assert.ok(label, "the visible move label reached the rendered decision panel");
+  assert.equal(state.select.id, "reassign-entity-" + state.account.account_ref,
+    "the select id remains stable for this account");
+  assert.equal(label.htmlFor, state.select.id,
+    "the visible label programmatically names the move selector");
+});
+
 test("changed destination invalidates the reviewed move before Apply", async () => {
   const state = await reviewed();
   const oldApply = button(state.card, "Move account history");

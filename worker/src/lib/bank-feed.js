@@ -1621,6 +1621,7 @@ function appendReassignmentControl(card, account, entities) {
     const panel = make("div", null, "assign");
     const label = make("label", "Move this account to");
     const select = make("select");
+    label.htmlFor = select.id = "reassign-entity-" + accountRef;
     select.append(make("option", "Choose a different owner"));
     select.options[0].value = "";
     for (const entity of alternatives) {
