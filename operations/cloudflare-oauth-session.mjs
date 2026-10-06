@@ -241,6 +241,13 @@ function runWrangler(args, {
   statImpl = statSync,
   accessImpl = accessSync,
 } = {}) {
+  if (!processRunner && (
+    environment?.BRAIN_TEST_CHAIN === "1" || process.env.BRAIN_TEST_CHAIN === "1"
+  )) {
+    throw new Error(
+      "BRAIN_TEST_CHAIN refused real Wrangler authentication without an injected process runner",
+    );
+  }
   const run = processRunner ?? ((command, argv, options) => spawnSync(command, argv, options));
   const useShell = platformName === "win32";
   const exactArgs = [...args, `--env-file=${emptyWranglerEnvFile(platformName)}`];

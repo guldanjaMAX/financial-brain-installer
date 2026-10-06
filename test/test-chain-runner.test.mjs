@@ -154,6 +154,7 @@ try {
   const developerEnvironment = { HOME: "/developer", BRAIN_NO_WRANGLER_LOGIN: "" };
   const childEnvironment = isolatedTestEnvironment(developerEnvironment);
   assert.equal(childEnvironment.BRAIN_NO_WRANGLER_LOGIN, "1");
+  assert.equal(childEnvironment.BRAIN_TEST_CHAIN, "1");
   assert.equal(childEnvironment.HOME, "/developer");
   assert.equal(developerEnvironment.BRAIN_NO_WRANGLER_LOGIN, "",
     "test isolation must not mutate the parent process environment");

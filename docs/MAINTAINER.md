@@ -529,8 +529,8 @@ recovery, or older-manifest path. It has exactly these permissions:
 - Workers AI Read
 
 Add Workers R2 Storage Edit only if the manifest really provisions R2. Scope
-the token to the intended account, give it an expiry, and revoke it when the
-bounded control-plane work is finished.
+the token to the intended account, give it an expiry of about one year, and
+keep the owner's saved key for later updates. Roll it if it is exposed.
 
 The released CLI may request a recovery token only in its hidden terminal
 prompt after the owner explicitly chooses that path. The token must not be

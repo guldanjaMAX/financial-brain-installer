@@ -330,7 +330,13 @@ test("handoff treats original-file R2 storage as optional", () => {
 });
 
 test("handoff cleanup follows actual custody and the source-inventory v3 contract", () => {
-  assert.match(handoffGuide, /Only credentials and source access that were actually used are revoked or\s+removed at handoff/i);
+  assert.match(handoffGuide, /Only exposed credentials are rolled or removed at handoff/i);
+  assert.match(handoffGuide, /long-lived\s+Cloudflare recovery key is kept for future updates/i);
+  assert.doesNotMatch(
+    handoffGuide,
+    /exact token used[^\n]*should not be listed/i,
+    "handoff verification must not require removal of an unexposed long-lived recovery key",
+  );
   assert.match(handoffGuide, /If that key never left owner-only custody[^.]*do not rotate it solely for handoff/is);
   assert.match(handoffGuide, /If the admin key was exposed[\s\S]*reviewed owner-controlled secure\s+replacement path/i);
   assert.match(handoffGuide, /If no\s+such path is available, stop and record the handoff as incomplete/i);
@@ -423,9 +429,22 @@ test("Wrangler browser sign-in and recovery-token guidance match the installer",
   for (const permission of ["Workers Scripts", "D1", "Vectorize", "Workers AI"]) {
     assert.match(all, new RegExp(permission));
   }
-  assert.match(all, /expiry, normally two days/i);
-  assert.match(all, /owner enter the value only through the Brain\s+CLI's hidden prompt/i);
+  assert.match(all, /expiry\s+of about one year/i);
+  assert.match(all, /roll (?:it|the key) only if (?:it|the key) was exposed/i);
+  assert.match(all, /owner enter the value only\s+through the Brain\s+CLI's hidden prompt/i);
   assert.match(all, /real\s+browser callback[\s\S]*remain field gates/i);
+  const shippedOwnerAndTechnicianGuidance = [
+    topLevelReadme,
+    developerReadme,
+    provisioningPrerequisites,
+    technicianSkill,
+    all,
+  ].join("\n");
+  assert.doesNotMatch(
+    shippedOwnerAndTechnicianGuidance,
+    /at\s+least\s+7 days from now|short expiry/i,
+    "shipped guidance must not send the owner back to a short-lived recovery key",
+  );
 });
 
 test("support contact and response targets are explicit configurable fields", () => {

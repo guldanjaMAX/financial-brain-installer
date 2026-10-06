@@ -126,6 +126,13 @@ export function parseWranglerSession(text) {
  * their own account instead of the client's.
  */
 export function refreshWranglerSession(options = {}) {
+  if (!options.run && (
+    options.env?.BRAIN_TEST_CHAIN === "1" || process.env.BRAIN_TEST_CHAIN === "1"
+  )) {
+    throw new Error(
+      "BRAIN_TEST_CHAIN refused real Wrangler session refresh without an injected process runner",
+    );
+  }
   const run = options.run ?? spawnSync;
   const env = legacyWranglerRefreshEnvironment(options.env ?? process.env);
   const platformName = options.platform ?? process.platform;

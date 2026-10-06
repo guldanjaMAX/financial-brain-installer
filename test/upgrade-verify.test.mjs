@@ -44,6 +44,7 @@ import {
   ACCELERATED_BOOTSTRAP_MAX_ROUNDS,
   cloudflareTokenAvailable,
   cmdAcceleratedBootstrap,
+  cmdDrain,
   cmdHealth,
   cmdRollback,
   cmdRollbackInteractive,
@@ -74,6 +75,7 @@ import {
   installTechnicianSkillEverywhere,
   technicianSkillPaths,
 } from "../operations/claude-skill.mjs";
+import { createProductFixture } from "../worker/test/product-contract-fixture.mjs";
 
 // Every fixture below that says "the running package version" means exactly
 // that, so it is read from package.json rather than hardcoded. A literal here
@@ -302,6 +304,103 @@ const bootstrapCompletion = () => ({
   complete: true,
   vector_ready: true,
 });
+
+const convergenceDrainOptions = ({ responses, output = [] } = {}) => {
+  let clock = 0;
+  let calls = 0;
+  const queue = [...responses];
+  return {
+    options: {
+      loadManifest: () => ({ m: { brain: { domain: "fixture.invalid" } } }),
+      resolveBaseUrl: async () => "https://fixture.invalid",
+      resolveAdminKey: () => "fixture-admin-label",
+      http: async () => {
+        calls += 1;
+        const response = queue.length > 1 ? queue.shift() : queue[0];
+        return response.clone();
+      },
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      now: () => clock,
+      maxDurationMs: 130_000,
+      retryPausedCorpusPropagation: true,
+    },
+    calls: () => calls,
+    clock: () => clock,
+    output,
+  };
+};
+
+const drainResponse = (body, status) => new Response(JSON.stringify(body), {
+  status,
+  headers: { "content-type": "application/json" },
+});
+
+/* ---- update convergence retries only the stale paused-generation refusal ---- */
+{
+  const fixture = await createProductFixture();
+  fixture.env.VECTOR_DRAIN_MODE = "paused-for-upgrade";
+  const workerResponse = await fixture.post(
+    "/api/admin/brain/drain",
+    {},
+    { "X-Admin-Key": "fixture-admin-key" },
+  );
+  const pausedStatus = workerResponse.status;
+  const pausedText = await workerResponse.text();
+  fixture.close();
+  const pausedBody = JSON.parse(pausedText);
+  check("the retry fixture is the real Worker paused-guard response",
+    pausedStatus === 503 && pausedBody.paused === true && !Object.hasOwn(pausedBody, "code"),
+    pausedText);
+  const paused = drainResponse(pausedBody, pausedStatus);
+  const ready = drainResponse({
+    drained: 0, submitted: 0, waiting: 0, remaining: 0, vector_ready: true,
+    expected_vectors: 9, actual_vectors: 9,
+  }, 200);
+  const run = convergenceDrainOptions({ responses: [paused, ready] });
+  const priorLog = console.log;
+  const lines = [];
+  let result = null;
+  try {
+    console.log = (...values) => lines.push(values.map(String).join(" "));
+    result = await cmdDrain("fixture.manifest.json", run.options);
+  } finally {
+    console.log = priorLog;
+  }
+  check("the last-stage paused guard retries and then returns verified readiness",
+    run.calls() === 2 && result?.vector_ready === true && result?.actual_vectors === 9,
+    JSON.stringify({ calls: run.calls(), result }));
+  check("the retry is visible and reaches the exact decision point",
+    lines.some((line) => /still reaching every server; retrying 1\/24 in 5 second\(s\)\./.test(line)) &&
+      run.clock() === 5_000,
+    JSON.stringify({ lines, clock: run.clock() }));
+
+  const bare = convergenceDrainOptions({ responses: [paused, ready] });
+  delete bare.options.retryPausedCorpusPropagation;
+  let bareError = null;
+  try { await cmdDrain("fixture.manifest.json", bare.options); }
+  catch (error) { bareError = error; }
+  check("a bare brain drain does not retry the upgrade propagation refusal",
+    bare.calls() === 1 && bare.clock() === 0 && /drain failed \(503\)/.test(bareError?.message || ""),
+    JSON.stringify({ calls: bare.calls(), clock: bare.clock(), error: bareError?.message }));
+
+  const other = convergenceDrainOptions({
+    responses: [drainResponse({ error: "fixture upstream unavailable" }, 503)],
+  });
+  let otherError = null;
+  try { await cmdDrain("fixture.manifest.json", other.options); }
+  catch (error) { otherError = error; }
+  check("an unrelated 503 still fails closed without a retry",
+    other.calls() === 1 && other.clock() === 0 && /fixture upstream unavailable/.test(otherError?.message || ""),
+    otherError?.message);
+
+  const bounded = convergenceDrainOptions({ responses: [paused] });
+  let boundedError = null;
+  try { await cmdDrain("fixture.manifest.json", bounded.options); }
+  catch (error) { boundedError = error; }
+  check("the paused-guard retry is bounded to about two minutes",
+    bounded.calls() === 25 && bounded.clock() === 120_000 && /drain failed \(503\)/.test(boundedError?.message || ""),
+    JSON.stringify({ calls: bounded.calls(), clock: bounded.clock(), error: boundedError?.message }));
+}
 
 /* ---- the exact failure the field report saw ---- */
 {
@@ -1090,12 +1189,15 @@ const bootstrapCompletion = () => ({
     let privateExecutionPath = null;
     let privateExecutionDirectory = null;
     let d1Version = "0.1.9";
+    let convergenceCalls = 0;
+    let convergenceClock = 0;
+    let verifiedHistoryStatus = null;
     await cmdUpgrade(manifestPath, {
       resolveAccount: async () => {
         accountChecks++;
         return { id: "fixture-account" };
       },
-      d1Query: async (_account, _database, sql) => {
+      d1Query: async (_account, _database, sql, params = []) => {
         if (/sqlite_master/i.test(sql)) return { results: [{ name: "install_state" }] };
         if (/SELECT \* FROM install_state/i.test(sql)) {
           events.push("state");
@@ -1109,7 +1211,10 @@ const bootstrapCompletion = () => ({
           events.push("readback");
           return { results: [{ product_version: d1Version }] };
         }
-        if (/INSERT INTO upgrade_runs/i.test(sql)) events.push("log");
+        if (/INSERT INTO upgrade_runs/i.test(sql)) {
+          events.push("log");
+          verifiedHistoryStatus = params[4] || null;
+        }
         return { results: [] };
       },
       cf: async () => {
@@ -1185,9 +1290,34 @@ const bootstrapCompletion = () => ({
         check("upgrade reconciliation targets only this worker", scriptName === "fixture-brain");
         check("standard D1 upgrade allows no provider secrets", Array.isArray(allowed) && allowed.length === 0);
       },
-      cmdDrain: async (path) => {
+      cmdDrain: async (path, options) => {
         executionPaths.add(path);
         events.push("drain");
+        check("upgrade enables the bounded paused-generation convergence retry",
+          options?.retryPausedCorpusPropagation === true, JSON.stringify(options));
+        const responses = [
+          drainResponse({
+            error: "brain corpus writes are paused for a verified upgrade or rollback",
+            paused: true,
+          }, 503),
+          drainResponse({
+            drained: 0, submitted: 0, waiting: 0, remaining: 0, vector_ready: true,
+            expected_vectors: 9, actual_vectors: 9,
+          }, 200),
+        ];
+        return cmdDrain(path, {
+          ...options,
+          loadManifest: () => ({ m: { brain: { domain: "fixture.invalid" } } }),
+          resolveBaseUrl: async () => "https://fixture.invalid",
+          resolveAdminKey: () => "fixture-admin-label",
+          http: async () => {
+            convergenceCalls += 1;
+            return (responses.shift() || responses[0]).clone();
+          },
+          sleep: async (milliseconds) => { convergenceClock += milliseconds; },
+          now: () => convergenceClock,
+          maxDurationMs: 130_000,
+        });
       },
       cmdHealth: async (path, options) => {
         executionPaths.add(path);
@@ -1230,6 +1360,9 @@ const bootstrapCompletion = () => ({
       ["health-paused", "quiescence", "migrate", "bootstrap", "deploy-active"]
         .every((event) => events.filter((observed) => observed === event).length === 1),
       events.join(","));
+    check("a retried convergence drain is recorded as a verified upgrade",
+      convergenceCalls === 2 && convergenceClock === 5_000 && verifiedHistoryStatus === "verified",
+      JSON.stringify({ convergenceCalls, convergenceClock, verifiedHistoryStatus }));
     check("remote account revalidation is lifecycle-bounded, not bootstrap-round-bounded",
       accountChecks >= 10 && accountChecks < 30, String(accountChecks));
     check(

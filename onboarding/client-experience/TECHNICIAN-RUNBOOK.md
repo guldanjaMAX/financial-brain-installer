@@ -70,11 +70,12 @@ command.
 An expiring account-scoped API token remains available for a reviewed legacy,
 automation, or recovery path. If that exact plan calls for one, use only its
 required permissions: Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers
-AI Read, plus R2 Storage Edit only when this manifest uses R2. Set a short
-expiry, normally two days. Let the owner enter the value only through the Brain
-CLI's hidden prompt, or let reviewed automation use an approved no-history
-launcher. It stays out of the command line, chat, environment files,
-screenshots, and support notes.
+AI Read, plus R2 Storage Edit only when this manifest uses R2. Give it an expiry
+of about one year. Keep and reuse the protected copy when the installer offers
+one, and roll the key only if it was exposed. Let the owner enter the value only
+through the Brain CLI's hidden prompt, or let reviewed automation use an
+approved no-history launcher. It stays out of the command line, chat,
+environment files, screenshots, and support notes.
 
 Prepared-manifest, recovery-token, and approved automation setup paths must pass
 the same machine checks and the same exact-account Workers Paid prerequisite.
