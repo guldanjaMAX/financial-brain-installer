@@ -991,7 +991,51 @@ permission change rewrites it, and storing it once made 80% of a corpus look
 like it was written this year, silently disabling staleness reporting. Drive's
 `createdTime` is the fallback, and a date in the filename beats both.
 
-### Unattended Drive refresh on macOS
+### Permanent daily imports on Windows and macOS
+
+`operations.daily_refresh` is the cross-platform product schedule. One manifest
+produces one plan for one Brain and one operating-system user. The plan comes
+from the same `planLoad` registry as `brain load`; it never carries a fixed
+connector list. It classifies every manifest corpus as machine pull, Worker
+managed, push, resident capture, snapshot, disabled, or unsupported before it
+touches a native scheduler. An enabled unsupported source fails visibly.
+
+```bash
+node brain.mjs daily on ./brain.manifest.json
+node brain.mjs daily status ./brain.manifest.json
+node brain.mjs daily off ./brain.manifest.json
+node brain.mjs schedule ./brain.manifest.json --status --all-configured --json
+```
+
+Windows installs one current-user Task Scheduler definition under the Financial
+Brain task folder. macOS installs one current-user LaunchAgent. Both names bind
+the stable Brain resource identity and operating-system principal, so two
+Brains owned by one user and two users on one computer cannot collide. A
+definition carrying no installer ownership marker is foreign and read-only.
+Install, pause, restore, and remove all require exact native readback.
+
+The definition contains paths, hashes, cadence, and the manifest locator, but
+no key or provider credential. Each scheduled run takes the manifest-wide
+lifecycle lease before any source lease, verifies its definition and source
+plan hashes, runs ready daily-owned legs sequentially, and records `deferred`
+without writing when load or update already owns the lease. `brain update`
+holds that same lease, pauses the owned definition after custody verification,
+and recomputes it from the updated manifest only after the existing upgrade
+path proves version agreement, active query-ready health, and an empty vector
+queue. An ambiguous or paused update failure leaves imports paused. It never
+blindly restores a source removed by the updated manifest.
+
+Status joins contract-v3 `brain sources --json` receipts to local ownership and
+prints one stable line per manifest source:
+
+`source-key | current-state | last-success UTC or never | next-run local or event-driven | owner`
+
+The owner is `daily-task`, `existing-local-scheduler`, `worker-cron`, `push`,
+`resident-capture`, `snapshot`, or `none`. Scheduler success never invents
+source success: a source leg that reports success without advancing
+`receipt.last_successful_run_at` makes the daily run fail.
+
+### Connector-specific Drive refresh on macOS
 
 `operations.ingest_cron` is the standard source of truth for the Drive refresh
 schedule. Use the public `brain schedule` command for install, status and
@@ -1071,9 +1115,10 @@ does not inherit `BRAIN_GOOGLE_TOKEN_STORE=file` from the Terminal that ran
 OAuth. Use `auto` for the normal macOS Keychain default, or `file` only when that
 fallback was chosen deliberately. Status compares the installed plist with the
 current manifest and code paths, reports definition drift, and surfaces
-launchd's run count and last exit code. Windows and Linux schedulers are not
-built yet and fail with a platform-specific explanation rather than pretending
-the manifest schedule took effect.
+launchd's run count and last exit code. This older connector-specific command
+remains macOS-only. On Windows it points to the manifest-wide `brain daily on`
+contract instead of printing a fixed `schtasks` recipe. Linux still reports
+that no native product scheduler exists.
 
 Scheduler stdout and stderr remain private mode `0600`. At install, after each
 lock-owning ingest child exits, and at removal, each stream is cut back to a

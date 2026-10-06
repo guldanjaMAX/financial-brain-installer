@@ -13,6 +13,18 @@ offered as a customer update; its entries below ship for the first time in
 0.4.9, and its identity is retired so its evidence cannot be confused with
 this changed candidate.
 
+- **Daily imports now have one owned Windows and macOS contract.** `brain daily
+  on|off|status <manifest>` derives every source from your own manifest instead
+  of a fixed Google recipe, keeps Worker, push, capture, snapshot, disabled,
+  and existing faster schedules from being duplicated, and refuses unsupported
+  configured sources. The native task is different for every Brain and user,
+  contains no key, and must read back exactly before success. Updates pause it
+  while the shared load/update lock is held and restore a recomputed plan only
+  after the Brain is active, query-ready, and has no queued search updates.
+  Status prints one line per source with its owner and last successful run. To
+  check after updating: run `brain daily status <manifest>` and confirm every
+  source names the expected owner and a truthful last-success time or `never`.
+
 - **A Gmail sync can now move forward after a recoverable document storage
   failure without losing that message.** The exact message is saved for retry
   before the Gmail history marker advances, while the run still reports the

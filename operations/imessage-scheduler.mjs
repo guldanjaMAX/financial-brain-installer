@@ -28,9 +28,11 @@ import { printGuidance } from "./cli-guidance.mjs";
 import {
   buildSchedulerPlan,
   installScheduler,
+  pauseScheduler,
   recordDriveSchedulerFailure,
   recordDriveSchedulerResult,
   removeScheduler,
+  restoreScheduler,
   runScheduledIngest,
   safeIngestEnvironment,
   statusScheduler,
@@ -101,6 +103,14 @@ export function statusImessageScheduler(manifestPath, options = {}) {
 
 export function removeImessageScheduler(manifestPath, options = {}) {
   return removeScheduler(manifestPath, withSpec(options));
+}
+
+export function pauseImessageScheduler(manifestPath, options = {}) {
+  return pauseScheduler(manifestPath, withSpec(options));
+}
+
+export function restoreImessageScheduler(manifestPath, snapshot, options = {}) {
+  return restoreScheduler(manifestPath, snapshot, withSpec(options));
 }
 
 export function runImessageCapture(manifestPath, options = {}) {

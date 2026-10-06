@@ -69,6 +69,16 @@ import {
   SOURCE_FAMILY_UID_FILTER_MAX,
 } from "./worker/src/lib/store-d1.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
+import { withBrainLifecycleLock, withBrainLifecycleLockWait } from "./operations/brain-lifecycle-lock.mjs";
+import { planDailyRefresh } from "./operations/daily-refresh-plan.mjs";
+import {
+  installDailyRefreshSchedule,
+  pauseDailyRefreshSchedule,
+  reconcileDailyRefreshSchedule,
+  removeDailyRefreshSchedule,
+  restoreDailyRefreshSchedule,
+  statusDailyRefreshSchedule,
+} from "./operations/daily-refresh-scheduler.mjs";
 import {
   clearCustomApiClipboard,
   readCustomApiClipboard,
@@ -8059,6 +8069,7 @@ export const VALUE_FLAGS = new Set([
   // being read as a boolean and then reported as "needs --file".
   "file", "format", "account", "account-kind", "name", "slug", "institution", "currency", "entity", "entity-label",
   "year", "period-start", "period-end", "sections", "cursor", "provenance-baseline",
+  "definition-hash",
 ]);
 
 /** Read an exact Drive-id exclusion list from either its portable shape or a migration receipt. */
@@ -11993,7 +12004,7 @@ async function cmdOcrPreflightInteractive(manifestPath) {
  * step. Nothing is ever skipped silently; the run ends with a breakdown by
  * reason, and those reasons are kept in the state file.
  */
-async function cmdIngest(manifestPath) {
+async function cmdIngestUnlocked(manifestPath) {
   const { m } = loadManifest(manifestPath);
   const flags = parseFlags(process.argv.slice(4));
   // Remote sources reuse everything below the envelope: splitting, batching,
@@ -12017,6 +12028,16 @@ async function cmdIngest(manifestPath) {
   }
   if (flags.from) return cmdIngestRemote(m, manifestPath, flags);
   return cmdIngestLocal(m, manifestPath, flags);
+}
+
+async function cmdIngest(manifestPath, options = {}) {
+  if (options.lifecycleLockHeld === true) return cmdIngestUnlocked(manifestPath);
+  const lockTask = options.withBrainLifecycleLock ?? withBrainLifecycleLock;
+  return lockTask({
+    manifestPath,
+    operation: "ingest",
+    ...(options.lifecycleLockOptions || {}),
+  }, () => cmdIngestUnlocked(manifestPath));
 }
 
 /**
@@ -15154,6 +15175,8 @@ export function loadSourceRegistry(commands = {}) {
       label: PROVIDER_LOAD_METADATA[provider].label,
       scope: PROVIDER_LOAD_METADATA[provider].scope,
       note: PROVIDER_LOAD_PROOF_NOTE,
+      dailyClass: "machine-pull",
+      dailyOwner: "daily-task",
       legs: ({ m, manifestPath, flags }) => [{
         source: m?.corpora?.[provider]?.source || provider,
         run: () => ingestProvider(m, manifestPath, { ...flags, from: provider }),
@@ -15165,6 +15188,8 @@ export function loadSourceRegistry(commands = {}) {
       order: 10,
       label: "Google Calendar",
       scope: "meetings, attendees, times and who was in the room",
+      dailyClass: "machine-pull",
+      dailyOwner: "daily-task",
       legs: ({ m, manifestPath, flags }) => [{
         source: "calendar",
         run: () => ingestCalendar(m, manifestPath, { ...flags, from: "calendar" }),
@@ -15174,6 +15199,8 @@ export function loadSourceRegistry(commands = {}) {
       order: 20,
       label: "iMessage (this Mac)",
       scope: "message history from Messages.app, plus forwarded SMS",
+      dailyClass: "resident-capture",
+      dailyOwner: "resident-capture",
       legs: ({ m, manifestPath, flags }) => [{
         source: "imessage",
         run: () => ingestImessage(m, manifestPath, { ...flags, from: "imessage" }),
@@ -15183,6 +15210,8 @@ export function loadSourceRegistry(commands = {}) {
       order: 30,
       label: "WhatsApp (paired device)",
       scope: "conversations the paired linked device has captured so far",
+      dailyClass: "resident-capture",
+      dailyOwner: "resident-capture",
       legs: ({ m, manifestPath, flags }) => [{
         source: "whatsapp",
         run: () => ingestWhatsapp(m, manifestPath, { ...flags, from: "whatsapp" }),
@@ -15192,6 +15221,8 @@ export function loadSourceRegistry(commands = {}) {
       order: 40,
       label: "Folders on this machine",
       scope: "every readable document under the folders declared in the manifest",
+      dailyClass: "machine-pull",
+      dailyOwner: "daily-task",
       legs: ({ m, manifestPath, flags }) => {
         const folders = uploadFoldersOf(m?.corpora?.upload);
         if (!folders.length) {
@@ -15228,6 +15259,8 @@ export function loadSourceRegistry(commands = {}) {
       order: 50,
       label: "Gmail",
       scope: "mail threads, excluding bulk mail by default",
+      dailyClass: "machine-pull",
+      dailyOwner: "daily-task",
       legs: ({ m, manifestPath, flags }) => [{
         source: "gmail",
         run: () => ingestRemote(m, manifestPath, { ...flags, from: "gmail" }),
@@ -15237,6 +15270,8 @@ export function loadSourceRegistry(commands = {}) {
       order: 60,
       label: "Google Drive",
       scope: "documents, sheets, slides and PDFs with a text layer",
+      dailyClass: "machine-pull",
+      dailyOwner: "daily-task",
       legs: ({ m, manifestPath, flags }) => [{
         source: "drive",
         run: () => ingestRemote(m, manifestPath, { ...flags, from: "drive" }),
@@ -15248,6 +15283,8 @@ export function loadSourceRegistry(commands = {}) {
       label: "iPhone backup (one-time snapshot)",
       scope: "iMessage and SMS history inside an unencrypted local backup",
       note: "a point-in-time snapshot, not a connection: nothing new arrives after it",
+      dailyClass: "snapshot",
+      dailyOwner: "snapshot",
       legs: ({ m, manifestPath, flags }) => [{
         source: "iphone-backup",
         run: () => ingestIphoneBackup(m, manifestPath, { ...flags, from: "iphone-backup" }),
@@ -15257,18 +15294,52 @@ export function loadSourceRegistry(commands = {}) {
       order: 75,
       label: "Custom business API",
       scope: "the bounded JSON endpoints declared in this manifest",
+      dailyClass: "server-managed",
+      dailyOwner: "worker-cron",
       outsideLoad: "The owner's Worker pulls this source on its own cron, so brain load has no laptop-side work to run. Preview or run it now with brain custom-api <manifest> --dry-run or brain custom-api <manifest>.",
     },
     zoom: {
       order: 80,
       label: "Zoom cloud recordings",
       scope: "transcripts of new cloud recordings",
+      dailyClass: "push",
+      dailyOwner: "push",
       // Zoom pushes new transcripts, so this command has no pull leg. Worker
       // maintenance separately reconciles a bounded recent window; that safety
       // net must not be presented as complete historical backfill.
       pushOnly: "Zoom posts new transcripts to this brain's webhook, so brain load has nothing to pull. "
         + "Worker maintenance reconciles only a bounded recent window: the initial 30 days, then a 2-day overlap. "
         + "It is not a complete historical backfill.",
+    },
+    local_folder: {
+      order: 45,
+      label: "Watched folder",
+      scope: "the configured watched folder on this machine",
+      dailyClass: "machine-pull",
+      dailyOwner: "daily-task",
+      legs: ({ m, manifestPath, flags }) => {
+        const local = m?.corpora?.local_folder || {};
+        if (!local.path) {
+          return { unavailable: { reason: "enabled, but no watched-folder path is configured" } };
+        }
+        return [{
+          source: local.source || "documents",
+          detail: local.path,
+          run: () => ingestLocal(m, manifestPath, {
+            ...flags,
+            path: String(local.path),
+            source: local.source || "documents",
+          }),
+        }];
+      },
+    },
+    bank_feed: {
+      order: 76,
+      label: "Bank feed",
+      scope: "server-side account reconciliation",
+      dailyClass: "server-managed",
+      dailyOwner: "worker-cron",
+      outsideLoad: "The Brain's Worker reconciles this source on its own schedule, so brain load has no laptop-side work to run.",
     },
   };
 }
@@ -15316,6 +15387,8 @@ export async function planLoad({ m, manifestPath, flags = {}, registry, probes, 
       label: descriptor?.label || key,
       scope: descriptor?.scope || null,
       note: descriptor?.note || null,
+      daily_class: descriptor?.dailyClass || null,
+      daily_owner: descriptor?.dailyOwner || null,
       order: descriptor?.order ?? 900,
       enabled: m.corpora[key]?.enabled === true,
       status: "ready",
@@ -15605,6 +15678,14 @@ export function renderLoadReport(entries, { dryRun, totals, log: emit = console.
  * connected, in one run, and print one honest report.
  */
 export async function cmdLoad(manifestPath, options = {}) {
+  if (options.lifecycleLockHeld !== true) {
+    const lockTask = options.withBrainLifecycleLock ?? withBrainLifecycleLock;
+    return lockTask({
+      manifestPath,
+      operation: "load",
+      ...(options.lifecycleLockOptions || {}),
+    }, () => cmdLoad(manifestPath, { ...options, lifecycleLockHeld: true }));
+  }
   const { m } = loadManifest(manifestPath);
   const flags = options.flags || parseFlags(process.argv.slice(4));
   const log = options.log || console.log;
@@ -25503,6 +25584,13 @@ export function schedulePlatformLimitation(
   const providerId = PROVIDER_CONNECTOR_IDS.includes(String(provider || "").toLowerCase())
     ? String(provider).toLowerCase()
     : null;
+  if (platform === "win32") {
+    return renderCliCommands(
+      `Windows uses the owned per-Brain, per-user daily contract. Run brain daily on "${manifestPath}". ` +
+      "It derives sources from this manifest, refuses a foreign task collision, and reads the Task Scheduler definition back exactly. " +
+      `Inspect it with brain daily status "${manifestPath}".`
+    );
+  }
   const refreshName = providerId ? `${providerId} refresh` : "automatic refresh";
   const manualCommand = providerId
     ? `brain ingest "${manifestPath}" --from ${providerId}`
@@ -25511,43 +25599,300 @@ export function schedulePlatformLimitation(
     `${refreshName} is not scheduled by the installer on ${name} yet; the brain itself, the install, the update and the checkup all work here.`,
     "      Everything loads when you run it. To make it unattended, create one scheduled task that runs the refresh every hour.",
   ];
-  if (platform === "win32") {
-    const q = '\\"'; // an escaped quote inside schtasks' /TR string
-    const taskName = providerId ? `Financial Brain ${providerId} refresh` : "Financial Brain refresh";
-    const scheduledCommand = providerId
-      ? `${q}${q}<path to brain.cmd>${q} ingest ${q}${manifestPath}${q} --from ${providerId}${q}`
-      : `${q}${q}<path to brain.cmd>${q} load ${q}${manifestPath}${q} --only drive,calendar,upload${q}`;
-    lines.push(
-      "      Find the command first:   where.exe brain",
-      `      Then (fill in both paths): schtasks /Create /F /SC HOURLY /TN "${taskName}" /TR "cmd /c ${scheduledCommand}"`,
-      `      Run it once by hand first:  ${manualCommand}`,
-    );
-  } else {
-    lines.push(`      For example with cron:     0 * * * * ${manualCommand}`);
-  }
+  lines.push(`      For example with cron:     0 * * * * ${manualCommand}`);
   lines.push(
     "      Confirm the next run with `brain sources <manifest> --json`: require `contract_version: 3` and verify that the named source's `receipt.last_successful_run_at` advanced.",
   );
   return lines.join("\n");
 }
 
+async function existingDailySourceOwners(m, manifestPath, options = {}) {
+  if (options.existingSchedulerOwners !== undefined) return options.existingSchedulerOwners;
+  if ((options.platform ?? process.platform) !== "darwin") return [];
+  const owned = [];
+  const schedulerOptions = options.legacySchedulerOptions || {};
+  const healthy = (status) => status?.installed === true &&
+    status?.definitionMatches === true && !status?.scheduleError;
+  if (m?.corpora?.google_drive?.enabled === true) {
+    const drive = options.driveScheduler ?? await import("./operations/drive-scheduler.mjs");
+    if (healthy(drive.statusDriveScheduler(manifestPath, schedulerOptions))) owned.push("google_drive");
+  }
+  if (m?.corpora?.local_folder?.enabled === true) {
+    const folder = options.folderScheduler ?? await import("./operations/folder-scheduler.mjs");
+    if (healthy(folder.statusFolderScheduler(manifestPath, schedulerOptions))) owned.push("local_folder");
+  }
+  const configuredProviders = PROVIDER_CONNECTOR_IDS.filter((provider) => m?.corpora?.[provider]?.enabled === true);
+  if (configuredProviders.length) {
+    const providers = options.providerScheduler ?? await import("./operations/provider-scheduler.mjs");
+    for (const provider of configuredProviders) {
+      if (healthy(providers.statusProviderScheduler(provider, manifestPath, schedulerOptions))) owned.push(provider);
+    }
+  }
+  return owned;
+}
+
+async function pauseExistingOwnedSchedulers(m, manifestPath, options = {}) {
+  if ((options.platform ?? process.platform) !== "darwin") return [];
+  const schedulerOptions = options.legacySchedulerOptions || {};
+  const snapshots = [];
+  const restorePaused = async () => {
+    for (const entry of [...snapshots].reverse()) {
+      if (!entry.snapshot?.exists) continue;
+      if (entry.kind === "drive") entry.module.restoreDriveScheduler(manifestPath, entry.snapshot, schedulerOptions);
+      else if (entry.kind === "folder") entry.module.restoreFolderScheduler(manifestPath, entry.snapshot, schedulerOptions);
+      else if (entry.kind === "imessage") entry.module.restoreImessageScheduler(manifestPath, entry.snapshot, schedulerOptions);
+      else entry.module.restoreProviderScheduler(entry.provider, manifestPath, entry.snapshot, schedulerOptions);
+    }
+  };
+  try {
+    if (m?.corpora?.google_drive?.enabled === true) {
+      const module = options.driveScheduler ?? await import("./operations/drive-scheduler.mjs");
+      snapshots.push({ kind: "drive", sourceKey: "google_drive", module,
+        snapshot: module.pauseDriveScheduler(manifestPath, schedulerOptions) });
+    }
+    if (m?.corpora?.local_folder?.enabled === true) {
+      const module = options.folderScheduler ?? await import("./operations/folder-scheduler.mjs");
+      snapshots.push({ kind: "folder", sourceKey: "local_folder", module,
+        snapshot: module.pauseFolderScheduler(manifestPath, schedulerOptions) });
+    }
+    if (m?.corpora?.imessage?.enabled === true) {
+      const module = options.imessageScheduler ?? await import("./operations/imessage-scheduler.mjs");
+      snapshots.push({ kind: "imessage", sourceKey: "imessage", module,
+        snapshot: module.pauseImessageScheduler(manifestPath, schedulerOptions) });
+    }
+    const providers = PROVIDER_CONNECTOR_IDS.filter((provider) => m?.corpora?.[provider]?.enabled === true);
+    if (providers.length) {
+      const module = options.providerScheduler ?? await import("./operations/provider-scheduler.mjs");
+      for (const provider of providers) {
+        snapshots.push({ kind: "provider", sourceKey: provider, provider, module,
+          snapshot: module.pauseProviderScheduler(provider, manifestPath, schedulerOptions) });
+      }
+    }
+    return snapshots;
+  } catch (error) {
+    try { await restorePaused(); } catch (restoreError) {
+      throw new Error(`${error.message}; restoring an already-paused owned scheduler also failed: ${restoreError.message}`, { cause: error });
+    }
+    throw error;
+  }
+}
+
+function restoreExistingOwnedSchedulers(manifestPath, snapshots, options = {}) {
+  const schedulerOptions = options.legacySchedulerOptions || {};
+  for (const entry of [...snapshots].reverse()) {
+    if (!entry.snapshot?.exists) continue;
+    if (entry.kind === "drive") entry.module.restoreDriveScheduler(manifestPath, entry.snapshot, schedulerOptions);
+    else if (entry.kind === "folder") entry.module.restoreFolderScheduler(manifestPath, entry.snapshot, schedulerOptions);
+    else if (entry.kind === "imessage") entry.module.restoreImessageScheduler(manifestPath, entry.snapshot, schedulerOptions);
+    else entry.module.restoreProviderScheduler(entry.provider, manifestPath, entry.snapshot, schedulerOptions);
+  }
+}
+
+function reconcileExistingOwnedSchedulers(m, manifestPath, snapshots, options = {}) {
+  const schedulerOptions = options.legacySchedulerOptions || {};
+  for (const entry of snapshots) {
+    if (!entry.snapshot?.exists || m?.corpora?.[entry.sourceKey]?.enabled !== true) continue;
+    const result = entry.kind === "drive"
+      ? entry.module.installDriveScheduler(manifestPath, schedulerOptions)
+      : entry.kind === "folder"
+        ? entry.module.installFolderScheduler(manifestPath, schedulerOptions)
+        : entry.kind === "imessage"
+          ? entry.module.installImessageScheduler(manifestPath, schedulerOptions)
+          : entry.module.installProviderScheduler(entry.provider, manifestPath, schedulerOptions);
+    if (result?.installed !== true || result?.loaded !== true) {
+      throw new Error(`the updated ${entry.sourceKey} scheduler did not pass exact readback`);
+    }
+  }
+}
+
+export async function buildConfiguredDailyPlan(m, manifestPath, options = {}) {
+  const planner = options.planDailyRefresh ?? planDailyRefresh;
+  const existingSchedulerOwners = await existingDailySourceOwners(m, manifestPath, options);
+  return planner({
+    m,
+    manifestPath,
+    platform: options.platform ?? process.platform,
+    ...(options.principal ? { principal: options.principal } : {}),
+    ...(options.localTimezone ? { localTimezone: options.localTimezone } : {}),
+    planLoadFn: options.planLoad ?? planLoad,
+    planLoadOptions: {
+      registry: options.registry,
+      commands: options.commands,
+      probes: options.probes,
+      options,
+    },
+    existingSchedulerOwners,
+  });
+}
+
+function dailyFreshnessRows(plan, inventory) {
+  const inventoryRows = new Map((inventory?.sources || []).map((row) => [row.name, row]));
+  return plan.sources.map((source) => {
+    const names = source.source_names?.length ? source.source_names : [source.key];
+    const receiptRows = names.map((name) => inventoryRows.get(name)).filter(Boolean);
+    const newest = receiptRows
+      .map((row) => row?.receipt?.last_successful_run_at || null)
+      .filter(Boolean)
+      .sort()
+      .at(-1) || null;
+    const states = receiptRows.map((row) => row?.freshness?.state).filter(Boolean);
+    const currentState = states.includes("broken") ? "broken"
+      : states.includes("stale") ? "stale"
+        : states[0] || (source.class === "snapshot" ? "snapshot" : source.status);
+    const nextRun = source.owner === "daily-task"
+      ? `${plan.cron} ${plan.timezone}`
+      : ["push", "resident-capture"].includes(source.owner)
+        ? "event-driven"
+        : source.owner === "worker-cron"
+          ? "worker cron"
+          : source.owner === "existing-local-scheduler"
+            ? "local scheduler"
+            : source.class === "snapshot" ? "snapshot" : "not scheduled";
+    return Object.freeze({
+      source: source.key,
+      current_state: currentState,
+      last_successful_run_at: newest,
+      next_run: nextRun,
+      owner: source.owner,
+      reason: source.reason,
+    });
+  });
+}
+
+function renderDailyFreshnessRows(rows, log = console.log) {
+  for (const row of rows) {
+    log(`${row.source} | ${row.current_state} | ${row.last_successful_run_at || "never"} | ${row.next_run} | ${row.owner}`);
+  }
+}
+
+async function syncDailySourceExpectations(m, manifestPath, plan, expectedRefreshSeconds, options = {}) {
+  if (options.syncSourceExpectations === false) return [];
+  const sources = [...new Set(plan.sources
+    .filter((source) => source.class === "machine-pull" && source.owner === "daily-task")
+    .flatMap((source) => source.source_names || [source.key]))];
+  if (!sources.length) return [];
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const key = resolveKey(manifestPath);
+  if (!key) throw new Error("no admin key found, so daily freshness expectations could not be verified");
+  const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
+  const base = await resolveBase(m, null);
+  const post = options.postSourceExpectation ?? postSourceExpectation;
+  for (const source of sources) {
+    await post(base, key, {
+      source,
+      kind: plan.sources.find((entry) => (entry.source_names || []).includes(source))?.key || source,
+      expected_refresh_seconds: expectedRefreshSeconds,
+    });
+  }
+  return sources;
+}
+
+export async function cmdScheduleAllConfigured(manifestPath, action, options = {}) {
+  const { m } = loadManifest(manifestPath);
+  const plan = await buildConfiguredDailyPlan(m, manifestPath, options);
+  if (action === "install" && !plan.timezone_matches_machine) die(plan.configuration_error);
+  if (action === "install" && plan.unsupported_sources > 0) {
+    const unsupported = plan.sources.filter((source) => source.class === "unsupported").map((source) => source.key).join(", ");
+    die(`daily refresh cannot be scheduled because enabled source(s) are unsupported: ${unsupported}`);
+  }
+  const schedulerOptions = {
+    platform: options.platform ?? process.platform,
+    ...(options.schedulerOptions || {}),
+    ...(options.schedulerAdapter ? { adapter: options.schedulerAdapter } : {}),
+  };
+  let schedule;
+  if (action === "install") {
+    if (!plan.enabled) die("operations.daily_refresh.enabled is false; nothing was scheduled");
+    const runnable = plan.sources.filter((source) =>
+      source.class === "machine-pull" && source.owner === "daily-task" && source.status === "ready"
+    );
+    if (!runnable.length) die("this manifest has no connected machine-pull source for the daily task; nothing was scheduled");
+    schedule = installDailyRefreshSchedule(plan, schedulerOptions);
+    await syncDailySourceExpectations(m, manifestPath, plan, 86_400, options);
+  } else if (action === "remove") {
+    schedule = removeDailyRefreshSchedule(plan, schedulerOptions);
+    await syncDailySourceExpectations(m, manifestPath, plan, null, options);
+  } else {
+    schedule = statusDailyRefreshSchedule(plan, schedulerOptions);
+  }
+
+  let inventory = null;
+  try {
+    const readInventory = options.readSourceInventory ?? ((path) => cmdSources(path, {
+      flags: { json: true },
+      silent: true,
+    }));
+    inventory = await readInventory(manifestPath);
+  } catch (error) {
+    if (action !== "status") throw error;
+    warn(`local schedule status is available, but source freshness could not be read: ${String(error?.message || error).slice(0, 160)}`);
+  }
+  const sources = dailyFreshnessRows(plan, inventory);
+  const result = Object.freeze({
+    contract_version: 1,
+    kind: "daily_refresh_status",
+    plan,
+    schedule,
+    sources,
+  });
+  if (options.json) console.log(JSON.stringify(result, null, 2));
+  else {
+    if (action === "install") ok("Daily imports are on and the native definition passed exact readback.");
+    else if (action === "remove") ok(schedule.removed ? "Daily imports are off." : "Daily imports were already off.");
+    else if (!schedule.installed) warn("Daily imports are not installed for this Brain and user.");
+    else if (!schedule.enabled) warn("Daily imports are installed but paused.");
+    else if (!schedule.verified) warn("Daily imports are installed, but their definition no longer matches this manifest.");
+    else ok("Daily imports are on and match this manifest.");
+    renderDailyFreshnessRows(sources, options.log || console.log);
+  }
+  return result;
+}
+
+export async function cmdDaily(argv = process.argv.slice(3), options = {}) {
+  const [action, manifestPath, ...rest] = argv;
+  if (!new Set(["on", "off", "status", "run"]).has(action) || !manifestPath) {
+    die("usage: brain daily <on|off|status|run> <manifest> [--json]");
+  }
+  const flags = options.flags ?? parseFlags(rest);
+  assertKnownFlags(flags, ["json", "definition-hash"], "brain daily");
+  if (flags.json !== undefined && flags.json !== true) die("--json does not take a value");
+  if (action === "run") {
+    const runner = options.dailyRunner ?? await import("./operations/daily-refresh-run.mjs");
+    return runner.runDailyRefreshCli(manifestPath, {
+      expectedDefinitionHash: flags["definition-hash"] === true ? null : flags["definition-hash"],
+      ...options,
+    });
+  }
+  return cmdScheduleAllConfigured(
+    manifestPath,
+    action === "on" ? "install" : action === "off" ? "remove" : "status",
+    { ...options, json: flags.json === true },
+  );
+}
+
 export async function cmdSchedule(manifestPath, options = {}) {
   if (!manifestPath) {
-    die("usage: brain schedule <manifest> [--install|--status|--remove] [--folder|--provider <provider>]");
+    die("usage: brain schedule <manifest> [--install|--status|--remove] [--all-configured|--folder|--provider <provider>] [--json]");
   }
   const flags = options.flags ?? parseFlags(process.argv.slice(4));
-  assertKnownFlags(flags, ["install", "status", "remove", "folder", "provider"], "brain schedule");
+  assertKnownFlags(flags, ["install", "status", "remove", "all-configured", "folder", "provider", "json"], "brain schedule");
   const requested = ["install", "status", "remove"].filter((name) => flags[name]);
   if (requested.length > 1) {
     die("choose only one of --install, --status, or --remove");
   }
   const action = requested[0] || "status";
-  if (flags.folder && flags.provider) {
-    die("choose only one scheduler lane: --folder or --provider <provider>");
+  if ([flags["all-configured"], flags.folder, flags.provider].filter(Boolean).length > 1) {
+    die("choose only one scheduler lane: --all-configured, --folder, or --provider <provider>");
   }
   const provider = flags.provider ? String(flags.provider).trim().toLowerCase() : null;
   if (provider && !PROVIDER_CONNECTOR_IDS.includes(provider)) {
     die(`--provider must be one of ${PROVIDER_CONNECTOR_IDS.join(", ")}`);
+  }
+  if (flags["all-configured"]) {
+    return cmdScheduleAllConfigured(manifestPath, action, {
+      ...options,
+      json: flags.json === true,
+    });
   }
   const limitation = schedulePlatformLimitation(
     options.platform ?? process.platform,
@@ -28620,8 +28965,11 @@ export async function cmdFirstSourceFile(argv = process.argv.slice(3), options =
 async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   let installed;
   try {
-    const discoverManifest = options.discoverInstalledManifest ?? discoverInstalledManifest;
-    installed = discoverManifest(manifestPath, options.installedManifestOptions || {});
+    if (options.preDiscoveredInstalled) installed = options.preDiscoveredInstalled;
+    else {
+      const discoverManifest = options.discoverInstalledManifest ?? discoverInstalledManifest;
+      installed = discoverManifest(manifestPath, options.installedManifestOptions || {});
+    }
   } catch (error) {
     die(
       `${String(error?.message || error)}. ` +
@@ -28723,10 +29071,115 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     revalidateUpdateManifest(pin, "update verification");
     await (options.cmdVerify ?? cmdVerify)(pin.target);
     revalidateUpdateManifest(pin, "update verification");
-    const upgradeResult = await (options.cmdUpgrade ?? cmdUpgrade)(
-      pin.target,
-      backlog ? { ...(options.upgradeOptions || {}), initialUpdateBacklog: backlog } : options.upgradeOptions || {},
-    );
+    // The daily definition is paused only after custody verification and while
+    // this command owns the manifest-wide lifecycle lock. A successful
+    // cmdUpgrade return is already the installer's exact version, active,
+    // query-ready, and empty-queue proof. Recompute from the post-update
+    // manifest instead of restoring an old source list.
+    let dailyPlan = null;
+    let dailySnapshot = null;
+    let dailySchedulerOptions = null;
+    let manageDailyDefinition = false;
+    let legacySnapshots = [];
+    const beforeUpdateManifest = loadManifest(pin.target).m;
+    const dailyPlatform = options.dailyRefreshOptions?.platform ?? process.platform;
+    if (["darwin", "win32"].includes(dailyPlatform)) {
+      dailyPlan = await buildConfiguredDailyPlan(beforeUpdateManifest, pin.target, options.dailyRefreshOptions || {});
+      dailySchedulerOptions = {
+        platform: options.dailyRefreshOptions?.platform ?? process.platform,
+        ...(options.dailyRefreshOptions?.schedulerOptions || {}),
+        ...(options.dailyRefreshOptions?.schedulerAdapter
+          ? { adapter: options.dailyRefreshOptions.schedulerAdapter }
+          : {}),
+      };
+      const dailyStatus = statusDailyRefreshSchedule(dailyPlan, dailySchedulerOptions);
+      manageDailyDefinition = Object.hasOwn(beforeUpdateManifest?.operations || {}, "daily_refresh") ||
+        dailyStatus.installed === true;
+      if (dailyStatus.installed) {
+        dailySnapshot = pauseDailyRefreshSchedule(dailyPlan, dailySchedulerOptions);
+        info("Daily imports are paused for the verified update window.");
+      }
+      try {
+        legacySnapshots = await pauseExistingOwnedSchedulers(
+          beforeUpdateManifest,
+          pin.target,
+          options.dailyRefreshOptions || {},
+        );
+      } catch (error) {
+        if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
+        throw error;
+      }
+    }
+    let upgradeResult;
+    try {
+      upgradeResult = await (options.cmdUpgrade ?? cmdUpgrade)(
+        pin.target,
+        backlog ? { ...(options.upgradeOptions || {}), initialUpdateBacklog: backlog } : options.upgradeOptions || {},
+      );
+    } catch (error) {
+      // These refusal codes are emitted before the writer pause or deployment
+      // mutation. Their old, exactly read schedule is therefore safe to put
+      // back. Any ambiguous or paused failure deliberately leaves it off.
+      if ((dailySnapshot || legacySnapshots.some((entry) => entry.snapshot?.exists)) &&
+          ["UPDATE_BRAIN_BUSY", "UPDATE_WAITING_FOR_INDEXING"].includes(error?.supportCode)) {
+        restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
+        if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
+      }
+      throw error;
+    }
+    if (dailyPlan) {
+      const afterUpdateManifest = loadManifest(pin.target).m;
+      reconcileExistingOwnedSchedulers(
+        afterUpdateManifest,
+        pin.target,
+        legacySnapshots,
+        options.dailyRefreshOptions || {},
+      );
+      const updatedPlan = await buildConfiguredDailyPlan(afterUpdateManifest, pin.target, options.dailyRefreshOptions || {});
+      if (manageDailyDefinition && !updatedPlan.ready) {
+        throw new Error(
+          updatedPlan.configuration_error ||
+          "the updated manifest has an enabled unsupported source; daily imports remain paused",
+        );
+      }
+      const runnable = updatedPlan.sources.filter((source) =>
+        source.class === "machine-pull" && source.owner === "daily-task" && source.status === "ready"
+      );
+      if (manageDailyDefinition && updatedPlan.enabled && updatedPlan.ready && runnable.length) {
+        const reconciled = installDailyRefreshSchedule(updatedPlan, dailySchedulerOptions);
+        if (reconciled.verified !== true) throw new Error("the verified update could not restore daily imports exactly");
+        await syncDailySourceExpectations(
+          afterUpdateManifest,
+          pin.target,
+          updatedPlan,
+          86_400,
+          options.dailyRefreshOptions || {},
+        );
+        ok("Daily imports were recomputed from the updated manifest and restored after exact readback.");
+      } else if (manageDailyDefinition) {
+        if (dailySnapshot?.exists) {
+          const paused = reconcileDailyRefreshSchedule(updatedPlan, {
+            ...dailySchedulerOptions,
+            enabled: false,
+          });
+          if (paused.verified !== true || paused.enabled !== false) {
+            throw new Error("the updated daily definition could not remain safely paused");
+          }
+        }
+        await syncDailySourceExpectations(
+          afterUpdateManifest,
+          pin.target,
+          updatedPlan,
+          null,
+          options.dailyRefreshOptions || {},
+        );
+        info("The updated manifest has no enabled daily machine-pull work, so its owned daily definition remains paused and was not removed.");
+      } else if (updatedPlan.enabled && updatedPlan.ready && runnable.length) {
+        info(renderCliCommands(
+          "This older manifest now has an eligible daily import plan. Run brain daily on <manifest> to approve and install its owned schedule."
+        ));
+      }
+    }
     if (installed.source !== "remembered") {
       try {
         const rememberManifest = options.rememberInstalledManifest ?? rememberInstalledManifest;
@@ -28837,7 +29290,33 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
  * assistant refresh warnings that happen after the verified upgrade. */
 export async function cmdUpdate(manifestPath, options = {}) {
   try {
-    return await cmdUpdateWithPrompts(manifestPath, options);
+    if (options.lifecycleLockHeld === true) return await cmdUpdateWithPrompts(manifestPath, options);
+    let lockManifestPath = manifestPath;
+    let preDiscoveredInstalled = null;
+    if (!lockManifestPath) {
+      try {
+        const discoverManifest = options.discoverInstalledManifest ?? discoverInstalledManifest;
+        preDiscoveredInstalled = discoverManifest(manifestPath, options.installedManifestOptions || {});
+        lockManifestPath = preDiscoveredInstalled?.path || null;
+      } catch {
+        // Preserve the existing owner-facing discovery error from the command
+        // itself. There is no manifest identity to lock when discovery fails.
+        return await cmdUpdateWithPrompts(manifestPath, options);
+      }
+      if (!lockManifestPath) return await cmdUpdateWithPrompts(manifestPath, options);
+    }
+    const lockTask = options.withBrainLifecycleLockWait ?? withBrainLifecycleLockWait;
+    return await lockTask({
+      manifestPath: lockManifestPath,
+      operation: "update",
+      waitMs: options.lifecycleLockWaitMs ?? 120_000,
+      retryMs: options.lifecycleLockRetryMs ?? 500,
+      ...(options.lifecycleLockOptions || {}),
+    }, () => cmdUpdateWithPrompts(manifestPath, {
+      ...options,
+      lifecycleLockHeld: true,
+      ...(preDiscoveredInstalled ? { preDiscoveredInstalled } : {}),
+    }));
   } finally {
     closePrompts();
   }
@@ -30230,6 +30709,7 @@ const commands = {
   upgrade: cmdUpgradeInteractive,
   rollback: dispatchRollback,
   schedule: cmdSchedule,
+  daily: (_path) => cmdDaily(process.argv.slice(3)),
   folder: (path) => cmdFolder(path, process.argv.slice(4)),
   support: cmdSupport,
   tools: cmdLocalToolsInteractive,
@@ -30260,6 +30740,8 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "ocr-preflight",
   "custom-api",
   "folder",
+  "schedule",
+  "daily",
 ]);
 
 // Health proves the Brain over HTTPS with the admin key and must never refresh
@@ -30340,6 +30822,11 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain migrate    <manifest>            apply pending schema migrations
     brain deploy     <manifest>            upload the worker with its bindings
     brain health     <manifest>            prove the install actually works
+    brain daily      on|off|status <manifest>
+                                           install, remove, or inspect one manifest-derived
+                                           per-Brain/per-user daily import definition
+    brain schedule   <manifest> --status --all-configured [--json]
+                                           join native ownership with one freshness line per source
     brain drain      <manifest>            finish the vector embedding now, with a live ETA
     brain reindex    <manifest>            rebuild the vector index from D1, no source files needed
     brain diagnose   <manifest>            what is missing, stored wrong, or stored wastefully

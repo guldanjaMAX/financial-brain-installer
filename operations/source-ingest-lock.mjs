@@ -284,6 +284,9 @@ function busyError(sourceName) {
  * resume state. Atomic directory creation supplies exclusion on macOS, Linux,
  * and Windows. The heartbeat plus PID check makes an abrupt-exit residue
  * recoverable without allowing an old timestamp to evict a live long ingest.
+ * Mutating CLI entry points take the manifest lifecycle lease before reaching
+ * this function. The fixed order is lifecycle, source, shared provider record;
+ * reversing it would let a daily leg deadlock an update waiting to pause it.
  */
 export function acquireSourceIngestLock({
   manifestPath,
