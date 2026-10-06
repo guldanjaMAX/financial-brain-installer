@@ -8605,13 +8605,15 @@ export const sourceCursorCanAdvance = (
   Number(retryableSkips || 0) === 0;
 
 export const sourceReceiptHasRemoteGap = ({
+  source = null,
   tally,
   totalRefused = 0,
   coverageGaps = 0,
   driveReviewRequired = false,
   retryableSkips = 0,
   durableRetries = 0,
-} = {}) => Number(tally?.failed || 0) > 0 || Number(totalRefused || 0) > 0 ||
+} = {}) => Number(tally?.failed || 0) > 0 ||
+  (source !== "gmail" && Number(totalRefused || 0) > 0) ||
   Number(coverageGaps || 0) > 0 || Number(retryableSkips || 0) > 0 ||
   Number(durableRetries || 0) > 0 || driveReviewRequired === true;
 
@@ -17951,7 +17953,9 @@ const cmdIngestRemoteRun = async (
       `${unchanged} unchanged; ${skips.length} skipped; ${tally.failed} failed`
   );
 
-  const coverageGaps = Math.max(0, skips.length - policySkipped - sourceResolvedSkipped - adjudicatedSkipped) +
+  const gmailCredentialRefusalSkips = which === "gmail" ? localRefused + tally.refused : 0;
+  const coverageGaps = Math.max(0, skips.length - policySkipped - sourceResolvedSkipped - adjudicatedSkipped -
+    gmailCredentialRefusalSkips) +
     gmailHistoryMarkerMissing + imapSnapshotGaps;
 
   if (dry) {
@@ -18006,7 +18010,7 @@ const cmdIngestRemoteRun = async (
   const driveReviewRequired = which === "drive" &&
     (protectedDriveUids().size > 0 || malformedDriveIdentityCount > 0);
   const hasRemoteGap = sourceReceiptHasRemoteGap({
-    tally, totalRefused, coverageGaps, driveReviewRequired, retryableSkips: retryableOcrSkips,
+    source: which, tally, totalRefused, coverageGaps, driveReviewRequired, retryableSkips: retryableOcrSkips,
     durableRetries: gmailRetryBacklog,
   });
   const finalStatus = hasRemoteGap ? "error" : "ready";
@@ -18014,7 +18018,8 @@ const cmdIngestRemoteRun = async (
   await recordSourceReceipt({
     source: sourceName, kind: which, status: finalStatus, run_id: runId,
     lane, started_at: runStartedAt, completed_at: new Date().toISOString(),
-    complete_sweep: ["drive", "gmail", "imap"].includes(which) && !incremental && !hasRemoteGap,
+    complete_sweep: ["drive", "gmail", "imap"].includes(which) && !incremental &&
+      !hasRemoteGap && totalRefused === 0,
     // Reaching this terminal path means the provider enumeration itself
     // finished. Refused/failed documents and unresolved coverage remain
     // separate measured outcomes and still block complete_sweep.
@@ -18033,7 +18038,7 @@ const cmdIngestRemoteRun = async (
       ? {
           issue_code: driveReviewRequired
             ? "SAFETY_REVIEW_REQUIRED"
-            : totalRefused > 0 ? "INPUT_REFUSED" : "INGEST_FAILED",
+            : totalRefused > 0 && which !== "gmail" ? "INPUT_REFUSED" : "INGEST_FAILED",
           ...(which === "gmail" && gmailOperationalFailure
             ? { failure_evidence: gmailFailureEvidence(gmailOperationalFailure, statePath, gmailCheckpointBefore) }
             : {}),
@@ -18042,7 +18047,8 @@ const cmdIngestRemoteRun = async (
           detail: `${which} ${lane} sync completed; skipped=${skips.length}; ` +
             `policy_skipped=${policySkipped}; coverage_gaps=${coverageGaps}; ` +
             `source_resolved=${sourceResolvedSkipped}; adjudicated_skips=${adjudicatedSkipped}` +
-            (which === "imap" ? `; folder_policy_skipped=${folderPolicySkipped}` : ""),
+            (which === "imap" ? `; folder_policy_skipped=${folderPolicySkipped}` : "") +
+            (which === "gmail" ? `; withheld_for_secrets=${totalRefused}` : ""),
         }),
   });
   runClosed = true;
@@ -18050,7 +18056,13 @@ const cmdIngestRemoteRun = async (
   const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged`;
   if (tally.failed || retryableOcrSkips || gmailRetryBacklog) info(summary);
   else ok(summary);
-  if (totalRefused) warn(`${totalRefused} document(s) refused for carrying live credentials.`);
+  if (totalRefused) {
+    if (which === "gmail") {
+      info(`${totalRefused} Gmail message(s) withheld for carrying live credentials by design.`);
+    } else {
+      warn(`${totalRefused} document(s) refused for carrying live credentials.`);
+    }
+  }
   reportOcrRetryStats(ocrCallback);
   await reportSkips(skips);
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
@@ -18119,12 +18131,8 @@ const cmdIngestRemoteRun = async (
   }
   await reportBacklog(manifestPath);
   if (which === "gmail" && hasRemoteGap) {
-    const disposition = tally.created + tally.updated + unchanged + tally.unchanged > 0
-      ? "partial coverage"
-      : "refused coverage";
     die(
-      `${disposition}: ${coverageGaps} Gmail message(s) were not indexed` +
-        (totalRefused ? `, including ${totalRefused} credential refusal(s)` : "") + ".\n" +
+      `partial coverage: ${coverageGaps} Gmail message(s) had unresolved coverage gaps.\n` +
         "      Progress was saved. The cursor advances only when every message had trustworthy policy evidence.",
     );
   }

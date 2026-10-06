@@ -864,6 +864,11 @@ before the history cursor advances. The run still reports an error. The next
 incremental run retries those messages even when the new Gmail history window
 is empty, and clears each retry only after acceptance or a current typed source
 decision.
+If Gmail withholds a message because it contains a credential, that message
+stays out of the Brain and the receipt keeps the count. A run whose only
+non-accepted messages are those credential refusals finishes ready. It still
+does not claim a complete history sweep, and any storage failure, retry work,
+missing policy evidence, or other coverage gap keeps the run failed.
 Promotions, Social, and Forums are excluded by default. Updates stays included
 so statements, confirmations, and reminders are not silently missed.
 

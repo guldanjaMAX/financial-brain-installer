@@ -9,6 +9,9 @@ const userRoot = String(process.env.BRAIN_GMAIL_POLICY_USER_ROOT || "");
 const mode = String(process.env.BRAIN_GMAIL_POLICY_MODE || "");
 const MODES = [
   "mixed",
+  "refusal-only",
+  "refusal-only-sweep",
+  "refusal-with-failure",
   "unclassified",
   "credential-refusal",
   "worker-refusal",
@@ -118,6 +121,8 @@ globalThis.fetch = async (input, options = {}) => {
     }
     const idsByMode = {
       mixed: ["promotion", "inbox"],
+      "refusal-only": ["refusal-only-001", "refusal-only-002"],
+      "refusal-with-failure": ["refusal-failure-secret", "refusal-failure-worker"],
       unclassified: [...lateEligibleIds, "unclassified"],
       "credential-refusal": ["credential-refused", "credential-clean"],
       "worker-refusal": ["worker-refused"],
@@ -162,6 +167,10 @@ globalThis.fetch = async (input, options = {}) => {
     if (["sweep-query-evidence", "policy-change-sweep", "sweep-marker-missing"].includes(mode)) {
       requireDefaultFilteredQuery(url);
       return json({ messages: [{ id: "sweep-inbox" }] });
+    }
+    if (mode === "refusal-only-sweep") {
+      requireDefaultFilteredQuery(url);
+      return json({ messages: [{ id: "refusal-sweep-001" }, { id: "refusal-sweep-002" }] });
     }
     if (mode === "recoverable-worker-failure") {
       requireDefaultFilteredQuery(url);
@@ -265,6 +274,19 @@ globalThis.fetch = async (input, options = {}) => {
       return json({
         id, historyId: "history-current", internalDate: "1788030000000", labelIds: ["INBOX"],
         raw: rawMail("Clean inbox mail", "This invented clean inbox message confirms the reviewed project owner, agreed scope, timing, price, and next milestone."),
+      });
+    }
+    if (["refusal-only-001", "refusal-only-002", "refusal-sweep-001", "refusal-sweep-002",
+      "refusal-failure-secret"].includes(id)) {
+      return json({
+        id, historyId: "history-current", internalDate: "1788030000000", labelIds: ["INBOX"],
+        raw: rawMail("Invented credential", `This invented message contains a fake test value. admin_key: ${SYNTHETIC_OPENAI_KEY}`),
+      });
+    }
+    if (id === "refusal-failure-worker") {
+      return json({
+        id, historyId: "history-current", internalDate: "1788030000000", labelIds: ["INBOX"],
+        raw: rawMail("Recoverable storage failure", "This invented message remains retryable after a recoverable storage failure."),
       });
     }
     if (id === "worker-refused") {
@@ -373,6 +395,8 @@ globalThis.fetch = async (input, options = {}) => {
     return json({
       results: request.docs.map((doc) => mode === "worker-refusal"
         ? { source_id: doc.source_id, status: "refused", labels: ["synthetic_test_label"] }
+        : mode === "refusal-with-failure" && doc.source_id === "refusal-failure-worker"
+          ? { source_id: doc.source_id, status: "failed" }
         : mode === "recoverable-worker-failure" && doc.source_id === "retry-failed" &&
             evidence.batch_attempts[doc.source_id] === 1
           ? { source_id: doc.source_id, status: "failed" }

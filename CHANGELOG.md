@@ -23,6 +23,13 @@ this changed candidate.
   red, but later runs should stop replaying the oldest mail and the saved retry
   count should converge to zero.
 
+- **A Gmail sync now finishes ready when its only withheld messages contain
+  credentials.** Those messages still stay out of the Brain, and the receipt
+  keeps their count. Storage failures, retry work, unreadable policy evidence,
+  and other coverage gaps still fail the run. To check after updating: the next
+  refusal-only Gmail run should be ready and show its withheld-for-secrets
+  count, while a run with a storage failure should remain red.
+
 - **SECURITY: hidden entry now owns the terminal after a yes/no question.** A
   key pasted at a hidden prompt that followed a yes/no question could be shown
   on screen. If you did that while sharing your screen, roll that key. The
