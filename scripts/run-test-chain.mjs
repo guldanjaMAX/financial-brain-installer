@@ -138,6 +138,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings --test worker/test/fin-documents-writer-agreement.test.mjs",
   "node --no-warnings --test worker/test/ocr-reply-shape.test.mjs",
   "node --test test/mcp-moved-brain.test.mjs",
+  // MCP search-first contract: filters, paging, dates, facets, gaps, retry.
+  "node --test test/mcp-search-contract.test.mjs",
   // Plaid owner-flow repairs from two sandbox rehearsals: provider precision,
   // key replacement, Link errors, the first-connection page, and status truth.
   "node --no-warnings --test worker/test/plaid-amount-precision.test.mjs",
@@ -312,6 +314,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/mcp-apply.test.mjs",
   "node test/mcp-rotation.test.mjs",
   "node --test test/mcp-moved-brain.test.mjs",
+  // MCP search-first contract: filters, paging, dates, facets, gaps, retry.
+  "node --test test/mcp-search-contract.test.mjs",
   "node test/health-verify-exit.test.mjs",
   "node test/health-wrangler-session-exempt.test.mjs",
   "node test/drain-exit.test.mjs",
