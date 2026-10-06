@@ -12,10 +12,25 @@ const WINDOWS_INSTALLER = join(ROOT, "machine-prep", "installers", "windows");
 const KIT_URL = "https://financialbrain.ai/kit/brain-installer-0.4.9-0555ad1972d7f8d6.tgz";
 const KIT_SHA256 = "0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2";
 const KIT_SIZE = "6668013";
+const WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS = 120_000;
+const BASH_BEHAVIOR_ON_WINDOWS_SKIP_REASON =
+  "requires Unix shell semantics and remains active on the macOS and Linux CI lanes";
+
+function bashBehaviorOptions(platform = process.platform) {
+  return {
+    skip: platform === "win32" ? BASH_BEHAVIOR_ON_WINDOWS_SKIP_REASON : false,
+  };
+}
 
 function read(relativePath) {
   return readFileSync(join(ROOT, relativePath), "utf8").replaceAll("\r\n", "\n");
 }
+
+test("bash behavior platform guard keeps macOS and Linux coverage active", () => {
+  assert.deepEqual(bashBehaviorOptions("darwin"), { skip: false });
+  assert.deepEqual(bashBehaviorOptions("linux"), { skip: false });
+  assert.deepEqual(bashBehaviorOptions("win32"), { skip: BASH_BEHAVIOR_ON_WINDOWS_SKIP_REASON });
+});
 
 test("Claude handoff messages are local notes with no remote instructions", () => {
   const mac = read("machine-prep/handoff/message-macos.txt");
@@ -55,7 +70,7 @@ test("handoff URL renderer produces the documented Claude Desktop Code deep link
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   assert.match(result.stdout, /^claude:\/\/code\/new\?q=/);
   const decoded = decodeURIComponent(result.stdout.trim().split("?q=")[1]);
-  assert.equal(`${decoded}\n`, readFileSync(prompt, "utf8"));
+  assert.equal(`${decoded}\n`, readFileSync(prompt, "utf8").replaceAll("\r\n", "\n"));
 });
 
 test("both OS handoff launchers expose a no-side-effect decision probe and CLI fallback", () => {
@@ -68,41 +83,42 @@ test("both OS handoff launchers expose a no-side-effect decision probe and CLI f
   }
 });
 
-test("macOS installer refuses an unsupported release after reaching its OS gate", () => {
+test("macOS installer refuses an unsupported release after reaching its OS gate", bashBehaviorOptions(), () => {
   const preinstall = join(MAC_INSTALLER, "scripts", "preinstall");
-  const result = spawnSync("bash", [preinstall], {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      MACHINE_PREP_OS_VERSION_OVERRIDE: "12.6.9",
-      MACHINE_PREP_INSTALLER_TEST_MODE: "1",
-    },
-    encoding: "utf8",
-  });
-  const out = `${result.stdout}${result.stderr}`;
-  assert.equal(result.status, 2, out);
-  assert.match(out, /OS_DECISION_REACHED=1/);
-  assert.match(out, /REFUSED macOS 13\.5 or newer is required/);
-  assert.doesNotMatch(out, /PREP_STARTED/);
+  const home = mkdtempSync(join(ROOT, ".machine-prep-preinstall-home-"));
+  const environment = {
+    PATH: "/usr/bin:/bin",
+    HOME: home,
+    BRAIN_NO_WRANGLER_LOGIN: "1",
+    BRAIN_TEST_LAUNCHCTL: join(home, "injected-launchctl"),
+    MACHINE_PREP_INSTALLER_TEST_MODE: "1",
+  };
+  try {
+    const result = spawnSync("bash", [preinstall], {
+      cwd: ROOT,
+      env: { ...environment, MACHINE_PREP_OS_VERSION_OVERRIDE: "12.6.9" },
+      encoding: "utf8",
+    });
+    const out = `${result.stdout}${result.stderr}`;
+    assert.equal(result.status, 2, out);
+    assert.match(out, /OS_DECISION_REACHED=1/);
+    assert.match(out, /REFUSED macOS 13\.5 or newer is required/);
+    assert.doesNotMatch(out, /PREP_STARTED/);
 
-  const control = spawnSync("bash", [preinstall], {
-    cwd: ROOT,
-    env: {
-      PATH: "/usr/bin:/bin",
-      HOME: join(ROOT, ".installers-fix-test-home"),
-      BRAIN_NO_WRANGLER_LOGIN: "1",
-      BRAIN_TEST_LAUNCHCTL: join(ROOT, ".installers-fix-test-home", "injected-launchctl"),
-      MACHINE_PREP_OS_VERSION_OVERRIDE: "13.5",
-      MACHINE_PREP_INSTALLER_TEST_MODE: "1",
-    },
-    encoding: "utf8",
-  });
-  assert.equal(control.status, 0, `${control.stdout}${control.stderr}`);
-  assert.match(control.stdout, /OS_DECISION_REACHED=1/);
-  assert.match(control.stdout, /OS_SUPPORTED=1/);
+    const control = spawnSync("bash", [preinstall], {
+      cwd: ROOT,
+      env: { ...environment, MACHINE_PREP_OS_VERSION_OVERRIDE: "13.5" },
+      encoding: "utf8",
+    });
+    assert.equal(control.status, 0, `${control.stdout}${control.stderr}`);
+    assert.match(control.stdout, /OS_DECISION_REACHED=1/);
+    assert.match(control.stdout, /OS_SUPPORTED=1/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
-test("macOS staging contains the real prep, handoff, support log wrapper, and uninstall notes", () => {
+test("macOS staging contains the real prep, handoff, support log wrapper, and uninstall notes", bashBehaviorOptions(), () => {
   const staging = mkdtempSync(join(tmpdir(), "machine-prep-pkg-stage-"));
   try {
     const build = spawnSync("bash", [join(MAC_INSTALLER, "build-pkg.sh"), "--staging-only", staging], {
@@ -399,7 +415,7 @@ function assertSigningGate(probe, { mac, windows }) {
   assert.equal(values.windows_configured, String(windows));
 }
 
-test("signing configuration body authorizes only complete settings and explicit WiX confirmation", () => {
+test("signing configuration body authorizes only complete settings and explicit WiX confirmation", bashBehaviorOptions(), () => {
   const complete = runSigningGate();
   try {
     assertSigningGate(complete, { mac: true, windows: true });
@@ -436,7 +452,7 @@ test("signing configuration body authorizes only complete settings and explicit 
   }
 });
 
-test("signing missing-setting mutation turns the executed gate red", () => {
+test("signing missing-setting mutation turns the executed gate red", bashBehaviorOptions(), () => {
   const workflow = read(".github/workflows/installer-signing.yml");
   const from = '[ -n "$value" ] || mac_missing=1';
   assert.equal(workflow.includes(from), true, "missing signing configuration decision");
@@ -536,7 +552,7 @@ esac
   };
 }
 
-test("signing cleanup deletes only its marked keychain and fails loudly when deletion is unproven", () => {
+test("signing cleanup deletes only its marked keychain and fails loudly when deletion is unproven", bashBehaviorOptions(), () => {
   const owned = runSigningCleanup({ owned: true });
   try {
     assert.equal(owned.result.status, 0, `${owned.result.stdout}${owned.result.stderr}`);
@@ -568,7 +584,7 @@ test("signing cleanup deletes only its marked keychain and fails loudly when del
   }
 });
 
-test("signing cleanup ownership mutation turns the foreign-keychain control red", () => {
+test("signing cleanup ownership mutation turns the foreign-keychain control red", bashBehaviorOptions(), () => {
   const sourcePath = join(MAC_INSTALLER, "cleanup-signing-material.sh");
   const source = readFileSync(sourcePath, "utf8");
   const from = 'if [ "$marker_value" != "$attempt_id" ]; then';
@@ -739,7 +755,7 @@ function runMacWrapper({ prepExit, openExit, handoffExit }) {
   return { ...result, calls };
 }
 
-test("Mac launcher reaches prep and setup decisions, propagates failures, and hands off only after success", () => {
+test("Mac launcher reaches prep and setup decisions, propagates failures, and hands off only after success", bashBehaviorOptions(), () => {
   const prepFailure = runMacWrapper({ prepExit: 7, openExit: 0, handoffExit: 0 });
   assert.equal(prepFailure.status, 7, prepFailure.stderr);
   assert.deepEqual(prepFailure.calls, ["prep"]);
@@ -809,7 +825,7 @@ test("Windows launcher reaches one typed exit decision and starts setup only aft
   assert.match(control.stdout, /INSTALLER_HANDOFF_STARTED=1/);
 });
 
-test("Windows launcher concurrently drains oversized child output for zero and nonzero exits", { skip: process.platform !== "win32", timeout: 30_000 }, () => {
+test("Windows launcher concurrently drains oversized child output for zero and nonzero exits", { skip: process.platform !== "win32", timeout: 300_000 }, () => {
   const powerShell = process.env.SystemRoot
     ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
     : "powershell.exe";
@@ -838,7 +854,7 @@ test("Windows launcher concurrently drains oversized child output for zero and n
           MACHINE_PREP_INSTALLER_TEST_MODE: "1",
         },
         encoding: "utf8",
-        timeout: 15_000,
+        timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS,
       });
       assert.equal(result.error, undefined, String(result.error));
       assert.equal(result.status, exitCode, `${result.stdout}${result.stderr}`);

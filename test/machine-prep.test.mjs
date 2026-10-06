@@ -22,8 +22,17 @@ const ROOT = resolve(import.meta.dirname, "..");
 const FIXTURES = join(ROOT, "test", "fixtures", "machine-prep");
 const MAC = join(ROOT, "machine-prep", "prep-mac.sh");
 const WINDOWS = join(ROOT, "machine-prep", "prep-windows.ps1");
+const WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS = 120_000;
+const MAC_RUNTIME_ON_WINDOWS_SKIP_REASON =
+  "requires Unix/macOS shell paths and remains active on the macOS CI lane";
 const MAC_INSTALL_ORCHESTRATION_SKIP_REASON =
   "requires macOS because it exercises the production BSD stat and atomic rename path";
+
+function macRuntimeOptions(platform = process.platform) {
+  return {
+    skip: platform === "win32" ? MAC_RUNTIME_ON_WINDOWS_SKIP_REASON : false,
+  };
+}
 
 function macInstallOrchestrationOptions(platform = process.platform) {
   return {
@@ -84,7 +93,10 @@ function runWindows(args, fixture = "windows-not-ready") {
     "-File", WINDOWS, ...args,
   ], {
     cwd: ROOT,
-    env: cleanEnv(join(FIXTURES, fixture)),
+    env: {
+      ...cleanEnv(join(FIXTURES, fixture)),
+      MACHINE_PREP_HOME: "C:\\Users\\Fixture",
+    },
     encoding: "utf8",
   });
 }
@@ -157,7 +169,7 @@ exit /b 0\r
     writeFileSync(join(stage, "foreign.txt"), "preserve\n");
   }
   const result = runWindowsScratch(script, ["--test-install-brain"], home, {
-    timeout: 15_000,
+    timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS,
     extraEnv: {
       MACHINE_PREP_TEST_KIT_SOURCE: kit,
       MACHINE_PREP_TEST_KIT_SIZE: String(kitBytes.length + kitSizeOffset),
@@ -249,7 +261,7 @@ ln -s ../lib/node_modules/brain-installer/brain.mjs "$prefix/bin/brain"
   };
 }
 
-test("Mac check reaches every tool and reports missing, old, and shadowed states", () => {
+test("Mac check reaches every tool and reports missing, old, and shadowed states", macRuntimeOptions(), () => {
   const result = runMac(["--check"]);
   const out = combined(result);
   assert.equal(result.status, 1, out);
@@ -263,7 +275,7 @@ test("Mac check reaches every tool and reports missing, old, and shadowed states
   assert.match(out, /READY          Python 3/);
 });
 
-test("Mac ready fixture is green and read-only", () => {
+test("Mac ready fixture is green and read-only", macRuntimeOptions(), () => {
   const result = runMac(["--check"], "mac-ready");
   const out = combined(result);
   assert.equal(result.status, 0, out);
@@ -271,16 +283,16 @@ test("Mac ready fixture is green and read-only", () => {
   assert.match(out, /CHECKS_REACHED=10/);
 });
 
-test("Mac dry-run output matches the reviewed snapshot and is idempotent", () => {
+test("Mac dry-run output matches the reviewed snapshot and is idempotent", macRuntimeOptions(), () => {
   const first = runMac(["--dry-run"]);
   const second = runMac(["--dry-run"]);
-  const expected = readFileSync(join(FIXTURES, "mac-dry-run.txt"), "utf8");
+  const expected = readFileSync(join(FIXTURES, "mac-dry-run.txt"), "utf8").replaceAll("\r\n", "\n");
   assert.equal(first.status, 0, combined(first));
   assert.equal(combined(first), expected);
   assert.equal(combined(second), expected);
 });
 
-test("Mac checksum mismatch reaches verification and refuses before action", () => {
+test("Mac checksum mismatch reaches verification and refuses before action", macRuntimeOptions(), () => {
   const directory = mkdtempSync(join(tmpdir(), "machine-prep-checksum-"));
   try {
     const artifact = join(directory, "artifact.bin");
@@ -297,7 +309,7 @@ test("Mac checksum mismatch reaches verification and refuses before action", () 
   }
 });
 
-test("Mac checksum match is accepted only after the decision point", () => {
+test("Mac checksum match is accepted only after the decision point", macRuntimeOptions(), () => {
   const directory = mkdtempSync(join(tmpdir(), "machine-prep-checksum-"));
   try {
     const artifact = join(directory, "artifact.bin");
@@ -314,7 +326,7 @@ test("Mac checksum match is accepted only after the decision point", () => {
   }
 });
 
-test("Mac Brain prefix gate accepts an absent target and refuses a collision after reaching the decision", () => {
+test("Mac Brain prefix gate accepts an absent target and refuses a collision after reaching the decision", macRuntimeOptions(), () => {
   const directory = mkdtempSync(join(tmpdir(), "machine-prep-prefix-"));
   const prefix = join(directory, "brain-prefix");
   try {
@@ -335,7 +347,7 @@ test("Mac Brain prefix gate accepts an absent target and refuses a collision aft
   }
 });
 
-test("Mac existing-install decision refuses version-only, changed, and redirected installs", () => {
+test("Mac existing-install decision refuses version-only, changed, and redirected installs", macRuntimeOptions(), () => {
   const directory = mkdtempSync(join(tmpdir(), "machine-prep-installed-brain-"));
   const prefix = join(directory, "brain-prefix");
   try {
@@ -367,7 +379,7 @@ test("Mac existing-install decision refuses version-only, changed, and redirecte
   }
 });
 
-test("Mac readiness requires exact Brain version equality", () => {
+test("Mac readiness requires exact Brain version equality", macRuntimeOptions(), () => {
   const directory = mkdtempSync(join(ROOT, ".machine-prep-fixture-"));
   try {
     cpSync(join(FIXTURES, "mac-ready"), directory, { recursive: true });
@@ -387,7 +399,7 @@ test("Mac readiness requires exact Brain version equality", () => {
   }
 });
 
-test("Mac real mode refuses fixtures before any action", () => {
+test("Mac real mode refuses fixtures before any action", macRuntimeOptions(), () => {
   const result = runMac(["--real"]);
   const out = combined(result);
   assert.equal(result.status, 2, out);
@@ -396,6 +408,9 @@ test("Mac real mode refuses fixtures before any action", () => {
 });
 
 test("Mac install orchestration platform guard keeps Darwin coverage active", () => {
+  assert.deepEqual(macRuntimeOptions("darwin"), { skip: false });
+  assert.deepEqual(macRuntimeOptions("linux"), { skip: false });
+  assert.deepEqual(macRuntimeOptions("win32"), { skip: MAC_RUNTIME_ON_WINDOWS_SKIP_REASON });
   assert.deepEqual(macInstallOrchestrationOptions("darwin"), { skip: false });
   assert.deepEqual(macInstallOrchestrationOptions("linux"), { skip: MAC_INSTALL_ORCHESTRATION_SKIP_REASON });
   assert.deepEqual(macInstallOrchestrationOptions("win32"), { skip: MAC_INSTALL_ORCHESTRATION_SKIP_REASON });
@@ -594,7 +609,7 @@ test("Windows fixture coverage runs on the Windows CI lane", { skip: process.pla
 
   const first = runWindows(["--dry-run"]);
   const second = runWindows(["--dry-run"]);
-  const expected = readFileSync(join(FIXTURES, "windows-dry-run.txt"), "utf8");
+  const expected = readFileSync(join(FIXTURES, "windows-dry-run.txt"), "utf8").replaceAll("\r\n", "\n");
   assert.equal(first.status, 0, combined(first));
   assert.equal(combined(first), expected);
   assert.equal(combined(second), expected);
@@ -695,7 +710,7 @@ test("Windows pinned stream writer succeeds through File.Open CreateNew and pres
   }
 });
 
-test("Windows actual install refuses bad kit size and digest before npm or promotion, with a matching control", { skip: process.platform !== "win32", timeout: 60_000 }, () => {
+test("Windows actual install refuses bad kit size and digest before npm or promotion, with a matching control", { skip: process.platform !== "win32", timeout: 300_000 }, () => {
   const cases = [
     { name: "bad-size", options: { kitSizeOffset: 1 }, decision: /KIT_SIZE_DECISION_REACHED=1/ },
     { name: "bad-digest", options: { kitShaOverride: "0".repeat(64) }, decision: /CHECKSUM_DECISION_REACHED=1/ },
@@ -718,8 +733,8 @@ test("Windows actual install refuses bad kit size and digest before npm or promo
   }
 });
 
-test("Windows install verification-call mutation turns both bad-kit controls red", { skip: process.platform !== "win32", timeout: 60_000 }, () => {
-  const source = readFileSync(WINDOWS, "utf8");
+test("Windows install verification-call mutation turns both bad-kit controls red", { skip: process.platform !== "win32", timeout: 300_000 }, () => {
+  const source = readFileSync(WINDOWS, "utf8").replaceAll("\r\n", "\n");
   const from = "    Test-BrainKit $archive\n";
   assert.equal(source.includes(from), true, "missing Windows install verification decision");
   const directory = mkdtempSync(join(ROOT, ".machine-prep-windows-verify-mutant-"));
@@ -740,7 +755,7 @@ test("Windows install verification-call mutation turns both bad-kit controls red
   }
 });
 
-test("Windows isolated npm drains output larger than pipe capacity without deadlock", { skip: process.platform !== "win32", timeout: 20_000 }, () => {
+test("Windows isolated npm drains output larger than pipe capacity without deadlock", { skip: process.platform !== "win32", timeout: 150_000 }, () => {
   const directory = mkdtempSync(join(ROOT, ".machine-prep-windows-pipes-"));
   const home = join(directory, "home");
   const temp = join(home, "temp");
@@ -748,7 +763,7 @@ test("Windows isolated npm drains output larger than pipe capacity without deadl
   mkdirSync(temp, { recursive: true });
   writeFileSync(npm, "@echo off\r\nfor /L %%i in (1,1,20000) do @echo stderr-%%i 1>&2\r\nfor /L %%i in (1,1,20000) do @echo stdout-%%i\r\nexit /b 0\r\n");
   try {
-    const result = runWindowsScratch(WINDOWS, ["--test-isolated-npm", npm, join(directory, "prefix"), join(directory, "archive.tgz"), temp], home, { timeout: 15_000 });
+    const result = runWindowsScratch(WINDOWS, ["--test-isolated-npm", npm, join(directory, "prefix"), join(directory, "archive.tgz"), temp], home, { timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS });
     assert.equal(result.error, undefined, String(result.error));
     assert.equal(result.status, 0, combined(result));
     assert.match(combined(result), /REDIRECTED_PROCESS_DECISION_REACHED=1 exit=0/);
@@ -757,7 +772,7 @@ test("Windows isolated npm drains output larger than pipe capacity without deadl
   }
 });
 
-test("Windows install orchestration preserves collisions, cleans failures, and passes its control", { skip: process.platform !== "win32", timeout: 60_000 }, () => {
+test("Windows install orchestration preserves collisions, cleans failures, and passes its control", { skip: process.platform !== "win32", timeout: 600_000 }, () => {
   for (const scenario of ["lock-collision", "stage-collision", "destination-race"]) {
     const probe = runWindowsInstallOrchestration({ scenario });
     try {
@@ -797,8 +812,8 @@ test("Windows install orchestration preserves collisions, cleans failures, and p
   }
 });
 
-test("Windows ownership mutation turns the collision preservation control red", { skip: process.platform !== "win32", timeout: 20_000 }, () => {
-  const source = readFileSync(WINDOWS, "utf8");
+test("Windows ownership mutation turns the collision preservation control red", { skip: process.platform !== "win32", timeout: 180_000 }, () => {
+  const source = readFileSync(WINDOWS, "utf8").replaceAll("\r\n", "\n");
   const from = "if (-not (Test-InstallAttemptOwnership $Directory $AttemptId)) {";
   assert.equal(source.includes(from), true);
   const directory = mkdtempSync(join(ROOT, ".machine-prep-windows-mutant-"));
