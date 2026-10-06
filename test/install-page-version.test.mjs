@@ -487,7 +487,10 @@ test('release health accepts the exact held doorway and still requires the stabl
 });
 test('the old unconditional supervised-parser mutant fails the held-doorway fixture', async () => {
   const sourcePath = fileURLToPath(new URL('../scripts/check-install-page-version.mjs', import.meta.url));
-  const source = readFileSync(sourcePath, 'utf8');
+  // A Windows checkout (core.autocrlf) gives this file CRLF line endings, so the
+  // multi-line LF target below would match nothing there. Normalize first, as
+  // the other source-anchored suites do; the mutant is written back with LF.
+  const source = readFileSync(sourcePath, 'utf8').replace(/\r\n/g, '\n');
   const fixedBranch = `const install = manifest.release_state === 'held'
     ? (validateHeldInstallContract(installGuide), null)
     : validateSupervisedInstallContract(installGuide, { platform: RELEASE_HEALTH_PLATFORM });`;
