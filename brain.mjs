@@ -70,13 +70,13 @@ import {
 } from "./worker/src/lib/store-d1.js";
 import {
   BANK_ACCESS_WRAPPING_KEY_SECRET,
-  generateBankAccessWrappingKey,
 } from "./operations/bank-access-wrapping-key.mjs";
 import {
   clearCustomApiClipboard,
   readCustomApiClipboard,
 } from "./operations/custom-api-clipboard.mjs";
 import {
+  ensureBankFeedWrappingKey,
   ensureBankFeedWorkerSecrets,
   validatePlaidApplicationKeys,
 } from "./operations/bank-feed-owner-secrets.mjs";
@@ -2815,6 +2815,44 @@ async function cmdDeployWithPrompts(manifestPath, options = {}) {
   });
   ok(`deployed "${scriptName}"`);
 
+  // A Worker cannot create its own secret binding. Put the independent bank
+  // wrapping key on every lifecycle path that uploads an enabled bank Worker:
+  // fresh setup, update's paused and active deployments, and standalone deploy.
+  // Name-only inventory makes this idempotent; the existing value is never read
+  // or replaced, so rotation remains outside this path.
+  if (m.corpora?.bank_feed?.enabled === true) {
+    const secretPath = `/accounts/${acct.id}/workers/scripts/${scriptName}/secrets`;
+    const listSecretNames = options.listWorkerSecretNames ?? (async () => {
+      const inventory = await cf(secretPath);
+      if (!Array.isArray(inventory) || inventory.some((binding) =>
+        !binding || typeof binding !== "object" || typeof binding.name !== "string")) {
+        throw new TypeError("Cloudflare returned an invalid Worker secret inventory");
+      }
+      return inventory.map((binding) => binding.name);
+    });
+    const putSecret = options.putWorkerSecret ?? ((name, text) => cf(secretPath, {
+      method: "PUT",
+      body: { name, text, type: "secret_text" },
+    }));
+    let custody;
+    try {
+      custody = await (options.ensureBankFeedWrappingKey ?? ensureBankFeedWrappingKey)({
+        enabled: true,
+        listSecretNames,
+        putSecret,
+        generateWrappingKey: options.generateBankWrappingKey,
+      });
+    } catch (error) {
+      if (error instanceof Fatal) throw error;
+      die(String(error?.message || error));
+    }
+    if (custody.created) {
+      ok(`created and verified ${custody.name} on ${scriptName}`);
+    } else {
+      info(`${custody.name} already exists on ${scriptName}; it was not replaced`);
+    }
+  }
+
   // A deploy that is not verified is a belief. Enable the workers.dev route so
   // there is always a URL to prove it against, even before a custom domain.
   const workersDevPath = `/accounts/${acct.id}/workers/scripts/${scriptName}/subdomain`;
@@ -2987,9 +3025,9 @@ export function optionalWorkerSecretNames(m) {
   );
   // An enabled bank feed allows already-present provider credentials and its
   // independent wrapping key to remain on the Worker. This is a preservation
-  // allowlist only: generic `brain secrets` and setup must never source or
-  // replace these values from the process environment. The only writer is the
-  // owner-present hidden prompt in `brain connect bank`.
+  // allowlist only: generic `brain secrets` must never source or replace these
+  // values from the process environment. Deploy creates only a missing random
+  // wrapping key; the owner-present bank setup owns provider credentials.
   const bankFeedSecrets = bankFeedRequiredSecretNames(m);
   return Object.freeze([
     ...(storage === "supabase" ? ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"] : []),
@@ -3106,11 +3144,10 @@ async function reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
   const absent = required.filter((name) => !present.has(name));
   if (absent.length) {
     die(
-      `the enabled bank feed is missing required Worker secrets: ${absent.join(", ")}. ` +
-        "Bank credential setup remains held and is not available through `brain secrets`, " +
-        "`brain setup`, or the generic technician workflow. Complete it only through the " +
-        "separately reviewed owner-custody process: the owner runs `brain connect bank <manifest>` " +
-        "and enters the Plaid keys at its hidden prompt. No local or Worker secret was changed.",
+      `the enabled bank feed is missing its required independent Worker wrapping key: ${absent.join(", ")}. ` +
+        "Run the same `brain setup`, `brain update`, or `brain deploy` command again; its deploy step " +
+        "creates and verifies only a missing wrapping key. Provider credentials and existing keys are " +
+        "not changed by that path. No local or Worker secret was changed by `brain secrets`.",
     );
   }
   const unwanted = WORKER_PROVIDER_SECRET_NAMES.filter((name) =>
@@ -3170,9 +3207,9 @@ export async function cmdSecrets(manifestPath, options = {}) {
   if (ambientBankSecrets.length) {
     die(
       `${ambientBankSecrets.join(", ")} ${ambientBankSecrets.length === 1 ? "is" : "are"} not accepted ` +
-        "from environment variables or by `brain secrets`. Bank credential setup remains held " +
-        "and requires a separately reviewed owner-custody process. Unset the bank variable(s) " +
-        "and rerun. No local or Worker secret was changed.",
+        "from environment variables or by `brain secrets`. A missing wrapping key is generated only " +
+        "inside setup, update, or deploy; provider credentials use the reviewed owner-custody flow. " +
+        "Unset the bank variable(s) and rerun. No local or Worker secret was changed.",
     );
   }
 
@@ -3307,12 +3344,15 @@ export async function cmdSecrets(manifestPath, options = {}) {
 
   const acct = await resolveAccount(m);
 
-  // For an approved feed that is already configured, routine core-key repair
-  // may preserve the three bank bindings but may never manufacture them. Read
-  // the exact Worker inventory before any local or remote mutation. A partial
-  // bank setup therefore stops before ADMIN_KEY or its derived keys rotate.
+  // Routine core-key repair may preserve every bank binding but may never
+  // manufacture one. Deploy owns creation of the independent wrapping key;
+  // provider credentials may remain absent until the owner uses the reviewed
+  // browser or hidden-prompt flow. Read the exact Worker inventory before any
+  // local or remote mutation so a missing wrapping key still stops safely.
   await reconcileWorkerProviderSecrets(m, acct, scriptName, optional, {
-    required: bankFeedRequiredSecretNames(m),
+    required: m.corpora?.bank_feed?.enabled === true
+      ? [BANK_ACCESS_WRAPPING_KEY_SECRET]
+      : [],
     timeoutMs: secretsWriteTimeout.timeoutMs,
     waitEveryMs: secretsWriteTimeout.waitEveryMs,
   });
@@ -29409,27 +29449,15 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
         "Unset it and rerun; no Worker secret was changed.",
       );
     }
-    let names = await listSecretNames();
-    let wrappingKeyWritten = false;
+    const names = await listSecretNames();
     if (!names.includes(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
-      const wrappingKey = (options.generateWrappingKey ?? generateBankAccessWrappingKey)();
-      try {
-        await putSecret(BANK_ACCESS_WRAPPING_KEY_SECRET, wrappingKey);
-      } catch {
-        die(
-          `the Worker secret ${BANK_ACCESS_WRAPPING_KEY_SECRET} could not be written. ` +
-          "No Setup Token was requested. Rerun brain connect bank to try the same setup again.",
-        );
-      }
-      names = await listSecretNames();
-      if (!names.includes(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
-        die(`Cloudflare did not list ${BANK_ACCESS_WRAPPING_KEY_SECRET} after the write. Do not create a Setup Token yet.`);
-      }
-      wrappingKeyWritten = true;
-      ok(`wrote and verified ${BANK_ACCESS_WRAPPING_KEY_SECRET} on ${scriptName}`);
-    } else {
-      ok(`${BANK_ACCESS_WRAPPING_KEY_SECRET} already present on ${scriptName}; nothing was prompted or written`);
+      die(
+        `the Worker is missing ${BANK_ACCESS_WRAPPING_KEY_SECRET}. Run brain setup, update, or deploy ` +
+        "for this manifest to create and verify it, then rerun brain connect bank. " +
+        "No Setup Token was requested and no Worker secret was changed.",
+      );
     }
+    ok(`${BANK_ACCESS_WRAPPING_KEY_SECRET} is present on ${scriptName}; nothing was prompted or written`);
 
     const shouldOpen = flags.print !== true && options.open !== false;
     const opener = options.openImpl ?? openBrowser;
@@ -29445,7 +29473,7 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
     info("The Access URL is claimed by the owner's Worker and stored there encrypted; it is never returned to this CLI.");
     return {
       provider: "simplefin", url, opened, live_provider_proof: false,
-      secrets_written: wrappingKeyWritten ? [BANK_ACCESS_WRAPPING_KEY_SECRET] : [],
+      secrets_written: [],
       keys_replaced: false,
     };
   }
@@ -29467,7 +29495,6 @@ export async function cmdConnectBank(manifestPath, flags = {}, options = {}) {
       validateKeys,
       environment,
       replaceKeys,
-      generateWrappingKey: options.generateWrappingKey,
       report: info,
     });
   } catch (error) {

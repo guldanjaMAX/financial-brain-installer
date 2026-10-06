@@ -190,12 +190,16 @@ being tested. You did nothing wrong, and there is no bank password,
 verification code, Plaid setup key, or SimpleFIN Setup Token to enter here. Ordinary onboarding leaves
 bank connections off and the technician will never ask you to paste those
 values into chat or a normal command. If this Brain is an already approved
-pilot, its complete existing bank setup is left unchanged. If any saved piece
-is missing, setup stops before changing a credential and explains the
-separately reviewed next step. An approved SimpleFIN pilot creates its one-time
-Setup Token in SimpleFIN Bridge and pastes it only into the owner-authenticated
-page on that Brain. The resulting Access URL stays encrypted in the owner's
-Worker and is never returned to the installer.
+pilot and its manifest enables a bank feed, setup, update, and deploy make sure
+the Worker's independent bank wrapping key exists. They create it only when its
+secret name is missing, verify the name afterward, and never print, replace, or
+derive it from another key. Provider setup remains a separate owner step, but
+there is no wrapping-key command for the owner to run. Existing provider setup
+is left unchanged. Missing Plaid provider credentials are entered only through
+the separately reviewed `brain connect bank` owner flow. An approved SimpleFIN
+pilot creates its one-time Setup Token in SimpleFIN Bridge and pastes it only
+into the owner-authenticated page on that Brain. The resulting Access URL stays
+encrypted in the owner's Worker and is never returned to the installer.
 
 The complete guide is
 [onboarding/09-technician-setup-and-rehearsal.md](onboarding/09-technician-setup-and-rehearsal.md).

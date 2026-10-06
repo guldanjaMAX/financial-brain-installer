@@ -125,6 +125,7 @@ const apiResponse = (result) => new Response(JSON.stringify({ success: true, res
 });
 function cloudflareHarness() {
   const metadata = [];
+  const secretNames = new Set();
   let workerPuts = 0;
   const fetchImpl = async (input, options = {}) => {
     const path = new URL(String(input)).pathname;
@@ -139,6 +140,14 @@ function cloudflareHarness() {
     }
     if (path.endsWith("/workers/scripts/x-brain/subdomain") && method === "POST") {
       return apiResponse({ enabled: true });
+    }
+    if (path.endsWith("/workers/scripts/x-brain/secrets") && method === "GET") {
+      return apiResponse([...secretNames].map((name) => ({ name, type: "secret_text" })));
+    }
+    if (path.endsWith("/workers/scripts/x-brain/secrets") && method === "PUT") {
+      const body = JSON.parse(String(options.body || "{}"));
+      secretNames.add(body.name);
+      return apiResponse({});
     }
     if (path.endsWith("/workers/scripts/x-brain/schedules") && method === "GET") {
       return apiResponse([{ cron: "* * * * *" }]);

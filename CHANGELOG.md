@@ -64,6 +64,16 @@ this changed candidate.
   reports the saved connection, every account assignment, backfill progress,
   and no current provider issues.
 
+- **Bank setup no longer needs a separate wrapping-key Terminal step.** When a
+  bank feed is enabled, setup, update, and deploy check the Worker's secret
+  names. If the independent bank wrapping key is missing, the Brain creates it,
+  saves it directly to the Worker, and verifies the name before continuing. An
+  existing key is left untouched, so retained encrypted bank connections remain
+  recoverable. The value is never shown, returned, copied into the manifest, or
+  derived from the admin or browser-session key. To check: rerun deploy and
+  confirm it reports that the wrapping-key name already exists and was not
+  replaced.
+
 - **Dollar amounts in a partly answered question are no longer cut.** When an
   answer covers only part of a question, the Brain keeps the sentences your
   documents support and names what they do not cover. That trimming used to

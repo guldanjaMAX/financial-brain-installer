@@ -215,8 +215,8 @@ try {
       outcomes.every(({ name, events, localMutations, message }) =>
         message.includes(name) &&
         /not accepted from environment variables or by `brain secrets`/i.test(message) &&
-        /credential setup remains held/i.test(message) &&
-        /separately reviewed owner-custody process/i.test(message) &&
+        /missing wrapping key is generated only inside setup, update, or deploy/i.test(message) &&
+        /provider credentials use the reviewed owner-custody flow/i.test(message) &&
         events.length === 0 && localMutations.length === 0),
       JSON.stringify(outcomes.map(({ name, events, localMutations, message }) => ({
         name, events, localMutations, message: message.slice(0, 180),
@@ -258,11 +258,10 @@ try {
     } catch (error) {
       message = String(error?.message || error);
     }
-    check("a fresh enabled feed stops before any core-key or local mutation",
-      /BANK_FEED_CLIENT_ID/.test(message) && /BANK_FEED_SECRET/.test(message) &&
+    check("an enabled feed missing its deploy-owned wrapping key stops before any core-key or local mutation",
       /BANK_FEED_WRAPPING_KEY_V2/.test(message) &&
-      /credential setup remains held/i.test(message) &&
-      /separately reviewed owner-custody process/i.test(message) &&
+      !/BANK_FEED_CLIENT_ID/.test(message) && !/BANK_FEED_SECRET(?:\W|$)/.test(message) &&
+      /same `brain setup`, `brain update`, or `brain deploy` command/i.test(message) &&
       !/ceremony/i.test(message) && events.length === 0 && localMutations.length === 0,
       `${message.slice(0, 280)} ${JSON.stringify({ events, localMutations })}`);
   }
@@ -288,9 +287,9 @@ try {
     } catch (error) {
       message = String(error?.message || error);
     }
-    check("a partial bank inventory refuses before unrelated cleanup or core-key rotation",
+    check("a provider-only bank inventory still refuses a missing wrapping key before unrelated mutation",
       /BANK_FEED_WRAPPING_KEY_V2/.test(message) &&
-      /credential setup remains held/i.test(message) &&
+      /same `brain setup`, `brain update`, or `brain deploy` command/i.test(message) &&
       events.length === 0 && localMutations.length === 0,
       `${message.slice(0, 240)} ${JSON.stringify({ events, localMutations })}`);
   }
@@ -338,22 +337,18 @@ try {
     }, () => cmdSecrets(disabledPath, secretsOptions));
     const disabledEvents = [...events];
     const afterDisable = events.length;
-    let message = "";
-    try {
-      await isolatedRuntime({
-        fetchImpl,
-        env: { CLOUDFLARE_API_TOKEN: "fixture-token" },
-      }, () => cmdSecrets(enabledPath, secretsOptions));
-    } catch (error) {
-      message = String(error?.message || error);
-    }
+    await isolatedRuntime({
+      fetchImpl,
+      env: { CLOUDFLARE_API_TOKEN: "fixture-token" },
+    }, () => cmdSecrets(enabledPath, secretsOptions));
     const reenabledEvents = events.slice(afterDisable);
-    check("disabled to held re-enable preserves wrapping-key custody and refuses missing provider bindings",
+    check("disabled to re-enable preserves wrapping-key custody and permits provider setup to remain pending",
       disabledEvents.every((event) => event !== `delete:${WRAPPING_NAME}`) &&
       reenabledEvents.every((event) => event !== `set:${WRAPPING_NAME}`) &&
       fetchImpl.secretNames().has(WRAPPING_NAME) &&
-      /missing required Worker secrets/i.test(message) && reenabledEvents.length === 0,
-      JSON.stringify({ message, disabledEvents, reenabledEvents }));
+      ["ADMIN_KEY", "RAG_PROXY_KEY", "SESSION_SIGNING_KEY"].every((name) =>
+        reenabledEvents.includes(`set:${name}`)),
+      JSON.stringify({ disabledEvents, reenabledEvents }));
   }
 
 
@@ -395,32 +390,41 @@ try {
   }
 
   {
-    const run = await connectBank("connect-absent", { initial: ["ADMIN_KEY"] });
+    const run = await connectBank("connect-missing-custody", { initial: ["ADMIN_KEY"] });
+    check("CONNECT BANK, MISSING CUSTODY: Plaid reaches one inventory and refuses before provider work",
+      run.fetchImpl.listCount() === 1 && /BANK_FEED_WRAPPING_KEY_V2/.test(run.message) &&
+      /setup.*update.*deploy/i.test(run.message) && run.prompts.length === 0 &&
+      run.events.length === 0 && run.fetchImpl.plaidCheckCount() === 0 && run.opened.length === 0,
+      JSON.stringify({ events: run.events, lists: run.fetchImpl.listCount(), message: run.message.slice(0, 240) }));
+  }
+
+  {
+    const run = await connectBank("connect-provider-absent", { initial: ["ADMIN_KEY", WRAPPING_NAME] });
     const wrapping = run.fetchImpl.secretValue(WRAPPING_NAME);
-    check("CONNECT BANK, ABSENT: the owner is prompted once for each Plaid value",
+    check("CONNECT BANK, PROVIDER ABSENT: the owner is prompted once for each Plaid value",
       run.prompts.length === 2 && /client_id/.test(run.prompts[0]) && /secret/.test(run.prompts[1]) &&
       run.prompts.every((text) => /hidden/.test(text)),
       JSON.stringify({ prompts: run.prompts, message: run.message.slice(0, 200) }));
-    check("CONNECT BANK, ABSENT: all three are written as secret_text before the browser opens",
-      JSON.stringify(run.events) === JSON.stringify(FEED_NAMES.map((name) => `set:${name}`)) &&
+    check("CONNECT BANK, PROVIDER ABSENT: only the Plaid pair is written before the browser opens",
+      JSON.stringify(run.events) === JSON.stringify(SERVICE_NAMES.map((name) => `set:${name}`)) &&
       run.fetchImpl.secretValue("BANK_FEED_CLIENT_ID") === PLAID_CLIENT_ID &&
       run.fetchImpl.secretValue("BANK_FEED_SECRET") === PLAID_SECRET &&
-      /^v2\.[A-Za-z0-9_-]{43}$/.test(wrapping || "") &&
+      wrapping === undefined &&
       run.opened.length === 1 && run.result?.opened === true,
       JSON.stringify({ events: run.events, opened: run.opened, message: run.message.slice(0, 200) }));
-    check("CONNECT BANK, ABSENT: the Worker is re-listed after the writes and holds every name",
+    check("CONNECT BANK, PROVIDER ABSENT: the Worker is re-listed after the writes and holds every name",
       run.fetchImpl.listCount() === 2 && FEED_NAMES.every((name) => run.fetchImpl.secretNames().has(name)) &&
-      JSON.stringify(run.result?.secrets_written) === JSON.stringify(FEED_NAMES),
+      JSON.stringify(run.result?.secrets_written) === JSON.stringify(SERVICE_NAMES),
       JSON.stringify({ lists: run.fetchImpl.listCount(), written: run.result?.secrets_written }));
-    check("CONNECT BANK, ABSENT: the typed pair is checked with Plaid once before the first write",
+    check("CONNECT BANK, PROVIDER ABSENT: the typed pair is checked with Plaid once before the first write",
       run.fetchImpl.plaidCheckCount() === 1 && run.result?.keys_replaced === false,
       JSON.stringify({ checks: run.fetchImpl.plaidCheckCount(), replaced: run.result?.keys_replaced }));
-    check("CONNECT BANK, ABSENT: output uses owner wording and never prints a value",
+    check("CONNECT BANK, PROVIDER ABSENT: output uses owner wording and never prints a value",
       FEED_NAMES.every((name) => !run.output.includes(name)) &&
       /Plaid accepted both keys/.test(run.output) &&
-      [PLAID_CLIENT_ID, PLAID_SECRET, wrapping].every((value) => value && !run.output.includes(value)),
+      [PLAID_CLIENT_ID, PLAID_SECRET].every((value) => !run.output.includes(value)),
       "output withheld: it would be the leak being tested");
-    check("CONNECT BANK, ABSENT: owner card explains the return address and key custody",
+    check("CONNECT BANK, PROVIDER ABSENT: owner card explains the return address and key custody",
       /Plaid needs to know where to send you back/.test(run.output) &&
       /Copy this return address into Plaid\. It is not a page to open/.test(run.output) &&
       /https:\/\/dashboard\.plaid\.com\/team\/api/.test(run.output) &&
@@ -448,6 +452,60 @@ try {
       run.prompts.length === 0 && run.events.length === 0 && run.fetchImpl.listCount() === 1 &&
       run.opened.length === 1 && run.result?.secrets_written?.length === 0,
       JSON.stringify({ prompts: run.prompts, events: run.events, message: run.message.slice(0, 200) }));
+  }
+
+  async function connectSimplefin(name, { wrappingKeyPresent }) {
+    const manifestPath = writeManifest(name, {
+      ...manifest(),
+      corpora: { bank_feed: { enabled: true, provider: "simplefin", environment: "production" } },
+    });
+    const names = new Set(wrappingKeyPresent ? [WRAPPING_NAME] : []);
+    let inventoryReads = 0;
+    let writes = 0;
+    let generations = 0;
+    let opens = 0;
+    let result = null;
+    let message = "";
+    try {
+      ({ value: result } = await isolatedRuntime({ env: {} }, () => cmdConnectBank(manifestPath, {}, {
+        env: {},
+        listWorkerSecretNames: async () => {
+          inventoryReads++;
+          return [...names];
+        },
+        putWorkerSecret: async (secretName) => {
+          writes++;
+          names.add(secretName);
+        },
+        generateWrappingKey: () => {
+          generations++;
+          return FIXTURE_WRAPPING_KEY;
+        },
+        openImpl: () => {
+          opens++;
+          return true;
+        },
+      })));
+    } catch (error) {
+      message = String(error?.message || error);
+    }
+    return { generations, inventoryReads, message, opens, result, writes };
+  }
+
+  {
+    const missing = await connectSimplefin("connect-simplefin-missing", { wrappingKeyPresent: false });
+    check("CONNECT BANK, SIMPLEFIN MISSING: verification reaches one inventory and refuses the missing deploy-owned key",
+      missing.inventoryReads === 1 && /BANK_FEED_WRAPPING_KEY_V2/.test(missing.message) &&
+      /deploy/i.test(missing.message), JSON.stringify(missing));
+    check("CONNECT BANK, SIMPLEFIN MISSING: refusal generates and writes nothing and does not open the owner page",
+      missing.generations === 0 && missing.writes === 0 && missing.opens === 0,
+      JSON.stringify(missing));
+
+    const present = await connectSimplefin("connect-simplefin-present", { wrappingKeyPresent: true });
+    check("CONNECT BANK, SIMPLEFIN PRESENT: green control verifies once and opens without a secret mutation",
+      present.inventoryReads === 1 && present.generations === 0 && present.writes === 0 &&
+      present.opens === 1 && present.result?.provider === "simplefin" &&
+      present.result?.secrets_written?.length === 0, JSON.stringify(present));
   }
 
   {
@@ -485,7 +543,7 @@ try {
 
   {
     const run = await connectBank("connect-unverified", {
-      initial: ["ADMIN_KEY"], harness: { dropWrites: true },
+      initial: ["ADMIN_KEY", WRAPPING_NAME], harness: { dropWrites: true },
     });
     check("CONNECT BANK, UNVERIFIED: a write the re-list does not show stops before Plaid Link",
       /did not list/i.test(run.message) && run.opened.length === 0 &&
@@ -494,7 +552,9 @@ try {
   }
 
   {
-    const run = await connectBank("connect-blank", { initial: ["ADMIN_KEY"], answers: ["", PLAID_SECRET] });
+    const run = await connectBank("connect-blank", {
+      initial: ["ADMIN_KEY", WRAPPING_NAME], answers: ["", PLAID_SECRET],
+    });
     check("CONNECT BANK, BLANK ENTRY: nothing is written when the owner enters no value",
       /no value was entered for BANK_FEED_CLIENT_ID/.test(run.message) &&
       run.events.length === 0 && run.opened.length === 0,
