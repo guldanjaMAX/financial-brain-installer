@@ -487,9 +487,14 @@ for (const trigger of [
       JSON.stringify(counts) === JSON.stringify({ total: 0, stale: 0, unscheduled: 0 }),
     JSON.stringify({ countStatements, counts }));
   const countPlan = db.prepare(`EXPLAIN QUERY PLAN ${countSql}`).all().map((row) => String(row.detail || ""));
+  // The retirement lookup reads the latest relevant event as MAX(id) through
+  // the source index (alias latest), then fetches that one event by primary
+  // key (alias e). Either way it must search the index, never scan the event
+  // log, and never sort it.
   check("the aggregate retirement lookup uses the source-events index",
-    countPlan.some((detail) => /SEARCH e USING INDEX idx_source_events_source/.test(detail)) &&
-      !countPlan.some((detail) => /SCAN e(?: |$)/.test(detail)),
+    countPlan.some((detail) => /SEARCH (?:e|latest) USING (?:COVERING )?INDEX idx_source_events_source\b/.test(detail)) &&
+      !countPlan.some((detail) => /SCAN (?:e|latest)(?: |$)/.test(detail)) &&
+      !countPlan.some((detail) => /USE TEMP B-TREE/.test(detail)),
     JSON.stringify(countPlan));
   check("the aggregate active-job lookup uses the partial custom-API index",
     countPlan.some((detail) => /SEARCH job USING INDEX idx_custom_api_jobs_one_active/.test(detail)) &&
