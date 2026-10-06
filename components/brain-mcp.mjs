@@ -180,7 +180,7 @@ const ALL_TOOLS = [
   {
     name: "brain_search",
     description:
-      "Default tool for answering questions from the Brain. Returns raw ranked excerpts for you to refine, inspect, and synthesize yourself. Use date and source filters, then page or re-sort when the first results do not answer the question. A zero count with search_status \"search_unavailable\" means the search did not run. A \"coverage_incomplete\" status means declared source history is partial or unknown. Neither supports a complete-corpus absence claim.",
+      "Default tool for answering questions from the Brain. Returns raw ranked excerpts for you to refine, inspect, and synthesize yourself. Use date and source filters, then page or re-sort when the first results do not answer the question. current_authoritative is true only when the evidence is authoritative and the query was evaluated as a present-state claim. A zero count with search_status \"search_unavailable\" means the search did not run. A \"coverage_incomplete\" status means declared source history is partial or unknown. Neither supports a complete-corpus absence claim.",
     inputSchema: {
       type: "object",
       properties: {
@@ -330,24 +330,14 @@ function putFilter(body, key, value) {
 // `limit` at 50 and always ranks at that depth before slicing).
 const WORKER_RESULT_CAP = 50;
 
-function reordersOrFiltersLocally(args) {
-  return args.sort === "newest" || args.sort === "oldest" || args.reliable_dates_only === true;
-}
-
 function searchRequest(args) {
   const limit = boundedInteger(args.limit, 12, 1, 25);
   const offset = boundedInteger(args.offset, 0, 0, 49);
-  // Relevance order is a stable prefix of the Worker's ranking, so a page needs
-  // only offset+limit rows. A date sort or the reliable-date filter is applied
-  // here, over whatever window came back. If that window grew with the offset,
-  // each page would sort or filter a different set and rows would repeat or be
-  // skipped between pages, and a sort would only reorder the top few relevance
-  // rows. So both fetch one fixed window, the Worker cap, and every page slices
-  // the same filtered, sorted set.
-  const windowSize = reordersOrFiltersLocally(args)
-    ? WORKER_RESULT_CAP
-    : Math.min(offset + limit, WORKER_RESULT_CAP);
-  const body = { q: args.q, limit: windowSize };
+  // Paging, facets, and every local filter must describe the same ranked set.
+  // A growing relevance window made page-one facets hide sources that were
+  // present later in the Worker's fixed ranking. Always fetch that one ranking
+  // window, then slice only the returned result page below.
+  const body = { q: args.q, limit: WORKER_RESULT_CAP };
   putFilter(body, "source", args.source);
   putFilter(body, "category", args.category);
   putFilter(body, "from", dateOnlyInstant(args.from, "from"));
@@ -443,6 +433,19 @@ function excludedFromPageNote({ found, matching, offset, reliableOnly }) {
   return `The Brain found ${plural(found, "record")} for this search, but ${why}. An empty page is NOT "nothing recorded on this".`;
 }
 
+const WORKER_NARROWING_FILTERS = Object.freeze([
+  "from", "to", "source", "category", "platform", "client",
+]);
+
+function filteredEmptyNote(requestBody) {
+  const filters = WORKER_NARROWING_FILTERS.filter((key) => Object.hasOwn(requestBody, key));
+  if (!filters.length) return 'No hits. Report "nothing recorded on this" rather than inferring.';
+  const calendarRepeatCheck = filters.includes("from") || filters.includes("to")
+    ? ' Search the calendar without from for "repeats weekly" before claiming absence.'
+    : "";
+  return `Nothing matched those filters (${filters.join(", ")}). This is not proof the Brain has nothing on the topic.${calendarRepeatCheck}`;
+}
+
 // The Worker sends no row-level current_authoritative. Each /api/rag/unified
 // row carries the claim-specific authority object from authorityFor
 // (worker/src/lib/evidence-authority.js): `authoritative` says the row can
@@ -457,10 +460,18 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
 
 async function searchWorker(args) {
   const request = searchRequest(args);
-  let response = await call("/api/rag/unified", { method: "POST", body: request.body });
+  const firstResponse = await call("/api/rag/unified", { method: "POST", body: request.body });
+  let response = firstResponse;
   if (retrievalUnavailable({ ...response, results: response.results ?? [] })) {
     await wait(SEARCH_RETRY_MS);
-    response = await call("/api/rag/unified", { method: "POST", body: request.body });
+    try {
+      response = await call("/api/rag/unified", { method: "POST", body: request.body });
+    } catch {
+      // The first response is an honest, structured search failure. A thrown
+      // retry must not replace its status, cause, or absence warning with a raw
+      // transport error. There is still exactly one retry and no third request.
+      response = firstResponse;
+    }
   }
   return { ...request, response };
 }
@@ -581,7 +592,7 @@ async function runTool(name, args = {}) {
       return out;
     }
     case "brain_search": {
-      const { response: d, limit, offset } = await searchWorker(args);
+      const { response: d, body: requestBody, limit, offset } = await searchWorker(args);
       const workerRows = Array.isArray(d.results) ? d.results : [];
       let windowRows = [...workerRows];
       if (args.reliable_dates_only === true) {
@@ -662,7 +673,7 @@ async function runTool(name, args = {}) {
             ? { note: excluded }
           : rows.length
             ? {}
-            : { note: 'No hits. Report "nothing recorded on this" rather than inferring.' }),
+            : { note: filteredEmptyNote(requestBody) }),
       };
     }
 case "brain_remember": {
@@ -823,7 +834,7 @@ const FINANCIAL_MAP_INSTRUCTIONS = profileHas(PROFILE, "diagnostics:read")
 
 const INSTRUCTIONS = `This server is ${OWNER}'s private knowledge record: their documents, meetings, correspondence and decisions.
 
-Do NOT state a fact about a named person, client, deal, contract, commitment or figure in their world from your own knowledge. Your training data does not contain any of it, and a plausible reconstruction is indistinguishable from a real answer to the person reading it. To answer, search, read, then write. Turn relative dates into from/to using \`as_of\` ("this week", "Sunday", "Sept 30", "next"). Search with names and distinctive words, not the whole question. Narrow by source when the question names a channel (calendar, Zoom call, email, text). If the first page does not hold the answer, refine: try another source, a tighter window, or the next offset. Read the strongest one or two hits in full before summarizing them.
+Do NOT state a fact about a named person, client, deal, contract, commitment or figure in their world from your own knowledge. Your training data does not contain any of it, and a plausible reconstruction is indistinguishable from a real answer to the person reading it. To answer, search, read, then write. Turn relative dates into from/to using \`as_of\` ("this week", "Sunday", "Sept 30", "next"). Search with names and distinctive words, not the whole question. When the question asks about present state, retain words such as \`still\`, \`current\`, or \`latest\` in the search query. Narrow by source when the question names a channel (calendar, Zoom call, email, text). If the first page does not hold the answer, refine: try another source, a tighter window, or the next offset. Read the strongest one or two excerpts closely before summarizing them. Excerpts are partial. If the answer may lie outside one, search again using its title or distinctive words, and say when you saw only an excerpt.
 
 When the brain returns nothing, "nothing recorded on this" IS the answer. Say it in those words. Do not fill the gap with inference and do not silently drop the point.
 
