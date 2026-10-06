@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import worker from "../src/index.js";
+import { coverageGapReport } from "../src/lib/store-d1.js";
 import { WORKER_VERSION } from "../src/lib/version.js";
 
 /* A paused brain refuses ingest on eight write paths. Reporting ok:true through
@@ -73,6 +74,130 @@ for (const env of [{ ...base }, { ...base, VECTOR_DRAIN_MODE: "paused-for-upgrad
   const { body } = await health({ ...base, VECTOR_DRAIN_MODE: "something-else" });
   assert.equal(body.ok, true, "only the exact paused sentinel means paused");
   assert.equal(body.vector_drain_mode, "active");
+}
+
+/* ---------------- active D1 health publishes only aggregate source counts */
+
+{
+  const now = Date.parse("2026-10-05T12:00:00Z");
+  const originalNow = Date.now;
+  const sourceRows = [
+    {
+      name: "alpha-mail", kind: "mailbox_fixture", status: "ready", registered: 1,
+      last_ingest_at: new Date(now - 12 * 3600000).toISOString(),
+      last_complete_sweep_at: null,
+      expected_refresh_seconds: 86400, indexing_started_at: null,
+    },
+    {
+      name: "beta-calendar", kind: "calendar_fixture", status: "error", registered: 1,
+      last_ingest_at: new Date(now - 12 * 3600000).toISOString(),
+      last_complete_sweep_at: new Date(now - 12 * 3600000).toISOString(),
+      expected_refresh_seconds: 86400, stale_reason: "FIXTURE_REFRESH_FAILED", indexing_started_at: null,
+    },
+    {
+      name: "zeta-files", kind: "files_fixture", status: "ready", registered: 1,
+      last_ingest_at: new Date(now - 20 * 86400000).toISOString(),
+      last_complete_sweep_at: null,
+      expected_refresh_seconds: null, indexing_started_at: null,
+    },
+  ];
+  let schemaReads = 0;
+  let sourceReads = 0;
+  const env = {
+    ...base,
+    STORAGE: "d1",
+    DB: {
+      prepare(sql) {
+        if (/install_state/.test(sql)) {
+          schemaReads++;
+          return { first: async () => ({ schema_version: 48 }) };
+        }
+        if (/FROM sources s/.test(sql)) {
+          sourceReads++;
+          return { all: async () => ({ results: sourceRows }) };
+        }
+        throw new Error(`unexpected fixture SQL: ${sql}`);
+      },
+    },
+  };
+  try {
+    Date.now = () => now;
+    const { res, body } = await health(env);
+    assert.equal(res.status, 200, "R1 aggregate freshness keeps health reachable");
+    assert.equal(body.ok, true, "R1 stale sources do not make health fail");
+    assert.equal(body.status, "ok");
+    assert.equal(body.accepting_documents, true);
+    assert.equal(body.schema_version, 48);
+    assert.deepEqual(
+      {
+        total: body.sources_total,
+        stale: body.sources_stale,
+        unscheduled: body.sources_unscheduled,
+      },
+      { total: 3, stale: 1, unscheduled: 1 },
+      "R1 active D1 health publishes exact aggregate source counts",
+    );
+    assert.equal(schemaReads, 1, "R1 reached the schema decision point");
+    assert.equal(sourceReads, 1, "R1 reached the source-count decision point");
+
+    const serialized = JSON.stringify(body);
+    for (const privateFixtureText of [
+      "alpha-mail", "beta-calendar", "zeta-files",
+      "mailbox_fixture", "calendar_fixture", "files_fixture", "FIXTURE_REFRESH_FAILED",
+    ]) {
+      assert.equal(serialized.includes(privateFixtureText), false, `R2 health omits ${privateFixtureText}`);
+    }
+    const detailed = await coverageGapReport(env, { now });
+    assert.ok(
+      ["alpha-mail", "beta-calendar", "zeta-files"].every((name) =>
+        detailed.gaps.some((gap) => gap.source === name)),
+      "R2 positive control proves the detailed report had fixture names available",
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+}
+
+/* ---------------- unavailable, paused, and non-D1 counts remain absent */
+
+{
+  let prepareCalls = 0;
+  const paused = await health({
+    ...base,
+    STORAGE: "d1",
+    VECTOR_DRAIN_MODE: "paused-for-upgrade",
+    DB: { prepare: () => { prepareCalls++; throw new Error("paused health touched D1"); } },
+  });
+  assert.equal(paused.res.status, 200, "R3 paused health remains reachable");
+  assert.equal(prepareCalls, 0, "R3 paused health performs zero database calls");
+  assert.equal("sources_total" in paused.body, false);
+  assert.equal("sources_stale" in paused.body, false);
+  assert.equal("sources_unscheduled" in paused.body, false);
+
+  let sourceAttempts = 0;
+  const failed = await health({
+    ...base,
+    STORAGE: "d1",
+    DB: {
+      prepare(sql) {
+        if (/install_state/.test(sql)) return { first: async () => ({ schema_version: 48 }) };
+        sourceAttempts++;
+        return { all: async () => { throw new Error("fixture source read failed"); } };
+      },
+    },
+  });
+  assert.equal(failed.res.status, 200, "R4 source-count failure keeps health reachable");
+  assert.equal(failed.body.ok, true);
+  assert.equal(failed.body.schema_version, 48, "R4 schema evidence survives a source read failure");
+  assert.ok(sourceAttempts > 0, "R4 source query decision point was reached");
+  assert.equal("sources_total" in failed.body, false);
+  assert.equal("sources_stale" in failed.body, false);
+  assert.equal("sources_unscheduled" in failed.body, false);
+
+  const nonD1 = await health({ ...base });
+  assert.equal("sources_total" in nonD1.body, false, "R5 non-D1 health has no source counts");
+  assert.equal("sources_stale" in nonD1.body, false);
+  assert.equal("sources_unscheduled" in nonD1.body, false);
 }
 
 console.log("health honesty: all focused offline tests passed");

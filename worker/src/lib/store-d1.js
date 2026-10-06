@@ -3760,22 +3760,38 @@ function operationalFreshness(s, now) {
  * they change operating metadata, not whether the owner retired the source.
  */
 export function sourceRetirementState(row) {
-  const retiredAt = Number.isFinite(timestampMs(row?.retired_at))
-    ? new Date(timestampMs(row.retired_at)).toISOString()
+  const retiredAtMs = timestampMs(row?.retired_at);
+  const retiredAt = Number.isFinite(retiredAtMs)
+    ? new Date(retiredAtMs).toISOString()
     : null;
   return { retired: retiredAt !== null, retiredAt };
 }
 
 // Event insertion order is the lifecycle authority. MAX(id) preserves that
 // rule without making SQLite sort every event for a long-lived source.
-export const sourceFreshnessSql = ({ ordered = false, includeUnregisteredCounts = false } = {}) => `
+export const sourceFreshnessSql = ({
+  ordered = false,
+  includeUnregisteredCounts = false,
+  includeCustomApiJobs = false,
+} = {}) => `
   SELECT inventory.*
     FROM (
       SELECT s.name, s.kind, s.zone, s.status, s.last_ingest_at, s.last_complete_sweep_at,
              s.expected_refresh_seconds, s.stale_reason, s.document_count,
-             (SELECT MIN(sr.started_at)
-                FROM sync_runs sr
-               WHERE sr.source = s.name AND sr.finished_at IS NULL) AS indexing_started_at,
+             ${includeCustomApiJobs
+               ? `COALESCE(
+                   (SELECT MIN(sr.started_at)
+                      FROM sync_runs sr
+                     WHERE sr.source = s.name AND sr.finished_at IS NULL),
+                   (SELECT MIN(job.created_at)
+                      FROM custom_api_jobs job
+                     WHERE s.kind = 'custom_api'
+                       AND job.source = s.name
+                       AND job.status IN ('staged','applying','promoting','promoted'))
+                 )`
+               : `(SELECT MIN(sr.started_at)
+                    FROM sync_runs sr
+                   WHERE sr.source = s.name AND sr.finished_at IS NULL)`} AS indexing_started_at,
              (SELECT CASE WHEN e.event='retired' THEN e.at ELSE NULL END
                 FROM source_events e
                WHERE e.id = (
@@ -3805,21 +3821,19 @@ export const sourceFreshnessSql = ({ ordered = false, includeUnregisteredCounts 
        WHERE registered_source.name IS NULL
     ) inventory${ordered ? " ORDER BY inventory.name" : ""}`;
 
-export async function coverageGapReport(env, { now = Date.now(), allowedSources = null } = {}) {
-  let rows;
-  try {
-    const r = await env.DB.prepare(sourceFreshnessSql()).all();
-    rows = r?.results || [];
-  } catch {
-    return { gaps: [], unavailable: true };
-  }
-  const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
-  const customApiReceipts = await currentCustomApiReceipts(env, rows);
-
+function assessCoverageRows(rows, {
+  now,
+  allowedSources = null,
+  activeCustomJobs = new Map(),
+  customApiReceipts = new Map(),
+} = {}) {
   const allowed = allowedSources === null
     ? null
     : new Set((Array.isArray(allowedSources) ? allowedSources : []).map((source) => String(source)));
   const gaps = [];
+  let total = 0;
+  let stale = 0;
+  let unscheduled = 0;
   for (const s of rows) {
     if (allowed && !allowed.has(String(s.name))) continue;
     if (s.registered === 0 || s.registered === false || String(s.registered) === "0") {
@@ -3830,6 +3844,8 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
       }));
       continue;
     }
+    total++;
+    if (!Number.isSafeInteger(total)) throw new Error("source count exceeds the safe integer range");
     const last = s.last_ingest_at ? Date.parse(s.last_ingest_at) : NaN;
     const ageSec = Number.isFinite(last) ? Math.floor((now - last) / 1000) : null;
     const days = ageSec === null ? null : Math.floor(ageSec / 86400);
@@ -3856,8 +3872,10 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
       custom_api_display_name: customApiReceipt?.displayName || null,
       indexing_started_at: s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null,
     }, now);
+    let sourceIsStale = false;
 
     if (operational.state === "broken") {
+      sourceIsStale = true;
       gaps.push(gapWithRemedy(s, "refresh", {
         type: "sync_broken",
         source: s.name,
@@ -3903,10 +3921,13 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
           detail: `The ${historicalSourceLabel(s.kind)} source has a complete point-in-time sweep, but no refresh schedule is recorded. Material added after${Number.isFinite(last) ? ` ${new Date(last).toISOString().slice(0, 10)}` : " that sweep"} may be missing from the brain.`,
         }));
       }
+      if (sourceIsStale) stale++;
+      else unscheduled++;
       continue; // no refresh expectation, so no staleness claim made
     }
 
     if (ageSec === null) {
+      sourceIsStale = true;
       gaps.push(gapWithRemedy(s, "refresh", {
         type: "never_synced",
         source: s.name,
@@ -3917,6 +3938,7 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
     // 1.5x before complaining: a cron that runs daily and is six hours late is
     // working. Warning at the first minute past due is how alerts get ignored.
     if (ageSec !== null && ageSec > expected * 1.5) {
+      sourceIsStale = true;
       gaps.push(gapWithRemedy(s, "refresh", {
         type: "coverage_stale",
         source: s.name,
@@ -3936,8 +3958,54 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
           : `The ${historicalSourceLabel(s.kind)} source is registered, but no complete history sweep has been confirmed. A missing result cannot be treated as proof that its declared records contain no answer.`,
       }));
     }
+    if (sourceIsStale) stale++;
   }
-  return { gaps, unavailable: false };
+  return { gaps, unavailable: false, counts: { total, stale, unscheduled } };
+}
+
+async function coverageGapAssessment(env, { now = Date.now(), allowedSources = null } = {}) {
+  let rows;
+  try {
+    const r = await env.DB.prepare(sourceFreshnessSql()).all();
+    rows = r?.results || [];
+  } catch {
+    return { gaps: [], unavailable: true, counts: null };
+  }
+  const activeCustomJobs = await activeCustomApiJobStarts(env, rows);
+  const customApiReceipts = await currentCustomApiReceipts(env, rows);
+  return assessCoverageRows(rows, { now, allowedSources, activeCustomJobs, customApiReceipts });
+}
+
+export async function coverageGapReport(env, options = {}) {
+  const report = await coverageGapAssessment(env, options);
+  return { gaps: report.gaps, unavailable: report.unavailable };
+}
+
+/** Aggregate-only freshness for the public health receipt. */
+export async function sourceFreshnessCounts(env, { now = Date.now() } = {}) {
+  try {
+    let result;
+    try {
+      // Counts need the active-job timestamp, not custom API receipt wording.
+      // Folding that timestamp into this registry read keeps current-schema
+      // public health at one D1 statement even on custom API decision arms.
+      result = await env.DB.prepare(sourceFreshnessSql({ includeCustomApiJobs: true })).all();
+    } catch (error) {
+      if (!missingCustomApiJobsTable(error)) return { unavailable: true };
+      // A partially migrated install has no custom API jobs to preserve. Its
+      // bounded compatibility retry keeps every older source classification.
+      result = await env.DB.prepare(sourceFreshnessSql()).all();
+    }
+    const assessment = assessCoverageRows(result?.results || [], { now });
+    const { total, stale, unscheduled } = assessment.counts || {};
+    if (![total, stale, unscheduled].every((value) =>
+      Number.isSafeInteger(value) && value >= 0) || stale + unscheduled > total) {
+      return { unavailable: true };
+    }
+    return { total, stale, unscheduled };
+  } catch {
+    return { unavailable: true };
+  }
 }
 
 /** Compatibility helper for callers that only need known gaps. */

@@ -55,7 +55,7 @@ import {
 import {
   storeFor, backendOf, D1, expectedD1ContentHash, ProvenanceTransitionError,
 } from "./lib/store.js";
-import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, SOURCE_FAMILY_CURSOR_MAX_BYTES, SOURCE_FAMILY_UID_FILTER_MAX, sourceFamilyCounts, sourceRetirementState, reindex, coverageGapReport, freshnessReport, diagnose } from "./lib/store-d1.js";
+import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, SOURCE_FAMILY_CURSOR_MAX_BYTES, SOURCE_FAMILY_UID_FILTER_MAX, sourceFamilyCounts, sourceRetirementState, reindex, coverageGapReport, freshnessReport, sourceFreshnessCounts, diagnose } from "./lib/store-d1.js";
 import { embedText, embedTexts } from "./lib/supabase.js";
 import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, newestCurrentEvidence,
@@ -2839,7 +2839,13 @@ export default {
       // an integer at the cost of that invariant is the wrong trade, and a
       // paused brain is not a candidate for an update anyway. Caught by the
       // route suite's zero-call assertion rather than by review.
-      const schemaVersion = !paused && backendOf(env) === D1 ? await installedSchemaVersion(env) : null;
+      const activeD1 = !paused && backendOf(env) === D1;
+      const schemaVersion = activeD1 ? await installedSchemaVersion(env) : null;
+      const sourceCounts = activeD1 ? await sourceFreshnessCounts(env) : null;
+      const sourceCountsAvailable = sourceCounts &&
+        [sourceCounts.total, sourceCounts.stale, sourceCounts.unscheduled].every((value) =>
+          Number.isSafeInteger(value) && value >= 0) &&
+        sourceCounts.stale + sourceCounts.unscheduled <= sourceCounts.total;
       return jsonResponse({
         ok: !paused,
         status: paused ? "paused-for-upgrade" : "ok",
@@ -2860,6 +2866,13 @@ export default {
           ? { configured_version: env.BRAIN_VERSION, version_mismatch: true }
           : {}),
         ...(schemaVersion === null ? {} : { schema_version: schemaVersion }),
+        ...(sourceCountsAvailable
+          ? {
+            sources_total: sourceCounts.total,
+            sources_stale: sourceCounts.stale,
+            sources_unscheduled: sourceCounts.unscheduled,
+          }
+          : {}),
         vector_writer_protocol: "lease-v1",
         vector_drain_mode: paused ? "paused-for-upgrade" : "active",
         ts: new Date().toISOString(),

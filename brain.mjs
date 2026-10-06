@@ -3888,6 +3888,15 @@ export async function cmdHealth(manifestPath, {
     );
   }
   info(`public /health ${res.status}; exact version and writer state received, binding it to authenticated inventory`);
+  const healthSourceCounts = [
+    healthReceipt.sources_total,
+    healthReceipt.sources_stale,
+    healthReceipt.sources_unscheduled,
+  ];
+  if (healthSourceCounts.every((value) => Number.isSafeInteger(value) && value >= 0) &&
+      healthReceipt.sources_stale + healthReceipt.sources_unscheduled <= healthReceipt.sources_total) {
+    info(`sources: ${healthReceipt.sources_total} registered, ${healthReceipt.sources_stale} stale, ${healthReceipt.sources_unscheduled} with no refresh schedule`);
+  }
   // Public reachability is not readiness evidence on its own. Bind even a
   // reach-only probe to the authenticated receipt so two rolling Worker
   // generations can never be combined into one green result.

@@ -492,6 +492,121 @@ if (SCENARIO) {
         /`brain health` again/.test(failure?.message || ""), failure?.message);
   }
 
+  {
+    const { cmdHealth } = await import("../brain.mjs");
+    const runCountReceipt = async (countFields) => {
+      const directory = mkdtempSync(join(tmpdir(), "brain-health-source-counts-"));
+      const manifestPath = join(directory, "fixture.manifest.json");
+      writeFileSync(manifestPath, JSON.stringify({
+        client: { slug: "fixture" },
+        brain: { domain: "fixture.invalid", worker_name: "fixture" },
+        infrastructure: { cloudflare: { storage: "d1" } },
+      }));
+      const logged = [];
+      const originalLog = console.log;
+      let failure = null;
+      try {
+        console.log = (...values) => logged.push(strip(values.join(" ")));
+        await cmdHealth(manifestPath, {
+          resolveKey: () => FIXTURE_ADMIN,
+          wait: async () => {},
+          request: async (url) => {
+            if (String(url).includes("/health")) return json({
+              ok: true, status: "ok", accepting_documents: true, version: "0.1.9",
+              vector_writer_protocol: "lease-v1", vector_drain_mode: "active",
+              ...(countFields || {}),
+            });
+            return json(boundedDocumentsReceipt({
+              backend: "d1",
+              rows: [{ source_type: "synthetic", has_documents: true }],
+              vector_backlog: {
+                pending: 0, upserts: 0, deletes: 0, submitted: 0, oldest_queued_at: null,
+              },
+              vector_readiness: {
+                ready: true, reason: null,
+                expected_vectors: 0, actual_vectors: 0, pending: 0, submitted: 0,
+                oldest_queued_at: null,
+              },
+            }));
+          },
+        });
+      } catch (error) {
+        failure = error;
+      } finally {
+        console.log = originalLog;
+        rmSync(directory, { recursive: true, force: true });
+      }
+      return { logged, failure };
+    };
+
+    const valid = await runCountReceipt({
+      sources_total: 5,
+      sources_stale: 2,
+      sources_unscheduled: 1,
+    });
+    const sourceLines = valid.logged.filter((line) => line.includes("sources:"));
+    check("C1 valid source counts print exactly once without failing health",
+      valid.failure === null && sourceLines.length === 1 &&
+        sourceLines[0] === "·     sources: 5 registered, 2 stale, 1 with no refresh schedule" &&
+        valid.logged.some((line) => /vector index is query-ready/.test(line)),
+      JSON.stringify({ sourceLines, failure: valid.failure?.message, logged: valid.logged }));
+
+    const olderWorker = await runCountReceipt(null);
+    check("C2 an older Worker prints no source-count line and still succeeds",
+      olderWorker.failure === null && !olderWorker.logged.some((line) => line.includes("sources:")) &&
+        olderWorker.logged.some((line) => /vector index is query-ready/.test(line)),
+      JSON.stringify({ failure: olderWorker.failure?.message, logged: olderWorker.logged }));
+
+    const malformedReceipts = [
+      { sources_total: 5, sources_stale: -1, sources_unscheduled: 1 },
+      { sources_total: 5, sources_stale: "2", sources_unscheduled: 1 },
+      { sources_total: 5, sources_stale: 1.5, sources_unscheduled: 1 },
+      { sources_total: 2, sources_stale: 2, sources_unscheduled: 1 },
+    ];
+    let malformedPassed = true;
+    const malformedDetails = [];
+    for (const receipt of malformedReceipts) {
+      const result = await runCountReceipt(receipt);
+      const printed = result.logged.some((line) => line.includes("sources:"));
+      malformedDetails.push({ receipt, printed, failure: result.failure?.message || null });
+      if (result.failure !== null || printed ||
+          !result.logged.some((line) => /vector index is query-ready/.test(line))) malformedPassed = false;
+    }
+    check("C3 malformed source counts stay silent without changing health",
+      malformedPassed, JSON.stringify(malformedDetails));
+
+    const runnerPatterns = [
+      /UPGRADE_FAILED/u,
+      /THIS BRAIN CANNOT ACCEPT DOCUMENTS/u,
+      /upgrade verified|Done[.] Your Brain is now on version/iu,
+      /accepting_documents[^A-Za-z]+true|accepting documents/iu,
+      /\b0[.]4[.]9\b/u,
+      /^\s*\[\d+\]\s+/u,
+      /Step\s+(\d+)\s+of\s+6/iu,
+      /still waiting for the .+ index to become active/iu,
+      /required D1 restore bookmark captured/iu,
+      /Updating your Brain from /iu,
+      /deployed "/iu,
+      /safety pause:/iu,
+      /schema up to date|applying \d+/iu,
+      /newly confirmed this run[)]/iu,
+      /upgrade verified, now at/iu,
+      /inventory agree on \S+\/active\b/iu,
+      /([\d,]*\d)\s+vector operation[(]s[)]/iu,
+      /over ([\d,]*\d) pieces\b/iu,
+      /([\d,]*\d) accepted(?: by Vectorize)?[)]/iu,
+      /oldest queued ([\d,]*\d) min ago/iu,
+      /not query-visible yet|vector operation[(]s[)] are still processing/iu,
+      /paused for an update|paused for an upgrade|paused-for-upgrade/iu,
+      /Vectorize holds [\d,]+ vector[(]s[)], but D1 requires/iu,
+    ];
+    const inventoryLine = valid.logged.find((line) => /inventory agree on \S+\/active\b/iu.test(line));
+    check("C4 source-count wording is not a runner signal and the control signal is present",
+      sourceLines.length === 1 && runnerPatterns.every((pattern) => !pattern.test(sourceLines[0])) &&
+        typeof inventoryLine === "string",
+      JSON.stringify({ sourceLine: sourceLines[0], inventoryLine }));
+  }
+
   const invalidDocuments = runScenario("health-documents-invalid", "health", { adminKey: true });
   check("health rejects a 200 that is not a real documents inventory",
     invalidDocuments.code === 1 && /did not return JSON.*authenticated access was not proven/is.test(invalidDocuments.output),

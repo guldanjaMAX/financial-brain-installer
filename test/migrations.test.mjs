@@ -25,6 +25,7 @@ import {
   coverageGapReport,
   releaseDrainLease,
   resetVectorProjectionBootstrap,
+  sourceFreshnessCounts,
   VECTOR_BOOTSTRAP_PAGE_SIZE,
 } from "../worker/src/lib/store-d1.js";
 
@@ -471,6 +472,29 @@ for (const trigger of [
     report.gaps.some((gap) => gap.type === "source_unregistered" && gap.source === "inventory-a") &&
       report.gaps.some((gap) => gap.type === "source_unregistered" && gap.source === "inventory-b"),
     JSON.stringify(report));
+
+  let countStatements = 0;
+  let countSql = null;
+  const countEnv = { DB: { prepare(sql) {
+    countStatements++;
+    countSql = sql;
+    const statement = db.prepare(sql);
+    return { all: async () => ({ results: statement.all() }) };
+  } } };
+  const counts = await sourceFreshnessCounts(countEnv);
+  check("the real current-schema aggregate query executes in one statement",
+    countStatements === 1 &&
+      JSON.stringify(counts) === JSON.stringify({ total: 0, stale: 0, unscheduled: 0 }),
+    JSON.stringify({ countStatements, counts }));
+  const countPlan = db.prepare(`EXPLAIN QUERY PLAN ${countSql}`).all().map((row) => String(row.detail || ""));
+  check("the aggregate retirement lookup uses the source-events index",
+    countPlan.some((detail) => /SEARCH e USING INDEX idx_source_events_source/.test(detail)) &&
+      !countPlan.some((detail) => /SCAN e(?: |$)/.test(detail)),
+    JSON.stringify(countPlan));
+  check("the aggregate active-job lookup uses the partial custom-API index",
+    countPlan.some((detail) => /SEARCH job USING INDEX idx_custom_api_jobs_one_active/.test(detail)) &&
+      !countPlan.some((detail) => /SCAN job(?: |$)/.test(detail)),
+    JSON.stringify(countPlan));
 
   db.prepare("UPDATE documents SET deleted_at=2 WHERE doc_uid='inventory:a-live'").run();
   db.prepare("DELETE FROM documents WHERE doc_uid='inventory:a-restorable'").run();

@@ -4425,7 +4425,10 @@ async function postConfirmedSourceForget(env, source = "meeting") {
   // fleet is checkable from one place. A D1 that cannot answer must not take
   // /health down with it: the field is simply absent.
   check("a paused brain reports health without reading its database for the schema",
-    !("schema_version" in health) && forbiddenCalls === 0, JSON.stringify({ health, forbiddenCalls }));
+    !("schema_version" in health) && !("sources_total" in health) &&
+      !("sources_stale" in health) && !("sources_unscheduled" in health) &&
+      forbiddenCalls === 0,
+    JSON.stringify({ health, forbiddenCalls }));
 
   {
     const readable = {
@@ -4436,6 +4439,9 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     const live = await (await worker.fetch(new Request("https://b.example/health"), readable, {})).json();
     check("health reports the schema version, so a brain ahead of a release is visible remotely",
       live.schema_version === 32 && live.ok === true, JSON.stringify(live));
+    check("health omits every source count when the registry statement cannot run",
+      !("sources_total" in live) && !("sources_stale" in live) && !("sources_unscheduled" in live),
+      JSON.stringify(live));
 
     const broken = { ...readable, DB: { prepare: () => ({ first: async () => ({ schema_version: "not a number" }) }) } };
     const soft = await (await worker.fetch(new Request("https://b.example/health"), broken, {})).json();
