@@ -761,6 +761,7 @@ const expected = [
   "worker/build-src/lib/upload-extract.js",
   "worker/src/lib/agent-action-receipts.js",
   "worker/src/lib/agent-authority.js",
+  "worker/src/lib/bank-activity-doc.js",
   "worker/src/lib/bank-export.js",
   "worker/src/lib/bank-feed-profiles.js",
   "worker/src/lib/ingestion-outcome.js",
