@@ -411,8 +411,12 @@ disconnect are scripted-provider tested. The connector requests delegated
 `Calendars.Read`, not a calendar write scope. A Microsoft connection created
 before this addition must run `brain connect microsoft <manifest>` again and
 approve the updated read-only consent screen because refresh cannot add a
-scope. No real Entra tenant has completed acceptance, and tenant consent may
-still require the client's Microsoft 365 administrator.
+scope. A verified same-account re-consent preserves the existing mail and drive
+cursors; a different or unprovable account is refused before replacement.
+Calendar events then use immutable Graph IDs. Any earlier mutable-ID calendar
+cursor takes one guarded baseline migration while mail and drive remain on
+their exact saved cursors. No real Entra tenant has completed acceptance, and
+tenant consent may still require the client's Microsoft 365 administrator.
 
 ### Notion
 

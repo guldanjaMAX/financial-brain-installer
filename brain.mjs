@@ -29142,6 +29142,26 @@ export async function cmdConnectProvider(provider, manifestPath, flags = {}, opt
   if (!manifestPath || String(manifestPath).startsWith("--")) {
     die(`usage: brain connect ${provider} <manifest> [--port <number>]`);
   }
+  if (options.providerRecordLease?.held !== true) {
+    const lockTask = options.withSourceIngestLock ?? withSourceIngestLock;
+    try {
+      return await lockTask(
+        {
+          sourceName: provider,
+          sharedRecord: `provider:${provider}`,
+          ...sourceIngestLockRuntimeOptions(options),
+        },
+        ({ assertOwned }) => cmdConnectProvider(provider, manifestPath, flags, {
+          ...options,
+          providerRecordLease: { held: true, assertOwned },
+        }),
+      );
+    } catch (error) {
+      if (error instanceof SourceIngestLockError) die(error.message);
+      throw error;
+    }
+  }
+  options.providerRecordLease.assertOwned();
   const { m } = loadManifest(manifestPath);
   const configuration = m?.corpora?.[provider] || {};
   if (configuration.enabled !== true) {
@@ -29214,6 +29234,7 @@ export async function cmdConnectProvider(provider, manifestPath, flags = {}, opt
     redirectHost,
     redirectUri,
     storage,
+    assertCredentialOwned: options.providerRecordLease.assertOwned,
     ...(provider === "quickbooks"
       ? {
           prepareConnection: (candidate, custody = {}) => {
@@ -29235,6 +29256,7 @@ export async function cmdConnectProvider(provider, manifestPath, flags = {}, opt
     ...(options.open === false ? { open: false } : {}),
     ...(options.quiet ? { log: () => {} } : options.log ? { log: options.log } : {}),
   });
+  options.providerRecordLease.assertOwned();
   if (provider === "quickbooks" && !connection?.provider_metadata?.realm_id) {
     const error = new Fatal("QuickBooks did not return a company identity, so the connection cannot be used safely.");
     error.code = "quickbooks_realm_missing";

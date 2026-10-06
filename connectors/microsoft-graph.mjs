@@ -12,7 +12,9 @@ import { restampFirstPartySourceProvenance } from "../worker/src/lib/provenance-
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
 const MAIL_PREFER = 'IdType="ImmutableId", outlook.body-content-type="text"';
-const CALENDAR_PREFER = 'outlook.body-content-type="text", outlook.timezone="UTC"';
+const CALENDAR_PREFER = 'IdType="ImmutableId", outlook.body-content-type="text", outlook.timezone="UTC"';
+const IMMUTABLE_CALENDAR_ID_TYPE = "immutable";
+const SAFE_GRAPH_TIME_ZONE = /^[A-Za-z0-9_+./: -]{1,100}$/;
 export const OUTLOOK_CALENDAR_PAST_DAYS = 30;
 export const OUTLOOK_CALENDAR_FUTURE_DAYS = 90;
 
@@ -157,17 +159,46 @@ function calendarWindow(now) {
 
 function normalizedCalendarCursor(value) {
   if (typeof value === "string" && value) {
-    return { delta_link: value, window_start: null, window_end: null, event_ids: [] };
+    return { delta_link: value, window_start: null, window_end: null, id_type: null, event_ids: [] };
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return {
     delta_link: typeof value.delta_link === "string" && value.delta_link ? value.delta_link : null,
     window_start: typeof value.window_start === "string" ? value.window_start : null,
     window_end: typeof value.window_end === "string" ? value.window_end : null,
+    id_type: value.id_type === IMMUTABLE_CALENDAR_ID_TYPE ? IMMUTABLE_CALENDAR_ID_TYPE : null,
     event_ids: Array.isArray(value.event_ids)
       ? [...new Set(value.event_ids.map(String).filter(Boolean))].sort()
       : [],
   };
+}
+
+function calendarPrefer(timeZone = "UTC") {
+  if (!SAFE_GRAPH_TIME_ZONE.test(String(timeZone || ""))) {
+    throw new ProviderSyncError("microsoft", "an Outlook event returned an invalid original time zone", {
+      kind: "retryable", code: "invalid_event_time_zone",
+    });
+  }
+  return `IdType="ImmutableId", outlook.body-content-type="text", outlook.timezone="${timeZone}"`;
+}
+
+async function eventWithCivilAllDayTime(event, { accessToken, fetchImpl }) {
+  if (event?.isAllDay !== true || !event?.id) return event;
+  const originalZone = String(event.originalStartTimeZone || event?.start?.timeZone || "");
+  const returnedZone = String(event?.start?.timeZone || "");
+  if (!originalZone || originalZone === returnedZone) return event;
+  const url = `${GRAPH}/me/events/${encodeURIComponent(String(event.id))}`;
+  const { data } = await providerJson("microsoft", url, {
+    accessToken,
+    fetchImpl,
+    headers: { Prefer: calendarPrefer(originalZone) },
+  });
+  if (String(data?.id || "") !== String(event.id)) {
+    throw new ProviderSyncError("microsoft", "the Outlook all-day event identity changed during civil-date recovery", {
+      kind: "retryable", code: "event_identity_changed",
+    });
+  }
+  return data;
 }
 
 function graphCalendarPerson(value) {
@@ -256,6 +287,8 @@ function outlookCalendarInstruction(event) {
         ...envelope.metadata,
         workload: "outlook_calendar",
         microsoft_event_id: eventId,
+        microsoft_original_start_time_zone: event?.originalStartTimeZone || null,
+        microsoft_original_end_time_zone: event?.originalEndTimeZone || null,
       },
     }, { sourceType: "microsoft", textSource: "native", textReliable: true }),
   };
@@ -265,7 +298,7 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
   const window = calendarWindow(now);
   const prior = normalizedCalendarCursor(cursor);
   const sameWindow = prior?.window_start === window.start && prior?.window_end === window.end;
-  let baseline = !prior?.delta_link || !sameWindow;
+  let baseline = !prior?.delta_link || !sameWindow || prior?.id_type !== IMMUTABLE_CALENDAR_ID_TYPE;
   const initialUrl = () => {
     const url = new URL(`${GRAPH}/me/calendarView/delta`);
     url.searchParams.set("startDateTime", window.start);
@@ -289,17 +322,28 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
     });
   }
 
-  const inventory = new Set(baseline ? [] : prior?.event_ids || []);
+  const priorEventIds = new Set(prior?.event_ids || []);
+  const inventory = new Set(baseline ? [] : priorEventIds);
   const documents = new Map();
   const deletions = new Map();
+  const warnings = [];
   for (const change of page.changes) {
     const eventId = change.item?.id ? String(change.item.id) : null;
-    if (!eventId) continue;
+    if (!eventId) {
+      warnings.push("An Outlook calendar event had no stable identity, so its cursor was withheld for retry.");
+      continue;
+    }
     const sourceId = `outlook:event:${eventId}`;
+    const scopedDeletion = change.kind === "delete" && priorEventIds.has(eventId);
+    const event = change.kind === "upsert"
+      ? await eventWithCivilAllDayTime(change.item, { accessToken, fetchImpl })
+      : change.item;
     const instruction = change.kind === "delete"
       ? { kind: "delete", event_id: eventId, source_id: sourceId }
-      : outlookCalendarInstruction(change.item);
+      : outlookCalendarInstruction(event);
     if (instruction.kind === "delete") {
+      if (change.kind === "delete" && !scopedDeletion) continue;
+      if (change.kind !== "delete" && !priorEventIds.has(eventId) && !inventory.has(eventId)) continue;
       inventory.delete(eventId);
       documents.delete(eventId);
       deletions.set(eventId, { source_type: "microsoft", source_id: sourceId });
@@ -307,13 +351,20 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
       inventory.add(eventId);
       deletions.delete(eventId);
       documents.set(eventId, instruction.envelope);
-    } else if (inventory.has(eventId)) {
+    } else if (instruction.reason === "no title, attendees or description; nothing to retrieve" &&
+        (inventory.has(eventId) || priorEventIds.has(eventId))) {
       // A changed event whose searchable fields were all blanked must not
-      // leave its prior document behind. The common provider runner applies
-      // the same aggregate removal cap and exact readback as a cancellation.
+      // leave its prior document behind. Calendar-scoped removal review below
+      // prevents unrelated mail or drive families from diluting this decision.
       inventory.delete(eventId);
       documents.delete(eventId);
       deletions.set(eventId, { source_type: "microsoft", source_id: sourceId });
+    } else {
+      // Missing start/time evidence is malformed provider data, not proof that
+      // the owner intentionally blanked the event. Keep a known prior family
+      // and withhold the cursor so a later complete response can repair it.
+      if (priorEventIds.has(eventId)) inventory.add(eventId);
+      warnings.push("An Outlook calendar event was incomplete, so its prior document was retained and its cursor was withheld for retry.");
     }
   }
   if (baseline) {
@@ -333,6 +384,8 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
     deltaLink: page.deltaLink,
     baseline,
     window,
+    warnings,
+    priorEventIds: [...priorEventIds].sort(),
   };
 }
 
@@ -364,11 +417,13 @@ export async function syncMicrosoftGraph({
     });
     documents.push(...calendar.documents);
     deletions.push(...calendar.deletions);
+    warnings.push(...calendar.warnings);
     snapshotSourceIds.push(...calendar.eventIds.map((eventId) => `outlook:event:${eventId}`));
     proposed.calendar = {
       delta_link: calendar.deltaLink,
       window_start: calendar.window.start,
       window_end: calendar.window.end,
+      id_type: IMMUTABLE_CALENDAR_ID_TYPE,
       event_ids: calendar.eventIds,
     };
     if (!calendar.baseline) authoritativeSnapshot = false;
@@ -466,5 +521,12 @@ export async function syncMicrosoftGraph({
   }, cursorSafe, {
     authoritative_snapshot: authoritativeSnapshot,
     snapshot_source_ids: snapshotSourceIds,
+    removal_review_scopes: includeCalendar && proposed.calendar ? [{
+      label: "Outlook calendar",
+      prior_source_ids: (prior?.calendar?.event_ids || []).map((eventId) => `outlook:event:${eventId}`),
+      deletion_source_ids: deletions
+        .map((item) => String(item?.source_id || ""))
+        .filter((sourceId) => sourceId.startsWith("outlook:event:")),
+    }] : [],
   });
 }

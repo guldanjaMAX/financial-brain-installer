@@ -1325,9 +1325,16 @@ Read this before scoping an engagement.
   Microsoft requests delegated `Calendars.Read` in addition to its existing
   read scopes. A connection created before that scope was added must run
   `brain connect microsoft <manifest>` again and approve the updated consent
-  screen. Token refresh cannot add a scope. The calendar adapter then maintains
-  its own rolling 30-day-past and 90-day-future `/me/calendarView/delta`
-  cursor without changing the mail or drive cursor members.
+  screen. Token refresh cannot add a scope. Under the shared provider-record
+  lease, re-consent resolves both protected grants through Graph and carries
+  prior source cursors forward only when their one-way account fingerprints
+  match; a different or unprovable account cannot replace the protected grant
+  or move its sync states. The calendar adapter then maintains its
+  own rolling 30-day-past and 90-day-future `/me/calendarView/delta` cursor
+  without changing the mail or drive cursor members. Calendar requests require
+  immutable event IDs. A cursor from the earlier mutable-ID shape takes one new
+  baseline and reconciles its old event families through the guarded removal
+  path before the immutable cursor is committed.
 - **The custom business API source is locally proven only.** Its declarative
   Worker path, strict HTTPS boundary, dedicated `CUSTOM_API_TOKEN_` secret
   namespace, durable checkpointed job, exact-row-and-document verified

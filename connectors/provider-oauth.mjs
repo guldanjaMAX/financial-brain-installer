@@ -132,6 +132,8 @@ export const PROVIDER_LOOPBACK_BIND_ADDRESS = "127.0.0.1";
 const QUICKBOOKS_SOURCE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const QUICKBOOKS_ENVIRONMENTS = new Set(["sandbox", "production"]);
 const QUICKBOOKS_SOURCE_REGISTRY_KEY = "quickbooks_source_bindings";
+const MICROSOFT_ACCOUNT_FINGERPRINT = /^[a-f0-9]{64}$/;
+const MICROSOFT_PROFILE_URL = "https://graph.microsoft.com/v1.0/me?$select=id";
 
 export class ProviderOAuthError extends Error {
   constructor(provider, phase, message, { status = null, code = null, uncertain = false } = {}) {
@@ -329,6 +331,118 @@ export function bindQuickBooksConnection({
       sources,
     },
   };
+}
+
+/**
+ * Carry Microsoft source cursors across a scope-renewal ceremony only when the
+ * old and new access grants resolve to the same Graph account. The protected
+ * record stores a one-way binding rather than the provider's account ID.
+ */
+export function bindMicrosoftConnection({ prior = null, candidate } = {}) {
+  const candidateFingerprint = clean(
+    candidate?.provider_metadata?.microsoft_account_fingerprint,
+  ).toLowerCase();
+  if (!MICROSOFT_ACCOUNT_FINGERPRINT.test(candidateFingerprint)) {
+    throw new ProviderOAuthError("microsoft", "binding", "the renewed connection has no verified Microsoft account identity", {
+      code: "account_identity_unproven",
+    });
+  }
+  const priorFingerprint = clean(
+    prior?.provider_metadata?.microsoft_account_fingerprint,
+  ).toLowerCase();
+  if (prior && !MICROSOFT_ACCOUNT_FINGERPRINT.test(priorFingerprint)) {
+    throw new ProviderOAuthError("microsoft", "binding", "the existing connection's Microsoft account identity could not be verified", {
+      code: "account_identity_unproven",
+    });
+  }
+  if (priorFingerprint && priorFingerprint !== candidateFingerprint) {
+    throw new ProviderOAuthError(
+      "microsoft",
+      "binding",
+      "the selected Microsoft account does not match the existing connection; disconnect explicitly before connecting a different account",
+      { code: "unexpected_account" },
+    );
+  }
+  return {
+    ...candidate,
+    sync_states: structuredClone(prior?.sync_states || {}),
+    provider_metadata: {
+      ...(candidate?.provider_metadata || {}),
+      microsoft_account_fingerprint: candidateFingerprint,
+    },
+  };
+}
+
+async function resolveMicrosoftConnectionIdentity(connection, fetchImpl) {
+  const metadata = connection?.provider_metadata || {};
+  const stored = clean(metadata.microsoft_account_fingerprint).toLowerCase();
+  if (stored) {
+    if (!MICROSOFT_ACCOUNT_FINGERPRINT.test(stored)) {
+      throw new ProviderOAuthError("microsoft", "binding", "the stored Microsoft account binding is invalid", {
+        code: "account_identity_corrupt",
+      });
+    }
+    return connection;
+  }
+  if (!clean(connection?.access_token)) {
+    throw new ProviderOAuthError("microsoft", "binding", "the Microsoft account identity cannot be verified without the protected access grant", {
+      code: "account_identity_unproven",
+    });
+  }
+  let data;
+  try {
+    ({ data } = await providerJson("microsoft", MICROSOFT_PROFILE_URL, {
+      accessToken: connection.access_token,
+      fetchImpl,
+      maxAttempts: 1,
+    }));
+  } catch {
+    throw new ProviderOAuthError("microsoft", "binding", "the Microsoft account identity could not be verified; keep the existing connection and retry re-consent", {
+      code: "account_identity_unproven",
+    });
+  }
+  const accountId = clean(data?.id);
+  if (!accountId || accountId.length > 200) {
+    throw new ProviderOAuthError("microsoft", "binding", "Microsoft did not return a bounded account identity", {
+      code: "account_identity_unproven",
+    });
+  }
+  const fingerprint = createHash("sha256")
+    .update(`microsoft-account-v1:${accountId}`)
+    .digest("hex");
+  return {
+    ...connection,
+    provider_metadata: {
+      ...metadata,
+      microsoft_account_fingerprint: fingerprint,
+    },
+  };
+}
+
+async function prepareMicrosoftPriorConnection(connection, { fetchImpl, now, storage, assertOwned = null }) {
+  if (!connection) return null;
+  assertOwned?.();
+  let identified;
+  try {
+    identified = await resolveMicrosoftConnectionIdentity(connection, fetchImpl);
+  } catch (error) {
+    if (error?.code !== "account_identity_unproven" || !clean(connection.refresh_token)) throw error;
+    // Legacy Microsoft records predate the account binding. If their short-lived
+    // access grant expired, refresh and persist it before the browser ceremony,
+    // then resolve /me. This keeps a replacement refresh token durable even if
+    // the owner closes the later consent window.
+    const refreshed = await refreshProviderCredentials("microsoft", connection, {
+      fetchImpl, now, storage,
+      ...(assertOwned ? { credentialLock: { assertOwned } } : {}),
+    });
+    assertOwned?.();
+    identified = await resolveMicrosoftConnectionIdentity(refreshed, fetchImpl);
+  }
+  assertOwned?.();
+  if (JSON.stringify(identified) === JSON.stringify(loadProviderCredentials("microsoft", storage))) {
+    return identified;
+  }
+  return saveProviderCredentialsUnlocked("microsoft", identified, storage);
 }
 
 /** Refuse ingest when the active token cannot prove the configured source. */
@@ -1733,8 +1847,13 @@ export async function authorizeProvider(provider, {
   refreshLockWaitMs = 45_000,
   refreshLockPollMs = 50,
   refreshLockStaleMs = 120_000,
+  assertCredentialOwned = null,
 } = {}) {
   const config = providerOAuthConfig(provider);
+  if (assertCredentialOwned !== null && typeof assertCredentialOwned !== "function") {
+    throw new TypeError("provider authorization credential ownership check must be a function");
+  }
+  assertCredentialOwned?.();
   if (config.provider === "quickbooks" && typeof prepareConnection !== "function") {
     throw new ProviderOAuthError("quickbooks", "binding", "QuickBooks authorization requires an explicit source and company binding", {
       code: "source_binding_required",
@@ -1749,6 +1868,14 @@ export async function authorizeProvider(provider, {
     : null;
   const startingQuickBooksGeneration = config.provider === "quickbooks"
     ? createHash("sha256").update(JSON.stringify(startingQuickBooksConnection)).digest("hex")
+    : null;
+  const startingMicrosoftConnection = config.provider === "microsoft"
+    ? await prepareMicrosoftPriorConnection(loadProviderCredentials(config.provider, storage), {
+        fetchImpl, now, storage, assertOwned: assertCredentialOwned,
+      })
+    : null;
+  const startingMicrosoftGeneration = config.provider === "microsoft"
+    ? createHash("sha256").update(JSON.stringify(startingMicrosoftConnection)).digest("hex")
     : null;
   const state = b64url(randomBytes(16));
   const proof = config.pkce ? pkce() : { verifier: null, challenge: null };
@@ -1770,6 +1897,7 @@ export async function authorizeProvider(provider, {
     openImpl,
     log,
   });
+  assertCredentialOwned?.();
   for (const field of config.callbackMetadataRequired || []) {
     if (!clean(callback.callback_metadata?.[field])) {
       throw new ProviderOAuthError(config.provider, "callback", `${field} was not returned, so the connection identity is incomplete`, {
@@ -1788,10 +1916,32 @@ export async function authorizeProvider(provider, {
     scopes: Array.isArray(scopes) ? scopes : config.scopes,
     connected_at: new Date(now).toISOString(),
   };
+  if (config.provider === "microsoft") {
+    const identifiedPrior = startingMicrosoftConnection;
+    const identifiedCandidate = await resolveMicrosoftConnectionIdentity(candidate, fetchImpl);
+    assertCredentialOwned?.();
+    const current = loadProviderCredentials(config.provider, storage);
+    const currentGeneration = createHash("sha256").update(JSON.stringify(current)).digest("hex");
+    if (currentGeneration !== startingMicrosoftGeneration) {
+      throw new ProviderOAuthError(
+        "microsoft",
+        "binding",
+        "the local Microsoft connection changed while authorization was open; keep the existing credential and start a fresh connection ceremony",
+        { code: "credential_changed_during_authorization", uncertain: true },
+      );
+    }
+    const bound = bindMicrosoftConnection({ prior: identifiedPrior, candidate: identifiedCandidate });
+    const prepared = typeof prepareConnection === "function"
+      ? await prepareConnection(bound, { prior: identifiedPrior })
+      : bound;
+    assertCredentialOwned?.();
+    return saveProviderCredentialsUnlocked(config.provider, prepared, storage);
+  }
   if (config.provider !== "quickbooks") {
     const prepared = typeof prepareConnection === "function"
       ? await prepareConnection(candidate)
       : candidate;
+    assertCredentialOwned?.();
     return saveProviderCredentialsUnlocked(config.provider, prepared, storage);
   }
   return withQuickBooksCredentialLock(
@@ -1828,6 +1978,7 @@ export async function authorizeProvider(provider, {
           };
         })(),
       });
+      assertCredentialOwned?.();
       assertOwned();
       return saveProviderCredentialsUnlocked(config.provider, prepared, storage);
     },
