@@ -3754,7 +3754,19 @@ function operationalFreshness(s, now) {
   return { state: "indexing", reason: null, indexingMs };
 }
 
-const sourceFreshnessSql = ({ ordered = false, includeUnregisteredCounts = false } = {}) => `
+/**
+ * Interpret the latest lifecycle event carried by a source read. Schedule and
+ * zone events are deliberately absent from the SQL that supplies these fields:
+ * they change operating metadata, not whether the owner retired the source.
+ */
+export function sourceRetirementState(row) {
+  const retiredAt = Number.isFinite(timestampMs(row?.retired_at))
+    ? new Date(timestampMs(row.retired_at)).toISOString()
+    : null;
+  return { retired: retiredAt !== null, retiredAt };
+}
+
+export const sourceFreshnessSql = ({ ordered = false, includeUnregisteredCounts = false } = {}) => `
   SELECT inventory.*
     FROM (
       SELECT s.name, s.kind, s.zone, s.status, s.last_ingest_at, s.last_complete_sweep_at,
@@ -3762,6 +3774,11 @@ const sourceFreshnessSql = ({ ordered = false, includeUnregisteredCounts = false
              (SELECT MIN(sr.started_at)
                 FROM sync_runs sr
                WHERE sr.source = s.name AND sr.finished_at IS NULL) AS indexing_started_at,
+             (SELECT CASE WHEN e.event='retired' THEN e.at ELSE NULL END
+                FROM source_events e
+               WHERE e.source_name = s.name
+                 AND e.event IN ('retired','unretired','ingest','error','registered','forget')
+               ORDER BY e.id DESC LIMIT 1) AS retired_at,
              1 AS registered
         FROM sources s
       UNION ALL
@@ -3775,6 +3792,7 @@ const sourceFreshnessSql = ({ ordered = false, includeUnregisteredCounts = false
                       AND live_documents.deleted_at IS NULL)`
                : "NULL"} AS document_count,
              NULL AS indexing_started_at,
+             NULL AS retired_at,
              0 AS registered
         FROM document_source_inventory source_inventory
         LEFT JOIN sources registered_source
@@ -3810,6 +3828,20 @@ export async function coverageGapReport(env, { now = Date.now(), allowedSources 
     const last = s.last_ingest_at ? Date.parse(s.last_ingest_at) : NaN;
     const ageSec = Number.isFinite(last) ? Math.floor((now - last) / 1000) : null;
     const days = ageSec === null ? null : Math.floor(ageSec / 86400);
+    const retirement = sourceRetirementState(s);
+    if (retirement.retired) {
+      if (!s.last_complete_sweep_at) {
+        const count = Number(s.document_count || 0);
+        const recordLabel = count === 1 ? "record" : "records";
+        gaps.push({
+          type: "history_unproven",
+          source: s.name,
+          detail: `The "${s.name}" source was retired by the owner on ${retirement.retiredAt.slice(0, 10)}. Its ${count} stored ${recordLabel} stay searchable and it is no longer refreshed; its history was never proven complete, so a missing result is not proof that those records hold no answer.`,
+          remedy: "No action needed.",
+        });
+      }
+      continue;
+    }
     const customApiReceipt = customApiReceipts.get(String(s.name)) || null;
     const customApiRefusedRows = customApiReceipt?.refusedRows || 0;
     const operational = operationalFreshness({
@@ -3990,6 +4022,7 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
       const days = Number.isFinite(last) ? Math.floor((now - last) / 86400000) : null;
       const expected = Number(s.expected_refresh_seconds) || null;
       const automatable = AUTOMATABLE_SOURCE_KINDS.has(String(s.kind));
+      const retirement = sourceRetirementState(s);
       const effectiveIndexingStartedAt = s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null;
       const customApiReceipt = customApiReceipts.get(String(s.name)) || null;
       const customApiRefusedRows = customApiReceipt?.refusedRows || 0;
@@ -4002,7 +4035,10 @@ export async function freshnessReport(env, { now = Date.now() } = {}) {
       }, now);
       let state = unregistered ? "unregistered" : "ok";
       let reason = unregistered ? "the source registry entry is missing" : operational.reason;
-      if (!unregistered && operational.state) state = operational.state;
+      if (!unregistered && retirement.retired) {
+        state = "manual";
+        reason = `retired by the owner on ${retirement.retiredAt.slice(0, 10)}; kept, not refreshed`;
+      } else if (!unregistered && operational.state) state = operational.state;
       else if (!unregistered && !expected) state = automatable ? "unscheduled" : "manual";
       else if (!unregistered && !Number.isFinite(last)) state = "never_synced";
       else if (!unregistered && (now - last) / 1000 > expected * 1.5) state = "stale";
@@ -4600,6 +4636,21 @@ export async function sourceInventory(env, {
   // referencing tables that do not exist yet.
   const result = await readWithCustomApiVisibility(env, readInventory, { probe: false });
   const rawRows = Array.isArray(result?.results) ? result.results : [];
+  // Keep the v3 inventory statement byte-for-byte stable. Retirement is a
+  // small indexed companion read, like the other post-inventory operational
+  // lookups below, and does not widen the published row contract.
+  const retirementResult = await env.DB.prepare(
+    `SELECT s.name AS source_name,
+            (SELECT CASE WHEN e.event='retired' THEN e.at ELSE NULL END
+               FROM source_events e
+              WHERE e.source_name=s.name
+                AND e.event IN ('retired','unretired','ingest','error','registered','forget')
+              ORDER BY e.id DESC LIMIT 1) AS retired_at
+       FROM sources s`
+  ).all();
+  const retirements = new Map((retirementResult?.results || []).map((row) => [
+    String(row.source_name), sourceRetirementState(row),
+  ]));
   const activeCustomJobs = await activeCustomApiJobStarts(env, rawRows.map((row) => ({
     name: row.name,
     kind: row.kind,
@@ -4639,9 +4690,13 @@ export async function sourceInventory(env, {
       custom_api_display_name: customApiReceipt?.displayName || null,
     }, now);
     const automatable = AUTOMATABLE_SOURCE_KINDS.has(String(row.kind || "").toLowerCase());
+    const retirement = retirements.get(sourceId) || { retired: false, retiredAt: null };
     let state = registered ? "ok" : "unregistered";
     let reason = registered ? operational.reason : "the source registry entry is missing";
-    if (registered && operational.state) state = operational.state;
+    if (registered && retirement.retired) {
+      state = "manual";
+      reason = `retired by the owner on ${retirement.retiredAt.slice(0, 10)}; kept, not refreshed`;
+    } else if (registered && operational.state) state = operational.state;
     else if (registered && !expectedSeconds) state = automatable ? "unscheduled" : "manual";
     else if (registered && !Number.isFinite(last)) state = "never_synced";
     else if (registered && (now - last) / 1000 > expectedSeconds * 1.5) state = "stale";

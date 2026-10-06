@@ -8941,6 +8941,8 @@ function sourceInventoryRetryCommand(flags, renderCommands = renderCliCommands) 
     command += " --refresh <schedule>";
     if (flags.source !== undefined) command += " --source <name>";
   }
+  if (flags.retire !== undefined) command += " --retire <name>";
+  if (flags.unretire !== undefined) command += " --unretire <name>";
   if (flags.recovery === true) {
     command += " --json --recovery";
     if (flags.source !== undefined) command += " --source <name>";
@@ -8950,6 +8952,15 @@ function sourceInventoryRetryCommand(flags, renderCommands = renderCliCommands) 
     command += " --json";
   }
   return renderCommands(command);
+}
+
+function manifestFillsSource(m, source) {
+  const upload = m?.corpora?.upload;
+  if (upload?.enabled === true && uploadFoldersOf(upload).some((folder) =>
+    String(folder.source || "upload") === source)) return true;
+  const local = m?.corpora?.local_folder;
+  return local?.enabled === true && !local?.retired_at &&
+    String(local.source || "documents") === source;
 }
 
 function sourceInventoryBaseUrl(m, retryCommand, renderCommands = renderCliCommands) {
@@ -9452,7 +9463,22 @@ export async function cmdSources(manifestPath, options = {}) {
   const flags = options.flags ?? parseFlags(argv.slice(4));
   const json = flags.json !== undefined;
   try {
-    assertKnownFlags(flags, ["json", "add", "cursor", "kind", "limit", "recovery", "refresh", "source"], "brain sources");
+    assertKnownFlags(flags, [
+      "json", "add", "cursor", "kind", "limit", "recovery", "refresh", "source",
+      "retire", "unretire",
+    ], "brain sources");
+    const retirementFlags = [flags.retire, flags.unretire].filter((value) => value !== undefined);
+    if (retirementFlags.length > 1) {
+      throw new SourceInventoryClientError("invalid_options", "--retire and --unretire cannot be combined");
+    }
+    const retirementRequested = retirementFlags.length === 1;
+    if (retirementRequested && [flags.add, flags.refresh, flags.json, flags.recovery]
+      .some((value) => value !== undefined)) {
+      throw new SourceInventoryClientError(
+        "invalid_options",
+        "--retire and --unretire cannot be combined with --add, --refresh, --json, or --recovery",
+      );
+    }
     if (flags.json !== undefined && flags.json !== true) {
       throw new SourceInventoryClientError("invalid_options", "--json does not take a value");
     }
@@ -9466,7 +9492,7 @@ export async function cmdSources(manifestPath, options = {}) {
     if ((flags.cursor !== undefined || flags.limit !== undefined) && !recovery) {
       throw new SourceInventoryClientError("invalid_options", "--cursor and --limit are available here only with --json --recovery");
     }
-    const sourceRegistryWrite = Boolean(flags.add) || flags.refresh !== undefined;
+    const sourceRegistryWrite = Boolean(flags.add) || flags.refresh !== undefined || retirementRequested;
     let writeAccepted = false;
     const acceptedChanges = [];
     if (json && sourceRegistryWrite) {
@@ -9485,8 +9511,43 @@ export async function cmdSources(manifestPath, options = {}) {
     const renderCommands = options.renderCliCommands ?? renderCliCommands;
     const retryCommand = sourceInventoryRetryCommand(flags, renderCommands);
     const { m } = loadManifest(manifestPath);
+    const retirementSource = retirementRequested
+      ? assertSourceName(flags.retire !== undefined
+        ? (flags.retire === true ? null : flags.retire)
+        : (flags.unretire === true ? null : flags.unretire))
+      : null;
+    if (retirementSource && manifestFillsSource(m, retirementSource)) {
+      throw new SourceInventoryClientError(
+        "source_still_filled",
+        `"${retirementSource}" is still filled by a folder in this manifest, so the next load would bring it back. Nothing was changed.`,
+      );
+    }
     const { base, authenticatedRequest, managedSourceRequest, requestPage } =
       sourceInventoryAccess(manifestPath, m, { ...options, retryCommand });
+
+    if (retirementSource) {
+      const retired = flags.retire !== undefined;
+      const result = await postSourceRetirement(base, "", {
+        source: retirementSource,
+        retired,
+      }, managedSourceRequest);
+      writeAccepted = true;
+      acceptedChanges.push({
+        operation: retired ? "retire" : "unretire",
+        source: retirementSource,
+      });
+      if (retired) {
+        console.log(`${successMark()}    ${renderCommands(
+          `"${retirementSource}" is retired: its ${result.documents} record(s) stay searchable and it will no longer be reported as stopped. ` +
+          `Undo: brain sources ${manifestPath} --unretire ${retirementSource}.`,
+        )}`);
+      } else {
+        console.log(`${successMark()}    ${renderCommands(
+          `"${retirementSource}" is active again and will be reported from its current source state. ` +
+          `Undo: brain sources ${manifestPath} --retire ${retirementSource}.`,
+        )}`);
+      }
+    }
 
     if (flags.add) {
       const name = assertSourceName(flags.add === true ? null : flags.add);
@@ -13418,6 +13479,46 @@ export async function postSourceExpectation(base, adminKey, {
     );
   }
   return body;
+}
+
+/** Retire or reactivate one upload source through the saved owner credential. */
+export async function postSourceRetirement(base, adminKey, {
+  source,
+  retired,
+}, request = http) {
+  const normalizedSource = assertSourceName(source);
+  const res = await request(`${base}/api/admin/brain/source-retire`, {
+    method: "POST",
+    headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
+    body: JSON.stringify({ source: normalizedSource, retired }),
+  }, { timeoutMs: 30_000, what: "the source retirement" });
+  const raw = await res.text();
+  let body = null;
+  try { body = JSON.parse(raw); } catch { /* checked below */ }
+  if (res.ok && body?.source === normalizedSource && body?.retired === retired &&
+      typeof body?.changed === "boolean" && Number.isSafeInteger(body?.documents) &&
+      (body?.retired_at === null || Number.isFinite(Date.parse(body?.retired_at)))) {
+    return body;
+  }
+  if (res.status === 404 && body?.code !== "source_not_registered") {
+    throw new SourceInventoryClientError(
+      "source_retirement_unsupported",
+      "This Brain does not support retiring a source yet; update it first. Nothing was changed.",
+    );
+  }
+  const messages = {
+    source_not_registered: `The source "${normalizedSource}" is not registered, so nothing was changed.`,
+    source_kind_not_retirable: `The source "${normalizedSource}" is not an upload source, so nothing was changed.`,
+    source_indexing: `The source "${normalizedSource}" has an open sync run, so nothing was changed.`,
+    source_review_pending: `The source "${normalizedSource}" has a pending safety review, so nothing was changed.`,
+    owner_key_required: "The saved credential is not the unrestricted owner key, so nothing was changed.",
+    source_retirement_unverified: "The Brain could not verify the source retirement, so nothing was changed.",
+  };
+  const code = typeof body?.code === "string" ? body.code : "source_retirement_failed";
+  throw new SourceInventoryClientError(
+    code,
+    messages[code] || `The Brain refused the source retirement (HTTP ${res.status}), so nothing was changed.`,
+  );
 }
 
 
@@ -30063,6 +30164,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
   repair, or any other write. Use --add <name>
   [--kind <drive|gmail|imap|calendar|upload>] to register one, and --source <name>
   --refresh <hourly|daily|weekly|monthly|never> to say how often it should refresh.
+  Use --retire <name> to keep a legacy upload source searchable without further
+  freshness warnings, and --unretire <name> to undo that choice.
   A source with no expectation is never reported as stale.
   brain forget needs --source <name>, and --yes before it removes anything. Without
   --yes it prints exactly what would go and stops.

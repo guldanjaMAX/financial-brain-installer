@@ -55,7 +55,7 @@ import {
 import {
   storeFor, backendOf, D1, expectedD1ContentHash, ProvenanceTransitionError,
 } from "./lib/store.js";
-import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, SOURCE_FAMILY_CURSOR_MAX_BYTES, SOURCE_FAMILY_UID_FILTER_MAX, sourceFamilyCounts, reindex, coverageGapReport, freshnessReport, diagnose } from "./lib/store-d1.js";
+import { installedSchemaVersion, acceleratedVectorBootstrap, drainOutbox, outboxDepth, vectorReadiness, retryQuarantinedVectorOps, forget, forgetFamilies, listSourceFamilies, SOURCE_FAMILY_CURSOR_MAX_BYTES, SOURCE_FAMILY_UID_FILTER_MAX, sourceFamilyCounts, sourceRetirementState, reindex, coverageGapReport, freshnessReport, diagnose } from "./lib/store-d1.js";
 import { embedText, embedTexts } from "./lib/supabase.js";
 import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, newestCurrentEvidence,
@@ -2261,6 +2261,110 @@ async function handleSourceReceipt(env, request) {
   });
 }
 
+/** Mark or unmark one legacy upload source without touching its stored corpus. */
+async function handleSourceRetirement(env, request) {
+  if (backendOf(env) !== D1) {
+    return jsonResponse({
+      error: "Source retirement applies to the D1 backend only.",
+      code: "source_retirement_backend_required",
+    }, 400);
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Source retirement requires a valid JSON body.", code: "invalid_request" }, 400);
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body) ||
+      Object.keys(body).length !== 2 || !Object.hasOwn(body, "source") ||
+      !Object.hasOwn(body, "retired") || typeof body.retired !== "boolean") {
+    return jsonResponse({
+      error: "Source retirement accepts exactly source and a boolean retired value.",
+      code: "invalid_request",
+    }, 400);
+  }
+  const source = typeof body.source === "string" ? body.source : "";
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(source)) {
+    return jsonResponse({
+      error: "Source must contain only lowercase letters, numbers, underscores, or hyphens.",
+      code: "invalid_request",
+    }, 400);
+  }
+
+  const sourceRow = await env.DB.prepare(
+    `SELECT lower(trim(s.kind)) AS kind, s.stale_reason,
+            EXISTS (SELECT 1 FROM sync_runs sr
+                     WHERE sr.source=s.name AND sr.finished_at IS NULL) AS open_sync,
+            (SELECT CASE WHEN e.event='retired' THEN e.at ELSE NULL END
+               FROM source_events e
+              WHERE e.source_name=s.name
+                AND e.event IN ('retired','unretired','ingest','error','registered','forget')
+              ORDER BY e.id DESC LIMIT 1) AS retired_at
+       FROM sources s WHERE s.name=?1`
+  ).bind(source).first();
+  if (!sourceRow) {
+    return jsonResponse({ error: "The source is not registered.", code: "source_not_registered" }, 404);
+  }
+  if (sourceRow.kind !== "upload") {
+    return jsonResponse({
+      error: "Only an upload source can be retired.",
+      code: "source_kind_not_retirable",
+    }, 409);
+  }
+  if (sourceRow.open_sync === 1 || sourceRow.open_sync === true) {
+    return jsonResponse({
+      error: "The source has an open sync run and cannot be retired.",
+      code: "source_indexing",
+    }, 409);
+  }
+  if (String(sourceRow.stale_reason || "").trim().toUpperCase() === SOURCE_REVIEW_ISSUE_CODE) {
+    return jsonResponse({
+      error: "The source has a pending safety review and cannot be retired.",
+      code: "source_review_pending",
+    }, 409);
+  }
+
+  const current = sourceRetirementState(sourceRow);
+  const documents = Number((await sourceFamilyCounts(env, { source }))?.logical_documents || 0);
+  if (current.retired === body.retired) {
+    return jsonResponse({
+      source, kind: sourceRow.kind, retired: current.retired,
+      retired_at: current.retiredAt, documents, changed: false,
+    });
+  }
+
+  const at = new Date().toISOString();
+  const event = body.retired ? "retired" : "unretired";
+  const operationId = crypto.randomUUID();
+  const detail = `owner-retire:${operationId}`;
+  const receipts = await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO source_events (source_name,event,at,documents,detail) VALUES (?1,?2,?3,?4,?5)"
+    ).bind(source, event, at, documents, detail),
+    env.DB.prepare(
+      `SELECT source_name,event,at,documents,detail
+         FROM source_events
+        WHERE source_name=?1 AND event=?2 AND detail=?3
+        ORDER BY id DESC LIMIT 1`
+    ).bind(source, event, detail),
+  ]);
+  const readback = receipts?.[1]?.results;
+  const exact = Array.isArray(readback) && readback.length === 1 &&
+    readback[0].source_name === source && readback[0].event === event &&
+    readback[0].at === at && readback[0].detail === detail &&
+    Number(readback[0].documents) === documents;
+  if (!exact) {
+    return jsonResponse({
+      error: "The source retirement event could not be verified.",
+      code: "source_retirement_unverified",
+    }, 500);
+  }
+  return jsonResponse({
+    source, kind: sourceRow.kind, retired: body.retired,
+    retired_at: body.retired ? at : null, documents, changed: true,
+  });
+}
+
 /**
  * Set the operational refresh expectation without claiming that an ingest ran.
  *
@@ -2630,6 +2734,7 @@ const PAUSED_CORPUS_MUTATION_PATHS = new Set([
   OWNER_NOTES_ROUTE,
   "/api/admin/brain/source-receipt",
   "/api/admin/brain/source-expectation",
+  "/api/admin/brain/source-retire",
   "/api/admin/brain/source-register",
   CUSTOM_API_RUN_PATH,
   "/api/admin/brain/zones",
@@ -3137,6 +3242,15 @@ export default {
       }
       if (path === "/api/admin/brain/source-expectation" && request.method === "POST") {
         return await handleSourceExpectation(env, request);
+      }
+      if (path === "/api/admin/brain/source-retire" && request.method === "POST") {
+        if (!ownerKeyAuthorized || !scopeIsUnrestricted(scope)) {
+          return jsonResponse({
+            error: "Source retirement requires the unrestricted owner admin key.",
+            code: "owner_key_required",
+          }, 403);
+        }
+        return await handleSourceRetirement(env, request);
       }
       if (path === "/api/admin/brain/source-register" && request.method === "POST") {
         return await handleSourceRegistration(env, request);
