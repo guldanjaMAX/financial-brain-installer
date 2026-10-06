@@ -1622,6 +1622,13 @@ Owner assistant tools are `brain_think`, `brain_search`, `brain_remember`,
 `brain_health`, and `brain_financial_map`. The last tool can read map state and
 store an expiring preview, but it has no activation operation.
 
+`brain sources <manifest> --retire <name>` records an owner-only lifecycle
+event for a registered upload source after refusing any folder the manifest
+would load under that name. Retirement keeps every stored record searchable,
+suppresses operational freshness advice, and leaves incomplete history visible
+with no-action guidance. A later ingest, error, registration, forget event, or
+`--unretire <name>` ends the retirement; schedule and zone events do not.
+
 The current ingest boundary validates evidence lineage and versioned text-origin
 receipts on new writes, and it refuses a later write that weakens established
 proof. Migration defaults and legacy `native/1` columns are still explicitly

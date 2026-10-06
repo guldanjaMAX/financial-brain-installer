@@ -4453,6 +4453,7 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     ["/api/admin/brain/ingest/batch", { documents: [] }],
     ["/api/admin/brain/source-receipt", { source: "drive", status: "ready" }],
     ["/api/admin/brain/source-expectation", { source: "drive", expected_interval_hours: 24 }],
+    ["/api/admin/brain/source-retire", { source: "upload", retired: true }],
     ["/api/admin/brain/source-register", { source: "drive", kind: "drive" }],
     ["/api/admin/brain/zones", { source: "drive", zone: "private" }],
     ["/api/admin/brain/forget", { source: "drive", confirm: true }],
