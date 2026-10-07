@@ -17,6 +17,12 @@ Brain Feeds landing folders. Aggregate freshness is visible across those
 sources, and answers search first so they can cite current records before they
 write a response.
 
+- **Large database updates now wait for a slow column addition.** If the first
+  reply is uncertain, the update checks the exact column definition for up to
+  15 minutes before continuing. It never resends that column change while
+  checking. If the checks cannot reach Cloudflare, the message names the
+  connection problem and explains how to check the column before retrying.
+
 - **Daily imports now have one owned Windows and macOS contract.** `brain daily
   on|off|status <manifest>` derives every source from your own manifest instead
   of a fixed Google recipe, keeps Worker, push, capture, snapshot, disabled,

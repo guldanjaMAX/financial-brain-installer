@@ -13,6 +13,7 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node test/migration-slow-apply.test.mjs",
   "node --test test/daily-refresh-plan.test.mjs",
   "node --test test/brain-lifecycle-lock.test.mjs",
   "node --test test/daily-refresh-scheduler.test.mjs",
@@ -362,6 +363,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/bank-feed-secrets.test.mjs",
   "node test/bank-feed-deploy-path.test.mjs",
   "node test/migrations.test.mjs",
+  "node test/migration-slow-apply.test.mjs",
   "node test/doc-date.test.mjs",
   "node test/quality.test.mjs",
   "node test/ingest-run.test.mjs",
