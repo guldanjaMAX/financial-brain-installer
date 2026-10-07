@@ -129,6 +129,7 @@ import {
   CUSTOM_API_RUN_PATH, customApiOwnerMessage, runCustomApiWorker,
 } from "./lib/custom-api.js";
 import { supplementalRetrievalFilters } from "./lib/retrieval-routing.js";
+import { entityFactAnswer } from "./lib/entity-fact-answer.js";
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -1157,12 +1158,25 @@ async function handleThink(
     : "";
   const userMsg = `Question: ${q}\n\nDOCUMENTS:\n${docBlock}${currentBlock}\n\nKNOWN GAPS (computed from the data, not inferred, do not contradict these):\n${gapBlock}\n\nWrite the answer. Then, only if one of the gaps above materially affects how much the reader should trust that answer, add a final line starting with "Heads up:" naming that one gap in a single sentence. If none do, omit the Heads up line entirely.`;
 
-  let answer = null;
+  // A deterministic proposal replaces only the two generative calls. The
+  // shared citation, temporal, authority and conflict gates below still run.
+  const asksForBindingAgreement = /\b(?:bound by|legally binding|executed agreement|signed agreement|governing agreement)\b/i.test(q);
+  const asksOwnerSpecificHighRiskFact = /\b(?:term sheet|parental leave|jury duty|i-9|401\s*\(?k\)?|office lease|ownership agreements?|blood type|soc\s*2|security certification|tpt license|vat|gst)\b/i.test(q);
+  let factAnswer = taxQuestion.applicable || asksForBindingAgreement || asksOwnerSpecificHighRiskFact
+    ? null : entityFactAnswer({
+      question: q, results, docs, owner: env.BRAIN_OWNER || null,
+      filters: requestedFilters, gaps, coverageGaps: sourceCoverageGaps,
+      degraded, operativeConflict, newerAuthoritativeEvidence, currentEvidence,
+    });
+  // Status language can describe a relationship even inside a name or role.
+  // Leave it to the general verifier plus the shared present-status gate.
+  if (factAnswer && explicitCurrentIntent && PRESENT_STATUS_ASSERTION.test(factAnswer.answer)) factAnswer = null;
+  let answer = factAnswer?.answer || null;
   let answerError = null;
   let model = null;
   let modelDeclaredNoEvidence = false;
   try {
-    const data = await callLLM(env, {
+    const data = factAnswer ? null : await callLLM(env, {
       model: env.ANSWER_MODEL || "claude-sonnet-4-5",
       max_tokens: 1000,
       system,
@@ -1170,7 +1184,7 @@ async function handleThink(
       timeoutMs: 45_000,
       messages: [{ role: "user", content: userMsg }],
     });
-    answer = (data?.content?.[0]?.text || "").trim() || null;
+    answer = factAnswer?.answer || (data?.content?.[0]?.text || "").trim() || null;
     model = data?.model || null;
     if (!answer) approvedDocs = [];
     if (answer) {
@@ -1212,7 +1226,7 @@ async function handleThink(
         evidenceGate = { supported: false, complete: false, evidence: [], reason: "draft made claims without document citations" };
       } else {
         try {
-          const check = await callLLM(env, {
+          const check = factAnswer ? null : await callLLM(env, {
             model: env.ANSWER_MODEL || "claude-sonnet-4-5",
             max_tokens: 300,
             label: "rag-evidence-gate",
@@ -1244,11 +1258,14 @@ async function handleThink(
           const raw = check?.content?.[0]?.text || "";
           const start = raw.indexOf("{");
           const end = raw.lastIndexOf("}");
-          const verdict = start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
+          const verdict = factAnswer
+            ? { supported: true, complete: true, evidence: factAnswer.evidence, reason: "exact native contact field with dated direct evidence" }
+            : start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
           const allowed = new Set((Array.isArray(verdict?.evidence) ? verdict.evidence : [])
             .map(Number)
             .filter((n) => citedDocs.some((doc) => doc.n === n)));
           evidenceGate = {
+            ...(factAnswer ? { method: "exact_contact_fact", fact_span: factAnswer.fact_span } : {}),
             supported: verdict?.supported === true || String(verdict?.supported).toLowerCase() === "true",
             complete: verdict?.complete === true || String(verdict?.complete).toLowerCase() === "true",
             evidence: [...allowed],
@@ -1259,7 +1276,6 @@ async function handleThink(
             evidenceGate.supported = false;
             evidenceGate.reason = "verifier did not approve every citation in the proposed answer";
           }
-          const asksForBindingAgreement = /\b(?:bound by|legally binding|executed agreement|signed agreement|governing agreement)\b/i.test(q);
           const allowedDocs = citedDocs.filter((doc) => allowed.has(doc.n));
           const mismatchedTaxEvidence = taxDocumentCoverage.applicable && allowedDocs.some((doc) =>
             doc.authority?.tax_scope?.matched !== true
@@ -1276,7 +1292,6 @@ async function handleThink(
             evidenceGate.supported = false;
             evidenceGate.reason = "the matching tax filing was not read from a reliable native text layer";
           }
-          const asksOwnerSpecificHighRiskFact = /\b(?:term sheet|parental leave|jury duty|i-9|401\s*\(?k\)?|office lease|ownership agreements?|blood type|soc\s*2|security certification|tpt license|vat|gst)\b/i.test(q);
           const ownerTokens = String(owner).toLowerCase().match(/[a-z0-9]+/g)?.filter((token) =>
             !new Set(["the", "owner", "brain", "shadow", "company", "inc", "llc"]).has(token)
           ) || [];
