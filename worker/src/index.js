@@ -64,6 +64,7 @@ import {
 } from "./lib/query-intent.js";
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
 import { answerSentences } from "./lib/answer-sentences.js";
+import { isQuickBooksBalanceClaim, quickBooksBalanceSupportsClaim } from "./lib/quickbooks-balance.js";
 import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
   documentMatchesOperativeClaim, documentUsesOperativeValue,
@@ -590,6 +591,9 @@ function statusPolarity(value) {
 }
 
 function documentDirectlySupportsStatus(sentence, doc, question = "") {
+  if (isQuickBooksBalanceClaim(sentence, doc)) {
+    return quickBooksBalanceSupportsClaim(sentence, doc) && hasMatchingAsOfDate(sentence, [doc]);
+  }
   const source = String(doc?.source || "").toLowerCase();
   const relationshipClaim = isRelationshipStatusClaim(sentence, question);
   // A Stripe Customer, invoice, subscription or accounting customer record is a
@@ -1140,6 +1144,7 @@ async function handleThink(
     "13. For a named tax-form question, the cited record must match the exact taxpayer or entity, tax year, and filing type. A partner's Schedule K-1 is not the partnership's Form 1065 return, even though its header mentions Form 1065.",
     "14. When a claim rests on reliably dated evidence, weave that date into the sentence naturally, like: per the 2026-07-31 call transcript. A dated claim can be checked; an undated one has to be trusted. Never state a date the documents do not carry.",
     "15. A derived report, generated pack, summary, or agent-written note may accurately restate its sources, but it is not independent confirmation of them. Documents with overlapping recorded source families count as one evidence family. When lineage is unknown, do not claim that multiple documents independently confirm a fact.",
+    "16. A QuickBooks balance snapshot observes the displayed balance at its exact as-of date, even if the transaction or provider last-change date is older. State that as-of date with the balance. Individual retrieved records do not establish a complete list or company-wide total.",
     env.BRAIN_STYLE_RULE || "",
   ]
     .filter(Boolean)
@@ -1311,7 +1316,8 @@ async function handleThink(
             const assertions = answerSentences(answer);
             let temporalFailure = null;
             for (const sentence of assertions) {
-              if (!PRESENT_STATUS_ASSERTION.test(sentence) || STATUS_UNCERTAINTY.test(sentence)) continue;
+              const balanceClaim = allowedDocs.some((doc) => isQuickBooksBalanceClaim(sentence, doc));
+              if ((!PRESENT_STATUS_ASSERTION.test(sentence) && !balanceClaim) || STATUS_UNCERTAINTY.test(sentence)) continue;
               if (!currentEvidenceNumbers.size) {
                 temporalFailure = "present-status claim had no reliable-dated evidence for the named subject";
                 break;
