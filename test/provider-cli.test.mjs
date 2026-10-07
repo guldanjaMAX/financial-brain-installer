@@ -212,6 +212,44 @@ try {
     authorizeOptions.redirectUri === "http://localhost:47812/" &&
     connected.connected === true);
 
+  const microsoftManifest = join(folder, "microsoft.manifest.json");
+  writeFileSync(microsoftManifest, JSON.stringify({
+    manifest_version: 1,
+    client: { slug: "fixture", display_name: "Fixture", timezone: "America/Phoenix" },
+    brain: { version: "0.2.0", domain: "fixture.invalid", worker_name: "fixture-brain" },
+    infrastructure: { cloudflare: { account_id: "fixture-account", storage: "d1" } },
+    corpora: { microsoft: { enabled: true, source: "microsoft" } },
+  }));
+  let providerRecordLockCalls = 0;
+  let providerRecordLockHeld = false;
+  let microsoftAuthorizeCalls = 0;
+  await cmdConnectProvider("microsoft", microsoftManifest, {}, {
+    environment: { MICROSOFT_CLIENT_ID: "fixture-client" },
+    withSourceIngestLock: async (lockOptions, task) => {
+      providerRecordLockCalls++;
+      assert.equal(lockOptions.sharedRecord, "provider:microsoft");
+      providerRecordLockHeld = true;
+      try { return await task({ assertOwned: () => true }); }
+      finally { providerRecordLockHeld = false; }
+    },
+    oauth: {
+      PROVIDER_DEFAULT_PORT: 47812,
+      providerOAuthConfig: () => ({
+        provider: "microsoft", label: "Microsoft 365", clientSecretRequired: false,
+      }),
+      providerRedirectUri: (port) => `http://127.0.0.1:${port}`,
+      loadProviderCredentials: () => null,
+      authorizeProvider: async () => {
+        microsoftAuthorizeCalls++;
+        assert.equal(providerRecordLockHeld, true);
+        return { provider_metadata: { microsoft_account_fingerprint: "a".repeat(64) } };
+      },
+      providerCredentialDescription: () => "the fixture store",
+    },
+  });
+  check("Microsoft re-consent holds the shared provider-record lease across credential replacement",
+    providerRecordLockCalls === 1 && microsoftAuthorizeCalls === 1 && providerRecordLockHeld === false);
+
   const order = [];
   let disconnectCustody = null;
   const disconnected = await cmdDisconnectProvider("quickbooks", manifestPath, {}, {

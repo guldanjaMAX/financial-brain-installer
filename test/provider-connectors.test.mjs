@@ -189,6 +189,9 @@ const json = (value, status = 200, headers = {}) => new Response(JSON.stringify(
           receivedDateTime: "2026-08-04T00:00:00Z",
         }], "@odata.deltaLink": mailDelta });
       }
+      if (target.includes("/me/calendarView/delta")) {
+        return json({ value: [], "@odata.deltaLink": "https://graph.microsoft.com/delta-calendar" });
+      }
       if (target.includes("/drives/D1/root/delta")) return json({ value: [{
         id: "f1", name: "Plan.txt", file: { mimeType: "text/plain" }, size: 9,
         lastModifiedDateTime: "2026-08-05T00:00:00Z", webUrl: "https://sharepoint.invalid/plan",
@@ -214,6 +217,7 @@ const json = (value, status = 200, headers = {}) => new Response(JSON.stringify(
 {
   const result = await syncMicrosoftGraph({
     accessToken: "token", mailFolderIds: [], driveIds: [], siteIds: [], includePersonalDrive: false,
+    includeCalendar: false,
     cursor: { mail: {}, drives: { missing: "https://graph.microsoft.com/prior-drive-delta" } },
     fetchImpl: async () => { throw new Error("an inaccessible retained drive must not cause a network request"); },
   });

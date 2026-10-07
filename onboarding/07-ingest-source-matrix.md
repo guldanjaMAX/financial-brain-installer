@@ -54,7 +54,7 @@ in ADR 003; they are not claimed as current connector behavior.
 | Plaid | **Built behind a held field gate. General bank invitations are closed.** Owner-only Link, signed webhooks, staged transaction sync, account-to-entity assignment, retry, and provider-confirmed disconnect are wired. The owner may run `brain connect bank` for their own owner-present pilot: it asks for the Plaid client ID and secret at a hidden prompt only when the Worker lacks them (or for both again with `--replace-keys`), checks the pair with one harmless Plaid read in the manifest's environment before saving, generates a missing wrapping key, verifies all three secret names, then opens Link. Customer invitations stay closed until the full release-gate journey passes. No Plaid Sandbox Item or real account has crossed this build yet |
 | Slack | **Built behind a field gate.** OAuth, channels, direct conversations, threads, scheduling, and explicit partial deletion truth are scripted-provider tested. No real workspace proof yet |
 | Notion | **Built behind a field gate.** OAuth, page search, properties, recursive blocks, trash reporting, and scheduling are scripted-provider tested. No real workspace proof yet |
-| Microsoft 365, Outlook, SharePoint, OneDrive | **Built behind a field gate.** OAuth, immutable Outlook IDs, delta sync, file extraction, tombstones, and scheduling are scripted-provider tested. No real Entra tenant proof yet |
+| Microsoft 365, Outlook, Calendar, SharePoint, OneDrive | **Built behind a field gate.** OAuth, immutable Outlook mail and event IDs, a rolling 30-day-past and 90-day-future calendar view, independent delta sync, file extraction, tombstones, and scheduling are scripted-provider tested. Existing connections must re-consent once for delegated `Calendars.Read`. No real Entra tenant proof yet |
 | Dropbox | **Built behind a field gate.** OAuth, bounded file extraction, cursor resume, tombstones, baseline reconciliation, and scheduling are scripted-provider tested. No real Dropbox account proof yet |
 | Box | No native connector. Use a reviewed export or a locally synced Box folder through the watched-folder path. That fallback is only as current as the local sync and Brain schedule |
 | QuickBooks Online | **Built behind a field gate.** Sandbox OAuth, company binding, rotating refresh, paginated read-only snapshots, scheduling, and disconnect are wired. No Intuit sandbox company has crossed the full acceptance run yet |
@@ -416,13 +416,21 @@ scripted provider harness. No real workspace has completed acceptance. Use an
 approved export or watched folder until the client's own workspace passes that
 gate.
 
-### Microsoft 365, Outlook, SharePoint, OneDrive
+### Microsoft 365, Outlook, Calendar, SharePoint, OneDrive
 
-**Built behind a field gate.** OAuth, immutable Outlook message identifiers,
-delta sync, OneDrive and SharePoint extraction, tombstones, scheduling, and
-disconnect are scripted-provider tested. No real Entra tenant has completed
-acceptance, and tenant consent may still require the client's Microsoft 365
-administrator.
+**Built behind a field gate.** OAuth, immutable Outlook message and event
+identifiers, independent delta sync, a rolling 30-day-past and 90-day-future
+calendar view, OneDrive and SharePoint extraction, tombstones, scheduling, and
+disconnect are scripted-provider tested. The connector requests delegated
+`Calendars.Read`, not a calendar write scope. A Microsoft connection created
+before this addition must run `brain connect microsoft <manifest>` again and
+approve the updated read-only consent screen because refresh cannot add a
+scope. A verified same-account re-consent preserves the existing mail and drive
+cursors; a different or unprovable account is refused before replacement.
+Calendar events then use immutable Graph IDs. Any earlier mutable-ID calendar
+cursor takes one guarded baseline migration while mail and drive remain on
+their exact saved cursors. No real Entra tenant has completed acceptance, and
+tenant consent may still require the client's Microsoft 365 administrator.
 
 ### Notion
 

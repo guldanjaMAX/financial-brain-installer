@@ -390,7 +390,7 @@
         },
         "microsoft": {
           "type": "object",
-          "description": "Read-only Microsoft 365 Outlook, OneDrive, and selected SharePoint drives using Graph delta links. Message and drive tombstones are authoritative, and supported file bodies are downloaded to the owner machine for the common extraction path before a terminal delta link may advance.",
+          "description": "Read-only Microsoft 365 Outlook mail and calendar, OneDrive, and selected SharePoint drives using independent Graph delta links. Calendar events use immutable IDs and a rolling 30-day-past and 90-day-future view; only tombstones scoped to the saved event inventory receive calendar deletion authority. Supported file bodies are downloaded to the owner machine for the common extraction path before terminal delta links may advance.",
           "properties": {
             "enabled": {
               "type": "boolean",

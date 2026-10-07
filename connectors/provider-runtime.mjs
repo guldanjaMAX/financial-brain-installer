@@ -280,12 +280,33 @@ export async function runProviderConnector({
       const planned = normalized.deletions.filter((item) =>
         storedFamiliesBefore.has(`${sourceName}:${String(item.source_id || "")}`));
       const plannedUids = planned.map((item) => `${sourceName}:${item.source_id}`);
-      const fingerprint = providerSnapshotRemovalFingerprint(sourceName, plannedUids);
-      if ((snapshotNeedsRemovalReview || providerRemovalReviewRequired(planned.length, storedFamiliesBefore.size)) &&
-          approvedSnapshotFingerprint !== fingerprint) {
+      const aggregateReviewRequired = snapshotNeedsRemovalReview ||
+        providerRemovalReviewRequired(planned.length, storedFamiliesBefore.size);
+      let scopedReview = null;
+      for (const scope of normalized.removal_review_scopes || []) {
+        const priorIds = new Set((scope?.prior_source_ids || []).map((id) => String(id || "")).filter(Boolean));
+        const deletionIds = new Set((scope?.deletion_source_ids || []).map((id) => String(id || "")).filter(Boolean));
+        const scopedPlannedUids = planned
+          .map((item) => String(item.source_id || ""))
+          .filter((id) => deletionIds.has(id) && priorIds.has(id))
+          .map((id) => `${sourceName}:${id}`);
+        if (providerRemovalReviewRequired(scopedPlannedUids.length, priorIds.size)) {
+          scopedReview = {
+            label: clean(scope?.label || "provider workload"),
+            plannedUids: scopedPlannedUids,
+            storedCount: priorIds.size,
+          };
+          break;
+        }
+      }
+      const reviewUids = aggregateReviewRequired ? plannedUids : scopedReview?.plannedUids || [];
+      const fingerprint = providerSnapshotRemovalFingerprint(sourceName, reviewUids);
+      if ((aggregateReviewRequired || scopedReview) && approvedSnapshotFingerprint !== fingerprint) {
+        const denominator = aggregateReviewRequired ? storedFamiliesBefore.size : scopedReview.storedCount;
+        const label = aggregateReviewRequired ? "provider" : scopedReview.label;
         throw new ProviderDeliveryError(
-          `${planned.length} provider document family or families are planned for removal from ` +
-          `${storedFamiliesBefore.size} stored families; review the aggregate scope and re-run with ` +
+          `${reviewUids.length} ${label} document family or families are planned for removal from ` +
+          `${denominator} stored families in that scope; review the aggregate scope and re-run with ` +
           `--approve-removals ${fingerprint}`,
           { code: "provider_removal_review_required" },
         );
