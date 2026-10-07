@@ -3,8 +3,9 @@
 import { createHash } from "node:crypto";
 
 import {
-  createPaginationGuard, providerEnvelope, providerJson, providerSyncResult, renderRecord,
+  createPaginationGuard, providerEnvelope, providerJson, providerSyncResult,
 } from "./provider-sync.mjs";
+import { renderQuickBooksRecord } from "./quickbooks-records.mjs";
 
 export const QBO_DEFAULT_ENTITIES = Object.freeze([
   "Account", "Customer", "Vendor", "Invoice", "Payment", "Bill", "Purchase",
@@ -122,6 +123,7 @@ export async function syncQuickBooksOnline({
   entities = QBO_DEFAULT_ENTITIES,
   minorVersion = null,
   snapshotAt = new Date().toISOString(),
+  now = Date.now,
   expectedCompanyFingerprint = null,
   expectedRealmFingerprint = null,
 } = {}) {
@@ -137,7 +139,12 @@ export async function syncQuickBooksOnline({
   if (!Array.isArray(entities) || !entities.length || entities.some((name) => !ENTITY.test(String(name)))) {
     throw new TypeError("QuickBooks entities must be a non-empty list of safe entity names");
   }
+  const snapshotTime = typeof snapshotAt === "string" ? Date.parse(snapshotAt) : NaN;
+  if (!Number.isFinite(snapshotTime) || new Date(snapshotTime).toISOString() !== snapshotAt || snapshotTime > now()) {
+    throw new TypeError("QuickBooks snapshot timestamp must be a canonical UTC observation no later than now");
+  }
   const documents = [];
+  let detailsOmitted = false;
   for (const entityValue of entities) {
     const entity = String(entityValue);
     const guard = createPaginationGuard("quickbooks", { maxPages: 10_000 });
@@ -158,10 +165,12 @@ export async function syncQuickBooksOnline({
         const sourceId = `${entity.toLowerCase()}:${id}`;
         const reconciliationLines = quickBooksReconciliationLines(entity, row)
           .map((line) => ({ ...line, qbo_company_fingerprint: companyFingerprint }));
-        documents.push(providerEnvelope("quickbooks", sourceId, {
-          title: `${entity}: ${row.DisplayName || row.DocNumber || row.CompanyName || id}`,
-          content: renderRecord(`QuickBooks ${entity}`, row),
-          occurredAt: changed,
+        const rendered = renderQuickBooksRecord(entity, row, snapshotAt);
+        detailsOmitted ||= rendered.detailsOmitted;
+        const document = providerEnvelope("quickbooks", sourceId, {
+          title: rendered.title,
+          content: rendered.content,
+          occurredAt: rendered.balanceField ? snapshotAt : changed,
           uri: `quickbooks://${entity.toLowerCase()}/${encodeURIComponent(id)}`,
           metadata: {
             qbo_company_fingerprint: companyFingerprint,
@@ -169,9 +178,14 @@ export async function syncQuickBooksOnline({
             provider_id: id,
             provider_version: changed,
             snapshot_at: snapshotAt,
+            transaction_date: row.TxnDate || null,
+            balance_snapshot_field: rendered.balanceField,
+            details_omitted: rendered.detailsOmitted,
             reconciliation_lines: reconciliationLines,
           },
-        }));
+        });
+        if (rendered.balanceField) document.date_source = "quickbooks:balance_snapshot";
+        documents.push(document);
       }
       const maxResults = Number(response?.maxResults ?? rows.length);
       if (!rows.length || rows.length < QBO_PAGE_SIZE || maxResults < QBO_PAGE_SIZE) break;
@@ -186,6 +200,8 @@ export async function syncQuickBooksOnline({
       deletionAuthority: "unavailable",
       warnings: [
         "QuickBooks query snapshots are idempotent for present records but do not prove which previously loaded records were deleted.",
+        "QuickBooks search results cover matching individual records. They cannot prove a complete list of receivables, bills or account balances; check the complete list in QuickBooks.",
+        ...(detailsOmitted ? ["Some QuickBooks records have additional details omitted from the bounded readable view; consult those provider records for the complete details."] : []),
       ],
     }),
     qbo_company_fingerprint: companyFingerprint,

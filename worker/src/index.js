@@ -64,6 +64,9 @@ import {
 } from "./lib/query-intent.js";
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
 import { answerSentences } from "./lib/answer-sentences.js";
+import { quickBooksMoneyPolicy } from "./lib/quickbooks-money.js";
+import { quickBooksBalanceAnswer, quickBooksBalanceRequest } from "./lib/quickbooks-balance.js";
+import { quickBooksOpenItemsAnswer } from "./lib/quickbooks-open-items.js";
 import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
   documentMatchesOperativeClaim, documentUsesOperativeValue,
@@ -637,6 +640,11 @@ function hasMatchingAsOfDate(sentence, docs) {
   });
 }
 
+function modelRefusedAnswer(answer) {
+  const firstLine = String(answer || "").split(/\r?\n/, 1)[0].trim();
+  return /^(?:the )?(?:documents|sources|provided (?:documents|sources)) (?:do not|don't|cannot|can't|does not|doesn't) (?:actually )?(?:answer|contain|provide)|^there (?:is|isn't|is not) (?:not )?enough (?:information|evidence)/i.test(firstLine);
+}
+
 /* -------------------------------------------------------------- routes */
 
 async function handleUnified(
@@ -1082,7 +1090,6 @@ async function handleThink(
     : operativeConflict
       ? newestOperativeCandidates
       : newestCurrentEvidence(q, docs, currentOptions);
-  const currentEvidenceNumbers = new Set(currentEvidence.map((doc) => doc.n));
   const operativeCurrentEvidence = selectedOperativeEvidence ? [selectedOperativeEvidence] : newestOperativeCandidates;
   const explicitCurrentIntent = hasExplicitCurrentIntent(q);
   let newerAuthoritativeEvidence = [];
@@ -1140,6 +1147,7 @@ async function handleThink(
     "13. For a named tax-form question, the cited record must match the exact taxpayer or entity, tax year, and filing type. A partner's Schedule K-1 is not the partnership's Form 1065 return, even though its header mentions Form 1065.",
     "14. When a claim rests on reliably dated evidence, weave that date into the sentence naturally, like: per the 2026-07-31 call transcript. A dated claim can be checked; an undated one has to be trusted. Never state a date the documents do not carry.",
     "15. A derived report, generated pack, summary, or agent-written note may accurately restate its sources, but it is not independent confirmation of them. Documents with overlapping recorded source families count as one evidence family. When lineage is unknown, do not claim that multiple documents independently confirm a fact.",
+    "16. A QuickBooks balance snapshot observes the displayed balance at its exact as-of date, even if the transaction or provider last-change date is older. State that as-of date with each account balance and cite that account's own record. For a negative Credit Card balance, say the owner owes the positive amount; retain the minus sign if also quoting the provider balance. Individual retrieved records do not establish a complete list or company-wide total.",
     env.BRAIN_STYLE_RULE || "",
   ]
     .filter(Boolean)
@@ -1150,36 +1158,56 @@ async function handleThink(
   const currentBlock = currentEvidence.length
     ? `\n\nCURRENT-STATUS CHECK:\nThe controlling current evidence for the named subject is document ${currentEvidence.map((doc) => `[${doc.n}]`).join(" and ")}. It may establish only the status it explicitly states. Older documents may explain history, and non-authoritative sources require an exact as-of date.${operativeConflict ? " Equally current owner-confirmed operative sections disagree. Do not choose a current value." : newerAuthoritativeEvidence.length ? " A newer authoritative record discusses this fact without repeating the owner-confirmed operative value and may supersede it. Do not choose a current value until they are reconciled." : operativeCurrentEvidence.length ? ` Document ${operativeCurrentEvidence.map((doc) => `[${doc.n}]`).join(" and ")} contains the newest owner-confirmed operative section for this question. Use only its Operative value as current; every Supersedes value is historical. A newer non-operative record does not replace it.` : ""}`
     : "";
-  const userMsg = `Question: ${q}\n\nDOCUMENTS:\n${docBlock}${currentBlock}\n\nKNOWN GAPS (computed from the data, not inferred, do not contradict these):\n${gapBlock}\n\nWrite the answer. Then, only if one of the gaps above materially affects how much the reader should trust that answer, add a final line starting with "Heads up:" naming that one gap in a single sentence. If none do, omit the Heads up line entirely.`;
+  const moneyPolicy = quickBooksMoneyPolicy({ question: q, docs, candidates: results.map(citationCandidateForResult) });
+  const userMsg = `Question: ${q}\n\nDOCUMENTS:\n${docBlock}${currentBlock}${moneyPolicy ? `\n\n${moneyPolicy.instruction}` : ""}\n\nKNOWN GAPS (computed from the data, not inferred, do not contradict these):\n${gapBlock}\n\n${moneyPolicy ? "Write the answer using only the relevant exact contract lines. Do not write a Heads up line; the application appends the computed gaps after verification." : 'Write the answer. Then, only if one of the gaps above materially affects how much the reader should trust that answer, add a final line starting with "Heads up:" naming that one gap in a single sentence. If none do, omit the Heads up line entirely.'}`;
 
-  let answer = null;
+  // Direct observed amounts need no generated prose. This replaces only the
+  // model calls and free-text temporal inference. Citation and authority
+  // checks remain shared; admission itself binds observation time and money.
+  const balanceAnswer = quickBooksBalanceAnswer({ question: q, results, docs });
+  const openItemsAnswer = balanceAnswer ? null : quickBooksOpenItemsAnswer({
+    question: q, candidates: results.map(citationCandidateForResult), citationCount: docs.length,
+  });
+  const observedAnswer = balanceAnswer || openItemsAnswer;
+  let answer = observedAnswer?.answer || null;
   let answerError = null;
   let model = null;
   let modelDeclaredNoEvidence = false;
   try {
-    const data = await callLLM(env, {
-      model: env.ANSWER_MODEL || "claude-sonnet-4-5",
-      max_tokens: 1000,
-      system,
-      label: "rag-think",
-      timeoutMs: 45_000,
-      messages: [{ role: "user", content: userMsg }],
-    });
-    answer = (data?.content?.[0]?.text || "").trim() || null;
-    model = data?.model || null;
-    if (!answer) approvedDocs = [];
-    if (answer) {
-      const headsUpAt = answer.search(/\n\s*Heads up:/i);
-      if (headsUpAt >= 0) {
-        const body = answer.slice(0, headsUpAt).trim();
-        const headsUp = answer.slice(headsUpAt).trim();
-        answer = /\b(?:not affected|does not affect|doesn't affect|no effect|not materially (?:affect|impact)|but in this case)\b/i.test(headsUp)
-          ? body
-          : `${body}\n\n${headsUp.replace(/\s*\[\d+\]/g, "")}`;
+    let repairInstruction = "";
+    for (let attempt = 0; !observedAnswer && attempt < 2; attempt++) {
+      const data = await callLLM(env, {
+        model: env.ANSWER_MODEL || "claude-sonnet-4-5",
+        max_tokens: 1000,
+        system,
+        label: attempt === 0 ? "rag-think" : "rag-think-repair",
+        timeoutMs: 45_000,
+        messages: [{ role: "user", content: attempt === 0 ? userMsg : `${userMsg}\n\nREGENERATION REQUIREMENTS:\n${repairInstruction}` }],
+      });
+      answer = (data?.content?.[0]?.text || "").trim() || null;
+      model = data?.model || null;
+      if (!answer) approvedDocs = [];
+      if (answer) {
+        const headsUpAt = answer.search(/\n\s*Heads up:/i);
+        if (headsUpAt >= 0) {
+          const body = answer.slice(0, headsUpAt).trim();
+          const headsUp = answer.slice(headsUpAt).trim();
+          answer = /\b(?:not affected|does not affect|doesn't affect|no effect|not materially (?:affect|impact)|but in this case)\b/i.test(headsUp)
+            ? body
+            : `${body}\n\n${headsUp.replace(/\s*\[\d+\]/g, "")}`;
+        }
       }
+      if (attempt !== 0 || !answer || modelRefusedAnswer(answer)) break;
+      const citedNumbers = new Set([...answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])));
+      const cited = docs.filter((doc) => citedNumbers.has(doc.n));
+      if (!cited.length && docs.some((doc) => doc.source_kind === "quickbooks")) {
+        repairInstruction = "The first draft did not cite a supplied document. Regenerate from the same DOCUMENTS. Cite every factual claim inline with its exact supplied document number, like [3]. Do not invent citation numbers or facts. If the documents cannot support a claim, omit it or say the documents do not answer that part.";
+      } else break;
     }
   } catch (e) {
     answerError = answerGenerationError(e);
+    // A failed repair must never return the unverified first draft.
+    answer = null;
     // Retrieval candidates are not approved citations when answer generation
     // itself failed. Keep the candidates in `results` for diagnostics, but do
     // not attach them to a null answer as if the model had cited them.
@@ -1191,9 +1219,7 @@ async function handleThink(
   // it cited, then fail closed before a plausible fact from another entity can
   // be returned as the owner's fact.
   if (answer && !answerError) {
-    const firstAnswerLine = answer.split(/\r?\n/, 1)[0].trim();
-    const alreadyRefused = /^(?:the )?(?:documents|sources|provided (?:documents|sources)) (?:do not|don't|cannot|can't|does not|doesn't) (?:actually )?(?:answer|contain|provide)|^there (?:is|isn't|is not) (?:not )?enough (?:information|evidence)/i.test(firstAnswerLine);
-    if (alreadyRefused) {
+    if (modelRefusedAnswer(answer)) {
       modelDeclaredNoEvidence = true;
       answer = unsupportedAnswer;
       approvedDocs = [];
@@ -1201,13 +1227,14 @@ async function handleThink(
     } else {
       const citedNumbers = new Set([...answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])));
       const citedDocs = docs.filter((doc) => citedNumbers.has(doc.n));
-      if (!citedDocs.length) {
+      if (!citedDocs.length || citedNumbers.size !== citedDocs.length) {
         answer = unsupportedAnswer;
         approvedDocs = [];
-        evidenceGate = { supported: false, complete: false, evidence: [], reason: "draft made claims without document citations" };
+        evidenceGate = { supported: false, complete: false, evidence: [], reason: citedDocs.length
+          ? "draft cited an unavailable document" : "draft made claims without document citations" };
       } else {
         try {
-          const check = await callLLM(env, {
+          const check = observedAnswer ? null : await callLLM(env, {
             model: env.ANSWER_MODEL || "claude-sonnet-4-5",
             max_tokens: 300,
             label: "rag-evidence-gate",
@@ -1239,11 +1266,16 @@ async function handleThink(
           const raw = check?.content?.[0]?.text || "";
           const start = raw.indexOf("{");
           const end = raw.lastIndexOf("}");
-          const verdict = start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
+          const verdict = observedAnswer
+            ? { supported: true, complete: true, evidence: observedAnswer.evidence, reason: balanceAnswer
+              ? "exact observed account balances; full inventory explicitly not established"
+              : "exact observed open items; full inventory and net amounts explicitly not established" }
+            : start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
           const allowed = new Set((Array.isArray(verdict?.evidence) ? verdict.evidence : [])
             .map(Number)
             .filter((n) => citedDocs.some((doc) => doc.n === n)));
           evidenceGate = {
+            ...(observedAnswer ? { method: balanceAnswer ? "quickbooks_observed_balances" : "quickbooks_observed_open_items" } : {}),
             supported: verdict?.supported === true || String(verdict?.supported).toLowerCase() === "true",
             complete: verdict?.complete === true || String(verdict?.complete).toLowerCase() === "true",
             evidence: [...allowed],
@@ -1306,13 +1338,13 @@ async function handleThink(
             evidenceGate.supported = false;
             evidenceGate.reason = "only non-final planning material was cited for a binding legal claim";
           }
-          if (evidenceGate.supported && explicitCurrentIntent) {
+          if (evidenceGate.supported && explicitCurrentIntent && !observedAnswer) {
             const allowedNumbers = new Set(allowedDocs.map((doc) => doc.n));
             const assertions = answerSentences(answer);
             let temporalFailure = null;
             for (const sentence of assertions) {
               if (!PRESENT_STATUS_ASSERTION.test(sentence) || STATUS_UNCERTAINTY.test(sentence)) continue;
-              if (!currentEvidenceNumbers.size) {
+              if (!currentEvidence.length) {
                 temporalFailure = "present-status claim had no reliable-dated evidence for the named subject";
                 break;
               }
@@ -1365,6 +1397,30 @@ async function handleThink(
               evidenceGate.reason = "current answer repeated a superseded value as current";
             }
           }
+          // Current QuickBooks balances have one approval path: exact observed
+          // Account rendering above. The ordinary verifier and temporal rule
+          // cannot certify free-form money tables or separate scale headings.
+          // Keep those generic checks unchanged, then fail closed if admission
+          // was unavailable. A forged snapshot marker cannot earn approval.
+          if (evidenceGate.supported && !observedAnswer && /\bbalances?\b/i.test(q) &&
+              (explicitCurrentIntent || quickBooksBalanceRequest(q) || /\b(?:show|list|what (?:are|is))\b/i.test(q)) &&
+              docs.some((doc) => doc.source_kind === "quickbooks" || doc.date_source === "quickbooks:balance_snapshot")) {
+            evidenceGate.supported = false;
+            evidenceGate.reason = "current QuickBooks balances require deterministic observed Account evidence";
+          }
+          // The money contract only vetoes; it never sets supported/complete.
+          // Observed proposals use the same label boundary and must survive
+          // unchanged. They are never admitted as generated model statements.
+          const draftMoneyPolicy = observedAnswer ? quickBooksMoneyPolicy({
+            docs, candidates: results.map(citationCandidateForResult), observedAnswer,
+          }) : moneyPolicy || quickBooksMoneyPolicy({
+            draft: answer, docs, candidates: results.map(citationCandidateForResult),
+          });
+          const moneyRefusal = draftMoneyPolicy?.refusal(answer);
+          if (moneyRefusal && evidenceGate.supported) {
+            evidenceGate.supported = false;
+            evidenceGate.reason = moneyRefusal;
+          }
           if (!evidenceGate.supported || !allowed.size) {
             answer = unsupportedAnswer;
             approvedDocs = [];
@@ -1378,20 +1434,34 @@ async function handleThink(
             const headsUpAt = answer.search(/\n\s*Heads up:/i);
             const bodyText = headsUpAt >= 0 ? answer.slice(0, headsUpAt) : answer;
             const headsUp = headsUpAt >= 0 ? answer.slice(headsUpAt).trim() : "";
-            // Split as answerSentences splits, so the dot inside a figure like
-            // $1,234.73 never cuts a supported sentence apart.
-            const kept = answerSentences(bodyText)
-              .filter((sentence) => {
+            // Money statements keep their original line boundaries, including
+            // dots within party names. Other answers retain the normal splitter.
+            const kept = draftMoneyPolicy
+              ? draftMoneyPolicy.partialBody(bodyText, allowed).split("\n").filter(Boolean)
+              : answerSentences(bodyText).filter((sentence) => {
                 const cites = [...sentence.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1]));
                 return cites.length > 0 && cites.every((n) => allowed.has(n));
               });
-            if (!kept.length) {
+            const factualBody = kept.join(draftMoneyPolicy ? "\n" : " ");
+            // Validate the actual returned monetary statements, after citation
+            // selection. Never approve a changed subject or a concatenation
+            // that was not bound to the cited native record in the draft.
+            const partialMoneyRefusal = draftMoneyPolicy?.refusal(factualBody);
+            if (!kept.length || partialMoneyRefusal) {
               answer = unsupportedAnswer;
               approvedDocs = [];
-              evidenceGate.reason = evidenceGate.reason || "no sentence survived the citation check";
+              if (draftMoneyPolicy) {
+                evidenceGate.supported = false;
+                evidenceGate.evidence = [];
+              }
+              evidenceGate.reason = partialMoneyRefusal || evidenceGate.reason || "no sentence survived the citation check";
             } else {
-              const missing = String(evidenceGate.reason || "one part of the question").replace(/\.$/, "");
-              answer = `${kept.join(" ")}\n\nNot covered by the documents: ${missing}.${headsUp ? `\n\n${headsUp}` : ""}`;
+              // A verifier explanation is also model prose. It must not append
+              // new money after the QuickBooks draft has passed its veto.
+              const missing = draftMoneyPolicy ? "one or more requested details"
+                : String(evidenceGate.reason || "one part of the question").replace(/\.$/, "");
+              if (draftMoneyPolicy) evidenceGate.reason = missing;
+              answer = `${factualBody}\n\nNot covered by the documents: ${missing}.${headsUp && !draftMoneyPolicy ? `\n\n${headsUp}` : ""}`;
               approvedDocs = citedDocs.filter((doc) => allowed.has(doc.n));
               evidenceGate.partial = true;
             }
@@ -1406,6 +1476,13 @@ async function handleThink(
         }
       }
     }
+  }
+
+  // Computed coverage warnings describe retrieval, not account facts. Append
+  // them only after the exact claims pass the shared gates, and keep `gaps` in
+  // the response. No model gets to dismiss or rewrite these warnings.
+  if ((observedAnswer || moneyPolicy) && evidenceGate?.supported && approvedDocs.length && gaps.length) {
+    answer += `\n\nHeads up: ${gaps.map((gap) => String(gap.detail || "").replace(/\[\d+\]/g, "")).filter(Boolean).join(" ")}`;
   }
 
   // Trust metadata beside the answer, never inside it: the refusal sentence
