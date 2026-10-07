@@ -1374,6 +1374,9 @@ export async function runAll({
   cloudflareAuthProfile,
   onResult,
   googleStorageStatus,
+  googleStorageCheck = tokenStorageStatus,
+  googleStorageReadability = verifyTokenStorageReadable,
+  windowsCredentialCheck = checkWindowsCredentialProtection,
   cloudflareToken,
   requireClaudeCode = true,
   allowCodexForExistingBrain = false,
@@ -1441,9 +1444,11 @@ export async function runAll({
     };
   }
   push(claude);
-  if (process.platform === "win32") push(checkWindowsCredentialProtection());
+  if (platformName === "win32") push(windowsCredentialCheck({ platformName }));
   push(codex);
-  push(checkGoogleConnection(googleStorageStatus));
+  // Storage metadata and readability are separate native credential boundaries.
+  // Isolated callers supply both; owner diagnostics retain the native defaults.
+  push(checkGoogleConnection(googleStorageStatus ?? googleStorageCheck(), googleStorageReadability));
   return out;
 }
 

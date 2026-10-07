@@ -7,8 +7,12 @@ import {
          checkWranglerLogin, checkVectorize, checkVectorizeApi, checkCfToken, CF_TOKEN_SCOPES,
          resolveWranglerProfile, wranglerProfileArgs, wranglerProfileName,
          WRANGLER_AUTH_PROFILE_PATTERN, WRANGLER_PACKAGE, platformCommandInvocation,
-         summarize, runAll, OK, WARN, FAIL } from "../doctor.mjs";
+         summarize, runAll as runDoctorChecks, OK, WARN, FAIL } from "../doctor.mjs";
 import { readFileSync } from "node:fs";
+import { doctorDependencies } from "./fixtures/doctor-cli-dependencies.mjs";
+// A local diagnostic may invoke an installed assistant's credential helper.
+// Every runAll arm starts isolated, including simulated Windows DPAPI checks.
+const runAll = (options) => runDoctorChecks({ ...doctorDependencies(), ...options });
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 220))); if (!c) fail++; };
 const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" : "--env-file=/dev/null";
@@ -343,7 +347,7 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
     JSON.stringify(dpapiCleanupDeferred));
   check("the profile-capable Wrangler release is a blocking requirement and is pinned through npx",
     checkWrangler(healthyTool).status === OK);
-  check("Codex is never fatal", checkCodex().status !== FAIL);
+  check("Codex is never fatal", checkCodex({ runCommand: healthyTool }).status !== FAIL);
   const missingCodex = checkCodex({
     runCommand: () => ({ ok: false, out: "fixture unavailable", missing: true }),
     environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
