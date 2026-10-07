@@ -15026,6 +15026,24 @@ export function declaredUploadSourceFor(manifest, folderPath) {
   return declaredUploadFolderFor(manifest, folderPath)?.source || null;
 }
 
+function ordinaryUploadPathMatches(leftPath, rightPath, platform) {
+  const normalize = (value) => String(value || "")
+    .trim()
+    .replace(/[\\/]+$/u, "")
+    .replace(/\\/gu, "/");
+  const left = normalize(leftPath);
+  const right = normalize(rightPath);
+  if (!left || !right) return false;
+  return platform === "win32"
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
+}
+
+function ordinaryUploadFolderMatches(folders, target, platform) {
+  return folders.filter((folder) => folder?.path &&
+    ordinaryUploadPathMatches(folder.path, target, platform));
+}
+
 /** The complete matching upload declaration, including append-only feed policy. */
 export function declaredUploadFolderFor(manifest, folderPath, options = {}) {
   const target = String(folderPath || "").trim();
@@ -15036,8 +15054,20 @@ export function declaredUploadFolderFor(manifest, folderPath, options = {}) {
   } catch {
     return null;
   }
+  const platform = options.platform || process.platform;
+  // Preserve the historical exact-match contract for ordinary uploads before
+  // applying the deliberately conservative feed identity rules. In
+  // particular, macOS can host a case-sensitive volume where two distinct
+  // declarations differ only by case; folding both would select whichever
+  // source happened to be listed first and expose that source to removals.
+  const exact = ordinaryUploadFolderMatches(folders, target, platform);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) return null;
+
+  const feeds = folders.filter((folder) => folder?.path && folder.feed === true);
+  if (!feeds.length) return null;
   const identityOptions = {
-    platform: options.platform || process.platform,
+    platform,
     ...(options.cwd ? { cwd: options.cwd } : {}),
     ...(options.pathApi ? { pathApi: options.pathApi } : {}),
     ...(options.fs ? { fs: options.fs } : {}),
@@ -15049,8 +15079,7 @@ export function declaredUploadFolderFor(manifest, folderPath, options = {}) {
   } catch {
     return null;
   }
-  for (const folder of folders) {
-    if (!folder?.path) continue;
+  for (const folder of feeds) {
     let declaredIdentity;
     try {
       declaredIdentity = comparableFeedPath(folder.path, identityOptions);
@@ -15061,7 +15090,7 @@ export function declaredUploadFolderFor(manifest, folderPath, options = {}) {
     // Loading a subfolder of a feed cannot downgrade that source to mirror
     // semantics. Ordinary upload folders keep their historical exact-match
     // behavior.
-    if (folder.feed === true && feedPathSameOrInside(target, folder.path, identityOptions)) return folder;
+    if (feedPathSameOrInside(target, folder.path, identityOptions)) return folder;
   }
   return null;
 }
@@ -15110,6 +15139,17 @@ function uploadFeedTopologyConflict(manifest, options = {}) {
   return null;
 }
 
+function uploadFolderIdentityConflict(manifest, folderPath, platform) {
+  const matches = ordinaryUploadFolderMatches(
+    uploadFoldersOf(manifest?.corpora?.upload),
+    folderPath,
+    platform,
+  );
+  return matches.length > 1
+    ? "the requested folder ambiguously matches multiple upload declarations"
+    : null;
+}
+
 function localUploadFeedPolicy(manifest, folderPath, sourceName, options = {}) {
   const identityOptions = {
     platform: options.platform || process.platform,
@@ -15118,7 +15158,8 @@ function localUploadFeedPolicy(manifest, folderPath, sourceName, options = {}) {
   };
   let conflict;
   try {
-    conflict = uploadFeedTopologyConflict(manifest, identityOptions);
+    conflict = uploadFolderIdentityConflict(manifest, folderPath, identityOptions.platform) ||
+      uploadFeedTopologyConflict(manifest, identityOptions);
   } catch (error) {
     return {
       outcome: "refused",

@@ -58,7 +58,7 @@ function directoryFs({ linkPaths = [], realpaths = new Map(), platform = "darwin
   };
 }
 
-async function ingestDecision(m, manifestPath, path, source) {
+async function ingestDecision(m, manifestPath, path, source, options = {}) {
   const calls = { locks: 0, walks: 0, diffs: 0, removals: [], decisions: [] };
   const state = {
     version: 1,
@@ -73,6 +73,8 @@ async function ingestDecision(m, manifestPath, path, source) {
       source,
       "dry-run": true,
     }, {
+      platform: options.platform,
+      feedFs: options.feedFs,
       onFeedIngestDecision: (decision) => calls.decisions.push(decision),
       withSourceIngestLock: async (_settings, task) => {
         calls.locks += 1;
@@ -102,6 +104,114 @@ async function ingestDecision(m, manifestPath, path, source) {
   }
   return { calls, error };
 }
+
+test("LFR-07: case-distinct ordinary upload folders retain their exact sources", async () => {
+  const root = mkdtempSync(join(sandbox, "lfr-07-"));
+  const lower = join(process.cwd(), "docs");
+  const upper = join(process.cwd(), "test");
+  const ordinary = join(process.cwd(), "operations");
+  const manifestPath = join(root, "brain.manifest.json");
+  writeFileSync(manifestPath, "{}\n");
+
+  const canonical = new Map([
+    [lower, "/synthetic/records"],
+    [upper, "/synthetic/RECORDS"],
+    [ordinary, "/synthetic/archive"],
+  ]);
+  const io = directoryFs({ realpaths: canonical, platform: "darwin" });
+  const arms = [
+    {
+      folders: [
+        { path: lower, source: "lower_source" },
+        { path: upper, source: "upper_source" },
+      ],
+      path: upper,
+      source: "upper_source",
+    },
+    {
+      folders: [
+        { path: upper, source: "upper_source" },
+        { path: lower, source: "lower_source" },
+      ],
+      path: lower,
+      source: "lower_source",
+    },
+  ];
+
+  for (const arm of arms) {
+    for (const explicit of [false, true]) {
+      const result = await ingestDecision(
+        manifest({ enabled: true, folders: arm.folders }),
+        manifestPath,
+        arm.path,
+        explicit ? arm.source : undefined,
+        { platform: "darwin", feedFs: io },
+      );
+      assert.ifError(result.error);
+      assert.equal(result.calls.locks, 1);
+      assert.equal(result.calls.walks, 1);
+      assert.equal(result.calls.diffs, 1, "the ordinary mirror reaches its non-empty removal decision");
+      assert.deepEqual(result.calls.removals, [[], [`${arm.source}:gone.txt`]]);
+      assert.deepEqual(result.calls.decisions, [{ outcome: "mirror", source: arm.source, reason: null }]);
+    }
+
+    const wrongSource = arm.folders.find((folder) => folder.source !== arm.source).source;
+    const refused = await ingestDecision(
+      manifest({ enabled: true, folders: arm.folders }),
+      manifestPath,
+      arm.path,
+      wrongSource,
+      { platform: "darwin", feedFs: io },
+    );
+    assert.match(refused.error?.message || "", /manifest files|source/i);
+    assert.deepEqual(refused.calls.decisions, [{ outcome: "mirror", source: wrongSource, reason: null }]);
+    assert.equal(refused.calls.locks, 0);
+    assert.equal(refused.calls.walks, 0);
+    assert.equal(refused.calls.diffs, 0);
+    assert.deepEqual(refused.calls.removals, []);
+  }
+
+  const ambiguous = await ingestDecision(
+    manifest({
+      enabled: true,
+      folders: [
+        { path: lower, source: "first_source" },
+        { path: `${lower}/`, source: "second_source" },
+      ],
+    }),
+    manifestPath,
+    lower,
+    undefined,
+    { platform: "darwin", feedFs: io },
+  );
+  assert.match(ambiguous.error?.message || "", /multiple|ambiguous/i);
+  assert.equal(ambiguous.calls.decisions.length, 1, "the ambiguous-source refusal reaches the policy decision");
+  assert.equal(ambiguous.calls.decisions[0].outcome, "refused");
+  assert.equal(ambiguous.calls.locks, 0);
+  assert.equal(ambiguous.calls.walks, 0);
+  assert.equal(ambiguous.calls.diffs, 0);
+  assert.deepEqual(ambiguous.calls.removals, []);
+
+  const control = await ingestDecision(
+    manifest({
+      enabled: true,
+      folders: [
+        { path: lower, source: "lower_source" },
+        { path: ordinary, source: "ordinary_source" },
+      ],
+    }),
+    manifestPath,
+    ordinary,
+    undefined,
+    { platform: "darwin", feedFs: io },
+  );
+  assert.ifError(control.error);
+  assert.equal(control.calls.locks, 1);
+  assert.equal(control.calls.walks, 1);
+  assert.equal(control.calls.diffs, 1);
+  assert.deepEqual(control.calls.removals, [[], ["ordinary_source:gone.txt"]]);
+  assert.deepEqual(control.calls.decisions, [{ outcome: "mirror", source: "ordinary_source", reason: null }]);
+});
 
 test("probe A: equivalent feed paths stay append-only and an ordinary mirror stays unchanged", async () => {
   const root = mkdtempSync(join(sandbox, "probe-a-"));
