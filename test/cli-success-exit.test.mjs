@@ -64,7 +64,7 @@ function runArm(mode, extraEnv = {}) {
 
 try {
   const results = [];
-  for (const mode of ["control", "update", "update-warning", "deploy", "deploy-warning"]) {
+  for (const mode of ["control", "update", "update-warning", "update-daily-attention", "deploy", "deploy-warning"]) {
     results.push(await runArm(mode));
   }
   const [control, ...commandArms] = results;
@@ -94,6 +94,13 @@ try {
     assert.equal(arm.code, 0, JSON.stringify(arm));
     assert.match(arm.stdout, new RegExp(`DECISION ${arm.mode} completed opened=true prompt_open=false`));
   }
+
+  const dailyAttention = commandArms.find((arm) => arm.mode === "update-daily-attention");
+  assert.equal(dailyAttention.code, 0, "a verified Brain update with retained daily recovery uses the documented success exit");
+  assert.match(dailyAttention.stdout, /Daily imports.*need attention/i,
+    "the command boundary prints a visible daily-import attention line");
+  assert.match(dailyAttention.stdout, /DECISION daily-attention recovery=true enabled=false/,
+    "the CLI arm reached the retained-recovery decision instead of silently enabling imports");
 
   assert.notEqual(
     control.stdout.includes("opened=true"),

@@ -13,6 +13,30 @@ offered as a customer update; its entries below ship for the first time in
 0.4.9, and its identity is retired so its evidence cannot be confused with
 this changed candidate.
 
+- **Daily imports now have one owned Windows and macOS contract.** `brain daily
+  on|off|status <manifest>` derives every source from your own manifest instead
+  of a fixed Google recipe, keeps Worker, push, capture, snapshot, disabled,
+  and existing faster schedules from being duplicated, and refuses unsupported
+  configured sources. The native task is different for every Brain and user,
+  contains no key, and must read back exactly before success. Updates pause it
+  while the shared load/update lock is held and restore a recomputed plan only
+  after the Brain is active, query-ready, and has no queued search updates.
+  Task Scheduler and launchd have no atomic compare-and-replace or
+  compare-and-delete operation. The installer makes its final ownership read
+  the last native call before each mutation, but another process running as the
+  same user can still replace the exactly named task in that operating-system
+  gap. If the Brain update passes but daily schedule recovery does not, the
+  command exits successfully with a visible `Daily imports need attention`
+  line, keeps the recovery receipt, and leaves imports paused for the next
+  verified update.
+  Turning daily imports off saves that choice in the manifest, so a later
+  update does not turn them back on. An interrupted update keeps a private
+  recovery receipt and keeps imports disabled across restart until recovery is
+  verified.
+  Status prints one line per source with its owner and last successful run. To
+  check after updating: run `brain daily status <manifest>` and confirm every
+  source names the expected owner and a truthful last-success time or `never`.
+
 - **A Gmail sync can now move forward after a recoverable document storage
   failure without losing that message.** The exact message is saved for retry
   before the Gmail history marker advances, while the run still reports the

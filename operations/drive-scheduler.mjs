@@ -1118,6 +1118,71 @@ export function statusScheduler(manifestPath, options = {}) {
 
 export const statusDriveScheduler = statusScheduler;
 
+/**
+ * Pause one verified installer-owned LaunchAgent without deleting its plist.
+ * Update holds the manifest lifecycle lease before calling this, so a running
+ * child indicates an older/uncoordinated owner and must stop the update.
+ */
+export function pauseScheduler(manifestPath, options = {}) {
+  const status = statusScheduler(manifestPath, options);
+  if (!status.installed) {
+    return Object.freeze({ exists: false, wasLoaded: false, path: status.plistPath, service: status.service });
+  }
+  if (!status.definitionMatches || status.scheduleError) {
+    throw new Error(`the owned ${status.spec.schedulerNoun} definition does not match this manifest; update cannot pause it safely`);
+  }
+  if (status.running) {
+    throw new Error(`the owned ${status.spec.schedulerNoun} is still running; update did not begin`);
+  }
+  const serialized = readFileSync(status.plistPath, "utf8");
+  const launchctl = options.launchctl || defaultLaunchctl;
+  const disabled = launchctl(["disable", status.service]);
+  if (disabled?.status !== 0) throw launchctlError(`persistently pausing the ${status.spec.schedulerNoun}`, disabled);
+  if (status.loaded) {
+    const stopped = launchctl(["bootout", status.service]);
+    if (stopped?.status !== 0) {
+      try { launchctl(["enable", status.service]); } catch {}
+      throw launchctlError(`pausing the ${status.spec.schedulerNoun}`, stopped);
+    }
+  }
+  const readback = statusScheduler(manifestPath, options);
+  if (!readback.installed || readback.loaded || !readback.definitionMatches ||
+      readFileSync(readback.plistPath, "utf8") !== serialized) {
+    throw new Error(`the ${status.spec.schedulerNoun} pause did not pass exact readback`);
+  }
+  return Object.freeze({
+    exists: true,
+    wasLoaded: status.loaded,
+    path: status.plistPath,
+    service: status.service,
+    serialized,
+  });
+}
+
+export function restoreScheduler(manifestPath, snapshot, options = {}) {
+  if (!snapshot?.exists) return Object.freeze({ restored: false, verified: true });
+  const status = statusScheduler(manifestPath, options);
+  if (!status.installed || readFileSync(status.plistPath, "utf8") !== snapshot.serialized) {
+    throw new Error(`the owned ${status.spec.schedulerNoun} changed while update held it paused`);
+  }
+  const launchctl = options.launchctl || defaultLaunchctl;
+  const enabled = launchctl(["enable", status.service]);
+  if (enabled?.status !== 0) throw launchctlError(`persistently restoring the ${status.spec.schedulerNoun}`, enabled);
+  if (snapshot.wasLoaded && !status.loaded) {
+    const restored = launchctl(["bootstrap", status.domain, status.plistPath]);
+    if (restored?.status !== 0) throw launchctlError(`restoring the ${status.spec.schedulerNoun}`, restored);
+  }
+  const readback = statusScheduler(manifestPath, options);
+  if (!readback.installed || readback.loaded !== snapshot.wasLoaded || !readback.definitionMatches ||
+      readFileSync(readback.plistPath, "utf8") !== snapshot.serialized) {
+    throw new Error(`the ${status.spec.schedulerNoun} restore did not pass exact readback`);
+  }
+  return Object.freeze({ restored: true, verified: true, loaded: readback.loaded });
+}
+
+export const pauseDriveScheduler = pauseScheduler;
+export const restoreDriveScheduler = restoreScheduler;
+
 /** Probe the native advisory lock without starting an ingest child. */
 export function schedulerLockHeld(plan, options = {}) {
   if (!plan?.lockPath || !existsSync(plan.lockPath)) return false;

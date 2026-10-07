@@ -504,7 +504,31 @@ OAuth from its chosen store, takes an owner-only lock, and rotates owner-only
 logs after the lock-holding ingest exits. The iMessage capture lane and the
 watched local folder lane are the same machinery with a different connector
 spec, so all three share that hardening rather than each re-deriving it.
-Windows and Linux do not yet have an equivalent unattended source scheduler.
+The manifest-wide daily scheduler is native on Windows and macOS. Its versioned
+identity hashes the canonical Brain resource identity with the local user
+principal, and its receipt binds manifest-path, manifest-content, source-plan,
+native-definition, cadence, and last-verified-state hashes. It derives every
+source from `planLoad`; older connector-specific LaunchAgents remain registered
+higher-frequency owners rather than duplicate daily pulls. Linux still has no
+native product scheduler.
+
+Updates, whole-manifest loads, direct source ingest, and scheduled daily runs
+share an exclusive lifecycle lease keyed by canonical Brain resource identity
+in a machine-shared lock root. Manifest aliases and operating-system users
+therefore reach the same writer boundary. Lock order is lifecycle lease first,
+then the source lease, then any shared provider credential-record lease. A
+scheduled collision records a deferred outcome; interactive mutations fail
+closed. Update durably records the verified prior schedule before persistently
+disabling it, and reconciles from the updated manifest only after version
+agreement, active query-ready health, queue zero, and exact schedule readback.
+The per-user transaction retains daily and legacy scheduler snapshots. A
+content-free fence keyed by canonical Brain identity is stored beside the
+machine-wide lifecycle boundary, so every local user and manifest alias fails
+closed while recovery is unresolved. Writers inspect that fence after taking
+the lease. An interrupted update leaves the receipt, fence, and disabled state
+in place; a retry uses the saved definition as its authorization even after a
+manifest fingerprint change, and clears the fence only after current health
+proof and exact reconciliation.
 
 ## D1, FTS5, Vectorize, and the outbox
 

@@ -161,10 +161,13 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
   const mode = Number(opened.mode) & 0o7777;
   const intendedBytes = Buffer.from(`${JSON.stringify(intendedManifest, null, 2)}\n`, "utf8");
   const stamp = folderOffTimestamp(now);
-  const backupPath = `${absolute}.before-folder-off-${stamp}`;
+  const backupLabel = typeof options.backupLabel === "string" && /^[a-z][a-z0-9-]{1,40}$/u.test(options.backupLabel)
+    ? options.backupLabel
+    : "folder-off";
+  const backupPath = `${absolute}.before-${backupLabel}-${stamp}`;
   const nonce = (options.randomBytes || randomBytes)(12).toString("hex");
-  const temporaryPath = `${directory}/.${basename(absolute)}.folder-off-${nonce}.tmp`;
-  const rollbackPath = `${directory}/.${basename(absolute)}.folder-off-${nonce}.rollback.tmp`;
+  const temporaryPath = `${directory}/.${basename(absolute)}.${backupLabel}-${nonce}.tmp`;
+  const rollbackPath = `${directory}/.${basename(absolute)}.${backupLabel}-${nonce}.rollback.tmp`;
   const syncDirectory = options.syncDirectory ||
     ((path) => defaultSyncDirectory(path, io, filesystemPlatform));
   let backupCreated = false;

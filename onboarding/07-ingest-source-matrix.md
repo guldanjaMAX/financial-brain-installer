@@ -1,5 +1,19 @@
 # What your brain can read, and what it cannot
 
+Daily ownership is derived from the owner's manifest, never from a product
+source list. `brain daily status <manifest>` and
+`brain schedule <manifest> --status --all-configured --json` classify every
+configured row before scheduling it. Machine-pull rows belong to the one
+per-Brain/per-user native daily task unless an installed faster connector
+scheduler already owns them. Bank feed and custom API remain Worker cron;
+webhook rows remain push; message capture remains resident capture; one-time
+imports remain snapshots; disabled rows remain unscheduled. An enabled source
+with no supported descriptor fails the plan visibly.
+
+Every status row reports its local or server owner beside the remote
+contract-v3 `last_successful_run_at`. A green native task without an advanced
+source receipt is not a successful refresh.
+
 The honest version. If a source is not on the built list below, assume it is **not connected**, and do not let anyone, including me, imply otherwise in a proposal.
 
 I would rather lose a sale to an honest table than win one and spend week three explaining.
@@ -26,7 +40,7 @@ in ADR 003; they are not claimed as current connector behavior.
 | Google Drive | **Built.** One real unbounded walk has partial real-data proof; the full add, edit, resume, delete, and scheduler lifecycle is not yet accepted |
 | Direct upload and API push | **Built.** Live-service smoke proof exists with a synthetic corpus; no authorized real-document receipt is accepted yet |
 | A custom read-only business API | **Built, locally proven only.** The owner's Worker fetches declared HTTPS JSON endpoints, stages one durable full-snapshot job, and advances one bounded slice per cron tick. Its bearer secret must use the dedicated `CUSTOM_API_TOKEN_` namespace; deploy, connect, and runtime fetch refuse every other binding name. Compact rows keep exact hashes, historical missing rows are excluded from current totals, and readable documents include monthly cross-store plus per-store rollups. Missing revenue streams are named at the store-month boundary in both layouts rather than rendered as zero. Inventory and cost search contains only the current snapshot; stored rows keep prior values as effective-dated history, with no daily history documents. A partial refusal carries and visibly marks the last verified value without advancing its last-seen time, while source status says ready with warnings and reports the count. The identical-response shortcut proves current row chunks and every mapped live document; missing documents regenerate, and status counts exclude staged or superseded versions. Saved state is reported separately from source-specific empty-outbox meaning readiness. Windows defaults to clipboard key entry with clearing and secret-name-only verification; macOS supports the same mode explicitly and retains the hidden prompt by default. Masked Cloudflare dashboard entry remains the fallback. `brain load` states this server-managed source as a skip; preview or run it with `brain custom-api`. No provider endpoint or deployed Brain has crossed this build, and rows do not feed the financial ledger or map yet |
-| A watched folder on your own machine | **Built, Mac-only for the schedule.** Name one folder in your manifest and it reloads itself on a schedule: new files load, edited files reload, deleted files are removed. This is what makes "drop it in a folder you already ingest" true for a folder that is not inside Google Drive. On Windows and Linux the same load runs by hand. Real multi-tick sleep, wake, and deletion behavior is not yet field-proven |
+| A watched folder on your own machine | **Built.** Name one folder in your manifest and it reloads itself: the existing faster per-source LaunchAgent owns it on macOS when installed, otherwise the per-Brain daily task can own it on macOS or Windows. New files load, edited files reload, and deleted files use the guarded removal plan. Linux remains manual. Real multi-tick sleep, wake, and deletion behavior is not yet field-proven |
 | Gmail | Built: `brain connect google --scopes gmail`, then `brain ingest --from gmail`. Incremental via historyId; bulk mail excluded by default. Not yet run against a real mailbox |
 | Any other mailbox, over IMAP (Yahoo, Fastmail, iCloud, a host) | Built: `brain connect imap`, then `brain ingest --from imap`. Read-only, so nothing is marked read. Inbox and Sent by default; Junk, Trash and Drafts skipped; **an Archive folder is NOT read**, and a folder whose role cannot be identified is not read either. Every folder is named in the run with the true reason it was or was not read. Incremental via UIDVALIDITY plus a per-folder UID watermark. Bulk mail is filtered locally on headers, which is weaker than Gmail's. **Never yet run against a real mailbox** |
 | Google Calendar | Built and wired: `brain connect google --scopes calendar`, then `brain ingest --from calendar`. Incremental via Google's own sync token; cancelled events are removed, not left behind. Not yet run against a real calendar |
@@ -87,13 +101,13 @@ Connected with **read-only** access. It can look at documents. It cannot change,
 
 **When a file disappears from Drive**, the matching material is removed from your index. That removal is guarded: if the run could not see all of your Drive (a permissions blip or a network failure mid-walk), it cannot complete the comparison. If one cleanup plan is more than 100 documents or more than 10% of the stored Drive corpus, it stops before deleting anything or advancing its cursor. The owner sees aggregate reasons and an opaque plan fingerprint, never file names or IDs, and must approve that exact plan on the rerun. A stale document costs nothing. A wrongly emptied index costs everything.
 
-**One honest note about how this runs.** Drive is a standard, packaged connector inside the installer, not a private script. You connect your own Google account once, load it with the normal ingest command, and on macOS the installer can schedule unattended refreshes. The Google sign-in still requires the account owner, and the packaged unattended scheduler is not built for Windows or Linux yet.
+**One honest note about how this runs.** Drive is a standard, packaged connector inside the installer, not a private script. You connect your own Google account once and load it with the normal ingest command. The existing faster Drive LaunchAgent remains the owner when it is installed on macOS; otherwise the manifest-wide daily task can own Drive on macOS or Windows. The Google sign-in still requires the account owner. Linux remains manual.
 
 ### Gmail and email
 
 Built as a connector. Connect your Google account with the Gmail scope, then run the normal Gmail ingest command. Later runs are incremental through Gmail's history cursor, and bulk mail is excluded by default.
 
-**The honest production boundary:** the connector has passed the product test suite but has not yet completed a real-mailbox production run. The packaged unattended scheduler currently covers Drive and iMessage, not Gmail, so Gmail refresh is manual until it is extended. Treat Gmail as built but not yet production-proven.
+**The honest production boundary:** the connector has passed the product test suite but has not yet completed a real-mailbox production run. The manifest-wide daily task can own Gmail on Windows or macOS when the connection is present. Treat Gmail as built but not yet production-proven.
 
 #### If you are not on Gmail
 
@@ -125,7 +139,7 @@ Three limits worth knowing before you rely on it:
    folders remain outside that deletion proof.
 3. **Very short messages are dropped**, the same floor every document clears. A one-line "approved, go ahead" is usually below it, which matters more for correspondence than for documents.
 
-**The honest production boundary:** this connector has passed the product test suite, driven end to end against a scripted IMAP server. **It has never been run against a real mailbox**, on Yahoo or anywhere else, so provider-specific behavior is documented from the specification rather than observed. The packaged unattended scheduler does not cover it, so refresh is manual, exactly as with Gmail.
+**The honest production boundary:** this connector has passed the product test suite, driven end to end against a scripted IMAP server. **It has never been run against a real mailbox**, on Yahoo or anywhere else, so provider-specific behavior is documented from the specification rather than observed. The manifest-wide daily task can own IMAP on Windows or macOS when the connection is present.
 
 Shared mailboxes and group threads contain messages from people who never agreed to be indexed. Your material stays in your own accounts throughout, which handles most of the exposure, but a business indexing a shared inbox should have a written note about it. Cheap to write now, expensive to retrofit after an employee asks.
 
@@ -351,7 +365,7 @@ The load is the named source `iphone-backup` (or whatever you pass to `--source`
 
 ### A watched folder on your own machine
 
-**Built. The schedule is Mac-only; the load itself runs anywhere.**
+**Built. The load runs anywhere; the owned daily schedule runs on Windows and macOS.**
 
 Several parts of this document tell you to drop a file into "a folder you already ingest": a WhatsApp export, an SMS backup, a Google Voice takeout, a saved meeting transcript, a mail archive. That sentence used to be true only if the folder happened to live inside Google Drive, because Drive was the only source that refreshed itself. Anywhere else, "already ingest" quietly meant "remember to run a command by hand, forever" — and the day you stop, your brain stops matching your world while still answering confidently from what it has.
 
@@ -380,7 +394,7 @@ brain schedule <manifest> --remove --folder     remove it, keep its logs
 
 **The honest limits:**
 
-- **The schedule needs macOS**, because it installs as a per-user LaunchAgent. On Windows and Linux the same load runs, you just start it yourself: `brain ingest <manifest> --path <folder> --source documents`.
+- **The existing faster folder schedule needs macOS**, because it is a per-source LaunchAgent. The manifest-wide daily task can own the same folder on Windows or macOS without duplicating that faster job. On Linux the same load is manual: `brain ingest <manifest> --path <folder> --source documents`.
 - **It is hourly by default**, not instant. It is a place to drop exports, not a live feed.
 - **The path must be absolute.** A scheduled job does not run from your shell, so a relative path would point somewhere neither of us intended.
 - **The folder must exist when you install the schedule.** Pointing at a folder that is not there would load nothing and report success forever, so it is refused at install time instead.

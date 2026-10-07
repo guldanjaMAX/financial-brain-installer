@@ -914,8 +914,40 @@
     },
     "operations": {
       "type": "object",
-      "description": "Machine-local unattended operations. ingest_cron is wired through the macOS Drive LaunchAgent scheduler. Health reports and webhooks remain descriptive until their commands are implemented.",
+      "description": "Machine-local unattended operations. daily_refresh is the cross-platform manifest-wide Windows/macOS contract; connector-specific cron fields retain their existing higher-frequency macOS LaunchAgents. Health reports and webhooks remain descriptive until their commands are implemented.",
       "properties": {
+        "daily_refresh": {
+          "type": "object",
+          "description": "One manifest-derived per-Brain, per-user daily import definition for Windows Task Scheduler or a macOS LaunchAgent. When enabled is omitted, the installer turns it on only when the current manifest has at least one connected machine-pull source. Server cron, push, resident-capture, snapshot, disabled, and unsupported sources are reported but never duplicated by this task.",
+          "properties": {
+            "_comment": {
+              "type": "string"
+            },
+            "enabled": {
+              "type": "boolean",
+              "description": "Explicit owner choice. Omit to use the conditional default: on only when at least one eligible machine-pull source exists."
+            },
+            "cron": {
+              "type": "string",
+              "pattern": "^[0-9]{1,2} [0-9]{1,2} \\* \\* \\*$",
+              "default": "0 9 * * *",
+              "description": "One daily numeric minute/hour schedule. The manifest timezone must match the machine timezone before installation."
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1,
+              "description": "IANA timezone for the daily schedule. Defaults to client.timezone and must match the machine timezone."
+            },
+            "max_runtime_minutes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 720,
+              "default": 45,
+              "description": "Execution budget for one sequential daily refresh. Windows also applies the same native Task Scheduler cap."
+            }
+          },
+          "additionalProperties": false
+        },
         "ingest_cron": {
           "type": "string",
           "minLength": 9,

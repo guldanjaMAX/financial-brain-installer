@@ -414,6 +414,11 @@
     }
   },
   "operations": {
+    "daily_refresh": {
+      "_comment": "One owned per-Brain, per-user daily task is derived from every configured source. Omit enabled for the conditional default: it turns on only after at least one connected machine-pull source exists. Worker cron, push, resident capture, snapshots, disabled sources, and existing faster schedulers are reported without duplication. The timezone defaults to client.timezone and must match this computer.",
+      "cron": "0 9 * * *",
+      "max_runtime_minutes": 45
+    },
     "_ingest_cron_comment": [
       "On macOS this installs as a per-user LaunchAgent and runs Google Drive",
       "normally incrementally, with periodic and policy-triggered full comparisons.",

@@ -14,7 +14,9 @@ import { recordSupportEvent } from "../support-journal.mjs";
 import {
   buildSchedulerPlan,
   installScheduler,
+  pauseScheduler,
   removeScheduler,
+  restoreScheduler,
   runScheduledIngest,
   safeIngestEnvironment,
   statusScheduler,
@@ -108,6 +110,10 @@ export const statusProviderScheduler = (provider, manifestPath, options = {}) =>
   statusScheduler(manifestPath, optionsFor(provider, options));
 export const removeProviderScheduler = (provider, manifestPath, options = {}) =>
   removeScheduler(manifestPath, optionsFor(provider, options));
+export const pauseProviderScheduler = (provider, manifestPath, options = {}) =>
+  pauseScheduler(manifestPath, optionsFor(provider, options));
+export const restoreProviderScheduler = (provider, manifestPath, snapshot, options = {}) =>
+  restoreScheduler(manifestPath, snapshot, optionsFor(provider, options));
 export const runProviderScheduledIngest = (provider, manifestPath, options = {}) =>
   runScheduledIngest(manifestPath, optionsFor(provider, options));
 
