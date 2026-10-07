@@ -146,6 +146,25 @@ export function bankFeedConfig(env) {
   const environment = env.BANK_FEED_ENV === "production" ? "production" : "sandbox";
   const profile = bankFeedProfile(env, environment);
   const apiBase = profile.apiBase;
+  if (profile.provider === "simplefin") {
+    if (!bankAccessWrappingKeyConfigured(env)) {
+      throw new FeedConfigError(
+        `the bank feed is not configured on this brain (${BANK_ACCESS_WRAPPING_KEY_SECRET} not set). ` +
+        "Run the reviewed bank connection setup first.",
+      );
+    }
+    return {
+      clientId: null,
+      secret: null,
+      environment: "production",
+      provider: "simplefin",
+      apiBase: null,
+      linkSdkUrl: null,
+      linkGlobal: null,
+      displayName: env.BANK_FEED_DISPLAY_NAME || env.BRAIN_NAME || "this brain",
+      countryCodes: [],
+    };
+  }
   const missing = [
     !clientId && "BANK_FEED_CLIENT_ID",
     !secret && "BANK_FEED_SECRET",
@@ -193,6 +212,7 @@ export function bankFeedConfig(env) {
 export function bankFeedEnabled(env) {
   const environment = env.BANK_FEED_ENV === "production" ? "production" : "sandbox";
   const profile = bankFeedProfile(env, environment);
+  if (profile.provider === "simplefin") return bankAccessWrappingKeyConfigured(env);
   return Boolean(
     env.BANK_FEED_CLIENT_ID &&
     env.BANK_FEED_SECRET &&
@@ -1216,6 +1236,10 @@ export async function runFeedSlice(env, { maxItems = 3, maxPages = MAX_PAGES_PER
     const { runPlaidFeedSlice } = await import("./plaid-bank-feed.js");
     return runPlaidFeedSlice(env, { maxItems, fetchImpl, now });
   }
+  if (bankFeedConfig(env).provider === "simplefin") {
+    const { runSimpleFinMaintenance } = await import("./simplefin-bank-feed.js");
+    return runSimpleFinMaintenance(env, { maxItems, maxRequestsPerItem: maxPages, fetchImpl, now });
+  }
   const { tenantId } = tenantReference(env);
   const stamp = now || new Date().toISOString();
   const pending = (await env.DB.prepare(
@@ -1296,6 +1320,10 @@ export async function feedStatus(env) {
     const { plaidFeedStatus } = await import("./plaid-bank-feed.js");
     return plaidFeedStatus(env);
   }
+  if (env.BANK_FEED_PROVIDER === "simplefin") {
+    const { simpleFinFeedStatus } = await import("./simplefin-bank-feed.js");
+    return simpleFinFeedStatus(env);
+  }
   const { tenantId } = tenantReference(env);
   const items = (await env.DB.prepare(
     `SELECT i.item_ref, i.institution_label, i.environment, i.status, i.status_detail, i.key_version,
@@ -1346,6 +1374,10 @@ export async function disconnectItem(env, itemRef, { fetchImpl = fetch, now = nu
   if (bankFeedConfig(env).provider === "plaid") {
     const { disconnectPlaidItem } = await import("./plaid-bank-feed.js");
     return disconnectPlaidItem(env, itemRef, { fetchImpl, now });
+  }
+  if (bankFeedConfig(env).provider === "simplefin") {
+    const { disconnectSimpleFinConnection } = await import("./simplefin-bank-feed.js");
+    return disconnectSimpleFinConnection(env, itemRef, { now });
   }
   const { tenantId } = tenantReference(env);
   const item = await loadItem(env, tenantId, itemRef);
@@ -2109,7 +2141,10 @@ export async function handleBankFeed(env, request, url, path, ctx) {
       } catch {
         ownerEntityCount = null;
       }
-      const { html, csp } = connectPageHtml(bankFeedConfig(env), { ownerEntityCount });
+      const runtime = bankFeedConfig(env);
+      const { html, csp } = runtime.provider === "simplefin"
+        ? (await import("./simplefin-bank-feed.js")).simpleFinConnectPageHtml(runtime, { ownerEntityCount })
+        : connectPageHtml(runtime, { ownerEntityCount });
       return new Response(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
@@ -2122,11 +2157,31 @@ export async function handleBankFeed(env, request, url, path, ctx) {
       });
     }
 
+    if (path === "/api/bank-feed/simplefin/claim" && request.method === "POST") {
+      const access = await ownerAccess();
+      if (!access.authorised) return privateNoStore(ownerRefusal(access));
+      if (bankFeedConfig(env).provider !== "simplefin") {
+        return ownerJson({ error: "not found", code: "simplefin_provider_not_selected" }, 404);
+      }
+      const body = await readJson(request);
+      const { claimSimpleFinAccess } = await import("./simplefin-bank-feed.js");
+      const result = await claimSimpleFinAccess(env, {
+        requestId: body.request_id,
+        setupToken: body.setup_token,
+        fetchImpl: ctx?.bankFeedFetchImpl || fetch,
+        now: ctx?.bankFeedNow || null,
+      });
+      return ownerJson(result.body, result.status);
+    }
+
     if (path === "/api/bank-feed/link-token" && request.method === "POST") {
       const access = await ownerAccess();
       if (!access.authorised) return ownerRefusal(access);
       const body = await readJson(request);
       const runtime = bankFeedConfig(env);
+      if (runtime.provider === "simplefin") {
+        return ownerJson({ error: "invalid_request", code: "simplefin_claim_required" }, 400);
+      }
       if (runtime.provider === "plaid" &&
           (typeof body.request_id !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(body.request_id))) {
         return jsonResponse({
@@ -2146,6 +2201,9 @@ export async function handleBankFeed(env, request, url, path, ctx) {
     if (path === "/api/bank-feed/exchange" && request.method === "POST") {
       const access = await ownerAccess();
       if (!access.authorised) return ownerRefusal(access);
+      if (bankFeedConfig(env).provider === "simplefin") {
+        return ownerJson({ error: "invalid_request", code: "simplefin_claim_required" }, 400);
+      }
       const body = await readJson(request);
       const result = await exchangePublicToken(env, {
         sessionRef: body.session_ref || null,
@@ -2175,6 +2233,10 @@ export async function handleBankFeed(env, request, url, path, ctx) {
       const access = await ownerAccess();
       if (!access.authorised) return privateNoStore(ownerRefusal(access));
       const runtime = bankFeedConfig(env);
+      if (runtime.provider === "simplefin") {
+        const { simpleFinOwnerAccountStatus } = await import("./simplefin-bank-feed.js");
+        return ownerJson(await simpleFinOwnerAccountStatus(env));
+      }
       if (runtime.provider !== "plaid") {
         return ownerJson({
           error: "unavailable",
@@ -2191,6 +2253,12 @@ export async function handleBankFeed(env, request, url, path, ctx) {
       const access = await ownerAccess();
       if (!access.authorised) return privateNoStore(ownerRefusal(access));
       const runtime = bankFeedConfig(env);
+      if (runtime.provider === "simplefin") {
+        const body = await readJson(request);
+        const { assignSimpleFinAccountEntity } = await import("./simplefin-bank-feed.js");
+        const assigned = await assignSimpleFinAccountEntity(env, body);
+        return ownerJson(assigned.body, assigned.status);
+      }
       if (runtime.provider !== "plaid") {
         return ownerJson({
           error: "unavailable",
@@ -2286,6 +2354,14 @@ export async function handleBankFeed(env, request, url, path, ctx) {
 
     return jsonResponse({ error: "not found" }, 404);
   } catch (error) {
+    if (error?.provider === "simplefin" && typeof error?.code === "string") {
+      const status = Number.isInteger(error.status) ? error.status : 502;
+      return privateNoStore(jsonResponse({
+        error: status === 409 ? "conflict" : status === 400 ? "invalid_request" : "unavailable",
+        code: String(error.code).slice(0, 80),
+        ...(status >= 500 ? { unavailable: true } : {}),
+      }, status));
+    }
     if (error instanceof PlaidAccountEntityError) {
       const errorName = error.status === 503
         ? "unavailable"

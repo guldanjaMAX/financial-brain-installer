@@ -717,6 +717,7 @@ const expected = [
   "migrations/d1/0046_source_original_observation_authority_chain.sql",
   "migrations/d1/0047_ocr_page_idempotency.sql",
   "migrations/d1/0048_custom_api_source.sql",
+  "migrations/d1/0049_simplefin_bank_feed.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values
@@ -836,6 +837,7 @@ const expected = [
   "worker/src/lib/app-page.js",
   "worker/src/lib/auth-store.js",
   "worker/src/lib/bank-feed.js",
+  "worker/src/lib/simplefin-bank-feed.js",
   "worker/src/lib/confidence.js",
   "worker/src/lib/connections.js",
   "worker/src/lib/core.js",

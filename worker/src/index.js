@@ -29,6 +29,7 @@ import { jsonResponse, privateNoStore, validateAdminKey, validateReadKey, callLL
 import { resolvePrincipal, principalMay, scopeIsUnrestricted } from "./lib/grants.js";
 import { handleBankFeed, bankFeedEnabled } from "./lib/bank-feed.js";
 import { handlePlaidWebhook, runPlaidMaintenance } from "./lib/plaid-bank-feed.js";
+import { runSimpleFinMaintenance } from "./lib/simplefin-bank-feed.js";
 import { handleSupportAccess } from "./lib/support-access.js";
 import {
   AGENT_DELETION_PATH_PREFIX, createAgentDeletionPreview, handleAgentDeletion,
@@ -3720,6 +3721,17 @@ export default {
             `${Number(activity.created || 0)} created, ${Number(activity.updated || 0)} updated, ` +
             `${Number(activity.unchanged || 0)} unchanged, ${Number(activity.failed || 0)} failed`,
           );
+        })
+        : Promise.resolve(),
+      env.BANK_FEED_PROVIDER === "simplefin" && bankFeedEnabled(env)
+        ? runSimpleFinMaintenance(env).then((result) => {
+          const ran = Number(result?.ran || 0);
+          const partial = Array.isArray(result?.items)
+            ? result.items.filter((item) => item?.partial || item?.ok === false).length
+            : 0;
+          if (ran) console.log(`simplefin maintenance: ${ran} connection(s), ${partial} need attention`);
+        }).catch(() => {
+          console.warn("simplefin maintenance: scheduled pull failed");
         })
         : Promise.resolve(),
       env.CUSTOM_API_CONFIG

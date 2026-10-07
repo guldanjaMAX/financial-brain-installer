@@ -1587,10 +1587,26 @@ device failures remain nonzero and preserve the technician coordinator's
 stop-on-first-failure contract.
 
 Plaid application-credential setup is intentionally absent from generic setup.
-`brain setup`, `brain secrets`, and `brain technician` never accept or write the
-three bank-feed credential bindings. For an approved enabled feed, a complete
-existing binding set is preserved. A missing or partial set refuses before
-provider cleanup, local key mutation, core-key rotation, or any Worker write.
+For any enabled bank provider, the shared deploy step lists Worker secret names,
+creates `BANK_FEED_WRAPPING_KEY_V2` only when absent with the reviewed random
+generator and secret-put path, then lists the names again. Setup and update use
+that same deploy step. They never read or replace an existing value, return its
+value, derive it from an admin or session key, or source it from the environment.
+Provider credentials remain owned by the reviewed owner-present flow and may be
+absent during setup. `brain secrets` preserves all allowed bank names, requires
+the wrapping-key name for an enabled feed, and does not manufacture any bank
+secret.
+
+SimpleFIN uses the same independent bank-feed wrapping key but no Plaid client
+ID, Plaid secret, manifest endpoint, or browser SDK. `brain connect bank` may
+create a missing wrapping key and open the owner page. The one-time Setup Token
+is submitted from that page directly to the owner's Worker. The Worker records
+the claim decision before POST, encrypts the returned Access URL immediately,
+and never returns it to the CLI or browser. Scheduled pulls use at most three
+90-day windows per connection per day, with a durable 24-request hard limit.
+Provider `errlist` messages, staged owner-assignment holds, and backfill progress
+remain visible on the owner page. SimpleFIN account type is not guessed: an
+untyped account enters the financial map as `other` with balance role `neither`.
 
 Technician plan schema 5 also carries the owner briefing for every ceremony:
 what will open, why it is needed, the minimum access, the safe non-secret work

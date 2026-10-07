@@ -103,12 +103,15 @@ check("an explicit custom endpoint remains explicit", () => {
   assert.equal(profile.apiBase, "https://provider.example");
 });
 
-check("manifest schema names Plaid without accepting Plaid endpoint overrides", () => {
+check("manifest schema names every bank provider without named-provider endpoint overrides", () => {
   const schema = JSON.parse(readFileSync(new URL("../../manifest.schema.json", import.meta.url), "utf8"));
   const feed = schema.properties.corpora.properties.bank_feed;
-  assert.deepEqual(feed.properties.provider.enum, ["plaid", "custom"]);
+  assert.deepEqual(feed.properties.provider.enum, ["plaid", "simplefin", "custom"]);
   assert.equal(feed.properties.provider.default, "plaid");
-  assert.equal(JSON.stringify(feed.allOf).includes("api_base"), true);
+  const namedProviderGuards = JSON.stringify(feed.allOf);
+  assert.equal(namedProviderGuards.includes('"const":"plaid"'), true);
+  assert.equal(namedProviderGuards.includes('"const":"simplefin"'), true);
+  assert.equal(namedProviderGuards.includes("api_base"), true);
 });
 
 check("public manifest template keeps Plaid disabled and contains no credential", () => {

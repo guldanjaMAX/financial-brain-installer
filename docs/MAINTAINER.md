@@ -559,10 +559,13 @@ needs a fresh, owner-approved scoped token only for a specific live operation.
 There is no shared master credential and no support backdoor.
 
 Plaid application-credential setup is intentionally absent from generic setup.
-`brain setup`, `brain secrets`, and `brain technician` never accept or write the
-three bank-feed credential bindings. For an approved enabled feed, a complete
-existing binding set is preserved. A missing or partial set refuses before
-provider cleanup, local key mutation, core-key rotation, or any Worker write.
+For any enabled bank provider, setup, update, and deploy create and verify the
+independent random wrapping key only when its Worker secret name is absent.
+They never accept its value, read or replace an existing value, derive it from
+another credential, or return it in output. Provider credentials remain in the
+reviewed owner-present flow and may be absent during setup. `brain secrets`
+preserves the bank allowlist, requires only the wrapping-key name for an enabled
+feed, and never manufactures a bank value.
 
 ## Issue-note collection and regression tracking
 
