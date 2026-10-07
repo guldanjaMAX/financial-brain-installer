@@ -29724,7 +29724,21 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         platform: dailyPlatform,
         machineLockRoot: dailySchedulerOptions.machineLockRoot,
       };
-      const dailyStatus = statusDailyRefreshSchedule(dailyPlan, dailySchedulerOptions);
+      let dailyStatus = null;
+      try {
+        dailyStatus = statusDailyRefreshSchedule(dailyPlan, dailySchedulerOptions);
+      } catch (error) {
+        if (error?.code !== "DAILY_REFRESH_INSPECTION_UNKNOWN") throw error;
+        // A verified data-plane update does not need to reinterpret an unknown
+        // native task as absent. Leave it untouched and make the missing local
+        // proof visible; ownership collisions remain hard refusals.
+        warn("Daily imports need attention. Their Windows task could not be inspected, so it was not changed during this update.");
+        updateAttention.push(
+          "Daily imports need attention: their Windows task could not be inspected or verified. Run brain daily on <manifest> after Task Scheduler is available.",
+        );
+        dailyPlan = null;
+      }
+      if (dailyStatus) {
       manageDailyDefinition = Object.hasOwn(beforeUpdateManifest?.operations || {}, "daily_refresh") ||
         dailyStatus.installed === true;
       existingDailyTransaction = readDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
@@ -29795,6 +29809,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           persistDailyTransaction("recovery_required");
         }
         throw error;
+      }
       }
     }
     let upgradeResult;

@@ -10,6 +10,7 @@ import {
   createNativeDailyRefreshAdapter,
   installDailyRefreshSchedule,
   pauseDailyRefreshSchedule,
+  parseWindowsTaskInventory,
   removeDailyRefreshSchedule,
   restoreDailyRefreshSchedule,
   runUpdateWithDailyRefreshPaused,
@@ -30,6 +31,20 @@ const basePlan = Object.freeze({
   enabled: true,
   ready: true,
   sources: [],
+});
+
+const DARWIN_DEFINITION_OPTIONS = Object.freeze({
+  platform: "darwin",
+  nodePath: "/fixture/runtime/node",
+  brainPath: "/fixture/runtime/brain.mjs",
+  runnerPath: "/fixture/runtime/daily-refresh-run.mjs",
+});
+
+const WINDOWS_DEFINITION_OPTIONS = Object.freeze({
+  platform: "win32",
+  nodePath: String.raw`C:\Fixture\Runtime\node.exe`,
+  brainPath: String.raw`C:\Fixture\Runtime\brain.mjs`,
+  runnerPath: String.raw`C:\Fixture\Runtime\daily-refresh-run.mjs`,
 });
 
 function memoryAdapter(initial = null) {
@@ -232,12 +247,15 @@ test("Node-only schedule drift stays runnable in owner freshness while requestin
 test("install refuses a foreign collision and exact readback failure", () => {
   const foreign = memoryAdapter({ exists: true, owned: false, enabled: true, definition: { name: "foreign" } });
   assert.throws(
-    () => installDailyRefreshSchedule(basePlan, { adapter: foreign, platform: "darwin" }),
+    () => installDailyRefreshSchedule(basePlan, { ...DARWIN_DEFINITION_OPTIONS, adapter: foreign }),
     /foreign schedule/i,
   );
   assert.deepEqual(foreign.calls, [["read", basePlan.identity.id]], "collision decision was reached before mutation");
 
-  const priorDefinition = buildDailyRefreshDefinition({ ...basePlan, source_plan_hash: "sha256:prior" }, { platform: "win32" });
+  const priorDefinition = buildDailyRefreshDefinition(
+    { ...basePlan, source_plan_hash: "sha256:prior" },
+    WINDOWS_DEFINITION_OPTIONS,
+  );
   const drift = memoryAdapter({ exists: true, owned: true, enabled: false, definition: priorDefinition });
   drift._changed = priorDefinition;
   drift._enabled = false;
@@ -259,7 +277,7 @@ test("install refuses a foreign collision and exact readback failure", () => {
     this._enabled = enabled;
   };
   assert.throws(
-    () => installDailyRefreshSchedule(basePlan, { adapter: drift, platform: "win32" }),
+    () => installDailyRefreshSchedule(basePlan, { ...WINDOWS_DEFINITION_OPTIONS, adapter: drift }),
     /exact readback/i,
   );
   assert.ok(drift.calls.some(([name]) => name === "install"), "readback refusal is not vacuous");
@@ -268,7 +286,7 @@ test("install refuses a foreign collision and exact readback failure", () => {
   assert.equal(drift.read(basePlan.identity).enabled, false, "the prior disabled state was restored exactly");
 
   const clean = memoryAdapter();
-  const installed = installDailyRefreshSchedule(basePlan, { adapter: clean, platform: "win32" });
+  const installed = installDailyRefreshSchedule(basePlan, { ...WINDOWS_DEFINITION_OPTIONS, adapter: clean });
   assert.equal(installed.verified, true, "green control installs and reads back exactly");
 });
 
@@ -365,6 +383,45 @@ test("native Windows absence requires a successful complete task inventory", () 
     /could not be inspected/i,
   );
   assert.equal(malformedCalls, 2, "malformed inventory reached the ambiguity decision and never proved absence");
+});
+
+test("Windows task inventory accepts complete localized rows with empty status fields", () => {
+  const inventory = [
+    "\ufeff\"TaskName\",\"Next Run Time\",\"Status\"",
+    "   ",
+    String.raw`"\Other Folder\Quoted ""Task""","","N/A"`,
+    String.raw`"\Other Folder\Empty State","N/A",""`,
+    "",
+  ].join("\r\n");
+  assert.deepEqual(parseWindowsTaskInventory(inventory), [
+    "TaskName",
+    String.raw`\Other Folder\Quoted "Task"`,
+    String.raw`\Other Folder\Empty State`,
+  ]);
+  assert.deepEqual(
+    parseWindowsTaskInventory(String.raw`"\Other Folder\Trailing CR","N/A","Ready"` + "\r"),
+    [String.raw`\Other Folder\Trailing CR`],
+  );
+});
+
+test("native Windows scheduler resolves schtasks from SystemRoot without PATH", () => {
+  const directory = mkdtempSync(join(tmpdir(), "daily-native-system-tool-"));
+  const commands = [];
+  const adapter = createNativeDailyRefreshAdapter({
+    platform: "win32",
+    home: directory,
+    environment: { SystemRoot: String.raw`C:\Windows`, WINDIR: String.raw`C:\Windows` },
+    spawn: (command, args) => {
+      commands.push({ command, args });
+      return args.includes("/FO")
+        ? { status: 0, stdout: String.raw`"\Other\Task","N/A","Ready"` }
+        : { status: 1, stdout: "", stderr: "localized native error" };
+    },
+  });
+  const status = statusDailyRefreshSchedule(basePlan, { platform: "win32", adapter });
+  assert.equal(status.installed, false, "the green control proves the absence decision was reached");
+  assert.equal(commands.length, 2);
+  assert.ok(commands.every(({ command }) => command === String.raw`C:\Windows\System32\schtasks.exe`));
 });
 
 test("macOS native readback compares the loaded program to the plist", () => {
@@ -686,6 +743,7 @@ test("native Windows absence rejects incomplete quoted inventory rows", () => {
     ['"\\Other\\Task",', true],
     ['"\\Other\\Task"', true],
     ['"\\Other\\Task","N/A","Ready",', true],
+    ['"\\Other\\Task","",""', false],
     ['"\\Other\\Task","N/A","Ready"', false],
   ]) {
     let calls = 0;
@@ -902,20 +960,20 @@ test("module URL defaults decode spaces before building a native definition", ()
 
 test("pause, restore, status, and remove operate only on the owned identity", () => {
   const adapter = memoryAdapter();
-  installDailyRefreshSchedule(basePlan, { adapter, platform: "darwin" });
-  const snapshot = pauseDailyRefreshSchedule(basePlan, { adapter, platform: "darwin" });
+  installDailyRefreshSchedule(basePlan, { ...DARWIN_DEFINITION_OPTIONS, adapter });
+  const snapshot = pauseDailyRefreshSchedule(basePlan, { ...DARWIN_DEFINITION_OPTIONS, adapter });
   assert.equal(snapshot.enabled, true);
-  assert.equal(statusDailyRefreshSchedule(basePlan, { adapter, platform: "darwin" }).enabled, false);
+  assert.equal(statusDailyRefreshSchedule(basePlan, { ...DARWIN_DEFINITION_OPTIONS, adapter }).enabled, false);
   restoreDailyRefreshSchedule(snapshot, { adapter });
-  assert.equal(statusDailyRefreshSchedule(basePlan, { adapter, platform: "darwin" }).enabled, true);
-  removeDailyRefreshSchedule(basePlan, { adapter, platform: "darwin" });
-  assert.equal(statusDailyRefreshSchedule(basePlan, { adapter, platform: "darwin" }).installed, false);
+  assert.equal(statusDailyRefreshSchedule(basePlan, { ...DARWIN_DEFINITION_OPTIONS, adapter }).enabled, true);
+  removeDailyRefreshSchedule(basePlan, { ...DARWIN_DEFINITION_OPTIONS, adapter });
+  assert.equal(statusDailyRefreshSchedule(basePlan, { ...DARWIN_DEFINITION_OPTIONS, adapter }).installed, false);
 });
 
 test("restoring a definition that was already paused is an exact no-op", () => {
-  const definition = buildDailyRefreshDefinition(basePlan, { platform: "darwin" });
+  const definition = buildDailyRefreshDefinition(basePlan, DARWIN_DEFINITION_OPTIONS);
   const adapter = memoryAdapter({ exists: true, owned: true, enabled: false, definition });
-  const snapshot = pauseDailyRefreshSchedule(basePlan, { adapter, platform: "darwin" });
+  const snapshot = pauseDailyRefreshSchedule(basePlan, { ...DARWIN_DEFINITION_OPTIONS, adapter });
   const beforeRestoreMutations = adapter.calls.filter(([name]) => name === "setEnabled").length;
   const restored = restoreDailyRefreshSchedule(snapshot, { adapter });
   const afterRestoreMutations = adapter.calls.filter(([name]) => name === "setEnabled").length;
@@ -926,9 +984,9 @@ test("restoring a definition that was already paused is an exact no-op", () => {
 
 test("manifest source-plan drift is visible without overwriting the owned task", () => {
   const adapter = memoryAdapter();
-  installDailyRefreshSchedule(basePlan, { adapter, platform: "darwin" });
+  installDailyRefreshSchedule(basePlan, { ...DARWIN_DEFINITION_OPTIONS, adapter });
   const changed = { ...basePlan, source_plan_hash: "sha256:changed" };
-  const status = statusDailyRefreshSchedule(changed, { adapter, platform: "darwin" });
+  const status = statusDailyRefreshSchedule(changed, { ...DARWIN_DEFINITION_OPTIONS, adapter });
   assert.equal(status.installed, true);
   assert.equal(status.verified, false);
   assert.equal(adapter.calls.filter(([name]) => name === "install").length, 1,
@@ -1061,6 +1119,7 @@ test("the public all-configured command installs on Windows and prints stable fr
     platform: "win32",
     planDailyRefresh: async () => plan,
     schedulerAdapter: adapter,
+    schedulerOptions: WINDOWS_DEFINITION_OPTIONS,
     syncSourceExpectations: false,
     readSourceInventory: async () => ({
       sources: [{
@@ -1152,7 +1211,7 @@ test("daily off persists owner intent and takes the lifecycle boundary", async (
   const adapter = memoryAdapter();
   installDailyRefreshSchedule({ ...basePlan, source_plan_hash: "sha256:registered-drift", sources: [{
     key: "google_drive", class: "machine-pull", owner: "daily-task", status: "ready", source_names: ["drive"],
-  }] }, { platform: "win32", adapter });
+  }] }, { ...WINDOWS_DEFINITION_OPTIONS, adapter });
   let locks = 0;
   await cmdScheduleAllConfigured(manifestPath, "remove", {
     platform: "win32",
@@ -1163,6 +1222,7 @@ test("daily off persists owner intent and takes the lifecycle boundary", async (
       sources: [{ key: "google_drive", class: "machine-pull", owner: "daily-task", status: "ready", source_names: ["drive"] }],
     }),
     schedulerAdapter: adapter,
+    schedulerOptions: WINDOWS_DEFINITION_OPTIONS,
     syncSourceExpectations: false,
     readSourceInventory: async () => ({ sources: [] }),
     withBrainLifecycleLock: async (_options, task) => { locks += 1; return task(); },
@@ -1179,7 +1239,7 @@ test("scheduled execution reuses the installed ownership plan before checking it
   const manifestPath = join(directory, "brain.manifest.json");
   writeFileSync(manifestPath, JSON.stringify({ client: { slug: "fixture" }, corpora: {} }));
   let planCalls = 0;
-  const definition = buildDailyRefreshDefinition(basePlan, { platform: "darwin" });
+  const definition = buildDailyRefreshDefinition(basePlan, DARWIN_DEFINITION_OPTIONS);
   const schedulerAdapter = memoryAdapter({ exists: true, owned: true, enabled: true, definition });
   const result = await runDailyRefreshCli(manifestPath, {
     brainModule: {},
@@ -1187,8 +1247,9 @@ test("scheduled execution reuses the installed ownership plan before checking it
     expectedDefinitionHash: definition.definition_hash,
     platform: "darwin",
     definitionOptions: {
-      nodePath: definition.node_path,
+      ...DARWIN_DEFINITION_OPTIONS,
       nodePathExists: () => true,
+      nodeRealpath: (path) => path,
       nodePathStat: () => ({ isFile: () => true }),
       nodePathAccess: () => {},
     },

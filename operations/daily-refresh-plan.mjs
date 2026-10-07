@@ -28,9 +28,10 @@ export function dailyRefreshPrincipal({
     let sid = windowsSid;
     if (!sid) {
       const systemRoot = environment.SystemRoot || environment.SYSTEMROOT || environment.WINDIR;
-      const command = systemRoot && win32Path.isAbsolute(systemRoot)
-        ? win32Path.join(systemRoot, "System32", "whoami.exe")
-        : "whoami.exe";
+      if (!win32Path.isAbsolute(String(systemRoot || ""))) {
+        throw new Error("the current Windows user SID is unavailable; daily scheduling stopped before mutation");
+      }
+      const command = win32Path.join(systemRoot, "System32", "whoami.exe");
       const childEnvironment = {};
       if (systemRoot) childEnvironment.SystemRoot = systemRoot;
       if (environment.WINDIR) childEnvironment.WINDIR = environment.WINDIR;

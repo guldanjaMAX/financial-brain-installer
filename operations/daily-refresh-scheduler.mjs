@@ -13,6 +13,14 @@ import {
 
 const OWNER_MARKER = "financial-brain-daily-refresh-v1";
 
+export class DailyRefreshInspectionError extends Error {
+  constructor(message = "the Windows daily refresh task could not be inspected", options = {}) {
+    super(message, options);
+    this.name = "DailyRefreshInspectionError";
+    this.code = "DAILY_REFRESH_INSPECTION_UNKNOWN";
+  }
+}
+
 const hash = (value) => `sha256:${createHash("sha256").update(String(value)).digest("hex")}`;
 const xml = (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 
@@ -443,9 +451,10 @@ export function createNativeDailyRefreshAdapter({
   home = homedir(),
   uid = typeof process.getuid === "function" ? process.getuid() : null,
   spawn = spawnSync,
+  environment = process.env,
 } = {}) {
   if (platform === "darwin") return macAdapter({ home, uid, spawn });
-  if (platform === "win32") return windowsAdapter({ home, spawn });
+  if (platform === "win32") return windowsAdapter({ home, spawn, environment });
   throw new Error(`daily refresh scheduling is not supported on ${platform}`);
 }
 
@@ -962,47 +971,78 @@ function macAdapter({ home, uid, spawn }) {
   };
 }
 
-function windowsAdapter({ home, spawn }) {
+export function parseWindowsTaskInventory(output) {
+  const rows = String(output || "")
+    .replace(/^\ufeff/u, "")
+    .split(/\r\n|[\r\n]/u)
+    .filter((line) => !/^\s*$/u.test(line));
+  if (!rows.length) throw new DailyRefreshInspectionError();
+  const names = rows.map((line) => {
+    const fields = [];
+    let index = 0;
+    while (index < line.length) {
+      if (line[index] !== '"') throw new DailyRefreshInspectionError();
+      index += 1;
+      let field = "";
+      let closed = false;
+      while (index < line.length) {
+        if (line[index] === '"' && line[index + 1] === '"') { field += '"'; index += 2; continue; }
+        if (line[index] === '"') { index += 1; closed = true; break; }
+        field += line[index++];
+      }
+      if (!closed || (index < line.length && line[index] !== ",")) {
+        throw new DailyRefreshInspectionError();
+      }
+      fields.push(field);
+      if (index < line.length) {
+        index += 1;
+        if (index === line.length) throw new DailyRefreshInspectionError();
+      }
+    }
+    // /Query without /V has exactly these three columns. The localized next-run
+    // time and status may legitimately be empty or N/A; only the task name is
+    // required to prove that a complete row participates in the inventory.
+    if (fields.length !== 3 || !fields[0]) throw new DailyRefreshInspectionError();
+    return fields[0];
+  });
+  return Object.freeze(names);
+}
+
+function windowsAdapter({ home, spawn, environment }) {
   const taskName = (identity) => `\\Financial Brain\\Daily ${identity.id}`;
-  const run = (args) => spawn("schtasks.exe", args, { encoding: "utf8", windowsHide: true, env: { SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR } });
+  const systemRoot = environment.SystemRoot || environment.SYSTEMROOT || environment.WINDIR;
+  // Unit tests on another host inject the process runner. A real Windows process
+  // must use the OS-owned executable directly because the allowlisted child
+  // environment deliberately has no PATH.
+  if (process.platform === "win32" && !win32Path.isAbsolute(String(systemRoot || ""))) {
+    throw new DailyRefreshInspectionError("the Windows system runtime directory is unavailable");
+  }
+  const command = win32Path.isAbsolute(String(systemRoot || ""))
+    ? win32Path.join(systemRoot, "System32", "schtasks.exe")
+    : "fixture-windows-schtasks";
+  const childEnvironment = {};
+  if (systemRoot) childEnvironment.SystemRoot = systemRoot;
+  if (environment.WINDIR) childEnvironment.WINDIR = environment.WINDIR;
+  const run = (args) => {
+    try {
+      return spawn(command, args, {
+        encoding: "utf8",
+        windowsHide: true,
+        env: childEnvironment,
+      });
+    } catch (cause) {
+      return { status: null, error: cause };
+    }
+  };
   const read = (identity) => {
     const result = run(["/Query", "/TN", taskName(identity), "/XML"]);
     if (result?.status !== 0) {
       const inventory = run(["/Query", "/FO", "CSV", "/NH"]);
       if (inventory?.status === 0) {
-        const rows = String(inventory.stdout || "").split(/\r?\n/u).filter((line) => line.length > 0);
-        const names = rows.map((line) => {
-          const fields = [];
-          let index = 0;
-          while (index < line.length) {
-            if (line[index] !== '"') throw new Error("the Windows daily refresh task could not be inspected");
-            index += 1;
-            let field = "";
-            let closed = false;
-            while (index < line.length) {
-              if (line[index] === '"' && line[index + 1] === '"') { field += '"'; index += 2; continue; }
-              if (line[index] === '"') { index += 1; closed = true; break; }
-              field += line[index++];
-            }
-            if (!closed || (index < line.length && line[index] !== ",")) {
-              throw new Error("the Windows daily refresh task could not be inspected");
-            }
-            fields.push(field);
-            if (index < line.length) {
-              index += 1;
-              if (index === line.length) {
-                throw new Error("the Windows daily refresh task could not be inspected");
-              }
-            }
-          }
-          if (fields.length !== 3 || fields.some((field) => !field)) {
-            throw new Error("the Windows daily refresh task could not be inspected");
-          }
-          return fields[0];
-        });
+        const names = parseWindowsTaskInventory(inventory.stdout);
         if (!names.includes(taskName(identity))) return null;
       }
-      throw new Error("the Windows daily refresh task could not be inspected");
+      throw new DailyRefreshInspectionError();
     }
     const serialized = String(result.stdout || "");
     const marker = markerOf(serialized);

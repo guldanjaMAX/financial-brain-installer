@@ -484,3 +484,26 @@ test("production native restore failure completes with visible daily attention a
       "the schedule failure happened after the real upgrade stages committed");
   });
 });
+
+test("unavailable native schedule inspection does not abort a verified Brain update", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath);
+    let inspectionCalls = 0;
+    harness.adapter.read = () => {
+      inspectionCalls += 1;
+      const error = new Error("the Windows daily refresh task could not be inspected");
+      error.code = "DAILY_REFRESH_INSPECTION_UNKNOWN";
+      throw error;
+    };
+
+    await cmdUpdate(manifestPath, harness.options);
+    assert.equal(JSON.parse(readFileSync(manifestPath, "utf8")).brain.version, PRODUCT_VERSION,
+      "the real update path reached its committed version decision");
+    assert.equal(inspectionCalls, 1, "the attention arm reached native schedule inspection exactly once");
+    assert.ok(harness.events.includes("deploy:paused"), "the update crossed its first deployment decision");
+    assert.equal(harness.events.includes("schedule:false"), false,
+      "an unknown native schedule was neither assumed present nor mutated");
+    assert.equal(harness.finish.length, 1);
+    assert.match(harness.finish[0], /Daily imports.*need attention/i);
+  });
+});

@@ -26,9 +26,10 @@ import * as ingestRuntime from "../ingest/run.mjs";
 
 const FIXED_NOW = new Date("2026-10-06T18:05:06.789Z");
 const ROOT = process.env.FEED_FOLDERS_TEST_ROOT || tmpdir();
+const nativeRealpath = realpathSync.native || realpathSync;
 mkdirSync(ROOT, { recursive: true });
 // Feeds refuse linked ancestors; macOS tmpdir() sits under the /var -> /private/var link.
-const sandbox = realpathSync(mkdtempSync(join(ROOT, "feed-folders-test-")));
+const sandbox = nativeRealpath(mkdtempSync(join(ROOT, "feed-folders-test-")));
 
 function manifestBytes(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
@@ -123,11 +124,11 @@ test("add is atomic, idempotent, and feeds the manifest-derived daily load plan"
 
   const addedFirst = await addFeed(f, first, "client_files");
   assert.ifError(addedFirst.error);
-  assert.match(addedFirst.text, new RegExp(`Added feed: ${realpathSync(first).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(source: client_files\\)`));
+  assert.match(addedFirst.text, new RegExp(`Added feed: ${nativeRealpath(first).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(source: client_files\\)`));
   const firstManifest = readManifest(f);
   assert.deepEqual(firstManifest.corpora.upload, {
     enabled: true,
-    folders: [{ path: realpathSync(first), source: "client_files", feed: true }],
+    folders: [{ path: nativeRealpath(first), source: "client_files", feed: true }],
   });
   assert.ok(existsSync(addedFirst.result.backupPath));
   assert.deepEqual(readFileSync(addedFirst.result.backupPath), Buffer.from(manifestBytes(f.manifest)));
@@ -153,8 +154,8 @@ test("add is atomic, idempotent, and feeds the manifest-derived daily load plan"
   const upload = plan.find((entry) => entry.key === "upload");
   assert.equal(upload.status, "ready");
   assert.deepEqual(upload.legs.map((leg) => ({ source: leg.source, detail: leg.detail })), [
-    { source: "client_files", detail: realpathSync(first) },
-    { source: "transcripts", detail: realpathSync(second) },
+    { source: "client_files", detail: nativeRealpath(first) },
+    { source: "transcripts", detail: nativeRealpath(second) },
   ]);
 });
 
@@ -183,8 +184,8 @@ test("create-feeds makes two empty home folders in one owner-approved command", 
   assert.deepEqual(readdirSync(clientFiles), []);
   assert.deepEqual(readdirSync(transcripts), []);
   assert.deepEqual(readManifest(f).corpora.upload.folders, [
-    { path: realpathSync(clientFiles), source: "client_files", feed: true },
-    { path: realpathSync(transcripts), source: "transcripts", feed: true },
+    { path: nativeRealpath(clientFiles), source: "client_files", feed: true },
+    { path: nativeRealpath(transcripts), source: "transcripts", feed: true },
   ]);
   assert.match(created.text, /Created feed folder: .*Brain Feeds.*Client files \(source: client_files\)/);
   assert.match(created.text, /Created feed folder: .*Brain Feeds.*Transcripts \(source: transcripts\)/);
@@ -264,7 +265,7 @@ test("host path refusals are non-vacuous and each has an allowed control", async
     const allowed = join(sandbox, "current-root");
     mkdirSync(retired, { recursive: true });
     mkdirSync(allowed, { recursive: true });
-    const retiredState = statSync(realpathSync(retired), { bigint: true });
+    const retiredState = statSync(nativeRealpath(retired), { bigint: true });
     const manifest = baseManifest({
       enabled: false,
       retired_at: "2026-09-28T16:36:00.000Z",
@@ -277,7 +278,7 @@ test("host path refusals are non-vacuous and each has an allowed control", async
       retired_at: "2026-09-28T16:36:00.000Z",
       retired_path: retired,
       retired_identity: {
-        realpath: realpathSync(retired),
+        realpath: nativeRealpath(retired),
         dev: String(retiredState.dev),
         ino: String(retiredState.ino),
       },

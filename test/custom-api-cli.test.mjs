@@ -342,16 +342,21 @@ test("native clipboard commands use captured no-shell processes and scrub the ch
     windowsCalls.push({ command, args, options });
     return { status: 0, signal: null, stdout: args.at(-1).startsWith("Get-") ? TOKEN : "", stderr: "" };
   };
-  const environment = { PATH: "fixture-path", HOME: "/fixture-home", PRIVATE_FIXTURE: TOKEN };
+  const environment = {
+    SystemRoot: String.raw`C:\Windows`,
+    PATH: "fixture-path",
+    HOME: "/fixture-home",
+    PRIVATE_FIXTURE: TOKEN,
+  };
   assert.equal(readCustomApiClipboard({ platform: "win32", spawn: windowsSpawn, environment }), TOKEN);
   clearCustomApiClipboard({ platform: "win32", spawn: windowsSpawn, environment });
   assert.deepEqual(windowsCalls.map(({ command, args }) => ({ command, args })), [
     {
-      command: "powershell",
+      command: String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
       args: ["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"],
     },
     {
-      command: "powershell",
+      command: String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
       args: ["-NoProfile", "-NonInteractive", "-Command", "Set-Clipboard -Value $null"],
     },
   ]);

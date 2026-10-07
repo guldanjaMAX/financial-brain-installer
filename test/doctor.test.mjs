@@ -179,13 +179,19 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   check("less than 2 GiB on the install drive stops before setup",
     lowSpace.status === FAIL && /2 GiB/.test(lowSpace.detail + lowSpace.fix),
     JSON.stringify(lowSpace));
+  let standardWindowsCommand = null;
   const standardWindows = checkInstallPrivilege({
     platformName: "win32",
     environment: { SystemRoot: "C:\\Windows" },
-    runCommand: () => ({ ok: true, out: "BRAIN_STANDARD_USER" }),
+    runCommand: (command) => {
+      standardWindowsCommand = command;
+      return { ok: true, out: "BRAIN_STANDARD_USER" };
+    },
   });
   check("a normal Windows user session passes the install privilege gate",
-    standardWindows.status === OK, JSON.stringify(standardWindows));
+    standardWindows.status === OK &&
+      standardWindowsCommand === "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    JSON.stringify({ standardWindows, standardWindowsCommand }));
   const adminWindows = checkInstallPrivilege({
     platformName: "win32",
     environment: { SystemRoot: "C:\\Windows" },

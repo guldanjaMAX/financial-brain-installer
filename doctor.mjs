@@ -525,15 +525,25 @@ export function checkInstallPrivilege({
 } = {}) {
   let elevated = null;
   if (platformName === "win32") {
-    const result = runCommand("powershell.exe", [
-      "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_ELEVATION_PROBE,
-    ], {
-      timeout: 30_000,
-      inheritEnv: false,
-      env: localToolEnvironment(environment),
-    });
-    if (result.ok && /BRAIN_STANDARD_USER/.test(result.out)) elevated = false;
-    else if (result.ok && /BRAIN_ELEVATED/.test(result.out)) elevated = true;
+    const systemRoot = environment.SystemRoot || environment.SYSTEMROOT || environment.WINDIR;
+    if (pathWin32.isAbsolute(String(systemRoot || ""))) {
+      const command = pathWin32.join(
+        systemRoot,
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      );
+      const result = runCommand(command, [
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_ELEVATION_PROBE,
+      ], {
+        timeout: 30_000,
+        inheritEnv: false,
+        env: localToolEnvironment(environment),
+      });
+      if (result.ok && /BRAIN_STANDARD_USER/.test(result.out)) elevated = false;
+      else if (result.ok && /BRAIN_ELEVATED/.test(result.out)) elevated = true;
+    }
   } else if (typeof getEffectiveUserId === "function") {
     elevated = Number(getEffectiveUserId()) === 0;
   }

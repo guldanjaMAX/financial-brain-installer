@@ -251,3 +251,18 @@ test("Windows lifecycle locks receive a private inheritable ACL before the owner
   assert.equal(recoveryAclCalls, 1);
   recovered.release();
 });
+
+test("Windows lifecycle ACL refuses a missing system root before process launch", () => {
+  let nativeAclCalls = 0;
+  assert.throws(() => restrictWindowsDirectoryToCurrentUser(
+    "C:\\ProgramData\\FinancialBrain\\locks\\fixture",
+    {
+      environment: { USERNAME: "fixture-owner" },
+      runAcl: () => {
+        nativeAclCalls += 1;
+        return { status: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+    },
+  ), /system runtime directory/i);
+  assert.equal(nativeAclCalls, 0, "the refusal was reached before any PATH-based ACL launch");
+});

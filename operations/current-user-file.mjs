@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { win32 as win32Path } from "node:path";
 
 const WINDOWS_ENV_NAMES = Object.freeze([
   "SystemRoot", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE",
@@ -36,9 +36,10 @@ function restrictWindowsPathToCurrentUser(path, grant, options = {}) {
   if (typeof username !== "string" || !username.trim() || /[\r\n\0]/.test(username) || username.length > 256) {
     throw new Error(`Windows could not identify the current user for ${label}`);
   }
-  const command = options.icaclsPath || (env.SystemRoot
-    ? join(env.SystemRoot, "System32", "icacls.exe")
-    : "icacls.exe");
+  if (!options.icaclsPath && !win32Path.isAbsolute(String(env.SystemRoot || ""))) {
+    throw new Error("Windows system runtime directory is unavailable for the private file ACL");
+  }
+  const command = options.icaclsPath || win32Path.join(env.SystemRoot, "System32", "icacls.exe");
   const args = [path, "/inheritance:r", "/grant:r", `${username}:${grant}`];
   let result;
   try {
