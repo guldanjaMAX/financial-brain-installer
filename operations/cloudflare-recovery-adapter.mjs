@@ -441,6 +441,11 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "llm_call_log",
   "sources",
   "source_events",
+  // Schema 49: the projection generation is durable refresh debt. Claims are
+  // imported before documents so durable refresh debt and exact write claims
+  // are in place before the restored corpus becomes queryable.
+  "bank_activity_refresh_state",
+  "bank_activity_write_claims",
   "documents",
   "chunks",
   "vector_outbox",
@@ -848,6 +853,10 @@ const SCHEMA_48_TABLES = Object.freeze([
   "custom_api_fetches",
   "custom_api_schedule_state",
 ]);
+const SCHEMA_49_TABLES = Object.freeze([
+  "bank_activity_refresh_state",
+  "bank_activity_write_claims",
+]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -870,7 +879,8 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
      ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
      ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
-     ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES, ...SCHEMA_48_TABLES].includes(table)
+     ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES, ...SCHEMA_48_TABLES,
+     ...SCHEMA_49_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -4381,7 +4391,8 @@ function expectedRecoveryTables(migrations) {
     (latest >= 44 || !SCHEMA_44_TABLES.includes(table)) &&
     (latest >= 45 || !SCHEMA_45_TABLES.includes(table)) &&
     (latest >= 47 || !SCHEMA_47_TABLES.includes(table)) &&
-    (latest >= 48 || !SCHEMA_48_TABLES.includes(table)));
+    (latest >= 48 || !SCHEMA_48_TABLES.includes(table)) &&
+    (latest >= 49 || !SCHEMA_49_TABLES.includes(table)));
 }
 
 export function recoveryExportTables(

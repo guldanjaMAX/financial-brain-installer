@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createProductFixture, seedCounterparty, seedOwnedEntity } from "./product-contract-fixture.mjs";
-import { handleBankFeed } from "../src/lib/bank-feed.js";
+import {
+  handleBankFeed,
+  refreshBankActivityAfterAccountAssignment,
+} from "../src/lib/bank-feed.js";
 import {
   completePlaidLink,
   createPlaidLinkToken,
@@ -13,8 +16,23 @@ import {
   syncPlaidItem,
 } from "../src/lib/plaid-bank-feed.js";
 import { reassignPlaidAccountEntity } from "../src/lib/plaid-account-entities.js";
+import { writeBankActivityDocuments } from "../src/lib/bank-activity-doc.js";
 
 const encoder = new TextEncoder();
+const ambientFetch = globalThis.fetch;
+let forbiddenAmbientFetches = 0;
+
+test.before(() => {
+  globalThis.fetch = async () => {
+    forbiddenAmbientFetches += 1;
+    throw new Error("ambient provider fetch is forbidden in this test file");
+  };
+});
+
+test.after(() => {
+  globalThis.fetch = ambientFetch;
+  assert.equal(forbiddenAmbientFetches, 0, "no test path reached an ambient provider fetch");
+});
 
 function assertReadyPromotion(receipt) {
   // Reusing saved pages commits their data, but only another actual provider
@@ -1687,6 +1705,7 @@ test("reviewed Plaid reassignment refreshes the committed move once and permits 
       from_entity_slug: "household",
       to_entity_slug: "business",
     }, ownerHeaders, {
+      bankFeedFetchImpl: fetchImpl,
       waitUntil(promise) { previewBackground.push(Promise.resolve(promise)); },
     });
     assert.equal(preview.status, 200);
@@ -1703,6 +1722,7 @@ test("reviewed Plaid reassignment refreshes the committed move once and permits 
       from_entity_slug: "household",
       to_entity_slug: "business",
     }, ownerHeaders, {
+      bankFeedFetchImpl: fetchImpl,
       waitUntil(promise) { dryRunBackground.push(Promise.resolve(promise)); },
     });
     assert.equal(dryRun.status, 400);
@@ -1714,7 +1734,7 @@ test("reviewed Plaid reassignment refreshes the committed move once and permits 
     const originalDb = fixture.env.DB;
     fixture.env.DB = { ...originalDb, async batch(statements) {
       batches += 1;
-      assert.equal(statements.length, 6, "the apply decision reaches one closed D1 batch");
+      assert.equal(statements.length, 8, "the apply decision reaches one closed D1 batch");
       return originalDb.batch(statements);
     } };
     const background = [];
@@ -1801,21 +1821,128 @@ test("reviewed Plaid reassignment refreshes the committed move once and permits 
   } finally { fixture.close(); }
 });
 
+test("a superseded bank-activity writer cannot restore pre-move scope", async () => {
+  const stamp = "2099-01-15T13:00:00.000Z";
+  for (const arm of ["serial-control", "assignment-overlap", "scheduled-overlap"]) {
+    const { fixture, state, run, assignAll, fetchImpl } = await containmentFixture([`move-generation-${arm}`]);
+    let release = null;
+    try {
+      state.now = stamp;
+      await run();
+      await assignAll();
+      assertReadyPromotion(await run());
+      await writeBankActivityDocuments(fixture.env, { metadataChanges: 1, at: stamp });
+      const account = fixture.first("SELECT account_ref FROM plaid_account_entity_assignments");
+      if (arm !== "scheduled-overlap") {
+        fixture.raw("UPDATE plaid_reconciliation SET due_at='2100-01-01T00:00:00.000Z'");
+      }
+
+      const originalDb = fixture.env.DB;
+      let reached;
+      let candidateReads = 0;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const candidatesCaptured = new Promise((resolve) => { reached = resolve; });
+      fixture.env.DB = {
+        ...originalDb,
+        prepare(sql) {
+          const wrap = (statement) => ({
+            ...statement,
+            bind(...args) { return wrap(statement.bind(...args)); },
+            async all() {
+              const result = await statement.all();
+              if (sql.includes("WITH plaid_accounts AS")) {
+                candidateReads += 1;
+                if (arm !== "serial-control" && candidateReads === 1) {
+                  assert.ok(result.results.length > 0, "the older writer captured a nonempty candidate plan");
+                  reached();
+                  await gate;
+                }
+              }
+              return result;
+            },
+          });
+          return wrap(originalDb.prepare(sql));
+        },
+      };
+
+      let olderWriter = null;
+      if (arm === "assignment-overlap") {
+        olderWriter = refreshBankActivityAfterAccountAssignment(fixture.env, { fetchImpl, now: stamp });
+      } else if (arm === "scheduled-overlap") {
+        olderWriter = runPlaidFeedSlice(fixture.env, { fetchImpl, now: stamp });
+      }
+      if (olderWriter) await candidatesCaptured;
+
+      const ownerHeaders = await fixture.ownerHeaders();
+      const routeUrl = new URL("https://brain.invalid/api/bank-feed/accounts/reassign");
+      const background = [];
+      const response = await handleBankFeed(fixture.env, new Request(routeUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...ownerHeaders },
+        body: JSON.stringify({
+          mode: "apply",
+          request_id: `move-generation-request-${arm}`,
+          account_ref: account.account_ref,
+          from_entity_slug: "household",
+          to_entity_slug: "business",
+        }),
+      }), routeUrl, routeUrl.pathname, {
+        bankFeedFetchImpl: fetchImpl,
+        bankFeedNow: stamp,
+        waitUntil(promise) { background.push(Promise.resolve(promise)); },
+      });
+      assert.equal(response.status, 201);
+      assert.equal(background.length, 1, "the committed move schedules its replacement writer");
+      await Promise.all(background);
+      assert.equal(fixture.first(
+        "SELECT entity_slug FROM documents WHERE source='bank_activity'",
+      ).entity_slug, "business", "the post-move writer persisted the new scope");
+
+      if (olderWriter) {
+        release();
+        release = null;
+        await olderWriter;
+      }
+      assert.equal(fixture.first(
+        "SELECT entity_slug FROM documents WHERE source='bank_activity'",
+      ).entity_slug, "business", `${arm} cannot restore the captured old scope`);
+      assert.equal(fixture.first("SELECT entity_slug FROM fin_accounts").entity_slug, "business");
+      assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n, 1);
+      assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_balance_snapshots").n, 1);
+      assert.equal(candidateReads, arm === "serial-control" ? 1 : 2,
+        `${arm} reached the expected writer decision points`);
+    } finally {
+      if (release) release();
+      fixture.close();
+    }
+  }
+});
+
 test("a reassignment refresh failure cannot roll back the committed move or stamp completion", async () => {
-  const { fixture, state, run, assignAll } = await containmentFixture(["refresh-failure-account"]);
+  const { fixture, state, run, assignAll, fetchImpl } = await containmentFixture(["refresh-failure-account"]);
   try {
     state.now = "2099-01-15T13:00:00.000Z";
     await run();
     await assignAll();
     assertReadyPromotion(await run());
+    await writeBankActivityDocuments(fixture.env, {
+      metadataChanges: 1,
+      at: "2099-01-15T12:00:00.000Z",
+    });
     const account = fixture.first(
       "SELECT a.account_ref,f.account_slug FROM plaid_account_entity_assignments a JOIN fin_accounts f ON f.external_ref=a.provider_account_id AND f.source_feed=('bank-feed:'||a.item_ref)",
     );
+    const completeBefore = fixture.first(
+      "SELECT last_complete_sweep_at FROM sources WHERE name='bank_activity'",
+    ).last_complete_sweep_at;
+    assert.equal(completeBefore, "2099-01-15T12:00:00.000Z", "the green setup reached a complete old-scope source");
     const ownerHeaders = await fixture.ownerHeaders();
     const routeUrl = new URL("https://brain.invalid/api/bank-feed/accounts/reassign");
     const background = [];
-    let providerFetches = 0;
-    fixture.control.failOn = /UPDATE sources SET status='ready'/;
+    const providerFetchesBefore = state.fetchPaths.length;
+    const transactionsBefore = fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n;
+    const balancesBefore = fixture.first("SELECT COUNT(*) AS n FROM fin_balance_snapshots").n;
+    fixture.control.failOn = /SELECT sync_cursor FROM sources/;
     const response = await handleBankFeed(fixture.env, new Request(routeUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...ownerHeaders },
@@ -1828,17 +1955,15 @@ test("a reassignment refresh failure cannot roll back the committed move or stam
       }),
     }), routeUrl, routeUrl.pathname, {
       bankFeedNow: state.now,
-      bankFeedFetchImpl: async () => {
-        providerFetches += 1;
-        throw new Error("synthetic provider fetch failure");
-      },
+      bankFeedFetchImpl: fetchImpl,
       waitUntil(promise) { background.push(Promise.resolve(promise)); },
     });
     assert.equal(response.status, 201, "the committed move response succeeds before refresh completion");
     assert.equal((await response.json()).changed, true);
     assert.equal(background.length, 1);
     await Promise.all(background);
-    assert.ok(providerFetches > 0, "the failing refresh reached the stubbed provider boundary");
+    assert.ok(state.fetchPaths.length > providerFetchesBefore,
+      "the failing refresh reached the stubbed provider boundary");
     assert.equal(fixture.first(
       "SELECT entity_slug FROM fin_accounts WHERE account_slug=?", account.account_slug,
     ).entity_slug, "business");
@@ -1848,12 +1973,28 @@ test("a reassignment refresh failure cannot roll back the committed move or stam
     assert.ok(marker, "the refresh restart marker remains after failure");
     assert.notEqual(marker.state, "complete");
     const source = fixture.first(
-      "SELECT last_complete_sweep_at FROM sources WHERE name='bank_activity'",
+      "SELECT status,last_complete_sweep_at FROM sources WHERE name='bank_activity'",
     );
-    assert.equal(source?.last_complete_sweep_at || null, null, "the failed refresh writes no complete stamp");
-    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n, 1);
-    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_balance_snapshots").n, 1);
-    assert.ok(state.fetchPaths.length > 0, "the green setup control used only the injected fixture provider");
+    assert.equal(source.status, "indexing", "the failed writer leaves visible refresh debt");
+    assert.equal(source.last_complete_sweep_at, null, "the failed refresh clears the stale complete stamp");
+    assert.equal(fixture.first(
+      "SELECT entity_slug FROM documents WHERE source='bank_activity'",
+    ).entity_slug, "household", "the injected writer failure preserved the old document for the retry probe");
+
+    fixture.control.failOn = null;
+    const retry = await runPlaidFeedSlice(fixture.env, { fetchImpl, now: state.now });
+    assert.equal(retry.bank_activity.outcome, "ran", "the next scheduled pass consumes document refresh debt");
+    assert.equal(retry.bank_activity.complete_sweep, true);
+    assert.equal(fixture.first(
+      "SELECT entity_slug FROM documents WHERE source='bank_activity'",
+    ).entity_slug, "business");
+    const recoveredSource = fixture.first(
+      "SELECT status,last_complete_sweep_at FROM sources WHERE name='bank_activity'",
+    );
+    assert.equal(recoveredSource.status, "ready");
+    assert.equal(recoveredSource.last_complete_sweep_at, state.now);
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n, transactionsBefore);
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_balance_snapshots").n, balancesBefore);
   } finally { fixture.close(); }
 });
 
@@ -1921,6 +2062,9 @@ test("reviewed Plaid reassignment refuses invalid target, changed scope, period 
           to_entity_slug: "business",
         }),
       }), routeUrl, routeUrl.pathname, {
+        bankFeedFetchImpl: async () => {
+          throw new Error("a refused move reached the provider boundary");
+        },
         waitUntil(promise) { background.push(Promise.resolve(promise)); },
       });
       assert.equal(response.status >= 400, true);

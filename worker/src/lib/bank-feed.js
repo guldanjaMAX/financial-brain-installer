@@ -2233,7 +2233,9 @@ export async function handleBankFeed(env, request, url, path, ctx) {
         }, 503);
       }
       const body = await readJson(request);
-      const reassigned = await reassignPlaidAccountEntity(env, body);
+      const reassigned = await reassignPlaidAccountEntity(env, body, {
+        now: ctx?.bankFeedNow || null,
+      });
       if (reassigned.body?.changed && reassigned.body?.replayed !== true && ctx?.waitUntil) {
         ctx.waitUntil(refreshBankActivityAfterAccountAssignment(env, {
           fetchImpl: ctx?.bankFeedFetchImpl || fetch,

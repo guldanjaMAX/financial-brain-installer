@@ -1,5 +1,8 @@
 import { providerJson, ProviderSyncError } from "./provider-sync.js";
-import { writeBankActivityDocuments } from "./bank-activity-doc.js";
+import {
+  bankActivityRefreshPending,
+  writeBankActivityDocuments,
+} from "./bank-activity-doc.js";
 import { assertPlaidConnectionDistinct } from "./plaid-connection-review.js";
 import { PlaidAccountEntityError, reconciliationRefreshPending } from "./plaid-account-entities.js";
 import {
@@ -1512,8 +1515,13 @@ export async function runPlaidFeedSlice(env, {
   const committedPromotions = items.filter((item) => ["complete", "partial"].includes(item.status)).length;
   let bankActivity;
   try {
+    // A reviewed move commits projection debt independently of provider work.
+    // This lets an ordinary scheduled pass repair a failed move refresh even
+    // when no new provider window is due or promoted in this invocation.
+    const metadataChanges = await bankActivityRefreshPending(env) ? 1 : 0;
     bankActivity = await writeBankActivityDocuments(env, {
       committedPromotions,
+      metadataChanges,
       at: stamp,
     });
   } catch {

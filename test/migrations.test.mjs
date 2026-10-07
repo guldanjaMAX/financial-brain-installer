@@ -76,12 +76,16 @@ const ocrMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) === 47
 check("the unshipped OCR schema is one consolidated migration 0047",
   ocrMigrationFiles.length === 1 && ocrMigrationFiles[0] === "0047_ocr_page_idempotency.sql",
   JSON.stringify(ocrMigrationFiles));
-// 0048 is the separate custom API source lane. Pin the exact unshipped suffix
-// so a stray OCR 0048/0049 cannot hide behind it.
+// 0048 and 0049 are separate source and derived-projection lanes. Pin the exact
+// unshipped suffix so a stray OCR migration cannot hide behind either one.
 const unshippedMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) >= 47);
-check("the unshipped suffix is exactly OCR 0047 then custom API 0048",
+check("the unshipped suffix ends with OCR, custom API, then bank-activity fencing",
   JSON.stringify(unshippedMigrationFiles) ===
-    JSON.stringify(["0047_ocr_page_idempotency.sql", "0048_custom_api_source.sql"]),
+    JSON.stringify([
+      "0047_ocr_page_idempotency.sql",
+      "0048_custom_api_source.sql",
+      "0049_bank_activity_refresh_generation.sql",
+    ]),
   JSON.stringify(unshippedMigrationFiles));
 
 const db = new DatabaseSync(":memory:");
@@ -94,6 +98,92 @@ for (const f of files) {
   }
 }
 check(`all ${applied} statements across ${files.length} files applied`, true);
+
+/* ---- 0049 upgrades existing bank-activity documents before fencing writes ---- */
+{
+  const upgraded = new DatabaseSync(":memory:");
+  for (const file of files.filter((name) => Number(name.slice(0, 4)) <= 48)) {
+    for (const statement of splitStatements(readFileSync(join(DIR, file), "utf8"))) {
+      upgraded.exec(statement);
+    }
+  }
+  upgraded.exec(
+    `INSERT INTO install_state
+       (id,client_slug,product_version,schema_version,gate_version,installed_at,ring)
+     VALUES (1,'fixture','0.0.0-test',48,0,'2026-01-01T00:00:00Z','test');
+     INSERT INTO documents
+       (doc_uid,source,source_id,title,ingested_at,content_hash,entity_slug)
+     VALUES
+       ('bank:scoped','bank_activity','account-month-scoped','Scoped activity',1,'hash-scoped','household'),
+       ('bank:legacy','bank_activity','account-month-legacy','Legacy activity',1,'hash-legacy',NULL);`,
+  );
+  for (const statement of splitStatements(
+    readFileSync(join(DIR, "0049_bank_activity_refresh_generation.sql"), "utf8"),
+  )) upgraded.exec(statement);
+
+  const claims = upgraded.prepare(
+    `SELECT source_id,generation,entity_slug,claimed_at
+       FROM bank_activity_write_claims ORDER BY source_id`,
+  ).all();
+  check("0049 backfills exact generation-zero claims before installing document guards",
+    claims.length === 2 && claims.every((row) => row.generation === 0 && row.claimed_at === "schema-0049") &&
+      claims[0].entity_slug === null && claims[1].entity_slug === "household",
+    JSON.stringify(claims));
+
+  let staleScopeRefused = false;
+  try {
+    upgraded.prepare(
+      "UPDATE documents SET entity_slug='business' WHERE source_id='account-month-scoped'",
+    ).run();
+  } catch {
+    staleScopeRefused = true;
+  }
+  check("0049 reaches the trigger and refuses a scope not claimed by the current generation",
+    staleScopeRefused && upgraded.prepare(
+      "SELECT entity_slug FROM documents WHERE source_id='account-month-scoped'",
+    ).get()?.entity_slug === "household");
+
+  upgraded.prepare(
+    "UPDATE bank_activity_write_claims SET entity_slug='business' WHERE source_id='account-month-scoped'",
+  ).run();
+  upgraded.prepare(
+    "UPDATE documents SET entity_slug='business' WHERE source_id='account-month-scoped'",
+  ).run();
+  upgraded.prepare(
+    "UPDATE documents SET content_hash='hash-legacy-2' WHERE source_id='account-month-legacy'",
+  ).run();
+  check("0049 permits claimed scoped and legacy-null recovery controls",
+    upgraded.prepare(
+      "SELECT entity_slug FROM documents WHERE source_id='account-month-scoped'",
+    ).get()?.entity_slug === "business" && upgraded.prepare(
+      "SELECT content_hash FROM documents WHERE source_id='account-month-legacy'",
+    ).get()?.content_hash === "hash-legacy-2");
+
+  upgraded.prepare(
+    `INSERT INTO documents
+       (doc_uid,source,source_id,title,ingested_at,content_hash,entity_slug)
+     VALUES ('bank:recovery','bank_activity','account-month-recovery',
+             'Recovered activity',1,'committed-recovery-hash','household')`,
+  ).run();
+  let unclaimedPendingRefused = false;
+  try {
+    upgraded.prepare(
+      `INSERT INTO documents
+         (doc_uid,source,source_id,title,ingested_at,content_hash,entity_slug)
+       VALUES ('bank:unclaimed','bank_activity','account-month-unclaimed',
+               'Unclaimed activity',1,'pending:unclaimed:revision','household')`,
+    ).run();
+  } catch {
+    unclaimedPendingRefused = true;
+  }
+  check("0049 permits committed recovery inserts and refuses unclaimed live revisions",
+    unclaimedPendingRefused && upgraded.prepare(
+      "SELECT COUNT(*) AS n FROM documents WHERE source_id='account-month-recovery'",
+    ).get()?.n === 1 && upgraded.prepare(
+      "SELECT COUNT(*) AS n FROM documents WHERE source_id='account-month-unclaimed'",
+    ).get()?.n === 0);
+  upgraded.close();
+}
 
 /* ---- consolidated 0047 is byte-shape equivalent to old 0047..0049 ---- */
 {

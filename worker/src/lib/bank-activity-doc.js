@@ -313,29 +313,81 @@ async function monthTransactions(env, tenantId, candidate) {
   return result?.results || [];
 }
 
+async function bankActivityGeneration(env) {
+  const row = await env.DB.prepare(
+    "SELECT generation,completed_generation FROM bank_activity_refresh_state WHERE id=1",
+  ).first();
+  const generation = Number(row?.generation);
+  const completedGeneration = Number(row?.completed_generation);
+  if (!Number.isSafeInteger(generation) || generation < 0 ||
+      !Number.isSafeInteger(completedGeneration) || completedGeneration < 0 ||
+      completedGeneration > generation) {
+    throw new Error("bank activity refresh generation is unavailable");
+  }
+  return { generation, completedGeneration };
+}
+
+export async function bankActivityRefreshPending(env) {
+  if (backendOf(env) !== D1 || !env.DB || env.BANK_FEED_PROVIDER !== "plaid") return false;
+  const state = await bankActivityGeneration(env);
+  return state.completedGeneration < state.generation;
+}
+
+async function claimBankActivityDocument(env, { sourceId, entitySlug, generation, at }) {
+  const claim = await env.DB.prepare(
+    `INSERT INTO bank_activity_write_claims (source_id,generation,entity_slug,claimed_at)
+     SELECT ?1,generation,?2,?3 FROM bank_activity_refresh_state
+      WHERE id=1 AND generation=?4
+     ON CONFLICT(source_id) DO UPDATE SET
+       generation=excluded.generation,entity_slug=excluded.entity_slug,claimed_at=excluded.claimed_at
+     WHERE (SELECT generation FROM bank_activity_refresh_state WHERE id=1)=?4
+     RETURNING generation,entity_slug`,
+  ).bind(sourceId, entitySlug, at, generation).first();
+  return Number(claim?.generation) === generation && claim?.entity_slug === entitySlug;
+}
+
 async function recordSourcePass(env, {
-  at, cursor, complete, confirmed, counts,
+  at, cursor, complete, confirmed, counts, generation,
 }) {
   const nextCursor = complete || !cursor ? null : JSON.stringify(cursor);
-  await env.DB.batch([
+  const result = await env.DB.batch([
     env.DB.prepare(
-      `UPDATE sources SET status='ready',last_ingest_at=CASE WHEN ?2=1 THEN ?3 ELSE last_ingest_at END,
+      `UPDATE sources SET status=CASE WHEN ?4=1 THEN 'ready' ELSE status END,
+          last_ingest_at=CASE WHEN ?2=1 THEN ?3 ELSE last_ingest_at END,
           last_complete_sweep_at=CASE WHEN ?4=1 THEN ?3 ELSE NULL END,
           document_count=(SELECT COUNT(*) FROM documents WHERE source=?1 AND deleted_at IS NULL),
-          sync_cursor=?5,expected_refresh_seconds=NULL,stale_reason=NULL
-        WHERE name=?1 AND kind=?6`,
-    ).bind(BANK_ACTIVITY_SOURCE, confirmed ? 1 : 0, at, complete ? 1 : 0, nextCursor, BANK_ACTIVITY_KIND),
+          sync_cursor=?5,expected_refresh_seconds=NULL,
+          stale_reason=CASE WHEN ?4=1 THEN NULL ELSE stale_reason END
+        WHERE name=?1 AND kind=?6
+          AND EXISTS (SELECT 1 FROM bank_activity_refresh_state WHERE id=1 AND generation=?7)`,
+    ).bind(
+      BANK_ACTIVITY_SOURCE,
+      confirmed ? 1 : 0,
+      at,
+      complete ? 1 : 0,
+      nextCursor,
+      BANK_ACTIVITY_KIND,
+      generation,
+    ),
     env.DB.prepare(
       `INSERT INTO source_events (source_name,event,at,documents,detail)
-       VALUES (?1,'ingest',?2,
-         (SELECT COUNT(*) FROM documents WHERE source=?1 AND deleted_at IS NULL),?3)`,
+       SELECT ?1,'ingest',?2,
+         (SELECT COUNT(*) FROM documents WHERE source=?1 AND deleted_at IS NULL),?3
+        WHERE EXISTS (SELECT 1 FROM bank_activity_refresh_state WHERE id=1 AND generation=?4)`,
     ).bind(
       BANK_ACTIVITY_SOURCE,
       at,
       `bank activity pass created=${counts.created} updated=${counts.updated} unchanged=${counts.unchanged} ` +
         `refused=${counts.refused} failed=${counts.failed} complete=${complete ? 1 : 0}`,
+      generation,
     ),
+    env.DB.prepare(
+      `UPDATE bank_activity_refresh_state
+          SET completed_generation=?1,completed_at=?2
+        WHERE id=1 AND generation=?1 AND ?3=1`,
+    ).bind(generation, at, complete ? 1 : 0),
   ]);
+  return Number(result?.[0]?.meta?.changes) === 1;
 }
 
 /**
@@ -376,6 +428,7 @@ export async function writeBankActivityDocuments(env, {
     requestedKind: BANK_ACTIVITY_KIND,
     defaultKind: BANK_ACTIVITY_KIND,
   });
+  const { generation } = await bankActivityGeneration(env);
   const source = await env.DB.prepare(
     "SELECT sync_cursor FROM sources WHERE name=?1 AND kind=?2",
   ).bind(BANK_ACTIVITY_SOURCE, BANK_ACTIVITY_KIND).first();
@@ -407,6 +460,17 @@ export async function writeBankActivityDocuments(env, {
         month: candidate.month,
         transactions,
       });
+      const claimed = await claimBankActivityDocument(env, {
+        sourceId: envelope.source_id,
+        entitySlug: candidate.entity_slug,
+        generation,
+        at: stamp,
+      });
+      if (!claimed) {
+        counts.failed += 1;
+        last = candidate;
+        continue;
+      }
       const nextEstimate = estimatedStatements + estimateD1IngestStatements(env, [envelope]);
       if (nextEstimate > BANK_ACTIVITY_INGEST_STATEMENT_BUDGET ||
           nextEstimate > D1_INGEST_STATEMENT_BUDGET) {
@@ -441,16 +505,18 @@ export async function writeBankActivityDocuments(env, {
     ledger_marker: currentMarker,
   } : priorCursor;
   const nextCursor = (!more && passFailures > 0) || !stableLedger ? null : cursor;
-  await recordSourcePass(env, {
+  const currentGeneration = await recordSourcePass(env, {
     at: stamp,
     cursor: nextCursor,
     complete,
     confirmed: counts.created + counts.updated + counts.unchanged > 0 || selected.length === 0,
     counts,
+    generation,
   });
   return {
     ...counts,
-    complete_sweep: complete,
+    ...(currentGeneration ? {} : { outcome: "generation_superseded" }),
+    complete_sweep: complete && currentGeneration,
     statement_estimate: estimatedStatements,
     document_cap: BANK_ACTIVITY_DOCUMENT_CAP,
     statement_budget: BANK_ACTIVITY_INGEST_STATEMENT_BUDGET,
