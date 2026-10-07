@@ -270,7 +270,10 @@ export function acquireBrainLifecycleLock({
     ? CURRENT_PROCESS_INSTANCE
     : null,
   now = () => new Date(),
-  restrictWindowsDirectory = restrictWindowsDirectoryToCurrentUser,
+  // Real ACLs only exist on a Windows host; a simulated win32 platform on POSIX has nothing to restrict.
+  restrictWindowsDirectory = (path, options) => (process.platform === "win32"
+    ? restrictWindowsDirectoryToCurrentUser(path, options)
+    : undefined),
 } = {}) {
   if (!operation || !/^[a-z][a-z0-9-]{1,31}$/u.test(String(operation))) {
     throw new TypeError("a bounded lifecycle operation name is required");
