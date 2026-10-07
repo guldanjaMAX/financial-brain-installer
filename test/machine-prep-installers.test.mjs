@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -315,31 +315,53 @@ test("pinned-kit source inventory permits only npm shims named by authenticated 
   } finally { rmSync(root, { recursive: true }); }
 });
 
-test("bootstrap version guard denies network and child processes after reached decisions", () => {
-  const directory = mkdtempSync(join(tmpdir(), "kit-version-guard-"));
-  const entry = join(directory, "brain.mjs");
-  const guard = join(ROOT, "machine-prep/installers/smoke/version-guard.mjs");
-  const execute = (source) => {
-    writeFileSync(entry, source);
-    return spawnSync(process.execPath, ["--permission", `--allow-fs-read=${directory}`, `--allow-fs-read=${guard}`, "--import", guard, entry, "--version"], {
-      cwd: directory, encoding: "utf8",
-      env: { HOME: directory, USERPROFILE: directory, BRAIN_NO_WRANGLER_LOGIN: "1" },
-    });
-  };
-  try {
-    const control = execute("console.log('VERSION_DECISION_REACHED=1'); console.log('0.4.9');\n");
-    assert.equal(control.status, 0, control.stderr);
-    assert.match(control.stdout, /VERSION_DECISION_REACHED=1\n0\.4\.9/);
-    const network = execute("console.log('VERSION_DECISION_REACHED=1'); await fetch('https://example.invalid');\n");
-    assert.notEqual(network.status, 0);
-    assert.match(network.stdout, /VERSION_DECISION_REACHED=1/);
-    assert.match(network.stderr, /BOOTSTRAP_VERSION_NETWORK_REFUSED=1/);
-    const child = execute("import { spawnSync } from 'node:child_process'; console.log('VERSION_DECISION_REACHED=1'); spawnSync('synthetic-never-executed');\n");
-    assert.notEqual(child.status, 0);
-    assert.match(child.stdout, /VERSION_DECISION_REACHED=1/);
-    assert.match(child.stderr, /ERR_ACCESS_DENIED/);
-  } finally { rmSync(directory, { recursive: true }); }
-});
+for (const fixtureKind of ["physical directory", "directory alias"]) {
+  test(`bootstrap version guard denies network and child processes after reached decisions (${fixtureKind})`, () => {
+    const root = mkdtempSync(join(tmpdir(), "kit-version-guard-"));
+    try {
+      const fixture = join(root, "fixture");
+      mkdirSync(fixture);
+      let fixturePath = fixture;
+      if (fixtureKind === "directory alias") {
+        fixturePath = join(root, "alias");
+        symlinkSync(realpathSync(fixture), fixturePath, process.platform === "win32" ? "junction" : "dir");
+        assert.ok(lstatSync(fixturePath).isSymbolicLink(), "directory-alias decision reached");
+        assert.equal(realpathSync(fixturePath), realpathSync(fixture), "alias resolves to the same fixture");
+      }
+      // Node resolves the entry point through realpath, but its permission
+      // allowlist does not follow directory aliases (including macOS /var).
+      // Use one canonical path for the allowlist, entry point, cwd, and HOME.
+      const directory = realpathSync(fixturePath);
+      const entry = join(directory, "brain.mjs");
+      const guard = realpathSync(join(ROOT, "machine-prep/installers/smoke/version-guard.mjs"));
+      const execute = (source) => {
+        writeFileSync(entry, source);
+        return spawnSync(process.execPath, ["--permission", `--allow-fs-read=${directory}`, `--allow-fs-read=${guard}`, "--import", guard, entry, "--version"], {
+          cwd: directory, encoding: "utf8",
+          env: { HOME: directory, USERPROFILE: directory, BRAIN_NO_WRANGLER_LOGIN: "1" },
+        });
+      };
+      const control = execute("console.log('VERSION_DECISION_REACHED=1'); console.log('0.4.9');\n");
+      assert.equal(control.status, 0, control.stderr);
+      assert.match(control.stdout, /VERSION_DECISION_REACHED=1\n0\.4\.9/);
+      const network = execute("console.log('VERSION_DECISION_REACHED=1'); await fetch('https://example.invalid');\n");
+      assert.notEqual(network.status, 0);
+      assert.match(network.stdout, /VERSION_DECISION_REACHED=1/);
+      assert.match(network.stderr, /BOOTSTRAP_VERSION_NETWORK_REFUSED=1/);
+      const child = execute("import { spawnSync } from 'node:child_process'; console.log('VERSION_DECISION_REACHED=1'); spawnSync('synthetic-never-executed');\n");
+      assert.notEqual(child.status, 0);
+      assert.match(child.stdout, /VERSION_DECISION_REACHED=1/);
+      assert.match(child.stderr, /ERR_ACCESS_DENIED/);
+      const outside = join(realpathSync(root), "outside.txt");
+      writeFileSync(outside, "synthetic unreadable sibling\n");
+      const readOutside = execute(`import { readFileSync } from 'node:fs'; console.log('VERSION_DECISION_REACHED=1'); readFileSync(${JSON.stringify(outside)});\n`);
+      assert.notEqual(readOutside.status, 0);
+      assert.match(readOutside.stdout, /VERSION_DECISION_REACHED=1/);
+      assert.match(readOutside.stderr, /ERR_ACCESS_DENIED/);
+      assert.match(readOutside.stderr, /FileSystemRead/);
+    } finally { rmSync(root, { recursive: true }); }
+  });
+}
 
 test("bootstrap failure retains native removal and cannot pass the shell lifecycle", async () => {
   const { runSmoke } = await import("../machine-prep/installers/smoke/contract.mjs");
