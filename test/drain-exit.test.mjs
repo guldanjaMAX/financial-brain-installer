@@ -306,3 +306,119 @@ assert.match(summariseResponseBody('{"errors":[{"message":"quota exceeded"}]}'),
 /* Neither an empty body nor junk may produce an empty or enormous line. */
 assert.match(summariseResponseBody(""), /no body/i);
 assert.ok(summariseResponseBody("x".repeat(5_000)).length <= 200);
+
+// A wait that outlives the bounded command remains incomplete, with no retry loop remedy.
+{
+  let clock = 0;
+  let decisions = 0;
+  const output = [];
+  const priorLog = console.log;
+  let failure;
+  try {
+    console.log = (...parts) => output.push(parts.join(" "));
+    await cmdDrain("fixture.manifest.json", {
+      loadManifest: () => ({ m: { brain: { domain: "fixture.invalid" } } }),
+      resolveBaseUrl: async () => "https://fixture.invalid",
+      resolveAdminKey: () => "fixture-label",
+      now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+      maxDurationMs: 1_000,
+      http: async () => {
+        decisions += 1;
+        return new Response(JSON.stringify({
+          drained: 0, submitted: 0, waiting: 200, remaining: 1,
+          remaining_is_lower_bound: true, vector_ready: false,
+        }));
+      },
+    });
+  } catch (error) { failure = error; }
+  finally { console.log = priorLog; }
+  assert.equal(decisions, 1, "the bounded wait must reach receipt validation");
+  assert.equal(clock, 1_000, "the wait must exhaust the injected deadline");
+  assert.match(failure?.message || "", /wall-clock safety limit/);
+  assert.match(output.join("\n"), /200 waiting for index visibility/);
+  assert.doesNotMatch(output.join("\n"), /query-ready/);
+  assert.doesNotMatch(failure.message, /re-run|resume from|drain.*again/i);
+  assert.match(failure.message, /scheduled background drain/);
+}
+console.log("drain bounded visibility wait: 7 assertions passed");
+
+// Exercise the real Worker route, D1 outbox, and CLI together. Provider acceptance
+// is delayed until the next command poll, with no network or re-embedding.
+{
+  const { createProductFixture } = await import("../worker/test/product-contract-fixture.mjs");
+  const fixture = await createProductFixture();
+  const visible = new Map();
+  const pending = [];
+  const receipts = [];
+  let mutation = 0;
+  let processed = null;
+  let embedded = 0;
+  let clock = Date.parse("2026-10-07T12:00:00Z");
+  const priorNow = Date.now;
+  const priorLog = console.log;
+  const lines = [];
+  try {
+    Date.now = () => clock;
+    console.log = (...parts) => lines.push(parts.join(" "));
+    for (let index = 0; index < 318; index++) {
+      const uid = `fixture:${index}`;
+      fixture.raw("INSERT INTO documents (doc_uid, source, source_id, title, ingested_at, content_hash) VALUES (?, 'fixture', ?, 'Synthetic', ?, 'fixture-hash')", uid, uid, clock);
+      fixture.raw("INSERT INTO chunks (chunk_uid, doc_uid, chunk_ix, text, source, vector_id) VALUES (?, ?, 0, 'Synthetic', 'fixture', ?)", uid, uid, uid);
+      if (index < 8) visible.set(uid, { id: uid });
+      else fixture.raw("INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at) VALUES (?, ?, 'upsert', ?)", uid, uid, clock + index);
+    }
+    fixture.raw("INSERT INTO corpus_stats (source, documents, chunks) VALUES ('fixture', 318, 318)");
+    fixture.raw("UPDATE install_state SET vector_projection_bootstrap_base_count = 8 WHERE id = 1");
+    fixture.env.VECTORIZE = {
+      upsert: async (rows) => {
+        const mutationId = `fixture-mutation-${++mutation}`;
+        pending.push({ mutationId, rows });
+        return { mutationId };
+      },
+      getByIds: async (ids) => ids.map((id) => visible.get(id)).filter(Boolean),
+      describe: async () => ({ vectorCount: visible.size, processedUpToMutation: processed }),
+    };
+    fixture.env.AI = { run: async (_model, { text }) => {
+      embedded += text.length;
+      return { data: text.map(() => [0.1, 0.2, 0.3]) };
+    } };
+    const result = await cmdDrain("fixture.manifest.json", {
+      loadManifest: () => ({ m: { brain: { domain: "fixture.invalid" } } }),
+      resolveBaseUrl: async () => "https://fixture.invalid",
+      resolveAdminKey: () => fixture.env.ADMIN_KEY,
+      now: () => clock,
+      sleep: async (milliseconds) => {
+        clock += milliseconds;
+        for (const accepted of pending.splice(0)) {
+          for (const row of accepted.rows) visible.set(row.id, row);
+          processed = accepted.mutationId;
+        }
+      },
+      http: async () => {
+        assert.ok(receipts.length < 5, "the real route must converge in bounded passes");
+        const response = await fixture.post("/api/admin/brain/drain", {}, { "X-Admin-Key": fixture.env.ADMIN_KEY });
+        receipts.push(await response.clone().json());
+        return response;
+      },
+    });
+    assert.deepEqual(receipts.map(({ drained, submitted, waiting, remaining, remaining_is_lower_bound, vector_ready }) =>
+      ({ drained, submitted, waiting, remaining, remaining_is_lower_bound, vector_ready })), [
+      { drained: 0, submitted: 200, waiting: 200, remaining: 100, remaining_is_lower_bound: true, vector_ready: false },
+      { drained: 200, submitted: 0, waiting: 0, remaining: 1, remaining_is_lower_bound: true, vector_ready: false },
+      { drained: 0, submitted: 110, waiting: 110, remaining: 10, remaining_is_lower_bound: true, vector_ready: false },
+      { drained: 110, submitted: 0, waiting: 0, remaining: 0, remaining_is_lower_bound: false, vector_ready: true },
+    ]);
+    assert.deepEqual(receipts.map((receipt) => receipt.actual_vectors), [8, 208, 208, 318]);
+    assert.equal(result.actual_vectors, 318);
+    assert.equal(result.confirmed_this_run, 310);
+    assert.equal(embedded, 310, "waiting must never re-embed accepted work");
+    assert.equal(fixture.first("SELECT count(*) AS n FROM vector_outbox").n, 0);
+    assert.equal(lines.filter((line) => /waiting for index visibility/.test(line)).length, 2);
+  } finally {
+    Date.now = priorNow;
+    console.log = priorLog;
+    fixture.close();
+  }
+}
+console.log("drain real Worker field-sequence receipt: 7 result assertions and 4 request guards passed");

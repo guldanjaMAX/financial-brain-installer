@@ -25329,15 +25329,24 @@ export function validateDrainReceipt(body) {
   const submitted = nonNegativeReceiptCount(body, "submitted", "the drain receipt");
   const waiting = nonNegativeReceiptCount(body, "waiting", "the drain receipt");
   const remaining = nonNegativeReceiptCount(body, "remaining", "the drain receipt");
+  if (Object.hasOwn(body, "remaining_is_lower_bound") &&
+      typeof body.remaining_is_lower_bound !== "boolean") {
+    die("the drain receipt did not include a valid queue bound. Nothing was declared complete.");
+  }
   const remainingIsLowerBound = body.remaining_is_lower_bound === true;
+  if (remainingIsLowerBound && remaining === 0) {
+    die("the drain receipt claimed an empty lower bound. Nothing was declared complete.");
+  }
   if (typeof body.vector_ready !== "boolean") {
     die("the drain receipt did not prove Vectorize query readiness. Nothing was declared complete.");
   }
   // submitted and drained are cumulative progress within this HTTP call. A
   // fast provider can accept and confirm the same mutation before the Worker
   // returns, so submitted may legitimately exceed the final queue depth.
-  // waiting is the current unconfirmed subset and must reconcile to remaining.
-  if (waiting > remaining) {
+  // Nonempty Worker receipts use an indexed existence check, often returning
+  // remaining: 1 with remaining_is_lower_bound: true. That lower bound cannot
+  // cap the known waiting subset. Exact depths still must reconcile.
+  if (!remainingIsLowerBound && waiting > remaining) {
     die("the drain receipt counts do not reconcile. The vector index was not declared complete.");
   }
   if (remaining === 0 && waiting !== 0) {
@@ -25355,7 +25364,7 @@ export function validateDrainReceipt(body) {
     }
     die(
       "the outbox is empty, but Vectorize has not confirmed query visibility.\n" +
-        "      Wait briefly and re-run `brain drain <manifest>`; if it persists, run `brain diagnose <manifest>`."
+        "      Let the scheduled background drain confirm visibility. Check `brain health <manifest>` later; if it persists, run `brain diagnose <manifest>`."
     );
   }
   if (remaining > 0 && drained === 0 && submitted === 0 && waiting === 0) {
@@ -25398,11 +25407,11 @@ export function assertDrainComplete({
     const remainingLabel = renderDrainRemaining(remaining, remainingIsLowerBound);
     die(
       `the drain reached its ${maxRounds}-round safety limit with ${remainingLabel} vector operation(s) still queued.\n` +
-        "      Completed chunks are safe, but the vector index is still incomplete. Re-run `brain drain` to continue."
+        "      Completed chunks are safe, but the vector index is still incomplete. Let the scheduled background drain continue, then check `brain health <manifest>`."
     );
   }
-  if (Number.isSafeInteger(expectedVectors) && Number.isSafeInteger(actualVectors) && expectedVectors > 0) {
-    if (actualVectors === 0) {
+  if (Number.isSafeInteger(expectedVectors) && Number.isSafeInteger(actualVectors)) {
+    if (actualVectors === 0 && expectedVectors > 0) {
       die(
         `the outbox is empty, but Vectorize holds 0 vector(s) while D1 requires ${expectedVectors}.\n` +
           "      The vector index is EMPTY, not ready: semantic search would return nothing.\n" +
@@ -25432,6 +25441,7 @@ export function renderDrainProgress({
   remaining,
   remainingIsLowerBound = false,
   rate = null,
+  waiting = 0,
 } = {}) {
   const progress = [
     Number.isSafeInteger(actualVectors)
@@ -25441,6 +25451,7 @@ export function renderDrainProgress({
     `${submitted} accepted this run`,
     `${renderDrainRemaining(remaining, remainingIsLowerBound)} to go`,
   ];
+  if (waiting > 0) progress.push(`${waiting} waiting for index visibility`);
   if (rate) progress.push(`~${rate}/min`);
   if (rate && remaining && !remainingIsLowerBound) {
     progress.push(`about ${Math.max(1, Math.ceil(remaining / rate))} min left`);
@@ -25694,6 +25705,7 @@ export async function cmdDrain(manifestPath, options = {}) {
       remaining,
       remainingIsLowerBound,
       rate,
+      waiting: receipt.waiting,
     }));
     if (remaining === 0) break;
     if (receipt.waiting > 0) {
@@ -25712,7 +25724,7 @@ export async function cmdDrain(manifestPath, options = {}) {
     die(
       `the drain reached its ${Math.ceil(maxDurationMs / 60_000)}-minute wall-clock safety limit with ` +
         `${remainingLabel} vector operation(s) still queued.\n` +
-        "      Completed chunks are safe. Re-run `brain drain` to resume from the durable queue.",
+        "      Completed chunks are safe. Let the scheduled background drain continue, then check `brain health <manifest>`.",
     );
   }
   assertDrainComplete({

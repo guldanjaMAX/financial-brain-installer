@@ -22,6 +22,12 @@ write a response.
   15 minutes before continuing. It never resends that column change while
   checking. If the checks cannot reach Cloudflare, the message names the
   connection problem and explains how to check the column before retrying.
+- **Drain progress no longer looks like a receipt failure.** Accepted vectors
+  can wait for index visibility while the queue reports only a lower bound.
+  The command now keeps those counts distinct and shows visibility waits.
+  Completion still requires exact readiness; genuine count mismatches fail.
+  Let the scheduled background drain finish if a safety limit is reached, then
+  check `brain health <manifest>`.
 
 - **Daily imports now have one owned Windows and macOS contract.** `brain daily
   on|off|status <manifest>` derives every source from your own manifest instead

@@ -898,7 +898,11 @@ If you run `brain drain <manifest>` after a load, its completion line separates
 the total vectors currently available to search from the vectors newly
 confirmed during that command. A healthy no-op can therefore report an existing
 query-visible total and zero newly confirmed, rather than making the index look
-empty.
+empty. While work is accepted but not yet visible, the command reports progress
+and waiting for index visibility. A nonempty queue may be reported as a lower
+bound. If the command reaches its safety limit, let the scheduled background
+drain continue and check `brain health <manifest>` later. Repeated manual drains
+do not speed up provider processing.
 
 ## Check changing facts and access zones
 
