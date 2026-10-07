@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { planDailyRefresh } from "../operations/daily-refresh-plan.mjs";
+import { dailyRefreshPrincipal, planDailyRefresh } from "../operations/daily-refresh-plan.mjs";
 
 const manifest = (overrides = {}) => ({
   client: { slug: "owner-brain", timezone: "America/Phoenix" },
@@ -36,6 +36,28 @@ const entries = [
   { key: "iphone_backup", enabled: true, status: "skipped", reason: "snapshot", daily_class: "snapshot", daily_owner: "snapshot", legs: [] },
   { key: "future_source", enabled: true, status: "unavailable", reason: "no loader", legs: [] },
 ];
+
+test("Windows identity is the exact current-user SID and fails closed when it cannot be read", () => {
+  let calls = 0;
+  const principal = dailyRefreshPrincipal({
+    platform: "win32",
+    uid: null,
+    spawn: (command, args) => {
+      calls += 1;
+      assert.equal(command, "whoami.exe");
+      assert.deepEqual(args, ["/user", "/fo", "csv", "/nh"]);
+      return { status: 0, stdout: `"fixture","S-1-5-21-123456"\r\n` };
+    },
+  });
+  assert.equal(calls, 1, "the native principal decision point was reached");
+  assert.equal(principal, "sid:S-1-5-21-123456");
+  assert.throws(
+    () => dailyRefreshPrincipal({
+      platform: "win32", uid: null, spawn: () => ({ status: 1, stdout: "" }),
+    }),
+    /user SID is unavailable/i,
+  );
+});
 
 test("daily plan comes from every manifest corpus and reports unsupported sources", async () => {
   let planningCalls = 0;

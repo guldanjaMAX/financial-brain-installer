@@ -1135,10 +1135,15 @@ export function pauseScheduler(manifestPath, options = {}) {
     throw new Error(`the owned ${status.spec.schedulerNoun} is still running; update did not begin`);
   }
   const serialized = readFileSync(status.plistPath, "utf8");
+  const launchctl = options.launchctl || defaultLaunchctl;
+  const disabled = launchctl(["disable", status.service]);
+  if (disabled?.status !== 0) throw launchctlError(`persistently pausing the ${status.spec.schedulerNoun}`, disabled);
   if (status.loaded) {
-    const launchctl = options.launchctl || defaultLaunchctl;
     const stopped = launchctl(["bootout", status.service]);
-    if (stopped?.status !== 0) throw launchctlError(`pausing the ${status.spec.schedulerNoun}`, stopped);
+    if (stopped?.status !== 0) {
+      try { launchctl(["enable", status.service]); } catch {}
+      throw launchctlError(`pausing the ${status.spec.schedulerNoun}`, stopped);
+    }
   }
   const readback = statusScheduler(manifestPath, options);
   if (!readback.installed || readback.loaded || !readback.definitionMatches ||
@@ -1160,8 +1165,10 @@ export function restoreScheduler(manifestPath, snapshot, options = {}) {
   if (!status.installed || readFileSync(status.plistPath, "utf8") !== snapshot.serialized) {
     throw new Error(`the owned ${status.spec.schedulerNoun} changed while update held it paused`);
   }
+  const launchctl = options.launchctl || defaultLaunchctl;
+  const enabled = launchctl(["enable", status.service]);
+  if (enabled?.status !== 0) throw launchctlError(`persistently restoring the ${status.spec.schedulerNoun}`, enabled);
   if (snapshot.wasLoaded && !status.loaded) {
-    const launchctl = options.launchctl || defaultLaunchctl;
     const restored = launchctl(["bootstrap", status.domain, status.plistPath]);
     if (restored?.status !== 0) throw launchctlError(`restoring the ${status.spec.schedulerNoun}`, restored);
   }

@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { homedir, userInfo } from "node:os";
 import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
@@ -20,8 +21,27 @@ export function dailyRefreshPrincipal({
   username = userInfo().username,
   home = homedir(),
   windowsSid = null,
+  spawn = spawnSync,
 } = {}) {
-  if (platform === "win32" && windowsSid) return `sid:${windowsSid}`;
+  if (platform === "win32") {
+    let sid = windowsSid;
+    if (!sid) {
+      const result = spawn("whoami.exe", ["/user", "/fo", "csv", "/nh"], {
+        encoding: "utf8",
+        windowsHide: true,
+        env: { SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR },
+      });
+      const fields = String(result?.stdout || "").match(/"([^"]*)"\s*,\s*"(S-1-[0-9-]+)"/u);
+      if (result?.status !== 0 || !fields) {
+        throw new Error("the current Windows user SID is unavailable; daily scheduling stopped before mutation");
+      }
+      sid = fields[2];
+    }
+    if (!/^S-1-[0-9-]+$/u.test(String(sid))) {
+      throw new Error("the current Windows user SID is unavailable; daily scheduling stopped before mutation");
+    }
+    return `sid:${sid}`;
+  }
   if (Number.isInteger(uid) && uid >= 0) return `uid:${uid}`;
   const fallback = digest({ username: String(username || ""), home: resolve(home || ".") }).slice(7, 39);
   return `user:${fallback}`;
@@ -148,6 +168,9 @@ export async function planDailyRefresh({
   const timezone = daily.timezone || "UTC";
   const timezoneMatches = !localTimezone || timezone === localTimezone;
   const unsupported = sources.filter((source) => source.class === "unsupported");
+  const unavailableDaily = sources.filter((source) =>
+    source.class === "machine-pull" && source.owner === "daily-task" && source.status !== "ready"
+  );
   const sourcePlanHash = digest(sources.map(({ key, run_key, enabled, class: sourceClass, owner, status, source_names }) => ({
     key, run_key, enabled, class: sourceClass, owner, status, source_names,
   })));
@@ -165,11 +188,15 @@ export async function planDailyRefresh({
     local_timezone: localTimezone,
     timezone_matches_machine: timezoneMatches,
     max_runtime_minutes: daily.maxRuntime || 45,
-    ready: unsupported.length === 0 && timezoneMatches && !daily.error,
+    ready: unsupported.length === 0 && unavailableDaily.length === 0 && timezoneMatches && !daily.error,
     unsupported_sources: unsupported.length,
-    configuration_error: daily.error || (timezoneMatches
+    configuration_error: daily.error || (unsupported.length
       ? null
-      : `manifest timezone ${timezone} does not match this machine's ${localTimezone}`),
+      : unavailableDaily.length
+        ? `enabled daily source(s) are unavailable: ${unavailableDaily.map((source) => source.key).join(", ")}`
+        : timezoneMatches
+          ? null
+          : `manifest timezone ${timezone} does not match this machine's ${localTimezone}`),
     sources: Object.freeze(sources),
   });
 }

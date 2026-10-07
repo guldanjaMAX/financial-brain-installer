@@ -21,6 +21,10 @@ this changed candidate.
   contains no key, and must read back exactly before success. Updates pause it
   while the shared load/update lock is held and restore a recomputed plan only
   after the Brain is active, query-ready, and has no queued search updates.
+  Turning daily imports off saves that choice in the manifest, so a later
+  update does not turn them back on. An interrupted update keeps a private
+  recovery receipt and keeps imports disabled across restart until recovery is
+  verified.
   Status prints one line per source with its owner and last successful run. To
   check after updating: run `brain daily status <manifest>` and confirm every
   source names the expected owner and a truthful last-success time or `never`.

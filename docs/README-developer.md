@@ -1012,18 +1012,29 @@ Brain task folder. macOS installs one current-user LaunchAgent. Both names bind
 the stable Brain resource identity and operating-system principal, so two
 Brains owned by one user and two users on one computer cannot collide. A
 definition carrying no installer ownership marker is foreign and read-only.
-Install, pause, restore, and remove all require exact native readback.
+Install, pause, restore, and remove parse and compare the actual action,
+arguments, trigger, principal, settings, and enabled state. A copied marker
+cannot authorize a changed native definition. Native inspection errors are not
+reported as absence.
 
 The definition contains paths, hashes, cadence, and the manifest locator, but
 no key or provider credential. Each scheduled run takes the manifest-wide
-lifecycle lease before any source lease, verifies its definition and source
+lifecycle lease before any source lease. That lease is keyed by canonical
+Brain resource identity in the machine-shared lock root, so another manifest
+path or operating-system user cannot open a second writer lane for the same
+Brain. It verifies its definition and source
 plan hashes, runs ready daily-owned legs sequentially, and records `deferred`
 without writing when load or update already owns the lease. `brain update`
 holds that same lease, pauses the owned definition after custody verification,
 and recomputes it from the updated manifest only after the existing upgrade
 path proves version agreement, active query-ready health, and an empty vector
 queue. An ambiguous or paused update failure leaves imports paused. It never
-blindly restores a source removed by the updated manifest.
+blindly restores a source removed by the updated manifest. Before pausing,
+update writes a private durable transaction containing the verified prior
+definition and enabled state. macOS uses launchd's persistent disable state,
+and a restarted runner also refuses while that transaction requires recovery.
+`daily on` and `daily off` save owner intent in `operations.daily_refresh`
+while holding the same lifecycle lease.
 
 Status joins contract-v3 `brain sources --json` receipts to local ownership and
 prints one stable line per manifest source:
@@ -1032,8 +1043,10 @@ prints one stable line per manifest source:
 
 The owner is `daily-task`, `existing-local-scheduler`, `worker-cron`, `push`,
 `resident-capture`, `snapshot`, or `none`. Scheduler success never invents
-source success: a source leg that reports success without advancing
-`receipt.last_successful_run_at` makes the daily run fail.
+source success: every named leg must have a valid
+`receipt.last_successful_run_at`, and every prior timestamp must advance. A
+missing or unknown leg makes the aggregate line unknown instead of allowing a
+current sibling to hide it.
 
 ### Connector-specific Drive refresh on macOS
 

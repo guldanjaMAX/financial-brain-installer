@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import * as dailySchedulerModule from "../operations/daily-refresh-scheduler.mjs";
 
 import {
   buildDailyRefreshDefinition,
+  createNativeDailyRefreshAdapter,
   installDailyRefreshSchedule,
   pauseDailyRefreshSchedule,
   removeDailyRefreshSchedule,
@@ -101,6 +103,167 @@ test("install refuses a foreign collision and exact readback failure", () => {
   assert.equal(installed.verified, true, "green control installs and reads back exactly");
 });
 
+test("native Windows readback verifies execution fields and distinguishes query failure", () => {
+  const directory = mkdtempSync(join(tmpdir(), "daily-native-win-"));
+  const definition = buildDailyRefreshDefinition(basePlan, {
+    platform: "win32",
+    nodePath: String.raw`C:\Runtime\node.exe`,
+    brainPath: String.raw`C:\Runtime\brain.mjs`,
+    runnerPath: String.raw`C:\Runtime\daily-refresh-run.mjs`,
+  });
+  let queryCalls = 0;
+  let response = { status: 0, stdout: definition.serialized };
+  const adapter = createNativeDailyRefreshAdapter({
+    platform: "win32",
+    home: directory,
+    spawn: (_command, args) => {
+      assert.equal(args[0], "/Query");
+      queryCalls += 1;
+      return response;
+    },
+  });
+  const exact = statusDailyRefreshSchedule(basePlan, {
+    platform: "win32", adapter,
+    nodePath: definition.node_path, brainPath: definition.brain_path, runnerPath: definition.runner_path,
+  });
+  assert.equal(exact.verified, true, "the exact native definition is the green control");
+
+  response = { status: 0, stdout: definition.serialized.replace(definition.node_path, String.raw`C:\Foreign\node.exe`) };
+  assert.equal(statusDailyRefreshSchedule(basePlan, {
+    platform: "win32", adapter,
+    nodePath: definition.node_path, brainPath: definition.brain_path, runnerPath: definition.runner_path,
+  }).verified, false, "a changed action is not authorized by an unchanged comment marker");
+
+  response = { status: 5, stdout: "", stderr: "access denied" };
+  assert.throws(
+    () => statusDailyRefreshSchedule(basePlan, { platform: "win32", adapter }),
+    /could not be inspected/i,
+  );
+  assert.equal(queryCalls, 4, "the failure arm also reached the locale-independent inventory check");
+});
+
+test("native Windows absence requires a successful complete task inventory", () => {
+  const directory = mkdtempSync(join(tmpdir(), "daily-native-absence-"));
+  let calls = 0;
+  const adapter = createNativeDailyRefreshAdapter({
+    platform: "win32",
+    home: directory,
+    spawn: (_command, args) => {
+      calls += 1;
+      if (args.includes("/FO")) return { status: 0, stdout: `"\\Other Folder\\Other Task","N/A"\r\n` };
+      return { status: 1, stdout: "", stderr: "localized native error" };
+    },
+  });
+  const status = statusDailyRefreshSchedule(basePlan, { platform: "win32", adapter });
+  assert.equal(status.installed, false);
+  assert.equal(status.verified, true);
+  assert.equal(calls, 2, "absence was proved by a successful inventory after the targeted query failed");
+});
+
+test("native removal refuses a replacement that appears at its mutation boundary", () => {
+  const directory = mkdtempSync(join(tmpdir(), "daily-native-race-"));
+  const definition = buildDailyRefreshDefinition(basePlan, {
+    platform: "win32",
+    nodePath: String.raw`C:\Runtime\node.exe`,
+    brainPath: String.raw`C:\Runtime\brain.mjs`,
+    runnerPath: String.raw`C:\Runtime\daily-refresh-run.mjs`,
+  });
+  let queries = 0;
+  let deletes = 0;
+  const adapter = createNativeDailyRefreshAdapter({
+    platform: "win32",
+    home: directory,
+    spawn: (_command, args) => {
+      if (args[0] === "/Query") {
+        queries += 1;
+        return { status: 0, stdout: queries === 1 ? definition.serialized : "<Task><RegistrationInfo><Description>foreign</Description></RegistrationInfo></Task>" };
+      }
+      deletes += 1;
+      return { status: 0 };
+    },
+  });
+  assert.throws(
+    () => removeDailyRefreshSchedule(basePlan, {
+      platform: "win32", adapter,
+      nodePath: definition.node_path, brainPath: definition.brain_path, runnerPath: definition.runner_path,
+    }),
+    /changed before removal|foreign schedule/i,
+  );
+  assert.equal(queries, 2, "ownership was re-read at the mutation boundary");
+  assert.equal(deletes, 0, "the replacement was never deleted");
+});
+
+test("macOS pause persists disabled state across a simulated new login", () => {
+  const home = mkdtempSync(join(tmpdir(), "daily-native-mac-"));
+  const definition = buildDailyRefreshDefinition(basePlan, {
+    platform: "darwin", nodePath: "/runtime/node", brainPath: "/runtime/brain.mjs",
+    runnerPath: "/runtime/operations/daily-refresh-run.mjs",
+  });
+  const plist = join(home, "Library", "LaunchAgents", `com.financialbrain.daily.${basePlan.identity.id}.plist`);
+  mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
+  writeFileSync(plist, definition.serialized);
+  let loaded = true;
+  let disabled = false;
+  const calls = [];
+  const spawn = (_command, args) => {
+    calls.push(args[0]);
+    if (args[0] === "print") return { status: loaded ? 0 : 113, stderr: loaded ? "" : "Could not find service" };
+    if (args[0] === "print-disabled") {
+      return { status: 0, stdout: disabled ? `\"com.financialbrain.daily.${basePlan.identity.id}\" => true` : "" };
+    }
+    if (args[0] === "bootout") loaded = false;
+    if (args[0] === "disable") disabled = true;
+    if (args[0] === "enable") disabled = false;
+    if (args[0] === "bootstrap") loaded = true;
+    return { status: 0 };
+  };
+  const adapter = createNativeDailyRefreshAdapter({ platform: "darwin", home, uid: 501, spawn });
+  adapter.setEnabled(basePlan.identity, false);
+  assert.equal(adapter.read(basePlan.identity).enabled, false);
+  assert.ok(calls.includes("disable"), "pause reached launchd's persistent disable decision");
+
+  loaded = false;
+  const afterLogin = createNativeDailyRefreshAdapter({ platform: "darwin", home, uid: 501, spawn });
+  assert.equal(afterLogin.read(basePlan.identity).enabled, false, "a new login cannot reload the disabled service");
+  afterLogin.setEnabled(basePlan.identity, true);
+  assert.equal(afterLogin.read(basePlan.identity).enabled, true, "verified restore is the green control");
+});
+
+test("update recovery state is durable, private, and readable after restart", () => {
+  const home = mkdtempSync(join(tmpdir(), "daily-update-transaction-"));
+  assert.equal(typeof dailySchedulerModule.writeDailyRefreshUpdateTransaction, "function");
+  assert.equal(typeof dailySchedulerModule.readDailyRefreshUpdateTransaction, "function");
+  assert.equal(typeof dailySchedulerModule.clearDailyRefreshUpdateTransaction, "function");
+  const definition = buildDailyRefreshDefinition(basePlan, {
+    platform: "darwin", nodePath: "/runtime/node", brainPath: "/runtime/brain.mjs",
+    runnerPath: "/runtime/operations/daily-refresh-run.mjs",
+  });
+  const transaction = dailySchedulerModule.writeDailyRefreshUpdateTransaction({
+    plan: basePlan,
+    snapshot: { exists: true, enabled: true, identity: basePlan.identity, definition },
+    phase: "recovery_required",
+  }, { home, now: () => new Date("2026-10-06T18:00:00.000Z") });
+  assert.equal(transaction.phase, "recovery_required");
+  const afterRestart = dailySchedulerModule.readDailyRefreshUpdateTransaction(basePlan.identity, { home });
+  assert.equal(afterRestart.snapshot.enabled, true);
+  assert.equal(afterRestart.snapshot.definition.definition_hash, definition.definition_hash);
+  assert.doesNotMatch(JSON.stringify(afterRestart), /admin.?key|api.?token|secret/i);
+  assert.equal(dailySchedulerModule.clearDailyRefreshUpdateTransaction(basePlan.identity, { home }), true);
+  assert.equal(dailySchedulerModule.readDailyRefreshUpdateTransaction(basePlan.identity, { home }), null);
+});
+
+test("module URL defaults decode spaces before building a native definition", () => {
+  const definition = buildDailyRefreshDefinition(basePlan, {
+    platform: "win32",
+    nodePath: String.raw`C:\Runtime\node.exe`,
+    brainUrl: new URL("file:///C:/Program%20Files/Financial%20Brain/brain.mjs"),
+    runnerUrl: new URL("file:///C:/Program%20Files/Financial%20Brain/operations/daily-refresh-run.mjs"),
+  });
+  assert.equal(definition.brain_path, String.raw`C:\Program Files\Financial Brain\brain.mjs`);
+  assert.equal(definition.runner_path, String.raw`C:\Program Files\Financial Brain\operations\daily-refresh-run.mjs`);
+  assert.doesNotMatch(definition.serialized, /%20/);
+});
+
 test("pause, restore, status, and remove operate only on the owned identity", () => {
   const adapter = memoryAdapter();
   installDailyRefreshSchedule(basePlan, { adapter, platform: "darwin" });
@@ -179,6 +342,100 @@ test("the public all-configured command installs on Windows and prints stable fr
   assert.ok(adapter.calls.some(([name]) => name === "install"), "the native install decision point was reached");
 });
 
+test("status aggregates missing or unknown legs and does not predict an absent native run", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "daily-status-"));
+  const manifestPath = join(directory, "brain.manifest.json");
+  writeFileSync(manifestPath, JSON.stringify({
+    client: { slug: "fixture", timezone: "America/Phoenix" },
+    infrastructure: { cloudflare: { account_id: "fixture-account", d1_database_id: "fixture-database" } },
+    corpora: { provider: { enabled: true } },
+    operations: { daily_refresh: { enabled: true, timezone: "America/Phoenix" } },
+  }));
+  const result = await cmdScheduleAllConfigured(manifestPath, "status", {
+    platform: "win32",
+    planDailyRefresh: async () => ({
+      ...basePlan,
+      timezone_matches_machine: true,
+      unsupported_sources: 0,
+      sources: [{
+        key: "provider", class: "machine-pull", owner: "daily-task", status: "ready",
+        source_names: ["mail", "files"],
+      }],
+    }),
+    schedulerAdapter: memoryAdapter(),
+    readSourceInventory: async () => ({ sources: [{
+      name: "mail",
+      freshness: { state: "current" },
+      receipt: { last_successful_run_at: "2026-10-06T16:00:00.000Z" },
+    }] }),
+    log: () => {},
+  });
+  assert.equal(result.sources[0].current_state, "unknown");
+  assert.equal(result.sources[0].next_run, "not scheduled");
+  assert.equal(result.sources[0].owner, "none");
+});
+
+test("an unloaded or interpreter-missing legacy scheduler does not suppress daily work", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "daily-owner-health-"));
+  const manifestPath = join(directory, "brain.manifest.json");
+  const manifest = {
+    client: { slug: "fixture" },
+    infrastructure: { cloudflare: { account_id: "fixture-account", d1_database_id: "fixture-database" } },
+    corpora: { google_drive: { enabled: true } },
+  };
+  writeFileSync(manifestPath, JSON.stringify(manifest));
+  const observedOwners = [];
+  await cmdScheduleAllConfigured(manifestPath, "status", {
+    platform: "darwin",
+    driveScheduler: {
+      statusDriveScheduler: () => ({
+        installed: true, definitionMatches: true, loaded: false, running: false,
+        interpreterPresent: true, scheduleError: null,
+      }),
+    },
+    planDailyRefresh: async ({ existingSchedulerOwners }) => {
+      observedOwners.push([...existingSchedulerOwners]);
+      return { ...basePlan, timezone_matches_machine: true, unsupported_sources: 0, sources: [] };
+    },
+    schedulerAdapter: memoryAdapter(),
+    readSourceInventory: async () => ({ sources: [] }),
+    log: () => {},
+  });
+  assert.deepEqual(observedOwners, [[]], "the inert definition reached and failed the ownership-health decision");
+});
+
+test("daily off persists owner intent and takes the lifecycle boundary", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "daily-intent-"));
+  const manifestPath = join(directory, "brain.manifest.json");
+  writeFileSync(manifestPath, `${JSON.stringify({
+    client: { slug: "fixture", timezone: "America/Phoenix" },
+    infrastructure: { cloudflare: { account_id: "fixture-account", d1_database_id: "fixture-database" } },
+    corpora: { google_drive: { enabled: true } },
+    operations: { daily_refresh: { enabled: true, timezone: "America/Phoenix" } },
+  }, null, 2)}\n`);
+  const adapter = memoryAdapter();
+  installDailyRefreshSchedule({ ...basePlan, sources: [{
+    key: "google_drive", class: "machine-pull", owner: "daily-task", status: "ready", source_names: ["drive"],
+  }] }, { platform: "win32", adapter });
+  let locks = 0;
+  await cmdScheduleAllConfigured(manifestPath, "remove", {
+    platform: "win32",
+    planDailyRefresh: async () => ({
+      ...basePlan,
+      timezone_matches_machine: true,
+      unsupported_sources: 0,
+      sources: [{ key: "google_drive", class: "machine-pull", owner: "daily-task", status: "ready", source_names: ["drive"] }],
+    }),
+    schedulerAdapter: adapter,
+    syncSourceExpectations: false,
+    readSourceInventory: async () => ({ sources: [] }),
+    withBrainLifecycleLock: async (_options, task) => { locks += 1; return task(); },
+    log: () => {},
+  });
+  assert.equal(locks, 1, "schedule mutation entered the shared lifecycle boundary");
+  assert.equal(JSON.parse(readFileSync(manifestPath, "utf8")).operations.daily_refresh.enabled, false);
+});
+
 test("scheduled execution reuses the installed ownership plan before checking its hash", async () => {
   const directory = mkdtempSync(join(tmpdir(), "daily-shared-plan-"));
   const manifestPath = join(directory, "brain.manifest.json");
@@ -234,8 +491,18 @@ test("update restores only after active, query-ready, queue-zero verification", 
     scheduler,
     plan: basePlan,
     runUpdate: async () => { events.push("update"); return { status: "noop" }; },
-    verifyFinal: async () => assert.fail("a no-op update does not enter final verification"),
+    verifyFinal: async () => ({ active: true, query_ready: true, pending: 0 }),
     recomputePlan: async () => assert.fail("a no-op update does not replace the schedule"),
   });
   assert.deepEqual(events, ["pause", "update", "restore"], "a verified no-op path restores the exact prior state");
+
+  events.length = 0;
+  await assert.rejects(() => runUpdateWithDailyRefreshPaused({
+    scheduler,
+    plan: basePlan,
+    runUpdate: async () => { events.push("update"); return { status: "rolled-back" }; },
+    verifyFinal: async () => ({ active: false, query_ready: false, pending: 0 }),
+    recomputePlan: async () => updatedPlan,
+  }), /active, query-ready/i);
+  assert.deepEqual(events, ["pause", "update", "leave-paused"], "an unverified rollback stays paused");
 });

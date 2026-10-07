@@ -19,6 +19,7 @@ import {
   updateCommandTarget,
 } from "../brain.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { buildDailyRefreshDefinition } from "../operations/daily-refresh-scheduler.mjs";
 
 const PENDING_MESSAGE = (pending) => renderCliCommands(
   `Your Brain is still indexing ${pending} recent items so they can be found by meaning. ` +
@@ -238,6 +239,92 @@ test("an empty backlog reaches the paused-deployment stage", async () => {
         "In Claude Code type /exit, then claude --continue.\n" +
         "Then ask: check my Brain.",
     ]);
+  });
+});
+
+test("production update integration restores daily imports only from explicit final-state proof", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const configured = fixtureManifest();
+    configured.client.timezone = "UTC";
+    configured.corpora = { google_drive: { enabled: true } };
+    configured.operations = { daily_refresh: { enabled: true, timezone: "UTC" } };
+    writeFileSync(manifestPath, `${JSON.stringify(configured, null, 2)}\n`);
+    const plan = {
+      schema_version: 1,
+      identity: { id: "v1-0123456789abcdef", principal: "sid:S-1-5-21-fixture" },
+      manifest_path: manifestPath,
+      manifest_path_hash: "sha256:path",
+      manifest_content_hash: "sha256:content",
+      source_plan_hash: "sha256:sources",
+      platform: "win32",
+      enabled: true,
+      ready: true,
+      timezone_matches_machine: true,
+      unsupported_sources: 0,
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      max_runtime_minutes: 45,
+      sources: [{
+        key: "google_drive", class: "machine-pull", owner: "daily-task", status: "ready",
+        run_key: "google_drive", source_names: ["drive"],
+      }],
+    };
+    const definition = buildDailyRefreshDefinition(plan, {
+      platform: "win32", nodePath: String.raw`C:\Runtime\node.exe`,
+      brainPath: String.raw`C:\Runtime\brain.mjs`, runnerPath: String.raw`C:\Runtime\daily-refresh-run.mjs`,
+    });
+    let state = { exists: true, owned: true, enabled: true, definition };
+    const mutations = [];
+    const adapter = {
+      read: () => state,
+      setEnabled: (_identity, enabled) => { mutations.push(`enabled:${enabled}`); state = { ...state, enabled }; },
+      install: (next) => { mutations.push("install"); state = { exists: true, owned: true, enabled: true, definition: next }; },
+      remove: () => { mutations.push("remove"); state = null; },
+    };
+    const dailyRefreshOptions = {
+      platform: "win32",
+      principal: plan.identity.principal,
+      localTimezone: "UTC",
+      existingSchedulerOwners: [],
+      planDailyRefresh: async () => plan,
+      schedulerAdapter: adapter,
+      schedulerOptions: {
+        nodePath: definition.node_path,
+        brainPath: definition.brain_path,
+        runnerPath: definition.runner_path,
+      },
+      syncSourceExpectations: false,
+    };
+    const base = {
+      ...updateHarness(manifestPath, async () => ({ pending: 0 }), []),
+      dailyRefreshOptions,
+      reportUpdateFinish: () => {},
+    };
+
+    await assert.rejects(
+      cmdUpdate(manifestPath, {
+        ...base,
+        cmdUpgrade: async () => ({
+          updated: true,
+          daily_final_state: { active: true, query_ready: false, pending: 0 },
+        }),
+      }),
+      /active, query-ready, and queue zero/i,
+    );
+    assert.deepEqual(mutations, ["enabled:false"], "the unhealthy arm reached pause and never restored");
+    assert.equal(state.enabled, false);
+
+    mutations.length = 0;
+    const healthy = await cmdUpdate(manifestPath, {
+      ...base,
+      cmdUpgrade: async () => ({
+        updated: true,
+        daily_final_state: { active: true, query_ready: true, pending: 0 },
+      }),
+    });
+    assert.equal(healthy.updated, true);
+    assert.deepEqual(mutations, ["install"], "the verified control reconciled the paused definition");
+    assert.equal(state.enabled, true);
   });
 });
 

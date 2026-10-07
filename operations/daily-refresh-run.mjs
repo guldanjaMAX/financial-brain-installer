@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireBrainLifecycleLock } from "./brain-lifecycle-lock.mjs";
-import { buildDailyRefreshDefinition } from "./daily-refresh-scheduler.mjs";
+import { buildDailyRefreshDefinition, readDailyRefreshUpdateTransaction } from "./daily-refresh-scheduler.mjs";
 
 function timestamp(now) {
   const value = now();
@@ -12,10 +12,29 @@ function timestamp(now) {
   return value.toISOString();
 }
 
-function lastSuccess(inventory, source) {
+function validTimestamp(value) {
+  return typeof value === "string" && value.length <= 64 && Number.isFinite(Date.parse(value))
+    ? value
+    : null;
+}
+
+function sourceFreshness(inventory, source) {
   const names = source.source_names?.length ? source.source_names : [source.key];
-  const values = names.map((name) => inventory?.[name]?.last_successful_run_at).filter(Boolean).sort();
-  return values.at(-1) || null;
+  return Object.fromEntries(names.map((name) => [name, validTimestamp(inventory?.[name]?.last_successful_run_at)]));
+}
+
+function compareFreshness(before, after) {
+  const missing = [];
+  const notAdvanced = [];
+  for (const name of Object.keys(after)) {
+    if (!after[name]) missing.push(name);
+    else if (before[name] && Date.parse(after[name]) <= Date.parse(before[name])) notAdvanced.push(name);
+  }
+  return Object.freeze({
+    advanced: missing.length === 0 && notAdvanced.length === 0,
+    missing: Object.freeze(missing),
+    notAdvanced: Object.freeze(notAdvanced),
+  });
 }
 
 export async function runDailyRefresh({
@@ -60,6 +79,23 @@ export async function runDailyRefresh({
   try {
     lock.assertOwned();
     const baseline = await readFreshness();
+    for (const source of plan.sources.filter((entry) =>
+      entry.class === "machine-pull" && entry.owner === "daily-task" && entry.status !== "ready"
+    )) {
+      const receipt = Object.freeze({
+        schema_version: 1,
+        kind: "daily_refresh_source",
+        identity: plan.identity.id,
+        source: source.source_names?.[0] || source.key,
+        status: source.status === "skipped" ? "skipped" : "unavailable",
+        started_at: startedAt,
+        completed_at: timestamp(now),
+        freshness_advanced: false,
+        reason_code: source.status === "skipped" ? "source_not_ready" : "source_unavailable",
+      });
+      sourceResults.push(receipt);
+      await writeReceipt(receipt);
+    }
     const runnable = plan.sources.filter((source) =>
       source.class === "machine-pull" && source.owner === "daily-task" && source.status === "ready"
     );
@@ -82,7 +118,7 @@ export async function runDailyRefresh({
         await writeReceipt(receipt);
         continue;
       }
-      const before = lastSuccess(baseline, source);
+      const beforeBySource = sourceFreshness(baseline, source);
       let runResult;
       let outcome = "complete";
       let reason = null;
@@ -90,11 +126,18 @@ export async function runDailyRefresh({
         runResult = await runSource(source, { assertOwned: lock.assertOwned });
         lock.assertOwned();
         const afterInventory = await readFreshness(source);
-        const after = lastSuccess(afterInventory, source);
-        const freshnessAdvanced = Boolean(after && (!before || Date.parse(after) > Date.parse(before)));
+        const afterBySource = sourceFreshness(afterInventory, source);
+        const freshness = compareFreshness(beforeBySource, afterBySource);
+        const afterValues = Object.values(afterBySource).filter(Boolean).sort();
+        const beforeValues = Object.values(beforeBySource).filter(Boolean).sort();
+        const after = afterValues.at(-1) || null;
+        const before = beforeValues.at(-1) || null;
+        const freshnessAdvanced = freshness.advanced;
         if (!freshnessAdvanced && runResult?.status !== "skipped") {
           outcome = "failed";
-          reason = "the source claimed success, but last_successful_run_at did not advance";
+          reason = freshness.missing.length
+            ? "the source claimed success, but one or more freshness receipts were missing or invalid"
+            : "the source claimed success, but last_successful_run_at did not advance for every source leg";
         }
         const receipt = Object.freeze({
           schema_version: 1,
@@ -107,6 +150,8 @@ export async function runDailyRefresh({
           last_successful_run_at_before: before,
           last_successful_run_at_after: after,
           freshness_advanced: freshnessAdvanced,
+          missing_freshness_sources: freshness.missing,
+          unadvanced_freshness_sources: freshness.notAdvanced,
           reason,
         });
         sourceResults.push(receipt);
@@ -121,7 +166,8 @@ export async function runDailyRefresh({
           started_at: sourceStartedAt,
           completed_at: timestamp(now),
           freshness_advanced: false,
-          reason: String(error?.message || error).replace(/\s+/gu, " ").slice(0, 240),
+          reason_code: "source_execution_failed",
+          reason: "the source refresh failed; retry this source or inspect its private local diagnostics",
         });
         sourceResults.push(receipt);
         await writeReceipt(receipt);
@@ -183,6 +229,25 @@ export async function runDailyRefreshCli(manifestPath, options = {}) {
     ...(options.planOptions || {}),
   });
   if (!plan.ready) throw new Error(plan.configuration_error || "the daily refresh plan is not ready");
+  const receiptWriter = options.writeReceipt ?? dailyReceiptWriter(plan, options);
+  const readUpdateTransaction = options.readUpdateTransaction ?? readDailyRefreshUpdateTransaction;
+  const updateTransaction = readUpdateTransaction(plan.identity, { home: options.home });
+  if (updateTransaction) {
+    const occurredAt = (options.now ? options.now() : new Date()).toISOString();
+    const receipt = Object.freeze({
+      schema_version: 1,
+      kind: "daily_refresh",
+      identity: plan.identity.id,
+      status: "deferred",
+      started_at: occurredAt,
+      completed_at: occurredAt,
+      reason_code: "update_recovery_required",
+      reason: "a prior update still requires verified schedule recovery",
+      sources: [],
+    });
+    await receiptWriter(receipt);
+    return receipt;
+  }
   const expectedDefinitionHash = options.expectedDefinitionHash || null;
   if (expectedDefinitionHash) {
     const definition = buildDailyRefreshDefinition(plan, {
@@ -205,7 +270,7 @@ export async function runDailyRefreshCli(manifestPath, options = {}) {
       lifecycleLockHeld: true,
     })),
     readFreshness,
-    writeReceipt: options.writeReceipt ?? dailyReceiptWriter(plan, options),
+    writeReceipt: receiptWriter,
     now: options.now,
     home: options.home,
     platform: options.platform,
@@ -231,8 +296,8 @@ const IS_MAIN = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLT
 if (IS_MAIN) {
   main().then((result) => {
     if (result.status === "failed") process.exitCode = 1;
-  }).catch((error) => {
-    console.error(`Daily refresh failed: ${String(error?.message || error).replace(/\s+/gu, " ").slice(0, 300)}`);
+  }).catch(() => {
+    console.error("Daily refresh failed: daily_refresh_failed. Inspect the private local diagnostics, then retry.");
     process.exitCode = 1;
   });
 }

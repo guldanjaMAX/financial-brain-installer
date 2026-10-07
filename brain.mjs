@@ -72,8 +72,11 @@ import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrappi
 import { withBrainLifecycleLock, withBrainLifecycleLockWait } from "./operations/brain-lifecycle-lock.mjs";
 import { planDailyRefresh } from "./operations/daily-refresh-plan.mjs";
 import {
+  clearDailyRefreshUpdateTransaction,
   installDailyRefreshSchedule,
   pauseDailyRefreshSchedule,
+  readDailyRefreshUpdateTransaction,
+  writeDailyRefreshUpdateTransaction,
   reconcileDailyRefreshSchedule,
   removeDailyRefreshSchedule,
   restoreDailyRefreshSchedule,
@@ -25612,7 +25615,8 @@ async function existingDailySourceOwners(m, manifestPath, options = {}) {
   const owned = [];
   const schedulerOptions = options.legacySchedulerOptions || {};
   const healthy = (status) => status?.installed === true &&
-    status?.definitionMatches === true && !status?.scheduleError;
+    status?.definitionMatches === true && status?.loaded === true &&
+    status?.interpreterPresent !== false && !status?.scheduleError;
   if (m?.corpora?.google_drive?.enabled === true) {
     const drive = options.driveScheduler ?? await import("./operations/drive-scheduler.mjs");
     if (healthy(drive.statusDriveScheduler(manifestPath, schedulerOptions))) owned.push("google_drive");
@@ -25725,27 +25729,38 @@ export async function buildConfiguredDailyPlan(m, manifestPath, options = {}) {
   });
 }
 
-function dailyFreshnessRows(plan, inventory) {
+export function dailyFreshnessRows(plan, inventory, schedule = null) {
   const inventoryRows = new Map((inventory?.sources || []).map((row) => [row.name, row]));
   return plan.sources.map((source) => {
     const names = source.source_names?.length ? source.source_names : [source.key];
-    const receiptRows = names.map((name) => inventoryRows.get(name)).filter(Boolean);
+    const receiptRows = names.map((name) => inventoryRows.get(name));
+    const receiptTimestamps = receiptRows.map((row) => {
+      const value = row?.receipt?.last_successful_run_at;
+      return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
+    });
     const newest = receiptRows
-      .map((row) => row?.receipt?.last_successful_run_at || null)
+      .map((_row, index) => receiptTimestamps[index])
       .filter(Boolean)
       .sort()
       .at(-1) || null;
-    const states = receiptRows.map((row) => row?.freshness?.state).filter(Boolean);
-    const currentState = states.includes("broken") ? "broken"
-      : states.includes("stale") ? "stale"
-        : states[0] || (source.class === "snapshot" ? "snapshot" : source.status);
-    const nextRun = source.owner === "daily-task"
+    const states = receiptRows.map((row, index) =>
+      row?.freshness?.state && receiptTimestamps[index] ? row.freshness.state : "unknown");
+    const currentState = source.class === "snapshot" ? "snapshot"
+      : source.class === "disabled" ? "skipped"
+        : states.includes("broken") ? "broken"
+          : states.includes("unknown") ? "unknown"
+            : states.includes("stale") ? "stale"
+              : states[0] || source.status;
+    const dailyOwnedAndRunnable = source.owner === "daily-task" &&
+      schedule?.installed === true && schedule?.enabled === true && schedule?.verified === true;
+    const effectiveOwner = source.owner === "daily-task" && !dailyOwnedAndRunnable ? "none" : source.owner;
+    const nextRun = dailyOwnedAndRunnable
       ? `${plan.cron} ${plan.timezone}`
-      : ["push", "resident-capture"].includes(source.owner)
+      : ["push", "resident-capture"].includes(effectiveOwner)
         ? "event-driven"
-        : source.owner === "worker-cron"
+        : effectiveOwner === "worker-cron"
           ? "worker cron"
-          : source.owner === "existing-local-scheduler"
+          : effectiveOwner === "existing-local-scheduler"
             ? "local scheduler"
             : source.class === "snapshot" ? "snapshot" : "not scheduled";
     return Object.freeze({
@@ -25753,7 +25768,7 @@ function dailyFreshnessRows(plan, inventory) {
       current_state: currentState,
       last_successful_run_at: newest,
       next_run: nextRun,
-      owner: source.owner,
+      owner: effectiveOwner,
       reason: source.reason,
     });
   });
@@ -25788,32 +25803,113 @@ async function syncDailySourceExpectations(m, manifestPath, plan, expectedRefres
 }
 
 export async function cmdScheduleAllConfigured(manifestPath, action, options = {}) {
-  const { m } = loadManifest(manifestPath);
-  const plan = await buildConfiguredDailyPlan(m, manifestPath, options);
-  if (action === "install" && !plan.timezone_matches_machine) die(plan.configuration_error);
-  if (action === "install" && plan.unsupported_sources > 0) {
-    const unsupported = plan.sources.filter((source) => source.class === "unsupported").map((source) => source.key).join(", ");
-    die(`daily refresh cannot be scheduled because enabled source(s) are unsupported: ${unsupported}`);
+  if (["install", "remove"].includes(action) && options.lifecycleLockHeld !== true) {
+    const lockTask = options.withBrainLifecycleLock ?? withBrainLifecycleLock;
+    return lockTask({
+      manifestPath,
+      operation: "daily-schedule",
+      ...(options.lifecycleLockOptions || {}),
+    }, () => cmdScheduleAllConfigured(manifestPath, action, { ...options, lifecycleLockHeld: true }));
   }
+  let { m } = loadManifest(manifestPath);
   const schedulerOptions = {
     platform: options.platform ?? process.platform,
     ...(options.schedulerOptions || {}),
     ...(options.schedulerAdapter ? { adapter: options.schedulerAdapter } : {}),
   };
+  let priorPlan = null;
+  let priorStatus = null;
+  let authorizedDefinition = null;
+  if (["install", "remove"].includes(action)) {
+    priorPlan = await buildConfiguredDailyPlan(m, manifestPath, options);
+    priorStatus = statusDailyRefreshSchedule(priorPlan, schedulerOptions);
+    if (priorStatus.installed && priorStatus.definition_matches_plan !== true) {
+      die("the owned daily definition no longer matches this manifest; nothing was changed");
+    }
+    authorizedDefinition = priorStatus.state?.definition || null;
+  }
+  const intendedEnabled = action === "install" ? true : action === "remove" ? false : null;
+  const priorManifest = m;
+  let intentChanged = false;
+  if (intendedEnabled !== null && m?.operations?.daily_refresh?.enabled !== intendedEnabled) {
+    m = {
+      ...m,
+      operations: {
+        ...(m.operations || {}),
+        daily_refresh: {
+          ...(m.operations?.daily_refresh || {}),
+          enabled: intendedEnabled,
+        },
+      },
+    };
+    const writer = options.writeManifestAtomically ?? writeManifestAtomically;
+    writer(manifestPath, m, {
+      ...(options.dailyIntentWriteOptions || {}),
+      backupLabel: "daily-refresh-intent",
+    });
+    intentChanged = true;
+  }
+  let plan;
   let schedule;
-  if (action === "install") {
-    if (!plan.enabled) die("operations.daily_refresh.enabled is false; nothing was scheduled");
-    const runnable = plan.sources.filter((source) =>
-      source.class === "machine-pull" && source.owner === "daily-task" && source.status === "ready"
-    );
-    if (!runnable.length) die("this manifest has no connected machine-pull source for the daily task; nothing was scheduled");
-    schedule = installDailyRefreshSchedule(plan, schedulerOptions);
-    await syncDailySourceExpectations(m, manifestPath, plan, 86_400, options);
-  } else if (action === "remove") {
-    schedule = removeDailyRefreshSchedule(plan, schedulerOptions);
-    await syncDailySourceExpectations(m, manifestPath, plan, null, options);
-  } else {
-    schedule = statusDailyRefreshSchedule(plan, schedulerOptions);
+  let scheduleMutated = false;
+  try {
+    plan = intentChanged
+      ? await buildConfiguredDailyPlan(m, manifestPath, options)
+      : priorPlan || await buildConfiguredDailyPlan(m, manifestPath, options);
+    if (action === "install" && !plan.timezone_matches_machine) die(plan.configuration_error);
+    if (action === "install" && plan.unsupported_sources > 0) {
+      const unsupported = plan.sources.filter((source) => source.class === "unsupported").map((source) => source.key).join(", ");
+      die(`daily refresh cannot be scheduled because enabled source(s) are unsupported: ${unsupported}`);
+    }
+    if (action === "install") {
+      if (!plan.enabled) die("operations.daily_refresh.enabled is false; nothing was scheduled");
+      const runnable = plan.sources.filter((source) =>
+        source.class === "machine-pull" && source.owner === "daily-task" && source.status === "ready"
+      );
+      if (!runnable.length) die("this manifest has no connected machine-pull source for the daily task; nothing was scheduled");
+      schedule = installDailyRefreshSchedule(plan, schedulerOptions);
+      scheduleMutated = schedule.changed !== false;
+      await syncDailySourceExpectations(m, manifestPath, plan, 86_400, options);
+    } else if (action === "remove") {
+      schedule = removeDailyRefreshSchedule(plan, { ...schedulerOptions, authorizedDefinition });
+      scheduleMutated = schedule.removed === true;
+      await syncDailySourceExpectations(m, manifestPath, plan, null, options);
+    } else {
+      schedule = statusDailyRefreshSchedule(plan, schedulerOptions);
+    }
+  } catch (error) {
+    let schedulerRollbackError = null;
+    if (scheduleMutated && priorStatus) {
+      try {
+        if (priorStatus.installed) {
+          restoreDailyRefreshSchedule({
+            identity: priorPlan.identity,
+            exists: true,
+            enabled: priorStatus.enabled === true,
+            definition: priorStatus.state.definition,
+          }, schedulerOptions);
+        } else {
+          removeDailyRefreshSchedule(plan, schedulerOptions);
+        }
+      } catch (rollbackError) {
+        schedulerRollbackError = rollbackError;
+      }
+    }
+    if (intentChanged) {
+      const writer = options.writeManifestAtomically ?? writeManifestAtomically;
+      try {
+        writer(manifestPath, priorManifest, {
+          ...(options.dailyIntentRollbackOptions || {}),
+          backupLabel: "daily-refresh-intent-rollback",
+        });
+      } catch (rollbackError) {
+        throw new Error(`${error.message}; the daily import preference also could not be restored: ${rollbackError.message}`, { cause: error });
+      }
+    }
+    if (schedulerRollbackError) {
+      throw new Error(`${error.message}; the prior native schedule also could not be restored: ${schedulerRollbackError.message}`, { cause: error });
+    }
+    throw error;
   }
 
   let inventory = null;
@@ -25827,7 +25923,7 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
     if (action !== "status") throw error;
     warn(`local schedule status is available, but source freshness could not be read: ${String(error?.message || error).slice(0, 160)}`);
   }
-  const sources = dailyFreshnessRows(plan, inventory);
+  const sources = dailyFreshnessRows(plan, inventory, schedule);
   const result = Object.freeze({
     contract_version: 1,
     kind: "daily_refresh_status",
@@ -29079,6 +29175,8 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     let dailyPlan = null;
     let dailySnapshot = null;
     let dailySchedulerOptions = null;
+    let dailyTransactionOptions = null;
+    let dailyTransactionActive = false;
     let manageDailyDefinition = false;
     let legacySnapshots = [];
     const beforeUpdateManifest = loadManifest(pin.target).m;
@@ -29092,11 +29190,35 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           ? { adapter: options.dailyRefreshOptions.schedulerAdapter }
           : {}),
       };
+      dailyTransactionOptions = { home: dailySchedulerOptions.home };
       const dailyStatus = statusDailyRefreshSchedule(dailyPlan, dailySchedulerOptions);
       manageDailyDefinition = Object.hasOwn(beforeUpdateManifest?.operations || {}, "daily_refresh") ||
         dailyStatus.installed === true;
+      if (manageDailyDefinition) {
+        const existingTransaction = readDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
+        const plannedSnapshot = existingTransaction?.snapshot || (dailyStatus.installed
+          ? Object.freeze({
+              identity: dailyPlan.identity,
+              exists: true,
+              enabled: dailyStatus.enabled === true,
+              definition: dailyStatus.state.definition,
+            })
+          : Object.freeze({ identity: dailyPlan.identity, exists: false, enabled: false, definition: null }));
+        dailySnapshot = plannedSnapshot;
+        writeDailyRefreshUpdateTransaction({
+          plan: dailyPlan,
+          snapshot: plannedSnapshot,
+          phase: "preparing",
+        }, dailyTransactionOptions);
+        dailyTransactionActive = true;
+      }
       if (dailyStatus.installed) {
-        dailySnapshot = pauseDailyRefreshSchedule(dailyPlan, dailySchedulerOptions);
+        pauseDailyRefreshSchedule(dailyPlan, dailySchedulerOptions);
+        writeDailyRefreshUpdateTransaction({
+          plan: dailyPlan,
+          snapshot: dailySnapshot,
+          phase: "paused",
+        }, dailyTransactionOptions);
         info("Daily imports are paused for the verified update window.");
       }
       try {
@@ -29107,6 +29229,10 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         );
       } catch (error) {
         if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
+        if (dailyTransactionActive) {
+          clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
+          dailyTransactionActive = false;
+        }
         throw error;
       }
     }
@@ -29116,6 +29242,18 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         pin.target,
         backlog ? { ...(options.upgradeOptions || {}), initialUpdateBacklog: backlog } : options.upgradeOptions || {},
       );
+      if (manageDailyDefinition) {
+        const finalState = typeof options.dailyRefreshOptions?.verifyFinalUpdateState === "function"
+          ? await options.dailyRefreshOptions.verifyFinalUpdateState(upgradeResult)
+          : options.cmdUpgrade
+            ? upgradeResult?.daily_final_state
+            : { active: true, query_ready: true, pending: 0 };
+        if (finalState?.active !== true || finalState?.query_ready !== true || finalState?.pending !== 0) {
+          throw new Error(
+            "the update did not prove the Brain active, query-ready, and queue zero; daily imports remain paused",
+          );
+        }
+      }
     } catch (error) {
       // These refusal codes are emitted before the writer pause or deployment
       // mutation. Their old, exactly read schedule is therefore safe to put
@@ -29124,6 +29262,21 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           ["UPDATE_BRAIN_BUSY", "UPDATE_WAITING_FOR_INDEXING"].includes(error?.supportCode)) {
         restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
         if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
+        if (dailyTransactionActive) {
+          clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
+          dailyTransactionActive = false;
+        }
+      } else if (dailyTransactionActive) {
+        writeDailyRefreshUpdateTransaction({
+          plan: dailyPlan,
+          snapshot: dailySnapshot || {
+            identity: dailyPlan.identity,
+            exists: false,
+            enabled: false,
+            definition: null,
+          },
+          phase: "recovery_required",
+        }, dailyTransactionOptions);
       }
       throw error;
     }
@@ -29178,6 +29331,10 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         info(renderCliCommands(
           "This older manifest now has an eligible daily import plan. Run brain daily on <manifest> to approve and install its owned schedule."
         ));
+      }
+      if (dailyTransactionActive) {
+        clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
+        dailyTransactionActive = false;
       }
     }
     if (installed.source !== "remembered") {

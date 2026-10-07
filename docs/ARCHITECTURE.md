@@ -513,13 +513,16 @@ higher-frequency owners rather than duplicate daily pulls. Linux still has no
 native product scheduler.
 
 Updates, whole-manifest loads, direct source ingest, and scheduled daily runs
-share an exclusive manifest lifecycle lease under `~/.brain/locks`. Lock order
-is lifecycle lease first, then the source lease, then any shared provider
-credential-record lease. A scheduled collision records a deferred outcome;
-interactive mutations fail closed. Update pauses only its owned native
-definition while holding the lifecycle lease, and reconciles from the updated
-manifest only after version agreement, active query-ready health, queue zero,
-and exact schedule readback.
+share an exclusive lifecycle lease keyed by canonical Brain resource identity
+in a machine-shared lock root. Manifest aliases and operating-system users
+therefore reach the same writer boundary. Lock order is lifecycle lease first,
+then the source lease, then any shared provider credential-record lease. A
+scheduled collision records a deferred outcome; interactive mutations fail
+closed. Update durably records the verified prior schedule before persistently
+disabling it, and reconciles from the updated manifest only after version
+agreement, active query-ready health, queue zero, and exact schedule readback.
+An interrupted update leaves the receipt and disabled state in place, and a
+restarted runner defers until recovery completes.
 
 ## D1, FTS5, Vectorize, and the outbox
 

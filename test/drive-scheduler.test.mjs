@@ -30,11 +30,13 @@ import {
   isVersionPinnedInterpreter,
   launchctlChildEnvironment,
   parseAdminKeySecretReference,
+  pauseDriveScheduler,
   recordDriveSchedulerFailure,
   recordDriveSchedulerResult,
   removeDriveScheduler,
   renderLaunchAgentPlist,
   resolveScheduledAdminKey,
+  restoreDriveScheduler,
   rotateDriveSchedulerLogs,
   runDriveIngest,
   safeIngestEnvironment,
@@ -748,6 +750,43 @@ try {
     const removed = removeDriveScheduler(disabledPath, opts({ home: identityHome, launchctl }));
     check("remove remains reachable after Drive or its cron is disabled",
       removed.removed && !existsSync(expectedPlist));
+  }
+  {
+    const persistentPath = join(directory, "persistent-pause", "brain.manifest.json");
+    const persistentHome = join(directory, "persistent-pause-home");
+    writeManifest(baseManifest, persistentPath);
+    let loaded = false;
+    let disabled = false;
+    const calls = [];
+    const launchctl = (args) => {
+      calls.push(args[0]);
+      if (args[0] === "print") return loaded
+        ? { status: 0, stdout: "state = waiting\nruns = 1\nlast exit code = 0\n", stderr: "" }
+        : { status: 1, stdout: "", stderr: "not loaded" };
+      if (args[0] === "disable") disabled = true;
+      if (args[0] === "enable") disabled = false;
+      if (args[0] === "bootout") loaded = false;
+      if (args[0] === "bootstrap") loaded = true;
+      return { status: 0, stdout: "", stderr: "" };
+    };
+    installDriveScheduler(persistentPath, opts({
+      home: persistentHome, nodePath: process.execPath, launchctl,
+    }));
+    calls.length = 0;
+    const snapshot = pauseDriveScheduler(persistentPath, opts({
+      home: persistentHome, nodePath: process.execPath, launchctl,
+    }));
+    check("update pause persistently disables the legacy LaunchAgent before bootout",
+      snapshot.exists && disabled && !loaded &&
+      calls.indexOf("disable") >= 0 && calls.indexOf("disable") < calls.indexOf("bootout"),
+      JSON.stringify(calls));
+    loaded = false;
+    check("the legacy scheduler stays disabled across a simulated new login", disabled && !loaded);
+    const restored = restoreDriveScheduler(persistentPath, snapshot, opts({
+      home: persistentHome, nodePath: process.execPath, launchctl,
+    }));
+    check("verified legacy restore re-enables and reloads the prior definition",
+      restored.verified && !disabled && loaded, JSON.stringify(calls));
   }
   {
     const rollbackPath = join(directory, "rollback", "brain.manifest.json");
