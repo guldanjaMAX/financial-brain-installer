@@ -579,3 +579,99 @@ test("daily log append refuses a live writer and recovers a proven dead writer",
   assert.equal(fs.readFileSync(paths.log_path, "utf8"), before + before);
   assert.equal(fs.existsSync(lockPath), false);
 });
+
+test("daily receipt distinguishes a measured partial refresh from a transient failure", async () => {
+  for (const failed of [0, 1]) {
+    let reads = 0, runs = 0;
+    const result = await runDailyRefresh({
+      plan,
+      acquireLock: () => ({ assertOwned() {}, release() {} }),
+      runSource: async () => { runs++; return {}; },
+      readFreshness: async () => ({ drive: {
+        last_successful_run_at: ++reads === 1 || failed
+          ? "2026-10-06T12:00:00.000Z" : "2026-10-07T11:00:00.000Z",
+        latest_run: { outcome: failed ? "failed" : "partial", docs_refused: 228, docs_failed: failed },
+      } }),
+      now: () => new Date("2026-10-07T12:00:00.000Z"),
+    });
+    assert.equal(runs, 1);
+    assert.equal(reads, 2, "both freshness decisions reached");
+    assert.equal(result.status, failed ? "failed" : "partial");
+    assert.equal(result.sources[0].docs_refused, 228);
+    assert.equal(result.sources[0].freshness_advanced, !failed);
+  }
+});
+
+test("daily refresh preserves intentional exclusions reported by a successful loader", async () => {
+  let reads = 0, runs = 0;
+  const result = await runDailyRefresh({
+    plan, acquireLock: () => ({ assertOwned() {}, release() {} }),
+    runSource: async () => { runs++; return { excluded: 12 }; },
+    readFreshness: async () => ({ drive: {
+      last_successful_run_at: ++reads === 1 ? "2026-10-06T12:00:00.000Z" : "2026-10-07T11:00:00.000Z",
+      latest_run: { outcome: "completed", docs_refused: 0, docs_failed: 0 },
+    } }),
+    now: () => new Date("2026-10-07T12:00:00.000Z"),
+  });
+  assert.equal(runs, 1);
+  assert.equal(result.status, "partial");
+  assert.equal(result.sources[0].docs_excluded, 12);
+  assert.equal(result.sources[0].freshness_advanced, true);
+});
+
+test("daily CLI carries partial loader permission and durable refusal evidence through its default adapters", async () => {
+  const { readDailyObservation, dailyObservationStatus } = await import("../operations/daily-refresh-observation.mjs");
+  const directory = mkdtempSync(join(tmpdir(), "daily-partial-adapters-"));
+  const manifestPath = join(directory, "brain.manifest.json");
+  writeFileSync(manifestPath, "{}\n");
+  const calls = [];
+  let reads = 0;
+  const result = await runDailyRefreshCli(manifestPath, {
+    home: directory,
+    silent: true,
+    buildPlan: async () => ({ ...plan, manifest_path: manifestPath }),
+    acquireLock: () => ({ assertOwned() {}, release() {} }),
+    readUpdateTransaction: () => null,
+    writeReceipt: () => {},
+    now: () => new Date("2026-10-07T12:00:00.000Z"),
+    brainModule: {
+      cmdLoad: async (_path, options) => {
+        calls.push(options);
+        return { partial: 1, excluded: 2 };
+      },
+      cmdSources: async () => ({ sources: [{ name: "drive", receipt: {
+        last_successful_run_at: ++reads === 1 ? "2026-10-06T12:00:00.000Z" : "2026-10-07T11:00:00.000Z",
+        latest_run: { outcome: "partial", docs_refused: 228, docs_failed: 0 },
+      }, freshness: { state: "ok" } }] }),
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].allowPartialRefresh, true);
+  assert.equal(calls[0].lifecycleLockHeld, true);
+  assert.equal(reads, 2);
+  assert.equal(result.status, "partial");
+  assert.equal(result.sources[0].docs_refused, 228);
+  assert.equal(result.sources[0].docs_excluded, 2);
+  const observation = readDailyObservation(plan.identity, { home: directory });
+  assert.equal(observation.record.result, "partial", "the successful partial run survives journal readback");
+  assert.equal(observation.record.error, null, "omissions do not become a process failure");
+  for (const exitCode of [0, 1]) {
+    const status = dailyObservationStatus(plan, { enabled: false },
+      { known: true, running: false, exit_code: exitCode }, true, { home: directory });
+    assert.equal(status.last_result, exitCode === 0 ? "partial" : "failed",
+      "native failure still overrides a successful partial receipt");
+  }
+});
+
+test("a failed first refresh stays broken even without a previous success timestamp", async () => {
+  const { dailyFreshnessRows } = await import("../brain.mjs");
+  for (const state of ["broken", "ok"]) {
+    const rows = dailyFreshnessRows({ sources: [{ key: "folder" }] }, { sources: [{
+      name: "folder", freshness: { state }, receipt: { last_successful_run_at: null,
+        latest_run: state === "broken" ? { outcome: "failed", docs_refused: 0, docs_failed: 1 } : null },
+    }] });
+    assert.equal(rows.length, 1, "the source joined the daily status decision");
+    assert.equal(rows[0].current_state, state === "broken" ? "broken" : "unknown");
+    assert.equal(rows[0].last_run_outcome, state === "broken" ? "failed" : "missing_history");
+  }
+});

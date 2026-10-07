@@ -203,6 +203,9 @@ export function sourceReceiptSummary(source) {
   let currency;
   if (["failed", "refused"].includes(latestOutcome)) {
     currency = "needs attention; the latest authenticated ingest did not succeed";
+  } else if (latestOutcome === "partial" && latestWasSuccessful && latestFailed === 0 &&
+      latestWalkComplete && latestRefused > 0 && state === "ok" && expected !== null) {
+    currency = `current against the authenticated refresh expectation; partial coverage, ${latestRefused} refused`;
   } else if (latestOutcome === "partial" && ((latestRefused || 0) > 0 || (latestFailed || 0) > 0)) {
     currency = "needs attention; the latest authenticated run left one or more documents unaccepted";
   } else if (latestOutcome === "partial" && !latestWalkComplete) {

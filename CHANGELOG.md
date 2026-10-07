@@ -6,6 +6,11 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.10 (2026-10-06)
 
+- Daily refresh now advances its success date when files are refused,
+  unsupported, or excluded by rule but the run has no failures. Partial receipts retain the refused
+  count and do not claim complete history. Check daily status for the latest
+  outcome and count; real failures still keep the prior success date.
+
 Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.

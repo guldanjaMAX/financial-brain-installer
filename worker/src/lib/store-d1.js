@@ -4557,9 +4557,11 @@ export const sourceInventorySql = ({
            -- A bounded run may successfully ingest every item it attempted
            -- without proving a whole-source walk. Keep that operational
            -- success distinct from the latest-run and history-completeness
-           -- fields below, while never advancing it past measured loss.
-           MAX(CASE WHEN finished_at IS NOT NULL AND error IS NULL AND refusal_reason IS NULL
-                         AND COALESCE(docs_refused,0)=0 AND COALESCE(docs_failed,0)=0
+           -- fields below. Refused files are visible coverage gaps, not retryable
+           -- run failures. An unmeasured refusal remains fail-closed.
+           MAX(CASE WHEN finished_at IS NOT NULL AND error IS NULL
+                         AND (refusal_reason IS NULL OR (metrics_version=1 AND docs_refused>0 AND docs_failed=0))
+                         AND COALESCE(docs_failed,0)=0
                     THEN finished_at END) AS last_successful_run_at
       FROM sync_runs
      GROUP BY source
@@ -4645,11 +4647,11 @@ export const sourceInventorySql = ({
          CASE
            WHEN r.source IS NULL THEN NULL
            WHEN r.finished_at IS NULL THEN 'in_progress'
-           WHEN r.error IS NOT NULL THEN 'failed'
-           WHEN r.refusal_reason IS NOT NULL THEN 'refused'
+           WHEN r.error IS NOT NULL OR COALESCE(r.docs_failed,0)>0 THEN 'failed'
+           WHEN r.refusal_reason IS NOT NULL
+             AND NOT (r.metrics_version=1 AND r.docs_refused>0 AND r.docs_failed=0) THEN 'refused'
            WHEN COALESCE(r.walk_complete,0)<>1
-             OR COALESCE(r.docs_refused,0)>0
-             OR COALESCE(r.docs_failed,0)>0 THEN 'partial'
+             OR COALESCE(r.docs_refused,0)>0 THEN 'partial'
            ELSE 'completed'
          END AS run_outcome,
          CASE WHEN r.error IS NULL THEN 0 ELSE 1 END AS run_had_error,

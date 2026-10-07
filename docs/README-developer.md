@@ -1086,7 +1086,9 @@ local calendar slot. A run that failed before the runner could start may have
 an unknown start time on Mac. Native inspection failure, an interrupted
 journal entry, and absent completion evidence remain unknown, not successful.
 A missing Node binary or runner is reported as a failure. A deferred run is
-reported as deferred. These are process diagnostics; source freshness remains
+reported as deferred. A successful run with coverage omissions is recorded as
+partial without adding a process error; native failures still override it.
+These are process diagnostics; source freshness remains
 a separate proof. The next clock slot is planned, not a promise that a logged
 out or powered-off machine will run.
 
@@ -1107,6 +1109,27 @@ source success: every named leg must have a valid
 `receipt.last_successful_run_at`, and every prior timestamp must advance. A
 missing or unknown leg makes the aggregate line unknown instead of allowing a
 current sibling to hide it.
+
+A finished refresh with zero document failures advances operational success even
+when files were refused or unsupported. Its latest run is `partial` and carries
+`docs_refused`; it does not extend `complete_history_through`. A measured failure
+is `failed`, retains the prior success timestamp, and makes source freshness
+broken. A source with no run receipt has `missing_history` in daily status.
+The durable `docs_refused` omission count also includes intentional local
+source-policy exclusions. The daily execution receipt additionally reports
+that subset as `docs_excluded`. Such a run is partial without invalidating a
+successful refresh. Adjudicated exclusions remain distinct from unresolved
+walk gaps for deletion safety; neither omissions nor a recent success date
+are proof of complete history.
+
+Daily execution permits a partial loader result only when every source leg ran
+without failures and every named source's durable success timestamp advances.
+The ordinary load command still requires a complete sweep. Daily status adds
+`last_run_outcome`, `docs_refused`, and `docs_failed` to JSON; its text line adds
+the refusal count for partial runs. Historical coverage and vector readiness
+remain independent checks. Update readiness must stop on actual run failures,
+stale or missing freshness, or vector debt; a current partial receipt alone is
+a coverage warning, not a failed refresh.
 
 ### Connector-specific Drive refresh on macOS
 

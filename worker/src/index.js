@@ -2044,7 +2044,7 @@ async function handleSourceReceipt(env, request) {
   if (!SOURCE_KINDS.has(requestedKind || defaultKind)) {
     return jsonResponse({ error: "unsupported source kind" }, 400);
   }
-  const status = String(body?.status || "ready").trim().toLowerCase();
+  let status = String(body?.status || "ready").trim().toLowerCase();
   if (!SOURCE_RECEIPT_STATUSES.has(status)) {
     return jsonResponse({ error: "status must be indexing, ready, or error" }, 400);
   }
@@ -2064,6 +2064,9 @@ async function handleSourceReceipt(env, request) {
   // Both fields opt the receipt into the versioned, measured outcome shape.
   // Missing counters remain unknown rather than defaulting to a clean zero.
   const metricsVersion = Object.hasOwn(body, "docs_refused") && Object.hasOwn(body, "docs_failed") ? 1 : 0;
+  // A producer's ready label cannot hide measured transient failures. Keep
+  // the cheap aggregate source row and the detailed run receipt consistent.
+  if (status === "ready" && receiptCount(body?.docs_failed) > 0) status = "error";
   if (body?.failure_evidence != null && !requestedKind) {
     return jsonResponse({ error: "kind is required when failure_evidence is supplied" }, 400);
   }
