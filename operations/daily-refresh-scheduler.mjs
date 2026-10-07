@@ -539,6 +539,7 @@ export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
     authorized_definition: authorizedDefinition,
     reconciliation,
     legacy_snapshots: durableLegacySnapshots(legacySnapshots),
+    bridge_snapshots: input.bridgeSnapshots ?? prior?.bridge_snapshots ?? [],
   });
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
   try {
@@ -635,6 +636,25 @@ export function clearDailyRefreshUpdateTransaction(identityOrPlan, options = {})
   let value;
   try { value = JSON.parse(readFileSync(path, "utf8")); } catch {
     throw new Error("the daily update transaction receipt is malformed");
+  }
+  // Keep bridge recovery evidence after completion without leaving a fence
+  // that would prevent the owner from approving the permanent daily task.
+  if (value.bridge_snapshots?.length) {
+    const history = join(dirname(path), "history");
+    mkdirSync(history, { recursive: true, mode: 0o700 });
+    if (!lstatSync(history).isDirectory() || lstatSync(history).isSymbolicLink() ||
+        !/^[a-f0-9]{32}$/u.test(String(value.transaction_id))) {
+      throw new Error("the daily update history is unsafe");
+    }
+    chmodSync(history, 0o700);
+    const archive = join(history, `${value.transaction_id}.json`);
+    const temporary = `${archive}.tmp-${randomBytes(8).toString("hex")}`;
+    try {
+      writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+      renameSync(temporary, archive);
+    } finally {
+      try { unlinkSync(temporary); } catch {}
+    }
   }
   if (manifestPath) {
     clearBrainRecoveryFence({

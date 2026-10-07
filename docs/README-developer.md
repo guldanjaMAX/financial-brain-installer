@@ -1053,6 +1053,35 @@ proof and exact scheduler reconciliation succeed.
 `daily on` and `daily off` save owner intent in `operations.daily_refresh`
 while holding the same lifecycle lease.
 
+Windows update separately inventories temporary tasks whose full names match
+`\Financial Brain\daily-refresh-[0-9a-f]{16}`. It obtains the current SID from
+`%SystemRoot%\System32\whoami.exe` and reads each task with the absolute
+`%SystemRoot%\System32\schtasks.exe` path. A matching task principal establishes
+current-user ownership; the temporary packet never specified a stable receipt
+serialization, so no old receipt hash or Brain-domain binding is assumed.
+This deliberately coordinates every matching bridge for that user, including
+bridges for another Brain. Decoded `brain` and `load` action mentions are only
+diagnostic booleans, never authorization or a required action shape.
+
+Before native disable, the update journal records task name, principal, prior
+enabled state, time, and action-recognition booleans. Raw task definitions stay
+in memory for exact replacement checks during this command; they and recomputed
+hashes are never saved in the bridge receipt. Recovery rechecks the recorded
+name and current-user principal. Exact disabled readback gates deployment. A failed update restores only
+recorded bridges that were previously enabled, with readback, and preserves
+recovery when restoration fails. After success and permanent daily readback,
+only those recorded bridges may be deleted. Already-disabled bridges are never
+enabled or deleted. Other task names and other users' tasks are counted without
+printing their identities. Native inspection or disable failures refuse update.
+Completed bridge receipts remain in the private daily-update history after the
+active recovery fence is cleared, so an owner can later approve `daily on`.
+A successful update with daily imports off leaves the bridges disabled and
+prints that instruction. As with permanent tasks, Task Scheduler offers no
+atomic compare-and-change/delete primitive; the final definition read is kept
+adjacent to mutation. Disabling prevents future triggers, but does not prove an
+already-running bridge process has exited; that needs native host evidence.
+
+
 Status joins contract-v3 `brain sources --json` receipts to local ownership and
 prints one stable line per manifest source:
 

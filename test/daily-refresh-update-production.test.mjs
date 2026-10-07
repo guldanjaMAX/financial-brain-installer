@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { cmdDrain, cmdHealth, cmdRollback, cmdUpdate } from "../brain.mjs";
 import {
   buildDailyRefreshDefinition,
@@ -154,6 +155,7 @@ function productionHarness(manifestPath, {
     lifecycleLockOptions: { platform: "win32", machineLockRoot },
     dailyRefreshOptions: {
       platform: "win32",
+      bridgeOptions: bridgeNativeHarness().options,
       existingSchedulerOwners: [],
       planDailyRefresh: async () => plan,
       schedulerAdapter: adapter,
@@ -506,4 +508,357 @@ test("unavailable native schedule inspection does not abort a verified Brain upd
     assert.equal(harness.finish.length, 1);
     assert.match(harness.finish[0], /Daily imports.*need attention/i);
   });
+});
+
+
+const BRIDGE_NAME = String.raw`\Financial Brain\daily-refresh-0123456789abcdef`;
+const BRIDGE_SID = "S-1-5-21-100-200-300-1001";
+const BRIDGE_TIME = "2026-10-07T15:00:00.000Z";
+
+function bridgeNativeHarness({ tasks = [], failDisable = false, ignoreDisable = false, onDisable = () => {}, onDelete = () => {}, failRestore = false, failDelete = false } = {}) {
+  const calls = [];
+  const rows = new Map(tasks.map((entry) => [entry.name || BRIDGE_NAME, {
+    sid: BRIDGE_SID, enabled: true, action: "brain load fixture.json --only google_drive", ...entry,
+  }]));
+  const options = {
+    environment: { SystemRoot: String.raw`C:\Windows`, PRIVATE_SENTINEL: "must-not-inherit" },
+    now: () => new Date(BRIDGE_TIME),
+    spawn: (command, args, child) => {
+      assert.equal(child.env.PRIVATE_SENTINEL, undefined);
+      assert.equal(child.env.PATH, undefined);
+      calls.push({ command, args });
+      if (command.endsWith("whoami.exe")) {
+        assert.equal(command, String.raw`C:\Windows\System32\whoami.exe`);
+        assert.deepEqual(args, ["/user", "/fo", "csv", "/nh"]);
+        return { status: 0, stdout: `"fixture\\owner","${BRIDGE_SID}"\r\n` };
+      }
+      assert.equal(command, String.raw`C:\Windows\System32\schtasks.exe`);
+      if (args.includes("/FO")) {
+        return { status: 0, stdout: [...rows.keys(), String.raw`\Unrelated\Control`]
+          .map((name) => `"${name}","N/A","Ready"`).join("\r\n") };
+      }
+      const name = args[args.indexOf("/TN") + 1];
+      const row = rows.get(name);
+      if (args[0] === "/Query") {
+        return row ? { status: 0, stdout: `<Task><Principals><Principal id="Owner"><UserId>${row.sid}</UserId></Principal></Principals><Settings><Enabled>${row.enabled}</Enabled></Settings><Actions><Exec><Command>powershell.exe</Command><Arguments>-EncodedCommand ${Buffer.from(row.action, "utf16le").toString("base64")}</Arguments></Exec></Actions></Task>` }
+          : { status: 1, stdout: "" };
+      }
+      assert.ok(row, "mutation addresses an inventoried task");
+      if (args[0] === "/Change") {
+        if (args.includes("/DISABLE")) {
+          onDisable();
+          if (failDisable) return { status: 1 };
+          if (!ignoreDisable) row.enabled = false;
+        } else {
+          if (failRestore) return { status: 1 };
+          row.enabled = true;
+        }
+        return { status: 0 };
+      }
+      if (args[0] === "/Delete") {
+        onDelete();
+        if (failDelete) return { status: 1 };
+        rows.delete(name); return { status: 0 };
+      }
+      assert.fail("unexpected native operation");
+    },
+  };
+  return { calls, rows, options, mutations: () => calls.filter(({ args }) => ["/Change", "/Delete"].includes(args[0])) };
+}
+
+function attachBridge(harness, manifestPath, fixture = {}) {
+  const native = bridgeNativeHarness({
+    ...fixture,
+    onDelete: () => {
+      assert.equal(harness.state().enabled, true, "permanent task is enabled before bridge deletion");
+      assert.ok(harness.events.includes("health:active-final"), "final health precedes bridge deletion");
+      assert.ok(harness.events.includes("schedule:true"), "permanent schedule readback precedes deletion");
+    },
+    onDisable: () => {
+      const receipt = readDailyRefreshUpdateTransaction(harness.plan.identity, {
+        home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
+      });
+      assert.ok(receipt.bridge_snapshots.some((entry) => entry.task_name === BRIDGE_NAME),
+        "durable bridge intent exists before disable");
+      harness.events.push("bridge:disable");
+    },
+  });
+  harness.options.dailyRefreshOptions.bridgeOptions = native.options;
+  return native;
+}
+
+function bridgeArchive(manifestPath) {
+  const root = join(dirname(manifestPath), ".brain", "daily-update-transactions", "history");
+  const names = readdirSync(root);
+  assert.equal(names.length, 1);
+  return JSON.parse(readFileSync(join(root, names[0]), "utf8"));
+}
+
+test("Windows bridge is journaled, disabled before update, and deleted only after permanent readback", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath);
+    const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+    await cmdUpdate(manifestPath, harness.options);
+    assert.ok(harness.events.indexOf("bridge:disable") >= 0);
+    assert.ok(harness.events.indexOf("bridge:disable") < harness.events.indexOf("deploy:paused"));
+    assert.equal(native.rows.size, 0);
+    assert.equal(native.mutations().filter(({ args }) => args[0] === "/Delete").length, 1);
+    assert.equal(harness.state().enabled, true, "permanent task passed native readback");
+    const receipt = bridgeArchive(manifestPath).bridge_snapshots[0];
+    assert.equal(Object.hasOwn(receipt, "definition_hash"), false, "bridge ownership does not depend on a recomputed hash");
+    assert.equal(Object.hasOwn(receipt, "definition"), false, "raw task actions remain outside the durable journal");
+    assert.equal(receipt.prior_enabled, true);
+    assert.equal(receipt.recorded_at, BRIDGE_TIME);
+    assert.equal(receipt.action_mentions_brain, true);
+    assert.equal(receipt.action_mentions_load, true);
+    assert.equal(receipt.state, "retired");
+  });
+});
+
+test("Windows bridge stays disabled with owner guidance when permanent daily imports are off", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath);
+    harness.plan.enabled = false;
+    const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+    await cmdUpdate(manifestPath, harness.options);
+    assert.ok(harness.events.includes("deploy:active"), "the off arm reached successful update");
+    assert.ok(native.calls.some(({ args }) => args.includes("/DISABLE")));
+    assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+    assert.equal(native.mutations().some(({ args }) => args[0] === "/Delete"), false);
+    assert.match(harness.finish[0], /old.*task.*paused/i);
+    assert.ok(harness.finish[0].includes(renderCliCommands("brain daily on <manifest>")));
+    assert.equal(bridgeArchive(manifestPath).bridge_snapshots[0].state, "paused");
+  });
+});
+
+test("Windows update failure restores only the bridge tasks it disabled", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath, { failStage: () => "migration" });
+    const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /fixture migration failure/);
+    assert.ok(harness.events.includes("migration"), "failure reached the update mutation");
+    assert.deepEqual(native.mutations().map(({ args }) => args.at(-1)), ["/DISABLE", "/ENABLE"]);
+    assert.equal(native.rows.get(BRIDGE_NAME).enabled, true);
+    const receipt = readDailyRefreshUpdateTransaction(harness.plan.identity, {
+      home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
+    });
+    assert.equal(receipt.bridge_snapshots[0].state, "restored");
+  });
+});
+
+for (const fault of ["failDisable", "ignoreDisable"]) {
+  test(`Windows bridge ${fault} refuses update before deployment`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath);
+      const native = attachBridge(harness, manifestPath, { tasks: [{}], [fault]: true });
+      await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /Task Scheduler.*retry.*update/i);
+      assert.ok(native.calls.some(({ args }) => args.includes("/DISABLE")), "refusal reached disable");
+      assert.equal(harness.events.includes("deploy:paused"), false);
+      assert.equal(native.rows.get(BRIDGE_NAME).enabled, true);
+      assert.equal(native.mutations().some(({ args }) => args[0] === "/Delete"), false);
+    });
+  });
+}
+
+test("Windows foreign-user and nonmatching tasks stay untouched; no-bridge control still updates", async () => {
+  for (const tasks of [[{ sid: "S-1-5-21-100-200-300-1002" }, { name: String.raw`\Financial Brain\daily-refresh-other` }], []]) {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath);
+      const native = attachBridge(harness, manifestPath, { tasks });
+      await cmdUpdate(manifestPath, harness.options);
+      assert.ok(native.calls.some(({ args }) => args.includes("/FO")), "inventory decision was reached");
+      assert.equal(native.mutations().length, 0);
+      assert.ok(harness.events.includes("deploy:active"), "the green control completed update");
+      assert.equal(native.rows.size, tasks.length);
+    });
+  }
+});
+
+
+test("Windows older manifest without a permanent task keeps the paused bridge and permits daily on later", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const manifest = manifestFixture();
+    delete manifest.operations;
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const harness = productionHarness(manifestPath);
+    harness.adapter.read = () => null;
+    const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+    await cmdUpdate(manifestPath, harness.options);
+    assert.ok(harness.events.includes("deploy:active"));
+    assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+    assert.equal(native.mutations().length, 1);
+    assert.equal(readDailyRefreshUpdateTransaction(harness.plan.identity, {
+      home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
+    }), null, "completion removes the fence that would block a later daily on");
+    assert.equal(bridgeArchive(manifestPath).bridge_snapshots[0].state, "paused");
+    assert.ok(harness.finish[0].includes(renderCliCommands("brain daily on <manifest>")));
+  });
+});
+
+test("Windows pre-disabled bridge is never enabled or deleted, and action recognition is diagnostic only", async () => {
+  for (const action of ["brain load fixture.json", "opaque fixture runner"]) {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath);
+      const otherName = String.raw`\Financial Brain\daily-refresh-fedcba9876543210`;
+      const native = attachBridge(harness, manifestPath, { tasks: [{ action }, { name: otherName, enabled: false }] });
+      await cmdUpdate(manifestPath, harness.options);
+      assert.equal(native.rows.get(otherName).enabled, false);
+      assert.equal(native.rows.has(BRIDGE_NAME), false, "the enabled green control was replaced");
+      assert.ok(native.mutations().every(({ args }) => args[args.indexOf("/TN") + 1] === BRIDGE_NAME));
+      const receipts = bridgeArchive(manifestPath).bridge_snapshots;
+      assert.equal(receipts.find((entry) => entry.task_name === otherName).state, "observed");
+      assert.equal(receipts.find((entry) => entry.task_name === BRIDGE_NAME).action_mentions_load, action.includes("load"));
+    });
+  }
+});
+
+test("Windows failed update retries from durable restored bridge receipts", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    let fail = true;
+    const harness = productionHarness(manifestPath, { failStage: () => fail ? "migration" : null });
+    const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /fixture migration failure/);
+    assert.ok(harness.events.includes("migration"));
+    assert.equal(native.rows.get(BRIDGE_NAME).enabled, true);
+    fail = false;
+    await cmdUpdate(manifestPath, harness.options);
+    assert.equal(native.rows.has(BRIDGE_NAME), false, "healthy retry is the restore control");
+    assert.deepEqual(native.mutations().map(({ args }) => args.at(-1)), ["/DISABLE", "/ENABLE", "/DISABLE", BRIDGE_NAME]);
+    assert.equal(bridgeArchive(manifestPath).bridge_snapshots[0].state, "retired");
+  });
+});
+
+test("Windows restore failure remains journaled and never claims a successful update", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath, { failStage: () => "migration" });
+    const native = attachBridge(harness, manifestPath, { tasks: [{}], failRestore: true });
+    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /Restore the old daily task in Task Scheduler/);
+    assert.ok(native.calls.some(({ args }) => args.includes("/ENABLE")), "restore decision reached native mutation");
+    assert.equal(harness.finish.length, 0);
+    assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+    const receipt = readDailyRefreshUpdateTransaction(harness.plan.identity, {
+      home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
+    });
+    assert.equal(receipt.bridge_snapshots[0].state, "paused");
+  });
+});
+
+test("Windows deletion failure keeps bridge disabled and recovers on the next verified update", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath);
+    const native = attachBridge(harness, manifestPath, { tasks: [{}], failDelete: true });
+    await cmdUpdate(manifestPath, harness.options);
+    assert.ok(native.calls.some(({ args }) => args[0] === "/Delete"), "retirement decision reached native mutation");
+    assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+    assert.match(harness.finish[0], /Daily imports need attention/);
+    const healthy = attachBridge(harness, manifestPath, { tasks: [{ enabled: false }] });
+    await cmdUpdate(manifestPath, harness.options);
+    assert.equal(healthy.rows.size, 0, "retry retires only the recorded bridge");
+    assert.equal(bridgeArchive(manifestPath).bridge_snapshots[0].state, "retired");
+  });
+});
+
+test("Windows bridge inventory failure is a refusal before deployment with no task mutations", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath);
+    const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+    const run = native.options.spawn;
+    let inventories = 0;
+    native.options.spawn = (command, args, child) => {
+      if (args.includes("/FO")) { inventories += 1; return { status: 1 }; }
+      return run(command, args, child);
+    };
+    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /Task Scheduler.*retry.*update/);
+    assert.equal(inventories, 1);
+    assert.equal(harness.events.includes("deploy:paused"), false);
+    assert.equal(native.mutations().length, 0);
+  });
+});
+
+test("Windows bridge replacement after update is never deleted or re-enabled", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath);
+    const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+    const restore = harness.adapter.setEnabled;
+    let replacements = 0;
+    harness.adapter.setEnabled = (identity, enabled) => {
+      restore(identity, enabled);
+      if (enabled) {
+        replacements += 1;
+        native.rows.get(BRIDGE_NAME).action = "replacement fixture action";
+      }
+    };
+    await cmdUpdate(manifestPath, harness.options);
+    assert.equal(replacements, 1, "the replacement reached the retirement boundary");
+    assert.equal(native.rows.get(BRIDGE_NAME).action, "replacement fixture action");
+    assert.deepEqual(native.mutations().map(({ args }) => args.at(-1)), ["/DISABLE"]);
+    assert.match(harness.finish[0], /Daily imports need attention/);
+  });
+});
+
+test("Windows partial bridge pause failure restores the first task and never changes the refused second task", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath);
+    const second = String.raw`\Financial Brain\daily-refresh-fedcba9876543210`;
+    const native = attachBridge(harness, manifestPath, { tasks: [{}, { name: second }] });
+    const run = native.options.spawn;
+    let refused = 0;
+    native.options.spawn = (command, args, child) => {
+      if (args.includes(second) && args.includes("/DISABLE")) { refused += 1; return { status: 1 }; }
+      return run(command, args, child);
+    };
+    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /Task Scheduler.*retry.*update/);
+    assert.equal(refused, 1, "second pause reached its failure decision");
+    assert.deepEqual(native.mutations().map(({ args }) => args.at(-1)), ["/DISABLE", "/ENABLE"]);
+    assert.ok([...native.rows.values()].every((row) => row.enabled));
+    assert.equal(harness.events.includes("deploy:paused"), false);
+  });
+});
+
+test("Windows bridge paused by another actor before our disable decision is never adopted for deletion", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath);
+    const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+    const run = native.options.spawn;
+    let queries = 0;
+    native.options.spawn = (command, args, child) => {
+      if (args.includes("/XML") && ++queries === 2) native.rows.get(BRIDGE_NAME).enabled = false;
+      return run(command, args, child);
+    };
+    await cmdUpdate(manifestPath, harness.options);
+    assert.ok(queries >= 2, "the concurrent pause reached our final ownership read");
+    assert.equal(native.mutations().length, 0, "update must not delete a task it did not disable");
+    assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+    assert.ok(harness.events.includes("deploy:active"), "the already-disabled control permits update");
+  });
+});
+
+test("Windows foreign principal needs no bridge execution schema, while an owned task needs readable enabled state", async () => {
+  for (const owned of [false, true]) {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath);
+      const native = attachBridge(harness, manifestPath, {
+        tasks: [{ sid: owned ? BRIDGE_SID : "S-1-5-21-100-200-300-1002" }],
+      });
+      const run = native.options.spawn;
+      let observations = 0;
+      native.options.spawn = (command, args, child) => {
+        const result = run(command, args, child);
+        if (args.includes("/XML")) {
+          observations += 1;
+          return { ...result, stdout: result.stdout.replace(/<Settings>[\s\S]*?<\/Settings>/u, "") };
+        }
+        return result;
+      };
+      if (owned) {
+        await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /Task Scheduler.*retry.*update/);
+        assert.equal(harness.events.includes("deploy:paused"), false);
+      } else {
+        await cmdUpdate(manifestPath, harness.options);
+        assert.ok(harness.events.includes("deploy:active"), "foreign-task control still updates");
+      }
+      assert.equal(observations, 1, "both arms reached principal and state inspection");
+      assert.equal(native.mutations().length, 0);
+    });
+  }
 });

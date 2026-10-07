@@ -70,6 +70,7 @@ import {
 } from "./worker/src/lib/store-d1.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
 import { withBrainLifecycleLock, withBrainLifecycleLockWait } from "./operations/brain-lifecycle-lock.mjs";
+import { createWindowsUpdateBridgeGuard } from "./operations/windows-update-bridge.mjs";
 import { planDailyRefresh } from "./operations/daily-refresh-plan.mjs";
 import {
   clearDailyRefreshUpdateTransaction,
@@ -29701,6 +29702,11 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     let manageDailyDefinition = false;
     let manageAnyLocalSchedule = false;
     let legacySnapshots = [];
+    let bridgeGuard = null;
+    let bridgeInventory = null;
+    let bridgeSnapshots = [];
+    let upgradeResult;
+    try {
     const beforeUpdateManifest = loadManifest(pin.target).m;
     const dailyPlatform = options.dailyRefreshOptions?.platform ?? process.platform;
     const dailyIdentityReady = Boolean(
@@ -29724,11 +29730,19 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         platform: dailyPlatform,
         machineLockRoot: dailySchedulerOptions.machineLockRoot,
       };
+      if (dailyPlatform === "win32") {
+        bridgeGuard = createWindowsUpdateBridgeGuard(options.dailyRefreshOptions?.bridgeOptions || {});
+        bridgeInventory = bridgeGuard.inventory();
+        if (bridgeInventory.ignored) info(`${bridgeInventory.ignored} other Windows task(s) were left untouched.`);
+      }
       let dailyStatus = null;
       try {
         dailyStatus = statusDailyRefreshSchedule(dailyPlan, dailySchedulerOptions);
       } catch (error) {
         if (error?.code !== "DAILY_REFRESH_INSPECTION_UNKNOWN") throw error;
+        if (bridgeInventory?.entries.length) {
+          throw new Error("Check the daily tasks in Task Scheduler, then retry the update.");
+        }
         // A verified data-plane update does not need to reinterpret an unknown
         // native task as absent. Leave it untouched and make the missing local
         // proof visible; ownership collisions remain hard refusals.
@@ -29746,6 +29760,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         throw new Error("this Brain has an update recovery fence, but this user has no verified schedule snapshot; imports remain paused");
       }
       resumingDailyRecovery = Boolean(existingDailyTransaction);
+      if (bridgeGuard) bridgeSnapshots = bridgeGuard.capture(bridgeInventory, existingDailyTransaction?.bridge_snapshots);
       dailySnapshot = existingDailyTransaction?.snapshot || (dailyStatus.installed
         ? Object.freeze({
             identity: dailyPlan.identity,
@@ -29771,14 +29786,16 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         snapshot: dailySnapshot,
         phase,
         legacySnapshots,
+        bridgeSnapshots,
         authorizedDefinition: dailyAuthorizedDefinition,
         reconciliation: dailyReconciliation,
       }, dailyTransactionOptions);
-      manageAnyLocalSchedule = manageDailyDefinition || legacySnapshots.some((entry) => entry.snapshot?.exists);
+      manageAnyLocalSchedule = manageDailyDefinition || legacySnapshots.some((entry) => entry.snapshot?.exists) || bridgeSnapshots.length > 0;
       if (manageAnyLocalSchedule) {
         persistDailyTransaction("preparing");
         dailyTransactionActive = true;
       }
+      if (bridgeSnapshots.length) bridgeGuard.pause(bridgeSnapshots, () => persistDailyTransaction("paused"));
       if (dailyStatus.installed) {
         pauseDailyRefreshSchedule(dailyPlan, {
           ...dailySchedulerOptions,
@@ -29801,7 +29818,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       } catch (error) {
         if (!resumingDailyRecovery) {
           if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
-          if (dailyTransactionActive) {
+          if (dailyTransactionActive && !bridgeSnapshots.length) {
             clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
             dailyTransactionActive = false;
           }
@@ -29812,7 +29829,6 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       }
       }
     }
-    let upgradeResult;
     try {
       upgradeResult = await (options.cmdUpgrade ?? cmdUpgrade)(
         pin.target,
@@ -29838,7 +29854,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           ["UPDATE_BRAIN_BUSY", "UPDATE_WAITING_FOR_INDEXING"].includes(error?.supportCode)) {
         restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
         if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
-        if (dailyTransactionActive) {
+        if (dailyTransactionActive && !bridgeSnapshots.length) {
           clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
           dailyTransactionActive = false;
         }
@@ -29849,6 +29865,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     }
     if (dailyPlan) {
       try {
+        let permanentDailyVerified = false;
         const afterUpdateManifest = loadManifest(pin.target).m;
         reconcileExistingOwnedSchedulers(
           afterUpdateManifest,
@@ -29881,6 +29898,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           );
           dailyReconciliation = { daily_definition: "verified", source_expectations: "verified" };
           if (dailyTransactionActive) persistDailyTransaction("recovery_required");
+          permanentDailyVerified = true;
           ok("Daily imports were recomputed from the updated manifest and restored after exact readback.");
         } else if (manageDailyDefinition) {
           if (dailySnapshot?.exists) {
@@ -29910,6 +29928,14 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
             "This older manifest now has an eligible daily import plan. Run brain daily on <manifest> to approve and install its owned schedule."
           ));
         }
+        if (bridgeSnapshots.some((entry) => entry.prior_enabled && entry.state !== "retired")) {
+          if (permanentDailyVerified) {
+            bridgeGuard.retire(bridgeSnapshots, () => persistDailyTransaction("paused"));
+            ok("The old daily bridge tasks paused by this update were removed after permanent daily task readback.");
+          } else {
+            updateAttention.push("The old daily task was paused; run brain daily on <manifest> to turn on permanent daily imports.");
+          }
+        }
         if (dailyTransactionActive) {
           clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
           dailyTransactionActive = false;
@@ -29932,6 +29958,17 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           throw error;
         }
       }
+    }
+    } catch (error) {
+      if (bridgeGuard && bridgeSnapshots.length) {
+        try {
+          bridgeGuard.restore(bridgeSnapshots, () => persistDailyTransaction("recovery_required"));
+          if (dailyTransactionActive) persistDailyTransaction("recovery_required");
+        } catch (restoreError) {
+          throw new Error(`${error.message} ${restoreError.message}`, { cause: error });
+        }
+      }
+      throw error;
     }
     if (installed.source !== "remembered") {
       try {

@@ -117,6 +117,7 @@ if (mode === "control") {
         platform: "win32",
         existingSchedulerOwners: [],
         planDailyRefresh: async () => dailyPlan,
+        bridgeOptions: { adapter: { inventory: () => ({ entries: [], ignored: 0 }) } },
         schedulerAdapter: {
           read: () => dailyState,
           setEnabled: (_identity, enabled) => {

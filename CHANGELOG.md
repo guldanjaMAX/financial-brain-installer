@@ -49,6 +49,14 @@ write a response.
   check after updating: run `brain daily status <manifest>` and confirm every
   source names the expected owner and a truthful last-success time or `never`.
 
+- **Windows updates coordinate temporary daily tasks.** Update pauses the old
+  daily tasks belonging to your Windows user and verifies the pause before
+  deployment. It removes only the tasks it paused, after the permanent daily
+  task is verified. If daily imports are off, the old task stays paused and
+  update tells you to run `brain daily on <manifest>`. A failed update attempts
+  to restore the old tasks and reports any restore failure. After updating,
+  check `brain daily status <manifest>` for the permanent schedule.
+
 - **You can now give your Brain up to six safe local landing folders.** Add an
   existing folder with `brain folder <manifest> add --path <absolute> --source
   <name>`, or create two empty `Brain Feeds` folders under your local home with
