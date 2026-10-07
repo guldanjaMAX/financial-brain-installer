@@ -164,6 +164,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node test/health-wrangler-session-exempt.test.mjs",
   // A completed update or deploy releases the shared prompt and exits.
   "node test/cli-success-exit.test.mjs",
+  "node --no-warnings test/windows-dpapi-signing-workflow.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -400,6 +401,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/recovery-mutation-boundaries.test.mjs",
   "node --no-warnings test/vector-drain-recovery.test.mjs",
   "node --no-warnings test/windows-dpapi-release-gate.test.mjs",
+  "node --no-warnings test/windows-dpapi-signing-workflow.test.mjs",
   "node --no-warnings worker/test/agent-authority-deletion.test.mjs",
   "node --no-warnings worker/test/owner-bank-import.test.mjs",
   "node --no-warnings worker/test/plaid-bank-feed.test.mjs",
