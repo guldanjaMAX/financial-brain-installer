@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { get } from "node:https";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { assertExactPaths, assertHostedRunner } from "./contract.mjs";
 
 // Independent witness pins, deliberately kept separate from installed script
@@ -122,6 +123,21 @@ export async function runKitProof(host, emit) {
   emit(`PINNED_KIT_BOOTSTRAP_VERIFIED=1 version=${KIT.version}`);
 }
 
+// Build Node argv for the authenticated installed entry and network preload.
+// Native realpath makes permissions and module loading agree on junctions,
+// directory aliases and Windows short names. Only the ESM --import argument
+// is a file URL; permission grants and the entry stay native filesystem paths.
+// Missing paths throw before launch. No credentials, network or writes are used.
+export function versionGuardArgs({ prefix, entrypoint, guard = resolve(import.meta.dirname, "version-guard.mjs") }, {
+  realpath = realpathSync.native, windows = process.platform === "win32",
+} = {}) {
+  const directory = realpath(prefix);
+  const entry = realpath(entrypoint);
+  const preload = realpath(guard);
+  return ["--permission", `--allow-fs-read=${directory}`, `--allow-fs-read=${preload}`,
+    "--import", pathToFileURL(preload, { windows }).href, entry, "--version"];
+}
+
 export async function bootstrapInstalled({ platform, logs, environment, command, emit }) {
   assertHostedRunner(environment);
   const mac = platform === "macos";
@@ -173,8 +189,8 @@ export async function bootstrapInstalled({ platform, logs, environment, command,
     verifyVersion() {
       // Invoke the kit's installed bin entry, never the checkout brain.mjs.
       // Permission mode denies subprocesses; the preload denies network APIs.
-      const guard = resolve(import.meta.dirname, "version-guard.mjs");
-      const output = command("installed-cli-version", process.execPath, ["--permission", `--allow-fs-read=${prefix}`, `--allow-fs-read=${guard}`, "--import", guard, join(installed, "brain.mjs"), "--version"]);
+      const output = command("installed-cli-version", process.execPath,
+        versionGuardArgs({ prefix, entrypoint: join(installed, "brain.mjs") }));
       if (output.trim() !== KIT.version) throw new Error("installed CLI version mismatch");
       emit(`INSTALLED_CLI_VERSION_VERIFIED=1 version=${KIT.version}`);
     },

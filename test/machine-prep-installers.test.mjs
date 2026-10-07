@@ -4,6 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { versionGuardArgs } from "../machine-prep/installers/smoke/bootstrap.mjs";
 import { inspectPerUserWix } from "./helpers/wix-authoring.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -315,29 +316,60 @@ test("pinned-kit source inventory permits only npm shims named by authenticated 
   } finally { rmSync(root, { recursive: true }); }
 });
 
-for (const fixtureKind of ["physical directory", "directory alias"]) {
+test("bootstrap version arguments use canonical Windows paths and an encoded ESM file URL", () => {
+  // Exercise Windows URL semantics on every host without touching a drive or share.
+  const canonical = [
+    "D:\\Runner Data\\Installed Kit",
+    "D:\\Runner Data\\Installed Kit\\brain.mjs",
+    "D:\\Reviewed Source # 100%\\version-guard.mjs",
+  ];
+  for (const paths of [
+    canonical,
+    ["d:/Runner Data/Installed Kit", "d:/Runner Data/Installed Kit/brain.mjs", "d:/Reviewed Source # 100%/version-guard.mjs"],
+    ["D:\\RUNNER~1\\INSTAL~1", "D:\\RUNNER~1\\INSTAL~1\\brain.mjs", "D:\\REVIEW~1\\version-guard.mjs"],
+    ["D:\\kit-junction", "D:\\kit-junction\\brain.mjs", "D:\\source-junction\\version-guard.mjs"],
+  ]) {
+    const calls = [];
+    const [prefix, entrypoint, guard] = paths;
+    const args = versionGuardArgs({ prefix, entrypoint, guard }, { windows: true, realpath(path) {
+      calls.push(path);
+      assert.ok(paths.includes(path), "only the three requested paths may be resolved");
+      return canonical[paths.indexOf(path)];
+    } });
+    assert.deepEqual(calls, paths, "every path canonicalization decision reached");
+    assert.deepEqual(args, ["--permission", `--allow-fs-read=${canonical[0]}`, `--allow-fs-read=${canonical[2]}`,
+      "--import", "file:///D:/Reviewed%20Source%20%23%20100%25/version-guard.mjs", canonical[1], "--version"]);
+  }
+});
+
+for (const fixtureKind of ["physical directory", "directory alias", "URL-reserved characters"]) {
   test(`bootstrap version guard denies network and child processes after reached decisions (${fixtureKind})`, () => {
     const root = mkdtempSync(join(tmpdir(), "kit-version-guard-"));
     try {
-      const fixture = join(root, "fixture");
+      const fixture = join(root, fixtureKind === "URL-reserved characters" ? "fixture # 100%" : "fixture");
       mkdirSync(fixture);
       let fixturePath = fixture;
       if (fixtureKind === "directory alias") {
         fixturePath = join(root, "alias");
-        symlinkSync(realpathSync(fixture), fixturePath, process.platform === "win32" ? "junction" : "dir");
+        symlinkSync(realpathSync.native(fixture), fixturePath, process.platform === "win32" ? "junction" : "dir");
         assert.ok(lstatSync(fixturePath).isSymbolicLink(), "directory-alias decision reached");
-        assert.equal(realpathSync(fixturePath), realpathSync(fixture), "alias resolves to the same fixture");
+        assert.equal(realpathSync.native(fixturePath), realpathSync.native(fixture), "alias resolves to the same fixture");
       }
       // Node resolves the entry point through realpath, but its permission
       // allowlist does not follow directory aliases (including macOS /var).
-      // Use one canonical path for the allowlist, entry point, cwd, and HOME.
-      const directory = realpathSync(fixturePath);
-      const entry = join(directory, "brain.mjs");
-      const guard = realpathSync(join(ROOT, "machine-prep/installers/smoke/version-guard.mjs"));
+      // The production argument builder must canonicalize the original alias.
+      const directory = realpathSync.native(fixturePath);
+      const entry = join(fixturePath, "brain.mjs");
+      const guardSource = readFileSync(join(ROOT, "machine-prep/installers/smoke/version-guard.mjs"));
+      const guardDirectory = join(root, fixtureKind === "URL-reserved characters" ? "guard # 100%" : "guard");
+      mkdirSync(guardDirectory);
+      const guard = join(guardDirectory, "version-guard.mjs");
+      writeFileSync(guard, guardSource);
+      assert.deepEqual(readFileSync(guard), guardSource, "exercise the unchanged production preload bytes");
       const execute = (source) => {
         writeFileSync(entry, source);
-        return spawnSync(process.execPath, ["--permission", `--allow-fs-read=${directory}`, `--allow-fs-read=${guard}`, "--import", guard, entry, "--version"], {
-          cwd: directory, encoding: "utf8",
+        return spawnSync(process.execPath, versionGuardArgs({ prefix: fixturePath, entrypoint: entry, guard }), {
+          cwd: directory, encoding: "utf8", timeout: 15_000,
           env: { HOME: directory, USERPROFILE: directory, BRAIN_NO_WRANGLER_LOGIN: "1" },
         });
       };
@@ -348,17 +380,25 @@ for (const fixtureKind of ["physical directory", "directory alias"]) {
       assert.notEqual(network.status, 0);
       assert.match(network.stdout, /VERSION_DECISION_REACHED=1/);
       assert.match(network.stderr, /BOOTSTRAP_VERSION_NETWORK_REFUSED=1/);
-      const child = execute("import { spawnSync } from 'node:child_process'; console.log('VERSION_DECISION_REACHED=1'); spawnSync('synthetic-never-executed');\n");
+      const child = execute("import { spawnSync } from 'node:child_process'; console.log('VERSION_DECISION_REACHED=1'); spawnSync(process.execPath, ['--eval', 'console.log(\"CHILD_EXECUTED=1\")'], { stdio: 'inherit' });\n");
       assert.notEqual(child.status, 0);
       assert.match(child.stdout, /VERSION_DECISION_REACHED=1/);
       assert.match(child.stderr, /ERR_ACCESS_DENIED/);
-      const outside = join(realpathSync(root), "outside.txt");
+      assert.match(child.stderr, /ChildProcess/);
+      assert.doesNotMatch(child.stdout, /CHILD_EXECUTED=1/);
+      const outside = join(realpathSync.native(root), "outside.txt");
       writeFileSync(outside, "synthetic unreadable sibling\n");
       const readOutside = execute(`import { readFileSync } from 'node:fs'; console.log('VERSION_DECISION_REACHED=1'); readFileSync(${JSON.stringify(outside)});\n`);
       assert.notEqual(readOutside.status, 0);
       assert.match(readOutside.stdout, /VERSION_DECISION_REACHED=1/);
       assert.match(readOutside.stderr, /ERR_ACCESS_DENIED/);
       assert.match(readOutside.stderr, /FileSystemRead/);
+      const writeInside = execute(`import { writeFileSync } from 'node:fs'; console.log('VERSION_DECISION_REACHED=1'); writeFileSync(${JSON.stringify(entry)}, 'unexpected write');\n`);
+      assert.notEqual(writeInside.status, 0);
+      assert.match(writeInside.stdout, /VERSION_DECISION_REACHED=1/);
+      assert.match(writeInside.stderr, /ERR_ACCESS_DENIED/);
+      assert.match(writeInside.stderr, /FileSystemWrite/);
+      assert.match(readFileSync(entry, "utf8"), /VERSION_DECISION_REACHED=1/, "read permission never grants writes");
     } finally { rmSync(root, { recursive: true }); }
   });
 }
@@ -385,7 +425,7 @@ test("bootstrap uses installed production preparation, guarded version, and same
   assert.match(bootstrap, /\[prep, "--prepare-cli"\]/);
   assert.match(bootstrap, /verifyKit\(bytes\)/);
   assert.match(bootstrap, /verifyPackageTree\(join\(scratch, "package"\), installed\)/);
-  assert.match(bootstrap, /join\(installed, "brain\.mjs"\), "--version"/);
+  assert.match(bootstrap, /versionGuardArgs\(\{ prefix, entrypoint: join\(installed, "brain\.mjs"\) \}\)/);
   assert.match(bootstrap, /"--permission"/);
   assert.doesNotMatch(bootstrap, /MACHINE_PREP_TEST|--test-install-brain|\.\.\.process\.env/);
   const limited = read("machine-prep/installers/smoke/windows-limited.ps1");
