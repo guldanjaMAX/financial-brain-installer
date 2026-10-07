@@ -7,12 +7,13 @@
  * Anything outside this finite language is ambiguous and is refused, including
  * every generated Account balance. The separate Account renderer is unchanged.
  */
+import { quickBooksLabel, quickBooksLabelText } from "./quickbooks-label.js";
 const MONEY = "([A-Z]{3} -?(?:[1-9]\\d{0,2}(?:,\\d{3})+|0|[1-9]\\d*)(?:\\.\\d{2,6}))";
 const STAMP = "(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z)";
 const DAY = "(\\d{4}-\\d{2}-\\d{2})";
 const NAME = "([\\p{L}\\p{N}][\\p{L}\\p{N} '&()/.\\-]{0,179})";
 const ID = "([\\p{L}\\p{N}][\\p{L}\\p{N}_/\\-]{0,79})";
-const identity = (value) => String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+const identity = (value) => quickBooksLabelText(value).toLowerCase();
 const textOf = (doc) => String(doc?.snippet || "").replace(/^\[[^\]\r\n]*\]\s*/, "");
 const pattern = (value) => new RegExp(`^${value}$`, "u");
 const exactTime = (value) => {
@@ -20,12 +21,6 @@ const exactTime = (value) => {
   return Number.isFinite(time) && new Date(time).toISOString() === value ? time : null;
 };
 const validDay = (value) => exactTime(`${value}T00:00:00.000Z`) !== null;
-// Labels are part of a monetary statement too. A field containing a second
-// monetary clause is ambiguous even when copied verbatim from the provider.
-// Ordinary names (including dots), document identifiers and Net 30 terms stay
-// usable; monetary prose in these slots never supplies another amount field.
-const monetaryLabel = (value) => /\b[A-Z]{3}\s+-?\d/u.test(value) ||
-  /\p{Sc}|\d[.,]\d|\b(?:amounts?|balances?|owes?|owed|paid|costs?|charges?|fees?|dollars?|cents?|bucks?|euros?|pounds?|pesos?|yen|yuan|rupees?|francs?|hundred|thousands?|millions?|billions?|trillions?)\b/iu.test(value);
 const units = (money) => {
   const [whole, fraction = ""] = money.slice(4).replaceAll(",", "").replace(/^-/, "").split(".");
   return BigInt(whole + fraction.padEnd(6, "0")) * (money[4] === "-" ? -1n : 1n);
@@ -65,38 +60,48 @@ function record(doc) {
     parsed.key = `${entity}:${identity(number)}:${identity(party)}`;
     const expectedState = units(balance) < 0n ? "credit balance" : units(balance) === 0n ? "paid"
       : units(balance) < units(total) ? "partially paid" : "unpaid";
-    if ([number, party, terms].some(monetaryLabel) || asOf !== observed || total.slice(0, 3) !== balance.slice(0, 3) || state !== expectedState ||
+    const numberLabel = quickBooksLabel(number, { identifier: true });
+    const partyLabel = quickBooksLabel(party);
+    const termsLabel = terms && quickBooksLabel(terms);
+    if (!numberLabel || !partyLabel || (terms && !termsLabel) || asOf !== observed || total.slice(0, 3) !== balance.slice(0, 3) || state !== expectedState ||
         !validDay(dated) || (due && !validDay(due))) return parsed;
-    add(opening);
+    add(`${entity} ${numberLabel} ${direction} ${partyLabel}: total ${total}, open balance ${balance} (${state}) as of ${asOf}; dated ${dated}${due ? `, due ${due}` : ""}${terms ? `, terms ${termsLabel}` : ""}`);
     for (const date of dates) {
-      add(`${entity} ${number} ${entity === "Invoice" ? "for" : "from"} ${party} has an open balance of ${balance} as of ${date}`);
-      add(`${entity} ${number} ${direction} ${party}: open balance ${balance} (${state}) as of ${date}`);
-      if (entity === "Invoice" && units(balance) > 0n) add(`${party} owes ${balance} on Invoice ${number} as of ${date}`);
-      if (entity === "Bill" && units(balance) > 0n) add(`We owe ${balance} to ${party} on Bill ${number} as of ${date}`);
+      add(`${entity} ${numberLabel} ${entity === "Invoice" ? "for" : "from"} ${partyLabel} has an open balance of ${balance} as of ${date}`);
+      add(`${entity} ${numberLabel} ${direction} ${partyLabel}: open balance ${balance} (${state}) as of ${date}`);
+      if (entity === "Invoice" && units(balance) > 0n) add(`${partyLabel} owes ${balance} on Invoice ${numberLabel} as of ${date}`);
+      if (entity === "Bill" && units(balance) > 0n) add(`We owe ${balance} to ${partyLabel} on Bill ${numberLabel} as of ${date}`);
     }
   } else if (entity === "Customer" || entity === "Vendor") {
     const match = pattern(`${NAME}: open balance ${MONEY} as of ${STAMP}`).exec(opening);
     if (!match) return parsed;
     const [, party, balance] = match;
     parsed.key = `${entity}:${identity(party)}`;
-    if (monetaryLabel(party)) return parsed;
-    for (const date of dates) add(`${party}: open balance ${balance} as of ${date}`);
+    const partyLabel = quickBooksLabel(party);
+    if (!partyLabel) return parsed;
+    for (const date of dates) add(`${partyLabel}: open balance ${balance} as of ${date}`);
   } else if (entity === "CreditMemo") {
     const match = pattern(`Credit memo ${ID} for ${NAME} on ${DAY}: total ${MONEY}, remaining credit ${MONEY} as of ${STAMP}`).exec(opening);
     if (!match) return parsed;
     const [, number, party, date, total, balance] = match;
     parsed.key = `${entity}:${identity(number)}:${identity(party)}`;
-    if ([number, party].some(monetaryLabel) || !validDay(date) || total.slice(0, 3) !== balance.slice(0, 3)) return parsed;
-    add(opening);
-    for (const asOf of dates) add(`Credit memo ${number} for ${party} has remaining credit of ${balance} as of ${asOf}`);
+    const numberLabel = quickBooksLabel(number, { identifier: true });
+    const partyLabel = quickBooksLabel(party);
+    if (!numberLabel || !partyLabel || !validDay(date) || total.slice(0, 3) !== balance.slice(0, 3)) return parsed;
+    add(`Credit memo ${numberLabel} for ${partyLabel} on ${date}: total ${total}, remaining credit ${balance} as of ${observed}`);
+    for (const asOf of dates) add(`Credit memo ${numberLabel} for ${partyLabel} has remaining credit of ${balance} as of ${asOf}`);
   } else if (entity === "BillPayment") {
     const match = pattern(`Bill payment to ${NAME} on ${DAY}: ${MONEY} by (credit card|cash|check) \\(${NAME}\\)(, for bill [\\p{L}\\p{N}_/\\-]+(?:, bill [\\p{L}\\p{N}_/\\-]+)*)?`).exec(opening);
     if (!match) return parsed;
     const [, party, date, amount, method, account, links = ""] = match;
     parsed.key = `${entity}:${doc.ref}`;
-    if ([party, account, links].some(monetaryLabel) || !validDay(date) || units(amount) < 0n) return parsed;
-    add(opening);
-    add(`${party} was paid ${amount} by ${method} on ${date}${links.replace(/^,/, "")}`);
+    const partyLabel = quickBooksLabel(party);
+    const accountLabel = quickBooksLabel(account);
+    const billLabels = [...links.matchAll(/bill ([\p{L}\p{N}_/\-]+)/gu)].map((match) => quickBooksLabel(match[1], { identifier: true }));
+    if (!partyLabel || !accountLabel || billLabels.some((label) => !label) || !validDay(date) || units(amount) < 0n) return parsed;
+    const linkedBills = billLabels.length ? ` for ${billLabels.map((label) => `bill ${label}`).join(", ")}` : "";
+    add(`Bill payment to ${partyLabel} on ${date}: ${amount} by ${method} (${accountLabel})${linkedBills ? `,${linkedBills}` : ""}`);
+    add(`${partyLabel} was paid ${amount} by ${method} on ${date}${linkedBills}`);
   }
   // A flattened excerpt cannot distinguish structural Line/Details markers
   // from those same strings inside a memo or description. Never promote that
@@ -123,7 +128,7 @@ function reliable(record, now) {
  * All retrieved candidates participate in the latest-observation check, even
  * those outside the numbered citation window.
  */
-export function quickBooksMoneyPolicy({ question, draft, docs = [], candidates = docs, now = Date.now() } = {}) {
+export function quickBooksMoneyPolicy({ question, draft, docs = [], candidates = docs, observedAnswer = null, now = Date.now() } = {}) {
   const scoped = /\b(?:quick[\s-]*books|qbo)\b/i.test(`${question || ""} ${draft || ""}`) || candidates.some((doc) =>
     doc.source_kind === "quickbooks" || String(doc.date_source || "").startsWith("quickbooks:") || /\bQuickBooks (?:Account|Customer|Vendor|Invoice|Bill|CreditMemo|BillPayment)\./.test(textOf(doc)));
   if (!scoped) return null;
@@ -154,6 +159,10 @@ export function quickBooksMoneyPolicy({ question, draft, docs = [], candidates =
       ...statements, ...NOTICES,
     ].join("\n"),
     refusal(answer) {
+      // Only the route's non-generative proposal may supply this contract.
+      // Its labels use the same boundary above; require the entire proposal
+      // unchanged, including its scope caveat. Never add it to model options.
+      if (observedAnswer) return answer === observedAnswer.answer ? null : REFUSAL;
       const lines = String(answer || "").split(/\r?\n/).map((line) => line.trim().replace(/^- /, "")).filter(Boolean);
       return lines.length && lines.every((line) => allowed.has(line)) && lines.some((line) => statements.includes(line)) ? null : REFUSAL;
     },

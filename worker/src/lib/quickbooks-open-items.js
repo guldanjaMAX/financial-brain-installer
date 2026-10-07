@@ -1,5 +1,6 @@
 /** Non-generative open-item answers. No model draft enters this module. */
-const identity = (value) => String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+import { quickBooksLabel, quickBooksLabelText } from "./quickbooks-label.js";
+const identity = (value) => quickBooksLabelText(value).toLowerCase();
 
 // Match the whole request. A filtered, historical, net-credit, total or compound
 // question needs the ordinary answer path; silently dropping a clause is unsafe.
@@ -37,11 +38,14 @@ function observedItem(doc, entity, now) {
   // Only the complete leading connector opening supplies facts. Never search
   // its arbitrary memo, description, Details or title for monetary markers.
   const text = String(doc.snippet || "").replace(/^\[[^\]\r\n]*\]\s*/, "");
+  if ([...text.matchAll(/\bQuickBooks (?:Invoice|Bill)\./g)].length !== 1) return null;
   const match = OPENING.exec(text);
   if (!match) return null;
-  const [, kind, number, direction, party, totalCurrency, total, currency, amount, state, observedAt, dated, due, , marker] = match;
+  const [, kind, number, direction, party, totalCurrency, total, currency, amount, state, observedAt, dated, due, terms, marker] = match;
+  const numberLabel = quickBooksLabel(number, { identifier: true });
+  const partyLabel = quickBooksLabel(party);
   if (kind !== entity || marker !== entity || direction !== (entity === "Invoice" ? "to" : "from") ||
-      party === "not provided" || totalCurrency !== currency ||
+      !numberLabel || !partyLabel || (terms && !quickBooksLabel(terms)) || totalCurrency !== currency ||
       exactTime(`${dated}T00:00:00.000Z`) === null || (due && exactTime(`${due}T00:00:00.000Z`) === null)) return null;
   const time = exactTime(observedAt);
   if (time === null || time !== Date.parse(doc.ts) || time > now || now - time > 86400000) return null;
@@ -50,7 +54,7 @@ function observedItem(doc, entity, now) {
   const expectedState = balance < 0n ? "credit balance" : balance === 0n ? "paid"
     : balance < totalAmount ? "partially paid" : "unpaid";
   if (state !== expectedState || totalAmount < 0n || balance > totalAmount) return null;
-  return { doc, number, party, currency, amount, balance, due, observedAt };
+  return { doc, number, party, numberLabel, partyLabel, currency, amount, balance, due, observedAt };
 }
 
 /** Authorized retrieval is the boundary, not a full ledger. Inspect even
@@ -83,7 +87,7 @@ export function quickBooksOpenItemsAnswer({ question, candidates = [], citationC
   // An empty retrieved subset cannot prove that nobody owes anything.
   if (!selected.length) return null;
   selected.sort((a, b) => a.party < b.party ? -1 : a.party > b.party ? 1 : a.number < b.number ? -1 : a.number > b.number ? 1 : 0);
-  const lines = selected.map((item) => `${entity} ${item.number} ${entity === "Invoice" ? "to" : "from"} ${item.party}: ${entity === "Invoice" ? "owes" : "we owe"} ${item.currency} ${item.amount}, ${item.due ? `due ${item.due}` : "due date not provided"}, as of ${item.observedAt.slice(0, 10)} [${item.doc.n}].`);
+  const lines = selected.map((item) => `${entity} ${item.numberLabel} ${entity === "Invoice" ? "to" : "from"} ${item.partyLabel}: ${entity === "Invoice" ? "owes" : "we owe"} ${item.currency} ${item.amount}, ${item.due ? `due ${item.due}` : "due date not provided"}, as of ${item.observedAt.slice(0, 10)} [${item.doc.n}].`);
   const noun = entity === "Invoice" ? "invoices" : "bills";
   return {
     answer: `${lines.join("\n")}\n\nLists only ${noun} found in the retrieved evidence with positive open balances, not a complete QuickBooks inventory. Amounts are per item. Credit memos and credit balances are not netted. No company-wide or net amount owed is established. Check QuickBooks for the complete list.`,

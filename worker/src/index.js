@@ -1408,12 +1408,15 @@ async function handleThink(
             evidenceGate.supported = false;
             evidenceGate.reason = "current QuickBooks balances require deterministic observed Account evidence";
           }
-          // The money contract can only veto a generated draft. It runs even
-          // after a negative verifier; it never sets supported or complete true.
-          const draftMoneyPolicy = moneyPolicy || quickBooksMoneyPolicy({
+          // The money contract only vetoes; it never sets supported/complete.
+          // Observed proposals use the same label boundary and must survive
+          // unchanged. They are never admitted as generated model statements.
+          const draftMoneyPolicy = observedAnswer ? quickBooksMoneyPolicy({
+            docs, candidates: results.map(citationCandidateForResult), observedAnswer,
+          }) : moneyPolicy || quickBooksMoneyPolicy({
             draft: answer, docs, candidates: results.map(citationCandidateForResult),
           });
-          const moneyRefusal = !observedAnswer && draftMoneyPolicy?.refusal(answer);
+          const moneyRefusal = draftMoneyPolicy?.refusal(answer);
           if (moneyRefusal && evidenceGate.supported) {
             evidenceGate.supported = false;
             evidenceGate.reason = moneyRefusal;

@@ -1,6 +1,7 @@
 /** Exact observed Account facts only. This module never accepts model prose. */
+import { quickBooksLabel, quickBooksLabelText } from "./quickbooks-label.js";
 const QUICKBOOKS_BALANCE_DATE_SOURCE = "quickbooks:balance_snapshot";
-const identity = (value) => String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+const identity = (value) => quickBooksLabelText(value).toLowerCase();
 const recordText = (doc) => String(doc?.snippet || "").replace(/^\[[^\]\r\n]*\]\s*/, "");
 
 // Whole-question admission: a balance request with another material clause
@@ -26,7 +27,6 @@ const ACCOUNT_TYPES = new Set([
   "Accounts Payable", "Other Current Liability", "Long Term Liability", "Equity", "Income",
   "Cost of Goods Sold", "Expense", "Other Income", "Other Expense", "Non-Posting",
 ]);
-const SAFE_ACCOUNT_NAME = /^[\p{L}\p{N}][\p{L}\p{N} '&()/-]{0,179}$/u;
 
 function observedAccount(doc, now) {
   if (doc.source_kind !== "quickbooks" || doc.date_source !== QUICKBOOKS_BALANCE_DATE_SOURCE ||
@@ -35,10 +35,16 @@ function observedAccount(doc, now) {
       doc.authority?.eligible === false || !doc.ref?.startsWith("account:")) return null;
   // Parse the entire connector opening and its Account marker. A number in
   // Details, a title, a derived summary or an incomplete excerpt cannot qualify.
-  const match = /^([A-Za-z ]+) account ([^:]+): balance ([A-Z]{3}) (-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{2,6}))(?: \(owes ([A-Z]{3}) ((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{2,6}))\))? as of (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)\.\s+QuickBooks Account\./.exec(recordText(doc));
+  const text = recordText(doc);
+  // A provider label can spell a complete fake opening before the real one.
+  // Multiple structural markers make the field boundary ambiguous, even when
+  // the apparent captured name and fake amount are individually well formed.
+  if ([...text.matchAll(/\bQuickBooks Account\./g)].length !== 1) return null;
+  const match = /^([A-Za-z ]+) account ([^:]+): balance ([A-Z]{3}) (-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{2,6}))(?: \(owes ([A-Z]{3}) ((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{2,6}))\))? as of (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)\.\s+QuickBooks Account\./.exec(text);
   if (!match) return null;
   const [, type, name, currency, amount, owedCurrency, owed, observedAt] = match;
-  if (!ACCOUNT_TYPES.has(type) || !SAFE_ACCOUNT_NAME.test(name) || name === "not provided") return null;
+  const label = quickBooksLabel(name);
+  if (!ACCOUNT_TYPES.has(type) || !label) return null;
   const time = Date.parse(observedAt);
   // Current money is volatile. This path admits at most one day's observation,
   // never a fresh account that launders an older account in the same list.
@@ -46,7 +52,7 @@ function observedAccount(doc, now) {
   const liability = type === "Credit Card" && amount.startsWith("-");
   if (liability ? owedCurrency !== currency || owed !== amount.slice(1) : owed !== undefined) return null;
   const day = observedAt.slice(0, 10);
-  const claim = `${name} (${type}): ${liability ? `owes ${currency} ${owed}` : `balance ${currency} ${amount}`} as of ${day} [${doc.n}].`;
+  const claim = `${label} (${type}): ${liability ? `owes ${currency} ${owed}` : `balance ${currency} ${amount}`} as of ${day} [${doc.n}].`;
   return { name, type, observedAt, claim, n: doc.n, source: doc.source };
 }
 
