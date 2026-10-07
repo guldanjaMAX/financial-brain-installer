@@ -230,7 +230,7 @@ function currentReleaseNotCoveredBlock(section) {
 
 function assertOrdinaryReleaseCopyPrecedesLimitations(section) {
   const rendered = renderCliCommands(section);
-  const ordinary = rendered.indexOf("Dollar amounts in a partly answered question are no longer cut.");
+  const ordinary = rendered.indexOf("Daily imports now have one owned Windows and macOS contract.");
   const limitations = rendered.indexOf("This release does NOT cover");
   assert.ok(ordinary >= 0 && limitations >= 0 && ordinary < limitations,
     "ordinary release copy must render before the final does-not-cover block");
@@ -253,7 +253,7 @@ function assertExactLimitationIds(block, registry = cases) {
 assert.ok(notCoveredBlock, "the current changelog needs a This release does NOT cover block");
 assert.throws(() => assertOrdinaryReleaseCopyPrecedesLimitations(
   "### This release does NOT cover\n\n- **UPDATE-999:** Deferred fixture.\n\n" +
-    "- **Dollar amounts in a partly answered question are no longer cut.** Fixture.",
+    "- **Daily imports now have one owned Windows and macOS contract.** Fixture.",
 ), /ordinary release copy must render before/,
 "the prior layout must fail because whatsnew renders ordinary changes inside the limitation block");
 assert.doesNotThrow(() => assertOrdinaryReleaseCopyPrecedesLimitations(currentReleaseSection));

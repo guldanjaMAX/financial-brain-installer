@@ -8,10 +8,7 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
-asset publication. The held 0.4.8 and 0.4.9 candidates were never tagged,
-published, or offered as customer updates. Their entries below ship for the
-first time in 0.4.10, and their identities are retired so their evidence cannot
-be confused with this changed candidate.
+asset publication.
 
 At a glance, this candidate adds permanent daily imports on Windows and macOS
 that survive verified updates, Outlook calendar records, a SimpleFIN bank
@@ -51,6 +48,7 @@ write a response.
   Status prints one line per source with its owner and last successful run. To
   check after updating: run `brain daily status <manifest>` and confirm every
   source names the expected owner and a truthful last-success time or `never`.
+
 - **You can now give your Brain up to six safe local landing folders.** Add an
   existing folder with `brain folder <manifest> add --path <absolute> --source
   <name>`, or create two empty `Brain Feeds` folders under your local home with
@@ -119,25 +117,6 @@ write a response.
   stop. A successful retry continues through the final health, acceptance, and
   version readback checks.
 
-- **A small fresh search backlog no longer looks like a search outage.** When
-  keyword and meaning-based search both complete while less than one percent
-  of the index is catching up from the last 24 hours, a missing answer is now
-  marked as incomplete coverage instead of unavailable search. The Brain still
-  refuses to say that nothing is recorded until the queue is empty. A cited
-  answer that passes the evidence check is still shown. A larger or older
-  backlog, or either search method actually failing, stays unavailable. To
-  check: ask one question with a known cited answer and one absence question
-  while a small recent load finishes.
-
-- **Calendar, meeting, and iMessage questions get a source-aware search lane.**
-  When a question explicitly says calendar, meeting, Zoom, iMessage, or text
-  message, the Brain now searches that category or platform before the normal
-  candidate cutoff, then combines those records with the ordinary whole-Brain
-  results. It does not restrict the answer to one source, and generic decision
-  questions still search everywhere without guessing where a decision lives.
-  To check: repeat a calendar, meeting, or iMessage question that previously
-  returned only file or email candidates and inspect the cited source.
-
 - **An approved pilot can use SimpleFIN Bridge as a second bank provider.** The
   owner creates a one-time Setup Token in SimpleFIN and pastes it only into the
   owner-only page on their Brain. The Brain claims the connection itself,
@@ -158,6 +137,68 @@ write a response.
   derived from the admin or browser-session key. To check: rerun deploy and
   confirm it reports that the wrapping-key name already exists and was not
   replaced.
+
+- **Known issue, still open in 0.4.10: a partial answer can drop a name that
+  ends in an abbreviation.** When the documents answer only part of a
+  question, the Brain keeps the sentences its sources support and names what
+  is missing. It still reads the full stop in an abbreviation such as "Co." as
+  the end of a sentence, so from "Example Co. recorded March income of $1,234
+  [1]." it can keep only "recorded March income of $1,234 [1]." The figure and
+  its citation are unchanged; the words before the abbreviation's full stop
+  are lost. To check: open the cited source to see whom a kept figure belongs
+  to.
+
+### This release does NOT cover
+
+- **UPDATE-012:** Windows x64 is the only supported Windows runtime in this
+  release. Windows ARM64 ships unproven.
+- **UPDATE-044:** Bank breadth ships unproven.
+  Bank invitations stay closed in this release.
+
+## 0.4.9
+
+Delivered to supervised owners through the sealed kit and owner update pages.
+This version was not tagged on GitHub.
+
+- **A saved browser sign-in no longer blocks a custom-domain Brain at the
+  workers.dev address check.** Cloudflare can refuse that account read even
+  when the sign-in can update a Brain that uses its own domain. That Brain now
+  continues; it never used the workers.dev address. A Brain whose address uses
+  workers.dev still stops, explains that its address needs the refused read,
+  and offers the same explicit account-scoped recovery token choice. Nothing
+  changes unless the owner accepts that recovery path. To check: run the next
+  update with the Brain's saved browser sign-in.
+
+- **Cloudflare setup now tells you when browser sign-in cannot reach
+  Vectorize, and it never silently switches credentials.** Wrangler 4.131.1
+  cannot request Vectorize permission for its browser profile. Reopening the
+  same browser approval cannot fix that, so setup now goes directly to a clear
+  recovery choice that names the required Workers Scripts Edit, D1 Edit,
+  Vectorize Edit, and Workers AI Read permissions. If this computer has a saved
+  recovery token, setup names its exact account and protected-store location,
+  warns that it may be old or revoked, and asks before using it. You can decline
+  it and enter a different token through the hidden prompt. Windows follows the
+  same scope and decision path; its existing visible-entry protection still
+  requires an approved secret-manager path instead of risking an echoed token.
+
+- **A small fresh search backlog no longer looks like a search outage.** When
+  keyword and meaning-based search both complete while less than one percent
+  of the index is catching up from the last 24 hours, a missing answer is now
+  marked as incomplete coverage instead of unavailable search. The Brain still
+  refuses to say that nothing is recorded until the queue is empty. A cited
+  answer that passes the evidence check is still shown. A larger or older
+  backlog, or either search method actually failing, stays unavailable. To
+  check: ask one question with a known cited answer and one absence question
+  while a small recent load finishes.
+
+- **Calendar, meeting, and iMessage questions get a source-aware search lane.**
+  When a question explicitly says calendar, meeting, Zoom, iMessage, or text
+  message, the Brain now searches that category or platform before the normal
+  candidate cutoff, then combines those records with the ordinary whole-Brain
+  results. It does not restrict the answer to one source, and generic decision
+  questions still search everywhere without guessing where a decision lives.
+  To check: repeat a calendar, meeting, or iMessage question that previously
+  returned only file or email candidates and inspect the cited source.
 
 - **Dollar amounts in a partly answered question are no longer cut.** When an
   answer covers only part of a question, the Brain keeps the sentences your
@@ -998,7 +1039,7 @@ write a response.
   the default OCR model is unchanged. To check: with OCR enabled, a scanned
   page read by the default model is indexed instead of refused.
 
-- **Known issue, not fixed in 0.4.10: a partial answer can drop a name that
+- **Known issue, not fixed in 0.4.9: a partial answer can drop a name that
   ends in an abbreviation.** When the documents answer only part of a
   question, the Brain keeps the sentences its sources support and names what
   is missing. It still reads the full stop in an abbreviation such as "Co." as

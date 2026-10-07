@@ -260,6 +260,8 @@ const currentNotesOnly = await whatsnewStatusOutput(async () => ({
   status: "up_to_date", latest_version: version,
 }), { full: true });
 assert.match(currentNotesOnly, new RegExp(`## ${escapedVersion} \\(2026-10-06\\)`, "u"));
+assert.doesNotMatch(currentNotesOnly, /## 0\.4\.9/u,
+  "whatsnew must not repeat the already delivered 0.4.9 notes in the current entry");
 assert.doesNotMatch(currentNotesOnly, /## 0\.4\.6/u,
   "whatsnew must print only the current version by default");
 const allNotes = await whatsnewStatusOutput(async () => ({
@@ -292,7 +294,7 @@ try {
     const originalLog = console.log;
     console.log = (...values) => whatsnewLines.push(values.join(" "));
     try {
-      await cmdWhatsnew(null, { discoverManifest: () => null });
+      await cmdWhatsnew(null, { discoverManifest: () => null, all: true });
     } finally {
       console.log = originalLog;
     }
