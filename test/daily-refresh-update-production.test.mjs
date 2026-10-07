@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash as boundaryHash } from "node:crypto";
 import { createWindowsUpdateBridgeGuard as boundaryGuard } from "../operations/windows-update-bridge.mjs";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -1010,4 +1010,92 @@ test("bridge fingerprint excludes only the task enabled field when the trigger h
   assert.equal(receipts[0].definition_hash, original);
   guard.restore(receipts, () => { writes += 1; });
   assert.equal(native.rows.get(BRIDGE_NAME).enabled, true);
+});
+
+for (const arm of ["exact-control", "directory-alias", "different-file", "missing-file"]) {
+  test(`bridge manifest file identity: ${arm}`, async () => withFixture(async ({ directory, manifestPath }) => {
+    const aliasDirectory = join(directory, "manifest-alias");
+    symlinkSync(realpathSync.native(directory), aliasDirectory, process.platform === "win32" ? "junction" : "dir");
+    const otherDirectory = join(directory, "other");
+    mkdirSync(otherDirectory);
+    const otherManifest = join(otherDirectory, "brain.manifest.json");
+    writeFileSync(otherManifest, readFileSync(manifestPath));
+    const taskPath = arm === "directory-alias" ? join(aliasDirectory, "brain.manifest.json")
+      : arm === "different-file" ? otherManifest
+        : arm === "missing-file" ? join(directory, "missing", "brain.manifest.json") : realpathSync.native(manifestPath);
+    if (arm === "directory-alias") {
+      assert.notEqual(taskPath, realpathSync.native(manifestPath), "fixture exercises a different directory spelling");
+      assert.equal(realpathSync.native(taskPath), realpathSync.native(manifestPath));
+    }
+    const harness = productionHarness(manifestPath);
+    const native = attachBridge(harness, manifestPath, {
+      tasks: [{ action: `brain load '${taskPath.replaceAll("'", "''")}' --only google_drive` }],
+    });
+    if (["exact-control", "directory-alias"].includes(arm)) {
+      await cmdUpdate(manifestPath, harness.options);
+      assert.ok(harness.events.includes("migration"), "bound task permits the real update");
+      assert.deepEqual(native.mutations().map(({ args }) => args[0]), ["/Change", "/Delete"]);
+      assert.equal(native.rows.size, 0, "verified permanent task replaces the bridge");
+    } else {
+      await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /Task Scheduler/);
+      assert.equal(native.mutations().length, 0);
+      assert.equal(native.rows.get(BRIDGE_NAME).enabled, true);
+      assert.equal(harness.events.includes("deploy:paused"), false);
+    }
+    assert.ok(native.calls.some(({ args }) => args.includes("/XML")), "binding decision read the native action");
+  }));
+}
+
+for (const arm of ["same-file", "different-file"]) {
+  test(`bridge differently named manifest alias: ${arm}`, async () => withFixture(async ({ directory, manifestPath }) => {
+    const targetDirectory = arm === "same-file" ? directory : join(directory, "other");
+    if (arm === "different-file") {
+      mkdirSync(targetDirectory);
+      writeFileSync(join(targetDirectory, "brain.manifest.json"), readFileSync(manifestPath));
+    }
+    const aliasDirectory = join(directory, "task-alias");
+    symlinkSync(realpathSync.native(targetDirectory), aliasDirectory, process.platform === "win32" ? "junction" : "dir");
+    const taskPath = join(aliasDirectory, "brain.manifest.json");
+    const name = String.raw`\Financial Brain\daily-refresh-0000000000000000`;
+    const harness = productionHarness(manifestPath);
+    const native = attachBridge(harness, manifestPath, {
+      tasks: [{ name, action: `brain load '${taskPath.replaceAll("'", "''")}' --only google_drive` }],
+    });
+    assert.equal(native.rows.get(name).action.includes(realpathSync.native(manifestPath)), false,
+      "fixture cannot be detected by the old manifest substring check");
+    if (arm === "same-file") {
+      await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /Task Scheduler/);
+      assert.equal(harness.events.includes("deploy:paused"), false);
+    } else {
+      await cmdUpdate(manifestPath, harness.options);
+      assert.ok(harness.events.includes("migration"), "different-file control reaches update");
+    }
+    assert.ok(native.calls.some(({ args }) => args.includes("/XML")), "unbound-task decision read the action");
+    assert.equal(native.mutations().length, 0, "a differently named task is never adopted");
+    assert.equal(native.rows.get(name).enabled, true);
+  }));
+}
+
+test("bridge manifest comparison resolves both paths before applying platform case semantics", async () => {
+  const { sameManifestFile } = await import("../operations/windows-update-bridge.mjs");
+  const taskPath = String.raw`C:\Fixture\BRAIN.manifest.json`;
+  const manifestPath = String.raw`c:\fixture\brain.manifest.json`;
+  for (const platform of ["win32", "darwin", "linux"]) {
+    const reads = [];
+    assert.equal(sameManifestFile(taskPath, manifestPath, {
+      platform, realpath: (path) => { reads.push(path); return path; },
+    }), platform === "win32");
+    assert.deepEqual(reads, [taskPath, manifestPath], "case comparison requires both successful resolutions");
+    for (const missing of [taskPath, manifestPath]) {
+      const attempts = [];
+      assert.equal(sameManifestFile(taskPath, manifestPath, {
+        platform, realpath: (path) => {
+          attempts.push(path);
+          if (path === missing) throw new Error("fixture path unavailable");
+          return path;
+        },
+      }), false, "unresolvable case-only spelling does not bind");
+      assert.ok(attempts.includes(missing), "negative arm reached the failed resolution");
+    }
+  }
 });

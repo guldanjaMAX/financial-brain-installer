@@ -1065,14 +1065,19 @@ normalization, so automatic binding accepts only an already canonical lowercase
 ASCII hostname. Other spellings require explicit repair, not guessed aliases.
 
 Matching names and principals alone are insufficient. A single PowerShell
-EncodedCommand must decode to a complete literal `brain load <exact manifest>
+EncodedCommand must decode to a complete literal `brain load <manifest>
 --only <source CSV>` invocation. Quoted constant arguments and an absolute
 `brain.cmd` or `brain.exe` invocation are accepted; comments, dynamic expressions,
 additional commands and opaque programs are refused. This deliberately does not
 interpret an arbitrary prose-generated PowerShell program or trust an old receipt
 with unspecified serialization. Its owner must repair such a task explicitly.
+The manifest path must match exactly or both spellings must resolve through native
+realpath to the same file, with case-insensitive comparison only on Windows.
+Unresolvable aliases fail closed. Recovery fingerprints still use the update's
+pinned manifest path, not the spelling in the task action.
 Another Brain's task is left untouched; a differently named task whose decoded
-action mentions this manifest or domain also requires repair before update.
+action mentions this manifest or domain, or whose literal load path resolves to
+this manifest, also requires repair before update.
 
 Before native disable, the update journal records task name, principal, prior
 enabled state, time, action-recognition booleans, a binding fingerprint and an
