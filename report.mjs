@@ -201,7 +201,9 @@ export function sourceReceiptSummary(source) {
   const completeThrough = isoDay(receipt.complete_history_through || freshness.last_complete_sweep_at);
 
   let currency;
-  if (["failed", "refused"].includes(latestOutcome)) {
+  if (latestOutcome === "empty") {
+    currency = "needs attention; the latest refresh verified no accepted or unchanged documents";
+  } else if (["failed", "refused"].includes(latestOutcome)) {
     currency = "needs attention; the latest authenticated ingest did not succeed";
   } else if (latestOutcome === "partial" && latestWasSuccessful && latestFailed === 0 &&
       latestWalkComplete && latestRefused > 0 && state === "ok" && expected !== null) {
@@ -233,7 +235,7 @@ export function sourceReceiptSummary(source) {
   }
 
   const historyState = String(coverage.history?.state || "unknown").toLowerCase();
-  const latestFailedOrRefused = ["failed", "refused"].includes(latestOutcome);
+  const latestFailedOrRefused = ["failed", "refused", "empty"].includes(latestOutcome);
   const history = latestOutcome === "partial" && completeThrough
     ? latestWalkComplete
       ? `last complete sweep recorded through ${completeThrough}; the newer run left document gaps and did not extend that boundary`

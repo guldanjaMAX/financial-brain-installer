@@ -203,7 +203,7 @@ test("a retired source with a proven complete sweep has no coverage gap", async 
     await register(fixture, "archive-2026");
     await receipt(fixture, "archive-2026", "ready", {
       run_id: "complete-sweep", lane: "sweep", walk_complete: true,
-      complete_sweep: true, docs_refused: 0, docs_failed: 0,
+      complete_sweep: true, docs_added: 1, docs_refused: 0, docs_failed: 0,
       completed_at: "2026-10-05T10:00:00.000Z",
     });
     const retired = await fixture.post(

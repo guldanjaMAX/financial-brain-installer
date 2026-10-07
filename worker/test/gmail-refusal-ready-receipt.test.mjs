@@ -66,15 +66,15 @@ async function closeOldError(fixture, runId) {
   });
 }
 
-async function closeReady(fixture, runId, completedAt = COMPLETED_AT) {
-  await post(fixture, "/api/admin/brain/source-receipt", gmailRefusalReadyReceipt({
+async function closeReady(fixture, runId, completedAt = COMPLETED_AT, accepted = 0) {
+  await post(fixture, "/api/admin/brain/source-receipt", { ...gmailRefusalReadyReceipt({
     runId,
     startedAt: STARTED_AT,
     completedAt,
-  }));
+  }), docs_added: accepted, files_seen: 2 + accepted });
 }
 
-test("a refusal-only ready Gmail receipt clears operational failure without claiming history", async (t) => {
+test("an all-refused Gmail receipt needs review until accepted work proves recovery", async (t) => {
   const control = await createProductFixture();
   t.after(() => control.close());
   await expectGmail(control);
@@ -95,17 +95,19 @@ test("a refusal-only ready Gmail receipt clears operational failure without clai
   const readyReport = await reportFor(ready);
   const readyTypes = readyReport.gaps.map((gap) => gap.type);
   assert.equal(readyTypes.includes("sync_broken"), false, JSON.stringify(readyReport.gaps));
-  assert.equal(readyTypes.includes("never_synced"), false, JSON.stringify(readyReport.gaps));
+  assert.equal(readyTypes.includes("never_synced"), true, JSON.stringify(readyReport.gaps));
+  assert.equal(readyTypes.includes("sync_review"), true, JSON.stringify(readyReport.gaps));
   const readyRun = ready.first("SELECT docs_refused,docs_failed FROM sync_runs WHERE run_id=?",
     "run_gmail_refusal_ready");
   assert.deepEqual({ ...readyRun }, { docs_refused: 2, docs_failed: 0 });
 
   await openRun(control, "run_gmail_refusal_recovery");
-  await closeReady(control, "run_gmail_refusal_recovery", "2026-09-29T02:00:00.000Z");
+  await closeReady(control, "run_gmail_refusal_recovery", "2026-09-29T02:00:00.000Z", 1);
   const recoveryReport = await reportFor(control);
   const recoveryTypes = recoveryReport.gaps.map((gap) => gap.type);
   assert.equal(recoveryTypes.includes("sync_broken"), false, JSON.stringify(recoveryReport.gaps));
   assert.equal(recoveryTypes.includes("never_synced"), false, JSON.stringify(recoveryReport.gaps));
+  assert.equal(recoveryTypes.includes("sync_review"), false, JSON.stringify(recoveryReport.gaps));
   const recoveryRun = control.first("SELECT docs_refused,docs_failed FROM sync_runs WHERE run_id=?",
     "run_gmail_refusal_recovery");
   assert.deepEqual({ ...recoveryRun }, { docs_refused: 2, docs_failed: 0 });

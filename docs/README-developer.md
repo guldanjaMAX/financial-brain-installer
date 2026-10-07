@@ -1065,11 +1065,15 @@ source success: every named leg must have a valid
 missing or unknown leg makes the aggregate line unknown instead of allowing a
 current sibling to hide it.
 
-A finished refresh with zero document failures advances operational success even
-when files were refused or unsupported. Its latest run is `partial` and carries
-`docs_refused`; it does not extend `complete_history_through`. A measured failure
-is `failed`, retains the prior success timestamp, and makes source freshness
-broken. A source with no run receipt has `missing_history` in daily status.
+A measured finished refresh advances operational success only with zero document
+failures and positive accepted or verified unchanged work, even when other files
+were refused or unsupported. An all-refused run is `refused`; a measured run with
+all accepted, unchanged, refused and failed counters zero is `empty`. Both retain
+the prior success and complete-history dates and request source review. Neither
+invents imported work or a transient document failure. A successful run with
+omissions is `partial` and carries `docs_refused`; it does not extend
+`complete_history_through`. A measured failure is `failed`, retains the prior
+success timestamp, and makes source freshness broken. A source with no run receipt has `missing_history` in daily status.
 The durable `docs_refused` omission count also includes intentional local
 source-policy exclusions. The daily execution receipt additionally reports
 that subset as `docs_excluded`. Such a run is partial without invalidating a

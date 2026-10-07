@@ -2064,6 +2064,10 @@ async function handleSourceReceipt(env, request) {
   // Both fields opt the receipt into the versioned, measured outcome shape.
   // Missing counters remain unknown rather than defaulting to a clean zero.
   const metricsVersion = Object.hasOwn(body, "docs_refused") && Object.hasOwn(body, "docs_failed") ? 1 : 0;
+  // A completed empty walk is evidence of an attempt, not verified freshness.
+  // Keep the zero counters and prior success; do not invent an imported item.
+  const verifiedWork = metricsVersion !== 1 || ["docs_added", "docs_updated", "docs_unchanged"]
+    .some((field) => receiptCount(body?.[field]) > 0);
   // A producer's ready label cannot hide measured transient failures. Keep
   // the cheap aggregate source row and the detailed run receipt consistent.
   if (status === "ready" && receiptCount(body?.docs_failed) > 0) status = "error";
@@ -2177,7 +2181,7 @@ async function handleSourceReceipt(env, request) {
   // completed walk and explicitly measures zero refused and failed documents.
   // Missing outcome counters are legacy/unknown evidence, never a clean zero.
   const completeSweep = status === "ready" && body?.complete_sweep === true &&
-    walkComplete && metricsVersion === 1 &&
+    walkComplete && metricsVersion === 1 && verifiedWork &&
     receiptCount(body?.docs_refused) === 0 && receiptCount(body?.docs_failed) === 0 &&
     !body?.refusal_reason;
   // Gmail failure evidence has its own closed durable contract. Do not let a
@@ -2194,13 +2198,14 @@ async function handleSourceReceipt(env, request) {
   if (status === "ready") {
     statements.push(env.DB.prepare(
       `INSERT INTO sources (name, kind, status, created_at, last_ingest_at, document_count, last_complete_sweep_at, stale_reason)
-       VALUES (?1,?2,'ready',?3,?3,?4,CASE WHEN ?5 = 1 THEN ?3 ELSE NULL END,NULL)
+       VALUES (?1,?2,'ready',?3,CASE WHEN ?6 = 1 THEN ?3 ELSE NULL END,?4,CASE WHEN ?5 = 1 THEN ?3 ELSE NULL END,?7)
        ON CONFLICT(name) DO UPDATE SET
-         status='ready', last_ingest_at=excluded.last_ingest_at,
-         document_count=excluded.document_count, stale_reason=NULL,
+         status='ready', last_ingest_at=CASE WHEN ?6 = 1 THEN excluded.last_ingest_at ELSE sources.last_ingest_at END,
+         document_count=excluded.document_count, stale_reason=excluded.stale_reason,
          last_complete_sweep_at=CASE WHEN ?5 = 1 THEN excluded.last_ingest_at ELSE sources.last_complete_sweep_at END
        WHERE sources.kind=excluded.kind`
-    ).bind(source, kind, completedAt, documents, completeSweep ? 1 : 0));
+    ).bind(source, kind, completedAt, documents, completeSweep ? 1 : 0,
+      verifiedWork ? 1 : 0, verifiedWork ? null : "NO_VERIFIED_WORK"));
   } else {
     // A failed attempt does not become the last successful ingest. Advancing
     // last_ingest_at here would make a broken daily sync look current for the

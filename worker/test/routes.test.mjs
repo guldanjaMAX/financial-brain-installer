@@ -1820,7 +1820,7 @@ const zeroChunkExpectedReturn = {
       seen.sql.some((sql) => /substr\(family_doc_uid, 1, length\(\?1\) \+ 1\)/.test(sql)),
     JSON.stringify(seen.sql));
   check("the receipt updates freshness and leaves an audit event", seen.sql.some((sql) => /INSERT INTO sources/.test(sql)) && seen.sql.some((sql) => /INSERT INTO source_events/.test(sql)), JSON.stringify(seen.sql));
-  const legacySourceBind = seen.binds.find((values) => values[0] === "drive" && values.length === 5);
+  const legacySourceBind = seen.binds.find((values) => values[0] === "drive" && values.length === 7);
   check("a legacy sweep without measured refused and failed counters cannot advance history completeness",
     legacySourceBind?.[4] === 0, JSON.stringify(legacySourceBind));
 
@@ -2060,7 +2060,7 @@ const zeroChunkExpectedReturn = {
     }),
   }), env, {});
   const sourceBind = seen.binds.find((values) =>
-    values[0] === "calendar-inconsistent" && values.length === 5);
+    values[0] === "calendar-inconsistent" && values.length === 7);
   const runBind = seen.binds.find((values) =>
     values[0] === "run_inconsistent_sweep" && values.length === 22);
   check("complete_sweep is fail-closed when the same ready receipt did not complete its walk",
@@ -2100,7 +2100,7 @@ const zeroChunkExpectedReturn = {
     }),
   }), env, {});
   const refusedSourceBind = seen.binds.find((values) =>
-    values[0] === "refused-calendar" && values.length === 5);
+    values[0] === "refused-calendar" && values.length === 7);
   const refusedRunBind = seen.binds.find((values) =>
     values[0] === "run_refused_sweep" && values.length === 22);
   check("measured document refusals prevent an otherwise complete receipt from advancing history",
@@ -2114,12 +2114,12 @@ const zeroChunkExpectedReturn = {
     body: JSON.stringify({
       source: "adjudicated-drive", kind: "drive", status: "ready",
       run_id: "run_adjudicated_sweep", lane: "sweep", walk_complete: true,
-      complete_sweep: true, docs_refused: 0, docs_failed: 0,
+      complete_sweep: true, docs_added: 1, docs_refused: 0, docs_failed: 0,
       detail: "policy_skipped=2; coverage_gaps=0; adjudicated_skips=3",
     }),
   }), env, {});
   const adjudicatedSourceBind = seen.binds.find((values) =>
-    values[0] === "adjudicated-drive" && values.length === 5);
+    values[0] === "adjudicated-drive" && values.length === 7);
   const adjudicatedRunBind = seen.binds.find((values) =>
     values[0] === "run_adjudicated_sweep" && values.length === 22);
   check("measured policy and adjudicated skips do not block a zero-refusal completed walk",
@@ -2153,13 +2153,13 @@ const zeroChunkExpectedReturn = {
     body: JSON.stringify({
       source: "imessage", kind: "imessage", status: "ready",
       run_id: "run_imessage_sweep", lane: "manual", walk_complete: true,
-      complete_sweep: true, docs_refused: 0, docs_failed: 0,
+      complete_sweep: true, docs_added: 1, docs_refused: 0, docs_failed: 0,
       target_range: { from: "2019-02-03T00:00:00.000Z", through: "2026-09-16T00:00:00.000Z" },
       detail: "iMessage capture: 4 without text (tapbacks/attachments), 0 unusable; " +
         "this Mac's local Messages database is swept complete end to end",
     }),
   }), env, {});
-  const sourceBind = seen.binds.find((values) => values[0] === "imessage" && values.length === 5);
+  const sourceBind = seen.binds.find((values) => values[0] === "imessage" && values.length === 7);
   const runBind = seen.binds.find((values) => values[0] === "run_imessage_sweep" && values.length === 22);
   check("an unbounded iMessage walk advances durable history proof for the imessage source",
     response.status === 200 && sourceBind?.[4] === 1 &&
@@ -2177,7 +2177,7 @@ const zeroChunkExpectedReturn = {
       complete_sweep: false, docs_refused: 0, docs_failed: 0,
     }),
   }), env, {});
-  const tickBind = seen.binds.find((values) => values[0] === "imessage-tick" && values.length === 5);
+  const tickBind = seen.binds.find((values) => values[0] === "imessage-tick" && values.length === 7);
   check("an incremental iMessage tick still records no completed history sweep",
     incremental.status === 200 && tickBind?.[4] === 0, JSON.stringify(tickBind));
 }
@@ -2412,7 +2412,7 @@ const zeroChunkExpectedReturn = {
   const body = await response.json();
   check("a receipt reports logical and physical document counts separately",
     body.documents === 2 && body.logical_documents === 2 && body.stored_documents === 3, JSON.stringify(body));
-  const sourceBind = seen.binds.find((bind) => bind[0] === "drive" && bind[1] === "drive" && bind.length === 5);
+  const sourceBind = seen.binds.find((bind) => bind[0] === "drive" && bind[1] === "drive" && bind.length === 7);
   check("the source registry stores the logical connector count", sourceBind?.[3] === 2, JSON.stringify(seen.binds));
 }
 
