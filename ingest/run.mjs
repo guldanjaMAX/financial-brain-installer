@@ -502,8 +502,16 @@ function feedExclusionMatcher(patterns = []) {
     for (let index = 0; index < pattern.length; index++) {
       const character = pattern[index];
       if (character === "*" && pattern[index + 1] === "*") {
-        expression += ".*";
-        index += 1;
+        if (pattern[index + 2] === "/") {
+          // A globstar directory segment includes zero directories. Without
+          // the optional slash, **/*.txt skipped nested files but admitted a
+          // root-level .txt file selected by the same owner exclusion.
+          expression += "(?:.*/)?";
+          index += 2;
+        } else {
+          expression += ".*";
+          index += 1;
+        }
       } else if (character === "*") {
         expression += "[^/]*";
       } else if (character === "?") {

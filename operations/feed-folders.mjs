@@ -9,10 +9,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import {
-  dirname,
-  isAbsolute,
-  join,
-  resolve,
+  posix as posixPath,
   win32 as win32Path,
 } from "node:path";
 
@@ -40,33 +37,40 @@ function feedFs(overrides = {}) {
 }
 
 function platformPath(platform) {
-  return platform === "win32"
-    ? win32Path
-    : { dirname, isAbsolute, join, resolve };
+  return platform === "win32" ? win32Path : posixPath;
 }
 
-function normalizedPath(value, platform, pathApi = platformPath(platform)) {
-  let output = String(value || "").replace(/\\/gu, "/");
-  while (output.length > 1 && output.endsWith("/")) output = output.slice(0, -1);
+function normalizedPath(value, platform, pathApi = platformPath(platform), cwd = process.cwd()) {
+  const raw = String(value || "");
+  const absolute = pathApi.isAbsolute(raw) ? raw : pathApi.resolve(cwd, raw);
+  const native = pathApi.normalize(absolute);
+  const nativeRoot = pathApi.parse(native).root;
+  let output = native.replace(/\\/gu, "/");
+  const root = nativeRoot.replace(/\\/gu, "/");
+  while (output.length > root.length && output.endsWith("/")) output = output.slice(0, -1);
   if (platform === "darwin" || platform === "win32") output = output.toLowerCase();
-  // Resolve only after checking absoluteness. win32.resolve otherwise borrows
-  // the host process drive, which is not the path the owner approved.
-  return output || String(pathApi.resolve(value));
+  return output;
 }
 
 function sameOrInside(child, parent) {
-  return Boolean(child && parent && (child === parent || child.startsWith(`${parent}/`)));
+  if (!child || !parent) return false;
+  if (child === parent) return true;
+  return child.startsWith(parent.endsWith("/") ? parent : `${parent}/`);
 }
 
 function overlaps(left, right) {
   return sameOrInside(left, right) || sameOrInside(right, left);
 }
 
-function uploadFolderEntries(manifest) {
-  const folders = manifest?.corpora?.upload?.folders;
-  if (folders === undefined) return [];
-  if (!Array.isArray(folders)) throw new Error("corpora.upload.folders must be an array");
-  return folders.map((entry) => {
+function effectiveUploadFolderValues(corpus) {
+  const declared = corpus?.folders ?? corpus?.paths ?? (corpus?.path ? [corpus.path] : []);
+  if (!Array.isArray(declared)) throw new Error("corpora.upload.folders must be an array");
+  return declared;
+}
+
+/** The loader's complete compatibility shape, shared by validation and mutation. */
+export function uploadFolderEntriesOf(corpus) {
+  return effectiveUploadFolderValues(corpus).map((entry) => {
     if (typeof entry === "string") return { path: entry, source: null, feed: false };
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       throw new Error("each corpora.upload.folders entry must be a path or an object");
@@ -75,12 +79,81 @@ function uploadFolderEntries(manifest) {
   });
 }
 
-function safeCanonicalPath(path, io, platform, pathApi) {
+function uploadFolderEntries(manifest) {
+  return uploadFolderEntriesOf(manifest?.corpora?.upload);
+}
+
+function safeCanonicalPath(path, io, platform, pathApi, cwd = process.cwd()) {
   try {
-    return normalizedPath(io.realpathNative(path), platform, pathApi);
+    return normalizedPath(io.realpathNative(path), platform, pathApi, cwd);
   } catch {
-    return normalizedPath(path, platform, pathApi);
+    return normalizedPath(path, platform, pathApi, cwd);
   }
+}
+
+export function comparableFeedPath(path, options = {}) {
+  const platform = options.platform || process.platform;
+  const pathApi = options.pathApi || platformPath(platform);
+  const io = feedFs(options.fs);
+  if (typeof options.realpathNative === "function") io.realpathNative = options.realpathNative;
+  return safeCanonicalPath(path, io, platform, pathApi, options.cwd || process.cwd());
+}
+
+export function feedPathSameOrInside(child, parent, options = {}) {
+  return sameOrInside(comparableFeedPath(child, options), comparableFeedPath(parent, options));
+}
+
+export function feedPathsOverlap(left, right, options = {}) {
+  return overlaps(comparableFeedPath(left, options), comparableFeedPath(right, options));
+}
+
+function isFilesystemRoot(path, platform, pathApi) {
+  const native = pathApi.normalize(String(path));
+  return normalizedPath(native, platform, pathApi) ===
+    normalizedPath(pathApi.parse(native).root, platform, pathApi);
+}
+
+function inspectNamedPathComponents(path, io, platform, pathApi, { allowMissing = false } = {}) {
+  const raw = String(path);
+  const parsed = pathApi.parse(raw);
+  const root = parsed.root;
+  const tail = raw.slice(root.length);
+  const parts = tail.split(platform === "win32" ? /[\\/]+/u : /\/+/u);
+  let current = root;
+  for (const component of parts.filter(Boolean)) {
+    current = pathApi.join(current, component);
+    if (!io.existsSync(current)) {
+      if (allowMissing) return;
+      continue;
+    }
+    const state = io.lstatSync(current);
+    if (state.isSymbolicLink?.()) {
+      throw new Error("a symbolic link or reparse point cannot be a Brain feed");
+    }
+  }
+}
+
+function configuredNonUploadSources(manifest) {
+  const sources = new Set();
+  const local = manifest?.corpora?.local_folder;
+  if (local && typeof local === "object" && !Array.isArray(local) &&
+      (local.enabled === true || local.path || local.source || local.retired_at)) {
+    sources.add(String(local.source || local.retired_source || "documents"));
+  }
+  const defaultNames = {
+    calendar: "calendar",
+    gmail: "gmail",
+    google_drive: "drive",
+    imessage: "imessage",
+    iphone_backup: "iphone-backup",
+    whatsapp: "whatsapp",
+    zoom: "zoom",
+  };
+  for (const [key, corpus] of Object.entries(manifest?.corpora || {})) {
+    if (["upload", "local_folder"].includes(key) || corpus?.enabled !== true) continue;
+    sources.add(String(corpus.source || defaultNames[key] || key));
+  }
+  return sources;
 }
 
 function cloudManagedReason(path, platform) {
@@ -140,6 +213,9 @@ export function prepareFeedAddition(manifest, requestedPath, source, options = {
   if (!rawPath || !pathApi.isAbsolute(rawPath)) {
     return refuse("a feed path must be absolute");
   }
+  if (isFilesystemRoot(rawPath, platform, pathApi)) {
+    return refuse("a filesystem root cannot be a Brain feed");
+  }
   const cloudReason = cloudManagedReason(rawPath, platform);
   if (cloudReason) return refuse(cloudReason);
 
@@ -184,6 +260,11 @@ export function prepareFeedAddition(manifest, requestedPath, source, options = {
   const exists = io.existsSync(rawPath);
   if (!exists && !options.allowMissing) return refuse("the selected feed folder does not exist");
   let canonical = rawPath;
+  try {
+    inspectNamedPathComponents(rawPath, io, platform, pathApi, { allowMissing: options.allowMissing === true });
+  } catch (error) {
+    return refuse(String(error?.message || error));
+  }
   if (exists) {
     let named;
     try {
@@ -191,9 +272,7 @@ export function prepareFeedAddition(manifest, requestedPath, source, options = {
     } catch {
       return refuse("the selected feed folder could not be inspected safely");
     }
-    if (named.isSymbolicLink?.()) {
-      return refuse("a symbolic link or reparse point cannot be a Brain feed");
-    }
+    if (named.isSymbolicLink?.()) return refuse("a symbolic link or reparse point cannot be a Brain feed");
     if (!named.isDirectory?.()) return refuse("the selected feed path is not a folder");
     try {
       canonical = io.realpathNative(rawPath);
@@ -223,8 +302,11 @@ export function prepareFeedAddition(manifest, requestedPath, source, options = {
     }
     return refuse("the selected path is already declared with different feed settings");
   }
-  if (folders.some((existing) => existing.source && existing.source === sourceName)) {
+  if (folders.some((existing) => String(existing.source || "upload") === sourceName)) {
     return refuse(`source ${sourceName} is already assigned to another folder`);
+  }
+  if (configuredNonUploadSources(manifest).has(sourceName)) {
+    return refuse(`source ${sourceName} is reserved by another configured source`);
   }
   for (const existing of folders) {
     if (!existing.path) continue;
@@ -244,11 +326,15 @@ export function prepareFeedAddition(manifest, requestedPath, source, options = {
   if (!previousUpload || typeof previousUpload !== "object" || Array.isArray(previousUpload)) {
     intended.corpora.upload = {};
   }
+  const priorFolderValues = effectiveUploadFolderValues(previousUpload)
+    .map((entry) => JSON.parse(JSON.stringify(entry)));
   intended.corpora.upload.enabled = true;
   intended.corpora.upload.folders = [
-    ...(Array.isArray(intended.corpora.upload.folders) ? intended.corpora.upload.folders : []),
+    ...priorFolderValues,
     { path: canonical, source: sourceName, feed: true },
   ];
+  delete intended.corpora.upload.path;
+  delete intended.corpora.upload.paths;
   feedDecision(notify, canonical, sourceName, "accepted", "add");
   return Object.freeze({ changed: true, path: canonical, source: sourceName, manifest: intended });
 }
@@ -276,6 +362,9 @@ export function createDefaultFeedDirectories(options = {}) {
     }
   };
   try {
+    for (const path of [parent, ...targets.map((target) => target.path)]) {
+      inspectNamedPathComponents(path, io, platform, pathApi, { allowMissing: true });
+    }
     if (io.existsSync(parent)) {
       const parentState = io.lstatSync(parent);
       if (parentState.isSymbolicLink?.() || !parentState.isDirectory?.()) {
