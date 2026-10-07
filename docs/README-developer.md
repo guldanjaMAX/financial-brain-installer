@@ -1207,6 +1207,50 @@ the source again and leaves a retry marker plus an error receipt if any exact
 target remains. A pending retry goes back through this current plan and cannot
 reuse an earlier denominator or bypass a changed fingerprint.
 
+### Exported mail handing over to Outlook
+
+For old Markdown digests without per-message identity, set
+`corpora.microsoft.mail_start_at` to the **inclusive first unexported instant**,
+as UTC `YYYY-MM-DDTHH:mm:ss.sssZ`. Leave it absent or null for ordinary full-mail
+sync. Configure it before the first Microsoft load. The normal provider
+configuration fingerprint incorporates this setting, so a changed boundary
+starts a fresh walk. Do not change it to today's date or remove it on retry.
+
+Verify the old source's actually loaded coverage, mailbox, selected folders,
+and export timezone first. A latest filename, modification time, offloaded
+placeholder, or successful task label is not coverage proof. If the last
+fully covered civil day were September 30 in UTC-07:00, the setting would be
+`2026-10-01T07:00:00.000Z`: every earlier timestamp is excluded and that exact
+instant is included. If coverage is partial, has holes, or its timezone is
+unknown, hold mail collection until the boundary is verified. This setting
+does not reconstruct missing older history or reconcile overlapping calendars.
+
+Use the existing update approval to stop the old mail collector and configure
+this setting, the exact `mail_folder_ids`, and the existing daily schedule.
+Keep old source names, stored digests, original files, and citation identities.
+Do not retire, rename, forget, or reload the old source. Disable unrelated
+drive selection for a mail/calendar-only handover (`include_personal_drive:
+false`, empty `drive_ids` and `site_ids`). The product does not discover or
+stop an external legacy collector automatically. Provider sign-in/consent
+remains the existing separate provider ceremony.
+
+The adapter walks all delta pages and filters locally on `receivedDateTime`.
+It deliberately does not use Graph's filtered-delta result limit to claim
+complete coverage. The cutoff applies to first load, saved deltas, moved old
+messages, and reset. Missing or invalid received times fail the run before
+delivery and cursor promotion. With a cutoff configured, mail tombstones are
+counted but retained, and the bounded inventory cannot trigger absence-based
+snapshot removals. Exact drive/calendar tombstones retain their existing
+behavior. Any mail deletion is a separate explicit owner decision.
+
+`brain sources <manifest>` shows the source, UTC boundary and retention rule;
+`--json` adds `mail_transition` from local manifest configuration, separate from
+the remote inventory rows. Ingest reports excluded-message and retained-removal
+counts. The verified update summary adds one plain line describing the
+configured handover; it does not claim that Outlook has already imported.
+No new prompt, storage migration, alias rewrite, or per-message matching is
+introduced. This remains scripted-provider proof pending the tenant field gate.
+
 ### Legacy curated collections during migration
 
 `operations/curated-dual-sync.mjs` is the internal rollback-compatible path for

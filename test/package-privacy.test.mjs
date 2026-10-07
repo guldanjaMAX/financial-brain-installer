@@ -685,6 +685,7 @@ const expected = [
   "connectors/dropbox.mjs",
   "connectors/hubspot.mjs",
   "connectors/microsoft-graph.mjs",
+  "connectors/microsoft-mail-transition.mjs",
   "connectors/notion.mjs",
   "connectors/offline-rehearsal.mjs",
   "connectors/provider-file.mjs",

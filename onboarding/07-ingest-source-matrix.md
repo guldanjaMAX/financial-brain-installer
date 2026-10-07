@@ -455,6 +455,14 @@ cursor takes one guarded baseline migration while mail and drive remain on
 their exact saved cursors. No real Entra tenant has completed acceptance, and
 tenant consent may still require the client's Microsoft 365 administrator.
 
+For a verified handover from exported mail digests, the optional manifest
+`corpora.microsoft.mail_start_at` is the inclusive UTC start of unexported mail.
+The first load and every later delta exclude earlier mail; old digests and
+citations remain in place. Mail removals are retained for separate approval.
+The boundary is visible in `brain sources`. Verify actually loaded coverage
+and export timezone before setting it; a dated filename is insufficient.
+This does not reconcile old calendar digests or prove real-tenant acceptance.
+
 ### Notion
 
 **Built behind a field gate.** OAuth, page search, properties, recursive block

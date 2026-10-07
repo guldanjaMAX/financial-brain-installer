@@ -17,6 +17,12 @@ Brain Feeds landing folders. Aggregate freshness is visible across those
 sources, and answers search first so they can cite current records before they
 write a response.
 
+- **Outlook can take over after verified exported-mail history.** Your update
+  can set an exact starting time so Outlook imports only mail from that point
+  forward. Earlier digests and their citations stay available, and this mode
+  does not automatically delete stored mail. Check the boundary with
+  `brain sources <manifest>`; the exported coverage must be verified first.
+
 - **Daily imports now have one owned Windows and macOS contract.** `brain daily
   on|off|status <manifest>` derives every source from your own manifest instead
   of a fixed Google recipe, keeps Worker, push, capture, snapshot, disabled,

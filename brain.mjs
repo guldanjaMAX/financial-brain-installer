@@ -40,6 +40,7 @@ import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { TextDecoder } from "node:util";
 import { assertIngestionOutcome, ingestionOutcome } from "./ingest/outcome.mjs";
+import { microsoftMailTransition, microsoftMailTransitionSummary, normalizeMailStartAt } from "./connectors/microsoft-mail-transition.mjs";
 import {
   PUBLIC_INSTALL_SMOKE_DOC_UID,
   PUBLIC_INSTALL_SMOKE_SOURCE,
@@ -9996,6 +9997,8 @@ export async function cmdSources(manifestPath, options = {}) {
         changes: acceptedChanges,
       };
     }
+    const mailTransition = microsoftMailTransition(m);
+    if (mailTransition) inventory = { ...inventory, mail_transition: mailTransition };
     if (json) {
       if (!options.silent) console.log(JSON.stringify(inventory, null, 2));
       return inventory;
@@ -10024,6 +10027,7 @@ export async function cmdSources(manifestPath, options = {}) {
     }
     console.log("");
     info(`complete D1 snapshot: ${inventory.returned} of ${inventory.total} sources as of ${inventory.as_of}`);
+    if (mailTransition) info(`${mailTransition.source}: ${microsoftMailTransitionSummary(mailTransition)}`);
     info("source names do not prove an entity, tax year, financial reconciliation, or tax completeness; those remain separate checks.");
     console.log("");
     return inventory;
@@ -29595,6 +29599,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     );
   }
   const forceQueuedUpdate = options.forceQueuedUpdate === true;
+  const mailTransition = microsoftMailTransition(loadManifest(installed.path).m);
   let backlog = null;
   // Replacing adoption, verification, or upgrade is a dependency-injection
   // seam used by their existing focused tests, not an installed CLI path. A
@@ -30027,6 +30032,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   const attention = [...new Set(updateAttention)];
   const closing = [
     `Done. Your Brain is now on version ${PRODUCT_VERSION} and passed its checks.`,
+    ...(mailTransition ? [microsoftMailTransitionSummary(mailTransition)] : []),
     ...(attention.length ? [
       `${attention.length} ${attention.length === 1 ? "thing" : "things"} still ${attention.length === 1 ? "needs" : "need"} attention:`,
       ...attention,
@@ -30205,6 +30211,7 @@ function providerAdapterOptions(provider, configuration, connection) {
   };
   if (provider === "microsoft") return {
     mailFolderIds: configuration.mail_folder_ids,
+    mailStartAt: normalizeMailStartAt(configuration.mail_start_at),
     driveIds: configuration.drive_ids,
     siteIds: configuration.site_ids,
     includePersonalDrive: configuration.include_personal_drive !== false,
@@ -30220,6 +30227,7 @@ export async function cmdIngestProvider(m, manifestPath, flags, options = {}) {
   if (!PROVIDER_CONNECTOR_IDS.includes(provider)) throw new TypeError(`unsupported provider connector ${provider}`);
   if (flags.limit) die(`--limit is unsafe for ${provider}; it would skip records covered by the provider cursor.`);
   const configuration = m?.corpora?.[provider] || {};
+  if (provider === "microsoft") normalizeMailStartAt(configuration.mail_start_at);
   if (configuration.enabled !== true) {
     die(`corpora.${provider}.enabled is not true in this manifest. Enable it before connecting or ingesting.`);
   }
@@ -30323,6 +30331,7 @@ async function cmdIngestProviderRun(
     const result = await adapter({ cursor, access: await resolveAccess() });
     info(`${result.documents.length} document(s) would be sent; ${result.deletions.length} exact tombstone(s) would be applied.`);
     for (const warning of result.warnings || []) warn(warning);
+    if (result.mail_transition) info(`${result.mail_transition.excluded_messages} mail message(s) precede the cutover; ${result.mail_transition.retained_tombstones} mail removal notice(s) retained without deletion.`);
     ok("dry run, no brain document, deletion, source receipt, or provider cursor was changed");
     return { dry_run: true, result };
   }
@@ -30365,6 +30374,7 @@ async function cmdIngestProviderRun(
   }
   const tally = result.tally;
   ok(`${provider} sync: ${tally.created} created, ${tally.updated} updated, ${tally.unchanged} unchanged, ${result.removed} removed`);
+  if (result.mail_transition) info(`${result.mail_transition.excluded_messages} mail message(s) precede the cutover; ${result.mail_transition.retained_tombstones} mail removal notice(s) retained without deletion.`);
   if (result.outcome.kind !== "completed") warn(result.outcome.reason || `${provider} completed with an explicit coverage gap`);
   info(result.cursor_advanced ? "the terminal provider cursor was saved" : "no provider cursor was advanced");
   return result;

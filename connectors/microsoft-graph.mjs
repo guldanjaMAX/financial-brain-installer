@@ -8,6 +8,7 @@ import {
   normalizeConfig as normalizeGoogleCalendarConfig,
 } from "./google-calendar.mjs";
 import { stripMarkup } from "../ingest/quality.mjs";
+import { mailReceivedAt, normalizeMailStartAt } from "./microsoft-mail-transition.mjs";
 import { restampFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
@@ -403,6 +404,7 @@ export async function syncMicrosoftGraph({
   accessToken,
   fetchImpl = fetch,
   mailFolderIds = ["inbox"],
+  mailStartAt = null,
   driveIds = [],
   siteIds = [],
   includePersonalDrive = true,
@@ -411,6 +413,10 @@ export async function syncMicrosoftGraph({
   now = Date.now,
 } = {}) {
   if (!accessToken) throw new TypeError("Microsoft Graph accessToken is required");
+  const mailStart = normalizeMailStartAt(mailStartAt);
+  const mailTransition = mailStart === null ? null : {
+    mail_start_at: mailStart, boundary: "inclusive", excluded_messages: 0, retained_tombstones: 0,
+  };
   const documents = [];
   const deletions = [];
   const proposed = { mail: {}, drives: {} };
@@ -419,7 +425,9 @@ export async function syncMicrosoftGraph({
   const warnings = [];
   const auth = { accessToken, fetchImpl };
   const prior = cursor && typeof cursor === "object" ? cursor : {};
-  let authoritativeSnapshot = true;
+  // A bounded mail walk cannot authorize absence-based deletion of an older
+  // stored family, including after a reset or a configuration fingerprint change.
+  let authoritativeSnapshot = mailStart === null;
 
   if (includeCalendar) {
     const calendar = await syncOutlookCalendar({
@@ -450,6 +458,13 @@ export async function syncMicrosoftGraph({
       headers: { Prefer: MAIL_PREFER },
     });
     for (const message of page.items) {
+      if (mailTransition && mailReceivedAt(message?.receivedDateTime) < Date.parse(mailStart)) {
+        mailTransition.excluded_messages++;
+        continue;
+      }
+      if (mailTransition && (typeof message?.id !== "string" || !message.id.trim())) {
+        throw new TypeError("Outlook mail has no immutable message identity; no mail cutover cursor may advance");
+      }
       if (!message?.id) continue;
       const sourceId = `outlook:message:${message.id}`;
       snapshotSourceIds.push(sourceId);
@@ -461,9 +476,15 @@ export async function syncMicrosoftGraph({
         metadata: { workload: "outlook", message_id: message.id, folder_id: folderId },
       }));
     }
-    deletions.push(...page.deletions.filter((message) => message?.id).map((message) => ({
-      source_type: "microsoft", source_id: `outlook:message:${message.id}`,
-    })));
+    if (mailTransition) {
+      // Tombstones lack receivedDateTime. The handover retains mail history;
+      // removing it is a separate owner-approved operation, never a sync effect.
+      mailTransition.retained_tombstones += page.deletions.length;
+    } else {
+      deletions.push(...page.deletions.filter((message) => message?.id).map((message) => ({
+        source_type: "microsoft", source_id: `outlook:message:${message.id}`,
+      })));
+    }
     proposed.mail[folderId] = page.deltaLink;
   }
 
@@ -529,6 +550,7 @@ export async function syncMicrosoftGraph({
     deletionAuthority: "authoritative",
     complete: warnings.length === 0,
   }, cursorSafe, {
+    ...(mailTransition ? { mail_transition: mailTransition } : {}),
     authoritative_snapshot: authoritativeSnapshot,
     snapshot_source_ids: snapshotSourceIds,
     removal_review_scopes: includeCalendar && proposed.calendar ? [{
