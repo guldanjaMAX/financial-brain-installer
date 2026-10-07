@@ -166,6 +166,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node test/cli-success-exit.test.mjs",
   "node --test test/machine-prep.test.mjs",
   "node --test test/machine-prep-installers.test.mjs",
+  "node --no-warnings test/windows-dpapi-signing-workflow.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node test/test-chain-complete.test.mjs",
@@ -404,6 +405,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/recovery-mutation-boundaries.test.mjs",
   "node --no-warnings test/vector-drain-recovery.test.mjs",
   "node --no-warnings test/windows-dpapi-release-gate.test.mjs",
+  "node --no-warnings test/windows-dpapi-signing-workflow.test.mjs",
   "node --no-warnings worker/test/agent-authority-deletion.test.mjs",
   "node --no-warnings worker/test/owner-bank-import.test.mjs",
   "node --no-warnings worker/test/plaid-bank-feed.test.mjs",
