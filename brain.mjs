@@ -29731,7 +29731,11 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         machineLockRoot: dailySchedulerOptions.machineLockRoot,
       };
       if (dailyPlatform === "win32") {
-        bridgeGuard = createWindowsUpdateBridgeGuard(options.dailyRefreshOptions?.bridgeOptions || {});
+        bridgeGuard = createWindowsUpdateBridgeGuard({
+          ...(options.dailyRefreshOptions?.bridgeOptions || {}),
+          domain: beforeUpdateManifest.brain?.domain,
+          manifestPath: pin.target,
+        });
         bridgeInventory = bridgeGuard.inventory();
         if (bridgeInventory.ignored) info(`${bridgeInventory.ignored} other Windows task(s) were left untouched.`);
       }

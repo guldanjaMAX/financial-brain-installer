@@ -1,16 +1,52 @@
 /** Reversible coordination of temporary, current-user Windows daily tasks. */
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { win32 } from "node:path";
 import { parseWindowsTaskInventory } from "./daily-refresh-scheduler.mjs";
 
 const BRIDGE_NAME = /^\\Financial Brain\\daily-refresh-[0-9a-f]{16}$/u;
 const SID = /^S-1-\d+(?:-\d+)+$/u;
+const HASH = /^sha256:[a-f0-9]{64}$/u;
 const repair = () => new Error("Check the old daily task in Task Scheduler, then retry the update.");
 const decodeXml = (value) => value.replaceAll("&quot;", '"').replaceAll("&apos;", "'")
   .replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
 function singleTag(text, name) {
   const matches = [...String(text).matchAll(new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${name}>`, "gu"))];
   return matches.length === 1 ? matches[0][1] : null;
+}
+
+const digest = (...fields) => createHash("sha256").update(fields.map((value) =>
+  `${Buffer.byteLength(value, "utf8")}:${value},`).join(""), "utf8").digest("hex");
+
+function binding(domain, manifestPath, sid) {
+  // The prose producer did not define normalization. Only accept its already
+  // canonical hostname input, rather than guess aliases into ownership.
+  if (typeof domain !== "string" || domain.length > 253 ||
+      !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(domain) ||
+      typeof manifestPath !== "string" || !manifestPath || !SID.test(sid)) throw repair();
+  const name = `\\Financial Brain\\daily-refresh-${digest("daily-refresh-v1", domain, sid).slice(0, 16)}`;
+  return { name, hash: `sha256:${digest("bridge-binding-v1", domain, manifestPath, sid, name)}` };
+}
+
+function actionBinds(entry, manifestPath) {
+  // A substring in a comment, string, or opaque PowerShell program is not
+  // execution proof. Recognize only a complete literal load invocation; an
+  // unrecognized prose-generated program needs explicit supervised repair.
+  if (typeof entry.action !== "string" || /[\r\n\0]/u.test(entry.action)) return false;
+  let rest = entry.action.trim();
+  const invocation = rest.startsWith("& ");
+  if (invocation) rest = rest.slice(2).trimStart();
+  const tokens = [];
+  while (rest) {
+    const match = rest.match(/^(?:'((?:[^']|'')*)'|"([^"$`]*)"|([A-Za-z0-9_./\\:,\-]+))(?=\s|$)/u);
+    if (!match || (tokens.length === 0 && match[3] === undefined && !invocation)) return false;
+    tokens.push(match[1]?.replaceAll("''", "'") ?? match[2] ?? match[3]);
+    rest = rest.slice(match[0].length).trimStart();
+  }
+  return tokens.length === 5 &&
+    (tokens[0] === "brain" || (win32.isAbsolute(tokens[0]) && /^brain\.(?:cmd|exe)$/iu.test(win32.basename(tokens[0])))) &&
+    tokens[1] === "load" && tokens[2] === manifestPath && tokens[3] === "--only" &&
+    /^[a-z][a-z0-9_]*(?:,[a-z][a-z0-9_]*)*$/u.test(tokens[4]);
 }
 
 function observe(taskName, serialized) {
@@ -21,23 +57,29 @@ function observe(taskName, serialized) {
   const enabled = singleTag(settings, "Enabled");
   if (!user) throw repair();
   const actions = singleTag(serialized, "Actions") || "";
-  let action = decodeXml(actions);
-  const encoded = action.match(/(?:^|[>\s])-EncodedCommand\s+([A-Za-z0-9+/]+={0,2})(?=\s|<|$)/iu)?.[1];
+  let action = null;
+  const exec = actions.match(/^\s*<Exec>\s*<Command>([^<]*)<\/Command>\s*<Arguments>([^<]*)<\/Arguments>\s*<\/Exec>\s*$/u);
+  const command = exec ? decodeXml(exec[1]) : "";
+  const args = exec ? decodeXml(exec[2]) : "";
+  const encoded = /^(?:powershell\.exe|[A-Za-z]:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe)$/iu.test(command)
+    ? args.match(/^(?:(?:-NoProfile|-NonInteractive|-NoLogo|-ExecutionPolicy\s+Bypass)\s+)*-EncodedCommand\s+([A-Za-z0-9+/]+={0,2})\s*$/iu)?.[1] : null;
   if (encoded) {
     const bytes = Buffer.from(encoded, "base64");
-    if (bytes.length % 2 === 0 && bytes.toString("base64") === encoded) action += ` ${bytes.toString("utf16le")}`;
+    if (bytes.length % 2 === 0 && bytes.toString("base64") === encoded) action = bytes.toString("utf16le");
   }
-  // Keep a transient exact definition comparison across native mutations.
-  // Never serialize raw actions or invent a legacy receipt/hash contract.
+  // Exclude only Settings/Enabled. Trigger enablement and every other byte
+  // remain part of the recovery fingerprint, including across process restart.
   const immutable = settings === null ? serialized
-    : serialized.replace(settings, settings.replace(/<Enabled>(true|false)<\/Enabled>/u, "<Enabled/>"));
+    : serialized.replace(/<Settings(?:\s[^>]*)?>[\s\S]*?<\/Settings>/u,
+      (section) => section.replace(/<Enabled>(true|false)<\/Enabled>/u, "<Enabled/>"));
   return {
     task_name: taskName,
     principal: user,
     enabled: ["true", "false"].includes(enabled) ? enabled === "true" : null,
     definition: immutable,
-    action_mentions_brain: /\bbrain\b/iu.test(action),
-    action_mentions_load: /\bload\b/iu.test(action),
+    action,
+    action_mentions_brain: /\bbrain\b/iu.test(action || ""),
+    action_mentions_load: /\bload\b/iu.test(action || ""),
   };
 }
 
@@ -82,7 +124,6 @@ export function createNativeWindowsBridgeAdapter({ spawn = spawnSync, environmen
         const entry = read(name);
         if (!entry) throw repair();
         if (entry.principal !== sid) { ignored += 1; continue; }
-        if (typeof entry.enabled !== "boolean") throw repair();
         entries.push(entry);
       }
       return { entries, ignored };
@@ -99,6 +140,7 @@ export function createNativeWindowsBridgeAdapter({ spawn = spawnSync, environmen
 
 function validateReceipt(entry) {
   if (!BRIDGE_NAME.test(entry?.task_name) || !SID.test(entry?.principal) ||
+      !HASH.test(entry?.binding_hash) || !HASH.test(entry?.definition_hash) ||
       typeof entry?.prior_enabled !== "boolean" ||
       !Number.isFinite(Date.parse(entry?.recorded_at)) ||
       !["observed", "disabling", "paused", "restored", "retiring", "retired"].includes(entry?.state)) throw repair();
@@ -108,32 +150,58 @@ function validateReceipt(entry) {
 export function createWindowsUpdateBridgeGuard(options = {}) {
   const adapter = options.adapter || createNativeWindowsBridgeAdapter(options);
   const now = options.now || (() => new Date());
-  let definitions = new Map();
+  const target = () => binding(options.domain, options.manifestPath, adapter.currentSid());
+  const fingerprint = (entry, bound) => {
+    if (typeof entry.definition !== "string" || !entry.definition) throw repair();
+    return `sha256:${digest("bridge-definition-v1", bound.hash, entry.task_name, entry.principal, entry.definition)}`;
+  };
   const checked = (entry, { absent = false } = {}) => {
     validateReceipt(entry);
-    if (adapter.currentSid() !== entry.principal) throw repair();
+    const bound = target();
+    if (bound.name !== entry.task_name || bound.hash !== entry.binding_hash) throw repair();
     const current = adapter.read(entry.task_name);
     if (!current && absent) return null;
-    if (!current || current.principal !== entry.principal ||
-        (definitions.has(entry.task_name) && current.definition !== definitions.get(entry.task_name))) throw repair();
+    if (!current || current.principal !== entry.principal || typeof current.enabled !== "boolean" ||
+        !actionBinds(current, options.manifestPath) || fingerprint(current, bound) !== entry.definition_hash) throw repair();
     return current;
   };
   return {
     inventory() {
       const inventory = adapter.inventory();
-      definitions = new Map(inventory.entries.map((entry) => [entry.task_name, entry.definition]));
-      return inventory;
+      if (!inventory.entries.length) return inventory;
+      const bound = target();
+      const entries = [];
+      let ignored = inventory.ignored;
+      for (const entry of inventory.entries) {
+        if (entry.task_name !== bound.name) {
+          // Even a differently named task cannot be silently ignored if its
+          // literal action points at this manifest or Brain.
+          if (entry.action?.includes(options.manifestPath) || entry.action?.includes(options.domain)) throw repair();
+          ignored += 1;
+          continue;
+        }
+        if (entry.principal !== adapter.currentSid() || typeof entry.enabled !== "boolean") throw repair();
+        entries.push(entry);
+      }
+      return { entries, ignored };
     },
     capture(inventory, prior = []) {
       const receipts = prior.map((entry) => ({ ...validateReceipt(entry) }));
       if (new Set(receipts.map((entry) => entry.task_name)).size !== receipts.length) throw repair();
+      // Never replace an old authorization with the freshly inventoried task.
+      for (const saved of receipts) checked(saved, { absent: ["retiring", "retired"].includes(saved.state) });
       for (const entry of inventory.entries) {
         const saved = receipts.find((receipt) => receipt.task_name === entry.task_name);
         if (saved) {
           if (saved.principal !== entry.principal || saved.state === "retired") throw repair();
         } else {
-          const { enabled, definition: _privateDefinition, ...observed } = entry;
-          receipts.push({ ...observed, prior_enabled: enabled, recorded_at: now().toISOString(), state: "observed" });
+          if (!actionBinds(entry, options.manifestPath)) throw repair();
+          const bound = target();
+          if (entry.task_name !== bound.name || entry.principal !== adapter.currentSid()) throw repair();
+          receipts.push({ task_name: entry.task_name, principal: entry.principal,
+            binding_hash: bound.hash, definition_hash: fingerprint(entry, bound),
+            action_mentions_brain: entry.action_mentions_brain, action_mentions_load: entry.action_mentions_load,
+            prior_enabled: entry.enabled, recorded_at: now().toISOString(), state: "observed" });
         }
       }
       return receipts;

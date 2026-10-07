@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash as boundaryHash } from "node:crypto";
+import { createWindowsUpdateBridgeGuard as boundaryGuard } from "../operations/windows-update-bridge.mjs";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -511,16 +513,17 @@ test("unavailable native schedule inspection does not abort a verified Brain upd
 });
 
 
-const BRIDGE_NAME = String.raw`\Financial Brain\daily-refresh-0123456789abcdef`;
+const BRIDGE_NAME = boundaryBridgeName("brain.example.invalid", "S-1-5-21-100-200-300-1001");
 const BRIDGE_SID = "S-1-5-21-100-200-300-1001";
 const BRIDGE_TIME = "2026-10-07T15:00:00.000Z";
 
-function bridgeNativeHarness({ tasks = [], failDisable = false, ignoreDisable = false, onDisable = () => {}, onDelete = () => {}, failRestore = false, failDelete = false } = {}) {
+function bridgeNativeHarness({ manifestPath = "C:\\Fixture\\brain.manifest.json", tasks = [], failDisable = false, ignoreDisable = false, onDisable = () => {}, onDelete = () => {}, failRestore = false, failDelete = false } = {}) {
   const calls = [];
   const rows = new Map(tasks.map((entry) => [entry.name || BRIDGE_NAME, {
-    sid: BRIDGE_SID, enabled: true, action: "brain load fixture.json --only google_drive", ...entry,
+    sid: BRIDGE_SID, enabled: true, action: `brain load '${manifestPath.replaceAll("'", "''")}' --only google_drive`, ...entry,
   }]));
   const options = {
+    domain: "brain.example.invalid", manifestPath,
     environment: { SystemRoot: String.raw`C:\Windows`, PRIVATE_SENTINEL: "must-not-inherit" },
     now: () => new Date(BRIDGE_TIME),
     spawn: (command, args, child) => {
@@ -568,6 +571,7 @@ function bridgeNativeHarness({ tasks = [], failDisable = false, ignoreDisable = 
 
 function attachBridge(harness, manifestPath, fixture = {}) {
   const native = bridgeNativeHarness({
+    manifestPath,
     ...fixture,
     onDelete: () => {
       assert.equal(harness.state().enabled, true, "permanent task is enabled before bridge deletion");
@@ -605,7 +609,8 @@ test("Windows bridge is journaled, disabled before update, and deleted only afte
     assert.equal(native.mutations().filter(({ args }) => args[0] === "/Delete").length, 1);
     assert.equal(harness.state().enabled, true, "permanent task passed native readback");
     const receipt = bridgeArchive(manifestPath).bridge_snapshots[0];
-    assert.equal(Object.hasOwn(receipt, "definition_hash"), false, "bridge ownership does not depend on a recomputed hash");
+    assert.match(receipt.definition_hash, /^sha256:[a-f0-9]{64}$/, "restart retains the exact immutable definition proof");
+    assert.match(receipt.binding_hash, /^sha256:[a-f0-9]{64}$/);
     assert.equal(Object.hasOwn(receipt, "definition"), false, "raw task actions remain outside the durable journal");
     assert.equal(receipt.prior_enabled, true);
     assert.equal(receipt.recorded_at, BRIDGE_TIME);
@@ -695,19 +700,22 @@ test("Windows older manifest without a permanent task keeps the paused bridge an
   });
 });
 
-test("Windows pre-disabled bridge is never enabled or deleted, and action recognition is diagnostic only", async () => {
-  for (const action of ["brain load fixture.json", "opaque fixture runner"]) {
+test("Windows pre-disabled bridge is never enabled or deleted, with an enabled control", async () => {
+  for (const enabled of [false, true]) {
     await withFixture(async ({ manifestPath }) => {
       const harness = productionHarness(manifestPath);
-      const otherName = String.raw`\Financial Brain\daily-refresh-fedcba9876543210`;
-      const native = attachBridge(harness, manifestPath, { tasks: [{ action }, { name: otherName, enabled: false }] });
+      const native = attachBridge(harness, manifestPath, { tasks: [{ enabled }] });
       await cmdUpdate(manifestPath, harness.options);
-      assert.equal(native.rows.get(otherName).enabled, false);
-      assert.equal(native.rows.has(BRIDGE_NAME), false, "the enabled green control was replaced");
-      assert.ok(native.mutations().every(({ args }) => args[args.indexOf("/TN") + 1] === BRIDGE_NAME));
-      const receipts = bridgeArchive(manifestPath).bridge_snapshots;
-      assert.equal(receipts.find((entry) => entry.task_name === otherName).state, "observed");
-      assert.equal(receipts.find((entry) => entry.task_name === BRIDGE_NAME).action_mentions_load, action.includes("load"));
+      assert.ok(native.calls.some(({ args }) => args.includes("/XML")), "ownership decision reached");
+      assert.ok(harness.events.includes("deploy:active"));
+      if (enabled) {
+        assert.equal(native.rows.has(BRIDGE_NAME), false, "enabled control is replaced");
+        assert.equal(native.mutations().length, 2);
+      } else {
+        assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+        assert.equal(native.mutations().length, 0);
+        assert.equal(bridgeArchive(manifestPath).bridge_snapshots[0].state, "observed");
+      }
     });
   }
 });
@@ -796,20 +804,17 @@ test("Windows bridge replacement after update is never deleted or re-enabled", a
   });
 });
 
-test("Windows partial bridge pause failure restores the first task and never changes the refused second task", async () => {
+test("Windows permanent pause failure restores only this Brain's bridge", async () => {
   await withFixture(async ({ manifestPath }) => {
     const harness = productionHarness(manifestPath);
-    const second = String.raw`\Financial Brain\daily-refresh-fedcba9876543210`;
-    const native = attachBridge(harness, manifestPath, { tasks: [{}, { name: second }] });
-    const run = native.options.spawn;
+    const other = boundaryBridgeName("other.example.invalid");
+    const native = attachBridge(harness, manifestPath, { tasks: [{}, { name: other, action: "other fixture runner" }] });
     let refused = 0;
-    native.options.spawn = (command, args, child) => {
-      if (args.includes(second) && args.includes("/DISABLE")) { refused += 1; return { status: 1 }; }
-      return run(command, args, child);
-    };
-    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /Task Scheduler.*retry.*update/);
-    assert.equal(refused, 1, "second pause reached its failure decision");
+    harness.adapter.setEnabled = () => { refused += 1; throw new Error("fixture permanent pause failure"); };
+    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /fixture permanent pause failure/);
+    assert.equal(refused, 1, "permanent pause reached its failure decision");
     assert.deepEqual(native.mutations().map(({ args }) => args.at(-1)), ["/DISABLE", "/ENABLE"]);
+    assert.ok(native.mutations().every(({ args }) => args[args.indexOf("/TN") + 1] === BRIDGE_NAME));
     assert.ok([...native.rows.values()].every((row) => row.enabled));
     assert.equal(harness.events.includes("deploy:paused"), false);
   });
@@ -861,4 +866,148 @@ test("Windows foreign principal needs no bridge execution schema, while an owned
       assert.equal(native.mutations().length, 0);
     });
   }
+});
+
+function boundaryBridgeName(domain, sid=BRIDGE_SID) {
+  const fields=['daily-refresh-v1',domain,sid];
+  const payload=fields.map(value=>`${Buffer.byteLength(value,'utf8')}:${value},`).join('');
+  return String.raw`\Financial Brain\daily-refresh-`+boundaryHash('sha256').update(payload,'utf8').digest('hex').slice(0,16);
+}
+for (const arm of ['own-control','two-brains','unbound','rollback-two-brains']) {
+  test(`BOUNDARY bridge ${arm}`,async()=>withFixture(async({manifestPath})=>{
+    const owner=boundaryBridgeName('brain.example.invalid');
+    const other=boundaryBridgeName('other.example.invalid');
+    const unbound=String.raw`\Financial Brain\daily-refresh-0000000000000000`;
+    const fail=arm==='rollback-two-brains';
+    const harness=productionHarness(manifestPath,{failStage:()=>fail?'migration':null});
+    const tasks=[{name:owner}];
+    if (arm.includes('two-brains'))tasks.push({name:other,action:'brain load other-fixture.json'});
+    if (arm==='unbound')tasks.push({name:unbound,action:'unrelated fixture runner'});
+    const native=bridgeNativeHarness({manifestPath,tasks});
+    harness.options.dailyRefreshOptions.bridgeOptions=native.options;
+    if(fail) await assert.rejects(()=>cmdUpdate(manifestPath,harness.options),/fixture migration failure/);
+    else await cmdUpdate(manifestPath,harness.options);
+    assert.ok(native.calls.some(({args})=>args.includes('/FO')),'native inventory decision reached');
+    assert.ok(harness.events.includes('migration'),'the real update reached migration');
+    const mutations=native.mutations().map(({args})=>({verb:args[0],name:args[args.indexOf('/TN')+1],enabled:args.at(-1)}));
+    assert.ok(mutations.some(entry=>entry.name===owner),'own bridge green control reached native mutation');
+    console.log(JSON.stringify({probe:arm,ownMutations:mutations.filter(m=>m.name===owner).length,otherMutations:mutations.filter(m=>m.name!==owner).length,remaining:native.rows.size}));
+    if(fail) {
+      assert.equal(native.rows.get(owner).enabled,true,'own disabled bridge was restored');
+      assert.deepEqual(mutations.filter(m=>m.name===owner).map(m=>m.enabled),['/DISABLE','/ENABLE']);
+    } else assert.equal(native.rows.has(owner),false,'own bridge retired after verified replacement');
+    assert.equal(mutations.filter(m=>m.name!==owner).length,0,'another Brain or an unbound task must never be disabled, enabled, or deleted');
+    for(const task of tasks.slice(1))assert.equal(native.rows.get(task.name)?.enabled,true);
+  }));
+}
+test('BOUNDARY bridge changed task after restart must not inherit rollback authority',()=>{
+  const native=bridgeNativeHarness({tasks:[{}]});
+  const first=boundaryGuard(native.options);
+  const receipts=first.capture(first.inventory());
+  let writes=0;
+  first.pause(receipts,()=>writes++);
+  assert.equal(native.rows.get(BRIDGE_NAME).enabled,false);
+  assert.ok(writes>=2 && native.mutations().length===1,'original disable and durable decision reached');
+  native.rows.get(BRIDGE_NAME).action='unrelated replacement runner';
+  const resumed=boundaryGuard(native.options);
+  const before=native.mutations().length;
+  let refused=false;
+  try {
+    const hydrated=resumed.capture(resumed.inventory(),JSON.parse(JSON.stringify(receipts)));
+    resumed.restore(hydrated,()=>writes++);
+  }catch{refused=true;}
+  console.log(JSON.stringify({probe:'replacement-after-restart',restoreRefused:refused,newMutations:native.mutations().length-before}));
+  assert.equal(refused,true,'changed recovery definition requires explicit repair');
+  assert.equal(native.mutations().length,before,'a changed task must not be enabled using the previous definition receipt');
+});
+
+for (const arm of ["unchanged", "action", "trigger", "missing-proof", "other-brain"]) {
+  for (const recovery of ["restore", "retire"]) {
+    test(`bridge restart ${recovery}: ${arm}`, () => {
+      const native = bridgeNativeHarness({ tasks: [{}] });
+      const run = native.options.spawn;
+      let triggerEnabled = true;
+      let reads = 0;
+      native.options.spawn = (command, args, child) => {
+        const result = run(command, args, child);
+        if (args.includes("/XML")) {
+          reads += 1;
+          result.stdout = result.stdout.replace("<Principals>", `<Triggers><CalendarTrigger><Enabled>${triggerEnabled}</Enabled></CalendarTrigger></Triggers><Principals>`);
+          result.stdout = result.stdout.replace("</Settings>", "<Hidden>false</Hidden></Settings>");
+        }
+        return result;
+      };
+      const first = boundaryGuard(native.options);
+      const receipts = first.capture(first.inventory());
+      let persisted;
+      first.pause(receipts, () => { persisted = JSON.parse(JSON.stringify(receipts)); });
+      assert.equal(native.mutations().length, 1, "original verified disable reached");
+      assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+      assert.equal(JSON.stringify(persisted).includes(native.rows.get(BRIDGE_NAME).action), false);
+      if (arm === "action") native.rows.get(BRIDGE_NAME).action += " --changed";
+      if (arm === "trigger") triggerEnabled = false;
+      if (arm === "missing-proof") delete persisted[0].definition_hash;
+      const resumed = boundaryGuard({ ...native.options, ...(arm === "other-brain" ? { domain: "other.example.invalid" } : {}) });
+      const beforeReads = reads;
+      const recover = () => {
+        const hydrated = resumed.capture(resumed.inventory(), persisted);
+        resumed[recovery](hydrated, () => {});
+      };
+      if (arm === "unchanged") {
+        recover();
+        assert.equal(native.mutations().length, 2, "unchanged restart green control mutates once");
+        assert.equal(native.rows.has(BRIDGE_NAME), recovery !== "retire");
+        if (recovery === "restore") assert.equal(native.rows.get(BRIDGE_NAME).enabled, true);
+      } else {
+        assert.throws(recover, /Task Scheduler/);
+        assert.equal(native.mutations().length, 1, "no new mutation from stale or missing proof");
+        assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+      }
+      assert.ok(reads > beforeReads, "restarted native inventory decision reached");
+    });
+  }
+}
+
+for (const arm of ["wrong-manifest", "unrelated", "comment", "extra-command", "noncanonical-domain"]) {
+  test(`bridge unbound target refuses before update: ${arm}`, async () => withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath);
+    const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+    const row = native.rows.get(BRIDGE_NAME);
+    if (arm === "wrong-manifest") row.action = "brain load 'C:\\Other\\brain.manifest.json' --only google_drive";
+    if (arm === "unrelated") row.action = "unrelated runner";
+    if (arm === "comment") row.action = `# ${row.action}`;
+    if (arm === "extra-command") row.action += "; unrelated runner";
+    if (arm === "noncanonical-domain") {
+      const manifest = manifestFixture();
+      manifest.brain.domain = "HTTPS://BRAIN.EXAMPLE.INVALID/";
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+    }
+    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /Task Scheduler/);
+    assert.ok(native.calls.some(({ args }) => args.includes("/FO")), "native inventory decision reached");
+    assert.equal(native.mutations().length, 0);
+    assert.equal(harness.events.includes("deploy:paused"), false);
+    assert.equal(row.enabled, true);
+  }));
+}
+
+test("bridge fingerprint excludes only the task enabled field when the trigger has identical contents", () => {
+  const native = bridgeNativeHarness({ tasks: [{}] });
+  const run = native.options.spawn;
+  native.options.spawn = (command, args, child) => {
+    const result = run(command, args, child);
+    if (args.includes("/XML")) result.stdout = result.stdout.replace("<Principals>",
+      "<Triggers><CalendarTrigger><Enabled>true</Enabled></CalendarTrigger></Triggers><Principals>");
+    return result;
+  };
+  const guard = boundaryGuard(native.options);
+  const receipts = guard.capture(guard.inventory());
+  const original = receipts[0].definition_hash;
+  let writes = 0;
+  guard.pause(receipts, () => { writes += 1; });
+  assert.ok(writes >= 2);
+  assert.equal(native.mutations().length, 1);
+  assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+  assert.equal(receipts[0].definition_hash, original);
+  guard.restore(receipts, () => { writes += 1; });
+  assert.equal(native.rows.get(BRIDGE_NAME).enabled, true);
 });

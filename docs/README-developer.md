@@ -1056,18 +1056,33 @@ while holding the same lifecycle lease.
 Windows update separately inventories temporary tasks whose full names match
 `\Financial Brain\daily-refresh-[0-9a-f]{16}`. It obtains the current SID from
 `%SystemRoot%\System32\whoami.exe` and reads each task with the absolute
-`%SystemRoot%\System32\schtasks.exe` path. A matching task principal establishes
-current-user ownership; the temporary packet never specified a stable receipt
-serialization, so no old receipt hash or Brain-domain binding is assumed.
-This deliberately coordinates every matching bridge for that user, including
-bridges for another Brain. Decoded `brain` and `load` action mentions are only
-diagnostic booleans, never authorization or a required action shape.
+`%SystemRoot%\System32\schtasks.exe` path. Binding requires the exact legacy name:
+the first 16 lowercase SHA-256 hex characters over three concatenated UTF-8
+netstrings (`daily-refresh-v1`, canonical Brain domain, current SID). Each
+netstring uses decimal UTF-8 byte length, colon, bytes, comma. This is separate
+from the permanent scheduler's identity. The prose producer did not specify
+normalization, so automatic binding accepts only an already canonical lowercase
+ASCII hostname. Other spellings require explicit repair, not guessed aliases.
+
+Matching names and principals alone are insufficient. A single PowerShell
+EncodedCommand must decode to a complete literal `brain load <exact manifest>
+--only <source CSV>` invocation. Quoted constant arguments and an absolute
+`brain.cmd` or `brain.exe` invocation are accepted; comments, dynamic expressions,
+additional commands and opaque programs are refused. This deliberately does not
+interpret an arbitrary prose-generated PowerShell program or trust an old receipt
+with unspecified serialization. Its owner must repair such a task explicitly.
+Another Brain's task is left untouched; a differently named task whose decoded
+action mentions this manifest or domain also requires repair before update.
 
 Before native disable, the update journal records task name, principal, prior
-enabled state, time, and action-recognition booleans. Raw task definitions stay
-in memory for exact replacement checks during this command; they and recomputed
-hashes are never saved in the bridge receipt. Recovery rechecks the recorded
-name and current-user principal. Exact disabled readback gates deployment. A failed update restores only
+enabled state, time, action-recognition booleans, a binding fingerprint and an
+immutable definition fingerprint. The fingerprints bind domain, exact manifest
+path, exact task name and SID; the definition excludes only Settings/Enabled,
+retaining trigger enablement and every other definition byte. Raw definitions
+and decoded actions are never persisted. Recovery validates the saved fingerprints
+against every native read, including after restart and before enable or delete.
+A missing legacy fingerprint or any mismatch refuses mutation rather than
+adopting the current definition. Exact disabled readback gates deployment. A failed update restores only
 recorded bridges that were previously enabled, with readback, and preserves
 recovery when restoration fails. After success and permanent daily readback,
 only those recorded bridges may be deleted. Already-disabled bridges are never
