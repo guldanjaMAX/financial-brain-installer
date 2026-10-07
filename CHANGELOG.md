@@ -6,6 +6,16 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.10 (2026-10-06)
 
+- Provider sign-in timeouts now explain that nothing changed in the Brain and no
+  new connection was saved. Run the same command again to finish sign-in.
+  Interrupted source operations recover their lock only after matching this computer and user and
+  proving the prior process has stopped. Recovery is reported; uncertain locks
+  remain protected.
+- Provider imports renew a rejected access token once and retry the request once.
+  A second rejection asks you to sign in again. Interrupted or unverified token
+  renewal keeps the connection paused for reconnect; a replacement that has
+  already been saved never restores an older, consumed refresh token.
+
 Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.

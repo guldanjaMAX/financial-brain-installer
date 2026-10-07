@@ -806,3 +806,19 @@ For an answer-quality problem, the journal deliberately knows nothing about what
 4. What you expected instead.
 
 Those four get most answer problems diagnosed in one reply instead of four.
+
+
+## Provider sign-in timeout and interrupted source locks
+
+`OAUTH_SIGN_IN_TIMEOUT` means the browser sign-in did not finish before its
+local time limit. Nothing changed in the Brain and no new connection was saved. Run the
+same command again and complete sign-in. This is an expected retry, not an
+installer defect or evidence of a Cloudflare network failure.
+
+A killed connect or ingest can leave a private source lock. The next command
+recovers it immediately only when its recorded host and operating-system user
+match this computer and the operating system proves the owning PID is gone.
+The command reports that recovery. A live PID, an uncertain process check,
+foreign host/user, older lock without identity, malformed record, or ownerless
+directory stays protected. Age alone never authorizes removal. A technician
+must review ambiguous legacy residue; do not delete a lock just to bypass it.

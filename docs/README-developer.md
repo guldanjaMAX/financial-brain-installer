@@ -689,7 +689,9 @@ nonblocking per-source owner lease under `~/.brain/locks` before it reads
 credentials or contacts a service. Direct commands, provenance repair,
 scheduled children, and `brain load` therefore cannot write the same adjacent
 resume state concurrently on macOS, Windows, or Linux. The owner record is
-private, heartbeated, and recoverable after a stale dead process; `--dry-run`
+private and heartbeated. Recovery requires matching recorded host/user digests
+and a proven-dead PID, without an age delay. Legacy, malformed, ownerless,
+foreign, and live records remain protected; `--dry-run`
 remains concurrent because it writes neither resume state nor source receipts.
 Manifest-file symlinks resolve to the target's adjacent state identity. A
 manifest with multiple hard links is refused with a path-free safety error,
@@ -752,6 +754,20 @@ message is a false statement about a folder that was in fact identified.
 **The connector has never been run against a real mailbox**;
 `test/imap-connector.test.mjs` drives it against a scripted IMAP server on a
 plain TCP socket, which does not exercise TLS.
+
+Provider data requests get one renewal and one retry after HTTP 401, including
+when the cached access-token expiry is still in the future. A repeated 401
+requires reconnect and cannot enter the transport retry loop. Renewal rereads
+the record under its credential lease, so concurrent calls use the replacement
+already saved by the winner. Non-rotating refresh responses retain the existing
+refresh token; QuickBooks requires a replacement refresh token.
+
+Refresh persistence first writes the newest record with a reconnect fence and
+then clears that fence after exact readback. A failure after replacement retains
+the newest token. An interrupted request with no durable response remains fenced
+because its provider outcome cannot be proven. The lane tests inject providers
+through connect and import entry points, exercise file and Keychain write faults,
+and abruptly exit fixture processes; they do not certify native provider behavior.
 
 **The client registers their own Google OAuth client, and we never hold it.**
 Not only a custody preference: every Drive and Gmail read scope is *restricted*,

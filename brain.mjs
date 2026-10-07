@@ -12155,6 +12155,7 @@ async function cmdIngest(manifestPath, options = {}) {
 function sourceIngestLockRuntimeOptions(options = {}) {
   const configured = options.sourceIngestLockOptions || {};
   return {
+    onRecovered: configured.onRecovered ?? (() => info("Recovered an interrupted source operation after verifying its process had stopped on this computer.")),
     ...(Object.hasOwn(configured, "home") ? { home: configured.home } : {}),
     ...(Object.hasOwn(configured, "platform") ? { platform: configured.platform } : {}),
   };
@@ -18937,7 +18938,7 @@ export async function cmdConnect(target, options = {}) {
     );
   }
   if (which === "imap") return cmdConnectImap(manifestPath, flags);
-  if (PROVIDER_CONNECTOR_IDS.includes(which)) return cmdConnectProvider(which, manifestPath, flags);
+  if (PROVIDER_CONNECTOR_IDS.includes(which)) return cmdConnectProvider(which, manifestPath, flags, options.providerOptions || {});
   if (which !== "google") {
     die(
       "brain connect supports bank, custom-api, google, imap, imessage, whatsapp, zoom, quickbooks, slack, notion, microsoft, dropbox and hubspot.\n" +
@@ -18964,6 +18965,9 @@ export async function cmdConnect(target, options = {}) {
     );
   } catch (error) {
     if (error instanceof SourceIngestLockError) die(error.message);
+    if (error?.code === "callback_timeout") {
+      dieWithSupportCode("The provider sign-in timed out. Nothing changed in your Brain and no new connection was saved. Run the same command again and complete sign-in.", "OAUTH_SIGN_IN_TIMEOUT");
+    }
     throw error;
   }
 }
@@ -30227,13 +30231,17 @@ export async function cmdIngestProvider(m, manifestPath, flags, options = {}) {
     flags.source === true || !flags.source ? configuration.source || provider : flags.source,
   );
   const dryRun = Boolean(flags["dry-run"]);
-  const run = (assertLockOwned = null) => cmdIngestProviderRun(
-    m,
-    manifestPath,
-    flags,
-    options,
-    { provider, configuration, sourceName, dryRun, assertLockOwned },
-  );
+  const run = async (assertLockOwned = null) => {
+    try {
+      return await cmdIngestProviderRun(m, manifestPath, flags, options,
+        { provider, configuration, sourceName, dryRun, assertLockOwned });
+    } catch (error) {
+      if (["reconnect_required", "refresh_outcome_unknown", "refresh_persistence_unverified"].includes(error?.code)) {
+        dieWithSupportCode(error.message, "AUTH_EXPIRED");
+      }
+      throw error;
+    }
+  };
   // A preview never writes a provider cursor, source receipt, document, or
   // tombstone. Every real path, including a LaunchAgent child, must acquire the
   // same source lease before credentials or network access.
@@ -30273,13 +30281,14 @@ async function cmdIngestProviderRun(
 ) {
   const oauth = options.oauth ?? await import("./connectors/provider-oauth.mjs");
   const syncImpl = options.sync ?? await providerSyncImplementation(provider);
-  const loadAccess = (quickBooksBinding = null) => {
+  const loadAccess = (quickBooksBinding = null, rejectedAccessToken = null) => {
     assertLockOwned?.();
     return oauth.providerAccessToken(provider, {
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
       ...(options.storage ? { storage: options.storage } : {}),
       ...(quickBooksBinding ? { quickBooksBinding } : {}),
       ...(assertLockOwned ? { assertSourceOwned: assertLockOwned } : {}),
+      ...(rejectedAccessToken !== null ? { rejectedAccessToken } : {}),
     });
   };
   let preparedAccess = null;
@@ -30309,12 +30318,19 @@ async function cmdIngestProviderRun(
       ...(assertLockOwned ? { assertSourceOwned: assertLockOwned } : {}),
     });
   };
-  const adapter = ({ cursor, access }) => syncImpl({
+  const adapter = async ({ cursor, access }) => syncImpl({
     accessToken: access.accessToken,
     connection: access.connection,
     cursor,
     ...providerAdapterOptions(provider, configuration, access.connection),
-    ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    fetchImpl: (await import("./connectors/provider-oauth.mjs")).providerDataFetch(provider, {
+      accessToken: access.accessToken,
+      fetchImpl: options.fetchImpl || fetch,
+      storage: options.storage || {},
+      assertSourceOwned: assertLockOwned,
+      resolveAccess: (rejectedAccessToken) => loadAccess(provider === "quickbooks"
+        ? { source: sourceName, environment: configuration.environment } : null, rejectedAccessToken),
+    }),
   });
 
   if (dryRun) {
@@ -30390,6 +30406,9 @@ export async function cmdConnectProvider(provider, manifestPath, flags = {}, opt
       );
     } catch (error) {
       if (error instanceof SourceIngestLockError) die(error.message);
+      if (error?.code === "callback_timeout" && error?.phase === "callback") {
+        dieWithSupportCode("The provider sign-in timed out. Nothing changed in your Brain and no new connection was saved. Run the same command again and complete sign-in.", "OAUTH_SIGN_IN_TIMEOUT");
+      }
       throw error;
     }
   }
