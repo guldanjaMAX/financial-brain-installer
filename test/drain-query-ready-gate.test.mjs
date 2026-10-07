@@ -12,7 +12,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import os from "node:os";
 import { syncBuiltinESMExports } from "node:module";
@@ -131,7 +131,9 @@ if (SCENARIO) {
   }
 
   function runScenario(scenario) {
-    const directory = mkdtempSync(join(tmpdir(), "brain-drain-ready-gate-"));
+    // The admin-key reader refuses a key reached through a linked folder, and
+    // macOS temp folders sit under the /var link, so use the resolved path.
+    const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-drain-ready-gate-")));
     const userRoot = join(directory, "isolated-user-root");
     const manifestPath = join(directory, "fixture.manifest.json");
     mkdirSync(userRoot, { recursive: true });
