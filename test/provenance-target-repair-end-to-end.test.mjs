@@ -602,8 +602,15 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
     recoveredBrain.close();
   });
 
-  assert.match(sourceBrain.migrationFiles.at(-1), /^0049_/);
-  assert.match(recoveredBrain.migrationFiles.at(-1), /^0049_/);
+  assert.match(sourceBrain.migrationFiles.at(-1), /^0050_/);
+  assert.match(recoveredBrain.migrationFiles.at(-1), /^0050_/);
+  assert.equal(RECOVERY_EXPORT_TABLES.includes("bank_activity_refresh_state"), true);
+  assert.equal(RECOVERY_EXPORT_TABLES.includes("bank_activity_write_claims"), true);
+  assert.equal(
+    RECOVERY_EXPORT_TABLES.indexOf("bank_activity_write_claims") < RECOVERY_EXPORT_TABLES.indexOf("documents"),
+    true,
+    "bank activity coordination state restores before its documents",
+  );
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_receipts"), true);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_accepted_resolutions"), true);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("source_original_result_family_verifications"), false);

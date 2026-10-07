@@ -13,7 +13,7 @@ import {
   writeBrainRecoveryFence,
 } from "../operations/brain-lifecycle-lock.mjs";
 
-function fixture() {
+function fixture({ machineLockRoot: sharedMachineLockRoot } = {}) {
   const root = mkdtempSync(join(tmpdir(), "daily-lock-"));
   const home = join(root, "home");
   mkdirSync(home, { mode: 0o700 });
@@ -21,7 +21,7 @@ function fixture() {
   writeFileSync(manifestPath, JSON.stringify({
     infrastructure: { cloudflare: { account_id: "fixture-account", d1_database_id: "fixture-database" } },
   }), { mode: 0o600 });
-  return { home, manifestPath, machineLockRoot: join(root, "machine-locks") };
+  return { home, manifestPath, machineLockRoot: sharedMachineLockRoot || join(root, "machine-locks") };
 }
 
 test("a canonical Brain recovery fence blocks writers but permits the verified update recovery lane", () => {
@@ -52,11 +52,11 @@ test("a canonical Brain recovery fence blocks writers but permits the verified u
 });
 
 test("manifest lifecycle lock excludes update, load, and scheduled refresh", async () => {
-  const { home, manifestPath } = fixture();
-  const first = acquireBrainLifecycleLock({ manifestPath, home, operation: "update" });
+  const { home, manifestPath, machineLockRoot } = fixture();
+  const first = acquireBrainLifecycleLock({ manifestPath, home, machineLockRoot, operation: "update" });
   let contentionReached = 0;
   await assert.rejects(
-    async () => withBrainLifecycleLock({ manifestPath, home, operation: "daily-refresh" }, async () => {}),
+    async () => withBrainLifecycleLock({ manifestPath, home, machineLockRoot, operation: "daily-refresh" }, async () => {}),
     (error) => {
       contentionReached += 1;
       return error instanceof BrainLifecycleLockError && error.code === "brain_lifecycle_busy";
@@ -67,7 +67,7 @@ test("manifest lifecycle lock excludes update, load, and scheduled refresh", asy
   first.release();
 
   let ran = 0;
-  await withBrainLifecycleLock({ manifestPath, home, operation: "load" }, async ({ assertOwned }) => {
+  await withBrainLifecycleLock({ manifestPath, home, machineLockRoot, operation: "load" }, async ({ assertOwned }) => {
     assert.equal(assertOwned(), true);
     ran += 1;
   });
@@ -76,11 +76,12 @@ test("manifest lifecycle lock excludes update, load, and scheduled refresh", asy
 
 test("the lifecycle lock is keyed by Brain identity across manifest aliases and homes", () => {
   const firstFixture = fixture();
-  const secondFixture = fixture();
+  const secondFixture = fixture({ machineLockRoot: firstFixture.machineLockRoot });
   writeFileSync(secondFixture.manifestPath, readFileSync(firstFixture.manifestPath));
   const first = acquireBrainLifecycleLock({
     manifestPath: firstFixture.manifestPath,
     home: firstFixture.home,
+    machineLockRoot: firstFixture.machineLockRoot,
     operation: "update",
   });
   let contentionReached = 0;
@@ -88,6 +89,7 @@ test("the lifecycle lock is keyed by Brain identity across manifest aliases and 
     () => acquireBrainLifecycleLock({
       manifestPath: secondFixture.manifestPath,
       home: secondFixture.home,
+      machineLockRoot: secondFixture.machineLockRoot,
       operation: "load",
     }),
     (error) => {
@@ -104,6 +106,7 @@ test("the lifecycle lock is keyed by Brain identity across manifest aliases and 
   const other = acquireBrainLifecycleLock({
     manifestPath: secondFixture.manifestPath,
     home: secondFixture.home,
+    machineLockRoot: secondFixture.machineLockRoot,
     operation: "load",
   });
   assert.notEqual(first.path, other.path, "a distinct Brain remains an independent green control");
@@ -111,8 +114,8 @@ test("the lifecycle lock is keyed by Brain identity across manifest aliases and 
 });
 
 test("old empty crash locks recover without adopting unexpected contents", () => {
-  const { home, manifestPath } = fixture();
-  const first = acquireBrainLifecycleLock({ manifestPath, home, operation: "update" });
+  const { home, manifestPath, machineLockRoot } = fixture();
+  const first = acquireBrainLifecycleLock({ manifestPath, home, machineLockRoot, operation: "update" });
   const lockPath = first.path;
   first.release();
   mkdirSync(lockPath, { mode: 0o700 });
@@ -121,6 +124,7 @@ test("old empty crash locks recover without adopting unexpected contents", () =>
   const recovered = acquireBrainLifecycleLock({
     manifestPath,
     home,
+    machineLockRoot,
     operation: "load",
     staleMs: 60_000,
     now: () => new Date("2026-10-06T12:00:00.000Z"),
@@ -130,9 +134,9 @@ test("old empty crash locks recover without adopting unexpected contents", () =>
 });
 
 test("a stale owner whose pid was reused cannot block the Brain forever", () => {
-  const { home, manifestPath } = fixture();
+  const { home, manifestPath, machineLockRoot } = fixture();
   const first = acquireBrainLifecycleLock({
-    manifestPath, home, operation: "update", processInstance: () => "old-process-instance",
+    manifestPath, home, machineLockRoot, operation: "update", processInstance: () => "old-process-instance",
   });
   const ownerPath = join(first.path, readdirSync(first.path)[0]);
   const old = new Date("2026-10-06T10:00:00.000Z");
@@ -140,6 +144,7 @@ test("a stale owner whose pid was reused cannot block the Brain forever", () => 
   const replacement = acquireBrainLifecycleLock({
     manifestPath,
     home,
+    machineLockRoot,
     operation: "load",
     staleMs: 60_000,
     now: () => new Date("2026-10-06T12:00:00.000Z"),
@@ -152,14 +157,14 @@ test("a stale owner whose pid was reused cannot block the Brain forever", () => 
 });
 
 test("unsafe lifecycle lock contents fail closed instead of being adopted", () => {
-  const { home, manifestPath } = fixture();
-  const first = acquireBrainLifecycleLock({ manifestPath, home, operation: "update" });
+  const { home, manifestPath, machineLockRoot } = fixture();
+  const first = acquireBrainLifecycleLock({ manifestPath, home, machineLockRoot, operation: "update" });
   first.release();
   mkdirSync(first.path, { mode: 0o700 });
   writeFileSync(join(first.path, "foreign.txt"), "not an owner receipt", { mode: 0o600 });
   let decisionReached = 0;
   assert.throws(
-    () => acquireBrainLifecycleLock({ manifestPath, home, operation: "load" }),
+    () => acquireBrainLifecycleLock({ manifestPath, home, machineLockRoot, operation: "load" }),
     (error) => {
       decisionReached += 1;
       return error instanceof BrainLifecycleLockError && error.code === "brain_lifecycle_unsafe";

@@ -581,6 +581,22 @@ export async function reassignPlaidAccountEntity(env, body, { now = null } = {})
          reason='owner_assignment',state='pending',due_at=excluded.due_at,
          attempts=0,last_error_code=NULL,updated_at=excluded.updated_at`,
     ).bind(tenantId, reviewed.item_ref, stamp, stamp),
+    // Invalidate the derived projection in the same transaction as its owner
+    // authority. The generation fences any writer that captured the old scope,
+    // while the source state is durable retry debt if the replacement fails.
+    env.DB.prepare(
+      `UPDATE bank_activity_refresh_state
+          SET generation=generation+1,requested_at=?
+        WHERE id=(SELECT CASE
+          WHEN EXISTS (SELECT 1 FROM bank_activity_refresh_state WHERE id=1) THEN 1
+          ELSE json_extract('bank activity refresh state unavailable','$') END)`,
+    ).bind(stamp),
+    env.DB.prepare(
+      `UPDATE sources
+          SET status='indexing',last_complete_sweep_at=NULL,sync_cursor=NULL,
+              stale_reason='bank activity refresh pending'
+        WHERE name='bank_activity' AND kind='bank_activity'`,
+    ),
     env.DB.prepare(
       `INSERT INTO owner_activity_events
          (event_id,tenant_id,request_id,event_type,entity_slug,

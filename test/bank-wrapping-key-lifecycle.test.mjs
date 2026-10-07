@@ -384,6 +384,7 @@ test("brain update reaches the real deploy and creates the wrapping key before v
   let d1Version = null;
   let upgradeDeployments = 0;
   const run = await isolatedRuntime(harness.fetchImpl, () => cmdUpdate(path, {
+    lifecycleLockOptions: { machineLockRoot: join(sandbox, "lifecycle-locks") },
     discoverInstalledManifest: () => ({ path, source: "explicit" }),
     readUpdateBacklog: async () => ({ pending: 0 }),
     adoptCloudflareAuthProfile: async () => {},

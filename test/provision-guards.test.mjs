@@ -991,7 +991,7 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
   const local = bodyBetween("async function cmdIngestLocalRun(", "\nasync function parseForgetResponse");
   const remote = bodyBetween("const cmdIngestRemoteRun = async (", "\nasync function sendBatches");
   for (const [name, publicMarker, body] of [
-    ["cmdIngest", "async function cmdIngest(manifestPath)", local],
+    ["cmdIngest", "async function cmdIngest(manifestPath, options = {})", local],
     ["cmdIngestRemote", "export async function cmdIngestRemote(", remote],
   ]) {
     check(`${name} exists`, src.includes(publicMarker) && body !== null);

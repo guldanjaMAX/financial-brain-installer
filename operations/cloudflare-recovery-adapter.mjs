@@ -441,6 +441,11 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "llm_call_log",
   "sources",
   "source_events",
+  // Schema 50: the projection generation is durable refresh debt. Claims are
+  // imported before documents so durable refresh debt and exact write claims
+  // are in place before the restored corpus becomes queryable.
+  "bank_activity_refresh_state",
+  "bank_activity_write_claims",
   "documents",
   "chunks",
   "vector_outbox",
@@ -868,6 +873,10 @@ const SCHEMA_49_TABLES = Object.freeze([
   "simplefin_stage_accounts",
   "simplefin_stage_transactions",
 ]);
+const SCHEMA_50_TABLES = Object.freeze([
+  "bank_activity_refresh_state",
+  "bank_activity_write_claims",
+]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -891,7 +900,7 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
      ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
      ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES, ...SCHEMA_48_TABLES,
-     ...SCHEMA_49_TABLES].includes(table)
+     ...SCHEMA_49_TABLES, ...SCHEMA_50_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -4403,8 +4412,15 @@ function expectedRecoveryTables(migrations) {
     (latest >= 45 || !SCHEMA_45_TABLES.includes(table)) &&
     (latest >= 47 || !SCHEMA_47_TABLES.includes(table)) &&
     (latest >= 48 || !SCHEMA_48_TABLES.includes(table)) &&
-    (latest >= 49 || !SCHEMA_49_TABLES.includes(table)));
+    (latest >= 49 || !SCHEMA_49_TABLES.includes(table)) &&
+    (latest >= 50 || !SCHEMA_50_TABLES.includes(table)));
 }
+
+// The v0.4.8 disposal proof is a frozen campaign contract. Later product
+// migrations must not silently widen either its expected inventory or export.
+export const V048_RECOVERY_DURABLE_TABLES = Object.freeze(
+  expectedRecoveryTables([{ version: 48 }]),
+);
 
 export function recoveryExportTables(
   migrations,
@@ -4474,6 +4490,38 @@ function normalizeV048D1DeletionStateSequences(rows, inventory) {
   } catch {
     refuse("RECOVERY_D1_DELETION_STATE_INVALID");
   }
+}
+
+function fingerprintRecoveryD1DeletionState(input) {
+  // Keep historical schema-48 receipts byte-for-byte compatible with the
+  // frozen campaign contract. A current recovery run must also prove every
+  // later migration and table before deletion, so later ledgers use a distinct
+  // discriminator instead of pretending to be a schema-48 receipt.
+  if (input.migrations.length === 48) {
+    return fingerprintV048D1DeletionState(input);
+  }
+  if (!SHA256_RE.test(input.durableExportSha256) ||
+      !Number.isSafeInteger(input.durableExportBytes) || input.durableExportBytes < 1 ||
+      input.durableExportBytes > V048_D1_DELETION_STATE_MAX_EXPORT_BYTES) {
+    refuse("RECOVERY_D1_DELETION_STATE_INVALID");
+  }
+  return sha256(canonical({
+    schema_version: 1,
+    kind: "recovery_d1_deletion_state_current_v1",
+    role: input.role,
+    binding: input.binding,
+    migrations: input.migrations,
+    quick_check: input.quickCheck,
+    inventory: input.inventory,
+    schema: input.schemaRows,
+    durable_export_sha256: input.durableExportSha256,
+    durable_export_bytes: input.durableExportBytes,
+    sqlite_sequence: input.sequenceRows,
+    fts_count: nonNegativeInteger(
+      input.ftsCount,
+      "RECOVERY_D1_DELETION_STATE_INVALID",
+    ),
+  }));
 }
 
 async function assertResultFamilyRecoveryStateEmptyWithReader(
@@ -6175,7 +6223,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         outputPin,
       );
       try {
-        return fingerprintV048D1DeletionState({
+        return fingerprintRecoveryD1DeletionState({
           role,
           binding: {
             account_id: binding.accountId,

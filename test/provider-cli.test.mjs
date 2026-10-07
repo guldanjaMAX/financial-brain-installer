@@ -58,7 +58,7 @@ try {
     heldBankError = String(error?.message || error);
   }
   check("bank connect keeps an ordinary disabled manifest inside the held field gate",
-    /general Plaid bank invitations remain held/i.test(heldBankError) &&
+    /general bank invitations remain held/i.test(heldBankError) &&
       /owner-present connection/i.test(heldBankError) &&
       !/disposable-candidate field plan/i.test(heldBankError), heldBankError);
   let bankPageUrl = null;

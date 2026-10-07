@@ -198,6 +198,7 @@ function realProvisioningExecutionFixture() {
   const workerPath = resolve("worker/src/index.js");
   const migrationFiles = readdirSync(resolve("migrations/d1"))
     .filter((name) => /^\d+_.*\.sql$/u.test(name))
+    .filter((name) => Number(name.slice(0, 4)) <= 48)
     .sort();
   const records = [
     { path: workerPath, relative: "worker/src/index.js" },

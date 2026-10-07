@@ -2528,6 +2528,7 @@ for (const boundary of ["open", "read"]) {
       installTechnicianSkills: installTemporarySkills,
       reportSkillRefreshOk: (message) => skillRefreshOk.push(message),
       reportSkillRefreshWarning: (message) => skillRefreshWarnings.push(message),
+      lifecycleLockOptions: { machineLockRoot: join(sandbox, "lifecycle-locks") },
     };
     process.chdir(sandbox);
     let failedVerifyError = null;
@@ -2808,6 +2809,7 @@ for (const boundary of ["open", "read"]) {
     let collisionRefreshHadToken = null;
     const collisionUpgradeResult = { updated: "collision-fixture" };
     const collisionResult = await cmdUpdate(undefined, {
+      lifecycleLockOptions: updateSkillOptions.lifecycleLockOptions,
       installedManifestOptions,
       claudeSkillOptions: { home: collisionSkillHome },
       installTechnicianSkills: (options) => {
@@ -2851,6 +2853,7 @@ for (const boundary of ["open", "read"]) {
     let refreshExceptionHadToken = null;
     const refreshExceptionUpgradeResult = { updated: "refresh-exception-fixture" };
     const refreshExceptionResult = await cmdUpdate(undefined, {
+      lifecycleLockOptions: updateSkillOptions.lifecycleLockOptions,
       installedManifestOptions,
       claudeSkillOptions: { home: join(sandbox, "exception-skill-home") },
       installTechnicianSkills: () => {
@@ -2876,6 +2879,7 @@ for (const boundary of ["open", "read"]) {
     const successReporterWarnings = [];
     const successReporterUpgradeResult = { updated: "success-reporter-fixture" };
     const successReporterResult = await cmdUpdate(undefined, {
+      lifecycleLockOptions: updateSkillOptions.lifecycleLockOptions,
       installedManifestOptions,
       claudeSkillOptions: { home: join(sandbox, "success-reporter-skill-home") },
       reportSkillRefreshOk: () => {
@@ -2902,6 +2906,7 @@ for (const boundary of ["open", "read"]) {
     try {
       console.log = (...values) => warningReporterOutput.push(values.map(String).join(" "));
       warningReporterResult = await cmdUpdate(undefined, {
+        lifecycleLockOptions: updateSkillOptions.lifecycleLockOptions,
         installedManifestOptions,
         claudeSkillOptions: { home: join(sandbox, "warning-reporter-skill-home") },
         installTechnicianSkills: () => [{

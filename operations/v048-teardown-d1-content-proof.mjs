@@ -29,7 +29,7 @@ import { basename, dirname, join, resolve } from "node:path";
 
 import {
   MIGRATION_CONTRACT_SQL,
-  RECOVERY_DURABLE_TABLES,
+  V048_RECOVERY_DURABLE_TABLES,
   validateMigrationContract,
 } from "./cloudflare-recovery-adapter.mjs";
 import {
@@ -335,7 +335,7 @@ function normalizeTableInventory(rows) {
     return exactText(row.name, code);
   });
   const expected = [
-    ...RECOVERY_DURABLE_TABLES,
+    ...V048_RECOVERY_DURABLE_TABLES,
     "chunks_fts",
     ...V048_D1_DELETION_STATE_FTS_SHADOW_TABLES,
   ].sort();
@@ -476,7 +476,7 @@ export async function captureV048TeardownD1DeletionStateFingerprint({
       "d1", "export", checkedBinding.databaseId,
       "--remote", "--no-schema", "--output", exportPath,
       ...[
-        ...RECOVERY_DURABLE_TABLES,
+        ...V048_RECOVERY_DURABLE_TABLES,
         ...V048_D1_DELETION_STATE_FTS_SHADOW_TABLES,
       ].flatMap((table) => ["--table", table]),
     ]);

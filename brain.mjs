@@ -25679,7 +25679,8 @@ export function schedulePlatformLimitation(
     return renderCliCommands(
       `Windows uses the owned per-Brain, per-user daily contract. Run brain daily on "${manifestPath}". ` +
       "It derives sources from this manifest, refuses a foreign task collision, and reads the Task Scheduler definition back exactly. " +
-      `Inspect it with brain daily status "${manifestPath}".`
+      `Inspect it with brain daily status "${manifestPath}". ` +
+      "Confirm the next run with `brain sources <manifest> --json`: require `contract_version: 3` and verify that the named source's `receipt.last_successful_run_at` advanced."
     );
   }
   const refreshName = providerId ? `${providerId} refresh` : "automatic refresh";

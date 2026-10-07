@@ -694,6 +694,10 @@ const SIMPLEFIN_RECOVERY_TABLES = Object.freeze([
   "simplefin_stage_accounts",
   "simplefin_stage_transactions",
 ]);
+const BANK_ACTIVITY_RECOVERY_TABLES = Object.freeze([
+  "bank_activity_refresh_state",
+  "bank_activity_write_claims",
+]);
 assert.equal(recoveryVectorProtocolSupported(appliedMigrations.slice(0, 35)), false);
 assert.equal(recoveryVectorProtocolSupported(appliedMigrations.slice(0, 36)), true);
 assert.equal(recoveryVectorProtocolSupported(appliedMigrations), true);
@@ -725,6 +729,11 @@ assert.equal(recoveryExportTables(appliedMigrations).includes("custom_api_schedu
 for (const table of SIMPLEFIN_RECOVERY_TABLES) {
   assert.equal(RECOVERY_DURABLE_TABLES.includes(table), true, table);
   assert.equal(recoveryExportTables(appliedMigrations.slice(0, 48)).includes(table), false, table);
+  assert.equal(recoveryExportTables(appliedMigrations).includes(table), true, table);
+}
+for (const table of BANK_ACTIVITY_RECOVERY_TABLES) {
+  assert.equal(RECOVERY_DURABLE_TABLES.includes(table), true, table);
+  assert.equal(recoveryExportTables(appliedMigrations.slice(0, 49)).includes(table), false, table);
   assert.equal(recoveryExportTables(appliedMigrations).includes(table), true, table);
 }
 assert.equal(
@@ -1952,6 +1961,7 @@ function providerHarness({
     "source_original_accepted_resolution_activations",
   ]);
   const simpleFinTables = new Set(SIMPLEFIN_RECOVERY_TABLES);
+  const bankActivityTables = new Set(BANK_ACTIVITY_RECOVERY_TABLES);
   const durableTablesForVersion = (version) => RECOVERY_DURABLE_TABLES.filter((name) =>
     (version >= 37 || name !== "memory_supersessions") &&
     (version >= 41 || !mapTables.has(name)) &&
@@ -1961,7 +1971,8 @@ function providerHarness({
     (version >= 45 || !sourceOriginalAcceptedResolutionTables.has(name)) &&
     (version >= 47 || name !== "ocr_page_requests") &&
     (version >= 48 || !name.startsWith("custom_api_")) &&
-    (version >= 49 || !simpleFinTables.has(name)));
+    (version >= 49 || !simpleFinTables.has(name)) &&
+    (version >= 50 || !bankActivityTables.has(name)));
 
   const runWrangler = async ({ command, args, env, cwd }) => {
     wranglerCalls.push({ command, args: [...args], env: { ...env }, cwd });

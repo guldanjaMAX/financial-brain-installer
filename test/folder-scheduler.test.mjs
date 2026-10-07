@@ -458,7 +458,7 @@ try {
   /* ================= the command is really wired to all of this ================= */
   {
     const cli = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
-    const ingestIndex = cli.indexOf("async function cmdIngest(manifestPath)");
+    const ingestIndex = cli.indexOf("async function cmdIngestLocalRun(");
     const forgetIndex = cli.indexOf("export function validateForgetReceipt", ingestIndex);
     const local = cli.slice(ingestIndex, forgetIndex);
     check("the local ingest lane computes deletions with the shared helper",
