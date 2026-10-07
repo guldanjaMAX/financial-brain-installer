@@ -66,6 +66,7 @@ import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js"
 import { answerSentences } from "./lib/answer-sentences.js";
 import { quickBooksMoneyPolicy } from "./lib/quickbooks-money.js";
 import { quickBooksBalanceAnswer, quickBooksBalanceRequest } from "./lib/quickbooks-balance.js";
+import { quickBooksOpenItemsAnswer } from "./lib/quickbooks-open-items.js";
 import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
   documentMatchesOperativeClaim, documentUsesOperativeValue,
@@ -1164,13 +1165,17 @@ async function handleThink(
   // model calls and free-text temporal inference. Citation and authority
   // checks remain shared; admission itself binds observation time and money.
   const balanceAnswer = quickBooksBalanceAnswer({ question: q, results, docs });
-  let answer = balanceAnswer?.answer || null;
+  const openItemsAnswer = balanceAnswer ? null : quickBooksOpenItemsAnswer({
+    question: q, candidates: results.map(citationCandidateForResult), citationCount: docs.length,
+  });
+  const observedAnswer = balanceAnswer || openItemsAnswer;
+  let answer = observedAnswer?.answer || null;
   let answerError = null;
   let model = null;
   let modelDeclaredNoEvidence = false;
   try {
     let repairInstruction = "";
-    for (let attempt = 0; !balanceAnswer && attempt < 2; attempt++) {
+    for (let attempt = 0; !observedAnswer && attempt < 2; attempt++) {
       const data = await callLLM(env, {
         model: env.ANSWER_MODEL || "claude-sonnet-4-5",
         max_tokens: 1000,
@@ -1229,7 +1234,7 @@ async function handleThink(
           ? "draft cited an unavailable document" : "draft made claims without document citations" };
       } else {
         try {
-          const check = balanceAnswer ? null : await callLLM(env, {
+          const check = observedAnswer ? null : await callLLM(env, {
             model: env.ANSWER_MODEL || "claude-sonnet-4-5",
             max_tokens: 300,
             label: "rag-evidence-gate",
@@ -1261,14 +1266,16 @@ async function handleThink(
           const raw = check?.content?.[0]?.text || "";
           const start = raw.indexOf("{");
           const end = raw.lastIndexOf("}");
-          const verdict = balanceAnswer
-            ? { supported: true, complete: true, evidence: balanceAnswer.evidence, reason: "exact observed account balances; full inventory explicitly not established" }
+          const verdict = observedAnswer
+            ? { supported: true, complete: true, evidence: observedAnswer.evidence, reason: balanceAnswer
+              ? "exact observed account balances; full inventory explicitly not established"
+              : "exact observed open items; full inventory and net amounts explicitly not established" }
             : start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
           const allowed = new Set((Array.isArray(verdict?.evidence) ? verdict.evidence : [])
             .map(Number)
             .filter((n) => citedDocs.some((doc) => doc.n === n)));
           evidenceGate = {
-            ...(balanceAnswer ? { method: "quickbooks_observed_balances" } : {}),
+            ...(observedAnswer ? { method: balanceAnswer ? "quickbooks_observed_balances" : "quickbooks_observed_open_items" } : {}),
             supported: verdict?.supported === true || String(verdict?.supported).toLowerCase() === "true",
             complete: verdict?.complete === true || String(verdict?.complete).toLowerCase() === "true",
             evidence: [...allowed],
@@ -1331,7 +1338,7 @@ async function handleThink(
             evidenceGate.supported = false;
             evidenceGate.reason = "only non-final planning material was cited for a binding legal claim";
           }
-          if (evidenceGate.supported && explicitCurrentIntent && !balanceAnswer) {
+          if (evidenceGate.supported && explicitCurrentIntent && !observedAnswer) {
             const allowedNumbers = new Set(allowedDocs.map((doc) => doc.n));
             const assertions = answerSentences(answer);
             let temporalFailure = null;
@@ -1395,7 +1402,7 @@ async function handleThink(
           // cannot certify free-form money tables or separate scale headings.
           // Keep those generic checks unchanged, then fail closed if admission
           // was unavailable. A forged snapshot marker cannot earn approval.
-          if (evidenceGate.supported && !balanceAnswer && /\bbalances?\b/i.test(q) &&
+          if (evidenceGate.supported && !observedAnswer && /\bbalances?\b/i.test(q) &&
               (explicitCurrentIntent || quickBooksBalanceRequest(q) || /\b(?:show|list|what (?:are|is))\b/i.test(q)) &&
               docs.some((doc) => doc.source_kind === "quickbooks" || doc.date_source === "quickbooks:balance_snapshot")) {
             evidenceGate.supported = false;
@@ -1406,7 +1413,7 @@ async function handleThink(
           const draftMoneyPolicy = moneyPolicy || quickBooksMoneyPolicy({
             draft: answer, docs, candidates: results.map(citationCandidateForResult),
           });
-          const moneyRefusal = !balanceAnswer && draftMoneyPolicy?.refusal(answer);
+          const moneyRefusal = !observedAnswer && draftMoneyPolicy?.refusal(answer);
           if (moneyRefusal && evidenceGate.supported) {
             evidenceGate.supported = false;
             evidenceGate.reason = moneyRefusal;
@@ -1461,7 +1468,7 @@ async function handleThink(
   // Computed coverage warnings describe retrieval, not account facts. Append
   // them only after the exact claims pass the shared gates, and keep `gaps` in
   // the response. No model gets to dismiss or rewrite these warnings.
-  if ((balanceAnswer || moneyPolicy) && evidenceGate?.supported && approvedDocs.length && gaps.length) {
+  if ((observedAnswer || moneyPolicy) && evidenceGate?.supported && approvedDocs.length && gaps.length) {
     answer += `\n\nHeads up: ${gaps.map((gap) => String(gap.detail || "").replace(/\[\d+\]/g, "")).filter(Boolean).join(" ")}`;
   }
 

@@ -35,6 +35,7 @@ import {
   currentEvidenceCandidates, hasExplicitCurrentIntent, parseCanonicalEvidenceDate,
 } from "./query-intent.js";
 import { authorityFor } from "./evidence-authority.js";
+import { quickBooksOpenItemsRequest } from "./quickbooks-open-items.js";
 import {
   annotateLineageFamilyTokens, attachEvidenceLineage, evidenceLineageFor,
 } from "./evidence-lineage.js";
@@ -352,6 +353,17 @@ function boundedEvidencePart(value, query) {
  * remains deterministic; identical chunks are emitted only once.
  */
 function composeDocumentEvidence(vectorRow, keywordRow, query) {
+  const row = keywordRow || vectorRow;
+  const openEntity = quickBooksOpenItemsRequest(query);
+  if (openEntity && row?.source_kind === "quickbooks" && row.date_source === "quickbooks:balance_snapshot" &&
+      String(row.source_id || "").startsWith(`${openEntity.toLowerCase()}:`) && row.authority_document_head) {
+    // Keyword/semantic overlap can center a 400-character excerpt inside the
+    // title and cut off the native opening. For this exact inventory request,
+    // preserve the already-authorized same-document head, within the existing
+    // answer budget. This supplies evidence only; the renderer still binds the
+    // entire opening, reliable provenance and latest observation before use.
+    return { ...row, text: String(row.authority_document_head).replace(/\s+/g, " ").trim().slice(0, 900) };
+  }
   if (!keywordRow) return vectorRow;
   if (!vectorRow) return keywordRow;
 

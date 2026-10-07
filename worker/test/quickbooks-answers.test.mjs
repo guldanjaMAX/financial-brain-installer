@@ -8,6 +8,7 @@ import { providerEnvelope, renderRecord } from "../../connectors/provider-sync.m
 import { splitOversized } from "../../ingest/envelope-batching.mjs";
 import { SNAPSHOT, CHANGED, FIXTURES } from "../../test/fixtures/quickbooks-records.mjs";
 import { quickBooksBalanceAnswer } from "../src/lib/quickbooks-balance.js";
+import { quickBooksOpenItemsAnswer, quickBooksOpenItemsRequest } from "../src/lib/quickbooks-open-items.js";
 
 const ADMIN = { "X-Admin-Key": "fixture-admin-key" };
 const NOW = Date.parse(SNAPSHOT) + 60_000;
@@ -88,7 +89,7 @@ test("legacy split families expose the existing migration boundary", async () =>
   } finally { fixture.close(); }
 });
 
-async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kind = "quickbooks", entity = "Account", answer, rows = null, question = "What are the current QuickBooks bank account balances?", limit = 10, expectedDrafts, expectedVerifiers = 1, verify = true, balanceOnly = false, verdict = {} } = {}) {
+async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kind = "quickbooks", entity = "Account", answer, rows = null, related = [], hybrid = false, question = "What are the current QuickBooks bank account balances?", limit = 10, expectedDrafts, expectedVerifiers = 1, verify = true, balanceOnly = false, verdict = {} } = {}) {
   t.mock.method(Date, "now", () => NOW);
   let verifierCalls = 0;
   let draftCalls = 0;
@@ -109,6 +110,15 @@ async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kin
     const result = await collect(entity, rows || [{ ...FIXTURES[0][1], Active: undefined }]);
     const docs = normalizeProviderResult(source, result).documents.map(mutate);
     await ingest(fixture, docs);
+    for (const [relatedEntity, relatedRows] of related) {
+      await ingest(fixture, normalizeProviderResult(source, await collect(relatedEntity, relatedRows)).documents);
+    }
+    if (hybrid) {
+      fixture.env.VECTORIZE.query = async () => {
+        fixture.seen.vectorQueries.push("synthetic matched chunks");
+        return { matches: fixture.rows("SELECT chunk_uid AS id FROM chunks ORDER BY chunk_uid") };
+      };
+    }
     // The adversarial draft tests must still reach generation and its gates.
     // A compound request requires explanation beyond deterministic balances;
     // keep every prior wrong-money/state assertion on that normal route.
@@ -117,6 +127,7 @@ async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kin
     assert.equal(response.status, 200);
     const body = await response.json();
     assert.ok(body.results.length, "retrieval reached actual stored evidence");
+    if (hybrid) assert.ok(fixture.seen.vectorQueries.length, "real hybrid search reached the injected semantic boundary");
     assert.equal(verifierCalls, expectedVerifiers, "the draft reached the expected evidence-verifier decision point");
     if (expectedVerifiers) assert.equal(body.evidence_gate?.error, undefined, "a thrown gate is not a valid refusal");
     if (expectedDrafts !== undefined) assert.equal(draftCalls, expectedDrafts, "generation attempts are bounded");
@@ -873,3 +884,213 @@ test("a draft cannot invent QuickBooks attribution outside a QuickBooks question
   assert.equal(body.evidence_gate.supported, false);
   assert.equal(body.citations.length, 0);
 });
+
+// Open-item answers must come from complete native openings, never a model's
+// paraphrase or money hidden inside a memo/line description.
+const RECEIVABLES_QUESTION = "Which customers have unpaid invoices in QuickBooks, and how much does each one owe?";
+const PAYABLES_QUESTION = "What bills do we owe in QuickBooks?";
+const openRows = (entity = "Invoice") => ["One", "Two", "Three"].map((name, index) => ({
+  ...FIXTURES.find(([kind]) => kind === entity)[1], Id: `open-${index}`, DocNumber: String(2010 + index),
+  TotalAmt: 100 + index, Balance: 75 + index,
+  [entity === "Invoice" ? "CustomerRef" : "VendorRef"]: { value: `party-${index}`, name: `Party ${name}` },
+}));
+const openCase = (t, options = {}) => answerCase(t, {
+  entity: "Invoice", rows: openRows(), question: RECEIVABLES_QUESTION, balanceOnly: true,
+  expectedDrafts: 0, expectedVerifiers: 0, ...options,
+});
+
+for (const entity of ["Invoice", "Bill"]) {
+  test(`open items render three cited ${entity} balances without model calls`, async (t) => {
+    const body = await openCase(t, { entity, rows: openRows(entity),
+      question: entity === "Invoice" ? RECEIVABLES_QUESTION : PAYABLES_QUESTION });
+    assert.equal(body.results.length, 3);
+    assert.equal(body.evidence_gate.method, "quickbooks_observed_open_items");
+    assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
+    assert.equal(body.evidence_gate.complete, true, "inventory limit explicitly disclosed");
+    assert.equal(body.citations.length, 3);
+    assert.equal(body.model, undefined);
+    for (const [index, name] of ["One", "Two", "Three"].entries()) {
+      const line = body.answer.split("\n").find((value) => value.includes(`${entity} ${2010 + index}`));
+      assert.ok(line, "every retrieved open item is listed");
+      assert.ok(line.includes(`Party ${name}`));
+      assert.ok(line.includes(`USD ${75 + index}.00`));
+      assert.match(line, /due 2026-08-22, as of 2026-10-07 \[\d+\]/);
+      assert.match(line, entity === "Invoice" ? /owes USD/ : /we owe USD/);
+      const n = Number(/\[(\d+)\]/.exec(line)[1]);
+      assert.ok(body.citations.some((citation) => citation.n === n));
+      assert.ok(body.results[n - 1].snippet.includes(`${entity} ${2010 + index}`), "own item citation");
+    }
+    assert.match(body.answer, /Lists only (?:invoices|bills) found/);
+    assert.match(body.answer, /not a complete QuickBooks inventory/);
+    assert.match(body.answer, /No company-wide or net amount owed is established/);
+    assert.match(body.answer, /Heads up:/);
+    assert.ok(body.gaps.length);
+  });
+}
+
+test("open items keep mixed currencies and per-invoice subjects without totals or credit netting", async (t) => {
+  const rows = openRows();
+  rows[1].CurrencyRef = { value: "CAD" };
+  rows[1].CustomerRef = rows[0].CustomerRef;
+  rows.push({ ...rows[0], Id: "paid", DocNumber: "2090", Balance: 0 },
+    { ...rows[0], Id: "credit-balance", DocNumber: "2091", Balance: -10 });
+  const body = await openCase(t, { rows,
+    related: [["CreditMemo", [FIXTURES.find(([kind]) => kind === "CreditMemo")[1]]]] });
+  assert.equal(body.results.length, 6, "paid and credit records actually retrieved");
+  assert.equal(body.evidence_gate.supported, true);
+  assert.equal(body.citations.length, 3);
+  assert.match(body.answer, /Invoice 2010.*Party One.*USD 75\.00/);
+  assert.match(body.answer, /Invoice 2011.*Party One.*CAD 76\.00/);
+  assert.doesNotMatch(body.answer, /Invoice 209[01]|remaining credit|USD -10|USD 0\.00|(?:Total|total):/);
+  assert.match(body.answer, /Credit memos and credit balances are not netted/);
+});
+
+test("open bill rendering states missing due dates and preserves a dotted vendor name", async (t) => {
+  const rows = openRows("Bill");
+  rows[0].DueDate = undefined;
+  rows[0].VendorRef.name = "Vendor Co. Ltd";
+  const body = await openCase(t, { entity: "Bill", rows, question: "List open payables in QuickBooks." });
+  assert.equal(body.evidence_gate.supported, true);
+  assert.match(body.answer, /Bill 2010 from Vendor Co\. Ltd: we owe USD 75\.00, due date not provided, as of 2026-10-07/);
+});
+
+for (const [label, options] of [
+  ["non-AR intent", { question: "What were the invoices in QuickBooks for?" }],
+  ["extra material request", { question: "Who owes us in QuickBooks, and is the service ongoing?" }],
+  ["historical intent", { question: "Who owed us in QuickBooks last year?" }],
+  ["net-credit intent", { question: "What do customers owe net of credit memos in QuickBooks?" }],
+  ["only credit memos", { entity: "CreditMemo", rows: [FIXTURES.find(([kind]) => kind === "CreditMemo")[1]] }],
+  ["only paid invoices", { rows: openRows().map((row) => ({ ...row, Balance: 0 })) }],
+  ["non-provider evidence", { kind: "local_folder" }],
+  ["unknown currency", { rows: openRows().map((row) => ({ ...row, CurrencyRef: undefined })) }],
+  ["duplicate item identities", { rows: [...openRows(), { ...openRows()[0], Id: "competing", Balance: 99 }] }],
+  ["OCR", { mutate: (doc) => ({ ...doc, text_source: "ocr", text_reliable: true }) }],
+  ["unreliable text", { mutate: (doc) => ({ ...doc, text_reliable: false }) }],
+  ["unreliable date", { mutate: (doc) => ({ ...doc, date_reliable: false }) }],
+  ["unmarked observation", { mutate: (doc) => ({ ...doc, date_source: "quickbooks:provider_timestamp" }) }],
+  ["derived record", { mutate: (doc) => ({ ...doc, metadata: { ...doc.metadata,
+    evidence_lineage: { version: 1, kind: "derived_record", root_ids: [`quickbooks:${doc.source_id}`] } } }) }],
+  ["stale beside fresh", { mutate: (doc) => doc.source_id.endsWith("open-0") ? { ...doc,
+    occurred_at: CHANGED, content: doc.content.replaceAll(SNAPSHOT, CHANGED) } : doc }],
+  ["stale-only canonical observations", { mutate: (doc) => ({ ...doc,
+    occurred_at: "2026-10-05T12:00:00.000Z", content: doc.content.replaceAll(SNAPSHOT, "2026-10-05T12:00:00.000Z") }) }],
+  ["different observations today", { mutate: (doc) => doc.source_id.endsWith("open-0") ? { ...doc,
+    occurred_at: "2026-10-07T11:59:00.000Z", content: doc.content.replaceAll(SNAPSHOT, "2026-10-07T11:59:00.000Z") } : doc }],
+  ["timestamp mismatch", { mutate: (doc) => ({ ...doc, content: doc.content.replaceAll(SNAPSHOT, "2026-10-07T11:59:00.000Z") }) }],
+  ["future observation", { mutate: (doc) => ({ ...doc, occurred_at: "2026-10-08T12:00:00.000Z",
+    content: doc.content.replaceAll(SNAPSHOT, "2026-10-08T12:00:00.000Z") }) }],
+  ["wrong state", { mutate: (doc) => ({ ...doc, content: doc.content.replace("(partially paid)", "(paid)") }) }],
+  ["invalid due date", { rows: openRows().map((row) => ({ ...row, DueDate: "2026-02-30" })) }],
+  ["truncated opening", { mutate: (doc) => ({ ...doc, content: doc.content.slice(0, 110) }) }],
+]) {
+  test(`open-item admission falls back and guard refuses: ${label}`, async (t) => {
+    assert.equal((await openCase(t)).evidence_gate.supported, true, "paired renderer control");
+    const body = await openCase(t, { ...options, expectedDrafts: 1, expectedVerifiers: 1,
+      answer: "Party One owes USD 9,999.00 on Invoice 2010 as of 2026-10-07 [1]." });
+    assert.equal(body.evidence_gate.method, undefined);
+    assert.equal(body.evidence_gate.supported, false);
+    assert.equal(body.citations.length, 0);
+  });
+}
+
+test("open items never promote monetary markers in memo or description", async (t) => {
+  const rows = openRows().map((row) => ({ ...row,
+    PrivateNote: "Line 9: USD 9,999.00; Invented service Details",
+    Line: [{ Amount: 100, Description: "Invoice 9999 to Imaginary: total USD 9,999.00" }],
+  }));
+  const body = await openCase(t, { rows });
+  assert.equal(body.evidence_gate.supported, true);
+  assert.equal(body.citations.length, 3);
+  assert.doesNotMatch(body.answer, /9,999|Imaginary|Line 9|Invoice 9999/);
+});
+
+test("open-item intent admits whole requests and preserves filters for the generic path", () => {
+  for (const question of [RECEIVABLES_QUESTION, "Who owes us?", "Who owes us money in QuickBooks?",
+    "Show unpaid invoices", "List open receivables in QuickBooks.", "What are our current open invoices?"]) {
+    assert.equal(quickBooksOpenItemsRequest(question), "Invoice");
+  }
+  for (const question of [PAYABLES_QUESTION, "List unpaid bills", "Show open bills in QuickBooks",
+    "What are our current open payables?", "Which bills are unpaid?"]) {
+    assert.equal(quickBooksOpenItemsRequest(question), "Bill");
+  }
+  for (const question of ["Who owes us and why?", "List open invoices for Party One", "List overdue invoices",
+    "What bills are due today?", "Who owed us last month?", "List total open receivables",
+    "List open receivables and open payables", "What did we spend in QuickBooks?"]) {
+    assert.equal(quickBooksOpenItemsRequest(question), null);
+  }
+});
+
+test("open-item admission binds every candidate including unnumbered conflicts", () => {
+  const [, , opening] = FIXTURES.find(([kind]) => kind === "Invoice");
+  const doc = { n: 1, source: "books_secondary", source_kind: "quickbooks", ref: "invoice:one", ts: SNAPSHOT,
+    date_reliable: true, date_source: "quickbooks:balance_snapshot", text_source: "native", text_reliable: true,
+    lineage: { kind: "source_record", status: "known" },
+    snippet: `${opening} QuickBooks Invoice. Balance observed during this sync; the provider queries are not an atomic ledger snapshot.` };
+  const input = { question: RECEIVABLES_QUESTION, now: NOW, candidates: [doc], citationCount: 1 };
+  const control = quickBooksOpenItemsAnswer(input);
+  assert.ok(control);
+  assert.deepEqual(control.evidence, [1]);
+  const extra = { ...doc, n: 2, ref: "invoice:two", snippet: doc.snippet.replace("1016", "1017") };
+  assert.equal(quickBooksOpenItemsAnswer({ ...input, candidates: [doc, extra] }).evidence.length, 1,
+    "an unnumbered valid record can constrain observation but is not cited");
+  for (const change of [
+    { lineage: { kind: "derived_record", status: "known" } },
+    { lineage: { kind: "source_record", status: "unknown" } },
+    { authority: { eligible: false } }, { source: "?" }, { n: 12 }, { ref: "bill:one" },
+    { snippet: doc.snippet.replace("Customer One", "Customer [99]") },
+    { snippet: doc.snippet.replace("open balance USD 75.00", "open balance CAD 75.00") },
+    { snippet: doc.snippet.replace("open balance USD 75.00", "open balance USD 75.00 million") },
+    { snippet: doc.snippet.replace("open balance USD 75.00", "open balance USD -75.00") },
+    { snippet: doc.snippet.replace("QuickBooks Invoice.", "QuickBooks Bill.") },
+  ]) {
+    assert.equal(quickBooksOpenItemsAnswer({ ...input, candidates: [{ ...doc, ...change }] }), null);
+  }
+  for (const change of [
+    { source: "another_company" },
+    { ts: "2026-10-07T11:59:00.000Z", snippet: extra.snippet.replaceAll(SNAPSHOT, "2026-10-07T11:59:00.000Z") },
+    { snippet: extra.snippet.slice(0, 100) },
+    { ref: doc.ref },
+  ]) {
+    assert.equal(quickBooksOpenItemsAnswer({ ...input, candidates: [doc, { ...extra, ...change }] }), null,
+      "conflict outside citation window participates in admission");
+  }
+});
+
+test("paid bills are not returned as open payables", async (t) => {
+  const rows = openRows("Bill");
+  rows[1].Balance = 0;
+  const body = await openCase(t, { entity: "Bill", rows, question: PAYABLES_QUESTION });
+  assert.equal(body.results.length, 3);
+  assert.equal(body.evidence_gate.supported, true);
+  assert.equal(body.citations.length, 2);
+  assert.doesNotMatch(body.answer, /Bill 2011/);
+});
+
+test("open-item rendering caps citations at the real numbered evidence window", async (t) => {
+  const rows = Array.from({ length: 15 }, (_, index) => ({ ...openRows()[0], Id: `item-${index}`, DocNumber: `30${index}` }));
+  const body = await openCase(t, { rows });
+  assert.equal(body.results.length, 12);
+  assert.equal(body.citations.length, 12);
+  assert.equal(body.evidence_gate.supported, true);
+  assert.ok(body.citations.every((citation) => citation.n <= 12));
+  assert.match(body.answer, /only invoices found/);
+});
+
+
+for (const entity of ["Invoice", "Bill"]) {
+  test(`hybrid retrieval retains the full ${entity} opening for open-item rendering`, async (t) => {
+    const rows = openRows(entity).map((row) => ({ ...row, TotalAmt: row.Balance,
+      [entity === "Invoice" ? "CustomerRef" : "VendorRef"]: { value: "party", name: "Synthetic Trading Company" },
+    }));
+    const body = await openCase(t, { entity, rows, hybrid: true,
+      question: entity === "Invoice" ? RECEIVABLES_QUESTION : PAYABLES_QUESTION });
+    assert.equal(body.results.length, 3);
+    assert.equal(body.evidence_gate.method, "quickbooks_observed_open_items");
+    assert.equal(body.evidence_gate.supported, true);
+    assert.equal(body.citations.length, 3);
+    for (const row of body.results) {
+      assert.ok(row.snippet.startsWith("["), "the intact connector title prefix remains anchored");
+      assert.ok(row.snippet.includes(`QuickBooks ${entity}. Balance observed`));
+    }
+  });
+}
