@@ -164,13 +164,20 @@ export async function runDailyRefresh({
         const docsRefused = latestRuns.every((run) => Number.isSafeInteger(run?.docs_refused))
           ? latestRuns.reduce((sum, run) => sum + run.docs_refused, 0) : null;
         const failedRun = latestRuns.some((run) => ["failed", "refused"].includes(run?.outcome) || run?.docs_failed > 0);
-        const freshnessAdvanced = freshness.advanced && !failedRun;
+        // Reject measured zero work even when an older server advanced its date.
+        const unverifiedRun = latestRuns.some((run) => run?.outcome === "empty" ||
+          ((run?.metrics_version === 1 || (Number.isSafeInteger(run?.docs_refused) &&
+            Number.isSafeInteger(run?.docs_failed))) &&
+            ![run?.docs_added, run?.docs_updated, run?.docs_unchanged]
+              .some((count) => Number.isSafeInteger(count) && count > 0)));
+        const freshnessAdvanced = freshness.advanced && !failedRun && !unverifiedRun;
         const docsExcluded = Number.isSafeInteger(runResult?.excluded) ? runResult.excluded : null;
         if (freshnessAdvanced && (latestRuns.some((run) => run?.outcome === "partial") ||
             runResult?.partial > 0 || docsExcluded > 0)) outcome = "partial";
         if (!freshnessAdvanced && runResult?.status !== "skipped") {
           outcome = "failed";
-          reason = failedRun ? "the latest source receipt reports a failed or refused run"
+          reason = unverifiedRun ? "the latest source receipt verified no accepted or unchanged documents"
+            : failedRun ? "the latest source receipt reports a failed or refused run"
             : freshness.missing.length
             ? "the source claimed success, but one or more freshness receipts were missing or invalid"
             : "the source claimed success, but last_successful_run_at did not advance for every source leg";

@@ -26546,14 +26546,14 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
         : row?.freshness?.state && receiptTimestamps[index] ? row.freshness.state : "unknown");
     const latestRuns = receiptRows.map((row) => row?.receipt?.latest_run);
     const outcomes = latestRuns.map((run) => run?.outcome || "missing_history");
-    const lastRunOutcome = ["failed", "refused", "missing_history", "in_progress", "partial", "completed"]
+    const lastRunOutcome = ["failed", "refused", "empty", "missing_history", "in_progress", "partial", "completed"]
       .find((outcome) => outcomes.includes(outcome)) || "missing_history";
     const measuredCount = (field) => latestRuns.every((run) => Number.isSafeInteger(run?.[field]))
       ? latestRuns.reduce((sum, run) => sum + run[field], 0) : null;
     const currentState = source.class === "snapshot" ? "snapshot"
       : source.class === "disabled" ? "skipped"
         : states.includes("broken") ? "broken"
-          : states.includes("review") ? "review"
+          : states.includes("review") || ["refused", "empty"].includes(lastRunOutcome) ? "review"
           : states.includes("unknown") ? "unknown"
             : states.includes("stale") ? "stale"
               : states[0] || source.status;
@@ -26588,7 +26588,8 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
 function renderDailyFreshnessRows(rows, log = console.log) {
   for (const row of rows) {
     log(`${row.source} | ${row.current_state} | ${row.last_successful_run_at || "never"} | ${row.next_run} | ${row.owner}` +
-      (row.last_run_outcome === "partial" ? ` | partial; ${row.docs_refused ?? "unknown"} refused` : ""));
+      (["partial", "refused", "empty"].includes(row.last_run_outcome)
+        ? ` | ${row.last_run_outcome}; ${row.docs_refused ?? "unknown"} refused` : ""));
   }
 }
 

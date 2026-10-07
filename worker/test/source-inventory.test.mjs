@@ -990,7 +990,7 @@ test("an unnamed store failure still returns a usable, bounded detail", async ()
 });
 
 // Exercise the real receipt route, SQLite rollup, daily status, and public count.
-test("refusal-only refresh advances success while failures and missing history remain distinct", async () => {
+test("mixed accepted and refused refresh advances success while failures and missing history remain distinct", async () => {
   const { sourceFreshnessCounts, freshnessReport } = await import("../src/lib/store-d1.js");
   const { dailyFreshnessRows, localReceiptCoverage } = await import("../../brain.mjs");
   const refusedFiles = Array.from({ length: 228 }, (_, index) => ({
@@ -1062,3 +1062,69 @@ test("refusal-only refresh advances success while failures and missing history r
   assert.equal(missing.last_run_outcome, "missing_history");
   assert.equal(missing.current_state, "unknown");
 });
+
+for (const arm of [
+  {name:'accepted-control', added:1, refused:2, failed:0, advances:true},
+  {name:'verified-unchanged-control', added:0, unchanged:3, refused:0, failed:0, advances:true},
+  {name:'all-refused', added:0, refused:3, failed:0, advances:false},
+  {name:'empty-measured', added:0, refused:0, failed:0, advances:false},
+  {name:'real-failure-control', added:1, refused:0, failed:1, advances:false},
+]) {
+  test(`BOUNDARY freshness ${arm.name}`, async () => {
+    const db=migratedDb('boundary-fixture');
+    try {
+      const {env,seen}=d1Env(db);
+      env.DB.prepare=(sql)=>{
+        const bound=(args=[])=>({bind:(...values)=>bound(values),
+          all:async()=>({results:db.prepare(sql).all(...args)}),
+          first:async()=>db.prepare(sql).get(...args)??null,
+          run:async()=>{seen.runs++;return db.prepare(sql).run(...args);}});
+        return bound();
+      };
+      env.DB.batch=async(statements)=>{seen.batches++;return Promise.all(statements.map(s=>s.run()));};
+      const before='2026-10-06T12:00:00.000Z';
+      const after='2026-10-07T11:00:00.000Z';
+      for (const [id,at,counts] of [['prior',before,{added:1,refused:0,failed:0}],['latest',after,arm]]) {
+        const response=await call(env,new Request(`${ORIGIN}/api/admin/brain/source-receipt`,{
+          method:'POST',headers:{'Content-Type':'application/json','X-Admin-Key':env.ADMIN_KEY},
+          body:JSON.stringify({source:'folder',kind:'upload',status:'ready',run_id:id,
+            started_at:at,completed_at:at,walk_complete:true,complete_sweep:true,
+            files_seen:counts.added+(counts.unchanged||0)+counts.refused+counts.failed,
+            docs_added:counts.added,docs_updated:0,docs_unchanged:counts.unchanged||0,
+            docs_refused:counts.refused,docs_failed:counts.failed})}));
+        assert.equal(response.status,200);
+      }
+      assert.equal(seen.batches,2,'both decisions reached the real receipt writes');
+      assert.ok(seen.runs>0);
+      const inventory=await sourceInventory(env,{now:Date.parse('2026-10-07T12:00:00.000Z')});
+      assert.equal(inventory.rows.length,1);
+      const source = inventory.rows[0];
+      const receipt=source.receipt;
+      console.log(JSON.stringify({probe:arm.name,batches:seen.batches,outcome:receipt.latest_run.outcome,advanced:receipt.last_successful_run_at===after}));
+      assert.equal(receipt.last_successful_run_at,arm.advances?after:before,
+        'zero accepted/unchanged documents must not advance success');
+      assert.equal(receipt.last_ingest_receipt_at, arm.advances ? after : before);
+      assert.equal(receipt.latest_run.outcome, arm.failed ? 'failed' : arm.advances
+        ? (arm.refused ? 'partial' : 'completed') : arm.refused ? 'refused' : 'empty');
+      assert.equal(receipt.latest_run.docs_added, arm.added);
+      assert.equal(receipt.latest_run.docs_unchanged, arm.unchanged || 0);
+      if (!arm.advances) {
+        assert.equal(source.freshness.coverage.history.state, 'needs_attention');
+        assert.equal(source.freshness.coverage.counts.accepted, arm.added + (arm.unchanged || 0));
+      }
+      assert.equal(receipt.complete_history_through, arm.advances && !arm.refused ? after : before);
+      const { sourceFreshnessCounts, freshnessReport } = await import('../src/lib/store-d1.js');
+      const { dailyFreshnessRows } = await import('../../brain.mjs');
+      db.prepare("UPDATE sources SET expected_refresh_seconds=86400 WHERE name='folder'").run();
+      const counts = await sourceFreshnessCounts(env, { now: Date.parse('2026-10-07T12:00:00.000Z') });
+      assert.equal(counts.total, 1, 'public freshness reached the registered source');
+      assert.equal(counts.stale, arm.advances ? 0 : 1);
+      const detail = await freshnessReport(env, { now: Date.parse('2026-10-07T12:00:00.000Z') });
+      assert.equal(detail.sources[0].state, arm.failed ? 'broken' : arm.advances ? 'ok' : 'review');
+      const daily = dailyFreshnessRows({ sources: [{ key: 'folder' }] }, { sources: [source] });
+      assert.equal(daily.length, 1);
+      assert.equal(daily[0].last_run_outcome, receipt.latest_run.outcome);
+      assert.equal(daily[0].current_state, arm.failed ? 'broken' : arm.advances ? 'manual' : 'review');
+    } finally {db.close();}
+  });
+}

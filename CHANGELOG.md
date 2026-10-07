@@ -7,8 +7,10 @@ the brain, not for whoever built it: what changed for them, and what to check.
 ## 0.4.10 (2026-10-06)
 
 - Daily refresh now advances its success date when files are refused,
-  unsupported, or excluded by rule but the run has no failures. Partial receipts retain the refused
-  count and do not claim complete history. Check daily status for the latest
+  unsupported, or excluded by rule when the run has no failures and verifies
+  accepted or unchanged documents. Empty or entirely refused runs keep the prior
+  success date and need review. Partial receipts retain the refused count and
+  do not claim complete history. Check daily status for the latest
   outcome and count; real failures still keep the prior success date.
 
 Candidate only. This version has not been released. Its versioned README URLs

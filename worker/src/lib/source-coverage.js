@@ -53,7 +53,7 @@ function liveState(source) {
 function latestRunNeedsAttention(latestRun) {
   if (!latestRun) return false;
   const outcome = String(latestRun.outcome || "").toLowerCase();
-  if (["failed", "refused", "partial"].includes(outcome)) return true;
+  if (["failed", "refused", "empty", "partial"].includes(outcome)) return true;
   if (latestRun.error || latestRun.refusal_reason) return true;
   const runClosed = latestRun.finished_at !== null && latestRun.finished_at !== undefined;
   if (!runClosed) return false;

@@ -3699,6 +3699,13 @@ function operationalFreshness(s, now) {
   const started = timestampMs(s.indexing_started_at);
   const indexingMs = Number.isFinite(started) ? Math.max(0, now - started) : null;
 
+  if (s.stale_reason === "NO_VERIFIED_WORK") {
+    return {
+      state: "review",
+      reason: "the latest refresh verified no accepted or unchanged documents",
+      indexingMs,
+    };
+  }
   if (String(s.stale_reason || "").trim().toUpperCase() === SOURCE_REVIEW_ISSUE_CODE) {
     return {
       state: "review",
@@ -3872,7 +3879,9 @@ function assessCoverageRows(rows, {
       custom_api_display_name: customApiReceipt?.displayName || null,
       indexing_started_at: s.indexing_started_at ?? activeCustomJobs.get(String(s.name)) ?? null,
     }, now);
-    let sourceIsStale = false;
+    // Zero-work receipts must also stop aggregate-only update readers, even
+    // while the previous successful date is inside the schedule grace period.
+    let sourceIsStale = s.stale_reason === "NO_VERIFIED_WORK";
 
     if (operational.state === "broken") {
       sourceIsStale = true;
@@ -4562,6 +4571,7 @@ export const sourceInventorySql = ({
            MAX(CASE WHEN finished_at IS NOT NULL AND error IS NULL
                          AND (refusal_reason IS NULL OR (metrics_version=1 AND docs_refused>0 AND docs_failed=0))
                          AND COALESCE(docs_failed,0)=0
+                         AND (metrics_version<>1 OR docs_added>0 OR docs_updated>0 OR docs_unchanged>0)
                     THEN finished_at END) AS last_successful_run_at
       FROM sync_runs
      GROUP BY source
@@ -4648,6 +4658,9 @@ export const sourceInventorySql = ({
            WHEN r.source IS NULL THEN NULL
            WHEN r.finished_at IS NULL THEN 'in_progress'
            WHEN r.error IS NOT NULL OR COALESCE(r.docs_failed,0)>0 THEN 'failed'
+           WHEN r.metrics_version=1 AND COALESCE(r.docs_added,0)=0
+             AND COALESCE(r.docs_updated,0)=0 AND COALESCE(r.docs_unchanged,0)=0
+             THEN CASE WHEN r.docs_refused>0 OR r.refusal_reason IS NOT NULL THEN 'refused' ELSE 'empty' END
            WHEN r.refusal_reason IS NOT NULL
              AND NOT (r.metrics_version=1 AND r.docs_refused>0 AND r.docs_failed=0) THEN 'refused'
            WHEN COALESCE(r.walk_complete,0)<>1

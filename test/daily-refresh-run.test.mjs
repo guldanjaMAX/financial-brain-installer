@@ -590,7 +590,7 @@ test("daily receipt distinguishes a measured partial refresh from a transient fa
       readFreshness: async () => ({ drive: {
         last_successful_run_at: ++reads === 1 || failed
           ? "2026-10-06T12:00:00.000Z" : "2026-10-07T11:00:00.000Z",
-        latest_run: { outcome: failed ? "failed" : "partial", docs_refused: 228, docs_failed: failed },
+        latest_run: { docs_added: 9, docs_updated: 22, docs_unchanged: 0, outcome: failed ? "failed" : "partial", docs_refused: 228, docs_failed: failed },
       } }),
       now: () => new Date("2026-10-07T12:00:00.000Z"),
     });
@@ -609,7 +609,7 @@ test("daily refresh preserves intentional exclusions reported by a successful lo
     runSource: async () => { runs++; return { excluded: 12 }; },
     readFreshness: async () => ({ drive: {
       last_successful_run_at: ++reads === 1 ? "2026-10-06T12:00:00.000Z" : "2026-10-07T11:00:00.000Z",
-      latest_run: { outcome: "completed", docs_refused: 0, docs_failed: 0 },
+      latest_run: { docs_added: 1, docs_updated: 0, docs_unchanged: 0, outcome: "completed", docs_refused: 0, docs_failed: 0 },
     } }),
     now: () => new Date("2026-10-07T12:00:00.000Z"),
   });
@@ -641,7 +641,7 @@ test("daily CLI carries partial loader permission and durable refusal evidence t
       },
       cmdSources: async () => ({ sources: [{ name: "drive", receipt: {
         last_successful_run_at: ++reads === 1 ? "2026-10-06T12:00:00.000Z" : "2026-10-07T11:00:00.000Z",
-        latest_run: { outcome: "partial", docs_refused: 228, docs_failed: 0 },
+        latest_run: { docs_added: 9, docs_updated: 22, docs_unchanged: 0, outcome: "partial", docs_refused: 228, docs_failed: 0 },
       }, freshness: { state: "ok" } }] }),
     },
   });
@@ -675,3 +675,34 @@ test("a failed first refresh stays broken even without a previous success timest
     assert.equal(rows[0].last_run_outcome, state === "broken" ? "failed" : "missing_history");
   }
 });
+
+// An advanced timestamp cannot override measured zero-work evidence.
+for (const arm of [
+  { name: "accepted", added: 1, unchanged: 0, refused: 228, failed: 0, expected: "partial" },
+  { name: "unchanged", added: 0, unchanged: 3, refused: 0, failed: 0, expected: "complete" },
+  { name: "all-refused", added: 0, unchanged: 0, refused: 228, failed: 0, expected: "failed" },
+  { name: "empty", added: 0, unchanged: 0, refused: 0, failed: 0, expected: "failed" },
+  { name: "failure", added: 1, unchanged: 0, refused: 0, failed: 1, expected: "failed" },
+]) {
+  test(`BOUNDARY daily verified work ${arm.name}`, async () => {
+    let reads = 0, runs = 0;
+    const receipts = [];
+    const result = await runDailyRefresh({
+      plan, acquireLock: () => ({ assertOwned() {}, release() {} }),
+      runSource: async () => { runs++; return {}; },
+      readFreshness: async () => ({ drive: {
+        last_successful_run_at: ++reads === 1 ? "2026-10-06T12:00:00.000Z" : "2026-10-07T11:00:00.000Z",
+        latest_run: { metrics_version: 1, outcome: arm.failed ? "failed" : arm.refused ? "partial" : "completed",
+          docs_added: arm.added, docs_updated: 0, docs_unchanged: arm.unchanged,
+          docs_refused: arm.refused, docs_failed: arm.failed },
+      } }),
+      writeReceipt: receipt => receipts.push(receipt),
+      now: () => new Date("2026-10-07T12:00:00.000Z"),
+    });
+    assert.equal(runs, 1);
+    assert.equal(reads, 2, "the source and both durable freshness reads were reached");
+    assert.equal(receipts.length, 2);
+    assert.equal(result.status, arm.expected);
+    assert.equal(result.sources[0].freshness_advanced, arm.expected !== "failed");
+  });
+}
