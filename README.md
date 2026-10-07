@@ -747,8 +747,11 @@ keeps a private recovery fingerprint that detects task replacement after restart
 update, it removes only the bridges it paused, and only when the permanent
 daily task reads back correctly. If daily imports are off, the old task stays
 paused; run `brain daily on <manifest>` to turn on permanent daily imports.
-If update fails, it attempts to restore the bridges it paused and reports any
-restore failure. Other Brains' tasks and other users' tasks remain untouched.
+If update fails before any deployment or migration dispatch, it attempts to
+restore the bridges it paused and reports any restore failure. Once deployment
+or migration may have started, daily imports stay paused until the update is
+retried and completes. This boundary survives a restart. Other Brains' tasks
+and other users' tasks remain untouched.
 
 The fifteen-minute no-movement check counts only continuously observed waiting.
 If the computer sleeps during the rebuild, waking it resumes the durable work

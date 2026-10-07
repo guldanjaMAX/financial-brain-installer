@@ -1163,9 +1163,15 @@ retaining trigger enablement and every other definition byte. Raw definitions
 and decoded actions are never persisted. Recovery validates the saved fingerprints
 against every native read, including after restart and before enable or delete.
 A missing legacy fingerprint or any mismatch refuses mutation rather than
-adopting the current definition. Exact disabled readback gates deployment. A failed update restores only
-recorded bridges that were previously enabled, with readback, and preserves
-recovery when restoration fails. After success and permanent daily readback,
+adopting the current definition. Exact disabled readback gates deployment.
+The transaction persists `remote_mutation_may_have_started` before dispatching
+the paused Worker deployment, the first possible schema/Worker change. The
+non-outbox compatibility path persists it before invoking migration. Intent
+is monotonic across retries; older receipts without it cannot prove pre-change
+state. A failed update restores previously enabled recorded bridges only when
+the durable marker explicitly remains false, with exact readback. After dispatch
+or uncertain recovery, bridges remain paused until a verified update completes.
+After success and permanent daily readback,
 only those recorded bridges may be deleted. Already-disabled bridges are never
 enabled or deleted. Other task names and other users' tasks are counted without
 printing their identities. Native inspection or disable failures refuse update.

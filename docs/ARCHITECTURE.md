@@ -542,6 +542,13 @@ in place; a retry uses the saved definition as its authorization even after a
 manifest fingerprint change, and clears the fence only after current health
 proof and exact reconciliation.
 
+Windows bridge recovery additionally records remote mutation intent before the
+paused Worker deployment begins, or before migration in the non-outbox path.
+That durable marker never resets on retry. Only an explicit pre-dispatch receipt
+permits restoring the old runner on failure; missing or ambiguous evidence keeps
+it disabled. A completed update retires the recorded bridge only after the
+permanent daily task passes exact readback.
+
 ## D1, FTS5, Vectorize, and the outbox
 
 D1 is authoritative for documents, chunks, source metadata, freshness,

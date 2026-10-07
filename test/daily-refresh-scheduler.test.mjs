@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1453,5 +1453,45 @@ test("Mac next-run calculation uses the local calendar slot and respects pause",
   } finally {
     if (priorTimezone === undefined) delete process.env.TZ;
     else process.env.TZ = priorTimezone;
+  }
+});
+
+
+test("update remote mutation intent is monotonic and older or malformed receipts cannot authorize restore", () => {
+  const home = mkdtempSync(join(tmpdir(), "daily-mutation-intent-"));
+  try {
+    const manifestPath = join(home, "brain.manifest.json");
+    writeFileSync(manifestPath, JSON.stringify({ client: { slug: "fixture" } }));
+    const plan = { ...basePlan, manifest_path: manifestPath };
+    const options = { home, manifestPath, machineLockRoot: join(home, "locks"), now: () => new Date("2026-10-07T15:00:00.000Z") };
+    const input = { plan, phase: "paused", snapshot: { identity: plan.identity, exists: false, enabled: false } };
+    const save = (overrides = {}) => dailySchedulerModule.writeDailyRefreshUpdateTransaction({ ...input, ...overrides }, options);
+    const read = () => dailySchedulerModule.readDailyRefreshUpdateTransaction(plan.identity, options);
+    const initial = save();
+    assert.equal(initial.remote_mutation_may_have_started, false, "fresh transaction is the pre-change control");
+    assert.equal(read().remote_mutation_may_have_started, false);
+    save({ remoteMutationMayHaveStarted: true });
+    assert.equal(read().remote_mutation_may_have_started, true);
+    save({ phase: "preparing", remoteMutationMayHaveStarted: false });
+    assert.equal(read().remote_mutation_may_have_started, true, "a retry cannot erase durable dispatch intent");
+    assert.equal(read().transaction_id, initial.transaction_id);
+
+    const path = join(home, ".brain", "daily-update-transactions", `${plan.identity.id}.json`);
+    const legacy = JSON.parse(readFileSync(path, "utf8"));
+    delete legacy.remote_mutation_may_have_started;
+    writeFileSync(path, JSON.stringify(legacy)); // Synthetic receipt from a version without dispatch intent.
+    assert.equal(read().remote_mutation_may_have_started, true, "missing intent is not evidence of a pre-change refusal");
+    save({ remoteMutationMayHaveStarted: false });
+    assert.equal(read().remote_mutation_may_have_started, true);
+
+    writeFileSync(path, JSON.stringify({ ...legacy, remote_mutation_may_have_started: "false" }));
+    assert.throws(read, /malformed/, "a malformed marker cannot grant restore authority");
+    for (const bytes of ["{", "null"]) {
+      writeFileSync(path, bytes);
+      assert.throws(save, /malformed/, "unreadable prior state must not become a fresh pre-change transaction");
+      assert.equal(readFileSync(path, "utf8"), bytes, "refused write preserves recovery evidence");
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
   }
 });

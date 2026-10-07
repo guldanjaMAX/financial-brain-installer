@@ -6840,6 +6840,9 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           // No asynchronous local stage sits between the closing queue receipt
           // and starting the pause upload. This narrows but cannot atomically
           // eliminate a remote ingest that begins after the receipt.
+          // Persist intent before handing control to deploy: a thrown upload
+          // can already have changed the Worker, even before any migration.
+          options.beforeRemoteMutation?.();
           return deploy(executionPin.target, {
             persistDomain: false,
             pauseVectorDrainForUpgrade: true,
@@ -6925,7 +6928,10 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           }));
         corpusPauseMayStillBeServing = false;
       } else {
-        await runStage("migration", () => migrate(executionPin.target));
+        await runStage("migration", () => {
+          options.beforeRemoteMutation?.();
+          return migrate(executionPin.target);
+        });
         await runStage("deployment", () => deploy(executionPin.target, { persistDomain: false }));
       }
       await runStage("provider-secret reconciliation", ({ manifest, account }) => {
@@ -30123,7 +30129,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
             pin.target,
             options.dailyRefreshOptions || {},
           );
-      persistDailyTransaction = (phase) => writeDailyRefreshUpdateTransaction({
+      persistDailyTransaction = (phase, remoteMutationMayHaveStarted) => writeDailyRefreshUpdateTransaction({
         plan: dailyPlan,
         snapshot: dailySnapshot,
         phase,
@@ -30131,6 +30137,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         bridgeSnapshots,
         authorizedDefinition: dailyAuthorizedDefinition,
         reconciliation: dailyReconciliation,
+        remoteMutationMayHaveStarted,
       }, dailyTransactionOptions);
       manageAnyLocalSchedule = manageDailyDefinition || legacySnapshots.some((entry) => entry.snapshot?.exists) || bridgeSnapshots.length > 0;
       if (manageAnyLocalSchedule) {
@@ -30174,7 +30181,13 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     try {
       upgradeResult = await (options.cmdUpgrade ?? cmdUpgrade)(
         pin.target,
-        backlog ? { ...(options.upgradeOptions || {}), initialUpdateBacklog: backlog } : options.upgradeOptions || {},
+        {
+          ...(options.upgradeOptions || {}),
+          ...(backlog ? { initialUpdateBacklog: backlog } : {}),
+          beforeRemoteMutation: () => {
+            if (dailyTransactionActive) persistDailyTransaction("paused", true);
+          },
+        },
       );
       if (manageAnyLocalSchedule) {
         const finalState = typeof options.dailyRefreshOptions?.verifyFinalUpdateState === "function"
@@ -30303,6 +30316,19 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     }
     } catch (error) {
       if (bridgeGuard && bridgeSnapshots.length) {
+        // Re-read the durable transaction, including on a fresh retry. A
+        // current preflight refusal cannot undo an earlier ambiguous dispatch.
+        let provenPreChange = false;
+        try {
+          provenPreChange = readDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions)
+            ?.remote_mutation_may_have_started === false;
+        } catch { /* Missing or unreadable intent is never restoration proof. */ }
+        if (!provenPreChange) {
+          throw new Error(
+            `${error.message} Daily imports stay paused until the update is retried and completes.`,
+            { cause: error },
+          );
+        }
         try {
           bridgeGuard.restore(bridgeSnapshots, () => persistDailyTransaction("recovery_required"));
           if (dailyTransactionActive) persistDailyTransaction("recovery_required");
