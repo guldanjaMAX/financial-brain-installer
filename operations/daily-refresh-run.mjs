@@ -158,10 +158,18 @@ export async function runDailyRefresh({
         const beforeValues = Object.values(beforeBySource).filter(Boolean).sort();
         const after = afterValues.at(-1) || null;
         const before = beforeValues.at(-1) || null;
-        const freshnessAdvanced = freshness.advanced;
+        const latestRuns = Object.keys(afterBySource).map((name) => afterInventory?.[name]?.latest_run);
+        const docsRefused = latestRuns.every((run) => Number.isSafeInteger(run?.docs_refused))
+          ? latestRuns.reduce((sum, run) => sum + run.docs_refused, 0) : null;
+        const failedRun = latestRuns.some((run) => ["failed", "refused"].includes(run?.outcome) || run?.docs_failed > 0);
+        const freshnessAdvanced = freshness.advanced && !failedRun;
+        const docsExcluded = Number.isSafeInteger(runResult?.excluded) ? runResult.excluded : null;
+        if (freshnessAdvanced && (latestRuns.some((run) => run?.outcome === "partial") ||
+            runResult?.partial > 0 || docsExcluded > 0)) outcome = "partial";
         if (!freshnessAdvanced && runResult?.status !== "skipped") {
           outcome = "failed";
-          reason = freshness.missing.length
+          reason = failedRun ? "the latest source receipt reports a failed or refused run"
+            : freshness.missing.length
             ? "the source claimed success, but one or more freshness receipts were missing or invalid"
             : "the source claimed success, but last_successful_run_at did not advance for every source leg";
         }
@@ -176,6 +184,8 @@ export async function runDailyRefresh({
           last_successful_run_at_before: before,
           last_successful_run_at_after: after,
           freshness_advanced: freshnessAdvanced,
+          docs_refused: docsRefused,
+          docs_excluded: docsExcluded,
           missing_freshness_sources: freshness.missing,
           unadvanced_freshness_sources: freshness.notAdvanced,
           reason,
@@ -203,7 +213,8 @@ export async function runDailyRefresh({
       schema_version: 1,
       kind: "daily_refresh",
       identity: plan.identity.id,
-      status: sourceResults.some((entry) => entry.status !== "complete") ? "failed" : "complete",
+      status: sourceResults.some((entry) => !["complete", "partial"].includes(entry.status)) ? "failed"
+        : sourceResults.some((entry) => entry.status === "partial") ? "partial" : "complete",
       started_at: startedAt,
       completed_at: timestamp(now),
       schedule_attention: Object.freeze([...scheduleAttention]),
@@ -220,6 +231,7 @@ function freshnessMap(inventory) {
   return Object.fromEntries((inventory?.sources || []).map((row) => [row.name, {
     last_successful_run_at: row?.receipt?.last_successful_run_at || null,
     state: row?.freshness?.state || null,
+    latest_run: row?.receipt?.latest_run || null,
   }]));
 }
 
@@ -302,6 +314,7 @@ export async function runDailyRefreshCli(manifestPath, options = {}) {
     runSource: options.runSource ?? ((source) => brain.cmdLoad(path, {
       flags: { only: source.run_key },
       lifecycleLockHeld: true,
+      allowPartialRefresh: true,
     })),
     readFreshness,
     writeReceipt: receiptWriter,
@@ -321,7 +334,9 @@ export async function runDailyRefreshCli(manifestPath, options = {}) {
     for (const attention of result.schedule_attention) log(attention);
     log(`daily refresh ${result.status}: ${result.sources.length} source(s) attempted`);
     for (const source of result.sources) {
-      log(`${source.source} | ${source.status} | ${source.last_successful_run_at_after || "never"}`);
+      log(`${source.source} | ${source.status} | ${source.last_successful_run_at_after || "never"}` +
+        (source.status === "partial" ? ` | ${source.docs_refused ?? "unknown"} refused` : "") +
+        (source.docs_excluded > 0 ? ` | ${source.docs_excluded} excluded by rule` : ""));
     }
   }
   return result;

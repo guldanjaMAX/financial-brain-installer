@@ -576,12 +576,12 @@ test("latest run truth keeps bounded ingest success separate from whole-source c
     },
     {
       source: "refused_gap", kind: "gmail", lane: "sweep", walkComplete: 1, refused: 1, failed: 0,
-      outcome: "partial", lastSuccessful: lastComplete, completeThrough: lastComplete,
+      outcome: "partial", lastSuccessful: latestFinished, completeThrough: lastComplete,
       history: "needs_attention",
     },
     {
       source: "failed_gap", kind: "drive", lane: "sweep", walkComplete: 1, refused: 0, failed: 1,
-      outcome: "partial", lastSuccessful: lastComplete, completeThrough: lastComplete,
+      outcome: "failed", lastSuccessful: lastComplete, completeThrough: lastComplete,
       history: "needs_attention",
     },
     {
@@ -987,4 +987,78 @@ test("an unnamed store failure still returns a usable, bounded detail", async ()
     () => call(refusingEnv(db, empty), post({}, { "X-Admin-Key": "test-admin-key" })),
   );
   assert.equal((await emptyResponse.json()).detail.reason, null);
+});
+
+// Exercise the real receipt route, SQLite rollup, daily status, and public count.
+test("refusal-only refresh advances success while failures and missing history remain distinct", async () => {
+  const { sourceFreshnessCounts, freshnessReport } = await import("../src/lib/store-d1.js");
+  const { dailyFreshnessRows, localReceiptCoverage } = await import("../../brain.mjs");
+  const refusedFiles = Array.from({ length: 228 }, (_, index) => ({
+    path: `unsupported-${String(index).padStart(3, "0")}.blob`, reason: "unsupported format",
+  }));
+  const measured = localReceiptCoverage({ created: 9, updated: 22, refused: 0 }, refusedFiles);
+  assert.equal(measured.docsRefused, 228, "the real local receipt classifier reached every invented file");
+  const excluded = localReceiptCoverage({}, Array.from({ length: 3 }, (_, index) => ({
+    path: `excluded-${index}.txt`, adjudication: "source_policy", coverage_gap: false,
+  })));
+  assert.equal(excluded.adjudicatedSkips, 3);
+  assert.equal(excluded.coverageGaps, 0, "policy decisions retain their deletion-safety classification");
+  const now = Date.parse("2026-10-07T12:00:00.000Z");
+  const before = "2026-10-06T12:00:00.000Z";
+  const after = "2026-10-07T11:00:00.000Z";
+  for (const shape of [
+    { name: "clean", refused: 0, failed: 0, outcome: "completed", advances: true },
+    { name: "unsupported", refused: measured.docsRefused, failed: 0, outcome: "partial", advances: true },
+    { name: "policy-excluded", refused: excluded.docsRefused, failed: 0, outcome: "partial", advances: true },
+    { name: "transient", refused: 228, failed: 1, outcome: "failed", advances: false },
+  ]) {
+    const db = migratedDb("freshness-fixture");
+    const { env, seen } = d1Env(db);
+    // Only this route test supplies writes; ordinary inventory tests stay read-only.
+    env.DB.prepare = (sql) => {
+      const shape = (args = []) => ({
+        bind: (...values) => shape(values),
+        all: async () => ({ results: db.prepare(sql).all(...args) }),
+        first: async () => db.prepare(sql).get(...args) ?? null,
+        run: async () => { seen.runs++; return db.prepare(sql).run(...args); },
+      });
+      return shape();
+    };
+    env.DB.batch = async (statements) => { seen.batches++; return Promise.all(statements.map((s) => s.run())); };
+    const send = async (run_id, completed_at, refused, failed) => {
+      const response = await call(env, new Request(`${ORIGIN}/api/admin/brain/source-receipt`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Key": "test-admin-key" },
+        body: JSON.stringify({ source: "folder", kind: "upload", status: "ready", run_id,
+          started_at: completed_at, completed_at, walk_complete: true, complete_sweep: true,
+          files_seen: 31 + refused + failed, docs_added: 9, docs_updated: 22,
+          docs_unchanged: 0, docs_refused: refused, docs_failed: failed }),
+      }));
+      assert.equal(response.status, 200);
+    };
+    await send("prior", before, 0, 0);
+    db.prepare("UPDATE sources SET expected_refresh_seconds=86400 WHERE name='folder'").run();
+    await send("latest", after, shape.refused, shape.failed);
+    assert.ok(seen.batches >= 2 && seen.runs > 0, "both receipt decisions reached durable writes");
+    const inventory = await sourceInventory(env, { now });
+    assert.equal(inventory.rows.length, 1);
+    const source = inventory.rows[0];
+    assert.equal(source.receipt.latest_run.outcome, shape.outcome, shape.name);
+    assert.equal(source.receipt.last_successful_run_at, shape.advances ? after : before, shape.name);
+    assert.equal(source.receipt.latest_run.docs_refused, shape.refused);
+    assert.equal(source.receipt.complete_history_through, shape.refused ? before : after);
+    const counts = await sourceFreshnessCounts(env, { now });
+    assert.equal(counts.total, 1);
+    assert.equal(counts.stale, shape.advances ? 0 : 1, shape.name);
+    const detailed = await freshnessReport(env, { now });
+    assert.equal(detailed.sources[0].state, shape.advances ? "ok" : "broken");
+    const [daily] = dailyFreshnessRows({ sources: [{ key: "folder", source_names: ["folder"] }] },
+      { sources: [{ ...source, name: "folder" }] });
+    assert.equal(daily.last_run_outcome, shape.outcome);
+    assert.equal(daily.docs_refused, shape.refused);
+    assert.equal(daily.current_state, shape.advances ? "ok" : "broken");
+    db.close();
+  }
+  const [missing] = dailyFreshnessRows({ sources: [{ key: "folder" }] }, { sources: [] });
+  assert.equal(missing.last_run_outcome, "missing_history");
+  assert.equal(missing.current_state, "unknown");
 });

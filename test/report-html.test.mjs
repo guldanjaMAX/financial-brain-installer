@@ -705,6 +705,20 @@ check("authenticated stale and failed receipts produce an attention finding",
   has(staleByReceipt, "Google Drive needs attention") &&
     has(staleByReceipt, "latest run outcome failed"));
 
+const refusalOnlySummary = sourceReceiptSummary({
+  source_id: "folder", kind: "upload",
+  freshness: { state: "ok", expected_refresh_seconds: 86400,
+    coverage: { history: { state: "needs_attention" } } },
+  receipt: { last_successful_run_at: "2026-10-07T11:00:00.000Z", latest_run: {
+    outcome: "partial", finished_at: "2026-10-07T11:00:00.000Z", walk_complete: true,
+    docs_refused: 228, docs_failed: 0,
+  } },
+});
+check("a current partial run reports successful freshness and the refused count separately",
+  refusalOnlySummary.currency === "current against the authenticated refresh expectation; partial coverage, 228 refused" &&
+    refusalOnlySummary.history.includes("historical completeness remains unverified"),
+  JSON.stringify(refusalOnlySummary));
+
 const partialRunSentinel = "SYNTHETIC_PRIVATE_RUN_DETAIL /private/source/path secret-account@example.invalid";
 const priorCompleteThrough = "2026-08-01T00:01:00.000Z";
 const latestBoundedSuccess = "2026-08-02T00:01:00.000Z";

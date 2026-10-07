@@ -8683,8 +8683,9 @@ export function localWalkRemovalCandidates(walkSkips = [], previouslyKnownKeys =
 /**
  * Keep local source adjudication separate from document ingest outcomes.
  * Private paths, empty files, and preserved junctions are resolved source
- * decisions. Unsupported, oversized, or otherwise unresolved files are
- * refused coverage, as are envelopes the Worker itself refused.
+ * decisions for deletion safety. All omissions still count in the durable
+ * partial-run receipt; only unresolved gaps block the separate local walk
+ * and removal decisions. Refusal counts never turn into transient failures.
  */
 export function localReceiptCoverage(tally = {}, skips = []) {
   const nonFailures = (skips || []).filter((skip) => skip?.failed !== true);
@@ -8694,7 +8695,7 @@ export function localReceiptCoverage(tally = {}, skips = []) {
   return {
     coverageGaps,
     adjudicatedSkips,
-    docsRefused: workerRefused + coverageGaps,
+    docsRefused: workerRefused + nonFailures.length,
   };
 }
 
@@ -13104,7 +13105,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     lane: "manual",
     started_at: sourceRunStartedAt,
     completed_at: new Date().toISOString(),
-    complete_sweep: localWalkComplete && tally.failed === 0 && tally.refused === 0 && localCoverageGaps === 0,
+    complete_sweep: localWalkComplete && tally.failed === 0 && localCoverage.docsRefused === 0,
     walk_complete: localWalkComplete,
     files_seen: scanned,
     docs_added: tally.created,
@@ -13153,6 +13154,8 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     updated: tally.updated,
     unchanged: unchanged + tally.unchanged,
     refused: tally.refused,
+    docs_refused: localCoverage.docsRefused,
+    docs_excluded: adjudicatedSkips,
     scanned,
     skipped: skips.length,
     ...(feedMode ? { placeholders: placeholderCount, excluded: exclusionCount } : {}),
@@ -15885,13 +15888,18 @@ export function describeLoadResult(result) {
     if (Number.isFinite(result.created)) {
       const counts = { created: result.created, updated: result.updated || 0, unchanged: result.unchanged || 0 };
       const extra = [];
-      if (result.refused) extra.push(`${result.refused} refused, NOT indexed`);
+      const refused = result.docs_refused ?? result.refused ?? 0;
+      const excluded = result.docs_excluded ?? result.excluded ?? 0;
+      if (refused) extra.push(`${refused} refused, NOT indexed`);
       if (result.skipped) extra.push(`${result.skipped} skipped`);
       return {
         known: true,
         counts,
-        partial: !!result.refused,
-        outcome: outcomeOf(result.refused ? "partial" : "completed"),
+        partial: !!(refused || excluded || result.failed),
+        refused,
+        excluded,
+        refreshSucceeded: !result.failed,
+        outcome: outcomeOf(refused || excluded || result.failed ? "partial" : "completed"),
         text: `${counts.created} created, ${counts.updated} updated, ${counts.unchanged} unchanged`
           + (extra.length ? `, ${extra.join(", ")}` : ""),
       };
@@ -16109,6 +16117,9 @@ export async function cmdLoad(manifestPath, options = {}) {
     entry.documents = legResults.reduce((n, r) => n + (Number.isFinite(r.documents) ? r.documents : 0), 0);
     entry.wouldSend = legResults.reduce((n, r) => n + (Number.isFinite(r.wouldSend) ? r.wouldSend : 0), 0);
     entry.volumeUnknown = legResults.some((r) => r?.volumeUnknown);
+    entry.excluded = legResults.reduce((sum, result) => sum + (result.excluded || 0), 0);
+    entry.refreshSucceeded = legFailures.length === 0 && !flags.limit &&
+      legResults.length > 0 && legResults.every((r) => r.refreshSucceeded === true || !r.partial);
 
     if (legFailures.length && !legResults.length) {
       entry.status = review ? "review" : "failed";
@@ -16200,6 +16211,7 @@ export async function cmdLoad(manifestPath, options = {}) {
     dryRun,
     loaded: done.length,
     partial: partialCount,
+    excluded: entries.reduce((sum, entry) => sum + (entry.excluded || 0), 0),
     skipped: skippedCount,
     unavailable: unavailableCount,
     failed: failedCount,
@@ -16214,7 +16226,11 @@ export async function cmdLoad(manifestPath, options = {}) {
         + "      Fix the reported cause, then re-run just that one: brain load <manifest> --only <source>"
     );
   }
-  if (unavailableCount || (!dryRun && partialCount)) {
+  // Daily refresh independently verifies each durable success timestamp. Let
+  // measured file omissions reach that check without claiming a full sweep.
+  const incompleteRefresh = entries.some((entry) => entry.status === "partial" && !entry.refreshSucceeded);
+  if (unavailableCount || (!dryRun && partialCount &&
+      (options.allowPartialRefresh !== true || incompleteRefresh))) {
     const parts = [
       unavailableCount ? `${unavailableCount} unavailable` : null,
       !dryRun && partialCount ? `${partialCount} partial` : null,
@@ -26260,10 +26276,18 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       .sort()
       .at(-1) || null;
     const states = receiptRows.map((row, index) =>
-      row?.freshness?.state && receiptTimestamps[index] ? row.freshness.state : "unknown");
+      ["broken", "review"].includes(row?.freshness?.state) ? row.freshness.state
+        : row?.freshness?.state && receiptTimestamps[index] ? row.freshness.state : "unknown");
+    const latestRuns = receiptRows.map((row) => row?.receipt?.latest_run);
+    const outcomes = latestRuns.map((run) => run?.outcome || "missing_history");
+    const lastRunOutcome = ["failed", "refused", "missing_history", "in_progress", "partial", "completed"]
+      .find((outcome) => outcomes.includes(outcome)) || "missing_history";
+    const measuredCount = (field) => latestRuns.every((run) => Number.isSafeInteger(run?.[field]))
+      ? latestRuns.reduce((sum, run) => sum + run[field], 0) : null;
     const currentState = source.class === "snapshot" ? "snapshot"
       : source.class === "disabled" ? "skipped"
         : states.includes("broken") ? "broken"
+          : states.includes("review") ? "review"
           : states.includes("unknown") ? "unknown"
             : states.includes("stale") ? "stale"
               : states[0] || source.status;
@@ -26284,6 +26308,9 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
     return Object.freeze({
       source: source.key,
       current_state: currentState,
+      last_run_outcome: lastRunOutcome,
+      docs_refused: measuredCount("docs_refused"),
+      docs_failed: measuredCount("docs_failed"),
       last_successful_run_at: newest,
       next_run: nextRun,
       owner: effectiveOwner,
@@ -26294,7 +26321,8 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
 
 function renderDailyFreshnessRows(rows, log = console.log) {
   for (const row of rows) {
-    log(`${row.source} | ${row.current_state} | ${row.last_successful_run_at || "never"} | ${row.next_run} | ${row.owner}`);
+    log(`${row.source} | ${row.current_state} | ${row.last_successful_run_at || "never"} | ${row.next_run} | ${row.owner}` +
+      (row.last_run_outcome === "partial" ? ` | partial; ${row.docs_refused ?? "unknown"} refused` : ""));
   }
 }
 

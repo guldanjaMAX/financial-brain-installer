@@ -6,8 +6,8 @@
  * through three corpus-sized materialised CTEs and every chunk's full text
  * through the sorter that counted chunks, so D1 aborted them while strictly
  * heavier aggregates over the same rows still completed. Four tests hold that
- * repair. The first proves the rewritten statements return rows byte-identical
- * to the shipped 0.4.8 SQL, which is kept verbatim below so the comparison is
+ * repair. The first proves the rewritten statements preserve all rows except two
+ * explicit refresh-outcome corrections relative to the shipped 0.4.8 SQL, which is kept verbatim below so the comparison is
  * against what actually failed rather than against the code under test. The
  * second reads the recovery statement's query plan and requires it to walk the
  * corpus once, which is what its `MATERIALIZED` hints buy and what their loss
@@ -883,7 +883,7 @@ async function mixedFixture(db) {
 
 const rowsOf = (db, sql, binds) => db.prepare(sql).all(...binds);
 
-test("the rewritten source statements return the shipped 0.4.8 rows byte for byte", async () => {
+test("source statements preserve shipped rows except the specified refresh outcome corrections", async () => {
   const db = migratedDb();
   await mixedFixture(db);
 
@@ -906,9 +906,22 @@ test("the rewritten source statements return the shipped 0.4.8 rows byte for byt
         `the fixture never produced a ${column}`,
       );
     }
+    // The frozen SQL still proves the storage rewrite. Only two specified
+    // freshness fields intentionally change: refusal-only success advances,
+    // and a measured document failure is failed rather than partial.
+    const refused = before.find((row) => row.name === "imessage");
+    const failed = before.find((row) => row.name === "message");
+    assert.equal(refused.run_docs_refused, 2, "refusal decision was reached");
+    assert.equal(refused.run_docs_failed, 0);
+    assert.ok(refused.last_successful_run_at < refused.run_finished_at);
+    assert.equal(failed.run_docs_failed, 1, "failure decision was reached");
+    assert.equal(failed.run_outcome, "partial");
+    const expected = before.map((row) => row.name === "imessage"
+      ? { ...row, last_successful_run_at: Date.parse("2026-09-09T00:01:00.000Z") }
+      : row.name === "message" ? { ...row, run_outcome: "failed" } : row);
     assert.equal(
-      JSON.stringify(after), JSON.stringify(before),
-      `inventory rows changed (failure evidence ${includeFailureEvidence})`,
+      JSON.stringify(after), JSON.stringify(expected),
+      `inventory rows changed beyond the specified refresh corrections (failure evidence ${includeFailureEvidence})`,
     );
     assert.deepEqual(Object.keys(after[0]), Object.keys(before[0]), "column order changed");
   }

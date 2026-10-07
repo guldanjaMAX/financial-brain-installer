@@ -2085,7 +2085,9 @@ const zeroChunkExpectedReturn = {
   const runBind = seen.binds.find((values) =>
     values[0] === "run_measured_sweep" && values.length === 22);
   check("measured document failures prevent an otherwise complete receipt from advancing history",
-    response.status === 200 && sourceBind?.[4] === 0 && runBind?.[11] === 1 && runBind?.[12] === 1,
+    response.status === 200 && sourceBind?.[4] === "INGEST_FAILED" &&
+      runBind?.[11] === 1 && runBind?.[12] === 1 && runBind?.[20] === "INGEST_FAILED" &&
+      seen.sql.some((sql) => /status='error', document_count=excluded.document_count/.test(sql)),
     JSON.stringify({ sourceBind, runBind }));
 
   const refused = await worker.fetch(new Request("https://b.example/api/admin/brain/source-receipt", {

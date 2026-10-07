@@ -416,6 +416,21 @@ try {
       run.error?.message);
   }
 
+  {
+    const dir = mkdtempSync(join(sandbox, "daily-partial-"));
+    const manifestPath = writeManifest(dir, { google_drive: { enabled: true } });
+    for (const failed of [0, 1]) {
+      const { table, calls } = scriptedRegistry({ google_drive: () => ({
+        created: 9, updated: 22, unchanged: 0, refused: 228, failed,
+      }) });
+      const run = await runLoad(manifestPath, { flags: {}, registry: table,
+        probes: { google_drive: connected }, allowPartialRefresh: true });
+      check(`daily partial refresh failed=${failed} reaches producer`, calls.length === 1);
+      check(`daily partial refresh failed=${failed} preserves failure boundary`,
+        failed ? !!run.error : !run.error && run.result.partial === 1, run.error?.message);
+    }
+  }
+
   /* ------------------------------------------------------ --only and --skip */
   {
     const dir = mkdtempSync(join(sandbox, "select-"));

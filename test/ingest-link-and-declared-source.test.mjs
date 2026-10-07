@@ -80,14 +80,14 @@ const localCoverage = localReceiptCoverage({ refused: 2 }, [
 assert.deepEqual(localCoverage, {
   coverageGaps: 3,
   adjudicatedSkips: 3,
-  docsRefused: 5,
+  docsRefused: 8,
 });
 assert.deepEqual(localReceiptCoverage({}, [
   { adjudication: "source_policy", coverage_gap: false },
   { adjudication: "empty_content", coverage_gap: false },
   { adjudication: "preserve_external_subtree", coverage_gap: false },
-]), { coverageGaps: 0, adjudicatedSkips: 3, docsRefused: 0 });
-console.log("PASS  local receipts count only Worker refusals and unresolved coverage gaps as refused");
+]), { coverageGaps: 0, adjudicatedSkips: 3, docsRefused: 3 });
+console.log("PASS  local receipts retain every omission while keeping adjudicated skips separate from unresolved gaps");
 
 /* ---------------- 2. the declared source wins over "upload" ---------------- */
 
