@@ -240,6 +240,16 @@ import {
   writeManifestAtomically,
 } from "./operations/folder-retirement.mjs";
 export { retiredLocalFolderOf, writeManifestAtomically } from "./operations/folder-retirement.mjs";
+import {
+  comparableFeedPath,
+  createDefaultFeedDirectories,
+  declaredFeeds,
+  feedPathSameOrInside,
+  feedPathsOverlap,
+  inspectFeedFolder,
+  prepareFeedAddition,
+  uploadFolderEntriesOf,
+} from "./operations/feed-folders.mjs";
 import { writeClaudeWorkspaceGuide } from "./operations/claude-workspace.mjs";
 import {
   captureTechnicianSkillRepairSnapshot,
@@ -12315,7 +12325,24 @@ function localIngestContext(m, manifestPath, flags, options = {}) {
   // contradicts it stops rather than guessing, because someone doing that on
   // purpose can say so and someone doing it by accident is about to duplicate a
   // corpus.
-  const declaredSource = declaredUploadSourceFor(m, root);
+  const declaredFolder = declaredUploadFolderFor(m, root, {
+    platform: options.platform || process.platform,
+    ...(options.feedPathApi ? { pathApi: options.feedPathApi } : {}),
+    ...(options.feedFs ? { fs: options.feedFs } : {}),
+  });
+  const declaredSource = declaredFolder?.source || null;
+  const sourceName = assertSourceName(
+    flags.source === true ? null : flags.source || declaredSource || "upload"
+  );
+  const feedPolicy = localUploadFeedPolicy(m, root, sourceName, options);
+  options.onFeedIngestDecision?.(Object.freeze({
+    outcome: feedPolicy.outcome,
+    source: sourceName,
+    reason: feedPolicy.reason,
+  }));
+  if (feedPolicy.outcome === "refused") {
+    die(`${feedPolicy.reason}. Nothing was read, sent, or removed.`);
+  }
   if (sourceExplicit && declaredSource && flags.source.trim() !== declaredSource) {
     die(
       `this manifest files "${root}" under source "${declaredSource}", but --source says ` +
@@ -12325,15 +12352,21 @@ function localIngestContext(m, manifestPath, flags, options = {}) {
         `  Drop --source to use the declared name, or pass --source "${declaredSource}" to confirm it.`
     );
   }
-  const sourceName = assertSourceName(
-    flags.source === true ? null : flags.source || declaredSource || "upload"
-  );
+  const feedMode = feedPolicy.feedMode;
+  const appendOnlySource = feedPolicy.appendOnlySource;
+  const feedExclusions = feedMode ? m?.corpora?.upload?.exclude ?? [] : [];
+  if (!Array.isArray(feedExclusions) || feedExclusions.some((value) => typeof value !== "string" || !value.trim())) {
+    die("corpora.upload.exclude must be an array of non-empty folder names or globs.");
+  }
   return {
     localRemovalApproval,
     root,
     sourceExplicit,
     declaredSource,
     sourceName,
+    feedMode,
+    appendOnlySource,
+    feedExclusions,
     dry: !!flags["dry-run"],
     retired: retiredDecision.retired,
     statePath: canonicalSourceIngestStatePath({ manifestPath, sourceName }),
@@ -12366,6 +12399,9 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     sourceExplicit,
     declaredSource,
     sourceName,
+    feedMode,
+    appendOnlySource,
+    feedExclusions,
     dry,
     retired,
     statePath,
@@ -12396,6 +12432,9 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
       : sourceExplicit ? " (from --source)"
       : " (the default; the manifest declares none for this folder, and --source names it)")
   );
+  if (appendOnlySource) {
+    info("feed safety: append-only; a missing, placeholder, or excluded file never removes Brain content");
+  }
   // What the content sniffer recognised, so the run can say so at the end.
   const messageExportsSeen = new Set();
   // The complete directory walk is the last retired-folder identity defence.
@@ -12409,6 +12448,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     walkResult = walk(root, {
       privatePrefixes,
       retiredDirectoryIdentity: retired?.retired_identity || null,
+      ...(feedMode ? { feedMode: true, exclude: feedExclusions } : {}),
     });
   } catch (error) {
     if (error?.reason === "LOCAL_FOLDER_RETIRED:contains_retired") {
@@ -12417,6 +12457,8 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     throw error;
   }
   const { files, skipped: walkSkips, complete: walkComplete } = walkResult;
+  const placeholderCount = walkSkips.filter((skip) => skip?.reason_code === "local_feed_placeholder").length;
+  const exclusionCount = walkSkips.filter((skip) => skip?.adjudication === "feed_exclusion").length;
   info(`${files.length} candidate file(s), ${walkSkips.length} skipped during the walk`);
   if (privatePrefixes.length) {
     info(`private prefixes enforced: ${privatePrefixes.join(", ")}`);
@@ -12513,7 +12555,9 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
 
   const skips = [...walkSkips];
   const notes = [];
-  const adjudicatedRemovals = localWalkRemovalCandidates(walkSkips, previouslyKnownKeys);
+  const adjudicatedRemovals = appendOnlySource
+    ? { policy: [], intentional: [] }
+    : localWalkRemovalCandidates(walkSkips, previouslyKnownKeys);
   const privateRemovalKeys = adjudicatedRemovals.policy;
   const intentionalRemovalKeys = new Set(adjudicatedRemovals.intentional);
   const adjudicatedRemovalSet = new Set([...privateRemovalKeys, ...intentionalRemovalKeys]);
@@ -12521,7 +12565,12 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   const missingScannerKeys = [...previouslyKnownKeys].filter(
     (key) => !candidateLocalKeys.has(key) && !adjudicatedRemovalSet.has(key)
   );
-  if (scannerPolicyChanged && missingScannerKeys.length) {
+  if (scannerPolicyChanged && missingScannerKeys.length && appendOnlySource) {
+    warn(
+      `${missingScannerKeys.length} previously-indexed feed file(s) are not present. ` +
+        "Their Brain content is preserved and no removal was planned."
+    );
+  } else if (scannerPolicyChanged && missingScannerKeys.length) {
     // A dry run previews rather than acts, but it must preview the actual
     // outcome. This gate used to be skipped outright under --dry-run, so the
     // one command an owner reaches for to see what WOULD happen said nothing
@@ -12561,6 +12610,11 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     if (raw !== normalized) candidateLocalKeys.add(raw);
   }
   addLocalPathAliases(candidateLocalKeys, walkSkips, "path");
+  if (appendOnlySource) {
+    // A feed is a landing inbox, not a mirror. Keep every previously accepted
+    // identity in the active set even when the owner moves the source file.
+    for (const key of previouslyKnownKeys) candidateLocalKeys.add(key);
+  }
   // A skipped link stands in for a whole subtree, so exact-path protection is
   // not enough: every key that was previously indexed UNDER it must be shielded
   // too, or the first run after a junction appears would read those children as
@@ -12587,7 +12641,9 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // stopped the run above. Getting this wrong in the other direction is what
   // an unattended lane must never do: a folder that mounted empty would
   // otherwise read as "the client deleted everything".
-  const vanishedRemovalKeys = flags.limit
+  const vanishedRemovalKeys = appendOnlySource
+    ? []
+    : flags.limit
     ? []
     : removedSinceLastRun(previouslyKnownKeys, protectedLocalSkipKeys)
       .filter((key) => !adjudicatedRemovalSet.has(key));
@@ -12753,14 +12809,17 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
       scanned += group.length;
     }
     process.stdout.write("\r");
-    await applyDriveRemovals({
-      uids: [...new Set([...privateRemovalKeys, ...intentionalRemovalKeys])].map((key) => `${sourceName}:${key}`),
-      base, adminKey, state, dryRun: true, label: "local source truth",
-    });
-    await applyDriveRemovals({
-      uids: vanishedRemovalKeys.map((key) => `${sourceName}:${key}`),
-      base, adminKey, state, dryRun: true, label: "Drive deletion",
-    });
+    const applyPreparedRemovals = options.applyDriveRemovals ?? applyDriveRemovals;
+    if (!appendOnlySource) {
+      await applyPreparedRemovals({
+        uids: [...new Set([...privateRemovalKeys, ...intentionalRemovalKeys])].map((key) => `${sourceName}:${key}`),
+        base, adminKey, state, dryRun: true, label: "local source truth",
+      });
+      await applyPreparedRemovals({
+        uids: vanishedRemovalKeys.map((key) => `${sourceName}:${key}`),
+        base, adminKey, state, dryRun: true, label: "Drive deletion",
+      });
+    }
     info(`${scanned} document(s) would be sent; ${unchanged} unchanged; ${skips.length} not indexed; ${tally.failed} failed`);
     reportNotes(notes);
     console.log("");
@@ -12776,7 +12835,14 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     // dry_run is stated on the returned shape rather than left to be inferred
     // from a zero, so a sweep reporting this leg can never call a preview a load.
     assertNoIngestFailures(tally, { noun: "file" });
-    return { dry_run: true, would_send: scanned, unchanged, skipped: skips.length, failed: 0 };
+    return {
+      dry_run: true,
+      would_send: scanned,
+      unchanged,
+      skipped: skips.length,
+      failed: 0,
+      ...(feedMode ? { placeholders: placeholderCount, excluded: exclusionCount } : {}),
+    };
   }
 
   // Routine ingest is a data-plane operation. Once setup has saved the live
@@ -12907,81 +12973,81 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // a family that exists in D1. This matters most for the unattended folder
   // lane, where a missing File Provider mount can otherwise look like the
   // owner deleted everything.
-  const storedLocalFamilies = await listPreparedSourceFamilies({
-    base, adminKey, source: sourceName,
-  });
-  const localRemovalPlan = buildDriveRemovalPlan({
-    storedFamilies: storedLocalFamilies,
-    activeFamilies: [...protectedLocalSkipKeys].map((key) => `${sourceName}:${key}`),
-    policyCandidates: privateRemovalKeys.map((key) => `${sourceName}:${key}`),
-    // A lost deletion response is re-planned against current authenticated
-    // truth. Restoration wins for this category, while a still-current policy
-    // or intentional refusal is assigned to its earlier, stronger category.
-    vanishedCandidates: [
-      ...vanishedRemovalKeys.map((key) => `${sourceName}:${key}`),
-      ...pendingLocalUids,
-    ],
-    intentionalCandidates: [...intentionalRemovalKeys].map((key) => `${sourceName}:${key}`),
-  });
-  // A local synced folder is not Google Drive. The review-required message
-  // this throws on an oversized plan used to say "Drive cleanup" regardless
-  // of source, which misnames the thing an owner is being asked to approve.
-  assertDriveRemovalPlanSafe(localRemovalPlan, localRemovalApproval, { sourceLabel: "Folder" });
-  if (localRemovalPlan.total) {
-    const percent = (localRemovalPlan.ratio * 100).toFixed(1);
-    const disposition = localRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-    info(`folder cleanup plan ${disposition}: ${localRemovalPlan.total} of ${localRemovalPlan.stored} loaded documents (${percent}%)`);
-  }
+  if (!appendOnlySource) {
+    const storedLocalFamilies = await listPreparedSourceFamilies({
+      base, adminKey, source: sourceName,
+    });
+    const localRemovalPlan = buildDriveRemovalPlan({
+      storedFamilies: storedLocalFamilies,
+      activeFamilies: [...protectedLocalSkipKeys].map((key) => `${sourceName}:${key}`),
+      policyCandidates: privateRemovalKeys.map((key) => `${sourceName}:${key}`),
+      // A lost deletion response is re-planned against current authenticated
+      // truth. Restoration wins for this category, while a still-current policy
+      // or intentional refusal is assigned to its earlier, stronger category.
+      vanishedCandidates: [
+        ...vanishedRemovalKeys.map((key) => `${sourceName}:${key}`),
+        ...pendingLocalUids,
+      ],
+      intentionalCandidates: [...intentionalRemovalKeys].map((key) => `${sourceName}:${key}`),
+    });
+    // A local synced folder is not Google Drive. The review-required message
+    // this throws on an oversized plan used to say "Drive cleanup" regardless
+    // of source, which misnames the thing an owner is being asked to approve.
+    assertDriveRemovalPlanSafe(localRemovalPlan, localRemovalApproval, { sourceLabel: "Folder" });
+    if (localRemovalPlan.total) {
+      const percent = (localRemovalPlan.ratio * 100).toFixed(1);
+      const disposition = localRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
+      info(`folder cleanup plan ${disposition}: ${localRemovalPlan.total} of ${localRemovalPlan.stored} loaded documents (${percent}%)`);
+    }
 
-  // Only the exact targets intersected with authenticated storage and covered
-  // by the approval fingerprint may reach the destructive endpoint.
-  const localTruthTargets = [
-    ...localRemovalPlan.targets.source_policy,
-    ...localRemovalPlan.targets.intentional_skip,
-  ];
-  const localRemoval = await applyDriveRemovals({
-    uids: localTruthTargets,
-    base, adminKey, state, dryRun: false, label: "local source truth",
-    assertOwned: assertLockOwned,
-  });
-  saveState(statePath, state);
-
-  const vanishedTargets = localRemovalPlan.targets.source_deleted;
-  let vanishedRemoval = { applied: 0, pending: 0 };
-  if (vanishedTargets.length) {
-    vanishedRemoval = await applyDriveRemovals({
-      uids: vanishedTargets, base, adminKey, state, dryRun: false, label: "Drive deletion",
+    // Only the exact targets intersected with authenticated storage and covered
+    // by the approval fingerprint may reach the destructive endpoint.
+    const localTruthTargets = [
+      ...localRemovalPlan.targets.source_policy,
+      ...localRemovalPlan.targets.intentional_skip,
+    ];
+    const applyPreparedRemovals = options.applyDriveRemovals ?? applyDriveRemovals;
+    await applyPreparedRemovals({
+      uids: localTruthTargets,
+      base, adminKey, state, dryRun: false, label: "local source truth",
       assertOwned: assertLockOwned,
     });
     saveState(statePath, state);
-    if (vanishedRemoval.applied) ok(`${vanishedRemoval.applied} document(s) removed because their file is gone from the folder`);
-  }
 
-  // An accepted HTTP receipt is necessary but not sufficient deletion proof.
-  // Read the authenticated inventory again before advancing local resume state.
-  // If a lost or malformed backend write left a family present, preserve a
-  // retry marker and fail the run instead of recording a clean source.
-  const plannedLocalTargets = [...new Set([...localTruthTargets, ...vanishedTargets])];
-  if (plannedLocalTargets.length) {
-    const afterLocalRemoval = await listPreparedSourceFamilies({
-      base, adminKey, source: sourceName,
-    });
-    const stillStored = plannedLocalTargets.filter((uid) => afterLocalRemoval.has(uid));
-    const failedAt = new Date().toISOString();
-    for (const uid of plannedLocalTargets) {
-      if (afterLocalRemoval.has(uid)) {
-        state.removed = { ...(state.removed || {}), [uid]: failedAt };
-      } else {
-        delete state.done[uid.slice(sourceName.length + 1)];
-        if (state.removed) delete state.removed[uid];
-      }
+    const vanishedTargets = localRemovalPlan.targets.source_deleted;
+    if (vanishedTargets.length) {
+      const vanishedRemoval = await applyPreparedRemovals({
+        uids: vanishedTargets, base, adminKey, state, dryRun: false, label: "Drive deletion",
+        assertOwned: assertLockOwned,
+      });
+      saveState(statePath, state);
+      if (vanishedRemoval.applied) ok(`${vanishedRemoval.applied} document(s) removed because their file is gone from the folder`);
     }
-    saveState(statePath, state);
-    if (stillStored.length) {
-      throw new Error(
-        `${stillStored.length} planned local folder removal(s) remained after exact source-inventory readback. ` +
-          "No completed source state was recorded; re-running will retry them through the same approval gate."
-      );
+
+    // An accepted HTTP receipt is necessary but not sufficient deletion proof.
+    // Read the authenticated inventory again before advancing local resume state.
+    const plannedLocalTargets = [...new Set([...localTruthTargets, ...vanishedTargets])];
+    if (plannedLocalTargets.length) {
+      const afterLocalRemoval = await listPreparedSourceFamilies({
+        base, adminKey, source: sourceName,
+      });
+      const stillStored = plannedLocalTargets.filter((uid) => afterLocalRemoval.has(uid));
+      const failedAt = new Date().toISOString();
+      for (const uid of plannedLocalTargets) {
+        if (afterLocalRemoval.has(uid)) {
+          state.removed = { ...(state.removed || {}), [uid]: failedAt };
+        } else {
+          delete state.done[uid.slice(sourceName.length + 1)];
+          if (state.removed) delete state.removed[uid];
+        }
+      }
+      saveState(statePath, state);
+      if (stillStored.length) {
+        throw new Error(
+          `${stillStored.length} planned local folder removal(s) remained after exact source-inventory readback. ` +
+            "No completed source state was recorded; re-running will retry them through the same approval gate."
+        );
+      }
     }
   }
 
@@ -13018,7 +13084,9 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   // Committing the new scanner fingerprint now would let the next run short-circuit
   // that revision as unchanged, so it would never meet the current scanner. The
   // remote lanes already commit their fingerprint only on a failure-free run.
-  if (tally.failed === 0) state.credential_scanner_fingerprint = scannerFingerprint;
+  if (tally.failed === 0 && !(appendOnlySource && scannerPolicyChanged && missingScannerKeys.length)) {
+    state.credential_scanner_fingerprint = scannerFingerprint;
+  }
   saveState(statePath, state);
 
   const localCoverageGaps = localCoverage.coverageGaps;
@@ -13076,7 +13144,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
 
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
   assertNoIngestFailures(tally, { noun: "file" });
-  await reportBacklog(manifestPath);
+  await (options.reportBacklog ?? reportBacklog)(manifestPath);
   // Returned only so a caller that ran this as one leg of a wider sweep can
   // report a real count instead of "unknown". Reached only after
   // assertNoIngestFailures, so these numbers describe a completed load.
@@ -13087,6 +13155,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     refused: tally.refused,
     scanned,
     skipped: skips.length,
+    ...(feedMode ? { placeholders: placeholderCount, excluded: exclusionCount } : {}),
   };
   } catch (error) {
     // Do not leave a source looking perpetually "indexing" when extraction,
@@ -15066,6 +15135,29 @@ const PROVIDER_LOAD_PROOF_NOTE =
  * manifest filed one folder under two names.
  */
 export function declaredUploadSourceFor(manifest, folderPath) {
+  return declaredUploadFolderFor(manifest, folderPath)?.source || null;
+}
+
+function ordinaryUploadPathMatches(leftPath, rightPath, platform) {
+  const normalize = (value) => String(value || "")
+    .trim()
+    .replace(/[\\/]+$/u, "")
+    .replace(/\\/gu, "/");
+  const left = normalize(leftPath);
+  const right = normalize(rightPath);
+  if (!left || !right) return false;
+  return platform === "win32"
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
+}
+
+function ordinaryUploadFolderMatches(folders, target, platform) {
+  return folders.filter((folder) => folder?.path &&
+    ordinaryUploadPathMatches(folder.path, target, platform));
+}
+
+/** The complete matching upload declaration, including append-only feed policy. */
+export function declaredUploadFolderFor(manifest, folderPath, options = {}) {
   const target = String(folderPath || "").trim();
   if (!target) return null;
   let folders;
@@ -15074,29 +15166,166 @@ export function declaredUploadSourceFor(manifest, folderPath) {
   } catch {
     return null;
   }
-  const same = (a, b) => {
-    const norm = (v) => String(v || "").trim().replace(/[\\/]+$/, "").replace(/\\/g, "/");
-    const left = norm(a); const right = norm(b);
-    if (!left || !right) return false;
-    // Windows paths are case-insensitive; POSIX ones are not.
-    return process.platform === "win32"
-      ? left.toLowerCase() === right.toLowerCase()
-      : left === right;
+  const platform = options.platform || process.platform;
+  // Preserve the historical exact-match contract for ordinary uploads before
+  // applying the deliberately conservative feed identity rules. In
+  // particular, macOS can host a case-sensitive volume where two distinct
+  // declarations differ only by case; folding both would select whichever
+  // source happened to be listed first and expose that source to removals.
+  const exact = ordinaryUploadFolderMatches(folders, target, platform);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) return null;
+
+  const feeds = folders.filter((folder) => folder?.path && folder.feed === true);
+  if (!feeds.length) return null;
+  const identityOptions = {
+    platform,
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    ...(options.pathApi ? { pathApi: options.pathApi } : {}),
+    ...(options.fs ? { fs: options.fs } : {}),
+    ...(options.realpathNative ? { realpathNative: options.realpathNative } : {}),
   };
-  for (const folder of folders) {
-    if (folder?.source && same(folder.path, target)) return String(folder.source);
+  let targetIdentity;
+  try {
+    targetIdentity = comparableFeedPath(target, identityOptions);
+  } catch {
+    return null;
+  }
+  for (const folder of feeds) {
+    let declaredIdentity;
+    try {
+      declaredIdentity = comparableFeedPath(folder.path, identityOptions);
+    } catch {
+      continue;
+    }
+    if (declaredIdentity === targetIdentity) return folder;
+    // Loading a subfolder of a feed cannot downgrade that source to mirror
+    // semantics. Ordinary upload folders keep their historical exact-match
+    // behavior.
+    if (feedPathSameOrInside(target, folder.path, identityOptions)) return folder;
   }
   return null;
 }
 
 export function uploadFoldersOf(corpus) {
-  const declared = corpus?.folders ?? corpus?.paths ?? (corpus?.path ? [corpus.path] : []);
-  if (!Array.isArray(declared)) {
-    throw new Error("corpora.upload.folders must be an array of folder paths");
+  return uploadFolderEntriesOf(corpus).map((entry) => ({
+    path: entry.path,
+    source: entry.source,
+    ...(entry.feed === true ? { feed: true } : {}),
+  }));
+}
+
+function uploadFeedTopologyConflict(manifest, options = {}) {
+  const folders = uploadFoldersOf(manifest?.corpora?.upload);
+  const feeds = folders.map((entry, index) => ({
+    ...entry,
+    index,
+    effectiveSource: String(entry.source || "upload"),
+  })).filter((entry) => entry.feed === true);
+  for (const feed of feeds) {
+    for (const other of folders.map((entry, index) => ({
+      ...entry,
+      index,
+      effectiveSource: String(entry.source || "upload"),
+    }))) {
+      if (feed.index === other.index) continue;
+      if (feed.effectiveSource === other.effectiveSource) {
+        return `append-only feed source "${feed.effectiveSource}" is also assigned to another upload folder`;
+      }
+      if (feed.path && other.path && feedPathsOverlap(feed.path, other.path, options)) {
+        return "an append-only feed overlaps another upload folder";
+      }
+    }
+    const watched = manifest?.corpora?.local_folder;
+    if (watched && typeof watched === "object" && !Array.isArray(watched) &&
+        (watched.enabled === true || watched.path || watched.source || watched.retired_at)) {
+      const watchedSource = String(watched.source || watched.retired_source || "documents");
+      if (watchedSource === feed.effectiveSource) {
+        return `append-only feed source "${feed.effectiveSource}" is also assigned to the watched folder`;
+      }
+      if (feed.path && watched.path && feedPathsOverlap(feed.path, watched.path, options)) {
+        return "an append-only feed overlaps the watched folder";
+      }
+    }
   }
-  return declared.map((entry) => (
-    typeof entry === "string" ? { path: entry, source: null } : { path: entry?.path, source: entry?.source || null }
-  ));
+  return null;
+}
+
+function uploadFolderIdentityConflict(manifest, folderPath, platform) {
+  const matches = ordinaryUploadFolderMatches(
+    uploadFoldersOf(manifest?.corpora?.upload),
+    folderPath,
+    platform,
+  );
+  return matches.length > 1
+    ? "the requested folder ambiguously matches multiple upload declarations"
+    : null;
+}
+
+function localUploadFeedPolicy(manifest, folderPath, sourceName, options = {}) {
+  const identityOptions = {
+    platform: options.platform || process.platform,
+    ...(options.feedPathApi ? { pathApi: options.feedPathApi } : {}),
+    ...(options.feedFs ? { fs: options.feedFs } : {}),
+  };
+  let conflict;
+  try {
+    conflict = uploadFolderIdentityConflict(manifest, folderPath, identityOptions.platform) ||
+      uploadFeedTopologyConflict(manifest, identityOptions);
+  } catch (error) {
+    return {
+      outcome: "refused",
+      reason: `the upload folder configuration could not be read: ${String(error?.message || error)}`,
+      feedMode: false,
+      appendOnlySource: true,
+    };
+  }
+  if (conflict) return { outcome: "refused", reason: conflict, feedMode: false, appendOnlySource: true };
+  const feeds = uploadFoldersOf(manifest?.corpora?.upload)
+    .filter((entry) => entry.feed === true)
+    .map((entry) => ({ ...entry, effectiveSource: String(entry.source || "upload") }));
+  const sourceOwnedByFeed = feeds.some((feed) => feed.effectiveSource === sourceName);
+  const containingFeeds = feeds.filter((feed) => feed.path &&
+    feedPathSameOrInside(folderPath, feed.path, identityOptions));
+  const containedFeeds = feeds.filter((feed) => feed.path &&
+    feedPathSameOrInside(feed.path, folderPath, identityOptions));
+  if (containingFeeds.length > 1 || containedFeeds.length > 1) {
+    return {
+      outcome: "refused",
+      reason: "the requested folder has an ambiguous relationship to multiple append-only feeds",
+      feedMode: false,
+      appendOnlySource: true,
+    };
+  }
+  if (containingFeeds.length === 1) {
+    const feed = containingFeeds[0];
+    if (feed.effectiveSource !== sourceName) {
+      return {
+        outcome: "refused",
+        reason: `this path belongs to append-only feed source "${feed.effectiveSource}", not "${sourceName}"`,
+        feedMode: false,
+        appendOnlySource: true,
+      };
+    }
+    return { outcome: "append-only", reason: null, feedMode: true, appendOnlySource: true };
+  }
+  if (containedFeeds.length === 1) {
+    return {
+      outcome: "refused",
+      reason: "the requested folder is a parent of an append-only feed",
+      feedMode: false,
+      appendOnlySource: true,
+    };
+  }
+  if (sourceOwnedByFeed) {
+    return {
+      outcome: "refused",
+      reason: `append-only feed source "${sourceName}" cannot be loaded from another folder`,
+      feedMode: false,
+      appendOnlySource: true,
+    };
+  }
+  return { outcome: "mirror", reason: null, feedMode: false, appendOnlySource: false };
 }
 
 /**
@@ -15315,6 +15544,15 @@ export function loadSourceRegistry(commands = {}) {
       dailyClass: "machine-pull",
       dailyOwner: "daily-task",
       legs: ({ m, manifestPath, flags }) => {
+        const feedConflict = uploadFeedTopologyConflict(m);
+        if (feedConflict) {
+          return {
+            unavailable: {
+              reason: feedConflict,
+              fix: "give every append-only feed one distinct source and one non-overlapping folder",
+            },
+          };
+        }
         const folders = uploadFoldersOf(m?.corpora?.upload);
         if (!folders.length) {
           return {
@@ -25429,12 +25667,23 @@ function cloneManifest(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-/** Turn off or inspect the one watched-folder declaration without deleting data. */
+/** Manage append-only landing feeds and the older one-folder watched lane. */
 export async function cmdFolder(manifestPath, argv = process.argv.slice(4), options = {}) {
-  if (!manifestPath || !Array.isArray(argv) || argv.length !== 1 || !["off", "status"].includes(argv[0])) {
-    die("usage: brain folder <manifest> off|status");
+  const usage = "usage: brain folder <manifest> add --path <absolute> --source <name>|create-feeds|off|status";
+  if (!manifestPath || !Array.isArray(argv) || !argv.length ||
+      !["add", "create-feeds", "off", "status"].includes(argv[0])) {
+    die(renderCliCommands(usage));
   }
   const action = argv[0];
+  if (["create-feeds", "off", "status"].includes(action) && argv.length !== 1) die(renderCliCommands(usage));
+  let addFlags = null;
+  if (action === "add") {
+    addFlags = parseFlags(argv.slice(1));
+    assertKnownFlags(addFlags, ["path", "source"], "brain folder add");
+    if (argv.length !== 5 || typeof addFlags.path !== "string" || typeof addFlags.source !== "string") {
+      die(renderCliCommands(usage));
+    }
+  }
   const platform = options.platform ?? process.platform;
   let initialManifestBytes;
   let m;
@@ -25482,6 +25731,21 @@ export async function cmdFolder(manifestPath, argv = process.argv.slice(4), opti
       "To undo this, restore the backup file as the manifest, then run: " +
         `brain schedule ${manifestPath} --install --folder`,
     ));
+    const feeds = declaredFeeds(m).map((feed) => inspectFeedFolder(feed, {
+      platform,
+      ...(options.feedFs ? { fs: options.feedFs } : {}),
+      ...(options.feedPathApi ? { pathApi: options.feedPathApi } : {}),
+    }));
+    if (!feeds.length) {
+      info("No Brain feeds are declared.");
+    } else {
+      for (const feed of feeds) {
+        const existence = !feed.exists ? "missing" : feed.readable ? "exists" : "unreadable";
+        const count = feed.fileCount === null ? "count unavailable" : `${feed.fileCount} ${feed.fileCount === 1 ? "file" : "files"}`;
+        const newest = feed.newestFileTime || "none";
+        info(`Feed ${feed.source} | ${existence} | ${count} | newest ${newest} | ${feed.path}`);
+      }
+    }
     return Object.freeze({
       action,
       declared: Boolean(local && typeof local === "object"),
@@ -25491,7 +25755,112 @@ export async function cmdFolder(manifestPath, argv = process.argv.slice(4), opti
       path: retired?.retired_path || local?.path || null,
       scheduler,
       backupPath: newestBackupPath,
+      feeds: Object.freeze(feeds),
     });
+  }
+
+  const prepareFeed = (manifest, path, source, extra = {}) => prepareFeedAddition(
+    manifest,
+    path,
+    assertSourceName(source),
+    {
+      platform,
+      ...(options.feedFs ? { fs: options.feedFs } : {}),
+      ...(options.feedPathApi ? { pathApi: options.feedPathApi } : {}),
+      ...(options.onFeedDecision ? { onDecision: options.onFeedDecision } : {}),
+      ...extra,
+    },
+  );
+  const writeFeedManifest = (intended, now) => (options.writeManifestAtomically ?? writeManifestAtomically)(
+    manifestPath,
+    intended,
+    {
+      platform,
+      filesystemPlatform: options.filesystemPlatform ?? process.platform,
+      now: () => now,
+      backupTag: "folder-feed",
+      includeMilliseconds: true,
+      operationLabel: "folder feed update",
+      ...(options.manifestWriteOptions || {}),
+      expectedOriginalBytes: initialManifestBytes,
+    },
+  );
+
+  if (action === "add") {
+    const prepared = prepareFeed(m, addFlags.path, addFlags.source);
+    if (!prepared.changed) {
+      info(`Feed already added: ${prepared.path} (source: ${prepared.source}). Nothing changed.`);
+      return Object.freeze({ action, changed: false, path: prepared.path, source: prepared.source, backupPath: null });
+    }
+    // Re-read every named component immediately before the atomic manifest
+    // write. A directory replaced by a link after preview must not inherit the
+    // preview's approval.
+    const revalidated = prepareFeed(m, addFlags.path, addFlags.source, { onDecision: undefined });
+    const now = options.now ? options.now() : new Date();
+    const writeResult = writeFeedManifest(revalidated.manifest, now);
+    ok(`Added feed: ${revalidated.path} (source: ${revalidated.source})`);
+    info("Files removed from this folder stay in your Brain.");
+    return Object.freeze({
+      action,
+      changed: true,
+      path: revalidated.path,
+      source: revalidated.source,
+      backupPath: writeResult.backupPath,
+      approvalCount: 1,
+    });
+  }
+
+  if (action === "create-feeds") {
+    const home = options.home || homedir();
+    const parent = join(home, "Brain Feeds");
+    const requested = [
+      { path: join(parent, "Client files"), source: "client_files" },
+      { path: join(parent, "Transcripts"), source: "transcripts" },
+    ];
+    let previewManifest = m;
+    const preview = requested.map((feed) => {
+      const result = prepareFeed(previewManifest, feed.path, feed.source, { allowMissing: true });
+      previewManifest = result.manifest;
+      return result;
+    });
+    if (preview.every((result) => !result.changed)) {
+      info("Brain feeds are already declared. Nothing changed.");
+      return Object.freeze({ action, changed: false, approvalCount: 1, backupPath: null });
+    }
+
+    let directories;
+    try {
+      directories = createDefaultFeedDirectories({
+        platform,
+        home,
+        ...(options.feedFs ? { fs: options.feedFs } : {}),
+        ...(options.feedPathApi ? { pathApi: options.feedPathApi } : {}),
+        allowNonEmpty: preview.filter((result) => !result.changed).map((result) => result.path),
+      });
+      let intended = m;
+      const additions = [];
+      for (const feed of requested) {
+        const result = prepareFeed(intended, feed.path, feed.source);
+        intended = result.manifest;
+        additions.push(result);
+      }
+      const now = options.now ? options.now() : new Date();
+      const writeResult = writeFeedManifest(intended, now);
+      for (const result of additions) {
+        if (result.changed) ok(`Created feed folder: ${result.path} (source: ${result.source})`);
+      }
+      info("Brain feeds ready: 2 folders are enabled. Files removed from these folders stay in your Brain.");
+      return Object.freeze({
+        action,
+        changed: true,
+        paths: Object.freeze(additions.map((result) => result.path)),
+        backupPath: writeResult.backupPath,
+        approvalCount: 1,
+      });
+    } catch (error) {
+      directories?.rollback?.();
+      throw error;
+    }
   }
 
   if (!local || typeof local !== "object" ||
@@ -31347,8 +31716,11 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
                                            local folder declared in corpora.local_folder (macOS)
     brain schedule   <manifest> --install --provider <id>  install unattended refresh for a
                                            connected OAuth provider (macOS)
+    brain folder     <manifest> add --path <absolute> --source <name>
+                                           add one validated append-only landing feed
+    brain folder     <manifest> create-feeds  create two empty Brain Feeds landing folders
     brain folder     <manifest> off        turn off the watched folder without removing anything
-    brain folder     <manifest> status     show whether the watched folder is active or retired
+    brain folder     <manifest> status     show watched-folder state and counts-only feed status
     brain support    [--preview|--export <file>]  inspect private local issue notes
     brain support    --explain <issue-code>       plain-language recovery for a typed issue
 
@@ -31381,7 +31753,9 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain schedule   <manifest> --remove   remove it and preserve its logs
     brain schedule   <manifest> --folder   inspect (or --install/--remove) the watched folder lane
     brain schedule   <manifest> --provider <id>  inspect (or --install/--remove) that provider lane
-    brain folder     <manifest> off|status turn off or inspect the watched folder
+    brain folder     <manifest> add --path <absolute> --source <name>  add one landing feed
+    brain folder     <manifest> create-feeds  create the two standard empty landing feeds
+    brain folder     <manifest> off|status turn off or inspect folders and feed status
     brain disconnect imessage <manifest>   stop live capture, flush open sessions, remove the agent
     brain disconnect whatsapp <manifest>   stop the capture daemon and its drain, flush, remove both agents
     brain disconnect zoom     <manifest>   remove the Zoom secrets so the webhook refuses deliveries

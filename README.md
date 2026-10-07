@@ -1119,6 +1119,14 @@ claiming the original enumeration as the removal count.
   is what makes "export it into this folder and forget about it" true for a
   folder that is not inside Google Drive. Hourly by default, so it is a drop
   box, not a live feed. Elsewhere, run the same load yourself.
+- **Brain Feeds are append-only landing folders.** Add an existing local folder
+  with `brain folder <manifest> add --path <absolute> --source <name>`, or use
+  `brain folder <manifest> create-feeds` to make two empty folders under your
+  local home. The command refuses cloud-managed roots, links, retired roots,
+  overlaps, and missing add paths before changing settings. A placeholder,
+  excluded folder, or file moved away never removes content already loaded into
+  the Brain. Check counts and newest-file times without exposing file names with
+  `brain folder <manifest> status`.
 - **The admin key is operator-only; people use passkeys.** An owner passkey has
   the owner's full workspace. A scoped person sees only exact documents granted
   to that session, and an unknown or unavailable grant fails closed. These

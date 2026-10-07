@@ -1377,6 +1377,25 @@ Cross-install collection is deliberately a later, opt-in feature. If built, it
 needs a separate write-only support credential and an exact payload preview. It
 must never reuse a brain admin key or a client's Cloudflare token.
 
+### Append-only Brain Feeds
+
+`brain folder <manifest> add --path <absolute> --source <name>` records one
+validated existing folder as `{path, source, feed: true}` under
+`corpora.upload.folders`. `create-feeds` creates the two empty local-home
+landing folders and records them in one atomic manifest update. Both paths
+refuse cloud-managed roots, links or reparse points, retired roots, parent or
+child overlap, missing add paths, and more than six feeds. The exact manifest
+bytes are backed up, replaced through a same-directory atomic rename, and read
+back before success is reported. An identical add is a no-op.
+
+Feed ingest reuses the ordinary upload loader and source locks, but it does not
+reuse the watched-folder mirror's removal phase. Missing prior files are kept
+in the active identity set and no whole-document removal plan or endpoint is
+entered. Zero-byte placeholders and `corpora.upload.exclude` folder names or
+globs are counted skips. Existing watched folders keep their mirror semantics,
+including guarded deletion. `planLoad` produces one upload leg per feed, so
+daily scheduling remains manifest-derived.
+
 ---
 
 ## What remains unproven or not built

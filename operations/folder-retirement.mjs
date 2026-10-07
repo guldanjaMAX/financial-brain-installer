@@ -93,9 +93,11 @@ function defaultSyncDirectory(directory, io, platform = process.platform) {
   }
 }
 
-function folderOffTimestamp(date) {
+function folderOffTimestamp(date, includeMilliseconds = false) {
   const iso = date.toISOString();
-  return iso.replace(/[-:]/gu, "").replace(/\.\d{3}Z$/u, "Z");
+  return includeMilliseconds
+    ? iso.replace(/[-:]/gu, "").replace(".", "")
+    : iso.replace(/[-:]/gu, "").replace(/\.\d{3}Z$/u, "Z");
 }
 
 function unlinkIfPresent(io, path) {
@@ -123,6 +125,11 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
     throw new TypeError("the folder-off timestamp is invalid");
   }
   const absolute = resolve(manifestPath);
+  const backupTag = options.backupTag || options.backupLabel || "folder-off";
+  const operationLabel = options.operationLabel || "folder off";
+  if (!/^[a-z0-9][a-z0-9-]*$/u.test(backupTag)) {
+    throw new TypeError("the manifest backup tag is invalid");
+  }
   const expectedOriginalBytes = options.expectedOriginalBytes === undefined
     ? null
     : options.expectedOriginalBytes;
@@ -160,21 +167,18 @@ export function writeManifestAtomically(manifestPath, intendedManifest, options 
 
   const mode = Number(opened.mode) & 0o7777;
   const intendedBytes = Buffer.from(`${JSON.stringify(intendedManifest, null, 2)}\n`, "utf8");
-  const stamp = folderOffTimestamp(now);
-  const backupLabel = typeof options.backupLabel === "string" && /^[a-z][a-z0-9-]{1,40}$/u.test(options.backupLabel)
-    ? options.backupLabel
-    : "folder-off";
-  const backupPath = `${absolute}.before-${backupLabel}-${stamp}`;
+  const stamp = folderOffTimestamp(now, options.includeMilliseconds === true);
+  const backupPath = `${absolute}.before-${backupTag}-${stamp}`;
   const nonce = (options.randomBytes || randomBytes)(12).toString("hex");
-  const temporaryPath = `${directory}/.${basename(absolute)}.${backupLabel}-${nonce}.tmp`;
-  const rollbackPath = `${directory}/.${basename(absolute)}.${backupLabel}-${nonce}.rollback.tmp`;
+  const temporaryPath = `${directory}/.${basename(absolute)}.${backupTag}-${nonce}.tmp`;
+  const rollbackPath = `${directory}/.${basename(absolute)}.${backupTag}-${nonce}.rollback.tmp`;
   const syncDirectory = options.syncDirectory ||
     ((path) => defaultSyncDirectory(path, io, filesystemPlatform));
   let backupCreated = false;
   let renamed = false;
   const concurrentEditError = () => {
     const error = new Error(
-      "The Brain manifest changed after folder off began, so nothing was replaced.",
+      `The Brain manifest changed after ${operationLabel} began, so nothing was replaced.`,
     );
     error.code = "FOLDER_MANIFEST_CHANGED";
     return error;

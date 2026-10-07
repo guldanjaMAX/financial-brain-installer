@@ -488,16 +488,71 @@ export class RetiredDirectoryEncounteredError extends Error {
   }
 }
 
+function feedExclusionMatcher(patterns = []) {
+  const rules = (patterns || []).map((value) => {
+    const raw = String(value).trim().replace(/\\/gu, "/").replace(/^\.\//u, "");
+    const folderOnly = raw.endsWith("/");
+    const pattern = raw.replace(/^\/+|\/+$/gu, "");
+    const hasSlash = pattern.includes("/");
+    const hasGlob = /[*?]/u.test(pattern);
+    if (!pattern || pattern.length > 256) {
+      throw new Error("feed exclusions must be non-empty globs or folder names of at most 256 characters");
+    }
+    let expression = "";
+    for (let index = 0; index < pattern.length; index++) {
+      const character = pattern[index];
+      if (character === "*" && pattern[index + 1] === "*") {
+        if (pattern[index + 2] === "/") {
+          // A globstar directory segment includes zero directories. Without
+          // the optional slash, **/*.txt skipped nested files but admitted a
+          // root-level .txt file selected by the same owner exclusion.
+          expression += "(?:.*/)?";
+          index += 2;
+        } else {
+          expression += ".*";
+          index += 1;
+        }
+      } else if (character === "*") {
+        expression += "[^/]*";
+      } else if (character === "?") {
+        expression += "[^/]";
+      } else {
+        expression += character.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      }
+    }
+    return {
+      folderOnly,
+      hasSlash,
+      hasGlob,
+      plain: pattern,
+      regex: new RegExp(`^${expression}${folderOnly ? "(?:/.*)?" : ""}$`, "u"),
+    };
+  });
+  return (relativePath, isDirectory) => {
+    const normalized = String(relativePath || "").replace(/\\/gu, "/").replace(/^\.\//u, "").replace(/\/+$/u, "");
+    const segments = normalized.split("/").filter(Boolean);
+    return rules.some((rule) => {
+      if (rule.folderOnly && !isDirectory) return false;
+      if (!rule.hasSlash && !rule.hasGlob) return segments.includes(rule.plain);
+      if (!rule.hasSlash && rule.hasGlob) return segments.some((segment) => rule.regex.test(segment));
+      return rule.regex.test(normalized);
+    });
+  };
+}
+
 export function walk(root, {
   privatePrefixes = [],
   maxBytes = MAX_FILE_BYTES,
   archiveBytes = MAX_ARCHIVE_BYTES,
   retiredDirectoryIdentity = null,
+  feedMode = false,
+  exclude = [],
 } = {}) {
   const files = [];
   const skipped = [];
   let complete = true;
   const prefixes = privatePrefixes.map((p) => p.toLowerCase());
+  const isFeedExcluded = feedExclusionMatcher(feedMode ? exclude : []);
 
   let rootApproval;
   try {
@@ -578,6 +633,18 @@ export function walk(root, {
         continue;
       }
       if (e.isDirectory()) {
+        if (feedMode && isFeedExcluded(rel, true)) {
+          skipped.push({
+            path: rel,
+            reason: "matched corpora.upload.exclude",
+            subtree: true,
+            coverage_gap: false,
+            adjudication: "feed_exclusion",
+            reason_code: "source_policy_excluded",
+            scope: "subtree",
+          });
+          continue;
+        }
         if (SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue;
         if (isPrivate(rel)) {
           skipped.push({
@@ -601,6 +668,17 @@ export function walk(root, {
       // would bury the real failures in noise.
       if (e.name.startsWith("._")) continue;
       if (JUNK_FILES.has(e.name.toLowerCase())) continue;
+      if (feedMode && isFeedExcluded(rel, false)) {
+        skipped.push({
+          path: rel,
+          reason: "matched corpora.upload.exclude",
+          coverage_gap: false,
+          adjudication: "feed_exclusion",
+          reason_code: "source_policy_excluded",
+          scope: "file",
+        });
+        continue;
+      }
       if (isPrivate(rel)) {
         skipped.push({
           path: rel,
@@ -643,10 +721,10 @@ export function walk(root, {
       if (size === 0) {
         const emptySkip = {
           path: rel,
-          reason: "file is empty",
+          reason: feedMode ? "placeholder or empty cloud stub was not loaded" : "file is empty",
           coverage_gap: false,
-          adjudication: "empty_content",
-          reason_code: "empty_file",
+          adjudication: feedMode ? "preserve_placeholder" : "empty_content",
+          reason_code: feedMode ? "local_feed_placeholder" : "empty_file",
           scope: "file",
           original_state: "empty",
         };

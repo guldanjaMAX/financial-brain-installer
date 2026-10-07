@@ -495,6 +495,51 @@
               "type": "boolean",
               "default": false
             },
+            "folders": {
+              "type": "array",
+              "description": "Local upload roots. A string is the legacy unnamed form. New Brain feeds use an object with path, source, and feed true so daily load preserves source identity and applies append-only feed safety.",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "path",
+                      "source"
+                    ],
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "An absolute local folder path selected by the owner. brain folder add validates existence, cloud-root boundaries, links, retired roots, and overlap before writing it."
+                      },
+                      "source": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]*$",
+                        "maxLength": 64
+                      },
+                      "feed": {
+                        "type": "boolean",
+                        "description": "True marks an owner landing feed as append-only: missing, placeholder, and excluded files never remove content already loaded into the Brain."
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "exclude": {
+              "type": "array",
+              "description": "Folder names or path globs skipped by feed-folder walks. Exclusions are counted, never loaded, and never treated as deletion evidence for append-only feeds.",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "uniqueItems": true,
+              "default": []
+            },
             "retired_at": {
               "type": "string",
               "format": "date-time",

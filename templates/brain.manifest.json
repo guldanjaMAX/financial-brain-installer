@@ -317,8 +317,17 @@
       ]
     },
     "upload": {
-      "_comment": "Manual drop zone. Setup enables and records it after a folder is chosen; until then there is no folder to load.",
-      "enabled": false
+      "_comment": [
+        "Manual upload roots and append-only Brain feeds. Add a feed with",
+        "brain folder <manifest> add --path <absolute> --source <name>, or",
+        "create both empty home landing folders with brain folder <manifest>",
+        "create-feeds. The command validates the folder and writes feed: true.",
+        "Files that disappear from a feed never remove Brain content. Folder",
+        "names or globs in exclude are skipped and counted."
+      ],
+      "enabled": false,
+      "folders": [],
+      "exclude": []
     },
     "local_folder": {
       "_comment": [

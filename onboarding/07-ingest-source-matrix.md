@@ -41,6 +41,7 @@ in ADR 003; they are not claimed as current connector behavior.
 | Direct upload and API push | **Built.** Live-service smoke proof exists with a synthetic corpus; no authorized real-document receipt is accepted yet |
 | A custom read-only business API | **Built, locally proven only.** The owner's Worker fetches declared HTTPS JSON endpoints, stages one durable full-snapshot job, and advances one bounded slice per cron tick. Its bearer secret must use the dedicated `CUSTOM_API_TOKEN_` namespace; deploy, connect, and runtime fetch refuse every other binding name. Compact rows keep exact hashes, historical missing rows are excluded from current totals, and readable documents include monthly cross-store plus per-store rollups. Missing revenue streams are named at the store-month boundary in both layouts rather than rendered as zero. Inventory and cost search contains only the current snapshot; stored rows keep prior values as effective-dated history, with no daily history documents. A partial refusal carries and visibly marks the last verified value without advancing its last-seen time, while source status says ready with warnings and reports the count. The identical-response shortcut proves current row chunks and every mapped live document; missing documents regenerate, and status counts exclude staged or superseded versions. Saved state is reported separately from source-specific empty-outbox meaning readiness. Windows defaults to clipboard key entry with clearing and secret-name-only verification; macOS supports the same mode explicitly and retains the hidden prompt by default. Masked Cloudflare dashboard entry remains the fallback. `brain load` states this server-managed source as a skip; preview or run it with `brain custom-api`. No provider endpoint or deployed Brain has crossed this build, and rows do not feed the financial ledger or map yet |
 | A watched folder on your own machine | **Built.** Name one folder in your manifest and it reloads itself: the existing faster per-source LaunchAgent owns it on macOS when installed, otherwise the per-Brain daily task can own it on macOS or Windows. New files load, edited files reload, and deleted files use the guarded removal plan. Linux remains manual. Real multi-tick sleep, wake, and deletion behavior is not yet field-proven |
+| Brain Feeds landing folders | **Built locally, field proof pending.** `brain folder <manifest> add --path <absolute> --source <name>` adds an existing owner-selected folder, or `brain folder <manifest> create-feeds` creates two empty folders under the owner's local home. Cloud-managed roots, links, retired roots, overlapping feeds, missing add paths, and a seventh feed are refused before the manifest changes. Feed loads are append-only: placeholders and `corpora.upload.exclude` matches are counted and skipped, and a missing file never removes Brain content. `brain folder <manifest> status` reports only source, existence, file count, and newest-file time, never file names. The daily load plan reads each enabled entry from `corpora.upload.folders` as a separate upload pull. |
 | Gmail | Built: `brain connect google --scopes gmail`, then `brain ingest --from gmail`. Incremental via historyId; bulk mail excluded by default. Not yet run against a real mailbox |
 | Any other mailbox, over IMAP (Yahoo, Fastmail, iCloud, a host) | Built: `brain connect imap`, then `brain ingest --from imap`. Read-only, so nothing is marked read. Inbox and Sent by default; Junk, Trash and Drafts skipped; **an Archive folder is NOT read**, and a folder whose role cannot be identified is not read either. Every folder is named in the run with the true reason it was or was not read. Incremental via UIDVALIDITY plus a per-folder UID watermark. Bulk mail is filtered locally on headers, which is weaker than Gmail's. **Never yet run against a real mailbox** |
 | Google Calendar | Built and wired: `brain connect google --scopes calendar`, then `brain ingest --from calendar`. Incremental via Google's own sync token; cancelled events are removed, not left behind. Not yet run against a real calendar |
@@ -402,6 +403,27 @@ brain schedule <manifest> --remove --folder     remove it, keep its logs
 - **`_Private` prefixes still apply**, exactly as everywhere else.
 
 The load is the named source you chose, so `brain sources` shows it and `brain forget <manifest> --source documents` removes exactly what it loaded.
+
+### Brain Feeds landing folders
+
+Brain Feeds are separate from the watched-folder mirror above. They are safe
+landing inboxes for owner-chosen files and transcripts. They are append-only:
+moving a source file away does not remove the document already in the Brain.
+
+```text
+brain folder <manifest> add --path <absolute> --source <name>
+brain folder <manifest> create-feeds
+brain folder <manifest> status
+```
+
+`create-feeds` makes empty `Brain Feeds/Client files` and
+`Brain Feeds/Transcripts` folders under the local home and records the sources
+`client_files` and `transcripts`. It does not move or classify any existing
+material. `corpora.upload.exclude` accepts folder names or globs. A matched
+subtree and an empty placeholder are both counted and skipped without becoming
+deletion evidence. The same enabled manifest entries are ordinary `upload`
+legs in `brain load`, so a manifest-derived daily runner does not need a second
+folder list.
 
 ---
 
