@@ -514,6 +514,7 @@ const expected = [
   "operations/admin-key-file.mjs",
   "operations/admin-key-persistence.mjs",
   "operations/brain-lifecycle-lock.mjs",
+  "operations/daily-refresh-observation.mjs",
   "operations/daily-refresh-plan.mjs",
   "operations/daily-refresh-run.mjs",
   "operations/daily-refresh-scheduler.mjs",

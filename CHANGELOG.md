@@ -45,7 +45,12 @@ write a response.
   update does not turn them back on. An interrupted update keeps a private
   recovery receipt and keeps imports disabled across restart until recovery is
   verified.
-  Status prints one line per source with its owner and last successful run. To
+  Daily runs now keep a private, size-limited log for each Brain on both
+  platforms. Status shows the last run time and result, the next planned run,
+  and the last error. Missing runners, failed processes, and unknown native
+  results cannot appear as a successful run. Existing schedules keep their
+  execution hashes.
+  Status also prints one line per source with its owner and last successful run. To
   check after updating: run `brain daily status <manifest>` and confirm every
   source names the expected owner and a truthful last-success time or `never`.
 

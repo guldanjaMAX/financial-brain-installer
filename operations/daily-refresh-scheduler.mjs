@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join, posix as posixPath, resolve, win32 as win32Path } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { dailyLogPaths, dailyObservationStatus } from "./daily-refresh-observation.mjs";
 import {
   clearBrainRecoveryFence,
   readBrainRecoveryFence,
@@ -191,6 +192,7 @@ export function buildDailyRefreshDefinition(plan, options = {}) {
     // The resolved binary is diagnostic evidence only. The stable launcher is
     // the native contract, so a package-manager retarget does not create drift.
     node_realpath: nodeRealpath,
+    log_path: dailyLogPaths(plan.identity, options).log_path,
     definition_hash: definitionHash,
     native_contract: Object.freeze(nativeContract),
     native_definition_hash: nativeDefinitionHash,
@@ -331,7 +333,10 @@ export function statusDailyRefreshSchedule(plan, options = {}) {
   const adapter = adapterFor(plan, options);
   const state = adapter.read(plan.identity);
   requireOwned(state);
-  if (!state?.exists) return Object.freeze({ installed: false, enabled: false, verified: true, identity: plan.identity });
+  if (!state?.exists) return Object.freeze({
+    ...dailyObservationStatus(plan, { enabled: false }, null, null, options),
+    installed: false, enabled: false, verified: true, identity: plan.identity,
+  });
   const expected = buildDailyRefreshDefinition(plan, options);
   const registeredNode = registeredNodeDetails(state.definition, platform, options);
   const registeredPlanDefinition = registeredNode.usable
@@ -343,14 +348,27 @@ export function statusDailyRefreshSchedule(plan, options = {}) {
     state.definition?.native_definition_hash === registeredPlanDefinition.native_definition_hash);
   const nodePathChanged = registeredPlanMatches &&
     !sameExecutablePath(registeredNode.path, expected.node_path, platform);
-  const attention = !registeredNode.present
+  let attention = !registeredNode.present
     ? "daily schedule Node binary is missing; run brain daily on <manifest> to repair it"
     : !registeredNode.usable
       ? "daily schedule Node binary is not executable; run brain daily on <manifest> to repair it"
     : nodePathChanged
       ? "daily schedule needs refresh (Node changed)"
       : null;
+  const runnerPath = platform === "win32"
+    ? state.definition?.native_contract?.arguments?.match(/^"([^"\n]+)"/u)?.[1]
+    : state.definition?.native_contract?.arguments?.[1];
+  let runnerUsable = false;
+  try {
+    runnerUsable = options.runnerPathUsable ? options.runnerPathUsable(runnerPath) === true
+      : Boolean(runnerPath && statSync(runnerPath).isFile() && (accessSync(runnerPath, fsConstants.R_OK), true));
+  } catch {}
+  if (!runnerUsable) attention ||= "daily schedule runner is missing or unreadable; repair the installed runtime before turning daily imports on again";
+  let runtime = state.runtime || null;
+  try { if (adapter.runtime) runtime = adapter.runtime(plan.identity); } catch { runtime = { known: false }; }
+  const summary = { enabled: state.enabled === true, plan_matches_registered_definition: registeredPlanMatches, registered_node_usable: registeredNode.usable };
   return Object.freeze({
+    ...dailyObservationStatus(plan, summary, runtime, runnerUsable, options),
     installed: true,
     enabled: state.enabled === true,
     verified: verifiedState(state, expected, { enabled: state.enabled === true }),
@@ -849,6 +867,14 @@ function macAdapter({ home, uid, spawn }) {
       exists: true,
       owned: markerOf(serialized)?.identity === identity.id,
       enabled: !disabled,
+      runtime: {
+        known: status?.status === 0,
+        running: /(?:^|\n)\s*state = running\s*(?:\n|$)/u.test(String(status.stdout || "")),
+        signal: /last terminating signal = (?:[^\n:]+: )?(\d+)/u.test(String(status.stdout || ""))
+          ? Number(String(status.stdout).match(/last terminating signal = (?:[^\n:]+: )?(\d+)/u)[1]) : null,
+        exit_code: /last exit code = (-?\d+)/u.test(String(status.stdout || ""))
+          ? Number(String(status.stdout).match(/last exit code = (-?\d+)/u)[1]) : null,
+      },
       loaded: status?.status === 0,
       loaded_definition_matches: status?.status === 0
         ? loadedMacProgramMatches(serialized, status.stdout)
@@ -1056,6 +1082,20 @@ function windowsAdapter({ home, spawn, environment }) {
   };
   return {
     read,
+    runtime(identity) {
+      if (!/^v1-[a-z0-9]+$/u.test(identity.id) || !win32Path.isAbsolute(String(systemRoot || ""))) return { known: false };
+      const script = String.raw`$ErrorActionPreference='Stop'; $t=Get-ScheduledTask -TaskPath '\Financial Brain\' -TaskName 'Daily ${identity.id}'; $i=$t | Get-ScheduledTaskInfo; @{known=$true;running=($t.State -eq 'Running');exit_code=[long]$i.LastTaskResult;last_run_at=$(if($i.LastRunTime.Year -gt 2000){$i.LastRunTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')}else{$null});next_run_at=$(if($i.NextRunTime.Year -gt 2000){$i.NextRunTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')}else{$null})} | ConvertTo-Json -Compress`;
+      try {
+        const result = spawn(win32Path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+          ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+          { encoding: "utf8", windowsHide: true, env: childEnvironment, timeout: 15000, maxBuffer: 16384 });
+        if (result?.status !== 0) return { known: false };
+        const value = JSON.parse(String(result.stdout || ""));
+        if (value.known !== true || typeof value.running !== "boolean" || !Number.isInteger(value.exit_code)) return { known: false };
+        // SCHED_S_TASK_HAS_NOT_RUN and SCHED_S_TASK_RUNNING are not exit codes.
+        return { ...value, exit_code: [0x41301, 0x41303].includes(value.exit_code) ? null : value.exit_code };
+      } catch { return { known: false }; }
+    },
     install(definition, { replaceOwned = false, expected = null } = {}) {
       return withScheduleMutationLock(home, definition.identity, () => {
         const directory = join(resolve(home), ".brain", "schedules");
