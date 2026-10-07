@@ -1,6 +1,6 @@
 /** Cross-platform owned scheduler definitions and update pause/restore rules. */
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, posix as posixPath, resolve, win32 as win32Path } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -47,6 +47,27 @@ function sameExecutablePath(left, right, platform) {
     : left === right;
 }
 
+function nodeLauncherDetails(path, platform, options = {}) {
+  const exists = options.nodePathExists || existsSync;
+  let present = false;
+  try { present = Boolean(path && exists(path) === true); } catch { present = false; }
+  if (!present) return Object.freeze({ path, present: false, usable: false, realpath: null });
+
+  const realpath = observedRealpath(path, options);
+  if (!realpath) return Object.freeze({ path, present: true, usable: false, realpath: null });
+  const stat = options.nodePathStat || statSync;
+  const access = options.nodePathAccess || accessSync;
+  try {
+    if (stat(realpath).isFile() !== true) {
+      return Object.freeze({ path, present: true, usable: false, realpath });
+    }
+    access(realpath, fsConstants.X_OK);
+    return Object.freeze({ path, present: true, usable: true, realpath });
+  } catch {
+    return Object.freeze({ path, present: true, usable: false, realpath });
+  }
+}
+
 function nodeRuntimePaths(platform, executablePath, options = {}) {
   const explicit = options.nodePath ? executablePath(options.nodePath) : null;
   const execPath = executablePath(options.execPath || process.execPath);
@@ -56,7 +77,6 @@ function nodeRuntimePaths(platform, executablePath, options = {}) {
   }
 
   const pathApi = platform === "win32" ? win32Path : posixPath;
-  const exists = options.nodePathExists || existsSync;
   const candidates = [];
   const pathValue = options.pathValue ?? process.env.PATH ?? process.env.Path ?? "";
   for (const directory of String(pathValue).split(platform === "win32" ? ";" : ":")) {
@@ -66,13 +86,16 @@ function nodeRuntimePaths(platform, executablePath, options = {}) {
   const argv0 = String(options.argv0 ?? process.argv0 ?? "");
   if (pathApi.isAbsolute(argv0)) candidates.push(argv0);
   for (const candidate of candidates) {
-    if (!exists(candidate)) continue;
+    const details = nodeLauncherDetails(candidate, platform, options);
+    if (!details.usable) continue;
     return Object.freeze({
       nodePath: executablePath(candidate),
-      nodeRealpath: observedRealpath(candidate, options) || executablePath(candidate),
+      nodeRealpath: details.realpath,
     });
   }
-  return Object.freeze({ nodePath: execPath, nodeRealpath: execRealpath });
+  const fallback = nodeLauncherDetails(execPath, platform, options);
+  if (!fallback.usable) throw new Error("the current Node runtime is not a regular executable file");
+  return Object.freeze({ nodePath: execPath, nodeRealpath: fallback.realpath || execRealpath });
 }
 
 export function buildDailyRefreshDefinition(plan, options = {}) {
@@ -203,16 +226,7 @@ function nodePathFromDefinition(definition, platform) {
 
 function registeredNodeDetails(definition, platform, options = {}) {
   const path = nodePathFromDefinition(definition, platform);
-  const exists = options.nodePathExists || existsSync;
-  let present = false;
-  if (path) {
-    try { present = exists(path) === true; } catch { present = false; }
-  }
-  return Object.freeze({
-    path,
-    present,
-    realpath: present ? observedRealpath(path, options) : null,
-  });
+  return nodeLauncherDetails(path, platform, options);
 }
 
 function verifiedState(state, definition, { enabled = true } = {}) {
@@ -313,7 +327,7 @@ export function statusDailyRefreshSchedule(plan, options = {}) {
   if (!state?.exists) return Object.freeze({ installed: false, enabled: false, verified: true, identity: plan.identity });
   const expected = buildDailyRefreshDefinition(plan, options);
   const registeredNode = registeredNodeDetails(state.definition, platform, options);
-  const registeredPlanDefinition = registeredNode.path
+  const registeredPlanDefinition = registeredNode.usable
     ? buildDailyRefreshDefinition(plan, { ...options, nodePath: registeredNode.path })
     : null;
   const registeredPlanMatches = Boolean(registeredPlanDefinition &&
@@ -324,6 +338,8 @@ export function statusDailyRefreshSchedule(plan, options = {}) {
     !sameExecutablePath(registeredNode.path, expected.node_path, platform);
   const attention = !registeredNode.present
     ? "daily schedule Node binary is missing; run brain daily on <manifest> to repair it"
+    : !registeredNode.usable
+      ? "daily schedule Node binary is not executable; run brain daily on <manifest> to repair it"
     : nodePathChanged
       ? "daily schedule needs refresh (Node changed)"
       : null;
@@ -337,6 +353,7 @@ export function statusDailyRefreshSchedule(plan, options = {}) {
     registered_node_path: registeredNode.path,
     registered_node_realpath: registeredNode.realpath,
     registered_node_present: registeredNode.present,
+    registered_node_usable: registeredNode.usable,
     node_path_changed: nodePathChanged,
     needs_refresh: attention !== null,
     attention,

@@ -25841,7 +25841,7 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
     const dailyOwnedAndRunnable = source.owner === "daily-task" &&
       schedule?.installed === true && schedule?.enabled === true &&
       (schedule?.verified === true || schedule?.plan_matches_registered_definition === true) &&
-      schedule?.registered_node_present !== false;
+      schedule?.registered_node_present !== false && schedule?.registered_node_usable !== false;
     const effectiveOwner = source.owner === "daily-task" && !dailyOwnedAndRunnable ? "none" : source.owner;
     const nextRun = dailyOwnedAndRunnable
       ? `${plan.cron} ${plan.timezone}`

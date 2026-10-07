@@ -270,14 +270,19 @@ export async function runDailyRefreshCli(manifestPath, options = {}) {
       ...definitionOptions,
       ...(options.schedulerAdapter ? { adapter: options.schedulerAdapter } : {}),
     });
-    if (!schedule?.installed || schedule.state?.definition?.definition_hash !== expectedDefinitionHash ||
-        schedule.plan_matches_registered_definition !== true) {
+    if (!schedule?.installed || schedule.state?.definition?.definition_hash !== expectedDefinitionHash) {
       throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
     }
-    if (schedule.registered_node_present === false) {
-      const error = new Error("the registered Node binary is missing; run brain daily on <manifest> to repair the daily schedule");
-      error.code = "daily_schedule_node_missing";
+    if (schedule.registered_node_usable === false) {
+      const missing = schedule.registered_node_present === false;
+      const error = new Error(missing
+        ? "the registered Node binary is missing; run brain daily on <manifest> to repair the daily schedule"
+        : "the registered Node binary is not executable; run brain daily on <manifest> to repair the daily schedule");
+      error.code = missing ? "daily_schedule_node_missing" : "daily_schedule_node_unusable";
       throw error;
+    }
+    if (schedule.plan_matches_registered_definition !== true) {
+      throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
     }
     const definition = buildDailyRefreshDefinition(plan, definitionOptions);
     if (definition.definition_hash !== expectedDefinitionHash) {
@@ -335,8 +340,8 @@ if (IS_MAIN) {
   main().then((result) => {
     if (result.status === "failed") process.exitCode = 1;
   }).catch((error) => {
-    console.error(error?.code === "daily_schedule_node_missing"
-      ? "Daily refresh did not run: the registered Node binary is missing. Turn daily imports on again from the normal Brain terminal to repair the schedule."
+    console.error(new Set(["daily_schedule_node_missing", "daily_schedule_node_unusable"]).has(error?.code)
+      ? `Daily refresh did not run: the registered Node binary is ${error.code === "daily_schedule_node_missing" ? "missing" : "not executable"}. Turn daily imports on again from the normal Brain terminal to repair the schedule.`
       : "Daily refresh failed: daily_refresh_failed. Inspect the private local diagnostics, then retry.");
     process.exitCode = 1;
   });

@@ -70,6 +70,8 @@ test("daily definitions prefer the PATH launcher while keeping the real binary d
     pathValue: "/opt/homebrew/bin:/usr/bin:/bin",
     nodePathExists: (path) => path === launcher || path === versioned,
     nodeRealpath: (path) => path === launcher ? versioned : path,
+    nodePathStat: () => ({ isFile: () => true }),
+    nodePathAccess: () => {},
     brainPath: "/opt/brain/brain.mjs",
     runnerPath: "/opt/brain/operations/daily-refresh-run.mjs",
   };
@@ -99,6 +101,8 @@ test("daily definitions retain a stable PATH shim whose realpath is not the laun
     pathValue: "/home/owner/.volta/bin:/usr/bin:/bin",
     nodePathExists: (path) => path === shim || path === versioned,
     nodeRealpath: (path) => path,
+    nodePathStat: () => ({ isFile: () => true }),
+    nodePathAccess: () => {},
     brainPath: "/opt/brain/brain.mjs",
     runnerPath: "/opt/brain/operations/daily-refresh-run.mjs",
   });
@@ -106,6 +110,91 @@ test("daily definitions retain a stable PATH shim whose realpath is not the laun
     "an executable PATH shim remains the stable native launcher");
   assert.equal(definition.node_realpath, shim,
     "the shim's own resolved path remains diagnostic-only");
+});
+
+test("daily launcher selection and status require a regular executable file", () => {
+  const stable = "/opt/homebrew/bin/node";
+  const shadow = "/shadow/bin/node";
+  const directory = "/directory/bin/node";
+  const versioned = "/opt/homebrew/Cellar/node/25.6.1/bin/node";
+  const launcherOptions = ({ present, files, executable, pathValue }) => ({
+    platform: "darwin",
+    execPath: versioned,
+    pathValue,
+    nodePathExists: (path) => present.has(path),
+    nodeRealpath: (path) => path,
+    nodePathStat: (path) => ({ isFile: () => files.has(path) }),
+    nodePathAccess: (path) => {
+      if (!executable.has(path)) throw Object.assign(new Error("not executable"), { code: "EACCES" });
+    },
+    brainPath: "/opt/brain/brain.mjs",
+    runnerPath: "/opt/brain/operations/daily-refresh-run.mjs",
+  });
+  const stableState = {
+    present: new Set([stable, versioned]),
+    files: new Set([stable, versioned]),
+    executable: new Set([stable, versioned]),
+  };
+
+  const stableControl = buildDailyRefreshDefinition(basePlan, launcherOptions({
+    ...stableState,
+    pathValue: "/opt/homebrew/bin:/usr/bin",
+  }));
+  assert.equal(stableControl.node_path, stable, "the executable stable launcher is selected");
+
+  const nonExecutableShadow = buildDailyRefreshDefinition(basePlan, launcherOptions({
+    present: new Set([shadow, stable, versioned]),
+    files: new Set([shadow, stable, versioned]),
+    executable: new Set([stable, versioned]),
+    pathValue: "/shadow/bin:/opt/homebrew/bin:/usr/bin",
+  }));
+  assert.equal(nonExecutableShadow.node_path, stable,
+    "a non-executable PATH shadow cannot become the scheduled launcher");
+
+  const directoryShadow = buildDailyRefreshDefinition(basePlan, launcherOptions({
+    present: new Set([directory, stable, versioned]),
+    files: new Set([stable, versioned]),
+    executable: new Set([directory, stable, versioned]),
+    pathValue: "/directory/bin:/opt/homebrew/bin:/usr/bin",
+  }));
+  assert.equal(directoryShadow.node_path, stable,
+    "a directory named node cannot become the scheduled launcher");
+
+  const absentShadow = buildDailyRefreshDefinition(basePlan, launcherOptions({
+    ...stableState,
+    pathValue: "/shadow/bin:/opt/homebrew/bin:/usr/bin",
+  }));
+  assert.equal(absentShadow.node_path, stable, "an absent first PATH entry remains a green control");
+
+  const registered = buildDailyRefreshDefinition(basePlan, {
+    platform: "darwin",
+    nodePath: shadow,
+    brainPath: "/opt/brain/brain.mjs",
+    runnerPath: "/opt/brain/operations/daily-refresh-run.mjs",
+  });
+  const status = statusDailyRefreshSchedule(basePlan, {
+    ...launcherOptions({
+      present: new Set([shadow, stable, versioned]),
+      files: new Set([shadow, stable, versioned]),
+      executable: new Set([stable, versioned]),
+      pathValue: "/opt/homebrew/bin:/usr/bin",
+    }),
+    adapter: memoryAdapter({ exists: true, owned: true, enabled: true, definition: registered }),
+  });
+  assert.equal(status.registered_node_present, true, "the registered shadow still exists");
+  assert.equal(status.registered_node_usable, false,
+    "status reaches the executable decision instead of treating existence as runnable");
+  assert.match(status.attention, /not executable/i);
+  const [freshness] = dailyFreshnessRows({
+    ...basePlan,
+    sources: [{
+      key: "google_drive", class: "machine-pull", owner: "daily-task", status: "ready",
+      run_key: "google_drive", source_names: ["drive"],
+    }],
+  }, { sources: [] }, status);
+  assert.equal(freshness.owner, "none",
+    "an existing but unusable launcher cannot advertise a runnable daily owner");
+  assert.equal(freshness.next_run, "not scheduled");
 });
 
 test("Node-only schedule drift stays runnable in owner freshness while requesting refresh", () => {
@@ -127,6 +216,9 @@ test("Node-only schedule drift stays runnable in owner freshness while requestin
     brainPath: registered.brain_path,
     runnerPath: registered.runner_path,
     nodePathExists: () => true,
+    nodeRealpath: (path) => path,
+    nodePathStat: () => ({ isFile: () => true }),
+    nodePathAccess: () => {},
   });
   assert.equal(schedule.plan_matches_registered_definition, true);
   assert.equal(schedule.node_path_changed, true);
@@ -890,6 +982,7 @@ test("status reports a missing registered Node binary and daily on repairs its o
     runnerPath: "/runtime/daily-refresh-run.mjs",
   });
   const adapter = memoryAdapter({ exists: true, owned: true, enabled: true, definition: registered });
+  let legacySchedulerReads = 0;
   const missing = statusDailyRefreshSchedule(basePlan, {
     platform: "darwin",
     adapter,
@@ -914,11 +1007,20 @@ test("status reports a missing registered Node binary and daily on repairs its o
     platform: "darwin",
     planDailyRefresh: async () => plan,
     schedulerAdapter: adapter,
+    existingSchedulerOwners: [],
+    driveScheduler: {
+      statusDriveScheduler: () => {
+        legacySchedulerReads += 1;
+        return { installed: false };
+      },
+    },
     schedulerOptions: {
       nodePath: "/current/runtime/node",
       brainPath: registered.brain_path,
       runnerPath: registered.runner_path,
       nodePathExists: (path) => path === "/current/runtime/node",
+      nodePathStat: () => ({ isFile: () => true }),
+      nodePathAccess: () => {},
     },
     syncSourceExpectations: false,
     readSourceInventory: async () => ({ sources: [] }),
@@ -929,6 +1031,8 @@ test("status reports a missing registered Node binary and daily on repairs its o
   assert.equal(repaired.schedule.definition.node_path, "/current/runtime/node");
   assert.equal(adapter.calls.some(([name]) => name === "install"), true,
     "daily on reached native replacement instead of refusing owned drift");
+  assert.equal(legacySchedulerReads, 0,
+    "the focused missing-Node repair never inspects a native legacy scheduler");
 });
 
 test("the public all-configured command installs on Windows and prints stable freshness", async () => {
@@ -1082,7 +1186,12 @@ test("scheduled execution reuses the installed ownership plan before checking it
     buildPlan: async () => { planCalls += 1; return basePlan; },
     expectedDefinitionHash: definition.definition_hash,
     platform: "darwin",
-    definitionOptions: { nodePath: definition.node_path, nodePathExists: () => true },
+    definitionOptions: {
+      nodePath: definition.node_path,
+      nodePathExists: () => true,
+      nodePathStat: () => ({ isFile: () => true }),
+      nodePathAccess: () => {},
+    },
     schedulerAdapter,
     acquireLock: () => ({ assertOwned: () => true, release: () => {} }),
     runSource: async () => assert.fail("the fixture has no daily-owned source"),

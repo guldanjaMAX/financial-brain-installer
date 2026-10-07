@@ -1020,13 +1020,15 @@ remains foreign and read-only. Native inspection errors are not reported as
 absence.
 
 The definition contains paths, hashes, cadence, and the manifest locator, but
-no key or provider credential. Its Node action prefers the stable launcher
-found on `PATH` when that launcher resolves to the running binary; the current
-binary realpath is diagnostic only and is not part of the definition hash. A
+no key or provider credential. Its Node action prefers a stable launcher on
+`PATH` only after its resolved target is proved to be a regular file executable
+by the current user; the current binary realpath is diagnostic only and is not
+part of the definition hash. A
 legacy Node-path-only difference may run, but reports `daily schedule needs
 refresh (Node changed)` until `brain daily on` or a verified update reconciles
-it. Status and the runner report a missing registered Node binary plainly, and
-`brain daily on` repairs the owned definition. Each scheduled run takes the
+it. Status and the runner report a missing or non-executable registered Node
+binary plainly, and `brain daily on` repairs the owned definition. Each
+scheduled run takes the
 manifest-wide lifecycle lease before any source lease. That lease is keyed by canonical
 Brain resource identity in the machine-shared lock root, so another manifest
 path or operating-system user cannot open a second writer lane for the same
