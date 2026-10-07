@@ -98,8 +98,15 @@ function productionHarness(manifestPath, {
   const upgradeOptions = {
     resolveAccount: async () => ({ id: "1".repeat(32) }),
     d1Query: async (_account, _database, sql, params = []) => {
+      if (sql === "ALTER TABLE fixture_records ADD COLUMN migrated INTEGER") {
+        events.push("migration:statement-dispatched");
+        if (failStage() === "migration") throw new Error("fixture migration failure");
+        return { results: [] };
+      }
       if (/sqlite_master/iu.test(sql)) return { results: [{ name: "install_state" }] };
       if (/SELECT \* FROM install_state/iu.test(sql)) {
+        events.push("install-state-preflight");
+        if (failStage() === "preflight") throw new Error("fixture preflight refusal");
         return { results: [{ client_slug: "fixture", product_version: d1Version, schema_version: 0 }] };
       }
       if (/UPDATE install_state/iu.test(sql)) {
@@ -116,6 +123,7 @@ function productionHarness(manifestPath, {
     cmdDeploy: async (_path, options) => {
       const stage = options.pauseVectorDrainForUpgrade ? "paused" : "active";
       events.push(`deploy:${stage}`);
+      if (failStage() === `deploy:${stage}`) throw new Error(`fixture ${stage} deployment failure`);
     },
     cmdHealth: async (_path, options) => {
       const stage = options.expectDrainMode === "paused-for-upgrade"
@@ -127,7 +135,8 @@ function productionHarness(manifestPath, {
     waitForVectorDrainQuiescence: async () => { events.push("writer-wait"); },
     cmdMigrate: async () => {
       events.push("migration");
-      if (failStage() === "migration") throw new Error("fixture migration failure");
+      await upgradeOptions.d1Query("1".repeat(32), "11111111-2222-4333-8444-555555555555",
+        "ALTER TABLE fixture_records ADD COLUMN migrated INTEGER");
     },
     cmdBootstrap: async () => {
       events.push("bootstrap");
@@ -636,18 +645,20 @@ test("Windows bridge stays disabled with owner guidance when permanent daily imp
   });
 });
 
-test("Windows update failure restores only the bridge tasks it disabled", async () => {
+test("Windows pre-change refusal restores only the bridge tasks it disabled", async () => {
   await withFixture(async ({ manifestPath }) => {
-    const harness = productionHarness(manifestPath, { failStage: () => "migration" });
+    const harness = productionHarness(manifestPath, { failStage: () => "preflight" });
     const native = attachBridge(harness, manifestPath, { tasks: [{}] });
-    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /fixture migration failure/);
-    assert.ok(harness.events.includes("migration"), "failure reached the update mutation");
+    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /fixture preflight refusal/);
+    assert.ok(harness.events.includes("install-state-preflight"), "refusal reached the remote read preflight");
     assert.deepEqual(native.mutations().map(({ args }) => args.at(-1)), ["/DISABLE", "/ENABLE"]);
     assert.equal(native.rows.get(BRIDGE_NAME).enabled, true);
     const receipt = readDailyRefreshUpdateTransaction(harness.plan.identity, {
       home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
     });
     assert.equal(receipt.bridge_snapshots[0].state, "restored");
+    assert.equal(receipt.remote_mutation_may_have_started, false);
+    assert.equal(harness.events.includes("deploy:paused"), false);
   });
 });
 
@@ -720,13 +731,13 @@ test("Windows pre-disabled bridge is never enabled or deleted, with an enabled c
   }
 });
 
-test("Windows failed update retries from durable restored bridge receipts", async () => {
+test("Windows pre-change refusal retries from durable restored bridge receipts", async () => {
   await withFixture(async ({ manifestPath }) => {
     let fail = true;
-    const harness = productionHarness(manifestPath, { failStage: () => fail ? "migration" : null });
+    const harness = productionHarness(manifestPath, { failStage: () => fail ? "preflight" : null });
     const native = attachBridge(harness, manifestPath, { tasks: [{}] });
-    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /fixture migration failure/);
-    assert.ok(harness.events.includes("migration"));
+    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /fixture preflight refusal/);
+    assert.ok(harness.events.includes("install-state-preflight"));
     assert.equal(native.rows.get(BRIDGE_NAME).enabled, true);
     fail = false;
     await cmdUpdate(manifestPath, harness.options);
@@ -736,9 +747,9 @@ test("Windows failed update retries from durable restored bridge receipts", asyn
   });
 });
 
-test("Windows restore failure remains journaled and never claims a successful update", async () => {
+test("Windows pre-change restore failure remains journaled and never claims a successful update", async () => {
   await withFixture(async ({ manifestPath }) => {
-    const harness = productionHarness(manifestPath, { failStage: () => "migration" });
+    const harness = productionHarness(manifestPath, { failStage: () => "preflight" });
     const native = attachBridge(harness, manifestPath, { tasks: [{}], failRestore: true });
     await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /Restore the old daily task in Task Scheduler/);
     assert.ok(native.calls.some(({ args }) => args.includes("/ENABLE")), "restore decision reached native mutation");
@@ -893,8 +904,8 @@ for (const arm of ['own-control','two-brains','unbound','rollback-two-brains']) 
     assert.ok(mutations.some(entry=>entry.name===owner),'own bridge green control reached native mutation');
     console.log(JSON.stringify({probe:arm,ownMutations:mutations.filter(m=>m.name===owner).length,otherMutations:mutations.filter(m=>m.name!==owner).length,remaining:native.rows.size}));
     if(fail) {
-      assert.equal(native.rows.get(owner).enabled,true,'own disabled bridge was restored');
-      assert.deepEqual(mutations.filter(m=>m.name===owner).map(m=>m.enabled),['/DISABLE','/ENABLE']);
+      assert.equal(native.rows.get(owner).enabled,false,'own bridge stays paused after migration failure');
+      assert.deepEqual(mutations.filter(m=>m.name===owner).map(m=>m.enabled),['/DISABLE']);
     } else assert.equal(native.rows.has(owner),false,'own bridge retired after verified replacement');
     assert.equal(mutations.filter(m=>m.name!==owner).length,0,'another Brain or an unbound task must never be disabled, enabled, or deleted');
     for(const task of tasks.slice(1))assert.equal(native.rows.get(task.name)?.enabled,true);
@@ -1098,4 +1109,152 @@ test("bridge manifest comparison resolves both paths before applying platform ca
       assert.ok(attempts.includes(missing), "negative arm reached the failed resolution");
     }
   }
+});
+
+
+function bridgeTransaction(harness, manifestPath) {
+  return readDailyRefreshUpdateTransaction(harness.plan.identity, {
+    home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
+  });
+}
+
+// RR-03 reviewer probe: exercise cmdUpdate/cmdUpgrade, not a stand-in catch.
+for (const failure of ["convergence", "health:active-final", "health:paused", "deploy:paused", "migration"]) {
+  test(`Windows post-boundary ${failure} failure keeps the old bridge paused`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath, { failStage: () => failure });
+      const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+      await assert.rejects(() => cmdUpdate(manifestPath, harness.options), (error) => {
+        assert.match(error.message, /fixture .*failure/);
+        assert.match(error.message, /daily imports stay paused until the update is retried and completes/i);
+        return true;
+      });
+      const decision = failure === "migration" ? "migration:statement-dispatched" : failure;
+      assert.ok(harness.events.includes(decision), "injected failure reached its remote decision point");
+      if (failure === "convergence") {
+        assert.ok(harness.events.includes("migration:statement-dispatched"));
+        assert.ok(harness.events.includes("deploy:active"));
+        assert.ok(harness.events.includes("health:active-cutover"));
+      }
+      assert.equal(harness.finish.length, 0);
+      assert.equal(native.rows.get(BRIDGE_NAME).enabled, false, "old runner cannot resume against changed remote state");
+      assert.deepEqual(native.mutations().map(({ args }) => args.at(-1)), ["/DISABLE"]);
+      const receipt = bridgeTransaction(harness, manifestPath);
+      assert.equal(receipt.bridge_snapshots[0].state, "paused");
+      assert.equal(receipt.remote_mutation_may_have_started, true);
+    });
+  });
+}
+
+test("Windows remote mutation intent is durable before the first deployment dispatch", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath);
+    const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+    const deploy = harness.options.upgradeOptions.cmdDeploy;
+    let deployments = 0;
+    harness.options.upgradeOptions.cmdDeploy = async (...args) => {
+      deployments += 1;
+      const receipt = bridgeTransaction(harness, manifestPath);
+      assert.equal(receipt.remote_mutation_may_have_started, true, "intent is persisted before invoking deploy");
+      assert.equal(receipt.bridge_snapshots[0].state, "paused");
+      return deploy(...args);
+    };
+    await cmdUpdate(manifestPath, harness.options);
+    assert.equal(deployments, 2);
+    assert.equal(native.rows.size, 0, "verified successful update is the retirement control");
+    assert.equal(bridgeArchive(manifestPath).remote_mutation_may_have_started, true);
+  });
+});
+
+test("Windows restart retains the mutation boundary through preflight refusal until verified retirement", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const first = productionHarness(manifestPath, { failStage: () => "convergence" });
+    const original = attachBridge(first, manifestPath, { tasks: [{}] });
+    await assert.rejects(() => cmdUpdate(manifestPath, first.options), /convergence/);
+    assert.ok(first.events.includes("convergence"));
+    const transaction = bridgeTransaction(first, manifestPath);
+    assert.equal(transaction.remote_mutation_may_have_started, true);
+    assert.equal(original.rows.get(BRIDGE_NAME).enabled, false);
+
+    // Fresh orchestration and native adapters retain only durable receipt and task state.
+    const retry = productionHarness(manifestPath, { failStage: () => "preflight" });
+    const resumed = attachBridge(retry, manifestPath, { tasks: [...original.rows.values()] });
+    await assert.rejects(() => cmdUpdate(manifestPath, retry.options), (error) => {
+      assert.match(error.message, /fixture preflight refusal/);
+      assert.match(error.message, /daily imports stay paused until the update is retried and completes/i);
+      return true;
+    });
+    assert.ok(retry.events.includes("install-state-preflight"));
+    assert.equal(retry.events.includes("deploy:paused"), false);
+    assert.equal(resumed.mutations().length, 0, "restart must not reset the persisted boundary to pre-change");
+    assert.equal(resumed.rows.get(BRIDGE_NAME).enabled, false);
+    assert.equal(bridgeTransaction(retry, manifestPath).bridge_snapshots[0].state, "paused");
+    assert.equal(bridgeTransaction(retry, manifestPath).transaction_id, transaction.transaction_id);
+
+    const completed = productionHarness(manifestPath);
+    const final = attachBridge(completed, manifestPath, { tasks: [...resumed.rows.values()] });
+    await cmdUpdate(manifestPath, completed.options);
+    assert.ok(completed.events.includes("health:active-final"));
+    assert.equal(completed.state().enabled, true);
+    assert.deepEqual(final.mutations().map(({ args }) => args[0]), ["/Delete"]);
+    assert.equal(final.rows.size, 0);
+    assert.equal(bridgeTransaction(completed, manifestPath), null);
+    assert.equal(bridgeArchive(manifestPath).bridge_snapshots[0].state, "retired");
+  });
+});
+
+
+for (const failure of ["disable-response", "disable-readback"]) {
+  test(`Windows pre-change ${failure} failure restores an ambiguously disabled bridge`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const harness = productionHarness(manifestPath);
+      const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+      const spawn = native.options.spawn;
+      let refuseReadback = false;
+      let refusals = 0;
+      native.options.spawn = (command, args, child) => {
+        const result = spawn(command, args, child);
+        if (args.includes("/DISABLE")) {
+          assert.equal(native.rows.get(BRIDGE_NAME).enabled, false, "disable took effect before the ambiguous response");
+          if (failure === "disable-response") { refusals += 1; return { status: 1 }; }
+          refuseReadback = true;
+        } else if (args.includes("/XML") && refuseReadback) {
+          refuseReadback = false;
+          refusals += 1;
+          return { status: 1 };
+        }
+        return result;
+      };
+      await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /Task Scheduler/);
+      assert.equal(refusals, 1, "the native refusal decision was reached once");
+      assert.deepEqual(native.mutations().map(({ args }) => args.at(-1)), ["/DISABLE", "/ENABLE"]);
+      assert.equal(native.rows.get(BRIDGE_NAME).enabled, true);
+      assert.equal(harness.events.includes("deploy:paused"), false);
+      const receipt = bridgeTransaction(harness, manifestPath);
+      assert.equal(receipt.remote_mutation_may_have_started, false);
+      assert.equal(receipt.bridge_snapshots[0].state, "restored");
+    });
+  });
+}
+
+test("Windows non-outbox compatibility path records intent before invoking migration", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const manifest = manifestFixture();
+    manifest.infrastructure.cloudflare.storage = "supabase";
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const harness = productionHarness(manifestPath);
+    const native = attachBridge(harness, manifestPath, { tasks: [{}] });
+    let migrations = 0;
+    harness.options.upgradeOptions.cmdMigrate = async () => {
+      migrations += 1;
+      assert.equal(bridgeTransaction(harness, manifestPath).remote_mutation_may_have_started, true);
+      throw new Error("fixture migration statement failure");
+    };
+    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /fixture migration statement failure/);
+    assert.equal(migrations, 1);
+    assert.equal(harness.events.some((event) => event.startsWith("deploy:")), false, "migration is the first mutation in this path");
+    assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+    assert.deepEqual(native.mutations().map(({ args }) => args.at(-1)), ["/DISABLE"]);
+    assert.equal(bridgeTransaction(harness, manifestPath).bridge_snapshots[0].state, "paused");
+  });
 });

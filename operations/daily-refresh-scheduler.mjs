@@ -500,8 +500,20 @@ export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
   chmodSync(directory, 0o700);
   let prior = null;
   if (existsSync(path)) {
-    try { prior = JSON.parse(readFileSync(path, "utf8")); } catch {}
+    try { prior = JSON.parse(readFileSync(path, "utf8")); } catch {
+      throw new Error("the daily update transaction receipt is malformed");
+    }
+    if (!prior || typeof prior !== "object" || Array.isArray(prior)) {
+      throw new Error("the daily update transaction receipt is malformed");
+    }
   }
+  if (input.remoteMutationMayHaveStarted !== undefined && typeof input.remoteMutationMayHaveStarted !== "boolean") {
+    throw new TypeError("the daily update remote mutation intent is invalid");
+  }
+  // Monotonic across retries. Older receipts cannot prove that their update
+  // stopped before dispatch, so absence of the marker must fail closed.
+  const remoteMutationMayHaveStarted = input.remoteMutationMayHaveStarted === true ||
+    (prior !== null && prior.remote_mutation_may_have_started !== false);
   const transactionId = /^[a-f0-9]{32}$/u.test(String(prior?.transaction_id || ""))
     ? prior.transaction_id
     : randomBytes(16).toString("hex");
@@ -529,6 +541,7 @@ export function writeDailyRefreshUpdateTransaction(input = {}, options = {}) {
     manifest_content_hash: plan.manifest_content_hash,
     source_plan_hash: plan.source_plan_hash,
     phase,
+    remote_mutation_may_have_started: remoteMutationMayHaveStarted,
     updated_at: now.toISOString(),
     snapshot: Object.freeze({
       exists: snapshot.exists === true,
@@ -593,6 +606,10 @@ export function readDailyRefreshUpdateTransaction(identityOrPlan, options = {}) 
       !new Set(["preparing", "paused", "recovery_required"]).has(value?.phase)) {
     throw new Error("the daily update transaction receipt is malformed");
   }
+  if (Object.hasOwn(value, "remote_mutation_may_have_started") &&
+      typeof value.remote_mutation_may_have_started !== "boolean") {
+    throw new Error("the daily update transaction receipt is malformed");
+  }
   const authorizedDefinition = value.authorized_definition ?? value.snapshot?.definition ?? null;
   const reconciliation = value.reconciliation ?? {
     daily_definition: "pending",
@@ -612,6 +629,7 @@ export function readDailyRefreshUpdateTransaction(identityOrPlan, options = {}) 
   if (manifestPath && !fence) return null;
   return Object.freeze({
     ...value,
+    remote_mutation_may_have_started: value.remote_mutation_may_have_started !== false,
     authorized_definition: authorizedDefinition,
     reconciliation: Object.freeze(reconciliation),
   });
