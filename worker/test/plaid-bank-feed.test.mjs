@@ -1291,7 +1291,7 @@ async function containmentFixture(accountIds, page = {}) {
   seedOwnedEntity(fixture, "household", "Household");
   seedOwnedEntity(fixture, "business", "Business");
   const provider = new PlaidSandboxFake();
-  const state = { page: {
+  const state = { fetchPaths: [], page: {
     added: accountIds.map((account_id, index) => ({
       transaction_id: `identity-transaction-${index}`, account_id, amount: "12.00",
       iso_currency_code: "USD", date: "2026-08-30", pending: false, name: "Synthetic identity fixture",
@@ -1303,6 +1303,7 @@ async function containmentFixture(accountIds, page = {}) {
   })) };
   const fetchImpl = async (url, init) => {
     const path = new URL(url).pathname;
+    state.fetchPaths.push(path);
     if (path === "/accounts/get") return jsonResponse({ accounts: state.accounts });
     if (path === "/transactions/sync") return jsonResponse(state.page);
     return provider.fetch(url, init);
@@ -1326,7 +1327,7 @@ async function containmentFixture(accountIds, page = {}) {
       }, { now });
     }
   };
-  return { fixture, state, run, assignAll };
+  return { fixture, state, run, assignAll, fetchImpl };
 }
 
 function seedIdentityLedgerAccount(fixture, { slug, external, source = "bank-feed:item-sandbox-1", entity = "household" }) {
@@ -1643,9 +1644,10 @@ test("Plaid account reassignment cannot silently move balance-only history", asy
   } finally { fixture.close(); }
 });
 
-test("reviewed Plaid reassignment previews counts, replays one atomic move, and permits later promotion", async () => {
-  const { fixture, state, run, assignAll } = await containmentFixture(["reviewed-move-account"]);
+test("reviewed Plaid reassignment refreshes the committed move once and permits later promotion", async () => {
+  const { fixture, state, run, assignAll, fetchImpl } = await containmentFixture(["reviewed-move-account"]);
   try {
+    state.now = "2099-01-15T13:00:00.000Z";
     assert.equal((await run()).status, "assignment_required");
     await assignAll();
     assertReadyPromotion(await run());
@@ -1660,12 +1662,12 @@ test("reviewed Plaid reassignment previews counts, replays one atomic move, and 
 
     const ownerHeaders = await fixture.ownerHeaders();
     const routeUrl = new URL("https://brain.invalid/api/bank-feed/accounts/reassign");
-    const route = async (body, headers = ownerHeaders) => {
+    const route = async (body, headers = ownerHeaders, ctx = {}) => {
       const response = await handleBankFeed(fixture.env, new Request(routeUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...headers },
         body: JSON.stringify(body),
-      }), routeUrl, routeUrl.pathname, {});
+      }), routeUrl, routeUrl.pathname, ctx);
       return { status: response.status, body: await response.json() };
     };
     const scopedHeaders = await fixture.ownerHeaders({ grantId: "grant-review-fixture" });
@@ -1678,17 +1680,35 @@ test("reviewed Plaid reassignment previews counts, replays one atomic move, and 
     assert.equal(scoped.status, 403);
     assert.equal(scoped.body.code, "owner_required");
 
+    const previewBackground = [];
     const preview = await route({
       mode: "preview",
       account_ref: account.account_ref,
       from_entity_slug: "household",
       to_entity_slug: "business",
+    }, ownerHeaders, {
+      waitUntil(promise) { previewBackground.push(Promise.resolve(promise)); },
     });
     assert.equal(preview.status, 200);
     assert.deepEqual(preview.body.from_owner, { entity_slug: "household", label: "Household" });
     assert.deepEqual(preview.body.to_owner, { entity_slug: "business", label: "Business" });
     assert.deepEqual(preview.body.history, { transactions: 1, balance_snapshots: 1 });
     assert.equal(preview.body.can_apply, true);
+    assert.equal(previewBackground.length, 0, "the reached preview decision schedules no refresh");
+
+    const dryRunBackground = [];
+    const dryRun = await route({
+      mode: "dry-run",
+      account_ref: account.account_ref,
+      from_entity_slug: "household",
+      to_entity_slug: "business",
+    }, ownerHeaders, {
+      waitUntil(promise) { dryRunBackground.push(Promise.resolve(promise)); },
+    });
+    assert.equal(dryRun.status, 400);
+    assert.equal(dryRun.body.code, "invalid_reassignment_mode",
+      "the unsupported dry-run mode reached the reassignment mode guard");
+    assert.equal(dryRunBackground.length, 0);
 
     let batches = 0;
     const originalDb = fixture.env.DB;
@@ -1697,6 +1717,10 @@ test("reviewed Plaid reassignment previews counts, replays one atomic move, and 
       assert.equal(statements.length, 6, "the apply decision reaches one closed D1 batch");
       return originalDb.batch(statements);
     } };
+    const background = [];
+    const providerFetchesBeforeApply = state.fetchPaths.length;
+    const transactionCountBefore = fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n;
+    const balanceCountBefore = fixture.first("SELECT COUNT(*) AS n FROM fin_balance_snapshots").n;
     let applied;
     try {
       applied = await route({
@@ -1705,6 +1729,10 @@ test("reviewed Plaid reassignment previews counts, replays one atomic move, and 
         account_ref: account.account_ref,
         from_entity_slug: "household",
         to_entity_slug: "business",
+      }, ownerHeaders, {
+        bankFeedFetchImpl: fetchImpl,
+        bankFeedNow: state.now,
+        waitUntil(promise) { background.push(Promise.resolve(promise)); },
       });
     } finally {
       fixture.env.DB = originalDb;
@@ -1713,20 +1741,42 @@ test("reviewed Plaid reassignment previews counts, replays one atomic move, and 
     assert.equal(applied.status, 201);
     assert.equal(applied.body.changed, true);
     assert.deepEqual(applied.body.entity_scope, { entity_slug: "business" });
+    assert.equal(background.length, 1, "one committed non-replayed move schedules exactly one refresh");
+    await Promise.all(background);
+    assert.ok(state.fetchPaths.length > providerFetchesBeforeApply,
+      "the scheduled refresh reached the stubbed provider fetch");
+    assert.ok(state.fetchPaths.slice(providerFetchesBeforeApply).includes("/transactions/sync"));
     assert.equal(fixture.first("SELECT entity_slug FROM fin_accounts WHERE account_slug=?", account.account_slug).entity_slug, "business");
     assert.equal(fixture.first("SELECT entity_slug FROM plaid_account_entity_assignments WHERE account_ref=?", account.account_ref).entity_slug, "business");
     assert.equal(fixture.first("SELECT COUNT(*) AS n FROM owner_activity_events WHERE request_id='reviewed-reassignment-0001'").n, 1);
-    assert.equal(fixture.first("SELECT reason FROM plaid_reconciliation WHERE item_ref='item-sandbox-1'").reason, "owner_assignment");
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n, transactionCountBefore,
+      "refresh preserves the transaction count");
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_balance_snapshots").n, balanceCountBefore,
+      "refresh preserves the balance count");
+    assert.equal(fixture.first(
+      "SELECT COUNT(*) AS n FROM documents WHERE source='bank_activity' AND entity_slug='business' AND deleted_at IS NULL",
+    ).n, 1, "the refreshed searchable document has the new entity scope");
+    assert.equal(fixture.first(
+      `SELECT COUNT(*) AS n FROM documents d JOIN chunks c ON c.doc_uid=d.doc_uid AND c.chunk_ix=0
+        WHERE d.source='bank_activity' AND d.entity_slug='business' AND c.text LIKE '%Business%'`,
+    ).n, 1, "the refreshed searchable document names the new owner label");
 
+    const replayBackground = [];
+    const providerFetchesBeforeReplay = state.fetchPaths.length;
     const replay = await route({
       mode: "apply",
       request_id: "reviewed-reassignment-0001",
       account_ref: account.account_ref,
       from_entity_slug: "household",
       to_entity_slug: "business",
+    }, ownerHeaders, {
+      bankFeedFetchImpl: fetchImpl,
+      waitUntil(promise) { replayBackground.push(Promise.resolve(promise)); },
     });
     assert.equal(replay.status, 200);
     assert.equal(replay.body.replayed, true);
+    assert.equal(replayBackground.length, 0, "the reached replay decision schedules no refresh");
+    assert.equal(state.fetchPaths.length, providerFetchesBeforeReplay);
     assert.equal(fixture.first("SELECT COUNT(*) AS n FROM owner_activity_events WHERE request_id='reviewed-reassignment-0001'").n, 1);
 
     state.page = {
@@ -1748,6 +1798,62 @@ test("reviewed Plaid reassignment previews counts, replays one atomic move, and 
     assert.equal(fixture.first(
       "SELECT f.entity_slug FROM fin_transactions t JOIN fin_accounts f ON f.tenant_id=t.tenant_id AND f.account_slug=t.account_slug WHERE t.external_id='after-reviewed-move-transaction'",
     ).entity_slug, "business");
+  } finally { fixture.close(); }
+});
+
+test("a reassignment refresh failure cannot roll back the committed move or stamp completion", async () => {
+  const { fixture, state, run, assignAll } = await containmentFixture(["refresh-failure-account"]);
+  try {
+    state.now = "2099-01-15T13:00:00.000Z";
+    await run();
+    await assignAll();
+    assertReadyPromotion(await run());
+    const account = fixture.first(
+      "SELECT a.account_ref,f.account_slug FROM plaid_account_entity_assignments a JOIN fin_accounts f ON f.external_ref=a.provider_account_id AND f.source_feed=('bank-feed:'||a.item_ref)",
+    );
+    const ownerHeaders = await fixture.ownerHeaders();
+    const routeUrl = new URL("https://brain.invalid/api/bank-feed/accounts/reassign");
+    const background = [];
+    let providerFetches = 0;
+    fixture.control.failOn = /UPDATE sources SET status='ready'/;
+    const response = await handleBankFeed(fixture.env, new Request(routeUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...ownerHeaders },
+      body: JSON.stringify({
+        mode: "apply",
+        request_id: "refresh-failure-reassignment-0001",
+        account_ref: account.account_ref,
+        from_entity_slug: "household",
+        to_entity_slug: "business",
+      }),
+    }), routeUrl, routeUrl.pathname, {
+      bankFeedNow: state.now,
+      bankFeedFetchImpl: async () => {
+        providerFetches += 1;
+        throw new Error("synthetic provider fetch failure");
+      },
+      waitUntil(promise) { background.push(Promise.resolve(promise)); },
+    });
+    assert.equal(response.status, 201, "the committed move response succeeds before refresh completion");
+    assert.equal((await response.json()).changed, true);
+    assert.equal(background.length, 1);
+    await Promise.all(background);
+    assert.ok(providerFetches > 0, "the failing refresh reached the stubbed provider boundary");
+    assert.equal(fixture.first(
+      "SELECT entity_slug FROM fin_accounts WHERE account_slug=?", account.account_slug,
+    ).entity_slug, "business");
+    const marker = fixture.first(
+      "SELECT state,reason FROM plaid_reconciliation WHERE item_ref='item-sandbox-1'",
+    );
+    assert.ok(marker, "the refresh restart marker remains after failure");
+    assert.notEqual(marker.state, "complete");
+    const source = fixture.first(
+      "SELECT last_complete_sweep_at FROM sources WHERE name='bank_activity'",
+    );
+    assert.equal(source?.last_complete_sweep_at || null, null, "the failed refresh writes no complete stamp");
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n, 1);
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_balance_snapshots").n, 1);
+    assert.ok(state.fetchPaths.length > 0, "the green setup control used only the injected fixture provider");
   } finally { fixture.close(); }
 });
 
@@ -1802,13 +1908,25 @@ test("reviewed Plaid reassignment refuses invalid target, changed scope, period 
           ? "bank_account_reassignment_period_closed"
           : "bank_account_reassignment_reconciled";
       const sqlBefore = fixture.seen.sql.length;
-      await assert.rejects(reassignPlaidAccountEntity(fixture.env, {
-        mode: "preview",
-        account_ref: account.account_ref,
-        from_entity_slug: "household",
-        to_entity_slug: "business",
-      }), (error) => error.code === expectedCode);
+      const ownerHeaders = await fixture.ownerHeaders();
+      const routeUrl = new URL("https://brain.invalid/api/bank-feed/accounts/reassign");
+      const background = [];
+      const response = await handleBankFeed(fixture.env, new Request(routeUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...ownerHeaders },
+        body: JSON.stringify({
+          mode: "preview",
+          account_ref: account.account_ref,
+          from_entity_slug: "household",
+          to_entity_slug: "business",
+        }),
+      }), routeUrl, routeUrl.pathname, {
+        waitUntil(promise) { background.push(Promise.resolve(promise)); },
+      });
+      assert.equal(response.status >= 400, true);
+      assert.equal((await response.json()).code, expectedCode);
       assert.ok(fixture.seen.sql.length > sqlBefore, `${blocker} reached the database decision point`);
+      assert.equal(background.length, 0, `${blocker} refusal schedules no refresh`);
       assert.equal(fixture.first("SELECT COUNT(*) AS n FROM owner_action_requests WHERE action_type='plaid_account_entity_reassignment'").n, 0);
     } finally { fixture.close(); }
   }

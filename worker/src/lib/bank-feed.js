@@ -2214,6 +2214,7 @@ export async function handleBankFeed(env, request, url, path, ctx) {
         if (readyToResume) {
           ctx.waitUntil(refreshBankActivityAfterAccountAssignment(env, {
             fetchImpl: ctx?.bankFeedFetchImpl || fetch,
+            now: ctx?.bankFeedNow || null,
           }).catch(() => {}));
         }
       }
@@ -2233,6 +2234,12 @@ export async function handleBankFeed(env, request, url, path, ctx) {
       }
       const body = await readJson(request);
       const reassigned = await reassignPlaidAccountEntity(env, body);
+      if (reassigned.body?.changed && reassigned.body?.replayed !== true && ctx?.waitUntil) {
+        ctx.waitUntil(refreshBankActivityAfterAccountAssignment(env, {
+          fetchImpl: ctx?.bankFeedFetchImpl || fetch,
+          now: ctx?.bankFeedNow || null,
+        }).catch(() => {}));
+      }
       return ownerJson(reassigned.body, reassigned.status);
     }
 
