@@ -398,6 +398,12 @@ const expected = [
   // Shared closed schema used immediately before Worker JSON serialization
   // and again before the CLI accepts or renders a financial-picture receipt.
   "worker/src/lib/financial-picture-contract.js",
+  "worker/src/lib/financial-contract-schema.js",
+  "worker/src/lib/financial-money.js",
+  "worker/src/lib/financial-snapshot-contract.js",
+  "worker/src/lib/financial-answer-plan.js",
+  "worker/src/lib/financial-evidence-store.js",
+  "docs/FINANCIAL-CONTRACTS.md",
   "connectors/gmail.mjs",
   "connectors/imap.mjs",
   "connectors/imessage.mjs",
@@ -725,6 +731,7 @@ const expected = [
   "migrations/d1/0048_custom_api_source.sql",
   "migrations/d1/0049_simplefin_bank_feed.sql",
   "migrations/d1/0050_bank_activity_refresh_generation.sql",
+  "migrations/d1/0051_financial_evidence.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values

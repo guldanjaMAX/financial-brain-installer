@@ -606,6 +606,12 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "simplefin_assignment_requests",
   "simplefin_stage_accounts",
   "simplefin_stage_transactions",
+  // Schema 51 keeps exact source observations, findings and run receipts.
+  // Restore all immutable generations before the separately fenced head.
+  "financial_snapshots",
+  "financial_findings",
+  "financial_run_events",
+  "financial_snapshot_heads",
 ]);
 
 /**
@@ -877,6 +883,9 @@ const SCHEMA_50_TABLES = Object.freeze([
   "bank_activity_refresh_state",
   "bank_activity_write_claims",
 ]);
+const SCHEMA_51_TABLES = Object.freeze([
+  "financial_snapshots", "financial_findings", "financial_run_events", "financial_snapshot_heads",
+]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -900,7 +909,7 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
      ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
      ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES, ...SCHEMA_48_TABLES,
-     ...SCHEMA_49_TABLES, ...SCHEMA_50_TABLES].includes(table)
+     ...SCHEMA_49_TABLES, ...SCHEMA_50_TABLES, ...SCHEMA_51_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -4413,7 +4422,8 @@ function expectedRecoveryTables(migrations) {
     (latest >= 47 || !SCHEMA_47_TABLES.includes(table)) &&
     (latest >= 48 || !SCHEMA_48_TABLES.includes(table)) &&
     (latest >= 49 || !SCHEMA_49_TABLES.includes(table)) &&
-    (latest >= 50 || !SCHEMA_50_TABLES.includes(table)));
+    (latest >= 50 || !SCHEMA_50_TABLES.includes(table)) &&
+    (latest >= 51 || !SCHEMA_51_TABLES.includes(table)));
 }
 
 // The v0.4.8 disposal proof is a frozen campaign contract. Later product
