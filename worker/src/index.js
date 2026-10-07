@@ -64,7 +64,7 @@ import {
 } from "./lib/query-intent.js";
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
 import { answerSentences } from "./lib/answer-sentences.js";
-import { isQuickBooksAccountBalanceRecord, isQuickBooksBalanceClaim, quickBooksBalanceSupportsClaim, quickBooksBalanceAnswerAssertions } from "./lib/quickbooks-balance.js";
+import { quickBooksBalanceAnswer, quickBooksBalanceRequest } from "./lib/quickbooks-balance.js";
 import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
   documentMatchesOperativeClaim, documentUsesOperativeValue,
@@ -590,10 +590,7 @@ function statusPolarity(value) {
   return null;
 }
 
-function documentDirectlySupportsStatus(sentence, doc, question = "", accountBalance = false) {
-  if (accountBalance || isQuickBooksBalanceClaim(sentence, doc)) {
-    return quickBooksBalanceSupportsClaim(sentence, doc) && hasMatchingAsOfDate(sentence, [doc]);
-  }
+function documentDirectlySupportsStatus(sentence, doc, question = "") {
   const source = String(doc?.source || "").toLowerCase();
   const relationshipClaim = isRelationshipStatusClaim(sentence, question);
   // A Stripe Customer, invoice, subscription or accounting customer record is a
@@ -639,50 +636,6 @@ function hasMatchingAsOfDate(sentence, docs) {
     }).format(date).toLowerCase().replaceAll(",", "");
     return normalized.includes(iso) || normalized.includes(long) || normalized.includes(short);
   });
-}
-
-// A format repair gets no authority of its own. It must pass this same rule
-// again after the independent evidence verifier approves the replacement.
-function temporalAnswerFailure(answer, docs, allowedDocs, currentEvidence, question) {
-  const allowedNumbers = new Set(allowedDocs.map((doc) => doc.n));
-  const accountBalanceQuestion = /\bbalances?\b/i.test(question) && allowedDocs.some(isQuickBooksAccountBalanceRecord);
-  const assertions = quickBooksBalanceAnswerAssertions(answerSentences(answer), docs)
-    .map((assertion) => ({ ...assertion, evidence: assertion.evidence || currentEvidence }));
-  let temporalFailure = null;
-  for (const { sentence, evidence, accountBalance } of assertions) {
-    // Unrecognized numeric prose or tables must not evade checking merely by
-    // omitting the word "balance". Only the checked, fully bound grammar earns
-    // this exception; other formats can request one regeneration below.
-    const balanceClaim = accountBalance || (accountBalanceQuestion && /\d/.test(sentence)) ||
-      allowedDocs.some((doc) => isQuickBooksBalanceClaim(sentence, doc));
-    if ((!PRESENT_STATUS_ASSERTION.test(sentence) && !balanceClaim) ||
-        (STATUS_UNCERTAINTY.test(sentence) && !balanceClaim)) continue;
-    if (!evidence.length) {
-      temporalFailure = "present-status claim had no reliable-dated evidence for the named subject";
-      break;
-    }
-    const numbers = [...sentence.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
-    const newestCited = evidence.filter(
-      (doc) => numbers.includes(doc.n) && allowedNumbers.has(doc.n),
-    );
-    if (!newestCited.length) {
-      temporalFailure = "present-status claim cited older evidence while newer direct evidence was available";
-      break;
-    }
-    const directlySupporting = newestCited.filter(
-      (doc) => documentDirectlySupportsStatus(sentence, doc, question, balanceClaim),
-    );
-    if (!directlySupporting.length) {
-      temporalFailure = "newest cited evidence did not itself support the present-status claim";
-      break;
-    }
-    if (directlySupporting.every((doc) => !authoritativeCurrentEvidence(sentence, doc, question)) &&
-        !hasMatchingAsOfDate(sentence, directlySupporting)) {
-      temporalFailure = "non-authoritative current-status evidence requires an exact as-of date";
-      break;
-    }
-  }
-  return temporalFailure;
 }
 
 function modelRefusedAnswer(answer) {
@@ -1205,13 +1158,17 @@ async function handleThink(
     : "";
   const userMsg = `Question: ${q}\n\nDOCUMENTS:\n${docBlock}${currentBlock}\n\nKNOWN GAPS (computed from the data, not inferred, do not contradict these):\n${gapBlock}\n\nWrite the answer. Then, only if one of the gaps above materially affects how much the reader should trust that answer, add a final line starting with "Heads up:" naming that one gap in a single sentence. If none do, omit the Heads up line entirely.`;
 
-  let answer = null;
+  // Direct observed amounts need no generated prose. This replaces only the
+  // model calls and free-text temporal inference. Citation and authority
+  // checks remain shared; admission itself binds observation time and money.
+  const balanceAnswer = quickBooksBalanceAnswer({ question: q, results, docs });
+  let answer = balanceAnswer?.answer || null;
   let answerError = null;
   let model = null;
   let modelDeclaredNoEvidence = false;
   try {
     let repairInstruction = "";
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; !balanceAnswer && attempt < 2; attempt++) {
       const data = await callLLM(env, {
         model: env.ANSWER_MODEL || "claude-sonnet-4-5",
         max_tokens: 1000,
@@ -1238,11 +1195,6 @@ async function handleThink(
       const cited = docs.filter((doc) => citedNumbers.has(doc.n));
       if (!cited.length && docs.some((doc) => doc.source_kind === "quickbooks")) {
         repairInstruction = "The first draft did not cite a supplied document. Regenerate from the same DOCUMENTS. Cite every factual claim inline with its exact supplied document number, like [3]. Do not invent citation numbers or facts. If the documents cannot support a claim, omit it or say the documents do not answer that part.";
-      } else if (explicitCurrentIntent && cited.length && cited.every(isQuickBooksAccountBalanceRecord) &&
-          temporalAnswerFailure(answer, docs, cited, currentEvidence, q)) {
-        // Field responses discard rejected drafts. Handle unrecognized model
-        // prose by asking once for the checked form, not by relaxing the gate.
-        repairInstruction = "The first draft did not pass the observed account balance check. Regenerate from the same DOCUMENTS using one sentence per account, with the exact account name, currency, balance, as-of date and that account's own citation in EACH sentence. Use: AccountName has a balance of USD 12.34 as of YYYY-MM-DD [3]. For a negative Credit Card balance use: AccountName owes USD 12.34 as of YYYY-MM-DD [3]. Copy the magnitude and date from the record; never guess or change a sign. No table or shared date heading. Do not claim a complete account list from retrieved candidates. If an account lacks a reliable observed balance, say it cannot be confirmed. Cite every factual claim.";
       } else break;
     }
   } catch (e) {
@@ -1275,7 +1227,7 @@ async function handleThink(
           ? "draft cited an unavailable document" : "draft made claims without document citations" };
       } else {
         try {
-          const check = await callLLM(env, {
+          const check = balanceAnswer ? null : await callLLM(env, {
             model: env.ANSWER_MODEL || "claude-sonnet-4-5",
             max_tokens: 300,
             label: "rag-evidence-gate",
@@ -1307,11 +1259,14 @@ async function handleThink(
           const raw = check?.content?.[0]?.text || "";
           const start = raw.indexOf("{");
           const end = raw.lastIndexOf("}");
-          const verdict = start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
+          const verdict = balanceAnswer
+            ? { supported: true, complete: true, evidence: balanceAnswer.evidence, reason: "exact observed account balances; full inventory explicitly not established" }
+            : start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
           const allowed = new Set((Array.isArray(verdict?.evidence) ? verdict.evidence : [])
             .map(Number)
             .filter((n) => citedDocs.some((doc) => doc.n === n)));
           evidenceGate = {
+            ...(balanceAnswer ? { method: "quickbooks_observed_balances" } : {}),
             supported: verdict?.supported === true || String(verdict?.supported).toLowerCase() === "true",
             complete: verdict?.complete === true || String(verdict?.complete).toLowerCase() === "true",
             evidence: [...allowed],
@@ -1374,8 +1329,37 @@ async function handleThink(
             evidenceGate.supported = false;
             evidenceGate.reason = "only non-final planning material was cited for a binding legal claim";
           }
-          if (evidenceGate.supported && explicitCurrentIntent) {
-            const temporalFailure = temporalAnswerFailure(answer, docs, allowedDocs, currentEvidence, q);
+          if (evidenceGate.supported && explicitCurrentIntent && !balanceAnswer) {
+            const allowedNumbers = new Set(allowedDocs.map((doc) => doc.n));
+            const assertions = answerSentences(answer);
+            let temporalFailure = null;
+            for (const sentence of assertions) {
+              if (!PRESENT_STATUS_ASSERTION.test(sentence) || STATUS_UNCERTAINTY.test(sentence)) continue;
+              if (!currentEvidence.length) {
+                temporalFailure = "present-status claim had no reliable-dated evidence for the named subject";
+                break;
+              }
+              const numbers = [...sentence.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
+              const newestCited = currentEvidence.filter(
+                (doc) => numbers.includes(doc.n) && allowedNumbers.has(doc.n),
+              );
+              if (!newestCited.length) {
+                temporalFailure = "present-status claim cited older evidence while newer direct evidence was available";
+                break;
+              }
+              const directlySupporting = newestCited.filter(
+                (doc) => documentDirectlySupportsStatus(sentence, doc, q),
+              );
+              if (!directlySupporting.length) {
+                temporalFailure = "newest cited evidence did not itself support the present-status claim";
+                break;
+              }
+              if (directlySupporting.every((doc) => !authoritativeCurrentEvidence(sentence, doc, q)) &&
+                  !hasMatchingAsOfDate(sentence, directlySupporting)) {
+                temporalFailure = "non-authoritative current-status evidence requires an exact as-of date";
+                break;
+              }
+            }
             if (temporalFailure) {
               evidenceGate.supported = false;
               evidenceGate.reason = temporalFailure;
@@ -1403,6 +1387,17 @@ async function handleThink(
               evidenceGate.supported = false;
               evidenceGate.reason = "current answer repeated a superseded value as current";
             }
+          }
+          // Current QuickBooks balances have one approval path: exact observed
+          // Account rendering above. The ordinary verifier and temporal rule
+          // cannot certify free-form money tables or separate scale headings.
+          // Keep those generic checks unchanged, then fail closed if admission
+          // was unavailable. A forged snapshot marker cannot earn approval.
+          if (evidenceGate.supported && !balanceAnswer && /\bbalances?\b/i.test(q) &&
+              (explicitCurrentIntent || quickBooksBalanceRequest(q) || /\b(?:show|list|what (?:are|is))\b/i.test(q)) &&
+              docs.some((doc) => doc.source_kind === "quickbooks" || doc.date_source === "quickbooks:balance_snapshot")) {
+            evidenceGate.supported = false;
+            evidenceGate.reason = "current QuickBooks balances require deterministic observed Account evidence";
           }
           if (!evidenceGate.supported || !allowed.size) {
             answer = unsupportedAnswer;
@@ -1445,6 +1440,13 @@ async function handleThink(
         }
       }
     }
+  }
+
+  // Computed coverage warnings describe retrieval, not account facts. Append
+  // them only after the exact claims pass the shared gates, and keep `gaps` in
+  // the response. No model gets to dismiss or rewrite these warnings.
+  if (balanceAnswer && evidenceGate?.supported && approvedDocs.length && gaps.length) {
+    answer += `\n\nHeads up: ${gaps.map((gap) => String(gap.detail || "").replace(/\[\d+\]/g, "")).filter(Boolean).join(" ")}`;
   }
 
   // Trust metadata beside the answer, never inside it: the refusal sentence

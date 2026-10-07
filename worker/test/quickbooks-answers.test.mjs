@@ -7,6 +7,7 @@ import { normalizeProviderResult, deliverProviderDocuments } from "../../connect
 import { providerEnvelope, renderRecord } from "../../connectors/provider-sync.mjs";
 import { splitOversized } from "../../ingest/envelope-batching.mjs";
 import { SNAPSHOT, CHANGED, FIXTURES } from "../../test/fixtures/quickbooks-records.mjs";
+import { quickBooksBalanceAnswer } from "../src/lib/quickbooks-balance.js";
 
 const ADMIN = { "X-Admin-Key": "fixture-admin-key" };
 const NOW = Date.parse(SNAPSHOT) + 60_000;
@@ -87,7 +88,7 @@ test("legacy split families expose the existing migration boundary", async () =>
   } finally { fixture.close(); }
 });
 
-async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kind = "quickbooks", entity = "Account", answer, rows = null, question = "What are the current QuickBooks bank account balances?", limit = 10, expectedDrafts, expectedVerifiers = 1, verify = true } = {}) {
+async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kind = "quickbooks", entity = "Account", answer, rows = null, question = "What are the current QuickBooks bank account balances?", limit = 10, expectedDrafts, expectedVerifiers = 1, verify = true, balanceOnly = false } = {}) {
   t.mock.method(Date, "now", () => NOW);
   let verifierCalls = 0;
   let draftCalls = 0;
@@ -108,11 +109,16 @@ async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kin
     const result = await collect(entity, rows || [{ ...FIXTURES[0][1], Active: undefined }]);
     const docs = normalizeProviderResult(source, result).documents.map(mutate);
     await ingest(fixture, docs);
-    const response = await fixture.post("/api/rag/think", { q: question, limit }, ADMIN);
+    // The adversarial draft tests must still reach generation and its gates.
+    // A compound request requires explanation beyond deterministic balances;
+    // keep every prior wrong-money/state assertion on that normal route.
+    const q = balanceOnly ? question : `${question} Explain what the evidence does and does not establish.`;
+    const response = await fixture.post("/api/rag/think", { q, limit }, ADMIN);
     assert.equal(response.status, 200);
     const body = await response.json();
     assert.ok(body.results.length, "retrieval reached actual stored evidence");
     assert.equal(verifierCalls, expectedVerifiers, "the draft reached the expected evidence-verifier decision point");
+    if (expectedVerifiers) assert.equal(body.evidence_gate?.error, undefined, "a thrown gate is not a valid refusal");
     if (expectedDrafts !== undefined) assert.equal(draftCalls, expectedDrafts, "generation attempts are bounded");
     return body;
   } finally { fixture.close(); }
@@ -120,7 +126,7 @@ async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kin
 
 for (const source of ["quickbooks", "books_secondary"]) {
   test(`balance read through real storage and think is answerable for ${source}`, async (t) => {
-    const body = await answerCase(t, { source });
+    const body = await answerCase(t, { source, balanceOnly: true, expectedDrafts: 0, expectedVerifiers: 0 });
     assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
     assert.match(body.answer, /1,201\.00/);
     assert.equal(body.citations[0].date_source, "quickbooks:balance_snapshot");
@@ -141,7 +147,7 @@ for (const [label, options] of [
   ["mixed relationship", { answer: "Checking currently has a balance of USD 1,201.00 as of 2026-10-07 and the client relationship remains active [1]." }],
   ["recurring income borrowed from a balance", { answer: "Checking currently receives USD 1,201.00 every month as of 2026-10-07 [1]." }],
 ]) {
-  test(`balance exception refuses ${label} after affirmative verifier`, async (t) => {
+  test(`generated current balance refuses ${label} after affirmative verifier`, async (t) => {
     const body = await answerCase(t, options);
     assert.equal(body.evidence_gate.supported, false);
     assert.equal(body.citations.length, 0);
@@ -149,11 +155,12 @@ for (const [label, options] of [
 }
 
 for (const [entity, subject, amount] of [["Customer", "Customer One", "75.00"], ["Vendor", "Vendor One", "75.00"], ["Invoice", "Customer One", "75.00"], ["Bill", "Vendor One", "25.00"], ["CreditMemo", "Customer One", "25.00"]]) {
-  test(`${entity} supports only the exact observed party balance`, async (t) => {
+  test(`${entity} current balance no longer earns an LLM exception`, async (t) => {
     const row = FIXTURES.find(([kind]) => kind === entity)[1];
     const body = await answerCase(t, { entity, rows: [row], question: `What is the current QuickBooks balance for ${subject}?`,
       answer: `${subject} currently has ${entity === "CreditMemo" ? "remaining credit" : "an open balance"} of USD ${amount} as of 2026-10-07 [1].` });
-    assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
+    assert.equal(body.evidence_gate.supported, false, body.evidence_gate.reason);
+    assert.equal(body.citations.length, 0);
   });
 }
 
@@ -190,6 +197,8 @@ for (const [label, answer] of [
   ["compact negative dollar without balance word", "As of 2026-10-07, Checking: -$1,201.00 [1]."],
   ["table integer without balance word", "As of 2026-10-07:\n| Checking | 9999 | [1] |"],
   ["bare integer without balance word", "Checking has 9999 as of 2026-10-07 [1]."],
+  ["incorrect account type", "Checking (Credit Card): balance USD 1,201.00 as of 2026-10-07 [1]."],
+  ["state clause inside account type", "Checking (Bank and service is ongoing): balance USD 1,201.00 as of 2026-10-07 [1]."],
 ]) {
   test(`entire balance claim refuses ${label}`, async (t) => {
     const body = await answerCase(t, { answer });
@@ -198,8 +207,8 @@ for (const [label, answer] of [
   });
 }
 
-test("dollar notation is accepted only with the exact observed USD sign and amount", async (t) => {
-  const body = await answerCase(t, { answer: "Checking currently has a balance of $1,201.00 as of 2026-10-07 [1]." });
+test("dollar notation in an unused model draft cannot change rendered currency", async (t) => {
+  const body = await answerCase(t, { balanceOnly: true, expectedDrafts: 0, expectedVerifiers: 0, answer: "Checking currently has a balance of $1,201.00 as of 2026-10-07 [1]." });
   assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
   assert.equal(body.citations.length, 1);
 });
@@ -212,7 +221,7 @@ for (const [entity, subject, balance] of [
   test(`explicit ${entity} identity must match the balance record`, async (t) => {
     const row = FIXTURES.find(([kind]) => kind === entity)[1];
     const claim = `${subject} currently has ${balance} as of 2026-10-07 [1].`;
-    const control = await answerCase(t, { entity, rows: [row], answer: claim });
+    const control = await answerCase(t, { entity, rows: [row], question: "What balance was recorded on 2026-10-07?", answer: claim.replace("currently ", "") });
     assert.equal(control.evidence_gate.supported, true, control.evidence_gate.reason);
     const wrong = await answerCase(t, { entity, rows: [row], answer: claim.replace("1016", "9999") });
     assert.equal(wrong.evidence_gate.supported, false);
@@ -237,6 +246,139 @@ const ACCOUNT_ROWS = [
   { ...FIXTURES[0][1], Id: "card-one", Name: "Company Card", Active: undefined, AccountType: "Credit Card", CurrentBalance: -75.25 },
 ];
 const MULTI_ANSWER = "As of 2026-10-07, Operating has a balance of USD 1,201.00 [1], Reserve has a balance of USD 500.00 [2], and Company Card owes USD 75.25 [3].";
+const BALANCE_QUESTION = "What bank and credit card accounts are in QuickBooks, and what are their current balances?";
+const deterministicCase = (t, options = {}) => answerCase(t, {
+  rows: ACCOUNT_ROWS, question: BALANCE_QUESTION, balanceOnly: true,
+  expectedDrafts: 0, expectedVerifiers: 0, ...options,
+});
+
+test("deterministic balances answer three accounts without generation or verification calls", async (t) => {
+  const body = await deterministicCase(t);
+  assert.equal(body.results.length, 3);
+  assert.equal(body.evidence_gate.method, "quickbooks_observed_balances");
+  assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
+  assert.equal(body.evidence_gate.complete, true, "the missing inventory is explicitly disclosed");
+  assert.equal(body.citations.length, 3);
+  assert.match(body.answer, /Operating \(Bank\): balance USD 1,201\.00 as of 2026-10-07 \[\d+\]/);
+  assert.match(body.answer, /Reserve \(Bank\): balance USD 500\.00 as of 2026-10-07 \[\d+\]/);
+  assert.match(body.answer, /Company Card \(Credit Card\): owes USD 75\.25 as of 2026-10-07 \[\d+\]/);
+  assert.match(body.answer, /only accounts found.*not a complete/i);
+  assert.match(body.answer, /Heads up:/);
+  assert.ok(body.gaps.length, "retrieval gaps remain available");
+  assert.equal(body.model, undefined);
+  for (const line of body.answer.split("\n").filter((value) => /\[\d+\]/.test(value))) {
+    const n = Number(/\[(\d+)\]/.exec(line)[1]);
+    assert.ok(body.citations.some((citation) => citation.n === n));
+    assert.ok(body.results[n - 1].snippet.includes(line.match(/^(.*?) \(/)[1]), "citation binds its own account");
+  }
+});
+
+test("deterministic bank and card scope excludes expense accounts and handles signed and zero balances", async (t) => {
+  const rows = [...ACCOUNT_ROWS.map((row) => row.Name === "Operating" ? { ...row, CurrentBalance: -0.25 } : row),
+    { ...ACCOUNT_ROWS[2], Id: "card-zero", Name: "Travel Card", CurrentBalance: 0 },
+    { ...ACCOUNT_ROWS[0], Id: "expense-one", Name: "Office Expense", AccountType: "Expense", CurrentBalance: 42 },
+  ];
+  const body = await deterministicCase(t, { rows });
+  assert.equal(body.results.length, 5);
+  assert.equal(body.citations.length, 4);
+  assert.match(body.answer, /Operating \(Bank\): balance USD -0\.25/);
+  assert.match(body.answer, /Travel Card \(Credit Card\): balance USD 0\.00/);
+  assert.doesNotMatch(body.answer, /Office Expense|Travel Card.*owes/);
+});
+
+test("deterministic balances support a renamed provider and an exact named account", async (t) => {
+  const body = await deterministicCase(t, { source: "books_secondary", question: "What is the current balance of Reserve in QuickBooks?" });
+  assert.equal(body.results.length, 3);
+  assert.equal(body.evidence_gate.method, "quickbooks_observed_balances");
+  assert.equal(body.citations.length, 1);
+  assert.match(body.answer, /Reserve \(Bank\): balance USD 500\.00/);
+  assert.doesNotMatch(body.answer, /Operating|Company Card/);
+});
+
+test("deterministic balances inspect a full retrieval window but cite only numbered accounts", async (t) => {
+  const rows = [...ACCOUNT_ROWS, ...Array.from({ length: 15 }, (_, i) => ({
+    ...ACCOUNT_ROWS[0], Id: `extra-${i}`, Name: `Extra Bank ${i}`, CurrentBalance: 20 + i,
+  }))];
+  const body = await deterministicCase(t, { rows });
+  assert.equal(body.results.length, 12, "public candidates remain bounded to the numbered citation window");
+  assert.equal(body.citations.length, 12);
+  assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
+  assert.ok(body.citations.every((citation) => citation.n <= body.results.length));
+  assert.match(body.answer, /not a complete QuickBooks inventory/);
+});
+
+test("an unrelated historical expense account does not cancel observed bank and card balances", async (t) => {
+  const rows = [...ACCOUNT_ROWS, { ...ACCOUNT_ROWS[0], Id: "expense-old", Name: "Office Expense",
+    AccountType: "Expense", CurrentBalance: undefined }];
+  const body = await deterministicCase(t, { rows });
+  assert.equal(body.results.length, 4);
+  assert.equal(body.citations.length, 3);
+  assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
+  assert.doesNotMatch(body.answer, /Office Expense/);
+});
+
+for (const [label, options] of [
+  ["spending intent", { question: "How much did we spend with Operating?" }],
+  ["compound balance and relationship request", { question: "What are the current QuickBooks bank account balances, and is the service ongoing?" }],
+  ["historical request", { question: "What were the bank balances last year?" }],
+  ["unknown named account", { question: "What is the current balance of Imaginary in QuickBooks?" }],
+  ["unbound extra named account", { question: "What is the current balance of Operating and Imaginary in QuickBooks?" }],
+  ["non-QuickBooks provider", { kind: "local_folder" }],
+  ["missing balance", { rows: ACCOUNT_ROWS.map((row) => row.Name === "Reserve" ? { ...row, CurrentBalance: undefined } : row) }],
+  ["unspecified currency", { rows: ACCOUNT_ROWS.map((row) => ({ ...row, CurrencyRef: undefined })) }],
+  ["duplicate account names", { rows: [...ACCOUNT_ROWS, { ...ACCOUNT_ROWS[0], Id: "ambiguous", CurrentBalance: 1202 }] }],
+  ["mixed observation times", { mutate: (doc) => doc.source_id.endsWith("bank-one") ? { ...doc,
+    occurred_at: "2026-10-07T11:59:00.000Z", content: doc.content.replaceAll(SNAPSHOT, "2026-10-07T11:59:00.000Z") } : doc }],
+  ["stale record beside fresh records", { mutate: (doc) => doc.source_id.endsWith("bank-one") ? { ...doc,
+    occurred_at: CHANGED, content: doc.content.replaceAll(SNAPSHOT, CHANGED) } : doc }],
+  ["stale-only records", { mutate: (doc) => ({ ...doc, occurred_at: CHANGED, content: doc.content.replaceAll(SNAPSHOT, CHANGED) }) }],
+  ["future observations", { mutate: (doc) => ({ ...doc, occurred_at: "2027-01-01T00:00:00.000Z", content: doc.content.replaceAll(SNAPSHOT, "2027-01-01T00:00:00.000Z") }) }],
+  ["unmarked snapshot", { mutate: (doc) => ({ ...doc, date_source: "quickbooks:provider_timestamp" }) }],
+  ["unreliable text", { mutate: (doc) => ({ ...doc, text_source: "ocr", text_reliable: false }) }],
+  ["unreliable date", { mutate: (doc) => ({ ...doc, date_reliable: false }) }],
+  ["mismatched observation date", { mutate: (doc) => ({ ...doc, content: doc.content.replaceAll(SNAPSHOT, "2026-10-06T12:00:00.000Z") }) }],
+  ["amount multiplier in record opening", { mutate: (doc) => ({ ...doc, content: doc.content.replace("USD 500.00 as of", "USD 500.00 million as of") }) }],
+  ["inconsistent card debt explanation", { mutate: (doc) => ({ ...doc, content: doc.content.replace("owes USD 75.25", "owes USD 175.25") }) }],
+]) {
+  test(`deterministic balance admission falls back for ${label}`, async (t) => {
+    const body = await deterministicCase(t, { ...options, expectedDrafts: 1, expectedVerifiers: 0,
+      answer: "The documents do not answer the question." });
+    assert.ok(body.results.length > 0, "the admission decision had retrieved evidence");
+    assert.notEqual(body.evidence_gate.method, "quickbooks_observed_balances");
+    assert.equal(body.evidence_gate.supported, false);
+    assert.equal(body.citations.length, 0);
+  });
+}
+
+test("deterministic admission binds source identity, lineage and the whole retrieved window", () => {
+  const doc = { n: 1, source: "quickbooks", source_kind: "quickbooks", ref: "account:one", ts: SNAPSHOT,
+    date_reliable: true, date_source: "quickbooks:balance_snapshot", text_source: "native", text_reliable: true,
+    lineage: { kind: "source_record", status: "known" },
+    snippet: `Bank account Operating: balance USD 1,201.00 as of ${SNAPSHOT}. QuickBooks Account.` };
+  const input = { question: BALANCE_QUESTION, now: NOW, docs: [doc], results: [{ ...doc, ref_key: doc.ref }] };
+  assert.ok(quickBooksBalanceAnswer(input), "exact direct observation is the green admission control");
+  for (const change of [
+    { lineage: { kind: "derived_record", status: "known" } },
+    { lineage: { kind: "source_record", status: "unknown" } },
+    { ref: "invoice:one" },
+    { authority: { eligible: false } },
+    { snippet: doc.snippet.replace("Operating", "Operating [99]") },
+    { snippet: doc.snippet.replace("USD 1,201.00", "CAD $1,201.00") },
+    { snippet: doc.snippet.replace("USD 1,201.00", "($1,201.00)") },
+    { snippet: doc.snippet.replace("USD 1,201.00", "-$1,201.00") },
+    { snippet: doc.snippet.replace("USD 1,201.00", "USD 1,201.00 million") },
+    { snippet: doc.snippet.replace("QuickBooks Account.", "QuickBooks Invoice.") },
+  ]) {
+    assert.equal(quickBooksBalanceAnswer({ ...input, docs: [{ ...doc, ...change }] }), null);
+  }
+  const extra = { ...doc, n: 2, source: "books_secondary", ref: "account:two",
+    snippet: doc.snippet.replace("Operating", "Reserve") };
+  assert.equal(quickBooksBalanceAnswer({ ...input, docs: [doc, extra],
+    results: [...input.results, { ...extra, ref_key: extra.ref }] }), null, "two source namespaces cannot establish one company");
+  assert.equal(quickBooksBalanceAnswer({ ...input,
+    results: [...input.results, { ...doc, ref_key: "account:outside-window" }] }), null, "an account outside numbered evidence cannot be silently ignored");
+});
+
 // Bind invented account slots to the actual retrieval order, including when
 // freshness changes ranking. A citation mismatch must be intentional in a test.
 const accountAnswer = (text) => (prompt) => {
@@ -249,23 +391,24 @@ const accountAnswer = (text) => (prompt) => {
   return text.replace(/\[(\d+)\]/g, (_, n) => `[${numbers[Number(n) - 1]}]`);
 };
 
-test("one sentence checks three account balances against their own same-sync observations", async (t) => {
-  const body = await answerCase(t, { rows: ACCOUNT_ROWS, answer: accountAnswer(MULTI_ANSWER),
+test("three exact balances move from a generated sentence to deterministic evidence", async (t) => {
+  const body = await answerCase(t, { rows: ACCOUNT_ROWS, balanceOnly: true, expectedDrafts: 0, expectedVerifiers: 0, answer: accountAnswer(MULTI_ANSWER),
     question: "What bank and credit card accounts are in QuickBooks, and what are their current balances?" });
   assert.equal(body.results.length, 3);
   assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
   assert.equal(body.evidence_gate.complete, true);
   assert.equal(body.citations.length, 3);
-  assert.match(body.answer, /Company Card owes USD 75\.25/);
+  assert.match(body.answer, /Company Card \(Credit Card\): owes USD 75\.25/);
 });
 
-test("a newer observation for a different account does not invalidate a dated balance", async (t) => {
+test("mixed observation times no longer earn an LLM balance exception", async (t) => {
   const body = await answerCase(t, { rows: ACCOUNT_ROWS,
     mutate: (doc) => doc.source_id.endsWith("bank-one") ? { ...doc,
       occurred_at: "2026-10-07T11:59:00.000Z", content: doc.content.replaceAll(SNAPSHOT, "2026-10-07T11:59:00.000Z") } : doc,
     answer: accountAnswer("Operating currently has a balance of USD 1,201.00 as of 2026-10-07 [1]. Reserve currently has a balance of USD 500.00 as of 2026-10-07 [2]. Company Card owes USD 75.25 as of 2026-10-07 [3].") });
   assert.equal(body.results.length, 3);
-  assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
+  assert.equal(body.evidence_gate.supported, false, body.evidence_gate.reason);
+  assert.equal(body.citations.length, 0);
 });
 
 for (const [label, answer] of [
@@ -291,7 +434,7 @@ for (const [label, answer] of [
 
 test("compact account list without the word balance still checks each amount", async (t) => {
   const answer = "As of 2026-10-07, Operating: USD 1,201.00 [1]; Reserve: USD 500.00 [2]; Company Card: USD -75.25 [3].";
-  const control = await answerCase(t, { rows: ACCOUNT_ROWS, answer: accountAnswer(answer) });
+  const control = await deterministicCase(t, { answer: accountAnswer(answer) });
   assert.equal(control.evidence_gate.supported, true, control.evidence_gate.reason);
   const wrong = await answerCase(t, { rows: ACCOUNT_ROWS, answer: accountAnswer(answer.replace("USD 500.00", "EUR 500.00")) });
   assert.equal(wrong.evidence_gate.supported, false);
@@ -310,7 +453,7 @@ test("multi-account answer cannot cite a stale observation of one account", asyn
     answer: accountAnswer(MULTI_ANSWER) });
   assert.equal(body.results.length, 4, "both versions plus the other two accounts reached retrieval");
   assert.equal(body.evidence_gate.supported, false);
-  assert.match(body.evidence_gate.reason, /older evidence/);
+  assert.match(body.evidence_gate.reason, /deterministic observed Account evidence/);
   assert.equal(body.citations.length, 0);
 });
 
@@ -321,8 +464,8 @@ for (const [label, answer] of [
   ["signed card balance", MULTI_ANSWER.replace("owes USD 75.25", "has a balance of USD -75.25")],
   ["signed balance with debt explanation", MULTI_ANSWER.replace("owes USD 75.25", "has balance USD -75.25 (owes USD 75.25)")],
 ]) {
-  test(`multi-account balances accept ${label}`, async (t) => {
-    const body = await answerCase(t, { rows: ACCOUNT_ROWS, answer: accountAnswer(answer) });
+  test(`deterministic multi-account balances replace ${label}`, async (t) => {
+    const body = await deterministicCase(t, { rows: ACCOUNT_ROWS, answer: accountAnswer(answer) });
     assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
     assert.equal(body.citations.length, 3);
   });
@@ -331,7 +474,7 @@ for (const [label, answer] of [
 test("a fractional negative balance cannot lose its sign", async (t) => {
   const rows = ACCOUNT_ROWS.map((row) => row.Name === "Company Card" ? { ...row, CurrentBalance: -0.25 } : row);
   const answer = MULTI_ANSWER.replace("owes USD 75.25", "owes USD 0.25");
-  const control = await answerCase(t, { rows, answer: accountAnswer(answer) });
+  const control = await deterministicCase(t, { rows, answer: accountAnswer(answer) });
   assert.equal(control.evidence_gate.supported, true, control.evidence_gate.reason);
   const wrong = await answerCase(t, { rows, answer: accountAnswer(answer.replace("owes USD 0.25", "has a balance of USD 0.25")) });
   assert.equal(wrong.evidence_gate.supported, false);
@@ -340,7 +483,7 @@ test("a fractional negative balance cannot lose its sign", async (t) => {
 
 test("an as-of heading qualifies only its contiguous account balance bullets", async (t) => {
   const list = "QuickBooks account balances as of 2026-10-07:\n- Operating: USD 1,201.00 [1]\n- Reserve: USD 500.00 [2]\n- Company Card: owes USD 75.25 [3]";
-  const control = await answerCase(t, { rows: ACCOUNT_ROWS, answer: accountAnswer(list) });
+  const control = await deterministicCase(t, { answer: accountAnswer(list) });
   assert.equal(control.evidence_gate.supported, true, control.evidence_gate.reason);
   for (const answer of [
     list.replace("2026-10-07", "2026-10-06"),
@@ -357,7 +500,7 @@ test("an as-of heading qualifies only its contiguous account balance bullets", a
 // citation numbers, but discard the rejected draft. Preserve that evidence
 // shape with invented records; this is a format-boundary reproduction, not a
 // claim to replay the lost model text.
-test("same-sync account evidence can regenerate an unsupported dated list format once", async (t) => {
+test("same-sync field evidence shape renders without a list-format repair", async (t) => {
   const rows = [...ACCOUNT_ROWS,
     { ...ACCOUNT_ROWS[2], Id: "card-two", Name: "Reserve Card", CurrentBalance: 0 },
     ...Array.from({ length: 8 }, (_, i) => ({ ...ACCOUNT_ROWS[0], Id: `expense-${i}`, Name: `Expense ${i}`, AccountType: "Expense", CurrentBalance: i })),
@@ -372,19 +515,19 @@ test("same-sync account evidence can regenerate an unsupported dated list format
   const initial = "Your QuickBooks bank and credit card accounts currently show these balances (as of October 7, 2026) [1][2][3][4]:\n- Operating: USD 1,201.00 [1]\n- Reserve: USD 500.00 [2]\n- Company Card: owes USD 75.25 [3]\n- Reserve Card: USD 0.00 [4]";
   const repaired = "Operating has a balance of USD 1,201.00 as of 2026-10-07 [1].\nReserve has a balance of USD 500.00 as of 2026-10-07 [2].\nCompany Card owes USD 75.25 as of 2026-10-07 [3].\nReserve Card has a balance of USD 0.00 as of 2026-10-07 [4].";
   const options = { rows, limit: 12, question: "What bank and credit card accounts are in QuickBooks, and what are their current balances?" };
-  const refused = await answerCase(t, { ...options, answer: (prompt) => bind(initial, prompt), expectedDrafts: 2 });
+  const refused = await answerCase(t, { ...options, answer: (prompt) => bind(initial, prompt), expectedDrafts: 1 });
   assert.equal(refused.results.length, 12);
   assert.equal(refused.evidence_gate.supported, false);
   assert.match(refused.evidence_gate.reason, /newest cited evidence did not itself support/);
   assert.equal(refused.citations.length, 0);
-  const body = await answerCase(t, { ...options, expectedDrafts: 2, answer: (prompt, attempt) => {
+  const body = await answerCase(t, { ...options, balanceOnly: true, expectedDrafts: 0, expectedVerifiers: 0, answer: (prompt, attempt) => {
     if (attempt === 2) assert.match(prompt, /one sentence per account/i);
     return bind(attempt === 1 ? initial : repaired, prompt);
   } });
   assert.equal(body.results.length, 12);
   assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
   assert.equal(body.citations.length, 4);
-  assert.match(body.answer, /Company Card owes USD 75\.25/);
+  assert.match(body.answer, /Company Card \(Credit Card\): owes USD 75\.25/);
 });
 
 test("an uncited vendor draft is regenerated once and the cited replacement is verified", async (t) => {
@@ -458,13 +601,52 @@ test("a failed citation repair cannot expose its unverified first draft", async 
   assert.equal(body.evidence_gate, undefined);
 });
 
-test("a cited balance table can request the checked sentence format without recognizing its rows", async (t) => {
+test("a balance table is never generated when exact Account rendering is available", async (t) => {
   const initial = "As of 2026-10-07:\n| Account | Current balance | Evidence |\n| --- | --- | --- |\n| Operating | USD 1,201.00 | [1] |\n| Reserve | USD 500.00 | [2] |\n| Company Card | USD -75.25 | [3] |";
-  const body = await answerCase(t, { rows: ACCOUNT_ROWS, expectedDrafts: 2,
+  const body = await deterministicCase(t, { rows: ACCOUNT_ROWS,
     answer: (prompt, attempt) => accountAnswer(attempt === 1 ? initial : MULTI_ANSWER)(prompt) });
   assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
   assert.equal(body.citations.length, 3);
-  const unchanged = await answerCase(t, { rows: ACCOUNT_ROWS, expectedDrafts: 2, answer: accountAnswer(initial) });
+  const unchanged = await answerCase(t, { rows: ACCOUNT_ROWS, expectedDrafts: 1, answer: accountAnswer(initial) });
   assert.equal(unchanged.evidence_gate.supported, false);
   assert.equal(unchanged.citations.length, 0);
 });
+
+// Review R4: separate semantic context cannot earn approval through a
+// balance clause, even after an affirmative verifier and real retrieval.
+for (const [label, answer] of [
+  ["millions heading", "Amounts in millions:\nChecking has a balance of USD 1,201.00 as of 2026-10-07 [1]."],
+  ["thousands sentence", "All figures below are in thousands.\nChecking has a balance of USD 1,201.00 as of 2026-10-07 [1]."],
+  ["currency heading", "Amounts in CAD:\nChecking has a balance of $1,201.00 as of 2026-10-07 [1]."],
+  ["negative heading", "Every amount below is negative:\nChecking has a balance of USD 1,201.00 as of 2026-10-07 [1]."],
+  ["absent second subject", "Checking has a balance of USD 1,201.00 as of 2026-10-07 [1].\nThe same amount applies to Savings."],
+  ["renewed engagement", "Checking has a balance of USD 1,201.00 as of 2026-10-07 [1].\nThe engagement has been renewed."],
+]) {
+  test(`review R4 refuses generated ${label}`, async (t) => {
+    const control = await deterministicCase(t);
+    assert.equal(control.evidence_gate.supported, true);
+    const body = await answerCase(t, { answer, expectedDrafts: 1 });
+    assert.equal(body.results.length, 1);
+    assert.equal(body.evidence_gate.supported, false);
+    assert.equal(body.citations.length, 0);
+  });
+}
+
+test("the balance module exposes no generated-claim approval API", async () => {
+  const exports = await import("../src/lib/quickbooks-balance.js");
+  assert.deepEqual(Object.keys(exports), ["quickBooksBalanceAnswer", "quickBooksBalanceRequest"]);
+});
+
+for (const question of ["What are my bank balances?", "What are my bank balances, and what fees did we pay?"]) {
+  test(`an implied-current balance request cannot fall back to generated stale money: ${question}`, async (t) => {
+    const control = await deterministicCase(t, { question: "What are my bank balances?" });
+    assert.equal(control.evidence_gate.supported, true);
+    const body = await deterministicCase(t, { question,
+      mutate: (doc) => ({ ...doc, occurred_at: CHANGED, content: doc.content.replaceAll(SNAPSHOT, CHANGED) }),
+      expectedDrafts: 1, expectedVerifiers: 1,
+      answer: "Operating has a balance of USD 9,999.00 as of 2026-10-07 [1]." });
+    assert.equal(body.results.length, 3);
+    assert.equal(body.evidence_gate.supported, false);
+    assert.equal(body.citations.length, 0);
+  });
+}
