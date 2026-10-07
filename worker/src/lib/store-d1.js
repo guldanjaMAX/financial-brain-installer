@@ -1,3 +1,4 @@
+import { measureQueryStage, startQueryStage } from "./query-timing.js";
 /**
  * store-d1 — retrieval over Cloudflare alone: D1 for text and keywords,
  * Vectorize for vectors, fusion in the Worker.
@@ -722,7 +723,7 @@ export async function unchunkedTaxDocumentCandidates(env, {
 }
 
 /** Vector search over Vectorize, hydrated and filtered in D1. */
-export async function searchVector(env, embedding, { limit, filters = {}, scope = null } = {}) {
+export async function searchVector(env, embedding, { limit, filters = {}, scope = null, timing = null } = {}) {
   const topK = Math.min(limit, VECTOR_TOPK_MAX);
   const vectorFilter = await vectorFilterFor(filters);
   const hasFilter = Object.keys(vectorFilter).length > 0;
@@ -732,14 +733,14 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
   // drift. If an upgraded install is missing a metadata index, the fallback
   // widens the candidate pool before D1 narrows it.
   const query = (withFilter) =>
-    env.VECTORIZE.query(embedding, {
+    measureQueryStage(timing, "vector_query", () => env.VECTORIZE.query(embedding, {
       topK: !withFilter && hasFilter ? VECTOR_TOPK_MAX : topK,
       returnValues: false,
       // Metadata is deliberately not returned. It halves topK from 100 to 50, and
       // everything needed is in D1 anyway, keyed by the same chunk_uid.
       returnMetadata: "none",
       ...(withFilter && hasFilter ? { filter: vectorFilter } : {}),
-    });
+    }));
 
   let res;
   try {
@@ -825,7 +826,7 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
  */
 export async function search(env, {
   query, embedding, limit = 10, filters = {}, weights = {}, rrfK = RRF_K, access = null, scope = null,
-  projectionReadiness = null, supplementalFilters = [], now = Date.now(),
+  projectionReadiness = null, supplementalFilters = [], now = Date.now(), timing = null,
 }) {
   // Refuse malformed or schema-skewed scope before the first D1 or Vectorize
   // call. If each modality caught this independently, the invalid scope could
@@ -845,17 +846,17 @@ export async function search(env, {
   const vectorEligible = Boolean(embedding) && access?.kind !== "grant" && scopeIsUnrestricted(scope);
   const hintAttemptsPromise = Promise.all(supplementalFilters.map(async (hint) => {
     const [keyword, vector] = await Promise.all([
-      settleModality(searchKeyword(env, query, { limit: pool, filters: hint, access, scope })),
+      settleModality(measureQueryStage(timing, "keyword", () => searchKeyword(env, query, { limit: pool, filters: hint, access, scope }))),
       vectorEligible
-        ? settleModality(searchVector(env, embedding, { limit: pool, filters: hint, scope }))
+        ? settleModality(measureQueryStage(timing, "vector", () => searchVector(env, embedding, { limit: pool, filters: hint, scope, timing })))
         : Promise.resolve({ attempted: false, results: [], error: null }),
     ]);
     return { keyword, vector };
   }));
   const [keywordAttempt, vectorAttempt, projection, hintAttempts] = await Promise.all([
-    settleModality(searchKeyword(env, query, { limit: pool, filters, access, scope })),
+    settleModality(measureQueryStage(timing, "keyword", () => searchKeyword(env, query, { limit: pool, filters, access, scope }))),
     vectorEligible
-      ? settleModality(searchVector(env, embedding, { limit: pool, filters, scope }))
+      ? settleModality(measureQueryStage(timing, "vector", () => searchVector(env, embedding, { limit: pool, filters, scope, timing })))
       : Promise.resolve({ attempted: false, results: [], error: null }),
     // Vectorize may return some old/current candidates while a newer accepted
     // changeset is still processing. Non-empty semantic results therefore do
@@ -864,7 +865,7 @@ export async function search(env, {
     // advertises partial projection instead of looking fully healthy.
     vectorEligible
       ? projectionReadiness === null
-        ? vectorReadiness(env).catch(() => ({ ready: false }))
+        ? measureQueryStage(timing, "projection_readiness", () => vectorReadiness(env)).catch(() => ({ ready: false }))
         : Promise.resolve(projectionReadiness)
       : Promise.resolve(null),
     hintAttemptsPromise,
@@ -879,6 +880,7 @@ export async function search(env, {
   ]
     .find((error) => memorySupersessionIntegrityFailure(error));
   if (integrityFailure) throw integrityFailure;
+  const finishAuthority = startQueryStage(timing, "authority_lineage");
   const kw = keywordAttempt.results.map(assessStoredProvenance);
   const vec = vectorAttempt.results.map(assessStoredProvenance);
   const keywordFailed = keywordAttempt.attempted && Boolean(keywordAttempt.error);
@@ -1098,6 +1100,7 @@ export async function search(env, {
     }, lineage));
   }
   await annotateLineageFamilyTokens(documents);
+  finishAuthority();
 
   return {
     results: documents.slice(0, limit),
