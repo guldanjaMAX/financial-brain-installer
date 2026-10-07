@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { restrictWindowsDirectoryToCurrentUser, restrictWindowsFileToCurrentUser } from "./current-user-file.mjs";
 
 export const DAILY_LOG_MAX_BYTES = 64 * 1024;
-const RESULTS = new Set(["running", "complete", "failed", "deferred"]);
+const RESULTS = new Set(["running", "complete", "partial", "failed", "deferred"]);
 export const DAILY_RUN_ERROR = "Daily refresh failed before completion. Inspect the schedule and source authorization.";
 const ERRORS = new Set([DAILY_RUN_ERROR, "One or more daily sources failed or did not prove freshness.", "Daily refresh was deferred by another operation or recovery."]);
 
@@ -183,7 +183,8 @@ export async function observeDailyRun(identity, run, options = {}) {
     const result = await run();
     const status = RESULTS.has(result?.status) && result.status !== "running" ? result.status : "failed";
     write(identity, { started_at, completed_at: now().toISOString(), result: status,
-      error: status === "complete" ? null : status === "deferred"
+      // Verified partial coverage is an outcome, not a process failure.
+      error: status === "complete" || status === "partial" ? null : status === "deferred"
         ? "Daily refresh was deferred by another operation or recovery."
         : "One or more daily sources failed or did not prove freshness." }, options);
     return result;
@@ -233,7 +234,7 @@ export function dailyObservationStatus(plan, schedule, runtime, runnerUsable, op
 
 export function renderDailyObservation(schedule, log) {
   log(`Last daily run: ${schedule.last_run_at || "unknown or never"}`);
-  log(`Last daily result: ${schedule.last_result || "unknown"}`);
+  log(`Last daily result: ${schedule.last_result === "partial" ? "partial (coverage omissions)" : schedule.last_result || "unknown"}`);
   log(`Next daily run: ${schedule.next_run || "not scheduled"}`);
   log(`Last daily error: ${schedule.last_error_line || "none recorded"}`);
   if (schedule.log_path) log(`Daily log: ${schedule.log_path}`);

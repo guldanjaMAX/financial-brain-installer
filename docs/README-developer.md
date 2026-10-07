@@ -1072,7 +1072,9 @@ local calendar slot. A run that failed before the runner could start may have
 an unknown start time on Mac. Native inspection failure, an interrupted
 journal entry, and absent completion evidence remain unknown, not successful.
 A missing Node binary or runner is reported as a failure. A deferred run is
-reported as deferred. These are process diagnostics; source freshness remains
+reported as deferred. Verified partial refreshes retain a partial result with
+coverage omissions, without adding a false process failure to the error log.
+These are process diagnostics; source freshness remains
 a separate proof. The next clock slot is planned, not a promise that a logged
 out or powered-off machine will run.
 
