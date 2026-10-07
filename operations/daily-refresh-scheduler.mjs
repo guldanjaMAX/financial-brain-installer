@@ -1,10 +1,15 @@
 /** Cross-platform owned scheduler definitions and update pause/restore rules. */
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {
+  clearBrainRecoveryFence,
+  readBrainRecoveryFence,
+  writeBrainRecoveryFence,
+} from "./brain-lifecycle-lock.mjs";
 
 const OWNER_MARKER = "financial-brain-daily-refresh-v1";
 
@@ -81,11 +86,23 @@ export function buildDailyRefreshDefinition(plan, options = {}) {
         start_when_available: true,
         multiple_instances_policy: "IgnoreNew",
         execution_time_limit: `PT${plan.max_runtime_minutes}M`,
+        task_enabled: true,
+        disallow_start_on_batteries: false,
+        stop_on_batteries: false,
+        allow_hard_terminate: true,
+        run_only_if_network_available: false,
+        stop_on_idle_end: true,
+        restart_on_idle: false,
+        allow_start_on_demand: true,
+        hidden: false,
+        run_only_if_idle: false,
+        wake_to_run: true,
+        priority: 7,
       };
   const nativeDefinitionHash = hash(JSON.stringify(nativeContract));
   const serialized = platform === "darwin"
     ? `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${xml(name)}</string>\n<key>ProgramArguments</key><array><string>${xml(nodePath)}</string>${args.map((arg) => `<string>${xml(arg)}</string>`).join("")}</array>\n<key>StartCalendarInterval</key><dict><key>Hour</key><integer>${clock.hour}</integer><key>Minute</key><integer>${clock.minute}</integer></dict>\n<key>RunAtLoad</key><true/>\n<key>ProcessType</key><string>Background</string>\n<!-- ${marker} -->\n</dict></plist>\n`
-    : `<?xml version="1.0" encoding="UTF-16"?>\n<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>${xml(marker)}</Description></RegistrationInfo><Triggers><CalendarTrigger><StartBoundary>2000-01-01T${clock.hhmm}</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers><Principals><Principal id="Owner">${windowsSid ? `<UserId>${xml(windowsSid)}</UserId>` : ""}<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><StartWhenAvailable>true</StartWhenAvailable><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><ExecutionTimeLimit>PT${plan.max_runtime_minutes}M</ExecutionTimeLimit></Settings><Actions Context="Owner"><Exec><Command>${xml(nodePath)}</Command><Arguments>${xml(args.map((arg) => `"${arg}"`).join(" "))}</Arguments></Exec></Actions></Task>\n`;
+    : `<?xml version="1.0" encoding="UTF-16"?>\n<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>${xml(marker)}</Description></RegistrationInfo><Triggers><CalendarTrigger><StartBoundary>2000-01-01T${clock.hhmm}</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers><Principals><Principal id="Owner">${windowsSid ? `<UserId>${xml(windowsSid)}</UserId>` : ""}<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><IdleSettings><StopOnIdleEnd>true</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>true</WakeToRun><ExecutionTimeLimit>PT${plan.max_runtime_minutes}M</ExecutionTimeLimit><Priority>7</Priority></Settings><Actions Context="Owner"><Exec><Command>${xml(nodePath)}</Command><Arguments>${xml(args.map((arg) => `"${arg}"`).join(" "))}</Arguments></Exec></Actions></Task>\n`;
   return Object.freeze({
     ...payload,
     definition_hash: definitionHash,
@@ -123,6 +140,7 @@ function adapterFor(plan, options) {
 function verifiedState(state, definition, { enabled = true } = {}) {
   return Boolean(state?.exists && state.owned === true && state.enabled === enabled &&
     (!enabled || state.loaded !== false) &&
+    state.loaded_definition_matches !== false &&
     state.definition?.definition_hash === definition.definition_hash &&
     state.definition?.native_definition_hash === definition.native_definition_hash);
 }
@@ -132,7 +150,8 @@ function sameObservedState(left, right) {
   return left.owned === right.owned && left.enabled === right.enabled &&
     left.definition?.definition_hash === right.definition?.definition_hash &&
     left.definition?.native_definition_hash === right.definition?.native_definition_hash &&
-    left.definition?.serialized === right.definition?.serialized;
+    left.definition?.serialized === right.definition?.serialized &&
+    left.loaded_definition_matches === right.loaded_definition_matches;
 }
 
 export function reconcileDailyRefreshSchedule(plan, options = {}) {
@@ -305,7 +324,22 @@ function updateTransactionPath(identity, { home = homedir() } = {}) {
   return join(resolve(home), ".brain", "daily-update-transactions", `${id}.json`);
 }
 
-export function writeDailyRefreshUpdateTransaction({ plan, snapshot, phase } = {}, options = {}) {
+function transactionContext(identityOrPlan, options = {}) {
+  const identity = identityOrPlan?.identity?.id ? identityOrPlan.identity : identityOrPlan;
+  const manifestPath = identityOrPlan?.manifest_path || options.manifestPath || null;
+  return { identity, manifestPath };
+}
+
+function durableLegacySnapshots(entries = []) {
+  return Object.freeze((entries || []).map((entry) => Object.freeze({
+    kind: String(entry.kind || ""),
+    sourceKey: String(entry.sourceKey || ""),
+    ...(entry.provider ? { provider: String(entry.provider) } : {}),
+    snapshot: entry.snapshot || null,
+  })));
+}
+
+export function writeDailyRefreshUpdateTransaction({ plan, snapshot, phase, legacySnapshots = [] } = {}, options = {}) {
   if (!new Set(["preparing", "paused", "recovery_required"]).has(phase)) {
     throw new TypeError("a valid daily update transaction phase is required");
   }
@@ -318,10 +352,18 @@ export function writeDailyRefreshUpdateTransaction({ plan, snapshot, phase } = {
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   chmodSync(directory, 0o700);
+  let prior = null;
+  if (existsSync(path)) {
+    try { prior = JSON.parse(readFileSync(path, "utf8")); } catch {}
+  }
+  const transactionId = /^[a-f0-9]{32}$/u.test(String(prior?.transaction_id || ""))
+    ? prior.transaction_id
+    : randomBytes(16).toString("hex");
   const receipt = Object.freeze({
     schema_version: 1,
     kind: "daily_refresh_update_transaction",
     identity: plan.identity,
+    transaction_id: transactionId,
     manifest_path_hash: plan.manifest_path_hash,
     manifest_content_hash: plan.manifest_content_hash,
     source_plan_hash: plan.source_plan_hash,
@@ -333,21 +375,43 @@ export function writeDailyRefreshUpdateTransaction({ plan, snapshot, phase } = {
       identity: snapshot.identity,
       definition: snapshot.definition || null,
     }),
+    legacy_snapshots: durableLegacySnapshots(legacySnapshots),
   });
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
   try {
     writeFileSync(temporary, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     renameSync(temporary, path);
     chmodSync(path, 0o600);
+    writeBrainRecoveryFence({
+      manifestPath: plan.manifest_path,
+      transactionId,
+      platform: options.platform,
+      machineLockRoot: options.machineLockRoot,
+    });
   } finally {
     try { unlinkSync(temporary); } catch {}
   }
   return receipt;
 }
 
-export function readDailyRefreshUpdateTransaction(identity, options = {}) {
+export function readDailyRefreshUpdateTransaction(identityOrPlan, options = {}) {
+  const { identity, manifestPath } = transactionContext(identityOrPlan, options);
   const path = updateTransactionPath(identity, options);
-  if (!existsSync(path)) return null;
+  const fence = manifestPath ? readBrainRecoveryFence({
+    manifestPath,
+    platform: options.platform,
+    machineLockRoot: options.machineLockRoot,
+  }) : null;
+  if (!existsSync(path)) {
+    return fence ? Object.freeze({
+      schema_version: 1,
+      kind: "daily_refresh_update_transaction",
+      phase: "recovery_required",
+      shared_fence: true,
+      transaction_id: fence.transaction_id,
+      identity,
+    }) : null;
+  }
   const state = lstatSync(path);
   if (!state.isFile() || state.isSymbolicLink() || state.nlink !== 1 || state.size > 1024 * 1024) {
     throw new Error("the daily update transaction receipt is unsafe");
@@ -361,18 +425,44 @@ export function readDailyRefreshUpdateTransaction(identity, options = {}) {
   }
   if (value?.schema_version !== 1 || value?.kind !== "daily_refresh_update_transaction" ||
       value?.identity?.id !== identity.id ||
+      !/^[a-f0-9]{32}$/u.test(String(value?.transaction_id || "")) ||
       !new Set(["preparing", "paused", "recovery_required"]).has(value?.phase)) {
     throw new Error("the daily update transaction receipt is malformed");
   }
+  if (fence && fence.transaction_id !== value.transaction_id) {
+    throw new Error("the daily update transaction does not match the Brain recovery fence");
+  }
+  if (manifestPath && !fence) return null;
   return Object.freeze(value);
 }
 
-export function clearDailyRefreshUpdateTransaction(identity, options = {}) {
+export function clearDailyRefreshUpdateTransaction(identityOrPlan, options = {}) {
+  const { identity, manifestPath } = transactionContext(identityOrPlan, options);
   const path = updateTransactionPath(identity, options);
-  if (!existsSync(path)) return false;
+  if (!existsSync(path)) {
+    const fence = manifestPath ? readBrainRecoveryFence({
+      manifestPath,
+      platform: options.platform,
+      machineLockRoot: options.machineLockRoot,
+    }) : null;
+    if (fence) throw new Error("the Brain recovery fence has no local schedule transaction");
+    return false;
+  }
   const state = lstatSync(path);
   if (!state.isFile() || state.isSymbolicLink() || state.nlink !== 1) {
     throw new Error("the daily update transaction receipt is unsafe");
+  }
+  let value;
+  try { value = JSON.parse(readFileSync(path, "utf8")); } catch {
+    throw new Error("the daily update transaction receipt is malformed");
+  }
+  if (manifestPath) {
+    clearBrainRecoveryFence({
+      manifestPath,
+      transactionId: value.transaction_id,
+      platform: options.platform,
+      machineLockRoot: options.machineLockRoot,
+    });
   }
   unlinkSync(path);
   return true;
@@ -392,8 +482,66 @@ function boolTag(serialized, name) {
   return value === null ? null : value.toLowerCase() === "true";
 }
 
+function tagCount(serialized, name) {
+  return [...String(serialized || "").matchAll(new RegExp(`<${name}(?:\\s[^>]*)?>`, "giu"))].length;
+}
+
+function exactlyOne(serialized, names) {
+  return names.every((name) => tagCount(serialized, name) === 1);
+}
+
+function directChildNames(serialized) {
+  const names = [];
+  let depth = 0;
+  for (const match of String(serialized || "").matchAll(/<\/?([A-Za-z][A-Za-z0-9:_-]*)(?:\s[^>]*)?\s*\/?>/gu)) {
+    const token = match[0];
+    if (token.startsWith("</")) {
+      depth -= 1;
+    } else {
+      if (depth === 0) names.push(match[1]);
+      if (!token.endsWith("/>") ) depth += 1;
+    }
+  }
+  return names;
+}
+
+function sameNames(actual, expected) {
+  return actual.length === expected.length && actual.every((name, index) => name === expected[index]);
+}
+
 function observedWindowsContract(serialized) {
-  return {
+  const text = String(serialized || "");
+  const actions = text.match(/<Actions(?:\s[^>]*)?>([\s\S]*?)<\/Actions>/iu)?.[1] || "";
+  const triggers = text.match(/<Triggers(?:\s[^>]*)?>([\s\S]*?)<\/Triggers>/iu)?.[1] || "";
+  const principals = text.match(/<Principals(?:\s[^>]*)?>([\s\S]*?)<\/Principals>/iu)?.[1] || "";
+  const exec = actions.match(/<Exec(?:\s[^>]*)?>([\s\S]*?)<\/Exec>/iu)?.[1] || "";
+  const calendar = triggers.match(/<CalendarTrigger(?:\s[^>]*)?>([\s\S]*?)<\/CalendarTrigger>/iu)?.[1] || "";
+  const scheduleByDay = calendar.match(/<ScheduleByDay(?:\s[^>]*)?>([\s\S]*?)<\/ScheduleByDay>/iu)?.[1] || "";
+  const principal = principals.match(/<Principal(?:\s[^>]*)?>([\s\S]*?)<\/Principal>/iu)?.[1] || "";
+  const settings = text.match(/<Settings(?:\s[^>]*)?>([\s\S]*?)<\/Settings>/iu)?.[1] || "";
+  const idleSettings = settings.match(/<IdleSettings(?:\s[^>]*)?>([\s\S]*?)<\/IdleSettings>/iu)?.[1] || "";
+  const principalNames = directChildNames(principal);
+  const expectedPrincipalNames = tag(principal, "UserId") === null
+    ? ["LogonType", "RunLevel"]
+    : ["UserId", "LogonType", "RunLevel"];
+  const valid = exactlyOne(text, [
+    "Actions", "Exec", "Command", "Arguments", "Triggers", "CalendarTrigger", "StartBoundary",
+    "ScheduleByDay", "DaysInterval", "Principals", "Principal", "LogonType", "RunLevel", "Settings",
+    "StartWhenAvailable", "MultipleInstancesPolicy", "ExecutionTimeLimit",
+  ]) && tagCount(text, "Enabled") === 2 &&
+    sameNames(directChildNames(actions), ["Exec"]) &&
+    sameNames(directChildNames(exec), ["Command", "Arguments"]) &&
+    sameNames(directChildNames(triggers), ["CalendarTrigger"]) &&
+    sameNames(directChildNames(calendar), ["StartBoundary", "Enabled", "ScheduleByDay"]) &&
+    sameNames(directChildNames(scheduleByDay), ["DaysInterval"]) &&
+    sameNames(directChildNames(principals), ["Principal"]) &&
+    sameNames(principalNames, expectedPrincipalNames) &&
+    sameNames(directChildNames(settings), [
+      "MultipleInstancesPolicy", "DisallowStartIfOnBatteries", "StopIfGoingOnBatteries",
+      "AllowHardTerminate", "StartWhenAvailable", "RunOnlyIfNetworkAvailable", "IdleSettings",
+      "AllowStartOnDemand", "Enabled", "Hidden", "RunOnlyIfIdle", "WakeToRun", "ExecutionTimeLimit", "Priority",
+    ]) && sameNames(directChildNames(idleSettings), ["StopOnIdleEnd", "RestartOnIdle"]);
+  const contract = {
     command: tag(serialized, "Command"),
     arguments: tag(serialized, "Arguments"),
     start_boundary: tag(serialized, "StartBoundary"),
@@ -405,7 +553,20 @@ function observedWindowsContract(serialized) {
     start_when_available: boolTag(serialized, "StartWhenAvailable"),
     multiple_instances_policy: tag(serialized, "MultipleInstancesPolicy"),
     execution_time_limit: tag(serialized, "ExecutionTimeLimit"),
+    task_enabled: boolTag(settings, "Enabled"),
+    disallow_start_on_batteries: boolTag(settings, "DisallowStartIfOnBatteries"),
+    stop_on_batteries: boolTag(settings, "StopIfGoingOnBatteries"),
+    allow_hard_terminate: boolTag(settings, "AllowHardTerminate"),
+    run_only_if_network_available: boolTag(settings, "RunOnlyIfNetworkAvailable"),
+    stop_on_idle_end: boolTag(idleSettings, "StopOnIdleEnd"),
+    restart_on_idle: boolTag(idleSettings, "RestartOnIdle"),
+    allow_start_on_demand: boolTag(settings, "AllowStartOnDemand"),
+    hidden: boolTag(settings, "Hidden"),
+    run_only_if_idle: boolTag(settings, "RunOnlyIfIdle"),
+    wake_to_run: boolTag(settings, "WakeToRun"),
+    priority: Number(tag(settings, "Priority")),
   };
+  return { valid, contract };
 }
 
 function observedMacContract(serialized) {
@@ -413,7 +574,7 @@ function observedMacContract(serialized) {
   const argumentsList = [...argumentsBlock.matchAll(/<string>([\s\S]*?)<\/string>/giu)].map((match) => decodeXml(match[1]));
   const calendar = String(serialized).match(/<key>StartCalendarInterval<\/key><dict>([\s\S]*?)<\/dict>/iu)?.[1] || "";
   const integerAfter = (key) => Number(calendar.match(new RegExp(`<key>${key}<\\/key><integer>(\\d+)<\\/integer>`, "iu"))?.[1]);
-  return {
+  const contract = {
     label: String(serialized).match(/<key>Label<\/key><string>([\s\S]*?)<\/string>/iu) ?
       decodeXml(String(serialized).match(/<key>Label<\/key><string>([\s\S]*?)<\/string>/iu)[1]) : null,
     arguments: argumentsList,
@@ -423,20 +584,61 @@ function observedMacContract(serialized) {
     process_type: String(serialized).match(/<key>ProcessType<\/key><string>([\s\S]*?)<\/string>/iu) ?
       decodeXml(String(serialized).match(/<key>ProcessType<\/key><string>([\s\S]*?)<\/string>/iu)[1]) : null,
   };
+  const keys = [...String(serialized).matchAll(/<key>([^<]+)<\/key>/gu)].map((match) => match[1]);
+  const valid = argumentsList.length === 6 &&
+    [...String(serialized).matchAll(/<key>ProgramArguments<\/key>/giu)].length === 1 &&
+    [...String(serialized).matchAll(/<key>StartCalendarInterval<\/key>/giu)].length === 1 &&
+    [...String(serialized).matchAll(/<key>Label<\/key>/giu)].length === 1 &&
+    sameNames(keys, ["Label", "ProgramArguments", "StartCalendarInterval", "Hour", "Minute", "RunAtLoad", "ProcessType"]);
+  return { valid, contract };
 }
 
 function definitionFromNative(identity, serialized, platform) {
   const marker = markerOf(serialized);
-  const nativeContract = platform === "win32"
+  const observed = platform === "win32"
     ? observedWindowsContract(serialized)
     : observedMacContract(serialized);
   return {
     identity,
     definition_hash: marker?.definition_hash || null,
-    native_contract: nativeContract,
-    native_definition_hash: hash(JSON.stringify(nativeContract)),
+    native_contract: observed.contract,
+    native_definition_hash: observed.valid ? hash(JSON.stringify(observed.contract)) : null,
+    native_contract_valid: observed.valid,
     serialized,
   };
+}
+
+function loadedMacProgramMatches(serialized, output) {
+  const expected = observedMacContract(serialized);
+  if (!expected.valid) return false;
+  const text = String(output || "");
+  const match = text.match(/^\s*program\s*=\s*(.+?)\s*$/imu);
+  const block = text.match(/^\s*arguments\s*=\s*\{([\s\S]*?)^\s*\}\s*$/imu)?.[1] || null;
+  if (!match || block === null || match[1] !== expected.contract.arguments[0]) return false;
+  const observedArguments = block.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean)
+    .map((line) => line.replace(/^\d+\s*=\s*/u, ""));
+  return observedArguments.length === expected.contract.arguments.length &&
+    observedArguments.every((argument, index) => argument === expected.contract.arguments[index]);
+}
+
+function withScheduleMutationLock(home, identity, task) {
+  const root = join(resolve(home), ".brain", "schedule-mutations");
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  chmodSync(root, 0o700);
+  const path = join(root, `${identity.id}.lock`);
+  try {
+    mkdirSync(path, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      throw new Error("this owned daily schedule is already being changed; no concurrent mutation was attempted");
+    }
+    throw error;
+  }
+  try {
+    return task();
+  } finally {
+    try { rmdirSync(path); } catch {}
+  }
 }
 
 function macAdapter({ home, uid, spawn }) {
@@ -447,6 +649,11 @@ function macAdapter({ home, uid, spawn }) {
   const read = (identity) => {
     const path = pathOf(identity);
     if (!existsSync(path)) return null;
+    const fileState = lstatSync(path);
+    if (!fileState.isFile() || fileState.isSymbolicLink() || fileState.nlink !== 1 ||
+        (typeof process.getuid === "function" && fileState.uid !== process.getuid())) {
+      throw new Error("the macOS daily refresh definition is unsafe");
+    }
     const serialized = readFileSync(path, "utf8");
     const status = launchctl(["print", serviceOf(identity)]);
     if (status?.status !== 0 && status?.status !== 1 && status?.status !== 113) {
@@ -461,54 +668,63 @@ function macAdapter({ home, uid, spawn }) {
       owned: markerOf(serialized)?.identity === identity.id,
       enabled: !disabled,
       loaded: status?.status === 0,
+      loaded_definition_matches: status?.status === 0
+        ? loadedMacProgramMatches(serialized, status.stdout)
+        : null,
       definition,
     };
   };
   return {
     read,
     install(definition, { replaceOwned = false, expected = null } = {}) {
-      const path = pathOf(definition.identity);
-      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      const staged = `${path}.tmp-${process.pid}`;
-      try {
-        writeFileSync(staged, definition.serialized, { mode: 0o600, flag: "wx" });
-        const current = read(definition.identity);
-        if (!sameObservedState(current, expected)) throw new Error("the daily definition changed before installation; nothing was replaced");
-        if (current?.exists) {
-          requireOwned(current);
-          if (!replaceOwned) throw new Error("the owned daily definition appeared during installation; nothing was replaced");
-          launchctl(["bootout", serviceOf(definition.identity)]);
+      return withScheduleMutationLock(home, definition.identity, () => {
+        const path = pathOf(definition.identity);
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        const staged = `${path}.tmp-${process.pid}`;
+        try {
+          writeFileSync(staged, definition.serialized, { mode: 0o600, flag: "wx" });
+          const current = read(definition.identity);
+          if (!sameObservedState(current, expected)) throw new Error("the daily definition changed before installation; nothing was replaced");
+          if (current?.exists) {
+            requireOwned(current);
+            if (!replaceOwned) throw new Error("the owned daily definition appeared during installation; nothing was replaced");
+            launchctl(["bootout", serviceOf(definition.identity)]);
+          }
+          renameSync(staged, path);
+          const enabled = launchctl(["enable", serviceOf(definition.identity)]);
+          const loaded = launchctl(["bootstrap", `gui/${uid}`, path]);
+          if (enabled?.status !== 0 || loaded?.status !== 0) throw new Error("launchd refused the daily refresh definition");
+        } finally {
+          try { unlinkSync(staged); } catch {}
         }
-        renameSync(staged, path);
-        const enabled = launchctl(["enable", serviceOf(definition.identity)]);
-        const loaded = launchctl(["bootstrap", `gui/${uid}`, path]);
-        if (enabled?.status !== 0 || loaded?.status !== 0) throw new Error("launchd refused the daily refresh definition");
-      } finally {
-        try { unlinkSync(staged); } catch {}
-      }
+      });
     },
     setEnabled(identity, enabled) {
-      requireOwned(read(identity));
-      if (enabled) {
-        const enabledResult = launchctl(["enable", serviceOf(identity)]);
-        if (enabledResult?.status !== 0) throw new Error("launchd could not persistently enable daily refresh");
-        const loaded = launchctl(["bootstrap", `gui/${uid}`, pathOf(identity)]);
-        if (loaded?.status !== 0) throw new Error("launchd could not restore daily refresh");
-      } else {
-        const stopped = launchctl(["bootout", serviceOf(identity)]);
-        if (stopped?.status !== 0 && stopped?.status !== 1 && stopped?.status !== 113) {
-          throw new Error("launchd could not pause daily refresh");
+      return withScheduleMutationLock(home, identity, () => {
+        requireOwned(read(identity));
+        if (enabled) {
+          const enabledResult = launchctl(["enable", serviceOf(identity)]);
+          if (enabledResult?.status !== 0) throw new Error("launchd could not persistently enable daily refresh");
+          const loaded = launchctl(["bootstrap", `gui/${uid}`, pathOf(identity)]);
+          if (loaded?.status !== 0) throw new Error("launchd could not restore daily refresh");
+        } else {
+          const stopped = launchctl(["bootout", serviceOf(identity)]);
+          if (stopped?.status !== 0 && stopped?.status !== 1 && stopped?.status !== 113) {
+            throw new Error("launchd could not pause daily refresh");
+          }
+          const disabled = launchctl(["disable", serviceOf(identity)]);
+          if (disabled?.status !== 0) throw new Error("launchd could not persistently disable daily refresh");
         }
-        const disabled = launchctl(["disable", serviceOf(identity)]);
-        if (disabled?.status !== 0) throw new Error("launchd could not persistently disable daily refresh");
-      }
+      });
     },
     remove(identity, { expected = null } = {}) {
-      const current = read(identity);
-      requireOwned(current);
-      if (!sameObservedState(current, expected)) throw new Error("the daily definition changed before removal; nothing was removed");
-      launchctl(["bootout", serviceOf(identity)]);
-      unlinkSync(pathOf(identity));
+      return withScheduleMutationLock(home, identity, () => {
+        const current = read(identity);
+        requireOwned(current);
+        if (!sameObservedState(current, expected)) throw new Error("the daily definition changed before removal; nothing was removed");
+        launchctl(["bootout", serviceOf(identity)]);
+        unlinkSync(pathOf(identity));
+      });
     },
   };
 }
@@ -521,10 +737,29 @@ function windowsAdapter({ home, spawn }) {
     if (result?.status !== 0) {
       const inventory = run(["/Query", "/FO", "CSV", "/NH"]);
       if (inventory?.status === 0) {
-        const names = String(inventory.stdout || "").split(/\r?\n/u).map((line) => {
-          const match = line.match(/^"((?:[^"]|"")*)"(?:,|$)/u);
-          return match ? match[1].replaceAll('""', '"') : null;
-        }).filter(Boolean);
+        const rows = String(inventory.stdout || "").split(/\r?\n/u).filter((line) => line.length > 0);
+        const names = rows.map((line) => {
+          const fields = [];
+          let index = 0;
+          while (index < line.length) {
+            if (line[index] !== '"') throw new Error("the Windows daily refresh task could not be inspected");
+            index += 1;
+            let field = "";
+            let closed = false;
+            while (index < line.length) {
+              if (line[index] === '"' && line[index + 1] === '"') { field += '"'; index += 2; continue; }
+              if (line[index] === '"') { index += 1; closed = true; break; }
+              field += line[index++];
+            }
+            if (!closed || (index < line.length && line[index] !== ",")) {
+              throw new Error("the Windows daily refresh task could not be inspected");
+            }
+            fields.push(field);
+            if (index < line.length) index += 1;
+          }
+          if (!fields.length || !fields[0]) throw new Error("the Windows daily refresh task could not be inspected");
+          return fields[0];
+        });
         if (!names.includes(taskName(identity))) return null;
       }
       throw new Error("the Windows daily refresh task could not be inspected");
@@ -542,34 +777,40 @@ function windowsAdapter({ home, spawn }) {
   return {
     read,
     install(definition, { replaceOwned = false, expected = null } = {}) {
-      const directory = join(resolve(home), ".brain", "schedules");
-      mkdirSync(directory, { recursive: true, mode: 0o700 });
-      const path = join(directory, `daily-${definition.identity.id}-${process.pid}.xml`);
-      try {
-        writeFileSync(path, `\ufeff${definition.serialized}`, { encoding: "utf16le", mode: 0o600, flag: "wx" });
-        const current = read(definition.identity);
-        if (!sameObservedState(current, expected)) throw new Error("the daily definition changed before installation; nothing was replaced");
-        if (current?.exists) {
-          requireOwned(current);
-          if (!replaceOwned) throw new Error("the owned daily definition appeared during installation; nothing was replaced");
+      return withScheduleMutationLock(home, definition.identity, () => {
+        const directory = join(resolve(home), ".brain", "schedules");
+        mkdirSync(directory, { recursive: true, mode: 0o700 });
+        const path = join(directory, `daily-${definition.identity.id}-${process.pid}.xml`);
+        try {
+          writeFileSync(path, `\ufeff${definition.serialized}`, { encoding: "utf16le", mode: 0o600, flag: "wx" });
+          const current = read(definition.identity);
+          if (!sameObservedState(current, expected)) throw new Error("the daily definition changed before installation; nothing was replaced");
+          if (current?.exists) {
+            requireOwned(current);
+            if (!replaceOwned) throw new Error("the owned daily definition appeared during installation; nothing was replaced");
+          }
+          const result = run(["/Create", ...(current?.exists ? ["/F"] : []), "/TN", taskName(definition.identity), "/XML", path]);
+          if (result?.status !== 0) throw new Error("Task Scheduler refused the daily refresh definition");
+        } finally {
+          try { unlinkSync(path); } catch {}
         }
-        const result = run(["/Create", ...(current?.exists ? ["/F"] : []), "/TN", taskName(definition.identity), "/XML", path]);
-        if (result?.status !== 0) throw new Error("Task Scheduler refused the daily refresh definition");
-      } finally {
-        try { unlinkSync(path); } catch {}
-      }
+      });
     },
     setEnabled(identity, enabled) {
-      requireOwned(read(identity));
-      const result = run(["/Change", "/TN", taskName(identity), enabled ? "/ENABLE" : "/DISABLE"]);
-      if (result?.status !== 0) throw new Error(`Task Scheduler could not ${enabled ? "restore" : "pause"} daily refresh`);
+      return withScheduleMutationLock(home, identity, () => {
+        requireOwned(read(identity));
+        const result = run(["/Change", "/TN", taskName(identity), enabled ? "/ENABLE" : "/DISABLE"]);
+        if (result?.status !== 0) throw new Error(`Task Scheduler could not ${enabled ? "restore" : "pause"} daily refresh`);
+      });
     },
     remove(identity, { expected = null } = {}) {
-      const current = read(identity);
-      requireOwned(current);
-      if (!sameObservedState(current, expected)) throw new Error("the daily definition changed before removal; nothing was removed");
-      const result = run(["/Delete", "/F", "/TN", taskName(identity)]);
-      if (result?.status !== 0) throw new Error("Task Scheduler could not remove daily refresh");
+      return withScheduleMutationLock(home, identity, () => {
+        const current = read(identity);
+        requireOwned(current);
+        if (!sameObservedState(current, expected)) throw new Error("the daily definition changed before removal; nothing was removed");
+        const result = run(["/Delete", "/F", "/TN", taskName(identity)]);
+        if (result?.status !== 0) throw new Error("Task Scheduler could not remove daily refresh");
+      });
     },
   };
 }

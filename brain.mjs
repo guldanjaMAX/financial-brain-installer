@@ -25636,45 +25636,75 @@ async function existingDailySourceOwners(m, manifestPath, options = {}) {
 }
 
 async function pauseExistingOwnedSchedulers(m, manifestPath, options = {}) {
+  const captured = await captureExistingOwnedSchedulers(m, manifestPath, options);
+  return pauseCapturedOwnedSchedulers(manifestPath, captured, options);
+}
+
+async function captureExistingOwnedSchedulers(m, manifestPath, options = {}) {
   if ((options.platform ?? process.platform) !== "darwin") return [];
   const schedulerOptions = options.legacySchedulerOptions || {};
   const snapshots = [];
-  const restorePaused = async () => {
-    for (const entry of [...snapshots].reverse()) {
-      if (!entry.snapshot?.exists) continue;
-      if (entry.kind === "drive") entry.module.restoreDriveScheduler(manifestPath, entry.snapshot, schedulerOptions);
-      else if (entry.kind === "folder") entry.module.restoreFolderScheduler(manifestPath, entry.snapshot, schedulerOptions);
-      else if (entry.kind === "imessage") entry.module.restoreImessageScheduler(manifestPath, entry.snapshot, schedulerOptions);
-      else entry.module.restoreProviderScheduler(entry.provider, manifestPath, entry.snapshot, schedulerOptions);
+  const capture = (kind, sourceKey, module, status, provider = null) => {
+    if (!status?.installed) {
+      snapshots.push({ kind, sourceKey, ...(provider ? { provider } : {}), module,
+        snapshot: { exists: false, wasLoaded: false, path: status?.plistPath || null, service: status?.service || null } });
+      return;
     }
+    if (!status.definitionMatches || status.scheduleError || status.running) {
+      throw new Error(`the owned ${sourceKey} scheduler cannot be snapshotted safely before update`);
+    }
+    snapshots.push({ kind, sourceKey, ...(provider ? { provider } : {}), module,
+      snapshot: {
+        exists: true,
+        wasLoaded: status.loaded === true,
+        path: status.plistPath,
+        service: status.service,
+        serialized: readFileSync(status.plistPath, "utf8"),
+      } });
   };
+  if (m?.corpora?.google_drive?.enabled === true) {
+    const module = options.driveScheduler ?? await import("./operations/drive-scheduler.mjs");
+    capture("drive", "google_drive", module, module.statusDriveScheduler(manifestPath, schedulerOptions));
+  }
+  if (m?.corpora?.local_folder?.enabled === true) {
+    const module = options.folderScheduler ?? await import("./operations/folder-scheduler.mjs");
+    capture("folder", "local_folder", module, module.statusFolderScheduler(manifestPath, schedulerOptions));
+  }
+  if (m?.corpora?.imessage?.enabled === true) {
+    const module = options.imessageScheduler ?? await import("./operations/imessage-scheduler.mjs");
+    capture("imessage", "imessage", module, module.statusImessageScheduler(manifestPath, schedulerOptions));
+  }
+  const providers = PROVIDER_CONNECTOR_IDS.filter((provider) => m?.corpora?.[provider]?.enabled === true);
+  if (providers.length) {
+    const module = options.providerScheduler ?? await import("./operations/provider-scheduler.mjs");
+    for (const provider of providers) {
+      capture("provider", provider, module, module.statusProviderScheduler(provider, manifestPath, schedulerOptions), provider);
+    }
+  }
+  return snapshots;
+}
+
+async function pauseCapturedOwnedSchedulers(manifestPath, snapshots, options = {}) {
+  const schedulerOptions = options.legacySchedulerOptions || {};
+  const paused = [];
   try {
-    if (m?.corpora?.google_drive?.enabled === true) {
-      const module = options.driveScheduler ?? await import("./operations/drive-scheduler.mjs");
-      snapshots.push({ kind: "drive", sourceKey: "google_drive", module,
-        snapshot: module.pauseDriveScheduler(manifestPath, schedulerOptions) });
-    }
-    if (m?.corpora?.local_folder?.enabled === true) {
-      const module = options.folderScheduler ?? await import("./operations/folder-scheduler.mjs");
-      snapshots.push({ kind: "folder", sourceKey: "local_folder", module,
-        snapshot: module.pauseFolderScheduler(manifestPath, schedulerOptions) });
-    }
-    if (m?.corpora?.imessage?.enabled === true) {
-      const module = options.imessageScheduler ?? await import("./operations/imessage-scheduler.mjs");
-      snapshots.push({ kind: "imessage", sourceKey: "imessage", module,
-        snapshot: module.pauseImessageScheduler(manifestPath, schedulerOptions) });
-    }
-    const providers = PROVIDER_CONNECTOR_IDS.filter((provider) => m?.corpora?.[provider]?.enabled === true);
-    if (providers.length) {
-      const module = options.providerScheduler ?? await import("./operations/provider-scheduler.mjs");
-      for (const provider of providers) {
-        snapshots.push({ kind: "provider", sourceKey: provider, provider, module,
-          snapshot: module.pauseProviderScheduler(provider, manifestPath, schedulerOptions) });
+    for (const entry of snapshots) {
+      if (!entry.snapshot?.exists) continue;
+      const actual = entry.kind === "drive"
+        ? entry.module.pauseDriveScheduler(manifestPath, schedulerOptions)
+        : entry.kind === "folder"
+          ? entry.module.pauseFolderScheduler(manifestPath, schedulerOptions)
+          : entry.kind === "imessage"
+            ? entry.module.pauseImessageScheduler(manifestPath, schedulerOptions)
+            : entry.module.pauseProviderScheduler(entry.provider, manifestPath, schedulerOptions);
+      if (actual?.serialized !== entry.snapshot.serialized || actual?.wasLoaded !== entry.snapshot.wasLoaded) {
+        throw new Error(`the owned ${entry.sourceKey} scheduler changed after its durable pre-update snapshot`);
       }
+      paused.push(entry);
     }
     return snapshots;
   } catch (error) {
-    try { await restorePaused(); } catch (restoreError) {
+    try { restoreExistingOwnedSchedulers(manifestPath, paused, options); } catch (restoreError) {
       throw new Error(`${error.message}; restoring an already-paused owned scheduler also failed: ${restoreError.message}`, { cause: error });
     }
     throw error;
@@ -25690,6 +25720,34 @@ function restoreExistingOwnedSchedulers(manifestPath, snapshots, options = {}) {
     else if (entry.kind === "imessage") entry.module.restoreImessageScheduler(manifestPath, entry.snapshot, schedulerOptions);
     else entry.module.restoreProviderScheduler(entry.provider, manifestPath, entry.snapshot, schedulerOptions);
   }
+}
+
+async function hydrateExistingOwnedSchedulerSnapshots(snapshots, options = {}) {
+  const hydrated = [];
+  for (const entry of snapshots || []) {
+    if (!entry || typeof entry !== "object" || !entry.snapshot ||
+        !new Set(["drive", "folder", "imessage", "provider"]).has(entry.kind)) {
+      throw new Error("the durable legacy scheduler recovery snapshot is malformed");
+    }
+    let module;
+    if (entry.kind === "drive") module = options.driveScheduler ?? await import("./operations/drive-scheduler.mjs");
+    else if (entry.kind === "folder") module = options.folderScheduler ?? await import("./operations/folder-scheduler.mjs");
+    else if (entry.kind === "imessage") module = options.imessageScheduler ?? await import("./operations/imessage-scheduler.mjs");
+    else {
+      if (!PROVIDER_CONNECTOR_IDS.includes(entry.provider)) {
+        throw new Error("the durable provider scheduler recovery snapshot is malformed");
+      }
+      module = options.providerScheduler ?? await import("./operations/provider-scheduler.mjs");
+    }
+    hydrated.push({
+      kind: entry.kind,
+      sourceKey: entry.sourceKey,
+      ...(entry.provider ? { provider: entry.provider } : {}),
+      snapshot: entry.snapshot,
+      module,
+    });
+  }
+  return hydrated;
 }
 
 function reconcileExistingOwnedSchedulers(m, manifestPath, snapshots, options = {}) {
@@ -29177,11 +29235,20 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     let dailySchedulerOptions = null;
     let dailyTransactionOptions = null;
     let dailyTransactionActive = false;
+    let resumingDailyRecovery = false;
+    let existingDailyTransaction = null;
     let manageDailyDefinition = false;
+    let manageAnyLocalSchedule = false;
     let legacySnapshots = [];
     const beforeUpdateManifest = loadManifest(pin.target).m;
     const dailyPlatform = options.dailyRefreshOptions?.platform ?? process.platform;
-    if (["darwin", "win32"].includes(dailyPlatform)) {
+    const dailyIdentityReady = Boolean(
+      beforeUpdateManifest?.infrastructure?.cloudflare?.d1_database_id ||
+      beforeUpdateManifest?.brain?.worker_name ||
+      beforeUpdateManifest?.brain?.domain ||
+      beforeUpdateManifest?.client?.slug
+    );
+    if (["darwin", "win32"].includes(dailyPlatform) && dailyIdentityReady) {
       dailyPlan = await buildConfiguredDailyPlan(beforeUpdateManifest, pin.target, options.dailyRefreshOptions || {});
       dailySchedulerOptions = {
         platform: options.dailyRefreshOptions?.platform ?? process.platform,
@@ -29190,48 +29257,91 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           ? { adapter: options.dailyRefreshOptions.schedulerAdapter }
           : {}),
       };
-      dailyTransactionOptions = { home: dailySchedulerOptions.home };
+      dailyTransactionOptions = {
+        home: dailySchedulerOptions.home,
+        manifestPath: pin.target,
+        platform: dailyPlatform,
+        machineLockRoot: dailySchedulerOptions.machineLockRoot,
+      };
       const dailyStatus = statusDailyRefreshSchedule(dailyPlan, dailySchedulerOptions);
       manageDailyDefinition = Object.hasOwn(beforeUpdateManifest?.operations || {}, "daily_refresh") ||
         dailyStatus.installed === true;
-      if (manageDailyDefinition) {
-        const existingTransaction = readDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
-        const plannedSnapshot = existingTransaction?.snapshot || (dailyStatus.installed
-          ? Object.freeze({
-              identity: dailyPlan.identity,
-              exists: true,
-              enabled: dailyStatus.enabled === true,
-              definition: dailyStatus.state.definition,
-            })
-          : Object.freeze({ identity: dailyPlan.identity, exists: false, enabled: false, definition: null }));
-        dailySnapshot = plannedSnapshot;
+      existingDailyTransaction = readDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
+      if (existingDailyTransaction?.shared_fence === true || (existingDailyTransaction && !existingDailyTransaction.snapshot)) {
+        throw new Error("this Brain has an update recovery fence, but this user has no verified schedule snapshot; imports remain paused");
+      }
+      resumingDailyRecovery = Boolean(existingDailyTransaction);
+      dailySnapshot = existingDailyTransaction?.snapshot || (dailyStatus.installed
+        ? Object.freeze({
+            identity: dailyPlan.identity,
+            exists: true,
+            enabled: dailyStatus.enabled === true,
+            definition: dailyStatus.state.definition,
+          })
+        : Object.freeze({ identity: dailyPlan.identity, exists: false, enabled: false, definition: null }));
+      legacySnapshots = existingDailyTransaction?.legacy_snapshots?.length
+        ? await hydrateExistingOwnedSchedulerSnapshots(
+            existingDailyTransaction.legacy_snapshots,
+            options.dailyRefreshOptions || {},
+          )
+        : await captureExistingOwnedSchedulers(
+            beforeUpdateManifest,
+            pin.target,
+            options.dailyRefreshOptions || {},
+          );
+      manageAnyLocalSchedule = manageDailyDefinition || legacySnapshots.some((entry) => entry.snapshot?.exists);
+      if (manageAnyLocalSchedule) {
         writeDailyRefreshUpdateTransaction({
           plan: dailyPlan,
-          snapshot: plannedSnapshot,
+          snapshot: dailySnapshot,
           phase: "preparing",
+          legacySnapshots,
         }, dailyTransactionOptions);
         dailyTransactionActive = true;
       }
       if (dailyStatus.installed) {
-        pauseDailyRefreshSchedule(dailyPlan, dailySchedulerOptions);
+        pauseDailyRefreshSchedule(dailyPlan, {
+          ...dailySchedulerOptions,
+          ...(dailySnapshot?.definition ? { authorizedDefinition: dailySnapshot.definition } : {}),
+        });
         writeDailyRefreshUpdateTransaction({
           plan: dailyPlan,
           snapshot: dailySnapshot,
           phase: "paused",
+          legacySnapshots,
         }, dailyTransactionOptions);
         info("Daily imports are paused for the verified update window.");
       }
       try {
-        legacySnapshots = await pauseExistingOwnedSchedulers(
-          beforeUpdateManifest,
-          pin.target,
-          options.dailyRefreshOptions || {},
-        );
-      } catch (error) {
-        if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
+        if (!resumingDailyRecovery) {
+          legacySnapshots = await pauseCapturedOwnedSchedulers(
+            pin.target,
+            legacySnapshots,
+            options.dailyRefreshOptions || {},
+          );
+        }
         if (dailyTransactionActive) {
-          clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
-          dailyTransactionActive = false;
+          writeDailyRefreshUpdateTransaction({
+            plan: dailyPlan,
+            snapshot: dailySnapshot,
+            phase: "paused",
+            legacySnapshots,
+          }, dailyTransactionOptions);
+        }
+      } catch (error) {
+        if (!resumingDailyRecovery) {
+          if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
+          if (dailyTransactionActive) {
+            clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
+            dailyTransactionActive = false;
+          }
+        } else if (dailyTransactionActive) {
+          writeDailyRefreshUpdateTransaction({
+            plan: dailyPlan,
+            snapshot: dailySnapshot,
+            phase: "recovery_required",
+            legacySnapshots,
+          }, dailyTransactionOptions);
         }
         throw error;
       }
@@ -29242,7 +29352,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         pin.target,
         backlog ? { ...(options.upgradeOptions || {}), initialUpdateBacklog: backlog } : options.upgradeOptions || {},
       );
-      if (manageDailyDefinition) {
+      if (manageAnyLocalSchedule) {
         const finalState = typeof options.dailyRefreshOptions?.verifyFinalUpdateState === "function"
           ? await options.dailyRefreshOptions.verifyFinalUpdateState(upgradeResult)
           : options.cmdUpgrade
@@ -29258,7 +29368,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       // These refusal codes are emitted before the writer pause or deployment
       // mutation. Their old, exactly read schedule is therefore safe to put
       // back. Any ambiguous or paused failure deliberately leaves it off.
-      if ((dailySnapshot || legacySnapshots.some((entry) => entry.snapshot?.exists)) &&
+      if (!resumingDailyRecovery && (dailySnapshot || legacySnapshots.some((entry) => entry.snapshot?.exists)) &&
           ["UPDATE_BRAIN_BUSY", "UPDATE_WAITING_FOR_INDEXING"].includes(error?.supportCode)) {
         restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
         if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
@@ -29276,6 +29386,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
             definition: null,
           },
           phase: "recovery_required",
+          legacySnapshots,
         }, dailyTransactionOptions);
       }
       throw error;

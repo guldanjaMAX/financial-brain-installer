@@ -5,6 +5,7 @@
  */
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -101,6 +102,14 @@ function defaultMachineLockRoot(platform) {
   return "/tmp/financial-brain-lifecycle-v1";
 }
 
+export function brainLifecycleCoordinates({ manifestPath, platform = process.platform, machineLockRoot } = {}) {
+  const identity = brainIdentityFromManifest(manifestPath);
+  const root = resolve(machineLockRoot || defaultMachineLockRoot(platform));
+  mkdirSync(root, { recursive: true, mode: platform === "win32" ? 0o700 : 0o1777 });
+  assertSharedRoot(root, platform);
+  return Object.freeze({ identity, root: realpathSync(root) });
+}
+
 function assertSharedRoot(path, platform) {
   const state = lstatSync(path);
   if (!state.isDirectory() || state.isSymbolicLink()) {
@@ -115,11 +124,83 @@ function assertSharedRoot(path, platform) {
 }
 
 function lockDirectory({ manifestPath, platform, machineLockRoot }) {
-  const identity = brainIdentityFromManifest(manifestPath);
-  const locks = resolve(machineLockRoot || defaultMachineLockRoot(platform));
-  mkdirSync(locks, { recursive: true, mode: platform === "win32" ? 0o700 : 0o1777 });
-  assertSharedRoot(locks, platform);
-  return join(realpathSync(locks), `brain-lifecycle-${identity}.lock`);
+  const { identity, root } = brainLifecycleCoordinates({ manifestPath, platform, machineLockRoot });
+  return join(root, `brain-lifecycle-${identity}.lock`);
+}
+
+function recoveryFencePath(options) {
+  const { identity, root } = brainLifecycleCoordinates(options);
+  return join(root, `brain-update-recovery-${identity}.json`);
+}
+
+export function readBrainRecoveryFence({ manifestPath, platform = process.platform, machineLockRoot } = {}) {
+  const path = recoveryFencePath({ manifestPath, platform, machineLockRoot });
+  if (!existsSync(path)) return null;
+  const state = lstatSync(path);
+  if (!state.isFile() || state.isSymbolicLink() || state.nlink !== 1 || state.size > 2048) {
+    throw failure("brain_lifecycle_unsafe", "the Brain update recovery fence is unsafe");
+  }
+  let value;
+  try { value = JSON.parse(readFileSync(path, "utf8")); } catch {
+    throw failure("brain_lifecycle_unsafe", "the Brain update recovery fence is malformed");
+  }
+  if (value?.schema_version !== 1 || value?.kind !== "brain_update_recovery_fence" ||
+      !/^[a-f0-9]{32}$/u.test(String(value?.brain_identity || "")) ||
+      !/^[a-f0-9]{32}$/u.test(String(value?.transaction_id || ""))) {
+    throw failure("brain_lifecycle_unsafe", "the Brain update recovery fence is malformed");
+  }
+  return Object.freeze({ ...value, path });
+}
+
+export function writeBrainRecoveryFence({
+  manifestPath,
+  transactionId,
+  platform = process.platform,
+  machineLockRoot,
+} = {}) {
+  if (!/^[a-f0-9]{32}$/u.test(String(transactionId || ""))) {
+    throw new TypeError("a valid Brain update transaction id is required");
+  }
+  const coordinates = brainLifecycleCoordinates({ manifestPath, platform, machineLockRoot });
+  const path = join(coordinates.root, `brain-update-recovery-${coordinates.identity}.json`);
+  const existing = readBrainRecoveryFence({ manifestPath, platform, machineLockRoot });
+  if (existing) {
+    if (existing.transaction_id !== transactionId) {
+      throw failure("brain_lifecycle_recovery_required", "this Brain already has an unresolved update recovery fence");
+    }
+    return existing;
+  }
+  const value = Object.freeze({
+    schema_version: 1,
+    kind: "brain_update_recovery_fence",
+    brain_identity: coordinates.identity,
+    transaction_id: transactionId,
+  });
+  try {
+    writeFileSync(path, `${JSON.stringify(value)}\n`, { encoding: "utf8", flag: "wx", mode: 0o644 });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const collision = readBrainRecoveryFence({ manifestPath, platform, machineLockRoot });
+    if (collision?.transaction_id !== transactionId) {
+      throw failure("brain_lifecycle_recovery_required", "this Brain already has an unresolved update recovery fence");
+    }
+  }
+  return Object.freeze({ ...value, path });
+}
+
+export function clearBrainRecoveryFence({
+  manifestPath,
+  transactionId,
+  platform = process.platform,
+  machineLockRoot,
+} = {}) {
+  const existing = readBrainRecoveryFence({ manifestPath, platform, machineLockRoot });
+  if (!existing) return false;
+  if (existing.transaction_id !== transactionId) {
+    throw failure("brain_lifecycle_recovery_required", "the Brain update recovery fence belongs to another transaction");
+  }
+  unlinkSync(existing.path);
+  return true;
 }
 
 function readOwner(path, platform) {
@@ -265,6 +346,16 @@ export function acquireBrainLifecycleLock({
   }
 
   const ownerPath = join(path, `owner-${process.pid}-${token}.json`);
+  if (operation !== "update") {
+    const fence = readBrainRecoveryFence({ manifestPath, platform, machineLockRoot });
+    if (fence) {
+      releaseOwner(path, token, platform);
+      throw failure(
+        "brain_lifecycle_recovery_required",
+        `a prior Brain update requires verified recovery before ${operation} can write`,
+      );
+    }
+  }
   const assertOwned = () => {
     const owner = readOwner(path, platform);
     if (!owner || owner.token !== token) {

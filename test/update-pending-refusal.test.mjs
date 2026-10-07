@@ -19,7 +19,10 @@ import {
   updateCommandTarget,
 } from "../brain.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
-import { buildDailyRefreshDefinition } from "../operations/daily-refresh-scheduler.mjs";
+import {
+  buildDailyRefreshDefinition,
+  readDailyRefreshUpdateTransaction,
+} from "../operations/daily-refresh-scheduler.mjs";
 
 const PENDING_MESSAGE = (pending) => renderCliCommands(
   `Your Brain is still indexing ${pending} recent items so they can be found by meaning. ` +
@@ -292,6 +295,8 @@ test("production update integration restores daily imports only from explicit fi
         nodePath: definition.node_path,
         brainPath: definition.brain_path,
         runnerPath: definition.runner_path,
+        home: join(join(manifestPath, ".."), "daily-home"),
+        machineLockRoot: join(join(manifestPath, ".."), "daily-machine-locks"),
       },
       syncSourceExpectations: false,
     };
@@ -325,6 +330,137 @@ test("production update integration restores daily imports only from explicit fi
     assert.equal(healthy.updated, true);
     assert.deepEqual(mutations, ["install"], "the verified control reconciled the paused definition");
     assert.equal(state.enabled, true);
+  });
+});
+
+test("production recovery retry keeps imports paused through refusal and reconciles manifest drift only after health proof", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const configured = fixtureManifest();
+    configured.client.timezone = "UTC";
+    configured.corpora = { google_drive: { enabled: true } };
+    configured.operations = { daily_refresh: { enabled: true, timezone: "UTC" } };
+    writeFileSync(manifestPath, `${JSON.stringify(configured, null, 2)}\n`);
+    const home = join(join(manifestPath, ".."), "home");
+    const machineLockRoot = join(join(manifestPath, ".."), "machine-locks");
+    const legacyPlist = join(join(manifestPath, ".."), "legacy-drive.plist");
+    writeFileSync(legacyPlist, "fixture legacy plist");
+    let legacyLoaded = true;
+    let legacyPauses = 0;
+    let legacyInstalls = 0;
+    const legacySnapshot = {
+      exists: true, wasLoaded: true, path: legacyPlist,
+      service: "gui/501/com.financialbrain.drive.fixture", serialized: "fixture legacy plist",
+    };
+    const driveScheduler = {
+      statusDriveScheduler: () => ({
+        installed: true, loaded: legacyLoaded, running: false, definitionMatches: true,
+        interpreterPresent: true, scheduleError: null, plistPath: legacyPlist,
+        service: legacySnapshot.service,
+      }),
+      pauseDriveScheduler: () => { legacyPauses += 1; legacyLoaded = false; return legacySnapshot; },
+      restoreDriveScheduler: (_path, snapshot) => { legacyLoaded = snapshot.wasLoaded; return { verified: true }; },
+      installDriveScheduler: () => { legacyInstalls += 1; legacyLoaded = true; return { installed: true, loaded: true }; },
+    };
+    let planRevision = "before";
+    const plan = () => ({
+      schema_version: 1,
+      identity: { id: "v1-0123456789abcdef", principal: "uid:501" },
+      manifest_path: manifestPath,
+      manifest_path_hash: "sha256:path",
+      manifest_content_hash: `sha256:${planRevision}`,
+      source_plan_hash: `sha256:sources-${planRevision}`,
+      platform: "darwin",
+      enabled: true,
+      ready: true,
+      timezone_matches_machine: true,
+      unsupported_sources: 0,
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      max_runtime_minutes: 45,
+      sources: [{
+        key: "google_drive", class: "machine-pull", owner: "daily-task", status: "ready",
+        run_key: "google_drive", source_names: ["drive"],
+      }],
+    });
+    const nativeOptions = {
+      platform: "darwin", nodePath: "/runtime/node",
+      brainPath: "/runtime/brain.mjs", runnerPath: "/runtime/daily-refresh-run.mjs",
+    };
+    let state = {
+      exists: true,
+      owned: true,
+      enabled: true,
+      definition: buildDailyRefreshDefinition(plan(), nativeOptions),
+    };
+    const mutations = [];
+    const adapter = {
+      read: () => state,
+      setEnabled: (_identity, enabled) => { mutations.push(`enabled:${enabled}`); state = { ...state, enabled }; },
+      install: (definition) => {
+        mutations.push(`install:${definition.manifest_content_hash}`);
+        state = { exists: true, owned: true, enabled: true, definition };
+      },
+      remove: () => { mutations.push("remove"); state = null; },
+    };
+    const dailyRefreshOptions = {
+      platform: "darwin",
+      principal: plan().identity.principal,
+      localTimezone: "UTC",
+      existingSchedulerOwners: [],
+      planDailyRefresh: async () => plan(),
+      schedulerAdapter: adapter,
+      driveScheduler,
+      schedulerOptions: { ...nativeOptions, home, machineLockRoot },
+      syncSourceExpectations: false,
+    };
+    const base = {
+      ...updateHarness(manifestPath, async () => ({ pending: 0 }), []),
+      dailyRefreshOptions,
+      reportUpdateFinish: () => {},
+    };
+
+    await assert.rejects(cmdUpdate(manifestPath, {
+      ...base,
+      cmdUpgrade: async () => ({
+        updated: true,
+        daily_final_state: { active: true, query_ready: false, pending: 0 },
+      }),
+    }), /active, query-ready, and queue zero/i);
+    assert.equal(state.enabled, false);
+    assert.equal(legacyLoaded, false);
+    assert.equal(legacyPauses, 1, "the first production attempt reached the legacy pause decision once");
+    assert.ok(readDailyRefreshUpdateTransaction(plan().identity, { home, machineLockRoot, manifestPath }),
+      "the failed production update left a durable recovery decision point");
+
+    planRevision = "after";
+    const refusal = Object.assign(new Error("fixture pre-deployment refusal"), {
+      supportCode: "UPDATE_WAITING_FOR_INDEXING",
+    });
+    await assert.rejects(cmdUpdate(manifestPath, {
+      ...base,
+      cmdUpgrade: async () => { throw refusal; },
+    }), (error) => error === refusal);
+    assert.equal(state.enabled, false, "a retry refusal never restores the historical enabled snapshot");
+    assert.equal(legacyLoaded, false);
+    assert.equal(legacyPauses, 1, "restart recovery reused the durable legacy snapshot instead of overwriting it");
+    assert.ok(readDailyRefreshUpdateTransaction(plan().identity, { home, machineLockRoot, manifestPath }),
+      "retry refusal retains the recovery fence");
+    assert.equal(mutations.filter((entry) => entry === "enabled:true").length, 0);
+
+    const recovered = await cmdUpdate(manifestPath, {
+      ...base,
+      cmdUpgrade: async () => ({
+        updated: true,
+        daily_final_state: { active: true, query_ready: true, pending: 0 },
+      }),
+    });
+    assert.equal(recovered.updated, true);
+    assert.equal(state.enabled, true);
+    assert.equal(legacyLoaded, true);
+    assert.equal(legacyInstalls, 1, "the healthy recovery control reconciled the legacy owner once");
+    assert.equal(state.definition.manifest_content_hash, "sha256:after");
+    assert.equal(readDailyRefreshUpdateTransaction(plan().identity, { home, machineLockRoot, manifestPath }), null,
+      "only the healthy exact-reconciliation control clears recovery");
   });
 });
 

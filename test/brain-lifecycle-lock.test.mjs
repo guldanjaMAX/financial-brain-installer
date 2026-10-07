@@ -7,7 +7,10 @@ import test from "node:test";
 import {
   BrainLifecycleLockError,
   acquireBrainLifecycleLock,
+  clearBrainRecoveryFence,
+  readBrainRecoveryFence,
   withBrainLifecycleLock,
+  writeBrainRecoveryFence,
 } from "../operations/brain-lifecycle-lock.mjs";
 
 function fixture() {
@@ -18,8 +21,35 @@ function fixture() {
   writeFileSync(manifestPath, JSON.stringify({
     infrastructure: { cloudflare: { account_id: "fixture-account", d1_database_id: "fixture-database" } },
   }), { mode: 0o600 });
-  return { home, manifestPath };
+  return { home, manifestPath, machineLockRoot: join(root, "machine-locks") };
 }
+
+test("a canonical Brain recovery fence blocks writers but permits the verified update recovery lane", () => {
+  const { home, manifestPath, machineLockRoot } = fixture();
+  const transactionId = "a".repeat(32);
+  const update = acquireBrainLifecycleLock({ manifestPath, home, machineLockRoot, operation: "update" });
+  writeBrainRecoveryFence({ manifestPath, machineLockRoot, transactionId });
+  update.release();
+  assert.equal(readBrainRecoveryFence({ manifestPath, machineLockRoot }).transaction_id, transactionId);
+
+  let blocked = 0;
+  assert.throws(
+    () => acquireBrainLifecycleLock({ manifestPath, home, machineLockRoot, operation: "load" }),
+    (error) => {
+      blocked += 1;
+      return error instanceof BrainLifecycleLockError && error.code === "brain_lifecycle_recovery_required";
+    },
+  );
+  assert.equal(blocked, 1, "the writer reached the machine-wide recovery decision point");
+
+  const recovery = acquireBrainLifecycleLock({ manifestPath, home, machineLockRoot, operation: "update" });
+  assert.equal(recovery.assertOwned(), true, "the update recovery control reacquired the canonical Brain lease");
+  assert.equal(clearBrainRecoveryFence({ manifestPath, machineLockRoot, transactionId }), true);
+  recovery.release();
+  const control = acquireBrainLifecycleLock({ manifestPath, home, machineLockRoot, operation: "load" });
+  assert.equal(control.assertOwned(), true);
+  control.release();
+});
 
 test("manifest lifecycle lock excludes update, load, and scheduled refresh", async () => {
   const { home, manifestPath } = fixture();

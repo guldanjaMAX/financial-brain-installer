@@ -46,6 +46,7 @@ export async function runDailyRefresh({
   now = () => new Date(),
   home = homedir(),
   platform = process.platform,
+  recoveryRequired = () => false,
 } = {}) {
   if (!plan?.ready || !plan?.enabled) throw new Error("the daily refresh plan is not enabled and ready");
   if (typeof runSource !== "function" || typeof readFreshness !== "function" || typeof writeReceipt !== "function") {
@@ -60,7 +61,7 @@ export async function runDailyRefresh({
   try {
     lock = acquireLock({ manifestPath: plan.manifest_path, operation: "daily-refresh", home, platform });
   } catch (error) {
-    if (error?.code !== "brain_lifecycle_busy") throw error;
+    if (!new Set(["brain_lifecycle_busy", "brain_lifecycle_recovery_required"]).has(error?.code)) throw error;
     const receipt = Object.freeze({
       schema_version: 1,
       kind: "daily_refresh",
@@ -68,7 +69,10 @@ export async function runDailyRefresh({
       status: "deferred",
       started_at: startedAt,
       completed_at: timestamp(now),
-      reason: "another Brain lifecycle operation owns the manifest lock",
+      reason_code: error?.code === "brain_lifecycle_recovery_required" ? "update_recovery_required" : "brain_lifecycle_busy",
+      reason: error?.code === "brain_lifecycle_recovery_required"
+        ? "a prior update still requires verified schedule recovery"
+        : "another Brain lifecycle operation owns the manifest lock",
       sources: [],
     });
     await writeReceipt(receipt);
@@ -78,6 +82,21 @@ export async function runDailyRefresh({
   const sourceResults = [];
   try {
     lock.assertOwned();
+    if (await recoveryRequired()) {
+      const receipt = Object.freeze({
+        schema_version: 1,
+        kind: "daily_refresh",
+        identity: plan.identity.id,
+        status: "deferred",
+        started_at: startedAt,
+        completed_at: timestamp(now),
+        reason_code: "update_recovery_required",
+        reason: "a prior update still requires verified schedule recovery",
+        sources: [],
+      });
+      await writeReceipt(receipt);
+      return receipt;
+    }
     const baseline = await readFreshness();
     for (const source of plan.sources.filter((entry) =>
       entry.class === "machine-pull" && entry.owner === "daily-task" && entry.status !== "ready"
@@ -231,23 +250,6 @@ export async function runDailyRefreshCli(manifestPath, options = {}) {
   if (!plan.ready) throw new Error(plan.configuration_error || "the daily refresh plan is not ready");
   const receiptWriter = options.writeReceipt ?? dailyReceiptWriter(plan, options);
   const readUpdateTransaction = options.readUpdateTransaction ?? readDailyRefreshUpdateTransaction;
-  const updateTransaction = readUpdateTransaction(plan.identity, { home: options.home });
-  if (updateTransaction) {
-    const occurredAt = (options.now ? options.now() : new Date()).toISOString();
-    const receipt = Object.freeze({
-      schema_version: 1,
-      kind: "daily_refresh",
-      identity: plan.identity.id,
-      status: "deferred",
-      started_at: occurredAt,
-      completed_at: occurredAt,
-      reason_code: "update_recovery_required",
-      reason: "a prior update still requires verified schedule recovery",
-      sources: [],
-    });
-    await receiptWriter(receipt);
-    return receipt;
-  }
   const expectedDefinitionHash = options.expectedDefinitionHash || null;
   if (expectedDefinitionHash) {
     const definition = buildDailyRefreshDefinition(plan, {
@@ -274,6 +276,12 @@ export async function runDailyRefreshCli(manifestPath, options = {}) {
     now: options.now,
     home: options.home,
     platform: options.platform,
+    recoveryRequired: () => Boolean(readUpdateTransaction(plan.identity, {
+      home: options.home,
+      manifestPath: path,
+      platform: options.platform ?? process.platform,
+      machineLockRoot: options.machineLockRoot,
+    })),
   });
   if (!options.silent) {
     console.log(`daily refresh ${result.status}: ${result.sources.length} source(s) attempted`);

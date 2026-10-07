@@ -1031,8 +1031,15 @@ path proves version agreement, active query-ready health, and an empty vector
 queue. An ambiguous or paused update failure leaves imports paused. It never
 blindly restores a source removed by the updated manifest. Before pausing,
 update writes a private durable transaction containing the verified prior
-definition and enabled state. macOS uses launchd's persistent disable state,
-and a restarted runner also refuses while that transaction requires recovery.
+definition, enabled state, and every owned legacy scheduler snapshot. It also
+creates a content-free recovery fence beside the canonical Brain lifecycle
+lock. The private snapshot remains per user, while the fence is visible to
+every local user so no manifest alias or second user can resume writes during
+recovery. macOS uses launchd's persistent disable state, and every writer
+checks the fence only after acquiring the lifecycle lease. A retry reuses the
+saved authorization even when the updated manifest fingerprint changed, and
+cannot restore or clear recovery until fresh active, query-ready, queue-zero
+proof and exact scheduler reconciliation succeed.
 `daily on` and `daily off` save owner intent in `operations.daily_refresh`
 while holding the same lifecycle lease.
 

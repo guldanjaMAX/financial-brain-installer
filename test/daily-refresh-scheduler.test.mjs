@@ -134,12 +134,33 @@ test("native Windows readback verifies execution fields and distinguishes query 
     nodePath: definition.node_path, brainPath: definition.brain_path, runnerPath: definition.runner_path,
   }).verified, false, "a changed action is not authorized by an unchanged comment marker");
 
+  response = {
+    status: 0,
+    stdout: definition.serialized.replace(
+      "</Actions>",
+      "<Exec><Command>C:\\Foreign\\extra.exe</Command><Arguments>extra</Arguments></Exec></Actions>",
+    ),
+  };
+  assert.equal(statusDailyRefreshSchedule(basePlan, {
+    platform: "win32", adapter,
+    nodePath: definition.node_path, brainPath: definition.brain_path, runnerPath: definition.runner_path,
+  }).verified, false, "an extra native action is execution drift, even when the first action and marker match");
+
+  response = {
+    status: 0,
+    stdout: definition.serialized.replace("</Triggers>", "<LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>"),
+  };
+  assert.equal(statusDailyRefreshSchedule(basePlan, {
+    platform: "win32", adapter,
+    nodePath: definition.node_path, brainPath: definition.brain_path, runnerPath: definition.runner_path,
+  }).verified, false, "an additional trigger is rejected instead of being projected away");
+
   response = { status: 5, stdout: "", stderr: "access denied" };
   assert.throws(
     () => statusDailyRefreshSchedule(basePlan, { platform: "win32", adapter }),
     /could not be inspected/i,
   );
-  assert.equal(queryCalls, 4, "the failure arm also reached the locale-independent inventory check");
+  assert.equal(queryCalls, 6, "the failure arm also reached the locale-independent inventory check");
 });
 
 test("native Windows absence requires a successful complete task inventory", () => {
@@ -158,6 +179,59 @@ test("native Windows absence requires a successful complete task inventory", () 
   assert.equal(status.installed, false);
   assert.equal(status.verified, true);
   assert.equal(calls, 2, "absence was proved by a successful inventory after the targeted query failed");
+
+  let malformedCalls = 0;
+  const malformed = createNativeDailyRefreshAdapter({
+    platform: "win32",
+    home: directory,
+    spawn: (_command, args) => {
+      malformedCalls += 1;
+      return args.includes("/FO")
+        ? { status: 0, stdout: "MALFORMED INVENTORY" }
+        : { status: 1, stdout: "", stderr: "localized native error" };
+    },
+  });
+  assert.throws(
+    () => statusDailyRefreshSchedule(basePlan, { platform: "win32", adapter: malformed }),
+    /could not be inspected/i,
+  );
+  assert.equal(malformedCalls, 2, "malformed inventory reached the ambiguity decision and never proved absence");
+});
+
+test("macOS native readback compares the loaded program to the plist", () => {
+  const home = mkdtempSync(join(tmpdir(), "daily-native-mac-readback-"));
+  const definition = buildDailyRefreshDefinition(basePlan, {
+    platform: "darwin", nodePath: "/runtime/node", brainPath: "/runtime/brain.mjs",
+    runnerPath: "/runtime/operations/daily-refresh-run.mjs",
+  });
+  const plist = join(home, "Library", "LaunchAgents", `com.financialbrain.daily.${basePlan.identity.id}.plist`);
+  mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
+  writeFileSync(plist, definition.serialized);
+  let program = definition.node_path;
+  let printCalls = 0;
+  const adapter = createNativeDailyRefreshAdapter({
+    platform: "darwin", home, uid: 501,
+    spawn: (_command, args) => {
+      if (args[0] === "print") {
+        printCalls += 1;
+        return {
+          status: 0,
+          stdout: `program = ${program}\narguments = {\n${definition.native_contract.arguments.join("\n")}\n}\n`,
+        };
+      }
+      if (args[0] === "print-disabled") return { status: 0, stdout: "" };
+      return { status: 0, stdout: "" };
+    },
+  });
+  const options = {
+    platform: "darwin", adapter, nodePath: definition.node_path,
+    brainPath: definition.brain_path, runnerPath: definition.runner_path,
+  };
+  assert.equal(statusDailyRefreshSchedule(basePlan, options).verified, true, "the loaded-program control verifies");
+  program = "/foreign/node";
+  assert.equal(statusDailyRefreshSchedule(basePlan, options).verified, false,
+    "a foreign loaded program cannot borrow the exact plist and ownership marker");
+  assert.equal(printCalls, 2, "both loaded-service decision points were inspected");
 });
 
 test("native removal refuses a replacement that appears at its mutation boundary", () => {
@@ -191,6 +265,43 @@ test("native removal refuses a replacement that appears at its mutation boundary
   );
   assert.equal(queries, 2, "ownership was re-read at the mutation boundary");
   assert.equal(deletes, 0, "the replacement was never deleted");
+});
+
+test("native task mutations serialize the ownership read and mutation boundary", () => {
+  const home = mkdtempSync(join(tmpdir(), "daily-native-serialize-"));
+  const definition = buildDailyRefreshDefinition(basePlan, {
+    platform: "win32",
+    nodePath: String.raw`C:\Runtime\node.exe`,
+    brainPath: String.raw`C:\Runtime\brain.mjs`,
+    runnerPath: String.raw`C:\Runtime\daily-refresh-run.mjs`,
+  });
+  let adapter;
+  let gone = false;
+  let deletes = 0;
+  let concurrentRefusals = 0;
+  const spawn = (_command, args) => {
+    if (args.includes("/FO")) return { status: 0, stdout: `"\\Other\\Task","N/A"\n` };
+    if (args[0] === "/Query") return gone ? { status: 1, stdout: "" } : { status: 0, stdout: definition.serialized };
+    if (args[0] === "/Delete") {
+      deletes += 1;
+      assert.throws(
+        () => adapter.remove(basePlan.identity, { expected: { exists: true, owned: true, enabled: true, definition } }),
+        /already being changed/i,
+      );
+      concurrentRefusals += 1;
+      gone = true;
+      return { status: 0, stdout: "" };
+    }
+    assert.fail(`unexpected native operation ${args[0]}`);
+  };
+  adapter = createNativeDailyRefreshAdapter({ platform: "win32", home, spawn });
+  const result = removeDailyRefreshSchedule(basePlan, {
+    platform: "win32", adapter,
+    nodePath: definition.node_path, brainPath: definition.brain_path, runnerPath: definition.runner_path,
+  });
+  assert.equal(result.verified, true);
+  assert.equal(deletes, 1);
+  assert.equal(concurrentRefusals, 1, "the competing product mutation reached and lost the serialization boundary");
 });
 
 test("macOS pause persists disabled state across a simulated new login", () => {
@@ -231,6 +342,14 @@ test("macOS pause persists disabled state across a simulated new login", () => {
 
 test("update recovery state is durable, private, and readable after restart", () => {
   const home = mkdtempSync(join(tmpdir(), "daily-update-transaction-"));
+  const otherHome = join(home, "other-home");
+  const machineLockRoot = join(home, "machine-locks");
+  const manifestPath = join(home, "brain.manifest.json");
+  writeFileSync(manifestPath, JSON.stringify({
+    client: { slug: "fixture" },
+    infrastructure: { cloudflare: { account_id: "fixture-account", d1_database_id: "fixture-database" } },
+  }));
+  const transactionPlan = { ...basePlan, manifest_path: manifestPath };
   assert.equal(typeof dailySchedulerModule.writeDailyRefreshUpdateTransaction, "function");
   assert.equal(typeof dailySchedulerModule.readDailyRefreshUpdateTransaction, "function");
   assert.equal(typeof dailySchedulerModule.clearDailyRefreshUpdateTransaction, "function");
@@ -239,17 +358,34 @@ test("update recovery state is durable, private, and readable after restart", ()
     runnerPath: "/runtime/operations/daily-refresh-run.mjs",
   });
   const transaction = dailySchedulerModule.writeDailyRefreshUpdateTransaction({
-    plan: basePlan,
+    plan: transactionPlan,
     snapshot: { exists: true, enabled: true, identity: basePlan.identity, definition },
     phase: "recovery_required",
-  }, { home, now: () => new Date("2026-10-06T18:00:00.000Z") });
+    legacySnapshots: [{
+      kind: "drive", sourceKey: "google_drive", module: { should_not_serialize: true },
+      snapshot: { exists: true, wasLoaded: true, serialized: "fixture plist" },
+    }],
+  }, { home, machineLockRoot, now: () => new Date("2026-10-06T18:00:00.000Z") });
   assert.equal(transaction.phase, "recovery_required");
-  const afterRestart = dailySchedulerModule.readDailyRefreshUpdateTransaction(basePlan.identity, { home });
+  const afterRestart = dailySchedulerModule.readDailyRefreshUpdateTransaction(basePlan.identity, {
+    home, machineLockRoot, manifestPath,
+  });
   assert.equal(afterRestart.snapshot.enabled, true);
   assert.equal(afterRestart.snapshot.definition.definition_hash, definition.definition_hash);
+  assert.equal(afterRestart.legacy_snapshots[0].snapshot.wasLoaded, true);
+  assert.equal(Object.hasOwn(afterRestart.legacy_snapshots[0], "module"), false,
+    "durable recovery carries legacy state without serializing executable dependencies");
   assert.doesNotMatch(JSON.stringify(afterRestart), /admin.?key|api.?token|secret/i);
-  assert.equal(dailySchedulerModule.clearDailyRefreshUpdateTransaction(basePlan.identity, { home }), true);
-  assert.equal(dailySchedulerModule.readDailyRefreshUpdateTransaction(basePlan.identity, { home }), null);
+  const crossUser = dailySchedulerModule.readDailyRefreshUpdateTransaction(basePlan.identity, {
+    home: otherHome, machineLockRoot, manifestPath,
+  });
+  assert.equal(crossUser.shared_fence, true, "another user sees the canonical Brain recovery fence without the private snapshot");
+  assert.equal(dailySchedulerModule.clearDailyRefreshUpdateTransaction(basePlan.identity, {
+    home, machineLockRoot, manifestPath,
+  }), true);
+  assert.equal(dailySchedulerModule.readDailyRefreshUpdateTransaction(basePlan.identity, {
+    home, machineLockRoot, manifestPath,
+  }), null);
 });
 
 test("module URL defaults decode spaces before building a native definition", () => {

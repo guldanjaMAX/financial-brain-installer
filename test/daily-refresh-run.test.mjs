@@ -200,6 +200,39 @@ test("a restarted scheduled runner honors an update recovery-required receipt", 
   assert.equal(receipts.at(-1).status, "deferred");
 });
 
+test("a recovery fence created while the runner acquires its lease still defers all sources", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "daily-run-recovery-race-"));
+  const manifestPath = join(directory, "brain.manifest.json");
+  writeFileSync(manifestPath, "{}\n");
+  let recovering = false;
+  let runs = 0;
+  let transactionReads = 0;
+  let releases = 0;
+  const receipts = [];
+  const result = await runDailyRefreshCli(manifestPath, {
+    brainModule: {},
+    buildPlan: async () => ({ ...plan, manifest_path: manifestPath }),
+    readUpdateTransaction: () => {
+      transactionReads += 1;
+      return recovering ? { phase: "recovery_required" } : null;
+    },
+    acquireLock: () => {
+      recovering = true;
+      return { assertOwned: () => true, release: () => { releases += 1; } };
+    },
+    runSource: async () => { runs += 1; return { status: "complete" }; },
+    readFreshness: async () => ({ drive: { last_successful_run_at: "2026-10-06T12:00:00.000Z" } }),
+    writeReceipt: (receipt) => receipts.push(receipt),
+    silent: true,
+  });
+  assert.equal(transactionReads, 1, "the recovery boundary was inspected after lease acquisition");
+  assert.equal(runs, 0);
+  assert.equal(releases, 1);
+  assert.equal(result.status, "deferred");
+  assert.equal(result.reason_code, "update_recovery_required");
+  assert.equal(receipts.at(-1).status, "deferred");
+});
+
 test("runtime exhaustion reaches the decision point and defers remaining sources", async () => {
   let runCalls = 0;
   const boundedPlan = {

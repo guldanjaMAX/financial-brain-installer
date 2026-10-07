@@ -521,8 +521,14 @@ scheduled collision records a deferred outcome; interactive mutations fail
 closed. Update durably records the verified prior schedule before persistently
 disabling it, and reconciles from the updated manifest only after version
 agreement, active query-ready health, queue zero, and exact schedule readback.
-An interrupted update leaves the receipt and disabled state in place, and a
-restarted runner defers until recovery completes.
+The per-user transaction retains daily and legacy scheduler snapshots. A
+content-free fence keyed by canonical Brain identity is stored beside the
+machine-wide lifecycle boundary, so every local user and manifest alias fails
+closed while recovery is unresolved. Writers inspect that fence after taking
+the lease. An interrupted update leaves the receipt, fence, and disabled state
+in place; a retry uses the saved definition as its authorization even after a
+manifest fingerprint change, and clears the fence only after current health
+proof and exact reconciliation.
 
 ## D1, FTS5, Vectorize, and the outbox
 
