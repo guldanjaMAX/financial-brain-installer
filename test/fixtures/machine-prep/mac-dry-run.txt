@@ -1,0 +1,27 @@
+Machine Prep for macOS
+MODE dry-run (no changes)
+
+READINESS
+WRONG_VERSION  Node.js                 v20.11.1; OWNER ACTION: install supported major 22 or 24
+READY          npm                     10.2.4
+MISSING        Git                     OWNER ACTION: install Apple's signed Command Line Tools
+MISSING        Claude Code             OWNER ACTION: install pinned 2.1.261 from the official signed installer
+WRONG_VERSION  Codex CLI               codex-cli 0.154.0; expected 0.155.0-alpha.16; fix: run --real
+SHADOWED       Financial Brain CLI     2 PATH matches; fix: remove the earlier PATH entry and reopen the shell
+READY          Wrangler                package pin 4.131.1; no global install needed
+READY          Python 3                not required by standard machine prep
+MISSING        Xcode Command Line Tools OWNER ACTION: install Apple's signed tools to supply Git
+READY          macOS session           normal current-user shell
+CHECKS_REACHED=10
+READINESS RED
+
+PLAN
+1. OWNER ACTION: install any missing Node.js, Git, Claude Code, or Codex prerequisite from its official signed installer, then rerun this launcher.
+2. REFUSE: the launcher does not download or execute prerequisite installers whose bytes it cannot authenticate before execution.
+3. SKIP: do not install global Wrangler; Financial Brain owns wrangler@4.131.1.
+4. DOWNLOAD: Financial Brain 0.4.9 from the one pinned HTTPS kit URL without following redirects.
+5. VERIFY: require exactly 6668013 bytes and SHA-256 0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2 before npm sees the local file.
+6. INSTALL: use an isolated npm environment and private staging prefix, then atomically promote to clean per-user /fixture/home/.financial-brain.
+7. VERIFY: rerun --check and show the operator the green/red list.
+
+No command was executed, no directory was created, and no log was written.
