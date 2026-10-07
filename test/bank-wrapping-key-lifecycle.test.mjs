@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -161,6 +162,10 @@ async function isolatedRuntime(fetchImpl, operation) {
 }
 
 const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-bank-wrapping-lifecycle-")));
+// cmdUpdate records the installed-manifest pointer under the home folder; keep it in the sandbox
+// so a run without a scratch HOME can never write into the real one.
+process.env.HOME = join(sandbox, "home");
+mkdirSync(process.env.HOME, { recursive: true });
 const writeManifest = (name, value) => {
   const path = join(sandbox, name);
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
