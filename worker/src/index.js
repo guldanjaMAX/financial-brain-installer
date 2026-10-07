@@ -64,6 +64,7 @@ import {
 } from "./lib/query-intent.js";
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
 import { answerSentences } from "./lib/answer-sentences.js";
+import { quickBooksMoneyPolicy } from "./lib/quickbooks-money.js";
 import { quickBooksBalanceAnswer, quickBooksBalanceRequest } from "./lib/quickbooks-balance.js";
 import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
@@ -1156,7 +1157,8 @@ async function handleThink(
   const currentBlock = currentEvidence.length
     ? `\n\nCURRENT-STATUS CHECK:\nThe controlling current evidence for the named subject is document ${currentEvidence.map((doc) => `[${doc.n}]`).join(" and ")}. It may establish only the status it explicitly states. Older documents may explain history, and non-authoritative sources require an exact as-of date.${operativeConflict ? " Equally current owner-confirmed operative sections disagree. Do not choose a current value." : newerAuthoritativeEvidence.length ? " A newer authoritative record discusses this fact without repeating the owner-confirmed operative value and may supersede it. Do not choose a current value until they are reconciled." : operativeCurrentEvidence.length ? ` Document ${operativeCurrentEvidence.map((doc) => `[${doc.n}]`).join(" and ")} contains the newest owner-confirmed operative section for this question. Use only its Operative value as current; every Supersedes value is historical. A newer non-operative record does not replace it.` : ""}`
     : "";
-  const userMsg = `Question: ${q}\n\nDOCUMENTS:\n${docBlock}${currentBlock}\n\nKNOWN GAPS (computed from the data, not inferred, do not contradict these):\n${gapBlock}\n\nWrite the answer. Then, only if one of the gaps above materially affects how much the reader should trust that answer, add a final line starting with "Heads up:" naming that one gap in a single sentence. If none do, omit the Heads up line entirely.`;
+  const moneyPolicy = quickBooksMoneyPolicy({ question: q, docs, candidates: results.map(citationCandidateForResult) });
+  const userMsg = `Question: ${q}\n\nDOCUMENTS:\n${docBlock}${currentBlock}${moneyPolicy ? `\n\n${moneyPolicy.instruction}` : ""}\n\nKNOWN GAPS (computed from the data, not inferred, do not contradict these):\n${gapBlock}\n\n${moneyPolicy ? "Write the answer using only the relevant exact contract lines. Do not write a Heads up line; the application appends the computed gaps after verification." : 'Write the answer. Then, only if one of the gaps above materially affects how much the reader should trust that answer, add a final line starting with "Heads up:" naming that one gap in a single sentence. If none do, omit the Heads up line entirely.'}`;
 
   // Direct observed amounts need no generated prose. This replaces only the
   // model calls and free-text temporal inference. Citation and authority
@@ -1399,6 +1401,16 @@ async function handleThink(
             evidenceGate.supported = false;
             evidenceGate.reason = "current QuickBooks balances require deterministic observed Account evidence";
           }
+          // The money contract can only veto a generated draft. It runs even
+          // after a negative verifier; it never sets supported or complete true.
+          const draftMoneyPolicy = moneyPolicy || quickBooksMoneyPolicy({
+            draft: answer, docs, candidates: results.map(citationCandidateForResult),
+          });
+          const moneyRefusal = !balanceAnswer && draftMoneyPolicy?.refusal(answer);
+          if (moneyRefusal && evidenceGate.supported) {
+            evidenceGate.supported = false;
+            evidenceGate.reason = moneyRefusal;
+          }
           if (!evidenceGate.supported || !allowed.size) {
             answer = unsupportedAnswer;
             approvedDocs = [];
@@ -1424,7 +1436,11 @@ async function handleThink(
               approvedDocs = [];
               evidenceGate.reason = evidenceGate.reason || "no sentence survived the citation check";
             } else {
-              const missing = String(evidenceGate.reason || "one part of the question").replace(/\.$/, "");
+              // A verifier explanation is also model prose. It must not append
+              // new money after the QuickBooks draft has passed its veto.
+              const missing = moneyPolicy ? "one or more requested details"
+                : String(evidenceGate.reason || "one part of the question").replace(/\.$/, "");
+              if (moneyPolicy) evidenceGate.reason = missing;
               answer = `${kept.join(" ")}\n\nNot covered by the documents: ${missing}.${headsUp ? `\n\n${headsUp}` : ""}`;
               approvedDocs = citedDocs.filter((doc) => allowed.has(doc.n));
               evidenceGate.partial = true;
@@ -1445,7 +1461,7 @@ async function handleThink(
   // Computed coverage warnings describe retrieval, not account facts. Append
   // them only after the exact claims pass the shared gates, and keep `gaps` in
   // the response. No model gets to dismiss or rewrite these warnings.
-  if (balanceAnswer && evidenceGate?.supported && approvedDocs.length && gaps.length) {
+  if ((balanceAnswer || moneyPolicy) && evidenceGate?.supported && approvedDocs.length && gaps.length) {
     answer += `\n\nHeads up: ${gaps.map((gap) => String(gap.detail || "").replace(/\[\d+\]/g, "")).filter(Boolean).join(" ")}`;
   }
 

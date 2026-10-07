@@ -155,3 +155,9 @@ test("negative credit-card balances lead with the signed balance and amount owed
   const bank = (await collect("Account", [{ ...row, AccountType: "Bank" }])).documents[0];
   assert.doesNotMatch(bank.content.split("\n")[0], /owes/);
 });
+
+test("historical transaction excerpts carry their observation without redating history", async () => {
+  const doc = (await collect("BillPayment", [FIXTURES.find(([kind]) => kind === "BillPayment")[1]])).documents[0];
+  assert.match(doc.content, /Historical provider record\. Observed during sync at 2026-10-07T12:00:00\.000Z\./);
+  assert.equal(doc.occurred_at, CHANGED);
+});

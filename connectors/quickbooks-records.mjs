@@ -139,7 +139,7 @@ export function renderQuickBooksRecord(entity, row, snapshotAt) {
   }
   const priority = [
     opening,
-    `QuickBooks ${entity}. ${balanceField ? "Balance observed during this sync; the provider queries are not an atomic ledger snapshot." : "Historical provider record."}`,
+    `QuickBooks ${entity}. ${balanceField ? "Balance observed during this sync; the provider queries are not an atomic ledger snapshot." : `Historical provider record. Observed during sync at ${snapshotAt}.`}`,
     row.PrivateNote || row.CustomerMemo?.value ? `Memo: ${short(row.PrivateNote || row.CustomerMemo.value, 600)}` : "",
     row.TxnDate ? `Transaction date: ${short(row.TxnDate)}.` : "",
     row.MetaData?.LastUpdatedTime ? `Provider last changed: ${short(row.MetaData.LastUpdatedTime)}.` : "",

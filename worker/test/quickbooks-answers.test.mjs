@@ -88,7 +88,7 @@ test("legacy split families expose the existing migration boundary", async () =>
   } finally { fixture.close(); }
 });
 
-async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kind = "quickbooks", entity = "Account", answer, rows = null, question = "What are the current QuickBooks bank account balances?", limit = 10, expectedDrafts, expectedVerifiers = 1, verify = true, balanceOnly = false } = {}) {
+async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kind = "quickbooks", entity = "Account", answer, rows = null, question = "What are the current QuickBooks bank account balances?", limit = 10, expectedDrafts, expectedVerifiers = 1, verify = true, balanceOnly = false, verdict = {} } = {}) {
   t.mock.method(Date, "now", () => NOW);
   let verifierCalls = 0;
   let draftCalls = 0;
@@ -97,7 +97,7 @@ async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kin
     if (model.includes("bge-")) return { data: [[0.1, 0.2, 0.3]] };
     if (String(input.messages?.[0]?.content).includes("verify a proposed answer")) {
       verifierCalls++;
-      return { response: { supported: verify, complete: true, evidence: [...new Set([...draft.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])))], reason: verify ? "injected approval" : "injected rejection" } };
+      return { response: { supported: verify, complete: true, evidence: [...new Set([...draft.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])))], reason: verify ? "injected approval" : "injected rejection", ...verdict } };
     }
     draftCalls++;
     draft = typeof answer === "function" ? answer(input.messages.at(-1).content, draftCalls)
@@ -650,3 +650,226 @@ for (const question of ["What are my bank balances?", "What are my bank balances
     assert.equal(body.citations.length, 0);
   });
 }
+
+// R5 uses money questions without the old question-word trigger. Every attack
+// reaches generation and an affirmative verifier after a deterministic control.
+for (const [label, options] of [
+  ["amount", { answer: "Checking has a balance of USD 9,999.00 as of 2026-10-07 [1]." }],
+  ["currency", { answer: "Checking has USD 1,201.00 million as of 2026-10-07 [1]." }],
+  ["OCR", { mutate: (doc) => ({ ...doc, text_source: "ocr", text_reliable: true }) }],
+  ["unreliable", { mutate: (doc) => ({ ...doc, text_reliable: false }) }],
+  ["foreign source", { kind: "local_folder" }],
+  ["words", { answer: "Checking contains nine thousand dollars [1]." }],
+  ["no money token", { answer: "Checking contains nine thousand [1]." }],
+  ["implicit multiplier", { answer: "Amounts in millions. Checking contains USD 1,201.00 [1]." }],
+]) {
+  test(`R5 money guard rejects ${label} without a balance question`, async (t) => {
+    assert.equal((await deterministicCase(t)).evidence_gate.supported, true);
+    const body = await answerCase(t, { question: "How much money is currently in Checking in QuickBooks?", ...options });
+    assert.equal(body.evidence_gate.supported, false);
+    assert.equal(body.citations.length, 0);
+  });
+}
+
+const invoiceClaim = "Invoice 1016 to Customer One: open balance USD 75.00 (unpaid) as of 2026-10-07 [1].";
+const vendorClaim = "Vendor One was paid USD 75.00 by credit card on 2026-07-23 for bill bill-one [1].";
+for (const [entity, claim, question] of [
+  ["Invoice", invoiceClaim, "Which customers have unpaid invoices in QuickBooks, and how much does each owe?"],
+  ["BillPayment", vendorClaim, "How much did we spend with Vendor One in QuickBooks?"],
+]) {
+  test(`money guard preserves exact ${entity} and cannot override verifier refusal`, async (t) => {
+    const options = { entity, rows: [FIXTURES.find(([kind]) => kind === entity)[1]], answer: claim, question };
+    const body = await answerCase(t, options);
+    assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
+    assert.equal(body.citations.length, 1);
+    const refused = await answerCase(t, { ...options, verify: false });
+    assert.equal(refused.evidence_gate.supported, false);
+    assert.equal(refused.citations.length, 0);
+  });
+  for (const [label, change] of [
+    ["wrong value", (s) => s.replace("75.00", "999.00")],
+    ["wrong currency", (s) => s.replace("USD", "CAD")],
+    ["wrong sign", (s) => s.replace("USD 75", "USD -75")],
+    ["currency symbol ambiguity", (s) => s.replace("USD ", "$")],
+    ["scale", (s) => s.replace("75.00", "75.00 million")],
+    ["subject", (s) => s.replace("One", "Two")],
+    ["extra subject", (s) => s.replace("One", "One and Imaginary")],
+    ["date", (s) => s.replace("2026-10-07", "2026-10-08").replace("2026-07-23", "2026-07-24")],
+    ["side clause", (s) => s.replace(" [1]", " and the service is ongoing [1]")],
+    ["uncited afterthought", (s) => `${s}\nThe same amount applies to Imaginary.`],
+    ["heads-up money", (s) => `${s}\nHeads up: the amount is in millions.`],
+    ["separate context", (s) => `All amounts below are negative.\n${s}`],
+  ]) {
+    test(`money guard refuses ${entity} ${label} after affirmative verifier`, async (t) => {
+      const options = { entity, rows: [FIXTURES.find(([kind]) => kind === entity)[1]], question };
+      assert.equal((await answerCase(t, { ...options, answer: claim })).evidence_gate.supported, true);
+      const body = await answerCase(t, { ...options, answer: change(claim) });
+      assert.equal(body.evidence_gate.supported, false);
+      assert.equal(body.citations.length, 0);
+    });
+  }
+}
+
+for (const entity of ["Customer", "Vendor", "Bill", "CreditMemo"]) {
+  test(`money guard covers ${entity} independent of question wording`, async (t) => {
+    const [_, row, opening] = FIXTURES.find(([kind]) => kind === entity);
+    const control = await answerCase(t, { entity, rows: [row], question: "What do the QuickBooks records say?",
+      answer: `${opening.slice(0, -1)} [1].` });
+    assert.equal(control.evidence_gate.supported, true, control.evidence_gate.reason);
+    const body = await answerCase(t, { entity, rows: [FIXTURES.find(([kind]) => kind === entity)[1]],
+      question: "What do the QuickBooks records say?", answer: `${entity} One owes USD 9,999.00 [1].` });
+    assert.equal(body.evidence_gate.supported, false);
+    assert.equal(body.citations.length, 0);
+  });
+}
+
+test("Q1 unpaid invoice list preserves three individually cited customer amounts", async (t) => {
+  const base = FIXTURES.find(([kind]) => kind === "Invoice")[1];
+  const rows = ["One", "Two", "Three"].map((name, index) => ({ ...base, Id: `invoice-${index}`,
+    DocNumber: String(1016 + index), Balance: 75 + index, TotalAmt: 75 + index,
+    CustomerRef: { value: `customer-${index}`, name: `Customer ${name}` } }));
+  const body = await answerCase(t, { entity: "Invoice", rows, question: "Who owes us money in QuickBooks?",
+    answer: (prompt) => {
+      assert.match(prompt, /QUICKBOOKS MONEY CONTRACT/);
+      const lines = prompt.split("\n").filter((line) => /^Invoice \d+ to Customer \w+: open balance .* \[\d+\]\.$/.test(line) && !line.includes("T12:"));
+      assert.equal(lines.length, 3, "every invoice has its own admissible statement and citation");
+      return lines.join("\n") + "\nThe documents do not establish a complete list or a company-wide total.";
+    } });
+  assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
+  assert.equal(body.citations.length, 3);
+  assert.match(body.answer, /USD 75\.00/);
+  assert.match(body.answer, /USD 76\.00/);
+  assert.match(body.answer, /USD 77\.00/);
+  assert.match(body.answer, /Heads up:/);
+});
+
+test("Q2 two vendor payments retain their dates, cards, bills and recorded purpose", async (t) => {
+  const base = FIXTURES.find(([kind]) => kind === "BillPayment")[1];
+  const rows = [base, { ...base, Id: "second-payment", TxnDate: "2026-08-23", TotalAmt: 56.5,
+    Line: [{ Amount: 56.5, LinkedTxn: [{ TxnType: "Bill", TxnId: "bill-two" }] }] }];
+  const body = await answerCase(t, { entity: "BillPayment", rows,
+    question: "How much did we spend with Vendor One, and what were the bills or payments for?",
+    answer: (prompt) => {
+      const lines = prompt.split("\n").filter((line) => /^(?:Bill payment to|Recorded memo for BillPayment).* \[\d+\]\.$/.test(line));
+      assert.equal(lines.length, 4, "two independently bound payments and two purpose statements");
+      return lines.join("\n");
+    } });
+  assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
+  assert.equal(body.citations.length, 2);
+  assert.match(body.answer, /USD 75\.00/);
+  assert.match(body.answer, /USD 56\.50/);
+  assert.match(body.answer, /Company Card/);
+  assert.match(body.answer, /Monthly service/);
+});
+
+for (const [label, mutate] of [
+  ["OCR", (doc) => ({ ...doc, text_source: "ocr", text_reliable: true })],
+  ["unreliable date", (doc) => ({ ...doc, date_reliable: false })],
+  ["stale", (doc) => ({ ...doc, occurred_at: "2026-09-01T12:00:00.000Z", content: doc.content.replaceAll(SNAPSHOT, "2026-09-01T12:00:00.000Z") })],
+  ["derived", (doc) => ({ ...doc, metadata: { ...doc.metadata, evidence_lineage: { version: 1, kind: "derived_record", root_ids: ["quickbooks:invoice:row-one"] } } })],
+]) {
+  test(`exact invoice wording cannot launder ${label} evidence`, async (t) => {
+    const options = { entity: "Invoice", rows: [FIXTURES.find(([kind]) => kind === "Invoice")[1]],
+      question: "Who owes us money in QuickBooks?", answer: invoiceClaim };
+    assert.equal((await answerCase(t, options)).evidence_gate.supported, true);
+    const body = await answerCase(t, { ...options, mutate });
+    assert.equal(body.evidence_gate.supported, false);
+    assert.equal(body.citations.length, 0);
+  });
+}
+
+for (const [label, oldDate] of [["newer observation", "2026-10-07T11:59:00.000Z"], ["conflicting same-time observation", SNAPSHOT]]) {
+  test(`invoice money refuses ${label} for the same named document`, async (t) => {
+    const base = FIXTURES.find(([kind]) => kind === "Invoice")[1];
+    assert.equal((await answerCase(t, { entity: "Invoice", rows: [base], question: "Who owes us money in QuickBooks?",
+      answer: invoiceClaim })).evidence_gate.supported, true);
+    const rows = [base, { ...base, Id: "older-invoice", Balance: 65 }];
+    const body = await answerCase(t, { entity: "Invoice", rows, question: "Who owes us money in QuickBooks?",
+      mutate: (doc) => doc.source_id.endsWith("older-invoice") ? { ...doc, occurred_at: oldDate,
+        content: doc.content.replaceAll(SNAPSHOT, oldDate) } : doc,
+      answer: (prompt) => {
+        const suffix = createHash("sha256").update("Invoice:older-invoice").digest("hex").slice(0, 12);
+        const line = prompt.split("\n").find((line) => line.startsWith("[") && line.endsWith(suffix));
+        assert.ok(line, "the older/conflicting invoice reached the numbered prompt");
+        return `Invoice 1016 to Customer One: open balance USD 65.00 (partially paid) as of ${oldDate.slice(0, 10)} [${/^\[(\d+)\]/.exec(line)[1]}].`;
+      } });
+    assert.equal(body.results.length, 2);
+    assert.equal(body.evidence_gate.supported, false);
+    assert.equal(body.citations.length, 0);
+  });
+}
+
+test("a malformed newer invoice cannot disappear from the observation comparison", async (t) => {
+  const base = FIXTURES.find(([kind]) => kind === "Invoice")[1];
+  assert.equal((await answerCase(t, { entity: "Invoice", rows: [base], question: "Who owes us money in QuickBooks?",
+    answer: invoiceClaim })).evidence_gate.supported, true);
+  const body = await answerCase(t, { entity: "Invoice", rows: [base, { ...base, Id: "newer-broken" }],
+    question: "Who owes us money in QuickBooks?",
+    mutate: (doc) => doc.source_id.endsWith("newer-broken") ? { ...doc, occurred_at: "2026-10-07T12:00:30.000Z",
+      content: doc.content.replaceAll(SNAPSHOT, "2026-10-07T12:00:30.000Z").replace("total USD 75.00", "total USD 75.00 million") } : doc,
+    answer: (prompt) => {
+      const suffix = createHash("sha256").update("Invoice:row-one").digest("hex").slice(0, 12);
+      const line = prompt.split("\n").find((line) => line.startsWith("[") && line.endsWith(suffix));
+      assert.ok(line);
+      return invoiceClaim.replace("[1]", `[${/^\[(\d+)\]/.exec(line)[1]}]`);
+    } });
+  assert.equal(body.results.length, 2);
+  assert.equal(body.evidence_gate.supported, false);
+  assert.equal(body.citations.length, 0);
+});
+
+test("recorded memo cannot supply a separate monetary scale", async (t) => {
+  const row = { ...FIXTURES.find(([kind]) => kind === "BillPayment")[1], PrivateNote: "Amounts in millions" };
+  assert.equal((await answerCase(t, { entity: "BillPayment", rows: [row], question: "How much did we spend with Vendor One?",
+    answer: vendorClaim })).evidence_gate.supported, true);
+  const body = await answerCase(t, { entity: "BillPayment", rows: [row], question: "How much did we spend with Vendor One?",
+    answer: `${vendorClaim}\nRecorded memo for BillPayment row-one: "Amounts in millions" [1].` });
+  assert.equal(body.evidence_gate.supported, false);
+  assert.equal(body.citations.length, 0);
+});
+
+test("a bill purpose line keeps its amount and attribution without becoming a total", async (t) => {
+  const rows = [FIXTURES.find(([kind]) => kind === "Bill")[1]];
+  const claim = "Recorded line 1 for Bill 1016: USD 75.00; Telephone service [1].";
+  const options = { entity: "Bill", rows, question: "What was the bill from Vendor One for?" };
+  const body = await answerCase(t, { ...options, answer: claim });
+  assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
+  const wrong = await answerCase(t, { ...options, answer: claim.replace("75.00", "999.00") });
+  assert.equal(wrong.evidence_gate.supported, false);
+  assert.equal(wrong.citations.length, 0);
+});
+
+test("a native bill expense-account line preserves the expense purpose", async (t) => {
+  const base = FIXTURES.find(([kind]) => kind === "Bill")[1];
+  const rows = [{ ...base, Line: [{ Amount: 75, Description: "Telephone service",
+    AccountBasedExpenseLineDetail: { AccountRef: { value: "expense-one", name: "Telephone Expense" } } }] }];
+  const claim = "Recorded line 1 for Bill 1016: USD 75.00; account Telephone Expense; Telephone service [1].";
+  const options = { entity: "Bill", rows, question: "What were the bills from Vendor One for?" };
+  assert.equal((await answerCase(t, { ...options, answer: claim })).evidence_gate.supported, true);
+  const wrong = await answerCase(t, { ...options, answer: claim.replace("75.00", "999.00") });
+  assert.equal(wrong.evidence_gate.supported, false);
+  assert.equal(wrong.citations.length, 0);
+});
+
+
+test("a partial verifier explanation cannot append unbound money after the guard", async (t) => {
+  const options = { entity: "BillPayment", rows: [FIXTURES.find(([kind]) => kind === "BillPayment")[1]],
+    question: "How much did we spend with Vendor One?", answer: vendorClaim };
+  assert.equal((await answerCase(t, options)).evidence_gate.supported, true);
+  const body = await answerCase(t, { ...options,
+    verdict: { complete: false, reason: "Imaginary owes USD 9,999.00 as of 2026-10-07" } });
+  assert.equal(body.evidence_gate.partial, true, "the post-verifier partial rendering branch was reached");
+  assert.match(body.answer, /Vendor One was paid USD 75\.00/);
+  assert.doesNotMatch(body.answer, /Imaginary|9,999/);
+  assert.doesNotMatch(JSON.stringify(body.evidence_gate), /Imaginary|9,999/);
+});
+
+test("a draft cannot invent QuickBooks attribution outside a QuickBooks question", async (t) => {
+  const options = { kind: "local_folder", question: "What does the Checking memo say?",
+    mutate: (doc) => ({ ...doc, date_source: "file:modified", content: "Checking memo records money of USD 1,201.00 on 2026-10-07." }) };
+  const control = await answerCase(t, { ...options, answer: "The memo records Checking at USD 1,201.00 on 2026-10-07 [1]." });
+  assert.equal(control.evidence_gate.supported, true, "ordinary non-QuickBooks evidence keeps its generic gate");
+  const body = await answerCase(t, { ...options, answer: "QuickBooks says Checking has a balance of USD 9,999.00 [1]." });
+  assert.equal(body.evidence_gate.supported, false);
+  assert.equal(body.citations.length, 0);
+});
