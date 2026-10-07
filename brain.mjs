@@ -29237,6 +29237,9 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     let dailyTransactionActive = false;
     let resumingDailyRecovery = false;
     let existingDailyTransaction = null;
+    let dailyAuthorizedDefinition = null;
+    let dailyReconciliation = { daily_definition: "pending", source_expectations: "pending" };
+    let persistDailyTransaction = null;
     let manageDailyDefinition = false;
     let manageAnyLocalSchedule = false;
     let legacySnapshots = [];
@@ -29279,6 +29282,8 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
             definition: dailyStatus.state.definition,
           })
         : Object.freeze({ identity: dailyPlan.identity, exists: false, enabled: false, definition: null }));
+      dailyAuthorizedDefinition = existingDailyTransaction?.authorized_definition ?? dailySnapshot.definition ?? null;
+      dailyReconciliation = existingDailyTransaction?.reconciliation || dailyReconciliation;
       legacySnapshots = existingDailyTransaction?.legacy_snapshots?.length
         ? await hydrateExistingOwnedSchedulerSnapshots(
             existingDailyTransaction.legacy_snapshots,
@@ -29289,27 +29294,25 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
             pin.target,
             options.dailyRefreshOptions || {},
           );
+      persistDailyTransaction = (phase) => writeDailyRefreshUpdateTransaction({
+        plan: dailyPlan,
+        snapshot: dailySnapshot,
+        phase,
+        legacySnapshots,
+        authorizedDefinition: dailyAuthorizedDefinition,
+        reconciliation: dailyReconciliation,
+      }, dailyTransactionOptions);
       manageAnyLocalSchedule = manageDailyDefinition || legacySnapshots.some((entry) => entry.snapshot?.exists);
       if (manageAnyLocalSchedule) {
-        writeDailyRefreshUpdateTransaction({
-          plan: dailyPlan,
-          snapshot: dailySnapshot,
-          phase: "preparing",
-          legacySnapshots,
-        }, dailyTransactionOptions);
+        persistDailyTransaction("preparing");
         dailyTransactionActive = true;
       }
       if (dailyStatus.installed) {
         pauseDailyRefreshSchedule(dailyPlan, {
           ...dailySchedulerOptions,
-          ...(dailySnapshot?.definition ? { authorizedDefinition: dailySnapshot.definition } : {}),
+          ...(dailyAuthorizedDefinition ? { authorizedDefinition: dailyAuthorizedDefinition } : {}),
         });
-        writeDailyRefreshUpdateTransaction({
-          plan: dailyPlan,
-          snapshot: dailySnapshot,
-          phase: "paused",
-          legacySnapshots,
-        }, dailyTransactionOptions);
+        persistDailyTransaction("paused");
         info("Daily imports are paused for the verified update window.");
       }
       try {
@@ -29321,12 +29324,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           );
         }
         if (dailyTransactionActive) {
-          writeDailyRefreshUpdateTransaction({
-            plan: dailyPlan,
-            snapshot: dailySnapshot,
-            phase: "paused",
-            legacySnapshots,
-          }, dailyTransactionOptions);
+          persistDailyTransaction("paused");
         }
       } catch (error) {
         if (!resumingDailyRecovery) {
@@ -29336,12 +29334,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
             dailyTransactionActive = false;
           }
         } else if (dailyTransactionActive) {
-          writeDailyRefreshUpdateTransaction({
-            plan: dailyPlan,
-            snapshot: dailySnapshot,
-            phase: "recovery_required",
-            legacySnapshots,
-          }, dailyTransactionOptions);
+          persistDailyTransaction("recovery_required");
         }
         throw error;
       }
@@ -29377,75 +29370,89 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           dailyTransactionActive = false;
         }
       } else if (dailyTransactionActive) {
-        writeDailyRefreshUpdateTransaction({
-          plan: dailyPlan,
-          snapshot: dailySnapshot || {
-            identity: dailyPlan.identity,
-            exists: false,
-            enabled: false,
-            definition: null,
-          },
-          phase: "recovery_required",
-          legacySnapshots,
-        }, dailyTransactionOptions);
+        persistDailyTransaction("recovery_required");
       }
       throw error;
     }
     if (dailyPlan) {
-      const afterUpdateManifest = loadManifest(pin.target).m;
-      reconcileExistingOwnedSchedulers(
-        afterUpdateManifest,
-        pin.target,
-        legacySnapshots,
-        options.dailyRefreshOptions || {},
-      );
-      const updatedPlan = await buildConfiguredDailyPlan(afterUpdateManifest, pin.target, options.dailyRefreshOptions || {});
-      if (manageDailyDefinition && !updatedPlan.ready) {
-        throw new Error(
-          updatedPlan.configuration_error ||
-          "the updated manifest has an enabled unsupported source; daily imports remain paused",
-        );
-      }
-      const runnable = updatedPlan.sources.filter((source) =>
-        source.class === "machine-pull" && source.owner === "daily-task" && source.status === "ready"
-      );
-      if (manageDailyDefinition && updatedPlan.enabled && updatedPlan.ready && runnable.length) {
-        const reconciled = installDailyRefreshSchedule(updatedPlan, dailySchedulerOptions);
-        if (reconciled.verified !== true) throw new Error("the verified update could not restore daily imports exactly");
-        await syncDailySourceExpectations(
+      try {
+        const afterUpdateManifest = loadManifest(pin.target).m;
+        reconcileExistingOwnedSchedulers(
           afterUpdateManifest,
           pin.target,
-          updatedPlan,
-          86_400,
+          legacySnapshots,
           options.dailyRefreshOptions || {},
         );
-        ok("Daily imports were recomputed from the updated manifest and restored after exact readback.");
-      } else if (manageDailyDefinition) {
-        if (dailySnapshot?.exists) {
-          const paused = reconcileDailyRefreshSchedule(updatedPlan, {
-            ...dailySchedulerOptions,
-            enabled: false,
-          });
-          if (paused.verified !== true || paused.enabled !== false) {
-            throw new Error("the updated daily definition could not remain safely paused");
+        const updatedPlan = await buildConfiguredDailyPlan(afterUpdateManifest, pin.target, options.dailyRefreshOptions || {});
+        if (manageDailyDefinition && !updatedPlan.ready) {
+          throw new Error(
+            updatedPlan.configuration_error ||
+            "the updated manifest has an enabled unsupported source; daily imports remain paused",
+          );
+        }
+        const runnable = updatedPlan.sources.filter((source) =>
+          source.class === "machine-pull" && source.owner === "daily-task" && source.status === "ready"
+        );
+        if (manageDailyDefinition && updatedPlan.enabled && updatedPlan.ready && runnable.length) {
+          const reconciled = installDailyRefreshSchedule(updatedPlan, dailySchedulerOptions);
+          if (reconciled.verified !== true) throw new Error("the verified update could not restore daily imports exactly");
+          dailyAuthorizedDefinition = reconciled.definition;
+          dailyReconciliation = { daily_definition: "verified", source_expectations: "pending" };
+          if (dailyTransactionActive) persistDailyTransaction("recovery_required");
+          await syncDailySourceExpectations(
+            afterUpdateManifest,
+            pin.target,
+            updatedPlan,
+            86_400,
+            options.dailyRefreshOptions || {},
+          );
+          dailyReconciliation = { daily_definition: "verified", source_expectations: "verified" };
+          if (dailyTransactionActive) persistDailyTransaction("recovery_required");
+          ok("Daily imports were recomputed from the updated manifest and restored after exact readback.");
+        } else if (manageDailyDefinition) {
+          if (dailySnapshot?.exists) {
+            const paused = reconcileDailyRefreshSchedule(updatedPlan, {
+              ...dailySchedulerOptions,
+              enabled: false,
+            });
+            if (paused.verified !== true || paused.enabled !== false) {
+              throw new Error("the updated daily definition could not remain safely paused");
+            }
+            dailyAuthorizedDefinition = paused.definition;
+          }
+          dailyReconciliation = { daily_definition: "verified", source_expectations: "pending" };
+          if (dailyTransactionActive) persistDailyTransaction("recovery_required");
+          await syncDailySourceExpectations(
+            afterUpdateManifest,
+            pin.target,
+            updatedPlan,
+            null,
+            options.dailyRefreshOptions || {},
+          );
+          dailyReconciliation = { daily_definition: "verified", source_expectations: "verified" };
+          if (dailyTransactionActive) persistDailyTransaction("recovery_required");
+          info("The updated manifest has no enabled daily machine-pull work, so its owned daily definition remains paused and was not removed.");
+        } else if (updatedPlan.enabled && updatedPlan.ready && runnable.length) {
+          info(renderCliCommands(
+            "This older manifest now has an eligible daily import plan. Run brain daily on <manifest> to approve and install its owned schedule."
+          ));
+        }
+        if (dailyTransactionActive) {
+          clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
+          dailyTransactionActive = false;
+        }
+      } catch (error) {
+        if (dailyTransactionActive) {
+          try {
+            persistDailyTransaction("recovery_required");
+          } catch (recoveryError) {
+            throw new Error(
+              `${error.message}; the daily import recovery authorization also could not be persisted: ${recoveryError.message}`,
+              { cause: error },
+            );
           }
         }
-        await syncDailySourceExpectations(
-          afterUpdateManifest,
-          pin.target,
-          updatedPlan,
-          null,
-          options.dailyRefreshOptions || {},
-        );
-        info("The updated manifest has no enabled daily machine-pull work, so its owned daily definition remains paused and was not removed.");
-      } else if (updatedPlan.enabled && updatedPlan.ready && runnable.length) {
-        info(renderCliCommands(
-          "This older manifest now has an eligible daily import plan. Run brain daily on <manifest> to approve and install its owned schedule."
-        ));
-      }
-      if (dailyTransactionActive) {
-        clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
-        dailyTransactionActive = false;
+        throw error;
       }
     }
     if (installed.source !== "remembered") {

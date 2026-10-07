@@ -171,7 +171,7 @@ test("native Windows absence requires a successful complete task inventory", () 
     home: directory,
     spawn: (_command, args) => {
       calls += 1;
-      if (args.includes("/FO")) return { status: 0, stdout: `"\\Other Folder\\Other Task","N/A"\r\n` };
+      if (args.includes("/FO")) return { status: 0, stdout: `"\\Other Folder\\Other Task","N/A","Ready"\r\n` };
       return { status: 1, stdout: "", stderr: "localized native error" };
     },
   });
@@ -267,6 +267,221 @@ test("native removal refuses a replacement that appears at its mutation boundary
   assert.equal(deletes, 0, "the replacement was never deleted");
 });
 
+test("native removal preserves a foreign replacement injected after the prior ownership read", () => {
+  const definition = buildDailyRefreshDefinition(basePlan, {
+    platform: "win32",
+    nodePath: String.raw`C:\Runtime\node.exe`,
+    brainPath: String.raw`C:\Runtime\brain.mjs`,
+    runnerPath: String.raw`C:\Runtime\daily-refresh-run.mjs`,
+  });
+  for (const arm of ["owned", "early-foreign", "late-foreign"]) {
+    const home = mkdtempSync(join(tmpdir(), `daily-native-late-race-${arm}-`));
+    let native = definition.serialized;
+    let queries = 0;
+    let deletes = 0;
+    let deletedForeign = false;
+    const adapter = createNativeDailyRefreshAdapter({
+      platform: "win32",
+      home,
+      spawn: (_command, args) => {
+        if (args.includes("/FO")) return { status: 0, stdout: '"\\Other\\Task","N/A","Ready"\r\n' };
+        if (args[0] === "/Query") {
+          queries += 1;
+          if (queries === 2 && arm === "early-foreign") native = "<Task>foreign</Task>";
+          const observed = native;
+          if (queries === 2 && arm === "late-foreign") native = "<Task>foreign</Task>";
+          return observed === null ? { status: 1 } : { status: 0, stdout: observed };
+        }
+        assert.equal(args[0], "/Delete");
+        assert.ok(args.includes("/F"));
+        deletes += 1;
+        deletedForeign = native === "<Task>foreign</Task>";
+        native = null;
+        return { status: 0 };
+      },
+    });
+    const action = () => removeDailyRefreshSchedule(basePlan, {
+      platform: "win32",
+      adapter,
+      nodePath: definition.node_path,
+      brainPath: definition.brain_path,
+      runnerPath: definition.runner_path,
+    });
+    if (arm === "owned") {
+      assert.equal(action().verified, true, "the unchanged owned task is the green control");
+      assert.equal(deletes, 1);
+      assert.equal(deletedForeign, false);
+    } else {
+      assert.throws(action, /foreign schedule|changed before removal/);
+      assert.equal(deletes, 0, `${arm} replacement was not deleted`);
+    }
+    assert.ok(queries >= 2, `${arm} reached the native ownership decision`);
+  }
+});
+
+test("native pause preserves a foreign replacement injected after the prior ownership read", () => {
+  const home = mkdtempSync(join(tmpdir(), "daily-native-late-pause-"));
+  const definition = buildDailyRefreshDefinition(basePlan, {
+    platform: "win32",
+    nodePath: String.raw`C:\Runtime\node.exe`,
+    brainPath: String.raw`C:\Runtime\brain.mjs`,
+    runnerPath: String.raw`C:\Runtime\daily-refresh-run.mjs`,
+  });
+  let native = definition.serialized;
+  let queries = 0;
+  let changes = 0;
+  let changedForeign = false;
+  const adapter = createNativeDailyRefreshAdapter({
+    platform: "win32",
+    home,
+    spawn: (_command, args) => {
+      if (args[0] === "/Query") {
+        queries += 1;
+        const observed = native;
+        if (queries === 2) native = "<Task>foreign</Task>";
+        return { status: 0, stdout: observed };
+      }
+      assert.equal(args[0], "/Change");
+      changes += 1;
+      changedForeign = native === "<Task>foreign</Task>";
+      return { status: 0 };
+    },
+  });
+  assert.throws(() => pauseDailyRefreshSchedule(basePlan, {
+    platform: "win32",
+    adapter,
+    nodePath: definition.node_path,
+    brainPath: definition.brain_path,
+    runnerPath: definition.runner_path,
+  }), /foreign schedule|changed before/);
+  assert.ok(queries >= 2, "pause reached the native ownership decision");
+  assert.equal(changes, 0);
+  assert.equal(changedForeign, false);
+});
+
+test("native replacement preserves a foreign replacement injected after the prior ownership read", () => {
+  const home = mkdtempSync(join(tmpdir(), "daily-native-late-replace-"));
+  const priorPlan = { ...basePlan, source_plan_hash: "sha256:prior" };
+  const options = {
+    platform: "win32",
+    nodePath: String.raw`C:\Runtime\node.exe`,
+    brainPath: String.raw`C:\Runtime\brain.mjs`,
+    runnerPath: String.raw`C:\Runtime\daily-refresh-run.mjs`,
+  };
+  const prior = buildDailyRefreshDefinition(priorPlan, options);
+  let native = prior.serialized;
+  let queries = 0;
+  let creates = 0;
+  let replacedForeign = false;
+  const adapter = createNativeDailyRefreshAdapter({
+    platform: "win32",
+    home,
+    spawn: (_command, args) => {
+      if (args[0] === "/Query") {
+        queries += 1;
+        const observed = native;
+        if (queries === 2) native = "<Task>foreign</Task>";
+        return { status: 0, stdout: observed };
+      }
+      assert.equal(args[0], "/Create");
+      creates += 1;
+      replacedForeign = native === "<Task>foreign</Task>";
+      return { status: 0 };
+    },
+  });
+  assert.throws(() => installDailyRefreshSchedule(basePlan, { ...options, adapter }), /foreign schedule|changed before/);
+  assert.ok(queries >= 2, "replacement reached the native ownership decision");
+  assert.equal(creates, 0);
+  assert.equal(replacedForeign, false);
+});
+
+test("native Windows absence rejects incomplete quoted inventory rows", () => {
+  const directory = mkdtempSync(join(tmpdir(), "daily-native-incomplete-inventory-"));
+  for (const [inventory, shouldRefuse] of [
+    ["MALFORMED INVENTORY", true],
+    ['"\\Other\\Task",', true],
+    ['"\\Other\\Task"', true],
+    ['"\\Other\\Task","N/A","Ready"', false],
+  ]) {
+    let calls = 0;
+    const adapter = createNativeDailyRefreshAdapter({
+      platform: "win32",
+      home: directory,
+      spawn: (_command, args) => {
+        calls += 1;
+        return args.includes("/FO")
+          ? { status: 0, stdout: inventory }
+          : { status: 1, stdout: "", stderr: "localized native error" };
+      },
+    });
+    const action = () => statusDailyRefreshSchedule(basePlan, { platform: "win32", adapter });
+    if (shouldRefuse) {
+      assert.throws(action, /could not be inspected/);
+    } else {
+      const status = action();
+      assert.equal(status.installed, false, "a complete absent row is the green control");
+      assert.equal(status.verified, true);
+    }
+    assert.equal(calls, 2, "each arm reached both native inspection decisions");
+  }
+});
+
+test("native Windows disabled state keeps the immutable execution authorization", () => {
+  const home = mkdtempSync(join(tmpdir(), "daily-native-disabled-authorization-"));
+  const definition = buildDailyRefreshDefinition(basePlan, {
+    platform: "win32",
+    nodePath: String.raw`C:\Runtime\node.exe`,
+    brainPath: String.raw`C:\Runtime\brain.mjs`,
+    runnerPath: String.raw`C:\Runtime\daily-refresh-run.mjs`,
+  });
+  let serialized = definition.serialized;
+  let disables = 0;
+  let enables = 0;
+  let reads = 0;
+  const adapter = createNativeDailyRefreshAdapter({
+    platform: "win32",
+    home,
+    spawn: (_command, args) => {
+      if (args[0] === "/Query") {
+        reads += 1;
+        return { status: 0, stdout: serialized };
+      }
+      assert.equal(args[0], "/Change");
+      if (args.includes("/DISABLE")) {
+        disables += 1;
+        serialized = serialized.replace(
+          "<AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled>",
+          "<AllowStartOnDemand>true</AllowStartOnDemand><Enabled>false</Enabled>",
+        );
+      } else {
+        enables += 1;
+        serialized = serialized.replace(
+          "<AllowStartOnDemand>true</AllowStartOnDemand><Enabled>false</Enabled>",
+          "<AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled>",
+        );
+      }
+      return { status: 0 };
+    },
+  });
+  const options = {
+    platform: "win32",
+    adapter,
+    nodePath: definition.node_path,
+    brainPath: definition.brain_path,
+    runnerPath: definition.runner_path,
+  };
+  const snapshot = pauseDailyRefreshSchedule(basePlan, options);
+  assert.equal(disables, 1, "the first pause reached the native disable decision");
+  assert.equal(statusDailyRefreshSchedule(basePlan, options).verified, true,
+    "mutable disabled state does not invalidate the execution definition");
+  const repeated = pauseDailyRefreshSchedule(basePlan, { ...options, authorizedDefinition: snapshot.definition });
+  assert.equal(repeated.enabled, false, "restart recovery observes the already-paused state");
+  assert.equal(disables, 1, "restart recovery does not disable twice");
+  assert.equal(restoreDailyRefreshSchedule(snapshot, { adapter }).verified, true);
+  assert.equal(enables, 1, "the enabled snapshot is restored by the green control");
+  assert.ok(reads >= 6, "pause, restart, and restore all reached native readback");
+});
+
 test("native task mutations serialize the ownership read and mutation boundary", () => {
   const home = mkdtempSync(join(tmpdir(), "daily-native-serialize-"));
   const definition = buildDailyRefreshDefinition(basePlan, {
@@ -280,7 +495,7 @@ test("native task mutations serialize the ownership read and mutation boundary",
   let deletes = 0;
   let concurrentRefusals = 0;
   const spawn = (_command, args) => {
-    if (args.includes("/FO")) return { status: 0, stdout: `"\\Other\\Task","N/A"\n` };
+    if (args.includes("/FO")) return { status: 0, stdout: `"\\Other\\Task","N/A","Ready"\n` };
     if (args[0] === "/Query") return gone ? { status: 1, stdout: "" } : { status: 0, stdout: definition.serialized };
     if (args[0] === "/Delete") {
       deletes += 1;

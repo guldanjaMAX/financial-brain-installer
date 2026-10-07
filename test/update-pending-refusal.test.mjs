@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   mkdtempSync,
   readFileSync,
@@ -7,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -22,6 +23,7 @@ import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import {
   buildDailyRefreshDefinition,
   readDailyRefreshUpdateTransaction,
+  writeDailyRefreshUpdateTransaction,
 } from "../operations/daily-refresh-scheduler.mjs";
 
 const PENDING_MESSAGE = (pending) => renderCliCommands(
@@ -164,10 +166,105 @@ async function withFixture(run) {
   const original = `${JSON.stringify(fixtureManifest(), null, 2)}\n`;
   writeFileSync(manifestPath, original);
   try {
-    await run({ manifestPath, original });
+    return await run({ manifestPath, original });
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }
+}
+
+async function runPersistedDailyPhaseArm(phase, { mutateAuthorization = false } = {}) {
+  return withFixture(async ({ manifestPath }) => {
+    const configured = fixtureManifest();
+    configured.client.timezone = "UTC";
+    configured.corpora = { google_drive: { enabled: true } };
+    configured.operations = { daily_refresh: { enabled: true, timezone: "UTC" } };
+    writeFileSync(manifestPath, `${JSON.stringify(configured, null, 2)}\n`);
+    const home = dirname(manifestPath);
+    const machineLockRoot = join(home, `machine-locks-${phase}-${mutateAuthorization ? "mutation" : "control"}`);
+    const plan = {
+      schema_version: 1,
+      identity: { id: "v1-0123456789abcdef", principal: "sid:S-1-5-21-fixture" },
+      manifest_path: manifestPath,
+      manifest_path_hash: "sha256:path",
+      manifest_content_hash: "sha256:content",
+      source_plan_hash: "sha256:sources",
+      platform: "win32",
+      enabled: true,
+      ready: true,
+      timezone_matches_machine: true,
+      unsupported_sources: 0,
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      max_runtime_minutes: 45,
+      sources: [{
+        key: "google_drive", class: "machine-pull", owner: "daily-task", status: "ready",
+        run_key: "google_drive", source_names: ["drive"],
+      }],
+    };
+    const nativeOptions = {
+      platform: "win32",
+      nodePath: String.raw`C:\Runtime\node.exe`,
+      brainPath: String.raw`C:\Runtime\brain.mjs`,
+      runnerPath: String.raw`C:\Runtime\daily-refresh-run.mjs`,
+    };
+    const definition = buildDailyRefreshDefinition(plan, nativeOptions);
+    const snapshot = { identity: plan.identity, exists: true, enabled: true, definition };
+    writeDailyRefreshUpdateTransaction({ plan, snapshot, phase }, {
+      home, manifestPath, machineLockRoot, platform: "win32",
+      now: () => new Date("2026-10-06T18:00:00.000Z"),
+    });
+    let state = {
+      exists: true,
+      owned: true,
+      enabled: phase === "preparing",
+      definition: mutateAuthorization
+        ? { ...definition, native_definition_hash: `sha256:${"f".repeat(64)}` }
+        : definition,
+    };
+    const mutations = [];
+    let upgradeCalls = 0;
+    const adapter = {
+      read: () => state,
+      setEnabled: (_identity, enabled) => {
+        mutations.push(`enabled:${enabled}`);
+        state = { ...state, enabled };
+      },
+      install: (next) => {
+        mutations.push("install");
+        state = { exists: true, owned: true, enabled: true, definition: next };
+      },
+    };
+    const options = {
+      ...updateHarness(manifestPath, async () => ({ pending: 0 }), []),
+      reportUpdateFinish: () => {},
+      cmdUpgrade: async () => {
+        upgradeCalls += 1;
+        return { updated: true, daily_final_state: { active: true, query_ready: true, pending: 0 } };
+      },
+      dailyRefreshOptions: {
+        platform: "win32",
+        existingSchedulerOwners: [],
+        planDailyRefresh: async () => plan,
+        schedulerAdapter: adapter,
+        schedulerOptions: { ...nativeOptions, home, machineLockRoot },
+        syncSourceExpectations: false,
+      },
+    };
+    if (mutateAuthorization) {
+      await assert.rejects(() => cmdUpdate(manifestPath, options), /authorized plan/);
+      assert.equal(upgradeCalls, 0, `${phase} mutation refused before update work`);
+      assert.ok(readDailyRefreshUpdateTransaction(plan.identity, { home, manifestPath, machineLockRoot }),
+        `${phase} mutation retained recovery`);
+      return { mutations, state, upgradeCalls };
+    }
+    const result = await cmdUpdate(manifestPath, options);
+    assert.equal(result.updated, true);
+    assert.equal(upgradeCalls, 1, `${phase} control obtained fresh final-state proof`);
+    assert.equal(state.enabled, true);
+    assert.equal(readDailyRefreshUpdateTransaction(plan.identity, { home, manifestPath, machineLockRoot }), null,
+      `${phase} control cleared recovery only after exact reconciliation`);
+    return { mutations, state, upgradeCalls };
+  });
 }
 
 test("pending vector work refuses before adoption, verification, deployment, or a manifest write", async () => {
@@ -328,7 +425,8 @@ test("production update integration restores daily imports only from explicit fi
       }),
     });
     assert.equal(healthy.updated, true);
-    assert.deepEqual(mutations, ["install"], "the verified control reconciled the paused definition");
+    assert.deepEqual(mutations, ["enabled:true"],
+      "the verified control restored the unchanged authorized definition without replacing it");
     assert.equal(state.enabled, true);
   });
 });
@@ -461,6 +559,116 @@ test("production recovery retry keeps imports paused through refusal and reconci
     assert.equal(state.definition.manifest_content_hash, "sha256:after");
     assert.equal(readDailyRefreshUpdateTransaction(plan().identity, { home, machineLockRoot, manifestPath }), null,
       "only the healthy exact-reconciliation control clears recovery");
+  });
+});
+
+for (const phase of ["preparing", "paused", "recovery_required"]) {
+  test(`production recovery resumes from persisted ${phase} state`, async () => {
+    const mutation = await runPersistedDailyPhaseArm(phase, { mutateAuthorization: true });
+    assert.ok(mutation.mutations.length === 0,
+      `${phase} authorization mutation reached the decision without changing the native task`);
+    const control = await runPersistedDailyPhaseArm(phase);
+    assert.ok(control.mutations.length >= 1,
+      `${phase} green control reached native pause or restore reconciliation`);
+  });
+}
+
+test("production recovery resumes after a post-install expectation failure", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const manifest = fixtureManifest();
+    manifest.client.timezone = "UTC";
+    manifest.operations = { daily_refresh: { enabled: true, timezone: "UTC" } };
+    manifest.corpora = { google_drive: { enabled: true } };
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const home = dirname(manifestPath);
+    const machineLockRoot = join(home, "machine-locks");
+    const keyPath = join(home, "fixture-admin-key");
+    writeFileSync(keyPath, "a".repeat(64), { mode: 0o600 });
+    const nativeOptions = {
+      platform: "win32",
+      nodePath: String.raw`C:\Runtime\node.exe`,
+      brainPath: String.raw`C:\Runtime\brain.mjs`,
+      runnerPath: String.raw`C:\Runtime\daily-refresh-run.mjs`,
+    };
+    const getPlan = () => ({
+      schema_version: 1,
+      identity: { id: "v1-0123456789abcdef", principal: "sid:S-1-5-21-fixture" },
+      manifest_path: manifestPath,
+      manifest_path_hash: "sha256:path",
+      manifest_content_hash: `sha256:${createHash("sha256").update(readFileSync(manifestPath)).digest("hex")}`,
+      source_plan_hash: "sha256:sources",
+      platform: "win32",
+      enabled: true,
+      ready: true,
+      timezone_matches_machine: true,
+      unsupported_sources: 0,
+      cron: "0 9 * * *",
+      timezone: "UTC",
+      max_runtime_minutes: 45,
+      sources: [{
+        key: "google_drive", class: "machine-pull", owner: "daily-task", status: "ready",
+        run_key: "google_drive", source_names: ["drive"],
+      }],
+    });
+    let native = {
+      exists: true,
+      owned: true,
+      enabled: true,
+      definition: buildDailyRefreshDefinition(getPlan(), nativeOptions),
+    };
+    let upgradeCalls = 0;
+    let expectationCalls = 0;
+    let installs = 0;
+    let failExpectation = true;
+    const adapter = {
+      read: () => native,
+      setEnabled: (_identity, enabled) => { native = { ...native, enabled }; },
+      install: (definition) => {
+        installs += 1;
+        native = { exists: true, owned: true, enabled: true, definition };
+      },
+    };
+    const options = {
+      ...updateHarness(manifestPath, async () => ({ pending: 0 }), []),
+      reportUpdateFinish: () => {},
+      cmdUpgrade: async () => {
+        upgradeCalls += 1;
+        manifest.brain.version = "0.4.9";
+        writeFileSync(manifestPath, JSON.stringify(manifest));
+        return { updated: true, daily_final_state: { active: true, query_ready: true, pending: 0 } };
+      },
+      dailyRefreshOptions: {
+        platform: "win32",
+        existingSchedulerOwners: [],
+        planDailyRefresh: async () => getPlan(),
+        schedulerAdapter: adapter,
+        schedulerOptions: { ...nativeOptions, home, machineLockRoot },
+        resolveAdminKey: () => readFileSync(keyPath, "utf8"),
+        resolveBaseUrl: async () => "https://brain.example.invalid",
+        postSourceExpectation: async () => {
+          expectationCalls += 1;
+          if (failExpectation) throw new Error("fixture expectation write failed");
+        },
+      },
+    };
+
+    await assert.rejects(() => cmdUpdate(manifestPath, options), /fixture expectation write failed/);
+    assert.equal(installs, 1, "the failed arm reached new-definition installation");
+    assert.equal(expectationCalls, 1, "the failed arm reached the post-install expectation decision");
+    assert.equal(upgradeCalls, 1);
+    assert.equal(native.enabled, true);
+    assert.ok(readDailyRefreshUpdateTransaction(getPlan().identity, { home, machineLockRoot, manifestPath }),
+      "the failed arm retained its durable recovery authorization");
+
+    failExpectation = false;
+    const recovered = await cmdUpdate(manifestPath, options);
+    assert.equal(recovered.updated, true, "the unchanged healthy retry is the green control");
+    assert.equal(upgradeCalls, 2, "recovery obtained a fresh update health proof");
+    assert.equal(installs, 1, "the already-installed authorized definition was not replaced again");
+    assert.equal(expectationCalls, 2, "recovery retried the incomplete expectation write exactly once");
+    assert.equal(native.enabled, true);
+    assert.equal(readDailyRefreshUpdateTransaction(getPlan().identity, { home, machineLockRoot, manifestPath }), null,
+      "exact recovery reconciliation cleared the durable fence");
   });
 });
 
