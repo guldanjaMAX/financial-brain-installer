@@ -29,6 +29,14 @@ this changed candidate.
   command exits successfully with a visible `Daily imports need attention`
   line, keeps the recovery receipt, and leaves imports paused for the next
   verified update.
+  New schedules keep a stable `node` launcher in the native action and record
+  its resolved binary only as diagnostic information, so a normal Node upgrade
+  does not silently stop imports. A legacy Node-path-only difference keeps
+  running and prints `daily schedule needs refresh (Node changed)`; a missing
+  registered Node binary is named plainly. Run `brain daily on <manifest>` to
+  repair either state. `brain daily off` and the update pause can still change
+  an identity-owned task after definition drift, while a task without the
+  matching owner marker and Brain-and-user identity remains untouched.
   Turning daily imports off saves that choice in the manifest, so a later
   update does not turn them back on. An interrupted update keeps a private
   recovery receipt and keeps imports disabled across restart until recovery is

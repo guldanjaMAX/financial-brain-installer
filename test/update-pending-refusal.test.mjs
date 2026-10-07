@@ -172,7 +172,7 @@ async function withFixture(run) {
   }
 }
 
-async function runPersistedDailyPhaseArm(phase, { mutateAuthorization = false } = {}) {
+async function runPersistedDailyPhaseArm(phase, { foreignOwner = false } = {}) {
   return withFixture(async ({ manifestPath }) => {
     const configured = fixtureManifest();
     configured.client.timezone = "UTC";
@@ -180,7 +180,7 @@ async function runPersistedDailyPhaseArm(phase, { mutateAuthorization = false } 
     configured.operations = { daily_refresh: { enabled: true, timezone: "UTC" } };
     writeFileSync(manifestPath, `${JSON.stringify(configured, null, 2)}\n`);
     const home = dirname(manifestPath);
-    const machineLockRoot = join(home, `machine-locks-${phase}-${mutateAuthorization ? "mutation" : "control"}`);
+    const machineLockRoot = join(home, `machine-locks-${phase}-${foreignOwner ? "mutation" : "control"}`);
     const plan = {
       schema_version: 1,
       identity: { id: "v1-0123456789abcdef", principal: "sid:S-1-5-21-fixture" },
@@ -215,11 +215,9 @@ async function runPersistedDailyPhaseArm(phase, { mutateAuthorization = false } 
     });
     let state = {
       exists: true,
-      owned: true,
+      owned: !foreignOwner,
       enabled: phase === "preparing",
-      definition: mutateAuthorization
-        ? { ...definition, native_definition_hash: `sha256:${"f".repeat(64)}` }
-        : definition,
+      definition: { ...definition, native_definition_hash: `sha256:${"f".repeat(64)}` },
     };
     const mutations = [];
     let upgradeCalls = 0;
@@ -250,9 +248,9 @@ async function runPersistedDailyPhaseArm(phase, { mutateAuthorization = false } 
         syncSourceExpectations: false,
       },
     };
-    if (mutateAuthorization) {
-      await assert.rejects(() => cmdUpdate(manifestPath, options), /authorized plan/);
-      assert.equal(upgradeCalls, 0, `${phase} mutation refused before update work`);
+    if (foreignOwner) {
+      await assert.rejects(() => cmdUpdate(manifestPath, options), /foreign schedule/);
+      assert.equal(upgradeCalls, 0, `${phase} foreign-owner mutation refused before update work`);
       assert.ok(readDailyRefreshUpdateTransaction(plan.identity, { home, manifestPath, machineLockRoot }),
         `${phase} mutation retained recovery`);
       return { mutations, state, upgradeCalls };
@@ -564,9 +562,9 @@ test("production recovery retry keeps imports paused through refusal and reconci
 
 for (const phase of ["preparing", "paused", "recovery_required"]) {
   test(`production recovery resumes from persisted ${phase} state`, async () => {
-    const mutation = await runPersistedDailyPhaseArm(phase, { mutateAuthorization: true });
+    const mutation = await runPersistedDailyPhaseArm(phase, { foreignOwner: true });
     assert.ok(mutation.mutations.length === 0,
-      `${phase} authorization mutation reached the decision without changing the native task`);
+      `${phase} foreign-owner mutation reached the decision without changing the native task`);
     const control = await runPersistedDailyPhaseArm(phase);
     assert.ok(control.mutations.length >= 1,
       `${phase} green control reached native pause or restore reconciliation`);

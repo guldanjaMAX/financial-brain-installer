@@ -49,7 +49,11 @@ function dailyPlan(manifestPath) {
   };
 }
 
-function productionHarness(manifestPath, { failStage = () => null, failRestore = false } = {}) {
+function productionHarness(manifestPath, {
+  failStage = () => null,
+  failRestore = false,
+  registeredDefinitionDrift = false,
+} = {}) {
   const events = [];
   const finish = [];
   const home = dirname(manifestPath);
@@ -65,7 +69,11 @@ function productionHarness(manifestPath, { failStage = () => null, failRestore =
     exists: true,
     owned: true,
     enabled: true,
-    definition: buildDailyRefreshDefinition(plan, nativeOptions),
+    definition: buildDailyRefreshDefinition(registeredDefinitionDrift
+      ? { ...plan, source_plan_hash: "sha256:registered-sources" }
+      : plan, registeredDefinitionDrift
+      ? { ...nativeOptions, nodePath: String.raw`C:\OldRuntime\node.exe` }
+      : nativeOptions),
   };
   let d1Version = "0.4.7";
   const adapter = {
@@ -291,6 +299,24 @@ test("production update proves active propagation before convergence and schedul
     assert.equal(harness.state().enabled, true);
     assert.equal(harness.finish.length, 1, "the green production control renders one completion message");
     assert.match(harness.finish[0], /passed its checks/i);
+  });
+});
+
+test("production update pauses an identity-owned drifted definition before deployment and reconciles it after proof", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const harness = productionHarness(manifestPath, { registeredDefinitionDrift: true });
+    await cmdUpdate(manifestPath, harness.options);
+    const pause = harness.events.indexOf("schedule:false");
+    const deploy = harness.events.indexOf("deploy:paused");
+    const reconcile = harness.events.lastIndexOf("schedule:install");
+    const finalHealth = harness.events.indexOf("health:active-final");
+    assert.ok(pause >= 0 && pause < deploy,
+      "the production update reached owned-drift pause before its first deployment mutation");
+    assert.ok(reconcile > finalHealth,
+      "the drifted definition was replaced only after active, query-ready, queue-zero proof");
+    assert.equal(harness.state().enabled, true);
+    assert.equal(harness.state().definition.source_plan_hash, harness.plan.source_plan_hash,
+      "the reconciled definition is the current manifest-derived control");
   });
 });
 
