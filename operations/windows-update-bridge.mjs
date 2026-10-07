@@ -1,6 +1,7 @@
 /** Reversible coordination of temporary, current-user Windows daily tasks. */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { win32 } from "node:path";
 import { parseWindowsTaskInventory } from "./daily-refresh-scheduler.mjs";
 
@@ -28,6 +29,20 @@ function binding(domain, manifestPath, sid) {
   return { name, hash: `sha256:${digest("bridge-binding-v1", domain, manifestPath, sid, name)}` };
 }
 
+export function sameManifestFile(taskPath, manifestPath, { platform = process.platform, realpath = realpathSync.native } = {}) {
+  if (typeof taskPath !== "string" || !taskPath || typeof manifestPath !== "string" || !manifestPath) return false;
+  if (taskPath === manifestPath) return true;
+  // Resolve both spellings before comparing: aliases include directory links,
+  // Windows short names and redirected folders. An unresolved alias is no proof.
+  try {
+    const taskFile = realpath(taskPath);
+    const manifestFile = realpath(manifestPath);
+    return platform === "win32"
+      ? taskFile.toLowerCase() === manifestFile.toLowerCase()
+      : taskFile === manifestFile;
+  } catch { return false; }
+}
+
 function actionBinds(entry, manifestPath) {
   // A substring in a comment, string, or opaque PowerShell program is not
   // execution proof. Recognize only a complete literal load invocation; an
@@ -45,7 +60,7 @@ function actionBinds(entry, manifestPath) {
   }
   return tokens.length === 5 &&
     (tokens[0] === "brain" || (win32.isAbsolute(tokens[0]) && /^brain\.(?:cmd|exe)$/iu.test(win32.basename(tokens[0])))) &&
-    tokens[1] === "load" && tokens[2] === manifestPath && tokens[3] === "--only" &&
+    tokens[1] === "load" && sameManifestFile(tokens[2], manifestPath) && tokens[3] === "--only" &&
     /^[a-z][a-z0-9_]*(?:,[a-z][a-z0-9_]*)*$/u.test(tokens[4]);
 }
 
@@ -176,7 +191,8 @@ export function createWindowsUpdateBridgeGuard(options = {}) {
         if (entry.task_name !== bound.name) {
           // Even a differently named task cannot be silently ignored if its
           // literal action points at this manifest or Brain.
-          if (entry.action?.includes(options.manifestPath) || entry.action?.includes(options.domain)) throw repair();
+          if (actionBinds(entry, options.manifestPath) ||
+              entry.action?.includes(options.manifestPath) || entry.action?.includes(options.domain)) throw repair();
           ignored += 1;
           continue;
         }
