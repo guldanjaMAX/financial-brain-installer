@@ -232,7 +232,19 @@ supported yet, before rather than after.
 `verify` and `provision` are safe to re-run. Migration execution itself is
 restart-safe after every independently committed statement, but a live D1
 install must use `brain update` whenever the pending migration changes the
-Vectorize writer protocol. Provision adopts existing resources rather than
+Vectorize writer protocol. Before dispatching an ADD COLUMN, migration writes
+and flushes local intent under `~/.brain/migration-intents/`, keyed by the exact
+account/database identity digest, migration checksum and statement digest.
+These files contain no SQL, credentials or corpus content. Keep them across
+restarts: an unresolved intent permits only exact-schema inspection and bounded
+polling, even when the column is still absent. Only exact verification or
+authoritative transport evidence of non-delivery clears the intent. A corrupt
+intent fails closed for installer review. Successful ALTER replies also require
+exact schema readback before the migration receipt is written. This local
+protection follows the same computer and retained state; it does not coordinate
+another computer or recover intent files that were removed. A crash after
+intent but before delivery can require installer review rather than an automatic
+resend. Provision adopts existing resources rather than
 duplicating them, and **refuses** to adopt a Vectorize index with the wrong
 dimensions or metric rather than silently writing vectors that would be
 rejected or mis-ranked.

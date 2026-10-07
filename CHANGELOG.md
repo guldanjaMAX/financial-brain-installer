@@ -22,6 +22,9 @@ write a response.
   15 minutes before continuing. It never resends that column change while
   checking. If the checks cannot reach Cloudflare, the message names the
   connection problem and explains how to check the column before retrying.
+  After an interruption, rerun the update on the same computer. Its saved
+  recovery record keeps an unconfirmed column change from being sent again;
+  the update continues only after checking the exact column definition.
 
 - **Daily imports now have one owned Windows and macOS contract.** `brain daily
   on|off|status <manifest>` derives every source from your own manifest instead

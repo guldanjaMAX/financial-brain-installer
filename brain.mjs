@@ -70,6 +70,7 @@ import {
 } from "./worker/src/lib/store-d1.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
 import { withBrainLifecycleLock, withBrainLifecycleLockWait } from "./operations/brain-lifecycle-lock.mjs";
+import { createMigrationStatementIntentStore } from "./operations/migration-statement-intent.mjs";
 import { planDailyRefresh } from "./operations/daily-refresh-plan.mjs";
 import {
   clearDailyRefreshUpdateTransaction,
@@ -4891,6 +4892,9 @@ function uncertainMigrationStatementMessage(index, total, migrationName) {
  * runner proves the existing column's complete declared contract before
  * treating that exact statement as already applied. All other statements in
  * restart-sensitive migrations must themselves be idempotent.
+ * cmdMigrate supplies durable statement intent; callers with injected database
+ * adapters can supply their own store. An unresolved claim never grants resend
+ * authority, including when the previous process died before its first reply.
  */
 export async function runRestartSafeMigrationStatements(
   statements,
@@ -4905,6 +4909,7 @@ export async function runRestartSafeMigrationStatements(
     now = () => Date.now(),
     log = () => {},
     maxPollIterations = Number.POSITIVE_INFINITY,
+    statementIntent = null,
   } = {},
 ) {
   if (!Array.isArray(statements) || typeof queryStatement !== "function" ||
@@ -4981,16 +4986,25 @@ export async function runRestartSafeMigrationStatements(
     const descriptor = addedColumnDescriptor(statement);
     let skipped = false;
     let recoveredAfterSlowApply = false;
+    // A previous process may have died after delivery but before any reply.
+    // Absence from a read is not evidence of non-delivery of that prior write.
+    const unresolvedIntent = descriptor && statementIntent?.has(statement);
     if (descriptor) {
       try {
         skipped = await inspectAddedColumn(inspectStatement, descriptor);
       } catch (error) {
         const kind = migrationFailureKind(error);
-        if (!["transient", "duplicate"].includes(kind)) throw error;
-        const result = await waitForColumnInventory(descriptor, error, { returnWhenAbsent: true });
+        if (!["transient", "duplicate", ...(unresolvedIntent ? ["unreachable"] : [])].includes(kind)) throw error;
+        const result = await waitForColumnInventory(descriptor, error, { returnWhenAbsent: !unresolvedIntent });
         skipped = result === "present";
         recoveredAfterSlowApply = skipped;
       }
+    }
+    if (descriptor && !skipped && statementIntent &&
+        (unresolvedIntent || !statementIntent.claim(statement))) {
+      await waitForColumnInventory(descriptor, null, { returnWhenAbsent: false });
+      skipped = true;
+      recoveredAfterSlowApply = true;
     }
     if (!skipped) {
       try {
@@ -5005,12 +5019,27 @@ export async function runRestartSafeMigrationStatements(
           }
           throw error;
         }
-        if (["definitive", "unreachable"].includes(kind)) throw error;
+        if (["definitive", "unreachable"].includes(kind)) {
+          // Only transport proof of non-delivery permits a future dispatch.
+          // Unknown/SQL failures retain intent for exact-schema recovery.
+          if (kind === "unreachable") statementIntent?.clear(statement);
+          throw error;
+        }
 
         const result = await waitForColumnInventory(descriptor, error, { returnWhenAbsent: false });
         skipped = result === "present";
         recoveredAfterSlowApply = skipped;
       }
+    }
+    if (descriptor && statementIntent) {
+      if (!skipped && !await inspectAddedColumn(inspectStatement, descriptor)) {
+        throw migrationStillApplyingError(
+          `Migration column ${descriptor.table}.${descriptor.column} is absent after a successful reply. ` +
+          "Its intent remains unresolved and no migration receipt was written. " +
+          renderCliCommands("Run brain update again to check its exact schema before continuing."),
+        );
+      }
+      statementIntent.clear(statement);
     }
     if (afterStatement) {
       await afterStatement({
@@ -5176,6 +5205,10 @@ export async function cmdMigrate(manifestPath, options = {}) {
       {
         ...migrationPoll,
         migrationName: mig.name,
+        statementIntent: createMigrationStatementIntentStore({
+          accountId: acct.id, databaseId: dbId, migrationChecksum: mig.checksum,
+          directory: options.migrationIntentDirectory,
+        }),
         inspectStatement: (statement) => queryDatabase(acct.id, dbId, statement),
         log: migrationPoll.log ?? (silent ? () => {} : info),
       },

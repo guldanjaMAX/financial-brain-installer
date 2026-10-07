@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { createMigrationStatementIntentStore } from "../operations/migration-statement-intent.mjs";
 import { supportRecovery } from "../support-recovery.mjs";
 
 import {
@@ -103,6 +104,8 @@ test("cmdMigrate waits for one slow 0044 column and sends its ALTER once", async
           checksum: createHash("sha256").update(sql).digest("hex").slice(0, 16),
         };
       });
+    const database = new DatabaseSync(":memory:");
+    for (const item of applied) database.exec(readFileSync(join(MIGRATIONS, item.name + ".sql"), "utf8"));
     const scriptedPolls = [tableInfo(), tableInfo(), timeoutFailure(), tableInfo(true)];
     const scriptedPollCount = scriptedPolls.length;
     const calls = [];
@@ -118,13 +121,14 @@ test("cmdMigrate waits for one slow 0044 column and sends its ALTER once", async
         if (next instanceof Error) throw next;
         return next;
       }
-      if (/^PRAGMA table_info/i.test(sql)) return { results: [] };
-      if (/SELECT sql FROM sqlite_master/.test(sql)) return { results: [{ sql: COMPATIBLE_CHUNKS_SQL }] };
+      if (/^PRAGMA table_info|^SELECT sql FROM sqlite_master/i.test(sql)) return { results: database.prepare(sql).all() };
+      if (requestOptions) database.exec(sql);
       if (String(sql).trim() === FIRST_SLOW_ALTER.trim()) throw timeoutFailure();
       return { results: [] };
     };
 
     await cmdMigrate(manifestPath, {
+      migrationIntentDirectory: join(sandbox, "intents"),
       silent: true,
       resolveAccount: async () => ({ id: "fixture-account" }),
       d1Query,
@@ -140,7 +144,8 @@ test("cmdMigrate waits for one slow 0044 column and sends its ALTER once", async
 
     const targetAlters = calls.filter((call) => call.sql.trim() === FIRST_SLOW_ALTER.trim());
     assert.equal(targetAlters.length, 1);
-    assert.equal(targetInspections, 1 + scriptedPollCount + 1);
+    assert.equal(targetInspections, 1 + scriptedPollCount + 2);
+    database.close();
     assert.equal(scriptedPolls.length, 0);
     assert.ok(calls.some((call) => /INSERT INTO schema_migrations/.test(call.sql) && call.params[0] === 44));
     assert.ok(lines.some((line) => /still applying a large database change/i.test(line)));
@@ -153,7 +158,9 @@ test("cmdMigrate waits for one slow 0044 column and sends its ALTER once", async
   }
 });
 
-test("every shipped ADD COLUMN recovers when the request times out after commit", async () => {
+test("every shipped ADD COLUMN recovers when the request times out after commit", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "migration-all-intents-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
   const migrationStatements = readdirSync(MIGRATIONS)
     .filter((name) => /^\d{4}_.+\.sql$/.test(name))
     .sort()
@@ -186,6 +193,10 @@ test("every shipped ADD COLUMN recovers when the request times out after commit"
         database.exec(sql);
         throw timeoutFailure();
       }, {
+        statementIntent: createMigrationStatementIntentStore({
+          directory, accountId: "fixture-account", databaseId: "fixture-db",
+          migrationChecksum: createHash("sha256").update(readFileSync(join(MIGRATIONS, name))).digest("hex").slice(0, 16),
+        }),
         pollIntervalMs: 1,
         pollDeadlineMs: 2,
         sleep: fakeClock.sleep,
@@ -600,17 +611,21 @@ test("only migration statements receive the longer request timeout", async () =>
       infrastructure: { cloudflare: { d1_database_id: "fixture-db", storage: "d1" } },
     }));
     const calls = [];
+    const database = new DatabaseSync(":memory:");
     await cmdMigrate(manifestPath, {
+      migrationIntentDirectory: join(sandbox, "intents"),
       silent: true,
       resolveAccount: async () => ({ id: "fixture-account" }),
       vectorDrainQuiesced: true,
       d1Query: async (_account, _database, sql, params = [], requestOptions) => {
         calls.push({ sql: String(sql), params, requestOptions });
         if (/SELECT version, checksum, name FROM schema_migrations/.test(sql)) return { results: [] };
-        if (/^PRAGMA table_info/i.test(sql)) return { results: [] };
+        if (/^PRAGMA table_info|^SELECT sql FROM sqlite_master/i.test(sql)) return { results: database.prepare(sql).all() };
+        database.prepare(sql).run(...params);
         return { results: [] };
       },
     });
+    database.close();
     const statements = calls.filter((call) =>
       call.requestOptions?.timeoutMs === MIGRATION_STATEMENT_TIMEOUT_MS);
     assert.ok(statements.length > 0);
@@ -815,6 +830,7 @@ for (const version of [49, 50]) {
       let caught;
       try {
         await cmdMigrate(manifestPath, {
+      migrationIntentDirectory: join(sandbox, "intents"),
           silent: true,
           vectorDrainQuiesced: true,
           resolveAccount: async () => ({ id: 'fixture-account' }),
@@ -847,3 +863,185 @@ for (const version of [49, 50]) {
     });
   }
 }
+
+for(const arm of ['verified-restart-control','interrupted-ambiguous-restart']) {
+  test(`BOUNDARY migration ${arm}`,async(t)=>{
+    const directory=mkdtempSync(join(tmpdir(),"migration-intent-boundary-"));
+    t.after(()=>rmSync(directory,{recursive:true,force:true}));
+    const visible=arm==='verified-restart-control';
+    let sends=0,inspections=0,verifiedCallbacks=0;
+    let interrupt=true;
+    const query=async(sql)=>{
+      if(/^PRAGMA table_info/.test(sql)) {inspections++;return tableInfo(sends>0&&visible);}
+      if(/^SELECT sql FROM sqlite_master/.test(sql))return {results:[{sql:COMPATIBLE_CHUNKS_SQL}]};
+      assert.equal(sql,FIRST_SLOW_ALTER);
+      sends++;
+      throw timeoutFailure();
+    };
+    const invoke=async()=>{
+      const time=clock();
+      return runRestartSafeMigrationStatements([FIRST_SLOW_ALTER],query,{
+        statementIntent:createMigrationStatementIntentStore({directory,accountId:"fixture-account",databaseId:"fixture-db",migrationChecksum:"fixture-checksum"}),
+        pollIntervalMs:1,pollDeadlineMs:2,now:time.now,
+        sleep:async(ms)=>{
+          if(!visible&&interrupt){interrupt=false;throw new Error('fixture process interrupted');}
+          await time.sleep(ms);
+        },afterStatement:()=>verifiedCallbacks++,
+      });
+    };
+    if(visible) {
+      await invoke();await invoke();
+      assert.equal(verifiedCallbacks,2);
+      assert.equal(sends,1,'visible exact schema lets a restarted command skip its ALTER');
+    } else {
+      await assert.rejects(invoke,/fixture process interrupted/);
+      assert.equal(sends,1,'first ambiguous write decision reached');
+      await assert.rejects(invoke,error=>error.supportCode==='MIGRATION_STILL_APPLYING');
+      assert.equal(verifiedCallbacks,0,'neither unverified invocation records statement completion');
+      assert.ok(inspections>=3,'restart and follow-up inspections were reached');
+      console.log(JSON.stringify({probe:arm,alterSends:sends,verifiedCallbacks,inspections}));
+      assert.equal(sends,1,'a restarted command must not resend an ALTER still ambiguous from the previous invocation');
+    }
+  });
+}
+
+test("durable intent is scoped exactly and survives the before-dispatch interruption window", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "migration-intent-scope-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const scope = { directory, accountId: "fixture-account", databaseId: "fixture-db", migrationChecksum: "checksum-one" };
+  const first = createMigrationStatementIntentStore(scope);
+  assert.equal(first.claim(FIRST_SLOW_ALTER), true);
+  const persisted = JSON.parse(readFileSync(join(directory, readdirSync(directory)[0]), "utf8"));
+  assert.deepEqual(Object.keys(persisted).sort(), ["databaseDigest", "migrationChecksum", "statementDigest", "version"]);
+  assert.match(persisted.databaseDigest, /^[a-f0-9]{64}$/);
+  assert.equal(persisted.statementDigest, createHash("sha256").update(FIRST_SLOW_ALTER).digest("hex"));
+  const restart = createMigrationStatementIntentStore(scope);
+  assert.equal(restart.claim(FIRST_SLOW_ALTER), false);
+  for (const change of [{ accountId: "other-account" }, { databaseId: "other-db" }, { migrationChecksum: "checksum-two" }]) {
+    assert.equal(createMigrationStatementIntentStore({ ...scope, ...change }).has(FIRST_SLOW_ALTER), false);
+  }
+  assert.equal(restart.has(SECOND_SLOW_ALTER), false);
+  let reads = 0, sends = 0, completions = 0;
+  const time = clock();
+  await assert.rejects(runRestartSafeMigrationStatements([FIRST_SLOW_ALTER], async () => { sends++; }, {
+    statementIntent: restart,
+    inspectStatement: async () => { reads++; return tableInfo(); },
+    now: time.now, sleep: time.sleep, pollIntervalMs: 1, pollDeadlineMs: 2,
+    afterStatement: () => completions++,
+  }), (error) => error.supportCode === "MIGRATION_STILL_APPLYING");
+  assert.equal(reads, 3);
+  assert.equal(sends, 0);
+  assert.equal(completions, 0);
+  assert.equal(restart.has(FIRST_SLOW_ALTER), true);
+  await runRestartSafeMigrationStatements([FIRST_SLOW_ALTER], async () => { sends++; }, {
+    statementIntent: createMigrationStatementIntentStore(scope),
+    inspectStatement: async (sql) => /^PRAGMA/.test(sql) ? tableInfo(true) : { results: [{ sql: COMPATIBLE_CHUNKS_SQL }] },
+    afterStatement: () => completions++,
+  });
+  assert.equal(sends, 0);
+  assert.equal(completions, 1);
+  assert.equal(restart.has(FIRST_SLOW_ALTER), false);
+});
+
+for (const arm of ["healthy", "non-delivery", "outage", "incompatible", "corrupt"]) {
+  test(`durable intent recovery ${arm}`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), "migration-intent-recovery-"));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const scope = { directory, accountId: "fixture-account", databaseId: "fixture-db", migrationChecksum: "checksum" };
+    let sends = 0, reads = 0, completions = 0;
+    const store = () => createMigrationStatementIntentStore(scope);
+    const time = clock();
+    const invoke = () => runRestartSafeMigrationStatements([FIRST_SLOW_ALTER], async () => {
+      sends++;
+      assert.equal(store().has(FIRST_SLOW_ALTER), true, "intent must reach disk before dispatch");
+      if (arm === "non-delivery") throw transportFailure("ENOTFOUND").translated;
+      if (arm !== "healthy") throw timeoutFailure();
+    }, {
+      statementIntent: store(), pollIntervalMs: 1, pollDeadlineMs: 2, now: time.now, sleep: time.sleep,
+      inspectStatement: async (sql) => {
+        reads++;
+        if (!sends || arm === "non-delivery") return tableInfo();
+        if (arm === "outage") throw timeoutFailure();
+        if (/^PRAGMA/.test(sql)) return tableInfo(true, arm === "incompatible" ? "INTEGER" : "TEXT");
+        return { results: [{ sql: COMPATIBLE_CHUNKS_SQL }] };
+      },
+      afterStatement: () => completions++,
+    });
+    if (arm === "corrupt") {
+      assert.equal(store().claim(FIRST_SLOW_ALTER), true);
+      const [file] = readdirSync(directory);
+      writeFileSync(join(directory, file), "{");
+      await assert.rejects(invoke, /intent cannot be verified/);
+      assert.equal(readdirSync(directory).length, 1);
+      assert.equal(sends, 0);
+      assert.equal(completions, 0);
+      return;
+    }
+    if (arm === "healthy") {
+      await invoke();
+      assert.equal(completions, 1);
+      assert.equal(reads, 3, "successful delivery still requires exact schema readback");
+      assert.equal(store().has(FIRST_SLOW_ALTER), false);
+    } else {
+      await assert.rejects(invoke, arm === "incompatible" ? /incompatible schema/ :
+        arm === "outage" ? /PRAGMA table_info\(chunks\)/ : /ENOTFOUND/);
+      assert.equal(completions, 0);
+      assert.ok(reads >= 1);
+      assert.equal(store().has(FIRST_SLOW_ALTER), arm !== "non-delivery");
+      if (arm === "non-delivery") {
+        await assert.rejects(invoke, /ENOTFOUND/);
+        assert.equal(sends, 2, "authoritative non-delivery permits a new dispatch");
+        return;
+      }
+    }
+    assert.equal(sends, 1);
+  });
+}
+
+test("cmdMigrate restart keeps ambiguous 0044 pending until exact schema proof, then completes 0050", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "migration-command-restart-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const database = new DatabaseSync(":memory:");
+  t.after(() => database.close());
+  const applied = [];
+  for (const name of readdirSync(MIGRATIONS).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort()) {
+    if (Number(name.slice(0, 4)) >= 44) break;
+    const sql = readFileSync(join(MIGRATIONS, name), "utf8");
+    database.exec(sql);
+    applied.push({ version: Number(name.slice(0, 4)), name: name.slice(0, -4), checksum: createHash("sha256").update(sql).digest("hex").slice(0, 16) });
+  }
+  const manifest = join(directory, "brain.manifest.json");
+  writeFileSync(manifest, JSON.stringify({ client: { slug: "fixture" }, infrastructure: { cloudflare: { d1_database_id: "fixture-db", storage: "d1" } } }));
+  let sends = 0, reads = 0, receipts = 0, interrupt = true;
+  const invoke = () => {
+    const time = clock();
+    return cmdMigrate(manifest, {
+      silent: true, resolveAccount: async () => ({ id: "fixture-account" }), vectorDrainQuiesced: true,
+      migrationIntentDirectory: join(directory, "intents"),
+      migrationPoll: { pollIntervalMs: 1, pollDeadlineMs: 2, now: time.now, sleep: async (ms) => {
+        if (interrupt) { interrupt = false; throw new Error("fixture process interrupted"); }
+        await time.sleep(ms);
+      } },
+      d1Query: async (_account, _database, sql, params = []) => {
+        if (/SELECT version, checksum, name/.test(sql)) return { results: applied };
+        if (sql === FIRST_SLOW_ALTER) { sends++; throw timeoutFailure(); }
+        if (/^PRAGMA|^SELECT sql FROM sqlite_master/.test(sql)) { reads++; return { results: database.prepare(sql).all() }; }
+        if (/INSERT INTO schema_migrations/.test(sql)) receipts++;
+        database.prepare(sql).run(...params);
+        return { results: [] };
+      },
+    });
+  };
+  await assert.rejects(invoke, /fixture process interrupted/);
+  assert.equal(sends, 1);
+  await assert.rejects(invoke, (error) => error.supportCode === "MIGRATION_STILL_APPLYING");
+  assert.ok(reads >= 4);
+  assert.equal(sends, 1);
+  assert.equal(receipts, 0);
+  database.exec(FIRST_SLOW_ALTER); // The original remote operation finally commits.
+  await invoke();
+  assert.equal(sends, 1);
+  assert.equal(receipts, 7);
+  assert.equal(database.prepare("SELECT max(version) AS version FROM schema_migrations").get().version, 50);
+  assert.deepEqual(readdirSync(join(directory, "intents")), []);
+});
