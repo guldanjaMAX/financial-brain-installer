@@ -54,6 +54,11 @@ write a response.
   using the guarded local compiler fallback. After updating, verify credential
   storage on Windows with Smart App Control enabled; native Windows proof is
   still required for this candidate.
+- **Outlook can take over after verified exported-mail history.** Your update
+  can set an exact starting time so Outlook imports only mail from that point
+  forward. Earlier digests and their citations stay available, and this mode
+  does not automatically delete stored mail. Check the boundary with
+  `brain sources <manifest>`; the exported coverage must be verified first.
 
 - **Daily imports now have one owned Windows and macOS contract.** `brain daily
   on|off|status <manifest>` derives every source from your own manifest instead

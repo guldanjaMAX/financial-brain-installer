@@ -413,6 +413,12 @@
                 "inbox"
               ]
             },
+            "mail_start_at": {
+              "type": ["string", "null"],
+              "default": null,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+              "description": "Optional inclusive UTC start of unexported mail after verified digest coverage (YYYY-MM-DDTHH:mm:ss.sssZ). Applies on first load, delta sync and reset. Earlier exports and citations stay in their original source. With this setting, mail tombstones and absence-based snapshot removals are not applied; deletion is a separate owner-approved operation. Null preserves ordinary full-mail sync. Never infer this from an export filename or file modification time."
+            },
             "drive_ids": {
               "type": "array",
               "uniqueItems": true,

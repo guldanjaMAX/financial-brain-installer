@@ -341,6 +341,45 @@ test("an empty backlog reaches the paused-deployment stage", async () => {
   });
 });
 
+test("verified update prints one mail handover line without an extra approval", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const configured = fixtureManifest();
+    configured.corpora = { microsoft: { enabled: true, mail_start_at: "2026-10-01T07:00:00.000Z" } };
+    writeFileSync(manifestPath, JSON.stringify(configured));
+    const events = [];
+    const finish = [];
+    let approvals = 0;
+    let schedulerReads = 0;
+    let credentialProbes = 0;
+    const fixtureHome = join(manifestPath, "..", "scheduler-home");
+    const result = await cmdUpdate(manifestPath, {
+      ...updateHarness(manifestPath, async () => ({ pending: 0 }), events),
+      dailyRefreshOptions: {
+        platform: "darwin",
+        providerOAuth: {
+          providerCredentialStatus: () => { credentialProbes++; return { connected: true }; },
+        },
+        legacySchedulerOptions: {
+          home: fixtureHome,
+          launchctl: () => { schedulerReads++; return { status: 1, stdout: "", stderr: "" }; },
+        },
+        schedulerAdapter: { read: () => ({ exists: false }) },
+        schedulerOptions: { home: fixtureHome, machineLockRoot: join(fixtureHome, "locks") },
+      },
+      askFn: async () => { approvals++; throw new Error("unexpected additional approval"); },
+      reportUpdateFinish: (line) => finish.push(line),
+    });
+    assert.deepEqual(result, { updated: true });
+    assert.ok(events.includes("paused vector-drain deployment"), "real update reached the injected deployment stage");
+    assert.equal(finish.length, 1);
+    assert.equal(finish[0].split("\n").filter((line) => line.startsWith("Outlook mail")).length, 1);
+    assert.match(finish[0], /2026-10-01T07:00:00.000Z.*earlier exported mail stays available with its existing citations/);
+    assert.equal(approvals, 0);
+    assert.ok(schedulerReads > 0, "scheduler inspection used only the injected host adapter");
+    assert.ok(credentialProbes > 0, "provider inspection used only the injected credential status");
+  });
+});
+
 test("production update integration restores daily imports only from explicit final-state proof", async () => {
   await withFixture(async ({ manifestPath }) => {
     const configured = fixtureManifest();

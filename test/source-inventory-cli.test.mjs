@@ -103,6 +103,33 @@ function inventoryPage({ source, cursor = null, truncated = false, row = null, t
   };
 }
 
+test("mail cutover is visible in both source inventory JSON and owner text without changing stored rows", async () => {
+  await withManifest(async (manifest) => {
+    const start = "2026-10-01T07:00:00.000Z";
+    writeFileSync(manifest, JSON.stringify({
+      brain: { domain: "brain.example.invalid" },
+      corpora: { microsoft: { enabled: true, source: "outlook-mail", mail_start_at: start } },
+    }));
+    let reads = 0;
+    const options = {
+      resolveAdminKey: () => OWNER_PROOF,
+      fetchImpl: async () => {
+        reads++;
+        return new Response(JSON.stringify(inventoryPage({ source: "exported-mail", total: 1 })));
+      },
+    };
+    const machine = await captureLogs(() => cmdSources(manifest, { ...options, flags: { json: true } }));
+    const owner = await captureLogs(() => cmdSources(manifest, { ...options, flags: {} }));
+    assert.equal(reads, 2, "both real source inventory reads completed");
+    assert.deepEqual(machine.value.sources, owner.value.sources);
+    assert.equal(machine.value.sources[0].name, "exported-mail");
+    assert.equal(JSON.parse(machine.output).mail_transition.mail_start_at, start);
+    assert.equal(machine.value.mail_transition.source, "outlook-mail");
+    assert.match(owner.output, /outlook-mail.*2026-10-01T07:00:00.000Z.*inclusive/);
+    assert.match(owner.output, /existing citations/);
+  });
+});
+
 function recoveryPage() {
   const recordId = `hmac-sha256:${"c".repeat(64)}`;
   return {
