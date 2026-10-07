@@ -210,7 +210,6 @@ jobs:
           path: |
             dist/FinancialBrainInstaller.pkg
             dist/FinancialBrainInstaller.pkg.sha256
-          archive: false
           retention-days: 14
       - name: remove temporary signing material
         if: always()
@@ -298,5 +297,4 @@ jobs:
           path: |
             dist/FinancialBrainInstaller.msi
             dist/FinancialBrainInstaller.msi.sha256
-          archive: false
           retention-days: 14
