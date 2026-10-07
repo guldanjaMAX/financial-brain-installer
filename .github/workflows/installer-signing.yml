@@ -97,6 +97,8 @@ jobs:
     environment: artifact-signing
     permissions:
       contents: read
+    outputs:
+      artifact_id: ${{ steps.signed-artifact.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -204,6 +206,7 @@ jobs:
           pkgutil --check-signature dist/FinancialBrainInstaller.pkg
           shasum -a 256 dist/FinancialBrainInstaller.pkg > dist/FinancialBrainInstaller.pkg.sha256
       - name: upload the signed and notarized package
+        id: signed-artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: FinancialBrainInstaller-macOS-signed
@@ -226,6 +229,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      artifact_id: ${{ steps.signed-artifact.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -291,10 +296,180 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $msi).Hash.ToLowerInvariant()
           "$hash  FinancialBrainInstaller.msi" | Set-Content -Encoding ascii dist/FinancialBrainInstaller.msi.sha256
       - name: upload the signed MSI
+        id: signed-artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: FinancialBrainInstaller-Windows-signed
           path: |
             dist/FinancialBrainInstaller.msi
             dist/FinancialBrainInstaller.msi.sha256
+          retention-days: 14
+
+  # Separate jobs start on fresh hosted VMs, without the signing environment,
+  # imported identities, or OIDC grant. Artifact IDs bind to this run's upload.
+  macos-smoke:
+    name: signed macOS installer shell on a fresh runner
+    needs: [authorization, macos-sign]
+    if: >-
+      needs.authorization.outputs.authorized == 'true' &&
+      needs.macos-sign.result == 'success' &&
+      needs.macos-sign.outputs.artifact_id != ''
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.13.1
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.macos-sign.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/signed-input
+      - name: verify, install, inspect, and remove the signed shell
+        env:
+          BRAIN_NO_WRANGLER_LOGIN: '1'
+        run: node machine-prep/installers/smoke/run.mjs macos "$RUNNER_TEMP/signed-input" "$RUNNER_TEMP/installer-smoke-logs"
+      - name: retain smoke logs even after refusal
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macOS-installer-shell-smoke-logs
+          path: ${{ runner.temp }}/installer-smoke-logs
+          if-no-files-found: warn
+          retention-days: 14
+      - name: state the proof boundary
+        if: always()
+        run: echo "Installer-shell smoke only. The signed package does not bundle Node or the Brain CLI. CLI version and interactive first-open remain unproven; inspect the job result and logs." >> "$GITHUB_STEP_SUMMARY"
+
+  windows-smoke:
+    name: signed Windows installer shell on a fresh runner
+    needs: [authorization, windows-sign]
+    if: >-
+      needs.authorization.outputs.authorized == 'true' &&
+      needs.windows-sign.result == 'success' &&
+      needs.windows-sign.outputs.artifact_id != ''
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.13.1
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.windows-sign.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/signed-input
+      - name: verify, install, inspect, and remove the signed shell
+        shell: pwsh
+        env:
+          BRAIN_NO_WRANGLER_LOGIN: '1'
+        run: |
+          node machine-prep/installers/smoke/run.mjs windows "$env:RUNNER_TEMP/signed-input" "$env:RUNNER_TEMP/installer-smoke-logs"
+          if ($LASTEXITCODE -ne 0) { throw 'Installer-shell smoke failed; inspect retained logs' }
+      - name: retain smoke logs even after refusal
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Windows-installer-shell-smoke-logs
+          path: ${{ runner.temp }}/installer-smoke-logs
+          if-no-files-found: warn
+          retention-days: 14
+      - name: state the proof boundary
+        if: always()
+        shell: pwsh
+        run: Add-Content $env:GITHUB_STEP_SUMMARY 'Installer-shell smoke only. The signed MSI does not bundle Node or the Brain CLI. CLI version, SmartScreen, and interactive first-open remain unproven; inspect the job result and logs.'
+
+  macos-bootstrap:
+    name: signed macOS shell and pinned kit CLI on a fresh runner
+    needs: [authorization, macos-sign]
+    if: >-
+      needs.authorization.outputs.authorized == 'true' &&
+      needs.macos-sign.result == 'success' &&
+      needs.macos-sign.outputs.artifact_id != ''
+    runs-on: macos-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.13.1
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.macos-sign.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/signed-input
+      - name: install signed shell and run installed pinned-kit preparation
+        env:
+          BRAIN_NO_WRANGLER_LOGIN: '1'
+        run: node machine-prep/installers/smoke/run.mjs macos "$RUNNER_TEMP/signed-input" "$RUNNER_TEMP/installer-bootstrap-logs" --bootstrap
+      - name: retain bootstrap receipts even after refusal
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macOS-installer-bootstrap-logs
+          path: |
+            ${{ runner.temp }}/installer-bootstrap-logs/*.log
+            ${{ runner.temp }}/installer-bootstrap-logs-control/*.log
+            ${{ runner.temp }}/installer-bootstrap-logs-control/exit-code.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows-bootstrap:
+    name: signed Windows shell and pinned kit CLI on a fresh runner
+    needs: [authorization, windows-sign]
+    if: >-
+      needs.authorization.outputs.authorized == 'true' &&
+      needs.windows-sign.result == 'success' &&
+      needs.windows-sign.outputs.artifact_id != ''
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.13.1
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.windows-sign.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/signed-input
+      - name: run --bootstrap as the same runner user with a limited token
+        shell: pwsh
+        env:
+          BRAIN_NO_WRANGLER_LOGIN: '1'
+        run: |
+          & machine-prep/installers/smoke/windows-limited.ps1 -ArtifactDirectory "$env:RUNNER_TEMP/signed-input" -LogDirectory "$env:RUNNER_TEMP/installer-bootstrap-logs"
+          if ($LASTEXITCODE -ne 0) { throw 'Limited-token bootstrap failed' }
+      - name: retain bootstrap receipts even after refusal
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Windows-installer-bootstrap-logs
+          path: |
+            ${{ runner.temp }}/installer-bootstrap-logs/*.log
+            ${{ runner.temp }}/installer-bootstrap-logs-control/*.log
+            ${{ runner.temp }}/installer-bootstrap-logs-control/exit-code.txt
+          if-no-files-found: warn
           retention-days: 14

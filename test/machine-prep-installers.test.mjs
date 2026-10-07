@@ -26,6 +26,344 @@ function read(relativePath) {
   return readFileSync(join(ROOT, relativePath), "utf8").replaceAll("\r\n", "\n");
 }
 
+test("x64 MSI launcher declaration and native smoke resolve the same 64-bit PowerShell", () => {
+  const authored = read("machine-prep/installers/windows/Package.wxs");
+  const adapter = read("machine-prep/installers/smoke/windows.ps1");
+  assert.match(read("machine-prep/installers/windows/FinancialBrainMachinePrep.wixproj"), /<Platform>x64<\/Platform>/);
+  const target = /Target="\[([^\]]+)\]WindowsPowerShell\\v1\.0\\powershell\.exe"/.exec(authored);
+  assert.ok(target, "actual authored shortcut decision reached");
+  // Windows Installer SystemFolder is SysWOW64 on x64; System64Folder is System32.
+  const resolveDirectory = (id) => ({ SystemFolder: "SysWOW64", System64Folder: "System32" })[id];
+  assert.equal(resolveDirectory("System64Folder"), "System32", "green Windows directory control");
+  assert.equal(resolveDirectory(target[1]), "System32");
+  assert.ok(adapter.includes("'[System64Folder]WindowsPowerShell\\v1.0\\powershell.exe'"));
+  assert.ok(adapter.includes("'System32\\WindowsPowerShell\\v1.0\\powershell.exe'"));
+  assert.match(adapter, /\$shortcut\.TargetPath -ine \$expectedTarget/);
+});
+
+function assertBootstrapJobs(workflow) {
+  for (const platform of ["macos", "windows"]) {
+    const marker = `\n  ${platform}-bootstrap:\n`;
+    assert.ok(workflow.includes(marker), `${platform} pinned-kit bootstrap job missing`);
+    const job = workflow.split(marker)[1].split(/\n  [a-z][a-z-]+:\n/)[0];
+    assert.match(job, new RegExp(`needs: \\[authorization, ${platform}-sign\\]`));
+    assert.ok(job.includes(`needs.${platform}-sign.result == 'success'`));
+    assert.ok(job.includes(`needs.${platform}-sign.outputs.artifact_id != ''`));
+    assert.match(job, /needs\.authorization\.outputs\.authorized == 'true'/);
+    assert.ok(job.includes("artifact-ids: ${{ needs." + platform + "-sign.outputs.artifact_id }}"));
+    assert.match(job, /permissions:\n      contents: read/);
+    assert.match(job, /--bootstrap/);
+    assert.match(job, /if: always\(\)/);
+    assert.match(job, /upload-artifact@[0-9a-f]{40}/);
+    assert.doesNotMatch(job, /environment:|secrets\.|id-token:|run-id:|github-token:|MACHINE_PREP_TEST/);
+  }
+}
+
+test("pinned-kit bootstrap jobs require same-run signatures and have no signing authority", () => {
+  const workflow = read(".github/workflows/installer-signing.yml");
+  assertBootstrapJobs(workflow);
+  for (const platform of ["macos", "windows"]) {
+    const start = workflow.indexOf(`\n  ${platform}-bootstrap:\n`);
+    const from = `needs.${platform}-sign.result == 'success'`;
+    assert.ok(start > 0 && workflow.slice(start).includes(from), "bootstrap authorization decision reached");
+    const mutant = workflow.slice(0, start) + workflow.slice(start).replace(from, "true");
+    assert.notEqual(mutant, workflow);
+    assert.throws(() => assertBootstrapJobs(mutant));
+  }
+});
+
+test("installed preparation exposes a bounded CLI-only mode without bypassing real session guards", () => {
+  for (const file of ["machine-prep/prep-mac.sh", "machine-prep/prep-windows.ps1"]) {
+    const source = read(file);
+    assert.match(source, /--prepare-cli/);
+    assert.match(source, /CLI_PREPARATION_SESSION_DECISION_REACHED=1/);
+    assert.match(source, /CLI_PREPARATION_PREREQUISITE_DECISION_REACHED=1/);
+  }
+});
+
+test("pinned-kit proof reaches every refusal and cleans after preparation with a green control", async () => {
+  const { runKitProof } = await import("../machine-prep/installers/smoke/bootstrap.mjs");
+  const phases = ["assertClean", "verifyPins", "download", "verifyArchive", "prepare", "verifyProvenance", "verifyVersion", "cleanup"];
+  const run = async (failure) => {
+    const calls = [], events = [];
+    const host = Object.fromEntries(phases.map((phase) => [phase, () => {
+      calls.push(phase);
+      if (phase === failure) throw new Error("synthetic bootstrap refusal");
+    }]));
+    let error;
+    try { await runKitProof(host, (event) => events.push(event)); } catch (caught) { error = caught; }
+    return { calls, events, error };
+  };
+  const control = await run();
+  assert.equal(control.error, undefined);
+  assert.deepEqual(control.calls, phases);
+  assert.match(control.events.at(-1), /PINNED_KIT_BOOTSTRAP_VERIFIED=1 version=0\.4\.9/);
+  for (const phase of phases) {
+    const refused = await run(phase);
+    assert.ok(refused.error);
+    assert.ok(refused.calls.includes(phase), "negative arm reached its real decision");
+    assert.ok(refused.events.includes(`BOOTSTRAP_DECISION_REACHED=${phase}`));
+    assert.equal(refused.calls.includes("cleanup"), phase !== "assertClean");
+    assert.ok(!refused.events.some((event) => event.startsWith("PINNED_KIT_BOOTSTRAP_VERIFIED=1")));
+  }
+});
+
+test("pinned-kit verifier rejects changed size, bytes and installed pins with green controls", async () => {
+  const { KIT, verifyKit, verifyPreparationPins } = await import("../machine-prep/installers/smoke/bootstrap.mjs");
+  const { createHash } = await import("node:crypto");
+  const bytes = Buffer.from("synthetic kit witness");
+  const pin = { size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+  verifyKit(bytes, pin);
+  assert.throws(() => verifyKit(Buffer.concat([bytes, Buffer.from("x")]), pin), /length mismatch/);
+  const tampered = Buffer.from(bytes); tampered[0] ^= 1;
+  assert.equal(tampered.length, pin.size, "digest decision reached after length passed");
+  assert.throws(() => verifyKit(tampered, pin), /SHA-256 mismatch/);
+  assert.equal(KIT.url, KIT_URL); assert.equal(String(KIT.size), KIT_SIZE); assert.equal(KIT.sha256, KIT_SHA256);
+  for (const [platform, path] of [["macos", "machine-prep/prep-mac.sh"], ["windows", "machine-prep/prep-windows.ps1"]]) {
+    const source = read(path);
+    verifyPreparationPins(source, platform);
+    for (const from of [KIT.version, KIT.url, String(KIT.size), KIT.sha256]) {
+      assert.ok(source.includes(from), "installed pin mutation reached");
+      const mutant = source.replace(from, "changed");
+      assert.notEqual(mutant, source);
+      assert.throws(() => verifyPreparationPins(mutant, platform), /pins differ/);
+    }
+  }
+});
+
+test("pinned-kit provenance compares actual installed bytes instead of trusting version text", async () => {
+  const { verifyPackageTree } = await import("../machine-prep/installers/smoke/bootstrap.mjs");
+  const root = mkdtempSync(join(tmpdir(), "kit-provenance-"));
+  const expected = join(root, "witness"), installed = join(root, "installed");
+  for (const directory of [expected, installed]) {
+    mkdirSync(directory);
+    writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.9", bin: { brain: "./brain.mjs" } }));
+    writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.9');\n");
+  }
+  try {
+    assert.equal(verifyPackageTree(expected, installed), 2, "green installed identity and bytes reached");
+    writeFileSync(join(installed, "brain.mjs"), "console.log('0.4.9'); // changed bytes\n");
+    assert.throws(() => verifyPackageTree(expected, installed), /bytes differ/);
+    writeFileSync(join(installed, "brain.mjs"), readFileSync(join(expected, "brain.mjs")));
+    writeFileSync(join(installed, "extra.mjs"), "synthetic\n");
+    assert.throws(() => verifyPackageTree(expected, installed), /inventory/);
+  } finally { rmSync(root, { recursive: true }); }
+});
+
+test("pinned-kit source inventory permits only npm shims named by authenticated dependency bins", async () => {
+  const { verifyPackageTree } = await import("../machine-prep/installers/smoke/bootstrap.mjs");
+  const root = mkdtempSync(join(tmpdir(), "kit-bin-map-"));
+  const expected = join(root, "witness"), installed = join(root, "installed");
+  try {
+    for (const directory of [expected, installed]) {
+      mkdirSync(join(directory, "node_modules", "synthetic-tool"), { recursive: true });
+      writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.9", bin: { brain: "./brain.mjs" } }));
+      writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.9');\n");
+      writeFileSync(join(directory, "node_modules", "synthetic-tool", "package.json"), JSON.stringify({ name: "synthetic-tool", bin: { "synthetic-tool": "run.js" } }));
+      writeFileSync(join(directory, "node_modules", "synthetic-tool", "run.js"), "// synthetic dependency\n");
+    }
+    mkdirSync(join(installed, "node_modules", ".bin"));
+    writeFileSync(join(installed, "node_modules", ".bin", "synthetic-tool.cmd"), "synthetic unexecuted npm command shim\n");
+    assert.equal(verifyPackageTree(expected, installed), 4, "authenticated bin-map decision reached");
+    writeFileSync(join(installed, "node_modules", ".bin", "unreviewed.cmd"), "synthetic extra\n");
+    assert.throws(() => verifyPackageTree(expected, installed), /inventory/);
+  } finally { rmSync(root, { recursive: true }); }
+});
+
+test("bootstrap version guard denies network and child processes after reached decisions", () => {
+  const directory = mkdtempSync(join(tmpdir(), "kit-version-guard-"));
+  const entry = join(directory, "brain.mjs");
+  const guard = join(ROOT, "machine-prep/installers/smoke/version-guard.mjs");
+  const execute = (source) => {
+    writeFileSync(entry, source);
+    return spawnSync(process.execPath, ["--permission", `--allow-fs-read=${directory}`, `--allow-fs-read=${guard}`, "--import", guard, entry, "--version"], {
+      cwd: directory, encoding: "utf8",
+      env: { HOME: directory, USERPROFILE: directory, BRAIN_NO_WRANGLER_LOGIN: "1" },
+    });
+  };
+  try {
+    const control = execute("console.log('VERSION_DECISION_REACHED=1'); console.log('0.4.9');\n");
+    assert.equal(control.status, 0, control.stderr);
+    assert.match(control.stdout, /VERSION_DECISION_REACHED=1\n0\.4\.9/);
+    const network = execute("console.log('VERSION_DECISION_REACHED=1'); await fetch('https://example.invalid');\n");
+    assert.notEqual(network.status, 0);
+    assert.match(network.stdout, /VERSION_DECISION_REACHED=1/);
+    assert.match(network.stderr, /BOOTSTRAP_VERSION_NETWORK_REFUSED=1/);
+    const child = execute("import { spawnSync } from 'node:child_process'; console.log('VERSION_DECISION_REACHED=1'); spawnSync('synthetic-never-executed');\n");
+    assert.notEqual(child.status, 0);
+    assert.match(child.stdout, /VERSION_DECISION_REACHED=1/);
+    assert.match(child.stderr, /ERR_ACCESS_DENIED/);
+  } finally { rmSync(directory, { recursive: true }); }
+});
+
+test("bootstrap failure retains native removal and cannot pass the shell lifecycle", async () => {
+  const { runSmoke } = await import("../machine-prep/installers/smoke/contract.mjs");
+  for (const fail of [false, true]) {
+    const calls = [], events = [];
+    const phases = ["verifyHash", "verifySignature", "inspectPayload", "assertClean", "install", "verifyInstalled", "bootstrap", "uninstall", "verifyRemoved"];
+    const host = Object.fromEntries(phases.map((phase) => [phase, () => {
+      calls.push(phase);
+      if (fail && phase === "bootstrap") throw new Error("synthetic bootstrap failed");
+    }]));
+    if (fail) await assert.rejects(runSmoke(host, (event) => events.push(event)), /bootstrap failed/);
+    else await runSmoke(host, (event) => events.push(event));
+    assert.deepEqual(calls, phases, "bootstrap and native removal both reached");
+    assert.equal(events.includes("INSTALLER_SHELL_SMOKE_PASSED=1"), !fail);
+  }
+});
+
+test("bootstrap uses installed production preparation, guarded version, and same-user limited Windows token", () => {
+  const bootstrap = read("machine-prep/installers/smoke/bootstrap.mjs");
+  assert.match(bootstrap, /verifyPreparationPins\(readFileSync\(prep/);
+  assert.match(bootstrap, /\[prep, "--prepare-cli"\]/);
+  assert.match(bootstrap, /verifyKit\(bytes\)/);
+  assert.match(bootstrap, /verifyPackageTree\(join\(scratch, "package"\), installed\)/);
+  assert.match(bootstrap, /join\(installed, "brain\.mjs"\), "--version"/);
+  assert.match(bootstrap, /"--permission"/);
+  assert.doesNotMatch(bootstrap, /MACHINE_PREP_TEST|--test-install-brain|\.\.\.process\.env/);
+  const limited = read("machine-prep/installers/smoke/windows-limited.ps1");
+  assert.match(limited, /-UserId \$context\.sid -LogonType S4U -RunLevel Limited/);
+  assert.match(limited, /\$identity\.User\.Value -cne \$context\.sid/);
+  assert.match(limited, /IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]::Administrator\)/);
+  assert.match(limited, /Unregister-ScheduledTask -TaskName \$taskName/);
+  assert.match(limited, /SAME_USER_LIMITED_TOKEN_VERIFIED=1/);
+  assert.doesNotMatch(limited, /-Password|-Credential|New-LocalUser|MACHINE_PREP_TEST/);
+});
+
+function assertSignedSmokeJobs(workflow) {
+  for (const platform of ["macos", "windows"]) {
+    const marker = `\n  ${platform}-smoke:\n`;
+    assert.equal(workflow.includes(marker), true, `${platform} signed smoke job is absent`);
+    const job = workflow.split(marker)[1].split(/\n  [a-z][a-z-]+:\n/)[0];
+    assert.match(job, new RegExp(`needs: \\[authorization, ${platform}-sign\\]`));
+    assert.match(job, /needs\.authorization\.outputs\.authorized == 'true'/);
+    assert.match(job, new RegExp(`needs\\.${platform}-sign\\.result == 'success'`));
+    assert.match(job, new RegExp(`runs-on: ${platform}-latest`));
+    assert.match(job, /permissions:\n      contents: read/);
+    assert.match(job, /download-artifact@[0-9a-f]{40}/);
+    assert.match(job, /artifact-ids: \$\{\{ needs\.[a-z]+-sign\.outputs\.artifact_id \}\}/);
+    assert.match(job, /machine-prep\/installers\/smoke\/run\.mjs/);
+    assert.match(job, /if: always\(\)/);
+    assert.match(job, /upload-artifact@[0-9a-f]{40}/);
+    assert.doesNotMatch(job, /environment:|secrets\.|id-token:|sudo|--real|brain setup|run-id:|github-token:/);
+  }
+}
+
+test("signed smoke jobs consume only successful same-run signed artifacts without signing authority", () => {
+  const workflow = read(".github/workflows/installer-signing.yml");
+  assertSignedSmokeJobs(workflow);
+  for (const from of [
+    "needs.macos-sign.result == 'success'", "needs.windows-sign.result == 'success'",
+    "artifact-ids: ${{ needs.macos-sign.outputs.artifact_id }}",
+  ]) {
+    assert.equal(workflow.includes(from), true, "workflow mutation decision reached");
+    const mutant = workflow.replace(from, "removed-contract");
+    assert.notEqual(mutant, workflow);
+    assert.throws(() => assertSignedSmokeJobs(mutant));
+  }
+});
+
+test("signed smoke lifecycle refuses each failed decision and cleans an attempted install", async () => {
+  const { runSmoke } = await import("../machine-prep/installers/smoke/contract.mjs");
+  const phases = ["verifyHash", "verifySignature", "inspectPayload", "assertClean", "install", "verifyInstalled", "uninstall", "verifyRemoved"];
+  const run = async (failure) => {
+    const calls = [];
+    const events = [];
+    const host = Object.fromEntries(phases.map((phase) => [phase, async () => {
+      calls.push(phase);
+      if (failure === phase) throw new Error(`synthetic ${phase} refusal`);
+    }]));
+    let error;
+    try { await runSmoke(host, (event) => events.push(event)); } catch (caught) { error = caught; }
+    return { calls, events, error };
+  };
+  const control = await run();
+  assert.equal(control.error, undefined);
+  assert.deepEqual(control.calls, phases);
+  assert.equal(control.events.at(-1), "INSTALLER_SHELL_SMOKE_PASSED=1");
+  assert.ok(control.events.includes("BUNDLED_CLI_VERSION_VERIFIED=0 reason=not_bundled"));
+  for (const failure of phases) {
+    const refused = await run(failure);
+    assert.match(refused.error.message, /synthetic/);
+    assert.ok(refused.calls.includes(failure), "refused decision was reached");
+    assert.ok(refused.events.includes(`DECISION_REACHED=${failure}`));
+    assert.ok(!refused.events.includes("INSTALLER_SHELL_SMOKE_PASSED=1"));
+    if (phases.indexOf(failure) < phases.indexOf("install")) {
+      assert.ok(!refused.calls.includes("install"));
+      assert.ok(!refused.calls.includes("uninstall"));
+    } else {
+      assert.ok(refused.calls.includes("uninstall"));
+    }
+  }
+});
+
+test("signed smoke checksum and exact inventory guards reject tampering with a green control", async () => {
+  const { verifyHashRecord, assertExactPaths, assertHostedRunner } = await import("../machine-prep/installers/smoke/contract.mjs");
+  const { createHash } = await import("node:crypto");
+  const bytes = Buffer.from("synthetic signed payload");
+  const file = "FinancialBrainInstaller.pkg";
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  assert.doesNotThrow(() => verifyHashRecord(bytes, `${digest}  dist/${file}\n`, file));
+  for (const record of [`${"0".repeat(64)}  ${file}`, `${digest}  ../${file}`, `${digest}  other.pkg`, `${digest}  ${file}\n${digest}  ${file}`]) {
+    assert.throws(() => verifyHashRecord(bytes, record, file), /checksum/);
+  }
+  assertExactPaths(["handoff/note.txt", "launcher"], ["launcher", "handoff/note.txt"]);
+  for (const actual of [["launcher"], ["launcher", "../escape"], ["launcher", "launcher"]]) {
+    assert.throws(() => assertExactPaths(actual, ["launcher", "handoff/note.txt"]), /inventory/);
+  }
+  assertHostedRunner({ GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted" });
+  for (const environment of [{}, { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }]) {
+    assert.throws(() => assertHostedRunner(environment), /hosted runner/);
+  }
+});
+
+test("signed smoke native entry refuses a local machine before creating logs", async () => {
+  const { assertHostedRunner } = await import("../machine-prep/installers/smoke/contract.mjs");
+  assert.doesNotThrow(() => assertHostedRunner({ GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted" }));
+  const result = spawnSync(process.execPath, [join(ROOT, "machine-prep/installers/smoke/run.mjs")], {
+    env: { BRAIN_NO_WRANGLER_LOGIN: "1", HOME: process.env.HOME }, encoding: "utf8",
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /installation requires a disposable GitHub-hosted runner/);
+  assert.doesNotMatch(result.stderr, /invalid smoke arguments|mkdir/);
+});
+
+test("signed smoke native adapters retain signature, user scope, footprint, and uninstall checks", () => {
+  const mac = read("machine-prep/installers/smoke/run.mjs");
+  const windows = read("machine-prep/installers/smoke/windows.ps1");
+  assert.match(mac, /"--check-signature", artifact/);
+  assert.match(mac, /"--assess", "--type", "install"/);
+  assert.match(mac, /"stapler", "validate"/);
+  assert.match(mac, /"-target", "CurrentUserHomeDirectory"/);
+  assert.match(mac, /"--volume", home/);
+  assert.match(mac, /"--forget", identifier/);
+  assert.match(mac, /digest\(join\(installed, file\)\) !== digest\(join\(payload, file\)\)/);
+  assert.match(mac, /BRAIN_NO_WRANGLER_LOGIN = "1"/);
+  assert.doesNotMatch(mac, /\.\.\.process\.env/);
+  const assertWindows = (source) => {
+    assert.match(source, /Get-AuthenticodeSignature -LiteralPath \$Artifact/);
+    assert.match(source, /\$signature\.Status -ne 'Valid'/);
+    assert.match(source, /TimeStamperCertificate/);
+    assert.match(source, /O=Financial Brain LLC/);
+    assert.match(source, /\$table -notin \$allowedTables/);
+    assert.match(source, /'MsiFileHash'/);
+    assert.match(source, /Installer\.FileHash/);
+    assert.match(source, /'\/qn', '\/norestart', '\/L\*v'/);
+    assert.match(source, /Invoke-Msi '\/i'/);
+    assert.match(source, /Invoke-Msi '\/x'/);
+    assert.match(source, /ProductState\(\$state\.product\) -ne -1/);
+  };
+  assertWindows(windows);
+  const from = "$signature.Status -ne 'Valid'";
+  assert.ok(windows.includes(from), "native signature decision reached");
+  const mutant = windows.replace(from, "$false");
+  assert.notEqual(mutant, windows);
+  assert.throws(() => assertWindows(mutant));
+  const packageFiles = JSON.parse(read("package.json")).files;
+  assert.ok(!packageFiles.some((file) => file.startsWith("machine-prep")));
+  assert.match(read("scripts/run-test-chain.mjs"), /node --test test\/machine-prep-installers\.test\.mjs/);
+});
+
 test("bash behavior platform guard keeps macOS and Linux coverage active", () => {
   assert.deepEqual(bashBehaviorOptions("darwin"), { skip: false });
   assert.deepEqual(bashBehaviorOptions("linux"), { skip: false });

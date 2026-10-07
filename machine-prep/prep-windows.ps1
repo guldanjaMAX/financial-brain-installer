@@ -387,7 +387,7 @@ function Invoke-IsolatedNpm([string]$Npm, [string]$Prefix, [string]$Archive, [st
   $info.RedirectStandardOutput = $true
   $info.RedirectStandardError = $true
   $quoted = @($Npm, $Prefix, $Archive) | ForEach-Object { '"' + $_.Replace('"', '""') + '"' }
-  $info.Arguments = "/d /s /c `"`"$($quoted[0])`" install --global --ignore-scripts --no-audit --no-fund --prefix $($quoted[1]) $($quoted[2])`""
+  $info.Arguments = "/d /s /c `"`"$($quoted[0])`" install --global --offline --ignore-scripts --no-audit --no-fund --prefix $($quoted[1]) $($quoted[2])`""
   $info.EnvironmentVariables.Clear()
   foreach ($pair in @{
     SystemRoot = $env:SystemRoot; ComSpec = $cmd; USERPROFILE = $PrepHome; HOME = $PrepHome
@@ -512,6 +512,25 @@ function Install-Brain {
   }
 }
 
+# CLI-only preparation shares the production download, verification, staging,
+# promotion and cleanup path. It never opens setup or checks assistant logins.
+function Invoke-CliPreparation {
+  Write-Output "CLI_PREPARATION_SESSION_DECISION_REACHED=1"
+  if ($env:MACHINE_PREP_TEST_MODE -eq "1" -or $FixtureDir) {
+    throw "REFUSED CLI preparation while fixture/test mode is active"
+  }
+  if (-not (Test-StandardSession)) {
+    throw "REFUSED CLI preparation requires normal current-user PowerShell"
+  }
+  Write-Output "CLI_PREPARATION_PREREQUISITE_DECISION_REACHED=1"
+  $nodeVersion = Get-ToolVersion "node"
+  if (-not $nodeVersion -or $nodeVersion -notmatch '^v(22|24)\.') {
+    throw "REFUSED CLI preparation requires Node.js 22 or 24"
+  }
+  if (@(Get-ToolPaths "npm").Count -eq 0) { throw "REFUSED npm is unavailable" }
+  Install-Brain
+}
+
 function Invoke-Real {
   $script:RealExitCode = 0
   if ($env:MACHINE_PREP_TEST_MODE -eq "1" -or $FixtureDir) {
@@ -542,6 +561,7 @@ switch ($Mode) {
   "--check" { Show-Check; if ($script:CheckFailures -eq 0) { exit 0 } else { exit 1 } }
   "--dry-run" { Show-Plan; exit 0 }
   "--real" { Invoke-Real; exit $script:RealExitCode }
+  "--prepare-cli" { Invoke-CliPreparation; exit 0 }
   "--verify-checksum" {
     if ($args.Count -ne 3) { [Console]::Error.WriteLine("Usage: prep-windows.ps1 --verify-checksum FILE EXPECTED_SHA256"); exit 2 }
     Test-Checksum ([string]$args[1]) ([string]$args[2]); exit $script:ChecksumExitCode
@@ -572,6 +592,6 @@ switch ($Mode) {
     Install-Brain
     exit 0
   }
-  "--help" { Write-Output "Usage: prep-windows.ps1 --check | --dry-run | --real | --verify-prefix DIRECTORY | --verify-installed DIRECTORY"; exit 0 }
-  default { [Console]::Error.WriteLine("Usage: prep-windows.ps1 --check | --dry-run | --real | --verify-prefix DIRECTORY | --verify-installed DIRECTORY"); exit 2 }
+  "--help" { Write-Output "Usage: prep-windows.ps1 --check | --dry-run | --real | --prepare-cli | --verify-prefix DIRECTORY | --verify-installed DIRECTORY"; exit 0 }
+  default { [Console]::Error.WriteLine("Usage: prep-windows.ps1 --check | --dry-run | --real | --prepare-cli | --verify-prefix DIRECTORY | --verify-installed DIRECTORY"); exit 2 }
 }

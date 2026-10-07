@@ -36,11 +36,13 @@
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ApplicationProgramsFolder" Name="Financial Brain Machine Prep">
         <Component Id="MachinePrepShortcut" Guid="8C61DEEB-2749-4F62-9446-B5DA941E4DBF">
+          <!-- Match the x64 package and native Node/CLI runtime. No payload
+               depends on the 32-bit PowerShell filesystem redirector. -->
           <Shortcut
             Id="RunMachinePrepShortcut"
             Name="Run Financial Brain Machine Prep"
             Description="Check prerequisites and open Financial Brain setup"
-            Target="[SystemFolder]WindowsPowerShell\v1.0\powershell.exe"
+            Target="[System64Folder]WindowsPowerShell\v1.0\powershell.exe"
             Arguments="-NoLogo -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]run-machine-prep.ps1&quot;"
             WorkingDirectory="INSTALLFOLDER" />
           <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
