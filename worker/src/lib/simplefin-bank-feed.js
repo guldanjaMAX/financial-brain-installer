@@ -1,4 +1,4 @@
-import { importBankExport } from "./fin-import.js";
+import { prepareBankExportImport } from "./fin-import.js";
 import {
   BANK_ACCESS_WRAPPING_KEY_VERSION,
   decryptAccessReference,
@@ -118,6 +118,24 @@ function validateAccessUrl(value) {
   return url.href.replace(/\/$/, "");
 }
 
+function providerRequest(value, method, accept, failureCode) {
+  try {
+    const url = new URL(value);
+    const headers = { Accept: accept };
+    if (url.username || url.password) {
+      const credentials = `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`;
+      headers.Authorization = `Basic ${btoa(String.fromCharCode(...new TextEncoder().encode(credentials)))}`;
+      url.username = "";
+      url.password = "";
+    }
+    // Workers rejects redirect:error; manual also prevents credentials from
+    // following a provider redirect. Construct before reserving a one-time claim.
+    return new Request(url.href, { method, redirect: "manual", headers });
+  } catch {
+    throw new SimpleFinError(failureCode, 400);
+  }
+}
+
 async function claimRow(env, tenantId, requestId) {
   return env.DB.prepare(
     `SELECT request_fingerprint,state,item_ref,error_code
@@ -129,6 +147,7 @@ function claimReceipt(row, replayed) {
   if (row.state === "claimed") {
     return { status: replayed ? 200 : 201, body: { ok: true, provider: PROVIDER, item_ref: row.item_ref, replayed } };
   }
+  if (row.error_code === "simplefin_claim_refused") throw new SimpleFinError(row.error_code, 502);
   throw new SimpleFinError("simplefin_claim_outcome_unknown", 409);
 }
 
@@ -147,6 +166,7 @@ export async function claimSimpleFinAccess(env, {
     throw new SimpleFinError("simplefin_claim_request_id_required", 400);
   }
   const claimUrl = decodeSetupToken(setupToken);
+  const request = providerRequest(claimUrl, "POST", "text/plain", "simplefin_claim_request_invalid");
   const fingerprint = await sha256Hex(setupToken);
   const { tenantId } = tenantReference(env);
   const stamp = stampOf(now);
@@ -172,20 +192,22 @@ export async function claimSimpleFinAccess(env, {
 
   let accessUrl;
   try {
-    const response = await fetchImpl(claimUrl, {
-      method: "POST",
-      redirect: "error",
-      headers: { Accept: "text/plain" },
-    });
-    if (!response.ok) throw new SimpleFinError("simplefin_claim_refused", 502);
+    const response = await fetchImpl(request);
+    if ((response.status >= 300 && response.status < 400) || !response.ok) {
+      throw new SimpleFinError("simplefin_claim_refused", 502);
+    }
     accessUrl = validateAccessUrl(await boundedText(response, 4096));
-  } catch {
+  } catch (error) {
+    // A refusal is observable, but still consumes the claim attempt: even a
+    // redirect response cannot prove that the provider left its token unused.
+    const code = error instanceof SimpleFinError && error.code === "simplefin_claim_refused"
+      ? error.code : "simplefin_claim_outcome_unknown";
     await env.DB.prepare(
       `UPDATE simplefin_claim_operations
-          SET state='outcome_unknown',error_code='simplefin_claim_outcome_unknown',updated_at=?
+          SET state='outcome_unknown',error_code=?,updated_at=?
         WHERE tenant_id=? AND request_id=? AND state='claiming'`,
-    ).bind(stamp, tenantId, requestId).run().catch(() => {});
-    throw new SimpleFinError("simplefin_claim_outcome_unknown", 409);
+    ).bind(code, stamp, tenantId, requestId).run().catch(() => {});
+    throw new SimpleFinError(code, code === "simplefin_claim_refused" ? 502 : 409);
   }
 
   const itemRef = `simplefin-${crypto.randomUUID()}`;
@@ -301,10 +323,46 @@ async function accountRef(tenantId, itemRef, providerAccountId) {
   return `sfa_${(await sha256Hex(`${tenantId}\0${itemRef}\0${providerAccountId}`)).slice(0, 32)}`;
 }
 
-async function batchInChunks(env, statements, size = 50) {
+async function revisionBatch(env, tenantId, window, statements, staging = false) {
+  // The fence and writes share a D1 transaction. Checking only before a batch
+  // lets an older promoter certify a new revision or overwrite newer ledger rows.
+  const result = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT CASE WHEN EXISTS (
+         SELECT 1 FROM simplefin_sync_windows w JOIN bank_feed_items i
+           ON i.tenant_id=w.tenant_id AND i.item_ref=w.item_ref
+          WHERE w.tenant_id=? AND w.item_ref=? AND w.window_start=? AND w.window_end=?
+            AND w.staging_revision=? AND i.removed_at IS NULL
+            ${staging ? "" : "AND w.revision=? AND w.state='staged'"}
+       ) THEN 1 ELSE json_extract('simplefin revision superseded','$') END AS revision_guard`,
+    ).bind(tenantId, window.item_ref, window.window_start, window.window_end, window.revision,
+      ...(staging ? [] : [window.revision])),
+    ...statements,
+  ]);
+  return result.slice(1);
+}
+
+async function batchInChunks(env, tenantId, window, statements, staging = false, size = 50) {
   for (let offset = 0; offset < statements.length; offset += size) {
-    await env.DB.batch(statements.slice(offset, offset + size));
+    await revisionBatch(env, tenantId, window, statements.slice(offset, offset + size), staging);
   }
+}
+
+async function beginWindowRevision(env, tenantId, itemRef, window, stamp) {
+  const revision = crypto.randomUUID();
+  // Establish custody before dispatch: a late older provider response cannot
+  // replace newer staged history that is still awaiting owner assignment.
+  const claimed = await env.DB.prepare(
+    `INSERT INTO simplefin_sync_windows
+       (tenant_id,item_ref,window_start,window_end,state,errlist_json,fetched_at,staging_revision)
+     SELECT ?,?,?,?,'staged','[]',?,? FROM simplefin_connections
+       WHERE tenant_id=? AND item_ref=? AND (?=0 OR backfill_next=?)
+     ON CONFLICT (tenant_id,item_ref,window_start,window_end) DO UPDATE SET
+       staging_revision=excluded.staging_revision`,
+  ).bind(tenantId, itemRef, window.start, window.end, stamp, revision,
+    tenantId, itemRef, window.backfill ? 1 : 0, window.start).run();
+  if (changed(claimed) !== 1) throw new SimpleFinError("simplefin_window_superseded", 409);
+  return revision;
 }
 
 async function stageResponse(env, {
@@ -315,17 +373,17 @@ async function stageResponse(env, {
   payload,
   accessUrl,
   stamp,
+  revision,
 }) {
   const validated = validatePayload(payload, { accessUrl });
-  const statements = [env.DB.prepare(
-    `INSERT INTO simplefin_sync_windows
-       (tenant_id,item_ref,window_start,window_end,state,errlist_json,fetched_at)
-     VALUES (?,?,?,?,'staged',?,?)
-     ON CONFLICT (tenant_id,item_ref,window_start,window_end) DO UPDATE SET
-       errlist_json=excluded.errlist_json,fetched_at=excluded.fetched_at`,
-  ).bind(tenantId, itemRef, windowStart, windowEnd, JSON.stringify(validated.errlist), stamp)];
+  const window = { item_ref: itemRef, window_start: windowStart, window_end: windowEnd, revision };
+  const statements = [];
+  const accountIds = new Set();
   let transactionCount = 0;
   for (const account of validated.accounts) {
+    if (accountIds.has(account.id)) throw new SimpleFinError("simplefin_response_invalid", 502);
+    accountIds.add(account.id);
+    const transactionIds = new Set();
     const currency = /^[A-Z]{3}$/.test(String(account.currency || "").toUpperCase())
       ? String(account.currency).toUpperCase() : "USD";
     const ref = await accountRef(tenantId, itemRef, account.id);
@@ -343,33 +401,36 @@ async function stageResponse(env, {
     statements.push(env.DB.prepare(
       `INSERT INTO simplefin_stage_accounts
          (tenant_id,item_ref,window_start,window_end,provider_account_id,account_label,
-          institution_label,currency,balance_decimal,available_decimal,balance_epoch)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)
+          institution_label,currency,balance_decimal,available_decimal,balance_epoch,revision)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT (tenant_id,item_ref,window_start,window_end,provider_account_id) DO UPDATE SET
          account_label=excluded.account_label,institution_label=excluded.institution_label,
          currency=excluded.currency,balance_decimal=excluded.balance_decimal,
-         available_decimal=excluded.available_decimal,balance_epoch=excluded.balance_epoch`,
+         available_decimal=excluded.available_decimal,balance_epoch=excluded.balance_epoch,
+         revision=excluded.revision`,
     ).bind(
       tenantId, itemRef, windowStart, windowEnd, account.id, label, institution, currency,
       account.balance == null ? null : String(account.balance),
       account["available-balance"] == null ? null : String(account["available-balance"]),
       Number.isSafeInteger(Number(account["balance-date"])) ? Number(account["balance-date"]) : null,
+      revision,
     ));
     for (const transaction of account.transactions) {
       if (!transaction || typeof transaction !== "object" || transaction.id == null ||
-          String(transaction.id).length > 128) {
+          String(transaction.id).length > 128 || transactionIds.has(String(transaction.id))) {
         throw new SimpleFinError("simplefin_response_invalid", 502);
       }
+      transactionIds.add(String(transaction.id));
       transactionCount++;
       statements.push(env.DB.prepare(
         `INSERT INTO simplefin_stage_transactions
            (tenant_id,item_ref,window_start,window_end,provider_account_id,provider_transaction_id,
-            posted_epoch,transacted_epoch,amount_decimal,description,payee,memo,currency)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            posted_epoch,transacted_epoch,amount_decimal,description,payee,memo,currency,revision)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT (tenant_id,item_ref,window_start,window_end,provider_account_id,provider_transaction_id)
          DO UPDATE SET posted_epoch=excluded.posted_epoch,transacted_epoch=excluded.transacted_epoch,
            amount_decimal=excluded.amount_decimal,description=excluded.description,
-           payee=excluded.payee,memo=excluded.memo,currency=excluded.currency`,
+           payee=excluded.payee,memo=excluded.memo,currency=excluded.currency,revision=excluded.revision`,
       ).bind(
         tenantId, itemRef, windowStart, windowEnd, account.id, String(transaction.id),
         Number.isSafeInteger(Number(transaction.posted)) ? Number(transaction.posted) : null,
@@ -378,11 +439,28 @@ async function stageResponse(env, {
         transaction.description == null ? null : String(transaction.description).slice(0, 500),
         transaction.payee == null ? null : String(transaction.payee).slice(0, 300),
         transaction.memo == null ? null : String(transaction.memo).slice(0, 500),
-        currency,
+        currency, revision,
       ));
     }
   }
-  await batchInChunks(env, statements);
+  // Until publication, revision != staging_revision excludes this window from
+  // promotion. Every chunk remains fenced to the pre-dispatch revision.
+  await batchInChunks(env, tenantId, window, statements, true);
+  await revisionBatch(env, tenantId, window, [
+    env.DB.prepare(
+      `SELECT CASE WHEN
+         (SELECT COUNT(*) FROM simplefin_stage_accounts
+           WHERE tenant_id=? AND item_ref=? AND window_start=? AND window_end=? AND revision=?)=?
+         AND (SELECT COUNT(*) FROM simplefin_stage_transactions
+           WHERE tenant_id=? AND item_ref=? AND window_start=? AND window_end=? AND revision=?)=?
+       THEN 1 ELSE json_extract('simplefin incomplete staging','$') END AS completeness_guard`,
+    ).bind(tenantId, itemRef, windowStart, windowEnd, revision, validated.accounts.length,
+      tenantId, itemRef, windowStart, windowEnd, revision, transactionCount),
+    env.DB.prepare(
+      `UPDATE simplefin_sync_windows SET revision=?,state='staged',promoted_at=NULL,errlist_json=?,fetched_at=?
+        WHERE tenant_id=? AND item_ref=? AND window_start=? AND window_end=? AND staging_revision=?`,
+    ).bind(revision, JSON.stringify(validated.errlist), stamp, tenantId, itemRef, windowStart, windowEnd, revision),
+  ], true);
   return { accounts: validated.accounts.length, transactions: transactionCount, errlist: validated.errlist };
 }
 
@@ -411,12 +489,12 @@ async function promoteWindow(env, tenantId, window, stamp) {
   const accounts = rowsOf(await env.DB.prepare(
     `SELECT s.*,a.account_ref,a.entity_slug
        FROM simplefin_stage_accounts s
-       JOIN simplefin_account_assignments a
+       LEFT JOIN simplefin_account_assignments a
          ON a.tenant_id=s.tenant_id AND a.item_ref=s.item_ref
         AND a.provider_account_id=s.provider_account_id
-      WHERE s.tenant_id=? AND s.item_ref=? AND s.window_start=? AND s.window_end=?
+      WHERE s.tenant_id=? AND s.item_ref=? AND s.window_start=? AND s.window_end=? AND s.revision=?
       ORDER BY s.provider_account_id`,
-  ).bind(tenantId, window.item_ref, window.window_start, window.window_end).all());
+  ).bind(tenantId, window.item_ref, window.window_start, window.window_end, window.revision).all());
   for (const account of accounts) {
     if (!account.entity_slug) return { promoted: false, assignment_required: true };
   }
@@ -425,9 +503,9 @@ async function promoteWindow(env, tenantId, window, stamp) {
     const transactionRows = rowsOf(await env.DB.prepare(
       `SELECT * FROM simplefin_stage_transactions
         WHERE tenant_id=? AND item_ref=? AND window_start=? AND window_end=?
-          AND provider_account_id=? ORDER BY provider_transaction_id`,
+          AND provider_account_id=? AND revision=? ORDER BY provider_transaction_id`,
     ).bind(
-      tenantId, window.item_ref, window.window_start, window.window_end, account.provider_account_id,
+      tenantId, window.item_ref, window.window_start, window.window_end, account.provider_account_id, window.revision,
     ).all());
     const currency = account.currency || "USD";
     const currentMinor = exactMinor(account.balance_decimal, currency);
@@ -481,29 +559,51 @@ async function promoteWindow(env, tenantId, window, stamp) {
         transactions: mapped,
       }],
     };
-    const receipt = await importBankExport(env, envelope, {
+    const plan = prepareBankExportImport(envelope, {
       tenantId,
       entitySlug: account.entity_slug,
       now: stamp,
       origin: { provenance: "feed", sourceFeed: feedScopeKey(window.item_ref) },
     });
-    await env.DB.prepare(
+    if (!plan.receipt.imported) throw new SimpleFinError("simplefin_promotion_refused", 409);
+    await batchInChunks(env, tenantId, window,
+      plan.statements.map(([sql, binds]) => env.DB.prepare(sql).bind(...binds)));
+    await revisionBatch(env, tenantId, window, [env.DB.prepare(
       `UPDATE fin_transactions SET source_provider='simplefin'
         WHERE tenant_id=? AND source_feed=? AND (source_provider IS NULL OR source_provider='simplefin')`,
-    ).bind(tenantId, feedScopeKey(window.item_ref)).run();
-    transactions += Number(receipt.transactions || 0);
+    ).bind(tenantId, feedScopeKey(window.item_ref))]);
+    transactions += Number(plan.receipt.transactions || 0);
   }
-  await env.DB.batch([
+  const result = await revisionBatch(env, tenantId, window, [
     env.DB.prepare(
       `UPDATE simplefin_sync_windows SET state='promoted',promoted_at=?
-        WHERE tenant_id=? AND item_ref=? AND window_start=? AND window_end=? AND state='staged'`,
-    ).bind(stamp, tenantId, window.item_ref, window.window_start, window.window_end),
+        WHERE tenant_id=? AND item_ref=? AND window_start=? AND window_end=? AND revision=? AND state='staged'`,
+    ).bind(stamp, tenantId, window.item_ref, window.window_start, window.window_end, window.revision),
+    // Exact receipt verification and cursor advancement share the same batch;
+    // response loss can only leave an already-committed, replay-safe receipt.
+    env.DB.prepare(
+      `SELECT CASE WHEN EXISTS (SELECT 1 FROM simplefin_sync_windows
+         WHERE tenant_id=? AND item_ref=? AND window_start=? AND window_end=?
+           AND revision=? AND staging_revision=? AND state='promoted' AND promoted_at=?)
+       THEN 1 ELSE json_extract('simplefin promotion unverified','$') END AS promotion_verified`,
+    ).bind(tenantId, window.item_ref, window.window_start, window.window_end, window.revision, window.revision, stamp),
     env.DB.prepare(
       `UPDATE bank_feed_backfill SET state='running',started_at=COALESCE(started_at,?),
           pages_done=pages_done+1,transactions_seen=transactions_seen+?
         WHERE tenant_id=? AND item_ref=?`,
     ).bind(stamp, transactions, tenantId, window.item_ref),
+    env.DB.prepare(
+      `UPDATE simplefin_connections SET backfill_next=?,updated_at=?
+        WHERE tenant_id=? AND item_ref=? AND backfill_next=? AND backfill_next<=backfill_end
+          AND EXISTS (SELECT 1 FROM simplefin_sync_windows
+            WHERE tenant_id=? AND item_ref=? AND window_start=? AND window_end=?
+              AND revision=? AND staging_revision=? AND state='promoted' AND errlist_json='[]')`,
+    ).bind(addDays(window.window_end, 1), stamp, tenantId, window.item_ref, window.window_start,
+      tenantId, window.item_ref, window.window_start, window.window_end, window.revision, window.revision),
   ]);
+  if (rowsOf(result[1])[0]?.promotion_verified !== 1) {
+    throw new SimpleFinError("simplefin_promotion_unverified", 503);
+  }
   return { promoted: true, transactions };
 }
 
@@ -511,8 +611,8 @@ export async function promoteSimpleFinWindows(env, { itemRef = null, now = null 
   const { tenantId } = tenantReference(env);
   const stamp = stampOf(now);
   const windows = rowsOf(await env.DB.prepare(
-    `SELECT item_ref,window_start,window_end FROM simplefin_sync_windows
-      WHERE tenant_id=? AND state='staged' AND (? IS NULL OR item_ref=?)
+    `SELECT item_ref,window_start,window_end,revision FROM simplefin_sync_windows
+      WHERE tenant_id=? AND state='staged' AND revision=staging_revision AND (? IS NULL OR item_ref=?)
       ORDER BY fetched_at,window_start`,
   ).bind(tenantId, itemRef, itemRef).all());
   const report = [];
@@ -523,16 +623,18 @@ export async function promoteSimpleFinWindows(env, { itemRef = null, now = null 
   ).bind(tenantId, itemRef, itemRef).all());
   for (const item of items) {
     if (item.backfill_next <= item.backfill_end) continue;
-    const pending = await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM simplefin_sync_windows
-        WHERE tenant_id=? AND item_ref=? AND state='staged'`,
-    ).bind(tenantId, item.item_ref).first();
-    if (Number(pending?.n || 0) === 0) {
-      await env.DB.prepare(
-        `UPDATE bank_feed_backfill SET state='complete',finished_at=?
-          WHERE tenant_id=? AND item_ref=?`,
-      ).bind(stamp, tenantId, item.item_ref).run();
-    }
+    // Assignment and maintenance may overlap between the listing and this
+    // write. Completion must observe the cursor and pending revisions atomically.
+    await env.DB.prepare(
+      `UPDATE bank_feed_backfill SET state='complete',finished_at=?
+        WHERE tenant_id=? AND item_ref=?
+          AND EXISTS (SELECT 1 FROM simplefin_connections c
+            WHERE c.tenant_id=bank_feed_backfill.tenant_id AND c.item_ref=bank_feed_backfill.item_ref
+              AND c.backfill_next>c.backfill_end)
+          AND NOT EXISTS (SELECT 1 FROM simplefin_sync_windows w
+            WHERE w.tenant_id=bank_feed_backfill.tenant_id AND w.item_ref=bank_feed_backfill.item_ref
+              AND (w.state='staged' OR w.revision<>w.staging_revision))`,
+    ).bind(stamp, tenantId, item.item_ref).run();
   }
   return report;
 }
@@ -583,6 +685,7 @@ async function pullWindow(env, connection, item, {
   const { tenantId } = tenantReference(env);
   const window = requestWindow(connection, stamp);
   await reserveRequest(env, tenantId, item.item_ref, stamp);
+  const revision = await beginWindowRevision(env, tenantId, item.item_ref, window, stamp);
   let payload;
   let accessUrl;
   try {
@@ -593,12 +696,11 @@ async function pullWindow(env, connection, item, {
     endpoint.searchParams.set("version", "2");
     endpoint.searchParams.set("start-date", String(Math.floor(Date.parse(`${window.start}T00:00:00Z`) / 1000)));
     endpoint.searchParams.set("end-date", String(Math.floor(Date.parse(`${window.end}T23:59:59Z`) / 1000)));
-    const response = await fetchImpl(endpoint.href, {
-      method: "GET",
-      redirect: "error",
-      headers: { Accept: "application/json" },
-    });
-    if (!response.ok) throw new SimpleFinError("simplefin_pull_refused", 502);
+    const request = providerRequest(endpoint.href, "GET", "application/json", "simplefin_pull_request_invalid");
+    const response = await fetchImpl(request);
+    if ((response.status >= 300 && response.status < 400) || !response.ok) {
+      throw new SimpleFinError("simplefin_pull_refused", 502);
+    }
     payload = JSON.parse(await boundedText(response, MAX_BODY_BYTES));
   } catch (error) {
     if (error instanceof SimpleFinError) throw error;
@@ -612,14 +714,14 @@ async function pullWindow(env, connection, item, {
     payload,
     accessUrl,
     stamp,
+    revision,
   });
   const partial = staged.errlist.length > 0;
-  const nextBackfill = window.backfill && !partial ? addDays(window.end, 1) : connection.backfill_next;
   await env.DB.batch([
     env.DB.prepare(
-      `UPDATE simplefin_connections SET backfill_next=?,last_errlist_json=?,last_pull_partial=?,updated_at=?
+      `UPDATE simplefin_connections SET last_errlist_json=?,last_pull_partial=?,updated_at=?
         WHERE tenant_id=? AND item_ref=?`,
-    ).bind(nextBackfill, JSON.stringify(staged.errlist), partial ? 1 : 0, stamp, tenantId, item.item_ref),
+    ).bind(JSON.stringify(staged.errlist), partial ? 1 : 0, stamp, tenantId, item.item_ref),
     env.DB.prepare(
       `UPDATE bank_feed_items SET last_synced_at=?,status='connected',status_detail=?,last_error_at=NULL
         WHERE tenant_id=? AND item_ref=?`,
@@ -661,7 +763,11 @@ export async function runSimpleFinMaintenance(env, {
         const pulled = await pullWindow(env, current, connection, { fetchImpl, stamp });
         pulls.push(pulled);
         if (pulled.partial || !pulled.backfill) break;
-        current.backfill_next = addDays(pulled.end, 1);
+        const persisted = await env.DB.prepare(
+          `SELECT backfill_next FROM simplefin_connections WHERE tenant_id=? AND item_ref=?`,
+        ).bind(tenantId, connection.item_ref).first();
+        if (!persisted || persisted.backfill_next <= pulled.end) break;
+        current.backfill_next = persisted.backfill_next;
         if (current.backfill_next > current.backfill_end) break;
       }
       await env.DB.prepare(
