@@ -13,6 +13,16 @@ offered as a customer update; its entries below ship for the first time in
 0.4.9, and its identity is retired so its evidence cannot be confused with
 this changed candidate.
 
+- **You can now give your Brain up to six safe local landing folders.** Add an
+  existing folder with `brain folder <manifest> add --path <absolute> --source
+  <name>`, or create two empty `Brain Feeds` folders under your local home with
+  `brain folder <manifest> create-feeds`. The command refuses cloud-managed
+  roots, links, retired folders, overlaps, and missing paths before changing
+  settings. Feed loads skip configured exclusions and empty placeholders, and
+  moving a source file away never removes its content from your Brain. To
+  check: run `brain folder <manifest> status` and confirm each source, folder
+  existence, file count, and newest-file time without any file names shown.
+
 - **A Gmail sync can now move forward after a recoverable document storage
   failure without losing that message.** The exact message is saved for retry
   before the Gmail history marker advances, while the run still reports the
