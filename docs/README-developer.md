@@ -1012,14 +1012,24 @@ Brain task folder. macOS installs one current-user LaunchAgent. Both names bind
 the stable Brain resource identity and operating-system principal, so two
 Brains owned by one user and two users on one computer cannot collide. A
 definition carrying no installer ownership marker is foreign and read-only.
-Install, pause, restore, and remove parse and compare the actual action,
-arguments, trigger, principal, settings, and enabled state. A copied marker
-cannot authorize a changed native definition. Native inspection errors are not
-reported as absence.
+Install and status parse and compare the actual action, arguments, trigger,
+principal, settings, and enabled state. Pause and remove accept the exact owner
+marker plus Brain-and-user identity even when the definition has drifted, so a
+Node upgrade cannot strand an owned task. A definition without that identity
+remains foreign and read-only. Native inspection errors are not reported as
+absence.
 
 The definition contains paths, hashes, cadence, and the manifest locator, but
-no key or provider credential. Each scheduled run takes the manifest-wide
-lifecycle lease before any source lease. That lease is keyed by canonical
+no key or provider credential. Its Node action prefers a stable launcher on
+`PATH` only after its resolved target is proved to be a regular file executable
+by the current user; the current binary realpath is diagnostic only and is not
+part of the definition hash. A
+legacy Node-path-only difference may run, but reports `daily schedule needs
+refresh (Node changed)` until `brain daily on` or a verified update reconciles
+it. Status and the runner report a missing or non-executable registered Node
+binary plainly, and `brain daily on` repairs the owned definition. Each
+scheduled run takes the
+manifest-wide lifecycle lease before any source lease. That lease is keyed by canonical
 Brain resource identity in the machine-shared lock root, so another manifest
 path or operating-system user cannot open a second writer lane for the same
 Brain. It verifies its definition and source

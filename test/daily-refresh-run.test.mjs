@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { buildDailyRefreshDefinition } from "../operations/daily-refresh-scheduler.mjs";
 import { runDailyRefresh, runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
 
 const plan = Object.freeze({
@@ -231,6 +232,203 @@ test("a recovery fence created while the runner acquires its lease still defers 
   assert.equal(result.status, "deferred");
   assert.equal(result.reason_code, "update_recovery_required");
   assert.equal(receipts.at(-1).status, "deferred");
+});
+
+test("the runner accepts only Node-path drift and reports that the daily schedule needs refresh", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "daily-run-node-drift-"));
+  const manifestPath = join(directory, "brain.manifest.json");
+  writeFileSync(manifestPath, "{}\n");
+  const currentPlan = {
+    ...plan,
+    manifest_path: manifestPath,
+    manifest_path_hash: "sha256:path",
+    cron: "0 9 * * *",
+    timezone: "UTC",
+    sources: [{
+      key: "drive", class: "machine-pull", owner: "daily-task", status: "ready",
+      run_key: "google_drive", source_names: ["drive"],
+    }],
+  };
+  const definitionOptions = {
+    platform: "darwin",
+    nodePath: "/new/runtime/node",
+    brainPath: "/runtime/brain.mjs",
+    runnerPath: "/runtime/daily-refresh-run.mjs",
+  };
+  const registered = buildDailyRefreshDefinition(currentPlan, {
+    ...definitionOptions,
+    nodePath: "/old/runtime/node",
+  });
+  let reads = 0;
+  const schedulerAdapter = {
+    read: () => {
+      reads += 1;
+      return { exists: true, owned: true, enabled: true, definition: registered };
+    },
+  };
+  const lines = [];
+  let sourceRuns = 0;
+  let freshnessReads = 0;
+  const result = await runDailyRefreshCli(manifestPath, {
+    brainModule: {},
+    buildPlan: async () => currentPlan,
+    expectedDefinitionHash: registered.definition_hash,
+    platform: "darwin",
+    definitionOptions: {
+      ...definitionOptions,
+      nodePathExists: () => true,
+      nodeRealpath: (path) => path,
+      nodePathStat: () => ({ isFile: () => true }),
+      nodePathAccess: () => {},
+    },
+    schedulerAdapter,
+    acquireLock: () => ({ assertOwned: () => true, release: () => {} }),
+    runSource: async () => { sourceRuns += 1; return { status: "complete" }; },
+    readFreshness: async () => ({
+      drive: { last_successful_run_at: ++freshnessReads === 1
+        ? "2026-10-06T15:00:00.000Z"
+        : "2026-10-06T15:01:00.000Z" },
+    }),
+    readUpdateTransaction: () => null,
+    writeReceipt: () => {},
+    log: (line) => lines.push(line),
+    silent: false,
+  });
+  assert.ok(reads > 0, "the runner inspected the registered native definition");
+  assert.equal(sourceRuns, 1, "the Node-drift control executes its one ready daily source exactly once");
+  assert.equal(result.status, "complete");
+  assert.equal(result.sources[0].freshness_advanced, true);
+  assert.deepEqual(result.schedule_attention, ["daily schedule needs refresh (Node changed)"]);
+  assert.ok(lines.includes("daily schedule needs refresh (Node changed)"));
+
+  const changedPlan = { ...currentPlan, source_plan_hash: "sha256:changed-sources" };
+  let driftRuns = 0;
+  await assert.rejects(() => runDailyRefreshCli(manifestPath, {
+    brainModule: {},
+    buildPlan: async () => changedPlan,
+    expectedDefinitionHash: registered.definition_hash,
+    platform: "darwin",
+    definitionOptions: {
+      ...definitionOptions,
+      nodePathExists: () => true,
+      nodeRealpath: (path) => path,
+      nodePathStat: () => ({ isFile: () => true }),
+      nodePathAccess: () => {},
+    },
+    schedulerAdapter,
+    runSource: async () => { driftRuns += 1; },
+    readFreshness: async () => ({}),
+    writeReceipt: () => {},
+    silent: true,
+  }), /manifest or source plan changed/i);
+  assert.equal(driftRuns, 0, "source-plan drift reaches the schedule decision before source execution");
+});
+
+test("the runner names a missing registered Node binary before any source runs", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "daily-run-node-missing-"));
+  const manifestPath = join(directory, "brain.manifest.json");
+  writeFileSync(manifestPath, "{}\n");
+  const currentPlan = {
+    ...plan,
+    manifest_path: manifestPath,
+    manifest_path_hash: "sha256:path",
+    cron: "0 9 * * *",
+    timezone: "UTC",
+    sources: [{
+      key: "drive", class: "machine-pull", owner: "daily-task", status: "ready",
+      run_key: "google_drive", source_names: ["drive"],
+    }],
+  };
+  const registered = buildDailyRefreshDefinition(currentPlan, {
+    platform: "darwin",
+    nodePath: "/missing/runtime/node",
+    brainPath: "/runtime/brain.mjs",
+    runnerPath: "/runtime/daily-refresh-run.mjs",
+  });
+  let reads = 0;
+  let runs = 0;
+  await assert.rejects(() => runDailyRefreshCli(manifestPath, {
+    brainModule: {},
+    buildPlan: async () => currentPlan,
+    expectedDefinitionHash: registered.definition_hash,
+    platform: "darwin",
+    definitionOptions: {
+      nodePath: "/current/runtime/node",
+      brainPath: registered.brain_path,
+      runnerPath: registered.runner_path,
+      nodePathExists: () => false,
+      nodePathStat: () => ({ isFile: () => true }),
+      nodePathAccess: () => {},
+    },
+    schedulerAdapter: {
+      read: () => {
+        reads += 1;
+        return { exists: true, owned: true, enabled: true, definition: registered };
+      },
+    },
+    runSource: async () => { runs += 1; },
+    readFreshness: async () => ({}),
+    writeReceipt: () => {},
+    silent: true,
+  }), /registered Node binary is missing/i);
+  assert.ok(reads > 0, "the missing-binary decision inspected the registered definition");
+  assert.equal(runs, 0);
+});
+
+test("the runner refuses a present non-executable registered Node before any source runs", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "daily-run-node-unusable-"));
+  const manifestPath = join(directory, "brain.manifest.json");
+  writeFileSync(manifestPath, "{}\n");
+  const currentPlan = {
+    ...plan,
+    manifest_path: manifestPath,
+    manifest_path_hash: "sha256:path",
+    cron: "0 9 * * *",
+    timezone: "UTC",
+    sources: [{
+      key: "drive", class: "machine-pull", owner: "daily-task", status: "ready",
+      run_key: "google_drive", source_names: ["drive"],
+    }],
+  };
+  const registeredPath = "/registered/runtime/node";
+  const currentPath = "/current/runtime/node";
+  const registered = buildDailyRefreshDefinition(currentPlan, {
+    platform: "darwin",
+    nodePath: registeredPath,
+    brainPath: "/runtime/brain.mjs",
+    runnerPath: "/runtime/daily-refresh-run.mjs",
+  });
+  let reads = 0;
+  let runs = 0;
+  await assert.rejects(() => runDailyRefreshCli(manifestPath, {
+    brainModule: {},
+    buildPlan: async () => currentPlan,
+    expectedDefinitionHash: registered.definition_hash,
+    platform: "darwin",
+    definitionOptions: {
+      nodePath: currentPath,
+      brainPath: registered.brain_path,
+      runnerPath: registered.runner_path,
+      nodePathExists: () => true,
+      nodeRealpath: (path) => path,
+      nodePathStat: () => ({ isFile: () => true }),
+      nodePathAccess: (path) => {
+        if (path === registeredPath) throw Object.assign(new Error("not executable"), { code: "EACCES" });
+      },
+    },
+    schedulerAdapter: {
+      read: () => {
+        reads += 1;
+        return { exists: true, owned: true, enabled: true, definition: registered };
+      },
+    },
+    runSource: async () => { runs += 1; },
+    readFreshness: async () => ({}),
+    writeReceipt: () => {},
+    silent: true,
+  }), /registered Node binary is not executable/i);
+  assert.ok(reads > 0, "the unusable-binary decision inspected the registered definition");
+  assert.equal(runs, 0, "an unusable registered launcher stops before source execution");
 });
 
 test("runtime exhaustion reaches the decision point and defers remaining sources", async () => {

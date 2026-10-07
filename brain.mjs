@@ -25899,7 +25899,9 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
             : states.includes("stale") ? "stale"
               : states[0] || source.status;
     const dailyOwnedAndRunnable = source.owner === "daily-task" &&
-      schedule?.installed === true && schedule?.enabled === true && schedule?.verified === true;
+      schedule?.installed === true && schedule?.enabled === true &&
+      (schedule?.verified === true || schedule?.plan_matches_registered_definition === true) &&
+      schedule?.registered_node_present !== false && schedule?.registered_node_usable !== false;
     const effectiveOwner = source.owner === "daily-task" && !dailyOwnedAndRunnable ? "none" : source.owner;
     const nextRun = dailyOwnedAndRunnable
       ? `${plan.cron} ${plan.timezone}`
@@ -25970,9 +25972,6 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
   if (["install", "remove"].includes(action)) {
     priorPlan = await buildConfiguredDailyPlan(m, manifestPath, options);
     priorStatus = statusDailyRefreshSchedule(priorPlan, schedulerOptions);
-    if (priorStatus.installed && priorStatus.definition_matches_plan !== true) {
-      die("the owned daily definition no longer matches this manifest; nothing was changed");
-    }
     authorizedDefinition = priorStatus.state?.definition || null;
   }
   const intendedEnabled = action === "install" ? true : action === "remove" ? false : null;
@@ -26080,6 +26079,7 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
   });
   if (options.json) console.log(JSON.stringify(result, null, 2));
   else {
+    if (schedule.attention) warn(schedule.attention);
     if (action === "install") ok("Daily imports are on and the native definition passed exact readback.");
     else if (action === "remove") ok(schedule.removed ? "Daily imports are off." : "Daily imports were already off.");
     else if (!schedule.installed) warn("Daily imports are not installed for this Brain and user.");

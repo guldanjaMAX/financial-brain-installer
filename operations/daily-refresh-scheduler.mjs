@@ -1,8 +1,8 @@
 /** Cross-platform owned scheduler definitions and update pause/restore rules. */
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix as posixPath, resolve, win32 as win32Path } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
@@ -31,6 +31,73 @@ function dailyClock(cron) {
   return { minute, hour, hhmm: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00` };
 }
 
+function observedRealpath(path, options = {}) {
+  const resolveRealpath = options.nodeRealpath || realpathSync.native || realpathSync;
+  try {
+    return String(resolveRealpath(path));
+  } catch {
+    return null;
+  }
+}
+
+function sameExecutablePath(left, right, platform) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  return platform === "win32"
+    ? left.replaceAll("/", "\\").toLowerCase() === right.replaceAll("/", "\\").toLowerCase()
+    : left === right;
+}
+
+function nodeLauncherDetails(path, platform, options = {}) {
+  const exists = options.nodePathExists || existsSync;
+  let present = false;
+  try { present = Boolean(path && exists(path) === true); } catch { present = false; }
+  if (!present) return Object.freeze({ path, present: false, usable: false, realpath: null });
+
+  const realpath = observedRealpath(path, options);
+  if (!realpath) return Object.freeze({ path, present: true, usable: false, realpath: null });
+  const stat = options.nodePathStat || statSync;
+  const access = options.nodePathAccess || accessSync;
+  try {
+    if (stat(realpath).isFile() !== true) {
+      return Object.freeze({ path, present: true, usable: false, realpath });
+    }
+    access(realpath, fsConstants.X_OK);
+    return Object.freeze({ path, present: true, usable: true, realpath });
+  } catch {
+    return Object.freeze({ path, present: true, usable: false, realpath });
+  }
+}
+
+function nodeRuntimePaths(platform, executablePath, options = {}) {
+  const explicit = options.nodePath ? executablePath(options.nodePath) : null;
+  const execPath = executablePath(options.execPath || process.execPath);
+  const execRealpath = observedRealpath(execPath, options) || execPath;
+  if (explicit) {
+    return Object.freeze({ nodePath: explicit, nodeRealpath: observedRealpath(explicit, options) || explicit });
+  }
+
+  const pathApi = platform === "win32" ? win32Path : posixPath;
+  const candidates = [];
+  const pathValue = options.pathValue ?? process.env.PATH ?? process.env.Path ?? "";
+  for (const directory of String(pathValue).split(platform === "win32" ? ";" : ":")) {
+    if (!directory || !pathApi.isAbsolute(directory)) continue;
+    candidates.push(pathApi.join(directory, platform === "win32" ? "node.exe" : "node"));
+  }
+  const argv0 = String(options.argv0 ?? process.argv0 ?? "");
+  if (pathApi.isAbsolute(argv0)) candidates.push(argv0);
+  for (const candidate of candidates) {
+    const details = nodeLauncherDetails(candidate, platform, options);
+    if (!details.usable) continue;
+    return Object.freeze({
+      nodePath: executablePath(candidate),
+      nodeRealpath: details.realpath,
+    });
+  }
+  const fallback = nodeLauncherDetails(execPath, platform, options);
+  if (!fallback.usable) throw new Error("the current Node runtime is not a regular executable file");
+  return Object.freeze({ nodePath: execPath, nodeRealpath: fallback.realpath || execRealpath });
+}
+
 export function buildDailyRefreshDefinition(plan, options = {}) {
   if (!plan?.identity?.id) throw new Error("a daily plan identity is required");
   const platform = options.platform ?? process.platform;
@@ -42,7 +109,7 @@ export function buildDailyRefreshDefinition(plan, options = {}) {
   const executablePath = (value) => platform === "win32" && /^[A-Za-z]:[\\/]/u.test(String(value))
     ? String(value)
     : resolve(String(value));
-  const nodePath = executablePath(options.nodePath || process.execPath);
+  const { nodePath, nodeRealpath } = nodeRuntimePaths(platform, executablePath, options);
   const urlPath = (value) => fileURLToPath(value, {
     windows: platform === "win32" && /^\/[A-Za-z]:\//u.test(new URL(value).pathname),
   });
@@ -114,6 +181,9 @@ export function buildDailyRefreshDefinition(plan, options = {}) {
     : `<?xml version="1.0" encoding="UTF-16"?>\n<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>${xml(marker)}</Description></RegistrationInfo><Triggers><CalendarTrigger><StartBoundary>2000-01-01T${clock.hhmm}</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers><Principals><Principal id="Owner">${windowsSid ? `<UserId>${xml(windowsSid)}</UserId>` : ""}<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><IdleSettings><StopOnIdleEnd>true</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>true</WakeToRun><ExecutionTimeLimit>PT${plan.max_runtime_minutes}M</ExecutionTimeLimit><Priority>7</Priority></Settings><Actions Context="Owner"><Exec><Command>${xml(nodePath)}</Command><Arguments>${xml(args.map((arg) => `"${arg}"`).join(" "))}</Arguments></Exec></Actions></Task>\n`;
   return Object.freeze({
     ...payload,
+    // The resolved binary is diagnostic evidence only. The stable launcher is
+    // the native contract, so a package-manager retarget does not create drift.
+    node_realpath: nodeRealpath,
     definition_hash: definitionHash,
     native_contract: Object.freeze(nativeContract),
     native_definition_hash: nativeDefinitionHash,
@@ -126,6 +196,8 @@ export function buildDailyRefreshDefinition(plan, options = {}) {
       manifest_content_hash: plan.manifest_content_hash,
       source_plan_hash: plan.source_plan_hash,
       definition_hash: definitionHash,
+      node_path: nodePath,
+      node_realpath: nodeRealpath,
       cadence: plan.cron,
       timezone: plan.timezone,
       last_verified_state: "enabled",
@@ -144,6 +216,17 @@ function adapterFor(plan, options) {
     uid: options.uid,
     spawn: options.spawn,
   });
+}
+
+function nodePathFromDefinition(definition, platform) {
+  return platform === "win32"
+    ? definition?.native_contract?.command || null
+    : definition?.native_contract?.arguments?.[0] || null;
+}
+
+function registeredNodeDetails(definition, platform, options = {}) {
+  const path = nodePathFromDefinition(definition, platform);
+  return nodeLauncherDetails(path, platform, options);
 }
 
 function verifiedState(state, definition, { enabled = true } = {}) {
@@ -237,17 +320,43 @@ export function installDailyRefreshSchedule(plan, options = {}) {
 }
 
 export function statusDailyRefreshSchedule(plan, options = {}) {
+  const platform = options.platform ?? process.platform;
   const adapter = adapterFor(plan, options);
   const state = adapter.read(plan.identity);
   requireOwned(state);
   if (!state?.exists) return Object.freeze({ installed: false, enabled: false, verified: true, identity: plan.identity });
   const expected = buildDailyRefreshDefinition(plan, options);
+  const registeredNode = registeredNodeDetails(state.definition, platform, options);
+  const registeredPlanDefinition = registeredNode.usable
+    ? buildDailyRefreshDefinition(plan, { ...options, nodePath: registeredNode.path })
+    : null;
+  const registeredPlanMatches = Boolean(registeredPlanDefinition &&
+    state.loaded_definition_matches !== false &&
+    state.definition?.definition_hash === registeredPlanDefinition.definition_hash &&
+    state.definition?.native_definition_hash === registeredPlanDefinition.native_definition_hash);
+  const nodePathChanged = registeredPlanMatches &&
+    !sameExecutablePath(registeredNode.path, expected.node_path, platform);
+  const attention = !registeredNode.present
+    ? "daily schedule Node binary is missing; run brain daily on <manifest> to repair it"
+    : !registeredNode.usable
+      ? "daily schedule Node binary is not executable; run brain daily on <manifest> to repair it"
+    : nodePathChanged
+      ? "daily schedule needs refresh (Node changed)"
+      : null;
   return Object.freeze({
     installed: true,
     enabled: state.enabled === true,
     verified: verifiedState(state, expected, { enabled: state.enabled === true }),
     definition_matches_plan: state.definition?.definition_hash === expected.definition_hash &&
       state.definition?.native_definition_hash === expected.native_definition_hash,
+    plan_matches_registered_definition: registeredPlanMatches,
+    registered_node_path: registeredNode.path,
+    registered_node_realpath: registeredNode.realpath,
+    registered_node_present: registeredNode.present,
+    registered_node_usable: registeredNode.usable,
+    node_path_changed: nodePathChanged,
+    needs_refresh: attention !== null,
+    attention,
     identity: plan.identity,
     state,
   });
@@ -258,11 +367,6 @@ export function pauseDailyRefreshSchedule(plan, options = {}) {
   const state = adapter.read(plan.identity);
   requireOwned(state);
   if (!state?.exists) return Object.freeze({ identity: plan.identity, exists: false, enabled: false, definition: null });
-  const authorized = options.authorizedDefinition || buildDailyRefreshDefinition(plan, options);
-  if (state.definition?.definition_hash !== authorized.definition_hash ||
-      state.definition?.native_definition_hash !== authorized.native_definition_hash) {
-    throw new Error("the owned daily refresh definition does not match the authorized plan; nothing was paused");
-  }
   const snapshot = Object.freeze({ identity: plan.identity, exists: true, enabled: state.enabled === true, definition: state.definition });
   if (state.enabled) adapter.setEnabled(plan.identity, false);
   const readback = adapter.read(plan.identity);
@@ -297,11 +401,6 @@ export function removeDailyRefreshSchedule(plan, options = {}) {
   const state = adapter.read(plan.identity);
   requireOwned(state);
   if (!state?.exists) return Object.freeze({ removed: false, verified: true });
-  const authorized = options.authorizedDefinition || buildDailyRefreshDefinition(plan, options);
-  if (state.definition?.definition_hash !== authorized.definition_hash ||
-      state.definition?.native_definition_hash !== authorized.native_definition_hash) {
-    throw new Error("the owned daily refresh definition does not match the authorized plan; nothing was removed");
-  }
   adapter.remove(plan.identity, { expected: state });
   if (adapter.read(plan.identity)?.exists) throw new Error("daily refresh removal exact readback failed");
   return Object.freeze({ removed: true, verified: true });

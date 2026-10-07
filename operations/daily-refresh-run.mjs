@@ -4,7 +4,11 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireBrainLifecycleLock } from "./brain-lifecycle-lock.mjs";
-import { buildDailyRefreshDefinition, readDailyRefreshUpdateTransaction } from "./daily-refresh-scheduler.mjs";
+import {
+  buildDailyRefreshDefinition,
+  readDailyRefreshUpdateTransaction,
+  statusDailyRefreshSchedule,
+} from "./daily-refresh-scheduler.mjs";
 
 function timestamp(now) {
   const value = now();
@@ -47,6 +51,7 @@ export async function runDailyRefresh({
   home = homedir(),
   platform = process.platform,
   recoveryRequired = () => false,
+  scheduleAttention = [],
 } = {}) {
   if (!plan?.ready || !plan?.enabled) throw new Error("the daily refresh plan is not enabled and ready");
   if (typeof runSource !== "function" || typeof readFreshness !== "function" || typeof writeReceipt !== "function") {
@@ -73,6 +78,7 @@ export async function runDailyRefresh({
       reason: error?.code === "brain_lifecycle_recovery_required"
         ? "a prior update still requires verified schedule recovery"
         : "another Brain lifecycle operation owns the manifest lock",
+      schedule_attention: Object.freeze([...scheduleAttention]),
       sources: [],
     });
     await writeReceipt(receipt);
@@ -92,6 +98,7 @@ export async function runDailyRefresh({
         completed_at: timestamp(now),
         reason_code: "update_recovery_required",
         reason: "a prior update still requires verified schedule recovery",
+        schedule_attention: Object.freeze([...scheduleAttention]),
         sources: [],
       });
       await writeReceipt(receipt);
@@ -199,6 +206,7 @@ export async function runDailyRefresh({
       status: sourceResults.some((entry) => entry.status !== "complete") ? "failed" : "complete",
       started_at: startedAt,
       completed_at: timestamp(now),
+      schedule_attention: Object.freeze([...scheduleAttention]),
       sources: Object.freeze(sourceResults),
     });
     await writeReceipt(result);
@@ -251,13 +259,37 @@ export async function runDailyRefreshCli(manifestPath, options = {}) {
   const receiptWriter = options.writeReceipt ?? dailyReceiptWriter(plan, options);
   const readUpdateTransaction = options.readUpdateTransaction ?? readDailyRefreshUpdateTransaction;
   const expectedDefinitionHash = options.expectedDefinitionHash || null;
+  const scheduleAttention = [];
   if (expectedDefinitionHash) {
-    const definition = buildDailyRefreshDefinition(plan, {
+    const definitionOptions = {
       platform: options.platform ?? process.platform,
       ...(options.definitionOptions || {}),
+    };
+    const inspectSchedule = options.inspectSchedule ?? statusDailyRefreshSchedule;
+    const schedule = await inspectSchedule(plan, {
+      ...definitionOptions,
+      ...(options.schedulerAdapter ? { adapter: options.schedulerAdapter } : {}),
     });
-    if (definition.definition_hash !== expectedDefinitionHash) {
+    if (!schedule?.installed || schedule.state?.definition?.definition_hash !== expectedDefinitionHash) {
       throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
+    }
+    if (schedule.registered_node_usable === false) {
+      const missing = schedule.registered_node_present === false;
+      const error = new Error(missing
+        ? "the registered Node binary is missing; run brain daily on <manifest> to repair the daily schedule"
+        : "the registered Node binary is not executable; run brain daily on <manifest> to repair the daily schedule");
+      error.code = missing ? "daily_schedule_node_missing" : "daily_schedule_node_unusable";
+      throw error;
+    }
+    if (schedule.plan_matches_registered_definition !== true) {
+      throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
+    }
+    const definition = buildDailyRefreshDefinition(plan, definitionOptions);
+    if (definition.definition_hash !== expectedDefinitionHash) {
+      if (schedule.node_path_changed !== true) {
+        throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
+      }
+      scheduleAttention.push("daily schedule needs refresh (Node changed)");
     }
   }
   const readFreshness = options.readFreshness ?? (async () => freshnessMap(await brain.cmdSources(path, {
@@ -276,6 +308,7 @@ export async function runDailyRefreshCli(manifestPath, options = {}) {
     now: options.now,
     home: options.home,
     platform: options.platform,
+    scheduleAttention,
     recoveryRequired: () => Boolean(readUpdateTransaction(plan.identity, {
       home: options.home,
       manifestPath: path,
@@ -284,9 +317,11 @@ export async function runDailyRefreshCli(manifestPath, options = {}) {
     })),
   });
   if (!options.silent) {
-    console.log(`daily refresh ${result.status}: ${result.sources.length} source(s) attempted`);
+    const log = options.log || console.log;
+    for (const attention of result.schedule_attention) log(attention);
+    log(`daily refresh ${result.status}: ${result.sources.length} source(s) attempted`);
     for (const source of result.sources) {
-      console.log(`${source.source} | ${source.status} | ${source.last_successful_run_at_after || "never"}`);
+      log(`${source.source} | ${source.status} | ${source.last_successful_run_at_after || "never"}`);
     }
   }
   return result;
@@ -304,8 +339,10 @@ const IS_MAIN = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLT
 if (IS_MAIN) {
   main().then((result) => {
     if (result.status === "failed") process.exitCode = 1;
-  }).catch(() => {
-    console.error("Daily refresh failed: daily_refresh_failed. Inspect the private local diagnostics, then retry.");
+  }).catch((error) => {
+    console.error(new Set(["daily_schedule_node_missing", "daily_schedule_node_unusable"]).has(error?.code)
+      ? `Daily refresh did not run: the registered Node binary is ${error.code === "daily_schedule_node_missing" ? "missing" : "not executable"}. Turn daily imports on again from the normal Brain terminal to repair the schedule.`
+      : "Daily refresh failed: daily_refresh_failed. Inspect the private local diagnostics, then retry.");
     process.exitCode = 1;
   });
 }
