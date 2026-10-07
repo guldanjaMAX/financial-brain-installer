@@ -17,6 +17,13 @@ Brain Feeds landing folders. Aggregate freshness is visible across those
 sources, and answers search first so they can cite current records before they
 write a response.
 
+- **Windows credential storage now carries a signed helper.** Admin keys and
+  Google credentials use the verified packaged helper without compiling a new
+  program on each run. A missing or changed helper reports the reason before
+  using the guarded local compiler fallback. After updating, verify credential
+  storage on Windows with Smart App Control enabled; native Windows proof is
+  still required for this candidate.
+
 - **Daily imports now have one owned Windows and macOS contract.** `brain daily
   on|off|status <manifest>` derives every source from your own manifest instead
   of a fixed Google recipe, keeps Worker, push, capture, snapshot, disabled,

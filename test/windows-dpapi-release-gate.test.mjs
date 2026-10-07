@@ -3,9 +3,10 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { linkSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { verifyWindowsDpapiSignature, inspectWindowsDpapiSignedHelper, WINDOWS_DPAPI_SIGNED_SHA256 } from "../operations/windows-dpapi-signed.mjs";
 import { createTestSymlink } from "./helpers/symlink-capability.mjs";
 
 const gate = readFileSync(new URL("../scripts/windows-dpapi-release-gate.mjs", import.meta.url), "utf8");
@@ -27,7 +28,7 @@ test("the Windows release gate uses the production probe for exactly 25 fresh ro
   assert.match(gate, /result\.passed !== true/);
   assert.match(gate, /result\.rounds !== REQUIRED_ROUNDS/);
   assert.match(gate, /result\.cleanup_status !== "retained"/);
-  assert.match(gate, /result\.compile_count !== 1/);
+  assert.match(gate, /result\.compile_count !== 0/);
   assert.match(gate, /result\.helper_invocations !== REQUIRED_ROUNDS \* 2/);
   assert.match(gate, /writeAdminKeyFile\(adminPath, first, adminOptions\)/);
   assert.match(gate, /readAdminKeyFile\(adminPath, adminOptions\) !== first/);
@@ -35,7 +36,11 @@ test("the Windows release gate uses the production probe for exactly 25 fresh ro
   assert.match(gate, /saveTokens\(googleRecord, googleOptions\)/);
   assert.match(gate, /loadTokens\(googleOptions\)/);
   assert.match(gate, /REQUIRED_HELPER_INVOCATIONS = \(REQUIRED_ROUNDS \* 2\) \+ 11 \+ 4/);
-  assert.match(gate, /metrics\.compile_count !== 1/);
+  assert.match(gate, /metrics\.compile_count !== 0/);
+  assert.match(gate, /metrics\.signed_helper_count !== 1/);
+  assert.match(gate, /metrics\.fallback_reason !== null/);
+  assert.ok(gate.indexOf("verifyWindowsDpapiSignature();") < gate.indexOf("const result = probeWindowsDpapi("));
+  assert.ok(gate.includes("verifyWindowsDpapiSignature();"));
   assert.match(gate, /metrics\.helper_invocations !== REQUIRED_HELPER_INVOCATIONS/);
   assert.match(gate, /metrics\.launch_refusals !== 0/);
   assert.match(gate, /launch_refusals=\$\{safeCount\(readWindowsDpapiSessionMetrics\(\)\.launch_refusals\)\}/);
@@ -151,4 +156,37 @@ test("the gate output is restricted to stable diagnostic fields", () => {
   assert.match(gate, /issueCode = safeIssueCode\(result\.issue_code\)/);
   assert.match(gate, /issue_code=\$\{safeIssueCode\(issueCode\)\}/);
   assert.doesNotMatch(gate, /JSON\.stringify|stdout|stderr/);
+});
+
+test("the package carries the exact signed helper artifact", () => {
+  const helper = inspectWindowsDpapiSignedHelper();
+  assert.equal(helper.reason, undefined);
+  assert.equal(helper.sha256, WINDOWS_DPAPI_SIGNED_SHA256);
+});
+
+test("Authenticode validates the pinned helper and exact signer organization", {
+  skip: process.platform !== "win32" ? "Authenticode requires the native Windows trust provider" : false,
+}, () => {
+  assert.equal(verifyWindowsDpapiSignature().verified, true);
+});
+
+test("signature verification refuses a failed native trust decision and has a green control", () => {
+  const calls = [];
+  let status = 1;
+  const options = {
+    platform: "win32", environment: { SystemRoot: resolve("fixture-windows"), PRIVATE_SENTINEL: "must-not-inherit" },
+    run(command, args, details) {
+      calls.push({ command, args, details });
+      return { status, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    },
+  };
+  assert.throws(() => verifyWindowsDpapiSignature(options), /Authenticode verification failed/);
+  assert.equal(calls.length, 1, "the native trust decision was reached");
+  assert.match(calls[0].args.at(-1), /Get-AuthenticodeSignature/);
+  assert.match(calls[0].args.at(-1), /Financial Brain LLC/);
+  assert.match(calls[0].args.at(-1), /Status -ne 'Valid'/);
+  assert.deepEqual(Object.keys(calls[0].details.env).sort(), ["BRAIN_DPAPI_SIGNATURE_FILE", "SystemRoot"]);
+  status = 0;
+  assert.equal(verifyWindowsDpapiSignature(options).verified, true);
+  assert.equal(calls.length, 2);
 });
