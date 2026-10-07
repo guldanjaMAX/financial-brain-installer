@@ -64,7 +64,7 @@ import {
 } from "./lib/query-intent.js";
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
 import { answerSentences } from "./lib/answer-sentences.js";
-import { isQuickBooksBalanceClaim, quickBooksBalanceSupportsClaim, quickBooksBalanceAnswerAssertions } from "./lib/quickbooks-balance.js";
+import { isQuickBooksAccountBalanceRecord, isQuickBooksBalanceClaim, quickBooksBalanceSupportsClaim, quickBooksBalanceAnswerAssertions } from "./lib/quickbooks-balance.js";
 import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
   documentMatchesOperativeClaim, documentUsesOperativeValue,
@@ -641,6 +641,55 @@ function hasMatchingAsOfDate(sentence, docs) {
   });
 }
 
+// A format repair gets no authority of its own. It must pass this same rule
+// again after the independent evidence verifier approves the replacement.
+function temporalAnswerFailure(answer, docs, allowedDocs, currentEvidence, question) {
+  const allowedNumbers = new Set(allowedDocs.map((doc) => doc.n));
+  const accountBalanceQuestion = /\bbalances?\b/i.test(question) && allowedDocs.some(isQuickBooksAccountBalanceRecord);
+  const assertions = quickBooksBalanceAnswerAssertions(answerSentences(answer), docs)
+    .map((assertion) => ({ ...assertion, evidence: assertion.evidence || currentEvidence }));
+  let temporalFailure = null;
+  for (const { sentence, evidence, accountBalance } of assertions) {
+    // Unrecognized numeric prose or tables must not evade checking merely by
+    // omitting the word "balance". Only the checked, fully bound grammar earns
+    // this exception; other formats can request one regeneration below.
+    const balanceClaim = accountBalance || (accountBalanceQuestion && /\d/.test(sentence)) ||
+      allowedDocs.some((doc) => isQuickBooksBalanceClaim(sentence, doc));
+    if ((!PRESENT_STATUS_ASSERTION.test(sentence) && !balanceClaim) ||
+        (STATUS_UNCERTAINTY.test(sentence) && !balanceClaim)) continue;
+    if (!evidence.length) {
+      temporalFailure = "present-status claim had no reliable-dated evidence for the named subject";
+      break;
+    }
+    const numbers = [...sentence.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
+    const newestCited = evidence.filter(
+      (doc) => numbers.includes(doc.n) && allowedNumbers.has(doc.n),
+    );
+    if (!newestCited.length) {
+      temporalFailure = "present-status claim cited older evidence while newer direct evidence was available";
+      break;
+    }
+    const directlySupporting = newestCited.filter(
+      (doc) => documentDirectlySupportsStatus(sentence, doc, question, balanceClaim),
+    );
+    if (!directlySupporting.length) {
+      temporalFailure = "newest cited evidence did not itself support the present-status claim";
+      break;
+    }
+    if (directlySupporting.every((doc) => !authoritativeCurrentEvidence(sentence, doc, question)) &&
+        !hasMatchingAsOfDate(sentence, directlySupporting)) {
+      temporalFailure = "non-authoritative current-status evidence requires an exact as-of date";
+      break;
+    }
+  }
+  return temporalFailure;
+}
+
+function modelRefusedAnswer(answer) {
+  const firstLine = String(answer || "").split(/\r?\n/, 1)[0].trim();
+  return /^(?:the )?(?:documents|sources|provided (?:documents|sources)) (?:do not|don't|cannot|can't|does not|doesn't) (?:actually )?(?:answer|contain|provide)|^there (?:is|isn't|is not) (?:not )?enough (?:information|evidence)/i.test(firstLine);
+}
+
 /* -------------------------------------------------------------- routes */
 
 async function handleUnified(
@@ -1161,29 +1210,45 @@ async function handleThink(
   let model = null;
   let modelDeclaredNoEvidence = false;
   try {
-    const data = await callLLM(env, {
-      model: env.ANSWER_MODEL || "claude-sonnet-4-5",
-      max_tokens: 1000,
-      system,
-      label: "rag-think",
-      timeoutMs: 45_000,
-      messages: [{ role: "user", content: userMsg }],
-    });
-    answer = (data?.content?.[0]?.text || "").trim() || null;
-    model = data?.model || null;
-    if (!answer) approvedDocs = [];
-    if (answer) {
-      const headsUpAt = answer.search(/\n\s*Heads up:/i);
-      if (headsUpAt >= 0) {
-        const body = answer.slice(0, headsUpAt).trim();
-        const headsUp = answer.slice(headsUpAt).trim();
-        answer = /\b(?:not affected|does not affect|doesn't affect|no effect|not materially (?:affect|impact)|but in this case)\b/i.test(headsUp)
-          ? body
-          : `${body}\n\n${headsUp.replace(/\s*\[\d+\]/g, "")}`;
+    let repairInstruction = "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const data = await callLLM(env, {
+        model: env.ANSWER_MODEL || "claude-sonnet-4-5",
+        max_tokens: 1000,
+        system,
+        label: attempt === 0 ? "rag-think" : "rag-think-repair",
+        timeoutMs: 45_000,
+        messages: [{ role: "user", content: attempt === 0 ? userMsg : `${userMsg}\n\nREGENERATION REQUIREMENTS:\n${repairInstruction}` }],
+      });
+      answer = (data?.content?.[0]?.text || "").trim() || null;
+      model = data?.model || null;
+      if (!answer) approvedDocs = [];
+      if (answer) {
+        const headsUpAt = answer.search(/\n\s*Heads up:/i);
+        if (headsUpAt >= 0) {
+          const body = answer.slice(0, headsUpAt).trim();
+          const headsUp = answer.slice(headsUpAt).trim();
+          answer = /\b(?:not affected|does not affect|doesn't affect|no effect|not materially (?:affect|impact)|but in this case)\b/i.test(headsUp)
+            ? body
+            : `${body}\n\n${headsUp.replace(/\s*\[\d+\]/g, "")}`;
+        }
       }
+      if (attempt !== 0 || !answer || modelRefusedAnswer(answer)) break;
+      const citedNumbers = new Set([...answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])));
+      const cited = docs.filter((doc) => citedNumbers.has(doc.n));
+      if (!cited.length && docs.some((doc) => doc.source_kind === "quickbooks")) {
+        repairInstruction = "The first draft did not cite a supplied document. Regenerate from the same DOCUMENTS. Cite every factual claim inline with its exact supplied document number, like [3]. Do not invent citation numbers or facts. If the documents cannot support a claim, omit it or say the documents do not answer that part.";
+      } else if (explicitCurrentIntent && cited.length && cited.every(isQuickBooksAccountBalanceRecord) &&
+          temporalAnswerFailure(answer, docs, cited, currentEvidence, q)) {
+        // Field responses discard rejected drafts. Handle unrecognized model
+        // prose by asking once for the checked form, not by relaxing the gate.
+        repairInstruction = "The first draft did not pass the observed account balance check. Regenerate from the same DOCUMENTS using one sentence per account, with the exact account name, currency, balance, as-of date and that account's own citation in EACH sentence. Use: AccountName has a balance of USD 12.34 as of YYYY-MM-DD [3]. For a negative Credit Card balance use: AccountName owes USD 12.34 as of YYYY-MM-DD [3]. Copy the magnitude and date from the record; never guess or change a sign. No table or shared date heading. Do not claim a complete account list from retrieved candidates. If an account lacks a reliable observed balance, say it cannot be confirmed. Cite every factual claim.";
+      } else break;
     }
   } catch (e) {
     answerError = answerGenerationError(e);
+    // A failed repair must never return the unverified first draft.
+    answer = null;
     // Retrieval candidates are not approved citations when answer generation
     // itself failed. Keep the candidates in `results` for diagnostics, but do
     // not attach them to a null answer as if the model had cited them.
@@ -1195,9 +1260,7 @@ async function handleThink(
   // it cited, then fail closed before a plausible fact from another entity can
   // be returned as the owner's fact.
   if (answer && !answerError) {
-    const firstAnswerLine = answer.split(/\r?\n/, 1)[0].trim();
-    const alreadyRefused = /^(?:the )?(?:documents|sources|provided (?:documents|sources)) (?:do not|don't|cannot|can't|does not|doesn't) (?:actually )?(?:answer|contain|provide)|^there (?:is|isn't|is not) (?:not )?enough (?:information|evidence)/i.test(firstAnswerLine);
-    if (alreadyRefused) {
+    if (modelRefusedAnswer(answer)) {
       modelDeclaredNoEvidence = true;
       answer = unsupportedAnswer;
       approvedDocs = [];
@@ -1205,10 +1268,11 @@ async function handleThink(
     } else {
       const citedNumbers = new Set([...answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])));
       const citedDocs = docs.filter((doc) => citedNumbers.has(doc.n));
-      if (!citedDocs.length) {
+      if (!citedDocs.length || citedNumbers.size !== citedDocs.length) {
         answer = unsupportedAnswer;
         approvedDocs = [];
-        evidenceGate = { supported: false, complete: false, evidence: [], reason: "draft made claims without document citations" };
+        evidenceGate = { supported: false, complete: false, evidence: [], reason: citedDocs.length
+          ? "draft cited an unavailable document" : "draft made claims without document citations" };
       } else {
         try {
           const check = await callLLM(env, {
@@ -1311,38 +1375,7 @@ async function handleThink(
             evidenceGate.reason = "only non-final planning material was cited for a binding legal claim";
           }
           if (evidenceGate.supported && explicitCurrentIntent) {
-            const allowedNumbers = new Set(allowedDocs.map((doc) => doc.n));
-            const assertions = quickBooksBalanceAnswerAssertions(answerSentences(answer), docs)
-              .map((assertion) => ({ ...assertion, evidence: assertion.evidence || currentEvidence }));
-            let temporalFailure = null;
-            for (const { sentence, evidence, accountBalance } of assertions) {
-              const balanceClaim = accountBalance || allowedDocs.some((doc) => isQuickBooksBalanceClaim(sentence, doc));
-              if ((!PRESENT_STATUS_ASSERTION.test(sentence) && !balanceClaim) || STATUS_UNCERTAINTY.test(sentence)) continue;
-              if (!evidence.length) {
-                temporalFailure = "present-status claim had no reliable-dated evidence for the named subject";
-                break;
-              }
-              const numbers = [...sentence.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
-              const newestCited = evidence.filter(
-                (doc) => numbers.includes(doc.n) && allowedNumbers.has(doc.n),
-              );
-              if (!newestCited.length) {
-                temporalFailure = "present-status claim cited older evidence while newer direct evidence was available";
-                break;
-              }
-              const directlySupporting = newestCited.filter(
-                (doc) => documentDirectlySupportsStatus(sentence, doc, q, accountBalance),
-              );
-              if (!directlySupporting.length) {
-                temporalFailure = "newest cited evidence did not itself support the present-status claim";
-                break;
-              }
-              if (directlySupporting.every((doc) => !authoritativeCurrentEvidence(sentence, doc, q)) &&
-                  !hasMatchingAsOfDate(sentence, directlySupporting)) {
-                temporalFailure = "non-authoritative current-status evidence requires an exact as-of date";
-                break;
-              }
-            }
+            const temporalFailure = temporalAnswerFailure(answer, docs, allowedDocs, currentEvidence, q);
             if (temporalFailure) {
               evidenceGate.supported = false;
               evidenceGate.reason = temporalFailure;

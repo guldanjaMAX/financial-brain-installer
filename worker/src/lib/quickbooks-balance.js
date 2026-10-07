@@ -1,13 +1,15 @@
 /** Claim-specific support for a directly observed QuickBooks balance. */
 export const QUICKBOOKS_BALANCE_DATE_SOURCE = "quickbooks:balance_snapshot";
 const BALANCE = /\b(?:balances?|owes?|owed|remaining credit)\b/i;
-const RELATIONSHIP_OR_STATE = /\b(?:client|relationship|engagement|active|inactive|closed|stopped|ended|terminated|cancelled|canceled|ceased|churned|left|no longer|still|partner|member|patient|employee|tenant)\b/i;
 const normalized = (value) => ` ${String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()} `;
 const recordText = (doc) => String(doc?.snippet || "").replace(/^\[[^\]\r\n]*\]\s*/, "");
 const accountName = (doc) => /^[^:\r\n]+? account ([^:\r\n]+):/.exec(recordText(doc))?.[1];
 const MONEY = /(?:\b[A-Z]{3}\s*|\$\s*)-?\d/;
 const AS_OF_DATE = /\b(?:as of|through)\s+(\d{4}-\d{2}-\d{2}(?:T[\d:.]+(?:Z|[+-]\d{2}:\d{2}))?|[A-Za-z]+ \d{1,2},? \d{4})(?![Tt\d+-]|:\d)/gi;
-const plain = (value) => String(value).replace(/[*_`~]/g, "");
+// Paired presentation wrappers are safe to remove. A bare tilde is an
+// approximation sign; a single underscore can be part of an account identity.
+const plain = (value) => String(value).replace(/(\*\*|__|`)([^\n]+?)\1/g, "$2");
+const identity = (value) => plain(value).toLowerCase().replace(/\s+/g, " ").trim();
 const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function compactAccountBalanceClaim(sentence, doc) {
   const account = accountName(doc);
@@ -22,6 +24,13 @@ const amountKey = (value) => {
   return `${whole.startsWith("-") ? "-" : ""}${BigInt(whole.replace(/^-/, ""))}.${fraction.replace(/0+$/, "")}`;
 };
 
+// Identify the evidence independently of generated prose. An unsupported
+// table or heading must be eligible for repair even when no row parsed.
+export function isQuickBooksAccountBalanceRecord(doc) {
+  return doc?.source_kind === "quickbooks" && doc.date_source === QUICKBOOKS_BALANCE_DATE_SOURCE &&
+    Boolean(accountName(doc));
+}
+
 export function isQuickBooksBalanceClaim(sentence, doc) {
   return (BALANCE.test(sentence) || compactAccountBalanceClaim(sentence, doc)) &&
     (doc?.date_source === QUICKBOOKS_BALANCE_DATE_SOURCE || doc?.source_kind === "quickbooks");
@@ -32,7 +41,7 @@ export function quickBooksBalanceSupportsClaim(sentence, doc, { now = Date.now()
   // arbitrary snapshot_at metadata. Renaming a source keeps its registered kind.
   if (doc?.source_kind !== "quickbooks" || doc.date_source !== QUICKBOOKS_BALANCE_DATE_SOURCE ||
       doc.date_reliable !== true || doc.text_source !== "native" || doc.text_reliable !== true ||
-      doc.lineage?.kind !== "source_record" || !isQuickBooksBalanceClaim(sentence, doc) || RELATIONSHIP_OR_STATE.test(sentence)) return false;
+      doc.lineage?.kind !== "source_record" || !isQuickBooksBalanceClaim(sentence, doc)) return false;
   const time = Date.parse(doc.ts);
   if (!Number.isFinite(time) || time > now) return false;
   // Every explicit qualifier must agree, not merely one matching date anywhere
@@ -52,26 +61,40 @@ export function quickBooksBalanceSupportsClaim(sentence, doc, { now = Date.now()
   const evidence = recordText(doc);
   const observed = /\b(?:balance|remaining credit) ([A-Z]{3}) (-?\d[\d,]*(?:\.\d+)?) (?:\([^)]*\) )?as of (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)/.exec(evidence);
   if (!observed || observed[3] !== new Date(time).toISOString()) return false;
-  // Require the same account or party in this sentence. A newest balance for
-  // another account cannot freshen an older account's balance.
-  const account = /^[^:]+? account ([^:]+):/.exec(evidence)?.[1];
-  const party = /^(?:Invoice [^:]+ to |Bill [^:]+ from )([^:]+):/.exec(evidence)?.[1] ||
-    /^Credit memo [^:]+ for (.+?) on \d{4}-\d{2}-\d{2}:/.exec(evidence)?.[1];
-  const namedBalance = /^([^:]+): open balance/.exec(evidence)?.[1];
-  const subject = account || party || namedBalance;
-  if (!subject || !normalized(sentence).includes(normalized(subject))) return false;
-  const amounts = [...String(sentence).matchAll(/(?:\b([A-Z]{3})\s*|(\$)\s*)(-?\d[\d,]*(?:\.\d+)?)/g)];
+  // Consume the ENTIRE claim, not a matching substring. Any unparsed subject,
+  // sign, currency, multiplier or additional state clause fails closed.
+  const account = accountName(doc);
+  const transaction = /^(Invoice|Bill) ([^:]+?) (?:to|from) ([^:]+):/.exec(evidence) ||
+    /^(Credit memo) ([^:]+?) for (.+?) on \d{4}-\d{2}-\d{2}:/.exec(evidence);
+  const party = transaction?.[3] || /^([^:]+): open balance/.exec(evidence)?.[1];
+  const subjects = account ? [account] : party ? [party] : [];
+  if (transaction) {
+    const [, kind, number, name] = transaction;
+    for (const join of ["for", kind === "Invoice" ? "to" : kind === "Bill" ? "from" : "for"]) {
+      subjects.push(`${kind} ${number} ${join} ${name}`);
+    }
+  }
+  if (!subjects.length) return false;
+  const subjectPattern = subjects.map((subject) => escape(plain(subject)).replace(/\s+/g, "\\s+")).join("|");
+  const datePattern = "(?:as of|through)\\s+(?:\\d{4}-\\d{2}-\\d{2}(?:T[\\d:.]+(?:Z|[+-]\\d{2}:\\d{2}))?|[A-Za-z]+ \\d{1,2},? \\d{4})";
+  const qualifier = `(?:${datePattern})`;
+  const amount = "(?:[A-Z]{3}\\s+|\\$\\s*)-?(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d{1,6})?";
+  const balancePredicate = "(?:(?:an? )?(?:open |current )?balance|remaining credit)(?: of)?";
+  const predicate = `(?:(?:currently )?has ${balancePredicate}|(?:currently )?owes|:\\s*(?:${balancePredicate}|owes)?)`;
+  const claim = plain(sentence).replace(/\[\d+\]/g, "").trim().replace(/^[-•]\s+/, "").trim();
+  const match = new RegExp(`^(?:${qualifier},?\\s+)?(?:${subjectPattern})\\s*(${predicate})\\s*(${amount})(?: \\(owes (${amount})\\))?(?:\\s+${qualifier})?\\s*[.]?$`, "i").exec(claim);
+  if (!match) return false;
+  if (/\bremaining credit\b/i.test(match[1]) !== observed[0].startsWith("remaining credit")) return false;
+  const money = (value) => /^(?:([A-Z]{3})\s+|(\$)\s*)(-?[\d,]+(?:\.\d+)?)$/.exec(value);
+  const sameMoney = (value, expected) => {
+    const parsed = money(value);
+    return parsed && (parsed[1] || "USD") === observed[1] && amountKey(parsed[3]) === amountKey(expected);
+  };
   const cardLiability = /^Credit Card account /.test(evidence) && observed[2].startsWith("-");
-  // An unrecognized second account must not borrow this account's value just
-  // because its amount happens to be equal. Only the explicit signed-balance
-  // plus parenthesized debt explanation may contain two amounts in one clause.
-  if (account && amounts.length > 1 && !(cardLiability && amounts.length === 2 &&
-      /\bbalance (?:[A-Z]{3}|\$) -?[\d,.]+ \(owes (?:[A-Z]{3}|\$) [\d,.]+\)/.test(sentence))) return false;
-  return amounts.length > 0 && amounts.every((match) => {
-    const owing = /\b(?:owes?|owed|owing)\s*$/i.test(sentence.slice(0, match.index));
-    const expected = cardLiability && owing ? observed[2].slice(1) : observed[2];
-    return (match[1] || (match[2] ? "USD" : "")) === observed[1] && amountKey(match[3]) === amountKey(expected);
-  });
+  const owing = /\bowes$/i.test(match[1]);
+  if (owing && !cardLiability) return false;
+  if (!sameMoney(match[2], owing ? observed[2].slice(1) : observed[2])) return false;
+  return !match[3] || (cardLiability && !owing && sameMoney(match[3], observed[2].slice(1)));
 }
 
 /** Split only named QuickBooks account balances, preserving local citations.
@@ -79,7 +102,7 @@ export function quickBooksBalanceSupportsClaim(sentence, doc, { now = Date.now()
  * A citation to an unrelated account must never freshen this account's balance.
  */
 export function quickBooksAccountBalanceAssertions(sentence, docs) {
-  if ((!BALANCE.test(sentence) && !MONEY.test(sentence)) || RELATIONSHIP_OR_STATE.test(sentence)) return null;
+  if (!BALANCE.test(sentence) && !MONEY.test(sentence)) return null;
   const accounts = docs.filter((doc) => doc.source_kind === "quickbooks" && accountName(doc));
   if (!BALANCE.test(sentence) && !accounts.some((doc) => compactAccountBalanceClaim(sentence, doc))) return null;
   // Strip presentation marks on both sides of matching. Keep punctuation and
@@ -94,15 +117,18 @@ export function quickBooksAccountBalanceAssertions(sentence, docs) {
   // Amount-before-subject prose is deliberately left to the single-record
   // checker. Do not silently drop an unassigned amount when splitting.
   if (/(?:\b[A-Z]{3}\s*|\$\s*)-?\d/.test(prefix)) return null;
-  const pieces = mentions.map((mention, index) => text.slice(mention.index, mentions[index + 1]?.index ?? text.length));
+  const pieces = mentions.map((mention, index) => {
+    const piece = text.slice(mention.index, mentions[index + 1]?.index ?? text.length);
+    return index < mentions.length - 1 ? piece.replace(/(?:[,;]\s*(?:and\s+)?|\s+and\s+)$/i, "").trim() : piece;
+  });
   const citations = (value) => [...value.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
   // A trailing citation group can cover the whole enumeration only when no
   // earlier clause supplies local citations. Mixed missing citations refuse.
   const sharedCitations = pieces.slice(0, -1).every((part) => citations(part).length === 0)
     ? citations(pieces.at(-1)) : [];
   return pieces.map((piece, index) => {
-    const subject = normalized(mentions[index][0]);
-    const relevant = accounts.filter((doc) => normalized(plain(accountName(doc))) === subject);
+    const subject = identity(mentions[index][0]);
+    const relevant = accounts.filter((doc) => identity(accountName(doc)) === subject);
     const numbers = citations(piece).length ? citations(piece) : sharedCitations;
     const citedSources = new Set(relevant.filter((doc) => numbers.includes(doc.n)).map((doc) => doc.source));
     const candidates = relevant.filter((doc) => citedSources.has(doc.source) && doc.date_reliable === true && Number.isFinite(Date.parse(doc.ts)));
@@ -135,7 +161,7 @@ export function quickBooksBalanceAnswerAssertions(sentences, docs) {
       continue;
     }
     if (!bullet.test(sentence)) heading = "";
-    const accounts = quickBooksAccountBalanceAssertions(`${heading ? `${heading}, ` : ""}${sentence}`, docs);
+    const accounts = quickBooksAccountBalanceAssertions(heading ? `${heading}, ${sentence.replace(bullet, "")}` : sentence, docs);
     if (accounts) assertions.push(...accounts);
     else {
       heading = "";
