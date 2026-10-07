@@ -189,6 +189,23 @@ function combined(result) {
   return `${result.stdout || ""}${result.stderr || ""}`.replaceAll("\r\n", "\n");
 }
 
+function mutateWindowsCleanupOwnership(source) {
+  const lineEnding = source.includes("\r\n") ? "\r\n" : "\n";
+  const guard = [
+    "function Remove-OwnedInstallDirectory([string]$Directory, [string]$AttemptId) {",
+    "  Write-Output \"CLEANUP_OWNERSHIP_DECISION_REACHED=1\"",
+    "  if (-not (Test-InstallAttemptOwnership $Directory $AttemptId)) {",
+  ].join(lineEnding);
+  const disabledGuard = guard.replace(
+    "if (-not (Test-InstallAttemptOwnership $Directory $AttemptId)) {",
+    "if ($false) {",
+  );
+  const mutated = source.replace(guard, disabledGuard);
+  assert.notEqual(mutated, source, "Windows ownership mutation target was not found");
+  assert.equal(mutated.includes(disabledGuard), true, "Windows cleanup ownership guard was not disabled");
+  return mutated;
+}
+
 function runMacInstallOrchestration({ scenario, script = MAC, kitSizeOffset = 0, kitShaOverride = null }) {
   const directory = mkdtempSync(join(ROOT, ".machine-prep-install-test-"));
   const home = join(directory, "home");
@@ -812,13 +829,33 @@ test("Windows install orchestration preserves collisions, cleans failures, and p
   }
 });
 
+test("Windows ownership mutation targets the cleanup guard with LF and CRLF", () => {
+  const lfSource = readFileSync(WINDOWS, "utf8").replaceAll("\r\n", "\n");
+  for (const source of [lfSource, lfSource.replaceAll("\n", "\r\n")]) {
+    const mutated = mutateWindowsCleanupOwnership(source);
+    const normalized = mutated.replaceAll("\r\n", "\n");
+    const markerFunction = normalized.slice(
+      normalized.indexOf("function Set-InstallAttemptMarker"),
+      normalized.indexOf("function Test-InstallAttemptOwnership"),
+    );
+    const cleanupFunction = normalized.slice(
+      normalized.indexOf("function Remove-OwnedInstallDirectory"),
+      normalized.indexOf("function Install-Brain"),
+    );
+    assert.match(markerFunction, /if \(-not \(Test-InstallAttemptOwnership \$Directory \$AttemptId\)\) \{/);
+    assert.match(cleanupFunction, /if \(\$false\) \{/);
+  }
+  assert.throws(
+    () => mutateWindowsCleanupOwnership(lfSource.replace("function Remove-OwnedInstallDirectory", "function Removed-InstallDirectory")),
+    /Windows ownership mutation target was not found/,
+  );
+});
+
 test("Windows ownership mutation turns the collision preservation control red", { skip: process.platform !== "win32", timeout: 180_000 }, () => {
-  const source = readFileSync(WINDOWS, "utf8").replaceAll("\r\n", "\n");
-  const from = "if (-not (Test-InstallAttemptOwnership $Directory $AttemptId)) {";
-  assert.equal(source.includes(from), true);
+  const source = readFileSync(WINDOWS, "utf8");
   const directory = mkdtempSync(join(ROOT, ".machine-prep-windows-mutant-"));
   const mutant = join(directory, "prep-windows.ps1");
-  writeFileSync(mutant, source.replace(from, "if ($false) {"));
+  writeFileSync(mutant, mutateWindowsCleanupOwnership(source));
   const probe = runWindowsInstallOrchestration({ scenario: "lock-collision", script: mutant });
   try {
     assert.throws(() => {
