@@ -1636,6 +1636,17 @@ and never returns it to the CLI or browser. Scheduled pulls use at most three
 Provider `errlist` messages, staged owner-assignment holds, and backfill progress
 remain visible on the owner page. SimpleFIN account type is not guessed: an
 untyped account enters the financial map as `other` with balance role `neither`.
+The first history window waits for account assignment and verified ledger
+promotion before its cursor advances. A corrected partial response supersedes
+the prior promotion marker only after every staging chunk is durable. Revision
+guards in the same D1 transactions as staging, ledger writes, and promotion
+prevent interrupted or concurrent replacements from certifying incomplete work.
+Migration 0051 preserves old rows and rewinds legacy connections to their first
+retained window, since earlier cursors did not prove promotion. Those windows
+are fetched again before promotion. Requests construct explicit Basic authorization
+outside the URL, use manual redirects, and refuse every redirect response.
+A local request-construction refusal creates no one-time claim operation;
+an ambiguous dispatched claim remains blocked from automatic replay.
 
 Technician plan schema 5 also carries the owner briefing for every ceremony:
 what will open, why it is needed, the minimum access, the safe non-secret work

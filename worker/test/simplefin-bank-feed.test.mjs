@@ -20,13 +20,20 @@ const json = (value, status = 200) => new Response(JSON.stringify(value), {
 function provider(overrides = {}) {
   const calls = [];
   const fetchImpl = async (input, init = {}) => {
-    const target = String(input);
-    calls.push({ target, method: init.method || "GET" });
-    if ((init.method || "GET") === "POST") {
-      assert.equal(target, CLAIM_URL, "the decoded claim URL is the claim decision point");
+    const request = new Request(input, init);
+    const target = new URL(request.url);
+    const expected = new URL(request.method === "POST" ? CLAIM_URL : ACCESS_URL);
+    assert.ok(request.headers.get("Authorization") === `Basic ${btoa(`${expected.username}:${expected.password}`)}`,
+      "the decrypted reference supplies Basic auth without exposing it");
+    expected.username = ""; expected.password = "";
+    assert.equal(target.username, ""); assert.equal(target.password, "");
+    assert.equal(request.redirect, "manual");
+    calls.push({ method: request.method });
+    if (request.method === "POST") {
+      assert.ok(target.href === expected.href, "the decoded claim URL is the claim decision point");
       return new Response(ACCESS_URL, { status: 200 });
     }
-    assert.ok(target.startsWith(`${ACCESS_URL}/accounts?`), "the encrypted access URL is opened only for a pull");
+    assert.ok(target.href.startsWith(`${expected.href}/accounts?`), "the encrypted access URL is opened only for a pull");
     return json(overrides.accounts || DEMO);
   };
   return { calls, fetchImpl };
@@ -166,8 +173,8 @@ test("the demo response stages owner choices, promotes four deduplicated transac
       now: "2026-09-28T12:00:00.000Z",
     });
     assert.equal(pulled.ran, 1);
-    assert.equal(fake.calls.filter((call) => call.method === "GET").length, 3,
-      "the backfill decision point uses three bounded windows in one daily slice");
+    assert.equal(fake.calls.filter((call) => call.method === "GET").length, 1,
+      "history waits on the first window until owner assignment permits verified promotion");
     assert.equal(fixture.first("SELECT COUNT(*) AS n FROM fin_transactions").n, 0,
       "unassigned account data remains staged");
 
@@ -231,11 +238,13 @@ test("provider issues retain safe guidance without persisting access-credential 
   } });
   let providerPulls = 0;
   const fetchImpl = async (input, init = {}) => {
-    if ((init.method || "GET") === "POST") {
+    const request = new Request(input, init);
+    if (request.method === "POST") {
       return new Response(shortAccessUrl, { status: 200 });
     }
     providerPulls++;
-    assert.ok(String(input).startsWith(`${shortAccessUrl}/accounts?`),
+    const expected = new URL(shortAccessUrl); expected.username = ""; expected.password = "";
+    assert.ok(request.url.startsWith(`${expected.href}/accounts?`),
       "the pull decision point decrypted the stored access reference");
     return json({
       accounts: [],
@@ -394,8 +403,8 @@ test("the actual Worker cron runs a due SimpleFIN slice without exceeding three 
     });
     assert.ok(work, "the scheduled decision point registers its work with waitUntil");
     await work;
-    assert.equal(fake.calls.filter((call) => call.method === "GET").length, 3);
-    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM simplefin_sync_windows").n, 3);
+    assert.equal(fake.calls.filter((call) => call.method === "GET").length, 1);
+    assert.equal(fixture.first("SELECT COUNT(*) AS n FROM simplefin_sync_windows").n, 1);
   } finally {
     globalThis.fetch = previousFetch;
     fixture.close();
