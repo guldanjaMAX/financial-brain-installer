@@ -20,7 +20,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SCENARIO = String(process.env.BRAIN_DRAIN_READY_SCENARIO || "");
-const FIXTURE_ADMIN = "fixture-admin-label";
+const FIXTURE_ADMIN = "fixture-admin-label".repeat(2);
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -33,7 +33,34 @@ function requestUrl(input) {
   return new URL(typeof input === "string" || input instanceof URL ? String(input) : input.url);
 }
 
+// Three failed/complete field invocations cover four bounded HTTP receipts.
+// The corrected CLI consumes them in one invocation.
+const FIELD_SEQUENCE = [
+  { drained: 0, submitted: 200, waiting: 200, remaining: 100,
+    remaining_is_lower_bound: true, vector_ready: false,
+    readiness_reason: "accepted_mutation_processing", expected_vectors: 318, actual_vectors: 8 },
+  { drained: 200, submitted: 0, waiting: 0, remaining: 1,
+    remaining_is_lower_bound: true, vector_ready: false,
+    readiness_reason: "vector_work_queued", expected_vectors: 318, actual_vectors: 208 },
+  { drained: 0, submitted: 110, waiting: 110, remaining: 10,
+    remaining_is_lower_bound: true, vector_ready: false,
+    readiness_reason: "accepted_mutation_processing", expected_vectors: 318, actual_vectors: 208 },
+  { drained: 110, submitted: 0, waiting: 0, remaining: 0,
+    remaining_is_lower_bound: false, vector_ready: true,
+    readiness_reason: null, expected_vectors: 318, actual_vectors: 318 },
+];
 const RECEIPTS = {
+  "drain-three-pass": FIELD_SEQUENCE,
+  "drain-waiting": [
+    { ...FIELD_SEQUENCE[0], submitted: 0 },
+    FIELD_SEQUENCE[3],
+  ],
+  "drain-exact-mismatch": { ...FIELD_SEQUENCE[0], remaining_is_lower_bound: false },
+  "drain-zero-bound": { ...FIELD_SEQUENCE[0], remaining: 0 },
+  "drain-invalid-bound": { ...FIELD_SEQUENCE[0], remaining_is_lower_bound: "true" },
+  "drain-false-ready": { ...FIELD_SEQUENCE[0], vector_ready: true },
+  "drain-stalled": { ...FIELD_SEQUENCE[0], submitted: 0, waiting: 0 },
+  "drain-excess": { ...FIELD_SEQUENCE[3], expected_vectors: 0, actual_vectors: 1 },
   // The run A shape: nothing queued, provider claims readiness, index is empty.
   "drain-empty-index": {
     drained: 0, submitted: 0, waiting: 0, remaining: 0, vector_ready: true,
@@ -62,13 +89,17 @@ if (SCENARIO) {
   os.homedir = () => userRoot;
   syncBuiltinESMExports();
 
+  let calls = 0;
   globalThis.fetch = async (input, options = {}) => {
     const url = requestUrl(input);
     if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/drain") {
       if (new Headers(options.headers).get("X-Admin-Key") !== FIXTURE_ADMIN) {
         return json({ error: "fixture unauthorized" }, 401);
       }
-      const receipt = RECEIPTS[SCENARIO];
+      calls += 1;
+      console.log(`fixture drain decision ${calls}`);
+      const scenario = RECEIPTS[SCENARIO];
+      const receipt = Array.isArray(scenario) ? scenario[calls - 1] : scenario;
       if (!receipt) throw new Error(`unknown fixture scenario: ${SCENARIO}`);
       return json(receipt);
     }
@@ -109,11 +140,14 @@ if (SCENARIO) {
       brain: { domain: "fixture.invalid", worker_name: "fixture-brain" },
       infrastructure: { cloudflare: { account_id: "fixture-account", storage: "d1" } },
     }));
+    writeFileSync(join(directory, ".brain-admin-key"), `${FIXTURE_ADMIN}\n`, { mode: 0o600 });
     const environment = {
       ...safeChildEnvironment(),
       BRAIN_DRAIN_READY_SCENARIO: scenario,
       BRAIN_DRAIN_READY_USER_ROOT: userRoot,
-      ADMIN_KEY: FIXTURE_ADMIN,
+      HOME: userRoot,
+      USERPROFILE: userRoot,
+      BRAIN_NO_WRANGLER_LOGIN: "1",
     };
     const result = spawnSync(process.execPath, ["--import", THIS_FILE, CLI, "drain", manifestPath], {
       encoding: "utf-8",
@@ -123,6 +157,32 @@ if (SCENARIO) {
     const output = strip(`${result.stdout || ""}${result.stderr || ""}`);
     rmSync(directory, { recursive: true, force: true });
     return { code: result.status, output, error: result.error };
+  }
+
+  const threePass = runScenario("drain-three-pass");
+  check("310 queued upserts complete through four real CLI receipt decisions",
+    threePass.code === 0 && (threePass.output.match(/fixture drain decision/g) || []).length === 4,
+    `code=${threePass.code} ${threePass.output}`);
+  check("progress distinguishes accepted, confirmed, visibility waiting, and total readiness",
+    /200 accepted this run/.test(threePass.output) &&
+      /200 newly confirmed this run/.test(threePass.output) &&
+      /waiting for index visibility/i.test(threePass.output) &&
+      /318 total query-visible vector\(s\); 310 newly confirmed this run/.test(threePass.output),
+    threePass.output);
+  check("normal progress never prints a failure or tells the owner to repeat drain",
+    !/fail|re-run|run.*drain.*again/i.test(threePass.output), threePass.output);
+
+  const waiting = runScenario("drain-waiting");
+  check("a visibility-only wait reaches another decision and completion",
+    waiting.code === 0 && /fixture drain decision 2/.test(waiting.output) &&
+      /waiting for index visibility/i.test(waiting.output), waiting.output);
+
+  for (const scenario of ["drain-exact-mismatch", "drain-zero-bound", "drain-invalid-bound",
+    "drain-false-ready", "drain-stalled", "drain-excess"]) {
+    const refusal = runScenario(scenario);
+    check(`${scenario} fails at the receipt decision without declaring completion`,
+      refusal.code === 1 && /fixture drain decision 1/.test(refusal.output) &&
+        !/query-ready/.test(refusal.output), refusal.output);
   }
 
   const emptyIndex = runScenario("drain-empty-index");

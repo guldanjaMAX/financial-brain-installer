@@ -376,7 +376,14 @@ query-visible count and `drained` as the number newly confirmed during this
 command. Its returned object preserves `drained`, `submitted`, and `remaining`
 and adds `confirmed_this_run`, `expected_vectors`, `actual_vectors`, and
 `vector_ready`. A no-op over a populated, ready index must never look like an
-empty index.
+empty index. Nonempty Worker receipts use `remaining_is_lower_bound: true`;
+that queue lower bound cannot cap the known `waiting` count. Exact queue counts
+still reject `waiting > remaining`, and readiness still requires an empty queue
+and matching vector counts, including when D1 requires zero. Accepted work and
+visibility waits are printed separately from completion. A safety-limit exit
+remains incomplete so lifecycle callers cannot advance without readiness; its
+remedy is background completion and a later health check, never a manual drain
+retry loop.
 
 ---
 
