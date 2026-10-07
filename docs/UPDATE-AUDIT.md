@@ -161,12 +161,12 @@ login as a completed update. Never promise a duration without a measurement.
 
 ## Current candidate lineage
 
-The unreleased 0.4.10/schema48 field candidate carries 41 stable incident rows.
-The earlier held 0.4.7, 0.4.8, and 0.4.9 candidates were never tagged, published, or
-offered as customer updates. Their identities and planning records remain
-historical and are not reused as proof for the changed 0.4.10 bytes. The
-[current 0.4.10 evidence plan](release-evidence/v0.4.10-candidate-release-evidence-plan.md)
-remains unbound to a final SHA and records no field execution.
+The 0.4.10/schema48 audit tracks 41 stable incident rows. The earlier held
+0.4.7, 0.4.8 and 0.4.9 candidate records describe their own historical bytes;
+their evidence does not transfer to a changed package. Installation eligibility
+and publication status come from the current approved guide and reviewed
+receipt for the exact 0.4.10 artifact. The linked candidate evidence plan is a
+planning record, not installation approval or proof of field acceptance.
 Four are `verified` on reviewed evidence: UPDATE-010, UPDATE-014, UPDATE-026,
 and UPDATE-032. Their evidence documents remain attached to the exact rows in
 `update-incidents.json`. Two carry exact-version 0.4.10 deferrals renewed on
