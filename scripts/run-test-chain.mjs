@@ -164,6 +164,8 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node test/health-wrangler-session-exempt.test.mjs",
   // A completed update or deploy releases the shared prompt and exits.
   "node test/cli-success-exit.test.mjs",
+  "node --test test/machine-prep.test.mjs",
+  "node --test test/machine-prep-installers.test.mjs",
   "node --no-warnings test/windows-dpapi-signing-workflow.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
@@ -313,6 +315,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/mcp-apply.test.mjs",
   "node test/mcp-rotation.test.mjs",
   "node --test test/mcp-moved-brain.test.mjs",
+  "node --test test/machine-prep.test.mjs",
+  "node --test test/machine-prep-installers.test.mjs",
   "node test/health-verify-exit.test.mjs",
   "node test/health-wrangler-session-exempt.test.mjs",
   "node test/drain-exit.test.mjs",
