@@ -133,6 +133,71 @@ async function runCalendarContract(syncImpl) {
 }
 
 {
+  const priorEventIds = Array.from({ length: 20 }, (_, index) => `event-baseline-${index + 1}`);
+  const cursor = {
+    mail: { inbox: "https://graph.microsoft.com/mail-delta-baseline-control" }, drives: {},
+    calendar: {
+      delta_link: "https://graph.microsoft.com/calendar-delta-old-window",
+      window_start: "2026-09-05T00:00:00.000Z",
+      window_end: "2027-01-03T00:00:00.000Z",
+      id_type: "immutable",
+      event_ids: priorEventIds,
+    },
+  };
+  let graphCalls = 0;
+  const adapter = await syncMicrosoftGraph({
+    accessToken: "offline-token",
+    mailFolderIds: ["inbox"], driveIds: [], siteIds: [], includePersonalDrive: false,
+    cursor,
+    now: () => NOW,
+    fetchImpl: async (url) => {
+      graphCalls++;
+      if (String(url) === cursor.mail.inbox) {
+        return json({
+          value: [{ id: "mail-not-stored", "@removed": { reason: "deleted" } }],
+          "@odata.deltaLink": cursor.mail.inbox,
+        });
+      }
+      return json({
+        value: [
+          { ...activeEvent, id: undefined },
+          ...priorEventIds.slice(1).map((id) => ({ ...activeEvent, id })),
+        ],
+        "@odata.deltaLink": "https://graph.microsoft.com/calendar-delta-renewed",
+      });
+    },
+  });
+  const stored = new Set(priorEventIds.map((id) => `microsoft:outlook:event:${id}`));
+  let inventoryCalls = 0;
+  let removalCalls = 0;
+  let stateSaves = 0;
+  await runProviderConnector({
+    provider: "microsoft",
+    sync: async () => adapter,
+    resolveAccess: async () => ({ accessToken: "offline-token", connection: {} }),
+    loadState: () => ({ cursor }),
+    saveState: () => { stateSaves++; },
+    sendBatch: async ({ docs }) => ({
+      body: { results: docs.map((document) => ({ source_id: document.source_id, status: "unchanged" })) },
+    }),
+    removeDocuments: async ({ uids }) => {
+      removalCalls++;
+      for (const uid of uids) stored.delete(uid);
+      return { applied: uids.length, pending: 0 };
+    },
+    listStoredFamilies: async () => { inventoryCalls++; return new Set(stored); },
+    postReceipt: async () => {},
+    base: "https://brain.invalid",
+    adminKey: "offline-key",
+    now: () => new Date(NOW),
+  });
+  check("an incomplete baseline reaches reconciliation without treating unmatched prior identity as deletion",
+    graphCalls === 2 && inventoryCalls > 0 && adapter.warnings.length === 1 &&
+    adapter.cursor_can_advance === false && removalCalls === 0 && stateSaves === 0 &&
+    priorEventIds.every((id) => stored.has(`microsoft:outlook:event:${id}`)));
+}
+
+{
   let decisionCalls = 0;
   const result = await syncMicrosoftGraph({
     accessToken: "offline-token",
@@ -162,6 +227,47 @@ async function runCalendarContract(syncImpl) {
   check("only a tombstone already in the tracked calendar view receives deletion authority",
     decisionCalls === 1 && result.deletions.length === 1 &&
     result.deletions[0].source_id === "outlook:event:event-known-1");
+}
+
+{
+  const runPagedTerminalChange = async (terminalChange) => {
+    let pageCalls = 0;
+    const result = await syncMicrosoftGraph({
+      accessToken: "offline-token",
+      mailFolderIds: [], driveIds: [], siteIds: [], includePersonalDrive: false,
+      now: () => NOW,
+      fetchImpl: async () => {
+        pageCalls++;
+        if (pageCalls === 1) {
+          return json({
+            value: [{ ...activeEvent, id: "event-paged-terminal" }],
+            "@odata.nextLink": "https://graph.microsoft.com/calendar-page-2",
+          });
+        }
+        assert.equal(pageCalls, 2, "the paged deletion probe must stop after its terminal page");
+        return json({
+          value: [{ id: "event-paged-terminal", ...terminalChange }],
+          "@odata.deltaLink": "https://graph.microsoft.com/calendar-delta-paged-terminal",
+        });
+      },
+    });
+    return { result, pageCalls };
+  };
+
+  const removed = await runPagedTerminalChange({ "@removed": { reason: "deleted" } });
+  const cancelled = await runPagedTerminalChange({ isCancelled: true });
+  check("a later-page removal clears an event proven live earlier in the same completed walk",
+    removed.pageCalls === 2 && removed.result.documents.length === 0 &&
+    removed.result.deletions.length === 1 &&
+    removed.result.deletions[0].source_id === "outlook:event:event-paged-terminal" &&
+    removed.result.proposed_cursor.calendar.event_ids.length === 0 &&
+    removed.result.cursor_can_advance === true);
+  check("the same paged walk reaches cancellation handling as the green control",
+    cancelled.pageCalls === 2 && cancelled.result.documents.length === 0 &&
+    cancelled.result.deletions.length === 1 &&
+    cancelled.result.deletions[0].source_id === "outlook:event:event-paged-terminal" &&
+    cancelled.result.proposed_cursor.calendar.event_ids.length === 0 &&
+    cancelled.result.cursor_can_advance === true);
 }
 
 {

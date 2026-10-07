@@ -327,14 +327,17 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
   const documents = new Map();
   const deletions = new Map();
   const warnings = [];
+  let baselineIdentityIncomplete = false;
   for (const change of page.changes) {
     const eventId = change.item?.id ? String(change.item.id) : null;
     if (!eventId) {
+      baselineIdentityIncomplete = true;
       warnings.push("An Outlook calendar event had no stable identity, so its cursor was withheld for retry.");
       continue;
     }
     const sourceId = `outlook:event:${eventId}`;
-    const scopedDeletion = change.kind === "delete" && priorEventIds.has(eventId);
+    const scopedDeletion = change.kind === "delete" &&
+      (priorEventIds.has(eventId) || inventory.has(eventId));
     const event = change.kind === "upsert"
       ? await eventWithCivilAllDayTime(change.item, { accessToken, fetchImpl })
       : change.item;
@@ -370,10 +373,17 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
   if (baseline) {
     for (const eventId of prior?.event_ids || []) {
       if (!inventory.has(eventId)) {
-        deletions.set(eventId, {
-          source_type: "microsoft",
-          source_id: `outlook:event:${eventId}`,
-        });
+        if (baselineIdentityIncomplete && !deletions.has(eventId)) {
+          // A row with no immutable ID means absence cannot distinguish a
+          // genuinely aged-out event from the malformed row. Keep unmatched
+          // prior families visible for retry, while honoring exact tombstones.
+          inventory.add(eventId);
+        } else {
+          deletions.set(eventId, {
+            source_type: "microsoft",
+            source_id: `outlook:event:${eventId}`,
+          });
+        }
       }
     }
   }
