@@ -1313,3 +1313,145 @@ test("update restores only after active, query-ready, queue-zero verification", 
   }), /active, query-ready/i);
   assert.deepEqual(events, ["pause", "update", "leave-paused"], "an unverified rollback stays paused");
 });
+
+for (const platform of ["darwin", "win32"]) {
+  test(`${platform} daily status reports process failure and missing runner without inventing success`, () => {
+    const home = mkdtempSync(join(tmpdir(), "daily-observation-status-"));
+    const options = {
+      ...(platform === "darwin" ? DARWIN_DEFINITION_OPTIONS : WINDOWS_DEFINITION_OPTIONS),
+      home, now: () => new Date("2026-10-07T16:30:00.000Z"),
+      nodePathExists: () => true, nodeRealpath: (path) => path,
+      nodePathStat: () => ({ isFile: () => true }), nodePathAccess: () => {},
+    };
+    const definition = buildDailyRefreshDefinition(basePlan, options);
+    const adapter = memoryAdapter({ exists: true, owned: true, enabled: true, definition });
+    let runtimeReads = 0;
+    let runtime = { known: true, running: false, exit_code: 1, last_run_at: "2026-10-07T16:00:00.000Z", next_run_at: "2026-10-08T16:00:00.000Z" };
+    adapter.runtime = () => { runtimeReads += 1; return runtime; };
+    let runnerReads = 0;
+    const inspect = (present) => statusDailyRefreshSchedule(basePlan, {
+      ...options, adapter, runnerPathUsable: () => { runnerReads += 1; return present; },
+    });
+    const failed = inspect(true);
+    assert.equal(failed.last_result, "failed");
+    assert.equal(failed.last_run_at, runtime.last_run_at);
+    assert.match(failed.last_error_line, /code 1/);
+    runtime = { ...runtime, exit_code: 0 };
+    assert.equal(inspect(false).last_result, "failed", "a missing runner cannot inherit an earlier zero exit");
+    const directory = join(home, ".brain", "logs", basePlan.identity.id);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeFileSync(join(directory, "daily.log"), `${JSON.stringify({
+      schema_version: 1, started_at: runtime.last_run_at, completed_at: "2026-10-07T16:01:00.000Z",
+      result: "complete", error: null,
+    })}\n`, { mode: 0o600 });
+    const green = inspect(true);
+    assert.equal(green.last_result, "complete", "native zero plus a completion receipt is the green control");
+    assert.ok(green.next_run);
+    assert.equal(green.next_run_at, "2026-10-08T16:00:00.000Z");
+    assert.equal(runtimeReads, 3);
+    assert.equal(runnerReads, 3);
+    assert.equal(buildDailyRefreshDefinition(basePlan, { ...options, home: join(home, "relocated") }).definition_hash, definition.definition_hash,
+      "diagnostic storage cannot change execution authorization");
+  });
+}
+
+test("macOS daily runtime exposes exit and signal failures from the loaded service", () => {
+  const home = mkdtempSync(join(tmpdir(), "daily-native-runtime-"));
+  const definition = buildDailyRefreshDefinition(basePlan, DARWIN_DEFINITION_OPTIONS);
+  const directory = join(home, "Library", "LaunchAgents");
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, `${definition.name}.plist`), definition.serialized);
+  let evidence = "state = not running\nlast exit code = 7\n";
+  let reads = 0;
+  const adapter = createNativeDailyRefreshAdapter({ platform: "darwin", home, uid: 501,
+    spawn: (_command, args) => {
+      if (args[0] === "print") { reads += 1; return { status: 0, stdout: evidence }; }
+      return { status: 0, stdout: "" };
+    },
+  });
+  assert.equal(adapter.read(basePlan.identity).runtime.exit_code, 7);
+  evidence = "state = not running\nlast terminating signal = Terminated: 15\n";
+  assert.equal(adapter.read(basePlan.identity).runtime.signal, 15);
+  evidence = "state = not running\nlast exit code = 0\n";
+  assert.equal(adapter.read(basePlan.identity).runtime.exit_code, 0);
+  assert.equal(reads, 3);
+});
+
+test("daily status renders the observed run fields through the public command", async () => {
+  const { cmdDaily } = await import("../brain.mjs");
+  const home = mkdtempSync(join(tmpdir(), "daily-status-output-"));
+  const manifestPath = join(home, "brain.manifest.json");
+  writeFileSync(manifestPath, JSON.stringify({ client: { slug: "fixture" }, corpora: {} }));
+  const definition = buildDailyRefreshDefinition(basePlan, DARWIN_DEFINITION_OPTIONS);
+  const adapter = memoryAdapter({ exists: true, owned: true, enabled: true, definition });
+  adapter.runtime = () => ({ known: true, running: false, exit_code: 5, last_run_at: "2026-10-07T16:00:00.000Z" });
+  const lines = [];
+  const result = await cmdDaily(["status", manifestPath], {
+    platform: "darwin", schedulerAdapter: adapter,
+    schedulerOptions: { ...DARWIN_DEFINITION_OPTIONS, home, runnerPathUsable: () => true,
+      nodePathExists: () => true, nodeRealpath: (path) => path, nodePathStat: () => ({ isFile: () => true }), nodePathAccess() {} },
+    planDailyRefresh: async () => ({ ...basePlan, timezone_matches_machine: true, unsupported_sources: 0 }),
+    readSourceInventory: async () => ({ sources: [] }), log: (line) => lines.push(line),
+  });
+  assert.equal(result.schedule.last_result, "failed");
+  assert.ok(lines.includes("Last daily run: 2026-10-07T16:00:00.000Z"));
+  assert.ok(lines.includes("Last daily result: failed"));
+  assert.ok(lines.some((line) => line.startsWith("Next daily run: ")));
+  assert.ok(lines.includes("Last daily error: Daily process exited with code 5."));
+  assert.ok(adapter.calls.length > 0);
+});
+
+test("daily execution hashes retain the pre-observability contract", () => {
+  const mac = buildDailyRefreshDefinition(basePlan, DARWIN_DEFINITION_OPTIONS);
+  const windows = buildDailyRefreshDefinition(basePlan, WINDOWS_DEFINITION_OPTIONS);
+  assert.equal(mac.definition_hash, "sha256:fa20159bef67f028755af04241d7603c4949f1add0fec8792e908fcb7835387c");
+  assert.equal(windows.definition_hash, "sha256:7c56a91ee26964d1946a1ea03d00d9240820c7281454c9596a82aa1529998527");
+  assert.ok(mac.log_path.endsWith("daily.log"));
+  assert.ok(windows.log_path.endsWith("daily.log"));
+});
+
+test("daily status distinguishes absent, stale, interrupted, and unreadable run evidence", async () => {
+  const { appendDailyObservation, dailyObservationStatus } = await import("../operations/daily-refresh-observation.mjs");
+  const home = mkdtempSync(join(tmpdir(), "daily-evidence-states-"));
+  const options = { home, platform: "darwin", now: () => new Date("2026-10-07T16:30:00.000Z") };
+  const schedule = { enabled: true, plan_matches_registered_definition: true, registered_node_usable: true };
+  const native = { known: true, running: false, exit_code: 0, last_run_at: "2026-10-07T16:00:00.000Z" };
+  const status = (runtime = native) => dailyObservationStatus(basePlan, schedule, runtime, true, options);
+  assert.equal(status().last_result, "unknown", "native zero alone has no completion proof");
+  const row = { started_at: "2026-10-07T16:00:00.000Z", completed_at: "2026-10-07T16:01:00.000Z", result: "complete", error: null };
+  const paths = appendDailyObservation(basePlan.identity, row, options);
+  assert.equal(status().last_result, "complete", "matching completion is the green control");
+  assert.equal(status({ ...native, last_run_at: "2026-10-08T16:00:00.000Z" }).last_result, "unknown", "a later native attempt cannot reuse old success");
+  assert.equal(status({ known: false }).last_result, "unknown", "denied runtime inspection cannot report success");
+  assert.equal(status({ ...native, signal: 15 }).last_result, "failed");
+  appendDailyObservation(basePlan.identity, { ...row, result: "running", completed_at: null }, options);
+  assert.equal(status().last_result, "unknown", "an interrupted run did not complete");
+  assert.equal(status({ ...native, running: true }).last_result, "running");
+  writeFileSync(paths.log_path, "{broken journal\n");
+  assert.equal(status().last_result, "unknown");
+  assert.match(status().last_error_line, /could not be read safely/);
+});
+
+test("Mac next-run calculation uses the local calendar slot and respects pause", async () => {
+  const { dailyObservationStatus } = await import("../operations/daily-refresh-observation.mjs");
+  const home = mkdtempSync(join(tmpdir(), "daily-next-run-"));
+  const priorTimezone = process.env.TZ;
+  process.env.TZ = "UTC";
+  try {
+    const plan = { ...basePlan, timezone: "UTC" };
+    const schedule = { enabled: true, plan_matches_registered_definition: true, registered_node_usable: true };
+    const options = { home, platform: "darwin", now: () => new Date("2026-10-07T08:30:00.000Z") };
+    const today = dailyObservationStatus(plan, schedule, { known: true }, true, options);
+    assert.equal(today.next_run_at, "2026-10-07T09:00:00.000Z");
+    const tomorrow = dailyObservationStatus(plan, schedule, { known: true }, true, {
+      ...options, now: () => new Date("2026-10-07T09:00:00.000Z"),
+    });
+    assert.equal(tomorrow.next_run_at, "2026-10-08T09:00:00.000Z");
+    const paused = dailyObservationStatus(plan, { ...schedule, enabled: false }, { known: true }, true, options);
+    assert.equal(paused.next_run_at, null);
+    assert.equal(paused.next_run, "not scheduled");
+  } finally {
+    if (priorTimezone === undefined) delete process.env.TZ;
+    else process.env.TZ = priorTimezone;
+  }
+});

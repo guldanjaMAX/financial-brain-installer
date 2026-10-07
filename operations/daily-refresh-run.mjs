@@ -3,6 +3,8 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "n
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { dailyRefreshIdentity, dailyRefreshPrincipal } from "./daily-refresh-plan.mjs";
+import { observeDailyRun } from "./daily-refresh-observation.mjs";
 import { acquireBrainLifecycleLock } from "./brain-lifecycle-lock.mjs";
 import {
   buildDailyRefreshDefinition,
@@ -242,6 +244,16 @@ export async function runDailyRefreshCli(manifestPath, options = {}) {
   try { m = JSON.parse(readFileSync(path, "utf8")); } catch (error) {
     throw new Error(`the daily refresh manifest could not be read: ${error.message}`);
   }
+  if (m?.brain?.domain || m?.brain?.worker_name || m?.infrastructure?.cloudflare?.d1_database_id || m?.client?.slug) {
+    const identity = dailyRefreshIdentity(m, options.principal ?? dailyRefreshPrincipal({
+      platform: options.platform ?? process.platform, home: options.home,
+    }));
+    return observeDailyRun(identity, () => executeDailyRefreshCli(path, m, options, true), options);
+  }
+  return executeDailyRefreshCli(path, m, options, false);
+}
+
+async function executeDailyRefreshCli(path, m, options, observationStarted) {
   const brain = options.brainModule ?? await import("../brain.mjs");
   const buildPlan = options.buildPlan ?? brain.buildConfiguredDailyPlan;
   if (typeof buildPlan !== "function") throw new TypeError("the shared daily plan builder is unavailable");
@@ -255,76 +267,79 @@ export async function runDailyRefreshCli(manifestPath, options = {}) {
       : {}),
     ...(options.planOptions || {}),
   });
-  if (!plan.ready) throw new Error(plan.configuration_error || "the daily refresh plan is not ready");
-  const receiptWriter = options.writeReceipt ?? dailyReceiptWriter(plan, options);
-  const readUpdateTransaction = options.readUpdateTransaction ?? readDailyRefreshUpdateTransaction;
-  const expectedDefinitionHash = options.expectedDefinitionHash || null;
-  const scheduleAttention = [];
-  if (expectedDefinitionHash) {
-    const definitionOptions = {
-      platform: options.platform ?? process.platform,
-      ...(options.definitionOptions || {}),
-    };
-    const inspectSchedule = options.inspectSchedule ?? statusDailyRefreshSchedule;
-    const schedule = await inspectSchedule(plan, {
-      ...definitionOptions,
-      ...(options.schedulerAdapter ? { adapter: options.schedulerAdapter } : {}),
-    });
-    if (!schedule?.installed || schedule.state?.definition?.definition_hash !== expectedDefinitionHash) {
-      throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
-    }
-    if (schedule.registered_node_usable === false) {
-      const missing = schedule.registered_node_present === false;
-      const error = new Error(missing
-        ? "the registered Node binary is missing; run brain daily on <manifest> to repair the daily schedule"
-        : "the registered Node binary is not executable; run brain daily on <manifest> to repair the daily schedule");
-      error.code = missing ? "daily_schedule_node_missing" : "daily_schedule_node_unusable";
-      throw error;
-    }
-    if (schedule.plan_matches_registered_definition !== true) {
-      throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
-    }
-    const definition = buildDailyRefreshDefinition(plan, definitionOptions);
-    if (definition.definition_hash !== expectedDefinitionHash) {
-      if (schedule.node_path_changed !== true) {
+  const execute = async () => {
+    if (!plan.ready) throw new Error(plan.configuration_error || "the daily refresh plan is not ready");
+    const receiptWriter = options.writeReceipt ?? dailyReceiptWriter(plan, options);
+    const readUpdateTransaction = options.readUpdateTransaction ?? readDailyRefreshUpdateTransaction;
+    const expectedDefinitionHash = options.expectedDefinitionHash || null;
+    const scheduleAttention = [];
+    if (expectedDefinitionHash) {
+      const definitionOptions = {
+        platform: options.platform ?? process.platform,
+        ...(options.definitionOptions || {}),
+      };
+      const inspectSchedule = options.inspectSchedule ?? statusDailyRefreshSchedule;
+      const schedule = await inspectSchedule(plan, {
+        ...definitionOptions,
+        ...(options.schedulerAdapter ? { adapter: options.schedulerAdapter } : {}),
+      });
+      if (!schedule?.installed || schedule.state?.definition?.definition_hash !== expectedDefinitionHash) {
         throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
       }
-      scheduleAttention.push("daily schedule needs refresh (Node changed)");
+      if (schedule.registered_node_usable === false) {
+        const missing = schedule.registered_node_present === false;
+        const error = new Error(missing
+          ? "the registered Node binary is missing; run brain daily on <manifest> to repair the daily schedule"
+          : "the registered Node binary is not executable; run brain daily on <manifest> to repair the daily schedule");
+        error.code = missing ? "daily_schedule_node_missing" : "daily_schedule_node_unusable";
+        throw error;
+      }
+      if (schedule.plan_matches_registered_definition !== true) {
+        throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
+      }
+      const definition = buildDailyRefreshDefinition(plan, definitionOptions);
+      if (definition.definition_hash !== expectedDefinitionHash) {
+        if (schedule.node_path_changed !== true) {
+          throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
+        }
+        scheduleAttention.push("daily schedule needs refresh (Node changed)");
+      }
     }
-  }
-  const readFreshness = options.readFreshness ?? (async () => freshnessMap(await brain.cmdSources(path, {
-    flags: { json: true },
-    silent: true,
-  })));
-  const result = await runDailyRefresh({
-    plan,
-    acquireLock: options.acquireLock,
-    runSource: options.runSource ?? ((source) => brain.cmdLoad(path, {
-      flags: { only: source.run_key },
-      lifecycleLockHeld: true,
-    })),
-    readFreshness,
-    writeReceipt: receiptWriter,
-    now: options.now,
-    home: options.home,
-    platform: options.platform,
-    scheduleAttention,
-    recoveryRequired: () => Boolean(readUpdateTransaction(plan.identity, {
+    const readFreshness = options.readFreshness ?? (async () => freshnessMap(await brain.cmdSources(path, {
+      flags: { json: true },
+      silent: true,
+    })));
+    const result = await runDailyRefresh({
+      plan,
+      acquireLock: options.acquireLock,
+      runSource: options.runSource ?? ((source) => brain.cmdLoad(path, {
+        flags: { only: source.run_key },
+        lifecycleLockHeld: true,
+      })),
+      readFreshness,
+      writeReceipt: receiptWriter,
+      now: options.now,
       home: options.home,
-      manifestPath: path,
-      platform: options.platform ?? process.platform,
-      machineLockRoot: options.machineLockRoot,
-    })),
-  });
-  if (!options.silent) {
-    const log = options.log || console.log;
-    for (const attention of result.schedule_attention) log(attention);
-    log(`daily refresh ${result.status}: ${result.sources.length} source(s) attempted`);
-    for (const source of result.sources) {
-      log(`${source.source} | ${source.status} | ${source.last_successful_run_at_after || "never"}`);
+      platform: options.platform,
+      scheduleAttention,
+      recoveryRequired: () => Boolean(readUpdateTransaction(plan.identity, {
+        home: options.home,
+        manifestPath: path,
+        platform: options.platform ?? process.platform,
+        machineLockRoot: options.machineLockRoot,
+      })),
+    });
+    if (!options.silent) {
+      const log = options.log || console.log;
+      for (const attention of result.schedule_attention) log(attention);
+      log(`daily refresh ${result.status}: ${result.sources.length} source(s) attempted`);
+      for (const source of result.sources) {
+        log(`${source.source} | ${source.status} | ${source.last_successful_run_at_after || "never"}`);
+      }
     }
-  }
-  return result;
+    return result;
+  };
+  return observationStarted ? execute() : observeDailyRun(plan.identity, execute, options);
 }
 
 async function main(argv = process.argv.slice(2)) {

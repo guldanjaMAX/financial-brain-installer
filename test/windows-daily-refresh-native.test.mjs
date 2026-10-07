@@ -60,3 +60,26 @@ test("real Windows schtasks inventory and absent XML query match the production 
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("Windows daily runtime uses exact native task info and reports denied inspection", () => {
+  const calls = [];
+  let response = { status: 0, stdout: JSON.stringify({ known: true, running: false, exit_code: 5,
+    last_run_at: "2026-10-07T16:00:00.000Z", next_run_at: "2026-10-08T16:00:00.000Z" }) };
+  const adapter = createNativeDailyRefreshAdapter({ platform: "win32", home: "fixture-home",
+    environment: { SystemRoot: String.raw`C:\Windows`, UNRELATED_VALUE: "must-not-reach-child" },
+    spawn: (command, args, options) => { calls.push({ command, args, options }); return response; },
+  });
+  const identity = { id: "v1-fixture" };
+  assert.equal(adapter.runtime(identity).exit_code, 5, "a process authorization failure is retained");
+  assert.equal(calls[0].command, String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`);
+  assert.ok(calls[0].args.at(-1).includes(String.raw`-TaskPath '\Financial Brain\'`));
+  assert.ok(calls[0].args.at(-1).includes("-TaskName 'Daily v1-fixture'"));
+  assert.deepEqual(calls[0].options.env, { SystemRoot: String.raw`C:\Windows` });
+  response = { status: 5, stderr: "private native error" };
+  assert.deepEqual(adapter.runtime(identity), { known: false });
+  response = { status: 0, stdout: JSON.stringify({ known: true, running: false, exit_code: 0 }) };
+  assert.equal(adapter.runtime(identity).exit_code, 0, "the identical inspection has a green control");
+  response = { status: 0, stdout: "not JSON" };
+  assert.deepEqual(adapter.runtime(identity), { known: false });
+  assert.equal(calls.length, 4, "every outcome reached native inspection");
+});

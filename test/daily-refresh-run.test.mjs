@@ -460,3 +460,122 @@ test("runtime exhaustion reaches the decision point and defers remaining sources
   assert.deepEqual(result.sources.map((source) => source.status), ["deferred", "deferred"]);
   assert.ok(result.sources.every((source) => /runtime budget/i.test(source.reason)));
 });
+
+test("daily CLI journals successful, refused, and failed runs without raw diagnostics", async () => {
+  const { readFileSync } = await import("node:fs");
+  const home = mkdtempSync(join(tmpdir(), "daily-observation-"));
+  const manifestPath = join(home, "brain.manifest.json");
+  writeFileSync(manifestPath, "{}\n");
+  let decisions = 0;
+  const options = {
+    home, platform: "darwin", brainModule: {},
+    buildPlan: async () => ({ ...plan, manifest_path: manifestPath }),
+    now: () => new Date("2026-10-07T16:00:00.000Z"),
+    acquireLock: () => ({ assertOwned() {}, release() {} }),
+    readUpdateTransaction: () => null,
+    readFreshness: async () => ({}), writeReceipt: () => {}, silent: true,
+    runSource: async () => { decisions += 1; throw new Error("private diagnostic must not be retained"); },
+  };
+  const failed = await runDailyRefreshCli(manifestPath, options);
+  assert.equal(decisions, 1, "the failed source was actually attempted");
+  assert.equal(failed.status, "failed");
+  const logPath = join(home, ".brain", "logs", plan.identity.id, "daily.log");
+  let rows = readFileSync(logPath, "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(rows.at(-1).result, "failed");
+  assert.equal(rows.at(-1).started_at, "2026-10-07T16:00:00.000Z");
+  assert.doesNotMatch(JSON.stringify(rows), /private diagnostic|google_drive|fixtures/);
+  let reads = 0;
+  const complete = await runDailyRefreshCli(manifestPath, {
+    ...options,
+    runSource: async () => { decisions += 1; },
+    readFreshness: async () => ({ drive: { last_successful_run_at: ++reads === 1
+      ? "2026-10-06T16:00:00.000Z" : "2026-10-07T16:00:00.000Z" } }),
+  });
+  assert.equal(complete.status, "complete", "the same CLI path has a green control");
+  assert.equal(decisions, 2);
+  let authorizationReads = 0;
+  await assert.rejects(runDailyRefreshCli(manifestPath, {
+    ...options, expectedDefinitionHash: "sha256:expected",
+    inspectSchedule: () => { authorizationReads += 1; throw new Error("authorization denied"); },
+  }), /authorization denied/);
+  assert.equal(authorizationReads, 1, "the refusal reached schedule authorization");
+  rows = readFileSync(logPath, "utf8").trim().split("\n").map(JSON.parse);
+  assert.deepEqual(rows.filter((row) => row.result !== "running").map((row) => row.result), ["failed", "complete", "failed"]);
+  assert.equal(rows.at(-1).error, "Daily refresh failed before completion. Inspect the schedule and source authorization.");
+});
+
+test("daily logs rotate at a fixed bound, stay private, and refuse links or failed ACLs", async () => {
+  const fs = await import("node:fs");
+  const { appendDailyObservation, readDailyObservation, DAILY_LOG_MAX_BYTES } = await import("../operations/daily-refresh-observation.mjs");
+  const home = mkdtempSync(join(tmpdir(), "daily-log-retention-"));
+  const identity = { id: "v1-fixture" };
+  const row = { started_at: "2026-10-07T16:00:00.000Z", completed_at: "2026-10-07T16:01:00.000Z", result: "complete", error: null };
+  let paths;
+  for (let i = 0; i < 600; i += 1) paths = appendDailyObservation(identity, row, { home, platform: "darwin" });
+  assert.ok(fs.statSync(paths.history_path).size > 0, "the rotation threshold was reached");
+  for (const path of [paths.log_path, paths.history_path]) {
+    assert.ok(fs.statSync(path).size <= DAILY_LOG_MAX_BYTES);
+    if (process.platform !== "win32") assert.equal(fs.statSync(path).mode & 0o777, 0o600);
+  }
+  if (process.platform !== "win32") assert.equal(fs.statSync(paths.directory).mode & 0o777, 0o700);
+  assert.equal(readDailyObservation(identity, { home }).record.result, "complete");
+  fs.renameSync(paths.log_path, join(home, "retained.log"));
+  fs.linkSync(join(home, "retained.log"), paths.log_path);
+  assert.throws(() => appendDailyObservation(identity, row, { home }), /regular unlinked/);
+  assert.equal(readDailyObservation(identity, { home }).unreadable, true);
+  let aclCalls = 0;
+  const windowsHome = mkdtempSync(join(tmpdir(), "daily-log-acl-"));
+  const options = { home: windowsHome, platform: "win32", username: "fixture", environment: { SystemRoot: String.raw`C:\Windows` },
+    runAcl: () => { aclCalls += 1; return { status: 5 }; } };
+  assert.throws(() => appendDailyObservation(identity, row, options), /could not restrict/);
+  assert.equal(aclCalls, 1, "the denied ACL reached the permissions boundary before writing");
+  assert.equal(fs.existsSync(join(windowsHome, ".brain", "logs", identity.id, "daily.log")), false);
+  appendDailyObservation(identity, row, { ...options, runAcl: () => { aclCalls += 1; return { status: 0 }; } });
+  assert.equal(aclCalls, 3, "the green control restricts both directory and file");
+});
+
+test("daily CLI records a planner authorization failure before source execution", async () => {
+  const { readDailyObservation } = await import("../operations/daily-refresh-observation.mjs");
+  const { dailyRefreshIdentity } = await import("../operations/daily-refresh-plan.mjs");
+  const home = mkdtempSync(join(tmpdir(), "daily-plan-log-"));
+  const manifestPath = join(home, "brain.manifest.json");
+  const manifest = { client: { slug: "fixture" }, brain: { domain: "brain.example.invalid" } };
+  writeFileSync(manifestPath, JSON.stringify(manifest));
+  let planned = 0;
+  const options = { home, platform: "darwin", principal: "uid:501", brainModule: {}, silent: true,
+    buildPlan: async () => { planned += 1; throw new Error("authorization denied"); } };
+  await assert.rejects(runDailyRefreshCli(manifestPath, options), /authorization denied/);
+  assert.equal(planned, 1);
+  const identity = dailyRefreshIdentity(manifest, options.principal);
+  assert.equal(readDailyObservation(identity, { home }).record?.result, "failed");
+  await runDailyRefreshCli(manifestPath, { ...options,
+    buildPlan: async () => ({ ...plan, identity, sources: [], manifest_path: manifestPath }),
+    acquireLock: () => ({ assertOwned() {}, release() {} }),
+    readUpdateTransaction: () => null, readFreshness: async () => ({}), runSource: async () => {}, writeReceipt: () => {},
+  });
+  assert.equal(readDailyObservation(identity, { home }).record.result, "complete");
+});
+
+test("daily log append refuses a live writer and recovers a proven dead writer", async () => {
+  const fs = await import("node:fs");
+  const { appendDailyObservation } = await import("../operations/daily-refresh-observation.mjs");
+  const home = mkdtempSync(join(tmpdir(), "daily-log-lock-"));
+  const identity = { id: "v1-fixture" };
+  const row = { started_at: "2026-10-07T16:00:00.000Z", completed_at: "2026-10-07T16:01:00.000Z", result: "complete", error: null };
+  const paths = appendDailyObservation(identity, row, { home, platform: "darwin" });
+  const before = fs.readFileSync(paths.log_path, "utf8");
+  const lockPath = join(paths.directory, "daily.lock");
+  fs.writeFileSync(lockPath, `${process.pid}\n`, { mode: 0o600 });
+  let inspected = 0;
+  assert.throws(() => appendDailyObservation(identity, row, { home, platform: "darwin",
+    processAlive: (pid) => { inspected += 1; assert.equal(pid, process.pid); return true; },
+  }), /another writer/);
+  assert.equal(inspected, 1, "the live holder was checked before refusal");
+  assert.equal(fs.readFileSync(paths.log_path, "utf8"), before);
+  appendDailyObservation(identity, row, { home, platform: "darwin",
+    processAlive: (pid) => { inspected += 1; assert.equal(pid, process.pid); return false; },
+  });
+  assert.equal(inspected, 2, "the dead-writer control reached the same decision");
+  assert.equal(fs.readFileSync(paths.log_path, "utf8"), before + before);
+  assert.equal(fs.existsSync(lockPath), false);
+});

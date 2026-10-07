@@ -70,6 +70,7 @@ import {
 } from "./worker/src/lib/store-d1.js";
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
 import { withBrainLifecycleLock, withBrainLifecycleLockWait } from "./operations/brain-lifecycle-lock.mjs";
+import { renderDailyObservation } from "./operations/daily-refresh-observation.mjs";
 import { planDailyRefresh } from "./operations/daily-refresh-plan.mjs";
 import {
   clearDailyRefreshUpdateTransaction,
@@ -26720,6 +26721,7 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
     else if (!schedule.enabled) warn("Daily imports are installed but paused.");
     else if (!schedule.verified) warn("Daily imports are installed, but their definition no longer matches this manifest.");
     else ok("Daily imports are on and match this manifest.");
+    if (action === "status") renderDailyObservation(schedule, options.log || console.log);
     renderDailyFreshnessRows(sources, options.log || console.log);
   }
   return result;
