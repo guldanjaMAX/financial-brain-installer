@@ -232,7 +232,19 @@ supported yet, before rather than after.
 `verify` and `provision` are safe to re-run. Migration execution itself is
 restart-safe after every independently committed statement, but a live D1
 install must use `brain update` whenever the pending migration changes the
-Vectorize writer protocol. Provision adopts existing resources rather than
+Vectorize writer protocol. Before dispatching an ADD COLUMN, migration writes
+and flushes local intent under `~/.brain/migration-intents/`, keyed by the exact
+account/database identity digest, migration checksum and statement digest.
+These files contain no SQL, credentials or corpus content. Keep them across
+restarts: an unresolved intent permits only exact-schema inspection and bounded
+polling, even when the column is still absent. Only exact verification or
+authoritative transport evidence of non-delivery clears the intent. A corrupt
+intent fails closed for installer review. Successful ALTER replies also require
+exact schema readback before the migration receipt is written. This local
+protection follows the same computer and retained state; it does not coordinate
+another computer or recover intent files that were removed. A crash after
+intent but before delivery can require installer review rather than an automatic
+resend. Provision adopts existing resources rather than
 duplicating them, and **refuses** to adopt a Vectorize index with the wrong
 dimensions or metric rather than silently writing vectors that would be
 rejected or mis-ranked.
@@ -696,7 +708,9 @@ nonblocking per-source owner lease under `~/.brain/locks` before it reads
 credentials or contacts a service. Direct commands, provenance repair,
 scheduled children, and `brain load` therefore cannot write the same adjacent
 resume state concurrently on macOS, Windows, or Linux. The owner record is
-private, heartbeated, and recoverable after a stale dead process; `--dry-run`
+private and heartbeated. Recovery requires matching recorded host/user digests
+and a proven-dead PID, without an age delay. Legacy, malformed, ownerless,
+foreign, and live records remain protected; `--dry-run`
 remains concurrent because it writes neither resume state nor source receipts.
 Manifest-file symlinks resolve to the target's adjacent state identity. A
 manifest with multiple hard links is refused with a path-free safety error,
@@ -759,6 +773,20 @@ message is a false statement about a folder that was in fact identified.
 **The connector has never been run against a real mailbox**;
 `test/imap-connector.test.mjs` drives it against a scripted IMAP server on a
 plain TCP socket, which does not exercise TLS.
+
+Provider data requests get one renewal and one retry after HTTP 401, including
+when the cached access-token expiry is still in the future. A repeated 401
+requires reconnect and cannot enter the transport retry loop. Renewal rereads
+the record under its credential lease, so concurrent calls use the replacement
+already saved by the winner. Non-rotating refresh responses retain the existing
+refresh token; QuickBooks requires a replacement refresh token.
+
+Refresh persistence first writes the newest record with a reconnect fence and
+then clears that fence after exact readback. A failure after replacement retains
+the newest token. An interrupted request with no durable response remains fenced
+because its provider outcome cannot be proven. The lane tests inject providers
+through connect and import entry points, exercise file and Keychain write faults,
+and abruptly exit fixture processes; they do not certify native provider behavior.
 
 **The client registers their own Google OAuth client, and we never hold it.**
 Not only a custody preference: every Drive and Gmail read scope is *restricted*,
@@ -1097,6 +1125,50 @@ unbounded native stdout/stderr. No native launch argument, execution contract,
 or definition hash changes, so existing owned schedules gain logging when the
 runner is updated, without a definition migration or a false plan-change
 refusal. Logs remain available after daily scheduling is turned off.
+
+Windows update separately inventories temporary tasks whose full names match
+`\Financial Brain\daily-refresh-[0-9a-f]{16}`. It obtains the current SID from
+`%SystemRoot%\System32\whoami.exe` and reads each task with the absolute
+`%SystemRoot%\System32\schtasks.exe` path. Binding requires the exact legacy name:
+the first 16 lowercase SHA-256 hex characters over three concatenated UTF-8
+netstrings (`daily-refresh-v1`, canonical Brain domain, current SID). Each
+netstring uses decimal UTF-8 byte length, colon, bytes, comma. This is separate
+from the permanent scheduler's identity. The prose producer did not specify
+normalization, so automatic binding accepts only an already canonical lowercase
+ASCII hostname. Other spellings require explicit repair, not guessed aliases.
+
+Matching names and principals alone are insufficient. A single PowerShell
+EncodedCommand must decode to a complete literal `brain load <exact manifest>
+--only <source CSV>` invocation. Quoted constant arguments and an absolute
+`brain.cmd` or `brain.exe` invocation are accepted; comments, dynamic expressions,
+additional commands and opaque programs are refused. This deliberately does not
+interpret an arbitrary prose-generated PowerShell program or trust an old receipt
+with unspecified serialization. Its owner must repair such a task explicitly.
+Another Brain's task is left untouched; a differently named task whose decoded
+action mentions this manifest or domain also requires repair before update.
+
+Before native disable, the update journal records task name, principal, prior
+enabled state, time, action-recognition booleans, a binding fingerprint and an
+immutable definition fingerprint. The fingerprints bind domain, exact manifest
+path, exact task name and SID; the definition excludes only Settings/Enabled,
+retaining trigger enablement and every other definition byte. Raw definitions
+and decoded actions are never persisted. Recovery validates the saved fingerprints
+against every native read, including after restart and before enable or delete.
+A missing legacy fingerprint or any mismatch refuses mutation rather than
+adopting the current definition. Exact disabled readback gates deployment. A failed update restores only
+recorded bridges that were previously enabled, with readback, and preserves
+recovery when restoration fails. After success and permanent daily readback,
+only those recorded bridges may be deleted. Already-disabled bridges are never
+enabled or deleted. Other task names and other users' tasks are counted without
+printing their identities. Native inspection or disable failures refuse update.
+Completed bridge receipts remain in the private daily-update history after the
+active recovery fence is cleared, so an owner can later approve `daily on`.
+A successful update with daily imports off leaves the bridges disabled and
+prints that instruction. As with permanent tasks, Task Scheduler offers no
+atomic compare-and-change/delete primitive; the final definition read is kept
+adjacent to mutation. Disabling prevents future triggers, but does not prove an
+already-running bridge process has exited; that needs native host evidence.
+
 
 Status joins contract-v3 `brain sources --json` receipts to local ownership and
 prints one stable line per manifest source:

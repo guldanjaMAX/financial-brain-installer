@@ -1,14 +1,8 @@
 /**
- * Keep the field recovery liveness signal strict unless the test is running on
- * a hosted macOS CI runner, where shared-runner variance needs extra margin.
+ * Local wall time includes host scheduling and is not a D1 cost measurement.
+ * Query shape, statement size, exact rows and memory growth carry the cost
+ * proof. Keep a generous finite ceiling solely to detect lost liveness.
  */
-export function fieldRecoveryMsBound({ platform = process.platform, env = process.env } = {}) {
-  const runnerEnvironment = env.RUNNER_ENVIRONMENT;
-  const githubHosted = runnerEnvironment === "github-hosted"
-    || (
-      runnerEnvironment === undefined
-      && env.GITHUB_ACTIONS === "true"
-      && env.RUNNER_OS === "macOS"
-    );
-  return platform === "darwin" && githubHosted ? 5_000 : 3_000;
+export function fieldRecoveryMsBound() {
+  return 30_000;
 }

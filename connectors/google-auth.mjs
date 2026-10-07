@@ -233,7 +233,7 @@ export async function authorize({ clientId, clientSecret, scopes, port = DEFAULT
 
     setTimeout(() => {
       server.close();
-      reject(new Error("timed out waiting for the browser to complete sign-in"));
+      reject(Object.assign(new Error("timed out waiting for the browser to complete sign-in"), { code: "callback_timeout" }));
     }, timeoutMs).unref();
   });
 
@@ -843,7 +843,8 @@ function syncTokenDirectory(path, platform, options, phase, required = true) {
   return false;
 }
 
-/** Stage, verify, atomically replace, verify again, and roll back on failure. */
+/** Stage and verify before replacement. Ordinary edits roll back on failure;
+ * an externally rotated credential must retain its fenced replacement. */
 function writeFileStore(path, store, options = {}) {
   const platform = options.platform || process.platform;
   validateTokenDirectory(path, platform, options, { prepare: true });
@@ -931,6 +932,15 @@ function writeFileStore(path, store, options = {}) {
       if (stagedIdentity) removeIfSame(temporary, stagedIdentity);
       if (backupIdentity) removeIfSame(backup, backupIdentity);
       throw error;
+    }
+
+    if (options.preserveReplacementOnFailure === true) {
+      // The provider may have consumed the previous refresh token already.
+      // The caller includes a reconnect fence in this replacement, so keeping
+      // it is safe even when readback fails. Never resurrect the backup.
+      if (backupIdentity) removeIfSame(backup, backupIdentity);
+      syncTokenDirectory(path, platform, options, "retained replacement", false);
+      throw new Error("the newest credential replacement was retained but could not be verified");
     }
 
     let restored = false;
@@ -1160,8 +1170,10 @@ function writeKeychainStore(options = {}, store) {
     }
     // The short manifest is the atomic switch. Until it verifies, the prior
     // generation remains the active complete record.
-    writeKeychainValue(options, account, manifestValue);
     switched = true;
+    // The helper writes before its own readback. Treat even a helper readback
+    // failure as a possible descriptor switch, not as uncommitted staging.
+    writeKeychainValue(options, account, manifestValue);
 
   // Do not remove a legacy file until the exact object can be read back. This
   // turns migration into a verified move rather than a hopeful copy-and-delete.
@@ -1170,6 +1182,11 @@ function writeKeychainStore(options = {}, store) {
       throw new Error("macOS Keychain verification failed; the existing token file was left untouched");
     }
   } catch (error) {
+    if (switched && options.preserveReplacementOnFailure === true) {
+      // Keep the active descriptor and all of its parts. The fenced new
+      // generation may contain the only refresh token the provider accepts.
+      throw new Error("the newest credential replacement was retained but could not be verified");
+    }
     if (switched) {
       try {
         if (previousRaw !== null) writeKeychainValue(options, account, previousRaw);

@@ -262,3 +262,14 @@ test("an unregistered workers.dev subdomain explains how to register one and rer
   error.code = "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED";
   assert.equal(supportErrorCode(error, { command: "setup" }), "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED");
 });
+
+
+test("callback timeout recovery is distinct from connectivity and installer defects", () => {
+  const error = Object.assign(new Error("fixture"), { supportCode: "OAUTH_SIGN_IN_TIMEOUT" });
+  assert.equal(supportErrorCode(error, { command: "connect" }), "OAUTH_SIGN_IN_TIMEOUT");
+  const guide = supportRecovery("OAUTH_SIGN_IN_TIMEOUT");
+  assert.equal(guide.retry, "safe_now");
+  assert.match(guide.protection, /Nothing changed/);
+  assert.match(guide.next_steps.join(" "), /same command again/);
+  assert.equal(supportErrorCode(new Error("fixture"), { unexpected: true }), "INTERNAL_ERROR");
+});

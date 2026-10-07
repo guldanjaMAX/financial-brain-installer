@@ -706,3 +706,85 @@ for (const arm of [
     assert.equal(result.sources[0].freshness_advanced, arm.expected !== "failed");
   });
 }
+
+for (const platform of ["darwin", "win32"]) {
+  for (const status of ["complete", "partial", "failed", "unexpected"]) {
+    test(`${platform} daily observation preserves ${status} without inventing a source failure`, async () => {
+      const { observeDailyRun, readDailyObservation, dailyObservationStatus, renderDailyObservation } =
+        await import("../operations/daily-refresh-observation.mjs");
+      const home = mkdtempSync(join(tmpdir(), "daily-result-"));
+      let runs = 0;
+      let aclCalls = 0;
+      const now = () => new Date("2026-10-07T16:00:00.000Z");
+      const options = { home, platform, now, username: "fixture",
+        environment: { SystemRoot: String.raw`C:\Windows` },
+        runAcl: () => { aclCalls += 1; return { status: 0 }; } };
+      const receipt = { status };
+      const result = await observeDailyRun(plan.identity, async () => { runs += 1; return receipt; }, options);
+      assert.equal(runs, 1, "the runner reached the outcome decision");
+      assert.equal(result, receipt, "observation preserves the runner receipt");
+      if (platform === "win32") assert.equal(aclCalls, 4, "both journal writes reached directory and file ACLs");
+      const observed = readDailyObservation(plan.identity, options);
+      const expected = status === "unexpected" ? "failed" : status;
+      assert.equal(observed.record.result, expected, "writer and reader agree on the outcome");
+      assert.equal(observed.record.completed_at, now().toISOString());
+      const schedule = dailyObservationStatus(plan, { enabled: false }, { known: true, exit_code: 0 }, true, options);
+      assert.equal(schedule.last_result, expected, "status preserves the journal outcome");
+      const lines = [];
+      renderDailyObservation(schedule, (line) => lines.push(line));
+      if (["complete", "partial"].includes(status)) {
+        assert.equal(observed.record.error, null, "coverage omissions are not a process failure");
+        assert.equal(schedule.last_error_line, null);
+        assert.ok(lines.includes("Last daily error: none recorded"));
+      } else {
+        assert.equal(observed.record.error, "One or more daily sources failed or did not prove freshness.");
+        assert.ok(lines.includes(`Last daily error: ${observed.record.error}`));
+      }
+      assert.ok(lines.includes(`Last daily result: ${status === "partial" ? "partial (coverage omissions)" : expected}`));
+      const failedProcess = dailyObservationStatus(plan, { enabled: false }, { known: true, exit_code: 5 }, true, options);
+      assert.equal(failedProcess.last_result, "failed", "a native process failure still overrides any journal result");
+      assert.equal(failedProcess.last_error_line, "Daily process exited with code 5.");
+    });
+  }
+}
+
+for (const status of ["complete", "partial", "failed"]) {
+  test(`daily journal preserves the production receipt for ${status} source coverage`, async () => {
+    const { observeDailyRun, readDailyObservation } = await import("../operations/daily-refresh-observation.mjs");
+    const before = "2026-10-06T12:00:00.000Z";
+    const after = "2026-10-07T12:00:00.000Z";
+    const plan = {
+      ready: true, enabled: true, identity: { id: "v1-composed" }, manifest_path: "/fixtures/brain.manifest.json",
+      sources: [{ key: "folder", class: "machine-pull", owner: "daily-task", status: "ready",
+        run_key: "folder", source_names: ["folder"] }],
+    };
+    const home = mkdtempSync(join(tmpdir(), "observation-combined-"));
+    const options = { home, platform: "darwin", now: () => new Date(after) };
+    let readCalls = 0;
+    let runCalls = 0;
+    let writes = 0;
+    const result = await observeDailyRun(plan.identity, () => runDailyRefresh({
+      plan, acquireLock: () => ({ assertOwned() {}, release() {} }), now: options.now,
+      runSource: async () => { runCalls += 1; return { status: "complete", partial: status === "partial" ? 1 : 0 }; },
+      readFreshness: async () => ({ folder: {
+        last_successful_run_at: readCalls++ === 0 ? before : status === "failed" ? before : after,
+        latest_run: { outcome: status === "complete" ? "completed" : status,
+          docs_added: 1, docs_updated: 0, docs_unchanged: 0,
+          docs_refused: status === "partial" ? 3 : 0, docs_failed: status === "failed" ? 1 : 0 },
+      } }),
+      writeReceipt: () => { writes += 1; }, home, platform: "darwin",
+    }), options);
+    assert.equal(runCalls, 1, "the production source execution was reached");
+    assert.equal(readCalls, 2, "freshness was checked before and after execution");
+    assert.equal(writes, 2, "both source and aggregate receipts were written");
+    if (status === "partial") {
+      assert.equal(result.sources[0].freshness_advanced, true, "omissions accompany verified advancing freshness");
+      assert.equal(result.status, result.sources[0].status, "aggregate retains the source outcome");
+    }
+    assert.equal(result.status, status, "production freshness decision reached expected outcome");
+    const observed = readDailyObservation(plan.identity, options);
+    assert.equal(observed.record.result, result.status, "process log must preserve the production receipt outcome");
+    if (status !== "failed") assert.equal(observed.record.error, null);
+    else assert.equal(observed.record.error, "One or more daily sources failed or did not prove freshness.");
+  });
+}

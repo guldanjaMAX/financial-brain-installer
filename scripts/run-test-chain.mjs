@@ -14,6 +14,8 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
   "node test/migration-slow-apply.test.mjs",
+  "node --test test/oauth-lock-recovery.test.mjs",
+  "node --test test/doctor-cli-isolation.test.mjs",
   "node --test test/daily-refresh-plan.test.mjs",
   "node --test test/brain-lifecycle-lock.test.mjs",
   "node --test test/daily-refresh-scheduler.test.mjs",
@@ -192,6 +194,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node test/cli-success-exit.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
+  "node --test test/oauth-lock-recovery.test.mjs",
   "node test/test-chain-complete.test.mjs",
   "node test/test-chain-runner.test.mjs",
   "node --test test/daily-refresh-plan.test.mjs",
@@ -360,6 +363,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/report-deploy-exit.test.mjs",
   "node test/cli-success-exit.test.mjs",
   "node test/errors.test.mjs",
+  "node --test test/doctor-cli-isolation.test.mjs",
   "node test/doctor.test.mjs",
   "node --test test/drain-cron-default.test.mjs",
   "node --no-warnings test/bank-feed-secrets.test.mjs",

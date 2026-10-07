@@ -404,9 +404,10 @@ and released in `finally`.
 Direct commands, scheduled children, and `brain load` enter the same writer
 boundary exactly once. Legacy provenance repair apply is disabled before this
 boundary; any future repair executor must enter it. Its private owner token and heartbeat
-allow a stale dead process to be recovered without letting an old timestamp
-evict a live long-running sync. Dry runs do not take the lease because they
-write no state or source receipt.
+allow an interrupted process to be recovered immediately only after the recorded
+host/user digests match and the operating system proves its PID is gone. Age
+alone cannot evict a live process, legacy record, or ownerless directory. Dry
+runs do not take the lease because they write no state or source receipt.
 Manifest-file symlinks resolve to the target before the state identity is
 derived. A multiply hard-linked manifest is rejected before the runtime lock,
 credentials, or network because it has no portable single adjacent state path.
@@ -994,6 +995,23 @@ Google OAuth uses Keychain by default on macOS and a protected file under
 `~/.brain/` on other supported paths. Scheduler logs and locks also live under
 the private per-user `.brain` directory. These files are runtime evidence, not
 repository fixtures.
+
+Local provider renewal is serialized by the provider credential lock and rereads
+custody after acquiring that lock. A data HTTP 401 forces renewal even before
+access-token expiry, then permits exactly one replay. A second 401 fences that
+record for reconnect; it cannot become a generic HTTP transport retry. Concurrent
+401 responses share a replacement when their rejected access token is no longer
+current. Only bearer-authenticated connector requests use this path; the token
+endpoint and unauthenticated downloads do not.
+
+Before a refresh request, a durable outcome-unknown fence prevents replay if the
+process exits before its response is durable. A returned token is atomically
+saved with a verification-required fence before the fence is cleared in a second
+verified transaction. The first replacement cannot roll back to the consumed
+refresh token. The second transaction can roll back only to the already saved
+newest fenced record. File storage and Keychain generation switches obey the
+same rule. Native crash and power-loss behavior still needs host evidence; a
+provider response lost before local persistence requires reconnect.
 
 Source content travels from the owner's source through their machine to their
 Worker and storage in their Cloudflare account. The installer operator does not

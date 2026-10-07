@@ -1035,15 +1035,17 @@ const fixture = () => {
     );
     check("a recent malformed owner fails closed", existsSync(ownerPath));
     utimesSync(ownerPath, OLD, OLD);
-    const recovered = acquireSourceIngestLock({
-      manifestPath: f.manifestPath,
-      sourceName: "gmail",
-      home: f.home,
-      isOwnerAlive: () => false,
-    });
-    check("a private correctly named malformed owner recovers only when stale and dead",
-      recovered.assertOwned() === true);
-    recovered.release();
+    assert.throws(
+      () => acquireSourceIngestLock({
+        manifestPath: f.manifestPath, sourceName: "gmail", home: f.home,
+        isOwnerAlive: () => false,
+      }),
+      (error) => error.code === "source_ingest_lock_unsafe",
+    );
+    check("a malformed owner remains protected even when old and apparently dead", existsSync(ownerPath));
+    // A malformed record cannot supply host/user proof. The valid-owner
+    // recovery and killed-child cases below are the positive controls.
+
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
@@ -1128,9 +1130,12 @@ const fixture = () => {
     );
     check("a newly created ownerless directory is treated as an initializing live lock", existsSync(path));
     utimesSync(path, OLD, OLD);
-    const recovered = acquireSourceIngestLock({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home });
-    check("an old empty crash residue can be recovered", recovered.assertOwned() === true);
-    recovered.release();
+    assert.throws(
+      () => acquireSourceIngestLock({ manifestPath: f.manifestPath, sourceName: "gmail", home: f.home }),
+      (error) => error.code === "source_ingest_already_running",
+    );
+    check("an old ownerless directory remains protected without process identity", existsSync(path));
+
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

@@ -13,6 +13,16 @@ the brain, not for whoever built it: what changed for them, and what to check.
   do not claim complete history. Check daily status for the latest
   outcome and count; real failures still keep the prior success date.
 
+- Provider sign-in timeouts now explain that nothing changed in the Brain and no
+  new connection was saved. Run the same command again to finish sign-in.
+  Interrupted source operations recover their lock only after matching this computer and user and
+  proving the prior process has stopped. Recovery is reported; uncertain locks
+  remain protected.
+- Provider imports renew a rejected access token once and retry the request once.
+  A second rejection asks you to sign in again. Interrupted or unverified token
+  renewal keeps the connection paused for reconnect; a replacement that has
+  already been saved never restores an older, consumed refresh token.
+
 Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
 asset publication.
@@ -29,6 +39,9 @@ write a response.
   15 minutes before continuing. It never resends that column change while
   checking. If the checks cannot reach Cloudflare, the message names the
   connection problem and explains how to check the column before retrying.
+  After an interruption, rerun the update on the same computer. Its saved
+  recovery record keeps an unconfirmed column change from being sent again;
+  the update continues only after checking the exact column definition.
 - **Drain progress no longer looks like a receipt failure.** Accepted vectors
   can wait for index visibility while the queue reports only a lower bound.
   The command now keeps those counts distinct and shows visibility waits.
@@ -78,6 +91,14 @@ write a response.
   Status also prints one line per source with its owner and last successful run. To
   check after updating: run `brain daily status <manifest>` and confirm every
   source names the expected owner and a truthful last-success time or `never`.
+
+- **Windows updates coordinate temporary daily tasks.** Update pauses the old
+  daily tasks belonging to your Windows user and verifies the pause before
+  deployment. It removes only the tasks it paused, after the permanent daily
+  task is verified. If daily imports are off, the old task stays paused and
+  update tells you to run `brain daily on <manifest>`. A failed update attempts
+  to restore the old tasks and reports any restore failure. After updating,
+  check `brain daily status <manifest>` for the permanent schedule.
 
 - **You can now give your Brain up to six safe local landing folders.** Add an
   existing folder with `brain folder <manifest> add --path <absolute> --source

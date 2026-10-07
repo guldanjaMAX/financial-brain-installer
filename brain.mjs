@@ -71,6 +71,8 @@ import {
 import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrapping-key.mjs";
 import { withBrainLifecycleLock, withBrainLifecycleLockWait } from "./operations/brain-lifecycle-lock.mjs";
 import { renderDailyObservation } from "./operations/daily-refresh-observation.mjs";
+import { createMigrationStatementIntentStore } from "./operations/migration-statement-intent.mjs";
+import { createWindowsUpdateBridgeGuard } from "./operations/windows-update-bridge.mjs";
 import { planDailyRefresh } from "./operations/daily-refresh-plan.mjs";
 import {
   clearDailyRefreshUpdateTransaction,
@@ -4892,6 +4894,9 @@ function uncertainMigrationStatementMessage(index, total, migrationName) {
  * runner proves the existing column's complete declared contract before
  * treating that exact statement as already applied. All other statements in
  * restart-sensitive migrations must themselves be idempotent.
+ * cmdMigrate supplies durable statement intent; callers with injected database
+ * adapters can supply their own store. An unresolved claim never grants resend
+ * authority, including when the previous process died before its first reply.
  */
 export async function runRestartSafeMigrationStatements(
   statements,
@@ -4906,6 +4911,7 @@ export async function runRestartSafeMigrationStatements(
     now = () => Date.now(),
     log = () => {},
     maxPollIterations = Number.POSITIVE_INFINITY,
+    statementIntent = null,
   } = {},
 ) {
   if (!Array.isArray(statements) || typeof queryStatement !== "function" ||
@@ -4982,16 +4988,25 @@ export async function runRestartSafeMigrationStatements(
     const descriptor = addedColumnDescriptor(statement);
     let skipped = false;
     let recoveredAfterSlowApply = false;
+    // A previous process may have died after delivery but before any reply.
+    // Absence from a read is not evidence of non-delivery of that prior write.
+    const unresolvedIntent = descriptor && statementIntent?.has(statement);
     if (descriptor) {
       try {
         skipped = await inspectAddedColumn(inspectStatement, descriptor);
       } catch (error) {
         const kind = migrationFailureKind(error);
-        if (!["transient", "duplicate"].includes(kind)) throw error;
-        const result = await waitForColumnInventory(descriptor, error, { returnWhenAbsent: true });
+        if (!["transient", "duplicate", ...(unresolvedIntent ? ["unreachable"] : [])].includes(kind)) throw error;
+        const result = await waitForColumnInventory(descriptor, error, { returnWhenAbsent: !unresolvedIntent });
         skipped = result === "present";
         recoveredAfterSlowApply = skipped;
       }
+    }
+    if (descriptor && !skipped && statementIntent &&
+        (unresolvedIntent || !statementIntent.claim(statement))) {
+      await waitForColumnInventory(descriptor, null, { returnWhenAbsent: false });
+      skipped = true;
+      recoveredAfterSlowApply = true;
     }
     if (!skipped) {
       try {
@@ -5006,12 +5021,27 @@ export async function runRestartSafeMigrationStatements(
           }
           throw error;
         }
-        if (["definitive", "unreachable"].includes(kind)) throw error;
+        if (["definitive", "unreachable"].includes(kind)) {
+          // Only transport proof of non-delivery permits a future dispatch.
+          // Unknown/SQL failures retain intent for exact-schema recovery.
+          if (kind === "unreachable") statementIntent?.clear(statement);
+          throw error;
+        }
 
         const result = await waitForColumnInventory(descriptor, error, { returnWhenAbsent: false });
         skipped = result === "present";
         recoveredAfterSlowApply = skipped;
       }
+    }
+    if (descriptor && statementIntent) {
+      if (!skipped && !await inspectAddedColumn(inspectStatement, descriptor)) {
+        throw migrationStillApplyingError(
+          `Migration column ${descriptor.table}.${descriptor.column} is absent after a successful reply. ` +
+          "Its intent remains unresolved and no migration receipt was written. " +
+          renderCliCommands("Run brain update again to check its exact schema before continuing."),
+        );
+      }
+      statementIntent.clear(statement);
     }
     if (afterStatement) {
       await afterStatement({
@@ -5177,6 +5207,10 @@ export async function cmdMigrate(manifestPath, options = {}) {
       {
         ...migrationPoll,
         migrationName: mig.name,
+        statementIntent: createMigrationStatementIntentStore({
+          accountId: acct.id, databaseId: dbId, migrationChecksum: mig.checksum,
+          directory: options.migrationIntentDirectory,
+        }),
         inspectStatement: (statement) => queryDatabase(acct.id, dbId, statement),
         log: migrationPoll.log ?? (silent ? () => {} : info),
       },
@@ -12401,6 +12435,7 @@ async function cmdIngest(manifestPath, options = {}) {
 function sourceIngestLockRuntimeOptions(options = {}) {
   const configured = options.sourceIngestLockOptions || {};
   return {
+    onRecovered: configured.onRecovered ?? (() => info("Recovered an interrupted source operation after verifying its process had stopped on this computer.")),
     ...(Object.hasOwn(configured, "home") ? { home: configured.home } : {}),
     ...(Object.hasOwn(configured, "platform") ? { platform: configured.platform } : {}),
   };
@@ -19198,7 +19233,7 @@ export async function cmdConnect(target, options = {}) {
     );
   }
   if (which === "imap") return cmdConnectImap(manifestPath, flags);
-  if (PROVIDER_CONNECTOR_IDS.includes(which)) return cmdConnectProvider(which, manifestPath, flags);
+  if (PROVIDER_CONNECTOR_IDS.includes(which)) return cmdConnectProvider(which, manifestPath, flags, options.providerOptions || {});
   if (which !== "google") {
     die(
       "brain connect supports bank, custom-api, google, imap, imessage, whatsapp, zoom, quickbooks, slack, notion, microsoft, dropbox and hubspot.\n" +
@@ -19225,6 +19260,9 @@ export async function cmdConnect(target, options = {}) {
     );
   } catch (error) {
     if (error instanceof SourceIngestLockError) die(error.message);
+    if (error?.code === "callback_timeout") {
+      dieWithSupportCode("The provider sign-in timed out. Nothing changed in your Brain and no new connection was saved. Run the same command again and complete sign-in.", "OAUTH_SIGN_IN_TIMEOUT");
+    }
     throw error;
   }
 }
@@ -29997,6 +30035,11 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     let manageDailyDefinition = false;
     let manageAnyLocalSchedule = false;
     let legacySnapshots = [];
+    let bridgeGuard = null;
+    let bridgeInventory = null;
+    let bridgeSnapshots = [];
+    let upgradeResult;
+    try {
     const beforeUpdateManifest = loadManifest(pin.target).m;
     const dailyPlatform = options.dailyRefreshOptions?.platform ?? process.platform;
     const dailyIdentityReady = Boolean(
@@ -30020,11 +30063,23 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         platform: dailyPlatform,
         machineLockRoot: dailySchedulerOptions.machineLockRoot,
       };
+      if (dailyPlatform === "win32") {
+        bridgeGuard = createWindowsUpdateBridgeGuard({
+          ...(options.dailyRefreshOptions?.bridgeOptions || {}),
+          domain: beforeUpdateManifest.brain?.domain,
+          manifestPath: pin.target,
+        });
+        bridgeInventory = bridgeGuard.inventory();
+        if (bridgeInventory.ignored) info(`${bridgeInventory.ignored} other Windows task(s) were left untouched.`);
+      }
       let dailyStatus = null;
       try {
         dailyStatus = statusDailyRefreshSchedule(dailyPlan, dailySchedulerOptions);
       } catch (error) {
         if (error?.code !== "DAILY_REFRESH_INSPECTION_UNKNOWN") throw error;
+        if (bridgeInventory?.entries.length) {
+          throw new Error("Check the daily tasks in Task Scheduler, then retry the update.");
+        }
         // A verified data-plane update does not need to reinterpret an unknown
         // native task as absent. Leave it untouched and make the missing local
         // proof visible; ownership collisions remain hard refusals.
@@ -30042,6 +30097,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         throw new Error("this Brain has an update recovery fence, but this user has no verified schedule snapshot; imports remain paused");
       }
       resumingDailyRecovery = Boolean(existingDailyTransaction);
+      if (bridgeGuard) bridgeSnapshots = bridgeGuard.capture(bridgeInventory, existingDailyTransaction?.bridge_snapshots);
       dailySnapshot = existingDailyTransaction?.snapshot || (dailyStatus.installed
         ? Object.freeze({
             identity: dailyPlan.identity,
@@ -30067,14 +30123,16 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         snapshot: dailySnapshot,
         phase,
         legacySnapshots,
+        bridgeSnapshots,
         authorizedDefinition: dailyAuthorizedDefinition,
         reconciliation: dailyReconciliation,
       }, dailyTransactionOptions);
-      manageAnyLocalSchedule = manageDailyDefinition || legacySnapshots.some((entry) => entry.snapshot?.exists);
+      manageAnyLocalSchedule = manageDailyDefinition || legacySnapshots.some((entry) => entry.snapshot?.exists) || bridgeSnapshots.length > 0;
       if (manageAnyLocalSchedule) {
         persistDailyTransaction("preparing");
         dailyTransactionActive = true;
       }
+      if (bridgeSnapshots.length) bridgeGuard.pause(bridgeSnapshots, () => persistDailyTransaction("paused"));
       if (dailyStatus.installed) {
         pauseDailyRefreshSchedule(dailyPlan, {
           ...dailySchedulerOptions,
@@ -30097,7 +30155,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       } catch (error) {
         if (!resumingDailyRecovery) {
           if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
-          if (dailyTransactionActive) {
+          if (dailyTransactionActive && !bridgeSnapshots.length) {
             clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
             dailyTransactionActive = false;
           }
@@ -30108,7 +30166,6 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       }
       }
     }
-    let upgradeResult;
     try {
       upgradeResult = await (options.cmdUpgrade ?? cmdUpgrade)(
         pin.target,
@@ -30134,7 +30191,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           ["UPDATE_BRAIN_BUSY", "UPDATE_WAITING_FOR_INDEXING"].includes(error?.supportCode)) {
         restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
         if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
-        if (dailyTransactionActive) {
+        if (dailyTransactionActive && !bridgeSnapshots.length) {
           clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
           dailyTransactionActive = false;
         }
@@ -30145,6 +30202,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     }
     if (dailyPlan) {
       try {
+        let permanentDailyVerified = false;
         const afterUpdateManifest = loadManifest(pin.target).m;
         reconcileExistingOwnedSchedulers(
           afterUpdateManifest,
@@ -30177,6 +30235,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           );
           dailyReconciliation = { daily_definition: "verified", source_expectations: "verified" };
           if (dailyTransactionActive) persistDailyTransaction("recovery_required");
+          permanentDailyVerified = true;
           ok("Daily imports were recomputed from the updated manifest and restored after exact readback.");
         } else if (manageDailyDefinition) {
           if (dailySnapshot?.exists) {
@@ -30206,6 +30265,14 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
             "This older manifest now has an eligible daily import plan. Run brain daily on <manifest> to approve and install its owned schedule."
           ));
         }
+        if (bridgeSnapshots.some((entry) => entry.prior_enabled && entry.state !== "retired")) {
+          if (permanentDailyVerified) {
+            bridgeGuard.retire(bridgeSnapshots, () => persistDailyTransaction("paused"));
+            ok("The old daily bridge tasks paused by this update were removed after permanent daily task readback.");
+          } else {
+            updateAttention.push("The old daily task was paused; run brain daily on <manifest> to turn on permanent daily imports.");
+          }
+        }
         if (dailyTransactionActive) {
           clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
           dailyTransactionActive = false;
@@ -30228,6 +30295,17 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           throw error;
         }
       }
+    }
+    } catch (error) {
+      if (bridgeGuard && bridgeSnapshots.length) {
+        try {
+          bridgeGuard.restore(bridgeSnapshots, () => persistDailyTransaction("recovery_required"));
+          if (dailyTransactionActive) persistDailyTransaction("recovery_required");
+        } catch (restoreError) {
+          throw new Error(`${error.message} ${restoreError.message}`, { cause: error });
+        }
+      }
+      throw error;
     }
     if (installed.source !== "remembered") {
       try {
@@ -30523,13 +30601,17 @@ export async function cmdIngestProvider(m, manifestPath, flags, options = {}) {
     flags.source === true || !flags.source ? configuration.source || provider : flags.source,
   );
   const dryRun = Boolean(flags["dry-run"]);
-  const run = (assertLockOwned = null) => cmdIngestProviderRun(
-    m,
-    manifestPath,
-    flags,
-    options,
-    { provider, configuration, sourceName, dryRun, assertLockOwned },
-  );
+  const run = async (assertLockOwned = null) => {
+    try {
+      return await cmdIngestProviderRun(m, manifestPath, flags, options,
+        { provider, configuration, sourceName, dryRun, assertLockOwned });
+    } catch (error) {
+      if (["reconnect_required", "refresh_outcome_unknown", "refresh_persistence_unverified"].includes(error?.code)) {
+        dieWithSupportCode(error.message, "AUTH_EXPIRED");
+      }
+      throw error;
+    }
+  };
   // A preview never writes a provider cursor, source receipt, document, or
   // tombstone. Every real path, including a LaunchAgent child, must acquire the
   // same source lease before credentials or network access.
@@ -30569,13 +30651,14 @@ async function cmdIngestProviderRun(
 ) {
   const oauth = options.oauth ?? await import("./connectors/provider-oauth.mjs");
   const syncImpl = options.sync ?? await providerSyncImplementation(provider);
-  const loadAccess = (quickBooksBinding = null) => {
+  const loadAccess = (quickBooksBinding = null, rejectedAccessToken = null) => {
     assertLockOwned?.();
     return oauth.providerAccessToken(provider, {
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
       ...(options.storage ? { storage: options.storage } : {}),
       ...(quickBooksBinding ? { quickBooksBinding } : {}),
       ...(assertLockOwned ? { assertSourceOwned: assertLockOwned } : {}),
+      ...(rejectedAccessToken !== null ? { rejectedAccessToken } : {}),
     });
   };
   let preparedAccess = null;
@@ -30605,12 +30688,19 @@ async function cmdIngestProviderRun(
       ...(assertLockOwned ? { assertSourceOwned: assertLockOwned } : {}),
     });
   };
-  const adapter = ({ cursor, access }) => syncImpl({
+  const adapter = async ({ cursor, access }) => syncImpl({
     accessToken: access.accessToken,
     connection: access.connection,
     cursor,
     ...providerAdapterOptions(provider, configuration, access.connection),
-    ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    fetchImpl: (await import("./connectors/provider-oauth.mjs")).providerDataFetch(provider, {
+      accessToken: access.accessToken,
+      fetchImpl: options.fetchImpl || fetch,
+      storage: options.storage || {},
+      assertSourceOwned: assertLockOwned,
+      resolveAccess: (rejectedAccessToken) => loadAccess(provider === "quickbooks"
+        ? { source: sourceName, environment: configuration.environment } : null, rejectedAccessToken),
+    }),
   });
 
   if (dryRun) {
@@ -30686,6 +30776,9 @@ export async function cmdConnectProvider(provider, manifestPath, flags = {}, opt
       );
     } catch (error) {
       if (error instanceof SourceIngestLockError) die(error.message);
+      if (error?.code === "callback_timeout" && error?.phase === "callback") {
+        dieWithSupportCode("The provider sign-in timed out. Nothing changed in your Brain and no new connection was saved. Run the same command again and complete sign-in.", "OAUTH_SIGN_IN_TIMEOUT");
+      }
       throw error;
     }
   }

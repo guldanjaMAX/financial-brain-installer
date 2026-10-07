@@ -187,7 +187,15 @@ writeFileSync(manifestPath, JSON.stringify({
   safety: { credential_scanner: { gate_version: 0 } },
 }));
 
+// Each in-memory database represents a different install. Intent must survive
+// retries of that database without leaking into the next mutation arm.
+const intentDirectories = new WeakMap();
+const intentDirectoryFor = (db) => {
+  if (!intentDirectories.has(db)) intentDirectories.set(db, mkdtempSync(join(workDir, "intents-")));
+  return intentDirectories.get(db);
+};
 const migrate = (db, options = {}) => cmdMigrate(manifestPath, {
+  migrationIntentDirectory: intentDirectoryFor(db),
   silent: true,
   resolveAccount: async () => ({ id: "fixture-account" }),
   d1Query: d1QueryFor(db, options),
@@ -963,14 +971,14 @@ function statementsMatching(predicate) {
     `${failed.length}/${results.length} failed`);
   // Older heads can still report success and advance the ledger even when all
   // migration statements were swallowed. The current head adds a post-migration
-  // key finalizer, so a missing map table instead stops the walk before it can
-  // make that false claim. Both outcomes prove that ledger rows alone are not
+  // key finalizer and exact column readback, so a missing table or column stops
+  // the walk before it can make that false claim. These outcomes prove ledger rows are not
   // accepted as real state.
   const ledgerChecks = results.filter((r) => /contiguous|records schema/.test(r.name));
   const finalizerRefusal = results.find((r) => r.name === "the walk itself could not complete");
   check("and it fails on real state instead of trusting the migration ledger alone",
     (ledgerChecks.length === 2 && ledgerChecks.every((r) => r.ok)) ||
-      /owner_financial_map_key_state|source_original_retrieval_generation/.test(finalizerRefusal?.detail || ""),
+      /owner_financial_map_key_state|source_original_retrieval_generation|Migration column .+ is absent after a successful reply/.test(finalizerRefusal?.detail || ""),
     JSON.stringify(finalizerRefusal || ledgerChecks));
 
   const silent = [];

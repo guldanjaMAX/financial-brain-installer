@@ -183,9 +183,8 @@ export async function observeDailyRun(identity, run, options = {}) {
     const result = await run();
     const status = RESULTS.has(result?.status) && result.status !== "running" ? result.status : "failed";
     write(identity, { started_at, completed_at: now().toISOString(), result: status,
-      // Refused or excluded files are coverage warnings after a successful
-      // refresh, not a failed process or missing freshness proof.
-      error: ["complete", "partial"].includes(status) ? null : status === "deferred"
+      // Verified partial coverage is an outcome, not a process failure.
+      error: status === "complete" || status === "partial" ? null : status === "deferred"
         ? "Daily refresh was deferred by another operation or recovery."
         : "One or more daily sources failed or did not prove freshness." }, options);
     return result;
@@ -235,7 +234,7 @@ export function dailyObservationStatus(plan, schedule, runtime, runnerUsable, op
 
 export function renderDailyObservation(schedule, log) {
   log(`Last daily run: ${schedule.last_run_at || "unknown or never"}`);
-  log(`Last daily result: ${schedule.last_result || "unknown"}`);
+  log(`Last daily result: ${schedule.last_result === "partial" ? "partial (coverage omissions)" : schedule.last_result || "unknown"}`);
   log(`Next daily run: ${schedule.next_run || "not scheduled"}`);
   log(`Last daily error: ${schedule.last_error_line || "none recorded"}`);
   if (schedule.log_path) log(`Daily log: ${schedule.log_path}`);
