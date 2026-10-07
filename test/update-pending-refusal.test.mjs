@@ -620,6 +620,7 @@ test("production recovery resumes after a post-install expectation failure", asy
     let expectationCalls = 0;
     let installs = 0;
     let failExpectation = true;
+    const finish = [];
     const adapter = {
       read: () => native,
       setEnabled: (_identity, enabled) => { native = { ...native, enabled }; },
@@ -630,7 +631,7 @@ test("production recovery resumes after a post-install expectation failure", asy
     };
     const options = {
       ...updateHarness(manifestPath, async () => ({ pending: 0 }), []),
-      reportUpdateFinish: () => {},
+      reportUpdateFinish: (message) => finish.push(message),
       cmdUpgrade: async () => {
         upgradeCalls += 1;
         manifest.brain.version = "0.4.9";
@@ -652,13 +653,18 @@ test("production recovery resumes after a post-install expectation failure", asy
       },
     };
 
-    await assert.rejects(() => cmdUpdate(manifestPath, options), /fixture expectation write failed/);
-    assert.equal(installs, 1, "the failed arm reached new-definition installation");
-    assert.equal(expectationCalls, 1, "the failed arm reached the post-install expectation decision");
+    const attended = await cmdUpdate(manifestPath, options);
+    assert.equal(attended.updated, true,
+      "the verified Brain update completes even though daily recovery still needs attention");
+    assert.equal(installs, 1, "the attention arm reached new-definition installation");
+    assert.equal(expectationCalls, 1, "the attention arm reached the post-install expectation decision");
     assert.equal(upgradeCalls, 1);
     assert.equal(native.enabled, true);
+    assert.equal(finish.length, 1, "the attention arm reached the successful command footer");
+    assert.match(finish[0], /Daily imports.*need attention/i,
+      "the successful command makes the incomplete daily recovery visible");
     assert.ok(readDailyRefreshUpdateTransaction(getPlan().identity, { home, machineLockRoot, manifestPath }),
-      "the failed arm retained its durable recovery authorization");
+      "the attention arm retained its durable recovery authorization");
 
     failExpectation = false;
     const recovered = await cmdUpdate(manifestPath, options);
@@ -666,6 +672,9 @@ test("production recovery resumes after a post-install expectation failure", asy
     assert.equal(upgradeCalls, 2, "recovery obtained a fresh update health proof");
     assert.equal(installs, 1, "the already-installed authorized definition was not replaced again");
     assert.equal(expectationCalls, 2, "recovery retried the incomplete expectation write exactly once");
+    assert.equal(finish.length, 2, "the healthy recovery control reached its own success footer");
+    assert.doesNotMatch(finish[1], /Daily imports.*need attention/i,
+      "the healthy control clears the attention state");
     assert.equal(native.enabled, true);
     assert.equal(readDailyRefreshUpdateTransaction(getPlan().identity, { home, machineLockRoot, manifestPath }), null,
       "exact recovery reconciliation cleared the durable fence");

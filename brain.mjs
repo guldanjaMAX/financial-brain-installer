@@ -6881,12 +6881,41 @@ export async function cmdRollback(manifestPath, bookmarkArg, options = {}) {
     warn("D1 was restored, but its upgrade-history marker could not be updated. Record this recovery manually.");
   }
   warn("the Worker remains paused. Recreate/rebind a clean Vectorize index with every metadata index under supervised recovery, then run `brain update <manifest>` to rebuild, prove exact readiness, and return to active mode. Reindex and drain remain refused until active.");
+  let dailyImportsRecoveryRequired = false;
+  const dailyPlatform = options.dailyRefreshOptions?.platform ?? process.platform;
+  const dailyIdentityReady = Boolean(
+    m?.infrastructure?.cloudflare?.d1_database_id ||
+    m?.brain?.worker_name ||
+    m?.brain?.domain ||
+    m?.client?.slug
+  );
+  if (["darwin", "win32"].includes(dailyPlatform) && dailyIdentityReady) {
+    try {
+      const dailyPlan = await buildConfiguredDailyPlan(m, pin.target, options.dailyRefreshOptions || {});
+      const schedulerOptions = options.dailyRefreshOptions?.schedulerOptions || {};
+      const transaction = readDailyRefreshUpdateTransaction(dailyPlan.identity, {
+        home: schedulerOptions.home,
+        manifestPath: pin.target,
+        platform: dailyPlatform,
+        machineLockRoot: schedulerOptions.machineLockRoot,
+      });
+      dailyImportsRecoveryRequired = Boolean(transaction);
+      if (dailyImportsRecoveryRequired) {
+        warn("Daily imports remain paused with a recovery receipt. A verified brain update must restore them before unattended imports resume.");
+      }
+    } catch {
+      if (m?.operations?.daily_refresh) {
+        warn("Daily import recovery status could not be verified after rollback. Treat unattended imports as paused until brain daily status and a verified update prove otherwise.");
+      }
+    }
+  }
   return {
     confirmed: true,
     restored: true,
     databaseId: dbId,
     bookmark,
     requiresVectorizeRecreation: usesD1VectorOutbox,
+    daily_imports_recovery_required: dailyImportsRecoveryRequired,
   };
 }
 
@@ -29451,8 +29480,13 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
               { cause: error },
             );
           }
+          warn("Daily imports need attention. The Brain update passed, but unattended imports remain paused or could not be verified.");
+          updateAttention.push(
+            "Daily imports need attention: they remain paused or could not be verified. Run brain update <manifest> again to complete verified recovery.",
+          );
+        } else {
+          throw error;
         }
-        throw error;
       }
     }
     if (installed.source !== "remembered") {

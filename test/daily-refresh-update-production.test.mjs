@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { cmdUpdate } from "../brain.mjs";
+import { cmdDrain, cmdHealth, cmdRollback, cmdUpdate } from "../brain.mjs";
 import {
   buildDailyRefreshDefinition,
   readDailyRefreshUpdateTransaction,
@@ -160,6 +160,112 @@ function productionHarness(manifestPath, { failStage = () => null, failRestore =
   };
 }
 
+function response(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function readyDocumentsReceipt(version, drainMode) {
+  return {
+    backend: "d1",
+    version,
+    vector_drain_mode: drainMode,
+    rows: [],
+    summary: {
+      status: "informational",
+      complete: false,
+      exact_counts_available_from: "brain report",
+    },
+    vector_backlog: {
+      pending: 0,
+      pending_is_capped: false,
+      pending_display: "0",
+      upserts: 0,
+      deletes: 0,
+      submitted: 0,
+      component_counts_exact: true,
+      oldest_queued_at: null,
+    },
+    vector_readiness: {
+      ready: true,
+      reason: null,
+      expected_vectors: 0,
+      actual_vectors: 0,
+      pending: 0,
+      pending_is_capped: false,
+      submitted: 0,
+      submitted_counts_exact: true,
+      oldest_queued_at: null,
+    },
+  };
+}
+
+function useRealPropagationDecisions(harness, { exhaustDrain = false } = {}) {
+  let clock = 0;
+  let delayedActiveHealth = false;
+  let health503s = 0;
+  let drainCalls = 0;
+  harness.options.upgradeOptions.cmdHealth = async (manifestPath, options) => cmdHealth(manifestPath, {
+    ...options,
+    resolveKey: () => "fixture-admin-key-label",
+    wait: async (milliseconds) => { clock += milliseconds; },
+    request: async (url) => {
+      const path = new URL(String(url)).pathname;
+      const mode = options.expectDrainMode || "active";
+      if (path === "/health") {
+        if (mode === "active" && options.reachOnly === true && !delayedActiveHealth) {
+          delayedActiveHealth = true;
+          health503s += 1;
+          return response({ error: "fixture paused generation", paused: true }, 503);
+        }
+        return response({
+          ok: mode === "active",
+          status: mode === "active" ? "ok" : "paused-for-upgrade",
+          accepting_documents: mode === "active",
+          version: "0.4.9",
+          vector_writer_protocol: "lease-v1",
+          vector_drain_mode: mode,
+        });
+      }
+      assert.equal(path, "/api/admin/brain/documents");
+      return response(readyDocumentsReceipt("0.4.9", mode));
+    },
+  });
+  harness.options.upgradeOptions.cmdDrain = async (manifestPath, options) => cmdDrain(manifestPath, {
+    ...options,
+    resolveBaseUrl: async () => "https://brain.example.invalid",
+    resolveAdminKey: () => "fixture-admin-key-label",
+    sleep: async (milliseconds) => { clock += milliseconds; },
+    now: () => clock,
+    maxDurationMs: 130_000,
+    http: async () => {
+      drainCalls += 1;
+      if (exhaustDrain || drainCalls === 1) {
+        return response({
+          error: "brain corpus writes are paused for a verified upgrade or rollback",
+          paused: true,
+        }, 503);
+      }
+      return response({
+        drained: 0,
+        submitted: 0,
+        waiting: 0,
+        remaining: 0,
+        vector_ready: true,
+        expected_vectors: 0,
+        actual_vectors: 0,
+      });
+    },
+  });
+  return {
+    health503s: () => health503s,
+    drainCalls: () => drainCalls,
+    clock: () => clock,
+  };
+}
+
 async function withFixture(run) {
   const directory = mkdtempSync(join(tmpdir(), "daily-production-update-"));
   const manifestPath = join(directory, "brain.manifest.json");
@@ -242,12 +348,104 @@ test("production convergence failure occurs after active cutover and has a healt
   });
 });
 
-test("production native restore failure is non-success and remains recoverable", async () => {
+test("real rollback leaves daily imports paused, reports recovery, and a healthy update restores them", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    let failedStage = "migration";
+    const harness = productionHarness(manifestPath, { failStage: () => failedStage });
+    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /fixture migration failure/);
+    assert.equal(harness.state().enabled, false);
+
+    const lines = [];
+    const priorLog = console.log;
+    console.log = (...values) => lines.push(values.map(String).join(" "));
+    let rollback;
+    try {
+      rollback = await cmdRollback(manifestPath, "fixture-bookmark", {
+        confirmed: true,
+        resolveAccount: async () => ({ id: "1".repeat(32) }),
+        cf: async () => ({ restored: true }),
+        cmdDeploy: async () => {},
+        cmdHealth: async () => {},
+        waitForVectorDrainQuiescence: async () => {},
+        d1Query: async (_account, _database, sql) => {
+          if (/SELECT schema_version/iu.test(sql)) return { results: [{ schema_version: 48 }] };
+          if (/SELECT vector_projection_status/iu.test(sql)) {
+            return { results: [{
+              status: "bootstrap_required",
+              lease_owner: null,
+              lease_expires_at: null,
+              mutation_id: null,
+              mutation_submitted_at: null,
+              cursor: null,
+              high_water: null,
+              chunk_high_water: null,
+              submitted_rows: 0,
+              bootstrap_protocol: null,
+              bootstrap_base_count: 0,
+              bootstrap_batch_count: 0,
+              tagged_rows: 0,
+            }] };
+          }
+          return { results: [] };
+        },
+        dailyRefreshOptions: harness.options.dailyRefreshOptions,
+      });
+    } finally {
+      console.log = priorLog;
+    }
+    assert.equal(rollback.daily_imports_recovery_required, true,
+      "the real rollback result exposes the daily recovery decision");
+    assert.ok(lines.some((line) => /Daily imports remain paused.*recovery/i.test(line)),
+      "the rollback path visibly reports the retained daily recovery");
+    assert.equal(harness.state().enabled, false);
+    assert.ok(readDailyRefreshUpdateTransaction(harness.plan.identity, {
+      home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
+    }), "rollback retained the update transaction instead of silently enabling imports");
+
+    failedStage = null;
+    await cmdUpdate(manifestPath, harness.options);
+    assert.equal(harness.state().enabled, true, "the next healthy update is the restore control");
+    assert.equal(readDailyRefreshUpdateTransaction(harness.plan.identity, {
+      home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
+    }), null);
+  });
+});
+
+test("real health and drain propagation retries restore only after bounded success", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const control = productionHarness(manifestPath);
+    const decisions = useRealPropagationDecisions(control);
+    await cmdUpdate(manifestPath, control.options);
+    assert.equal(decisions.health503s(), 1, "the control reached the real cmdHealth 503 retry");
+    assert.equal(decisions.drainCalls(), 2, "the control reached the real cmdDrain paused-generation retry");
+    assert.ok(decisions.clock() >= 10_000, "both bounded retry waits were observed by the injected clock");
+    assert.equal(control.state().enabled, true);
+    assert.equal(readDailyRefreshUpdateTransaction(control.plan.identity, {
+      home: dirname(manifestPath), manifestPath, machineLockRoot: control.machineLockRoot,
+    }), null);
+  });
+
+  await withFixture(async ({ manifestPath }) => {
+    const mutation = productionHarness(manifestPath);
+    const decisions = useRealPropagationDecisions(mutation, { exhaustDrain: true });
+    await assert.rejects(() => cmdUpdate(manifestPath, mutation.options), /drain failed \(503\)/i);
+    assert.equal(decisions.drainCalls(), 25, "the exhausted arm reached every bounded cmdDrain retry decision");
+    assert.equal(mutation.state().enabled, false, "an exhausted propagation retry never restores daily imports");
+    assert.equal(mutation.finish.length, 0, "the nonzero arm prints no success footer");
+    assert.ok(readDailyRefreshUpdateTransaction(mutation.plan.identity, {
+      home: dirname(manifestPath), manifestPath, machineLockRoot: mutation.machineLockRoot,
+    }), "the exhausted arm retained recoverable daily state");
+  });
+});
+
+test("production native restore failure completes with visible daily attention and remains recoverable", async () => {
   await withFixture(async ({ manifestPath }) => {
     const harness = productionHarness(manifestPath, { failRestore: true });
-    await assert.rejects(() => cmdUpdate(manifestPath, harness.options), /fixture native restore failed/);
+    await cmdUpdate(manifestPath, harness.options);
     assert.equal(harness.state().enabled, false);
-    assert.equal(harness.finish.length, 0, "restore failure cannot be hidden behind exit-zero copy");
+    assert.equal(harness.finish.length, 1, "the verified Brain update reaches the attention footer");
+    assert.match(harness.finish[0], /Daily imports.*need attention/i);
+    assert.match(harness.finish[0], /remain paused|could not be verified/i);
     assert.ok(harness.events.includes("schedule:true"), "the native restore decision was reached");
     assert.ok(readDailyRefreshUpdateTransaction(harness.plan.identity, {
       home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,

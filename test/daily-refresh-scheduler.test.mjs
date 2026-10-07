@@ -395,12 +395,128 @@ test("native replacement preserves a foreign replacement injected after the prio
   assert.equal(replacedForeign, false);
 });
 
+test("native Windows mutations keep the final ownership read adjacent to the mutation", () => {
+  const options = {
+    platform: "win32",
+    nodePath: String.raw`C:\Runtime\node.exe`,
+    brainPath: String.raw`C:\Runtime\brain.mjs`,
+    runnerPath: String.raw`C:\Runtime\daily-refresh-run.mjs`,
+  };
+  const desired = buildDailyRefreshDefinition(basePlan, options);
+  const prior = buildDailyRefreshDefinition({
+    ...basePlan,
+    source_plan_hash: "sha256:prior-sequence",
+  }, options);
+  const assertAdjacent = (calls, mutation) => {
+    const commands = calls.map((args) => args[0]);
+    const mutationIndex = commands.lastIndexOf(mutation);
+    assert.ok(mutationIndex > 0, `${mutation} reached its native decision point`);
+    assert.equal(commands[mutationIndex - 1], "/Query",
+      `${mutation} has no native call between the final owned-definition read and mutation`);
+  };
+
+  const mutationTrace = [["/Query"], ["/Query"], ["/FO"], ["/Delete"]];
+  assert.throws(
+    () => assertAdjacent(mutationTrace, "/Delete"),
+    /no native call between/,
+    "the assertion turns red when any native call is inserted at the boundary",
+  );
+
+  {
+    const home = mkdtempSync(join(tmpdir(), "daily-native-replace-sequence-"));
+    let serialized = prior.serialized;
+    const calls = [];
+    const adapter = createNativeDailyRefreshAdapter({
+      platform: "win32", home,
+      spawn: (_command, args) => {
+        calls.push([...args]);
+        if (args[0] === "/Query") return { status: 0, stdout: serialized };
+        assert.equal(args[0], "/Create");
+        serialized = desired.serialized;
+        return { status: 0 };
+      },
+    });
+    const expected = adapter.read(basePlan.identity);
+    adapter.install(desired, { replaceOwned: true, expected });
+    assert.deepEqual(calls.slice(-3).map((args) => args[0]), ["/Query", "/Query", "/Create"]);
+    assert.ok(calls.at(-1).includes("/F"), "owned replacement uses the explicit replace switch");
+    assertAdjacent(calls, "/Create");
+  }
+
+  {
+    const home = mkdtempSync(join(tmpdir(), "daily-native-enable-sequence-"));
+    let serialized = desired.serialized;
+    const calls = [];
+    const adapter = createNativeDailyRefreshAdapter({
+      platform: "win32", home,
+      spawn: (_command, args) => {
+        calls.push([...args]);
+        if (args[0] === "/Query") return { status: 0, stdout: serialized };
+        assert.equal(args[0], "/Change");
+        serialized = serialized.replace(
+          "<AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled>",
+          "<AllowStartOnDemand>true</AllowStartOnDemand><Enabled>false</Enabled>",
+        );
+        return { status: 0 };
+      },
+    });
+    adapter.setEnabled(basePlan.identity, false);
+    assert.deepEqual(calls.map((args) => args[0]), ["/Query", "/Query", "/Change"]);
+    assertAdjacent(calls, "/Change");
+  }
+
+  {
+    const home = mkdtempSync(join(tmpdir(), "daily-native-remove-sequence-"));
+    let serialized = desired.serialized;
+    const calls = [];
+    const adapter = createNativeDailyRefreshAdapter({
+      platform: "win32", home,
+      spawn: (_command, args) => {
+        calls.push([...args]);
+        if (args[0] === "/Query") return { status: 0, stdout: serialized };
+        assert.equal(args[0], "/Delete");
+        serialized = null;
+        return { status: 0 };
+      },
+    });
+    const expected = adapter.read(basePlan.identity);
+    adapter.remove(basePlan.identity, { expected });
+    assert.deepEqual(calls.slice(-3).map((args) => args[0]), ["/Query", "/Query", "/Delete"]);
+    assertAdjacent(calls, "/Delete");
+  }
+
+  {
+    const home = mkdtempSync(join(tmpdir(), "daily-native-create-sequence-"));
+    let serialized = null;
+    const calls = [];
+    const adapter = createNativeDailyRefreshAdapter({
+      platform: "win32", home,
+      spawn: (_command, args) => {
+        calls.push([...args]);
+        if (args[0] === "/Query" && args.includes("/FO")) {
+          return { status: 0, stdout: '"\\Other\\Task","N/A","Ready"' };
+        }
+        if (args[0] === "/Query") return { status: 1, stdout: "" };
+        assert.equal(args[0], "/Create");
+        serialized = desired.serialized;
+        return { status: 0 };
+      },
+    });
+    adapter.install(desired, { replaceOwned: false, expected: null });
+    assert.ok(serialized, "the green control reached native create");
+    assert.equal(calls.at(-1)[0], "/Create");
+    assert.equal(calls.at(-1).includes("/F"), false,
+      "create-if-absent lets Task Scheduler refuse a foreign arrival");
+  }
+});
+
 test("native Windows absence rejects incomplete quoted inventory rows", () => {
   const directory = mkdtempSync(join(tmpdir(), "daily-native-incomplete-inventory-"));
   for (const [inventory, shouldRefuse] of [
     ["MALFORMED INVENTORY", true],
     ['"\\Other\\Task",', true],
     ['"\\Other\\Task"', true],
+    ['"\\Other\\Task","N/A","Ready",', true],
     ['"\\Other\\Task","N/A","Ready"', false],
   ]) {
     let calls = 0;

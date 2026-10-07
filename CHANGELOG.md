@@ -21,6 +21,14 @@ this changed candidate.
   contains no key, and must read back exactly before success. Updates pause it
   while the shared load/update lock is held and restore a recomputed plan only
   after the Brain is active, query-ready, and has no queued search updates.
+  Task Scheduler and launchd have no atomic compare-and-replace or
+  compare-and-delete operation. The installer makes its final ownership read
+  the last native call before each mutation, but another process running as the
+  same user can still replace the exactly named task in that operating-system
+  gap. If the Brain update passes but daily schedule recovery does not, the
+  command exits successfully with a visible `Daily imports need attention`
+  line, keeps the recovery receipt, and leaves imports paused for the next
+  verified update.
   Turning daily imports off saves that choice in the manifest, so a later
   update does not turn them back on. An interrupted update keeps a private
   recovery receipt and keeps imports disabled across restart until recovery is

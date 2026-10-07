@@ -890,7 +890,12 @@ function windowsAdapter({ home, spawn }) {
               throw new Error("the Windows daily refresh task could not be inspected");
             }
             fields.push(field);
-            if (index < line.length) index += 1;
+            if (index < line.length) {
+              index += 1;
+              if (index === line.length) {
+                throw new Error("the Windows daily refresh task could not be inspected");
+              }
+            }
           }
           if (fields.length !== 3 || fields.some((field) => !field)) {
             throw new Error("the Windows daily refresh task could not be inspected");
@@ -932,6 +937,8 @@ function windowsAdapter({ home, spawn }) {
             current,
             "the daily definition changed immediately before installation; nothing was replaced",
           );
+          // schtasks has no compare-and-create/replace primitive. Keep this
+          // final owned-definition read immediately adjacent to the mutation.
           const result = run(["/Create", ...(current?.exists ? ["/F"] : []), "/TN", taskName(definition.identity), "/XML", path]);
           if (result?.status !== 0) throw new Error("Task Scheduler refused the daily refresh definition");
         } finally {
@@ -949,6 +956,8 @@ function windowsAdapter({ home, spawn }) {
           current,
           `the daily definition changed immediately before ${enabled ? "restore" : "pause"}; nothing was changed`,
         );
+        // schtasks has no compare-and-change primitive. Keep this final
+        // owned-definition read immediately adjacent to the mutation.
         const result = run(["/Change", "/TN", taskName(identity), enabled ? "/ENABLE" : "/DISABLE"]);
         if (result?.status !== 0) throw new Error(`Task Scheduler could not ${enabled ? "restore" : "pause"} daily refresh`);
       });
@@ -964,6 +973,8 @@ function windowsAdapter({ home, spawn }) {
           current,
           "the daily definition changed immediately before removal; nothing was removed",
         );
+        // schtasks has no compare-and-delete primitive. Keep this final
+        // owned-definition read immediately adjacent to the mutation.
         const result = run(["/Delete", "/F", "/TN", taskName(identity)]);
         if (result?.status !== 0) throw new Error("Task Scheduler could not remove daily refresh");
       });
