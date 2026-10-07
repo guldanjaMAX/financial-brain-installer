@@ -16,6 +16,11 @@ $InstallRoot = Join-Path $env:LOCALAPPDATA 'Financial Brain Machine Prep'
 $MenuRoot = Join-Path ([Environment]::GetFolderPath('Programs')) 'Financial Brain Machine Prep'
 $ShortcutPath = Join-Path $MenuRoot 'Run Financial Brain Machine Prep.lnk'
 $RegistryPath = 'HKCU:\Software\FinancialBrain\MachinePrep'
+$RegistryMarkers = @{
+  MachinePrepScripts = 'scriptsInstalled'
+  ClaudeHandoff = 'handoffInstalled'
+  MachinePrepShortcut = 'installed'
+}
 $ExpectedFiles = @('prep-windows.ps1', 'run-machine-prep.ps1', 'start-brain-setup.ps1', 'UNINSTALL.txt',
   'handoff/handoff-windows.ps1', 'handoff/message-windows.txt', 'handoff/handoff-windows.url')
 $StateFile = Join-Path $LogDirectory 'windows-state.json'
@@ -25,6 +30,27 @@ $Sentinels = @((Join-Path $env:LOCALAPPDATA 'FinancialBrain'), (Join-Path $env:U
 
 function Assert-EqualSet($Actual, $Expected) {
   if ((@($Actual | Sort-Object) -join "`n") -cne (@($Expected | Sort-Object) -join "`n")) { throw 'Unexpected MSI inventory' }
+}
+function Assert-PerUserTables([object[]]$Components, [object[]]$RegistryRows, [object[]]$RemovalRows) {
+  Write-Output 'PER_USER_TABLE_DECISION_REACHED=1'
+  Assert-EqualSet @($Components | ForEach-Object { $_.Component }) @($RegistryMarkers.Keys)
+  if ($RegistryRows.Count -ne $RegistryMarkers.Count) { throw 'Unexpected MSI registry write count' }
+  if ($RemovalRows.Count -ne $Components.Count) { throw 'Unexpected MSI removal scope count' }
+  foreach ($component in $Components) {
+    $rows = @($RegistryRows | Where-Object { $_.Component_ -ceq $component.Component })
+    # MSI Component.KeyPath refers to Registry.Registry when bit 4 is set.
+    # Matching counts alone would accept a file key path or a shared marker.
+    if ($rows.Count -ne 1 -or $rows[0].Root -ne '1' -or $rows[0].Key -cne 'Software\FinancialBrain\MachinePrep' -or
+        $rows[0].Name -cne $RegistryMarkers[$component.Component] -or $rows[0].Value -cne '#1' -or
+        ([int]$component.Attributes -band 4) -ne 4 -or $component.KeyPath -cne $rows[0].Registry) {
+      throw 'Unexpected MSI per-user registry KeyPath'
+    }
+    $removal = @($RemovalRows | Where-Object { $_.Component_ -ceq $component.Component })
+    if ($removal.Count -ne 1 -or $removal[0].FileName -or
+        $removal[0].DirProperty -cne $component.Directory_ -or $removal[0].InstallMode -ne '2') {
+      throw 'Unexpected MSI removal scope'
+    }
+  }
 }
 function Assert-Absent([string]$Path) {
   if (Test-Path -LiteralPath $Path) { throw 'Smoke destination is occupied' }
@@ -108,7 +134,8 @@ switch ($Phase) {
       if ($properties.ContainsKey($key)) { throw 'MSI overrides a standard user directory' }
     }
     $components = @{}
-    Read-Rows 'Component' @('Component', 'Directory_') | ForEach-Object { $components[$_.Component] = $_.Directory_ }
+    $componentRows = @(Read-Rows 'Component' @('Component', 'Directory_', 'Attributes', 'KeyPath'))
+    $componentRows | ForEach-Object { $components[$_.Component] = $_.Directory_ }
     Assert-EqualSet @($components.Keys) @('MachinePrepScripts', 'ClaudeHandoff', 'MachinePrepShortcut')
     if ($components['MachinePrepScripts'] -cne 'INSTALLFOLDER' -or $components['ClaudeHandoff'] -cne 'HANDOFFFOLDER' -or
         $components['MachinePrepShortcut'] -cne 'ApplicationProgramsFolder') { throw 'Unexpected MSI component destination' }
@@ -119,17 +146,14 @@ switch ($Phase) {
       else { throw 'File attached to an unreviewed component' }
     })
     Assert-EqualSet $payload $ExpectedFiles
-    $registry = @(Read-Rows 'Registry' @('Root', 'Key', 'Name', 'Value', 'Component_'))
-    if ($registry.Count -ne 1 -or $registry[0].Root -ne '1' -or $registry[0].Key -cne 'Software\FinancialBrain\MachinePrep' -or
-        $registry[0].Name -cne 'installed' -or $registry[0].Value -cne '#1' -or $registry[0].Component_ -cne 'MachinePrepShortcut') { throw 'Unexpected MSI registry write' }
+    $registry = @(Read-Rows 'Registry' @('Registry', 'Root', 'Key', 'Name', 'Value', 'Component_'))
     $shortcuts = @(Read-Rows 'Shortcut' @('Directory_', 'Target', 'Arguments', 'WkDir'))
     if ($shortcuts.Count -ne 1 -or $shortcuts[0].Directory_ -cne 'ApplicationProgramsFolder' -or
         $shortcuts[0].Target -cne '[System64Folder]WindowsPowerShell\v1.0\powershell.exe' -or
         $shortcuts[0].Arguments -cne '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "[INSTALLFOLDER]run-machine-prep.ps1"' -or
         $shortcuts[0].WkDir -cne 'INSTALLFOLDER') { throw 'Unexpected MSI shortcut' }
     $removals = @(Read-Rows 'RemoveFile' @('Component_', 'FileName', 'DirProperty', 'InstallMode'))
-    if ($removals.Count -ne 1 -or $removals[0].Component_ -cne 'MachinePrepShortcut' -or $removals[0].FileName -or
-        $removals[0].DirProperty -cne 'ApplicationProgramsFolder' -or $removals[0].InstallMode -ne '2') { throw 'Unexpected MSI removal scope' }
+    Assert-PerUserTables $componentRows $registry $removals
     Write-Output "PAYLOAD_FILES_VERIFIED=$($payload.Count)"
   }
   'assertClean' {
@@ -150,7 +174,10 @@ switch ($Phase) {
     $expectedTarget = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     if ($shortcut.TargetPath -ine $expectedTarget -or $shortcut.WorkingDirectory -ine $InstallRoot -or
         $shortcut.Arguments -cne ('-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}\run-machine-prep.ps1"' -f $InstallRoot)) { throw 'Installed launcher readback differs' }
-    if ((Get-ItemProperty -LiteralPath $RegistryPath).installed -ne 1) { throw 'Installed registry marker missing' }
+    $installedMarkers = Get-ItemProperty -LiteralPath $RegistryPath
+    foreach ($marker in $RegistryMarkers.Values) {
+      if ($installedMarkers.$marker -ne 1) { throw 'Installed registry marker missing' }
+    }
     Open-Database
     $state = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json
     if ($script:Installer.ProductState($state.product) -ne 5) { throw 'MSI product is not installed' }

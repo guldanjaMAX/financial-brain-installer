@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { inspectPerUserWix } from "./helpers/wix-authoring.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const HANDOFF = join(ROOT, "machine-prep", "handoff");
@@ -25,6 +26,150 @@ function bashBehaviorOptions(platform = process.platform) {
 function read(relativePath) {
   return readFileSync(join(ROOT, relativePath), "utf8").replaceAll("\r\n", "\n");
 }
+
+test("per-user WiX contract reaches every directory and component in the actual package", () => {
+  const inspected = inspectPerUserWix(read("machine-prep/installers/windows/Package.wxs"));
+  assert.equal(inspected.directories.length, 3, "actual per-user directory decisions reached");
+  assert.equal(inspected.components.length, 3, "actual component KeyPath decisions reached");
+  assert.deepEqual(inspected.issues, []);
+});
+
+test("per-user WiX contract rejects missing cleanup and invalid key paths with a green control", () => {
+  const component = (id) => `<Component Id="${id}">
+    <File Id="${id}File" Source="synthetic.txt" />
+    <RemoveFolder Id="Remove${id}" On="uninstall" />
+    <RegistryValue Root="HKCU" Key="Software\\SyntheticInstaller" Name="${id}" KeyPath="yes" />
+  </Component>`;
+  const control = `<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"><Package Scope="perUser">
+    <StandardDirectory Id="LocalAppDataFolder"><Directory Id="App">
+      ${component("Payload")}<Directory Id="Nested">${component("Handoff")}</Directory>
+    </Directory></StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder"><Directory Id="Menu">${component("Shortcut")}</Directory></StandardDirectory>
+  </Package></Wix>`;
+  assert.deepEqual(inspectPerUserWix(control).issues, [], "green nested-directory and shortcut control");
+  const mutants = [];
+  for (const [id, directory] of [["Payload", "App"], ["Handoff", "Nested"], ["Shortcut", "Menu"]]) {
+    const removal = `<RemoveFolder Id="Remove${id}" On="uninstall" />`;
+    const registry = `<RegistryValue Root="HKCU" Key="Software\\SyntheticInstaller" Name="${id}" KeyPath="yes" />`;
+    mutants.push(
+      [removal, `<!-- ${removal} -->`, `ICE64: ${directory}`],
+      [removal, removal.replace('On="uninstall"', 'On="install"'), `ICE64: ${directory}`],
+      [removal, removal.replace('On="uninstall"', 'On="uninstall" Directory="Elsewhere"'), `ICE64: ${directory}`],
+      [registry, "", `ICE38/ICE43: ${id}`],
+      [registry, registry.replace('Root="HKCU"', 'Root="HKLM"'), `ICE57: ${id}`],
+      [registry, registry.replace(' KeyPath="yes"', ""), `ICE38/ICE43: ${id}`],
+      [`<File Id="${id}File"`, `<File KeyPath="yes" Id="${id}File"`, `ICE38/ICE43: ${id}`],
+    );
+  }
+  mutants.push(['<Directory Id="Nested">', '<Directory Id="Uncovered" /><Directory Id="Nested">', "ICE64: Uncovered"]);
+  mutants.push(['Name="Handoff" KeyPath="yes"', 'Name="Payload" KeyPath="yes"', "Shared registry marker: Handoff"]);
+  mutants.push(['Name="Handoff" KeyPath="yes"', 'Name="PAYLOAD" KeyPath="yes"', "Shared registry marker: Handoff"]);
+  for (const [from, to, issue] of mutants) {
+    assert.ok(control.includes(from), "mutation target reached");
+    const mutant = control.replace(from, to);
+    assert.notEqual(mutant, control);
+    const inspected = inspectPerUserWix(mutant);
+    assert.ok(inspected.directories.length >= 3 && inspected.components.length === 3, "negative arm traversed real decisions");
+    assert.ok(inspected.issues.some((message) => message.startsWith(issue)), issue);
+  }
+  const reformatted = control.replaceAll('"', "'").replaceAll("\n", "\r\n");
+  assert.deepEqual(inspectPerUserWix(reformatted).issues, [], "quote style and CRLF do not hide authoring");
+});
+
+test("Windows smoke verifies every per-user registry marker and uninstall directory", () => {
+  const source = read("machine-prep/installers/smoke/windows.ps1");
+  for (const [component, marker] of [["MachinePrepScripts", "scriptsInstalled"], ["ClaudeHandoff", "handoffInstalled"], ["MachinePrepShortcut", "installed"]]) {
+    assert.ok(source.includes(`${component} = '${marker}'`), `smoke must expect the ${component} registry KeyPath`);
+  }
+  assert.match(source, /Assert-PerUserTables \$componentRows \$registry \$removals/);
+  assert.match(source, /\$RegistryRows\.Count -ne \$RegistryMarkers\.Count/);
+  assert.match(source, /\$RemovalRows\.Count -ne \$Components\.Count/);
+  assert.match(source, /\$component\.KeyPath -cne \$rows\[0\]\.Registry/);
+  assert.match(source, /\$component\.Attributes -band 4/);
+  assert.match(source, /\$removal\[0\]\.DirProperty -cne \$component\.Directory_/);
+  assert.match(source, /\$removal\[0\]\.InstallMode -ne '2'/);
+  assert.match(source, /foreach \(\$marker in \$RegistryMarkers\.Values\)/);
+  assert.match(source, /\$installedMarkers\.\$marker -ne 1/);
+});
+
+test("Windows smoke executes per-user table refusals with a green control", { skip: process.platform !== "win32" }, () => {
+  const source = read("machine-prep/installers/smoke/windows.ps1");
+  const markers = /\$RegistryMarkers = @\{[^}]+\}/.exec(source)?.[0];
+  const functions = source.slice(source.indexOf("function Assert-EqualSet("), source.indexOf("function Assert-Absent("));
+  assert.ok(markers && functions.includes("function Assert-PerUserTables("), "real smoke table validator extracted");
+  const ids = ["MachinePrepScripts", "ClaudeHandoff", "MachinePrepShortcut"];
+  const directories = ["INSTALLFOLDER", "HANDOFFFOLDER", "ApplicationProgramsFolder"];
+  const names = ["scriptsInstalled", "handoffInstalled", "installed"];
+  const control = {
+    components: ids.map((id, index) => ({ Component: id, Directory_: directories[index], Attributes: "260", KeyPath: `Marker${index}` })),
+    registry: ids.map((id, index) => ({ Registry: `Marker${index}`, Component_: id, Root: "1", Key: "Software\\FinancialBrain\\MachinePrep", Name: names[index], Value: "#1" })),
+    removals: ids.map((id, index) => ({ Component_: id, FileName: "", DirProperty: directories[index], InstallMode: "2" })),
+  };
+  const cases = [{ name: "green", rows: control, accept: true }];
+  for (let index = 0; index < ids.length; index++) {
+    for (const [table, field, value] of [
+      ["registry", "Root", "2"], ["registry", "Name", "unreviewed"],
+      ["registry", "Key", "Software\\Elsewhere"], ["registry", "Value", "#0"],
+      ["registry", "Component_", "unreviewed"], ["components", "Attributes", "256"],
+      ["components", "KeyPath", "FileKeyPath"], ["removals", "DirProperty", "LocalAppDataFolder"],
+      ["removals", "FileName", "*"], ["removals", "InstallMode", "1"],
+    ]) {
+      const rows = structuredClone(control);
+      rows[table][index][field] = value;
+      cases.push({ name: `${ids[index]}-${field}`, rows, accept: false });
+    }
+    for (const table of ["registry", "removals"]) {
+      for (const action of ["missing", "extra"]) {
+        const rows = structuredClone(control);
+        if (action === "missing") rows[table].splice(index, 1);
+        else rows[table].push({ ...rows[table][index] });
+        cases.push({ name: `${ids[index]}-${table}-${action}`, rows, accept: false });
+      }
+    }
+  }
+  const home = mkdtempSync(join(ROOT, ".machine-prep-wix-tables-"));
+  mkdirSync(join(home, "temp"));
+  const fixture = join(home, "table-contract.ps1");
+  // Only the pure table-check functions are executed. No installer, registry,
+  // credential helper, or top-level native smoke phase is invoked by this test.
+  writeFileSync(fixture, `Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+${markers}
+${functions}
+$cases = @'
+${JSON.stringify(cases)}
+'@ | ConvertFrom-Json
+foreach ($case in $cases) {
+  $accepted = $false
+  $events = @()
+  try {
+    Assert-PerUserTables $case.rows.components $case.rows.registry $case.rows.removals | ForEach-Object { $events += $_ }
+    $accepted = $true
+  } catch {
+    if ($_.Exception.Message -notmatch '^Unexpected MSI ') { throw }
+  }
+  if ($events -notcontains 'PER_USER_TABLE_DECISION_REACHED=1') { throw 'table decision not reached' }
+  if ($accepted -ne $case.accept) { throw ('wrong table decision: ' + $case.name) }
+  Write-Output ('TABLE_ARM_VERIFIED=' + $case.name)
+}
+`);
+  try {
+    const powerShell = process.env.SystemRoot
+      ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe") : "powershell.exe";
+    const result = spawnSync(powerShell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fixture], {
+      cwd: ROOT, encoding: "utf8", timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS,
+      env: {
+        SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR,
+        PATH: process.env.PATH, PATHEXT: process.env.PATHEXT, COMSPEC: process.env.COMSPEC,
+        HOME: home, USERPROFILE: home, LOCALAPPDATA: join(home, "local"), APPDATA: join(home, "roaming"),
+        TEMP: join(home, "temp"), TMP: join(home, "temp"), BRAIN_NO_WRANGLER_LOGIN: "1",
+        BRAIN_TEST_LAUNCHCTL: join(home, "injected-launchctl"),
+      },
+    });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.equal(result.stdout.match(/^TABLE_ARM_VERIFIED=/gm)?.length, cases.length, "all 43 table decisions reached");
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
 
 test("x64 MSI launcher declaration and native smoke resolve the same 64-bit PowerShell", () => {
   const authored = read("machine-prep/installers/windows/Package.wxs");
