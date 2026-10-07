@@ -1431,24 +1431,34 @@ async function handleThink(
             const headsUpAt = answer.search(/\n\s*Heads up:/i);
             const bodyText = headsUpAt >= 0 ? answer.slice(0, headsUpAt) : answer;
             const headsUp = headsUpAt >= 0 ? answer.slice(headsUpAt).trim() : "";
-            // Split as answerSentences splits, so the dot inside a figure like
-            // $1,234.73 never cuts a supported sentence apart.
-            const kept = answerSentences(bodyText)
-              .filter((sentence) => {
+            // Money statements keep their original line boundaries, including
+            // dots within party names. Other answers retain the normal splitter.
+            const kept = draftMoneyPolicy
+              ? draftMoneyPolicy.partialBody(bodyText, allowed).split("\n").filter(Boolean)
+              : answerSentences(bodyText).filter((sentence) => {
                 const cites = [...sentence.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1]));
                 return cites.length > 0 && cites.every((n) => allowed.has(n));
               });
-            if (!kept.length) {
+            const factualBody = kept.join(draftMoneyPolicy ? "\n" : " ");
+            // Validate the actual returned monetary statements, after citation
+            // selection. Never approve a changed subject or a concatenation
+            // that was not bound to the cited native record in the draft.
+            const partialMoneyRefusal = draftMoneyPolicy?.refusal(factualBody);
+            if (!kept.length || partialMoneyRefusal) {
               answer = unsupportedAnswer;
               approvedDocs = [];
-              evidenceGate.reason = evidenceGate.reason || "no sentence survived the citation check";
+              if (draftMoneyPolicy) {
+                evidenceGate.supported = false;
+                evidenceGate.evidence = [];
+              }
+              evidenceGate.reason = partialMoneyRefusal || evidenceGate.reason || "no sentence survived the citation check";
             } else {
               // A verifier explanation is also model prose. It must not append
               // new money after the QuickBooks draft has passed its veto.
-              const missing = moneyPolicy ? "one or more requested details"
+              const missing = draftMoneyPolicy ? "one or more requested details"
                 : String(evidenceGate.reason || "one part of the question").replace(/\.$/, "");
-              if (moneyPolicy) evidenceGate.reason = missing;
-              answer = `${kept.join(" ")}\n\nNot covered by the documents: ${missing}.${headsUp ? `\n\n${headsUp}` : ""}`;
+              if (draftMoneyPolicy) evidenceGate.reason = missing;
+              answer = `${factualBody}\n\nNot covered by the documents: ${missing}.${headsUp && !draftMoneyPolicy ? `\n\n${headsUp}` : ""}`;
               approvedDocs = citedDocs.filter((doc) => allowed.has(doc.n));
               evidenceGate.partial = true;
             }

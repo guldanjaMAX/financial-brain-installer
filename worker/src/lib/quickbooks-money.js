@@ -20,11 +20,16 @@ const exactTime = (value) => {
   return Number.isFinite(time) && new Date(time).toISOString() === value ? time : null;
 };
 const validDay = (value) => exactTime(`${value}T00:00:00.000Z`) !== null;
+// Labels are part of a monetary statement too. A field containing a second
+// monetary clause is ambiguous even when copied verbatim from the provider.
+// Ordinary names (including dots), document identifiers and Net 30 terms stay
+// usable; monetary prose in these slots never supplies another amount field.
+const monetaryLabel = (value) => /\b[A-Z]{3}\s+-?\d/u.test(value) ||
+  /\p{Sc}|\d[.,]\d|\b(?:amounts?|balances?|owes?|owed|paid|costs?|charges?|fees?|dollars?|cents?|bucks?|euros?|pounds?|pesos?|yen|yuan|rupees?|francs?|hundred|thousands?|millions?|billions?|trillions?)\b/iu.test(value);
 const units = (money) => {
   const [whole, fraction = ""] = money.slice(4).replaceAll(",", "").replace(/^-/, "").split(".");
   return BigInt(whole + fraction.padEnd(6, "0")) * (money[4] === "-" ? -1n : 1n);
 };
-const AMBIGUOUS_NOTE = /\b(?:amounts?|balances?|money|dollars?|cents?|currenc(?:y|ies)|USD|CAD|EUR|GBP|thousands?|millions?|billions?|negative|positive|debit|credit|owes?|owed|zero|one|two|three|four|five|six|seven|eight|nine|ten|hundred)\b/i;
 const REFUSAL = "QuickBooks money draft contains an ambiguous or unbound statement; exact cited native records at the latest observation are required";
 const NOTICES = [
   "Lists only records found in the retrieved evidence, not a complete QuickBooks inventory.",
@@ -39,6 +44,10 @@ function record(doc) {
   const header = /^(.*?)\. QuickBooks (Account|Customer|Vendor|Invoice|Bill|CreditMemo|BillPayment)\. (.*)$/.exec(text);
   if (!header) return null;
   const [, opening, entity, rest] = header;
+  // A label can itself contain a forged opening/marker. Ambiguous repeated
+  // markers or a missing native observation preface cannot define field slots.
+  if ([...text.matchAll(/\bQuickBooks (?:Account|Customer|Vendor|Invoice|Bill|CreditMemo|BillPayment)\./g)].length !== 1 ||
+      (entity !== "BillPayment" && !rest.startsWith("Balance observed during this sync; the provider queries are not an atomic ledger snapshot."))) return null;
   if (!/^[a-z]+:[A-Za-z0-9._~-]{1,128}$/.test(doc.ref || "")) return null;
   if (!String(doc.ref || "").startsWith(`${entity.toLowerCase()}:`)) return null;
   const observed = entity === "BillPayment"
@@ -52,12 +61,11 @@ function record(doc) {
     const direction = entity === "Invoice" ? "to" : "from";
     const match = pattern(`${entity} ${ID} ${direction} ${NAME}: total ${MONEY}, open balance ${MONEY} \\((unpaid|paid|partially paid|credit balance)\\) as of ${STAMP}; dated ${DAY}(?:, due ${DAY})?(?:, terms ${NAME})?`).exec(opening);
     if (!match) return parsed;
-    const [, number, party, total, balance, state, asOf, dated, due] = match;
+    const [, number, party, total, balance, state, asOf, dated, due, terms = ""] = match;
     parsed.key = `${entity}:${identity(number)}:${identity(party)}`;
-    parsed.label = `${entity} ${number}`;
     const expectedState = units(balance) < 0n ? "credit balance" : units(balance) === 0n ? "paid"
       : units(balance) < units(total) ? "partially paid" : "unpaid";
-    if (asOf !== observed || total.slice(0, 3) !== balance.slice(0, 3) || state !== expectedState ||
+    if ([number, party, terms].some(monetaryLabel) || asOf !== observed || total.slice(0, 3) !== balance.slice(0, 3) || state !== expectedState ||
         !validDay(dated) || (due && !validDay(due))) return parsed;
     add(opening);
     for (const date of dates) {
@@ -71,38 +79,31 @@ function record(doc) {
     if (!match) return parsed;
     const [, party, balance] = match;
     parsed.key = `${entity}:${identity(party)}`;
+    if (monetaryLabel(party)) return parsed;
     for (const date of dates) add(`${party}: open balance ${balance} as of ${date}`);
   } else if (entity === "CreditMemo") {
     const match = pattern(`Credit memo ${ID} for ${NAME} on ${DAY}: total ${MONEY}, remaining credit ${MONEY} as of ${STAMP}`).exec(opening);
     if (!match) return parsed;
     const [, number, party, date, total, balance] = match;
     parsed.key = `${entity}:${identity(number)}:${identity(party)}`;
-    parsed.label = `${entity} ${number}`;
-    if (!validDay(date) || total.slice(0, 3) !== balance.slice(0, 3)) return parsed;
+    if ([number, party].some(monetaryLabel) || !validDay(date) || total.slice(0, 3) !== balance.slice(0, 3)) return parsed;
     add(opening);
     for (const asOf of dates) add(`Credit memo ${number} for ${party} has remaining credit of ${balance} as of ${asOf}`);
   } else if (entity === "BillPayment") {
     const match = pattern(`Bill payment to ${NAME} on ${DAY}: ${MONEY} by (credit card|cash|check) \\(${NAME}\\)(, for bill [\\p{L}\\p{N}_/\\-]+(?:, bill [\\p{L}\\p{N}_/\\-]+)*)?`).exec(opening);
     if (!match) return parsed;
-    const [, party, date, amount, method, , links = ""] = match;
+    const [, party, date, amount, method, account, links = ""] = match;
     parsed.key = `${entity}:${doc.ref}`;
-    if (!validDay(date) || units(amount) < 0n) return parsed;
+    if ([party, account, links].some(monetaryLabel) || !validDay(date) || units(amount) < 0n) return parsed;
     add(opening);
     add(`${party} was paid ${amount} by ${method} on ${date}${links.replace(/^,/, "")}`);
   }
-  // Purpose is attributed to the record, not promoted to another amount or
-  // current relationship. Complex notes are left to the source application.
-  const memo = /(?:^| )Memo: ([\p{L}][\p{L} ,'/()-]{0,179})(?= Transaction date:| Provider last changed:| Details)/u.exec(rest)?.[1];
-  if (parsed.statements.length && memo && !AMBIGUOUS_NOTE.test(memo)) add(`Recorded memo for ${entity} ${doc.ref.slice(entity.length + 1)}: "${memo}"`);
-  // Only complete, simple native line items qualify. A cut excerpt or a
-  // description that changes monetary units/side cannot lend a safe purpose.
-  if (parsed.label && parsed.statements.length) {
-    const lines = new RegExp(`(?:^| )Line ([1-9]\\d*): (${MONEY}; [\\p{L}][\\p{L} ;,'/()-]{0,299})(?= Line [1-9]\\d*:| Details)`, "gu");
-    for (const match of rest.matchAll(lines)) {
-      const description = match[2].slice(match[2].indexOf("; ") + 2);
-      if (!AMBIGUOUS_NOTE.test(description)) add(`Recorded line ${match[1]} for ${parsed.label}: ${match[2]}`);
-    }
-  }
+  // A flattened excerpt cannot distinguish structural Line/Details markers
+  // from those same strings inside a memo or description. Never promote that
+  // tail to monetary facts, even when its numbers match a genuine total.
+  // Nor can a word blacklist prove that arbitrary prose contains no money
+  // (e.g. "eighty bucks"). Purpose/line-item answers require structured field
+  // provenance before they can join this finite language.
   return parsed;
 }
 
@@ -149,12 +150,23 @@ export function quickBooksMoneyPolicy({ question, draft, docs = [], candidates =
   const allowed = new Set([...statements, ...NOTICES]);
   return {
     instruction: [
-      "QUICKBOOKS MONEY CONTRACT: If answering from these QuickBooks records, select relevant complete lines from the list below and copy them exactly, one per line (optional '- ' bullets). Do not add a heading, sum, paraphrase, currency symbol, scale, sign change, additional subject, or Heads up line. Do not present a transaction amount as a balance. The separate evidence verifier must still support the answer to the question. If no listed statement answers it, say exactly: The documents do not answer the question.",
+      "QUICKBOOKS MONEY CONTRACT: If answering from these QuickBooks records, select relevant complete lines from the list below and copy them exactly, one per line (optional '- ' bullets). Do not add a heading, sum, subtotal, range, words-for-numbers, paraphrase, currency symbol, scale, sign change, additional subject, or Heads up line. Never copy a memo, description or line-item claim from the documents; those free-text boundaries do not establish a monetary field. Do not present a transaction amount as a balance. The separate evidence verifier must still support the answer to the question. If no listed statement answers it, say exactly: The documents do not answer the question.",
       ...statements, ...NOTICES,
     ].join("\n"),
     refusal(answer) {
       const lines = String(answer || "").split(/\r?\n/).map((line) => line.trim().replace(/^- /, "")).filter(Boolean);
       return lines.length && lines.every((line) => allowed.has(line)) && lines.some((line) => statements.includes(line)) ? null : REFUSAL;
+    },
+    // This is formatting, not approval. The route uses it only after both the
+    // independent verifier and the refusal check, and rechecks the retained
+    // body. Sentence splitting can detach a dotted party name from its money.
+    partialBody(answer, allowedNumbers) {
+      return String(answer || "").split(/\r?\n/).filter((line) => {
+        const statement = line.trim().replace(/^- /, "");
+        if (!statements.includes(statement)) return false;
+        const numbers = [...statement.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
+        return numbers.length === 1 && allowedNumbers.has(numbers[0]);
+      }).join("\n");
     },
   };
 }
