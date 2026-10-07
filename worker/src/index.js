@@ -64,7 +64,7 @@ import {
 } from "./lib/query-intent.js";
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
 import { answerSentences } from "./lib/answer-sentences.js";
-import { isQuickBooksBalanceClaim, quickBooksBalanceSupportsClaim } from "./lib/quickbooks-balance.js";
+import { isQuickBooksBalanceClaim, quickBooksBalanceSupportsClaim, quickBooksBalanceAnswerAssertions } from "./lib/quickbooks-balance.js";
 import {
   answerUsesOperativeValue, answerUsesSupersededValue, authorityFor,
   documentMatchesOperativeClaim, documentUsesOperativeValue,
@@ -590,8 +590,8 @@ function statusPolarity(value) {
   return null;
 }
 
-function documentDirectlySupportsStatus(sentence, doc, question = "") {
-  if (isQuickBooksBalanceClaim(sentence, doc)) {
+function documentDirectlySupportsStatus(sentence, doc, question = "", accountBalance = false) {
+  if (accountBalance || isQuickBooksBalanceClaim(sentence, doc)) {
     return quickBooksBalanceSupportsClaim(sentence, doc) && hasMatchingAsOfDate(sentence, [doc]);
   }
   const source = String(doc?.source || "").toLowerCase();
@@ -1086,7 +1086,6 @@ async function handleThink(
     : operativeConflict
       ? newestOperativeCandidates
       : newestCurrentEvidence(q, docs, currentOptions);
-  const currentEvidenceNumbers = new Set(currentEvidence.map((doc) => doc.n));
   const operativeCurrentEvidence = selectedOperativeEvidence ? [selectedOperativeEvidence] : newestOperativeCandidates;
   const explicitCurrentIntent = hasExplicitCurrentIntent(q);
   let newerAuthoritativeEvidence = [];
@@ -1144,7 +1143,7 @@ async function handleThink(
     "13. For a named tax-form question, the cited record must match the exact taxpayer or entity, tax year, and filing type. A partner's Schedule K-1 is not the partnership's Form 1065 return, even though its header mentions Form 1065.",
     "14. When a claim rests on reliably dated evidence, weave that date into the sentence naturally, like: per the 2026-07-31 call transcript. A dated claim can be checked; an undated one has to be trusted. Never state a date the documents do not carry.",
     "15. A derived report, generated pack, summary, or agent-written note may accurately restate its sources, but it is not independent confirmation of them. Documents with overlapping recorded source families count as one evidence family. When lineage is unknown, do not claim that multiple documents independently confirm a fact.",
-    "16. A QuickBooks balance snapshot observes the displayed balance at its exact as-of date, even if the transaction or provider last-change date is older. State that as-of date with the balance. Individual retrieved records do not establish a complete list or company-wide total.",
+    "16. A QuickBooks balance snapshot observes the displayed balance at its exact as-of date, even if the transaction or provider last-change date is older. State that as-of date with each account balance and cite that account's own record. For a negative Credit Card balance, say the owner owes the positive amount; retain the minus sign if also quoting the provider balance. Individual retrieved records do not establish a complete list or company-wide total.",
     env.BRAIN_STYLE_RULE || "",
   ]
     .filter(Boolean)
@@ -1313,17 +1312,18 @@ async function handleThink(
           }
           if (evidenceGate.supported && explicitCurrentIntent) {
             const allowedNumbers = new Set(allowedDocs.map((doc) => doc.n));
-            const assertions = answerSentences(answer);
+            const assertions = quickBooksBalanceAnswerAssertions(answerSentences(answer), docs)
+              .map((assertion) => ({ ...assertion, evidence: assertion.evidence || currentEvidence }));
             let temporalFailure = null;
-            for (const sentence of assertions) {
-              const balanceClaim = allowedDocs.some((doc) => isQuickBooksBalanceClaim(sentence, doc));
+            for (const { sentence, evidence, accountBalance } of assertions) {
+              const balanceClaim = accountBalance || allowedDocs.some((doc) => isQuickBooksBalanceClaim(sentence, doc));
               if ((!PRESENT_STATUS_ASSERTION.test(sentence) && !balanceClaim) || STATUS_UNCERTAINTY.test(sentence)) continue;
-              if (!currentEvidenceNumbers.size) {
+              if (!evidence.length) {
                 temporalFailure = "present-status claim had no reliable-dated evidence for the named subject";
                 break;
               }
               const numbers = [...sentence.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
-              const newestCited = currentEvidence.filter(
+              const newestCited = evidence.filter(
                 (doc) => numbers.includes(doc.n) && allowedNumbers.has(doc.n),
               );
               if (!newestCited.length) {
@@ -1331,7 +1331,7 @@ async function handleThink(
                 break;
               }
               const directlySupporting = newestCited.filter(
-                (doc) => documentDirectlySupportsStatus(sentence, doc, q),
+                (doc) => documentDirectlySupportsStatus(sentence, doc, q, accountBalance),
               );
               if (!directlySupporting.length) {
                 temporalFailure = "newest cited evidence did not itself support the present-status claim";

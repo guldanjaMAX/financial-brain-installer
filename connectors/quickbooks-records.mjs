@@ -87,9 +87,14 @@ export function renderQuickBooksRecord(entity, row, snapshotAt) {
   const terms = row.SalesTermRef ? `, terms ${ref(row.SalesTermRef)}` : "";
   let opening;
   switch (entity) {
-    case "Account":
-      opening = `${short(row.AccountType) || "Financial"} account ${ref({ name: row.Name || row.FullyQualifiedName })}: ${balanceField ? `balance ${balance} as of ${snapshotAt}` : balance}.`;
+    case "Account": {
+      // Keep the provider's signed value and explain a card liability without
+      // describing the absolute amount as money available to the owner.
+      const owed = row.AccountType === "Credit Card" && balanceUnits < 0n
+        ? ` (owes ${money(decimal(row[balanceField]).slice(1))})` : "";
+      opening = `${short(row.AccountType) || "Financial"} account ${ref({ name: row.Name || row.FullyQualifiedName })}: ${balanceField ? `balance ${balance}${owed} as of ${snapshotAt}` : balance}.`;
       break;
+    }
     case "Customer": case "Vendor":
       opening = `${short(row.DisplayName || row.CompanyName || row.Name) || entity}: ${balanceField ? `open balance ${balance} as of ${snapshotAt}` : balance}.`;
       break;

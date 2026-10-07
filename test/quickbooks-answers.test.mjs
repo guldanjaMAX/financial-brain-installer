@@ -146,3 +146,12 @@ test("partial-payment status compares exact decimal amounts", async () => {
   const doc = (await collect("Invoice", [{ ...row, TotalAmt: "9007199254740992.01", Balance: "9007199254740992.00" }])).documents[0];
   assert.match(doc.content.split("\n")[0], /partially paid/);
 });
+
+test("negative credit-card balances lead with the signed balance and amount owed", async () => {
+  const row = { ...FIXTURES[0][1], Name: "Company Card", AccountType: "Credit Card", CurrentBalance: "-75.25" };
+  const doc = (await collect("Account", [row])).documents[0];
+  assert.equal(doc.content.split("\n")[0], `Credit Card account Company Card: balance USD -75.25 (owes USD 75.25) as of ${SNAPSHOT}.`);
+  assert.match(doc.title, /USD -75\.25/);
+  const bank = (await collect("Account", [{ ...row, AccountType: "Bank" }])).documents[0];
+  assert.doesNotMatch(bank.content.split("\n")[0], /owes/);
+});
