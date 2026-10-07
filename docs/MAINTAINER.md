@@ -253,22 +253,22 @@ Never combine those into a broader claim than the evidence supports.
 
 ## Cut an immutable release
 
-The current 0.4.9/schema48 field candidate remains held. The earlier 0.4.7
-and 0.4.8 candidates were never tagged, published, or offered as customer
+The current 0.4.10/schema48 field candidate remains held. The earlier 0.4.7,
+0.4.8, and 0.4.9 candidates were never tagged, published, or offered as customer
 updates; their identities are retired so their evidence cannot be mistaken for
 evidence from these changed bytes. At this freeze the current candidate's
 41-row audit has 37 unresolved incidents and four rows closed on reviewed
-evidence. No earlier deferral was renewed; two of the unresolved rows,
-UPDATE-012 and UPDATE-044, carry new exact-version 0.4.9 deferrals recorded on
-2026-09-26 that print in the release note. Since the held 0.4.8 candidate,
+evidence. Two of the unresolved rows, UPDATE-012 and UPDATE-044, carry
+exact-version 0.4.10 deferrals explicitly renewed on 2026-10-06 and printed in
+the release note. No other earlier deferral was renewed. Since the held 0.4.8 candidate,
 three acceptance texts changed and one row was added, because two clauses
 were re-homed, not weakened:
 [ADR 007](./decisions/007-rehome-update-006-arm64-clause.md) moves UPDATE-006's
 Windows ARM64 clause into UPDATE-012, and
 [ADR 008](./decisions/008-rehome-update-025-breadth-into-update-044.md) moves
 UPDATE-025's two-institution, two-business and business-banking-login breadth
-into the new UPDATE-044, whose exact-version 0.4.9 narrowing is recorded in
-ADR 008.
+into the new UPDATE-044. ADR 008 defines that narrowing, and the current
+candidate plan records its exact-version 0.4.10 renewal.
 Against the last shipped release, v0.4.6, five
 acceptance texts changed and two rows were added: those three texts and
 UPDATE-044, plus UPDATE-043 and the UPDATE-036 and UPDATE-037 texts rewritten
@@ -277,7 +277,7 @@ all of them. A tag requests the release workflow; it never
 bypasses CI, unresolved incidents, owner acceptance, or the repository's
 immutable-release setting. Do not create or publish releases by hand to work
 around a failed workflow. The
-[0.4.9 candidate evidence plan](./release-evidence/v0.4.9-candidate-release-evidence-plan.md)
+[0.4.10 candidate evidence plan](./release-evidence/v0.4.10-candidate-release-evidence-plan.md)
 is planning only until a reviewed change binds it to the final candidate SHA.
 
 1. Keep package.json, both root lockfile versions, the manifest template, newest

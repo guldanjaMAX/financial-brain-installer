@@ -24,6 +24,10 @@ const check = (name, value, detail = "") => {
 };
 
 const folder = mkdtempSync(join(tmpdir(), "brain-provider-cli-"));
+// Provider connection takes the same owner lease as a real source run. Keep
+// its private lock tree inside this fixture instead of the developer's home.
+process.env.HOME = folder;
+process.env.USERPROFILE = folder;
 const manifestPath = join(folder, "brain.manifest.json");
 writeFileSync(manifestPath, JSON.stringify({
   manifest_version: 1,

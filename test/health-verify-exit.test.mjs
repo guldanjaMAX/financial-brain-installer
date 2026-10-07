@@ -5,7 +5,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import os from "node:os";
 import { syncBuiltinESMExports } from "node:module";
@@ -16,6 +16,9 @@ import { renderCliCommands } from "../operations/cli-guidance.mjs";
 const SCENARIO = String(process.env.BRAIN_HEALTH_VERIFY_SCENARIO || "");
 const FIXTURE_ADMIN = "fixture-admin-label";
 const FIXTURE_TOKEN = "fixture-cloudflare-label";
+const PRODUCT_VERSION = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version;
 
 function json(body, status = 200) {
   if (body && typeof body === "object" && body.backend &&
@@ -469,7 +472,7 @@ if (SCENARIO) {
         wait: async () => {},
         request: async (url) => {
           if (String(url).includes("/health")) return json({
-            ok: true, status: "ok", accepting_documents: true, version: "0.4.9",
+            ok: true, status: "ok", accepting_documents: true, version: PRODUCT_VERSION,
             vector_writer_protocol: "lease-v1", vector_drain_mode: "active",
           });
           documentCalls++;

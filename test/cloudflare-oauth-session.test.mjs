@@ -916,6 +916,7 @@ test("the update command uses a saved workers.dev address without requiring the 
     let upgradeCalls = 0;
     await cmdUpdate(manifestPath, {
       discoverInstalledManifest: () => ({ path: manifestPath, source: "remembered" }),
+      claudeSkillOptions: { home: root },
       readUpdateBacklog: async () => ({ pending: 0 }),
       adoptCloudflareAuthProfile: async () => manifest.infrastructure.cloudflare.auth_profile,
       interactive: false,

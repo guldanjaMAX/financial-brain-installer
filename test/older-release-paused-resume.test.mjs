@@ -97,6 +97,9 @@ async function scratchRelease(version) {
 const CHECKED_OUT = { version: PRODUCT_VERSION, cli: checkedOutCli, worker: checkedOutWorker };
 const NEXT = await scratchRelease(NEXT_VERSION);
 const PREVIOUS = await scratchRelease(PREVIOUS_VERSION);
+const DOCUMENTED_V048 = PREVIOUS_VERSION === "0.4.8"
+  ? PREVIOUS
+  : await scratchRelease("0.4.8");
 
 const migrationDir = join(ROOT, "migrations", "d1");
 const migrations = readdirSync(migrationDir)
@@ -370,6 +373,7 @@ async function update(brain, release, { force = false, duringAcceptance = null }
     upgradeOptions,
     reconcileExistingOwnerAgents: null,
     writeClaudeWorkspaceGuideAfterUpdate: null,
+    claudeSkillOptions: { home: brain.sandbox },
   }));
 }
 
@@ -519,9 +523,10 @@ function observeFolderListings(roots) {
 }
 
 test("the documented 0.4.8 active folder updates, retires, and refuses both legacy walks", async () => {
-  assert.equal(PREVIOUS_VERSION, "0.4.8", "this regression is pinned to the documented 0.4.8 shape");
-  const brain = installation(PREVIOUS, { activeFolder: true });
-  const walkedControl = installation(PREVIOUS, { activeFolder: true });
+  assert.equal(DOCUMENTED_V048.version, "0.4.8",
+    "this regression must keep exercising the documented 0.4.8 shape after later version bumps");
+  const brain = installation(DOCUMENTED_V048, { activeFolder: true });
+  const walkedControl = installation(DOCUMENTED_V048, { activeFolder: true });
   // One hook, connected before either update starts and removed only at the
   // end, so the zero below and the control's count come from the same observer.
   const folderListings = observeFolderListings([brain.watchedPath, walkedControl.watchedPath]);

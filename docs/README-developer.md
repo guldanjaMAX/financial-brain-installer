@@ -8,18 +8,18 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Status: unreleased 0.4.9/schema48 field candidate, held.** Provisioning,
+**Status: unreleased 0.4.10/schema48 field candidate, held.** Provisioning,
 retrieval, resumable ingest, guarded deletion, owner actions, exact entity
 scope, document grants, passkey observability, financial imports, provenance
 binding for eligible single-record local file ingests, bounded one-original
 accepted-resolution evidence, and restart-safe migrations are covered by local
 product and contract suites. Local proof is not field proof. At this freeze the
-41-row release audit has 37 unresolved incidents, two 0.4.9 deferrals, and four
-rows closed on reviewed evidence. No public 0.4.9 asset or customer update
-exists. The earlier held 0.4.7 and 0.4.8 candidates were never tagged or
+41-row release audit has 37 unresolved incidents, two 0.4.10 deferrals, and four
+rows closed on reviewed evidence. No public 0.4.10 asset or customer update
+exists. The earlier held 0.4.7, 0.4.8, and 0.4.9 candidates were never tagged or
 published, and their identities are retired rather than reused for these
 changed bytes. See "What is not built," `CONNECTOR-BACKLOG.md`, and the
-[0.4.9 candidate evidence plan](release-evidence/v0.4.9-candidate-release-evidence-plan.md)
+[0.4.10 candidate evidence plan](release-evidence/v0.4.10-candidate-release-evidence-plan.md)
 before promising anything to anyone.
 
 Engineering changes follow [the code, test, documentation, and tracking

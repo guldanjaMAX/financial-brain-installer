@@ -4,14 +4,21 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
-## 0.4.9
+## 0.4.10 (2026-10-06)
 
 Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
-asset publication. The held 0.4.8 candidate was never tagged, published, or
-offered as a customer update; its entries below ship for the first time in
-0.4.9, and its identity is retired so its evidence cannot be confused with
-this changed candidate.
+asset publication. The held 0.4.8 and 0.4.9 candidates were never tagged,
+published, or offered as customer updates. Their entries below ship for the
+first time in 0.4.10, and their identities are retired so their evidence cannot
+be confused with this changed candidate.
+
+At a glance, this candidate adds permanent daily imports on Windows and macOS
+that survive verified updates, Outlook calendar records, a SimpleFIN bank
+connection with transactions, bank-activity refresh after account moves, and
+Brain Feeds landing folders. Aggregate freshness is visible across those
+sources, and answers search first so they can cite current records before they
+write a response.
 
 - **Daily imports now have one owned Windows and macOS contract.** `brain daily
   on|off|status <manifest>` derives every source from your own manifest instead
@@ -991,7 +998,7 @@ this changed candidate.
   the default OCR model is unchanged. To check: with OCR enabled, a scanned
   page read by the default model is indexed instead of refused.
 
-- **Known issue, not fixed in 0.4.9: a partial answer can drop a name that
+- **Known issue, not fixed in 0.4.10: a partial answer can drop a name that
   ends in an abbreviation.** When the documents answer only part of a
   question, the Brain keeps the sentences its sources support and names what
   is missing. It still reads the full stop in an abbreviation such as "Co." as

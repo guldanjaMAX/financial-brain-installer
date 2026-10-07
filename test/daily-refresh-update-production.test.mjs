@@ -9,6 +9,10 @@ import {
   readDailyRefreshUpdateTransaction,
 } from "../operations/daily-refresh-scheduler.mjs";
 
+const PRODUCT_VERSION = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version;
+
 function manifestFixture() {
   return {
     client: { slug: "fixture", timezone: "UTC" },
@@ -232,13 +236,13 @@ function useRealPropagationDecisions(harness, { exhaustDrain = false } = {}) {
           ok: mode === "active",
           status: mode === "active" ? "ok" : "paused-for-upgrade",
           accepting_documents: mode === "active",
-          version: "0.4.9",
+          version: PRODUCT_VERSION,
           vector_writer_protocol: "lease-v1",
           vector_drain_mode: mode,
         });
       }
       assert.equal(path, "/api/admin/brain/documents");
-      return response(readyDocumentsReceipt("0.4.9", mode));
+      return response(readyDocumentsReceipt(PRODUCT_VERSION, mode));
     },
   });
   harness.options.upgradeOptions.cmdDrain = async (manifestPath, options) => cmdDrain(manifestPath, {
@@ -476,7 +480,7 @@ test("production native restore failure completes with visible daily attention a
     assert.ok(readDailyRefreshUpdateTransaction(harness.plan.identity, {
       home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
     }));
-    assert.equal(JSON.parse(readFileSync(manifestPath, "utf8")).brain.version, "0.4.9",
+    assert.equal(JSON.parse(readFileSync(manifestPath, "utf8")).brain.version, PRODUCT_VERSION,
       "the schedule failure happened after the real upgrade stages committed");
   });
 });

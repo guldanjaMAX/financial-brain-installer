@@ -280,6 +280,7 @@ async function update(brain) {
     upgradeOptions: brain.upgradeOptions,
     reconcileExistingOwnerAgents: null,
     writeClaudeWorkspaceGuideAfterUpdate: null,
+    claudeSkillOptions: { home: brain.sandbox },
   }));
 }
 

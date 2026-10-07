@@ -102,7 +102,8 @@ assert.equal(LOCKED_WRANGLER_LOCK_ROOT_VERSION, version,
 // matches the package, so it is pinned here with everything else.
 const workerVersion = read("worker/src/lib/version.js").match(/WORKER_VERSION = "([^"]+)"/)?.[1];
 assert.equal(workerVersion, version, "worker source version drifted from the package");
-assert.match(changelog, new RegExp(`^## ${escapedVersion}$`, "m"), "changelog has no current-version heading");
+assert.match(changelog, new RegExp(`^## ${escapedVersion} \\(2026-10-06\\)$`, "m"),
+  "changelog has no dated current-version heading");
 assert.match(currentEvidencePlan, new RegExp(`^# v${escapedVersion} candidate release evidence plan$`, "m"),
   "current candidate has no version-matched evidence plan");
 assert.match(currentEvidencePlan, /Candidate source commit: unbound[\s\S]*?Field execution: none/,
@@ -258,7 +259,7 @@ async function whatsnewStatusOutput(readStatus, options = {}) {
 const currentNotesOnly = await whatsnewStatusOutput(async () => ({
   status: "up_to_date", latest_version: version,
 }), { full: true });
-assert.match(currentNotesOnly, /## 0\.4\.9/u);
+assert.match(currentNotesOnly, new RegExp(`## ${escapedVersion} \\(2026-10-06\\)`, "u"));
 assert.doesNotMatch(currentNotesOnly, /## 0\.4\.6/u,
   "whatsnew must print only the current version by default");
 const allNotes = await whatsnewStatusOutput(async () => ({

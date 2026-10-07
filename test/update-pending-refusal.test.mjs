@@ -332,7 +332,7 @@ test("an empty backlog reaches the paused-deployment stage", async () => {
       "paused vector-drain deployment",
     ]);
     assert.deepEqual(finish, [
-      "Done. Your Brain is now on version 0.4.9 and passed its checks.\n" +
+      `Done. Your Brain is now on version ${PRODUCT_VERSION} and passed its checks.\n` +
         "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.\n" +
         "In Claude Code type /exit, then claude --continue.\n" +
         "Then ask: check my Brain.",
@@ -632,7 +632,7 @@ test("production recovery resumes after a post-install expectation failure", asy
       reportUpdateFinish: (message) => finish.push(message),
       cmdUpgrade: async () => {
         upgradeCalls += 1;
-        manifest.brain.version = "0.4.9";
+        manifest.brain.version = PRODUCT_VERSION;
         writeFileSync(manifestPath, JSON.stringify(manifest));
         return { updated: true, daily_final_state: { active: true, query_ready: true, pending: 0 } };
       },

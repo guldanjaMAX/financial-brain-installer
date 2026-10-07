@@ -203,18 +203,21 @@ for (const id of ["UPDATE-012", "UPDATE-044"]) {
 }
 const deferralCopies = [updateAuditDoc, maintainerDoc, candidatePlan].join("\n");
 for (const approvalCopy of [
-  /owner-approved exact-version 0\.4\.9/gi,
+  /owner-approved exact-version 0\.4\.10/gi,
   /owner-approved narrowing/gi,
   /new owner-approved record/gi,
-  /owner approved that 0\.4\.9 may ship without/gi,
+  /owner approved that 0\.4\.10 may ship without/gi,
   /owner decided on 2026-09-25 to defer Windows ARM64/gi,
   /approved this exact deferral on 2026-09-26/gi,
-  /owner confirmed it for the 0\.4\.9 release text/gi,
+  /owner confirmed it for the 0\.4\.10 release text/gi,
 ]) {
   assert.doesNotMatch(deferralCopies, approvalCopy,
     "deferral documentation must rely on the repository record rather than approval prose");
 }
-const currentReleaseSection = changelog.split(new RegExp(`^## ${packageVersion.replaceAll(".", "\\.")}\\s*$`, "m"))[1]
+const currentReleaseSection = changelog.split(new RegExp(
+  `^## ${packageVersion.replaceAll(".", "\\.")}(?: \\(\\d{4}-\\d{2}-\\d{2}\\))?\\s*$`,
+  "m",
+))[1]
   ?.split(/^## /m)[0] || "";
 function currentReleaseNotCoveredBlock(section) {
   const heading = /^### This release does NOT cover\s*$/m.exec(section);
