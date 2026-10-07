@@ -517,6 +517,7 @@ const expected = [
   "operations/daily-refresh-plan.mjs",
   "operations/daily-refresh-run.mjs",
   "operations/daily-refresh-scheduler.mjs",
+  "operations/feed-folders.mjs",
   "operations/wrangler-oauth.mjs",
   "operations/wrangler-runtime-contract.mjs",
   "operations/claude-workspace.mjs",
