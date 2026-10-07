@@ -19,6 +19,7 @@ import {
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
+import { restrictWindowsDirectoryToCurrentUser } from "./current-user-file.mjs";
 
 const CURRENT_PROCESS_INSTANCE = `${Math.round(Date.now() - process.uptime() * 1000)}`;
 
@@ -269,6 +270,7 @@ export function acquireBrainLifecycleLock({
     ? CURRENT_PROCESS_INSTANCE
     : null,
   now = () => new Date(),
+  restrictWindowsDirectory = restrictWindowsDirectoryToCurrentUser,
 } = {}) {
   if (!operation || !/^[a-z][a-z0-9-]{1,31}$/u.test(String(operation))) {
     throw new TypeError("a bounded lifecycle operation name is required");
@@ -285,6 +287,16 @@ export function acquireBrainLifecycleLock({
   for (;;) {
     try {
       mkdirSync(path, { mode: 0o700 });
+      if (platform === "win32") {
+        try {
+          restrictWindowsDirectory(path, { label: "the Brain lifecycle lock" });
+        } catch {
+          try {
+            if (readdirSync(path).length === 0) rmdirSync(path);
+          } catch {}
+          throw failure("brain_lifecycle_unsafe", "the local Brain lifecycle lock is not private");
+        }
+      }
       assertPrivateDirectory(path, "Brain lifecycle lock", platform);
       token = randomBytes(16).toString("hex");
       writeFileSync(join(path, `owner-${process.pid}-${token}.json`), JSON.stringify({

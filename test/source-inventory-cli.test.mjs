@@ -617,11 +617,24 @@ test("source CLI fails closed before network or credential reads and rejects pri
 });
 
 test("CLI help advertises the read-only inventory and recovery preview without an MCP change", () => {
+  const home = mkdtempSync(join(tmpdir(), "brain-source-help-"));
+  const environment = {
+    HOME: home,
+    USERPROFILE: home,
+    NO_COLOR: "1",
+    BRAIN_NO_WRANGLER_LOGIN: "1",
+    BRAIN_TEST_LAUNCHCTL: join(home, "launchctl-unavailable"),
+    BRAIN_ADMIN_KEY_FILE: join(home, ".brain-admin-key"),
+  };
+  for (const name of ["PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT", "TEMP", "TMP"]) {
+    if (process.env[name]) environment[name] = process.env[name];
+  }
   const result = spawnSync(process.execPath, [join(process.cwd(), "brain.mjs"), "--help"], {
     cwd: process.cwd(),
     encoding: "utf8",
-    env: { ...process.env, NO_COLOR: "1" },
+    env: environment,
   });
+  rmSync(home, { recursive: true, force: true });
   assert.equal(result.status, 0, result.stderr);
   const shownSources = escapeForRegExp(renderCliCommands("brain sources"));
   assert.match(result.stdout, new RegExp(`${shownSources}\\s+<manifest>.*read-only D1 source inventory`));
@@ -648,6 +661,7 @@ test("shipped source guidance uses v3 JSON or the actual concise human columns",
   assert.match(shippedGuidance, /`receipt\.logical_matches_reported`.*`storage\.logical_documents`/is);
 
   const scheduler = schedulePlatformLimitation("win32", String.raw`C:\Users\owner\brain.manifest.json`);
-  assert.match(scheduler, /brain sources <manifest> --json.*`contract_version: 3`.*receipt\.last_successful_run_at/is);
+  const shownInventory = escapeForRegExp(renderCliCommands("brain sources <manifest> --json"));
+  assert.match(scheduler, new RegExp(`${shownInventory}.*\`contract_version: 3\`.*receipt\\.last_successful_run_at`, "is"));
   assert.doesNotMatch(scheduler, /last-ingest time moving|`last ingest` column/i);
 });

@@ -12,6 +12,9 @@ import {
 import { safeIngestEnvironment } from "../operations/drive-scheduler.mjs";
 import { cmdSchedule, VALUE_FLAGS } from "../brain.mjs";
 import { previewSupportJournal } from "../support-journal.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
+
+const escapeForRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 let ran = 0;
 const check = (name, value, detail = "") => {
@@ -133,17 +136,25 @@ try {
   }
   publicCliEnvironment.HOME = folder;
   publicCliEnvironment.USERPROFILE = folder;
+  publicCliEnvironment.BRAIN_NO_WRANGLER_LOGIN = "1";
+  publicCliEnvironment.BRAIN_TEST_LAUNCHCTL = join(folder, "launchctl-unavailable");
+  publicCliEnvironment.BRAIN_ADMIN_KEY_FILE = join(folder, ".brain-admin-key");
   const publicStatus = spawnSync(
     process.execPath,
     [brainCli, "schedule", manifestPath, "--provider", "slack", "--status"],
     { encoding: "utf8", env: publicCliEnvironment, timeout: 30_000 },
   );
   const publicStatusOutput = `${publicStatus.stdout || ""}${publicStatus.stderr || ""}`;
+  const renderedDailyOn = renderCliCommands(`brain daily on "${manifestPath}"`);
   check("the public schedule CLI preserves its provider selection",
-    /slack refresh/i.test(publicStatusOutput) && !/Drive refresh/.test(publicStatusOutput) &&
+    !/Drive refresh/.test(publicStatusOutput) &&
       (process.platform === "darwin"
-        ? publicStatus.status === 0
-        : publicStatus.status === 1 && /not scheduled by the installer/.test(publicStatusOutput)),
+        ? publicStatus.status === 0 && /slack refresh/i.test(publicStatusOutput)
+        : process.platform === "win32"
+          ? publicStatus.status === 1 && /owned per-Brain, per-user daily contract/.test(publicStatusOutput) &&
+            new RegExp(escapeForRegExp(renderedDailyOn), "i").test(publicStatusOutput) &&
+            !/--from slack/.test(publicStatusOutput)
+          : publicStatus.status === 1 && /slack refresh.*not scheduled by the installer/is.test(publicStatusOutput)),
     publicStatusOutput);
 
   const changed = JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -199,6 +210,9 @@ try {
   }
   cliEnvironment.HOME = cliRoot;
   cliEnvironment.USERPROFILE = cliRoot;
+  cliEnvironment.BRAIN_NO_WRANGLER_LOGIN = "1";
+  cliEnvironment.BRAIN_TEST_LAUNCHCTL = join(cliRoot, "launchctl-unavailable");
+  cliEnvironment.BRAIN_ADMIN_KEY_FILE = join(cliRoot, ".brain-admin-key");
   const missingManifest = join(folder, "RAW_SCHEDULE_MANIFEST_SENTINEL.json");
   const schedulerCli = fileURLToPath(new URL("../operations/provider-scheduler.mjs", import.meta.url));
   const cliFailure = spawnSync(process.execPath, [schedulerCli, "slack", "install", missingManifest], {

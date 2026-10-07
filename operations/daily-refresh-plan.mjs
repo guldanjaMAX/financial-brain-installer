@@ -1,7 +1,7 @@
 /** Pure manifest-derived daily-refresh planning. */
 import { createHash } from "node:crypto";
 import { homedir, userInfo } from "node:os";
-import { resolve } from "node:path";
+import { resolve, win32 as win32Path } from "node:path";
 import { spawnSync } from "node:child_process";
 
 function canonical(value) {
@@ -22,14 +22,22 @@ export function dailyRefreshPrincipal({
   home = homedir(),
   windowsSid = null,
   spawn = spawnSync,
+  environment = process.env,
 } = {}) {
   if (platform === "win32") {
     let sid = windowsSid;
     if (!sid) {
-      const result = spawn("whoami.exe", ["/user", "/fo", "csv", "/nh"], {
+      const systemRoot = environment.SystemRoot || environment.SYSTEMROOT || environment.WINDIR;
+      const command = systemRoot && win32Path.isAbsolute(systemRoot)
+        ? win32Path.join(systemRoot, "System32", "whoami.exe")
+        : "whoami.exe";
+      const childEnvironment = {};
+      if (systemRoot) childEnvironment.SystemRoot = systemRoot;
+      if (environment.WINDIR) childEnvironment.WINDIR = environment.WINDIR;
+      const result = spawn(command, ["/user", "/fo", "csv", "/nh"], {
         encoding: "utf8",
         windowsHide: true,
-        env: { SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR },
+        env: childEnvironment,
       });
       const fields = String(result?.stdout || "").match(/"([^"]*)"\s*,\s*"(S-1-[0-9-]+)"/u);
       if (result?.status !== 0 || !fields) {

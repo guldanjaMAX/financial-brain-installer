@@ -28,8 +28,7 @@ function wipeChildResult(result) {
   if (Buffer.isBuffer(result?.stderr)) result.stderr.fill(0);
 }
 
-/** Apply a Windows DACL that grants the current user full control only. */
-export function restrictWindowsFileToCurrentUser(path, options = {}) {
+function restrictWindowsPathToCurrentUser(path, grant, options = {}) {
   const environment = options.environment || process.env;
   const env = windowsFileChildEnvironment(environment);
   const username = options.username || environment.USERNAME || environment.USER;
@@ -40,7 +39,7 @@ export function restrictWindowsFileToCurrentUser(path, options = {}) {
   const command = options.icaclsPath || (env.SystemRoot
     ? join(env.SystemRoot, "System32", "icacls.exe")
     : "icacls.exe");
-  const args = [path, "/inheritance:r", "/grant:r", `${username}:F`];
+  const args = [path, "/inheritance:r", "/grant:r", `${username}:${grant}`];
   let result;
   try {
     result = (options.runAcl || spawnSync)(command, args, {
@@ -60,4 +59,17 @@ export function restrictWindowsFileToCurrentUser(path, options = {}) {
     wipeChildResult(result);
   }
   return true;
+}
+
+/** Apply a Windows DACL that grants the current user full control only. */
+export function restrictWindowsFileToCurrentUser(path, options = {}) {
+  return restrictWindowsPathToCurrentUser(path, "F", options);
+}
+
+/**
+ * Restrict a directory before writing private descendants. Object and
+ * container inheritance keeps future owner receipts inside the same boundary.
+ */
+export function restrictWindowsDirectoryToCurrentUser(path, options = {}) {
+  return restrictWindowsPathToCurrentUser(path, "(OI)(CI)F", options);
 }

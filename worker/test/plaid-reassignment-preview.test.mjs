@@ -7,7 +7,7 @@ import vm from "node:vm";
 import { readFileSync } from "node:fs";
 
 const source = readFileSync(process.env.BANK_PREVIEW_SOURCE ||
-  new URL("../src/lib/bank-feed.js", import.meta.url), "utf8");
+  new URL("../src/lib/bank-feed.js", import.meta.url), "utf8").replace(/\r\n?/gu, "\n");
 const errorStart = source.indexOf("export function bankFeedOwnerErrorMessage(");
 const errorEnd = source.indexOf("\n}\n", errorStart) + 3;
 const pageStart = source.indexOf("export function connectPageHtml(");

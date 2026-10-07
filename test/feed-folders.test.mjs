@@ -57,7 +57,7 @@ function fixture({ manifest = baseManifest() } = {}) {
 
 function folderOptions(f, extra = {}) {
   return {
-    platform: "darwin",
+    platform: process.platform,
     home: f.home,
     now: () => new Date(FIXED_NOW),
     ...extra,
@@ -238,8 +238,10 @@ test("status reports source, existence, count, and newest time without file name
   assert.equal(status.result.feeds[0].fileCount, 2);
 });
 
-test("Mac path refusals are non-vacuous and each has an allowed control", async (t) => {
-  await t.test("iCloud, CloudDocs, Mobile Documents, and File Provider roots", async () => {
+test("host path refusals are non-vacuous and each has an allowed control", async (t) => {
+  await t.test("macOS iCloud, CloudDocs, Mobile Documents, and File Provider roots", {
+    skip: process.platform !== "darwin" && "macOS-only cloud-root policy",
+  }, async () => {
     for (const relative of [
       ["Library", "Mobile Documents", "com~apple~CloudDocs", "Feed"],
       ["Library", "Application Support", "CloudDocs", "Feed"],

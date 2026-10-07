@@ -25,6 +25,10 @@ function runArm(mode, extraEnv = {}) {
     const args = usePty
       ? [ptyFixture, ...childArgs]
       : [fixture, mode];
+    const operatingSystemEnvironment = {};
+    for (const name of ["SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT"]) {
+      if (process.env[name]) operatingSystemEnvironment[name] = process.env[name];
+    }
     const child = spawn(command, args, {
       cwd: dirname(dirname(fixture)),
       env: {
@@ -34,6 +38,7 @@ function runArm(mode, extraEnv = {}) {
         BRAIN_TEST_LAUNCHCTL: join(root, "launchctl-unavailable"),
         BRAIN_ADMIN_KEY_FILE: join(home, ".brain-admin-key"),
         CLI_EXIT_PTY_SECONDS: String(ARM_BUDGET_SECONDS),
+        ...operatingSystemEnvironment,
         ...extraEnv,
       },
       stdio: ["pipe", "pipe", "pipe"],

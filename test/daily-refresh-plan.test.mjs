@@ -42,10 +42,13 @@ test("Windows identity is the exact current-user SID and fails closed when it ca
   const principal = dailyRefreshPrincipal({
     platform: "win32",
     uid: null,
-    spawn: (command, args) => {
+    environment: { SystemRoot: "C:\\Windows", WINDIR: "C:\\Windows" },
+    spawn: (command, args, options) => {
       calls += 1;
-      assert.equal(command, "whoami.exe");
+      assert.equal(command, "C:\\Windows\\System32\\whoami.exe");
       assert.deepEqual(args, ["/user", "/fo", "csv", "/nh"]);
+      assert.deepEqual(options.env, { SystemRoot: "C:\\Windows", WINDIR: "C:\\Windows" });
+      assert.equal("PATH" in options.env, false, "SID lookup never inherits the desktop PATH or credentials");
       return { status: 0, stdout: `"fixture","S-1-5-21-123456"\r\n` };
     },
   });

@@ -354,7 +354,7 @@ test("probe B: adding a feed preserves legacy path and paths load legs", async (
   ]) {
     const beforeManifest = manifest(upload);
     const before = await planLoad({ m: beforeManifest, manifestPath: join(root, "brain.manifest.json"), probes: {} });
-    const added = prepareFeedAddition(beforeManifest, next, "feed_source", { platform: "darwin" });
+    const added = prepareFeedAddition(beforeManifest, next, "feed_source", { platform: process.platform });
     const after = await planLoad({ m: added.manifest, manifestPath: join(root, "brain.manifest.json"), probes: {} });
     assert.deepEqual(
       before.find((entry) => entry.key === "upload").legs.map((leg) => leg.detail),
@@ -499,7 +499,7 @@ test("probe C: globstar exclusions cover root and nested files with slash contro
   }
   const control = walk(root, { feedMode: true, exclude: ["**/*.md"] });
   assert.equal(control.complete, true);
-  assert.deepEqual(control.files.map((file) => file.rel).sort(), ["Nested/nested.txt", "current.txt"]);
+  assert.deepEqual(control.files.map((file) => file.rel).sort(), [join("Nested", "nested.txt"), "current.txt"]);
 });
 
 test.after(() => {

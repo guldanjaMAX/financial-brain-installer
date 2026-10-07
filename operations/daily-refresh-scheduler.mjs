@@ -106,9 +106,8 @@ export function buildDailyRefreshDefinition(plan, options = {}) {
   const name = platform === "darwin"
     ? `com.financialbrain.daily.${plan.identity.id}`
     : `\\Financial Brain\\Daily ${plan.identity.id}`;
-  const executablePath = (value) => platform === "win32" && /^[A-Za-z]:[\\/]/u.test(String(value))
-    ? String(value)
-    : resolve(String(value));
+  const pathApi = platform === "win32" ? win32Path : posixPath;
+  const executablePath = (value) => pathApi.resolve(String(value));
   const { nodePath, nodeRealpath } = nodeRuntimePaths(platform, executablePath, options);
   const urlPath = (value) => fileURLToPath(value, {
     windows: platform === "win32" && /^\/[A-Za-z]:\//u.test(new URL(value).pathname),

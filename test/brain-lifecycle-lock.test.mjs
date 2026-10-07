@@ -12,6 +12,7 @@ import {
   withBrainLifecycleLock,
   writeBrainRecoveryFence,
 } from "../operations/brain-lifecycle-lock.mjs";
+import { restrictWindowsDirectoryToCurrentUser } from "../operations/current-user-file.mjs";
 
 function fixture({ machineLockRoot: sharedMachineLockRoot } = {}) {
   const root = mkdtempSync(join(tmpdir(), "daily-lock-"));
@@ -171,4 +172,82 @@ test("unsafe lifecycle lock contents fail closed instead of being adopted", () =
     },
   );
   assert.equal(decisionReached, 1);
+});
+
+test("Windows lifecycle locks receive a private inheritable ACL before the owner receipt", () => {
+  let nativeAclCalls = 0;
+  assert.equal(restrictWindowsDirectoryToCurrentUser("C:\\ProgramData\\FinancialBrain\\locks\\fixture", {
+    environment: { SystemRoot: "C:\\Windows", USERNAME: "fixture-owner" },
+    icaclsPath: "C:\\Windows\\System32\\icacls.exe",
+    runAcl(command, args, options) {
+      nativeAclCalls += 1;
+      assert.equal(command, "C:\\Windows\\System32\\icacls.exe");
+      assert.deepEqual(args, [
+        "C:\\ProgramData\\FinancialBrain\\locks\\fixture",
+        "/inheritance:r",
+        "/grant:r",
+        "fixture-owner:(OI)(CI)F",
+      ]);
+      assert.deepEqual(options.env, { SystemRoot: "C:\\Windows", USERNAME: "fixture-owner" });
+      return { status: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    },
+  }), true);
+  assert.equal(nativeAclCalls, 1, "the inheritable icacls boundary was reached");
+
+  const { home, manifestPath, machineLockRoot } = fixture();
+  const aclCalls = [];
+  const lock = acquireBrainLifecycleLock({
+    manifestPath,
+    home,
+    machineLockRoot,
+    operation: "load",
+    platform: "win32",
+    restrictWindowsDirectory(path) {
+      aclCalls.push({ path, entries: readdirSync(path) });
+      return true;
+    },
+  });
+  try {
+    assert.equal(lock.assertOwned(), true, "the restricted Windows lock remains usable as a green control");
+  } finally {
+    lock.release();
+  }
+  assert.equal(aclCalls.length, 1, "the Windows ACL decision point was reached once");
+  assert.equal(aclCalls[0].path, lock.path);
+  assert.deepEqual(aclCalls[0].entries, [], "the directory was restricted before its owner receipt was written");
+
+  const refusedFixture = fixture();
+  let aclFailureCalls = 0;
+  let refusalDecisions = 0;
+  assert.throws(
+    () => acquireBrainLifecycleLock({
+      ...refusedFixture,
+      operation: "load",
+      platform: "win32",
+      restrictWindowsDirectory() {
+        aclFailureCalls += 1;
+        throw new Error("synthetic ACL refusal");
+      },
+    }),
+    (error) => {
+      refusalDecisions += 1;
+      return error instanceof BrainLifecycleLockError && error.code === "brain_lifecycle_unsafe";
+    },
+  );
+  assert.equal(aclFailureCalls, 1, "the refusing ACL boundary was attempted");
+  assert.equal(refusalDecisions, 1, "the private-lock refusal decision point was reached");
+
+  let recoveryAclCalls = 0;
+  const recovered = acquireBrainLifecycleLock({
+    ...refusedFixture,
+    operation: "load",
+    platform: "win32",
+    restrictWindowsDirectory() {
+      recoveryAclCalls += 1;
+      return true;
+    },
+  });
+  assert.equal(recovered.assertOwned(), true, "an ACL-capable retry is the green control");
+  assert.equal(recoveryAclCalls, 1);
+  recovered.release();
 });
