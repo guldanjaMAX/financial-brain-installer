@@ -780,15 +780,22 @@ macOS token file is deleted only after the full credential record has been
 written to Keychain and read back exactly. Browser, Keychain, Expect, ACL, and
 DPAPI helper processes receive a small allowlisted environment rather than the
 Terminal's ambient credentials.
-On a Windows machine with Smart App Control on, Windows can intermittently
-refuse to start the freshly compiled, unsigned DPAPI helper, and a refused file
-stays refused. Both the admin key and the Google credential record share one
-retry in `operations/windows-dpapi-session.mjs`: only a launch refusal (a
-launch-class spawn error or the bridge's `launch` stage, with no output) disposes
-that helper and compiles a fresh one into a new private folder, for at most three
-launches. A DPAPI answer such as a wrong-user decrypt, and any compile failure,
-is never retried. The session metrics record `launch_refusals` and
-`max_launch_attempts`, which `brain doctor` and the release gate report.
+Windows credentials prefer the packaged `operations/windows-dpapi-helper.exe`,
+pinned to the reviewed signed artifact's SHA-256. The Windows release gate
+requires valid Authenticode with signer organization `Financial Brain LLC`,
+exactly one signed helper session, zero compiles, and zero launch refusals.
+Native signature verification requires Windows; other hosts verify the pinned
+bytes and exercise synthetic selection and refusal controls only.
+A missing image or hash mismatch emits `BRAIN_DPAPI_FALLBACK:missing` or
+`BRAIN_DPAPI_FALLBACK:hash_mismatch` before the guarded compiler fallback.
+Unreadable images and invalid file identities fail closed. The unsigned
+fallback retains the shared three-launch retry in
+`operations/windows-dpapi-session.mjs`, compiling into a fresh private folder
+only after a launch refusal with no output. A signed-helper launch refusal,
+a definite DPAPI failure, or a compile failure never triggers that retry.
+Cleanup retains the packaged image. Session metrics include
+`signed_helper_count`, `fallback_reason`, `launch_refusals`, and
+`max_launch_attempts`.
 Planning and dry-run reads never trigger either legacy migration. A real source
 run performs migration only while holding both its source lease and the shared
 Google credential-record lease; `brain connect google` holds the shared lease

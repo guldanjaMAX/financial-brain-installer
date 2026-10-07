@@ -1,12 +1,13 @@
 /**
  * Windows-only packed release gate for the exact shared DPAPI session.
  *
- * One private compiled helper serves 25 protect/unprotect probe rounds, an
+ * One verified signed helper serves 25 protect/unprotect probe rounds, an
  * admin-key create/read/rotate/read transaction, and a synthetic Google token
- * save/load. The gate disposes that helper exactly once and prints only stable
+ * save/load. The gate releases that session exactly once and prints only stable
  * counts and stage codes, never a credential or child-process output.
  */
 
+import { verifyWindowsDpapiSignature } from "../operations/windows-dpapi-signed.mjs";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -75,11 +76,14 @@ function cleanupSharedSessionOnce() {
 }
 
 try {
+  stage = "signature";
+  verifyWindowsDpapiSignature();
+  stage = "probe";
   const result = probeWindowsDpapi({ rounds: REQUIRED_ROUNDS, retainSession: true });
   roundsCompleted = Number(result.rounds || 0);
   if (result.checked !== true || result.passed !== true ||
       result.rounds !== REQUIRED_ROUNDS || result.cleanup_status !== "retained" ||
-      result.compile_count !== 1 || result.helper_invocations !== REQUIRED_ROUNDS * 2) {
+      result.compile_count !== 0 || result.helper_invocations !== REQUIRED_ROUNDS * 2) {
     if (result.checked === true && result.passed === false) {
       stage = safeStage(result.stage);
       issueCode = safeIssueCode(result.issue_code);
@@ -117,7 +121,8 @@ try {
 
   stage = "metrics";
   const metrics = readWindowsDpapiSessionMetrics();
-  if (metrics.compile_count !== 1 || metrics.helper_invocations !== REQUIRED_HELPER_INVOCATIONS ||
+  if (metrics.compile_count !== 0 || metrics.signed_helper_count !== 1 || metrics.fallback_reason !== null ||
+      metrics.helper_invocations !== REQUIRED_HELPER_INVOCATIONS ||
       metrics.launch_refusals !== 0) {
     throw new Error("shared-session metrics failed");
   }
@@ -126,7 +131,7 @@ try {
 
   console.log(
     `windows-dpapi-release-gate result=pass cleanup_status=clean rounds_completed=${REQUIRED_ROUNDS} ` +
-    `compile_count=1 helper_invocations=${REQUIRED_HELPER_INVOCATIONS} launch_refusals=0 ` +
+    `compile_count=0 signed_helper_count=1 signature=verified helper_invocations=${REQUIRED_HELPER_INVOCATIONS} launch_refusals=0 ` +
     "admin_key_create_read_rotate=pass google_storage_save_load=pass ciphertext_scan=pass",
   );
 } catch {
@@ -134,8 +139,7 @@ try {
   console.error(
     `windows-dpapi-release-gate result=fail issue_code=${safeIssueCode(issueCode)} ` +
     `stage=${safeStage(stage)} rounds_completed=${roundsCompleted} cleanup_status=${cleanup.status === "clean" ? "clean" : "cleanup_deferred"} ` +
-    // A launch retry recompiles, so it also breaks the exact compile_count=1
-    // contract. Printing the count tells a Smart App Control refusal apart.
+    // A signed-helper refusal is fatal; unsigned fallback cannot pass this gate.
     `launch_refusals=${safeCount(readWindowsDpapiSessionMetrics().launch_refusals)}`,
   );
   process.exitCode = 1;

@@ -829,6 +829,8 @@ const expected = [
   "operations/windows-dpapi.ps1",
   "operations/windows-dpapi-bridge.mjs",
   "operations/windows-dpapi.cs",
+  "operations/windows-dpapi-helper.exe",
+  "operations/windows-dpapi-signed.mjs",
   "package.json",
   "report-html.mjs",
   "report.mjs",
@@ -1036,6 +1038,11 @@ for (const path of privateScanPaths) {
   } catch {
     continue; // listed in `expected` but not on disk: `missing` already reports it
   }
+  if (path === "operations/windows-dpapi-helper.exe" &&
+      createHash("sha256").update(buffer).digest("hex") !==
+        "ca94c72a0ca4562629224e9cdb51d02fa2fe132b315e98b12cdbec8128d8f859") {
+    throw new Error("Packaged signed DPAPI helper differs from the reviewed binary");
+  }
   if (looksBinary(buffer)) {
     skippedBinary.push(path);
     continue;
@@ -1086,6 +1093,13 @@ if (packageProbeDirectory) try {
   } else {
     try {
       const packedArchivePath = join(packageProbeDirectory, filename);
+      const signedHelpers = inspectNpmArchiveBytes(readFileSync(packedArchivePath)).rows
+        .filter((row) => row.path.endsWith(".exe"));
+      if (signedHelpers.length !== 1 ||
+          signedHelpers[0].path !== "operations/windows-dpapi-helper.exe" ||
+          signedHelpers[0].sha256 !== "ca94c72a0ca4562629224e9cdb51d02fa2fe132b315e98b12cdbec8128d8f859") {
+        throw new Error("Release must carry exactly the reviewed signed DPAPI image");
+      }
       const localMetadata = normalizeWindowsLocalPackMetadata(actualMetadata);
       if (localMetadata.normalized) {
         const localRows = normalizeWindowsLocalPackRows(

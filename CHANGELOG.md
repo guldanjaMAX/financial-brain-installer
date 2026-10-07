@@ -28,6 +28,12 @@ write a response.
   Completion still requires exact readiness; genuine count mismatches fail.
   Let the scheduled background drain finish if a safety limit is reached, then
   check `brain health <manifest>`.
+- **Windows credential storage now carries a signed helper.** Admin keys and
+  Google credentials use the verified packaged helper without compiling a new
+  program on each run. A missing or changed helper reports the reason before
+  using the guarded local compiler fallback. After updating, verify credential
+  storage on Windows with Smart App Control enabled; native Windows proof is
+  still required for this candidate.
 
 - **Daily imports now have one owned Windows and macOS contract.** `brain daily
   on|off|status <manifest>` derives every source from your own manifest instead

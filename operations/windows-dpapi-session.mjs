@@ -1,10 +1,13 @@
 /**
- * One process-scoped compiled helper for Windows DPAPI operations.
+ * One process-scoped verified helper for Windows DPAPI operations.
  *
- * Compilation happens before a bridge receives credential bytes. The helper
- * lives only in one random current-user ACL directory and is identified by its
- * exact file identity plus SHA-256. Cleanup touches only captured identities.
+ * The pinned signed package image is preferred before any compiler discovery.
+ * Only missing or hash-mismatched bytes permit compilation in a private ACL
+ * directory. Both paths pass exact identity and SHA-256 to the bridge before
+ * credential input. Cleanup never removes the packaged image.
  */
+
+import { inspectWindowsDpapiSignedHelper } from "./windows-dpapi-signed.mjs";
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -47,7 +50,7 @@ const LAUNCH_REFUSED_MESSAGE =
   "Nothing was changed; re-running the command usually works.";
 
 function freshMetrics() {
-  return { compile_count: 0, helper_invocations: 0, launch_refusals: 0, max_launch_attempts: 0 };
+  return { signed_helper_count: 0, fallback_reason: null, compile_count: 0, helper_invocations: 0, launch_refusals: 0, max_launch_attempts: 0 };
 }
 
 function staged(stage, message) {
@@ -225,6 +228,10 @@ function synchronousPause(milliseconds) {
 
 export function disposeWindowsDpapiSession({ attempts = 5, pause = synchronousPause, unlink, rmdir } = {}) {
   const session = activeSession;
+  if (session?.public?.kind === "signed") {
+    activeSession = null;
+    return Object.freeze({ status: "clean", attempts: 0 });
+  }
   if (!session) return Object.freeze({ status: "clean", attempts: 0 });
   let error = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -297,6 +304,24 @@ export function prepareWindowsDpapiSession(options = {}) {
       throw staged("cleanup_deferred", "the prior DPAPI helper cleanup is still deferred");
     }
   }
+  const signed = inspectWindowsDpapiSignedHelper(options.signedHelperPath);
+  if (!signed.reason) {
+    activeSession = { public: Object.freeze({
+      helper: signed.path, sha256: signed.sha256, size: signed.identity.size,
+      dev: String(signed.identity.dev), ino: String(signed.identity.ino), kind: "signed",
+    }) };
+    sessionMetrics.signed_helper_count += 1;
+    installExitHook();
+    return activeSession.public;
+  }
+  sessionMetrics.fallback_reason = signed.reason;
+  // Only absent or hash-mismatched package bytes authorize unsigned fallback.
+  // Never include a path, credential, or native error in this diagnostic.
+  const line = `BRAIN_DPAPI_FALLBACK:${signed.reason}\n`;
+  try {
+    if (options.report) options.report(line);
+    else writeSync(2, Buffer.from(line, "ascii"));
+  } catch { /* diagnostics must not change the credential result */ }
   const run = options.spawnSync ?? spawnSync;
   const source = options.sourcePath ?? WINDOWS_DPAPI_SOURCE;
   assertFixedSource(source);
@@ -310,6 +335,7 @@ export function prepareWindowsDpapiSession(options = {}) {
       directoryIdentity: lstatSync(directory),
       artifacts: capturedArtifacts(directory),
       public: Object.freeze({
+        kind: "compiled",
         helper: helper.path,
         sha256: helper.sha256,
         size: helper.identity.size,
@@ -370,7 +396,8 @@ function recordLaunchAttempts(attempts) {
  * credential record). `invoke(session)` runs the bridge against that session's
  * captured helper and returns the raw child result for the caller to judge.
  *
- * Only a launch refusal is retried. The refused helper is disposed through the
+ * Only an unsigned fallback launch refusal is retried. A signed-image refusal
+ * fails closed without compiling. The unsigned helper is disposed through the
  * normal captured-identity cleanup, and the next prepare compiles a new helper
  * into a new random private folder with the same compiler discovery, ACL, and
  * hard-link checks. Preparation and compile failures propagate unretried.
@@ -392,9 +419,11 @@ export function runWithWindowsDpapiHelper(invoke, {
     // Never launch that exact file again. If its removal is deferred, the
     // session still holds it, so a retry would only reuse the refused file.
     const cleanup = dispose();
-    if (attempt >= attempts || cleanup?.status !== "clean") {
+    if (session.kind === "signed" || attempt >= attempts || cleanup?.status !== "clean") {
       recordLaunchAttempts(attempt);
-      const error = staged("launch_refused", LAUNCH_REFUSED_MESSAGE);
+      const error = staged("launch_refused", session.kind === "signed"
+        ? "Windows refused to run the signed DPAPI helper. Check Windows application control policy before retrying."
+        : LAUNCH_REFUSED_MESSAGE);
       error.attempts = attempt;
       throw error;
     }

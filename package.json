@@ -84,6 +84,7 @@
     "migrations/",
     "onboarding/",
     "operations/",
+    "operations/windows-dpapi-helper.exe",
     "privacy/",
     "report-html.mjs",
     "report.mjs",

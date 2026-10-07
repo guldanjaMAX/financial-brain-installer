@@ -33,6 +33,8 @@ import {
   disposeWindowsDpapiSession,
   readWindowsDpapiSessionMetrics,
   resetWindowsDpapiSessionMetrics,
+  prepareWindowsDpapiSession,
+  runWithWindowsDpapiHelper,
 } from "../operations/windows-dpapi-session.mjs";
 
 const bridgeFile = fileURLToPath(new URL("../operations/windows-dpapi-bridge.mjs", import.meta.url));
@@ -64,7 +66,7 @@ function fakeWindows() {
     environment,
     compiled,
     failCompile() { compileFails = true; },
-    dpapiSessionOptions: { spawnSync: spawnSyncFake },
+    dpapiSessionOptions: { spawnSync: spawnSyncFake, signedHelperPath: join(root, "windows-dpapi-helper.exe") },
     cleanup() {
       disposeWindowsDpapiSession();
       rmSync(root, { recursive: true, force: true });
@@ -306,6 +308,7 @@ test("a compile failure is never retried", () => {
     assert.equal(bridge.calls.length, 0);
     let compileAttempts = 0;
     const counting = {
+      signedHelperPath: windows.dpapiSessionOptions.signedHelperPath,
       spawnSync(command, args, options) {
         if (!command.endsWith("icacls.exe")) compileAttempts++;
         return windows.dpapiSessionOptions.spawnSync(command, args, options);
@@ -437,3 +440,116 @@ for (const code of ["UNKNOWN", "EPERM"]) {
     }
   });
 }
+
+test("the pinned packaged helper is selected without compiler access and survives disposal", () => {
+  disposeWindowsDpapiSession();
+  resetWindowsDpapiSessionMetrics();
+  let commands = 0;
+  const helper = fileURLToPath(new URL("../operations/windows-dpapi-helper.exe", import.meta.url));
+  try {
+    const selected = prepareWindowsDpapiSession({
+      environment: {},
+      spawnSync() { commands++; throw new Error("compiler must not run"); },
+    });
+    assert.equal(selected.helper, helper);
+    assert.equal(selected.sha256, "ca94c72a0ca4562629224e9cdb51d02fa2fe132b315e98b12cdbec8128d8f859");
+    assert.equal(selected.kind, "signed");
+    assert.equal(prepareWindowsDpapiSession(), selected, "one shared helper session");
+    assert.equal(commands, 0);
+    assert.equal(readWindowsDpapiSessionMetrics().signed_helper_count, 1);
+    assert.equal(readWindowsDpapiSessionMetrics().compile_count, 0);
+    assert.equal(disposeWindowsDpapiSession().status, "clean");
+    assert.ok(existsSync(helper), "cleanup must retain the packaged image");
+  } finally { disposeWindowsDpapiSession(); }
+});
+
+for (const reason of ["missing", "hash_mismatch"]) {
+  test(`unsigned fallback reports ${reason} and reaches compilation`, () => {
+    disposeWindowsDpapiSession();
+    resetWindowsDpapiSessionMetrics();
+    const windows = fakeWindows();
+    const reports = [];
+    try {
+      if (reason === "hash_mismatch") writeFileSync(windows.dpapiSessionOptions.signedHelperPath, "changed image");
+      const session = prepareWindowsDpapiSession({
+        ...windows.dpapiSessionOptions, environment: windows.environment,
+        report: (line) => reports.push(line),
+      });
+      assert.equal(windows.compiled.length, 1, "fallback decision reached the compiler");
+      assert.equal(session.kind, "compiled");
+      assert.deepEqual(reports, [`BRAIN_DPAPI_FALLBACK:${reason}\n`]);
+      assert.equal(readWindowsDpapiSessionMetrics().fallback_reason, reason);
+    } finally { windows.cleanup(); }
+    // Green control uses the pinned image with the same selection code.
+    const control = prepareWindowsDpapiSession({ environment: {} });
+    assert.equal(control.kind, "signed");
+    disposeWindowsDpapiSession();
+  });
+}
+
+test("an invalid packaged file identity fails closed before compiler access", () => {
+  disposeWindowsDpapiSession();
+  const windows = fakeWindows();
+  try {
+    mkdirSync(windows.dpapiSessionOptions.signedHelperPath);
+    assert.throws(() => prepareWindowsDpapiSession({
+      ...windows.dpapiSessionOptions, environment: windows.environment,
+    }), /Invalid packaged DPAPI helper identity/);
+    assert.equal(windows.compiled.length, 0);
+    assert.equal(prepareWindowsDpapiSession({ environment: {} }).kind, "signed");
+  } finally { windows.cleanup(); }
+});
+
+test("a signed helper launch refusal never authorizes compilation or removes the package image", () => {
+  disposeWindowsDpapiSession();
+  resetWindowsDpapiSessionMetrics();
+  const helper = fileURLToPath(new URL("../operations/windows-dpapi-helper.exe", import.meta.url));
+  let calls = 0;
+  try {
+    assert.throws(() => runWithWindowsDpapiHelper((session) => {
+      assert.equal(session.kind, "signed");
+      calls++;
+      return refusedAtLaunchStage();
+    }), /Windows refused to run the signed DPAPI helper/);
+    assert.equal(calls, 1, "signed image launch was attempted once");
+    assert.equal(readWindowsDpapiSessionMetrics().compile_count, 0);
+    assert.ok(existsSync(helper));
+    const result = runWithWindowsDpapiHelper(() => {
+      calls++;
+      return { status: 0, stdout: Buffer.from("synthetic-success") };
+    });
+    assert.equal(result.status, 0);
+    assert.equal(calls, 2);
+  } finally { disposeWindowsDpapiSession(); }
+});
+
+test("admin and Google storage share the signed helper without compiling", () => {
+  disposeWindowsDpapiSession();
+  resetWindowsDpapiSessionMetrics();
+  const windows = fakeWindows();
+  const calls = [];
+  const helper = fileURLToPath(new URL("../operations/windows-dpapi-helper.exe", import.meta.url));
+  const bridge = {
+    runDpapiBridge(command, args, details) {
+      assert.equal(args[args.indexOf("--helper") + 1], helper);
+      const operation = args[args.indexOf("--operation") + 1];
+      calls.push(operation);
+      const stdout = operation === "protect"
+        ? Buffer.from(`sealed:${details.input.toString("base64")}`, "ascii")
+        : Buffer.from(details.input.toString("ascii").slice("sealed:".length), "base64");
+      return { status: 0, stdout, stderr: Buffer.alloc(0) };
+    },
+  };
+  try {
+    const sessionOptions = { spawnSync: windows.dpapiSessionOptions.spawnSync };
+    assert.equal(readAdminKeyFile(adminEnvelope(windows), {
+      ...adminReadOptions(windows, bridge), dpapiSessionOptions: sessionOptions,
+    }), adminSecret);
+    const options = { ...googleOptions(windows, bridge), dpapiSessionOptions: sessionOptions };
+    saveTokens(googleRecord, options);
+    assert.deepEqual(loadTokens(options), googleRecord);
+    assert.ok(calls.includes("protect") && calls.includes("unprotect"));
+    assert.equal(readWindowsDpapiSessionMetrics().signed_helper_count, 1);
+    assert.equal(windows.compiled.length, 0);
+  } finally { windows.cleanup(); }
+});
