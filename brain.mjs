@@ -1618,7 +1618,13 @@ async function cf(path, options = {}) {
 
 export { cf as cloudflareApiRequest };
 
-async function cfOnce(path, { method = "GET", body, raw } = {}) {
+async function cfOnce(path, {
+  method = "GET",
+  body,
+  raw,
+  timeoutMs = HTTP_TIMEOUT_MS,
+  what = "the request",
+} = {}) {
   const res = await http(API + path, {
     method,
     headers: {
@@ -1626,17 +1632,21 @@ async function cfOnce(path, { method = "GET", body, raw } = {}) {
       ...(body && !raw ? { "Content-Type": "application/json" } : {}),
     },
     body: raw ? body : body ? JSON.stringify(body) : undefined,
-  });
+  }, { timeoutMs, what });
   const text = await res.text();
   let json;
   try {
     json = JSON.parse(text);
   } catch {
-    throw new Error(`${method} ${path} returned non-JSON (${res.status}): ${text.slice(0, 200)}`);
+    const error = new Error(`${method} ${path} returned non-JSON (${res.status}): ${text.slice(0, 200)}`);
+    error.status = res.status;
+    throw error;
   }
   if (!json.success) {
     const errs = (json.errors || []).map((e) => `${e.code}: ${e.message}`).join("; ");
-    throw new Error(`${method} ${path} failed (${res.status}): ${errs || text.slice(0, 200)}`);
+    const error = new Error(`${method} ${path} failed (${res.status}): ${errs || text.slice(0, 200)}`);
+    error.status = res.status;
+    throw error;
   }
   return json.result;
 }
@@ -4480,10 +4490,11 @@ export async function cmdFinancialPicture(manifestPath, options = {}) {
 /* ---------------------------------------------------------- migrations */
 
 
-async function d1Query(acctId, dbId, sql, params = []) {
+async function d1Query(acctId, dbId, sql, params = [], { timeoutMs } = {}) {
   const res = await cf(`/accounts/${acctId}/d1/database/${dbId}/query`, {
     method: "POST",
     body: { sql, params },
+    ...(timeoutMs === undefined ? {} : { timeoutMs, what: "the database change" }),
   });
   return Array.isArray(res) ? res[0] : res;
 }
@@ -4754,6 +4765,123 @@ function exactAddedColumnDefinition(createSql, descriptor) {
   return false;
 }
 
+async function inspectAddedColumn(queryStatement, descriptor, inspected = null) {
+  const inventory = inspected ?? await queryStatement(`PRAGMA table_info(${descriptor.table})`);
+  if (!inventory || !Array.isArray(inventory.results)) {
+    throw new Error(`migration could not inspect ${descriptor.table}.${descriptor.column}`);
+  }
+  const existing = inventory.results.find((row) => row?.name === descriptor.column);
+  if (!existing) return false;
+
+  let compatible = String(existing.type || "").toUpperCase() === descriptor.type &&
+    Number(existing.notnull || 0) === Number(descriptor.notNull) &&
+    normalizedSqlDefault(existing.dflt_value) === normalizedSqlDefault(descriptor.defaultValue);
+  if (compatible && descriptor.hasCheckConstraint) {
+    const schema = await queryStatement(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '${descriptor.table}'`,
+    );
+    if (!schema || !Array.isArray(schema.results) || schema.results.length !== 1 ||
+        typeof schema.results[0]?.sql !== "string") {
+      throw new Error(`migration could not inspect ${descriptor.table}.${descriptor.column} definition`);
+    }
+    compatible = exactAddedColumnDefinition(schema.results[0].sql, descriptor);
+  }
+  if (!compatible) {
+    throw new Error(
+      `migration column ${descriptor.table}.${descriptor.column} already exists with an incompatible schema`,
+    );
+  }
+  return true;
+}
+
+function migrationFailureKind(error) {
+  const name = String(error?.name || "");
+  const declaredCode = String(error?.supportCode || error?.code || "").toUpperCase();
+  const causeCode = String(error?.cause?.cause?.code || error?.cause?.code || "").toUpperCase();
+  const status = Number(error?.status || error?.cause?.status || 0);
+  const message = String(error?.message || error || "");
+  if (/duplicate\s+column\s+name/i.test(message)) return "duplicate";
+  // DNS failure and a refused socket prove the write was never delivered.
+  // A reset or timeout does not: the service may still have committed it.
+  if (error?.transport === "unresolved" ||
+      (error?.transport === "connection" && causeCode === "ECONNREFUSED") ||
+      [declaredCode, causeCode].some((code) => ["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED"].includes(code))) {
+    return "unreachable";
+  }
+  if (error?.retryable === true || (declaredCode === "NETWORK_UNREACHABLE" && !error?.transport) ||
+      name === "TimeoutError" || name === "AbortError" ||
+      [declaredCode, causeCode].some((code) => [
+        "ECONNRESET", "EPIPE", "ETIMEDOUT", "UND_ERR_SOCKET",
+      ].includes(code)) ||
+      [declaredCode, causeCode].some((code) => /^UND_ERR_.*TIMEOUT$/.test(code)) ||
+      (status >= 500 && status <= 599) ||
+      /returned\s+non-JSON\s+\(5\d\d\)/i.test(message) ||
+      /\bD1\b[\s\S]{0,100}\b(?:timeout|timed out|overload(?:ed)?|reset)\b/i.test(message) ||
+      /\b(?:connection reset|connection refused|socket hang up)\b/i.test(message)) {
+    return "transient";
+  }
+  return "definitive";
+}
+
+function migrationDuration(milliseconds) {
+  const elapsed = Math.max(0, Math.trunc(Number(milliseconds) || 0));
+  if (elapsed < 1_000) return `${elapsed} ms`;
+  const seconds = Math.floor(elapsed / 1_000);
+  const minutes = Math.floor(seconds / 60);
+  const remaining = seconds % 60;
+  if (!minutes) return `${seconds} s`;
+  return remaining ? `${minutes} min ${remaining} s` : `${minutes} min`;
+}
+
+function migrationFirstReplyDetail(error, descriptor) {
+  if (error?.transport === "timeout" || ["TimeoutError", "AbortError"].includes(error?.name)) {
+    return `first reply: none within ${migrationDuration(error?.timeoutMs || MIGRATION_STATEMENT_TIMEOUT_MS)} ` +
+      `to the change for ${descriptor.table}.${descriptor.column}`;
+  }
+  if (migrationFailureKind(error) === "duplicate") {
+    return `first reply: ${descriptor.table}.${descriptor.column} was reported as already present`;
+  }
+  if (Number(error?.status || 0) >= 500) {
+    return `first reply: HTTP ${error.status} while changing ${descriptor.table}.${descriptor.column}`;
+  }
+  return `first reply: no confirmed result for the change to ${descriptor.table}.${descriptor.column}`;
+}
+
+function migrationStillApplyingError(message, { cause = null, descriptor = null } = {}) {
+  const error = new Fatal(message, cause ? { cause } : undefined);
+  error.supportCode = "MIGRATION_STILL_APPLYING";
+  if (cause && descriptor) error.migrationFirstReply = migrationFirstReplyDetail(cause, descriptor);
+  return error;
+}
+
+function migrationCheckUnreachableError(message, { cause, descriptor }) {
+  const error = new Fatal(message, { cause });
+  error.supportCode = "NETWORK_UNREACHABLE";
+  error.migrationFirstReply = migrationFirstReplyDetail(cause, descriptor);
+  return error;
+}
+
+function slowAddedColumnDeadlineMessage(descriptor) {
+  return `Cloudflare is still applying a large database change (${descriptor.table}.${descriptor.column}). ` +
+    "Nothing was lost and nothing needs undoing. Wait about 10 minutes, then " +
+    renderCliCommands("run brain update again. It checks the column first and continues.");
+}
+
+function unreachableAddedColumnDeadlineMessage(descriptor, deadline) {
+  return `The CLI could not reach Cloudflare to check on the change for ${migrationDuration(deadline)} ` +
+    `(${descriptor.table}.${descriptor.column}). The change may or may not have finished. ` +
+    "Nothing was lost. Check the connection, then " +
+    renderCliCommands("run brain update again. It checks the column first and continues.") +
+    ` For your installer: once the connection returns, use PRAGMA table_info(${descriptor.table}) ` +
+    `to check ${descriptor.column}; the update also verifies its exact definition before continuing.`;
+}
+
+function uncertainMigrationStatementMessage(index, total, migrationName) {
+  return `Cloudflare did not answer while applying database change ${index + 1} of ${total} in ${migrationName}. ` +
+    "It may still be working. Nothing was lost and nothing needs undoing. Wait about 10 minutes, then " +
+    renderCliCommands("run brain update again.");
+}
+
 /**
  * Apply per-statement D1 migrations so a process restart can safely resume.
  *
@@ -4767,45 +4895,131 @@ function exactAddedColumnDefinition(createSql, descriptor) {
 export async function runRestartSafeMigrationStatements(
   statements,
   queryStatement,
-  { afterStatement = null } = {},
+  {
+    afterStatement = null,
+    inspectStatement = queryStatement,
+    migrationName = "this migration",
+    pollIntervalMs = 30_000,
+    pollDeadlineMs = 15 * 60_000,
+    sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)),
+    now = () => Date.now(),
+    log = () => {},
+    maxPollIterations = Number.POSITIVE_INFINITY,
+  } = {},
 ) {
-  if (!Array.isArray(statements) || typeof queryStatement !== "function") {
+  if (!Array.isArray(statements) || typeof queryStatement !== "function" ||
+      typeof inspectStatement !== "function") {
     throw new Error("migration statement runner received invalid input");
   }
+  const interval = Math.max(1, Math.trunc(Number(pollIntervalMs) || 30_000));
+  const deadline = Math.max(interval, Math.trunc(Number(pollDeadlineMs) || 15 * 60_000));
+  const waitForColumnInventory = async (descriptor, firstFailure, { returnWhenAbsent }) => {
+    const startedAt = now();
+    log(
+      `Cloudflare is still applying a large database change (adding ${descriptor.table}.${descriptor.column}). ` +
+      `On a large Brain this can take several minutes. Checking every ${migrationDuration(interval)} ` +
+      `for up to ${migrationDuration(deadline)}.`,
+    );
+    let pollIterations = 0;
+    let inventoryReadSucceeded = false;
+    while (now() - startedAt < deadline) {
+      if (++pollIterations > maxPollIterations) {
+        throw new Error("migration polling exceeded its iteration guard");
+      }
+      await sleep(Math.min(interval, Math.max(0, deadline - (now() - startedAt))));
+      let inspected;
+      try {
+        inspected = await inspectStatement(`PRAGMA table_info(${descriptor.table})`);
+        if (!inspected || !Array.isArray(inspected.results)) {
+          throw new Error(`migration could not inspect ${descriptor.table}.${descriptor.column}`);
+        }
+        inventoryReadSucceeded = true;
+      } catch (pollError) {
+        if (["transient", "unreachable"].includes(migrationFailureKind(pollError))) {
+          log(`could not check yet; trying again in ${migrationDuration(interval)}`);
+          continue;
+        }
+        throw pollError;
+      }
+
+      let recovered;
+      try {
+        recovered = await inspectAddedColumn(inspectStatement, descriptor, inspected);
+      } catch (inspectionError) {
+        if (["transient", "unreachable"].includes(migrationFailureKind(inspectionError))) {
+          log(`could not check yet; trying again in ${migrationDuration(interval)}`);
+          continue;
+        }
+        throw inspectionError;
+      }
+      if (recovered) {
+        log(`Cloudflare finished adding ${descriptor.table}.${descriptor.column}; continuing.`);
+        return "present";
+      }
+      if (returnWhenAbsent) {
+        log(`Cloudflare answered the column check for ${descriptor.table}.${descriptor.column}; continuing.`);
+        return "absent";
+      }
+      log(`still applying (${migrationDuration(now() - startedAt)} so far)`);
+    }
+    // Only a successful inventory read supports saying the service is still
+    // applying the change. An entire wait made of failed reads is an outage.
+    if (inventoryReadSucceeded) {
+      throw migrationStillApplyingError(slowAddedColumnDeadlineMessage(descriptor), {
+        cause: firstFailure,
+        descriptor,
+      });
+    }
+    throw migrationCheckUnreachableError(unreachableAddedColumnDeadlineMessage(descriptor, deadline), {
+      cause: firstFailure,
+      descriptor,
+    });
+  };
+
   for (let index = 0; index < statements.length; index++) {
     const statement = statements[index];
     const descriptor = addedColumnDescriptor(statement);
     let skipped = false;
+    let recoveredAfterSlowApply = false;
     if (descriptor) {
-      const inspected = await queryStatement(`PRAGMA table_info(${descriptor.table})`);
-      if (!inspected || !Array.isArray(inspected.results)) {
-        throw new Error(`migration could not inspect ${descriptor.table}.${descriptor.column}`);
-      }
-      const existing = inspected.results.find((row) => row?.name === descriptor.column);
-      if (existing) {
-        let compatible = String(existing.type || "").toUpperCase() === descriptor.type &&
-          Number(existing.notnull || 0) === Number(descriptor.notNull) &&
-          normalizedSqlDefault(existing.dflt_value) === normalizedSqlDefault(descriptor.defaultValue);
-        if (compatible && descriptor.hasCheckConstraint) {
-          const schema = await queryStatement(
-            `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '${descriptor.table}'`,
-          );
-          if (!schema || !Array.isArray(schema.results) || schema.results.length !== 1 ||
-              typeof schema.results[0]?.sql !== "string") {
-            throw new Error(`migration could not inspect ${descriptor.table}.${descriptor.column} definition`);
-          }
-          compatible = exactAddedColumnDefinition(schema.results[0].sql, descriptor);
-        }
-        if (!compatible) {
-          throw new Error(
-            `migration column ${descriptor.table}.${descriptor.column} already exists with an incompatible schema`,
-          );
-        }
-        skipped = true;
+      try {
+        skipped = await inspectAddedColumn(inspectStatement, descriptor);
+      } catch (error) {
+        const kind = migrationFailureKind(error);
+        if (!["transient", "duplicate"].includes(kind)) throw error;
+        const result = await waitForColumnInventory(descriptor, error, { returnWhenAbsent: true });
+        skipped = result === "present";
+        recoveredAfterSlowApply = skipped;
       }
     }
-    if (!skipped) await queryStatement(statement);
-    if (afterStatement) await afterStatement({ index, statement, skipped });
+    if (!skipped) {
+      try {
+        await queryStatement(statement);
+      } catch (error) {
+        const kind = migrationFailureKind(error);
+        if (!descriptor) {
+          if (kind === "transient") {
+            throw migrationStillApplyingError(
+              uncertainMigrationStatementMessage(index, statements.length, migrationName),
+            );
+          }
+          throw error;
+        }
+        if (["definitive", "unreachable"].includes(kind)) throw error;
+
+        const result = await waitForColumnInventory(descriptor, error, { returnWhenAbsent: false });
+        skipped = result === "present";
+        recoveredAfterSlowApply = skipped;
+      }
+    }
+    if (afterStatement) {
+      await afterStatement({
+        index,
+        statement,
+        skipped,
+        ...(recoveredAfterSlowApply ? { recoveredAfterSlowApply: true } : {}),
+      });
+    }
   }
 }
 
@@ -4949,9 +5163,22 @@ export async function cmdMigrate(manifestPath, options = {}) {
 
   for (const mig of pending) {
     if (!silent) info(`applying ${mig.name}`);
+    const migrationPoll = options.migrationPoll ?? {};
     await runRestartSafeMigrationStatements(
       splitStatements(mig.sql),
-      (statement) => queryDatabase(acct.id, dbId, statement),
+      (statement) => queryDatabase(
+        acct.id,
+        dbId,
+        statement,
+        [],
+        { timeoutMs: MIGRATION_STATEMENT_TIMEOUT_MS },
+      ),
+      {
+        ...migrationPoll,
+        migrationName: mig.name,
+        inspectStatement: (statement) => queryDatabase(acct.id, dbId, statement),
+        log: migrationPoll.log ?? (silent ? () => {} : info),
+      },
     );
     await queryDatabase(
       acct.id,
@@ -6733,14 +6960,25 @@ export async function cmdUpgrade(manifestPath, options = {}) {
             "      does not claim that reindex or drain are blocked by an update pause.\n"
         : "      This install does not use the D1 Vectorize outbox cutover, so no paused reindex or drain\n" +
           "      restriction is being claimed for this failure. Review this backend's restore impact.\n";
-      const ownerRecovery = corpusPauseMayStillBeServing
-        ? "The update stopped partway. Your Brain can still answer questions but won't take new documents until the update finishes. Nothing was lost. Run brain update once more."
-        : "The update stopped before its last check. Your Brain is working normally and nothing was lost. Run brain update once more; it picks up where it stopped.";
-      die(
+      const slowMigration = error?.supportCode === "MIGRATION_STILL_APPLYING";
+      const migrationOutage = stage === "migration" && (
+        error?.supportCode === "NETWORK_UNREACHABLE" || migrationFailureKind(error) === "unreachable"
+      );
+      const ownerRecovery = slowMigration
+        ? corpusPauseMayStillBeServing
+          ? "Cloudflare is still applying a large database change. Your Brain can still answer questions but won't take new documents until the update finishes. Nothing was lost. Wait about 10 minutes, then run brain update once more."
+          : "Cloudflare is still applying a large database change. Your Brain is working normally. Nothing was lost. Wait about 10 minutes, then run brain update once more."
+        : corpusPauseMayStillBeServing
+          ? "The update stopped partway. Your Brain can still answer questions but won't take new documents until the update finishes. Nothing was lost. Run brain update once more."
+          : "The update stopped before its last check. Your Brain is working normally and nothing was lost. Run brain update once more; it picks up where it stopped.";
+      const failureMessage =
         `${ownerRecovery}\n` +
           "If it stops again at the same step, run brain support --preview and send us that note.\n\n" +
           "For your installer:\n" +
           `      update stopped during ${stage}: ${error.message}\n` +
+          (typeof error?.migrationFirstReply === "string"
+            ? `      ${error.migrationFirstReply}\n`
+            : "") +
           `      D1 recovery bookmark: ${bookmark}\n` +
           "      Do not restore it as the first response. A D1 restore discards newer writes.\n" +
           projectionRecovery +
@@ -6756,8 +6994,14 @@ export async function cmdUpgrade(manifestPath, options = {}) {
               "      than staying paused. Do not clear VECTOR_DRAIN_MODE by hand.\n" +
               "      Confirm the state any time with `brain health <manifest>`; it reports\n" +
               "      accepting_documents false while this lasts."
-            : ""),
-      );
+            : "");
+      if (slowMigration || migrationOutage) {
+        dieWithSupportCode(
+          failureMessage,
+          slowMigration ? "MIGRATION_STILL_APPLYING" : "NETWORK_UNREACHABLE",
+        );
+      }
+      die(failureMessage);
     }
     ok(`upgrade verified, now at ${toVersion}`);
   } finally {
@@ -23617,6 +23861,7 @@ function crash(err) {
  * now either answers, fails with a reason, or gives up out loud.
  */
 const HTTP_TIMEOUT_MS = 60_000;
+export const MIGRATION_STATEMENT_TIMEOUT_MS = 300_000;
 
 /**
  * A response body fit to print to a person.
@@ -23647,7 +23892,7 @@ export function summariseResponseBody(raw) {
   return text.replace(/\s+/g, " ").slice(0, 160);
 }
 
-function translatedHttpFailure(error, url, { timeoutMs = HTTP_TIMEOUT_MS, what = "the request" } = {}) {
+export function translatedHttpFailure(error, url, { timeoutMs = HTTP_TIMEOUT_MS, what = "the request" } = {}) {
   let host = "the server";
   try {
     host = new URL(String(url)).host;
@@ -23656,7 +23901,9 @@ function translatedHttpFailure(error, url, { timeoutMs = HTTP_TIMEOUT_MS, what =
   const code = String(error?.cause?.code || error?.code || "");
   let message;
   let retryable = false;
+  let transport = "other";
   if (name === "TimeoutError" || name === "AbortError") {
+    transport = "timeout";
     retryable = true;
     message =
       `${what} timed out after ${Math.round(timeoutMs / 1000)}s (${host}).\n` +
@@ -23664,15 +23911,18 @@ function translatedHttpFailure(error, url, { timeoutMs = HTTP_TIMEOUT_MS, what =
       "      the same command continues from there. Check the connection, a VPN, or a\n" +
       "      corporate proxy, then try again.";
   } else if (["ENOTFOUND", "EAI_AGAIN"].includes(code)) {
+    transport = "unresolved";
     retryable = true;
     message = `${host} could not be resolved (${code}). Check the network connection or a DNS/VPN setting.`;
   } else if (
     ["ECONNREFUSED", "ECONNRESET", "EPIPE", "ETIMEDOUT", "UND_ERR_SOCKET"].includes(code) ||
     /^UND_ERR_.*TIMEOUT$/.test(code)
   ) {
+    transport = "connection";
     retryable = true;
     message = `the connection to ${host} failed (${code}). This is usually a network blip; re-running the command is safe.`;
   } else if (/certificate|self-signed|CERT_/i.test(`${code} ${String(error?.message || "")}`)) {
+    transport = "tls";
     message =
       `the TLS certificate for ${host} was rejected.\n` +
       "      On a corporate network this usually means an inspecting proxy. Ask IT for the\n" +
@@ -23683,6 +23933,9 @@ function translatedHttpFailure(error, url, { timeoutMs = HTTP_TIMEOUT_MS, what =
   const translated = new Fatal(message);
   translated.code = "NETWORK_UNREACHABLE";
   translated.retryable = retryable;
+  translated.transport = transport;
+  translated.cause = error;
+  translated.timeoutMs = timeoutMs;
   return translated;
 }
 
