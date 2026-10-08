@@ -22,10 +22,14 @@ for (const name of ["HOME", "USER", "LOGNAME", "PATH", "TMPDIR", "SystemRoot", "
 }
 environment.BRAIN_NO_WRANGLER_LOGIN = "1";
 
-function command(label, executable, args, accepted = [0]) {
+function command(label, executable, args, accepted = [0], { emptyStatusOne = false } = {}) {
   const timeout = label === "installed-cli-preparation" ? 900_000 : 180_000;
   const result = spawnSync(executable, args, { env: environment, cwd: logs, encoding: "utf8", timeout, maxBuffer: 8 * 1024 * 1024 });
   writeFileSync(join(logs, `${label}.log`), `${result.stdout || ""}${result.stderr || ""}\nexit=${result.status}\n`);
+  // pkgutil exits 1 with no output at all when a volume holds no receipts yet;
+  // any other status, or status 1 with output, is still a failure.
+  if (emptyStatusOne && !result.error && result.status === 1 &&
+      !String(result.stdout || "").trim() && !String(result.stderr || "").trim()) return "";
   if (result.error || !accepted.includes(result.status)) throw new Error(`${label} failed; inspect its log`);
   return result.stdout;
 }
@@ -55,7 +59,8 @@ function macHost() {
   const receiptArgs = ["--volume", home];
   let payload;
   let applicationDirectoryExisted;
-  const receiptPresent = () => command("receipt-list", "/usr/sbin/pkgutil", [...receiptArgs, "--pkgs"]).trim().split(/\r?\n/).includes(identifier);
+  const receiptPresent = () => command("receipt-list", "/usr/sbin/pkgutil", [...receiptArgs, "--pkgs"], [0], { emptyStatusOne: true })
+    .trim().split(/\r?\n/).includes(identifier);
   const sentinelPaths = [join(home, ".financial-brain"), join(home, ".brain"),
     join(home, "Library", "LaunchAgents"), "/Applications/Financial Brain Machine Prep"];
   let sentinelState;

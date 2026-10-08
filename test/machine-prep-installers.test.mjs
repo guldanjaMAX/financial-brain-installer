@@ -544,9 +544,19 @@ test("signed smoke native adapters retain signature, user scope, footprint, and 
   assert.match(mac, /"-target", "CurrentUserHomeDirectory"/);
   assert.match(mac, /"--volume", home/);
   assert.match(mac, /"--forget", identifier/);
+  // A fresh home holds no receipts and pkgutil then exits 1 with no output;
+  // only that exact case may read as "no receipts", every other failure stops.
+  assert.match(mac, /"receipt-list", "\/usr\/sbin\/pkgutil", \[\.\.\.receiptArgs, "--pkgs"\], \[0\], \{ emptyStatusOne: true \}/);
+  assert.match(mac, /emptyStatusOne && !result\.error && result\.status === 1 &&\s+!String\(result\.stdout \|\| ""\)\.trim\(\) && !String\(result\.stderr \|\| ""\)\.trim\(\)/);
+  assert.equal([...mac.matchAll(/emptyStatusOne: true/g)].length, 1, "only the receipt listing tolerates an empty status 1");
   assert.match(mac, /digest\(join\(installed, file\)\) !== digest\(join\(payload, file\)\)/);
   assert.match(mac, /BRAIN_NO_WRANGLER_LOGIN = "1"/);
   assert.doesNotMatch(mac, /\.\.\.process\.env/);
+  // Undiscarded Windows Installer COM results become extra pipeline rows.
+  const windowsSmoke = read("machine-prep/installers/smoke/windows.ps1");
+  assert.match(windowsSmoke, /^\s*\$null = \$view\.Execute\(\)\r?$/m);
+  assert.match(windowsSmoke, /\$null = \$view\.Close\(\)/);
+  assert.doesNotMatch(windowsSmoke, /^\s*\$view\.(?:Execute|Close)\(\)\s*$/m);
   const assertWindows = (source) => {
     assert.match(source, /Get-AuthenticodeSignature -LiteralPath \$Artifact/);
     assert.match(source, /\$signature\.Status -ne 'Valid'/);

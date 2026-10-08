@@ -62,14 +62,16 @@ function Open-Database {
 function Read-Rows([string]$Table, [string[]]$Columns) {
   $quoted = ($Columns | ForEach-Object { '`' + $_ + '`' }) -join ', '
   $view = $script:Database.OpenView(('SELECT {0} FROM `{1}`' -f $quoted, $Table))
-  $view.Execute()
+  # Windows Installer COM results would otherwise join this function's output
+  # as extra rows (the same defect verify-msi.ps1 had).
+  $null = $view.Execute()
   try {
     while ($record = $view.Fetch()) {
       $row = @{}
       for ($index = 0; $index -lt $Columns.Count; $index++) { $row[$Columns[$index]] = [string]$record.StringData($index + 1) }
       [pscustomobject]$row
     }
-  } finally { $view.Close() }
+  } finally { $null = $view.Close() }
 }
 function Read-Properties {
   $values = @{}
