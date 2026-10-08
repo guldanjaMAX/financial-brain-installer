@@ -1,3 +1,4 @@
+import { measureQueryStage } from "./query-timing.js";
 /**
  * store — one retrieval interface, two backends.
  *
@@ -747,22 +748,22 @@ const d1Backend = {
 
   async search(env, {
     query, limit, filters = {}, weights = {}, rrfK = 60, access = null, scope = null,
-    projectionReadiness = null, supplementalFilters = [],
+    projectionReadiness = null, supplementalFilters = [], timing = null,
   }) {
     let embedding = null;
     if (access?.kind !== "grant" && scopeIsUnrestricted(scope)) {
       try {
-        embedding = await embedText(env, query);
+        embedding = await embedText(env, query, timing);
       } catch {
         // Degrade to keyword rather than fail. store-d1 reports which side answered.
       }
     }
     const r = await d1.search(env, {
       query, embedding, limit, filters, weights, rrfK, access, scope, projectionReadiness,
-      supplementalFilters,
+      supplementalFilters, timing,
     });
     return {
-      results: r.results.map((x) => {
+      results: measureQueryStage(timing, "authority_lineage", () => r.results.map((x) => {
         const storedSourceId = x.source_id || (
           x.doc_uid && x.source && x.doc_uid.startsWith(`${x.source}:`)
             ? x.doc_uid.slice(x.source.length + 1)
@@ -813,7 +814,7 @@ const d1Backend = {
           score: x.rrf_score,
         };
         return attachEvidenceLineage(publicRow, { root_ids: evidenceLineageRootIds(x) });
-      }),
+      })),
       degraded: r.degraded,
       degraded_reason: r.degraded_reason ?? null,
       ignored_filters: r.ignored_filters,
@@ -1291,7 +1292,7 @@ const d1Backend = {
 /* ----------------------------------------------------------- Supabase backend */
 
 const supabaseBackend = {
-  async search(env, { query, limit, filters = {}, weights = {}, rrfK = 60, access = null, scope = null }) {
+  async search(env, { query, limit, filters = {}, weights = {}, rrfK = 60, access = null, scope = null, timing = null }) {
     if (access?.kind === "grant" || !scopeIsUnrestricted(scope)) {
       return {
         results: [],
@@ -1304,12 +1305,12 @@ const supabaseBackend = {
     }
     let embedding;
     try {
-      embedding = await embedText(env, query);
+      embedding = await embedText(env, query, timing);
     } catch {
-      const rows = await supabaseRpc(env, "notes_fts_documents", {
+      const rows = await measureQueryStage(timing, "keyword", () => supabaseRpc(env, "notes_fts_documents", {
         query_text: query, match_count: limit,
         filter_category: filters.category || null, filter_client: filters.client || null,
-      });
+      }));
       return {
         results: (rows || []).map((r) => ({
           chunk_uid: r.d1_key, ref_key: r.d1_key, source: "curated",
@@ -1323,7 +1324,7 @@ const supabaseBackend = {
         degraded: "fts", degraded_reason: "keyword-search-unavailable", ignored_filters: [],
       };
     }
-    const matches = await supabaseRpc(env, "notes_unified_hybrid_search", {
+    const matches = await measureQueryStage(timing, "legacy_hybrid", () => supabaseRpc(env, "notes_unified_hybrid_search", {
       query_text: query, query_embedding: embedding, match_count: limit, rrf_k: rrfK,
       filter_source: filters.source || null, filter_top_folder: filters.top_folder || null,
       filter_category: filters.category || null, filter_client: filters.client || null,
@@ -1331,7 +1332,7 @@ const supabaseBackend = {
       filter_platform: filters.platform || null,
       weight_curated: weights.curated ?? 1.0, weight_drive: weights.drive ?? 1.0,
       weight_message: weights.message ?? 1.0,
-    });
+    }));
     return {
       results: (matches || []).map((r) => ({
         chunk_uid: r.ref_key, ref_key: r.ref_key, source: r.source, title: r.title,

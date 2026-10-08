@@ -1,4 +1,5 @@
 import { readIngestRemovalRequest, previewIngestRemovals, applyIngestRemovals } from "./lib/ingest-removal-plan.js";
+import { createQueryTiming, queryTimingResponse, measureQueryStage, startQueryStage } from "./lib/query-timing.js";
 /**
  * brain worker — the client-installable retrieval brain.
  *
@@ -329,7 +330,7 @@ function citationForDocument(document) {
 
 async function unifiedRetrieve(env, url, {
   limit, access = null, scope = { all: true }, scopePrincipalKind = "owner",
-  projectionReadiness = null,
+  projectionReadiness = null, timing = null,
 }) {
   const q = url.searchParams.get("q");
   const rrfK = Math.min(Math.max(parseInt(url.searchParams.get("rrf_k")) || 60, 1), 1e3);
@@ -338,7 +339,7 @@ async function unifiedRetrieve(env, url, {
   // Which store answers is isolated from the routes. D1 plus Vectorize is the
   // standard product backend; the legacy adapter remains for migration checks
   // and temporary rollback only.
-  const r = await storeFor(env).search(env, {
+  const r = await measureQueryStage(timing, "retrieval", () => storeFor(env).search(env, {
     query: q,
     // Both public routes ask the store for the same ranking window. The D1
     // backend's modality pool is fixed separately; this depth only leaves room
@@ -355,9 +356,10 @@ async function unifiedRetrieve(env, url, {
     access,
     scope,
     projectionReadiness,
-  });
+    timing,
+  }));
 
-  const matches = normalizeRetrievedDocuments(r.results);
+  const matches = measureQueryStage(timing, "authority_lineage", () => normalizeRetrievedDocuments(r.results));
   return {
     matches,
     evidenceAuthority: strongestEvidenceAuthority(matches),
@@ -415,7 +417,7 @@ export function demoteScaffolding(results) {
  * Falls back to the original ranking on ANY error, so search never breaks
  * because the reranker had a bad day.
  */
-async function rerank(env, q, results, limit) {
+async function rerank(env, q, results, limit, timing = null) {
   const candidates = results.slice(0, 30);
   const list = candidates
     .map((r, i) => `[${i}] (${r.source || "?"}) ${(r.title || "untitled").slice(0, 120)}\n${(r.snippet || "").replace(/\s+/g, " ").slice(0, 300)}`)
@@ -434,6 +436,7 @@ async function rerank(env, q, results, limit) {
       max_tokens: 700,
       system,
       label: "rag-rerank",
+      timing, timingStage: "rerank",
       timeoutMs: 8000,
       messages: [{ role: "user", content: `Question: ${q}\n\nResults:\n${list}` }],
     });
@@ -649,14 +652,14 @@ function modelRefusedAnswer(answer) {
 /* -------------------------------------------------------------- routes */
 
 async function handleUnified(
-  env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner",
+  env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner", timing = null,
 ) {
   const url = await privateRagParameters(request);
   if (!url) return jsonResponse({ error: "Expected a JSON request body" }, 400);
   if (url.parameter_error) return jsonResponse(url.parameter_error, 400);
   const q = url.searchParams.get("q");
   if (!q || !q.trim()) return jsonResponse({ error: "Missing q" }, 400);
-  const scope = await applyBusinessScope(env, url);
+  const scope = await measureQueryStage(timing, "scope", () => applyBusinessScope(env, url));
   if (!scope.ok) return scope.response;
   const entityScope = scope.entityScope;
 
@@ -667,18 +670,18 @@ async function handleUnified(
 
   const {
     matches: retrieved, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
-  } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind });
+  } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind, timing });
   const accessStatus = {
     retrieval_scope: retrievalScope,
     degraded_reason: degradedReason || undefined,
     access: accessSummary,
   };
   const ignored = ignoredFilters.length ? { ignored_filters: ignoredFilters } : {};
-  const coverage = await coverageForRead(env, {
+  const coverage = await measureQueryStage(timing, "coverage", () => coverageForRead(env, {
     access,
     scope: grantScope,
     requestedSource: filtersFrom(url).source || null,
-  });
+  }));
   const sourceCoverageGaps = coverage.unavailable
     ? [{
         type: "coverage_unavailable",
@@ -720,7 +723,7 @@ async function handleUnified(
   let matches = retrieved;
 
   if (doRerank && Array.isArray(matches) && matches.length > 1) {
-    matches = await rerank(env, q, matches, limit);
+    matches = await rerank(env, q, matches, limit, timing);
   }
   if (Array.isArray(matches)) matches = matches.slice(0, limit);
 
@@ -870,7 +873,7 @@ function financialMapStateFor(env, question, {
 }
 
 async function handleThink(
-  env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner",
+  env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner", timing = null,
 ) {
   const unsupportedAnswer = "The documents do not answer the question.";
   const url = await privateRagParameters(request);
@@ -878,10 +881,10 @@ async function handleThink(
   if (url.parameter_error) return jsonResponse(url.parameter_error, 400);
   const q = (url.searchParams.get("q") || "").trim();
   if (!q) return jsonResponse({ error: "Missing q" }, 400);
-  const scope = await applyBusinessScope(env, url);
+  const scope = await measureQueryStage(timing, "scope", () => applyBusinessScope(env, url));
   if (!scope.ok) return scope.response;
   const entityScope = scope.entityScope;
-  const taxQuestion = taxQuestionScopeAssessment(q);
+  const taxQuestion = measureQueryStage(timing, "premise_temporal", () => taxQuestionScopeAssessment(q));
   if (taxQuestion.applicable && !taxQuestion.resolved) {
     return jsonResponse({
       mode: "think",
@@ -902,27 +905,27 @@ async function handleThink(
   }
   const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit")) || 8, 1), 20);
 
-  const mapState = financialMapStateFor(env, q, {
+  const mapState = measureQueryStage(timing, "financial_map", () => financialMapStateFor(env, q, {
     access, grantScope, scopePrincipalKind, entityScope,
-  });
+  }));
 
   const {
     matches, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
-  } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind });
+  } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind, timing });
   const results = Array.isArray(matches) ? matches : [];
   const requestedFilters = filtersFrom(url);
   const [coverage, taxDocumentCoverage] = await Promise.all([
-    coverageForRead(env, {
+    measureQueryStage(timing, "coverage", () => coverageForRead(env, {
       access,
       scope: grantScope,
       requestedSource: requestedFilters.source || null,
-    }),
-    taxDocumentCoverageForRead(env, {
+    })),
+    measureQueryStage(timing, "coverage", () => taxDocumentCoverageForRead(env, {
       question: q,
       filters: requestedFilters,
       access,
       scope: grantScope,
-    }),
+    })),
   ]);
   const sourceCoverageGaps = coverage.unavailable
     ? [{
@@ -997,7 +1000,7 @@ async function handleThink(
     });
   }
 
-  const gaps = computeGaps(results);
+  const gaps = measureQueryStage(timing, "gaps", () => computeGaps(results));
 
   // Coverage staleness goes in FRONT of the content gaps, because it qualifies
   // all of them. "The newest thing I found is 40 days old" reads very
@@ -1073,6 +1076,7 @@ async function handleThink(
   let evidenceGate = null;
   const owner = env.BRAIN_OWNER || "the owner";
   const currentOptions = { filters: filtersFrom(url), owner: env.BRAIN_OWNER || null };
+  const finishCurrentChecks = startQueryStage(timing, "premise_temporal");
   const allCurrentEvidence = currentEvidenceCandidates(q, docs, currentOptions);
   const operativeCandidates = allCurrentEvidence.filter((doc) => doc.authority?.operative_section);
   const newestOperativeCandidates = newestCurrentEvidence(q, operativeCandidates, currentOptions);
@@ -1127,6 +1131,8 @@ async function handleThink(
     }
   }
 
+  finishCurrentChecks();
+
   // Owner name is templated per install. A hardcoded source-instance name here
   // would otherwise ship to every client.
   const system = [
@@ -1165,11 +1171,13 @@ async function handleThink(
   // Direct observed amounts need no generated prose. This replaces only the
   // model calls and free-text temporal inference. Citation and authority
   // checks remain shared; admission itself binds observation time and money.
+  const finishObservedChecks = startQueryStage(timing, "premise_temporal");
   const balanceAnswer = quickBooksBalanceAnswer({ question: q, results, docs });
   const openItemsAnswer = balanceAnswer ? null : quickBooksOpenItemsAnswer({
     question: q, candidates: results.map(citationCandidateForResult), citationCount: docs.length,
   });
   const observedAnswer = balanceAnswer || openItemsAnswer;
+  finishObservedChecks();
   let answer = observedAnswer?.answer || null;
   let answerError = null;
   let model = null;
@@ -1182,6 +1190,7 @@ async function handleThink(
         max_tokens: 1000,
         system,
         label: attempt === 0 ? "rag-think" : "rag-think-repair",
+        timing, timingStage: "answer_llm",
         timeoutMs: 45_000,
         messages: [{ role: "user", content: attempt === 0 ? userMsg : `${userMsg}\n\nREGENERATION REQUIREMENTS:\n${repairInstruction}` }],
       });
@@ -1219,6 +1228,7 @@ async function handleThink(
   // the exact question. Verify the concrete draft against only the documents
   // it cited, then fail closed before a plausible fact from another entity can
   // be returned as the owner's fact.
+  const finishEvidenceGate = startQueryStage(answer && !answerError ? timing : null, "evidence_gate");
   if (answer && !answerError) {
     if (modelRefusedAnswer(answer)) {
       modelDeclaredNoEvidence = true;
@@ -1239,6 +1249,7 @@ async function handleThink(
             model: env.ANSWER_MODEL || "claude-sonnet-4-5",
             max_tokens: 300,
             label: "rag-evidence-gate",
+            timing, timingStage: "verifier_llm",
             timeoutMs: 45_000,
             system: [
               "You verify a proposed answer against its cited documents. You do not rewrite the answer.",
@@ -1287,6 +1298,7 @@ async function handleThink(
             evidenceGate.supported = false;
             evidenceGate.reason = "verifier did not approve every citation in the proposed answer";
           }
+          const finishPremiseChecks = startQueryStage(timing, "premise_temporal");
           const asksForBindingAgreement = /\b(?:bound by|legally binding|executed agreement|signed agreement|governing agreement)\b/i.test(q);
           const allowedDocs = citedDocs.filter((doc) => allowed.has(doc.n));
           const mismatchedTaxEvidence = taxDocumentCoverage.applicable && allowedDocs.some((doc) =>
@@ -1422,6 +1434,7 @@ async function handleThink(
             evidenceGate.supported = false;
             evidenceGate.reason = moneyRefusal;
           }
+          finishPremiseChecks();
           if (!evidenceGate.supported || !allowed.size) {
             answer = unsupportedAnswer;
             approvedDocs = [];
@@ -1485,6 +1498,7 @@ async function handleThink(
   if ((observedAnswer || moneyPolicy) && evidenceGate?.supported && approvedDocs.length && gaps.length) {
     answer += `\n\nHeads up: ${gaps.map((gap) => String(gap.detail || "").replace(/\[\d+\]/g, "")).filter(Boolean).join(" ")}`;
   }
+  finishEvidenceGate(Boolean(answerError));
 
   // Trust metadata beside the answer, never inside it: the refusal sentence
   // is a verbatim contract (worker tests and the eval refusal scorer both pin
@@ -2919,7 +2933,13 @@ function pausedDeletionRefusal() {
 }
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env, ctx, timingOptions = {}) {
+    const timingPath = new URL(request.url).pathname;
+    const timingRoute = timingPath === "/api/rag/think" ? "think"
+      : timingPath === "/api/rag/unified" ? "unified" : timingPath === "/mcp" ? "mcp" : null;
+    const timing = timingRoute ? createQueryTiming({ route: timingRoute, now: timingOptions.now }) : null;
+    if (timingRoute !== "mcp" && validateAdminKey(request, env)) timing?.expose();
+    const response = await (async () => {
     const requestStartedAt = Date.now();
     const url = new URL(request.url);
     const path = url.pathname;
@@ -3214,9 +3234,9 @@ export default {
           body: JSON.stringify(body),
         });
       return handleMcp(env, request, url, {
-        grant,
-        think: async (body) => (await handleThink(env, internalJson("/api/rag/think", body))).json(),
-        search: async (body) => (await handleUnified(env, internalJson("/api/rag/unified", body))).json(),
+        grant, timing,
+        think: async (body) => (await handleThink(env, internalJson("/api/rag/think", body), null, { all: true }, "owner", timing)).json(),
+        search: async (body) => (await handleUnified(env, internalJson("/api/rag/unified", body), null, { all: true }, "owner", timing)).json(),
         // Writes take the dedicated owner-note lifecycle around the ordinary
         // ingest guards. The credential scanner and storage contract stay the
         // same, while source registration and exact readback cannot be skipped.
@@ -3341,10 +3361,10 @@ export default {
         }, 405));
       }
       if (path === "/api/rag/unified" && request.method === "POST") {
-        return privateNoStore(await handleUnified(env, request, readAccess, scope, scopePrincipalKind));
+        return privateNoStore(await handleUnified(env, request, readAccess, scope, scopePrincipalKind, timing));
       }
       if (path === "/api/rag/think" && request.method === "POST") {
-        return privateNoStore(await handleThink(env, request, readAccess, scope, scopePrincipalKind));
+        return privateNoStore(await handleThink(env, request, readAccess, scope, scopePrincipalKind, timing));
       }
       if (path === "/api/admin/auth/invite" && request.method === "POST") {
         return handleAdminInvite(env, url);
@@ -3771,6 +3791,8 @@ export default {
       }
       return response;
     }
+    })();
+    return queryTimingResponse(timing, response);
   },
 
   /**

@@ -404,6 +404,17 @@ const expected = [
   "worker/src/lib/financial-answer-plan.js",
   "worker/src/lib/financial-evidence-store.js",
   "docs/FINANCIAL-CONTRACTS.md",
+  "scripts/query-spans-probe.mjs",
+  "worker/src/lib/query-timing.js",
+  // 0.4.11 bank-to-books matching and tax-return possible-miss review. Reviewed
+  // 2026-10-08 at integration: pure functions over the owner's own records, no
+  // account, person or credential; the names scan matched only word fragments.
+  "worker/src/lib/books-candidate-graph.js",
+  "worker/src/lib/books-match.js",
+  "worker/src/lib/tax-check-document.js",
+  "worker/src/lib/tax-check-rules.js",
+  "worker/src/lib/tax-check.js",
+  "components/brain-mcp-timing.mjs",
   "connectors/gmail.mjs",
   "connectors/imap.mjs",
   "connectors/imessage.mjs",

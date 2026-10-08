@@ -1,3 +1,4 @@
+import { startQueryStage } from "./query-timing.js";
 /**
  * mcp-endpoint — the brain as a remote MCP server, so it appears inside the
  * Claude apps and ChatGPT as a connector.
@@ -504,6 +505,23 @@ function toolsFor(profile) {
  * test can drive it with fakes or the real thing alike.
  */
 export async function handleMcp(env, request, url, deps) {
+  let endWrapping = startQueryStage(deps.timing, "mcp_wrapping");
+  const backend = (name) => async (...args) => {
+    endWrapping();
+    try {
+      const result = await deps[name](...args);
+      deps.timing?.observeResult(result);
+      return result;
+    } finally {
+      endWrapping = startQueryStage(deps.timing, "mcp_wrapping");
+    }
+  };
+  try {
+    return await handleMcpImpl(env, request, url, { ...deps, think: backend("think"), search: backend("search") });
+  } finally { endWrapping(); }
+}
+
+async function handleMcpImpl(env, request, url, deps) {
   if (request.method !== "POST") {
     return rpcError(null, -32600, "POST JSON-RPC messages to this endpoint", 405);
   }
@@ -545,8 +563,16 @@ export async function handleMcp(env, request, url, deps) {
     const name = String(params?.name || "");
     const args = params?.arguments || {};
     try {
-      if (name === "ask") return rpcResult(id, await runAsk(deps, args));
-      if (name === "search") return rpcResult(id, await runSearch(deps, args, url.origin));
+      if (name === "ask") {
+        if (profileHas(profile.name, "diagnostics:read")) deps.timing?.expose();
+        deps.timing?.setRoute("mcp.ask");
+        return rpcResult(id, await runAsk(deps, args));
+      }
+      if (name === "search") {
+        if (profileHas(profile.name, "diagnostics:read")) deps.timing?.expose();
+        deps.timing?.setRoute("mcp.search");
+        return rpcResult(id, await runSearch(deps, args, url.origin));
+      }
       if (name === "fetch") return rpcResult(id, await runFetch(env, args, url.origin));
       // The former one-call deletion name is permanently inert. In particular,
       // prompt-injected `confirm:true` cannot be interpreted as owner approval.

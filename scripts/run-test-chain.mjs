@@ -13,6 +13,9 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node --test test/query-mcp-timing.test.mjs",
+  "node --test test/query-spans-probe.test.mjs",
+  "node --test worker/test/query-timing.test.mjs",
   "node --test test/ingest-plan-first.test.mjs",
   "node --test test/ingest-removal-plan.test.mjs",
   "node --test test/ingest-plan-compatibility.test.mjs",
@@ -233,6 +236,9 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/windows-dpapi-signing-workflow.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
+  "node --test test/query-mcp-timing.test.mjs",
+  "node --test test/query-spans-probe.test.mjs",
+  "node --test worker/test/query-timing.test.mjs",
   "node --test test/oauth-lock-recovery.test.mjs",
   "node test/test-chain-complete.test.mjs",
   "node test/test-chain-runner.test.mjs",

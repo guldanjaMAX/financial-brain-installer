@@ -28,6 +28,7 @@
  * Zero dependencies. Node 22+ (matches the installer runtime requirement).
  */
 
+import { createMcpQueryTiming } from "./brain-mcp-timing.mjs";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -127,7 +128,8 @@ const CREDENTIALS = createBrainCredentialResolver({
 /* http                                                                */
 /* ------------------------------------------------------------------ */
 
-async function call(path, { method = "GET", body } = {}) {
+async function call(path, { method = "GET", body } = {}, queryTiming = null) {
+  if (queryTiming) return queryTiming.backend(() => call(path, { method, body }));
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
   try {
@@ -458,14 +460,15 @@ function currentAuthoritative(authority) {
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function searchWorker(args) {
+async function searchWorker(args, queryTiming = null) {
   const request = searchRequest(args);
-  const firstResponse = await call("/api/rag/unified", { method: "POST", body: request.body });
+  const firstResponse = await call("/api/rag/unified", { method: "POST", body: request.body }, queryTiming);
   let response = firstResponse;
   if (retrievalUnavailable({ ...response, results: response.results ?? [] })) {
-    await wait(SEARCH_RETRY_MS);
+    if (queryTiming) await queryTiming.wait(() => wait(SEARCH_RETRY_MS));
+    else await wait(SEARCH_RETRY_MS);
     try {
-      response = await call("/api/rag/unified", { method: "POST", body: request.body });
+      response = await call("/api/rag/unified", { method: "POST", body: request.body }, queryTiming);
     } catch {
       // The first response is an honest, structured search failure. A thrown
       // retry must not replace its status, cause, or absence warning with a raw
@@ -476,7 +479,7 @@ async function searchWorker(args) {
   return { ...request, response };
 }
 
-async function runTool(name, args = {}) {
+async function runTool(name, args = {}, queryTiming = null) {
   if (name === "brain_remember" && !profileHas(PROFILE, "curated:write")) {
     throw new Error("the active agent profile cannot write; reconnect as owner-assistant or structured-contributor");
   }
@@ -493,7 +496,7 @@ async function runTool(name, args = {}) {
       const d = await call("/api/rag/think", {
         method: "POST",
         body,
-      });
+      }, queryTiming);
       // A degraded search is the ONLY thing separating "the brain holds
       // nothing" from "the brain was not fully read", so it rides out on every
       // response that has it, answered or not. Without it this tool hands the
@@ -592,7 +595,7 @@ async function runTool(name, args = {}) {
       return out;
     }
     case "brain_search": {
-      const { response: d, body: requestBody, limit, offset } = await searchWorker(args);
+      const { response: d, body: requestBody, limit, offset } = await searchWorker(args, queryTiming);
       const workerRows = Array.isArray(d.results) ? d.results : [];
       let windowRows = [...workerRows];
       if (args.reliable_dates_only === true) {
@@ -874,13 +877,17 @@ async function handle(msg) {
   if (id === undefined || id === null) return;
   if (method === "tools/list") return ok(id, { tools: TOOLS });
   if (method === "tools/call") {
+    const queryTiming = ["brain_think", "brain_search"].includes(params?.name) && profileHas(PROFILE, "diagnostics:read")
+      ? createMcpQueryTiming({ route: `mcp.${params.name}` }) : null;
     try {
-      const result = await runTool(params?.name, params?.arguments ?? {});
-      return ok(id, { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] });
+      const result = await runTool(params?.name, params?.arguments ?? {}, queryTiming);
+      const content = [{ type: "text", text: JSON.stringify(result, null, 2) }];
+      return ok(id, { content, ...(queryTiming ? { _meta: { timing: queryTiming.finish() } } : {}) });
     } catch (err) {
       return ok(id, {
         content: [{ type: "text", text: renderCliCommands(`brain error in ${params?.name}: ${err.message}`) }],
         isError: true,
+        ...(queryTiming ? { _meta: { timing: queryTiming.finish("error") } } : {}),
       });
     }
   }

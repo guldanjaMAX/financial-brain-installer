@@ -439,11 +439,22 @@ test("a map read that throws leaves the think response exactly as it is without 
     "a map that could not be read is not a map that is not set up");
   assert.equal(JSON.stringify(broken.body).includes("map_guidance"), false);
 
-  // The added key is the ONLY difference between a working read and a broken
-  // one, which is the same as saying a broken read gives today's response.
+  // Guidance is the only answer-contract difference. Query diagnostics now
+  // deliberately vary per request; assert those separately rather than make
+  // a clock or opaque request identity part of answer equivalence.
   assert.ok(working.body.map_guidance, "the comparison is worthless if the working run added nothing");
-  const { map_guidance: _added, ...withoutGuidance } = working.body;
-  assert.deepEqual(broken.body, withoutGuidance);
+  const { map_guidance: _added, timing: workingTiming, ...withoutGuidance } = working.body;
+  const { timing: brokenTiming, ...brokenAnswer } = broken.body;
+  assert.deepEqual(brokenAnswer, withoutGuidance);
+  for (const timing of [brokenTiming, workingTiming]) {
+    assert.equal(timing.version, 1);
+    assert.equal(timing.route, "think");
+    assert.equal(timing.outcome, "refused");
+    assert.equal(timing.stages.financial_map.calls, 1);
+    assert.ok(Number.isFinite(timing.total_ms) && timing.total_ms >= 0);
+    assert.match(timing.request_id, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+  }
+  assert.notEqual(brokenTiming.request_id, workingTiming.request_id);
 });
 
 /* --------------------------------------------------------------- (c)(d) */

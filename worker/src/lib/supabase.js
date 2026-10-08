@@ -1,6 +1,11 @@
+import { measureQueryStage, measureQueryModel } from "./query-timing.js";
 // lib/supabase.js — Supabase PostgREST RPC client and the embedding helper.
 
-async function embedText(env, text) {
+function embedText(env, text, timing = null) {
+  return measureQueryStage(timing, "embedding", () => embedTextImpl(env, text, timing));
+}
+
+async function embedTextImpl(env, text, timing) {
   const input = (text || "").slice(0, 8e3);
   // One retry with a short backoff. Workers AI embedding failures are almost
   // always transient (cold start / occasional 5xx); a single retry turns most
@@ -8,7 +13,8 @@ async function embedText(env, text) {
   let lastErr = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const result = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: input });
+      const result = await measureQueryModel(timing, "embedding", "cloudflare-workers-ai", "@cf/baai/bge-base-en-v1.5",
+        () => env.AI.run("@cf/baai/bge-base-en-v1.5", { text: input }));
       if (result && result.data && result.data[0]) return result.data[0];
       lastErr = new Error("Workers AI returned no embedding");
     } catch (e) {
