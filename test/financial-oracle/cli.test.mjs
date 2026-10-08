@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { main, privateJournal, captureAnswers, captureReports } from './cli.mjs';
@@ -11,7 +11,8 @@ import { buildCases } from './evaluator.mjs';
 import { recordedControl } from './response-fixtures.mjs';
 const fixture=JSON.parse(readFileSync(new URL('./fixtures/golden-company.json',import.meta.url)));
 const templates=JSON.parse(readFileSync(new URL('./fixtures/seed-requests.json',import.meta.url)));
-const area=()=>mkdtempSync(join(tmpdir(),'oracle-cli-'));
+// The CLI refuses output parents reached through a link (macOS /var -> /private/var).
+const area=()=>realpathSync.native(mkdtempSync(join(tmpdir(),'oracle-cli-')));
 const save=(p,v)=>writeFileSync(p,JSON.stringify(v),{mode:0o600});
 test('real CLI entry path dry-runs without credential use and writes exclusive private plan',async()=>{
  const dir=area(),config=configuration();save(join(dir,'config.json'),config);let loads=0;
