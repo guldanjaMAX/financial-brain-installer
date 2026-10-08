@@ -181,6 +181,10 @@
     },
     {
       "name": "AccountRet",
+      "fieldVerification": {
+        "ListID": "unverified against Intuit",
+        "TimeCreated": "unverified against Intuit"
+      },
       "fields": [
         "ListID",
         "TimeCreated",
@@ -207,8 +211,12 @@
         "Balance",
         "TotalBalance",
         "CurrencyRef.ListID",
-        "CurrencyRef.FullName"
-      ]
+        "CurrencyRef.FullName",
+        "Sublevel"
+      ],
+      "fieldVerification": {
+        "Sublevel": "unverified against Intuit"
+      }
     },
     {
       "name": "VendorRet",
@@ -241,8 +249,16 @@
         "BalanceRemaining",
         "IsPaid",
         "CurrencyRef.ListID",
-        "ExchangeRate"
-      ]
+        "ExchangeRate",
+        "IsPending",
+        "CustomerRef.FullName",
+        "TermsRef.FullName"
+      ],
+      "fieldVerification": {
+        "IsPending": "unverified against Intuit",
+        "CustomerRef.FullName": "unverified against Intuit",
+        "TermsRef.FullName": "unverified against Intuit"
+      }
     },
     {
       "name": "BillRet",
@@ -259,8 +275,16 @@
         "AmountDue",
         "IsPaid",
         "CurrencyRef.ListID",
-        "ExchangeRate"
-      ]
+        "ExchangeRate",
+        "OpenAmount",
+        "IsPending",
+        "VendorRef.FullName"
+      ],
+      "fieldVerification": {
+        "OpenAmount": "unverified against Intuit",
+        "IsPending": "unverified against Intuit",
+        "VendorRef.FullName": "unverified against Intuit"
+      }
     },
     {
       "name": "CreditMemoRet",
@@ -277,8 +301,16 @@
         "SalesTaxTotal",
         "CreditRemaining",
         "CurrencyRef.ListID",
-        "ExchangeRate"
-      ]
+        "ExchangeRate",
+        "TotalAmount",
+        "IsPending",
+        "CustomerRef.FullName"
+      ],
+      "fieldVerification": {
+        "TotalAmount": "unverified against Intuit",
+        "IsPending": "unverified against Intuit",
+        "CustomerRef.FullName": "unverified against Intuit"
+      }
     },
     {
       "name": "TransactionRet",
@@ -288,8 +320,12 @@
         "TxnType",
         "TxnDate",
         "Amount",
-        "AccountRef.ListID"
-      ]
+        "AccountRef.ListID",
+        "CurrencyRef.ListID"
+      ],
+      "fieldVerification": {
+        "CurrencyRef.ListID": "unverified against Intuit"
+      }
     },
     {
       "name": "BillPaymentCheckRet",
@@ -303,7 +339,29 @@
         "TxnDate",
         "Amount",
         "CurrencyRef.ListID",
-        "ExchangeRate"
+        "ExchangeRate",
+        "PayeeEntityRef.FullName",
+        "BankAccountRef.FullName",
+        "AppliedToTxnRet"
+      ],
+      "fieldVerification": {
+        "PayeeEntityRef.FullName": "unverified against Intuit",
+        "BankAccountRef.FullName": "unverified against Intuit",
+        "AppliedToTxnRet": "unverified against Intuit",
+        "AppliedToTxnRet.TxnID": "unverified against Intuit",
+        "AppliedToTxnRet.TxnType": "unverified against Intuit",
+        "AppliedToTxnRet.Amount": "unverified against Intuit"
+      },
+      "repeated": [
+        {
+          "field": "AppliedToTxnRet",
+          "fields": [
+            "TxnID",
+            "TxnType",
+            "Amount"
+          ],
+          "maxItems": 500
+        }
       ]
     },
     {
@@ -318,7 +376,29 @@
         "TxnDate",
         "Amount",
         "CurrencyRef.ListID",
-        "ExchangeRate"
+        "ExchangeRate",
+        "PayeeEntityRef.FullName",
+        "CreditCardAccountRef.FullName",
+        "AppliedToTxnRet"
+      ],
+      "fieldVerification": {
+        "PayeeEntityRef.FullName": "unverified against Intuit",
+        "CreditCardAccountRef.FullName": "unverified against Intuit",
+        "AppliedToTxnRet": "unverified against Intuit",
+        "AppliedToTxnRet.TxnID": "unverified against Intuit",
+        "AppliedToTxnRet.TxnType": "unverified against Intuit",
+        "AppliedToTxnRet.Amount": "unverified against Intuit"
+      },
+      "repeated": [
+        {
+          "field": "AppliedToTxnRet",
+          "fields": [
+            "TxnID",
+            "TxnType",
+            "Amount"
+          ],
+          "maxItems": 500
+        }
       ]
     },
     {
@@ -411,5 +491,15 @@
       "value": 23,
       "code": "QB_PROCESSOR_UNTRUSTED"
     }
-  ]
+  ],
+  "probeIdentity": {
+    "request": "Account",
+    "fields": [
+      "ListID",
+      "TimeCreated"
+    ],
+    "maxRows": 10000,
+    "verification": "unverified against Intuit",
+    "purpose": "Complete bounded identity tuples for the connector to select the earliest account. Account permanence, creation-time ordering and stable ties require field verification; never use a name or path."
+  }
 }

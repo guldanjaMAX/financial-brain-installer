@@ -10,6 +10,9 @@ const PRIVATE_FIELD = /^(?:VendorTaxIdent|BankNumber|AccountNumber|CreditCardInf
 const fail = () => { throw new Error('QB_HELPER_STATIC_REFUSAL'); };
 export function checkQbdContract(contract) {
   if (contract?.protocol !== 1 || contract.minimumVersion !== '13.0' || contract.requests?.length !== 17 || contract.returns?.length !== 16 || contract.exits?.length !== 14) fail();
+  const identity = contract.probeIdentity;
+  if (identity?.request !== 'Account' || identity.maxRows !== 10_000 ||
+      JSON.stringify(identity.fields) !== JSON.stringify(['ListID', 'TimeCreated']) || identity.verification !== 'unverified against Intuit') fail();
   const seen = new Set();
   for (const request of contract.requests) {
     if (!REQUESTS.has(request.request) || !request.request.endsWith('QueryRq') || seen.has(request.key) ||
@@ -22,9 +25,19 @@ export function checkQbdContract(contract) {
   for (const ret of contract.returns) {
     if (!/^[A-Za-z]+Ret$/.test(ret.name) || returned.has(ret.name) || !ret.fields?.length ||
         new Set(ret.fields).size !== ret.fields.length || ret.fields.some((field) => !/^[A-Za-z]+(?:\.[A-Za-z]+)*$/.test(field) || field.split('.').some((part) => PRIVATE_FIELD.test(part)))) fail();
+    const payment = ['BillPaymentCheckRet', 'BillPaymentCreditCardRet'].includes(ret.name);
+    if (payment) {
+      // This is the only admitted object array. Keep its shape and budget closed
+      // so adding a nested field cannot bypass the scalar privacy gate above.
+      const link = ret.repeated?.[0];
+      if (ret.repeated?.length !== 1 || link?.field !== 'AppliedToTxnRet' || link.maxItems !== 500 ||
+          !ret.fields.includes(link.field) || JSON.stringify(link.fields) !== JSON.stringify(['TxnID', 'TxnType', 'Amount'])) fail();
+    } else if (ret.repeated?.length || ret.fields.includes('AppliedToTxnRet')) fail();
     returned.add(ret.name);
   }
   if (contract.requests.some((entry) => !returned.has(entry.ret))) fail();
+  const account = contract.requests.find((entry) => entry.key === identity.request);
+  if (account?.request !== 'AccountQueryRq' || account.ret !== 'AccountRet' || account.mode !== 'balance' || account.iterator !== true) fail();
   if (new Set(contract.exits.map((entry) => entry.value)).size !== 14 || new Set(contract.exits.map((entry) => entry.code)).size !== 14 ||
       contract.exits.some((entry, i) => entry.value !== 10 + i || !/^QB_[A-Z_]+$/.test(entry.code)) ||
       contract.exits.find((entry) => entry.code === 'QB_PARTIAL_VIEW')?.value !== 21) fail();
@@ -44,7 +57,7 @@ export function checkQbdSource(source, contract) {
   for (const invariant of ['DtdProcessing.Prohibit', 'settings.XmlResolver = null', 'document.XmlResolver = null',
     'reader.Depth > 24', 'settings.MaxCharactersInDocument', 'DataContractJsonSerializer', 'RegOverridePredefKey',
     'processor.End(ticket)', 'processor.Close()', 'Frame(output, new QbdTerminal',
-    'writer.WriteStartElement(request.request)', 'Build(request, version, iterator, plan, index)']) if (!source.includes(invariant)) fail();
+    'writer.WriteStartElement(request.request)', 'Build(request, version, iterator, plan, index, identityOnly)']) if (!source.includes(invariant)) fail();
   if (!/document\.Load\(reader\)/.test(source) || /\.Load\((?!reader\))/.test(source)) fail();
   if ((source.match(/\.Query\(/g) || []).length !== 1 || !source.includes('processor.Query(ticket, xml)')) fail();
   for (const [, dll] of source.matchAll(/\[DllImport\("([^"]+)"/g)) if (!['advapi32.dll', 'ole32.dll', 'kernel32.dll'].includes(dll)) fail();

@@ -56,15 +56,29 @@ export function qbdPlan(input, now = new Date()) {
 }
 export function qbdRequests(operation, plan) {
   const requests = QBD_CONTRACT.requests.filter((entry) => operation === 'probe2' ? entry.key === 'Host' :
-    operation === 'probe' ? entry.mode === 'base' : entry.mode !== 'postdated').map((entry) => ({ ...entry, id: entry.key }));
+    operation === 'probe' ? entry.mode === 'base' || entry.key === QBD_CONTRACT.probeIdentity.request : entry.mode !== 'postdated').map((entry) => ({ ...entry, id: entry.key }));
   if (operation === 'snapshot') {
     const postdated = QBD_CONTRACT.requests.find((entry) => entry.key === 'Postdated');
     for (let i = 0; i < plan.accountListIds.length; i++) requests.push({ ...postdated, id: `Postdated:${i}` });
   }
   return requests;
 }
-function projectRows(rows, entity) {
-  const fields = QBD_CONTRACT.returns.find((ret) => ret.name === entity)?.fields;
+function projectLinks(value, contract) {
+  if (!Array.isArray(value) || value.length > contract.maxItems) throw new Error('QB_PARTIAL_VIEW');
+  return value.map((link) => {
+    if (!plain(link)) throw new Error('QB_PARTIAL_VIEW');
+    const result = {};
+    for (const field of contract.fields) {
+      if (!Object.hasOwn(link, field) || typeof link[field] !== 'string' || link[field].length > 4096) throw new Error('QB_PARTIAL_VIEW');
+      result[field] = link[field];
+    }
+    if (!QBD_ID.test(result.TxnID)) throw new Error('QB_PARTIAL_VIEW');
+    return result;
+  });
+}
+function projectRows(rows, entity, identityOnly) {
+  const contract = QBD_CONTRACT.returns.find((ret) => ret.name === entity);
+  const fields = identityOnly ? QBD_CONTRACT.probeIdentity.fields : contract?.fields;
   if (!fields || !Array.isArray(rows) || rows.length > 500) throw new Error('QB_PARTIAL_VIEW');
   return rows.map((row) => {
     if (!plain(row)) throw new Error('QB_PARTIAL_VIEW');
@@ -72,7 +86,9 @@ function projectRows(rows, entity) {
     for (const field of fields) {
       if (!Object.hasOwn(row, field)) continue;
       const value = row[field];
-      if (field === 'SupportedQBXMLVersion' && Array.isArray(value) && value.length <= 64 && value.every((s) => typeof s === 'string' && /^\d{1,2}\.\d{1,2}$/.test(s))) result[field] = [...value];
+      const repeated = contract?.repeated?.find((entry) => entry.field === field);
+      if (repeated) result[field] = projectLinks(value, repeated);
+      else if (field === 'SupportedQBXMLVersion' && Array.isArray(value) && value.length <= 64 && value.every((s) => typeof s === 'string' && /^\d{1,2}\.\d{1,2}$/.test(s))) result[field] = [...value];
       else if (typeof value === 'string' && value.length <= 4096) result[field] = value;
       else throw new Error('QB_PARTIAL_VIEW');
     }
@@ -89,11 +105,22 @@ export function validateQbdResult(bytes, operation, plan) {
     const requests = new Map(expected.map((entry) => [entry.id, entry]));
     const counts = new Map(expected.map((entry) => [entry.id, 0]));
     const batchSeen = new Set();
+    const identityIds = new Set();
     const frames = [];
     for (const frame of raw.slice(0, -1)) {
       const request = requests.get(frame.request);
       if (frame.type !== 'batch' || frame.protocol !== 1 || !request || frame.entity !== request.ret || request.mode === 'postdated') return refuse();
-      const rows = projectRows(frame.rows, frame.entity);
+      const identityOnly = operation === 'probe' && request.key === QBD_CONTRACT.probeIdentity.request;
+      const rows = projectRows(frame.rows, frame.entity, identityOnly);
+      if (identityOnly) {
+        // No early page is sufficient to select an earliest-created account.
+        // Complete the bounded stream or withhold the entire probe.
+        for (const row of rows) {
+          if (typeof row.ListID !== 'string' || !QBD_ID.test(row.ListID) || !row.TimeCreated || identityIds.has(row.ListID)) return refuse();
+          identityIds.add(row.ListID);
+        }
+        if (identityIds.size > QBD_CONTRACT.probeIdentity.maxRows) return refuse();
+      }
       batchSeen.add(frame.request);
       counts.set(frame.request, counts.get(frame.request) + rows.length);
       frames.push({ protocol: 1, type: 'batch', request: frame.request, entity: frame.entity, rows });
@@ -113,6 +140,7 @@ export function validateQbdResult(bytes, operation, plan) {
         ...(request.mode === 'postdated' ? { matchedCount: receipt.matchedCount } : {}) });
     }
     // A valid transport is not permission to accept an unattended or unknown grant.
+    if (operation === 'probe' && identityIds.size === 0) return refuse();
     if (operation !== 'probe2') {
       const preferences = frames.filter((frame) => frame.entity === 'PreferencesRet').flatMap((frame) => frame.rows);
       if (preferences.length !== 1) return refuse();
