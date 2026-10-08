@@ -183,6 +183,15 @@ switch ($Phase) {
   'verifyInstalled' {
     Assert-EqualSet (Get-Inventory $InstallRoot) (@('handoff/') + $ExpectedFiles)
     Assert-EqualSet (Get-Inventory $MenuRoot) @('Run Financial Brain Machine Prep.lnk')
+    # Bind the actual installed objects to the logon profile, including the
+    # separator so a sibling with a matching name prefix cannot pass.
+    $profilePrefix = [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\') + '\'
+    $installedInProfile = (Get-Item -LiteralPath $InstallRoot).FullName.StartsWith($profilePrefix, [StringComparison]::OrdinalIgnoreCase)
+    $shortcutInProfile = (Get-Item -LiteralPath $ShortcutPath).FullName.StartsWith($profilePrefix, [StringComparison]::OrdinalIgnoreCase)
+    Write-Output 'INSTALLED_PROFILE_DECISION_REACHED=1'
+    Write-Output "INSTALL_ROOT_IN_PROFILE=$([int]$installedInProfile)"
+    Write-Output "START_MENU_SHORTCUT_IN_PROFILE=$([int]$shortcutInProfile)"
+    if (-not $installedInProfile -or -not $shortcutInProfile) { throw 'Installed locations escaped the user profile' }
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($ShortcutPath)
     # MSI writes [INSTALLFOLDER] with its trailing separator into the launcher.
