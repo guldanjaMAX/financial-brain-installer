@@ -133,6 +133,7 @@ import {
   CUSTOM_API_RUN_PATH, customApiOwnerMessage, runCustomApiWorker,
 } from "./lib/custom-api.js";
 import { supplementalRetrievalFilters } from "./lib/retrieval-routing.js";
+import { entityFactAnswer } from "./lib/entity-fact-answer.js";
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -1177,14 +1178,27 @@ async function handleThink(
     question: q, candidates: results.map(citationCandidateForResult), citationCount: docs.length,
   });
   const observedAnswer = balanceAnswer || openItemsAnswer;
+  // Contact extraction cannot replace a money observation or certify a money
+  // request that failed observation admission. Both paths share the gate below.
+  const asksForBindingAgreement = /\b(?:bound by|legally binding|executed agreement|signed agreement|governing agreement)\b/i.test(q);
+  const asksOwnerSpecificHighRiskFact = /\b(?:term sheet|parental leave|jury duty|i-9|401\s*\(?k\)?|office lease|ownership agreements?|blood type|soc\s*2|security certification|tpt license|vat|gst)\b/i.test(q);
+  let factAnswer = observedAnswer || moneyPolicy || taxQuestion.applicable || asksForBindingAgreement || asksOwnerSpecificHighRiskFact
+    ? null : entityFactAnswer({
+      question: q, results, docs, owner: env.BRAIN_OWNER || null,
+      filters: requestedFilters, gaps, coverageGaps: sourceCoverageGaps,
+      degraded, operativeConflict, newerAuthoritativeEvidence, currentEvidence,
+    });
+  // Status language can describe a relationship even inside a name or role.
+  // Leave it to the general verifier plus the shared present-status gate.
+  if (factAnswer && explicitCurrentIntent && PRESENT_STATUS_ASSERTION.test(factAnswer.answer)) factAnswer = null;
   finishObservedChecks();
-  let answer = observedAnswer?.answer || null;
+  let answer = observedAnswer?.answer || factAnswer?.answer || null;
   let answerError = null;
   let model = null;
   let modelDeclaredNoEvidence = false;
   try {
     let repairInstruction = "";
-    for (let attempt = 0; !observedAnswer && attempt < 2; attempt++) {
+    for (let attempt = 0; !observedAnswer && !factAnswer && attempt < 2; attempt++) {
       const data = await callLLM(env, {
         model: env.ANSWER_MODEL || "claude-sonnet-4-5",
         max_tokens: 1000,
@@ -1245,7 +1259,7 @@ async function handleThink(
           ? "draft cited an unavailable document" : "draft made claims without document citations" };
       } else {
         try {
-          const check = observedAnswer ? null : await callLLM(env, {
+          const check = (observedAnswer || factAnswer) ? null : await callLLM(env, {
             model: env.ANSWER_MODEL || "claude-sonnet-4-5",
             max_tokens: 300,
             label: "rag-evidence-gate",
@@ -1282,12 +1296,15 @@ async function handleThink(
             ? { supported: true, complete: true, evidence: observedAnswer.evidence, reason: balanceAnswer
               ? "exact observed account balances; full inventory explicitly not established"
               : "exact observed open items; full inventory and net amounts explicitly not established" }
-            : start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
+            : factAnswer
+              ? { supported: true, complete: true, evidence: factAnswer.evidence, reason: "exact native contact field with dated direct evidence" }
+              : start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
           const allowed = new Set((Array.isArray(verdict?.evidence) ? verdict.evidence : [])
             .map(Number)
             .filter((n) => citedDocs.some((doc) => doc.n === n)));
           evidenceGate = {
-            ...(observedAnswer ? { method: balanceAnswer ? "quickbooks_observed_balances" : "quickbooks_observed_open_items" } : {}),
+            ...(observedAnswer ? { method: balanceAnswer ? "quickbooks_observed_balances" : "quickbooks_observed_open_items" }
+              : factAnswer ? { method: "exact_contact_fact", fact_span: factAnswer.fact_span } : {}),
             supported: verdict?.supported === true || String(verdict?.supported).toLowerCase() === "true",
             complete: verdict?.complete === true || String(verdict?.complete).toLowerCase() === "true",
             evidence: [...allowed],
@@ -1299,7 +1316,6 @@ async function handleThink(
             evidenceGate.reason = "verifier did not approve every citation in the proposed answer";
           }
           const finishPremiseChecks = startQueryStage(timing, "premise_temporal");
-          const asksForBindingAgreement = /\b(?:bound by|legally binding|executed agreement|signed agreement|governing agreement)\b/i.test(q);
           const allowedDocs = citedDocs.filter((doc) => allowed.has(doc.n));
           const mismatchedTaxEvidence = taxDocumentCoverage.applicable && allowedDocs.some((doc) =>
             doc.authority?.tax_scope?.matched !== true
@@ -1316,7 +1332,6 @@ async function handleThink(
             evidenceGate.supported = false;
             evidenceGate.reason = "the matching tax filing was not read from a reliable native text layer";
           }
-          const asksOwnerSpecificHighRiskFact = /\b(?:term sheet|parental leave|jury duty|i-9|401\s*\(?k\)?|office lease|ownership agreements?|blood type|soc\s*2|security certification|tpt license|vat|gst)\b/i.test(q);
           const ownerTokens = String(owner).toLowerCase().match(/[a-z0-9]+/g)?.filter((token) =>
             !new Set(["the", "owner", "brain", "shadow", "company", "inc", "llc"]).has(token)
           ) || [];

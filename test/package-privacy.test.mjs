@@ -406,6 +406,7 @@ const expected = [
   "docs/FINANCIAL-CONTRACTS.md",
   "scripts/query-spans-probe.mjs",
   "worker/src/lib/query-timing.js",
+  "worker/src/lib/entity-fact-answer.js",
   // 0.4.11 bank-to-books matching and tax-return possible-miss review. Reviewed
   // 2026-10-08 at integration: pure functions over the owner's own records, no
   // account, person or credential; the names scan matched only word fragments.

@@ -379,6 +379,25 @@ brain holds nothing about still returns rows. `/api/rag/think` is the only guard
 and it holds. Never show raw `/api/rag/unified` output as proof the brain "found
 something".
 
+For a narrow contact lookup, `/think` can extract an address, email, phone,
+company, or role directly from one explicitly labelled contact record or a
+matching owner-confirmed operative section. It requires a matching subject,
+reliable native text, known direct lineage, and a reliable date within the
+existing thirty-day stale boundary. Historical requests, ambiguous identities,
+conflicts, incomplete coverage, shortened excerpts, and unsupported premises
+use ordinary answer generation and verification. Financial, legal, medical,
+and relationship-status reasoning receive no shortcut.
+
+An accepted extraction makes zero generative calls and still runs the shared
+citation, authority, temporal, and operative-conflict checks. Its answer includes
+the exact as-of day. `evidence_gate.method` is `exact_contact_fact`, and
+`evidence_gate.fact_span` identifies the numbered result, field, and half-open
+UTF-16 offsets into that result's returned `snippet`. Retrieval can normalize
+whitespace; these offsets describe the returned excerpt, not the original file.
+All normal gaps, citation provenance, access scope, and confidence remain in the
+response. Other record shapes continue through the general path. Synthetic
+virtual timing proves avoided model calls, not a live latency guarantee.
+
 **A chunk is keyword-searchable before it is semantically searchable.** There is
 no transaction across D1 and Vectorize, so ingest writes the text and queues the
 vector; a cron drains it every five minutes. Until it drains, both systems are
