@@ -895,7 +895,7 @@ export function supportSystemProjection(status) {
       const projected = {
         label: [
         "Files you uploaded", "Google Drive", "Messages", "Email", "Calendar",
-        "Meeting recordings", "QuickBooks Online", "Slack", "Notion",
+        "Meeting recordings", "QuickBooks", "Slack", "Notion",
         "Microsoft 365", "Dropbox", "Box", "HubSpot", "Banking transactions", "Custom business API", "Another source",
       ].includes(source.label) ? source.label : "Another source",
         kind: kindAllowlist.has(source.kind) ? source.kind : "other",

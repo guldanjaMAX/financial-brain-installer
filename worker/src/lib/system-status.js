@@ -50,7 +50,7 @@ const SOURCE_LABELS = {
   notion: "Notion",
   slack: "Slack",
   hubspot: "HubSpot",
-  quickbooks: "QuickBooks Online",
+  quickbooks: "QuickBooks",
   plaid: "Banking transactions",
   custom_api: "Custom business API",
 };
@@ -74,7 +74,7 @@ const KIND_LABELS = {
   notion: "Notion",
   slack: "Slack",
   hubspot: "HubSpot",
-  quickbooks: "QuickBooks Online",
+  quickbooks: "QuickBooks",
   plaid: "Banking transactions",
   custom_api: "Custom business API",
 };
