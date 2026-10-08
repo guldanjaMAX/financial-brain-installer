@@ -404,6 +404,21 @@ retry loop.
 
 ## Loading material
 
+Ordinary folder, Drive, Gmail, IMAP, Calendar, and provider ingest saves accepted additions
+and updates, then stops if authenticated storage contains any planned removal.
+This includes obsolete split parts and declared message-export family members.
+Follow the one printed `brain ingest <manifest> --source <source>
+--apply-removals <fingerprint>` command to apply the saved exact plan. Keep any
+additional `--approve-removals` argument in that command. Then rerun normal ingest
+to finish the source cursor. A dry run cannot authorize removal.
+
+The plan requires migration 0052 and the `INGEST_VERSION` version metadata binding.
+A missing capability fails closed. Changed checkpoint, policy, runtime bytes,
+Worker generation, or stored document/chunk state invalidates approval. Physical
+targets are previewed from authenticated storage, checked again at apply, fenced
+inside each D1 transaction, and read back after removal. Accepted non-destructive
+progress remains resumable on a review stop or failed apply.
+
 `brain ingest` walks a folder, extracts text, and sends it in batches.
 
 **Resumable by design.** Progress is keyed by content hash and saved after every
@@ -584,7 +599,7 @@ because `15234.11` on its own is unretrievable while `Balance: 15234.11` answers
 a question about a balance.
 
 A local-folder run also reconciles DELETIONS: a file this source loaded before
-and can no longer find is removed, through the same aggregate removal plan and
+and can no longer find becomes a removal candidate, through the same aggregate removal plan and
 the same safety limits Drive uses. The plan denominator comes from the
 authenticated Worker inventory, not the local resume file, and exact targets
 are read back after deletion before completed source state is recorded. Pending
@@ -594,13 +609,13 @@ deletions re-enter the current plan rather than bypassing it. Suppressed under
 **`safety.private_path_prefixes` is enforced on local-folder and Google Drive
 ingest**, per path segment. Drive also enforces `corpora.google_drive` exact
 file-id, path-prefix and filename-part exclusions before downloading content.
-An excluded document already present in the brain is removed rather than left
-stranded. Gmail has no folder path and does not use these rules.
+An excluded document already present in the brain enters the separate removal
+review. Gmail has no folder path and does not use these rules.
 
 Flags: `--dry-run`, `--source <name>`, `--limit <n>`, `--reset`, Drive-only
 `--dry-run --json` for a bounded aggregate assistant preview, and the
-exact-plan acknowledgement `--approve-removals <fingerprint>` when a Drive,
-Gmail, IMAP, or local-folder cleanup exceeds its routine safety limits.
+separate `--apply-removals <fingerprint>` command. Keep the additional
+`--approve-removals <fingerprint>` argument when the printed command includes it.
 
 ---
 
@@ -852,18 +867,17 @@ changed rather than to the corpus. Promotions, Social, and Forums are excluded;
 Updates remains included because statements, confirmations, and reminders are
 commonly classified there.
 
-**Drive, Gmail, and IMAP deletions are applied.** Each connector intersects
-source-policy, source-deletion, and intentional-skip candidates with the
-authenticated stored-family inventory, deduplicates them, and checks one
-aggregate plan. More than 100 removals or more than 10% of the stored source
-corpus stops before any planned deletion or cursor advancement. One current
-typed Gmail deletion or policy exclusion remains routine so a small mailbox can
-converge. The refusal shows category counts and an opaque SHA-256 fingerprint,
-never source IDs. Only the exact `--approve-removals <fingerprint>` value can
-authorize that exact plan. Pending deletions return through the same gate, and
-a currently accepted message wins over a stale pending marker. A complete IMAP
-pass also compares its stable message identities with D1 and reads every planned
-removal back before committing folder watermarks.
+**Drive, Gmail, and IMAP deletions require separate apply.** Each connector
+intersects source-policy, source-deletion, and intentional-skip candidates with
+authenticated stored families. Obsolete replacement members join the exact
+physical removal plan. Every nonempty plan stops after accepted additions and
+updates are saved, and before removal or cursor advancement. More than 100
+removals or more than 10% of the stored source remains an additional gate.
+The typed single-message Gmail exception changes only that additional gate;
+it never permits automatic deletion. The printed command includes the exact
+`--apply-removals` fingerprint and any required `--approve-removals` value.
+Pending deletions return through the same boundary. A fresh ordinary pass can
+clear restored candidates; a changed stored inventory invalidates saved apply.
 
 Any account-wide changed item is rebuilt through the reviewed-root traversal
 before content is read.
@@ -925,9 +939,10 @@ distinct-run observations, including the last, plus a cumulative
 `observation_count`. Seven-day proof continues to use the retained first and
 last valid server-anchored endpoints without unbounded local-state growth.
 Even one such candidate stops for the exact `brain ingest
-<manifest> --from drive --approve-removals <fingerprint>` owner approval and
-shows its name and folder from durable local state, with the authenticated D1
-family inventory as the fallback. Every run backfills missing labels from those
+<manifest> --source drive --apply-removals <fingerprint>` owner approval,
+with the printed additional `--approve-removals` value. Its private review state
+keeps the name and folder, with authenticated D1 family inventory as the fallback;
+the approval command prints aggregate counts only. Every run backfills missing labels from those
 two sources. A family still missing either label is recorded as
 `label_unavailable`, retained, protected from every deletion reason, and left
 out of the approval target set while the completed cursor advances. The
@@ -966,8 +981,8 @@ and cleanup both pass.
 
 Oversized Drive documents are reconciled as a family. A revision that changes
 from one document to several parts, changes its part count, or becomes small
-again removes only the obsolete representation after every replacement part is
-accepted. A document-level failure leaves the Drive cursor unadvanced so the
+again plans only the obsolete representation after every replacement part is
+accepted. Removing that representation requires the separate exact apply. A document-level failure leaves the Drive cursor unadvanced so the
 same change is retried instead of being acknowledged and lost.
 
 Calendar uses the same completion boundary. Its new sync token is saved only
@@ -1345,8 +1360,8 @@ reachable when the folder is later deleted, so a loaded agent is never stranded.
 
 **Deletions.** The local ingest lane now reconciles files that are gone, through
 the same `buildDriveRemovalPlan` / `assertDriveRemovalPlanSafe` aggregate guard
-the Drive lane uses, with the same 100-document and 10% limits and the same
-`--approve-removals <fingerprint>` acknowledgement. `removedSinceLastRun` in
+the Drive lane uses, with the same 100-document and 10% additional limits. Every
+nonempty plan requires the separate `--apply-removals` command. `removedSinceLastRun` in
 `ingest/run.mjs` computes the candidates from the resume state and the set of
 paths the walk saw — including paths it SKIPPED, so a file skipped this run for
 being empty, oversized or private is not mistaken for a deleted one. It is
@@ -1396,8 +1411,8 @@ complete coverage. The cutoff applies to first load, saved deltas, moved old
 messages, and reset. Missing or invalid received times fail the run before
 delivery and cursor promotion. With a cutoff configured, mail tombstones are
 counted but retained, and the bounded inventory cannot trigger absence-based
-snapshot removals. Exact drive/calendar tombstones retain their existing
-behavior. Any mail deletion is a separate explicit owner decision.
+snapshot removals. Exact drive/calendar tombstones enter the separate authenticated removal plan.
+Any mail deletion is also a separate explicit owner decision.
 
 `brain sources <manifest>` shows the source, UTC boundary and retention rule;
 `--json` adds `mail_transition` from local manifest configuration, separate from

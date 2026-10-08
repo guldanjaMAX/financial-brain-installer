@@ -36,6 +36,7 @@ import { basename, delimiter, isAbsolute, join, dirname, relative, resolve, sep,
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { removalDigest, createIngestRemovalReview } from "./operations/ingest-removal-plan.mjs";
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { TextDecoder } from "node:util";
@@ -2906,6 +2907,7 @@ export function workerBindings(m, cfg, options = {}) {
   return [
       { type: "d1", name: "DB", id: cfg.d1_database_id },
       { type: "ai", name: "AI" },
+      { type: "version_metadata", name: "INGEST_VERSION" },
       // Explicit, never inferred. The worker CAN guess its backend from which
       // bindings are present, but a guess that silently picks the wrong store
       // returns an empty brain rather than an error, so the manifest states it.
@@ -8448,7 +8450,7 @@ function assertSourceName(name) {
 export const VALUE_FLAGS = new Set([
   "path", "source", "limit", "from", "manifest", "scopes", "port", "host", "user", "run", "confirm-host", "kind", "add", "bookmark", "export", "explain", "backup", "provider",
   "golden", "profile", "k", "repeat", "baseline", "save", "artifacts",
-  "corpus-contract", "approve-removals", "only", "skip",
+  "corpus-contract", "approve-removals", "apply-removals", "only", "skip",
   "pace-vectors-per-minute",
   "approve", "target",
   "can", "zones", "exclude-zones", "until", "as", "subject",
@@ -12395,9 +12397,55 @@ async function cmdOcrPreflightInteractive(manifestPath) {
  * step. Nothing is ever skipped silently; the run ends with a breakdown by
  * reason, and those reasons are kept in the state file.
  */
+function ingestRemovalReview(m, manifestPath, sourceName, state, saveState, base, adminKey, options, assertOwned) {
+  return createIngestRemovalReview({
+    manifest: m, manifestPath: resolve(manifestPath), source: sourceName,
+    state, saveState, base, adminKey, assertOwned,
+    kind: options.removalSourceKind || state.ingest_removal_plan?.kind || "upload",
+    policy: () => (options.removalSourceKind || state.ingest_removal_plan?.kind) === "drive"
+      ? driveConnectorConfig(m, manifestPath) : null,
+    ...(options.removalPlanRequest ? { request: options.removalPlanRequest } : {}),
+    ...(options.removalPlanRuntime ? { runtime: options.removalPlanRuntime } : {}),
+  });
+}
+
+export async function cmdApplyIngestRemovals(m, manifestPath, flags, options = {}) {
+  if (typeof flags["apply-removals"] !== "string" || !/^[a-f0-9]{64}$/.test(flags["apply-removals"])) {
+    die("--apply-removals needs the exact lowercase 64-character fingerprint from the stopped ingest.");
+  }
+  if (flags["dry-run"] || flags.reset || flags.limit || !flags.source) {
+    die("Removal apply needs --source and the exact --apply-removals fingerprint, without dry-run, reset or limit.");
+  }
+  const sourceName = assertSourceName(flags.source);
+  const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName });
+  return runMutatingSourceIngest({ manifestPath, sourceName, statePath, dryRun: false, options,
+    sharedRecord: PROVIDER_CONNECTOR_IDS.includes(flags.from) ? `provider:${flags.from}` : null,
+  }, async (assertOwned) => {
+    const lib = await (options.ingestLib ?? ingestLib)();
+    const state = lib.loadState(statePath);
+    if (state.ingest_provider) {
+      if (flags.from !== state.ingest_provider) die("Apply this provider plan with its original --from source.");
+      const oauth = options.oauth ?? await import("./connectors/provider-oauth.mjs");
+      const current = await oauth.loadProviderSyncState(state.ingest_provider, sourceName, options.storage || {});
+      if (removalDigest(current) !== state.ingest_provider_checkpoint) {
+        throw new DriveRemovalReviewRequired("Provider cursor state changed; run ingestion again before removal.");
+      }
+    }
+    const base = await (options.resolveBaseUrl ?? resolveBaseUrl)(m, m.brain?.domain ? null : await (options.resolveAccount ?? resolveAccount)(m));
+    const adminKey = (options.resolveAdminKey ?? resolveAdminKey)(manifestPath);
+    if (!adminKey) die("Removal apply needs this Brain's durable admin key.");
+    const review = ingestRemovalReview(m, manifestPath, sourceName, state,
+      () => { assertOwned?.(); lib.saveState(statePath, state); }, base, adminKey, options, assertOwned);
+    const result = await review.apply(flags["apply-removals"], flags["approve-removals"]);
+    ok(`${result.removed} planned document(s) removed from source ${sourceName}; exact readback passed. Run ingestion again to complete the source refresh.`);
+    return result;
+  });
+}
+
 async function cmdIngestUnlocked(manifestPath) {
   const { m } = loadManifest(manifestPath);
   const flags = parseFlags(process.argv.slice(4));
+  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags);
   // Remote sources reuse everything below the envelope: splitting, batching,
   // the credential gate, resume state and the skip report. Only the producer
   // differs. Calendar is the one exception: its connector already carries
@@ -12576,13 +12624,12 @@ function retiredLocalFolderVariant(m, root, flags, options = {}) {
 }
 
 function localIngestContext(m, manifestPath, flags, options = {}) {
-  // A local folder now reconciles its own deletions, so it has the same
-  // approval gate Drive does. It stays invalid on every OTHER remote source,
-  // which is checked in cmdIngestRemote.
+  // Legacy source approvals remain an additional review input. Only the
+  // separate apply-removals command can perform a saved removal plan.
   const localRemovalApproval = flags["approve-removals"] === undefined
     ? undefined
-    : String(flags["approve-removals"] || "").trim().toLowerCase();
-  if (localRemovalApproval !== undefined && !/^[0-9a-f]{64}$/.test(localRemovalApproval)) {
+    : flags["approve-removals"];
+  if (localRemovalApproval !== undefined && (typeof localRemovalApproval !== "string" || !/^[0-9a-f]{64}$/.test(localRemovalApproval))) {
     die("--approve-removals needs the exact 64-character fingerprint the refusal printed.");
   }
 
@@ -12665,6 +12712,7 @@ function localIngestContext(m, manifestPath, flags, options = {}) {
 }
 
 export async function cmdIngestLocal(m, manifestPath, flags, options = {}) {
+  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags, options);
   const context = localIngestContext(m, manifestPath, flags, options);
   return runMutatingSourceIngest({
     manifestPath,
@@ -12781,7 +12829,6 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   }
   const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
   const sendPreparedBatches = options.sendBatches ?? sendBatches;
-  const reconcilePreparedFamilies = options.reconcileDocumentFamilies ?? reconcileDocumentFamilies;
   const listPreparedSourceFamilies = options.listStoredSourceFamilies ?? listStoredSourceFamilies;
   const recordSourceReceipt = (receipt) => {
     assertLockOwned?.();
@@ -12791,6 +12838,8 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   const state = flags.reset
     ? { version: 1, done: {}, skipped: {}, ...(savedState.removed ? { removed: savedState.removed } : {}) }
     : savedState;
+  const removalReview = ingestRemovalReview(m, manifestPath, sourceName, state,
+    () => saveState(statePath, state), base, adminKey, options, assertLockOwned);
   const previouslyKnownKeys = new Set(Object.keys(savedState.done || {}));
   const scannerOn = m.safety?.credential_scanner?.enabled !== false;
   const scannerFingerprint = credentialScannerFingerprint(scannerOn);
@@ -13213,19 +13262,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     // An incomplete family is a storage failure, not a deletion instruction:
     // emitting an empty keep list for it would delete every part that DID
     // land. Its state key is cleared below, so the next run re-sends it.
-    const reconciliation = outcome.completed.map((plan) => ({
-      base_doc_uid: plan.base_doc_uid,
-      keep_doc_uids: plan.keep_doc_uids,
-      ...(plan.family_kind ? { family_kind: plan.family_kind } : {}),
-    }));
-    if (reconciliation.length) {
-      await reconcilePreparedFamilies({
-        families: reconciliation,
-        base,
-        adminKey,
-        assertOwned: assertLockOwned,
-      });
-    }
+    removalReview.remember(outcome.completed);
     for (const plan of outcome.completed) {
       await acknowledgeStoredOcrPages({
         base,
@@ -13281,65 +13318,10 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
       ],
       intentionalCandidates: [...intentionalRemovalKeys].map((key) => `${sourceName}:${key}`),
     });
-    // A local synced folder is not Google Drive. The review-required message
-    // this throws on an oversized plan used to say "Drive cleanup" regardless
-    // of source, which misnames the thing an owner is being asked to approve.
-    assertDriveRemovalPlanSafe(localRemovalPlan, localRemovalApproval, { sourceLabel: "Folder" });
-    if (localRemovalPlan.total) {
-      const percent = (localRemovalPlan.ratio * 100).toFixed(1);
-      const disposition = localRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-      info(`folder cleanup plan ${disposition}: ${localRemovalPlan.total} of ${localRemovalPlan.stored} loaded documents (${percent}%)`);
-    }
-
-    // Only the exact targets intersected with authenticated storage and covered
-    // by the approval fingerprint may reach the destructive endpoint.
-    const localTruthTargets = [
-      ...localRemovalPlan.targets.source_policy,
-      ...localRemovalPlan.targets.intentional_skip,
-    ];
-    const applyPreparedRemovals = options.applyDriveRemovals ?? applyDriveRemovals;
-    await applyPreparedRemovals({
-      uids: localTruthTargets,
-      base, adminKey, state, dryRun: false, label: "local source truth",
-      assertOwned: assertLockOwned,
-    });
-    saveState(statePath, state);
-
-    const vanishedTargets = localRemovalPlan.targets.source_deleted;
-    if (vanishedTargets.length) {
-      const vanishedRemoval = await applyPreparedRemovals({
-        uids: vanishedTargets, base, adminKey, state, dryRun: false, label: "Drive deletion",
-        assertOwned: assertLockOwned,
-      });
-      saveState(statePath, state);
-      if (vanishedRemoval.applied) ok(`${vanishedRemoval.applied} document(s) removed because their file is gone from the folder`);
-    }
-
-    // An accepted HTTP receipt is necessary but not sufficient deletion proof.
-    // Read the authenticated inventory again before advancing local resume state.
-    const plannedLocalTargets = [...new Set([...localTruthTargets, ...vanishedTargets])];
-    if (plannedLocalTargets.length) {
-      const afterLocalRemoval = await listPreparedSourceFamilies({
-        base, adminKey, source: sourceName,
-      });
-      const stillStored = plannedLocalTargets.filter((uid) => afterLocalRemoval.has(uid));
-      const failedAt = new Date().toISOString();
-      for (const uid of plannedLocalTargets) {
-        if (afterLocalRemoval.has(uid)) {
-          state.removed = { ...(state.removed || {}), [uid]: failedAt };
-        } else {
-          delete state.done[uid.slice(sourceName.length + 1)];
-          if (state.removed) delete state.removed[uid];
-        }
-      }
-      saveState(statePath, state);
-      if (stillStored.length) {
-        throw new Error(
-          `${stillStored.length} planned local folder removal(s) remained after exact source-inventory readback. ` +
-            "No completed source state was recorded; re-running will retry them through the same approval gate."
-        );
-      }
-    }
+    await removalReview.finish({ sourcePlan: localRemovalPlan, familyKind: "hybrid" });
+  } else {
+    // Append-only source policy still permits replacement-family review.
+    await removalReview.finish();
   }
 
   const localCoverage = localReceiptCoverage(tally, skips);
@@ -14280,10 +14262,11 @@ function saveCalendarState(path, state) {
  * family-plan machinery, built for a very different shape (files that must
  * be split and batched), would risk the well-tested Drive and Gmail paths
  * for no real gain. Reuse where it fits (postSourceReceipt for `brain
- * sources` visibility, applyDriveRemovals for cancelled-event cleanup);
+ * sources` visibility, saved removal plans for cancelled-event cleanup);
  * write new code only for what is actually new (the sync-token state file).
  */
 export async function cmdIngestCalendar(m, manifestPath, flags, options = {}) {
+  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags, options);
   const sourceName = assertSourceName(flags.source === true || !flags.source ? "calendar" : flags.source);
   const dry = !!flags["dry-run"];
   const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName });
@@ -14342,7 +14325,7 @@ async function cmdIngestCalendarRun(
     assertLockOwned?.();
     return postReceipt(base, adminKey, receipt, undefined, { assertOwned: assertLockOwned });
   };
-  const removeDocs = options.applyDriveRemovals ?? applyDriveRemovals;
+  const listFamilies = options.listStoredSourceFamilies ?? listStoredSourceFamilies;
   const loadState = options.loadCalendarState ?? loadCalendarState;
   const persistState = options.saveCalendarState ?? saveCalendarState;
   const saveState = (path, value) => {
@@ -14432,16 +14415,25 @@ async function cmdIngestCalendarRun(
     assertOwned: assertLockOwned,
   });
 
-  let removed = 0;
+  const removed = 0;
   let removalPending = 0;
-  if (result.deletions.length) {
+  let removalError = null;
+  if (result.deletions.length && !sent.errors.length && !sent.refused.length) {
     const uids = result.deletions.map((d) => `${sourceName}:${d.source_id}`);
-    const removal = await removeDocs({
-      uids, base, adminKey, state: { done: {}, removed: {} }, dryRun: false, label: "calendar cancellation",
-      assertOwned: assertLockOwned,
-    });
-    removed = removal.applied;
-    removalPending = removal.pending;
+    // Calendar keeps per-calendar cursors. Preserve those exact prior tokens
+    // alongside the common removal checkpoint until separate apply completes.
+    state.done ||= {};
+    state.skipped ||= {};
+    const review = ingestRemovalReview(m, manifestPath, sourceName, state,
+      () => saveState(statePath, state), base, adminKey,
+      { ...options, removalSourceKind: "calendar" }, assertLockOwned);
+    try {
+      const storedFamilies = await listFamilies({ base, adminKey, source: sourceName, assertOwned: assertLockOwned });
+      await review.finish({ sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }) });
+    } catch (error) {
+      removalError = error;
+      removalPending = uids.length;
+    }
   }
 
   // Provider-level partial failure is tracked per calendar in result.state, so
@@ -14496,6 +14488,7 @@ async function cmdIngestCalendarRun(
       (completeSweep
         ? "every configured calendar completed a full traversal and returned an authoritative sync token"
         : "this run did not prove the configured history in full"),
+    ...(removalError?.code === "SAFETY_REVIEW_REQUIRED" ? { issue_code: "SAFETY_REVIEW_REQUIRED" } : {}),
     ...(finalStatus === "error" ? { error: incompleteReason || "calendar sync incomplete" } : {}),
   });
 
@@ -14507,6 +14500,7 @@ async function cmdIngestCalendarRun(
   }
   if (sent.errors.length) warn(`${sent.errors.length} event(s) failed to send and will be retried on the next run`);
   if (removalPending) warn(`${removalPending} cancellation removal(s) remain pending and will be retried on the next run`);
+  if (removalError) throw removalError;
   return { result, sent, removed, removalPending };
 }
 
@@ -16619,6 +16613,7 @@ export function gmailFailureEvidence(error, statePath, beforeState) {
 }
 
 export async function cmdIngestRemote(m, manifestPath, flags, options = {}) {
+  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags, options);
   const which = String(flags.from).toLowerCase();
   if (!["drive", "gmail", "imap"].includes(which)) {
     die(`--from ${which} is not a source. Available: drive, gmail, imap.`);
@@ -16759,7 +16754,6 @@ const cmdIngestRemoteRun = async (
     return persistState(path, value);
   };
   const sendPreparedBatches = options.sendBatches ?? sendBatches;
-  const reconcilePreparedFamilies = options.reconcileDocumentFamilies ?? reconcileDocumentFamilies;
   const listPreparedSourceFamilies = options.listStoredSourceFamilies ?? listStoredSourceFamilies;
   const applyPreparedRemovals = options.applyDriveRemovals ?? applyDriveRemovals;
   const paceSleep = options.paceSleep ?? ((milliseconds) =>
@@ -16830,6 +16824,8 @@ const cmdIngestRemoteRun = async (
         ),
       }
     : savedState;
+  const removalReview = ingestRemovalReview(m, manifestPath, sourceName, state,
+    () => saveState(statePath, state), base, adminKey, { ...options, removalSourceKind: which }, assertLockOwned);
   const scannerOn = m.safety?.credential_scanner?.enabled !== false;
   const scannerFingerprint = credentialScannerFingerprint(scannerOn);
   const scannerPolicyChanged = state.credential_scanner_fingerprint !== scannerFingerprint;
@@ -17346,13 +17342,7 @@ const cmdIngestRemoteRun = async (
 
     const outcome = remoteFamilyOutcomes(familyPlans.values(), sentFamilyParts, acceptedFamilyParts);
     const settlement = remoteFamilySettlement(outcome, rejectedFamilyParts);
-    if (settlement.reconciliations.length) {
-      const staleParts = await reconcilePreparedFamilies({
-        families: settlement.reconciliations, base, adminKey,
-        assertOwned: assertLockOwned,
-      });
-      if (staleParts) ok(`${staleParts} obsolete split-document part(s) removed`);
-    }
+    removalReview.remember(outcome.completed);
     for (const plan of outcome.completed) {
       await acknowledgeStoredOcrPages({
         base,
@@ -17895,85 +17885,19 @@ const cmdIngestRemoteRun = async (
           })),
       });
       saveState(statePath, state);
-      if (eligibleCorroboratedPlanTargets.length && removalApproval !== driveRemovalPlan.fingerprint) {
-        const localDetails = eligibleCorroboratedPlanTargets.map((uid) => {
-          const record = pendingSourceDeletionDriveReview.get(uid);
-          const name = safeIngestDisplay(record.name);
-          const folder = safeIngestDisplay(record.folder_path);
-          return `      - ${name} (folder: ${folder})`;
-        }).join("\n");
-        throw new DriveRemovalReviewRequired(
-          `Drive did not return ${eligibleCorroboratedPlanTargets.length} stored item(s) ` +
-            "on two walks at least seven days apart.\n" +
-            `${localDetails}\n` +
-            (expiredDriveReviewApproval
-              ? "      The earlier approval fingerprint expired after 24 hours; review this fresh observation before approving.\n"
-              : "") +
-            "      Nothing from this removal plan was removed. The source cursor was not advanced.\n" +
-            "      Confirm this exact source-deletion plan by re-running:\n" +
-            `      brain ingest <manifest> --from drive --approve-removals ${driveRemovalPlan.fingerprint}`
-        );
-      }
-      assertDriveRemovalPlanSafe(driveRemovalPlan, removalApproval);
-      // Every candidate list is filtered through excludeProtectedDriveUids
-      // before buildDriveRemovalPlan, which only intersects, deduplicates and
-      // sorts those inputs. It cannot add a protected UID, so a second check
-      // here would be unreachable rather than an independently useful guard.
-
-      const currentlyPlanned = new Set(Object.values(driveRemovalPlan.targets).flat());
-      let clearedRestoredPending = false;
-      for (const uid of pendingDriveUids) {
-        if (storedUids.has(uid) && seenUids.has(uid) && !currentlyPlanned.has(uid)) {
-          delete state.removed[uid];
-          clearedRestoredPending = true;
-        }
-      }
-      if (clearedRestoredPending) saveState(statePath, state);
-
-      if (driveRemovalPlan.total) {
-        const percent = (driveRemovalPlan.ratio * 100).toFixed(1);
-        const disposition = driveRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-        info(`Drive cleanup plan ${disposition}: ${driveRemovalPlan.total} of ${driveRemovalPlan.stored} stored documents (${percent}%)`);
-      }
-
-      const categories = [
-        ["source_policy", "source policy", "document(s) removed to enforce the Drive source policy"],
-        ["source_deleted", "Drive source deletion", "stale document(s) removed to match Drive source truth"],
-        ["intentional_skip", "intentional source skip", "previously-indexed document(s) removed because the source now skips them"],
-      ];
-      for (const [category, label, success] of categories) {
-        const result = await applyPreparedRemovals({
-          uids: excludeProtectedDriveUids(driveRemovalPlan.targets[category]),
-          base, adminKey, state, dryRun: false, label,
-          familyKind: "structural",
-          assertOwned: assertLockOwned,
-        });
-        if (result.applied) ok(`${result.applied} ${success}`);
-        if (driveRemovalPlan.targets[category].length) saveState(statePath, state);
-      }
-      if (driveRemovalPlan.total) {
-        const afterRemoval = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
-        const plannedTargets = Object.values(driveRemovalPlan.targets).flat();
-        const stillStored = plannedTargets.filter((uid) => afterRemoval.has(uid));
-        const failedAt = new Date().toISOString();
-        for (const uid of plannedTargets) {
-          if (afterRemoval.has(uid)) {
-            state.removed = { ...(state.removed || {}), [uid]: failedAt };
-          } else {
-            if (state.done) delete state.done[uid];
-            if (state.removed) delete state.removed[uid];
-            dropDriveRemovalReviewUid(uid);
-          }
-        }
-        updateDriveRemovalReview();
-        saveState(statePath, state);
-        if (stillStored.length) {
-          throw new Error(
-            `${stillStored.length} planned Drive removal(s) remained after exact source-inventory readback. ` +
-              "The source cursor was not advanced; re-running will retry them through the same approval gate."
-          );
-        }
-      }
+      await removalReview.finish({
+        sourcePlan: driveRemovalPlan,
+        requireSourceApproval: eligibleCorroboratedPlanTargets.length > 0,
+        notice: eligibleCorroboratedPlanTargets.length
+          ? `Drive did not return ${eligibleCorroboratedPlanTargets.length} stored item(s) on two walks at least seven days apart.` +
+            (expiredDriveReviewApproval ? " The earlier approval fingerprint expired after 24 hours; review this fresh observation." : "")
+          : "",
+        expiresAt: eligibleCorroboratedPlanTargets.length ? new Date(Math.min(
+          ...eligibleCorroboratedPlanTargets.map((uid) => Date.parse(
+            pendingSourceDeletionDriveReview.get(uid).approval_observed_at,
+          ) + 24 * 60 * 60 * 1000),
+        )).toISOString() : null,
+      });
       intentionalRemovalUids.length = 0;
     }
     if (assistantJson) {
@@ -18368,52 +18292,8 @@ const cmdIngestRemoteRun = async (
           ratioFloorCount: oneTypedRoutineRemoval ? 1 : 0,
           fingerprintContext: oneTypedRoutineRemoval ? "gmail-current-typed" : "gmail-strict",
         });
-        assertDriveRemovalPlanSafe(gmailRemovalPlan, removalApproval, { sourceLabel: "Gmail" });
-
-        if (gmailRemovalPlan.total) {
-          const percent = (gmailRemovalPlan.ratio * 100).toFixed(1);
-          const disposition = gmailRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-          info(`Gmail cleanup plan ${disposition}: ${gmailRemovalPlan.total} of ${gmailRemovalPlan.stored} stored documents (${percent}%)`);
-        }
-        const categories = [
-          ["source_policy", "Gmail source policy", "message(s) removed to enforce the Gmail source policy"],
-          ["source_deleted", "Gmail source deletion", "message(s) removed to match Gmail source truth"],
-          ["intentional_skip", "intentional Gmail skip", "message(s) removed because the current source revision is ineligible"],
-        ];
-        for (const [category, label, success] of categories) {
-          const result = await applyPreparedRemovals({
-            uids: gmailRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
-            familyKind: "structural",
-            assertOwned: assertLockOwned,
-          });
-          if (result.applied) ok(`${result.applied} ${success}`);
-          if (gmailRemovalPlan.targets[category].length) saveState(statePath, state);
-        }
-        if (gmailRemovalPlan.total) {
-          const afterRemoval = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
-          const plannedTargets = Object.values(gmailRemovalPlan.targets).flat();
-          const stillStored = plannedTargets.filter((uid) => afterRemoval.has(uid));
-          const failedAt = new Date().toISOString();
-          for (const uid of plannedTargets) {
-            if (afterRemoval.has(uid)) {
-              state.removed = { ...(state.removed || {}), [uid]: failedAt };
-            } else {
-              if (state.done) delete state.done[uid];
-              if (state.removed) delete state.removed[uid];
-              if (gmailRemovalPlan.targets.source_deleted.includes(uid)) delete state.skipped[uid];
-              clearGmailRetry(state, uid);
-            }
-          }
-          saveState(statePath, state);
-          if (stillStored.length) {
-            throw new Error(
-              `${stillStored.length} planned Gmail removal(s) remained after exact source-inventory readback. ` +
-                "The history cursor and scanner migration were not committed; re-running will retry them through the same approval gate."
-            );
-          }
-        }
+        await removalReview.finish({ sourcePlan: gmailRemovalPlan });
       }
-      saveState(statePath, state);
     }
     intentionalRemovalUids.length = 0;
     pendingCursor = {
@@ -18740,48 +18620,7 @@ const cmdIngestRemoteRun = async (
         safetyBaselineCount: imapRemovalSafetyCount ?? storedImapUids.size,
         fingerprintContext: "imap-strict",
       });
-      assertDriveRemovalPlanSafe(imapRemovalPlan, removalApproval, { sourceLabel: "IMAP" });
-
-      if (imapRemovalPlan.total) {
-        const percent = (imapRemovalPlan.ratio * 100).toFixed(1);
-        const disposition = imapRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-        info(`IMAP cleanup plan ${disposition}: ${imapRemovalPlan.total} of ${imapRemovalPlan.stored} stored documents (${percent}%)`);
-      }
-      const categories = [
-        ["source_policy", "IMAP source policy", "message(s) removed to enforce the IMAP source policy"],
-        ["source_deleted", "IMAP source deletion", "message(s) removed to match the complete IMAP snapshot"],
-        ["intentional_skip", "intentional IMAP skip", "message(s) removed because the current source revision is ineligible"],
-      ];
-      for (const [category, label, success] of categories) {
-        const result = await applyPreparedRemovals({
-          uids: imapRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
-          familyKind: "structural",
-        });
-        if (result.applied) ok(`${result.applied} ${success}`);
-        if (imapRemovalPlan.targets[category].length) saveState(statePath, state);
-      }
-      if (imapRemovalPlan.total) {
-        const afterRemoval = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
-        const plannedTargets = Object.values(imapRemovalPlan.targets).flat();
-        const stillStored = plannedTargets.filter((uid) => afterRemoval.has(uid));
-        const failedAt = new Date().toISOString();
-        for (const uid of plannedTargets) {
-          if (afterRemoval.has(uid)) {
-            state.removed = { ...(state.removed || {}), [uid]: failedAt };
-          } else {
-            if (state.done) delete state.done[uid];
-            if (state.removed) delete state.removed[uid];
-          }
-        }
-        saveState(statePath, state);
-        if (stillStored.length) {
-          throw new Error(
-            `${stillStored.length} planned IMAP removal(s) remained after exact source-inventory readback. ` +
-            "The folder cursor and scanner migration were not committed; re-running will retry them through the same approval gate."
-          );
-        }
-      }
-      saveState(statePath, state);
+      await removalReview.finish({ sourcePlan: imapRemovalPlan });
     }
     intentionalRemovalUids.length = 0;
 
@@ -18821,6 +18660,8 @@ const cmdIngestRemoteRun = async (
     ok("dry run, nothing was sent");
     return { dry_run: true, would_send: prepared, unchanged, skipped: skips.length, failed: 0 };
   }
+
+  await removalReview.finish();
 
   // Gmail may advance past a failed Worker part only after the exact logical
   // message identity is durable in its retry list. Other sources retain the
@@ -30623,6 +30464,7 @@ function providerAdapterOptions(provider, configuration, connection) {
 
 /** Run one OAuth provider through common receipts, retries, tombstones, and cursor custody. */
 export async function cmdIngestProvider(m, manifestPath, flags, options = {}) {
+  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags, options);
   const provider = String(flags.from || "").toLowerCase();
   if (!PROVIDER_CONNECTOR_IDS.includes(provider)) throw new TypeError(`unsupported provider connector ${provider}`);
   if (flags.limit) die(`--limit is unsafe for ${provider}; it would skip records covered by the provider cursor.`);
@@ -30776,9 +30618,20 @@ async function cmdIngestProviderRun(
       adminKey,
       assertOwned: assertLockOwned,
       reset: Boolean(flags.reset),
-      approvedSnapshotFingerprint: flags["approve-removals"] === true || !flags["approve-removals"]
-        ? null
-        : String(flags["approve-removals"]).toLowerCase(),
+      reviewRemovals: async ({ uids, storedFamilies, requiredApproval }) => {
+        const lib = await (options.ingestLib ?? ingestLib)();
+        const path = canonicalSourceIngestStatePath({ manifestPath, sourceName });
+        const reviewState = lib.loadState(path);
+        reviewState.ingest_provider = provider;
+        reviewState.ingest_provider_checkpoint = removalDigest(await loadState());
+        const review = ingestRemovalReview(m, manifestPath, sourceName, reviewState,
+          () => { assertLockOwned?.(); lib.saveState(path, reviewState); },
+          base, adminKey, options, assertLockOwned);
+        await review.finish({
+          sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }),
+          providerApproval: requiredApproval,
+        });
+      },
     });
   } catch (error) {
     if (["provider_snapshot_removal_review_required", "provider_removal_review_required"].includes(error?.code)) die(error.message);
@@ -32117,6 +31970,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain ingest-file <manifest> --source <id> --file <direct-name> --expect-runtime-sha256 <64hex> --apply --approve <64hex>
                                            ingest only that unchanged approved item and prove
                                            Received, Saved, Search ready, and Answer checked
+    brain ingest     <manifest> --source <source> --apply-removals <fingerprint>  apply a saved exact removal plan
     brain ingest     <manifest> --from drive  load from a connected remote source
                                            add --dry-run --json for one bounded,
                                            aggregate-only assistant preview
@@ -32205,9 +32059,10 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain support    --clear --yes         clear private local issue notes
 
   brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. It is
-  resumable: re-run the same command to continue an interrupted load. A large
-  Drive, Gmail, or IMAP cleanup stops first and prints the exact
-  --approve-removals fingerprint.
+  resumable: re-run the same command to continue an interrupted load. Folder,
+  Drive, Gmail, IMAP and provider removals always stop for a separate
+  --apply-removals command. Larger or protected plans also need the printed
+  --approve-removals fingerprint. Accepted additions and updates are saved.
 
   brain load is install day in one command. It reads the manifest, runs every
   source that is both enabled AND connected, and skips the rest with a stated

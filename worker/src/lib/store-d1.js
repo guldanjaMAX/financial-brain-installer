@@ -7388,6 +7388,7 @@ export async function forget(env, {
   source = null,
   sourceHighWater = null,
   corpusMutationGeneration = null,
+  ingestRemovalFence = null,
   dryRun = true,
 } = {}) {
   let targets = docUids;
@@ -7477,6 +7478,7 @@ export async function forget(env, {
   // D1 first. The FTS index follows via the delete trigger, and ON DELETE
   // CASCADE removes the chunks with their document.
   const queuedAt = Date.now();
+  let removalMarker = ingestRemovalFence;
   let deletedDocuments = 0;
   let deletedChunks = 0;
   for (const group of groups) {
@@ -7485,7 +7487,14 @@ export async function forget(env, {
     const groupSources = [...new Set(documentRows
       .filter((row) => groupSet.has(row.doc_uid))
       .map((row) => row.source))];
+    const fenceStatements = removalMarker ? [env.DB.prepare(
+      `SELECT CASE WHEN EXISTS (
+         SELECT 1 FROM ingest_removal_generation
+          WHERE id=1 AND instance=?1 AND generation=?2 AND nonce=?3
+       ) THEN 1 ELSE json('ingest removal inventory changed') END AS verified`,
+    ).bind(removalMarker.instance, removalMarker.generation, removalMarker.nonce)] : [];
     const receipts = await env.DB.batch([
+      ...fenceStatements,
       env.DB.prepare(
         `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at, attempts, last_error)
          SELECT chunk_uid, COALESCE(vector_id, chunk_uid), 'delete', ?${group.length + 1}, 0, NULL
@@ -7510,7 +7519,17 @@ export async function forget(env, {
          ON CONFLICT(source) DO UPDATE SET
            documents=excluded.documents, chunks=excluded.chunks`
       ).bind(src)),
+      ...(removalMarker ? [env.DB.prepare(
+        "SELECT instance, nonce, generation FROM ingest_removal_generation WHERE id=1",
+      )] : []),
     ]);
+    if (removalMarker) {
+      const next = receipts.at(-1)?.results?.[0];
+      if (!next || !Number.isSafeInteger(next.generation)) throw new Error("Removal generation receipt missing");
+      removalMarker = { ...next, runtime: removalMarker.runtime };
+      receipts.shift();
+      receipts.pop();
+    }
     if (!Array.isArray(receipts) || receipts.length < 3) {
       throw new Error("the forget delete receipts were incomplete");
     }
@@ -7550,6 +7569,7 @@ export async function forget(env, {
     vectors,
     vector_cleanup_queued: deletedChunks,
     dry_run: false, vector_error: null, targets,
+    ...(removalMarker ? { ingest_removal_marker: removalMarker } : {}),
   };
 }
 

@@ -152,7 +152,14 @@ function stateFor(mode) {
   return state;
 }
 
-function runCase(mode, { approval = null, directory = null, reset = false } = {}) {
+function runCase(mode, { approval = null, apply = null, directory = null, reset = false } = {}) {
+  if (approval && !apply && directory) {
+    const plan = JSON.parse(readFileSync(join(directory, ".brain-ingest-gmail.json"), "utf8")).ingest_removal_plan;
+    assert.ok(plan?.targets.length > 0, "separate approval must name a nonempty saved plan");
+    const applied = runCase(mode, { directory, approval, apply: plan.fingerprint });
+    if (applied.code !== 0) return applied;
+    return runCase(mode, { directory });
+  }
   const fresh = directory == null;
   directory ||= realpathSync.native(mkdtempSync(join(tmpdir(), `brain-test-gmail-${mode}-`)));
   const manifestPath = join(directory, "fixture.manifest.json");
@@ -201,6 +208,7 @@ function runCase(mode, { approval = null, directory = null, reset = false } = {}
     "--import", FIXTURE, CLI, "ingest", manifestPath, "--from", "gmail",
   ];
   if (reset) args.push("--reset");
+  if (apply) args.push("--source", "gmail", "--apply-removals", apply);
   if (approval) args.push("--approve-removals", approval);
   const result = spawnSync(process.execPath, args, { encoding: "utf8", env: environment, timeout: 30_000 });
   assert.equal(result.error, undefined, String(result.error || ""));
@@ -216,11 +224,17 @@ function runCase(mode, { approval = null, directory = null, reset = false } = {}
   };
 }
 
-function runApprovedCase(mode) {
-  const review = runCase(mode);
-  const approval = /--approve-removals ([0-9a-f]{64})/.exec(review.output)?.[1] || null;
-  assert.ok(approval, `${mode} did not produce a removal approval fingerprint: ${review.output.slice(-1_200)}`);
-  return runCase(mode, { directory: review.directory, approval });
+function runApprovedCase(mode, options = {}) {
+  const priorRemovals = options.directory ? JSON.parse(readFileSync(join(options.directory, "evidence.json"), "utf8")).forget_targets.length : 0;
+  const review = runCase(mode, options);
+  const plan = review.state.ingest_removal_plan;
+  assert.equal(review.code, 1, review.output);
+  assert.ok(plan?.targets.length > 0, "separate apply control must reach a nonempty plan");
+  assert.equal(review.evidence.forget_targets.length, priorRemovals);
+  const applied = runCase(mode, { directory: review.directory, apply: plan.fingerprint,
+    approval: plan.sourcePlan.tooLarge || plan.requireSourceApproval ? plan.sourcePlan.fingerprint : null });
+  if (applied.code !== 0) return applied;
+  return runCase(mode, { directory: review.directory });
 }
 
 if (process.platform !== "win32") {
@@ -520,7 +534,8 @@ if (process.platform !== "win32") {
     check("a later Gmail floor reaches the existing removal-review gate before any removal",
       review.code === 1 && !!approval && review.evidence.forget_targets.length === 0 &&
       review.state.history_id === "history-prior" &&
-      /Gmail cleanup would remove 1 of 2 stored documents/.test(review.output),
+      /1 stored document\(s\) would be removed/.test(review.output) &&
+      review.state.ingest_removal_plan.sourcePlan.stored === 2,
       `${review.output.slice(-1_400)}\n${JSON.stringify(review.evidence)}`);
     if (approval) {
       const approved = runCase("since-removal-review", { directory: review.directory, approval });
@@ -536,7 +551,7 @@ if (process.platform !== "win32") {
 }
 
 {
-  const result = runCase("since-incremental");
+  const result = runApprovedCase("since-incremental");
   try {
     check("incremental Gmail applies the same date floor as the full-list query",
       result.code === 0 && result.evidence.ingested_ids.join(",") === "since-incremental-current" &&
@@ -575,7 +590,8 @@ if (process.platform !== "win32") {
       review.code === 1 && review.state.history_id === "history-prior" &&
       review.state.credential_scanner_fingerprint === credentialScannerFingerprint(true, 4) &&
       review.evidence.forget_targets.length === 0 && !!approval &&
-      /Gmail cleanup would remove 1 of 2 stored documents/.test(review.output),
+      /1 stored document\(s\) would be removed/.test(review.output) &&
+      review.state.ingest_removal_plan.sourcePlan.stored === 2,
       `${review.output.slice(-1_200)}\n${JSON.stringify(review.state)}\n${JSON.stringify(review.evidence)}`);
     if (approval) {
       const approved = runCase("scanner-v5-omitted", { approval, directory: review.directory });
@@ -619,7 +635,7 @@ if (process.platform !== "win32") {
 }
 
 {
-  const result = runCase("deleted");
+  const result = runApprovedCase("deleted");
   try {
     check("a typed Gmail deletion removes the prior family and advances only after readback",
       result.code === 0 && result.evidence.forget_targets.join(",") === "gmail:gone" &&
@@ -630,7 +646,7 @@ if (process.platform !== "win32") {
 }
 
 {
-  const result = runCase("relabeled");
+  const result = runApprovedCase("relabeled");
   try {
     check("moving prior mail into an excluded category removes it as deliberate policy",
       result.code === 0 && result.evidence.forget_targets.join(",") === "gmail:relabelled" &&
@@ -693,37 +709,37 @@ if (process.platform !== "win32") {
 }
 
 {
-  const result = runCase("readback-stale");
+  const result = runApprovedCase("readback-stale");
   try {
     check("a success-shaped Gmail deletion cannot advance past a family still present on readback",
       result.code === 1 && result.evidence.forget_targets.join(",") === "gmail:gone" &&
       result.state.history_id === "history-prior" &&
-      Object.hasOwn(result.state.removed || {}, "gmail:gone") &&
+      result.state.ingest_removal_plan.targets.includes("gmail:gone") &&
       result.evidence.final_receipt?.status === "error" &&
-      /remained after exact source-inventory readback/i.test(result.output),
+      /Removal readback found remaining targets/i.test(result.output),
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.state)}\n${JSON.stringify(result.evidence)}`);
-    const retry = runCase("readback-stale", { directory: result.directory });
+    const retry = runApprovedCase("readback-stale", { directory: result.directory });
     check("a transient readback failure does not turn the same typed Gmail deletion into a manual-review wedge",
       retry.code === 1 && retry.state.history_id === "history-prior" &&
       retry.evidence.forget_targets.filter((uid) => uid === "gmail:gone").length === 2 &&
       !/--approve-removals [0-9a-f]{64}/.test(retry.output) &&
-      /remained after exact source-inventory readback/i.test(retry.output),
+      /Removal readback found remaining targets/i.test(retry.output),
       `${retry.output.slice(-1_300)}\n${JSON.stringify(retry.state)}\n${JSON.stringify(retry.evidence)}`);
   } finally { rmSync(result.directory, { recursive: true, force: true }); }
 }
 
 {
-  const first = runCase("pending-readback-failure");
+  const first = runApprovedCase("pending-readback-failure");
   try {
     check("a failed Gmail removal readback retains a pending-only retry",
       first.code === 1 &&
       first.evidence.forget_targets.join(",") === "gmail:pending-readback" &&
       first.state.history_id === "history-prior" &&
       Object.hasOwn(first.state.removed || {}, "gmail:pending-readback") &&
-      /ECONNRESET|NETWORK_UNREACHABLE/i.test(first.output),
+      /authenticated removal plan is unavailable or changed/i.test(first.output),
       `${first.output.slice(-1_300)}\n${JSON.stringify(first.state)}\n${JSON.stringify(first.evidence)}`);
 
-    const retry = runCase("pending-readback-failure", { directory: first.directory });
+    const retry = runApprovedCase("pending-readback-failure", { directory: first.directory });
     check("an empty history retry reissues the preserved Gmail removal and converges",
       retry.code === 0 &&
       retry.evidence.forget_targets.filter((uid) => uid === "gmail:pending-readback").length === 2 &&
@@ -741,7 +757,8 @@ if (process.platform !== "win32") {
       result.code === 1 && result.evidence.forget_targets.length === 0 &&
       result.state.history_id === "history-prior" &&
       result.state.credential_scanner_fingerprint === credentialScannerFingerprint(true, 4) &&
-      /Gmail cleanup would remove 101 of 101 stored documents/.test(result.output) &&
+      /101 stored document\(s\) would be removed/.test(result.output) &&
+      result.state.ingest_removal_plan.sourcePlan.stored === 101 &&
       /--approve-removals [0-9a-f]{64}/.test(result.output),
       `${result.output.slice(-1_400)}\n${JSON.stringify(result.evidence)}`);
   } finally { rmSync(result.directory, { recursive: true, force: true }); }
@@ -755,7 +772,8 @@ if (process.platform !== "win32") {
       result.code === 1 && result.evidence.ingested_ids.length === 901 &&
       result.evidence.forget_targets.length === 0 &&
       result.state.history_id === "history-prior" &&
-      /Gmail cleanup would remove 100 of 100 stored documents/.test(result.output) &&
+      /100 stored document\(s\) would be removed/.test(result.output) &&
+      result.state.ingest_removal_plan.sourcePlan.stored === 100 &&
       !!approval,
       `${result.output.slice(-1_400)}\n${JSON.stringify(result.evidence.final_receipt)}`);
     if (approval) {
@@ -764,7 +782,8 @@ if (process.platform !== "win32") {
       check("a persisted retry keeps the original Gmail removal denominator and approval fingerprint",
         retry.code === 1 && retryApproval === approval &&
         retry.evidence.ingested_ids.length === 901 && retry.evidence.forget_targets.length === 0 &&
-        /Gmail cleanup would remove 100 of 100 stored documents/.test(retry.output),
+        /100 stored document\(s\) would be removed/.test(retry.output) &&
+      retry.state.ingest_removal_plan.sourcePlan.stored === 100,
         `${retry.output.slice(-1_400)}\n${JSON.stringify(retry.state)}`);
       const approved = runCase("scanner-v5-dilution-guard", {
         directory: result.directory,
@@ -793,7 +812,8 @@ if (process.platform !== "win32") {
     check("repeating --reset cannot discard Gmail's reviewed denominator or bypass exact approval",
       first.code === 1 && retry.code === 1 && !!approval && retryApproval === approval &&
       retry.evidence.forget_targets.length === 0 &&
-      /Gmail cleanup would remove 100 of 100 stored documents/.test(retry.output),
+      /100 stored document\(s\) would be removed/.test(retry.output) &&
+      retry.state.ingest_removal_plan.sourcePlan.stored === 100,
       `${retry.output.slice(-1_400)}\n${JSON.stringify(retry.state)}`);
   } finally { rmSync(first.directory, { recursive: true, force: true }); }
 }
@@ -818,7 +838,8 @@ if (process.platform !== "win32") {
       first.code === 1 && !!approval && retry.code === 1 && retryApproval === approval &&
       retry.evidence.forget_targets.length === 0 &&
       retry.state.gmail_removal_safety_baseline?.stored === 100 &&
-      /Gmail cleanup would remove 100 of 100 stored documents/.test(retry.output),
+      /100 stored document\(s\) would be removed/.test(retry.output) &&
+      retry.state.ingest_removal_plan.sourcePlan.stored === 100,
       `${retry.output.slice(-1_400)}\n${JSON.stringify(retry.state)}`);
   } finally { rmSync(first.directory, { recursive: true, force: true }); }
 }

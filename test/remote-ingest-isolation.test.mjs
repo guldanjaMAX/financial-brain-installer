@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import * as brain from "../brain.mjs";
+globalThis.fetch = async () => { throw new Error("unexpected unmocked request"); };
 import { batchStream, prefetch, splitOversized } from "../ingest/run.mjs";
 
 test("remote per-item isolation has one shared command-path constructor", () => {
@@ -70,7 +71,7 @@ async function runRemoteCase(source, {
   const receipts = [];
   const sent = [];
   const prepared = [];
-  const reconciled = [];
+  const reviewed = [];
   const removals = [];
   const removalCalls = [];
   const logs = [];
@@ -201,9 +202,10 @@ async function runRemoteCase(source, {
       }
       return { created: items.length, updated: 0, unchanged: 0, refused: 0, failed: 0 };
     },
-    reconcileDocumentFamilies: async ({ families }) => {
-      reconciled.push(...families);
-      return 0;
+    removalPlanRequest: async ({ body }) => {
+      assert.equal(body.action, "preview", "isolation fixtures contain no stale parts to apply");
+      reviewed.push(...body.families);
+      return { marker: { instance: "fixture", nonce: "fixture", generation: 1, runtime: "fixture" }, targets: [], documents: 0 };
     },
     paceSleep: async (milliseconds) => {
       paceSleeps.push(milliseconds);
@@ -240,7 +242,7 @@ async function runRemoteCase(source, {
       receipts,
       sent,
       prepared,
-      reconciled,
+      reviewed,
       removals,
       removalCalls,
       logs,
@@ -263,7 +265,7 @@ test("Gmail pacing waits for accepted chunks and the unpaced control does not", 
   });
   assert.deepEqual(paced.sent, ["good-before", "good-after"]);
   assert.ok(
-    paced.reconciled.length > 0 && paced.reconciled.every((family) => family.family_kind === "structural"),
+    paced.reviewed.length > 0 && paced.reviewed.every((family) => family.family_kind === "structural"),
     "the paced Gmail batch must reach the indexed structural cleanup path",
   );
   assert.deepEqual(paced.paceSleeps, [9_000]);
@@ -318,7 +320,7 @@ for (const source of ["drive", "gmail", "imap"]) {
     assert.deepEqual(result.prepared, ["good-before", "bad", "good-after"]);
     assert.match(result.logs.join("\n"), /1 failed/);
     assert.deepEqual(result.sent, []);
-    assert.deepEqual(result.reconciled, []);
+    assert.deepEqual(result.reviewed, []);
     assert.deepEqual(result.removals, []);
     assert.equal(result.removalCalls.some((call) => call.dryRun !== true), false);
     assert.equal(result.savedStates.length, 0);
@@ -331,7 +333,7 @@ for (const source of ["drive", "imap"]) {
     const result = await runRemoteCase(source, { systemic: true });
     assert.deepEqual(result.prepared, ["good-before", "bad"]);
     assert.deepEqual(result.sent, []);
-    assert.deepEqual(result.reconciled, []);
+    assert.deepEqual(result.reviewed, []);
     assert.deepEqual(result.removals, []);
     assert.equal(result.receipts.length, 2);
     assert.equal(result.receipts.at(-1)?.status, "error");
@@ -385,7 +387,7 @@ test("gmail systemic refusal stops new prefetch work after the concurrent consum
   // refusal. Once it does, the source iterator closes and no new item starts.
   assert.deepEqual(result.prepared, ids.slice(0, 10));
   assert.deepEqual(result.sent, []);
-  assert.deepEqual(result.reconciled, []);
+  assert.deepEqual(result.reviewed, []);
   assert.deepEqual(result.removals, []);
   assert.equal(result.receipts.at(-1)?.walk_complete, false);
 });

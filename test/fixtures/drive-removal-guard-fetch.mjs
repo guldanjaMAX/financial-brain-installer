@@ -1,3 +1,4 @@
+import { installRemovalPlanAdapter } from "./removal-plan-adapter.mjs";
 /**
  * Offline network fixture for the command-level Drive removal guard test.
  *
@@ -80,12 +81,12 @@ function storedFamilyIndexes(evidence) {
   if (evidence.successfulRemovalFamilies === 0) {
     return Array.from({ length: FAMILY_COUNT }, (_, index) => index);
   }
-  // The injected first-group failure leaves 0..49 stored while the following
-  // two groups succeed. The retry must inventory those remaining families and
-  // pass them through a newly fingerprinted approval plan.
-  if (evidence.failureInjected && evidence.successfulRemovalFamilies === 51) {
-    return Array.from({ length: 50 }, (_, index) => index);
+  // A failed second group leaves the committed prefix intact. The retry
+  // inventories the exact suffix and requires a fresh plan.
+  if (evidence.successfulRemovalFamilies === 50) {
+    return Array.from({ length: 51 }, (_, index) => index + 50);
   }
+  if (evidence.successfulRemovalFamilies === 100) return [100];
   if (evidence.successfulRemovalFamilies === FAMILY_COUNT) return [];
   throw new Error("fixture removal state is inconsistent");
 }
@@ -187,25 +188,26 @@ globalThis.fetch = async (input, options = {}) => {
     }
 
     evidence.removalRequests++;
-    if (!evidence.failureInjected) {
+    if (evidence.successfulRemovalFamilies === 0) {
       if (!isExactRange(indexes, 0, 50)) throw new Error("fixture received an unexpected first removal group");
+      return acceptedForget(families, evidence);
+    }
+    if (!evidence.failureInjected) {
+      if (!isExactRange(indexes, 50, 50)) throw new Error("fixture received an unexpected second removal group");
       evidence.failureInjected = true;
       evidence.failedRemovalFamilies += families.length;
       saveEvidence(evidence);
       return json({ error: "synthetic removal failure" }, 503);
     }
-    if (evidence.successfulRemovalFamilies === 0) {
-      if (!isExactRange(indexes, 50, 50)) throw new Error("fixture received an unexpected second removal group");
-      return acceptedForget(families, evidence);
-    }
     if (evidence.successfulRemovalFamilies === 50) {
-      if (!isExactRange(indexes, 100, 1)) throw new Error("fixture received an unexpected third removal group");
+      if (!isExactRange(indexes, 50, 50)) throw new Error("fixture received an unexpected retry group");
       return acceptedForget(families, evidence);
     }
-    if (evidence.successfulRemovalFamilies === 51) {
-      if (!isExactRange(indexes, 0, 50)) throw new Error("fixture received an unexpected retry removal group");
+    if (evidence.successfulRemovalFamilies === 100) {
+      if (!isExactRange(indexes, 100, 1)) throw new Error("fixture received an unexpected final group");
       return acceptedForget(families, evidence);
     }
+
     throw new Error("fixture received a removal after completion");
   }
 
@@ -237,3 +239,14 @@ globalThis.fetch = async (input, options = {}) => {
 
   throw new Error(`unexpected fixture request: ${options.method || "GET"} ${url.origin}${url.pathname}`);
 };
+
+installRemovalPlanAdapter({
+  record: (action) => {
+    const evidence = readEvidence();
+    const key = action === "preview" ? "planPreviews" : "planApplies";
+    evidence[key] = Number(evidence[key] || 0) + 1;
+    saveEvidence(evidence);
+  },
+  inventory: () => storedFamilyIndexes(readEvidence()).map(familyUid),
+  revision: () => readEvidence().successfulRemovalFamilies + readEvidence().ingestBatchWrites,
+});

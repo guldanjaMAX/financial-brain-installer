@@ -45,14 +45,22 @@ const versionOf = (raw) => `sha256:${createHash("sha256").update(raw).digest("he
 const stateKeyOf = (messageId) => `${SOURCE}:mid:${messageId.toLowerCase()}`;
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 
-function runCli({ manifestPath, evidencePath, statePath, userRoot, port, run, approval = null }) {
+async function runCli({ manifestPath, evidencePath, statePath, userRoot, port, run, approval = null, apply = null }) {
+  if (approval && !apply) {
+    const plan = readJson(statePath).ingest_removal_plan;
+    assert.ok(plan?.targets.length > 0, "separate apply must name a saved nonempty plan");
+    const result = await runCli({ manifestPath, evidencePath, statePath, userRoot, port, run, approval, apply: plan.fingerprint });
+    if (result.code !== 0) return result;
+    return runCli({ manifestPath, evidencePath, statePath, userRoot, port, run });
+  }
   const environment = {};
   for (const name of ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR"]) {
     if (process.env[name] !== undefined) environment[name] = process.env[name];
   }
   Object.assign(environment, {
     NO_COLOR: "1",
-    ADMIN_KEY: "fixture-admin",
+    HOME: userRoot,
+    BRAIN_NO_WRANGLER_LOGIN: "1",
     BRAIN_IMAP_CREDENTIAL_STORE: "file",
     BRAIN_IMAP_SCANNER_EVIDENCE_PATH: evidencePath,
     BRAIN_IMAP_SCANNER_USER_ROOT: userRoot,
@@ -62,6 +70,7 @@ function runCli({ manifestPath, evidencePath, statePath, userRoot, port, run, ap
   });
   const args = ["--import", FIXTURE, CLI, "ingest", manifestPath, "--from", "imap", "--source", SOURCE];
   if (approval) args.push("--approve-removals", approval);
+  if (apply) args.push("--apply-removals", apply);
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, { cwd: ROOT, env: environment, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
@@ -113,6 +122,7 @@ try {
   const replayVersion = versionOf(replayRaw);
 
   await server.listen();
+  writeFileSync(join(directory, ".brain-admin-key"), "fixture-admin", { mode: 0o600 });
   mkdirSync(credentialRoot, { recursive: true, mode: 0o700 });
   writeFileSync(manifestPath, JSON.stringify({
     client: { slug: "fixture" },
@@ -162,7 +172,7 @@ try {
       !server.log.some((line) => /SEARCH UID 102:\*/.test(line)), server.log.join(" | "));
   check("more than 100 prior IMAP families stop at one aggregate removal review",
     review.code !== 0 && approval !== null &&
-      /IMAP cleanup would remove 101 of 101 stored documents \(100\.0%\)/.test(review.output), review.output.slice(-1400));
+      /101 stored document\(s\) would be removed/.test(review.output), review.output.slice(-1400));
   check("the stopped review prints only an exact reusable approval fingerprint",
     /--approve-removals [0-9a-f]{64}/.test(review.output) &&
       !review.output.includes("scanner-sensitive-") && !review.output.includes(SYNTHETIC_KEY), review.output.slice(-1400));

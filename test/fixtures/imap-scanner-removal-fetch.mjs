@@ -1,3 +1,4 @@
+import { installRemovalPlanAdapter } from "./removal-plan-adapter.mjs";
 /**
  * Offline Worker, socket, and state-observation fixture for IMAP scanner
  * migration cleanup. Every mailbox identity and credential-shaped value used
@@ -161,3 +162,9 @@ globalThis.fetch = async (input, options = {}) => {
 
   throw new Error(`unexpected IMAP scanner-removal request: ${options.method || "GET"} ${url.pathname}`);
 };
+
+installRemovalPlanAdapter({
+  inventory: () => readEvidence().stored_families,
+  revision: () => readEvidence().ingested_ids.length + readEvidence().forget_targets.length,
+  record: (action) => event(`plan_${action}`),
+});

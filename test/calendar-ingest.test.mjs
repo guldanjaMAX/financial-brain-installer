@@ -19,13 +19,15 @@
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   TOKEN_URL,
   createTokenProvider,
   syncAll,
 } from "../connectors/google-calendar.mjs";
+import assert from "node:assert/strict";
 import { cmdIngestCalendar } from "../brain.mjs";
+import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
 
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 220))); if (!c) fail++; };
@@ -62,13 +64,13 @@ const provider = (impl) => createTokenProvider({ clientId: "cid", clientSecret: 
 const EVENT_KICKOFF = {
   kind: "calendar#event", id: "evt_kickoff_001", status: "confirmed",
   htmlLink: "https://www.google.com/calendar/event?eid=ZXZ0X2tpY2tvZmY",
-  summary: "Henderson project kickoff", updated: "2026-06-10T18:22:41.512Z",
+  summary: "Synthetic project kickoff", updated: "2026-06-10T18:22:41.512Z",
   start: { dateTime: "2026-06-12T09:00:00-07:00", timeZone: "America/Phoenix" },
   end: { dateTime: "2026-06-12T10:30:00-07:00", timeZone: "America/Phoenix" },
-  organizer: { email: "dana@acme.com", displayName: "Dana Reyes" },
+  organizer: { email: "organizer@example.invalid", displayName: "Organizer" },
   attendees: [
-    { email: "dana@acme.com", displayName: "Dana Reyes", responseStatus: "accepted" },
-    { email: "owner@acme.com", displayName: "Chris Vale", self: true, responseStatus: "accepted" },
+    { email: "organizer@example.invalid", displayName: "Organizer", responseStatus: "accepted" },
+    { email: "owner@example.invalid", displayName: "Owner", self: true, responseStatus: "accepted" },
   ],
   iCalUID: "evt_kickoff_001@google.com",
 };
@@ -80,7 +82,22 @@ writeFileSync(manifestPath, "{}\n", { mode: 0o600 });
 
 const fakeReceipts = [];
 const fakeRemovals = [];
+const store = ingestPlanStore();
+const seededSources = new Set();
 const commonOptions = () => ({
+  removalPlanRuntime: () => "fixture-runtime",
+  listStoredSourceFamilies: async ({ source }) => {
+    if (!seededSources.has(source)) {
+      seededSources.add(source);
+      store.put(`${source}:gcal:primary:evt_old_002`);
+      for (let index = 0; index < 20; index++) store.put(`${source}:neighbor${index}`);
+    }
+    return new Set(store.uids().filter((uid) => uid.startsWith(`${source}:`)));
+  },
+  removalPlanRequest: async (input) => {
+    if (input.body.action === "apply") fakeRemovals.push(input.body.targets);
+    return store.request(input);
+  },
   sourceIngestLockOptions: { home: sandbox },
   resolveAccount: async () => ({ id: "fixture-account" }),
   resolveBaseUrl: async () => "https://fixture.invalid",
@@ -88,6 +105,19 @@ const commonOptions = () => ({
   postSourceReceipt: async (base, adminKey, receipt) => { fakeReceipts.push({ base, adminKey, receipt }); },
   applyDriveRemovals: async ({ uids }) => { fakeRemovals.push(uids); return { applied: uids.length, pending: 0 }; },
 });
+
+async function reviewThenResume(manifest, path, flags, options) {
+  const statePath = join(dirname(path), `.brain-ingest-${flags.source || "calendar"}.json`);
+  await assert.rejects(cmdIngestCalendar(manifest, path, flags, options), { code: "SAFETY_REVIEW_REQUIRED" });
+  const state = JSON.parse(readFileSync(statePath, "utf8"));
+  assert.ok(state.ingest_removal_plan.targets.length > 0);
+  assert.equal(state.primary?.sync_token, undefined);
+  const applied = await cmdIngestCalendar(manifest, path, {
+    source: flags.source || "calendar", "apply-removals": state.ingest_removal_plan.fingerprint,
+  }, options);
+  assert.equal(applied.removed, 1);
+  return cmdIngestCalendar(manifest, path, flags, options);
+}
 
 try {
   /* ---- dry run: computes and previews, sends and saves NOTHING ---- */
@@ -104,7 +134,7 @@ try {
       },
     );
     check("dry run computes the real event as something that would upsert",
-      result.documents.length === 1 && result.documents[0].title.includes("Henderson project kickoff"),
+      result.documents.length === 1 && result.documents[0].title.includes("Synthetic project kickoff"),
       JSON.stringify(result.documents.map((d) => d.title)));
     check("dry run returns the common preview receipt",
       result.dry_run === true && result.would_send === 1, JSON.stringify(result));
@@ -120,10 +150,13 @@ try {
   let savedSyncToken = null;
   {
     const impl = fakeGoogle({
-      calendar: [{ status: 200, body: { nextSyncToken: "TOK_1", items: [EVENT_KICKOFF, EVENT_CANCELLED] } }],
+      calendar: [
+        { status: 200, body: { nextSyncToken: "TOK_1", items: [EVENT_KICKOFF, EVENT_CANCELLED] } },
+        { status: 200, body: { nextSyncToken: "TOK_1", items: [] } },
+      ],
     });
     const sentEnvelopes = [];
-    const result = await cmdIngestCalendar(
+    const result = await reviewThenResume(
       { infrastructure: { cloudflare: {} } }, manifestPath, {},
       {
         ...commonOptions(),
@@ -150,21 +183,20 @@ try {
     check("the cancelled event was forwarded to removal, not upsert",
       fakeRemovals.length === 1 && fakeRemovals[0][0] === "calendar:gcal:primary:evt_old_002",
       JSON.stringify(fakeRemovals));
-    check("two source receipts were posted (indexing, then final)",
-      fakeReceipts.length === 2 && fakeReceipts[0].receipt.status === "indexing" && fakeReceipts[1].receipt.status === "ready",
+    check("review and resumed runs each post indexing and final receipts",
+      fakeReceipts.length === 4 && fakeReceipts[1].receipt.status === "error" && fakeReceipts[3].receipt.status === "ready",
       JSON.stringify(fakeReceipts.map((r) => r.receipt.status)));
-    check("the final receipt reports the real created/removed counts",
-      fakeReceipts[1].receipt.docs_added === 1 && /1 removed/.test(fakeReceipts[1].receipt.detail),
+    check("the review receipt reports accepted additions and pending removal",
+      fakeReceipts[1].receipt.docs_added === 1 && /1 removal\(s\) pending/.test(fakeReceipts[1].receipt.detail),
       JSON.stringify(fakeReceipts[1].receipt));
-    check("a full Calendar walk with a terminal sync token proves configured history",
+    check("a review stop preserves traversal evidence without claiming complete history",
       fakeReceipts[1].receipt.walk_complete === true &&
-      fakeReceipts[1].receipt.complete_sweep === true &&
+      fakeReceipts[1].receipt.complete_sweep === false &&
       fakeReceipts[1].receipt.files_seen === 2 &&
       fakeReceipts[1].receipt.docs_refused === 0 &&
       fakeReceipts[1].receipt.docs_failed === 0 &&
-      fakeReceipts[1].receipt.confirmed_range?.from === null &&
-      fakeReceipts[1].receipt.confirmed_range?.through === null &&
-      /authoritative sync token/.test(fakeReceipts[1].receipt.detail),
+      !("confirmed_range" in fakeReceipts[1].receipt) &&
+      fakeReceipts[3].receipt.complete_sweep === true,
       JSON.stringify(fakeReceipts[1].receipt));
     check("cmdIngestCalendar returns a real result object, not undefined",
       result && result.result && result.sent && typeof result.removed === "number");
@@ -215,12 +247,15 @@ try {
     const customManifest = join(sandbox, "custom-source.manifest.json");
     writeFileSync(customManifest, "{}\n", { mode: 0o600 });
     const impl = fakeGoogle({
-      calendar: [{ status: 200, body: { nextSyncToken: "TOK_CUSTOM", items: [EVENT_KICKOFF, EVENT_CANCELLED] } }],
+      calendar: [
+        { status: 200, body: { nextSyncToken: "TOK_CUSTOM", items: [EVENT_KICKOFF, EVENT_CANCELLED] } },
+        { status: 200, body: { nextSyncToken: "TOK_CUSTOM", items: [] } },
+      ],
     });
     const sentEnvelopes = [];
     const removalsBefore = fakeRemovals.length;
     const receiptsBefore = fakeReceipts.length;
-    await cmdIngestCalendar(
+    await reviewThenResume(
       { infrastructure: { cloudflare: {} } }, customManifest, { source: "client-calendar" },
       {
         ...commonOptions(),
@@ -241,7 +276,7 @@ try {
       fakeRemovals[removalsBefore]?.[0] === "client-calendar:gcal:primary:evt_old_002",
       JSON.stringify(fakeRemovals.slice(removalsBefore)));
     check("a custom Calendar source names its lifecycle receipts",
-      fakeReceipts.slice(receiptsBefore).length === 2 &&
+      fakeReceipts.slice(receiptsBefore).length === 4 &&
         fakeReceipts.slice(receiptsBefore).every((entry) => entry.receipt.source === "client-calendar"),
       JSON.stringify(fakeReceipts.slice(receiptsBefore).map((entry) => entry.receipt.source)));
     check("a custom Calendar source gets its own resume state",
@@ -359,11 +394,14 @@ try {
     const impl = fakeGoogle({
       calendar: [{ status: 200, body: { nextSyncToken: "TOK_PENDING_DELETE", items: [EVENT_CANCELLED] } }],
     });
-    await cmdIngestCalendar(
+    await assert.rejects(cmdIngestCalendar(
       { infrastructure: { cloudflare: {} } }, cleanupManifest, {},
       {
         ...commonOptions(),
-        applyDriveRemovals: async () => ({ applied: 0, pending: 1 }),
+        listStoredSourceFamilies: async () => {
+          store.put("calendar:gcal:primary:evt_old_002");
+          return new Set(store.uids().filter((uid) => uid.startsWith("calendar:")));
+        },
         getAccessToken: provider(impl).get,
         fetchImpl: impl,
         googleCalendar: {
@@ -371,9 +409,10 @@ try {
           ingestEnvelopes: async () => ({ created: 0, updated: 0, unchanged: 0, refused: [], errors: [], total: 0 }),
         },
       },
-    );
+    ), { code: "SAFETY_REVIEW_REQUIRED" });
+    const pending = JSON.parse(readFileSync(join(cleanupDir, ".brain-ingest-calendar.json"), "utf8"));
     check("a pending Calendar cancellation withholds the sync state",
-      !existsSync(join(cleanupDir, ".brain-ingest-calendar.json")));
+      pending.primary?.sync_token === undefined && pending.ingest_removal_plan.targets.length === 1);
     check("a pending Calendar cancellation marks the source receipt incomplete",
       fakeReceipts.at(-1)?.receipt.status === "error" && /remain pending/.test(fakeReceipts.at(-1)?.receipt.error || ""),
       JSON.stringify(fakeReceipts.at(-1)?.receipt));
@@ -477,6 +516,7 @@ try {
 
   console.log(fail ? `\n${fail} FAILURES` : `\ncalendar-ingest: all ${ran} tests passed`);
 } finally {
+  store.db.close();
   rmSync(sandbox, { recursive: true, force: true });
 }
 process.exit(fail ? 1 : 0);

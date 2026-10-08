@@ -1,0 +1,264 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+import worker from "../worker/src/index.js";
+import { createIngestRemovalReview } from "../operations/ingest-removal-plan.mjs";
+import { buildDriveRemovalPlan } from "../operations/drive-removal-plan.mjs";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
+import { previewIngestRemovals, applyIngestRemovals } from "../worker/src/lib/ingest-removal-plan.js";
+
+function fixture(count = 20, options = {}) {
+  const store = ingestPlanStore();
+  for (let index = 0; index < count; index++) store.put(`drive:item${index}`);
+  const state = { version: 1, done: {}, skipped: {} };
+  const manifest = { safety: { ocr: { enabled: false } } };
+  let runtime = "runtime-one";
+  let saves = 0;
+  const review = createIngestRemovalReview({ state, saveState: () => { saves++; },
+    source: "drive", manifest, manifestPath: "/fixture/manifest.json",
+    base: "https://fixture.invalid", request: store.request, runtime: () => runtime, ...options });
+  const plan = () => buildDriveRemovalPlan({ storedFamilies: store.uids(), vanishedCandidates: ["drive:item0"] });
+  const stop = async () => {
+    await assert.rejects(review.finish({ sourcePlan: plan() }), { code: "SAFETY_REVIEW_REQUIRED" });
+    assert.deepEqual(state.ingest_removal_plan.targets, ["drive:item0"]);
+    assert.ok(store.calls.preview > 0);
+    return state.ingest_removal_plan.fingerprint;
+  };
+  return { store, state, manifest, review, stop, setRuntime: (next) => { runtime = next; }, saves: () => saves };
+}
+
+test("the review command names an exact plan without disclosing target identities", async () => {
+  const f = fixture();
+  try {
+    let stopped;
+    try { await f.stop(); } catch (error) { throw error; }
+    const fingerprint = f.state.ingest_removal_plan.fingerprint;
+    try { await f.review.finish({ sourcePlan: f.state.ingest_removal_plan.sourcePlan }); }
+    catch (error) { stopped = error; }
+    assert.ok(renderCliCommands(stopped.message).includes(renderCliCommands(
+      `brain ingest <manifest> --source drive --apply-removals ${fingerprint}`,
+    )));
+    assert.doesNotMatch(stopped.message, /item0|\/fixture\/|fixture\.invalid/);
+    assert.ok(f.saves() >= 2);
+    await f.review.apply(fingerprint);
+    assert.equal(f.store.calls.apply, 1);
+    assert.equal(f.store.uids().includes("drive:item0"), false);
+  } finally { f.store.db.close(); }
+});
+
+for (const drift of ["fingerprint", "state", "policy", "runtime", "inventory", "worker-runtime"]) {
+  test(`${drift} drift refuses a nonempty plan; a fresh matching plan applies`, async () => {
+    const f = fixture();
+    try {
+      const fingerprint = await f.stop();
+      if (drift === "state") f.state.done.other = "changed";
+      if (drift === "policy") f.manifest.safety.ocr.enabled = true;
+      if (drift === "runtime") f.setRuntime("runtime-two");
+      if (drift === "inventory") f.store.put("drive:item1", {}, "new-revision");
+      if (drift === "worker-runtime") f.store.env.INGEST_VERSION.id = "fixture-runtime-two";
+      await assert.rejects(f.review.apply(drift === "fingerprint" ? "f".repeat(64) : fingerprint));
+      assert.equal(f.store.calls.apply, 0);
+      assert.ok(f.store.uids().includes("drive:item0"));
+      const fresh = await f.stop();
+      await f.review.apply(fresh);
+      assert.equal(f.store.calls.apply, 1);
+      assert.equal(f.store.uids().includes("drive:item0"), false);
+    } finally { f.store.db.close(); }
+  });
+}
+
+test("the original over-ten-percent refusal remains an additional gate", async () => {
+  const f = fixture(2);
+  try {
+    const fingerprint = await f.stop();
+    assert.equal(f.state.ingest_removal_plan.sourcePlan.tooLarge, true);
+    await assert.rejects(f.review.apply(fingerprint), { code: "SAFETY_REVIEW_REQUIRED" });
+    assert.equal(f.store.calls.apply, 0);
+    await f.review.apply(fingerprint, f.state.ingest_removal_plan.sourcePlan.fingerprint);
+    assert.equal(f.store.calls.apply, 1);
+  } finally { f.store.db.close(); }
+});
+
+test("a writer between preflight and DELETE is fenced inside the transaction", async () => {
+  const store = ingestPlanStore();
+  try {
+    store.put("gmail:original");
+    const families = [{ base_doc_uid: "gmail:original", keep_doc_uids: [] }];
+    const plan = await previewIngestRemovals(store.env, { families });
+    assert.deepEqual(plan.targets, ["gmail:original"]);
+    let reached = 0;
+    store.beforeBatch(() => { reached++; store.put("gmail:concurrent"); });
+    await assert.rejects(applyIngestRemovals(store.env, plan), /malformed JSON/);
+    assert.equal(reached, 1);
+    assert.ok(store.uids().includes("gmail:original"));
+    store.beforeBatch(null);
+    const fresh = await previewIngestRemovals(store.env, { families });
+    const receipt = await applyIngestRemovals(store.env, fresh);
+    assert.equal(receipt.documents, 1);
+    assert.deepEqual(store.uids(), ["gmail:concurrent"]);
+  } finally { store.db.close(); }
+});
+
+test("deferred replacement families survive restart and remove only obsolete members", async () => {
+  const f = fixture();
+  try {
+    f.store.put("message:old", { family_of: "drive:export" });
+    f.store.put("message:current", { family_of: "drive:export" });
+    f.state.done.export = "accepted";
+    f.review.remember([{ stateKey: "export", hash: "accepted", base_doc_uid: "drive:export",
+      keep_doc_uids: ["message:current"], family_kind: "declared" }]);
+    await assert.rejects(f.review.finish(), { code: "SAFETY_REVIEW_REQUIRED" });
+    assert.deepEqual(f.state.ingest_removal_plan.targets, ["message:old"]);
+    const reloadedState = JSON.parse(JSON.stringify(f.state));
+    const reloaded = createIngestRemovalReview({ state: reloadedState, saveState() {},
+      source: "drive", manifest: f.manifest, manifestPath: "/fixture/manifest.json",
+      base: "https://fixture.invalid", request: f.store.request, runtime: () => "runtime-one" });
+    await reloaded.apply(reloadedState.ingest_removal_plan.fingerprint);
+    assert.ok(f.store.uids().includes("message:current"));
+    assert.equal(f.store.uids().includes("message:old"), false);
+  } finally { f.store.db.close(); }
+});
+
+test("zero-removal replacement commits without a decision and makes no delete call", async () => {
+  const f = fixture();
+  try {
+    f.state.done.item0 = "accepted";
+    f.review.remember([{ stateKey: "item0", hash: "accepted", base_doc_uid: "drive:item0",
+      keep_doc_uids: ["drive:item0"], family_kind: "structural" }]);
+    await f.review.finish();
+    assert.ok(f.store.calls.preview > 0);
+    assert.equal(f.store.calls.apply, 0);
+    assert.equal(f.state.ingest_removal_plan, undefined);
+    assert.equal(f.store.uids().length, 20);
+  } finally { f.store.db.close(); }
+});
+
+test("the authenticated route previews without mutation, refuses drift, and honors the upgrade pause", async () => {
+  const store = ingestPlanStore();
+  const key = randomBytes(32).toString("hex");
+  store.env.ADMIN_KEY = key;
+  const route = (body, authorized = true) => worker.fetch(new Request("https://fixture.invalid/api/admin/brain/ingest-removal-plan", {
+    method: "POST", headers: { "Content-Type": "application/json", ...(authorized ? { "X-Admin-Key": key } : {}) },
+    body: JSON.stringify(body),
+  }), store.env, { waitUntil() {} });
+  try {
+    store.put("drive:original");
+    const families = [{ base_doc_uid: "drive:original", keep_doc_uids: [] }];
+    assert.equal((await route({ action: "preview", families }, false)).status, 401);
+    const response = await route({ action: "preview", families });
+    assert.equal(response.status, 200);
+    const plan = await response.json();
+    assert.deepEqual(plan.targets, ["drive:original"]);
+    assert.equal(store.calls.batches, 0);
+    store.env.VECTOR_DRAIN_MODE = "paused-for-upgrade";
+    assert.equal((await route({ action: "apply", targets: plan.targets, marker: plan.marker })).status, 503);
+    assert.ok(store.uids().includes("drive:original"));
+    delete store.env.VECTOR_DRAIN_MODE;
+    store.put("drive:neighbor");
+    assert.equal((await route({ action: "apply", targets: plan.targets, marker: plan.marker })).status, 409);
+    const fresh = await (await route({ action: "preview", families })).json();
+    assert.equal((await route({ action: "apply", targets: fresh.targets, marker: fresh.marker })).status, 200);
+    assert.deepEqual(store.uids(), ["drive:neighbor"]);
+  } finally { store.db.close(); }
+});
+
+test("multiple bounded groups delete only their named targets and read back the final generation", async () => {
+  const f = fixture(120);
+  try {
+    const sourcePlan = buildDriveRemovalPlan({ storedFamilies: f.store.uids(),
+      vanishedCandidates: f.store.uids().slice(0, 101) });
+    await assert.rejects(f.review.finish({ sourcePlan }), { code: "SAFETY_REVIEW_REQUIRED" });
+    const plan = f.state.ingest_removal_plan;
+    assert.equal(plan.targets.length, 101);
+    const kept = f.store.uids().filter((uid) => !plan.targets.includes(uid));
+    await assert.rejects(f.review.apply(plan.fingerprint), { code: "SAFETY_REVIEW_REQUIRED" });
+    assert.equal(f.store.calls.apply, 0);
+    await f.review.apply(plan.fingerprint, sourcePlan.fingerprint);
+    assert.equal(f.store.calls.apply, 3);
+    assert.deepEqual(f.store.uids(), kept);
+  } finally { f.store.db.close(); }
+});
+
+
+test("an expired source observation refuses its nonempty plan and a fresh observation applies", async () => {
+  const anchor = Date.parse("2026-10-07T00:00:00.000Z");
+  let now = anchor;
+  const f = fixture(20, { now: () => now });
+  try {
+    const sourcePlan = buildDriveRemovalPlan({ storedFamilies: f.store.uids(), vanishedCandidates: ["drive:item0"] });
+    const expiresAt = new Date(anchor + 24 * 60 * 60 * 1000).toISOString();
+    await assert.rejects(f.review.finish({ sourcePlan, expiresAt }), { code: "SAFETY_REVIEW_REQUIRED" });
+    assert.deepEqual(f.state.ingest_removal_plan.targets, ["drive:item0"]);
+    now = Date.parse(expiresAt);
+    await assert.rejects(f.review.apply(f.state.ingest_removal_plan.fingerprint), /observation expired/);
+    assert.equal(f.store.calls.apply, 0);
+    await f.stop();
+    await f.review.apply(f.state.ingest_removal_plan.fingerprint);
+    assert.equal(f.store.calls.apply, 1);
+  } finally { f.store.db.close(); }
+});
+
+test("equal generation counters from diverged restore histories are not interchangeable", async () => {
+  const f = fixture();
+  try {
+    const fingerprint = await f.stop();
+    f.store.db.exec("UPDATE ingest_removal_generation SET nonce = lower(hex(randomblob(16))) WHERE id = 1");
+    await assert.rejects(f.review.apply(fingerprint), /changed/);
+    assert.equal(f.store.calls.apply, 0);
+    assert.ok(f.store.uids().includes("drive:item0"));
+    await f.review.apply(await f.stop());
+    assert.equal(f.store.calls.apply, 1);
+  } finally { f.store.db.close(); }
+});
+
+
+test("a lost successful apply response preserves the checkpoint and cannot replay its old approval", async () => {
+  const f = fixture();
+  try {
+    const fingerprint = await f.stop();
+    let lost = false;
+    const review = createIngestRemovalReview({ state: f.state, saveState() {}, source: "drive",
+      manifest: f.manifest, manifestPath: "/fixture/manifest.json", base: "https://fixture.invalid",
+      runtime: () => "runtime-one", request: async (input) => {
+        const result = await f.store.request(input);
+        if (input.body.action === "apply") { lost = true; throw new Error("fixture lost response"); }
+        return result;
+      } });
+    await assert.rejects(review.apply(fingerprint), /lost response/);
+    assert.equal(lost, true);
+    assert.equal(f.store.calls.apply, 1);
+    assert.equal(f.state.ingest_removal_plan.fingerprint, fingerprint);
+    await assert.rejects(f.review.apply(fingerprint), /changed/);
+    assert.equal(f.store.calls.apply, 1);
+    await f.review.finish({ sourcePlan: buildDriveRemovalPlan({ storedFamilies: f.store.uids(), vanishedCandidates: ["drive:item0"] }) });
+    assert.equal(f.state.ingest_removal_plan, undefined);
+    assert.equal(f.store.uids().length, 19);
+  } finally { f.store.db.close(); }
+});
+
+
+test("runtime binding works in a packed installation without a lockfile and covers root modules", async () => {
+  const root = mkdtempSync(join(tmpdir(), "removal-runtime-"));
+  try {
+    for (const folder of ["operations", "connectors", "ingest", "worker/src/lib"]) mkdirSync(join(root, folder), { recursive: true });
+    for (const path of ["operations/ingest-removal-plan.mjs", "operations/drive-removal-plan.mjs", "worker/src/lib/stored-family-identity.js"]) {
+      const bytes = readFileSync(new URL(`../${path}`, import.meta.url));
+      writeFileSync(join(root, path), bytes);
+      console.log(`copied-runtime-source ${path} sha256=${createHash("sha256").update(bytes).digest("hex")}`);
+    }
+    writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module", dependencies: {} }));
+    writeFileSync(join(root, "brain.mjs"), "// synthetic dispatcher\n");
+    const helper = join(root, "support-recovery.mjs");
+    writeFileSync(helper, "// first helper revision\n");
+    const { ingestRemovalRuntime } = await import(pathToFileURL(join(root, "operations/ingest-removal-plan.mjs")));
+    let first;
+    assert.doesNotThrow(() => { first = ingestRemovalRuntime(); }, "npm omits package-lock.json from the published artifact");
+    writeFileSync(helper, "// second helper revision\n");
+    assert.notEqual(ingestRemovalRuntime(), first, "a root runtime module change must invalidate approval");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

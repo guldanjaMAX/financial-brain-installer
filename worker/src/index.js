@@ -1,3 +1,4 @@
+import { readIngestRemovalRequest, previewIngestRemovals, applyIngestRemovals } from "./lib/ingest-removal-plan.js";
 /**
  * brain worker — the client-installable retrieval brain.
  *
@@ -3412,6 +3413,26 @@ export default {
             code,
             retryable: error?.retryable === true,
           }, status));
+        }
+      }
+      if (path === "/api/admin/brain/ingest-removal-plan" && request.method === "POST") {
+        if (backendOf(env) !== D1 || !scopeIsUnrestricted(scope)) {
+          return privateNoStore(jsonResponse({ error: "Removal plans need the owner and the D1 backend." }, 403));
+        }
+        try {
+          const body = await readIngestRemovalRequest(request);
+          if (body?.action === "apply" && upgradePauseHolds(env)) return privateNoStore(jsonResponse(pausedCorpusRefusal(), 503));
+          const result = body?.action === "preview"
+            ? await previewIngestRemovals(env, body)
+            : body?.action === "apply"
+              ? await applyIngestRemovals(env, body)
+              : null;
+          if (!result) throw new Error("Choose preview or apply for a removal plan.");
+          return privateNoStore(jsonResponse(result));
+        } catch {
+          return privateNoStore(jsonResponse({
+            error: "Removal plan unavailable or changed. Verify the migration and runtime, then plan ingestion again.",
+          }, 409));
         }
       }
       if (path === "/api/admin/brain/source-families" && request.method === "POST") {

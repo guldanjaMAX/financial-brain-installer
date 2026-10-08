@@ -283,6 +283,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/source-family-inventory-retry.test.mjs",
   "node --no-warnings test/d1-transient-fault.test.mjs",
   "node --no-warnings test/family-reconciliation.test.mjs",
+  "node --test test/ingest-plan-first.test.mjs",
+  "node --test test/ingest-removal-plan.test.mjs",
   "node --no-warnings test/ingestion-contract.test.mjs",
   "node test/curated-dual-sync.test.mjs",
   "node test/curated-sync-scheduler.test.mjs",
