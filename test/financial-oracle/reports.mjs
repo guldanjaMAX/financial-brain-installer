@@ -1,6 +1,6 @@
 // Independent Reports API traversal. It never imports the product report code.
 import { createHash } from 'node:crypto';
-import { decimalMinor, day } from './ledger.mjs';
+import { decimalMinor, day, requireAccrualBasis } from './ledger.mjs';
 export const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 export const REPORT_NAMES = Object.freeze(['ProfitAndLoss','BalanceSheet','AgedReceivables','AgedReceivableDetail','AgedPayables','AgedPayableDetail','TrialBalance','CashFlow','GeneralLedger']);
 const fail = () => {throw new Error('ORACLE_REPORT_INVALID');};
@@ -61,10 +61,15 @@ export function parseReport(raw,scope) {
     completeness:'parsed_only', limitation:'Transport, storage readback, filters and a stable generation require separate evidence.'};
 }
 export function bindReportCells(report,bindings) {
+ // Capture may retain unsupported reports for later native review. Binding a
+ // numeric expectation is stricter: neither cash recognition nor native cash
+ // flow semantics has an approved truth model here, even if the numbers match.
+ const scope=report?.scope;
+ requireAccrualBasis(scope?.basis==='Accrual'&&scope?.report!=='CashFlow'?'accrual':null,'report_binding');
   const seen=new Set();
   return bindings.map(b=>{
     const c=report.money_cells.find(c=>c.path===b.path);
     if(!c||seen.has(b.metric)||c.minor!==b.expected_minor) fail(); seen.add(b.metric);
-    return {metric:b.metric,minor:c.minor,content_hash:report.sha256,row_path:c.path,column_key:c.column_key,scope:report.scope};
+    return {metric:b.metric,minor:c.minor,content_hash:report.sha256,row_path:c.path,column_key:c.column_key,scope:report.scope,completeness:report.completeness,limitation:report.limitation};
   });
 }

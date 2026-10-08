@@ -13,6 +13,35 @@ test('nested report retains cell paths without summing parent and child', () => 
   assert.equal(bound.length,1);
   assert.equal(bound[0].content_hash,result.sha256);
 });
+for(const [name,basis,metric,amount,expected] of [
+ ['ProfitAndLoss','Cash','profit','1675.00','167500'],
+ ['CashFlow','Accrual','cash_change','2505.00','250500'],
+])test(`FOR-02: ${name} ${basis} truth binding refuses and accrual bindings retain parser limits`,()=>{
+ const parse=(name,basis,amount)=>{
+  const source=report();source.Header.ReportName=name;source.Header.ReportBasis=basis;
+  source.Rows.Row=[{type:'Data',ColData:[{value:'Synthetic row'},{value:amount}]}];
+  return parseReport(JSON.stringify(source),{...scope,report:name,basis});
+ };
+ const binding={metric,path:'/Rows/Row/0/ColData/1',expected_minor:expected};
+ const green=parse('ProfitAndLoss','Accrual','1675.00');assert.equal(green.rows_checked,1);
+ const goodBinding={...binding,metric:'profit',expected_minor:'167500'};
+ const bound=bindReportCells(green,[goodBinding]);assert.equal(bound.length,1);assert.equal(bound[0].minor,'167500');
+ let mismatchReads=0;
+ assert.throws(()=>bindReportCells(green,[{...goodBinding,get expected_minor(){mismatchReads++;return '167501';}}]),/^Error: ORACLE_REPORT_INVALID$/);
+ assert.equal(mismatchReads,1,'one-cent mismatch reached equality comparison');
+ const pending=parse(name,basis,amount);assert.equal(pending.rows_checked,1);assert.equal(pending.completeness,'parsed_only');
+ let scopeReads=0,comparisons=0;
+ const parsedScope=pending.scope;
+ Object.defineProperty(pending,'scope',{get(){scopeReads++;return parsedScope;}});
+ for(const minor of [expected,String(BigInt(expected)+1n)]){
+  assert.throws(()=>bindReportCells(pending,[{...binding,get expected_minor(){comparisons++;return minor;}}]),{
+   code:'ORACLE_BASIS_UNSUPPORTED',reason:'unsupported_basis',stage:'report_binding',
+  });
+ }
+ assert.ok(scopeReads>0,'report scope refusal reached');assert.equal(comparisons,0,'unsupported reports never compare amounts');
+ assert.equal(bound[0].completeness,green.completeness);assert.equal(bound[0].limitation,green.limitation);
+ assert.equal(bound[0].completeness,'parsed_only');assert.ok(bound[0].limitation.length>0);
+});
 test('blank is unknown; money text may be negative or parenthesized; nonmoney is never summed', () => {
   const r = report(); r.Rows.Row[0].Rows.Row[0].ColData[1].value = '(0.01)';
   assert.equal(parseReport(JSON.stringify(r),scope).money_cells[0].minor,'-1');

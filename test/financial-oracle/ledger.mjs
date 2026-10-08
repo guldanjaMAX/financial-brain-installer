@@ -18,9 +18,9 @@ export function minorDecimal(value, exponent = 2) {
   return `${n<0n?'-':''}${exponent?`${digits.slice(0,-exponent)}.${digits.slice(-exponent)}`:digits}`;
 }
 const sum = values => values.reduce((s,v)=>s+v,0n);
-export function requireAccrualBasis(basis) {
+export function requireAccrualBasis(basis, stage = 'basis') {
   if (basis !== 'accrual') throw Object.assign(new Error('ORACLE_BASIS_UNSUPPORTED'), {
-    code:'ORACLE_BASIS_UNSUPPORTED', reason:'unsupported_basis', stage:'basis',
+    code:'ORACLE_BASIS_UNSUPPORTED', reason:'unsupported_basis', stage,
   });
   return basis;
 }

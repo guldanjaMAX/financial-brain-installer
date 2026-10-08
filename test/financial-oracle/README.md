@@ -18,6 +18,20 @@ The case builder enforces the same rule for `period.basis` and an optional
 top-level `basis`; neither can override an unsupported value in the other.
 Only the exact canonical value `accrual` is supported, with no normalization.
 
+The exported `evaluate` and `scoreCampaign` functions validate every expected
+case and claim scope before comparing any money or citations, including cases
+without responses and campaign phases without captures. Unsupported bases
+return `ready: false`, `code: ORACLE_BASIS_UNSUPPORTED`,
+`reason: unsupported_basis`, a stage of `evaluator` or `campaign`, and zero
+comparison counts. Supported bank movements keep their existing accrual scope.
+They do not introduce a cash accounting basis or a native cash-flow claim.
+
+`bindReportCells` refuses Cash-basis reports and every `CashFlow` report with
+the same typed error and stage `report_binding`, before comparing cells.
+Successful accrual bindings retain the parser's `completeness: parsed_only`
+and exact `limitation`. Matching an expected amount does not prove report
+completeness or remove the need for separate evidence.
+
 Cash-basis answers and the native Statement of Cash Flows (`CashFlow`) are
 explicitly out of scope for this campaign. They need native report review:
 cash-basis recognition, the report's cash-account perimeter, activity
