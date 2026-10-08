@@ -25,7 +25,7 @@ import {
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, win32 as win32Path } from "node:path";
 import { TextDecoder } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
@@ -153,8 +153,8 @@ function removeIfSame(path, identity) {
 function defaultAcl(args) {
   const { env } = windowsPowerShellRuntime();
   const command = env.SystemRoot
-    ? join(env.SystemRoot, "System32", "icacls.exe")
-    : "icacls";
+    ? win32Path.join(env.SystemRoot, "System32", "icacls.exe")
+    : "windows-icacls-unavailable-off-windows";
   return spawnSync(command, args, {
     encoding: "utf-8",
     env,
@@ -213,7 +213,7 @@ function windowsPowerShellRuntime(environment = process.env) {
     if (process.platform === "win32") {
       throw new Error("Windows could not locate its system runtime directory");
     }
-    return { command: "powershell.exe", env: {} };
+    return { command: "windows-powershell-unavailable-off-windows", env: {} };
   }
   const env = { SystemRoot: systemRoot };
   // DPAPI CurrentUser depends on the loaded Windows profile. Keep only the
@@ -223,7 +223,7 @@ function windowsPowerShellRuntime(environment = process.env) {
     if (typeof environment[name] === "string" && environment[name]) env[name] = environment[name];
   }
   return {
-    command: join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    command: win32Path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     env,
   };
 }

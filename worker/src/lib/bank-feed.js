@@ -50,6 +50,7 @@ import {
   assignPlaidAccountEntity,
   PlaidAccountEntityError,
   plaidOwnerAccountStatus,
+  reassignPlaidAccountEntity,
 } from "./plaid-account-entities.js";
 
 /**
@@ -145,6 +146,25 @@ export function bankFeedConfig(env) {
   const environment = env.BANK_FEED_ENV === "production" ? "production" : "sandbox";
   const profile = bankFeedProfile(env, environment);
   const apiBase = profile.apiBase;
+  if (profile.provider === "simplefin") {
+    if (!bankAccessWrappingKeyConfigured(env)) {
+      throw new FeedConfigError(
+        `the bank feed is not configured on this brain (${BANK_ACCESS_WRAPPING_KEY_SECRET} not set). ` +
+        "Run the reviewed bank connection setup first.",
+      );
+    }
+    return {
+      clientId: null,
+      secret: null,
+      environment: "production",
+      provider: "simplefin",
+      apiBase: null,
+      linkSdkUrl: null,
+      linkGlobal: null,
+      displayName: env.BANK_FEED_DISPLAY_NAME || env.BRAIN_NAME || "this brain",
+      countryCodes: [],
+    };
+  }
   const missing = [
     !clientId && "BANK_FEED_CLIENT_ID",
     !secret && "BANK_FEED_SECRET",
@@ -192,6 +212,7 @@ export function bankFeedConfig(env) {
 export function bankFeedEnabled(env) {
   const environment = env.BANK_FEED_ENV === "production" ? "production" : "sandbox";
   const profile = bankFeedProfile(env, environment);
+  if (profile.provider === "simplefin") return bankAccessWrappingKeyConfigured(env);
   return Boolean(
     env.BANK_FEED_CLIENT_ID &&
     env.BANK_FEED_SECRET &&
@@ -319,6 +340,10 @@ export function bankFeedOwnerErrorMessage(data, status) {
     bank_account_status_unavailable: "We could not safely read the account list. Your connection is unchanged. Please check again.",
     bank_account_assignment_unavailable: "We could not safely save that choice. Nothing was moved. Please try the same choice again.",
     bank_account_reassignment_requires_review: "This account already has financial history under another business. A technician should review it before anything moves.",
+    bank_account_reassignment_scope_changed: "The account owner changed since this move was reviewed. Refresh the account list and review it again.",
+    bank_account_reassignment_period_closed: "A closed financial period protects one of these owners. Nothing was moved.",
+    bank_account_reassignment_reconciled: "This account has a saved reconciliation that must be reviewed before its owner can change.",
+    bank_account_reassignment_unavailable: "We could not safely finish that reviewed move. Nothing was moved. Retry the same request.",
     entity_not_found: "That business is no longer available. Refresh the list and choose an active business.",
     entity_not_owned: "That business is not owner-controlled, so the account was not assigned to it.",
     request_id_conflict: "This saved retry belongs to a different choice. Refresh the page and try again.",
@@ -1211,6 +1236,10 @@ export async function runFeedSlice(env, { maxItems = 3, maxPages = MAX_PAGES_PER
     const { runPlaidFeedSlice } = await import("./plaid-bank-feed.js");
     return runPlaidFeedSlice(env, { maxItems, fetchImpl, now });
   }
+  if (bankFeedConfig(env).provider === "simplefin") {
+    const { runSimpleFinMaintenance } = await import("./simplefin-bank-feed.js");
+    return runSimpleFinMaintenance(env, { maxItems, maxRequestsPerItem: maxPages, fetchImpl, now });
+  }
   const { tenantId } = tenantReference(env);
   const stamp = now || new Date().toISOString();
   const pending = (await env.DB.prepare(
@@ -1256,6 +1285,32 @@ export async function runFeedSlice(env, { maxItems = 3, maxPages = MAX_PAGES_PER
 }
 
 /**
+ * A committed owner assignment changes rendered bank metadata even when the
+ * provider has no new ledger page. Reuse the provider-triggered writer when it
+ * ran, and otherwise start one bounded metadata generation directly.
+ */
+export async function refreshBankActivityAfterAccountAssignment(env, {
+  fetchImpl = fetch,
+  now = null,
+  runFeedSliceImpl = runFeedSlice,
+  writeBankActivityDocumentsImpl = null,
+} = {}) {
+  let sync;
+  let syncError = null;
+  try {
+    sync = await runFeedSliceImpl(env, { fetchImpl, now });
+    if (sync?.bank_activity?.outcome !== "no_committed_promotion") return sync;
+  } catch (error) {
+    syncError = error;
+  }
+  const writer = writeBankActivityDocumentsImpl ||
+    (await import("./bank-activity-doc.js")).writeBankActivityDocuments;
+  const bankActivity = await writer(env, { metadataChanges: 1, at: now });
+  if (syncError) throw syncError;
+  return { ...sync, bank_activity: bankActivity };
+}
+
+/**
  * What the operator and the owner both need to see: which banks are connected,
  * which need attention, and how far the history load has got. No reference, no
  * ciphertext, no provider payload.
@@ -1264,6 +1319,10 @@ export async function feedStatus(env) {
   if (env.BANK_FEED_PROVIDER === "plaid") {
     const { plaidFeedStatus } = await import("./plaid-bank-feed.js");
     return plaidFeedStatus(env);
+  }
+  if (env.BANK_FEED_PROVIDER === "simplefin") {
+    const { simpleFinFeedStatus } = await import("./simplefin-bank-feed.js");
+    return simpleFinFeedStatus(env);
   }
   const { tenantId } = tenantReference(env);
   const items = (await env.DB.prepare(
@@ -1315,6 +1374,10 @@ export async function disconnectItem(env, itemRef, { fetchImpl = fetch, now = nu
   if (bankFeedConfig(env).provider === "plaid") {
     const { disconnectPlaidItem } = await import("./plaid-bank-feed.js");
     return disconnectPlaidItem(env, itemRef, { fetchImpl, now });
+  }
+  if (bankFeedConfig(env).provider === "simplefin") {
+    const { disconnectSimpleFinConnection } = await import("./simplefin-bank-feed.js");
+    return disconnectSimpleFinConnection(env, itemRef, { now });
   }
   const { tenantId } = tenantReference(env);
   const item = await loadItem(env, tenantId, itemRef);
@@ -1453,6 +1516,16 @@ function assignmentRequestId(accountRef, entitySlug) {
   }
   return { key, value };
 }
+function reassignmentRequestId(accountRef, fromEntitySlug, toEntitySlug) {
+  const key = "bank_reassignment_request:" + accountRef + ":" + fromEntitySlug + ":" + toEntitySlug;
+  let value = null;
+  try { value = sessionStorage.getItem(key); } catch (e) {}
+  if (!value) {
+    value = crypto.randomUUID();
+    try { sessionStorage.setItem(key, value); } catch (e) {}
+  }
+  return { key, value };
+}
 function make(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined && text !== null) node.textContent = String(text);
@@ -1500,6 +1573,7 @@ const assignmentQueue = [];
 const bankAssignmentStates = new Map();
 const bankAssignmentResults = new Map();
 let assignmentQueueBusy = false;
+let accountRenderVersion = 0;
 async function saveAccountAssignment(account, entitySlug) {
   const retry = assignmentRequestId(account.account_ref, entitySlug);
   accountSay("Saving that choice…");
@@ -1588,6 +1662,178 @@ async function assignBankAccounts(bankKey, accounts, entitySlug, button, results
   const failures = results.filter((result) => !result.saved);
   if (failures.length > 0) accountSay(failures[failures.length - 1].message, true);
 }
+function appendReassignmentControl(card, account, entities) {
+  const accountRef = account.account_ref;
+  const renderVersion = accountRenderVersion;
+  const fromEntitySlug = account.assignment && account.assignment.entity_scope
+    ? account.assignment.entity_scope.entity_slug
+    : null;
+  if (!fromEntitySlug) return;
+  const alternatives = entities.filter((entity) => entity.entity_slug !== fromEntitySlug);
+  if (alternatives.length === 0) return;
+  const start = make("button", "Move to another owner");
+  start.type = "button";
+  start.className = "secondary";
+  start.onclick = () => {
+    start.disabled = true;
+    const panel = make("div", null, "assign");
+    const label = make("label", "Move this account to");
+    const select = make("select");
+    label.htmlFor = select.id = "reassign-entity-" + accountRef;
+    select.append(make("option", "Choose a different owner"));
+    select.options[0].value = "";
+    for (const entity of alternatives) {
+      const option = make("option", entity.label || entity.legal_name || entity.entity_slug);
+      option.value = entity.entity_slug;
+      select.append(option);
+    }
+    const review = make("button", "Review move");
+    review.type = "button";
+    const result = make("div", null, "note");
+    let reviewVersion = 0;
+    let reviewedMove = null;
+    let currentApply = null;
+    let applying = false;
+    const currentSource = () => account.assignment && account.assignment.state === "assigned" &&
+      account.assignment.entity_scope ? account.assignment.entity_scope.entity_slug : null;
+    const currentAccount = () => accountRenderVersion === renderVersion &&
+      account.account_ref === accountRef && currentSource() === fromEntitySlug;
+    const staleAccountMessage = () => currentSource() !== fromEntitySlug
+      ? "The account owner changed. Refresh the account list and review it again."
+      : "The account list changed. Refresh the account list and review it again.";
+    const invalidateReview = (message) => {
+      reviewVersion += 1;
+      reviewedMove = null;
+      if (currentApply) currentApply.disabled = true;
+      currentApply = null;
+      result.replaceChildren(make("p", message));
+      result.className = "note";
+      review.disabled = false;
+    };
+    select.onchange = () => {
+      if (!applying) invalidateReview("The choice changed. Review this move again before applying it.");
+    };
+    review.onclick = async () => {
+      if (applying || review.disabled) return;
+      if (!currentAccount()) { invalidateReview(staleAccountMessage()); return; }
+      if (!select.value) { result.textContent = "Choose a different owner first."; return; }
+      const toEntitySlug = select.value;
+      const version = ++reviewVersion;
+      reviewedMove = null;
+      if (currentApply) currentApply.disabled = true;
+      currentApply = null;
+      review.disabled = true;
+      result.replaceChildren();
+      result.className = "note";
+      result.textContent = "Checking the account history and review locks…";
+      try {
+        const preview = await post("/api/bank-feed/accounts/reassign", {
+          mode: "preview",
+          account_ref: accountRef,
+          from_entity_slug: fromEntitySlug,
+          to_entity_slug: toEntitySlug,
+        });
+        // An older response cannot revive approval after a selection change or
+        // account-list refresh, even when the choice changes away and back.
+        if (version !== reviewVersion) return;
+        if (!currentAccount()) { invalidateReview(staleAccountMessage()); return; }
+        if (select.value !== toEntitySlug) {
+          invalidateReview("The choice changed. Review this move again before applying it.");
+          return;
+        }
+        if (preview?.account_ref !== accountRef || preview.can_apply !== true ||
+            preview.from_owner?.entity_slug !== fromEntitySlug ||
+            preview.to_owner?.entity_slug !== toEntitySlug ||
+            !Number.isSafeInteger(preview.history?.transactions) || preview.history.transactions < 0 ||
+            !Number.isSafeInteger(preview.history?.balance_snapshots) || preview.history.balance_snapshots < 0) {
+          throw new Error("The reviewed move preview was incomplete. Nothing was moved.");
+        }
+        const approvedMove = Object.freeze({
+          account_ref: accountRef,
+          from_entity_slug: fromEntitySlug,
+          to_entity_slug: toEntitySlug,
+        });
+        reviewedMove = approvedMove;
+        const transactions = preview.history.transactions;
+        const balances = preview.history.balance_snapshots;
+        result.replaceChildren();
+        result.append(make("p", "Move from " + preview.from_owner.label + " to " + preview.to_owner.label +
+          ". This keeps " + transactions + " " + (transactions === 1 ? "transaction" : "transactions") +
+          " and " + balances + " " + (balances === 1 ? "balance snapshot" : "balance snapshots") +
+          " with the account."));
+        const apply = make("button", "Move account history");
+        apply.type = "button";
+        currentApply = apply;
+        apply.onclick = async () => {
+          if (apply.disabled || applying) return;
+          if (!currentAccount()) { invalidateReview(staleAccountMessage()); return; }
+          if (reviewedMove !== approvedMove || version !== reviewVersion ||
+              select.value !== approvedMove.to_entity_slug) {
+            invalidateReview("The choice changed. Review this move again before applying it.");
+            return;
+          }
+          applying = true;
+          select.disabled = true;
+          review.disabled = true;
+          apply.disabled = true;
+          apply.textContent = "Moving…";
+          const retry = reassignmentRequestId(approvedMove.account_ref,
+            approvedMove.from_entity_slug, approvedMove.to_entity_slug);
+          try {
+            const moved = await post("/api/bank-feed/accounts/reassign", {
+              mode: "apply",
+              request_id: retry.value,
+              ...approvedMove,
+            });
+            if (moved?.moved !== true || moved.changed !== true ||
+                moved.request_id !== retry.value || moved.account_ref !== approvedMove.account_ref ||
+                moved.from_owner?.entity_slug !== approvedMove.from_entity_slug ||
+                moved.to_owner?.entity_slug !== approvedMove.to_entity_slug ||
+                moved.entity_scope?.entity_slug !== approvedMove.to_entity_slug ||
+                typeof moved.to_owner.label !== "string" || !moved.to_owner.label.trim()) {
+              const message = "The move response could not be verified. Check the account list before trying again.";
+              invalidateReview(message);
+              accountSay(message, true);
+              return;
+            }
+            try { sessionStorage.removeItem(retry.key); } catch (e) {}
+            reviewedMove = null;
+            const refreshed = await loadAccounts({ quiet: true });
+            accountSay("The account and its saved history now belong to " + moved.to_owner.label + "." +
+              (refreshed < 0 ? " The account list could not refresh. Check again." : ""), refreshed < 0);
+          } catch (error) {
+            accountSay(error.message, true);
+            if (error.code === "bank_account_reassignment_scope_changed" ||
+                error.code === "request_id_conflict" || !currentAccount()) {
+              invalidateReview(error.message);
+            } else if (reviewedMove === approvedMove && version === reviewVersion &&
+                select.value === approvedMove.to_entity_slug) {
+              // A lost response may have committed. Retain the exact receipt
+              // identity and let only the same reviewed choice be retried.
+              apply.disabled = false;
+              apply.textContent = "Move account history";
+            } else {
+              invalidateReview("The choice changed. Review this move again before applying it.");
+            }
+          } finally {
+            applying = false;
+            select.disabled = false;
+            if (!reviewedMove) review.disabled = false;
+          }
+        };
+        result.append(apply);
+      } catch (error) {
+        if (version !== reviewVersion) return;
+        result.textContent = error.message;
+        result.className = "err";
+        review.disabled = false;
+      }
+    };
+    panel.append(label, select, review);
+    card.append(panel, result);
+  };
+  card.append(start);
+}
 function renderAccountCard(account, entities) {
     const waiting = !account.assignment || account.assignment.state !== "assigned";
     const card = make("article", null, waiting ? "account waiting" : "account");
@@ -1595,6 +1841,7 @@ function renderAccountCard(account, entities) {
     const institution = account.institution_label ? account.institution_label + ". " : "";
     if (account.assignment && account.assignment.state === "assigned") {
       card.append(make("p", institution + "Assigned to " + (account.assignment.entity_label || "the selected owner") + "."));
+      appendReassignmentControl(card, account, entities);
     } else if (entities.length === 0) {
       // An empty list with a disabled button is a dead end. Point to the one
       // thing that unblocks every account instead.
@@ -1632,6 +1879,7 @@ function renderAccountCard(account, entities) {
     return card;
 }
 function renderAccounts(accounts, entities) {
+  accountRenderVersion += 1;
   const root = el("accounts");
   root.replaceChildren();
   const groups = new Map();
@@ -1893,7 +2141,10 @@ export async function handleBankFeed(env, request, url, path, ctx) {
       } catch {
         ownerEntityCount = null;
       }
-      const { html, csp } = connectPageHtml(bankFeedConfig(env), { ownerEntityCount });
+      const runtime = bankFeedConfig(env);
+      const { html, csp } = runtime.provider === "simplefin"
+        ? (await import("./simplefin-bank-feed.js")).simpleFinConnectPageHtml(runtime, { ownerEntityCount })
+        : connectPageHtml(runtime, { ownerEntityCount });
       return new Response(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
@@ -1906,11 +2157,31 @@ export async function handleBankFeed(env, request, url, path, ctx) {
       });
     }
 
+    if (path === "/api/bank-feed/simplefin/claim" && request.method === "POST") {
+      const access = await ownerAccess();
+      if (!access.authorised) return privateNoStore(ownerRefusal(access));
+      if (bankFeedConfig(env).provider !== "simplefin") {
+        return ownerJson({ error: "not found", code: "simplefin_provider_not_selected" }, 404);
+      }
+      const body = await readJson(request);
+      const { claimSimpleFinAccess } = await import("./simplefin-bank-feed.js");
+      const result = await claimSimpleFinAccess(env, {
+        requestId: body.request_id,
+        setupToken: body.setup_token,
+        fetchImpl: ctx?.bankFeedFetchImpl || fetch,
+        now: ctx?.bankFeedNow || null,
+      });
+      return ownerJson(result.body, result.status);
+    }
+
     if (path === "/api/bank-feed/link-token" && request.method === "POST") {
       const access = await ownerAccess();
       if (!access.authorised) return ownerRefusal(access);
       const body = await readJson(request);
       const runtime = bankFeedConfig(env);
+      if (runtime.provider === "simplefin") {
+        return ownerJson({ error: "invalid_request", code: "simplefin_claim_required" }, 400);
+      }
       if (runtime.provider === "plaid" &&
           (typeof body.request_id !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(body.request_id))) {
         return jsonResponse({
@@ -1930,6 +2201,9 @@ export async function handleBankFeed(env, request, url, path, ctx) {
     if (path === "/api/bank-feed/exchange" && request.method === "POST") {
       const access = await ownerAccess();
       if (!access.authorised) return ownerRefusal(access);
+      if (bankFeedConfig(env).provider === "simplefin") {
+        return ownerJson({ error: "invalid_request", code: "simplefin_claim_required" }, 400);
+      }
       const body = await readJson(request);
       const result = await exchangePublicToken(env, {
         sessionRef: body.session_ref || null,
@@ -1959,6 +2233,10 @@ export async function handleBankFeed(env, request, url, path, ctx) {
       const access = await ownerAccess();
       if (!access.authorised) return privateNoStore(ownerRefusal(access));
       const runtime = bankFeedConfig(env);
+      if (runtime.provider === "simplefin") {
+        const { simpleFinOwnerAccountStatus } = await import("./simplefin-bank-feed.js");
+        return ownerJson(await simpleFinOwnerAccountStatus(env));
+      }
       if (runtime.provider !== "plaid") {
         return ownerJson({
           error: "unavailable",
@@ -1975,6 +2253,12 @@ export async function handleBankFeed(env, request, url, path, ctx) {
       const access = await ownerAccess();
       if (!access.authorised) return privateNoStore(ownerRefusal(access));
       const runtime = bankFeedConfig(env);
+      if (runtime.provider === "simplefin") {
+        const body = await readJson(request);
+        const { assignSimpleFinAccountEntity } = await import("./simplefin-bank-feed.js");
+        const assigned = await assignSimpleFinAccountEntity(env, body);
+        return ownerJson(assigned.body, assigned.status);
+      }
       if (runtime.provider !== "plaid") {
         return ownerJson({
           error: "unavailable",
@@ -1996,12 +2280,37 @@ export async function handleBankFeed(env, request, url, path, ctx) {
           readyToResume = !status.unavailable && status.summary?.assignment_required === 0;
         } catch {}
         if (readyToResume) {
-          ctx.waitUntil(runFeedSlice(env, {
+          ctx.waitUntil(refreshBankActivityAfterAccountAssignment(env, {
             fetchImpl: ctx?.bankFeedFetchImpl || fetch,
+            now: ctx?.bankFeedNow || null,
           }).catch(() => {}));
         }
       }
       return ownerJson(assigned.body, assigned.status);
+    }
+
+    if (path === "/api/bank-feed/accounts/reassign" && request.method === "POST") {
+      const access = await ownerAccess();
+      if (!access.authorised) return privateNoStore(ownerRefusal(access));
+      const runtime = bankFeedConfig(env);
+      if (runtime.provider !== "plaid") {
+        return ownerJson({
+          error: "unavailable",
+          code: "bank_account_reassignment_unavailable",
+          unavailable: true,
+        }, 503);
+      }
+      const body = await readJson(request);
+      const reassigned = await reassignPlaidAccountEntity(env, body, {
+        now: ctx?.bankFeedNow || null,
+      });
+      if (reassigned.body?.changed && reassigned.body?.replayed !== true && ctx?.waitUntil) {
+        ctx.waitUntil(refreshBankActivityAfterAccountAssignment(env, {
+          fetchImpl: ctx?.bankFeedFetchImpl || fetch,
+          now: ctx?.bankFeedNow || null,
+        }).catch(() => {}));
+      }
+      return ownerJson(reassigned.body, reassigned.status);
     }
 
     if (path === "/api/bank-feed/sync" && request.method === "POST") {
@@ -2054,6 +2363,14 @@ export async function handleBankFeed(env, request, url, path, ctx) {
 
     return jsonResponse({ error: "not found" }, 404);
   } catch (error) {
+    if (error?.provider === "simplefin" && typeof error?.code === "string") {
+      const status = Number.isInteger(error.status) ? error.status : 502;
+      return privateNoStore(jsonResponse({
+        error: status === 409 ? "conflict" : status === 400 ? "invalid_request" : "unavailable",
+        code: String(error.code).slice(0, 80),
+        ...(status >= 500 ? { unavailable: true } : {}),
+      }, status));
+    }
     if (error instanceof PlaidAccountEntityError) {
       const errorName = error.status === 503
         ? "unavailable"

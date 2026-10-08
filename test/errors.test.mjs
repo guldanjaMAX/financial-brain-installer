@@ -23,6 +23,7 @@ import {
 import { tmpdir } from "node:os";
 import { previewSupportJournal } from "../support-journal.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { cliTestEnvironment } from "./helpers/cli-test-environment.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -56,6 +57,9 @@ const PUBLIC_SECRET_GUIDANCE = [
 ];
 const INGEST_EXIT_FETCH = pathToFileURL(join(HERE, "fixtures", "ingest-exit-fetch.mjs")).href;
 const ISOLATE_SUPPORT_ROOT = pathToFileURL(join(HERE, "fixtures", "isolate-support-root.mjs")).href;
+const SIDE_EFFECT_TRIPWIRE = new URL("./fixtures/cli-side-effect-tripwire.mjs", import.meta.url).href;
+const DOCTOR_DEPENDENCIES = new URL("./fixtures/doctor-cli-preload.mjs", import.meta.url).href;
+const SUPPORT_ACL = new URL("./fixtures/support-journal-acl-preload.mjs", import.meta.url).href;
 const UNEXPECTED_CRASH = pathToFileURL(join(HERE, "fixtures", "unexpected-crash.mjs")).href;
 const UNWRITABLE_SUPPORT = pathToFileURL(join(HERE, "fixtures", "unwritable-support.mjs")).href;
 let fail = 0, ran = 0;
@@ -74,7 +78,7 @@ function readSupportJournal(userRoot) {
 }
 function cli(args, env = {}, options = {}) {
   const userRoot = options.userRoot || mkdtempSync(join(tmpdir(), "brain-support-cli-"));
-  const e = { ...process.env, ...env };
+  const e = cliTestEnvironment(userRoot, env);
   delete e.CLOUDFLARE_API_TOKEN;
   delete e.ADMIN_KEY;
   delete e.BRAIN_DEBUG;
@@ -83,13 +87,15 @@ function cli(args, env = {}, options = {}) {
   // `wrangler login` on the machine running the suite is a credential, so pin
   // it off rather than letting the result depend on who is signed in.
   e.BRAIN_NO_WRANGLER_LOGIN = "1";
-  const imports = [ISOLATE_SUPPORT_ROOT, ...(options.imports || [])];
+  const imports = [SIDE_EFFECT_TRIPWIRE, ISOLATE_SUPPORT_ROOT, SUPPORT_ACL, ...(options.imports || [])];
   const nodeArguments = imports.flatMap((specifier) => ["--import", specifier]);
-  // Generous: on a cold machine the Cloudflare checks download wrangler before
-  // they can answer, which is minutes, not seconds.
-  const r = spawnSync("node", [...nodeArguments, CLI, ...args], {
-    encoding: "utf-8", env: e, timeout: 300_000,
+  const r = spawnSync(process.execPath, [...nodeArguments, CLI, ...args], {
+    encoding: "utf-8", env: e, cwd: userRoot, timeout: 30_000,
   });
+  if (r.status === 86 || /TEST_SIDE_EFFECT_BLOCKED:/.test(r.stderr || "")) {
+    const boundary = String(r.stderr || "").match(/TEST_SIDE_EFFECT_BLOCKED:[^\r\n]*/)?.[0] || `exit ${r.status}`;
+    throw new Error(`CLI fixture attempted an uninjected host action (${boundary})`);
+  }
   const journal = readSupportJournal(userRoot);
   if (!options.keepUserRoot) rmSync(userRoot, { recursive: true, force: true });
   return {
@@ -242,27 +248,36 @@ function ingestExitCli(scenario) {
       scopes: ["drive"],
     },
   }), { mode: 0o600 });
+  const adminKeyPath = join(userRoot, ".brain-admin-key");
+  writeFileSync(adminKeyPath, "fixture-admin", { mode: 0o600 });
 
-  const env = {
-    ...process.env,
+  const env = cliTestEnvironment(userRoot, {
     BRAIN_GOOGLE_TOKEN_STORE: "file",
     BRAIN_INGEST_EXIT_TEST: scenario,
     BRAIN_INGEST_EXIT_USER_ROOT: userRoot,
-    ADMIN_KEY: "fixture-admin",
-  };
+    BRAIN_TEST_ADMIN_KEY_FILE: adminKeyPath,
+  });
   delete env.CLOUDFLARE_API_TOKEN;
   delete env.BRAIN_DEBUG;
   const args = scenario.startsWith("drive")
     ? ["ingest", manifest, "--from", "drive"]
     : ["ingest", manifest, "--path", source];
-  const result = spawnSync("node", ["--import", INGEST_EXIT_FETCH, CLI, ...args], {
-    encoding: "utf-8", env, timeout: 30_000,
+  env.BRAIN_TEST_USER_ROOT = userRoot;
+  const result = spawnSync(process.execPath, ["--import", SIDE_EFFECT_TRIPWIRE, "--import", SUPPORT_ACL, "--import", INGEST_EXIT_FETCH, CLI, ...args], {
+    encoding: "utf-8", env, cwd: userRoot, timeout: 30_000,
   });
+  if (result.status === 86 || /TEST_SIDE_EFFECT_BLOCKED:/.test(result.stderr || "")) {
+    const boundary = String(result.stderr || "").match(/TEST_SIDE_EFFECT_BLOCKED:[^\r\n]*/)?.[0] || `exit ${result.status}`;
+    throw new Error(`Ingest fixture attempted an uninjected host action (${boundary})`);
+  }
+  const statePath = join(dir, `.brain-ingest-${scenario.startsWith("drive") ? "drive" : "upload"}.json`);
+  check(`synthetic ${scenario} ingest reached its recovery-state write`,
+    existsSync(statePath), strip(`${result.stdout || ""}${result.stderr || ""}`));
   return {
     code: result.status,
     out: strip(`${result.stdout || ""}${result.stderr || ""}`),
     dir,
-    statePath: join(dir, `.brain-ingest-${scenario.startsWith("drive") ? "drive" : "upload"}.json`),
+    statePath,
     journal: readSupportJournal(userRoot),
   };
 }
@@ -437,7 +452,8 @@ function ingestExitCli(scenario) {
   const failed = cli(["status", missing], {}, { userRoot, keepUserRoot: true });
   const preview = cli(["support", "--preview"], {}, { userRoot, keepUserRoot: true });
   check("support preview returns the exact canonical bytes recorded by the failed command",
-    failed.code === 1 && preview.code === 0 && preview.out === failed.journal, preview.out);
+    // The preview channel is stdout; Windows test fixtures report on stderr.
+    failed.code === 1 && preview.code === 0 && preview.stdout === failed.journal, preview.out);
   if (process.platform !== "win32") {
     const legacyDirectories = [
       join(userRoot, ".brain"),
@@ -537,10 +553,16 @@ for (const helpArgument of ["--help", "-h", "help"]) {
 
 /* ---- doctor must never be the thing that breaks ---- */
 {
-  const r = cli(["doctor"]);
+  const r = cli(["doctor"], { BRAIN_TEST_DOCTOR: "missing" }, { imports: [DOCTOR_DEPENDENCIES] });
   check("doctor reports even with nothing configured", /Node/.test(r.out), r.out.slice(0, 160));
   check("and shows no stack trace", !/\bat .*\.mjs:\d+/.test(r.out));
   check("and tells the reader what to fix", /What to do/.test(r.out) || /ready to install/.test(r.out), r.out.slice(-200));
+  check("doctor reached the real diagnostic stages before its explained refusal",
+    r.code === 1 && ["dispatch", "local", "network", "google-storage"].every((stage) =>
+      r.out.includes(`TEST_DOCTOR_STAGE:${stage}`)));
+  const ready = cli(["doctor"], { BRAIN_TEST_DOCTOR: "ready" }, { imports: [DOCTOR_DEPENDENCIES] });
+  check("doctor green control reaches credential readability and completes",
+    ready.code === 0 && /TEST_DOCTOR_STAGE:google-readable/.test(ready.out) && /ready to install/.test(ready.out));
 }
 
 /* ---- the network layer translates rather than leaking ---- */

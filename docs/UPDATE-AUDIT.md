@@ -161,21 +161,21 @@ login as a completed update. Never promise a duration without a measurement.
 
 ## Current candidate lineage
 
-The unreleased 0.4.9/schema48 field candidate carries 41 stable incident rows.
-The earlier held 0.4.7 and 0.4.8 candidates were never tagged, published, or
-offered as customer updates. Their identities and planning records remain
-historical and are not reused as proof for the changed 0.4.9 bytes. The
-[current 0.4.9 evidence plan](release-evidence/v0.4.9-candidate-release-evidence-plan.md)
-remains unbound to a final SHA and records no field execution.
+The 0.4.10/schema48 audit tracks 41 stable incident rows. The earlier held
+0.4.7, 0.4.8 and 0.4.9 candidate records describe their own historical bytes;
+their evidence does not transfer to a changed package. Installation eligibility
+and publication status come from the current approved guide and reviewed
+receipt for the exact 0.4.10 artifact. The linked candidate evidence plan is a
+planning record, not installation approval or proof of field acceptance.
 Four are `verified` on reviewed evidence: UPDATE-010, UPDATE-014, UPDATE-026,
 and UPDATE-032. Their evidence documents remain attached to the exact rows in
-`update-incidents.json`. Two carry new exact-version 0.4.9 deferrals recorded
-on 2026-09-26 and ship unproven, printed in the release note: UPDATE-012
+`update-incidents.json`. Two carry exact-version 0.4.10 deferrals renewed on
+2026-10-06 and ship unproven, printed in the release note: UPDATE-012
 (Windows ARM64, under the condition ADR 007 set) and UPDATE-044 (bank freshness
 account breadth, under
 [ADR 008](decisions/008-rehome-update-025-breadth-into-update-044.md), only while
 general invitations stay closed). The other 35 block release
-writes. No earlier deferral was renewed for this candidate. UPDATE-017 through
+writes. No other earlier deferral was renewed for this candidate. UPDATE-017 through
 UPDATE-022 and UPDATE-025 still need their required real-provider evidence
 while bank credential setup and general invitations remain held. Schema 43 can bind
 eligible single-record local file ingests to their exact raw originals. Schema
@@ -186,9 +186,9 @@ citation pass together. Other ingest producers and ambiguous multi-record
 exports remain unbound, and the legacy whole-source provenance repair remains
 unaccepted. Every narrow receipt states `whole_source_complete: false` and does
 not authorize OCR, reingest, deletion, deployment, or customer execution.
-One exact-version narrowing recorded on 2026-09-26 applies to 0.4.9 only:
-ADR 008 lets UPDATE-044 carry an exact-version
-deferral although 0.4.9 changes Plaid code, and that deferral prints in the
+One exact-version narrowing originally recorded on 2026-09-26 is renewed for
+0.4.10 only: ADR 008 defines UPDATE-044's scope, and the current candidate plan
+records the renewal although 0.4.10 changes bank code. That deferral prints in the
 release note. Nothing else in this candidate weakens the gate. The
 acceptance-text record depends on the reference point. Since the held 0.4.8
 candidate, three acceptance texts changed and one row was added, because two
@@ -202,8 +202,8 @@ two-institution, two-business and business-banking-login breadth in the same
 words.
 Against the last shipped release, v0.4.6, five acceptance texts changed and
 two rows were added: those three texts and UPDATE-044, plus two more texts
-rewritten during the unshipped 0.4.7/0.4.8 work that ship for the first time in
-0.4.9, and UPDATE-043. UPDATE-037 (commit `41e8e30`) now requires the Windows refusal to name a
+rewritten during the unshipped 0.4.7/0.4.8/0.4.9 work that ship for the first time in
+0.4.10, and UPDATE-043. UPDATE-037 (commit `41e8e30`) now requires the Windows refusal to name a
 supported route that needs no secret entry, instead of a route that masks
 entry, because this release ships no PowerShell secret-entry bridge; the
 physical PowerShell 5.1 and 7 proof stays required. UPDATE-036 (commit
@@ -215,7 +215,9 @@ queued upserts cover the full deficit, every other shortfall or malformed state
 stopping, and proof of zero writes and side effects. UPDATE-043 is a new row
 since v0.4.6, not a changed text. The eight v0.4.6 deferrals (UPDATE-012,
 UPDATE-017 through UPDATE-022, and UPDATE-025) named version 0.4.6 and have
-expired; none was renewed for 0.4.7, 0.4.8, or 0.4.9. No row changed status or
+expired; none was renewed for 0.4.7 or 0.4.8. UPDATE-012 and UPDATE-044 received
+new exact-version records for 0.4.9 and are explicitly renewed for 0.4.10. No
+row changed status or
 evidence with either re-homing, and the release workflow still
 refuses to publish while any incident blocks. Earlier candidate
 rehearsals do not automatically clear changed code. Current named-profile OAuth

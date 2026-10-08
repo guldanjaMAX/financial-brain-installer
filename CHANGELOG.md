@@ -4,14 +4,217 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
-## 0.4.9
+## 0.4.10 (2026-10-06)
+
+- Daily refresh now advances its success date when files are refused,
+  unsupported, or excluded by rule when the run has no failures and verifies
+  accepted or unchanged documents. Empty or entirely refused runs keep the prior
+  success date and need review. Partial receipts retain the refused count and
+  do not claim complete history. Check daily status for the latest
+  outcome and count; real failures still keep the prior success date.
+
+- Provider sign-in timeouts now explain that nothing changed in the Brain and no
+  new connection was saved. Run the same command again to finish sign-in.
+  Interrupted source operations recover their lock only after matching this computer and user and
+  proving the prior process has stopped. Recovery is reported; uncertain locks
+  remain protected.
+- Provider imports renew a rejected access token once and retry the request once.
+  A second rejection asks you to sign in again. Interrupted or unverified token
+  renewal keeps the connection paused for reconnect; a replacement that has
+  already been saved never restores an older, consumed refresh token.
 
 Candidate only. This version has not been released. Its versioned README URLs
 are deliberately unavailable until a separate release approval and immutable
-asset publication. The held 0.4.8 candidate was never tagged, published, or
-offered as a customer update; its entries below ship for the first time in
-0.4.9, and its identity is retired so its evidence cannot be confused with
-this changed candidate.
+asset publication.
+
+At a glance, this candidate adds permanent daily imports on Windows and macOS
+that survive verified updates, Outlook calendar records, a SimpleFIN bank
+connection with transactions, bank-activity refresh after account moves, and
+Brain Feeds landing folders. Aggregate freshness is visible across those
+sources, and answers search first so they can cite current records before they
+write a response.
+
+- **Large database updates now wait for a slow column addition.** If the first
+  reply is uncertain, the update checks the exact column definition for up to
+  15 minutes before continuing. It never resends that column change while
+  checking. If the checks cannot reach Cloudflare, the message names the
+  connection problem and explains how to check the column before retrying.
+  After an interruption, rerun the update on the same computer. Its saved
+  recovery record keeps an unconfirmed column change from being sent again;
+  the update continues only after checking the exact column definition.
+- **Drain progress no longer looks like a receipt failure.** Accepted vectors
+  can wait for index visibility while the queue reports only a lower bound.
+  The command now keeps those counts distinct and shows visibility waits.
+  Completion still requires exact readiness; genuine count mismatches fail.
+  Let the scheduled background drain finish if a safety limit is reached, then
+  check `brain health <manifest>`.
+- **Windows credential storage now carries a signed helper.** Admin keys and
+  Google credentials use the verified packaged helper without compiling a new
+  program on each run. A missing or changed helper reports the reason before
+  using the guarded local compiler fallback. After updating, verify credential
+  storage on Windows with Smart App Control enabled; native Windows proof is
+  still required for this candidate.
+- **Outlook can take over after verified exported-mail history.** Your update
+  can set an exact starting time so Outlook imports only mail from that point
+  forward. Earlier digests and their citations stay available, and this mode
+  does not automatically delete stored mail. Check the boundary with
+  `brain sources <manifest>`; the exported coverage must be verified first.
+
+- **Daily imports now have one owned Windows and macOS contract.** `brain daily
+  on|off|status <manifest>` derives every source from your own manifest instead
+  of a fixed Google recipe, keeps Worker, push, capture, snapshot, disabled,
+  and existing faster schedules from being duplicated, and refuses unsupported
+  configured sources. The native task is different for every Brain and user,
+  contains no key, and must read back exactly before success. Updates pause it
+  while the shared load/update lock is held and restore a recomputed plan only
+  after the Brain is active, query-ready, and has no queued search updates.
+  Task Scheduler and launchd have no atomic compare-and-replace or
+  compare-and-delete operation. The installer makes its final ownership read
+  the last native call before each mutation, but another process running as the
+  same user can still replace the exactly named task in that operating-system
+  gap. If the Brain update passes but daily schedule recovery does not, the
+  command exits successfully with a visible `Daily imports need attention`
+  line, keeps the recovery receipt, and leaves imports paused for the next
+  verified update.
+  New schedules keep a stable `node` launcher in the native action and record
+  its resolved binary only as diagnostic information, so a normal Node upgrade
+  does not silently stop imports. A legacy Node-path-only difference keeps
+  running and prints `daily schedule needs refresh (Node changed)`; a missing
+  registered Node binary is named plainly. Run `brain daily on <manifest>` to
+  repair either state. `brain daily off` and the update pause can still change
+  an identity-owned task after definition drift, while a task without the
+  matching owner marker and Brain-and-user identity remains untouched.
+  Turning daily imports off saves that choice in the manifest, so a later
+  update does not turn them back on. An interrupted update keeps a private
+  recovery receipt and keeps imports disabled across restart until recovery is
+  verified.
+  Daily runs now keep a private, size-limited log for each Brain on both
+  platforms. Status shows the last run time and result, the next planned run,
+  and the last error. Missing runners, failed processes, and unknown native
+  results cannot appear as a successful run. Existing schedules keep their
+  execution hashes.
+  Status also prints one line per source with its owner and last successful run. To
+  check after updating: run `brain daily status <manifest>` and confirm every
+  source names the expected owner and a truthful last-success time or `never`.
+
+- **Windows updates coordinate temporary daily tasks.** Update pauses the old
+  daily tasks belonging to your Windows user and verifies the pause before
+  deployment. It removes only the tasks it paused, after the permanent daily
+  task is verified. If daily imports are off, the old task stays paused and
+  update tells you to run `brain daily on <manifest>`. A failed update attempts
+  to restore the old tasks and reports any restore failure. After updating,
+  check `brain daily status <manifest>` for the permanent schedule.
+
+- **You can now give your Brain up to six safe local landing folders.** Add an
+  existing folder with `brain folder <manifest> add --path <absolute> --source
+  <name>`, or create two empty `Brain Feeds` folders under your local home with
+  `brain folder <manifest> create-feeds`. The command refuses cloud-managed
+  roots, links, retired folders, overlaps, and missing paths before changing
+  settings. Feed loads skip configured exclusions and empty placeholders, and
+  moving a source file away never removes its content from your Brain. To
+  check: run `brain folder <manifest> status` and confirm each source, folder
+  existence, file count, and newest-file time without any file names shown.
+
+- **A Gmail sync can now move forward after a recoverable document storage
+  failure without losing that message.** The exact message is saved for retry
+  before the Gmail history marker advances, while the run still reports the
+  failure instead of claiming success. The next scheduled sync retries that
+  saved message even when Gmail reports no new changes, then clears it only
+  after the complete document family is accepted or Gmail supplies a current
+  typed exclusion. To check after updating: the first affected run may remain
+  red, but later runs should stop replaying the oldest mail and the saved retry
+  count should converge to zero.
+
+- **A Gmail sync now finishes ready when its only withheld messages contain
+  credentials.** Those messages still stay out of the Brain, and the receipt
+  keeps their count. Storage failures, retry work, unreadable policy evidence,
+  and other coverage gaps still fail the run. To check after updating: the next
+  refusal-only Gmail run should be ready and show its withheld-for-secrets
+  count, while a run with a storage failure should remain red.
+
+- **SECURITY: hidden entry now owns the terminal after a yes/no question.** A
+  key pasted at a hidden prompt that followed a yes/no question could be shown
+  on screen. If you did that while sharing your screen, roll that key. The
+  prompt now closes the visible question reader before accepting hidden input,
+  restores it afterward, and lets the command finish on its own.
+
+- **A Brain with a saved address no longer needs the account's workers.dev
+  address read during an update.** Cloudflare can refuse that account read even
+  when the saved browser sign-in can update the Brain. The full saved address,
+  including a saved workers.dev address, is already enough, so the update now
+  continues. A first setup with no saved address still stops and offers the
+  explicit account-scoped recovery token choice. To check: run the next update
+  with the Brain's saved browser sign-in.
+
+- **Cloudflare setup now gives you a recovery route if browser sign-in cannot
+  create the search index, and it never silently switches credentials.** Setup
+  now goes directly to a clear recovery choice that names the required Workers
+  Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read permissions. If
+  this computer has a saved recovery token, setup names its exact account and
+  protected-store location, warns that it may be old or revoked, and asks
+  before using it. You can decline it and enter a different token through the
+  hidden prompt. The saved account-bound key is also reused by later updates,
+  deploys, and verification without asking you to enter it again; only the
+  recovery path asks before choosing a saved key. On Windows, the recovery
+  offer is skipped because this release cannot prove that the prompt will hide
+  the key; approved automation can still use its reviewed secret-manager path.
+  A refused create now makes the same
+  recovery offer instead of stopping without a next step. A resumed setup
+  checks for each existing search filter before trying to create it again. A
+  non-interactive setup refusal names setup's existing `--cloudflare-token`
+  switch and all four required permissions. Updates keep using the saved
+  browser sign-in and never ask the owner to add that switch.
+
+- **An update now retries the last search-index check when an older paused
+  server answers briefly.** The active version can take a few seconds to reach
+  every server after deployment. If the final convergence step reaches the
+  older paused version, update now says it is retrying and waits for up to about
+  two minutes. Only that exact paused response is retried; other errors still
+  stop. A successful retry continues through the final health, acceptance, and
+  version readback checks.
+
+- **An approved pilot can use SimpleFIN Bridge as a second bank provider.** The
+  owner creates a one-time Setup Token in SimpleFIN and pastes it only into the
+  owner-only page on their Brain. The Brain claims the connection itself,
+  encrypts the Access URL in the owner's Worker, pulls bounded 90-day history
+  windows on its schedule, and asks where each discovered account belongs
+  before adding transactions to the financial map. Provider issues remain
+  visible on that page. This is not part of ordinary onboarding and has only
+  synthetic offline proof so far. To check an approved pilot, confirm the page
+  reports the saved connection, every account assignment, backfill progress,
+  and no current provider issues.
+
+- **Bank setup no longer needs a separate wrapping-key Terminal step.** When a
+  bank feed is enabled, setup, update, and deploy check the Worker's secret
+  names. If the independent bank wrapping key is missing, the Brain creates it,
+  saves it directly to the Worker, and verifies the name before continuing. An
+  existing key is left untouched, so retained encrypted bank connections remain
+  recoverable. The value is never shown, returned, copied into the manifest, or
+  derived from the admin or browser-session key. To check: rerun deploy and
+  confirm it reports that the wrapping-key name already exists and was not
+  replaced.
+
+- **Known issue, still open in 0.4.10: a partial answer can drop a name that
+  ends in an abbreviation.** When the documents answer only part of a
+  question, the Brain keeps the sentences its sources support and names what
+  is missing. It still reads the full stop in an abbreviation such as "Co." as
+  the end of a sentence, so from "Example Co. recorded March income of $1,234
+  [1]." it can keep only "recorded March income of $1,234 [1]." The figure and
+  its citation are unchanged; the words before the abbreviation's full stop
+  are lost. To check: open the cited source to see whom a kept figure belongs
+  to.
+
+### This release does NOT cover
+
+- **UPDATE-012:** Windows x64 is the only supported Windows runtime in this
+  release. Windows ARM64 ships unproven.
+- **UPDATE-044:** Bank breadth ships unproven.
+  Bank invitations stay closed in this release.
+
+## 0.4.9
+
+Delivered to supervised owners through the sealed kit and owner update pages.
+This version was not tagged on GitHub.
 
 - **A saved browser sign-in no longer blocks a custom-domain Brain at the
   workers.dev address check.** Cloudflare can refuse that account read even

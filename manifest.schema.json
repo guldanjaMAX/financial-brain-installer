@@ -390,7 +390,7 @@
         },
         "microsoft": {
           "type": "object",
-          "description": "Read-only Microsoft 365 Outlook, OneDrive, and selected SharePoint drives using Graph delta links. Message and drive tombstones are authoritative, and supported file bodies are downloaded to the owner machine for the common extraction path before a terminal delta link may advance.",
+          "description": "Read-only Microsoft 365 Outlook mail and calendar, OneDrive, and selected SharePoint drives using independent Graph delta links. Calendar events use immutable IDs and a rolling 30-day-past and 90-day-future view; only tombstones scoped to the saved event inventory receive calendar deletion authority. Supported file bodies are downloaded to the owner machine for the common extraction path before terminal delta links may advance.",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -412,6 +412,12 @@
               "default": [
                 "inbox"
               ]
+            },
+            "mail_start_at": {
+              "type": ["string", "null"],
+              "default": null,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+              "description": "Optional inclusive UTC start of unexported mail after verified digest coverage (YYYY-MM-DDTHH:mm:ss.sssZ). Applies on first load, delta sync and reset. Earlier exports and citations stay in their original source. With this setting, mail tombstones and absence-based snapshot removals are not applied; deletion is a separate owner-approved operation. Null preserves ordinary full-mail sync. Never infer this from an export filename or file modification time."
             },
             "drive_ids": {
               "type": "array",
@@ -495,6 +501,51 @@
               "type": "boolean",
               "default": false
             },
+            "folders": {
+              "type": "array",
+              "description": "Local upload roots. A string is the legacy unnamed form. New Brain feeds use an object with path, source, and feed true so daily load preserves source identity and applies append-only feed safety.",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "path",
+                      "source"
+                    ],
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "An absolute local folder path selected by the owner. brain folder add validates existence, cloud-root boundaries, links, retired roots, and overlap before writing it."
+                      },
+                      "source": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_-]*$",
+                        "maxLength": 64
+                      },
+                      "feed": {
+                        "type": "boolean",
+                        "description": "True marks an owner landing feed as append-only: missing, placeholder, and excluded files never remove content already loaded into the Brain."
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "exclude": {
+              "type": "array",
+              "description": "Folder names or path globs skipped by feed-folder walks. Exclusions are counted, never loaded, and never treated as deletion evidence for append-only feeds.",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "uniqueItems": true,
+              "default": []
+            },
             "retired_at": {
               "type": "string",
               "format": "date-time",
@@ -575,7 +626,7 @@
         },
         "bank_feed": {
           "type": "object",
-          "description": "A hosted, read-only bank connection the ACCOUNT HOLDER authorises themselves, in their own browser, on their own bank's screen. No password, one-time code, or bank credential is ever seen, requested, handled, or stored by the operator or by this codebase; what the brain receives is a read-only reference for fetching transaction history, and it is stored encrypted in the client's own D1. General customer invitations remain held. The Brain owner may set enabled:true with provider plaid and environment sandbox or production for their own owner-present connection. `brain connect bank` lists the Worker's secret names and, only when BANK_FEED_CLIENT_ID, BANK_FEED_SECRET, or BANK_FEED_WRAPPING_KEY_V2 is missing, asks the owner for the Plaid client ID and secret at a hidden prompt, generates a missing wrapping key, writes them to the Worker, and re-lists the names before opening Link; an existing wrapping key is never replaced. No command, including `brain connect bank`, `brain secrets`, `brain setup`, or technician workflows, accepts those values from environment variables. When enabled:true, routine secret repair requires all three names to exist already on the Worker before rotating core keys and preserves those existing bindings; a missing binding stops and points to `brain connect bank`. The wrapping key is never derived from provider, admin, or session credentials and remains owner custody needed for recovery. With enabled:false the provider client ID and secret are deleted by the next `brain secrets` run, stopping sync. The independent wrapping key is preserved so disabling and later re-enabling cannot silently destroy access-reference recovery custody; removing that key requires a separate explicit teardown. `brain doctor` fails unless the manifest records this brain's exact return and Plaid webhook addresses. Those URI fields are non-secret evidence of registration already completed in the owner's Plaid dashboard; they do not perform it.",
+          "description": "A hosted, read-only bank connection the ACCOUNT HOLDER authorises themselves. No password, one-time code, or bank credential is handled by the operator. Provider plaid uses owner-present Link and Worker-held Plaid application credentials. Provider simplefin accepts a one-time Setup Token only on the owner-authenticated Brain page and encrypts the returned Access URL in the owner's D1; it has no manifest credential or endpoint. Setup, update, and deploy create the independent wrapping key BANK_FEED_WRAPPING_KEY_V2 only when its exact Worker secret name is absent, then re-list that name; an ambiguous case or whitespace spelling stops without a write, and an existing wrapping key is never replaced. Provider credentials may remain absent until the owner uses `brain connect bank`, which verifies the wrapping-key name and asks only for a missing Plaid client ID and secret at a hidden prompt before opening Link. No command accepts bank values from environment variables. Both providers stage account ownership decisions before ledger promotion and remain outside ordinary onboarding. Plaid redirect and webhook evidence applies only to Plaid. With enabled:false the provider client ID and secret are deleted by the next `brain secrets` run, while the independent wrapping key is preserved for retained encrypted connection recovery.",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -584,10 +635,11 @@
             "provider": {
               "enum": [
                 "plaid",
+                "simplefin",
                 "custom"
               ],
               "default": "plaid",
-              "description": "plaid selects the reviewed public endpoint profile. custom preserves an explicitly configured compatible bank-feed provider. A legacy manifest that predates this field and carries endpoint metadata is treated as custom; it must still provide the complete custom endpoint set. Credentials never belong in this manifest."
+              "description": "plaid selects the reviewed Plaid endpoint profile. simplefin accepts a one-time Setup Token only on the owner-authenticated Worker page, stores the resulting Access URL encrypted in the owner's D1, and has no manifest endpoint or credential. custom preserves an explicitly configured compatible provider. Credentials never belong in this manifest."
             },
             "environment": {
               "enum": [
@@ -705,6 +757,36 @@
                   "api_base",
                   "link_sdk_url",
                   "link_global"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "provider": {
+                    "const": "simplefin"
+                  }
+                },
+                "required": [
+                  "provider"
+                ]
+              },
+              "then": {
+                "allOf": [
+                  {
+                    "not": {
+                      "anyOf": [
+                        { "required": ["api_base"] },
+                        { "required": ["link_sdk_url"] },
+                        { "required": ["link_global"] }
+                      ]
+                    }
+                  },
+                  {
+                    "properties": {
+                      "environment": { "const": "production" }
+                    }
+                  }
                 ]
               }
             }
@@ -914,8 +996,40 @@
     },
     "operations": {
       "type": "object",
-      "description": "Machine-local unattended operations. ingest_cron is wired through the macOS Drive LaunchAgent scheduler. Health reports and webhooks remain descriptive until their commands are implemented.",
+      "description": "Machine-local unattended operations. daily_refresh is the cross-platform manifest-wide Windows/macOS contract; connector-specific cron fields retain their existing higher-frequency macOS LaunchAgents. Health reports and webhooks remain descriptive until their commands are implemented.",
       "properties": {
+        "daily_refresh": {
+          "type": "object",
+          "description": "One manifest-derived per-Brain, per-user daily import definition for Windows Task Scheduler or a macOS LaunchAgent. When enabled is omitted, the installer turns it on only when the current manifest has at least one connected machine-pull source. Server cron, push, resident-capture, snapshot, disabled, and unsupported sources are reported but never duplicated by this task.",
+          "properties": {
+            "_comment": {
+              "type": "string"
+            },
+            "enabled": {
+              "type": "boolean",
+              "description": "Explicit owner choice. Omit to use the conditional default: on only when at least one eligible machine-pull source exists."
+            },
+            "cron": {
+              "type": "string",
+              "pattern": "^[0-9]{1,2} [0-9]{1,2} \\* \\* \\*$",
+              "default": "0 9 * * *",
+              "description": "One daily numeric minute/hour schedule. The manifest timezone must match the machine timezone before installation."
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1,
+              "description": "IANA timezone for the daily schedule. Defaults to client.timezone and must match the machine timezone."
+            },
+            "max_runtime_minutes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 720,
+              "default": 45,
+              "description": "Execution budget for one sequential daily refresh. Windows also applies the same native Task Scheduler cap."
+            }
+          },
+          "additionalProperties": false
+        },
         "ingest_cron": {
           "type": "string",
           "minLength": 9,

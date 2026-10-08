@@ -268,11 +268,11 @@
     "evidence": [],
     "testPlatform": "win32",
     "deferral": {
-      "version": "0.4.9",
+      "version": "0.4.10",
       "blocked_on": "physical_hardware_unavailable",
-      "reason": "The acceptance requires a physical Windows ARM64 host on Node 24 and states in its own text that x64 hosted CI is insufficient, so no CI run can close it. No physical Windows ARM64 machine is available for this cut, and 0.4.9 does not claim Windows ARM64 as a supported runtime. Since ADR 007 the row also carries the Windows ARM64 CLI-identity walk re-homed from UPDATE-006; this deferral covers that walk too and moves nothing back into UPDATE-006. The exact-version 0.4.9 deferral was recorded on 2026-09-26 in the separately reviewed ADR 007 change.",
-      "unproven": "Windows ARM64 owners get no packaged-launch, DPAPI, browser login, interrupted-update, clean-exit or printed-command identity proof in 0.4.9. The release note must name Windows x64 as the only claimed Windows runtime.",
-      "review": "docs/decisions/007-rehome-update-006-arm64-clause.md"
+      "reason": "The acceptance requires a physical Windows ARM64 host on Node 24 and states in its own text that x64 hosted CI is insufficient, so no CI run can close it. No physical Windows ARM64 machine is available for this cut, and 0.4.10 does not claim Windows ARM64 as a supported runtime. Since ADR 007 the row also carries the Windows ARM64 CLI-identity walk re-homed from UPDATE-006; this deferral covers that walk too and moves nothing back into UPDATE-006. The exact-version 0.4.10 renewal is recorded on 2026-10-06 in the current candidate plan.",
+      "unproven": "Windows ARM64 owners get no packaged-launch, DPAPI, browser login, interrupted-update, clean-exit or printed-command identity proof in 0.4.10. The release note must name Windows x64 as the only claimed Windows runtime.",
+      "review": "docs/release-evidence/v0.4.10-candidate-release-evidence-plan.md"
     }
   },
   {
@@ -809,11 +809,11 @@
     ],
     "evidence": [],
     "deferral": {
-      "version": "0.4.9",
+      "version": "0.4.10",
       "blocked_on": "live_third_party_account_required",
-      "reason": "The acceptance requires real Items at two institutions and at least four real accounts spanning a person and two owned businesses, including a real business banking login, and no sandbox receipt or CI can stand in for them. No reviewed evidence meeting that breadth was available for the 0.4.9 cut on 2026-09-26. The exact-version deferral is recorded in ADR 008. It holds only while general bank invitations stay closed. If reviewed evidence for this row from the sealed package exists before the release write, the change that closes the row deletes this deferral.",
-      "unproven": "Bank freshness honesty across two institutions, at least four accounts spanning a person and two owned businesses, and a real business banking login ships unproven in 0.4.9; only UPDATE-025's real-Item proof backs the freshness claim. No owner may be invited to connect a bank while this deferral stands, and general bank invitations stay closed.",
-      "review": "docs/decisions/008-rehome-update-025-breadth-into-update-044.md"
+      "reason": "The acceptance requires real Items at two institutions and at least four real accounts spanning a person and two owned businesses, including a real business banking login, and no sandbox receipt or CI can stand in for them. No reviewed evidence meeting that breadth is available for the 0.4.10 cut. ADR 008 defines the narrowed scope, and the exact-version 0.4.10 renewal is recorded on 2026-10-06 in the current candidate plan. It holds only while general bank invitations stay closed. If reviewed evidence for this row from the sealed package exists before the release write, the change that closes the row deletes this deferral.",
+      "unproven": "Bank freshness honesty across two institutions, at least four accounts spanning a person and two owned businesses, and a real business banking login ships unproven in 0.4.10; only UPDATE-025's real-Item proof backs the freshness claim. No owner may be invited to connect a bank while this deferral stands, and general bank invitations stay closed.",
+      "review": "docs/release-evidence/v0.4.10-candidate-release-evidence-plan.md"
     }
   }
 ]

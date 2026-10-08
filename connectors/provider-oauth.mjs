@@ -27,7 +27,7 @@ import {
   tokenStorageStatus,
   verifyTokenStorageReadable,
 } from "./google-auth.mjs";
-import { providerJson, providerRequest } from "./provider-sync.mjs";
+import { ProviderSyncError, providerJson, providerRequest } from "./provider-sync.mjs";
 import {
   normalizeQuickBooksRealmId,
   quickBooksCompanyFingerprint,
@@ -91,8 +91,9 @@ export const PROVIDER_OAUTH = Object.freeze({
     tokenUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
     scopes: Object.freeze([
       "openid", "profile", "offline_access", "User.Read", "Mail.Read",
-      "Files.Read", "Sites.Read.All",
+      "Calendars.Read", "Files.Read", "Sites.Read.All",
     ]),
+    consentNotice: "Microsoft 365 will ask for read-only access to Outlook mail and calendar events, plus OneDrive and SharePoint files. Financial Brain cannot create, edit, send, or delete Microsoft 365 content.",
     clientAuth: "body",
     clientSecretRequired: false,
     omitClientSecret: true,
@@ -131,6 +132,8 @@ export const PROVIDER_LOOPBACK_BIND_ADDRESS = "127.0.0.1";
 const QUICKBOOKS_SOURCE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const QUICKBOOKS_ENVIRONMENTS = new Set(["sandbox", "production"]);
 const QUICKBOOKS_SOURCE_REGISTRY_KEY = "quickbooks_source_bindings";
+const MICROSOFT_ACCOUNT_FINGERPRINT = /^[a-f0-9]{64}$/;
+const MICROSOFT_PROFILE_URL = "https://graph.microsoft.com/v1.0/me?$select=id";
 
 export class ProviderOAuthError extends Error {
   constructor(provider, phase, message, { status = null, code = null, uncertain = false } = {}) {
@@ -328,6 +331,118 @@ export function bindQuickBooksConnection({
       sources,
     },
   };
+}
+
+/**
+ * Carry Microsoft source cursors across a scope-renewal ceremony only when the
+ * old and new access grants resolve to the same Graph account. The protected
+ * record stores a one-way binding rather than the provider's account ID.
+ */
+export function bindMicrosoftConnection({ prior = null, candidate } = {}) {
+  const candidateFingerprint = clean(
+    candidate?.provider_metadata?.microsoft_account_fingerprint,
+  ).toLowerCase();
+  if (!MICROSOFT_ACCOUNT_FINGERPRINT.test(candidateFingerprint)) {
+    throw new ProviderOAuthError("microsoft", "binding", "the renewed connection has no verified Microsoft account identity", {
+      code: "account_identity_unproven",
+    });
+  }
+  const priorFingerprint = clean(
+    prior?.provider_metadata?.microsoft_account_fingerprint,
+  ).toLowerCase();
+  if (prior && !MICROSOFT_ACCOUNT_FINGERPRINT.test(priorFingerprint)) {
+    throw new ProviderOAuthError("microsoft", "binding", "the existing connection's Microsoft account identity could not be verified", {
+      code: "account_identity_unproven",
+    });
+  }
+  if (priorFingerprint && priorFingerprint !== candidateFingerprint) {
+    throw new ProviderOAuthError(
+      "microsoft",
+      "binding",
+      "the selected Microsoft account does not match the existing connection; disconnect explicitly before connecting a different account",
+      { code: "unexpected_account" },
+    );
+  }
+  return {
+    ...candidate,
+    sync_states: structuredClone(prior?.sync_states || {}),
+    provider_metadata: {
+      ...(candidate?.provider_metadata || {}),
+      microsoft_account_fingerprint: candidateFingerprint,
+    },
+  };
+}
+
+async function resolveMicrosoftConnectionIdentity(connection, fetchImpl) {
+  const metadata = connection?.provider_metadata || {};
+  const stored = clean(metadata.microsoft_account_fingerprint).toLowerCase();
+  if (stored) {
+    if (!MICROSOFT_ACCOUNT_FINGERPRINT.test(stored)) {
+      throw new ProviderOAuthError("microsoft", "binding", "the stored Microsoft account binding is invalid", {
+        code: "account_identity_corrupt",
+      });
+    }
+    return connection;
+  }
+  if (!clean(connection?.access_token)) {
+    throw new ProviderOAuthError("microsoft", "binding", "the Microsoft account identity cannot be verified without the protected access grant", {
+      code: "account_identity_unproven",
+    });
+  }
+  let data;
+  try {
+    ({ data } = await providerJson("microsoft", MICROSOFT_PROFILE_URL, {
+      accessToken: connection.access_token,
+      fetchImpl,
+      maxAttempts: 1,
+    }));
+  } catch {
+    throw new ProviderOAuthError("microsoft", "binding", "the Microsoft account identity could not be verified; keep the existing connection and retry re-consent", {
+      code: "account_identity_unproven",
+    });
+  }
+  const accountId = clean(data?.id);
+  if (!accountId || accountId.length > 200) {
+    throw new ProviderOAuthError("microsoft", "binding", "Microsoft did not return a bounded account identity", {
+      code: "account_identity_unproven",
+    });
+  }
+  const fingerprint = createHash("sha256")
+    .update(`microsoft-account-v1:${accountId}`)
+    .digest("hex");
+  return {
+    ...connection,
+    provider_metadata: {
+      ...metadata,
+      microsoft_account_fingerprint: fingerprint,
+    },
+  };
+}
+
+async function prepareMicrosoftPriorConnection(connection, { fetchImpl, now, storage, assertOwned = null }) {
+  if (!connection) return null;
+  assertOwned?.();
+  let identified;
+  try {
+    identified = await resolveMicrosoftConnectionIdentity(connection, fetchImpl);
+  } catch (error) {
+    if (error?.code !== "account_identity_unproven" || !clean(connection.refresh_token)) throw error;
+    // Legacy Microsoft records predate the account binding. If their short-lived
+    // access grant expired, refresh and persist it before the browser ceremony,
+    // then resolve /me. This keeps a replacement refresh token durable even if
+    // the owner closes the later consent window.
+    const refreshed = await refreshProviderCredentials("microsoft", connection, {
+      fetchImpl, now, storage,
+      ...(assertOwned ? { credentialLock: { assertOwned } } : {}),
+    });
+    assertOwned?.();
+    identified = await resolveMicrosoftConnectionIdentity(refreshed, fetchImpl);
+  }
+  assertOwned?.();
+  if (JSON.stringify(identified) === JSON.stringify(loadProviderCredentials("microsoft", storage))) {
+    return identified;
+  }
+  return saveProviderCredentialsUnlocked("microsoft", identified, storage);
 }
 
 /** Refuse ingest when the active token cannot prove the configured source. */
@@ -922,7 +1037,14 @@ export function providerCredentialStatus(provider, options = {}) {
   const readable = verifyTokenStorageReadable(storage);
   if (!readable.readable) return { connected: false, readable: false, storage: envelope, reason: readable.reason };
   let connected = false;
-  try { connected = Boolean(loadProviderCredentials(config.provider, options)); } catch { connected = false; }
+  try {
+    const connection = loadProviderCredentials(config.provider, { ...options, migrateLegacy: false });
+    if (connection?.oauth_refresh_fence) return {
+      connected: false, readable: true, storage: envelope, code: "refresh_outcome_unknown",
+      reason: "this connection requires reconnect; sign in again before using it",
+    };
+    connected = Boolean(connection);
+  } catch { connected = false; }
   return { connected, readable: true, storage: envelope };
 }
 
@@ -1411,7 +1533,7 @@ async function refreshProviderCredentialsOnce(provider, connection, {
       code: "missing_refresh_token",
     });
   }
-  if (quickbooks) {
+  {
     const latestBefore = providerConnectionFromStore(loadProviderCredentialStore(
       config.provider,
       storage,
@@ -1422,13 +1544,14 @@ async function refreshProviderCredentialsOnce(provider, connection, {
         code: "not_connected",
       });
     }
-    if (quickBooksBinding) assertQuickBooksSourceBinding(latestBefore, quickBooksBinding);
-    if (latestBefore.quickbooks_refresh_fence) {
+    if (quickbooks && quickBooksBinding) assertQuickBooksSourceBinding(latestBefore, quickBooksBinding);
+    if (latestBefore.quickbooks_refresh_fence || latestBefore.oauth_refresh_fence) {
       throw new ProviderOAuthError(config.provider, "refresh", "the last refresh outcome is unknown; reconnect before trying again", {
         code: "refresh_outcome_unknown",
       });
     }
-    if (latestBefore?.refresh_token && latestBefore.refresh_token !== connection.refresh_token) {
+    if (latestBefore?.refresh_token && (latestBefore.refresh_token !== connection.refresh_token ||
+        latestBefore.access_token !== connection.access_token)) {
       return latestBefore;
     }
     connection = latestBefore;
@@ -1451,14 +1574,14 @@ async function refreshProviderCredentialsOnce(provider, connection, {
     }
     credentialLock?.assertOwned?.();
     const tokenFingerprint = createHash("sha256")
-      .update(`quickbooks-refresh-v1:${connection.refresh_token}`)
+      .update(`${config.provider}-refresh-v1:${connection.refresh_token}`)
       .digest("hex");
     connection = saveProviderCredentialsUnlocked(config.provider, {
       ...connection,
-      // This fence is durable before Intuit can consume the rotating token.
+      // This fence is durable before a provider can consume the refresh token.
       // A process crash, lost body, wrong-realm response, or failed final save
       // therefore requires reconnect instead of blindly replaying the request.
-      quickbooks_refresh_fence: {
+      [quickbooks ? "quickbooks_refresh_fence" : "oauth_refresh_fence"]: {
         state: "outcome_unknown",
         attempted_at: new Date(now).toISOString(),
         token_fingerprint: tokenFingerprint,
@@ -1482,7 +1605,8 @@ async function refreshProviderCredentialsOnce(provider, connection, {
       });
     }
   }
-  const { quickbooks_refresh_fence: _priorRefreshFence, ...connectionWithoutFence } = connection;
+  const { quickbooks_refresh_fence: _priorRefreshFence, oauth_refresh_fence: _priorOAuthFence,
+    ...connectionWithoutFence } = connection;
   const replacement = quickbooks
     ? {
         ...connectionWithoutFence,
@@ -1494,7 +1618,7 @@ async function refreshProviderCredentialsOnce(provider, connection, {
         refreshed_at: new Date(now).toISOString(),
       }
     : {
-        ...connection,
+        ...connectionWithoutFence,
         ...token,
         refresh_token: token.refresh_token || connection.refresh_token,
         refreshed_at: new Date(now).toISOString(),
@@ -1523,7 +1647,7 @@ async function refreshProviderCredentialsOnce(provider, connection, {
     }
   }
   credentialLock?.assertOwned?.();
-  return saveProviderCredentialsUnlocked(config.provider, replacement, storage);
+  return persistProviderRenewal(config.provider, replacement, storage, credentialLock);
 }
 
 /**
@@ -1533,19 +1657,49 @@ async function refreshProviderCredentialsOnce(provider, connection, {
  */
 export async function refreshProviderCredentials(provider, connection, options = {}) {
   const config = providerOAuthConfig(provider);
-  if (config.provider !== "quickbooks") {
-    return refreshProviderCredentialsOnce(config.provider, connection, options);
-  }
   const storage = options.storage || {};
   return withQuickBooksCredentialLock(
     config.provider,
     storage,
     ({ assertOwned }) => refreshProviderCredentialsOnce(config.provider, connection, {
       ...options,
-      credentialLock: { assertOwned },
+      credentialLock: { assertOwned: () => { options.credentialLock?.assertOwned?.(); assertOwned(); } },
     }),
     options,
   );
+}
+
+// A fenced replacement becomes durable before it can be used. Clearing that
+// fence is a separate ordinary transaction whose rollback also contains the
+// newest token, never the consumed one from before the provider exchange.
+function persistProviderRenewal(provider, replacement, storage, credentialLock) {
+  const fenceKey = provider === "quickbooks" ? "quickbooks_refresh_fence" : "oauth_refresh_fence";
+  const fenced = { ...replacement, [fenceKey]: { state: "verification_required" } };
+  try {
+    credentialLock?.assertOwned?.();
+    saveProviderCredentialsUnlocked(provider, fenced, { ...storage, preserveReplacementOnFailure: true });
+    credentialLock?.assertOwned?.();
+    return saveProviderCredentialsUnlocked(provider, replacement, storage);
+  } catch {
+    credentialLock?.assertOwned?.();
+    let retained = false;
+    try {
+      let current = loadProviderCredentials(provider, storage);
+      if (current?.access_token === replacement.access_token && current?.refresh_token === replacement.refresh_token) {
+        if (!current[fenceKey]) {
+          // Also cover failure of the outer readback after the store committed.
+          try { saveProviderCredentialsUnlocked(provider, fenced, { ...storage, preserveReplacementOnFailure: true }); } catch { /* inspect the durable fence below */ }
+          current = loadProviderCredentials(provider, storage);
+        }
+        retained = current?.refresh_token === replacement.refresh_token && Boolean(current?.[fenceKey]);
+      }
+    } catch { /* unreadable custody cannot be claimed as verified */ }
+    throw new ProviderOAuthError(provider, "refresh", retained
+      ? "the newest token was retained with a reconnect-required fence, but verification failed; sign in again"
+      : "the renewed credential could not be verified; preserve local custody and sign in again", {
+      code: "refresh_persistence_unverified", uncertain: true,
+    });
+  }
 }
 
 export async function providerAccessToken(provider, {
@@ -1560,73 +1714,138 @@ export async function providerAccessToken(provider, {
   refreshLockPollMs = 50,
   refreshLockStaleMs = 120_000,
   assertSourceOwned = null,
+  rejectedAccessToken = null,
 } = {}) {
   const config = providerOAuthConfig(provider);
-  if (config.provider === "quickbooks") {
-    return withQuickBooksCredentialLock(
-      config.provider,
-      storage,
-      async ({ assertOwned }) => {
-        const assertMutationOwned = () => {
-          assertSourceOwned?.();
-          assertOwned();
-        };
-        assertSourceOwned?.();
-        // Never trust a caller-retained object for QBO. The durable record may
-        // now carry a refresh fence, a replacement token, or a new binding.
-        const current = providerConnectionFromStore(loadProviderCredentialStore(
-          config.provider,
-          storage,
-          { allowQuickBooksMigration: true },
-        ));
-        if (!current) {
-          throw new ProviderOAuthError(config.provider, "load", "this provider is not connected", {
-            code: "not_connected",
-          });
-        }
-        if (current.quickbooks_refresh_fence) {
-          throw new ProviderOAuthError("quickbooks", "load", "the last refresh outcome is unknown; reconnect before using this connection", {
-            code: "refresh_outcome_unknown",
-          });
-        }
-        if (!quickBooksBinding || typeof quickBooksBinding !== "object") {
-          throw new ProviderOAuthError("quickbooks", "binding", "the expected source and environment are required before using this connection", {
-            code: "source_binding_required",
-          });
-        }
-        assertQuickBooksSourceBinding(current, quickBooksBinding);
-        const expiresAt = Number(current.expires_at);
-        if (clean(current.access_token) && (!Number.isFinite(expiresAt) || expiresAt - now > refreshSkewMs)) {
-          return { accessToken: current.access_token, connection: current, refreshed: false };
-        }
-        const refreshed = await refreshProviderCredentialsOnce(config.provider, current, {
-          fetchImpl,
-          now,
-          storage,
-          tokenRequestTimeoutMs,
-          quickBooksBinding,
-          credentialLock: { assertOwned: assertMutationOwned },
+  const quickbooks = config.provider === "quickbooks";
+  const validateAccess = (current) => {
+    if (current.quickbooks_refresh_fence || current.oauth_refresh_fence) {
+      throw new ProviderOAuthError(provider, "load", "this connection requires reconnect; sign in again before using it", {
+        code: "refresh_outcome_unknown",
+      });
+    }
+    if (config.provider === "microsoft" &&
+        (!Array.isArray(current.scopes) || !current.scopes.includes("Calendars.Read"))) {
+      throw new ProviderOAuthError(provider, "load",
+        "the saved Microsoft 365 connection predates Outlook calendar access and does not include delegated Calendars.Read. Re-run brain connect microsoft <manifest> and approve the updated read-only consent screen; the existing token cannot gain this scope through refresh.",
+        { code: "reconsent_required" });
+    }
+  };
+  // Preserve the explicit, no-lookup access snapshot used by read-only
+  // preflights. Refresh and forced 401 renewal still require durable custody.
+  if (!quickbooks && connection) {
+    assertSourceOwned?.();
+    validateAccess(connection);
+    const expiresAt = Number(connection.expires_at);
+    if (rejectedAccessToken === null && clean(connection.access_token) &&
+        (!Number.isFinite(expiresAt) || expiresAt - now > refreshSkewMs)) {
+      return { accessToken: connection.access_token, connection, refreshed: false };
+    }
+  }
+  return withQuickBooksCredentialLock(config.provider, storage, async ({ assertOwned }) => {
+    const assertMutationOwned = () => { assertSourceOwned?.(); assertOwned(); };
+    assertMutationOwned();
+    // Read under the renewal lease: another request may already have renewed
+    // the rejected token while this request waited for custody.
+    const current = providerConnectionFromStore(loadProviderCredentialStore(config.provider, storage,
+      { allowQuickBooksMigration: quickbooks })) || (!quickbooks ? connection : null);
+    if (!current) throw new ProviderOAuthError(provider, "load", "this provider is not connected", { code: "not_connected" });
+    validateAccess(current);
+    if (quickbooks) {
+      if (!quickBooksBinding || typeof quickBooksBinding !== "object") {
+        throw new ProviderOAuthError(provider, "binding", "the expected source and environment are required before using this connection", {
+          code: "source_binding_required",
         });
-        assertQuickBooksSourceBinding(refreshed, quickBooksBinding);
-        return { accessToken: refreshed.access_token, connection: refreshed, refreshed: true };
-      },
-      { refreshLockWaitMs, refreshLockPollMs, refreshLockStaleMs },
-    );
-  }
-  assertSourceOwned?.();
-  const current = connection || loadProviderCredentials(config.provider, storage);
-  if (!current) throw new ProviderOAuthError(provider, "load", "this provider is not connected", { code: "not_connected" });
-  const expiresAt = Number(current.expires_at);
-  if (clean(current.access_token) && (!Number.isFinite(expiresAt) || expiresAt - now > refreshSkewMs)) {
-    return { accessToken: current.access_token, connection: current, refreshed: false };
-  }
-  const refreshed = await refreshProviderCredentials(config.provider, current, {
-    fetchImpl,
-    now,
-    storage,
-    ...(assertSourceOwned ? { credentialLock: { assertOwned: assertSourceOwned } } : {}),
-  });
-  return { accessToken: refreshed.access_token, connection: refreshed, refreshed: true };
+      }
+      assertQuickBooksSourceBinding(current, quickBooksBinding);
+    }
+    const expiresAt = Number(current.expires_at);
+    const rejected = rejectedAccessToken !== null && rejectedAccessToken === current.access_token;
+    if (!rejected && clean(current.access_token) && (!Number.isFinite(expiresAt) || expiresAt - now > refreshSkewMs)) {
+      return { accessToken: current.access_token, connection: current, refreshed: false };
+    }
+    const refreshed = await refreshProviderCredentialsOnce(provider, current, {
+      fetchImpl, now, storage, tokenRequestTimeoutMs, quickBooksBinding,
+      credentialLock: { assertOwned: assertMutationOwned },
+    });
+    if (quickbooks) assertQuickBooksSourceBinding(refreshed, quickBooksBinding);
+    return { accessToken: refreshed.access_token, connection: refreshed, refreshed: true };
+  }, { refreshLockWaitMs, refreshLockPollMs, refreshLockStaleMs });
+}
+
+/** One forced renewal and one replay of a data request, including unexpired
+ * tokens revoked by the provider. The token endpoint never uses this wrapper. */
+export function providerDataFetch(provider, {
+  accessToken, fetchImpl = fetch, resolveAccess, storage = {}, assertSourceOwned = null,
+} = {}) {
+  provider = providerOAuthConfig(provider).provider;
+  let currentToken = accessToken;
+  let stopped = false;
+  return async (url, init = {}) => {
+    if (stopped) throw new ProviderSyncError(provider, "this connection requires reconnect; sign in again", {
+      kind: "unavailable", status: 401, code: "reconnect_required",
+    });
+    const headers = new Headers(init.headers);
+    // Only the connector's bearer-authenticated calls have replay authority.
+    // Do not attach credentials to public downloads or unrelated requests.
+    const bearer = headers.get("authorization");
+    if (bearer !== `Bearer ${accessToken}` && bearer !== `Bearer ${currentToken}`) return fetchImpl(url, init);
+    const send = (token) => {
+      const nextHeaders = new Headers(headers);
+      nextHeaders.set("authorization", `Bearer ${token}`);
+      return fetchImpl(url, { ...init, headers: nextHeaders });
+    };
+    const rejectedToken = currentToken;
+    let response = await send(rejectedToken);
+    if (response.status !== 401) return response;
+    await response.body?.cancel?.();
+    // The shared HTTP deadline can expire while local renewal is in flight.
+    // Stop this wrapper then, so an outer transport retry cannot send another
+    // stale request. The one in-flight exchange still finishes durable custody.
+    const stop = () => { stopped = true; };
+    init.signal?.addEventListener?.("abort", stop, { once: true });
+    try {
+      if (init.signal?.aborted) stop();
+      if (stopped) throw new ProviderSyncError(provider, "this connection requires reconnect; sign in again", {
+        kind: "unavailable", status: 401, code: "reconnect_required",
+      });
+      const renewed = await resolveAccess(rejectedToken);
+      currentToken = renewed.accessToken;
+      if (stopped || init.signal?.aborted) throw new ProviderSyncError(provider, "the request stopped during renewal; sign in again if the next command cannot use the saved connection", {
+        kind: "unavailable", status: 401, code: "reconnect_required",
+      });
+      const retryToken = currentToken;
+      response = await send(retryToken);
+      if (response.status !== 401) return response;
+      await response.body?.cancel?.();
+      stopped = true;
+      await withQuickBooksCredentialLock(provider, storage, async ({ assertOwned }) => {
+        assertSourceOwned?.(); assertOwned();
+        const current = loadProviderCredentials(provider, storage);
+        // A late response cannot fence a newer independently renewed record.
+        if (current?.access_token === retryToken) {
+          saveProviderCredentialsUnlocked(provider, { ...current,
+            [provider === "quickbooks" ? "quickbooks_refresh_fence" : "oauth_refresh_fence"]: { state: "reconnect_required" },
+          }, { ...storage, preserveReplacementOnFailure: true });
+        }
+      });
+    } catch (error) {
+      stopped = true;
+      if (error instanceof ProviderSyncError && error.code === "reconnect_required") throw error;
+      if (error instanceof ProviderOAuthError && error.code === "refresh_persistence_unverified") {
+        throw new ProviderSyncError(provider, error.message, {
+          kind: "unavailable", status: 401, code: "reconnect_required",
+        });
+      }
+      // Preserve a sanitized reconnect outcome across the shared HTTP layer;
+      // token-exchange failures must never become generic transport retries.
+    } finally {
+      init.signal?.removeEventListener?.("abort", stop);
+    }
+    throw new ProviderSyncError(provider, "the connection could not be renewed; sign in again", {
+      kind: "unavailable", status: 401, code: "reconnect_required",
+    });
+  };
 }
 
 const html = (title, body) =>
@@ -1723,8 +1942,13 @@ export async function authorizeProvider(provider, {
   refreshLockWaitMs = 45_000,
   refreshLockPollMs = 50,
   refreshLockStaleMs = 120_000,
+  assertCredentialOwned = null,
 } = {}) {
   const config = providerOAuthConfig(provider);
+  if (assertCredentialOwned !== null && typeof assertCredentialOwned !== "function") {
+    throw new TypeError("provider authorization credential ownership check must be a function");
+  }
+  assertCredentialOwned?.();
   if (config.provider === "quickbooks" && typeof prepareConnection !== "function") {
     throw new ProviderOAuthError("quickbooks", "binding", "QuickBooks authorization requires an explicit source and company binding", {
       code: "source_binding_required",
@@ -1739,6 +1963,14 @@ export async function authorizeProvider(provider, {
     : null;
   const startingQuickBooksGeneration = config.provider === "quickbooks"
     ? createHash("sha256").update(JSON.stringify(startingQuickBooksConnection)).digest("hex")
+    : null;
+  const startingMicrosoftConnection = config.provider === "microsoft"
+    ? await prepareMicrosoftPriorConnection(loadProviderCredentials(config.provider, storage), {
+        fetchImpl, now, storage, assertOwned: assertCredentialOwned,
+      })
+    : null;
+  const startingMicrosoftGeneration = config.provider === "microsoft"
+    ? createHash("sha256").update(JSON.stringify(startingMicrosoftConnection)).digest("hex")
     : null;
   const state = b64url(randomBytes(16));
   const proof = config.pkce ? pkce() : { verifier: null, challenge: null };
@@ -1760,6 +1992,7 @@ export async function authorizeProvider(provider, {
     openImpl,
     log,
   });
+  assertCredentialOwned?.();
   for (const field of config.callbackMetadataRequired || []) {
     if (!clean(callback.callback_metadata?.[field])) {
       throw new ProviderOAuthError(config.provider, "callback", `${field} was not returned, so the connection identity is incomplete`, {
@@ -1778,10 +2011,32 @@ export async function authorizeProvider(provider, {
     scopes: Array.isArray(scopes) ? scopes : config.scopes,
     connected_at: new Date(now).toISOString(),
   };
+  if (config.provider === "microsoft") {
+    const identifiedPrior = startingMicrosoftConnection;
+    const identifiedCandidate = await resolveMicrosoftConnectionIdentity(candidate, fetchImpl);
+    assertCredentialOwned?.();
+    const current = loadProviderCredentials(config.provider, storage);
+    const currentGeneration = createHash("sha256").update(JSON.stringify(current)).digest("hex");
+    if (currentGeneration !== startingMicrosoftGeneration) {
+      throw new ProviderOAuthError(
+        "microsoft",
+        "binding",
+        "the local Microsoft connection changed while authorization was open; keep the existing credential and start a fresh connection ceremony",
+        { code: "credential_changed_during_authorization", uncertain: true },
+      );
+    }
+    const bound = bindMicrosoftConnection({ prior: identifiedPrior, candidate: identifiedCandidate });
+    const prepared = typeof prepareConnection === "function"
+      ? await prepareConnection(bound, { prior: identifiedPrior })
+      : bound;
+    assertCredentialOwned?.();
+    return saveProviderCredentialsUnlocked(config.provider, prepared, storage);
+  }
   if (config.provider !== "quickbooks") {
     const prepared = typeof prepareConnection === "function"
       ? await prepareConnection(candidate)
       : candidate;
+    assertCredentialOwned?.();
     return saveProviderCredentialsUnlocked(config.provider, prepared, storage);
   }
   return withQuickBooksCredentialLock(
@@ -1818,6 +2073,7 @@ export async function authorizeProvider(provider, {
           };
         })(),
       });
+      assertCredentialOwned?.();
       assertOwned();
       return saveProviderCredentialsUnlocked(config.provider, prepared, storage);
     },

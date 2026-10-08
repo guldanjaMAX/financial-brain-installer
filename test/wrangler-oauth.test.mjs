@@ -119,6 +119,22 @@ assert.equal(readWranglerOAuthToken({ ...base, readFileSync: () => 'refresh_toke
 const refreshParent = mkdtempSync(join(tmpdir(), "brain-wrangler-refresh-parent-"));
 writeFileSync(join(refreshParent, ".env"), "CLOUDFLARE_API_TOKEN=planted-value\n");
 try {
+  const priorChain = process.env.BRAIN_TEST_CHAIN;
+  process.env.BRAIN_TEST_CHAIN = "1";
+  try {
+    assert.throws(
+      () => refreshWranglerSession({
+        env: { HOME: "/fixture/home", PATH: "" },
+        tmpDirectory: refreshParent,
+      }),
+      /BRAIN_TEST_CHAIN refused real Wrangler session refresh without an injected process runner/,
+      "the process-wide chain guard must fire even when a fixture passes its own environment",
+    );
+  } finally {
+    if (priorChain === undefined) delete process.env.BRAIN_TEST_CHAIN;
+    else process.env.BRAIN_TEST_CHAIN = priorChain;
+  }
+
   for (const platform of ["linux", "win32"]) {
     let sawCommand = null;
     let sawArgs = null;

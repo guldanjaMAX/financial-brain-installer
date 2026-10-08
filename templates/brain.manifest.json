@@ -18,7 +18,7 @@
     "timezone": "America/Phoenix"
   },
   "brain": {
-    "version": "0.4.9",
+    "version": "0.4.10",
     "domain": "brain.acme.com",
     "worker_name": "acme-brain"
   },
@@ -214,14 +214,18 @@
     },
     "microsoft": {
       "_comment": [
-        "Microsoft 365 Outlook plus selected OneDrive or SharePoint drives.",
-        "Graph delta links carry exact message and file tombstones. Add exact",
-        "drive_ids or site_ids after reviewing the tenant selection."
+        "Microsoft 365 Outlook mail and calendar plus selected OneDrive or SharePoint drives.",
+        "Outlook Calendar keeps a rolling 30-day-past and 90-day-future view.",
+        "Optional mail_start_at is the inclusive UTC start of unexported mail after verified digest coverage; earlier exports and citations stay readable. Null keeps full-mail sync.",
+        "With mail_start_at set, mail removals and absence-based snapshot removals are held for a separate owner-approved operation.",
+        "Independent Graph delta links carry exact message and file tombstones; calendar tombstones are limited to the saved event inventory.",
+        "Add exact drive_ids or site_ids after reviewing the tenant selection."
       ],
       "enabled": false,
       "mail_folder_ids": [
         "inbox"
       ],
+      "mail_start_at": null,
       "drive_ids": [],
       "site_ids": [],
       "include_personal_drive": true
@@ -316,8 +320,17 @@
       ]
     },
     "upload": {
-      "_comment": "Manual drop zone. Setup enables and records it after a folder is chosen; until then there is no folder to load.",
-      "enabled": false
+      "_comment": [
+        "Manual upload roots and append-only Brain feeds. Add a feed with",
+        "brain folder <manifest> add --path <absolute> --source <name>, or",
+        "create both empty home landing folders with brain folder <manifest>",
+        "create-feeds. The command validates the folder and writes feed: true.",
+        "Files that disappear from a feed never remove Brain content. Folder",
+        "names or globs in exclude are skipped and counted."
+      ],
+      "enabled": false,
+      "folders": [],
+      "exclude": []
     },
     "local_folder": {
       "_comment": [
@@ -355,7 +368,12 @@
         "read-only Transactions and never sees bank login credentials. Scheduled",
         "reconciliation remains active because webhooks are not a sole source of truth.",
         "After Link, assign each masked account to its owning entity. Plaid never",
-        "defaults every account at one institution to a primary entity."
+        "defaults every account at one institution to a primary entity.",
+        "SimpleFIN is the second reviewed provider. Set provider to simplefin and",
+        "environment to production. brain connect bank then opens the owner-only page",
+        "without asking for Plaid keys. The owner creates a one-time Setup Token in",
+        "SimpleFIN Bridge and pastes it only into that page. The owner's Worker claims",
+        "and encrypts the Access URL; it never enters the manifest, CLI, logs, or chat."
       ],
       "enabled": false,
       "provider": "plaid",
@@ -414,6 +432,11 @@
     }
   },
   "operations": {
+    "daily_refresh": {
+      "_comment": "One owned per-Brain, per-user daily task is derived from every configured source. Omit enabled for the conditional default: it turns on only after at least one connected machine-pull source exists. Worker cron, push, resident capture, snapshots, disabled sources, and existing faster schedulers are reported without duplication. The timezone defaults to client.timezone and must match this computer.",
+      "cron": "0 9 * * *",
+      "max_runtime_minutes": 45
+    },
     "_ingest_cron_comment": [
       "On macOS this installs as a per-user LaunchAgent and runs Google Drive",
       "normally incrementally, with periodic and policy-triggered full comparisons.",

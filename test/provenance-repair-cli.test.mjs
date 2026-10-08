@@ -409,15 +409,22 @@ test("public whatsnew copy matches the fail-closed provenance repair command", a
     discoverManifest: () => null,
   }));
   const normalizedOutput = whatsnew.output.replace(/\r\n?/g, "\n");
-  const currentEntry = normalizedOutput.match(
-    /# What's new[\s\S]*?\n## \d+\.\d+\.\d+\n([\s\S]*?)(?=\n## \d|$)/,
+  const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8")
+    .replace(/\r\n?/g, "\n");
+  const shippedEntry = changelog.match(
+    /(?:^|\n)## 0\.4\.9\s*\n([\s\S]*?)(?=\n## |\s*$)/,
   )?.[1] || "";
-  assert.match(currentEntry, /stays read-only/i);
-  assert.match(currentEntry, /schema-1 `--apply` path is unavailable/i);
-  assert.match(currentEntry, /Nothing is changed and zero candidates are reported fixed/i);
-  assert.match(currentEntry, /Add `--target <source-relative-file>`/i);
-  assert.match(currentEntry, /schema-44 family[\s\S]*schema-45 accepted resolution/i);
-  assert.match(currentEntry, /eight private retrieval probes/i);
+  const currentEntry = normalizedOutput.match(
+    /(?:^|\n)## 0\.4\.10(?: \(\d{4}-\d{2}-\d{2}\))?\s*\n([\s\S]*?)(?=\n## |\s*$)/,
+  )?.[1] || "";
+  assert.ok(shippedEntry, "the shipped 0.4.9 changelog section must be present");
+  assert.ok(currentEntry, "the current whatsnew entry must be present before applying its negative guard");
+  assert.match(shippedEntry, /stays read-only/i);
+  assert.match(shippedEntry, /schema-1 `--apply` path is unavailable/i);
+  assert.match(shippedEntry, /Nothing is changed and zero candidates are reported fixed/i);
+  assert.match(shippedEntry, /Add `--target <source-relative-file>`/i);
+  assert.match(shippedEntry, /schema-44 family[\s\S]*schema-45 accepted resolution/i);
+  assert.match(shippedEntry, /eight private retrieval probes/i);
   assert.doesNotMatch(currentEntry, /runs the ordinary source ingest|reset and no limit|candidate is called fixed/i);
 
   await assert.rejects(

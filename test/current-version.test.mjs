@@ -102,7 +102,8 @@ assert.equal(LOCKED_WRANGLER_LOCK_ROOT_VERSION, version,
 // matches the package, so it is pinned here with everything else.
 const workerVersion = read("worker/src/lib/version.js").match(/WORKER_VERSION = "([^"]+)"/)?.[1];
 assert.equal(workerVersion, version, "worker source version drifted from the package");
-assert.match(changelog, new RegExp(`^## ${escapedVersion}$`, "m"), "changelog has no current-version heading");
+assert.match(changelog, new RegExp(`^## ${escapedVersion} \\(2026-10-06\\)$`, "m"),
+  "changelog has no dated current-version heading");
 assert.match(currentEvidencePlan, new RegExp(`^# v${escapedVersion} candidate release evidence plan$`, "m"),
   "current candidate has no version-matched evidence plan");
 assert.match(currentEvidencePlan, /Candidate source commit: unbound[\s\S]*?Field execution: none/,
@@ -219,24 +220,56 @@ assert.match(retiredEvidencePlan, /Status: superseded planning record; no field 
 assert.match(retiredEvidencePlan, /Superseded by: \[v0\.4\.8 candidate release evidence plan\]/,
   "the retired candidate must point to the current evidence lineage");
 
-assert.match(readme, new RegExp(
-  `This checkout is the unreleased ${escapedVersion} candidate\\.[\\s\\S]*?` +
-  `No ${escapedVersion} customer release or\\s+immutable release asset exists\\.[\\s\\S]*?` +
-  "intentionally unavailable placeholders[\\s\\S]*?Do not\\s+run or share those commands",
-  "i",
-), "README must dynamically warn that the current-version candidate URLs are unavailable and must not be shared");
-assert.match(readme,
-  /earlier held 0\.4\.7 candidate was never[\s\S]*?tagged, published, or offered as a customer update; its identity is retired/i,
-  "README must distinguish a retired held candidate identity from a public release");
-
-const releaseLinks = [...readme.matchAll(
-  /releases\/download\/v(\d+\.\d+\.\d+)\/brain-installer-(\d+\.\d+\.\d+)\.tgz/g,
-)];
-assert.ok(releaseLinks.length >= 2, "README must show the pinned POSIX and Windows release commands");
-for (const [, tagVersion, assetVersion] of releaseLinks) {
-  assert.equal(tagVersion, version, "README release tag version drifted");
-  assert.equal(assetVersion, version, "README release asset version drifted");
+// Package identity cannot grant installation approval. The guide must bind
+// exact bytes, and standalone bootstrap examples must not bypass that gate.
+const normalizedReadme = readme.replaceAll("\r\n", "\n");
+const installStart = normalizedReadme.indexOf("## Install it\n");
+const installEnd = normalizedReadme.indexOf("\n## Set it up", installStart);
+assert.ok(installStart >= 0 && installEnd > installStart,
+  "the install guidance decision must inspect a nonempty real README section");
+const installGuidance = normalizedReadme.slice(installStart, installEnd);
+let installGuidanceChecks = 0;
+function assertInstallGuidance(document) {
+  installGuidanceChecks += 1;
+  assert.match(document, new RegExp(
+    `This package identifies itself as brain-installer ${escapedVersion}\\.`),
+  "README must identify the current package without granting approval");
+  assert.match(document, /match the exact approved package version, byte count and SHA-256/,
+    "installation requires the guide's exact package fingerprint");
+  assert.match(document, /If the page\s+is on hold, identifies a different package, or the required review is missing,\s+stop before changing anything/,
+    "held, mismatched or unreviewed installation must stop");
+  assert.match(document, /Earlier candidate records remain historical evidence for their exact bytes;\s+they do not authorize installation of this package/,
+    "historical candidate evidence cannot approve changed bytes");
+  assert.match(document, /This README does not supply a standalone bootstrap command/,
+    "the README must direct installation to the approved guide");
+  assert.doesNotMatch(document, /(?:npm(?:\.cmd)?\s+install\b|releases\/download\/)/,
+    "the install section must not supply a standalone bootstrap or release URL");
+  assert.match(document, /native package-identity\s+check and tiny LOCALAPPDATA physical-path probe before any install or update\s+command runs/,
+    "Windows requires both native identity and physical-path proof before commands");
+  assert.match(document, /If the window is packaged, redirected\s+or cannot be verified, stop before installing anything/,
+    "unverified Windows contexts must stop");
+  assert.match(document, /Do not use Run as administrator or bypass Windows\s+security controls\. Preserve any partial-install checkpoint for review/,
+    "fallback must preserve Windows security and partial-install evidence");
 }
+assertInstallGuidance(installGuidance);
+for (const [before, after, failure] of [
+  ["byte count and SHA-256", "version only", /exact package fingerprint/],
+  ["stop before changing anything", "continue anyway", /installation must stop/],
+  ["they do not authorize installation", "they authorize installation", /historical candidate evidence/],
+  ["physical-path probe", "environment string", /physical-path proof/],
+  ["stop before installing anything", "continue installing", /Windows contexts must stop/],
+  ["Preserve any partial-install checkpoint", "Discard any partial-install checkpoint", /partial-install evidence/],
+]) {
+  const changed = installGuidance.replace(before, after);
+  assert.notEqual(changed, installGuidance, "each negative arm must reach its copy decision");
+  assert.throws(() => assertInstallGuidance(changed), failure);
+}
+const bootstrapProbe = `${installGuidance}\n\`\`\`sh\nnpm install ./package.tgz\n\`\`\`\n`;
+assert.ok(bootstrapProbe.length > installGuidance.length,
+  "the bootstrap refusal probe must add an actual command");
+assert.throws(() => assertInstallGuidance(bootstrapProbe), /standalone bootstrap or release URL/);
+assert.equal(installGuidanceChecks, 8,
+  "the guidance validator must reach the green control and all seven negative decisions");
 
 async function whatsnewStatusOutput(readStatus, options = {}) {
   const manifestPath = Object.prototype.hasOwnProperty.call(options, "manifestPath")
@@ -258,7 +291,9 @@ async function whatsnewStatusOutput(readStatus, options = {}) {
 const currentNotesOnly = await whatsnewStatusOutput(async () => ({
   status: "up_to_date", latest_version: version,
 }), { full: true });
-assert.match(currentNotesOnly, /## 0\.4\.9/u);
+assert.match(currentNotesOnly, new RegExp(`## ${escapedVersion} \\(2026-10-06\\)`, "u"));
+assert.doesNotMatch(currentNotesOnly, /## 0\.4\.9/u,
+  "whatsnew must not repeat the already delivered 0.4.9 notes in the current entry");
 assert.doesNotMatch(currentNotesOnly, /## 0\.4\.6/u,
   "whatsnew must print only the current version by default");
 const allNotes = await whatsnewStatusOutput(async () => ({
@@ -291,7 +326,7 @@ try {
     const originalLog = console.log;
     console.log = (...values) => whatsnewLines.push(values.join(" "));
     try {
-      await cmdWhatsnew(null, { discoverManifest: () => null });
+      await cmdWhatsnew(null, { discoverManifest: () => null, all: true });
     } finally {
       console.log = originalLog;
     }
@@ -359,4 +394,4 @@ assert.equal(checkedWithoutManifest, false,
 assert.match(missingManifestOutput, /no installed Brain manifest could be read/i,
   "whatsnew must explain why no current-version claim can be made");
 
-console.log(`current version alignment: package, lockfile, template, changelog, and ${releaseLinks.length} install links all use ${version}`);
+console.log(`current version alignment: package, lockfile, template, changelog, and README all use ${version}; ${installGuidanceChecks} installation guidance decisions passed`);

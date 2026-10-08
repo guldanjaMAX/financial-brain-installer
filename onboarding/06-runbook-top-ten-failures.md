@@ -614,6 +614,21 @@ fail  upgrade failed: <reason>
 
 **Why:** anything can fail mid-update. What matters is what the system did about it. A snapshot was taken **before** anything was touched, the failure was recorded, and **the recorded version was not advanced**, so your install correctly still reports the version it is actually running rather than the one it tried to become.
 
+If the issue code is `MIGRATION_STILL_APPLYING`, an uncertain database change
+may still be finishing. Wait about 10 minutes, then run `brain update` once
+more. ADD COLUMN statements use a five-minute first request window followed by
+column checks every 30 seconds for up to 15 minutes. The runner verifies the
+column's type, nullability, default, and declared CHECK constraint before
+continuing; it never blindly resends an ambiguous ALTER.
+
+If every follow-up read fails, the issue remains `NETWORK_UNREACHABLE` and the
+outcome is unknown. Restore connectivity first. The installer detail names
+`PRAGMA table_info(<table>)` for checking the column; update also checks its
+exact definition before continuing. A DNS failure or refused connection is
+reported immediately. Other statement types receive the same five-minute
+request window, but an uncertain result stops before the migration receipt
+rather than inferring completion from an unrelated column check.
+
 **A specific version of this is worth naming on its own: the update died AFTER pausing your corpus for the schema migration, and never reached the step that resumes writes.** If so, `brain health <manifest>` reports `accepting_documents: false`, and ingest, forget, and reindex all return 503 until it is fixed. This is deliberate (writing over a half-migrated schema is worse than staying paused) but it used to be silent: nothing told the operator this had happened, and the only way back was reconstructing "run brain update again" from the failure message by hand. It no longer is:
 
 ```
@@ -806,3 +821,19 @@ For an answer-quality problem, the journal deliberately knows nothing about what
 4. What you expected instead.
 
 Those four get most answer problems diagnosed in one reply instead of four.
+
+
+## Provider sign-in timeout and interrupted source locks
+
+`OAUTH_SIGN_IN_TIMEOUT` means the browser sign-in did not finish before its
+local time limit. Nothing changed in the Brain and no new connection was saved. Run the
+same command again and complete sign-in. This is an expected retry, not an
+installer defect or evidence of a Cloudflare network failure.
+
+A killed connect or ingest can leave a private source lock. The next command
+recovers it immediately only when its recorded host and operating-system user
+match this computer and the operating system proves the owning PID is gone.
+The command reports that recovery. A live PID, an uncertain process check,
+foreign host/user, older lock without identity, malformed record, or ownerless
+directory stays protected. Age alone never authorizes removal. A technician
+must review ambiguous legacy residue; do not delete a lock just to bypass it.

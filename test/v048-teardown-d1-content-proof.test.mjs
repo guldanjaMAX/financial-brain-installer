@@ -24,7 +24,7 @@ import test, { after } from "node:test";
 
 import {
   MIGRATION_CONTRACT_SQL,
-  RECOVERY_DURABLE_TABLES,
+  V048_RECOVERY_DURABLE_TABLES,
 } from "../operations/cloudflare-recovery-adapter.mjs";
 import {
   V048_D1_DELETION_STATE_FTS_COUNT_SQL,
@@ -60,6 +60,7 @@ function sha256(value) {
 function migrationRows() {
   return readdirSync(MIGRATIONS_DIRECTORY)
     .filter((name) => /^\d+_.*\.sql$/u.test(name))
+    .filter((name) => Number(name.slice(0, 4)) <= 48)
     .sort()
     .map((name) => {
       const sql = readFileSync(join(MIGRATIONS_DIRECTORY, name), "utf8");
@@ -247,13 +248,13 @@ test("full deletion capture uses exact UUID argv, inventory, shadows, and pure f
     exportedTables.push(exportCall[index + 1]);
   }
   assert.deepEqual(exportedTables, [
-    ...RECOVERY_DURABLE_TABLES,
+    ...V048_RECOVERY_DURABLE_TABLES,
     ...V048_D1_DELETION_STATE_FTS_SHADOW_TABLES,
   ]);
   assert.equal(exportedTables.includes("chunks_fts"), false);
   assert.deepEqual(
     rowsForSql(V048_D1_DELETION_STATE_INVENTORY_SQL).map((row) => row.name),
-    [...RECOVERY_DURABLE_TABLES, "chunks_fts", ...V048_D1_DELETION_STATE_FTS_SHADOW_TABLES].sort(),
+    [...V048_RECOVERY_DURABLE_TABLES, "chunks_fts", ...V048_D1_DELETION_STATE_FTS_SHADOW_TABLES].sort(),
   );
   for (const { output, snapshot } of runner.returnedOutputs) {
     assert.deepEqual(output, snapshot, "caller-owned wrapper output must not be wiped or mutated");

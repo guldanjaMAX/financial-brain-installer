@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { homedir } from "node:os";
+import { homedir, hostname, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 const OWNER_FILE_RE = /^owner-([1-9][0-9]*)-([a-f0-9]{32})\.json$/;
@@ -182,6 +182,17 @@ export function sourceIngestLockPath({
   return join(ensurePrivateRuntime(home, platform), `source-ingest-${identity}.lock`);
 }
 
+// Digests keep host and account labels out of the private lease record. Never
+// infer identity from age or a PID: a synced directory may belong to a different
+// machine, and the same PID can exist there.
+function localOwnerIdentity() {
+  const hash = (value) => createHash("sha256").update(value).digest("hex");
+  return {
+    host: hash(`source-lock-host-v1:${hostname()}`),
+    user: hash(`source-lock-user-v1:${process.platform}:${typeof process.getuid === "function" ? process.getuid() : userInfo().username}`),
+  };
+}
+
 const ownerName = (pid, token) => `owner-${pid}-${token}.json`;
 
 function readOwner(lockPath, platform = process.platform) {
@@ -230,6 +241,9 @@ function readOwner(lockPath, platform = process.platform) {
     mtimeMs: state.mtimeMs,
     path,
     malformed,
+    host: parsed?.host,
+    user: parsed?.user,
+    schemaVersion: parsed?.schema_version,
   };
 }
 
@@ -255,10 +269,12 @@ function releaseOwner(lockPath, expectedToken, platform) {
   return true;
 }
 
-function removeStaleOwner(lockPath, expectedOwner, { isOwnerAlive, platform }) {
-  if (!expectedOwner || isOwnerAlive(expectedOwner.pid)) return false;
+function removeStaleOwner(lockPath, expectedOwner, { isOwnerAlive, platform, identity }) {
+  const matches = (owner) => owner && !owner.malformed && owner.schemaVersion === 2 &&
+    owner.host === identity.host && owner.user === identity.user;
+  if (!matches(expectedOwner) || isOwnerAlive(expectedOwner.pid)) return false;
   const current = readOwner(lockPath, platform);
-  if (!current ||
+  if (!matches(current) ||
       current.token !== expectedOwner.token ||
       current.pid !== expectedOwner.pid ||
       current.mtimeMs !== expectedOwner.mtimeMs ||
@@ -282,8 +298,11 @@ function busyError(sourceName) {
 /**
  * Acquire one nonblocking, cross-platform writer lease for a source's local
  * resume state. Atomic directory creation supplies exclusion on macOS, Linux,
- * and Windows. The heartbeat plus PID check makes an abrupt-exit residue
- * recoverable without allowing an old timestamp to evict a live long ingest.
+ * and Windows. Matching host/user evidence plus a dead PID makes an abrupt-exit
+ * residue recoverable. Neither age nor an empty directory proves abandonment.
+ * Mutating CLI entry points take the manifest lifecycle lease before reaching
+ * this function. The fixed order is lifecycle, source, shared provider record;
+ * reversing it would let a daily leg deadlock an update waiting to pause it.
  */
 export function acquireSourceIngestLock({
   manifestPath,
@@ -295,9 +314,12 @@ export function acquireSourceIngestLock({
   staleMs = MIN_STALE_MS,
   isOwnerAlive = ownerAlive,
   writeOwner = writeFileSync,
+  onRecovered = () => {},
 } = {}) {
   const lockPath = sourceIngestLockPath({ manifestPath, sourceName, statePath, sharedRecord, home, platform });
   const staleAfter = Math.max(MIN_STALE_MS, Number(staleMs) || 0);
+  const identity = localOwnerIdentity();
+  let recovered = false;
   let ownerToken = null;
 
   while (!ownerToken) {
@@ -308,7 +330,8 @@ export function acquireSourceIngestLock({
       const ownerPath = join(lockPath, ownerName(process.pid, ownerToken));
       try {
         writeOwner(ownerPath, JSON.stringify({
-          schema_version: 1,
+          schema_version: 2,
+          ...identity,
           token: ownerToken,
           pid: process.pid,
           created_at: new Date().toISOString(),
@@ -347,19 +370,14 @@ export function acquireSourceIngestLock({
       }
       assertPrivateDirectory(lockPath, "ingest lock", platform);
       const owner = readOwner(lockPath, platform);
-      const lastHeartbeat = owner?.mtimeMs ?? state.mtimeMs;
-      if (Date.now() - lastHeartbeat > staleAfter) {
-        try {
-          if (owner) {
-            if (removeStaleOwner(lockPath, owner, { isOwnerAlive, platform })) continue;
-          } else {
-            rmdirSync(lockPath);
-            continue;
-          }
-        } catch (removeError) {
-          if (removeError?.code === "ENOENT") continue;
-          if (removeError?.code !== "ENOTEMPTY") throw removeError;
+      try {
+        if (removeStaleOwner(lockPath, owner, { isOwnerAlive, platform, identity })) {
+          recovered = true;
+          continue;
         }
+      } catch (removeError) {
+        if (removeError?.code === "ENOENT") continue;
+        if (removeError?.code !== "ENOTEMPTY") throw removeError;
       }
       if (owner?.malformed) {
         throw lockError("the local ingest lock owner is malformed", "source_ingest_lock_unsafe");
@@ -396,6 +414,12 @@ export function acquireSourceIngestLock({
     try { return releaseOwner(lockPath, ownerToken, platform); } catch { return false; }
   };
   process.once("exit", release);
+  try {
+    if (recovered) onRecovered();
+  } catch (error) {
+    release();
+    throw error;
+  }
   return { path: lockPath, assertOwned, release };
 }
 

@@ -38,9 +38,11 @@ import { retiredLocalFolderOf } from "./folder-retirement.mjs";
 import {
   buildSchedulerPlan,
   installScheduler,
+  pauseScheduler,
   recordDriveSchedulerFailure,
   recordDriveSchedulerResult,
   removeScheduler,
+  restoreScheduler,
   runScheduledIngest,
   safeIngestEnvironment,
   statusScheduler,
@@ -158,6 +160,14 @@ export function statusFolderScheduler(manifestPath, options = {}) {
 
 export function removeFolderScheduler(manifestPath, options = {}) {
   return removeScheduler(manifestPath, withSpec(options));
+}
+
+export function pauseFolderScheduler(manifestPath, options = {}) {
+  return pauseScheduler(manifestPath, withSpec(options));
+}
+
+export function restoreFolderScheduler(manifestPath, snapshot, options = {}) {
+  return restoreScheduler(manifestPath, snapshot, withSpec(options));
 }
 
 export function runFolderIngest(manifestPath, options = {}) {

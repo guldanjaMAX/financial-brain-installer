@@ -7,7 +7,9 @@
  */
 
 import os from "node:os";
-import { syncBuiltinESMExports } from "node:module";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { registerHooks, syncBuiltinESMExports } from "node:module";
 
 const scenario = String(process.env.BRAIN_INGEST_EXIT_TEST || "");
 if (!scenario) throw new Error("BRAIN_INGEST_EXIT_TEST is required");
@@ -18,8 +20,50 @@ if (!scenario) throw new Error("BRAIN_INGEST_EXIT_TEST is required");
 // home-directory variable.
 const userRoot = String(process.env.BRAIN_INGEST_EXIT_USER_ROOT || "");
 if (!userRoot) throw new Error("BRAIN_INGEST_EXIT_USER_ROOT is required");
+// The fixture config carries only a path. Read its synthetic key here so the
+// real ingest CLI never falls through to a host credential backend on Windows.
+const adminKeyPath = process.env.BRAIN_TEST_ADMIN_KEY_FILE;
+if (!adminKeyPath) throw new Error("BRAIN_TEST_ADMIN_KEY_FILE is required");
+process.env.ADMIN_KEY = readFileSync(adminKeyPath, "utf8");
 os.homedir = () => userRoot;
 syncBuiltinESMExports();
+
+// A file selector alone still migrates plaintext through native DPAPI on
+// Windows. Read the fixture with native filesystem rules, without migrating
+// a read. Explicit writes use an in-memory protection double and ACL adapter.
+const googleStorage = new URL("../../connectors/google-auth.mjs", import.meta.url).href;
+const storageOptions = { backend: "file", platform: process.platform, migrateLegacy: false,
+  path: join(userRoot, ".brain", "google-tokens.json"), env: {} };
+registerHooks({
+  load(url, context, nextLoad) {
+    if (url !== googleStorage) return nextLoad(url, context);
+    const original = `${googleStorage}?isolated-ingest-storage`;
+    const readers = ["loadTokens", "loadTokensReadOnly", "inspectGoogleTokenStorage", "tokenStorageDescription", "tokenStorageStatus", "verifyTokenStorageReadable"];
+    return {
+      format: "module", shortCircuit: true,
+      source: `export * from ${JSON.stringify(original)};
+        import * as original from ${JSON.stringify(original)};
+        const options = ${JSON.stringify(storageOptions)};
+        const protectedRecords = new Map();
+        options.username = "fixture-user";
+        options.environment = { SystemRoot: "C:\\\\Windows" };
+        options.runAcl = () => ({ status: 0 });
+        options.runPowerShell = (_command, args, run) => {
+          const operation = args[args.indexOf("-Operation") + 1];
+          if (operation === "protect") {
+            const id = "fixture-protected-record-" + protectedRecords.size;
+            protectedRecords.set(id, Buffer.from(run.input));
+            return { status: 0, stdout: Buffer.from(id) };
+          }
+          const bytes = protectedRecords.get(run.input.toString());
+          if (operation !== "unprotect" || !bytes) throw new Error("fixture protection record missing");
+          return { status: 0, stdout: Buffer.from(bytes) };
+        };
+        ${readers.map((name) => `export const ${name} = () => original.${name}(options);`).join("\n")}
+        export const saveTokens = (store) => original.saveTokens(store, options);`,
+    };
+  },
+});
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
   status,

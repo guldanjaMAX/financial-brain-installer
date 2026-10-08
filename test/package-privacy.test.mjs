@@ -513,6 +513,15 @@ const expected = [
   "onboarding/client-experience/support-profile.schema.json",
   "operations/admin-key-file.mjs",
   "operations/admin-key-persistence.mjs",
+  "operations/brain-lifecycle-lock.mjs",
+  "operations/daily-refresh-observation.mjs",
+  // Content-free durable dispatch intent is required by the migration runner.
+  "operations/migration-statement-intent.mjs",
+  "operations/daily-refresh-plan.mjs",
+  "operations/daily-refresh-run.mjs",
+  "operations/daily-refresh-scheduler.mjs",
+  "operations/windows-update-bridge.mjs",
+  "operations/feed-folders.mjs",
   "operations/wrangler-oauth.mjs",
   "operations/wrangler-runtime-contract.mjs",
   "operations/claude-workspace.mjs",
@@ -680,6 +689,7 @@ const expected = [
   "connectors/dropbox.mjs",
   "connectors/hubspot.mjs",
   "connectors/microsoft-graph.mjs",
+  "connectors/microsoft-mail-transition.mjs",
   "connectors/notion.mjs",
   "connectors/offline-rehearsal.mjs",
   "connectors/provider-file.mjs",
@@ -687,6 +697,7 @@ const expected = [
   "connectors/provider-runtime.mjs",
   "connectors/provider-sync.mjs",
   "connectors/quickbooks-online.mjs",
+  "connectors/quickbooks-records.mjs",
   "connectors/slack.mjs",
   "ingest/archive.mjs",
   "ingest/linkedin-export.mjs",
@@ -717,6 +728,9 @@ const expected = [
   "migrations/d1/0046_source_original_observation_authority_chain.sql",
   "migrations/d1/0047_ocr_page_idempotency.sql",
   "migrations/d1/0048_custom_api_source.sql",
+  "migrations/d1/0049_simplefin_bank_feed.sql",
+  "migrations/d1/0050_bank_activity_refresh_generation.sql",
+  "migrations/d1/0051_simplefin_window_revisions.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values
@@ -761,6 +775,7 @@ const expected = [
   "worker/build-src/lib/upload-extract.js",
   "worker/src/lib/agent-action-receipts.js",
   "worker/src/lib/agent-authority.js",
+  "worker/src/lib/bank-activity-doc.js",
   "worker/src/lib/bank-export.js",
   "worker/src/lib/bank-feed-profiles.js",
   "worker/src/lib/ingestion-outcome.js",
@@ -775,6 +790,11 @@ const expected = [
   "worker/src/lib/public-request-guard.js",
   "worker/src/lib/qbo-bank-reconciliation.js",
   "worker/src/lib/quickbooks-callback-crypto.js",
+  "worker/src/lib/quickbooks-balance.js",
+  // Pure observed-money and label boundaries. No I/O, owner data or secrets.
+  "worker/src/lib/quickbooks-label.js",
+  "worker/src/lib/quickbooks-money.js",
+  "worker/src/lib/quickbooks-open-items.js",
   "worker/src/lib/quickbooks-oauth-callback.js",
   "worker/src/lib/reliability-alerts.js",
   "worker/src/lib/source-receipt.js",
@@ -821,6 +841,8 @@ const expected = [
   "operations/windows-dpapi.ps1",
   "operations/windows-dpapi-bridge.mjs",
   "operations/windows-dpapi.cs",
+  "operations/windows-dpapi-helper.exe",
+  "operations/windows-dpapi-signed.mjs",
   "package.json",
   "report-html.mjs",
   "report.mjs",
@@ -835,6 +857,7 @@ const expected = [
   "worker/src/lib/app-page.js",
   "worker/src/lib/auth-store.js",
   "worker/src/lib/bank-feed.js",
+  "worker/src/lib/simplefin-bank-feed.js",
   "worker/src/lib/confidence.js",
   "worker/src/lib/connections.js",
   "worker/src/lib/core.js",
@@ -1027,6 +1050,11 @@ for (const path of privateScanPaths) {
   } catch {
     continue; // listed in `expected` but not on disk: `missing` already reports it
   }
+  if (path === "operations/windows-dpapi-helper.exe" &&
+      createHash("sha256").update(buffer).digest("hex") !==
+        "ca94c72a0ca4562629224e9cdb51d02fa2fe132b315e98b12cdbec8128d8f859") {
+    throw new Error("Packaged signed DPAPI helper differs from the reviewed binary");
+  }
   if (looksBinary(buffer)) {
     skippedBinary.push(path);
     continue;
@@ -1077,6 +1105,13 @@ if (packageProbeDirectory) try {
   } else {
     try {
       const packedArchivePath = join(packageProbeDirectory, filename);
+      const signedHelpers = inspectNpmArchiveBytes(readFileSync(packedArchivePath)).rows
+        .filter((row) => row.path.endsWith(".exe"));
+      if (signedHelpers.length !== 1 ||
+          signedHelpers[0].path !== "operations/windows-dpapi-helper.exe" ||
+          signedHelpers[0].sha256 !== "ca94c72a0ca4562629224e9cdb51d02fa2fe132b315e98b12cdbec8128d8f859") {
+        throw new Error("Release must carry exactly the reviewed signed DPAPI image");
+      }
       const localMetadata = normalizeWindowsLocalPackMetadata(actualMetadata);
       if (localMetadata.normalized) {
         const localRows = normalizeWindowsLocalPackRows(

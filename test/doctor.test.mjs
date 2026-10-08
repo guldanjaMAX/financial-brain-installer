@@ -7,8 +7,12 @@ import {
          checkWranglerLogin, checkVectorize, checkVectorizeApi, checkCfToken, CF_TOKEN_SCOPES,
          resolveWranglerProfile, wranglerProfileArgs, wranglerProfileName,
          WRANGLER_AUTH_PROFILE_PATTERN, WRANGLER_PACKAGE, platformCommandInvocation,
-         summarize, runAll, OK, WARN, FAIL } from "../doctor.mjs";
+         summarize, runAll as runDoctorChecks, OK, WARN, FAIL } from "../doctor.mjs";
 import { readFileSync } from "node:fs";
+import { doctorDependencies } from "./fixtures/doctor-cli-dependencies.mjs";
+// A local diagnostic may invoke an installed assistant's credential helper.
+// Every runAll arm starts isolated, including simulated Windows DPAPI checks.
+const runAll = (options) => runDoctorChecks({ ...doctorDependencies(), ...options });
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => { ran++; console.log((c ? "PASS  " : "FAIL  ") + n + (c ? "" : "  " + String(d).slice(0, 220))); if (!c) fail++; };
 const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" : "--env-file=/dev/null";
@@ -179,13 +183,19 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
   check("less than 2 GiB on the install drive stops before setup",
     lowSpace.status === FAIL && /2 GiB/.test(lowSpace.detail + lowSpace.fix),
     JSON.stringify(lowSpace));
+  let standardWindowsCommand = null;
   const standardWindows = checkInstallPrivilege({
     platformName: "win32",
     environment: { SystemRoot: "C:\\Windows" },
-    runCommand: () => ({ ok: true, out: "BRAIN_STANDARD_USER" }),
+    runCommand: (command) => {
+      standardWindowsCommand = command;
+      return { ok: true, out: "BRAIN_STANDARD_USER" };
+    },
   });
   check("a normal Windows user session passes the install privilege gate",
-    standardWindows.status === OK, JSON.stringify(standardWindows));
+    standardWindows.status === OK &&
+      standardWindowsCommand === "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    JSON.stringify({ standardWindows, standardWindowsCommand }));
   const adminWindows = checkInstallPrivilege({
     platformName: "win32",
     environment: { SystemRoot: "C:\\Windows" },
@@ -337,7 +347,7 @@ const EMPTY_WRANGLER_ENV_ARG = process.platform === "win32" ? "--env-file=NUL" :
     JSON.stringify(dpapiCleanupDeferred));
   check("the profile-capable Wrangler release is a blocking requirement and is pinned through npx",
     checkWrangler(healthyTool).status === OK);
-  check("Codex is never fatal", checkCodex().status !== FAIL);
+  check("Codex is never fatal", checkCodex({ runCommand: healthyTool }).status !== FAIL);
   const missingCodex = checkCodex({
     runCommand: () => ({ ok: false, out: "fixture unavailable", missing: true }),
     environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },

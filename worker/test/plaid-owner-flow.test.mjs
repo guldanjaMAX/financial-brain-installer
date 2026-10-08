@@ -132,7 +132,7 @@ async function pageHtml(fixture) {
 }
 
 /** Execute the page's own inline script against a minimal DOM and API. */
-async function runPage(html, { entities, accounts, connections = [], onAssign = null }) {
+async function runPage(html, { entities, accounts, connections = [], onAssign = null, onReassign = null }) {
   const script = [...html.matchAll(/<script(?: [^>]*)?>([\s\S]*?)<\/script>/g)]
     .map((match) => match[1]).filter(Boolean);
   assert.equal(script.length, 1);
@@ -145,6 +145,7 @@ async function runPage(html, { entities, accounts, connections = [], onAssign = 
   };
   const storage = new Map();
   const assignments = [];
+  const reassignments = [];
   let accountLoads = 0;
   const context = vm.createContext({
     document: {
@@ -172,6 +173,37 @@ async function runPage(html, { entities, accounts, connections = [], onAssign = 
         account.assignment = { state: "assigned", entity_label: body.entity_slug };
         return { ok: true, status: 200, json: async () => ({ changed: true }) };
       }
+      if (path === "/api/bank-feed/accounts/reassign") {
+        const body = JSON.parse(init.body);
+        reassignments.push(body);
+        if (onReassign) await onReassign(body, reassignments.length);
+        const account = accounts.find((row) => row.account_ref === body.account_ref);
+        assert.ok(account, "the page posted a fixture account ref for reviewed reassignment");
+        const from = entities.find((row) => row.entity_slug === body.from_entity_slug);
+        const to = entities.find((row) => row.entity_slug === body.to_entity_slug);
+        if (body.mode === "apply") {
+          account.assignment = {
+            state: "assigned",
+            entity_scope: { entity_slug: body.to_entity_slug },
+            entity_label: to?.label || body.to_entity_slug,
+          };
+        }
+        return { ok: true, status: body.mode === "apply" ? 201 : 200, json: async () => body.mode === "apply"
+          ? {
+              moved: true, changed: true, replayed: false,
+              request_id: body.request_id, account_ref: body.account_ref,
+              from_owner: { entity_slug: body.from_entity_slug, label: from?.label || body.from_entity_slug },
+              to_owner: { entity_slug: body.to_entity_slug, label: to?.label || body.to_entity_slug },
+              entity_scope: { entity_slug: body.to_entity_slug },
+            }
+          : {
+              account_ref: body.account_ref,
+              from_owner: { entity_slug: body.from_entity_slug, label: from?.label || body.from_entity_slug },
+              to_owner: { entity_slug: body.to_entity_slug, label: to?.label || body.to_entity_slug },
+              history: { transactions: 2, balance_snapshots: 1 },
+              can_apply: true,
+            } };
+      }
       return { ok: true, status: 200, json: async () => responses[path] };
     },
     sessionStorage: {
@@ -189,6 +221,7 @@ async function runPage(html, { entities, accounts, connections = [], onAssign = 
   vm.runInContext(script[0], context);
   for (let tick = 0; tick < 20; tick += 1) await new Promise((resolve) => setImmediate(resolve));
   nodes.assignments = assignments;
+  nodes.reassignments = reassignments;
   nodes.accountLoads = () => accountLoads;
   return nodes;
 }
@@ -386,6 +419,58 @@ test("a single account choice still makes exactly one assignment request", async
     await until(() => nodes.assignments.length === 1, "the single assignment reached the endpoint");
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(nodes.assignments.length, 1);
+  } finally { fixture.close(); }
+});
+
+test("an assigned account offers a reviewed move preview before one idempotent apply", async () => {
+  const fixture = await createProductFixture({ env: ENV });
+  try {
+    seedOwnedEntity(fixture, "fixture-household", "Fixture Household");
+    seedOwnedEntity(fixture, "fixture-business", "Fixture Business");
+    const html = await pageHtml(fixture);
+    const account = {
+      ...unassigned(1),
+      assignment: {
+        state: "assigned",
+        entity_scope: { entity_slug: "fixture-household" },
+        entity_label: "Fixture Household",
+      },
+    };
+    const nodes = await runPage(html, {
+      entities: [
+        { entity_slug: "fixture-household", label: "Fixture Household", status: "active", relationship: "owned" },
+        { entity_slug: "fixture-business", label: "Fixture Business", status: "active", relationship: "owned" },
+      ],
+      accounts: [account],
+    });
+    const [card] = findAll(nodes.get("accounts"), "ARTICLE");
+    const move = findAll(card, "BUTTON").find((button) => button.textContent === "Move to another owner");
+    assert.ok(move, "the assigned-account move decision point is visible behind the owner session");
+    move.onclick();
+    const [select] = findAll(card, "SELECT");
+    assert.deepEqual(select.options.map((option) => option.value), ["", "fixture-business"]);
+    select.value = "fixture-business";
+    const review = findAll(card, "BUTTON").find((button) => button.textContent === "Review move");
+    review.onclick();
+    await until(() => nodes.reassignments.length === 1, "the preview reached the reviewed-move route");
+    assert.deepEqual(nodes.reassignments[0], {
+      mode: "preview",
+      account_ref: account.account_ref,
+      from_entity_slug: "fixture-household",
+      to_entity_slug: "fixture-business",
+    });
+    await until(() => /2 transactions and 1 balance snapshot/.test(textOf(card)), "the reviewed counts became visible before apply");
+    assert.match(textOf(card), /2 transactions and 1 balance snapshot/);
+    const apply = findAll(card, "BUTTON").find((button) => button.textContent === "Move account history");
+    assert.ok(apply, "apply is unavailable until the preview has been shown");
+    apply.onclick();
+    await until(() => nodes.reassignments.length === 2, "the apply reached the reviewed-move route");
+    assert.equal(nodes.reassignments[1].mode, "apply");
+    assert.match(nodes.reassignments[1].request_id, /^[A-Za-z0-9_-]{1,128}$/);
+    assert.equal(nodes.reassignments[1].request_id,
+      "00000000-0000-4000-8000-000000000000",
+      "the apply retry identity is created once and kept in session storage");
+    await until(() => account.assignment.entity_scope.entity_slug === "fixture-business", "the green control applies the reviewed move");
   } finally { fixture.close(); }
 });
 

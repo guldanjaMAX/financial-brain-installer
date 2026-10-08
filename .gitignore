@@ -83,3 +83,8 @@ machine-prep/installers/windows/handoff-windows.url
 # Exact CI package and extracted preflight are generated, never product source.
 .release-package/
 .packaged-preflight/
+
+# Local signed-helper input and isolated lane verification outputs.
+/artifact-in/
+/home-dpapi/
+/lane-evidence/

@@ -2,19 +2,19 @@
  * Owner-present Plaid application-credential custody for `brain connect bank`.
  *
  * The owner types their own Plaid client ID and secret at a hidden prompt, and
- * this module writes them, with a freshly generated wrapping key, straight onto
- * the owner's Worker. Nothing is read from the environment, a flag, the
- * manifest, or a file, and nothing but secret NAMES is ever reported back.
+ * this module writes that pair straight onto the owner's Worker only after the
+ * deploy-owned wrapping key is present. Nothing is read from the environment,
+ * a flag, the manifest, or a file, and nothing but secret NAMES is ever
+ * reported back.
  *
  * Four invariants are enforced here rather than trusted to the caller:
  *
  * - An ambient bank value is refused before any Cloudflare read. The same
  *   refusal `brain secrets` makes: a value in a shell is a value in history.
- * - An existing BANK_FEED_WRAPPING_KEY_V2 is never replaced. Disabling the feed
- *   deletes the provider pair but deliberately keeps the wrapping key, because
- *   retained encrypted access references can only be recovered with it. A
- *   re-enable that regenerated it would silently orphan them. `--replace-keys`
- *   touches only the provider pair for the same reason.
+ * - BANK_FEED_WRAPPING_KEY_V2 must already exist. Deploy is the only creator.
+ *   Disabling the feed deletes the provider pair but deliberately keeps the
+ *   wrapping key, because retained encrypted access references can only be
+ *   recovered with it. `--replace-keys` touches only the provider pair.
  * - A typed pair is proven against the manifest's Plaid environment with one
  *   harmless authenticated read before anything is written. Field evidence:
  *   two operators pasted a secret from the wrong environment, the write
@@ -37,6 +37,72 @@ export const BANK_FEED_OWNER_SECRET_NAMES = Object.freeze([
   BANK_ACCESS_WRAPPING_KEY_SECRET,
 ]);
 
+/**
+ * Establish only the independent bank wrapping key during a Worker lifecycle.
+ *
+ * Provider credentials still belong to their owner-present setup path. This
+ * helper receives and returns names only, apart from passing the new value
+ * directly from the reviewed generator to the injected Worker secret writer.
+ * An existing key is never read, replaced, validated, or derived from another
+ * credential. Rotation therefore remains impossible from install, update, and
+ * deploy.
+ */
+export async function ensureBankFeedWrappingKey({
+  enabled = false,
+  listSecretNames,
+  putSecret,
+  generateWrappingKey = generateBankAccessWrappingKey,
+} = {}) {
+  if (enabled !== true) {
+    return Object.freeze({ created: false, name: BANK_ACCESS_WRAPPING_KEY_SECRET });
+  }
+  if (typeof listSecretNames !== "function" || typeof putSecret !== "function") {
+    throw new TypeError("bank wrapping-key custody needs Worker secret-list and secret-put operations");
+  }
+
+  let present;
+  try {
+    present = namesFromInventory(await listSecretNames());
+  } catch {
+    throw new Error(
+      "the Worker's secret names could not be checked, so the independent bank wrapping key was not changed. " +
+        "Rerun the same command after Workers Scripts access is available.",
+    );
+  }
+  if (present.has(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
+    return Object.freeze({ created: false, name: BANK_ACCESS_WRAPPING_KEY_SECRET });
+  }
+
+  const generated = generateWrappingKey();
+  try {
+    await putSecret(BANK_ACCESS_WRAPPING_KEY_SECRET, generated);
+  } catch {
+    throw new Error(
+      "the independent bank wrapping key could not be created or confirmed on the Worker. " +
+        "The write result is unknown, and the Worker may already contain the key. " +
+        "Rerun the same setup, update, or deploy command; it will recheck the secret names before " +
+        "deciding whether a write is needed. No wrapping-key value was saved locally.",
+    );
+  }
+
+  let verified;
+  try {
+    verified = namesFromInventory(await listSecretNames());
+  } catch {
+    throw new Error(
+      "the independent bank wrapping key write could not be verified by listing the Worker's secret names again. " +
+        "Rerun the same setup, update, or deploy command before opening bank setup.",
+    );
+  }
+  if (!verified.has(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
+    throw new Error(
+      "the independent bank wrapping key was not listed after its Worker write. " +
+        "Rerun the same setup, update, or deploy command before opening bank setup.",
+    );
+  }
+  return Object.freeze({ created: true, name: BANK_ACCESS_WRAPPING_KEY_SECRET });
+}
+
 const PROMPT_LABELS = Object.freeze({
   BANK_FEED_CLIENT_ID: "client_id",
   BANK_FEED_SECRET: "secret",
@@ -52,6 +118,15 @@ function promptFor(name, environment) {
 function namesFromInventory(inventory) {
   if (!Array.isArray(inventory) || inventory.some((name) => typeof name !== "string")) {
     throw new Error("Cloudflare returned an invalid Worker secret inventory. No bank secret was written.");
+  }
+  const canonicalByFoldedName = new Map(BANK_FEED_OWNER_SECRET_NAMES.map((name) => [name.toLowerCase(), name]));
+  for (const name of inventory) {
+    const canonical = canonicalByFoldedName.get(name.trim().toLowerCase());
+    if (canonical && name !== canonical) {
+      throw new Error(
+        `Cloudflare returned an ambiguous spelling of ${canonical}. No bank secret was written.`,
+      );
+    }
   }
   return new Set(inventory);
 }
@@ -151,8 +226,8 @@ export async function validatePlaidApplicationKeys({
 }
 
 /**
- * Make sure all three bank secret names exist on the Worker, prompting the
- * owner only for what is actually missing, or for the whole Plaid pair when
+ * Verify the deploy-owned wrapping key and make sure the Plaid pair exists on
+ * the Worker, prompting the owner only when that pair is missing or when
  * `replaceKeys` is set.
  *
  * `listSecretNames()` resolves to the Worker's secret names (read-only).
@@ -169,7 +244,6 @@ export async function ensureBankFeedWorkerSecrets({
   validateKeys,
   environment = null,
   replaceKeys = false,
-  generateWrappingKey = generateBankAccessWrappingKey,
   report = () => {},
 } = {}) {
   // Presence, not validity, is the unsafe condition, so no value is inspected
@@ -185,11 +259,11 @@ export async function ensureBankFeedWorkerSecrets({
 
   const present = namesFromInventory(await listSecretNames());
   const absent = BANK_FEED_OWNER_SECRET_NAMES.filter((name) => !present.has(name));
-  if (replaceKeys === true && !present.has(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
+  if (!present.has(BANK_ACCESS_WRAPPING_KEY_SECRET)) {
     throw new Error(
-      `--replace-keys changes only the Plaid client_id and secret, and this Worker has no ` +
-        `${BANK_ACCESS_WRAPPING_KEY_SECRET} yet. Run \`brain connect bank <manifest>\` without ` +
-        "--replace-keys to finish the first setup. Nothing was prompted or written.",
+      `this Worker has no ${BANK_ACCESS_WRAPPING_KEY_SECRET}. Run \`brain setup <manifest>\`, ` +
+        "`brain update <manifest>`, or `brain deploy <manifest>` to create and verify it, then " +
+        "rerun `brain connect bank`. Nothing was prompted or written.",
     );
   }
   if (replaceKeys !== true && !absent.length) {
@@ -200,7 +274,6 @@ export async function ensureBankFeedWorkerSecrets({
   // is missing, ask for both so a stale half can never be paired with a new one.
   const needsProvider = replaceKeys === true ||
     BANK_FEED_PROVIDER_SECRET_NAMES.some((name) => !present.has(name));
-  const needsWrappingKey = replaceKeys !== true && !present.has(BANK_ACCESS_WRAPPING_KEY_SECRET);
   const writes = [];
   if (needsProvider) {
     report(
@@ -223,8 +296,6 @@ export async function ensureBankFeedWorkerSecrets({
     await validateKeys({ clientId: pair[0][1], secret: pair[1][1] });
     writes.push(...pair);
   }
-  if (needsWrappingKey) writes.push([BANK_ACCESS_WRAPPING_KEY_SECRET, generateWrappingKey()]);
-
   // The writes are sequential PUTs with no rollback. A failure between the client_id and the
   // secret leaves a new client_id paired with the old secret. That fails loudly: the next
   // connection is refused as INVALID_API_KEYS, and its message names --replace-keys, which

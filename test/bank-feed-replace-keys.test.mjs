@@ -143,7 +143,7 @@ test("the typed pair is proven with one harmless Plaid read against the manifest
 });
 
 test("a pair from another Plaid environment is refused at the prompt and nothing is written", async () => {
-  for (const initial of [ALL_NAMES, ["ADMIN_KEY"]]) {
+  for (const initial of [ALL_NAMES, [WRAPPING]]) {
     const run = await connect({
       flags: initial === ALL_NAMES ? { "replace-keys": true } : {},
       initial, answers: [CLIENT_ID, WRONG_SECRET],
@@ -157,11 +157,15 @@ test("a pair from another Plaid environment is refused at the prompt and nothing
   }
 });
 
-test("the first-time prompt is checked the same way before any write", async () => {
-  const run = await connect({ initial: ["ADMIN_KEY"] });
+test("the first-time provider prompt is checked the same way before any write", async () => {
+  const run = await connect({ initial: [WRAPPING] });
   assert.equal(run.message, "");
   assert.equal(run.plaid.calls.length, 1);
-  assert.deepEqual(run.worker.writes, ALL_NAMES, "a missing wrapping key is still generated on first setup");
+  assert.deepEqual(
+    run.worker.writes,
+    ["BANK_FEED_CLIENT_ID", "BANK_FEED_SECRET"],
+    "the lifecycle-created wrapping key is preserved on first provider setup",
+  );
   assert.equal(run.result.keys_replaced, false);
 });
 
@@ -179,7 +183,9 @@ test("--replace-keys never creates a missing wrapping key and never runs as a va
   const missingWrapping = await connect({
     flags: { "replace-keys": true }, initial: ["BANK_FEED_CLIENT_ID", "BANK_FEED_SECRET"],
   });
-  assert.match(missingWrapping.message, /--replace-keys changes only the Plaid client_id and secret/);
+  assert.match(missingWrapping.message, /this Worker has no BANK_FEED_WRAPPING_KEY_V2/);
+  assert.match(missingWrapping.message, /brain (?:setup|update|deploy) <manifest>/);
+  assert.match(missingWrapping.message, /Nothing was prompted or written/);
   assert.equal(missingWrapping.prompts.length, 0, "refused before any prompt");
   assert.deepEqual(missingWrapping.worker.writes, []);
 

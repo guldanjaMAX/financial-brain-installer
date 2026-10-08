@@ -416,7 +416,7 @@ const RECOVERY_TEST_HUMAN_FIELD_GATES = Object.freeze([
 const RECOVERY_TEST_FIELD_IDENTITY = Object.freeze({
   clientSlug: "v048-field-proof",
   clientDisplayName: "Synthetic Field Gate v0.4.8",
-  productVersion: "0.4.9",
+  productVersion: "0.4.10",
   sourceResource: "brain-test-v048-field-source-recovery-gate-a48f1101",
   targetResource: "brain-test-v048-field-target-recovery-gate-a48f1102",
   sourceAdminKeySecret:
@@ -441,6 +441,11 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "llm_call_log",
   "sources",
   "source_events",
+  // Schema 50: the projection generation is durable refresh debt. Claims are
+  // imported before documents so durable refresh debt and exact write claims
+  // are in place before the restored corpus becomes queryable.
+  "bank_activity_refresh_state",
+  "bank_activity_write_claims",
   "documents",
   "chunks",
   "vector_outbox",
@@ -590,6 +595,17 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "custom_api_job_slices",
   "custom_api_fetches",
   "custom_api_schedule_state",
+  // Schema 49: SimpleFIN's one-time claim decision, encrypted-connection
+  // schedule, staged windows, and owner assignments are one recovery unit.
+  // Dropping the claim receipt could re-POST a consumed Setup Token; dropping
+  // staged rows could advance history past records that never reached ledger.
+  "simplefin_claim_operations",
+  "simplefin_connections",
+  "simplefin_sync_windows",
+  "simplefin_account_assignments",
+  "simplefin_assignment_requests",
+  "simplefin_stage_accounts",
+  "simplefin_stage_transactions",
 ]);
 
 /**
@@ -848,6 +864,19 @@ const SCHEMA_48_TABLES = Object.freeze([
   "custom_api_fetches",
   "custom_api_schedule_state",
 ]);
+const SCHEMA_49_TABLES = Object.freeze([
+  "simplefin_claim_operations",
+  "simplefin_connections",
+  "simplefin_sync_windows",
+  "simplefin_account_assignments",
+  "simplefin_assignment_requests",
+  "simplefin_stage_accounts",
+  "simplefin_stage_transactions",
+]);
+const SCHEMA_50_TABLES = Object.freeze([
+  "bank_activity_refresh_state",
+  "bank_activity_write_claims",
+]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -870,7 +899,8 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_32_TABLES, ...SCHEMA_34_TABLES, ...SCHEMA_35_TABLES,
      ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
      ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
-     ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES, ...SCHEMA_48_TABLES].includes(table)
+     ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES, ...SCHEMA_48_TABLES,
+     ...SCHEMA_49_TABLES, ...SCHEMA_50_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -1512,7 +1542,7 @@ function inspectNpmPackedExecutionInventory(raw, code) {
       }
     }
     if (!packageJson || typeof packageJson !== "object" || Array.isArray(packageJson) ||
-        packageJson.name !== "brain-installer" || packageJson.version !== "0.4.9") refuse(code);
+        packageJson.name !== "brain-installer" || packageJson.version !== "0.4.10") refuse(code);
     return Object.freeze({
       name: packageJson.name,
       version: packageJson.version,
@@ -1788,7 +1818,7 @@ function inspectTestBootstrapCandidateEvidence(request, plan, pins) {
   ], code);
   if (!/^[0-9a-f]{40}$/.test(String(source.head_sha || "")) ||
       !/^[0-9a-f]{40}$/.test(String(source.tree_sha || "")) ||
-      source.package_name !== "brain-installer" || source.package_version !== "0.4.9" ||
+      source.package_name !== "brain-installer" || source.package_version !== "0.4.10" ||
       !SHA256_RE.test(String(source.package_json_sha256 || "")) ||
       !SHA256_RE.test(String(source.package_lock_sha256 || "")) ||
       source.working_tree_clean !== true || source.shallow_repository !== false ||
@@ -3019,7 +3049,7 @@ function readCompletedTestBootstrapCheckpoint(pins, plan) {
         candidateEvidence.seedVectorCount !== candidateEvidence.seedChunkCount ||
         candidateEvidence.seedReplayUnchangedDocuments !==
           DISPOSABLE_RECOVERY_SEED_DOCUMENTS ||
-        candidateEvidence.packageFilename !== "brain-installer-0.4.9.tgz" ||
+        candidateEvidence.packageFilename !== "brain-installer-0.4.10.tgz" ||
         candidateEvidence.wranglerRuntimeDirectory !==
           LOCKED_WRANGLER_RUNTIME_DIRECTORY ||
         candidateEvidence.wranglerRuntimeEntrypoint !== LOCKED_WRANGLER_ENTRYPOINT ||
@@ -4381,8 +4411,16 @@ function expectedRecoveryTables(migrations) {
     (latest >= 44 || !SCHEMA_44_TABLES.includes(table)) &&
     (latest >= 45 || !SCHEMA_45_TABLES.includes(table)) &&
     (latest >= 47 || !SCHEMA_47_TABLES.includes(table)) &&
-    (latest >= 48 || !SCHEMA_48_TABLES.includes(table)));
+    (latest >= 48 || !SCHEMA_48_TABLES.includes(table)) &&
+    (latest >= 49 || !SCHEMA_49_TABLES.includes(table)) &&
+    (latest >= 50 || !SCHEMA_50_TABLES.includes(table)));
 }
+
+// The v0.4.8 disposal proof is a frozen campaign contract. Later product
+// migrations must not silently widen either its expected inventory or export.
+export const V048_RECOVERY_DURABLE_TABLES = Object.freeze(
+  expectedRecoveryTables([{ version: 48 }]),
+);
 
 export function recoveryExportTables(
   migrations,
@@ -4452,6 +4490,38 @@ function normalizeV048D1DeletionStateSequences(rows, inventory) {
   } catch {
     refuse("RECOVERY_D1_DELETION_STATE_INVALID");
   }
+}
+
+function fingerprintRecoveryD1DeletionState(input) {
+  // Keep historical schema-48 receipts byte-for-byte compatible with the
+  // frozen campaign contract. A current recovery run must also prove every
+  // later migration and table before deletion, so later ledgers use a distinct
+  // discriminator instead of pretending to be a schema-48 receipt.
+  if (input.migrations.length === 48) {
+    return fingerprintV048D1DeletionState(input);
+  }
+  if (!SHA256_RE.test(input.durableExportSha256) ||
+      !Number.isSafeInteger(input.durableExportBytes) || input.durableExportBytes < 1 ||
+      input.durableExportBytes > V048_D1_DELETION_STATE_MAX_EXPORT_BYTES) {
+    refuse("RECOVERY_D1_DELETION_STATE_INVALID");
+  }
+  return sha256(canonical({
+    schema_version: 1,
+    kind: "recovery_d1_deletion_state_current_v1",
+    role: input.role,
+    binding: input.binding,
+    migrations: input.migrations,
+    quick_check: input.quickCheck,
+    inventory: input.inventory,
+    schema: input.schemaRows,
+    durable_export_sha256: input.durableExportSha256,
+    durable_export_bytes: input.durableExportBytes,
+    sqlite_sequence: input.sequenceRows,
+    fts_count: nonNegativeInteger(
+      input.ftsCount,
+      "RECOVERY_D1_DELETION_STATE_INVALID",
+    ),
+  }));
 }
 
 async function assertResultFamilyRecoveryStateEmptyWithReader(
@@ -6153,7 +6223,7 @@ export function createCloudflareRecoveryFieldGateAdapters(configInput, dependenc
         outputPin,
       );
       try {
-        return fingerprintV048D1DeletionState({
+        return fingerprintRecoveryD1DeletionState({
           role,
           binding: {
             account_id: binding.accountId,

@@ -8,19 +8,22 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Status: unreleased 0.4.9/schema48 field candidate, held.** Provisioning,
-retrieval, resumable ingest, guarded deletion, owner actions, exact entity
-scope, document grants, passkey observability, financial imports, provenance
-binding for eligible single-record local file ingests, bounded one-original
-accepted-resolution evidence, and restart-safe migrations are covered by local
-product and contract suites. Local proof is not field proof. At this freeze the
-41-row release audit has 37 unresolved incidents, two 0.4.9 deferrals, and four
-rows closed on reviewed evidence. No public 0.4.9 asset or customer update
-exists. The earlier held 0.4.7 and 0.4.8 candidates were never tagged or
-published, and their identities are retired rather than reused for these
-changed bytes. See "What is not built," `CONNECTOR-BACKLOG.md`, and the
-[0.4.9 candidate evidence plan](release-evidence/v0.4.9-candidate-release-evidence-plan.md)
-before promising anything to anyone.
+**Package identity: brain-installer 0.4.10, schema48.** Publication, supported
+platforms and field acceptance are established by the reviewed evidence for
+the exact package bytes, not by this README or its version number. Before an
+install or update, match the package to the current approved guide and release
+receipt. Stop if the guide is held, the identity differs, or required evidence
+is missing.
+
+Local product and contract tests are not field proof. Consult UPDATE-AUDIT.md,
+CONNECTOR-BACKLOG.md, the release evidence and the exact release's limitations
+before making support claims. An unresolved release blocker remains a blocker
+until reviewed evidence closes it; a deferred capability remains unproven.
+Earlier candidate identities and their planning records remain historical and
+must not be reused as proof for changed bytes.
+
+The 41-row release audit has 37 unresolved incidents, two 0.4.10 deferrals, and four
+rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
 standard](./ENGINEERING-STANDARDS.md). Architecturally significant choices are
@@ -58,9 +61,10 @@ A scoped Cloudflare token is a bounded legacy, automation, or recovery path.
 With Wrangler 4.131.1 it is also the explicit fallback when browser OAuth cannot
 reach Vectorize. The installer names that limitation, the required Workers
 Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read permissions, and the
-exact saved credential before use. A saved token may be old or revoked, so it
-is never selected without owner approval. Keep a new value inside the reviewed
-hidden prompt or approved no-history launcher.
+exact saved credential before use. A saved token may be old or revoked, but it
+is kept as the owner's long-lived key and reused for update, deploy, and verify.
+Only an interactive recovery choice asks before using it. Keep a new value
+inside the reviewed hidden prompt or approved no-history launcher.
 
 ---
 
@@ -231,7 +235,19 @@ supported yet, before rather than after.
 `verify` and `provision` are safe to re-run. Migration execution itself is
 restart-safe after every independently committed statement, but a live D1
 install must use `brain update` whenever the pending migration changes the
-Vectorize writer protocol. Provision adopts existing resources rather than
+Vectorize writer protocol. Before dispatching an ADD COLUMN, migration writes
+and flushes local intent under `~/.brain/migration-intents/`, keyed by the exact
+account/database identity digest, migration checksum and statement digest.
+These files contain no SQL, credentials or corpus content. Keep them across
+restarts: an unresolved intent permits only exact-schema inspection and bounded
+polling, even when the column is still absent. Only exact verification or
+authoritative transport evidence of non-delivery clears the intent. A corrupt
+intent fails closed for installer review. Successful ALTER replies also require
+exact schema readback before the migration receipt is written. This local
+protection follows the same computer and retained state; it does not coordinate
+another computer or recover intent files that were removed. A crash after
+intent but before delivery can require installer review rather than an automatic
+resend. Provision adopts existing resources rather than
 duplicating them, and **refuses** to adopt a Vectorize index with the wrong
 dimensions or metric rather than silently writing vectors that would be
 rejected or mis-ranked.
@@ -375,7 +391,14 @@ query-visible count and `drained` as the number newly confirmed during this
 command. Its returned object preserves `drained`, `submitted`, and `remaining`
 and adds `confirmed_this_run`, `expected_vectors`, `actual_vectors`, and
 `vector_ready`. A no-op over a populated, ready index must never look like an
-empty index.
+empty index. Nonempty Worker receipts use `remaining_is_lower_bound: true`;
+that queue lower bound cannot cap the known `waiting` count. Exact queue counts
+still reject `waiting > remaining`, and readiness still requires an empty queue
+and matching vector counts, including when D1 requires zero. Accepted work and
+visibility waits are printed separately from completion. A safety-limit exit
+remains incomplete so lifecycle callers cannot advance without readiness; its
+remedy is background completion and a later health check, never a manual drain
+retry loop.
 
 ---
 
@@ -647,6 +670,24 @@ remains at its prior complete sweep. The repeat still re-lists message ids to
 rebuild authoritative deletion truth, but it does not download an immutable
 message body again when both its D1 family and scanner receipt are proven.
 
+A per-document Worker `failed` result is different from a provider or policy
+gap. Gmail first saves the exact logical message identity in `gmail_retry`, then
+may commit the observed history marker while the source receipt and process
+remain failed. The next incremental pass prepends those identities to the
+history changes, deduplicates them, and removes a retry only after full family
+acceptance or a current typed source decision. The cursor gate requires the
+failed-part count to match the durable retry count, and malformed retry state
+fails closed.
+
+A credential refusal is a measured Gmail policy outcome rather than an
+operational failure. Local scanner refusals and Worker content-scanner
+refusals are removed from Gmail's skip-derived coverage gap and do not set
+`INPUT_REFUSED`; the ready receipt keeps `docs_refused`, appends
+`withheld_for_secrets` to its detail, and leaves `complete_sweep` false. A
+failed part, retry backlog, retryable extraction skip, missing history marker,
+label gap, or other non-policy skip still produces `INGEST_FAILED`. Drive,
+IMAP, and all other source receipts keep their existing refusal behavior.
+
 `corpora.gmail.since` optionally declares an inclusive `YYYY-MM-DD` corpus
 floor. Full sweeps append Gmail's `after:YYYY/MM/DD` search term. Incremental
 history cannot carry a search query, so its bounded metadata policy read also
@@ -670,7 +711,9 @@ nonblocking per-source owner lease under `~/.brain/locks` before it reads
 credentials or contacts a service. Direct commands, provenance repair,
 scheduled children, and `brain load` therefore cannot write the same adjacent
 resume state concurrently on macOS, Windows, or Linux. The owner record is
-private, heartbeated, and recoverable after a stale dead process; `--dry-run`
+private and heartbeated. Recovery requires matching recorded host/user digests
+and a proven-dead PID, without an age delay. Legacy, malformed, ownerless,
+foreign, and live records remain protected; `--dry-run`
 remains concurrent because it writes neither resume state nor source receipts.
 Manifest-file symlinks resolve to the target's adjacent state identity. A
 manifest with multiple hard links is refused with a path-free safety error,
@@ -734,6 +777,20 @@ message is a false statement about a folder that was in fact identified.
 `test/imap-connector.test.mjs` drives it against a scripted IMAP server on a
 plain TCP socket, which does not exercise TLS.
 
+Provider data requests get one renewal and one retry after HTTP 401, including
+when the cached access-token expiry is still in the future. A repeated 401
+requires reconnect and cannot enter the transport retry loop. Renewal rereads
+the record under its credential lease, so concurrent calls use the replacement
+already saved by the winner. Non-rotating refresh responses retain the existing
+refresh token; QuickBooks requires a replacement refresh token.
+
+Refresh persistence first writes the newest record with a reconnect fence and
+then clears that fence after exact readback. A failure after replacement retains
+the newest token. An interrupted request with no durable response remains fenced
+because its provider outcome cannot be proven. The lane tests inject providers
+through connect and import entry points, exercise file and Keychain write faults,
+and abruptly exit fixture processes; they do not certify native provider behavior.
+
 **The client registers their own Google OAuth client, and we never hold it.**
 Not only a custody preference: every Drive and Gmail read scope is *restricted*,
 so one vendor-owned OAuth client serving many customers would require Google
@@ -754,15 +811,22 @@ macOS token file is deleted only after the full credential record has been
 written to Keychain and read back exactly. Browser, Keychain, Expect, ACL, and
 DPAPI helper processes receive a small allowlisted environment rather than the
 Terminal's ambient credentials.
-On a Windows machine with Smart App Control on, Windows can intermittently
-refuse to start the freshly compiled, unsigned DPAPI helper, and a refused file
-stays refused. Both the admin key and the Google credential record share one
-retry in `operations/windows-dpapi-session.mjs`: only a launch refusal (a
-launch-class spawn error or the bridge's `launch` stage, with no output) disposes
-that helper and compiles a fresh one into a new private folder, for at most three
-launches. A DPAPI answer such as a wrong-user decrypt, and any compile failure,
-is never retried. The session metrics record `launch_refusals` and
-`max_launch_attempts`, which `brain doctor` and the release gate report.
+Windows credentials prefer the packaged `operations/windows-dpapi-helper.exe`,
+pinned to the reviewed signed artifact's SHA-256. The Windows release gate
+requires valid Authenticode with signer organization `Financial Brain LLC`,
+exactly one signed helper session, zero compiles, and zero launch refusals.
+Native signature verification requires Windows; other hosts verify the pinned
+bytes and exercise synthetic selection and refusal controls only.
+A missing image or hash mismatch emits `BRAIN_DPAPI_FALLBACK:missing` or
+`BRAIN_DPAPI_FALLBACK:hash_mismatch` before the guarded compiler fallback.
+Unreadable images and invalid file identities fail closed. The unsigned
+fallback retains the shared three-launch retry in
+`operations/windows-dpapi-session.mjs`, compiling into a fresh private folder
+only after a launch refusal with no output. A signed-helper launch refusal,
+a definite DPAPI failure, or a compile failure never triggers that retry.
+Cleanup retains the packaged image. Session metrics include
+`signed_helper_count`, `fallback_reason`, `launch_refusals`, and
+`max_launch_attempts`.
 Planning and dry-run reads never trigger either legacy migration. A real source
 run performs migration only while holding both its source lease and the shared
 Google credential-record lease; `brain connect google` holds the shared lease
@@ -972,7 +1036,192 @@ permission change rewrites it, and storing it once made 80% of a corpus look
 like it was written this year, silently disabling staleness reporting. Drive's
 `createdTime` is the fallback, and a date in the filename beats both.
 
-### Unattended Drive refresh on macOS
+### Permanent daily imports on Windows and macOS
+
+`operations.daily_refresh` is the cross-platform product schedule. One manifest
+produces one plan for one Brain and one operating-system user. The plan comes
+from the same `planLoad` registry as `brain load`; it never carries a fixed
+connector list. It classifies every manifest corpus as machine pull, Worker
+managed, push, resident capture, snapshot, disabled, or unsupported before it
+touches a native scheduler. An enabled unsupported source fails visibly.
+
+```bash
+node brain.mjs daily on ./brain.manifest.json
+node brain.mjs daily status ./brain.manifest.json
+node brain.mjs daily off ./brain.manifest.json
+node brain.mjs schedule ./brain.manifest.json --status --all-configured --json
+```
+
+Windows installs one current-user Task Scheduler definition under the Financial
+Brain task folder. macOS installs one current-user LaunchAgent. Both names bind
+the stable Brain resource identity and operating-system principal, so two
+Brains owned by one user and two users on one computer cannot collide. A
+definition carrying no installer ownership marker is foreign and read-only.
+Install and status parse and compare the actual action, arguments, trigger,
+principal, settings, and enabled state. Pause and remove accept the exact owner
+marker plus Brain-and-user identity even when the definition has drifted, so a
+Node upgrade cannot strand an owned task. A definition without that identity
+remains foreign and read-only. Native inspection errors are not reported as
+absence.
+
+The definition contains paths, hashes, cadence, and the manifest locator, but
+no key or provider credential. Its Node action prefers a stable launcher on
+`PATH` only after its resolved target is proved to be a regular file executable
+by the current user; the current binary realpath is diagnostic only and is not
+part of the definition hash. A
+legacy Node-path-only difference may run, but reports `daily schedule needs
+refresh (Node changed)` until `brain daily on` or a verified update reconciles
+it. Status and the runner report a missing or non-executable registered Node
+binary plainly, and `brain daily on` repairs the owned definition. Each
+scheduled run takes the
+manifest-wide lifecycle lease before any source lease. That lease is keyed by canonical
+Brain resource identity in the machine-shared lock root, so another manifest
+path or operating-system user cannot open a second writer lane for the same
+Brain. It verifies its definition and source
+plan hashes, runs ready daily-owned legs sequentially, and records `deferred`
+without writing when load or update already owns the lease. `brain update`
+holds that same lease, pauses the owned definition after custody verification,
+and recomputes it from the updated manifest only after the existing upgrade
+path proves version agreement, active query-ready health, and an empty vector
+queue. An ambiguous or paused update failure leaves imports paused. It never
+blindly restores a source removed by the updated manifest. Before pausing,
+update writes a private durable transaction containing the verified prior
+definition, enabled state, and every owned legacy scheduler snapshot. It also
+creates a content-free recovery fence beside the canonical Brain lifecycle
+lock. The private snapshot remains per user, while the fence is visible to
+every local user so no manifest alias or second user can resume writes during
+recovery. macOS uses launchd's persistent disable state, and every writer
+checks the fence only after acquiring the lifecycle lease. A retry reuses the
+saved authorization even when the updated manifest fingerprint changed, and
+cannot restore or clear recovery until fresh active, query-ready, queue-zero
+proof and exact scheduler reconciliation succeed.
+`daily on` and `daily off` save owner intent in `operations.daily_refresh`
+while holding the same lifecycle lease.
+
+Every scheduled runner writes a content-free run journal at
+`~/.brain/logs/<brain-and-user-identity>/daily.log` on both platforms. The
+identity is the same one used by the native schedule. The directory is private
+to the owner (0700 on POSIX, current-user DACL on Windows), and each log file is
+0600 or current-user-only. The active log and one rotated history file each
+have a 64 KiB limit. Unsafe links, invalid records, or a failed permissions
+operation stop logging and execution instead of accepting an unprotected log.
+Entries contain only timestamps, a result, and a fixed diagnostic sentence.
+Source names, raw stdout/stderr, exception text, and credentials are excluded.
+
+`daily status` reports the last observed start time, result, next planned run,
+last error line, and log path. A native nonzero exit or terminating signal
+cannot be hidden by an older successful journal entry. Windows obtains last
+and next run times from Task Scheduler's locale-independent task-info object.
+Mac status combines launchd exit evidence with journal timestamps and the next
+local calendar slot. A run that failed before the runner could start may have
+an unknown start time on Mac. Native inspection failure, an interrupted
+journal entry, and absent completion evidence remain unknown, not successful.
+A missing Node binary or runner is reported as a failure. A deferred run is
+reported as deferred. A successful run with coverage omissions is recorded as
+partial without adding a process error; native failures still override it.
+These are process diagnostics; source freshness remains
+a separate proof. The next clock slot is planned, not a promise that a logged
+out or powered-off machine will run.
+
+The journal is written directly by the shared runner rather than redirecting
+unbounded native stdout/stderr. No native launch argument, execution contract,
+or definition hash changes, so existing owned schedules gain logging when the
+runner is updated, without a definition migration or a false plan-change
+refusal. Logs remain available after daily scheduling is turned off.
+
+Windows update separately inventories temporary tasks whose full names match
+`\Financial Brain\daily-refresh-[0-9a-f]{16}`. It obtains the current SID from
+`%SystemRoot%\System32\whoami.exe` and reads each task with the absolute
+`%SystemRoot%\System32\schtasks.exe` path. Binding requires the exact legacy name:
+the first 16 lowercase SHA-256 hex characters over three concatenated UTF-8
+netstrings (`daily-refresh-v1`, canonical Brain domain, current SID). Each
+netstring uses decimal UTF-8 byte length, colon, bytes, comma. This is separate
+from the permanent scheduler's identity. The prose producer did not specify
+normalization, so automatic binding accepts only an already canonical lowercase
+ASCII hostname. Other spellings require explicit repair, not guessed aliases.
+
+Matching names and principals alone are insufficient. A single PowerShell
+EncodedCommand must decode to a complete literal `brain load <manifest>
+--only <source CSV>` invocation. Quoted constant arguments and an absolute
+`brain.cmd` or `brain.exe` invocation are accepted; comments, dynamic expressions,
+additional commands and opaque programs are refused. This deliberately does not
+interpret an arbitrary prose-generated PowerShell program or trust an old receipt
+with unspecified serialization. Its owner must repair such a task explicitly.
+The manifest path must match exactly or both spellings must resolve through native
+realpath to the same file, with case-insensitive comparison only on Windows.
+Unresolvable aliases fail closed. Recovery fingerprints still use the update's
+pinned manifest path, not the spelling in the task action.
+Another Brain's task is left untouched; a differently named task whose decoded
+action mentions this manifest or domain, or whose literal load path resolves to
+this manifest, also requires repair before update.
+
+Before native disable, the update journal records task name, principal, prior
+enabled state, time, action-recognition booleans, a binding fingerprint and an
+immutable definition fingerprint. The fingerprints bind domain, exact manifest
+path, exact task name and SID; the definition excludes only Settings/Enabled,
+retaining trigger enablement and every other definition byte. Raw definitions
+and decoded actions are never persisted. Recovery validates the saved fingerprints
+against every native read, including after restart and before enable or delete.
+A missing legacy fingerprint or any mismatch refuses mutation rather than
+adopting the current definition. Exact disabled readback gates deployment.
+The transaction persists `remote_mutation_may_have_started` before dispatching
+the paused Worker deployment, the first possible schema/Worker change. The
+non-outbox compatibility path persists it before invoking migration. Intent
+is monotonic across retries; older receipts without it cannot prove pre-change
+state. A failed update restores previously enabled recorded bridges only when
+the durable marker explicitly remains false, with exact readback. After dispatch
+or uncertain recovery, bridges remain paused until a verified update completes.
+After success and permanent daily readback,
+only those recorded bridges may be deleted. Already-disabled bridges are never
+enabled or deleted. Other task names and other users' tasks are counted without
+printing their identities. Native inspection or disable failures refuse update.
+Completed bridge receipts remain in the private daily-update history after the
+active recovery fence is cleared, so an owner can later approve `daily on`.
+A successful update with daily imports off leaves the bridges disabled and
+prints that instruction. As with permanent tasks, Task Scheduler offers no
+atomic compare-and-change/delete primitive; the final definition read is kept
+adjacent to mutation. Disabling prevents future triggers, but does not prove an
+already-running bridge process has exited; that needs native host evidence.
+
+
+Status joins contract-v3 `brain sources --json` receipts to local ownership and
+prints one stable line per manifest source:
+
+`source-key | current-state | last-success UTC or never | next-run local or event-driven | owner`
+
+The owner is `daily-task`, `existing-local-scheduler`, `worker-cron`, `push`,
+`resident-capture`, `snapshot`, or `none`. Scheduler success never invents
+source success: every named leg must have a valid
+`receipt.last_successful_run_at`, and every prior timestamp must advance. A
+missing or unknown leg makes the aggregate line unknown instead of allowing a
+current sibling to hide it.
+
+A measured finished refresh advances operational success only with zero document
+failures and positive accepted or verified unchanged work, even when other files
+were refused or unsupported. An all-refused run is `refused`; a measured run with
+all accepted, unchanged, refused and failed counters zero is `empty`. Both retain
+the prior success and complete-history dates and request source review. Neither
+invents imported work or a transient document failure. A successful run with
+omissions is `partial` and carries `docs_refused`; it does not extend
+`complete_history_through`. A measured failure is `failed`, retains the prior
+success timestamp, and makes source freshness broken. A source with no run receipt has `missing_history` in daily status.
+The durable `docs_refused` omission count also includes intentional local
+source-policy exclusions. The daily execution receipt additionally reports
+that subset as `docs_excluded`. Such a run is partial without invalidating a
+successful refresh. Adjudicated exclusions remain distinct from unresolved
+walk gaps for deletion safety; neither omissions nor a recent success date
+are proof of complete history.
+
+Daily execution permits a partial loader result only when every source leg ran
+without failures and every named source's durable success timestamp advances.
+The ordinary load command still requires a complete sweep. Daily status adds
+`last_run_outcome`, `docs_refused`, and `docs_failed` to JSON; its text line adds
+the refusal count for partial runs. Historical coverage and vector readiness
+remain independent checks. Update readiness must stop on actual run failures,
+stale or missing freshness, or vector debt; a current partial receipt alone is
+a coverage warning, not a failed refresh.
+
+### Connector-specific Drive refresh on macOS
 
 `operations.ingest_cron` is the standard source of truth for the Drive refresh
 schedule. Use the public `brain schedule` command for install, status and
@@ -1052,9 +1301,10 @@ does not inherit `BRAIN_GOOGLE_TOKEN_STORE=file` from the Terminal that ran
 OAuth. Use `auto` for the normal macOS Keychain default, or `file` only when that
 fallback was chosen deliberately. Status compares the installed plist with the
 current manifest and code paths, reports definition drift, and surfaces
-launchd's run count and last exit code. Windows and Linux schedulers are not
-built yet and fail with a platform-specific explanation rather than pretending
-the manifest schedule took effect.
+launchd's run count and last exit code. This older connector-specific command
+remains macOS-only. On Windows it points to the manifest-wide `brain daily on`
+contract instead of printing a fixed `schtasks` recipe. Linux still reports
+that no native product scheduler exists.
 
 Scheduler stdout and stderr remain private mode `0600`. At install, after each
 lock-owning ingest child exits, and at removal, each stream is cut back to a
@@ -1112,6 +1362,50 @@ Only the categorized plan targets reach the forget route. It then inventories
 the source again and leaves a retry marker plus an error receipt if any exact
 target remains. A pending retry goes back through this current plan and cannot
 reuse an earlier denominator or bypass a changed fingerprint.
+
+### Exported mail handing over to Outlook
+
+For old Markdown digests without per-message identity, set
+`corpora.microsoft.mail_start_at` to the **inclusive first unexported instant**,
+as UTC `YYYY-MM-DDTHH:mm:ss.sssZ`. Leave it absent or null for ordinary full-mail
+sync. Configure it before the first Microsoft load. The normal provider
+configuration fingerprint incorporates this setting, so a changed boundary
+starts a fresh walk. Do not change it to today's date or remove it on retry.
+
+Verify the old source's actually loaded coverage, mailbox, selected folders,
+and export timezone first. A latest filename, modification time, offloaded
+placeholder, or successful task label is not coverage proof. If the last
+fully covered civil day were September 30 in UTC-07:00, the setting would be
+`2026-10-01T07:00:00.000Z`: every earlier timestamp is excluded and that exact
+instant is included. If coverage is partial, has holes, or its timezone is
+unknown, hold mail collection until the boundary is verified. This setting
+does not reconstruct missing older history or reconcile overlapping calendars.
+
+Use the existing update approval to stop the old mail collector and configure
+this setting, the exact `mail_folder_ids`, and the existing daily schedule.
+Keep old source names, stored digests, original files, and citation identities.
+Do not retire, rename, forget, or reload the old source. Disable unrelated
+drive selection for a mail/calendar-only handover (`include_personal_drive:
+false`, empty `drive_ids` and `site_ids`). The product does not discover or
+stop an external legacy collector automatically. Provider sign-in/consent
+remains the existing separate provider ceremony.
+
+The adapter walks all delta pages and filters locally on `receivedDateTime`.
+It deliberately does not use Graph's filtered-delta result limit to claim
+complete coverage. The cutoff applies to first load, saved deltas, moved old
+messages, and reset. Missing or invalid received times fail the run before
+delivery and cursor promotion. With a cutoff configured, mail tombstones are
+counted but retained, and the bounded inventory cannot trigger absence-based
+snapshot removals. Exact drive/calendar tombstones retain their existing
+behavior. Any mail deletion is a separate explicit owner decision.
+
+`brain sources <manifest>` shows the source, UTC boundary and retention rule;
+`--json` adds `mail_transition` from local manifest configuration, separate from
+the remote inventory rows. Ingest reports excluded-message and retained-removal
+counts. The verified update summary adds one plain line describing the
+configured handover; it does not claim that Outlook has already imported.
+No new prompt, storage migration, alias rewrite, or per-message matching is
+introduced. This remains scripted-provider proof pending the tenant field gate.
 
 ### Legacy curated collections during migration
 
@@ -1283,6 +1577,25 @@ Cross-install collection is deliberately a later, opt-in feature. If built, it
 needs a separate write-only support credential and an exact payload preview. It
 must never reuse a brain admin key or a client's Cloudflare token.
 
+### Append-only Brain Feeds
+
+`brain folder <manifest> add --path <absolute> --source <name>` records one
+validated existing folder as `{path, source, feed: true}` under
+`corpora.upload.folders`. `create-feeds` creates the two empty local-home
+landing folders and records them in one atomic manifest update. Both paths
+refuse cloud-managed roots, links or reparse points, retired roots, parent or
+child overlap, missing add paths, and more than six feeds. The exact manifest
+bytes are backed up, replaced through a same-directory atomic rename, and read
+back before success is reported. An identical add is a no-op.
+
+Feed ingest reuses the ordinary upload loader and source locks, but it does not
+reuse the watched-folder mirror's removal phase. Missing prior files are kept
+in the active identity set and no whole-document removal plan or endpoint is
+entered. Zero-byte placeholders and `corpora.upload.exclude` folder names or
+globs are counted skips. Existing watched folders keep their mirror semantics,
+including guarded deletion. `planLoad` produces one upload leg per feed, so
+daily scheduling remains manifest-derived.
+
 ---
 
 ## What remains unproven or not built
@@ -1303,6 +1616,19 @@ Read this before scoping an engagement.
   workspace, tenant, sandbox company, Plaid Item, or account receipt yet. Box
   and Airtable still have no native API connector; use a reviewed export or a
   watched folder where suitable.
+  Microsoft requests delegated `Calendars.Read` in addition to its existing
+  read scopes. A connection created before that scope was added must run
+  `brain connect microsoft <manifest>` again and approve the updated consent
+  screen. Token refresh cannot add a scope. Under the shared provider-record
+  lease, re-consent resolves both protected grants through Graph and carries
+  prior source cursors forward only when their one-way account fingerprints
+  match; a different or unprovable account cannot replace the protected grant
+  or move its sync states. The calendar adapter then maintains its
+  own rolling 30-day-past and 90-day-future `/me/calendarView/delta` cursor
+  without changing the mail or drive cursor members. Calendar requests require
+  immutable event IDs. A cursor from the earlier mutable-ID shape takes one new
+  baseline and reconciles its old event families through the guarded removal
+  path before the immutable cursor is committed.
 - **The custom business API source is locally proven only.** Its declarative
   Worker path, strict HTTPS boundary, dedicated `CUSTOM_API_TOKEN_` secret
   namespace, durable checkpointed job, exact-row-and-document verified
@@ -1490,10 +1816,37 @@ device failures remain nonzero and preserve the technician coordinator's
 stop-on-first-failure contract.
 
 Plaid application-credential setup is intentionally absent from generic setup.
-`brain setup`, `brain secrets`, and `brain technician` never accept or write the
-three bank-feed credential bindings. For an approved enabled feed, a complete
-existing binding set is preserved. A missing or partial set refuses before
-provider cleanup, local key mutation, core-key rotation, or any Worker write.
+For any enabled bank provider, the shared deploy step lists Worker secret names,
+creates `BANK_FEED_WRAPPING_KEY_V2` only when absent with the reviewed random
+generator and secret-put path, then lists the names again. Setup and update use
+that same deploy step. They never read or replace an existing value, return its
+value, derive it from an admin or session key, or source it from the environment.
+Provider credentials remain owned by the reviewed owner-present flow and may be
+absent during setup. `brain secrets` preserves all allowed bank names, requires
+the wrapping-key name for an enabled feed, and does not manufacture any bank
+secret.
+
+SimpleFIN uses the same independent bank-feed wrapping key but no Plaid client
+ID, Plaid secret, manifest endpoint, or browser SDK. `brain connect bank` may
+create a missing wrapping key and open the owner page. The one-time Setup Token
+is submitted from that page directly to the owner's Worker. The Worker records
+the claim decision before POST, encrypts the returned Access URL immediately,
+and never returns it to the CLI or browser. Scheduled pulls use at most three
+90-day windows per connection per day, with a durable 24-request hard limit.
+Provider `errlist` messages, staged owner-assignment holds, and backfill progress
+remain visible on the owner page. SimpleFIN account type is not guessed: an
+untyped account enters the financial map as `other` with balance role `neither`.
+The first history window waits for account assignment and verified ledger
+promotion before its cursor advances. A corrected partial response supersedes
+the prior promotion marker only after every staging chunk is durable. Revision
+guards in the same D1 transactions as staging, ledger writes, and promotion
+prevent interrupted or concurrent replacements from certifying incomplete work.
+Migration 0051 preserves old rows and rewinds legacy connections to their first
+retained window, since earlier cursors did not prove promotion. Those windows
+are fetched again before promotion. Requests construct explicit Basic authorization
+outside the URL, use manual redirects, and refuse every redirect response.
+A local request-construction refusal creates no one-time claim operation;
+an ambiguous dispatched claim remains blocked from automatic replay.
 
 Technician plan schema 5 also carries the owner briefing for every ceremony:
 what will open, why it is needed, the minimum access, the safe non-secret work
@@ -1602,6 +1955,13 @@ This source-inventory feature does not widen MCP authority. The five local
 Owner assistant tools are `brain_think`, `brain_search`, `brain_remember`,
 `brain_health`, and `brain_financial_map`. The last tool can read map state and
 store an expiring preview, but it has no activation operation.
+
+`brain sources <manifest> --retire <name>` records an owner-only lifecycle
+event for a registered upload source after refusing any folder the manifest
+would load under that name. Retirement keeps every stored record searchable,
+suppresses operational freshness advice, and leaves incomplete history visible
+with no-action guidance. A later ingest, error, registration, forget event, or
+`--unretire <name>` ends the retirement; schedule and zone events do not.
 
 The current ingest boundary validates evidence lineage and versioned text-origin
 receipts on new writes, and it refuses a later write that weakens established

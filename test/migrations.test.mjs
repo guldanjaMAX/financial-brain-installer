@@ -25,6 +25,7 @@ import {
   coverageGapReport,
   releaseDrainLease,
   resetVectorProjectionBootstrap,
+  sourceFreshnessCounts,
   VECTOR_BOOTSTRAP_PAGE_SIZE,
 } from "../worker/src/lib/store-d1.js";
 
@@ -75,12 +76,18 @@ const ocrMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) === 47
 check("the unshipped OCR schema is one consolidated migration 0047",
   ocrMigrationFiles.length === 1 && ocrMigrationFiles[0] === "0047_ocr_page_idempotency.sql",
   JSON.stringify(ocrMigrationFiles));
-// 0048 is the separate custom API source lane. Pin the exact unshipped suffix
-// so a stray OCR 0048/0049 cannot hide behind it.
+// Schemas 0048 through 0051 are separate source, projection and revision lanes.
+// Pin the exact unshipped suffix so a stray migration cannot hide among them.
 const unshippedMigrationFiles = files.filter((name) => Number(name.slice(0, 4)) >= 47);
-check("the unshipped suffix is exactly OCR 0047 then custom API 0048",
+check("the unshipped suffix is exactly OCR, custom API, SimpleFIN, bank-activity fencing, then SimpleFIN revisions",
   JSON.stringify(unshippedMigrationFiles) ===
-    JSON.stringify(["0047_ocr_page_idempotency.sql", "0048_custom_api_source.sql"]),
+    JSON.stringify([
+      "0047_ocr_page_idempotency.sql",
+      "0048_custom_api_source.sql",
+      "0049_simplefin_bank_feed.sql",
+      "0050_bank_activity_refresh_generation.sql",
+      "0051_simplefin_window_revisions.sql",
+    ]),
   JSON.stringify(unshippedMigrationFiles));
 
 const db = new DatabaseSync(":memory:");
@@ -93,6 +100,92 @@ for (const f of files) {
   }
 }
 check(`all ${applied} statements across ${files.length} files applied`, true);
+
+/* ---- 0050 upgrades existing bank-activity documents before fencing writes ---- */
+{
+  const upgraded = new DatabaseSync(":memory:");
+  for (const file of files.filter((name) => Number(name.slice(0, 4)) <= 49)) {
+    for (const statement of splitStatements(readFileSync(join(DIR, file), "utf8"))) {
+      upgraded.exec(statement);
+    }
+  }
+  upgraded.exec(
+    `INSERT INTO install_state
+       (id,client_slug,product_version,schema_version,gate_version,installed_at,ring)
+     VALUES (1,'fixture','0.0.0-test',49,0,'2026-01-01T00:00:00Z','test');
+     INSERT INTO documents
+       (doc_uid,source,source_id,title,ingested_at,content_hash,entity_slug)
+     VALUES
+       ('bank:scoped','bank_activity','account-month-scoped','Scoped activity',1,'hash-scoped','household'),
+       ('bank:legacy','bank_activity','account-month-legacy','Legacy activity',1,'hash-legacy',NULL);`,
+  );
+  for (const statement of splitStatements(
+    readFileSync(join(DIR, "0050_bank_activity_refresh_generation.sql"), "utf8"),
+  )) upgraded.exec(statement);
+
+  const claims = upgraded.prepare(
+    `SELECT source_id,generation,entity_slug,claimed_at
+       FROM bank_activity_write_claims ORDER BY source_id`,
+  ).all();
+  check("0050 backfills exact generation-zero claims after SimpleFIN and before installing document guards",
+    claims.length === 2 && claims.every((row) => row.generation === 0 && row.claimed_at === "schema-0050") &&
+      claims[0].entity_slug === null && claims[1].entity_slug === "household",
+    JSON.stringify(claims));
+
+  let staleScopeRefused = false;
+  try {
+    upgraded.prepare(
+      "UPDATE documents SET entity_slug='business' WHERE source_id='account-month-scoped'",
+    ).run();
+  } catch {
+    staleScopeRefused = true;
+  }
+  check("0050 reaches the trigger and refuses a scope not claimed by the current generation",
+    staleScopeRefused && upgraded.prepare(
+      "SELECT entity_slug FROM documents WHERE source_id='account-month-scoped'",
+    ).get()?.entity_slug === "household");
+
+  upgraded.prepare(
+    "UPDATE bank_activity_write_claims SET entity_slug='business' WHERE source_id='account-month-scoped'",
+  ).run();
+  upgraded.prepare(
+    "UPDATE documents SET entity_slug='business' WHERE source_id='account-month-scoped'",
+  ).run();
+  upgraded.prepare(
+    "UPDATE documents SET content_hash='hash-legacy-2' WHERE source_id='account-month-legacy'",
+  ).run();
+  check("0050 permits claimed scoped and legacy-null recovery controls",
+    upgraded.prepare(
+      "SELECT entity_slug FROM documents WHERE source_id='account-month-scoped'",
+    ).get()?.entity_slug === "business" && upgraded.prepare(
+      "SELECT content_hash FROM documents WHERE source_id='account-month-legacy'",
+    ).get()?.content_hash === "hash-legacy-2");
+
+  upgraded.prepare(
+    `INSERT INTO documents
+       (doc_uid,source,source_id,title,ingested_at,content_hash,entity_slug)
+     VALUES ('bank:recovery','bank_activity','account-month-recovery',
+             'Recovered activity',1,'committed-recovery-hash','household')`,
+  ).run();
+  let unclaimedPendingRefused = false;
+  try {
+    upgraded.prepare(
+      `INSERT INTO documents
+         (doc_uid,source,source_id,title,ingested_at,content_hash,entity_slug)
+       VALUES ('bank:unclaimed','bank_activity','account-month-unclaimed',
+               'Unclaimed activity',1,'pending:unclaimed:revision','household')`,
+    ).run();
+  } catch {
+    unclaimedPendingRefused = true;
+  }
+  check("0050 permits committed recovery inserts and refuses unclaimed live revisions",
+    unclaimedPendingRefused && upgraded.prepare(
+      "SELECT COUNT(*) AS n FROM documents WHERE source_id='account-month-recovery'",
+    ).get()?.n === 1 && upgraded.prepare(
+      "SELECT COUNT(*) AS n FROM documents WHERE source_id='account-month-unclaimed'",
+    ).get()?.n === 0);
+  upgraded.close();
+}
 
 /* ---- consolidated 0047 is byte-shape equivalent to old 0047..0049 ---- */
 {
@@ -471,6 +564,34 @@ for (const trigger of [
     report.gaps.some((gap) => gap.type === "source_unregistered" && gap.source === "inventory-a") &&
       report.gaps.some((gap) => gap.type === "source_unregistered" && gap.source === "inventory-b"),
     JSON.stringify(report));
+
+  let countStatements = 0;
+  let countSql = null;
+  const countEnv = { DB: { prepare(sql) {
+    countStatements++;
+    countSql = sql;
+    const statement = db.prepare(sql);
+    return { all: async () => ({ results: statement.all() }) };
+  } } };
+  const counts = await sourceFreshnessCounts(countEnv);
+  check("the real current-schema aggregate query executes in one statement",
+    countStatements === 1 &&
+      JSON.stringify(counts) === JSON.stringify({ total: 0, stale: 0, unscheduled: 0 }),
+    JSON.stringify({ countStatements, counts }));
+  const countPlan = db.prepare(`EXPLAIN QUERY PLAN ${countSql}`).all().map((row) => String(row.detail || ""));
+  // The retirement lookup reads the latest relevant event as MAX(id) through
+  // the source index (alias latest), then fetches that one event by primary
+  // key (alias e). Either way it must search the index, never scan the event
+  // log, and never sort it.
+  check("the aggregate retirement lookup uses the source-events index",
+    countPlan.some((detail) => /SEARCH (?:e|latest) USING (?:COVERING )?INDEX idx_source_events_source\b/.test(detail)) &&
+      !countPlan.some((detail) => /SCAN (?:e|latest)(?: |$)/.test(detail)) &&
+      !countPlan.some((detail) => /USE TEMP B-TREE/.test(detail)),
+    JSON.stringify(countPlan));
+  check("the aggregate active-job lookup uses the partial custom-API index",
+    countPlan.some((detail) => /SEARCH job USING INDEX idx_custom_api_jobs_one_active/.test(detail)) &&
+      !countPlan.some((detail) => /SCAN job(?: |$)/.test(detail)),
+    JSON.stringify(countPlan));
 
   db.prepare("UPDATE documents SET deleted_at=2 WHERE doc_uid='inventory:a-live'").run();
   db.prepare("DELETE FROM documents WHERE doc_uid='inventory:a-restorable'").run();

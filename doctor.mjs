@@ -87,7 +87,8 @@ export const CF_TOKEN_REJECTED_REMEDY =
   "  If the reviewed automation or recovery plan specifically requires a token, the\n" +
   "  owner can review that bounded credential in My Profile > API Tokens without\n" +
   `  revealing it to the assistant. Leave the start date empty or set it to today; set\n` +
-  `  the end at least 7 days from now. Minimum scopes: ${CF_TOKEN_SCOPES.join(", ")}.`;
+  `  the end at least 7 days from now, with about one year recommended for the owner's saved key. ` +
+  `Minimum scopes: ${CF_TOKEN_SCOPES.join(", ")}.`;
 
 /** Does this failure mean the credential was refused, rather than the tool misbehaving? */
 export function isCredentialRejection(error) {
@@ -524,15 +525,25 @@ export function checkInstallPrivilege({
 } = {}) {
   let elevated = null;
   if (platformName === "win32") {
-    const result = runCommand("powershell.exe", [
-      "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_ELEVATION_PROBE,
-    ], {
-      timeout: 30_000,
-      inheritEnv: false,
-      env: localToolEnvironment(environment),
-    });
-    if (result.ok && /BRAIN_STANDARD_USER/.test(result.out)) elevated = false;
-    else if (result.ok && /BRAIN_ELEVATED/.test(result.out)) elevated = true;
+    const systemRoot = environment.SystemRoot || environment.SYSTEMROOT || environment.WINDIR;
+    if (pathWin32.isAbsolute(String(systemRoot || ""))) {
+      const command = pathWin32.join(
+        systemRoot,
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      );
+      const result = runCommand(command, [
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_ELEVATION_PROBE,
+      ], {
+        timeout: 30_000,
+        inheritEnv: false,
+        env: localToolEnvironment(environment),
+      });
+      if (result.ok && /BRAIN_STANDARD_USER/.test(result.out)) elevated = false;
+      else if (result.ok && /BRAIN_ELEVATED/.test(result.out)) elevated = true;
+    }
   } else if (typeof getEffectiveUserId === "function") {
     elevated = Number(getEffectiveUserId()) === 0;
   }
@@ -1154,10 +1165,25 @@ export function checkBankFeedRedirect(manifest) {
   const required = bankFeedRedirectUri(domain);
   const requiredWebhook = plaidWebhookUri(domain);
   const provider = manifestBankFeedProvider(feed);
-  if (!["plaid", "custom"].includes(provider) ||
+  if (!["plaid", "simplefin", "custom"].includes(provider) ||
       (feed.environment !== undefined && !["sandbox", "production"].includes(feed.environment))) {
     return check("Bank feed", FAIL, "the bank provider or environment is invalid",
-      "  Choose provider plaid or custom and environment sandbox or production.");
+      "  Choose provider plaid, simplefin, or custom and a supported environment.");
+  }
+  if (provider === "simplefin") {
+    if (feed.environment !== undefined && feed.environment !== "production") {
+      return check("Bank feed", FAIL, "SimpleFIN has no sandbox environment",
+        "  Set corpora.bank_feed.environment to production or remove it. The saved demo fixture is used for offline rehearsal.");
+    }
+    if (["api_base", "link_sdk_url", "link_global"].some((field) => Object.hasOwn(feed, field))) {
+      return check("Bank feed", FAIL, "the SimpleFIN profile has an endpoint override",
+        "  Remove api_base, link_sdk_url, and link_global. The one-time Setup Token is claimed only inside the owner's Worker.");
+    }
+    return check(
+      "Bank feed",
+      OK,
+      `simplefin; production; owner page ${required}; no provider redirect or webhook registration is required`,
+    );
   }
   const declared = Array.isArray(feed.registered_redirect_uris) ? feed.registered_redirect_uris : [];
   const missingConfig = provider === "custom" ? [
@@ -1348,6 +1374,9 @@ export async function runAll({
   cloudflareAuthProfile,
   onResult,
   googleStorageStatus,
+  googleStorageCheck = tokenStorageStatus,
+  googleStorageReadability = verifyTokenStorageReadable,
+  windowsCredentialCheck = checkWindowsCredentialProtection,
   cloudflareToken,
   requireClaudeCode = true,
   allowCodexForExistingBrain = false,
@@ -1415,9 +1444,11 @@ export async function runAll({
     };
   }
   push(claude);
-  if (process.platform === "win32") push(checkWindowsCredentialProtection());
+  if (platformName === "win32") push(windowsCredentialCheck({ platformName }));
   push(codex);
-  push(checkGoogleConnection(googleStorageStatus));
+  // Storage metadata and readability are separate native credential boundaries.
+  // Isolated callers supply both; owner diagnostics retain the native defaults.
+  push(checkGoogleConnection(googleStorageStatus ?? googleStorageCheck(), googleStorageReadability));
   return out;
 }
 

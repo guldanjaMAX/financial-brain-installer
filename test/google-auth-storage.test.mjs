@@ -13,6 +13,9 @@ import {
   GOOGLE_KEYCHAIN_SERVICE, GOOGLE_KEYCHAIN_ACCOUNT,
 } from "../connectors/google-auth.mjs";
 
+// Simulated Windows calls carry a system root so the product resolves the real ACL tool path.
+const SIMULATED_WINDOWS_ENVIRONMENT = Object.freeze({ SystemRoot: "C:\\Windows" });
+
 let fail = 0, ran = 0;
 const check = (name, condition, detail = "") => {
   ran++;
@@ -425,6 +428,7 @@ try {
       loadTokens({
         backend: "file",
         platform: "win32",
+        environment: SIMULATED_WINDOWS_ENVIRONMENT,
         username: "fixture-user",
         path,
         randomBytes: () => Buffer.alloc(8, 0x34),
@@ -453,6 +457,7 @@ try {
     const base = {
       backend: "file",
       platform: "win32",
+      environment: SIMULATED_WINDOWS_ENVIRONMENT,
       username: "fixture-user",
       path,
       runAcl: acl.runAcl,
@@ -494,6 +499,7 @@ try {
       saveTokens(record, {
         backend: "file",
         platform: "win32",
+        environment: SIMULATED_WINDOWS_ENVIRONMENT,
         username: "fixture-user",
         path,
         randomBytes: () => Buffer.alloc(8, 0x37),
@@ -520,6 +526,7 @@ try {
     const base = {
       backend: "file",
       platform: "win32",
+      environment: SIMULATED_WINDOWS_ENVIRONMENT,
       username: "fixture-user",
       path,
       runAcl: acl.runAcl,
@@ -558,6 +565,7 @@ try {
       loadTokens({
         backend: "file",
         platform: "win32",
+        environment: SIMULATED_WINDOWS_ENVIRONMENT,
         username: "fixture-user",
         path,
         runAcl: () => ({ status: 1, stdout: Buffer.alloc(0), stderr: Buffer.from(record.google.refresh_token) }),
@@ -580,6 +588,7 @@ try {
       loadTokens({
         backend: "file",
         platform: "win32",
+        environment: SIMULATED_WINDOWS_ENVIRONMENT,
         username: "fixture-user",
         path,
         runPowerShell: () => { throw new Error("malformed data must not reach DPAPI"); },
@@ -597,6 +606,7 @@ try {
       saveTokens(record, {
         backend: "file",
         platform: "win32",
+        environment: SIMULATED_WINDOWS_ENVIRONMENT,
         username: "fixture-user",
         path,
         runPowerShell: () => { throw new Error(record.google.refresh_token); },
@@ -758,6 +768,7 @@ try {
     const options = {
       backend: "file",
       platform: "win32",
+      environment: SIMULATED_WINDOWS_ENVIRONMENT,
       username: process.env.USERNAME || process.env.USER,
       path,
     };
@@ -877,7 +888,7 @@ try {
   const childBuffers = [];
   let preparations = 0, invocations = 0, serial = 0, dispatchFailed = false;
   const options = {
-    backend: "file", platform: "win32", path, username: "fixture-user",
+    backend: "file", platform: "win32", environment: SIMULATED_WINDOWS_ENVIRONMENT, path, username: "fixture-user",
     environment: ambientCredentials,
     runAcl: () => ({ status: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }),
     prepareWindowsDpapiSession(details) {

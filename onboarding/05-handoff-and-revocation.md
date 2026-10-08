@@ -20,14 +20,15 @@ At **[TIME] on [DATE]**, with you watching:
 
 | What | Action | Result |
 |---|---|---|
-| A fallback Cloudflare API token for your account, only if one was used | [Not used / Revoked by you] | [No token existed / The exact token used for this work no longer authorizes account changes] |
-| The protected local copy of that token, only if one was used | [Not used / Removed with `brain token <manifest> --forget`, with you watching] | [Nothing was stored / The encrypted recovery copy no longer remains on this computer] |
+| A fallback Cloudflare API token for your account, only if one was used | [Not used / Kept for reuse / Rolled by you only after exposure] | [No token existed / The long-lived key remains available for updates / The exposed key no longer authorizes account changes] |
+| The protected local copy of that token, only if one was used | [Not used / Kept for reuse / Removed with `brain token <manifest> --forget` only after exposure, with you watching] | [Nothing was stored / The protected recovery copy remains on this computer / The exposed recovery copy no longer remains on this computer] |
 | Temporary access to your [Google Drive folders / source], only if granted | [Not granted / Removed by you] | [No temporary access existed / I can no longer read that source material] |
 | Your admin key | [Not rotated because it was generated directly into your protected store and never left your custody / Rotated by you through the reviewed owner-controlled secure replacement path after exposure] | [No unnecessary credential change / I no longer know a key that can query your Brain] |
 
-Only credentials and source access that were actually used are revoked or
-removed at handoff. Normal fresh setup uses the owner's Cloudflare browser
-sign-in and generates the admin key directly into the owner's protected store.
+Only exposed credentials are rolled or removed at handoff. A long-lived
+Cloudflare recovery key is kept for future updates when it stayed in owner-only
+custody. Normal fresh setup uses the owner's Cloudflare browser sign-in and
+generates the admin key directly into the owner's protected store.
 If that key never left owner-only custody and the installer never saw, copied,
 or retained it, do not rotate it solely for handoff.
 
@@ -56,7 +57,7 @@ This is not a policy I am promising to follow. It is a fact about what keys exis
 Do not take my word for any of the above. Verify only the checks that actually
 apply:
 
-1. **Cloudflare, only if a fallback token was used.** Log in, go to **My Profile, then API Tokens**. The exact token used for this work should not be listed. If it remains, the cleanup is incomplete.
+1. **Cloudflare, only if a fallback token was used.** Log in, go to **My Profile, then API Tokens**. The long-lived recovery key should remain listed when it stayed protected. If it was exposed, confirm that the exposed key was rolled and is no longer listed.
 2. **Source sharing, only if temporary access was granted.** Open the sharing settings on the source you granted. My access should not appear.
 3. **Your admin key.** If it never left your protected store, confirm that no installer or technician received it and leave it unchanged. If exposure required a reviewed rotation, confirm that the rotation succeeded without showing the new value, then sign back in with an existing passkey.
 After every applicable check, run `node brain.mjs test <manifest>` yourself. Then complete
@@ -178,9 +179,10 @@ consent in the official browser yourself. Do not send a credential to me or put
 one in a shared channel.
 
 If the released CLI explicitly requires its recovery-only scoped token path,
-create the exact short-lived token named by that plan and enter it yourself at
-the hidden prompt. **Delete it when the work is done.** Routine work should not
-create a token merely because a technician is present.
+create the exact token named by that plan with an expiry of about one year and
+enter it yourself at the hidden prompt. Keep and reuse its protected copy. Roll
+the key only if it was exposed. Routine work should not create a token merely
+because a technician is present.
 
 ---
 

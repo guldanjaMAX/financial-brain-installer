@@ -77,7 +77,7 @@ const SCENARIOS = Object.freeze([
     },
   }),
   Object.freeze({
-    id: "microsoft", label: "Microsoft Outlook delta and drive body",
+    id: "microsoft", label: "Microsoft Outlook mail, calendar delta, and drive body",
     run: async () => {
       const result = await syncMicrosoftGraph({
         accessToken: "offline-token", includePersonalDrive: false, driveIds: ["D1"],
@@ -87,6 +87,11 @@ const SCENARIOS = Object.freeze([
             id: "m1", subject: "Invented mail", body: { contentType: "text", content: "Invented mail body" },
             receivedDateTime: "2026-01-04T00:00:00.000Z",
           }], "@odata.deltaLink": "https://graph.microsoft.com/offline-mail-delta" });
+          if (target.includes("/me/calendarView/delta")) return response({ value: [{
+            id: "e1", subject: "Invented calendar event",
+            start: { dateTime: "2026-01-05T09:00:00.000Z", timeZone: "UTC" },
+            end: { dateTime: "2026-01-05T10:00:00.000Z", timeZone: "UTC" },
+          }], "@odata.deltaLink": "https://graph.microsoft.com/offline-calendar-delta" });
           if (target.includes("/drives/D1/root/delta")) return response({ value: [{
             id: "f1", name: "Plan.txt", file: { mimeType: "text/plain" },
             "@microsoft.graph.downloadUrl": "https://offline.sharepoint.com/download?invented=1",
@@ -100,6 +105,7 @@ const SCENARIOS = Object.freeze([
         },
       });
       expect(result.documents.some((item) => item.content.includes("Invented drive body")), "microsoft_drive_body");
+      expect(result.documents.some((item) => item.source_id === "outlook:event:e1"), "microsoft_calendar_identity");
       expect(result.authoritative_snapshot && result.cursor_can_advance, "microsoft_cursor_truth");
     },
   }),

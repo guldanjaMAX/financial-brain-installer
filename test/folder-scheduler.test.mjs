@@ -458,7 +458,7 @@ try {
   /* ================= the command is really wired to all of this ================= */
   {
     const cli = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
-    const ingestIndex = cli.indexOf("async function cmdIngest(manifestPath)");
+    const ingestIndex = cli.indexOf("async function cmdIngestLocalRun(");
     const forgetIndex = cli.indexOf("export function validateForgetReceipt", ingestIndex);
     const local = cli.slice(ingestIndex, forgetIndex);
     check("the local ingest lane computes deletions with the shared helper",
@@ -467,7 +467,10 @@ try {
       /flags\.limit\s*\n?\s*\?\s*\[\]/.test(local), "limit guard not found");
     const planIndex = local.indexOf("buildDriveRemovalPlan({");
     const assertIndex = local.indexOf("assertDriveRemovalPlanSafe(", planIndex);
-    const applyIndex = local.indexOf("applyDriveRemovals({", assertIndex);
+    // Removal runs through the injectable applyPreparedRemovals seam (or the direct call); either must follow approval.
+    const applyIndex = [local.indexOf("applyDriveRemovals({", assertIndex), local.indexOf("applyPreparedRemovals(", assertIndex)]
+      .filter((index) => index >= 0)
+      .reduce((first, index) => (first < 0 || index < first ? index : first), -1);
     check("every removal reason goes into one plan",
       planIndex > 0 && ["storedFamilies", "activeFamilies", "policyCandidates", "vanishedCandidates", "intentionalCandidates"]
         .every((field) => new RegExp(`\\b${field}\\b`).test(local.slice(planIndex, assertIndex))),

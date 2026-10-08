@@ -32,8 +32,9 @@ Wrangler 4.131.1 cannot request Vectorize permission for that profile. Its
 read-only preflight therefore fails closed at the Vectorize read and may offer
 an explicitly selected, account-scoped API token before any mutation. A saved
 token is named by account and protected-store location, described as possibly
-old or revoked, and never selected without owner approval. Scoped API tokens
-otherwise remain limited to explicit automation, recovery, and older manifests.
+old or revoked, and reused for update, deploy, and verify. Only an interactive
+recovery choice asks before using it. Scoped API tokens otherwise remain
+limited to explicit automation, recovery, and older manifests.
 Routine use goes through the deployed Worker with the Brain's own admin key.
 Removing the control-plane profile or revoking a recovery token does not disable
 retrieval, health, ingest through a configured domain, evaluation, drain, or
@@ -67,7 +68,7 @@ the same packaging caution as private evaluation data.
 | Storage | `worker/src/lib/store.js`, `store-d1.js`, `supabase.js` | Backend selection, D1 and legacy storage behavior, vector outbox, source lifecycle |
 | D1 schema | `migrations/d1/` | Append-only schema and data migrations |
 | Extraction | `ingest/` | File walking, format extraction, quality checks, dates, splitting, batching, resume state |
-| Google sources | `connectors/google-auth.mjs`, `google-drive.mjs`, `gmail.mjs`, `google-calendar.mjs` | OAuth storage and source-specific listing, cursor, export, and envelope logic |
+| Google and Microsoft sources | `connectors/google-auth.mjs`, `google-drive.mjs`, `gmail.mjs`, `google-calendar.mjs`, `microsoft-graph.mjs` | OAuth storage and source-specific listing, cursor, export, and envelope logic |
 | Local operations | `operations/` | Admin-key persistence, Claude owner-workspace guidance, and macOS unattended scheduling (Drive, iMessage capture, watched folder) |
 | MCP | `components/brain-mcp.mjs`, `brain-mcp-runtime.mjs` | Tool surface and runtime resolution of the current durable admin key |
 | Acceptance and eval | `acceptance.mjs`, `eval/`, `report*.mjs` | Install checks, retrieval measurement, regression comparison, owner-facing reports |
@@ -383,6 +384,17 @@ Local and remote state is saved adjacent to the manifest as
 resumable. A failure stays retryable. Drive policy changes and periodic full
 sweeps compare source truth with stored families so excluded, deleted, moved,
 or no-longer-accessible files can be removed safely.
+For Gmail, a recoverable Worker part failure adds the exact logical message to
+the private `gmail_retry` map before the history cursor can advance. The source
+receipt stays failed, and the next incremental run retries that map even if the
+provider reports no new history. Acceptance or a typed current source decision
+clears the entry; malformed retry state stops cursor settlement.
+Gmail credential refusals remain measured in `docs_refused` but do not make a
+run fail when they are its only non-accepted outcome. The ready receipt records
+the count in its detail and keeps `complete_sweep` false, because the Worker
+does not credit a complete history sweep with refused documents. Failed parts,
+durable retry backlog, missing history or label proof, and other non-policy
+skips remain receipt gaps. Other connectors retain refusal-as-gap behavior.
 
 Mutating local-folder, Drive, Gmail, and Calendar runs share one cross-platform
 owner lease keyed to the canonical adjacent source-state path. The lease is
@@ -392,9 +404,10 @@ and released in `finally`.
 Direct commands, scheduled children, and `brain load` enter the same writer
 boundary exactly once. Legacy provenance repair apply is disabled before this
 boundary; any future repair executor must enter it. Its private owner token and heartbeat
-allow a stale dead process to be recovered without letting an old timestamp
-evict a live long-running sync. Dry runs do not take the lease because they
-write no state or source receipt.
+allow an interrupted process to be recovered immediately only after the recorded
+host/user digests match and the operating system proves its PID is gone. Age
+alone cannot evict a live process, legacy record, or ownerless directory. Dry
+runs do not take the lease because they write no state or source receipt.
 Manifest-file symlinks resolve to the target before the state identity is
 derived. A multiply hard-linked manifest is rejected before the runtime lock,
 credentials, or network because it has no portable single adjacent state path.
@@ -480,11 +493,22 @@ without exposing source identifiers.
 | Bank exports and hosted feed | Built into the shared financial ledger; real-statement and real-feed reconciliation remain field gates |
 | OCR for scanned PDFs | Built, optional, and provenance-marked; aggregate local preflight is read-only and synthetic-tested, while private real scans remain a field gate |
 | Slack and Notion | Built behind field gates with scripted provider-I/O proof; no real workspace has completed acceptance |
-| Microsoft 365 and Dropbox | Built behind field gates for mail and files, cursor resume, tombstones, and scheduling; no real tenant or account has completed acceptance |
+| Microsoft 365 and Dropbox | Built behind field gates. Microsoft covers mail, a rolling 30-day-past and 90-day-future Outlook calendar view, and files with independent cursor resume. Calendar state uses immutable event IDs, account-bound scope renewal, event-inventory-scoped tombstones, and a workload-specific removal review; Dropbox covers files. No real tenant or account has completed acceptance |
 | QuickBooks Online and HubSpot CRM | Built behind field gates with owner connection, incremental read, retry, and disconnect paths; no provider sandbox or real account has completed acceptance |
-| Plaid | Native owner connection, incremental read, signed webhook, scheduled reconciliation, retry, repair, and disconnect paths are built, but general bank invitations are held. The owner enters Plaid application credentials only through `brain connect bank`, at a hidden prompt, when the Worker lacks them or with `--replace-keys` to correct them; the pair is checked with one harmless Plaid read in the manifest's environment before anything is written, and the command generates a missing wrapping key and verifies the names before Link. Generic setup preserves a complete Worker binding set and refuses a missing or partial set before mutation. Customer invitations wait for the full release-gate journey and a production pilot |
+| Plaid | Native owner connection, incremental read, signed webhook, scheduled reconciliation, retry, repair, and disconnect paths are built, but general bank invitations are held. For every enabled bank provider, setup, update, and deploy list Worker secret names, create the independent random wrapping key only when absent, and verify its name without printing, returning, deriving, or replacing its value. The owner enters Plaid application credentials only through `brain connect bank`, at a hidden prompt, when the Worker lacks them or with `--replace-keys` to correct them; the pair is checked with one harmless Plaid read in the manifest's environment before anything is written. Customer invitations wait for the full release-gate journey and a production pilot |
+| SimpleFIN Bridge | A second bank-feed profile reuses encrypted `bank_feed_items` custody and the provider-neutral ledger. The owner submits the one-time Setup Token only to the owner-authenticated Worker page. A durable operation row prevents automatic re-claim after an ambiguous POST; the Access URL is immediately wrapped with `BANK_FEED_WRAPPING_KEY_V2`. Native requests use explicit Basic authorization with URL credentials removed, manual redirects and explicit redirect refusal. Scheduled pulls stage at most three 90-day windows per connection per day and enforce a durable 24-request ceiling. Each replacement response publishes a new revision only after all staging chunks are verified. Ledger batches and promotion receipts are fenced to that revision; history advances only after verified promotion with no `errlist` and every account assigned. General bank invitations remain held pending live owner review. |
 | Custom business API | A declarative `corpora.custom_api` manifest block becomes a plain Worker binding containing only endpoint rules and a bearer-token secret name matching `CUSTOM_API_TOKEN_[A-Z0-9_]{1,40}`. Runtime, deploy, and connect validation reject every other binding name before credential inventory or provider fetch. On Windows the owner uses the CLI's clipboard entry by default; masked Cloudflare dashboard entry is the explicit fallback. macOS keeps the hidden prompt. Clipboard mode is selected before secret inventory and clears once across inventory, existing-name, validation, write, and readback exits. Dashboard replacement requires an owner confirmation after the new value is pasted; an existing name is not replacement proof. Each pull fetches and validates the complete snapshot before staging a durable D1 job, then advances at most one compact row or document slice per Worker request under a 600-statement budget. Known identity fields are validated before they can authorize presence or absence: sales requires a trimmed store, a real `YYYY-MM-01` month, and a configured revenue stream; inventory and costs allow a null store but otherwise require a trimmed store and breed. Every fully stamped document passes the shared storage-envelope validator before a job exists. A later-invalid staged document fails that job and permits a fresh provider pull. Rows and searchable documents are job-versioned; readers resolve the per-source current-job pointer through that job's exact logical-document version map. The identical-response shortcut first proves every current row chunk and mapped live document. Staging carries an unchanged document version only after exact live-document readback and regenerates a missing one; terminal mismatch durably fails the active job. A refused known key carries its last verified row and last-seen time forward with explicit not-refreshed state and cannot authorize absence. A missing sales stream affects only prior labeled rows for that exact store-month; both sales layouts name the store and month instead of inventing zero. A malformed identity with no safe scope fails absence decisions closed by carrying unmatched prior keys. A partial refusal promotes usable changes but keeps the source in ready-with-warnings freshness with a durable refused count; every readable document containing a carried value begins with the fixed dated warning even when its template has no row table. An all-refused pull leaves the pointer unchanged and keeps its current refused count in the source receipt. Scheduled failures likewise retain a closed issue code and render reviewed owner guidance only at the reader boundary. The pointer flips atomically with the terminal fetch receipt after every staged row, promoted document, and carried-forward document version reads back exactly. Owner-facing counts apply that same current-map boundary and exclude staged or superseded physical versions. Obsolete physical document versions are then handed to the normal guarded delete path in job-tracked bounded slices, which queues vector deletes; the shared drain processes deletes before upserts. Prior row chunks are collected afterward in bounded slices. Only a terminally verified job can use the whole-body fast path or mark the saved snapshot ready. A durable active job supplies the custom source's indexing start receipt. Packed rows retain per-row hashes, presence, last-seen state, and any refused refresh marker. Inventory and cost rows close their active value interval when a key disappears and open a new interval when it returns, so structured history preserves absence gaps. Search contains only the current inventory and cost snapshot, one document per store; it does not create daily history documents. Sales prose remains one cross-store document per month and one history per store. Saved state and empty-outbox meaning readiness are separate receipts. No custom API row is wired into the financial ledger or map. |
 | Box and Airtable | No native API connector. Box can use a reviewed export or locally synced watched folder. Airtable requires an approved export until a native connector is built. |
+
+An optional Microsoft `mail_start_at` manifest boundary supports verified
+exported-digest handovers without changing stored history or citation keys.
+It is the inclusive UTC start of unexported mail. Every delta page is walked;
+the adapter filters received timestamps locally on first load, continuation,
+and reset. Configured handovers retain mail tombstones and disable
+absence-based snapshot removal, since a bounded mail inventory cannot prove
+an older document was deleted. Calendar and drive exact tombstones keep their
+existing independent behavior. There is no automatic legacy-collector freeze
+or export-coverage inference. Unknown coverage must hold the first mail load.
 
 The macOS Drive scheduler installs a per-user LaunchAgent. Its definition has no
 credentials. It resolves the declared durable admin key at runtime, uses Google
@@ -492,7 +516,38 @@ OAuth from its chosen store, takes an owner-only lock, and rotates owner-only
 logs after the lock-holding ingest exits. The iMessage capture lane and the
 watched local folder lane are the same machinery with a different connector
 spec, so all three share that hardening rather than each re-deriving it.
-Windows and Linux do not yet have an equivalent unattended source scheduler.
+The manifest-wide daily scheduler is native on Windows and macOS. Its versioned
+identity hashes the canonical Brain resource identity with the local user
+principal, and its receipt binds manifest-path, manifest-content, source-plan,
+native-definition, cadence, and last-verified-state hashes. It derives every
+source from `planLoad`; older connector-specific LaunchAgents remain registered
+higher-frequency owners rather than duplicate daily pulls. Linux still has no
+native product scheduler.
+
+Updates, whole-manifest loads, direct source ingest, and scheduled daily runs
+share an exclusive lifecycle lease keyed by canonical Brain resource identity
+in a machine-shared lock root. Manifest aliases and operating-system users
+therefore reach the same writer boundary. Lock order is lifecycle lease first,
+then the source lease, then any shared provider credential-record lease. A
+scheduled collision records a deferred outcome; interactive mutations fail
+closed. Update durably records the verified prior schedule before persistently
+disabling it, and reconciles from the updated manifest only after version
+agreement, active query-ready health, queue zero, and exact schedule readback.
+The per-user transaction retains daily and legacy scheduler snapshots. A
+content-free fence keyed by canonical Brain identity is stored beside the
+machine-wide lifecycle boundary, so every local user and manifest alias fails
+closed while recovery is unresolved. Writers inspect that fence after taking
+the lease. An interrupted update leaves the receipt, fence, and disabled state
+in place; a retry uses the saved definition as its authorization even after a
+manifest fingerprint change, and clears the fence only after current health
+proof and exact reconciliation.
+
+Windows bridge recovery additionally records remote mutation intent before the
+paused Worker deployment begins, or before migration in the non-outbox path.
+That durable marker never resets on retry. Only an explicit pre-dispatch receipt
+permits restoring the old runner on failure; missing or ambiguous evidence keeps
+it disabled. A completed update retires the recorded bridge only after the
+permanent daily task passes exact readback.
 
 ## D1, FTS5, Vectorize, and the outbox
 
@@ -957,6 +1012,23 @@ Google OAuth uses Keychain by default on macOS and a protected file under
 `~/.brain/` on other supported paths. Scheduler logs and locks also live under
 the private per-user `.brain` directory. These files are runtime evidence, not
 repository fixtures.
+
+Local provider renewal is serialized by the provider credential lock and rereads
+custody after acquiring that lock. A data HTTP 401 forces renewal even before
+access-token expiry, then permits exactly one replay. A second 401 fences that
+record for reconnect; it cannot become a generic HTTP transport retry. Concurrent
+401 responses share a replacement when their rejected access token is no longer
+current. Only bearer-authenticated connector requests use this path; the token
+endpoint and unauthenticated downloads do not.
+
+Before a refresh request, a durable outcome-unknown fence prevents replay if the
+process exits before its response is durable. A returned token is atomically
+saved with a verification-required fence before the fence is cleared in a second
+verified transaction. The first replacement cannot roll back to the consumed
+refresh token. The second transaction can roll back only to the already saved
+newest fenced record. File storage and Keychain generation switches obey the
+same rule. Native crash and power-loss behavior still needs host evidence; a
+provider response lost before local persistence requires reconnect.
 
 Source content travels from the owner's source through their machine to their
 Worker and storage in their Cloudflare account. The installer operator does not

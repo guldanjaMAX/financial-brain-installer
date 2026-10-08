@@ -295,6 +295,9 @@ export async function providerRequest(provider, url, {
         clearTimeoutImpl,
       });
     } catch (error) {
+      // Local OAuth custody has already made its bounded renewal decision.
+      // Retrying it as a transport error could replay a consumed refresh token.
+      if (error instanceof ProviderSyncError && error.code === "reconnect_required") throw error;
       const code = error?.provider_code === "deadline_exceeded" || error?.name === "AbortError"
         ? (signal?.aborted ? "aborted" : "timeout")
         : "transport_error";

@@ -20,7 +20,7 @@ const migrationDirectory = join(process.cwd(), "migrations", "d1");
 const migrationFiles = readdirSync(migrationDirectory)
   .filter((name) => /^\d{4}_.+\.sql$/.test(name))
   .sort();
-assert.ok(!migrationFiles.some((name) => name.startsWith("0049_")), "the cache migration was removed");
+assert.ok(!migrationFiles.includes("0049_documents_summary_cache.sql"), "the cache migration was removed");
 
 const scratch = mkdtempSync(join(process.env.HOME, "documents-summary-scale-"));
 const database = new DatabaseSync(join(scratch, "scale.sqlite"));

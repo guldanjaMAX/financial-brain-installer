@@ -19,10 +19,10 @@
 //   hidden prompt) continue unchanged.
 //
 // Multi-machine is BY DESIGN one paste per machine: keychains are not
-// transferred, and the better practice is a fresh token per machine so any
-// single computer can be revoked alone. Handoff revocation has a local half —
-// `brain token <manifest> --forget` — because a revoked token lingering in a
-// keychain is clutter pretending to be capability.
+// transferred. Keep the owner's long-lived account-scoped key on each approved
+// computer so updates can reuse it, and roll it if it is exposed. Removing a
+// retired copy still has a local half, `brain token <manifest> --forget`, so a
+// revoked key does not linger in protected storage as clutter.
 
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";

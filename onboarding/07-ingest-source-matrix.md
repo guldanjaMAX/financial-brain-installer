@@ -1,5 +1,19 @@
 # What your brain can read, and what it cannot
 
+Daily ownership is derived from the owner's manifest, never from a product
+source list. `brain daily status <manifest>` and
+`brain schedule <manifest> --status --all-configured --json` classify every
+configured row before scheduling it. Machine-pull rows belong to the one
+per-Brain/per-user native daily task unless an installed faster connector
+scheduler already owns them. Bank feed and custom API remain Worker cron;
+webhook rows remain push; message capture remains resident capture; one-time
+imports remain snapshots; disabled rows remain unscheduled. An enabled source
+with no supported descriptor fails the plan visibly.
+
+Every status row reports its local or server owner beside the remote
+contract-v3 `last_successful_run_at`. A green native task without an advanced
+source receipt is not a successful refresh.
+
 The honest version. If a source is not on the built list below, assume it is **not connected**, and do not let anyone, including me, imply otherwise in a proposal.
 
 I would rather lose a sale to an honest table than win one and spend week three explaining.
@@ -26,7 +40,8 @@ in ADR 003; they are not claimed as current connector behavior.
 | Google Drive | **Built.** One real unbounded walk has partial real-data proof; the full add, edit, resume, delete, and scheduler lifecycle is not yet accepted |
 | Direct upload and API push | **Built.** Live-service smoke proof exists with a synthetic corpus; no authorized real-document receipt is accepted yet |
 | A custom read-only business API | **Built, locally proven only.** The owner's Worker fetches declared HTTPS JSON endpoints, stages one durable full-snapshot job, and advances one bounded slice per cron tick. Its bearer secret must use the dedicated `CUSTOM_API_TOKEN_` namespace; deploy, connect, and runtime fetch refuse every other binding name. Compact rows keep exact hashes, historical missing rows are excluded from current totals, and readable documents include monthly cross-store plus per-store rollups. Missing revenue streams are named at the store-month boundary in both layouts rather than rendered as zero. Inventory and cost search contains only the current snapshot; stored rows keep prior values as effective-dated history, with no daily history documents. A partial refusal carries and visibly marks the last verified value without advancing its last-seen time, while source status says ready with warnings and reports the count. The identical-response shortcut proves current row chunks and every mapped live document; missing documents regenerate, and status counts exclude staged or superseded versions. Saved state is reported separately from source-specific empty-outbox meaning readiness. Windows defaults to clipboard key entry with clearing and secret-name-only verification; macOS supports the same mode explicitly and retains the hidden prompt by default. Masked Cloudflare dashboard entry remains the fallback. `brain load` states this server-managed source as a skip; preview or run it with `brain custom-api`. No provider endpoint or deployed Brain has crossed this build, and rows do not feed the financial ledger or map yet |
-| A watched folder on your own machine | **Built, Mac-only for the schedule.** Name one folder in your manifest and it reloads itself on a schedule: new files load, edited files reload, deleted files are removed. This is what makes "drop it in a folder you already ingest" true for a folder that is not inside Google Drive. On Windows and Linux the same load runs by hand. Real multi-tick sleep, wake, and deletion behavior is not yet field-proven |
+| A watched folder on your own machine | **Built.** Name one folder in your manifest and it reloads itself: the existing faster per-source LaunchAgent owns it on macOS when installed, otherwise the per-Brain daily task can own it on macOS or Windows. New files load, edited files reload, and deleted files use the guarded removal plan. Linux remains manual. Real multi-tick sleep, wake, and deletion behavior is not yet field-proven |
+| Brain Feeds landing folders | **Built locally, field proof pending.** `brain folder <manifest> add --path <absolute> --source <name>` adds an existing owner-selected folder, or `brain folder <manifest> create-feeds` creates two empty folders under the owner's local home. Cloud-managed roots, links, retired roots, overlapping feeds, missing add paths, and a seventh feed are refused before the manifest changes. Feed loads are append-only: placeholders and `corpora.upload.exclude` matches are counted and skipped, and a missing file never removes Brain content. `brain folder <manifest> status` reports only source, existence, file count, and newest-file time, never file names. The daily load plan reads each enabled entry from `corpora.upload.folders` as a separate upload pull. |
 | Gmail | Built: `brain connect google --scopes gmail`, then `brain ingest --from gmail`. Incremental via historyId; bulk mail excluded by default. Not yet run against a real mailbox |
 | Any other mailbox, over IMAP (Yahoo, Fastmail, iCloud, a host) | Built: `brain connect imap`, then `brain ingest --from imap`. Read-only, so nothing is marked read. Inbox and Sent by default; Junk, Trash and Drafts skipped; **an Archive folder is NOT read**, and a folder whose role cannot be identified is not read either. Every folder is named in the run with the true reason it was or was not read. Incremental via UIDVALIDITY plus a per-folder UID watermark. Bulk mail is filtered locally on headers, which is weaker than Gmail's. **Never yet run against a real mailbox** |
 | Google Calendar | Built and wired: `brain connect google --scopes calendar`, then `brain ingest --from calendar`. Incremental via Google's own sync token; cancelled events are removed, not left behind. Not yet run against a real calendar |
@@ -38,9 +53,10 @@ in ADR 003; they are not claimed as current connector behavior.
 | Facebook Messenger export | **Built as an export.** Select Messages and JSON in Meta's Download Your Information flow, then load the exported `message_*.json` files from their own folder with `brain ingest <manifest> --path <folder> --source <name>`; use one named source per folder. Exact epoch timestamps, stable thread/session identity, rerun idempotency, explicit attachment-only/unavailable counts, and family deletion are fixture-tested. No current real export has been accepted yet; there is no live Facebook API connector. |
 | Zoom | **Built.** `brain connect zoom`: a webhook on your own worker loads each cloud-recording transcript automatically, while bounded reconciliation checks the most recent 30 days for missed events. **Needs a paid (Licensed) Zoom seat** because the free tier cannot cloud record. Not yet run against a real Zoom account |
 | Plaid | **Built behind a held field gate. General bank invitations are closed.** Owner-only Link, signed webhooks, staged transaction sync, account-to-entity assignment, retry, and provider-confirmed disconnect are wired. The owner may run `brain connect bank` for their own owner-present pilot: it asks for the Plaid client ID and secret at a hidden prompt only when the Worker lacks them (or for both again with `--replace-keys`), checks the pair with one harmless Plaid read in the manifest's environment before saving, generates a missing wrapping key, verifies all three secret names, then opens Link. Customer invitations stay closed until the full release-gate journey passes. No Plaid Sandbox Item or real account has crossed this build yet |
+| SimpleFIN Bridge | **Built offline behind the same held bank field gate.** `brain connect bank` opens an owner-only page without collecting provider credentials in the CLI. The owner pastes a one-time Setup Token only into their own Brain; its Worker claims and encrypts the Access URL, stages 90-day windows, deduplicates overlapping transactions, waits for account-to-entity assignments, and surfaces `errlist` and request-budget status. The saved synthetic demo response is green. No live Setup Token, Access URL, institution, or account has crossed this build. |
 | Slack | **Built behind a field gate.** OAuth, channels, direct conversations, threads, scheduling, and explicit partial deletion truth are scripted-provider tested. No real workspace proof yet |
 | Notion | **Built behind a field gate.** OAuth, page search, properties, recursive blocks, trash reporting, and scheduling are scripted-provider tested. No real workspace proof yet |
-| Microsoft 365, Outlook, SharePoint, OneDrive | **Built behind a field gate.** OAuth, immutable Outlook IDs, delta sync, file extraction, tombstones, and scheduling are scripted-provider tested. No real Entra tenant proof yet |
+| Microsoft 365, Outlook, Calendar, SharePoint, OneDrive | **Built behind a field gate.** OAuth, immutable Outlook mail and event IDs, a rolling 30-day-past and 90-day-future calendar view, independent delta sync, file extraction, tombstones, and scheduling are scripted-provider tested. Existing connections must re-consent once for delegated `Calendars.Read`. No real Entra tenant proof yet |
 | Dropbox | **Built behind a field gate.** OAuth, bounded file extraction, cursor resume, tombstones, baseline reconciliation, and scheduling are scripted-provider tested. No real Dropbox account proof yet |
 | Box | No native connector. Use a reviewed export or a locally synced Box folder through the watched-folder path. That fallback is only as current as the local sync and Brain schedule |
 | QuickBooks Online | **Built behind a field gate.** Sandbox OAuth, company binding, rotating refresh, paginated read-only snapshots, scheduling, and disconnect are wired. No Intuit sandbox company has crossed the full acceptance run yet |
@@ -87,13 +103,13 @@ Connected with **read-only** access. It can look at documents. It cannot change,
 
 **When a file disappears from Drive**, the matching material is removed from your index. That removal is guarded: if the run could not see all of your Drive (a permissions blip or a network failure mid-walk), it cannot complete the comparison. If one cleanup plan is more than 100 documents or more than 10% of the stored Drive corpus, it stops before deleting anything or advancing its cursor. The owner sees aggregate reasons and an opaque plan fingerprint, never file names or IDs, and must approve that exact plan on the rerun. A stale document costs nothing. A wrongly emptied index costs everything.
 
-**One honest note about how this runs.** Drive is a standard, packaged connector inside the installer, not a private script. You connect your own Google account once, load it with the normal ingest command, and on macOS the installer can schedule unattended refreshes. The Google sign-in still requires the account owner, and the packaged unattended scheduler is not built for Windows or Linux yet.
+**One honest note about how this runs.** Drive is a standard, packaged connector inside the installer, not a private script. You connect your own Google account once and load it with the normal ingest command. The existing faster Drive LaunchAgent remains the owner when it is installed on macOS; otherwise the manifest-wide daily task can own Drive on macOS or Windows. The Google sign-in still requires the account owner. Linux remains manual.
 
 ### Gmail and email
 
 Built as a connector. Connect your Google account with the Gmail scope, then run the normal Gmail ingest command. Later runs are incremental through Gmail's history cursor, and bulk mail is excluded by default.
 
-**The honest production boundary:** the connector has passed the product test suite but has not yet completed a real-mailbox production run. The packaged unattended scheduler currently covers Drive and iMessage, not Gmail, so Gmail refresh is manual until it is extended. Treat Gmail as built but not yet production-proven.
+**The honest production boundary:** the connector has passed the product test suite but has not yet completed a real-mailbox production run. The manifest-wide daily task can own Gmail on Windows or macOS when the connection is present. Treat Gmail as built but not yet production-proven.
 
 #### If you are not on Gmail
 
@@ -125,7 +141,7 @@ Three limits worth knowing before you rely on it:
    folders remain outside that deletion proof.
 3. **Very short messages are dropped**, the same floor every document clears. A one-line "approved, go ahead" is usually below it, which matters more for correspondence than for documents.
 
-**The honest production boundary:** this connector has passed the product test suite, driven end to end against a scripted IMAP server. **It has never been run against a real mailbox**, on Yahoo or anywhere else, so provider-specific behavior is documented from the specification rather than observed. The packaged unattended scheduler does not cover it, so refresh is manual, exactly as with Gmail.
+**The honest production boundary:** this connector has passed the product test suite, driven end to end against a scripted IMAP server. **It has never been run against a real mailbox**, on Yahoo or anywhere else, so provider-specific behavior is documented from the specification rather than observed. The manifest-wide daily task can own IMAP on Windows or macOS when the connection is present.
 
 Shared mailboxes and group threads contain messages from people who never agreed to be indexed. Your material stays in your own accounts throughout, which handles most of the exposure, but a business indexing a shared inbox should have a written note about it. Cheap to write now, expensive to retrofit after an employee asks.
 
@@ -351,7 +367,7 @@ The load is the named source `iphone-backup` (or whatever you pass to `--source`
 
 ### A watched folder on your own machine
 
-**Built. The schedule is Mac-only; the load itself runs anywhere.**
+**Built. The load runs anywhere; the owned daily schedule runs on Windows and macOS.**
 
 Several parts of this document tell you to drop a file into "a folder you already ingest": a WhatsApp export, an SMS backup, a Google Voice takeout, a saved meeting transcript, a mail archive. That sentence used to be true only if the folder happened to live inside Google Drive, because Drive was the only source that refreshed itself. Anywhere else, "already ingest" quietly meant "remember to run a command by hand, forever" — and the day you stop, your brain stops matching your world while still answering confidently from what it has.
 
@@ -380,13 +396,34 @@ brain schedule <manifest> --remove --folder     remove it, keep its logs
 
 **The honest limits:**
 
-- **The schedule needs macOS**, because it installs as a per-user LaunchAgent. On Windows and Linux the same load runs, you just start it yourself: `brain ingest <manifest> --path <folder> --source documents`.
+- **The existing faster folder schedule needs macOS**, because it is a per-source LaunchAgent. The manifest-wide daily task can own the same folder on Windows or macOS without duplicating that faster job. On Linux the same load is manual: `brain ingest <manifest> --path <folder> --source documents`.
 - **It is hourly by default**, not instant. It is a place to drop exports, not a live feed.
 - **The path must be absolute.** A scheduled job does not run from your shell, so a relative path would point somewhere neither of us intended.
 - **The folder must exist when you install the schedule.** Pointing at a folder that is not there would load nothing and report success forever, so it is refused at install time instead.
 - **`_Private` prefixes still apply**, exactly as everywhere else.
 
 The load is the named source you chose, so `brain sources` shows it and `brain forget <manifest> --source documents` removes exactly what it loaded.
+
+### Brain Feeds landing folders
+
+Brain Feeds are separate from the watched-folder mirror above. They are safe
+landing inboxes for owner-chosen files and transcripts. They are append-only:
+moving a source file away does not remove the document already in the Brain.
+
+```text
+brain folder <manifest> add --path <absolute> --source <name>
+brain folder <manifest> create-feeds
+brain folder <manifest> status
+```
+
+`create-feeds` makes empty `Brain Feeds/Client files` and
+`Brain Feeds/Transcripts` folders under the local home and records the sources
+`client_files` and `transcripts`. It does not move or classify any existing
+material. `corpora.upload.exclude` accepts folder names or globs. A matched
+subtree and an empty placeholder are both counted and skipped without becoming
+deletion evidence. The same enabled manifest entries are ordinary `upload`
+legs in `brain load`, so a manifest-derived daily runner does not need a second
+folder list.
 
 ---
 
@@ -402,13 +439,29 @@ scripted provider harness. No real workspace has completed acceptance. Use an
 approved export or watched folder until the client's own workspace passes that
 gate.
 
-### Microsoft 365, Outlook, SharePoint, OneDrive
+### Microsoft 365, Outlook, Calendar, SharePoint, OneDrive
 
-**Built behind a field gate.** OAuth, immutable Outlook message identifiers,
-delta sync, OneDrive and SharePoint extraction, tombstones, scheduling, and
-disconnect are scripted-provider tested. No real Entra tenant has completed
-acceptance, and tenant consent may still require the client's Microsoft 365
-administrator.
+**Built behind a field gate.** OAuth, immutable Outlook message and event
+identifiers, independent delta sync, a rolling 30-day-past and 90-day-future
+calendar view, OneDrive and SharePoint extraction, tombstones, scheduling, and
+disconnect are scripted-provider tested. The connector requests delegated
+`Calendars.Read`, not a calendar write scope. A Microsoft connection created
+before this addition must run `brain connect microsoft <manifest>` again and
+approve the updated read-only consent screen because refresh cannot add a
+scope. A verified same-account re-consent preserves the existing mail and drive
+cursors; a different or unprovable account is refused before replacement.
+Calendar events then use immutable Graph IDs. Any earlier mutable-ID calendar
+cursor takes one guarded baseline migration while mail and drive remain on
+their exact saved cursors. No real Entra tenant has completed acceptance, and
+tenant consent may still require the client's Microsoft 365 administrator.
+
+For a verified handover from exported mail digests, the optional manifest
+`corpora.microsoft.mail_start_at` is the inclusive UTC start of unexported mail.
+The first load and every later delta exclude earlier mail; old digests and
+citations remain in place. Mail removals are retained for separate approval.
+The boundary is visible in `brain sources`. Verify actually loaded coverage
+and export timezone before setting it; a dated filename is insufficient.
+This does not reconcile old calendar digests or prove real-tenant acceptance.
 
 ### Notion
 

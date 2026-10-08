@@ -1,9 +1,24 @@
 import { spawnSync } from "node:child_process";
+import { win32 as win32Path } from "node:path";
 
 import { localToolEnvironment } from "../doctor.mjs";
 
 const CLIPBOARD_TIMEOUT_MS = 10_000;
 const CLIPBOARD_MAX_BUFFER_BYTES = 64 * 1024;
+
+function windowsPowerShellPath(environment) {
+  const systemRoot = environment.SystemRoot || environment.SYSTEMROOT || environment.WINDIR;
+  if (!win32Path.isAbsolute(String(systemRoot || ""))) {
+    throw new Error("Windows system runtime directory is unavailable");
+  }
+  return win32Path.join(
+    systemRoot,
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  );
+}
 
 function runClipboardCommand(command, args, {
   input,
@@ -35,7 +50,7 @@ export function readCustomApiClipboard({
 } = {}) {
   if (platform === "win32") {
     const result = runClipboardCommand(
-      "powershell",
+      windowsPowerShellPath(environment),
       ["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"],
       { spawn, environment },
     );
@@ -58,7 +73,7 @@ export function clearCustomApiClipboard({
 } = {}) {
   if (platform === "win32") {
     runClipboardCommand(
-      "powershell",
+      windowsPowerShellPath(environment),
       ["-NoProfile", "-NonInteractive", "-Command", "Set-Clipboard -Value $null"],
       { spawn, environment, output: "ignore" },
     );

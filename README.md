@@ -13,18 +13,19 @@ whichever supported clients are present without placing a key in their config.
 
 ## Install it
 
-This checkout is the unreleased 0.4.9 candidate. No 0.4.9 customer release or
-immutable release asset exists. The earlier held 0.4.7 candidate was never
-tagged, published, or offered as a customer update; its identity is retired so
-its evidence cannot be confused with this changed candidate. The held 0.4.8
-candidate was likewise never tagged, published, or offered as a customer
-update, and its identity is retired for the same reason. The versioned URLs
-in the candidate examples below are intentionally unavailable placeholders for
-release review. Do not run or share those commands as customer installation
-instructions. Check the guided page for the current release status before
-installing anything. The held candidate's proof boundary and remaining gates
-are recorded in the
-[0.4.9 evidence plan](docs/release-evidence/v0.4.9-candidate-release-evidence-plan.md).
+This package identifies itself as brain-installer 0.4.10. Its version alone does
+not establish whether it is approved for installation. Before installing or
+updating, use the current guided page at https://financialbrain.ai/install and
+match the exact approved package version, byte count and SHA-256. If the page
+is on hold, identifies a different package, or the required review is missing,
+stop before changing anything.
+
+A supervised kit, a development checkout and a public release are different
+artifacts. Use only the artifact approved for the current supervised plan.
+Earlier candidate records remain historical evidence for their exact bytes;
+they do not authorize installation of this package. Maintainers must consult
+the release evidence and unresolved gates for this exact package before
+approving it for an owner.
 
 The guided install path is at `financialbrain.ai/install`. It uses one immutable
 release asset and installs into a folder owned by your user account, so it needs
@@ -44,30 +45,24 @@ to approve those local changes before running it.
 Optimize never runs `brain tools`; it uses the non-writing machine-continuity,
 MCP discovery, and configuration checks instead.
 
-Mac or Linux:
+Get the exact install command and package fingerprint from the current approved
+guide. This README does not supply a standalone bootstrap command. Do not use
+an example release URL, a package version alone, or a command copied from a
+candidate record as installation approval.
 
-```bash
-# Unavailable 0.4.9 candidate placeholder. Do not run until the public channel names this release.
-npm install --global --ignore-scripts --no-audit --no-fund --prefix "$HOME/.financial-brain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.9/brain-installer-0.4.9.tgz"
-# Optional: makes the shorter `brain` examples work in this Terminal window.
-export PATH="$HOME/.financial-brain/bin:$PATH"
-```
+On Mac or Linux, use the approved guide's normal current-user terminal flow.
+On Windows, prepare and verify the reviewed sources, then use the guide's
+separate Financial Brain window. The agent must not run installation commands
+inside its own embedded terminal.
 
-Windows PowerShell:
-
-```powershell
-# Unavailable 0.4.9 candidate placeholder. Do not run until the public channel names this release.
-npm.cmd install --global --ignore-scripts --no-audit --no-fund --prefix "$env:LOCALAPPDATA\FinancialBrain" "https://github.com/guldanjaMAX/financial-brain-installer/releases/download/v0.4.9/brain-installer-0.4.9.tgz"
-# Optional: makes the shorter `brain` examples work in this PowerShell window.
-$env:Path = "$env:LOCALAPPDATA\FinancialBrain;$env:Path"
-```
-
-On Windows, open PowerShell from the Start menu before installing. Do not run
-the install inside Claude Desktop or another app's embedded terminal. Windows
-can redirect that install into the app's private container, where normal
-PowerShell cannot see it. The guided installer checks the process's native
-Windows package identity and stops before `npm.cmd` if it cannot prove the
-window is ordinary PowerShell.
+On Windows, the separate window must pass the guide's native package-identity
+check and tiny LOCALAPPDATA physical-path probe before any install or update
+command runs. A visible window or ordinary-looking environment path is not
+proof that it is outside an app package. If the window is packaged, redirected
+or cannot be verified, stop before installing anything. Open ordinary
+PowerShell from the Start menu as the current user, review the same sources,
+and repeat the check there. Do not use Run as administrator or bypass Windows
+security controls. Preserve any partial-install checkpoint for review.
 
 The full command path below is deliberate. It keeps working after Terminal is
 closed, without `sudo`, administrator access, or a shell-profile change.
@@ -81,13 +76,14 @@ offers its bounded recovery path; a hidden token prompt appears only when the
 released CLI explicitly offers that path and the owner chooses it. The
 recovery-only token is a separate, account-scoped API token from the Cloudflare
 dashboard with the minimum reviewed scope: Workers Scripts Edit, D1 Edit,
-Vectorize Edit, and Workers AI Read. The installer never quietly substitutes a
-saved token. Before using one from protected local storage, it names the exact
-credential location and account, warns that the token may be old or revoked, and
-asks the owner to approve that credential. The owner can decline it and choose a
-different token through the hidden prompt. Give a recovery token a short expiry:
-leave its start date empty or set it to today, and set its end at least 7 days
-from now. It never belongs in chat or a command argument.
+Vectorize Edit, and Workers AI Read. Give it an expiry of about one year. On a
+Mac, the installer offers to keep the key in the login Keychain; other platforms
+keep no copy in this release. When a copy exists, updates, deploys, and
+verification reuse that account-bound key without asking the owner to enter it
+again. Only an explicit recovery choice asks before using a saved key; it names
+the exact credential location and account and warns that the key may be old or
+revoked. The owner can decline it and choose a different key through the hidden
+prompt. It never belongs in chat or a command argument.
 
 Mac or Linux:
 
@@ -181,18 +177,25 @@ reviewed step at a time with `--run tools`, `cloudflare`, `smoke`, `google`, `zo
 `imap`, `passkey`, or `verify`. The owner still handles login, 2FA, OAuth consent,
 and the physical passkey gesture. For the supported Google, Zoom, and IMAP
 steps, tokens and app secrets go only into hidden terminal prompts or provider
-pages. The 0.4.9 candidate Windows path refuses those three credential ceremonies until
+pages. The 0.4.10 candidate Windows path refuses those three credential ceremonies until
 its secure secret-entry bridge is physically proven. Its first owner source is
 one explicitly approved local folder, previewed first and loaded manually.
 
 **Bank connections are not part of ordinary onboarding yet.** They are still
 being tested. You did nothing wrong, and there is no bank password,
-verification code, or Plaid setup key to enter here. Ordinary onboarding leaves
+verification code, Plaid setup key, or SimpleFIN Setup Token to enter here. Ordinary onboarding leaves
 bank connections off and the technician will never ask you to paste those
 values into chat or a normal command. If this Brain is an already approved
-pilot, its complete existing bank setup is left unchanged. If any saved piece
-is missing, setup stops before changing a credential and explains the
-separately reviewed next step.
+pilot and its manifest enables a bank feed, setup, update, and deploy make sure
+the Worker's independent bank wrapping key exists. They create it only when its
+secret name is missing, verify the name afterward, and never print, replace, or
+derive it from another key. Provider setup remains a separate owner step, but
+there is no wrapping-key command for the owner to run. Existing provider setup
+is left unchanged. Missing Plaid provider credentials are entered only through
+the separately reviewed `brain connect bank` owner flow. An approved SimpleFIN
+pilot creates its one-time Setup Token in SimpleFIN Bridge and pastes it only
+into the owner-authenticated page on that Brain. The resulting Access URL stays
+encrypted in the owner's Worker and is never returned to the installer.
 
 The complete guide is
 [onboarding/09-technician-setup-and-rehearsal.md](onboarding/09-technician-setup-and-rehearsal.md).
@@ -736,6 +739,20 @@ corpus/source write, not only vector drain. A failed update keeps the bookmark
 and tells you the safe rerun path. It never restores automatically because
 restoring would discard newer writes.
 
+On Windows, update also pauses temporary `daily-refresh-<16 hex>` tasks in
+`\Financial Brain\` only after proving they belong to this Brain and the current
+Windows user. An unrecognized action or missing recovery proof requires repair
+in Task Scheduler before update. It verifies each pause before deployment and
+keeps a private recovery fingerprint that detects task replacement after restart. After a verified
+update, it removes only the bridges it paused, and only when the permanent
+daily task reads back correctly. If daily imports are off, the old task stays
+paused; run `brain daily on <manifest>` to turn on permanent daily imports.
+If update fails before any deployment or migration dispatch, it attempts to
+restore the bridges it paused and reports any restore failure. Once deployment
+or migration may have started, daily imports stay paused until the update is
+retried and completes. This boundary survives a restart. Other Brains' tasks
+and other users' tasks remain untouched.
+
 The fifteen-minute no-movement check counts only continuously observed waiting.
 If the computer sleeps during the rebuild, waking it resumes the durable work
 instead of treating the sleep interval as proof that the index stalled. The
@@ -857,6 +874,17 @@ expired. Every planned Gmail removal is read back before its history cursor or
 credential-scanner version is marked complete. Scanner v5 makes local folders,
 Drive, Gmail, and IMAP recheck previously accepted documents with the corrected
 credential rules.
+If the Worker returns a recoverable failure for only some Gmail document parts,
+the adjacent private checkpoint keeps each exact logical message for retry
+before the history cursor advances. The run still reports an error. The next
+incremental run retries those messages even when the new Gmail history window
+is empty, and clears each retry only after acceptance or a current typed source
+decision.
+If Gmail withholds a message because it contains a credential, that message
+stays out of the Brain and the receipt keeps the count. A run whose only
+non-accepted messages are those credential refusals finishes ready. It still
+does not claim a complete history sweep, and any storage failure, retry work,
+missing policy evidence, or other coverage gap keeps the run failed.
 Promotions, Social, and Forums are excluded by default. Updates stays included
 so statements, confirmations, and reminders are not silently missed.
 
@@ -877,7 +905,11 @@ If you run `brain drain <manifest>` after a load, its completion line separates
 the total vectors currently available to search from the vectors newly
 confirmed during that command. A healthy no-op can therefore report an existing
 query-visible total and zero newly confirmed, rather than making the index look
-empty.
+empty. While work is accepted but not yet visible, the command reports progress
+and waiting for index visibility. A nonempty queue may be reported as a lower
+bound. If the command reaches its safety limit, let the scheduled background
+drain continue and check `brain health <manifest>` later. Repeated manual drains
+do not speed up provider processing.
 
 ## Check changing facts and access zones
 
@@ -1100,6 +1132,14 @@ claiming the original enumeration as the removal count.
   is what makes "export it into this folder and forget about it" true for a
   folder that is not inside Google Drive. Hourly by default, so it is a drop
   box, not a live feed. Elsewhere, run the same load yourself.
+- **Brain Feeds are append-only landing folders.** Add an existing local folder
+  with `brain folder <manifest> add --path <absolute> --source <name>`, or use
+  `brain folder <manifest> create-feeds` to make two empty folders under your
+  local home. The command refuses cloud-managed roots, links, retired roots,
+  overlaps, and missing add paths before changing settings. A placeholder,
+  excluded folder, or file moved away never removes content already loaded into
+  the Brain. Check counts and newest-file times without exposing file names with
+  `brain folder <manifest> status`.
 - **The admin key is operator-only; people use passkeys.** An owner passkey has
   the owner's full workspace. A scoped person sees only exact documents granted
   to that session, and an unknown or unavailable grant fails closed. These
