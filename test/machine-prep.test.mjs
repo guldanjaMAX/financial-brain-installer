@@ -416,6 +416,66 @@ test("Mac readiness requires exact Brain version equality", macRuntimeOptions(),
   }
 });
 
+test("Mac CLI-only preparation refuses fixtures after the session decision", macInstallOrchestrationOptions(), () => {
+  const control = runMac(["--help"]);
+  assert.equal(control.status, 0);
+  assert.match(control.stdout, /--prepare-cli/);
+  const refused = runMac(["--prepare-cli"], "mac-ready");
+  assert.equal(refused.status, 2);
+  assert.match(refused.stdout, /CLI_PREPARATION_SESSION_DECISION_REACHED=1/);
+  assert.match(refused.stderr, /REFUSED CLI preparation while fixture\/test mode is active/);
+  assert.doesNotMatch(refused.stdout, /DOWNLOAD_STARTED|INSTALL_STARTED/);
+  // Source the real script in help mode, then inject only its tool discovery
+  // and install dependency. The same session/prerequisite body must pass.
+  const home = mkdtempSync(join(ROOT, ".machine-prep-cli-home-"));
+  try {
+    const ready = spawnSync("bash", ["-c", '. "$1" --help >/dev/null\ntool_version() { printf "v24.13.1\\n"; }\ntool_paths() { printf "/synthetic/npm\\n"; }\ninstall_brain() { printf "CLI_INSTALL_DECISION_REACHED=1\\n"; }\nprepare_cli', "probe", MAC], {
+      env: { PATH: "/usr/bin:/bin", HOME: home, BRAIN_NO_WRANGLER_LOGIN: "1" }, encoding: "utf8",
+    });
+    assert.equal(ready.status, 0, ready.stderr);
+    assert.match(ready.stdout, /CLI_PREPARATION_SESSION_DECISION_REACHED=1/);
+    assert.match(ready.stdout, /CLI_PREPARATION_PREREQUISITE_DECISION_REACHED=1/);
+    assert.match(ready.stdout, /CLI_INSTALL_DECISION_REACHED=1/);
+  } finally { rmSync(home, { recursive: true }); }
+});
+
+test("Windows CLI-only preparation refuses fixtures after the session decision", { skip: process.platform !== "win32" }, () => {
+  const control = runWindows(["--help"]);
+  assert.equal(control.status, 0);
+  assert.match(control.stdout, /--prepare-cli/);
+  const refused = runWindows(["--prepare-cli"], "windows-ready");
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stdout, /CLI_PREPARATION_SESSION_DECISION_REACHED=1/);
+  assert.match(refused.stderr, /REFUSED CLI preparation while fixture\/test mode is active/);
+  assert.doesNotMatch(refused.stdout, /DOWNLOAD_STARTED|INSTALL_STARTED/);
+  const home = mkdtempSync(join(ROOT, ".machine-prep-cli-home-"));
+  const probe = join(home, "probe.ps1");
+  mkdirSync(join(home, "temp"));
+  writeFileSync(probe, `
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) { throw 'Preparation source syntax failed' }
+$function = $ast.Find({ param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq 'Invoke-CliPreparation' }, $true)
+if (-not $function) { throw 'Preparation function missing' }
+. ([scriptblock]::Create($function.Extent.Text))
+$FixtureDir = ''
+$env:MACHINE_PREP_TEST_MODE = ''
+function Test-StandardSession { return $true }
+function Get-ToolVersion { return 'v24.13.1' }
+function Get-ToolPaths { return @('synthetic-npm.cmd') }
+function Install-Brain { Write-Output 'CLI_INSTALL_DECISION_REACHED=1' }
+Invoke-CliPreparation
+`);
+  try {
+    const ready = runWindowsScratch(probe, [WINDOWS], home);
+    assert.equal(ready.status, 0, ready.stderr);
+    assert.match(ready.stdout, /CLI_PREPARATION_SESSION_DECISION_REACHED=1/);
+    assert.match(ready.stdout, /CLI_PREPARATION_PREREQUISITE_DECISION_REACHED=1/);
+    assert.match(ready.stdout, /CLI_INSTALL_DECISION_REACHED=1/);
+  } finally { rmSync(home, { recursive: true }); }
+});
+
 test("Mac real mode refuses fixtures before any action", macRuntimeOptions(), () => {
   const result = runMac(["--real"]);
   const out = combined(result);

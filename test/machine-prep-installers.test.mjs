@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { versionGuardArgs } from "../machine-prep/installers/smoke/bootstrap.mjs";
+import { inspectPerUserWix } from "./helpers/wix-authoring.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const HANDOFF = join(ROOT, "machine-prep", "handoff");
@@ -25,6 +27,549 @@ function bashBehaviorOptions(platform = process.platform) {
 function read(relativePath) {
   return readFileSync(join(ROOT, relativePath), "utf8").replaceAll("\r\n", "\n");
 }
+
+test("per-user WiX contract reaches every directory and component in the actual package", () => {
+  const inspected = inspectPerUserWix(read("machine-prep/installers/windows/Package.wxs"));
+  assert.equal(inspected.directories.length, 3, "actual per-user directory decisions reached");
+  assert.equal(inspected.components.length, 3, "actual component KeyPath decisions reached");
+  assert.deepEqual(inspected.issues, []);
+});
+
+test("per-user WiX contract rejects missing cleanup and invalid key paths with a green control", () => {
+  const component = (id) => `<Component Id="${id}">
+    <File Id="${id}File" Source="synthetic.txt" />
+    <RemoveFolder Id="Remove${id}" On="uninstall" />
+    <RegistryValue Root="HKCU" Key="Software\\SyntheticInstaller" Name="${id}" KeyPath="yes" />
+  </Component>`;
+  const control = `<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"><Package Scope="perUser">
+    <StandardDirectory Id="LocalAppDataFolder"><Directory Id="App">
+      ${component("Payload")}<Directory Id="Nested">${component("Handoff")}</Directory>
+    </Directory></StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder"><Directory Id="Menu">${component("Shortcut")}</Directory></StandardDirectory>
+  </Package></Wix>`;
+  assert.deepEqual(inspectPerUserWix(control).issues, [], "green nested-directory and shortcut control");
+  const mutants = [];
+  for (const [id, directory] of [["Payload", "App"], ["Handoff", "Nested"], ["Shortcut", "Menu"]]) {
+    const removal = `<RemoveFolder Id="Remove${id}" On="uninstall" />`;
+    const registry = `<RegistryValue Root="HKCU" Key="Software\\SyntheticInstaller" Name="${id}" KeyPath="yes" />`;
+    mutants.push(
+      [removal, `<!-- ${removal} -->`, `ICE64: ${directory}`],
+      [removal, removal.replace('On="uninstall"', 'On="install"'), `ICE64: ${directory}`],
+      [removal, removal.replace('On="uninstall"', 'On="uninstall" Directory="Elsewhere"'), `ICE64: ${directory}`],
+      [registry, "", `ICE38/ICE43: ${id}`],
+      [registry, registry.replace('Root="HKCU"', 'Root="HKLM"'), `ICE57: ${id}`],
+      [registry, registry.replace(' KeyPath="yes"', ""), `ICE38/ICE43: ${id}`],
+      [`<File Id="${id}File"`, `<File KeyPath="yes" Id="${id}File"`, `ICE38/ICE43: ${id}`],
+    );
+  }
+  mutants.push(['<Directory Id="Nested">', '<Directory Id="Uncovered" /><Directory Id="Nested">', "ICE64: Uncovered"]);
+  mutants.push(['Name="Handoff" KeyPath="yes"', 'Name="Payload" KeyPath="yes"', "Shared registry marker: Handoff"]);
+  mutants.push(['Name="Handoff" KeyPath="yes"', 'Name="PAYLOAD" KeyPath="yes"', "Shared registry marker: Handoff"]);
+  for (const [from, to, issue] of mutants) {
+    assert.ok(control.includes(from), "mutation target reached");
+    const mutant = control.replace(from, to);
+    assert.notEqual(mutant, control);
+    const inspected = inspectPerUserWix(mutant);
+    assert.ok(inspected.directories.length >= 3 && inspected.components.length === 3, "negative arm traversed real decisions");
+    assert.ok(inspected.issues.some((message) => message.startsWith(issue)), issue);
+  }
+  const reformatted = control.replaceAll('"', "'").replaceAll("\n", "\r\n");
+  assert.deepEqual(inspectPerUserWix(reformatted).issues, [], "quote style and CRLF do not hide authoring");
+});
+
+test("Windows smoke verifies every per-user registry marker and uninstall directory", () => {
+  const source = read("machine-prep/installers/smoke/windows.ps1");
+  for (const [component, marker] of [["MachinePrepScripts", "scriptsInstalled"], ["ClaudeHandoff", "handoffInstalled"], ["MachinePrepShortcut", "installed"]]) {
+    assert.ok(source.includes(`${component} = '${marker}'`), `smoke must expect the ${component} registry KeyPath`);
+  }
+  assert.match(source, /Assert-PerUserTables \$componentRows \$registry \$removals/);
+  assert.match(source, /\$RegistryRows\.Count -ne \$RegistryMarkers\.Count/);
+  assert.match(source, /\$RemovalRows\.Count -ne \$Components\.Count/);
+  assert.match(source, /\$component\.KeyPath -cne \$rows\[0\]\.Registry/);
+  assert.match(source, /\$component\.Attributes -band 4/);
+  assert.match(source, /\$removal\[0\]\.DirProperty -cne \$component\.Directory_/);
+  assert.match(source, /\$removal\[0\]\.InstallMode -ne '2'/);
+  assert.match(source, /foreach \(\$marker in \$RegistryMarkers\.Values\)/);
+  assert.match(source, /\$installedMarkers\.\$marker -ne 1/);
+});
+
+test("Windows smoke executes per-user table refusals with a green control", { skip: process.platform !== "win32" }, () => {
+  const source = read("machine-prep/installers/smoke/windows.ps1");
+  const markers = /\$RegistryMarkers = @\{[^}]+\}/.exec(source)?.[0];
+  const functions = source.slice(source.indexOf("function Assert-EqualSet("), source.indexOf("function Assert-Absent("));
+  assert.ok(markers && functions.includes("function Assert-PerUserTables("), "real smoke table validator extracted");
+  const ids = ["MachinePrepScripts", "ClaudeHandoff", "MachinePrepShortcut"];
+  const directories = ["INSTALLFOLDER", "HANDOFFFOLDER", "ApplicationProgramsFolder"];
+  const names = ["scriptsInstalled", "handoffInstalled", "installed"];
+  const control = {
+    components: ids.map((id, index) => ({ Component: id, Directory_: directories[index], Attributes: "260", KeyPath: `Marker${index}` })),
+    registry: ids.map((id, index) => ({ Registry: `Marker${index}`, Component_: id, Root: "1", Key: "Software\\FinancialBrain\\MachinePrep", Name: names[index], Value: "#1" })),
+    removals: ids.map((id, index) => ({ Component_: id, FileName: "", DirProperty: directories[index], InstallMode: "2" })),
+  };
+  const cases = [{ name: "green", rows: control, accept: true }];
+  for (let index = 0; index < ids.length; index++) {
+    for (const [table, field, value] of [
+      ["registry", "Root", "2"], ["registry", "Name", "unreviewed"],
+      ["registry", "Key", "Software\\Elsewhere"], ["registry", "Value", "#0"],
+      ["registry", "Component_", "unreviewed"], ["components", "Attributes", "256"],
+      ["components", "KeyPath", "FileKeyPath"], ["removals", "DirProperty", "LocalAppDataFolder"],
+      ["removals", "FileName", "*"], ["removals", "InstallMode", "1"],
+    ]) {
+      const rows = structuredClone(control);
+      rows[table][index][field] = value;
+      cases.push({ name: `${ids[index]}-${field}`, rows, accept: false });
+    }
+    for (const table of ["registry", "removals"]) {
+      for (const action of ["missing", "extra"]) {
+        const rows = structuredClone(control);
+        if (action === "missing") rows[table].splice(index, 1);
+        else rows[table].push({ ...rows[table][index] });
+        cases.push({ name: `${ids[index]}-${table}-${action}`, rows, accept: false });
+      }
+    }
+  }
+  const home = mkdtempSync(join(ROOT, ".machine-prep-wix-tables-"));
+  mkdirSync(join(home, "temp"));
+  const fixture = join(home, "table-contract.ps1");
+  // Only the pure table-check functions are executed. No installer, registry,
+  // credential helper, or top-level native smoke phase is invoked by this test.
+  writeFileSync(fixture, `Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+${markers}
+${functions}
+$cases = @'
+${JSON.stringify(cases)}
+'@ | ConvertFrom-Json
+foreach ($case in $cases) {
+  $accepted = $false
+  $events = @()
+  try {
+    Assert-PerUserTables $case.rows.components $case.rows.registry $case.rows.removals | ForEach-Object { $events += $_ }
+    $accepted = $true
+  } catch {
+    if ($_.Exception.Message -notmatch '^Unexpected MSI ') { throw }
+  }
+  if ($events -notcontains 'PER_USER_TABLE_DECISION_REACHED=1') { throw 'table decision not reached' }
+  if ($accepted -ne $case.accept) { throw ('wrong table decision: ' + $case.name) }
+  Write-Output ('TABLE_ARM_VERIFIED=' + $case.name)
+}
+`);
+  try {
+    const powerShell = process.env.SystemRoot
+      ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe") : "powershell.exe";
+    const result = spawnSync(powerShell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fixture], {
+      cwd: ROOT, encoding: "utf8", timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS,
+      env: {
+        SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR,
+        PATH: process.env.PATH, PATHEXT: process.env.PATHEXT, COMSPEC: process.env.COMSPEC,
+        HOME: home, USERPROFILE: home, LOCALAPPDATA: join(home, "local"), APPDATA: join(home, "roaming"),
+        TEMP: join(home, "temp"), TMP: join(home, "temp"), BRAIN_NO_WRANGLER_LOGIN: "1",
+        BRAIN_TEST_LAUNCHCTL: join(home, "injected-launchctl"),
+      },
+    });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.equal(result.stdout.match(/^TABLE_ARM_VERIFIED=/gm)?.length, cases.length, "all 43 table decisions reached");
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("x64 MSI launcher declaration and native smoke resolve the same 64-bit PowerShell", () => {
+  const authored = read("machine-prep/installers/windows/Package.wxs");
+  const adapter = read("machine-prep/installers/smoke/windows.ps1");
+  assert.match(read("machine-prep/installers/windows/FinancialBrainMachinePrep.wixproj"), /<Platform>x64<\/Platform>/);
+  const target = /Target="\[([^\]]+)\]WindowsPowerShell\\v1\.0\\powershell\.exe"/.exec(authored);
+  assert.ok(target, "actual authored shortcut decision reached");
+  // Windows Installer SystemFolder is SysWOW64 on x64; System64Folder is System32.
+  const resolveDirectory = (id) => ({ SystemFolder: "SysWOW64", System64Folder: "System32" })[id];
+  assert.equal(resolveDirectory("System64Folder"), "System32", "green Windows directory control");
+  assert.equal(resolveDirectory(target[1]), "System32");
+  assert.ok(adapter.includes("'[System64Folder]WindowsPowerShell\\v1.0\\powershell.exe'"));
+  assert.ok(adapter.includes("'System32\\WindowsPowerShell\\v1.0\\powershell.exe'"));
+  assert.match(adapter, /\$shortcut\.TargetPath -ine \$expectedTarget/);
+});
+
+function assertBootstrapJobs(workflow) {
+  for (const platform of ["macos", "windows"]) {
+    const marker = `\n  ${platform}-bootstrap:\n`;
+    assert.ok(workflow.includes(marker), `${platform} pinned-kit bootstrap job missing`);
+    const job = workflow.split(marker)[1].split(/\n  [a-z][a-z-]+:\n/)[0];
+    assert.match(job, new RegExp(`needs: \\[authorization, ${platform}-sign\\]`));
+    assert.ok(job.includes(`needs.${platform}-sign.result == 'success'`));
+    assert.ok(job.includes(`needs.${platform}-sign.outputs.artifact_id != ''`));
+    assert.match(job, /needs\.authorization\.outputs\.authorized == 'true'/);
+    assert.ok(job.includes("artifact-ids: ${{ needs." + platform + "-sign.outputs.artifact_id }}"));
+    assert.match(job, /permissions:\n      contents: read/);
+    assert.match(job, /--bootstrap/);
+    assert.match(job, /if: always\(\)/);
+    assert.match(job, /upload-artifact@[0-9a-f]{40}/);
+    assert.doesNotMatch(job, /environment:|secrets\.|id-token:|run-id:|github-token:|MACHINE_PREP_TEST/);
+  }
+}
+
+test("pinned-kit bootstrap jobs require same-run signatures and have no signing authority", () => {
+  const workflow = read(".github/workflows/installer-signing.yml");
+  assertBootstrapJobs(workflow);
+  for (const platform of ["macos", "windows"]) {
+    const start = workflow.indexOf(`\n  ${platform}-bootstrap:\n`);
+    const from = `needs.${platform}-sign.result == 'success'`;
+    assert.ok(start > 0 && workflow.slice(start).includes(from), "bootstrap authorization decision reached");
+    const mutant = workflow.slice(0, start) + workflow.slice(start).replace(from, "true");
+    assert.notEqual(mutant, workflow);
+    assert.throws(() => assertBootstrapJobs(mutant));
+  }
+});
+
+test("installed preparation exposes a bounded CLI-only mode without bypassing real session guards", () => {
+  for (const file of ["machine-prep/prep-mac.sh", "machine-prep/prep-windows.ps1"]) {
+    const source = read(file);
+    assert.match(source, /--prepare-cli/);
+    assert.match(source, /CLI_PREPARATION_SESSION_DECISION_REACHED=1/);
+    assert.match(source, /CLI_PREPARATION_PREREQUISITE_DECISION_REACHED=1/);
+  }
+});
+
+test("pinned-kit proof reaches every refusal and cleans after preparation with a green control", async () => {
+  const { runKitProof } = await import("../machine-prep/installers/smoke/bootstrap.mjs");
+  const phases = ["assertClean", "verifyPins", "download", "verifyArchive", "prepare", "verifyProvenance", "verifyVersion", "cleanup"];
+  const run = async (failure) => {
+    const calls = [], events = [];
+    const host = Object.fromEntries(phases.map((phase) => [phase, () => {
+      calls.push(phase);
+      if (phase === failure) throw new Error("synthetic bootstrap refusal");
+    }]));
+    let error;
+    try { await runKitProof(host, (event) => events.push(event)); } catch (caught) { error = caught; }
+    return { calls, events, error };
+  };
+  const control = await run();
+  assert.equal(control.error, undefined);
+  assert.deepEqual(control.calls, phases);
+  assert.match(control.events.at(-1), /PINNED_KIT_BOOTSTRAP_VERIFIED=1 version=0\.4\.9/);
+  for (const phase of phases) {
+    const refused = await run(phase);
+    assert.ok(refused.error);
+    assert.ok(refused.calls.includes(phase), "negative arm reached its real decision");
+    assert.ok(refused.events.includes(`BOOTSTRAP_DECISION_REACHED=${phase}`));
+    assert.equal(refused.calls.includes("cleanup"), phase !== "assertClean");
+    assert.ok(!refused.events.some((event) => event.startsWith("PINNED_KIT_BOOTSTRAP_VERIFIED=1")));
+  }
+});
+
+test("pinned-kit verifier rejects changed size, bytes and installed pins with green controls", async () => {
+  const { KIT, verifyKit, verifyPreparationPins } = await import("../machine-prep/installers/smoke/bootstrap.mjs");
+  const { createHash } = await import("node:crypto");
+  const bytes = Buffer.from("synthetic kit witness");
+  const pin = { size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+  verifyKit(bytes, pin);
+  assert.throws(() => verifyKit(Buffer.concat([bytes, Buffer.from("x")]), pin), /length mismatch/);
+  const tampered = Buffer.from(bytes); tampered[0] ^= 1;
+  assert.equal(tampered.length, pin.size, "digest decision reached after length passed");
+  assert.throws(() => verifyKit(tampered, pin), /SHA-256 mismatch/);
+  assert.equal(KIT.url, KIT_URL); assert.equal(String(KIT.size), KIT_SIZE); assert.equal(KIT.sha256, KIT_SHA256);
+  for (const [platform, path] of [["macos", "machine-prep/prep-mac.sh"], ["windows", "machine-prep/prep-windows.ps1"]]) {
+    const source = read(path);
+    verifyPreparationPins(source, platform);
+    for (const from of [KIT.version, KIT.url, String(KIT.size), KIT.sha256]) {
+      assert.ok(source.includes(from), "installed pin mutation reached");
+      const mutant = source.replace(from, "changed");
+      assert.notEqual(mutant, source);
+      assert.throws(() => verifyPreparationPins(mutant, platform), /pins differ/);
+    }
+  }
+});
+
+test("pinned-kit provenance compares actual installed bytes instead of trusting version text", async () => {
+  const { verifyPackageTree } = await import("../machine-prep/installers/smoke/bootstrap.mjs");
+  const root = mkdtempSync(join(tmpdir(), "kit-provenance-"));
+  const expected = join(root, "witness"), installed = join(root, "installed");
+  for (const directory of [expected, installed]) {
+    mkdirSync(directory);
+    writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.9", bin: { brain: "./brain.mjs" } }));
+    writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.9');\n");
+  }
+  try {
+    assert.equal(verifyPackageTree(expected, installed), 2, "green installed identity and bytes reached");
+    writeFileSync(join(installed, "brain.mjs"), "console.log('0.4.9'); // changed bytes\n");
+    assert.throws(() => verifyPackageTree(expected, installed), /bytes differ/);
+    writeFileSync(join(installed, "brain.mjs"), readFileSync(join(expected, "brain.mjs")));
+    writeFileSync(join(installed, "extra.mjs"), "synthetic\n");
+    assert.throws(() => verifyPackageTree(expected, installed), /inventory/);
+  } finally { rmSync(root, { recursive: true }); }
+});
+
+test("pinned-kit source inventory permits only npm shims named by authenticated dependency bins", async () => {
+  const { verifyPackageTree } = await import("../machine-prep/installers/smoke/bootstrap.mjs");
+  const root = mkdtempSync(join(tmpdir(), "kit-bin-map-"));
+  const expected = join(root, "witness"), installed = join(root, "installed");
+  try {
+    for (const directory of [expected, installed]) {
+      mkdirSync(join(directory, "node_modules", "synthetic-tool"), { recursive: true });
+      writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.9", bin: { brain: "./brain.mjs" } }));
+      writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.9');\n");
+      writeFileSync(join(directory, "node_modules", "synthetic-tool", "package.json"), JSON.stringify({ name: "synthetic-tool", bin: { "synthetic-tool": "run.js" } }));
+      writeFileSync(join(directory, "node_modules", "synthetic-tool", "run.js"), "// synthetic dependency\n");
+    }
+    mkdirSync(join(installed, "node_modules", ".bin"));
+    writeFileSync(join(installed, "node_modules", ".bin", "synthetic-tool.cmd"), "synthetic unexecuted npm command shim\n");
+    assert.equal(verifyPackageTree(expected, installed), 4, "authenticated bin-map decision reached");
+    writeFileSync(join(installed, "node_modules", ".bin", "unreviewed.cmd"), "synthetic extra\n");
+    assert.throws(() => verifyPackageTree(expected, installed), /inventory/);
+  } finally { rmSync(root, { recursive: true }); }
+});
+
+test("bootstrap version arguments use canonical Windows paths and an encoded ESM file URL", () => {
+  // Exercise Windows URL semantics on every host without touching a drive or share.
+  const canonical = [
+    "D:\\Runner Data\\Installed Kit",
+    "D:\\Runner Data\\Installed Kit\\brain.mjs",
+    "D:\\Reviewed Source # 100%\\version-guard.mjs",
+  ];
+  for (const paths of [
+    canonical,
+    ["d:/Runner Data/Installed Kit", "d:/Runner Data/Installed Kit/brain.mjs", "d:/Reviewed Source # 100%/version-guard.mjs"],
+    ["D:\\RUNNER~1\\INSTAL~1", "D:\\RUNNER~1\\INSTAL~1\\brain.mjs", "D:\\REVIEW~1\\version-guard.mjs"],
+    ["D:\\kit-junction", "D:\\kit-junction\\brain.mjs", "D:\\source-junction\\version-guard.mjs"],
+  ]) {
+    const calls = [];
+    const [prefix, entrypoint, guard] = paths;
+    const args = versionGuardArgs({ prefix, entrypoint, guard }, { windows: true, realpath(path) {
+      calls.push(path);
+      assert.ok(paths.includes(path), "only the three requested paths may be resolved");
+      return canonical[paths.indexOf(path)];
+    } });
+    assert.deepEqual(calls, paths, "every path canonicalization decision reached");
+    assert.deepEqual(args, ["--permission", `--allow-fs-read=${canonical[0]}`, `--allow-fs-read=${canonical[2]}`,
+      "--import", "file:///D:/Reviewed%20Source%20%23%20100%25/version-guard.mjs", canonical[1], "--version"]);
+  }
+});
+
+for (const fixtureKind of ["physical directory", "directory alias", "URL-reserved characters"]) {
+  test(`bootstrap version guard denies network and child processes after reached decisions (${fixtureKind})`, () => {
+    const root = mkdtempSync(join(tmpdir(), "kit-version-guard-"));
+    try {
+      const fixture = join(root, fixtureKind === "URL-reserved characters" ? "fixture # 100%" : "fixture");
+      mkdirSync(fixture);
+      let fixturePath = fixture;
+      if (fixtureKind === "directory alias") {
+        fixturePath = join(root, "alias");
+        symlinkSync(realpathSync.native(fixture), fixturePath, process.platform === "win32" ? "junction" : "dir");
+        assert.ok(lstatSync(fixturePath).isSymbolicLink(), "directory-alias decision reached");
+        assert.equal(realpathSync.native(fixturePath), realpathSync.native(fixture), "alias resolves to the same fixture");
+      }
+      // Node resolves the entry point through realpath, but its permission
+      // allowlist does not follow directory aliases (including macOS /var).
+      // The production argument builder must canonicalize the original alias.
+      const directory = realpathSync.native(fixturePath);
+      const entry = join(fixturePath, "brain.mjs");
+      const guardSource = readFileSync(join(ROOT, "machine-prep/installers/smoke/version-guard.mjs"));
+      const guardDirectory = join(root, fixtureKind === "URL-reserved characters" ? "guard # 100%" : "guard");
+      mkdirSync(guardDirectory);
+      const guard = join(guardDirectory, "version-guard.mjs");
+      writeFileSync(guard, guardSource);
+      assert.deepEqual(readFileSync(guard), guardSource, "exercise the unchanged production preload bytes");
+      const execute = (source) => {
+        writeFileSync(entry, source);
+        return spawnSync(process.execPath, versionGuardArgs({ prefix: fixturePath, entrypoint: entry, guard }), {
+          cwd: directory, encoding: "utf8", timeout: 15_000,
+          env: { HOME: directory, USERPROFILE: directory, BRAIN_NO_WRANGLER_LOGIN: "1" },
+        });
+      };
+      const control = execute("console.log('VERSION_DECISION_REACHED=1'); console.log('0.4.9');\n");
+      assert.equal(control.status, 0, control.stderr);
+      assert.match(control.stdout, /VERSION_DECISION_REACHED=1\n0\.4\.9/);
+      const network = execute("console.log('VERSION_DECISION_REACHED=1'); await fetch('https://example.invalid');\n");
+      assert.notEqual(network.status, 0);
+      assert.match(network.stdout, /VERSION_DECISION_REACHED=1/);
+      assert.match(network.stderr, /BOOTSTRAP_VERSION_NETWORK_REFUSED=1/);
+      const child = execute("import { spawnSync } from 'node:child_process'; console.log('VERSION_DECISION_REACHED=1'); spawnSync(process.execPath, ['--eval', 'console.log(\"CHILD_EXECUTED=1\")'], { stdio: 'inherit' });\n");
+      assert.notEqual(child.status, 0);
+      assert.match(child.stdout, /VERSION_DECISION_REACHED=1/);
+      assert.match(child.stderr, /ERR_ACCESS_DENIED/);
+      assert.match(child.stderr, /ChildProcess/);
+      assert.doesNotMatch(child.stdout, /CHILD_EXECUTED=1/);
+      const outside = join(realpathSync.native(root), "outside.txt");
+      writeFileSync(outside, "synthetic unreadable sibling\n");
+      const readOutside = execute(`import { readFileSync } from 'node:fs'; console.log('VERSION_DECISION_REACHED=1'); readFileSync(${JSON.stringify(outside)});\n`);
+      assert.notEqual(readOutside.status, 0);
+      assert.match(readOutside.stdout, /VERSION_DECISION_REACHED=1/);
+      assert.match(readOutside.stderr, /ERR_ACCESS_DENIED/);
+      assert.match(readOutside.stderr, /FileSystemRead/);
+      const writeInside = execute(`import { writeFileSync } from 'node:fs'; console.log('VERSION_DECISION_REACHED=1'); writeFileSync(${JSON.stringify(entry)}, 'unexpected write');\n`);
+      assert.notEqual(writeInside.status, 0);
+      assert.match(writeInside.stdout, /VERSION_DECISION_REACHED=1/);
+      assert.match(writeInside.stderr, /ERR_ACCESS_DENIED/);
+      assert.match(writeInside.stderr, /FileSystemWrite/);
+      assert.match(readFileSync(entry, "utf8"), /VERSION_DECISION_REACHED=1/, "read permission never grants writes");
+    } finally { rmSync(root, { recursive: true }); }
+  });
+}
+
+test("bootstrap failure retains native removal and cannot pass the shell lifecycle", async () => {
+  const { runSmoke } = await import("../machine-prep/installers/smoke/contract.mjs");
+  for (const fail of [false, true]) {
+    const calls = [], events = [];
+    const phases = ["verifyHash", "verifySignature", "inspectPayload", "assertClean", "install", "verifyInstalled", "bootstrap", "uninstall", "verifyRemoved"];
+    const host = Object.fromEntries(phases.map((phase) => [phase, () => {
+      calls.push(phase);
+      if (fail && phase === "bootstrap") throw new Error("synthetic bootstrap failed");
+    }]));
+    if (fail) await assert.rejects(runSmoke(host, (event) => events.push(event)), /bootstrap failed/);
+    else await runSmoke(host, (event) => events.push(event));
+    assert.deepEqual(calls, phases, "bootstrap and native removal both reached");
+    assert.equal(events.includes("INSTALLER_SHELL_SMOKE_PASSED=1"), !fail);
+  }
+});
+
+test("bootstrap uses installed production preparation, guarded version, and same-user limited Windows token", () => {
+  const bootstrap = read("machine-prep/installers/smoke/bootstrap.mjs");
+  assert.match(bootstrap, /verifyPreparationPins\(readFileSync\(prep/);
+  assert.match(bootstrap, /\[prep, "--prepare-cli"\]/);
+  assert.match(bootstrap, /verifyKit\(bytes\)/);
+  assert.match(bootstrap, /verifyPackageTree\(join\(scratch, "package"\), installed\)/);
+  assert.match(bootstrap, /versionGuardArgs\(\{ prefix, entrypoint: join\(installed, "brain\.mjs"\) \}\)/);
+  assert.match(bootstrap, /"--permission"/);
+  assert.doesNotMatch(bootstrap, /MACHINE_PREP_TEST|--test-install-brain|\.\.\.process\.env/);
+  const limited = read("machine-prep/installers/smoke/windows-limited.ps1");
+  assert.match(limited, /-UserId \$context\.sid -LogonType S4U -RunLevel Limited/);
+  assert.match(limited, /\$identity\.User\.Value -cne \$context\.sid/);
+  assert.match(limited, /IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]::Administrator\)/);
+  assert.match(limited, /Unregister-ScheduledTask -TaskName \$taskName/);
+  assert.match(limited, /SAME_USER_LIMITED_TOKEN_VERIFIED=1/);
+  assert.doesNotMatch(limited, /-Password|-Credential|New-LocalUser|MACHINE_PREP_TEST/);
+});
+
+function assertSignedSmokeJobs(workflow) {
+  for (const platform of ["macos", "windows"]) {
+    const marker = `\n  ${platform}-smoke:\n`;
+    assert.equal(workflow.includes(marker), true, `${platform} signed smoke job is absent`);
+    const job = workflow.split(marker)[1].split(/\n  [a-z][a-z-]+:\n/)[0];
+    assert.match(job, new RegExp(`needs: \\[authorization, ${platform}-sign\\]`));
+    assert.match(job, /needs\.authorization\.outputs\.authorized == 'true'/);
+    assert.match(job, new RegExp(`needs\\.${platform}-sign\\.result == 'success'`));
+    assert.match(job, new RegExp(`runs-on: ${platform}-latest`));
+    assert.match(job, /permissions:\n      contents: read/);
+    assert.match(job, /download-artifact@[0-9a-f]{40}/);
+    assert.match(job, /artifact-ids: \$\{\{ needs\.[a-z]+-sign\.outputs\.artifact_id \}\}/);
+    assert.match(job, /machine-prep\/installers\/smoke\/run\.mjs/);
+    assert.match(job, /if: always\(\)/);
+    assert.match(job, /upload-artifact@[0-9a-f]{40}/);
+    assert.doesNotMatch(job, /environment:|secrets\.|id-token:|sudo|--real|brain setup|run-id:|github-token:/);
+  }
+}
+
+test("signed smoke jobs consume only successful same-run signed artifacts without signing authority", () => {
+  const workflow = read(".github/workflows/installer-signing.yml");
+  assertSignedSmokeJobs(workflow);
+  for (const from of [
+    "needs.macos-sign.result == 'success'", "needs.windows-sign.result == 'success'",
+    "artifact-ids: ${{ needs.macos-sign.outputs.artifact_id }}",
+  ]) {
+    assert.equal(workflow.includes(from), true, "workflow mutation decision reached");
+    const mutant = workflow.replace(from, "removed-contract");
+    assert.notEqual(mutant, workflow);
+    assert.throws(() => assertSignedSmokeJobs(mutant));
+  }
+});
+
+test("signed smoke lifecycle refuses each failed decision and cleans an attempted install", async () => {
+  const { runSmoke } = await import("../machine-prep/installers/smoke/contract.mjs");
+  const phases = ["verifyHash", "verifySignature", "inspectPayload", "assertClean", "install", "verifyInstalled", "uninstall", "verifyRemoved"];
+  const run = async (failure) => {
+    const calls = [];
+    const events = [];
+    const host = Object.fromEntries(phases.map((phase) => [phase, async () => {
+      calls.push(phase);
+      if (failure === phase) throw new Error(`synthetic ${phase} refusal`);
+    }]));
+    let error;
+    try { await runSmoke(host, (event) => events.push(event)); } catch (caught) { error = caught; }
+    return { calls, events, error };
+  };
+  const control = await run();
+  assert.equal(control.error, undefined);
+  assert.deepEqual(control.calls, phases);
+  assert.equal(control.events.at(-1), "INSTALLER_SHELL_SMOKE_PASSED=1");
+  assert.ok(control.events.includes("BUNDLED_CLI_VERSION_VERIFIED=0 reason=not_bundled"));
+  for (const failure of phases) {
+    const refused = await run(failure);
+    assert.match(refused.error.message, /synthetic/);
+    assert.ok(refused.calls.includes(failure), "refused decision was reached");
+    assert.ok(refused.events.includes(`DECISION_REACHED=${failure}`));
+    assert.ok(!refused.events.includes("INSTALLER_SHELL_SMOKE_PASSED=1"));
+    if (phases.indexOf(failure) < phases.indexOf("install")) {
+      assert.ok(!refused.calls.includes("install"));
+      assert.ok(!refused.calls.includes("uninstall"));
+    } else {
+      assert.ok(refused.calls.includes("uninstall"));
+    }
+  }
+});
+
+test("signed smoke checksum and exact inventory guards reject tampering with a green control", async () => {
+  const { verifyHashRecord, assertExactPaths, assertHostedRunner } = await import("../machine-prep/installers/smoke/contract.mjs");
+  const { createHash } = await import("node:crypto");
+  const bytes = Buffer.from("synthetic signed payload");
+  const file = "FinancialBrainInstaller.pkg";
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  assert.doesNotThrow(() => verifyHashRecord(bytes, `${digest}  dist/${file}\n`, file));
+  for (const record of [`${"0".repeat(64)}  ${file}`, `${digest}  ../${file}`, `${digest}  other.pkg`, `${digest}  ${file}\n${digest}  ${file}`]) {
+    assert.throws(() => verifyHashRecord(bytes, record, file), /checksum/);
+  }
+  assertExactPaths(["handoff/note.txt", "launcher"], ["launcher", "handoff/note.txt"]);
+  for (const actual of [["launcher"], ["launcher", "../escape"], ["launcher", "launcher"]]) {
+    assert.throws(() => assertExactPaths(actual, ["launcher", "handoff/note.txt"]), /inventory/);
+  }
+  assertHostedRunner({ GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted" });
+  for (const environment of [{}, { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" }]) {
+    assert.throws(() => assertHostedRunner(environment), /hosted runner/);
+  }
+});
+
+test("signed smoke native entry refuses a local machine before creating logs", async () => {
+  const { assertHostedRunner } = await import("../machine-prep/installers/smoke/contract.mjs");
+  assert.doesNotThrow(() => assertHostedRunner({ GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted" }));
+  const result = spawnSync(process.execPath, [join(ROOT, "machine-prep/installers/smoke/run.mjs")], {
+    env: { BRAIN_NO_WRANGLER_LOGIN: "1", HOME: process.env.HOME }, encoding: "utf8",
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /installation requires a disposable GitHub-hosted runner/);
+  assert.doesNotMatch(result.stderr, /invalid smoke arguments|mkdir/);
+});
+
+test("signed smoke native adapters retain signature, user scope, footprint, and uninstall checks", () => {
+  const mac = read("machine-prep/installers/smoke/run.mjs");
+  const windows = read("machine-prep/installers/smoke/windows.ps1");
+  assert.match(mac, /"--check-signature", artifact/);
+  assert.match(mac, /"--assess", "--type", "install"/);
+  assert.match(mac, /"stapler", "validate"/);
+  assert.match(mac, /"-target", "CurrentUserHomeDirectory"/);
+  assert.match(mac, /"--volume", home/);
+  assert.match(mac, /"--forget", identifier/);
+  assert.match(mac, /digest\(join\(installed, file\)\) !== digest\(join\(payload, file\)\)/);
+  assert.match(mac, /BRAIN_NO_WRANGLER_LOGIN = "1"/);
+  assert.doesNotMatch(mac, /\.\.\.process\.env/);
+  const assertWindows = (source) => {
+    assert.match(source, /Get-AuthenticodeSignature -LiteralPath \$Artifact/);
+    assert.match(source, /\$signature\.Status -ne 'Valid'/);
+    assert.match(source, /TimeStamperCertificate/);
+    assert.match(source, /O=Financial Brain LLC/);
+    assert.match(source, /\$table -notin \$allowedTables/);
+    assert.match(source, /'MsiFileHash'/);
+    assert.match(source, /Installer\.FileHash/);
+    assert.match(source, /'\/qn', '\/norestart', '\/L\*v'/);
+    assert.match(source, /Invoke-Msi '\/i'/);
+    assert.match(source, /Invoke-Msi '\/x'/);
+    assert.match(source, /ProductState\(\$state\.product\) -ne -1/);
+  };
+  assertWindows(windows);
+  const from = "$signature.Status -ne 'Valid'";
+  assert.ok(windows.includes(from), "native signature decision reached");
+  const mutant = windows.replace(from, "$false");
+  assert.notEqual(mutant, windows);
+  assert.throws(() => assertWindows(mutant));
+  const packageFiles = JSON.parse(read("package.json")).files;
+  assert.ok(!packageFiles.some((file) => file.startsWith("machine-prep")));
+  assert.match(read("scripts/run-test-chain.mjs"), /node --test test\/machine-prep-installers\.test\.mjs/);
+});
 
 test("bash behavior platform guard keeps macOS and Linux coverage active", () => {
   assert.deepEqual(bashBehaviorOptions("darwin"), { skip: false });

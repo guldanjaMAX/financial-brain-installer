@@ -36,7 +36,7 @@ SESSION_STATE="READY"
 
 usage() {
   printf '%s\n' \
-    "Usage: prep-mac.sh --check | --dry-run | --real" \
+    "Usage: prep-mac.sh --check | --dry-run | --real | --prepare-cli" \
     "       prep-mac.sh --verify-checksum FILE EXPECTED_SHA256" \
     "       prep-mac.sh --verify-prefix DIRECTORY" \
     "       prep-mac.sh --verify-installed DIRECTORY"
@@ -433,7 +433,7 @@ install_brain() {
   npm_bin_dir=$(/usr/bin/dirname "$npm_path")
   /usr/bin/env -i HOME="$PREP_HOME" PATH="$npm_bin_dir:/usr/bin:/bin" BRAIN_NO_WRANGLER_LOGIN=1 \
     npm_config_userconfig="$temp/npmrc" npm_config_cache="$temp/npm-cache" npm_config_update_notifier=false \
-    "$npm_path" install --global --ignore-scripts --no-audit --no-fund --prefix "$stage" "$archive" || return 1
+    "$npm_path" install --global --offline --ignore-scripts --no-audit --no-fund --prefix "$stage" "$archive" || return 1
   package_json="$stage/lib/node_modules/brain-installer/package.json"
   installed_brain="$stage/bin/brain"
   expected_brain_link="../lib/node_modules/brain-installer/brain.mjs"
@@ -473,6 +473,28 @@ install_brain() {
   printf 'BRAIN_INSTALL_VERIFIED=1 version=%s\n' "$installed_version"
 }
 
+# This explicit mode prepares only the CLI. The visible launcher still uses
+# --real, including its assistant prerequisites, before it can open setup.
+prepare_cli() {
+  printf 'CLI_PREPARATION_SESSION_DECISION_REACHED=1\n'
+  if [ "${MACHINE_PREP_TEST_MODE:-}" = "1" ] || [ -n "$FIXTURE_DIR" ]; then
+    printf 'REFUSED CLI preparation while fixture/test mode is active\n' >&2
+    return 2
+  fi
+  if [ "$(/usr/bin/uname -s)" != "Darwin" ] || [ "$(/usr/bin/id -u)" = "0" ]; then
+    printf 'REFUSED CLI preparation requires a non-root macOS user\n' >&2
+    return 2
+  fi
+  printf 'CLI_PREPARATION_PREREQUISITE_DECISION_REACHED=1\n'
+  node_version=$(tool_version node 2>/dev/null || true)
+  case "$node_version" in
+    v22.*|v24.*) ;;
+    *) printf 'REFUSED CLI preparation requires Node.js 22 or 24\n' >&2; return 2 ;;
+  esac
+  [ -n "$(tool_paths npm)" ] || { printf 'REFUSED npm is unavailable\n' >&2; return 2; }
+  install_brain
+}
+
 run_real() {
   if [ "${MACHINE_PREP_TEST_MODE:-}" = "1" ] || [ -n "$FIXTURE_DIR" ]; then
     printf 'REFUSED real mode while fixture/test mode is active\n' >&2
@@ -504,6 +526,7 @@ case "$MODE" in
   --check) print_check ;;
   --dry-run) print_plan ;;
   --real) run_real ;;
+  --prepare-cli) prepare_cli ;;
   --verify-checksum) verify_checksum "$@" ;;
   --verify-prefix) verify_prefix "$@" ;;
   --verify-installed) verify_installed_brain "$@" ;;

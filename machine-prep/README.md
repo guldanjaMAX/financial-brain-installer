@@ -21,3 +21,18 @@ The hidden `--verify-checksum FILE SHA256` seam exists for deterministic refusal
 - `SIGNING.md` records the decision boundary. `docs/INSTALLERS-SIGNING.md` gives the current owner setup. The manual signing workflow can produce signed review artifacts but cannot publish, tag, or release them.
 
 The Windows workflow is manual because WiX v7's binary SDK carries an Open Source Maintenance Fee decision. The Mac job can run independently. Missing signing settings skip the corresponding job cleanly. Neither artifact is client-ready until signing, clean physical-machine opening, user-context execution, setup launch, handoff, and uninstall behavior pass on supported hardware.
+
+The signing workflow also defines fresh hosted-runner checks of each exact
+signed artifact after upload. The [clean smoke plan](../docs/INSTALLER-CLEAN-SMOKE.md)
+documents their current-user install, signature, payload and removal checks,
+separate pinned-kit bootstrap/version jobs, and short Windows and Mac observations.
+A passing shell smoke is not a CLI or customer-readiness result.
+
+Explicit `--prepare-cli` mode installs only the pinned CLI with Node.js and npm
+already available. It preserves normal-user, fixture refusal, verified-download
+and clean-prefix guards. It never opens setup or checks assistant logins.
+The visible launchers continue to use `--real` and all assistant prerequisites.
+Both install modes use offline npm on the authenticated local archive; missing
+bundled dependencies are a failure. Hosted bootstrap receipts prove the current
+0.4.9 kit only. The clean smoke plan lists every constant to re-pin after the
+0.4.10 seal.
