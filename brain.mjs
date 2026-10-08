@@ -12448,9 +12448,9 @@ export async function cmdApplyIngestRemovals(m, manifestPath, flags, options = {
   });
 }
 
-async function cmdIngestUnlocked(manifestPath) {
+async function cmdIngestUnlocked(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
-  const flags = parseFlags(process.argv.slice(4));
+  const flags = options.flags || parseFlags(process.argv.slice(4));
   if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags);
   // Remote sources reuse everything below the envelope: splitting, batching,
   // the credential gate, resume state and the skip report. Only the producer
@@ -12468,6 +12468,9 @@ async function cmdIngestUnlocked(manifestPath) {
   }
   // Provider LaunchAgents run this public command. Route them before the
   // Drive/Gmail/IMAP producer or an unattended provider job can never start.
+  if (["quickbooks-desktop", "quickbooks_desktop"].includes(String(flags.from).toLowerCase())) {
+    return (options.ingestQuickBooksDesktop || cmdIngestQuickBooksDesktop)(m, manifestPath, flags, options);
+  }
   if (PROVIDER_CONNECTOR_IDS.includes(String(flags.from).toLowerCase())) {
     return cmdIngestProvider(m, manifestPath, flags);
   }
@@ -12475,14 +12478,14 @@ async function cmdIngestUnlocked(manifestPath) {
   return cmdIngestLocal(m, manifestPath, flags);
 }
 
-async function cmdIngest(manifestPath, options = {}) {
-  if (options.lifecycleLockHeld === true) return cmdIngestUnlocked(manifestPath);
+export async function cmdIngest(manifestPath, options = {}) {
+  if (options.lifecycleLockHeld === true) return cmdIngestUnlocked(manifestPath, options);
   const lockTask = options.withBrainLifecycleLock ?? withBrainLifecycleLock;
   return lockTask({
     manifestPath,
     operation: "ingest",
     ...(options.lifecycleLockOptions || {}),
-  }, () => cmdIngestUnlocked(manifestPath));
+  }, lease => cmdIngestUnlocked(manifestPath, { ...options, lifecycleLockHeld: true, assertOwned: () => lease.assertOwned() }));
 }
 
 /**
@@ -15390,6 +15393,7 @@ export function normalizeLoadKey(value) {
 }
 
 const PROVIDER_LOAD_METADATA = Object.freeze({
+  quickbooks_desktop: Object.freeze({ label: "QuickBooks Desktop", scope: "attended reads on the same Windows PC; money freshness unverified" }),
   quickbooks: Object.freeze({
     label: "QuickBooks Online",
     scope: "read-only accounting snapshots from the bound sandbox company",
@@ -15749,6 +15753,9 @@ export function defaultLoadProbes(options = {}) {
         };
       }
     },
+    quickbooks_desktop: ({ platform }) => platform === "win32"
+      ? { connected: true }
+      : { connected: false, reason: "QuickBooks Desktop requires the same Windows PC; Mac and hosted editions use report uploads." },
     ...Object.fromEntries(PROVIDER_CONNECTOR_IDS.map((provider) => [
       provider,
       providerConnection(provider),
@@ -15900,6 +15907,11 @@ export function loadSourceRegistry(commands = {}) {
       }],
     },
     ...providerSources,
+    quickbooks_desktop: {
+      order: 65, ...PROVIDER_LOAD_METADATA.quickbooks_desktop, dailyClass: "machine-pull", dailyOwner: "quickbooks-schedule",
+      legs: ({ m, manifestPath, flags, options }) => [{ source: "quickbooks_desktop",
+        run: () => (commands.ingestQuickBooksDesktop || cmdIngestQuickBooksDesktop)(m, manifestPath, { ...flags, from: "quickbooks-desktop" }, options) }],
+    },
     iphone_backup: {
       order: 70,
       label: "iPhone backup (one-time snapshot)",
@@ -16059,7 +16071,7 @@ export async function planLoad({ m, manifestPath, flags = {}, registry, probes, 
         // abort a sweep the other seven sources were about to be part of.
         let legs;
         try {
-          legs = descriptor.legs({ m, manifestPath, flags });
+          legs = descriptor.legs({ m, manifestPath, flags, options });
         } catch (error) {
           legs = {
             unavailable: {
@@ -16311,7 +16323,7 @@ export async function cmdLoad(manifestPath, options = {}) {
       manifestPath,
       operation: "load",
       ...(options.lifecycleLockOptions || {}),
-    }, () => cmdLoad(manifestPath, { ...options, lifecycleLockHeld: true }));
+    }, lease => cmdLoad(manifestPath, { ...options, lifecycleLockHeld: true, assertOwned: () => lease.assertOwned() }));
   }
   const { m } = loadManifest(manifestPath);
   const flags = options.flags || parseFlags(process.argv.slice(4));
@@ -19058,6 +19070,18 @@ export async function cmdConnect(target, options = {}) {
   const flags = parseFlags(argv.slice(3));
   const which = (target || "").toLowerCase();
   const manifestPath = argv[4];
+  if (which === "quickbooks-desktop") return cmdConnectQuickBooksDesktop(manifestPath, flags, options.desktopOptions || {});
+  if (which === "quickbooks") {
+    const probe = options.probeQuickBooksEdition || (await import("./connectors/quickbooks-edition-probe.mjs")).probeQuickBooksEdition;
+    const edition = await probe(options.editionProbeOptions || {});
+    if (edition === "windows-desktop") return cmdConnectQuickBooksDesktop(manifestPath, flags, options.desktopOptions || {});
+    if (["mac-desktop", "hosted"].includes(edition)) {
+      const { DESKTOP_BOUNDARY } = await import("./connectors/quickbooks-edition-probe.mjs");
+      (options.log || info)(DESKTOP_BOUNDARY[edition]);
+      return { status: "unavailable", edition, upload_available: true };
+    }
+    return (options.connectOnline || cmdConnectProvider)("quickbooks", manifestPath, flags, options.providerOptions || {});
+  }
   if (which === "custom-api") {
     const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
     const connectCustomApi = options.connectCustomApi ?? cmdConnectCustomApi;
@@ -19953,6 +19977,7 @@ export async function cmdDisconnect(target, options = {}) {
   const flags = parseFlags(argv.slice(3));
   const which = (target || "").toLowerCase();
   const manifestPath = argv[4];
+  if (which === "quickbooks-desktop") return cmdDisconnectQuickBooksDesktop(manifestPath, flags, options.desktopOptions || {});
   if (which === "whatsapp") return cmdDisconnectWhatsapp(manifestPath, flags);
   if (which === "zoom") {
     const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
@@ -26679,7 +26704,18 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
 // Dedicated QuickBooks commands keep parsed arguments and dependencies outside
 // the dispatcher; legacy provider paths remain unchanged until opted in.
 export function quickBooksScheduleDependencies() {
-  return { resolveBaseUrl, readManifest: (path) => loadManifest(path).m };
+  return { resolveBaseUrl, readManifest: (path) => loadManifest(path).m,
+    runDesktopSource: async (m, path, source, options) => {
+      let receipt = null;
+      const result = await cmdIngestQuickBooksDesktop(m, path, { from: "quickbooks-desktop" }, { ...options,
+        postSourceReceipt: async (...args) => {
+          const response = await (options.postSourceReceipt || postSourceReceipt)(...args);
+          if (["ready", "error"].includes(args[2]?.status)) receipt = args[2];
+          return response;
+        },
+      });
+      return result?.code === "QB_NOT_CONNECTED" ? { status: "skipped", code: "QB_CONNECT_REQUIRED" } : { receipt };
+    } };
 }
 export async function cmdQuickBooks(argv, options = {}) {
   const scheduler = options.quickBooksScheduler ?? await import("./operations/quickbooks-schedule.mjs");
@@ -26953,6 +26989,12 @@ export function cloudflareAdoptionConsent(flags = {}, env = process.env) {
  */
 export function classifyCliCredentialBoundary(command, argv = []) {
   const name = String(command || "");
+  // Edition routing and Desktop data-plane commands never need the outer
+  // Wrangler session. Classify before a credential helper can be reached.
+  if (Array.isArray(argv) && ((name === "connect" && ["quickbooks", "quickbooks-desktop"].includes(argv[0])) ||
+      (name === "disconnect" && argv[0] === "quickbooks-desktop") ||
+      (["ingest", "load"].includes(name) && argv.some((arg, index) =>
+        ["quickbooks-desktop", "quickbooks_desktop"].includes(arg) && ["--from", "--only"].includes(argv[index - 1]))))) return "quickbooks-desktop-data";
   if (name === "ingest-file") {
     if (!Array.isArray(argv) || argv.length !== 10 ||
         argv.some((value) => typeof value !== "string" || !value ||
@@ -30450,6 +30492,179 @@ async function dispatchDoctor(manifestPath) {
    these, are deliberately NOT ported: they route through the field line's
    account-first Cloudflare OAuth ceremony, which this port keeps out. */
 
+/** Observation time comes only from a Worker response and a monotonic clock. */
+export async function quickBooksWorkerClock({ readWorkerDate, monotonic = () => performance.now() }) {
+  const value = await readWorkerDate();
+  const time = Date.parse(value || "");
+  const started = monotonic();
+  if (!Number.isFinite(time) || !Number.isFinite(started)) throw Object.assign(new Error("QB_CLOCK_UNVERIFIED"), { code: "QB_CLOCK_UNVERIFIED" });
+  return () => {
+    const elapsed = monotonic() - started;
+    if (!Number.isFinite(elapsed) || elapsed < 0) throw Object.assign(new Error("QB_CLOCK_UNVERIFIED"), { code: "QB_CLOCK_UNVERIFIED" });
+    return new Date(time + Math.floor(elapsed)).toISOString();
+  };
+}
+
+async function desktopCommandDependencies(manifestPath, options) {
+  const binding = await import("./connectors/quickbooks-desktop-binding.mjs");
+  const platform = options.platform || process.platform;
+  if (platform !== "win32") throw binding.qbdFailure("QB_NOT_INSTALLED");
+  const bridgeModule = await import("./operations/quickbooks-desktop-bridge.mjs");
+  const signatures = await import("./operations/quickbooks-desktop-signed.mjs");
+  const probe = await import("./connectors/quickbooks-edition-probe.mjs");
+  const scheduling = await import("./operations/quickbooks-schedule.mjs");
+  const { dailyRefreshPrincipal } = await import("./operations/daily-refresh-plan.mjs");
+  let access;
+  const readManifest = options.readManifest || (path => loadManifest(path).m);
+  const dataPlane = async () => {
+    if (!access) {
+      const m = readManifest(manifestPath);
+      const adminKey = (options.resolveAdminKey || resolveAdminKey)(manifestPath);
+      if (!adminKey) throw binding.qbdFailure("QB_OWNER_CREDENTIAL_MISSING");
+      access = { base: await (options.resolveBaseUrl || resolveBaseUrl)(m, null), adminKey };
+    }
+    return access;
+  };
+  return { platform, brainPath: options.brainPath || fileURLToPath(import.meta.url), nodePath: options.nodePath || process.execPath,
+    get principal() { return options.principal || (options.resolvePrincipal || dailyRefreshPrincipal)({ platform }); }, now: options.now || (() => new Date()),
+    monotonic: options.monotonic || (() => performance.now()), sleep: options.sleep || (ms => new Promise(done => setTimeout(done, ms))),
+    log: options.log || info, readManifest,
+    writeManifest: options.writeManifest || ((path, m) => writeManifestAtomically(path, m, { backupLabel: "quickbooks-desktop" })),
+    bindingStore: options.bindingStore || binding.desktopBindingStore(options.storage || {}),
+    bridge: options.bridge || (input => bridgeModule.runQuickBooksDesktop(input)),
+    verifyHelper: options.verifyHelper || (() => {
+      for (const artifact of Object.values(signatures.QBD_HELPERS)) {
+        const result = signatures.verifyQuickBooksDesktopHelper(artifact, { environment: process.env });
+        if (result.ok) return result;
+      }
+      return { ok: false };
+    }),
+    hasElevation: options.hasElevation || (() => probe.hasDesktopElevation()),
+    listProcesses: options.listProcesses || scheduling.listQuickBooksProcesses,
+    startTask: options.startTask || binding.startDesktopConnectTask,
+    listQuickBooksSources: options.listQuickBooksSources || (async () => {
+      const { base, adminKey } = await dataPlane();
+      const inventory = await collectSourceInventoryPages(payload => http(`${base}/api/admin/brain/sources`, {
+        method: "POST", redirect: "error", headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      }));
+      const rows = [];
+      for (const row of inventory.sources.filter(row => row.kind === "quickbooks")) {
+        const families = await listStoredSourceFamilies({ base, adminKey, source: row.name });
+        rows.push({ name: row.name, kind: row.kind, family_count: families.size });
+      }
+      return rows;
+    }),
+    registerSource: options.registerSource || (async expectation => {
+      const { base, adminKey } = await dataPlane();
+      await postSourceRegistration(base, adminKey, { source: expectation.source, kind: expectation.kind });
+      await postSourceExpectation(base, adminKey, expectation);
+    }),
+    reregister: options.reregister || (path => reregisterQuickBooksAfterManifestChange(path, { ...options, lifecycleLockHeld: true })),
+    runSnapshot: options.runSnapshot || (() => cmdIngestQuickBooksDesktop(readManifest(manifestPath), manifestPath, {}, { ...options, lifecycleLockHeld: true })),
+    previewForget: options.previewForget || (async ({ source }) => { const { base, adminKey } = await dataPlane(); return previewSourceForget(base, adminKey, source); }),
+    forget: options.forget || (async ({ source, preview }) => { const { base, adminKey } = await dataPlane(); return purgeDocuments(base, adminKey, source, preview); }),
+    assertOwned: options.assertOwned,
+  };
+}
+
+async function desktopLifecycle(manifestPath, options, run) {
+  const shared = locked => locked.desktopBindingLockHeld ? run(locked)
+    : (options.withSourceIngestLock || withSourceIngestLock)({ sourceName: "quickbooks_desktop", sharedRecord: "provider:quickbooks-desktop", ...(options.sourceIngestLockOptions || {}) }, lease =>
+      run({ ...locked, desktopBindingLockHeld: true, assertOwned: () => { locked.assertOwned?.(); lease.assertOwned(); } }));
+  if (options.lifecycleLockHeld) return shared(options);
+  const lock = options.waitForLifecycle ? options.withBrainLifecycleLockWait || withBrainLifecycleLockWait
+    : options.withBrainLifecycleLock || withBrainLifecycleLock;
+  return lock({ manifestPath, operation: "quickbooks-desktop", ...(options.lifecycleLockOptions || {}),
+    ...(options.waitForLifecycle ? { waitMs: 30000 } : {}) }, lease =>
+    shared({ ...options, lifecycleLockHeld: true, assertOwned: () => lease.assertOwned() }));
+}
+export async function cmdConnectQuickBooksDesktop(manifestPath, flags = {}, options = {}) {
+  if (!manifestPath) throw new TypeError("A manifest is required for QuickBooks Desktop connect");
+  const binding = await import("./connectors/quickbooks-desktop-binding.mjs");
+  if ((options.platform || process.platform) !== "win32") throw Object.assign(new Fatal(binding.qbdOwnerMessage("QB_NOT_INSTALLED")), { code: "QB_NOT_INSTALLED" });
+  return desktopLifecycle(manifestPath, { ...options, waitForLifecycle: Boolean(flags["attended-probe"]) }, async locked => {
+    const result = await binding.connectQuickBooksDesktop({ manifestPath, flags }, await desktopCommandDependencies(manifestPath, locked));
+    (options.log || info)([result.code, result.notice, ...(result.summary || [])].filter(Boolean).join("\n"));
+    return result;
+  }).catch(error => { throw Object.assign(new Fatal(binding.qbdOwnerMessage(error?.code)), { code: /^QB_[A-Z_]{1,48}$/.test(error?.code || "") ? error.code : "QB_OPERATION_FAILED" }); });
+}
+export async function cmdDisconnectQuickBooksDesktop(manifestPath, flags = {}, options = {}) {
+  if (!manifestPath) throw new TypeError("A manifest is required for QuickBooks Desktop disconnect");
+  const binding = await import("./connectors/quickbooks-desktop-binding.mjs");
+  return desktopLifecycle(manifestPath, options, async locked => {
+    const result = await binding.disconnectQuickBooksDesktop({ manifestPath, flags }, await desktopCommandDependencies(manifestPath, locked));
+    (options.log || info)(result.fingerprint
+      ? renderCliCommands(`QuickBooks Desktop removal preview: ${result.documents} document(s). Approve the exact company-bound scope with brain disconnect quickbooks-desktop ${commandPath(manifestPath)} --approve-removals ${result.fingerprint}`)
+      : result.notice);
+    return result;
+  }).catch(error => { throw Object.assign(new Fatal(binding.qbdOwnerMessage(error?.code)), { code: /^QB_[A-Z_]{1,48}$/.test(error?.code || "") ? error.code : "QB_OPERATION_FAILED" }); });
+}
+
+export async function cmdIngestQuickBooksDesktop(m, manifestPath, flags = {}, options = {}) {
+  const { qbdFailure, qbdOwnerMessage, desktopBindingStore } = await import("./connectors/quickbooks-desktop-binding.mjs");
+  if ((options.platform || process.platform) !== "win32") throw qbdFailure("QB_NOT_INSTALLED");
+  if (m.corpora?.quickbooks_desktop?.enabled !== true) throw qbdFailure("QB_NOT_CONNECTED");
+  if ((m.corpora.quickbooks_desktop.source || "quickbooks_desktop") !== "quickbooks_desktop" || flags.source || flags.limit) throw qbdFailure("QB_SOURCE_INVALID");
+  return desktopLifecycle(manifestPath, options, async locked => {
+    const source = "quickbooks_desktop";
+    const store = options.bindingStore || desktopBindingStore(options.storage || {});
+    let binding = await store.read();
+    if (!binding) return { status: "skipped", code: "QB_NOT_CONNECTED" };
+    const work = async assertOwned => {
+      const adminKey = (options.resolveAdminKey || resolveAdminKey)(manifestPath);
+      if (!adminKey) throw qbdFailure("QB_OWNER_CREDENTIAL_MISSING");
+      const base = await (options.resolveBaseUrl || resolveBaseUrl)(m, null);
+      const inventory = options.listStoredSourceFamilies || listStoredSourceFamilies;
+      const clock = await quickBooksWorkerClock({ monotonic: options.monotonic,
+        readWorkerDate: options.readWorkerDate || (async () => {
+          const response = await http(`${base}/api/admin/brain/source-families`, { method: "POST", redirect: "error",
+            headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" }, body: JSON.stringify({ source, limit: 1 }) });
+          if (!response.ok) throw qbdFailure("QB_CLOCK_UNVERIFIED");
+          const date = response.headers.get("date"); await response.arrayBuffer(); return date;
+        }) });
+      const snapshotAt = clock();
+      const runtime = await import("./connectors/provider-runtime.mjs");
+      const { syncQuickBooksDesktop } = await import("./connectors/quickbooks-desktop.mjs");
+      const bridge = options.bridge || (await import("./operations/quickbooks-desktop-bridge.mjs")).runQuickBooksDesktop;
+      const stored = await inventory({ base, adminKey, source });
+      let result = await syncQuickBooksDesktop({ bridge, binding, snapshotAt, listStoredFamilies: async () => stored, now: () => clock() });
+      if (flags["dry-run"]) return { dry_run: true, result };
+      const live = new Set(result.documents.map(doc => doc.source_id));
+      if (result.enumeration_complete) {
+        const pending = binding.pending_removals?.source_ids || [];
+        const ids = [...new Set([...pending, ...result.deletions.map(row => row.source_id)])]
+          .filter(id => !live.has(id) && stored.has(`${source}:${id}`)).sort();
+        const fingerprint = runtime.providerSnapshotRemovalFingerprint(source, ids.map(id => `${source}:${id}`));
+        const review = ids.length > 100 || (stored.size > 0 && ids.length / stored.size > 0.10);
+        if (review && flags["approve-removals"] !== fingerprint) {
+          binding = { ...binding, pending_removals: { fingerprint, company_fingerprint: binding.fingerprint, source_ids: ids } };
+          assertOwned(); await store.write(binding);
+          result = { ...result, deletions: [], code: "QB_REMOVALS_PENDING", walk_complete: false,
+            warnings: [...result.warnings, "QB_REMOVALS_PENDING"], outcome: ingestionOutcome("partial", { reason: "QB_REMOVALS_PENDING" }) };
+        } else result = { ...result, deletions: ids.map(source_id => ({ source_type: "quickbooks", source_id })) };
+      }
+      const delivered = await runtime.runProviderConnector({ provider: "quickbooks", source, kind: "quickbooks",
+        configurationFingerprint: providerConfigurationFingerprint("quickbooks", source, m.corpora.quickbooks_desktop, { qbo_company_fingerprint: binding.fingerprint }),
+        sync: async () => result, resolveAccess: async () => ({}), listStoredFamilies: inventory,
+        sendBatch: options.requestIngestBatch || requestIngestBatch, removeDocuments: options.applyDriveRemovals || applyDriveRemovals,
+        postReceipt: options.postSourceReceipt || postSourceReceipt, base, adminKey, assertOwned,
+        approvedSnapshotFingerprint: flags["approve-removals"] || null, now: () => new Date(clock()),
+      });
+      if (delivered.enumeration_complete) {
+        assertOwned();
+        await store.write({ ...binding, previous_counts: delivered.observation.counts,
+          previous_max_time_modified: delivered.observation.max_time_modified,
+          last_complete_snapshot_at: delivered.walk_complete ? snapshotAt : binding.last_complete_snapshot_at,
+          pending_removals: delivered.code === "QB_REMOVALS_PENDING" ? binding.pending_removals : null });
+      }
+      (options.log || info)(`${delivered.code || "QB_READY"}: ${delivered.tally.created} created, ${delivered.tally.updated} updated, ${delivered.removed} removed`);
+      return delivered;
+    };
+    return (options.withSourceIngestLock || withSourceIngestLock)({ manifestPath, sourceName: source, ...(options.sourceIngestLockOptions || {}) }, lease =>
+      work(() => { locked.assertOwned?.(); lease.assertOwned(); }));
+  }).catch(error => { throw Object.assign(new Fatal(qbdOwnerMessage(error?.code)), { code: /^QB_[A-Z_]{1,48}$/.test(error?.code || "") ? error.code : "QB_OPERATION_FAILED" }); });
+}
+
 export function providerConfigurationFingerprint(provider, source, configuration, identity = null) {
   const canonical = (value) => {
     if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -31901,6 +32116,7 @@ const versionRequested = VERSION_ARGUMENTS.has(cmd);
 // Keep this one set beside the actual dispatcher wrapper so tests exercise the
 // same decision the installed CLI uses.
 const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
+  "quickbooks-desktop-data",
   "sources",
   "financial-picture",
   "machine-continuity",

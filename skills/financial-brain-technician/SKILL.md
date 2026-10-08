@@ -7,6 +7,88 @@ description: Guide a Financial Brain install, update, Optimize check, checkup, c
 
 # Financial Brain technician
 
+## QuickBooks edition routing and Desktop field boundary
+
+For an explicitly approved QuickBooks connection, use `brain connect quickbooks
+<manifest>`. It probes the local edition without COM or network. Same-PC Windows
+Desktop routes to the attended helper; Mac Desktop and hosted Desktop offer the
+existing report-upload door. If no local Desktop is detected, the command uses
+the Online flow available in the installed release. Never call that fallback
+production-ready unless the production callback packet has been integrated.
+
+Desktop is held for signed-helper and real-file acceptance. Its production
+account sign set is empty and open-file freshness is unverified. Non-money
+records are searchable; Desktop money answers remain unavailable. No owner
+flag or manifest field enables the synthetic-test proof seam. US single-currency
+fallback is off. Card and liability balances require their own field proof.
+
+The typical attended connection has four owner actions:
+
+1. Approve the disclosed connect run. It checks the edition and helper, then
+   registers a 15-minute task outside the packaged Code tab.
+2. In QuickBooks, choose **Yes, whenever this company file is open**.
+3. Choose **Continue**.
+4. Confirm the permission screen.
+
+If needed, first open the company file as QuickBooks' Admin user. This does not
+mean Windows **Run as administrator**. A clerk sign-in, blocked Integrated
+Applications setting, or extra confirmation adds actions. Never ask for a
+QuickBooks password in chat. Reads occur only while the bound file is open on
+this PC. Answers age after a day without QuickBooks open. Use a Windows login
+only the owner signs into. The exact click count, grant fields and helper
+signature still need the Windows field receipt.
+
+Connect writes a verified private binding before enabling the corpus. Both
+connect and disconnect re-register the daily and QuickBooks schedules through
+the shared hook and require exact readback. Gmail and Drive stay in the daily
+plan. A pending task is not a completed connection.
+
+For disconnect or a company switch, run `brain disconnect quickbooks-desktop
+<manifest>` to obtain the exact company-bound removal preview. Obtain explicit
+approval of that scope, then repeat with its `--approve-removals` fingerprint.
+After confirmed removal and schedule readback, remove the app grant at
+**Edit > Preferences > Integrated Applications > Company Preferences**. Complete
+this disconnect before connecting a different company. Never bypass a company
+mismatch or delete the binding by hand.
+
+Large daily deletion plans retain their private company fingerprint and exact
+family scope for review while live records continue to arrive. Review
+`QB_REMOVALS_PENDING` on the next attended session; do not approve by count
+alone or describe the source as fully refreshed while that code remains.
+
+| Support code | One-line owner message |
+| --- | --- |
+| `QB_CONNECT_STARTED` | The separate connection window is starting; connection is still pending. |
+| `QB_NOT_INSTALLED` | Use QuickBooks Desktop on this Windows PC, or upload exported reports. |
+| `QB_NOT_OPEN` | Open QuickBooks with the company file on this PC. |
+| `QB_NOT_CONNECTED` | Finish the attended Desktop connection on this PC. |
+| `QB_NOT_AUTHORIZED` | Approve the attended Financial Brain request in QuickBooks. |
+| `QB_ADMIN_SIGNIN_DUE` | Sign in as the QuickBooks Admin user for the permission step. |
+| `QB_ELEVATED` | Untick Run as administrator in the QuickBooks shortcut's Properties, then reopen it normally. |
+| `QB_GRANT_TOO_BROAD` | In Integrated Applications, remove the always-access grant and reconnect with access only while the company file is open. |
+| `QB_GRANT_PROMPTS` | In Integrated Applications, replace prompt-each-time access with access while the company file is open. |
+| `QB_HELPER_UNAVAILABLE` | The reviewed signed helper is unavailable; stop for package repair. |
+| `QB_PROCESSOR_UNTRUSTED` | The local QuickBooks component did not pass its trust check; stop for repair. |
+| `QB_WRONG_COMPANY` | Open the connected company file; switching requires the reviewed removal first. |
+| `QB_SAMPLE_COMPANY` | A sample company cannot be connected. |
+| `QB_NON_US` | Records can be searched, but money answers are US-only in this version. |
+| `QB_READ_ONLY_SUBSCRIPTION` | The subscription is read-only; renew it or use report uploads. |
+| `QB_UNSUPPORTED_EDITION` | This Desktop edition is unsupported; use report uploads. |
+| `QB_FILE_VERSION` | The company-file version needs review before the helper can read it. |
+| `QB_FRESHNESS_UNVERIFIED` | File freshness is not yet proven, so Desktop money answers are unavailable. |
+| `QB_FILE_DORMANT` | Confirm that this is the live company file before relying on its balances. |
+| `QB_STALE_COPY` | This file looks older than the previous read; review it before continuing. |
+| `QB_PARTIAL_VIEW` | The read did not prove complete access; retry with the correct company permissions. |
+| `QB_BUSY` | Close any QuickBooks dialog and retry while the company file stays open. |
+| `QB_FRESH` | The last complete snapshot is still fresh; no new read is needed yet. |
+| `QB_CLOCK_UNVERIFIED` | The Brain's observation time could not be verified; retry after restoring access. |
+| `QB_REMOVALS_PENDING` | New records were delivered; the proposed removals still need review. |
+| `QB_REMOVAL_APPROVAL_REQUIRED` | Review and approve the exact removal preview before disconnecting. |
+| `QB_SCHEDULE_UNVERIFIED`, `SCHEDULE_INSTALL_FAILED` | The refresh schedules need attention before this connection is complete. |
+| `QB_CONNECT_TASK_FAILED` | The separate connection task did not pass its checks; stop for local repair. |
+| `QB_BINDING_INVALID`, `QB_SOURCE_INVALID` | The local connection record needs review; do not edit it by hand. |
+| `QB_BINDING_RECOVERY_REQUIRED` | The local binding is missing while stored books remain; review their company identity before reconnecting. |
+
 Help the owner complete one reviewed step at a time. Begin with a read-only
 plan. A request for guidance is not approval to deploy, connect an account,
 upload private data, delete anything, revoke access, change billing, or create
