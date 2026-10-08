@@ -96,6 +96,11 @@ const SAFE_ENV = Object.freeze([
   "LOCALAPPDATA", "APPDATA", "USERPROFILE",
 ]);
 
+// Per test file. The migration resume test replays a crash at every upgrade
+// boundary across the whole migration history and needs several minutes on
+// its own; field preparation still bounds the complete lab at one hour.
+const HICCUP_TEST_TIMEOUT_MS = 15 * 60 * 1000;
+
 export function hiccupLabEnvironment(environment = process.env) {
   const clean = { BRAIN_HICCUP_LAB: "1", CI: "1", NO_COLOR: "1" };
   for (const name of SAFE_ENV) {
@@ -146,7 +151,7 @@ export function runHiccupLab({
         cwd: root,
         env: hiccupLabEnvironment(environment),
         encoding: "utf8",
-        timeout: 5 * 60 * 1000,
+        timeout: HICCUP_TEST_TIMEOUT_MS,
       });
       if (result?.error || result?.status !== 0) {
         passed = false;
