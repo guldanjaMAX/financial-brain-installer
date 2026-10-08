@@ -49,8 +49,12 @@ if ($directories -notcontains "LocalAppDataFolder" -or $directories -contains "P
   throw "MSI is not confined to the current user's LocalAppData"
 }
 $launchConditions = @(Read-Column 'SELECT `Condition` FROM `LaunchCondition`')
-if (-not ($launchConditions -contains "Installed OR VersionNT64 >= 1000")) {
+if (-not ($launchConditions -contains "Installed OR (VersionNT64 AND WINDOWSBUILDNUMBER >= 10240)")) {
   throw "MSI does not carry the Windows 10 x64 refusal gate"
+}
+$buildSearch = @(Read-Column "SELECT ``Signature_`` FROM ``RegLocator`` WHERE ``Name`` = 'CurrentBuildNumber'")
+if ($buildSearch.Count -ne 1 -or $buildSearch[0] -ne 'WindowsBuildNumberSearch') {
+  throw "MSI does not read the real Windows build number"
 }
 
 Write-Output "MSI_CONTENTS_VERIFIED=$($files.Count)"

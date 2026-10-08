@@ -767,7 +767,11 @@ test("Windows MSI is per-user, Windows 10+, and uses process-only policy bypass"
   assert.match(wix, /<Shortcut/);
   assert.doesNotMatch(wix, /<CustomAction|InstallExecuteSequence/);
   assert.doesNotMatch(wix, /ProgramFiles64Folder|UAC prompt/);
-  assert.match(wix, /VersionNT64 &gt;= 1000/);
+  // Windows Installer reports VersionNT64 = 603 on Windows 10/11; the gate
+  // must use the registry build number (10240 = first Windows 10 build).
+  assert.doesNotMatch(wix, /VersionNT64 &gt;= 1000/);
+  assert.match(wix, /Condition="Installed OR \(VersionNT64 AND WINDOWSBUILDNUMBER &gt;= 10240\)"/);
+  assert.match(wix, /Key="SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"\s+Name="CurrentBuildNumber"\s+Type="raw"\s+Bitness="always64"/);
   assert.match(wix, /macOS 13\.5 and Windows 10 are the supported minimums|Windows 10 or newer is required/);
   assert.match(wix, /ExecutionPolicy Bypass/);
   assert.match(wix, /ProgramMenuFolder/);

@@ -12,8 +12,20 @@
     <SummaryInformation Description="Prepares the local tools used before a guided Financial Brain setup" />
     <MediaTemplate EmbedCab="yes" />
     <MajorUpgrade DowngradeErrorMessage="A newer Financial Brain Machine Prep is already installed." />
+    <!-- Windows Installer reports VersionNT64 as 603 on Windows 10 and 11, so
+         a VersionNT64 >= 1000 gate refused every supported PC. Read the real
+         build number instead; Windows 10 starts at build 10240. -->
+    <Property Id="WINDOWSBUILDNUMBER" Secure="yes">
+      <RegistrySearch
+        Id="WindowsBuildNumberSearch"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+        Name="CurrentBuildNumber"
+        Type="raw"
+        Bitness="always64" />
+    </Property>
     <Launch
-      Condition="Installed OR VersionNT64 &gt;= 1000"
+      Condition="Installed OR (VersionNT64 AND WINDOWSBUILDNUMBER &gt;= 10240)"
       Message="Windows 10 or newer is required. No machine preparation was started." />
 
     <StandardDirectory Id="LocalAppDataFolder">
