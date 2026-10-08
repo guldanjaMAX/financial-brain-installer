@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -24,6 +25,7 @@ import {
   listStoredSourceFamilies,
   renderMalformedDriveIdentities,
   remoteFamilySettlement,
+  safeIngestDisplay,
   VALUE_FLAGS,
 } from "../brain.mjs";
 import { driveVersion } from "../connectors/google-drive.mjs";
@@ -75,7 +77,7 @@ function assertReviewListing(output, state) {
   assert.ok(records.every((record) => record.name && record.folder_path),
     "every review item must have both stored labels");
   assert.deepEqual(output.split("\n").filter((line) => line.startsWith("- ")),
-    records.map((record) => `- ${record.name} (folder: ${record.folder_path})`),
+    records.map((record) => `- ${safeIngestDisplay(record.name)} (folder: ${safeIngestDisplay(record.folder_path)})`),
     "the approval stop must list exactly its eligible items with their stored name and folder");
 }
 
@@ -625,7 +627,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
  * source-policy decision while still preserving the credential outcome.
  */
 {
-  const directory = mkdtempSync(join(tmpdir(), "brain-drive-active-skips-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-drive-active-skips-")));
   const manifestPath = join(directory, "fixture.manifest.json");
   const statePath = join(directory, ".brain-ingest-drive.json");
   const evidencePath = join(directory, "active-skip-evidence.json");
@@ -651,6 +653,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   Object.assign(environment, {
     NO_COLOR: "1",
     BRAIN_GOOGLE_TOKEN_STORE: "file",
+    HOME: userRoot,
+    BRAIN_NO_WRANGLER_LOGIN: "1",
     BRAIN_DRIVE_SKIP_USER_ROOT: userRoot,
     BRAIN_DRIVE_SKIP_EVIDENCE: evidencePath,
     BRAIN_DRIVE_SKIP_MODE: "mixed",
@@ -671,6 +675,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
 
   try {
     mkdirSync(tokenRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(join(directory, ".brain-admin-key"), "fixture-admin", { mode: 0o600 });
     writeFileSync(manifestPath, JSON.stringify({
       client: { slug: "fixture" },
       brain: { domain: "fixture.invalid" },
@@ -760,7 +765,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
  * partial-write retry has to build and approve a fresh aggregate plan.
  */
 {
-  const directory = mkdtempSync(join(tmpdir(), "brain-drive-removal-guard-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-drive-removal-guard-")));
   const manifestPath = join(directory, "fixture.manifest.json");
   const statePath = join(directory, ".brain-ingest-drive.json");
   const evidencePath = join(directory, "guard-evidence.json");
@@ -817,6 +822,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   Object.assign(environment, {
     NO_COLOR: "1",
     BRAIN_GOOGLE_TOKEN_STORE: "file",
+    HOME: userRoot,
+    BRAIN_NO_WRANGLER_LOGIN: "1",
     BRAIN_DRIVE_GUARD_USER_ROOT: userRoot,
     BRAIN_DRIVE_GUARD_EVIDENCE: evidencePath,
     ADMIN_KEY: "fixture-admin",
@@ -834,6 +841,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
 
   try {
     mkdirSync(tokenRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(join(directory, ".brain-admin-key"), "fixture-admin", { mode: 0o600 });
     writeFileSync(manifestPath, JSON.stringify({
       client: { slug: "fixture" },
       brain: { domain: "fixture.invalid" },
@@ -863,6 +871,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(stopped.code, 1, safeDiagnostic(stopped.output));
     assertNoFamilyLeak(stopped.output);
     assert.match(stopped.output, /review required/i);
+    assert.match(stopped.output, /would remove 101 of 101 stored documents \(100\.0%\)/);
+    assert.match(stopped.output, /Aggregate reasons:/);
     assert.doesNotMatch(stopped.output, /unexpected error|This is a bug in the installer/i);
     const initialApproval = approvalFrom(stopped.output);
     const supportBytes = previewSupportJournal({ root: userRoot });
@@ -997,6 +1007,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
 
   const runScopeScenario = (mode, {
     full = false,
+    clockAnchor = null,
     pendingRemoval = false,
     priorReview = false,
     priorNotReturnedDays = null,
@@ -1017,14 +1028,15 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     win32 = false,
     args = [],
   } = {}) => {
-    const directory = mkdtempSync(join(tmpdir(), `brain-drive-scope-${mode}-`));
+    const fixtureNow = () => clockAnchor ?? Date.now();
+    const directory = realpathSync.native(mkdtempSync(join(tmpdir(), `brain-drive-scope-${mode}-`)));
     const manifestPath = join(directory, "fixture.manifest.json");
     const statePath = join(directory, ".brain-ingest-drive.json");
     const evidencePath = join(directory, "scope-evidence.json");
     const userRoot = join(directory, "isolated-user-root");
     const tokenRoot = join(userRoot, ".brain");
     const priorCursor = `fixture-prior-${mode}`;
-    const priorFullSweep = full ? "2000-01-01T00:00:00.000Z" : new Date().toISOString();
+    const priorFullSweep = full ? "2000-01-01T00:00:00.000Z" : new Date(fixtureNow()).toISOString();
     const environment = {};
     for (const name of ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR"]) {
       if (process.env[name] !== undefined) environment[name] = process.env[name];
@@ -1032,9 +1044,12 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     Object.assign(environment, {
       NO_COLOR: "1",
       BRAIN_GOOGLE_TOKEN_STORE: "file",
+      HOME: userRoot,
+      BRAIN_NO_WRANGLER_LOGIN: "1",
       BRAIN_DRIVE_SCOPE_USER_ROOT: userRoot,
       BRAIN_DRIVE_SCOPE_EVIDENCE: evidencePath,
       BRAIN_DRIVE_SCOPE_MODE: mode,
+      ...(clockAnchor === null ? {} : { BRAIN_DRIVE_SCOPE_NOW: String(clockAnchor) }),
       BRAIN_DRIVE_SCOPE_LABELS: inventoryLabels ? inventoryLabelMode : "none",
       BRAIN_DRIVE_SCOPE_DATE: inventoryDate ? "server" : "none",
       BRAIN_DRIVE_SCOPE_UID_FILTER: inventoryUidFilterMode,
@@ -1046,6 +1061,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     });
 
     mkdirSync(tokenRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(join(directory, ".brain-admin-key"), "fixture-admin", { mode: 0o600 });
     writeFileSync(manifestPath, JSON.stringify({
       client: { slug: "fixture" },
       brain: { domain: "fixture.invalid" },
@@ -1096,7 +1112,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       },
       removed: pendingRemoval ? { "drive:missing-sensitive": "2026-09-01T00:00:00.000Z" } : {},
       ...(Number.isFinite(priorMaturedDays) ? (() => {
-        const firstObservedAt = new Date(Date.now() - (priorMaturedDays * 24 * 60 * 60 * 1000));
+        const firstObservedAt = new Date(fixtureNow() - (priorMaturedDays * 24 * 60 * 60 * 1000));
         return {
           drive_removal_review: {
             schema_version: 5,
@@ -1137,7 +1153,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
           },
         };
       })() : Number.isFinite(priorChangeFeedDays) ? (() => {
-        const firstObservedAt = new Date(Date.now() - (priorChangeFeedDays * 24 * 60 * 60 * 1000));
+        const firstObservedAt = new Date(fixtureNow() - (priorChangeFeedDays * 24 * 60 * 60 * 1000));
         return {
           drive_removal_review: {
             schema_version: 3,
@@ -1176,7 +1192,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
           uids: ["drive:missing-sensitive"],
         },
       } : Number.isFinite(priorNotReturnedDays) ? (() => {
-        const firstObservedAt = new Date(Date.now() - (priorNotReturnedDays * 24 * 60 * 60 * 1000));
+        const firstObservedAt = new Date(fixtureNow() - (priorNotReturnedDays * 24 * 60 * 60 * 1000));
         return {
           drive_removal_review: {
             schema_version: 3,
@@ -1202,8 +1218,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
                   server_observed_at: firstObservedAt.toISOString(),
                 }, ...(Number.isFinite(priorConsistentObservationDays) ? [{
                   run_id: "sync_fixture_later_consistent_observation",
-                  observed_at: new Date(Date.now() - priorConsistentObservationDays * 24 * 60 * 60 * 1000).toISOString(),
-                  server_observed_at: new Date(Date.now() - priorConsistentObservationDays * 24 * 60 * 60 * 1000).toISOString(),
+                  observed_at: new Date(fixtureNow() - priorConsistentObservationDays * 24 * 60 * 60 * 1000).toISOString(),
+                  server_observed_at: new Date(fixtureNow() - priorConsistentObservationDays * 24 * 60 * 60 * 1000).toISOString(),
                 }] : [])],
               } : {}),
               ...(priorNotReturnedNamed ? {
@@ -2387,6 +2403,23 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     missingServerDate.cleanup();
   }
 
+  const invoiceListing = runScopeScenario("full-unresolved", {
+    clockAnchor: Date.parse("2026-10-08T12:00:00.000Z"),
+    full: true, priorNotReturnedDays: 8, priorObservation: true,
+    localDoneLabels: false, priorNotReturnedNamed: false, inventoryLabelMode: "invoice",
+  });
+  try {
+    assert.equal(invoiceListing.code, 1);
+    const state = invoiceListing.state();
+    assertReviewListing(invoiceListing.output, state);
+    assert.equal(state.ingest_removal_plan.sourceTargets.length, 1);
+    const record = state.drive_removal_review.source_deletion_candidates[0];
+    assert.ok(record.name.includes("invoice.stripe.com"), "the raw stored label still binds the plan");
+    assert.notEqual(safeIngestDisplay(record.name), record.name, "fixture reaches the URL cleaner");
+    assert.ok(!invoiceListing.output.includes(record.name), "raw hosted invoice URL must not reach output");
+    assert.equal(invoiceListing.evidence().forgetRequests, 0);
+  } finally { invoiceListing.cleanup(); }
+
   const elapsedRepeat = runScopeScenario("full-unresolved", {
     full: true,
     priorNotReturnedDays: 8,
@@ -2401,7 +2434,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.ok(elapsedApproval, "the elapsed approval stop did not print an approval fingerprint");
     assert.ok(
       elapsedRepeat.output.includes(renderCliCommands(
-        `brain ingest <manifest> --source drive --apply-removals ${elapsedRepeat.state().ingest_removal_plan.fingerprint} --approve-removals ${elapsedApproval}`,
+        `brain ingest <manifest> --from drive --source drive --apply-removals ${elapsedRepeat.state().ingest_removal_plan.fingerprint} --approve-removals ${elapsedApproval}`,
       )),
       "the elapsed approval stop did not show the exact platform-rendered retry command",
     );

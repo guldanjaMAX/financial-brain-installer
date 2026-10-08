@@ -119,6 +119,13 @@ export function buildDriveRemovalPlan(input = {}, options = {}) {
   };
 }
 
+/** Aggregate owner review text contains no document identities or source text. */
+export function formatDriveRemovalPlan(plan) {
+  const percent = (Number(plan.ratio || 0) * 100).toFixed(1);
+  return `${plan.total} of ${plan.stored} stored documents (${percent}%).\n` +
+    `      Aggregate reasons: source policy ${plan.counts.source_policy}; source deletion ${plan.counts.source_deleted}; intentional skip ${plan.counts.intentional_skip}.`;
+}
+
 /** Refuse a surprising plan without disclosing any source identifier. */
 export function assertDriveRemovalPlanSafe(plan, approval, options = {}) {
   const sourceLabel = String(options.sourceLabel || "Drive");
@@ -127,10 +134,8 @@ export function assertDriveRemovalPlanSafe(plan, approval, options = {}) {
   }
   if (!plan.tooLarge || approval === plan.fingerprint) return plan;
 
-  const percent = (Number(plan.ratio || 0) * 100).toFixed(1);
   throw new DriveRemovalReviewRequired(
-    `${sourceLabel} cleanup would remove ${plan.total} of ${plan.stored} stored documents (${percent}%).\n` +
-      `      Aggregate reasons: source policy ${plan.counts.source_policy}; source deletion ${plan.counts.source_deleted}; intentional skip ${plan.counts.intentional_skip}.\n` +
+    `${sourceLabel} cleanup would remove ${formatDriveRemovalPlan(plan)}\n` +
       "      Nothing in this removal plan was removed. The source cursor was not advanced.\n" +
       "      Review the source and policy, then approve this exact plan by re-running with:\n" +
       `      --approve-removals ${plan.fingerprint}`

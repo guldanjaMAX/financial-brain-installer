@@ -17927,7 +17927,7 @@ const cmdIngestRemoteRun = async (
             (expiredDriveReviewApproval ? " The earlier approval fingerprint expired after 24 hours; review this fresh observation." : "") +
             "\n" + eligibleCorroboratedPlanTargets.map((uid) => {
               const record = pendingSourceDeletionDriveReview.get(uid);
-              return `- ${record.name} (folder: ${record.folder_path})`;
+              return `- ${safeIngestDisplay(record.name)} (folder: ${safeIngestDisplay(record.folder_path)})`;
             }).join("\n")
           : "",
         expiresAt: eligibleCorroboratedPlanTargets.length ? new Date(Math.min(
@@ -30568,6 +30568,12 @@ async function desktopCommandDependencies(manifestPath, options) {
         method: "POST", redirect: "error", headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" }, body: JSON.stringify(payload),
       }));
       const rows = [];
+      // The registry alone misses documents written under an unregistered name.
+      // Never adopt those documents into the Desktop owner-only custody boundary.
+      if (!inventory.sources.some(row => row.name === "quickbooks_desktop" && row.kind === "quickbooks")) {
+        const families = await listStoredSourceFamilies({ base, adminKey, source: "quickbooks_desktop" });
+        if (families.size) throw binding.qbdFailure("QB_BINDING_RECOVERY_REQUIRED");
+      }
       for (const row of inventory.sources.filter(row => row.kind === "quickbooks")) {
         const families = await listStoredSourceFamilies({ base, adminKey, source: row.name });
         rows.push({ name: row.name, kind: row.kind, family_count: families.size });
@@ -30663,7 +30669,7 @@ export async function cmdIngestQuickBooksDesktop(m, manifestPath, flags = {}, op
         sendBatch: options.requestIngestBatch || requestIngestBatch, removeDocuments: options.applyDriveRemovals || applyDriveRemovals,
         postReceipt: options.postSourceReceipt || postSourceReceipt, base, adminKey, assertOwned,
         now: () => new Date(clock()),
-        reviewRemovals: async ({ uids, storedFamilies, requiredApproval }) => {
+        reviewRemovals: async ({ uids, storedFamilies, requiredApproval, notice }) => {
           // Save accepted delivery's pending scope before stopping. Bind apply
           // to the whole company checkpoint; it must not advance that cursor.
           binding = { ...binding, pending_removals: {
@@ -30686,7 +30692,7 @@ export async function cmdIngestQuickBooksDesktop(m, manifestPath, flags = {}, op
             () => { assertOwned(); lib.saveState(path, state); }, base, adminKey,
             { ...options, removalSourceKind: "quickbooks" }, assertOwned);
           await review.finish({ sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }),
-            providerApproval });
+            providerApproval, notice });
         },
       });
       if (delivered.enumeration_complete) {
@@ -30926,7 +30932,7 @@ async function cmdIngestProviderRun(
       adminKey,
       assertOwned: assertLockOwned,
       reset: Boolean(flags.reset),
-      reviewRemovals: async ({ uids, storedFamilies, requiredApproval }) => {
+      reviewRemovals: async ({ uids, storedFamilies, requiredApproval, notice }) => {
         const lib = await (options.ingestLib ?? ingestLib)();
         const path = canonicalSourceIngestStatePath({ manifestPath, sourceName });
         const reviewState = lib.loadState(path);
@@ -30938,6 +30944,7 @@ async function cmdIngestProviderRun(
         await review.finish({
           sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }),
           providerApproval: requiredApproval,
+          notice,
         });
       },
     });

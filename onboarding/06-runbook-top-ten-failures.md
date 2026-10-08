@@ -735,9 +735,14 @@ possible causes, and the owner action depends on which one the message names:
 
 1. **The cleanup plan crossed 100 documents or 10% of what the source had
    loaded.** Nothing in the plan was removed, and the source cursor was not
-   advanced. Review the aggregate reason counts. If the change is expected,
+   advanced. Review the printed "X of Y stored documents (Z%)" ratio and
+   "Aggregate reasons" counts for source policy, source deletion, and intentional
+   skips. Provider workload reviews also show "from N stored families" for the
+   affected workload. If the change is expected,
    run the exact printed `--apply-removals <fingerprint>` command, including
-   its additional `--approve-removals <fingerprint>` value. If
+   its `--from` selector when shown, `--source`, and additional
+   `--approve-removals <fingerprint>` value. Replace `<manifest>` with the same
+   manifest used for that ingest. If
    it is surprising, do not approve it. Check the connection and source policy,
    then rerun so a fresh comparison produces a new plan.
 2. **Drive stopped returning an item.** A bare 404 is never deletion evidence,
@@ -772,6 +777,18 @@ possible causes, and the owner action depends on which one the message names:
    The indexed copy remains in place and outside every deletion plan. Restore
    this credential's access to the file, then rerun Drive ingestion. There is no
    deletion approval to give for this stop.
+5. **Stored documents planned for removal could not be verified.** Those rows
+   remain stored, and this run cannot produce an exact apply approval. An old
+   removal checkpoint alone does not cause this refusal: verifiable legacy rows
+   still enter the ordinary review plan. Repeating ingestion while the stored
+   membership remains unverifiable will stop again. Keep the checkpoint and ask
+   for technician review using `brain support --explain SAFETY_REVIEW_REQUIRED`.
+   This release has no owner command that reviews and removes only those
+   unverifiable rows. `brain forget <manifest> --source <source>` previews the
+   whole source, and `--yes` removes that whole source; it is a separate,
+   broader decision. One-file provenance repair covers an accessible registered
+   local upload, not an absent remote item. Do not clear checkpoint markers or
+   remove rows directly to make the review pass.
 
 When Drive completed the walk and saved its cursor, protected 403, 404,
 temporary, grace-window, clock, and missing-label states warn but exit

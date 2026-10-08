@@ -5,6 +5,16 @@ import { readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { syncBuiltinESMExports } from "node:module";
 
+// A bounded clock injection keeps the hosted-invoice regression independent of the run date.
+if (process.env.BRAIN_DRIVE_SCOPE_NOW) {
+  const now = Number(process.env.BRAIN_DRIVE_SCOPE_NOW);
+  if (!Number.isFinite(now)) throw new Error("invalid fixture clock");
+  globalThis.Date = class extends Date {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  };
+}
+
 const userRoot = String(process.env.BRAIN_DRIVE_SCOPE_USER_ROOT || "");
 const evidencePath = String(process.env.BRAIN_DRIVE_SCOPE_EVIDENCE || "");
 const mode = String(process.env.BRAIN_DRIVE_SCOPE_MODE || "");
@@ -156,7 +166,7 @@ function storedFamilyDetails(families) {
   return families.map((uid) => {
     if (!inventoryLabelsAvailable) return { uid, name: null, folder_path: null };
     if (uid === MISSING_UID) {
-      return { uid, name: "Owner tax return.txt", folder_path: "Reviewed Root/Tax" };
+      return { uid, name: inventoryLabelMode === "invoice" ? `https://invoice.stripe.com/i/acct_fixture/${"f".repeat(48)}` : "Owner tax return.txt", folder_path: "Reviewed Root/Tax" };
     }
     const retained = /^drive:retained-(\d{2})$/.exec(uid);
     if (retained) {

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, lstatSync } from "node:fs";
 import { join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DriveRemovalReviewRequired, assertDriveRemovalPlanSafe } from "./drive-removal-plan.mjs";
+import { DriveRemovalReviewRequired, assertDriveRemovalPlanSafe, formatDriveRemovalPlan } from "./drive-removal-plan.mjs";
 import { renderCliCommands } from "./cli-guidance.mjs";
 
 const canonical = (value) => Array.isArray(value) ? value.map(canonical)
@@ -289,13 +289,15 @@ export function createIngestRemovalReview({
     saveState();
     const extraApproval = providerApproval || (sourcePlan?.tooLarge || requireSourceApproval
       ? sourcePlan.fingerprint : null);
+    const from = state.ingest_provider || (kind !== "upload" ? kind : null);
     fail(
       (notice ? `${notice}\n` : "") +
       `Source ${source}: ${observed.targets.length} stored document(s) would be removed ` +
       `across ${sourceTargets.length} source removal(s) and ${families.length - sourceTargets.length} replacement family review(s).\n` +
+      (sourcePlan ? `Source cleanup would remove ${formatDriveRemovalPlan(sourcePlan)}\n` : "") +
       "Accepted additions and updates are saved. No removal was applied; the source cursor was kept.\n" +
       (extraApproval ? "The additional source removal safety review also requires approval.\n" : "") +
-      `Review this plan, then run: brain ingest <manifest>${state.ingest_provider ? ` --from ${state.ingest_provider}` : ""} --source ${source} --apply-removals ${plan.fingerprint}` +
+      `Review this plan, then run: brain ingest <manifest>${from ? ` --from ${from}` : ""} --source ${source} --apply-removals ${plan.fingerprint}` +
       (extraApproval ? ` --approve-removals ${extraApproval}` : ""),
     );
   };

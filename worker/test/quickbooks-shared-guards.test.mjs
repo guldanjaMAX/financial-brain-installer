@@ -20,6 +20,52 @@ const OWES = '"Customer One" owes USD 75.00 on Invoice "1016" as of 2026-10-07 [
 const fixtureRow = (entity) => FIXTURES.find(([kind]) => kind === entity)[1];
 const statements = (policy) => policy.instruction.split("\n").filter((line) => /\[\d+\]\.$/.test(line));
 
+test("late registration cannot promote file-grant documents into owner-only evidence", async t => {
+  t.mock.method(Date, "now", () => NOW);
+  const fixture = await createProductFixture();
+  try {
+    const token = "synthetic-late-filing-grant";
+    fixture.raw("INSERT INTO grants(grant_id,display_name,capabilities,created_at,created_by) VALUES ('filer','Filer','[\"file\"]',?,'owner')", NOW);
+    fixture.raw("INSERT INTO grant_credentials(token_hash,grant_id,created_at) VALUES (?,'filer',?)", createHash("sha256").update(token).digest("hex"), NOW);
+    const result = await collect("Invoice", [fixtureRow("Invoice")]);
+    const [doc] = normalizeProviderResult("unregistered_ledger", result).documents;
+    const write = await fixture.post("/api/admin/brain/ingest", doc, { "X-Admin-Key": token });
+    assert.equal(write.status, 200);
+    assert.equal(fixture.first("SELECT count(*) AS n FROM documents WHERE source='unregistered_ledger'").n, 1);
+    const before = fixture.seen.sql.length;
+    const registration = await fixture.post("/api/admin/brain/source-register", { source: "unregistered_ledger", kind: "quickbooks" }, ADMIN);
+    assert.ok(fixture.seen.sql.slice(before).some(sql => /INSERT INTO sources/.test(sql)), "registration decision reached");
+    assert.equal(registration.status, 409);
+    assert.equal((await registration.json()).code, "source_kind_conflict");
+    assert.equal(fixture.first("SELECT count(*) AS n FROM sources WHERE name='unregistered_ledger'").n, 0);
+    assert.equal(fixture.first("SELECT count(*) AS n FROM source_events WHERE source_name='unregistered_ledger' AND event='registered'").n, 0);
+    const answerResponse = await fixture.post("/api/rag/think", { q: "Who owes us money in QuickBooks?" }, ADMIN);
+    assert.equal(answerResponse.status, 200);
+    const answer = await answerResponse.json();
+    assert.equal(answer.results.length, 1, "retrieval reached the stored unregistered evidence");
+    assert.notEqual(answer.evidence_gate?.supported, true);
+    const expectation = await fixture.post("/api/admin/brain/source-expectation", {
+      source: "unregistered_ledger", kind: "quickbooks", expected_refresh_seconds: 86400,
+    }, ADMIN);
+    assert.equal(expectation.status, 409);
+    assert.equal((await expectation.json()).code, "source_kind_conflict");
+    // Legacy non-owner-only adoption remains supported.
+    const upload = await fixture.post("/api/admin/brain/source-register", { source: "unregistered_ledger", kind: "upload" }, ADMIN);
+    assert.equal(upload.status, 200);
+    assert.equal((await upload.json()).registered, true);
+    const clean = await fixture.post("/api/admin/brain/source-register", { source: "owner_ledger", kind: "quickbooks" }, ADMIN);
+    assert.equal(clean.status, 200);
+    const [ownerDoc] = normalizeProviderResult("owner_ledger", result).documents;
+    assert.equal((await fixture.post("/api/admin/brain/ingest", ownerDoc, ADMIN)).status, 200);
+    const retry = await fixture.post("/api/admin/brain/source-register", { source: "owner_ledger", kind: "quickbooks" }, ADMIN);
+    assert.equal(retry.status, 200);
+    assert.equal((await retry.json()).registered, false);
+    const supported = await (await fixture.post("/api/rag/think", { q: "Who owes us money in QuickBooks?", source: "owner_ledger" }, ADMIN)).json();
+    assert.equal(supported.evidence_gate?.supported, true);
+    assert.equal(supported.evidence_gate.method, "quickbooks_observed_open_items");
+  } finally { fixture.close(); }
+});
+
 async function collect(entity, rows) {
   let reads = 0;
   const result = await syncQuickBooksOnline({

@@ -6,6 +6,9 @@ import {
   runProviderConnector,
 } from "../connectors/provider-runtime.mjs";
 import { SourceIngestLockError } from "../operations/source-ingest-lock.mjs";
+import { createIngestRemovalReview } from "../operations/ingest-removal-plan.mjs";
+import { buildDriveRemovalPlan } from "../operations/drive-removal-plan.mjs";
+import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
 
 let ran = 0;
 const check = (name, value, detail = "") => {
@@ -65,6 +68,38 @@ const lostSourceLease = () => new SourceIngestLockError(
   "the fixture source lease changed",
   { code: "source_ingest_lock_lost" },
 );
+
+{
+  const store = ingestPlanStore();
+  const state = { done: {}, skipped: {} };
+  for (let index = 0; index < 100; index++) store.put(`fixture:item${index}`);
+  const snapshot = { ...completeResult(), documents: [],
+    deletions: [0, 1].map(index => ({ source_type: "fixture-provider", source_id: `item${index}` })),
+    removal_review_scopes: [{ label: "mail", prior_source_ids: ["item0", "item1"], deletion_source_ids: ["item0", "item1"] }] };
+  const review = createIngestRemovalReview({ state, source: "fixture", kind: "upload", manifest: {},
+    manifestPath: "/fixture/manifest.json", base: "https://fixture.invalid", saveState() {},
+    request: store.request, runtime: () => "fixture-runtime" });
+  let reached = 0;
+  const h = harness({ sync: async () => snapshot, listStoredFamilies: async () => new Set(store.uids()),
+    reviewRemovals: async ({ uids, storedFamilies, requiredApproval, notice }) => {
+      reached++;
+      return review.finish({ sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }), providerApproval: requiredApproval, notice });
+    } });
+  try {
+    await assert.rejects(runProviderConnector(h.options), error => {
+      assert.match(error.message, /from 2 stored families/);
+      assert.match(error.message, /would remove 2 of 100 stored documents \(2\.0%\)/);
+      assert.match(error.message, /Aggregate reasons:/);
+      return error.code === "SAFETY_REVIEW_REQUIRED";
+    });
+    assert.equal(reached, 1);
+    assert.equal(state.ingest_removal_plan.targets.length, 2);
+    assert.equal(store.calls.apply, 0);
+    await review.apply(state.ingest_removal_plan.fingerprint, state.ingest_removal_plan.providerApproval);
+    assert.equal(store.uids().length, 98);
+    check("provider approval prints the workload denominator beside the aggregate source review", true);
+  } finally { store.db.close(); }
+}
 
 {
   const conflict = completeResult();

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -152,7 +153,7 @@ function stateFor(mode) {
   return state;
 }
 
-function runCase(mode, { approval = null, apply = null, directory = null, reset = false } = {}) {
+function runCase(mode, { approval = null, apply = null, directory = null, reset = false, printedCommand = null } = {}) {
   if (approval && !apply && directory) {
     const plan = JSON.parse(readFileSync(join(directory, ".brain-ingest-gmail.json"), "utf8")).ingest_removal_plan;
     assert.ok(plan?.targets.length > 0, "separate approval must name a nonempty saved plan");
@@ -210,6 +211,13 @@ function runCase(mode, { approval = null, apply = null, directory = null, reset 
   if (reset) args.push("--reset");
   if (apply) args.push("--source", "gmail", "--apply-removals", apply);
   if (approval) args.push("--approve-removals", approval);
+  if (printedCommand) {
+    const prefix = renderCliCommands("brain ingest <manifest>");
+    assert.ok(printedCommand.startsWith(prefix + " "));
+    // Substitute only the documented manifest placeholder and installed entrypoint.
+    // Every option comes from the literal printed command, with no hidden --from.
+    args.splice(args.indexOf("ingest") + 2, Infinity, ...printedCommand.slice(prefix.length + 1).split(" "));
+  }
   const result = spawnSync(process.execPath, args, { encoding: "utf8", env: environment, timeout: 30_000 });
   assert.equal(result.error, undefined, String(result.error || ""));
   assert.equal(result.signal, null, `${mode} Gmail fixture was terminated`);
@@ -560,6 +568,7 @@ if (process.platform !== "win32") {
       result.state.history_id === "history-current" &&
       /policy_skipped=1; coverage_gaps=0/.test(result.evidence.final_receipt?.detail || ""),
       `${result.output.slice(-1_400)}\n${JSON.stringify(result.evidence)}`);
+
   } finally { rmSync(result.directory, { recursive: true, force: true }); }
 }
 
@@ -758,9 +767,18 @@ if (process.platform !== "win32") {
       result.state.history_id === "history-prior" &&
       result.state.credential_scanner_fingerprint === credentialScannerFingerprint(true, 4) &&
       /101 stored document\(s\) would be removed/.test(result.output) &&
+      /would remove 101 of 101 stored documents \(100\.0%\)/.test(result.output) &&
+      /Aggregate reasons:/.test(result.output) &&
       result.state.ingest_removal_plan.sourcePlan.stored === 101 &&
       /--approve-removals [0-9a-f]{64}/.test(result.output),
       `${result.output.slice(-1_400)}\n${JSON.stringify(result.evidence)}`);
+    const command = result.output.split("Review this plan, then run: ")[1]?.split("\n")[0];
+    assert.ok(command?.includes(" --from gmail --source gmail "));
+    const applied = runCase("scanner-v5-mass-refusal", { directory: result.directory, printedCommand: command });
+    check("the literal printed Gmail command applies exactly its saved plan without advancing the cursor",
+      applied.code === 0 && applied.state.history_id === "history-prior" &&
+      applied.state.ingest_removal_plan === undefined &&
+      JSON.stringify([...applied.evidence.forget_targets].sort()) === JSON.stringify([...result.state.ingest_removal_plan.targets].sort()));
   } finally { rmSync(result.directory, { recursive: true, force: true }); }
 }
 
@@ -773,6 +791,8 @@ if (process.platform !== "win32") {
       result.evidence.forget_targets.length === 0 &&
       result.state.history_id === "history-prior" &&
       /100 stored document\(s\) would be removed/.test(result.output) &&
+      /would remove 100 of 100 stored documents \(100\.0%\)/.test(result.output) &&
+      /Aggregate reasons:/.test(result.output) &&
       result.state.ingest_removal_plan.sourcePlan.stored === 100 &&
       !!approval,
       `${result.output.slice(-1_400)}\n${JSON.stringify(result.evidence.final_receipt)}`);
@@ -783,6 +803,8 @@ if (process.platform !== "win32") {
         retry.code === 1 && retryApproval === approval &&
         retry.evidence.ingested_ids.length === 901 && retry.evidence.forget_targets.length === 0 &&
         /100 stored document\(s\) would be removed/.test(retry.output) &&
+      /would remove 100 of 100 stored documents \(100\.0%\)/.test(retry.output) &&
+      /Aggregate reasons:/.test(retry.output) &&
       retry.state.ingest_removal_plan.sourcePlan.stored === 100,
         `${retry.output.slice(-1_400)}\n${JSON.stringify(retry.state)}`);
       const approved = runCase("scanner-v5-dilution-guard", {
@@ -813,6 +835,8 @@ if (process.platform !== "win32") {
       first.code === 1 && retry.code === 1 && !!approval && retryApproval === approval &&
       retry.evidence.forget_targets.length === 0 &&
       /100 stored document\(s\) would be removed/.test(retry.output) &&
+      /would remove 100 of 100 stored documents \(100\.0%\)/.test(retry.output) &&
+      /Aggregate reasons:/.test(retry.output) &&
       retry.state.ingest_removal_plan.sourcePlan.stored === 100,
       `${retry.output.slice(-1_400)}\n${JSON.stringify(retry.state)}`);
   } finally { rmSync(first.directory, { recursive: true, force: true }); }
@@ -839,6 +863,8 @@ if (process.platform !== "win32") {
       retry.evidence.forget_targets.length === 0 &&
       retry.state.gmail_removal_safety_baseline?.stored === 100 &&
       /100 stored document\(s\) would be removed/.test(retry.output) &&
+      /would remove 100 of 100 stored documents \(100\.0%\)/.test(retry.output) &&
+      /Aggregate reasons:/.test(retry.output) &&
       retry.state.ingest_removal_plan.sourcePlan.stored === 100,
       `${retry.output.slice(-1_400)}\n${JSON.stringify(retry.state)}`);
   } finally { rmSync(first.directory, { recursive: true, force: true }); }

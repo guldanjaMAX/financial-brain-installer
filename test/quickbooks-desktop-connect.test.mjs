@@ -5,6 +5,7 @@ import { mkdtempSync, realpathSync, mkdirSync, readFileSync, lstatSync, symlinkS
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ingestPlanStore } from './helpers/ingest-plan-store.mjs';
+import { createProductFixture } from '../worker/test/product-contract-fixture.mjs';
 import { connectQuickBooksDesktop, disconnectQuickBooksDesktop, desktopBindingStore, makeDesktopBinding } from '../connectors/quickbooks-desktop-binding.mjs';
 import { desktopFixture, desktopBridge, SNAPSHOT } from './fixtures/quickbooks-desktop-qbxml.mjs';
 import { probeQuickBooksEdition, hasDesktopElevation } from '../connectors/quickbooks-edition-probe.mjs';
@@ -84,6 +85,41 @@ test('lost binding cannot adopt existing Desktop families without a company iden
   await assert.rejects(attended(h.deps), { code: 'QB_BINDING_RECOVERY_REQUIRED' });
   assert.ok(h.calls.includes('stored-company')); assert.ok(h.calls.some(call => call.operation === 'probe2'));
   assert.equal(hash(h.manifest()), before); assert.equal(h.binding(), null);
+});
+
+for (const malformed of [false, true]) test(`Desktop pre-check refuses unregistered documents (${malformed ? 'malformed' : 'canonical'} identity)`, async t => {
+  const fixture = await createProductFixture();
+  const reads = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    reads.push(new URL(url).pathname);
+    return fixture.worker.fetch(new Request(url, init), fixture.env, { waitUntil() {} });
+  });
+  const h = harness();
+  const { listQuickBooksSources: _injected, ...deps } = h.deps;
+  const options = { ...deps, lifecycleLockHeld: true, desktopBindingLockHeld: true,
+    resolveBaseUrl: async () => 'https://fixture.invalid', resolveAdminKey: () => 'fixture-admin-key' };
+  try {
+    if (malformed) {
+      fixture.raw("INSERT INTO documents(doc_uid,source,source_id,title,content_hash,ingested_at,meta) VALUES ('quickbooks_desktop:   ','quickbooks_desktop','   ','Synthetic record','fixture-hash',1790812800000,'{}')");
+    } else {
+      const stored = await fixture.post('/api/admin/brain/ingest', {
+        source_type: 'quickbooks_desktop', source_id: 'unregistered', title: 'Synthetic record', content: 'Synthetic stored record.'
+      }, { 'X-Admin-Key': 'fixture-admin-key' });
+      assert.equal(stored.status, 200);
+    }
+    assert.equal(fixture.first("SELECT count(*) AS n FROM documents WHERE source='quickbooks_desktop'").n, 1);
+    await assert.rejects(brain.cmdConnectQuickBooksDesktop(manifestPath, { 'attended-probe': true }, options), { code: 'QB_BINDING_RECOVERY_REQUIRED' });
+    assert.ok(reads.includes('/api/admin/brain/sources'), 'the default authenticated inventory was read');
+    assert.equal(fixture.first("SELECT count(*) AS n FROM documents WHERE source='quickbooks_desktop'").n, 1);
+    assert.equal(h.binding(), null);
+    assert.equal(h.calls.filter(call => call.source).length, 0);
+    // Empty unregistered name remains connectable with the same dependencies.
+    const clean = await createProductFixture();
+    try {
+      t.mock.method(globalThis, 'fetch', (url, init) => clean.worker.fetch(new Request(url, init), clean.env, { waitUntil() {} }));
+      assert.equal((await brain.cmdConnectQuickBooksDesktop(manifestPath, { 'attended-probe': true }, options)).status, 'connected');
+    } finally { clean.close(); }
+  } finally { fixture.close(); }
 });
 
 test('disconnect uses the exact company-bound preview, and preserves other corpora', async () => {
@@ -266,7 +302,12 @@ for (const large of [false, true]) test(`Desktop ${large ? 'large' : 'small'} re
     applyDriveRemovals: async () => { forgotten++; throw new Error('legacy deletion reached'); },
   };
   const readState = () => JSON.parse(readFileSync(join(home, '.brain-ingest-quickbooks_desktop.json'), 'utf8'));
-  await assert.rejects(cmdIngestQuickBooksDesktop(m, path, {}, options), { code: 'SAFETY_REVIEW_REQUIRED' });
+  await assert.rejects(cmdIngestQuickBooksDesktop(m, path, {}, options), error => {
+    assert.equal(error.code, 'SAFETY_REVIEW_REQUIRED');
+    assert.match(error.message, new RegExp(`from ${large ? 1 : 21} stored families`));
+    assert.match(error.message, /Aggregate reasons:/);
+    return true;
+  });
   assert.equal(requests.length, 1); assert.equal(requests[0].length, 9);
   assert.ok(store.calls.inventory > 0 && store.calls.preview > 0);
   assert.equal(store.calls.apply, 0); assert.equal(forgotten, 0);

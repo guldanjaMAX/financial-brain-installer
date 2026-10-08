@@ -5,9 +5,12 @@ import { mkdtempSync, realpathSync, mkdirSync, writeFileSync, readFileSync, rmSy
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
+import { parseArgs } from "node:util";
+import { spawnSync } from "node:child_process";
+import { cmdIngest, driveConnectorConfig, PROVIDER_CONNECTOR_IDS } from "../brain.mjs";
 import worker from "../worker/src/index.js";
 import { splitOversized, MAX_DOC_CHARS } from "../ingest/envelope-batching.mjs";
-import { createIngestRemovalReview, applyApprovedProvenanceFamily } from "../operations/ingest-removal-plan.mjs";
+import { createIngestRemovalReview, applyApprovedProvenanceFamily, removalDigest } from "../operations/ingest-removal-plan.mjs";
 import { buildDriveRemovalPlan, DriveRemovalReviewRequired } from "../operations/drive-removal-plan.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
@@ -31,6 +34,62 @@ function fixture(count = 20, options = {}) {
     return state.ingest_removal_plan.fingerprint;
   };
   return { store, state, manifest, review, stop, setRuntime: (next) => { runtime = next; }, saves: () => saves };
+}
+
+for (const lane of ["upload", "drive", "gmail", "imap", "calendar", ...PROVIDER_CONNECTOR_IDS, "quickbooks-desktop"]) {
+  test(`the printed ${lane} command dispatches and applies only its exact approved plan`, async () => {
+    const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "printed-removal-")));
+    const store = ingestPlanStore();
+    const provider = PROVIDER_CONNECTOR_IDS.includes(lane) || lane === "quickbooks-desktop";
+    const kind = provider ? (lane === "quickbooks-desktop" ? "quickbooks" : "upload") : lane;
+    const source = lane === "quickbooks-desktop" ? "quickbooks_desktop" : "fixture_source";
+    const manifestPath = join(directory, "fixture.manifest.json");
+    const manifest = { client: { slug: "fixture" }, brain: { domain: "fixture.invalid" },
+      safety: { private_path_prefixes: [] }, corpora: { google_drive: { root_folder_ids: ["fixture-root"] } } };
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    writeFileSync(join(directory, ".brain-admin-key"), randomBytes(32).toString("hex"), { mode: 0o600 });
+    const checkpoint = { cursor: "fixture-cursor" };
+    let state = { version: 1, done: {}, skipped: {}, ...(provider ? {
+      ingest_provider: lane, ingest_provider_checkpoint: removalDigest(checkpoint),
+    } : {}) };
+    const statePath = join(directory, `.brain-ingest-${source}.json`);
+    const saveState = () => writeFileSync(statePath, JSON.stringify(state));
+    const review = createIngestRemovalReview({ state, saveState, source, kind, manifest, manifestPath,
+      base: "https://fixture.invalid", request: store.request, runtime: () => "fixture-runtime",
+      policy: () => kind === "drive" ? driveConnectorConfig(manifest, manifestPath) : null });
+    try {
+      store.put(`${source}:removed`); store.put(`${source}:retained`); store.put("other:retained");
+      const sourcePlan = buildDriveRemovalPlan({ storedFamilies: [`${source}:removed`, `${source}:retained`], vanishedCandidates: [`${source}:removed`] });
+      let output;
+      await assert.rejects(review.finish({ sourcePlan }), error => { output = renderCliCommands(error.message); return error.code === "SAFETY_REVIEW_REQUIRED"; });
+      assert.deepEqual(state.ingest_removal_plan.targets, [`${source}:removed`]);
+      const command = output.split("Review this plan, then run: ")[1];
+      const prefix = renderCliCommands("brain ingest <manifest>");
+      assert.ok(command.startsWith(prefix + " "));
+      const { values: flags } = parseArgs({ args: command.slice(prefix.length + 1).split(" "), options: {
+        from: { type: "string" }, source: { type: "string" }, "apply-removals": { type: "string" }, "approve-removals": { type: "string" },
+      } });
+      assert.equal(flags.from, provider ? lane : kind === "upload" ? undefined : kind);
+      assert.equal(flags.source, source);
+      let leases = 0; let checkpointReads = 0;
+      const applied = await cmdIngest(manifestPath, { flags,
+        withBrainLifecycleLock: async (_input, task) => task({ assertOwned() {} }),
+        desktopBindingLockHeld: lane === "quickbooks-desktop",
+        withSourceIngestLock: async (_input, task) => { leases++; return task({ assertOwned() {} }); },
+        ingestLib: async () => ({ loadState: path => JSON.parse(readFileSync(path)), saveState: (path, value) => writeFileSync(path, JSON.stringify(value)) }),
+        resolveBaseUrl: async () => "https://fixture.invalid",
+        removalPlanRequest: store.request, removalPlanRuntime: () => "fixture-runtime",
+        oauth: { loadProviderSyncState: async () => { checkpointReads++; return checkpoint; } },
+        bindingStore: { read: async () => { checkpointReads++; return checkpoint; } },
+      });
+      assert.equal(applied.removed, 1);
+      assert.equal(applied.cursor_advanced, false);
+      assert.ok(leases > 0);
+      assert.equal(checkpointReads, provider ? 1 : 0);
+      assert.deepEqual(store.uids(), [`${source}:retained`, "other:retained"].sort());
+      assert.equal(JSON.parse(readFileSync(statePath)).ingest_removal_plan, undefined);
+    } finally { store.db.close(); rmSync(directory, { recursive: true, force: true }); }
+  });
 }
 
 test("the review command names an exact plan without disclosing target identities", async () => {
@@ -82,6 +141,23 @@ test("the original over-ten-percent refusal remains an additional gate", async (
     assert.equal(f.store.calls.apply, 0);
     await f.review.apply(fingerprint, f.state.ingest_removal_plan.sourcePlan.fingerprint);
     assert.equal(f.store.calls.apply, 1);
+  } finally { f.store.db.close(); }
+});
+
+test("approval prints the source ratio and aggregate reasons before any removal", async () => {
+  const f = fixture(101);
+  try {
+    const sourcePlan = buildDriveRemovalPlan({ storedFamilies: f.store.uids(), intentionalCandidates: f.store.uids() });
+    await assert.rejects(f.review.finish({ sourcePlan }), error => {
+      assert.match(error.message, /would remove 101 of 101 stored documents \(100\.0%\)/);
+      assert.match(error.message, /Aggregate reasons: source policy 0; source deletion 0; intentional skip 101/);
+      return error.code === "SAFETY_REVIEW_REQUIRED";
+    });
+    assert.equal(f.state.ingest_removal_plan.targets.length, 101);
+    assert.ok(f.store.calls.preview > 0);
+    assert.equal(f.store.calls.apply, 0);
+    await f.review.apply(f.state.ingest_removal_plan.fingerprint, sourcePlan.fingerprint);
+    assert.equal(f.store.uids().length, 0);
   } finally { f.store.db.close(); }
 });
 
@@ -522,6 +598,56 @@ function unverifyStoredBinding(store, uid) {
   store.db.prepare("UPDATE documents SET document_revision_id='rev-v1:' || lower(hex(randomblob(32))), source_original_binding_hash=? WHERE doc_uid=?")
     .run("sha256:" + "ab".repeat(32), uid);
 }
+
+test("0.4.10 removal markers recover for legacy rows but cannot approve unverifiable stored rows", async () => {
+  for (const unverifiable of [false, true]) {
+    const f = fixture();
+    try {
+      // The old checkpoint has no saved exact plan. Its retry marker alone
+      // cannot establish membership of a row with a broken stored binding.
+      f.state.done["drive:item0"] = "old-version";
+      f.state.removed = { "drive:item0": "2026-09-01T00:00:00.000Z" };
+      if (unverifiable) unverifyStoredBinding(f.store, "drive:item0");
+      const sourcePlan = buildDriveRemovalPlan({ storedFamilies: f.store.uids(), vanishedCandidates: Object.keys(f.state.removed) });
+      assert.equal(sourcePlan.total, 1);
+      for (let attempt = 0; attempt < (unverifiable ? 2 : 1); attempt++) {
+        await assert.rejects(f.review.finish({ sourcePlan }), error => {
+          assert.equal(error.code, "SAFETY_REVIEW_REQUIRED");
+          if (unverifiable) {
+            assert.match(error.message, /could not be verified, so they were kept/);
+            assert.ok(renderCliCommands(error.message).includes(renderCliCommands("brain support --explain SAFETY_REVIEW_REQUIRED")));
+            assert.doesNotMatch(error.message, /--apply-removals/);
+          }
+          return true;
+        });
+      }
+      assert.equal(f.store.calls.preview, unverifiable ? 4 : 1);
+      assert.equal(f.store.calls.apply, 0);
+      if (unverifiable) {
+        assert.equal(f.state.ingest_removal_plan, undefined);
+        assert.ok(f.store.uids().includes("drive:item0"));
+        assert.equal(f.state.removed["drive:item0"], "2026-09-01T00:00:00.000Z");
+        await assert.rejects(f.review.apply("a".repeat(64)), /No matching saved removal plan/);
+      } else {
+        assert.deepEqual(f.state.ingest_removal_plan.targets, ["drive:item0"]);
+        await f.review.apply(f.state.ingest_removal_plan.fingerprint);
+        assert.equal(f.store.uids().includes("drive:item0"), false);
+        assert.deepEqual(f.state.removed, {});
+      }
+    } finally { f.store.db.close(); }
+  }
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "removal-support-")));
+  try {
+    const result = spawnSync(process.execPath, [new URL("../brain.mjs", import.meta.url).pathname,
+      "support", "--explain", "SAFETY_REVIEW_REQUIRED"], {
+      encoding: "utf8", timeout: 30000,
+      env: { HOME: home, USERPROFILE: home, BRAIN_NO_WRANGLER_LOGIN: "1", NO_COLOR: "1" },
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /Ask the technician to review the plan/);
+    assert.doesNotMatch(result.stdout, /--apply-removals|--target/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
 
 test("an excluded source target refuses before an empty preview can commit progress", async () => {
   const f = fixture();

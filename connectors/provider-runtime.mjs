@@ -244,6 +244,7 @@ export async function runProviderConnector({
     let storedFamiliesBefore = null;
     let snapshotNeedsRemovalReview = false;
     let requiredRemovalApproval = null;
+    let removalReviewNotice = "";
     if (normalized.authoritative_snapshot === true) {
       if (typeof listStoredFamilies !== "function") {
         throw new ProviderDeliveryError("an authoritative provider snapshot needs stored-family reconciliation", {
@@ -303,6 +304,9 @@ export async function runProviderConnector({
       const reviewUids = aggregateReviewRequired ? plannedUids : scopedReview?.plannedUids || [];
       const fingerprint = providerSnapshotRemovalFingerprint(sourceName, reviewUids);
       if (aggregateReviewRequired || scopedReview) requiredRemovalApproval = fingerprint;
+      removalReviewNotice = scopedReview
+        ? `Provider workload cleanup would remove ${scopedReview.plannedUids.length} from ${scopedReview.storedCount} stored families.`
+        : `Provider cleanup would remove ${planned.length} from ${storedFamiliesBefore.size} stored families.`;
       normalized = { ...normalized, deletions: planned };
     }
     const tally = await deliverProviderDocuments(normalized.documents, {
@@ -333,6 +337,7 @@ export async function runProviderConnector({
         uids: normalized.deletions.map((item) => `${sourceName}:${item.source_id}`),
         storedFamilies: storedFamiliesBefore,
         requiredApproval: requiredRemovalApproval,
+        notice: removalReviewNotice,
       });
       // A review returning normally proved zero actual stored removals. Never
       // re-expand tombstones after that proof; only exact apply may delete.

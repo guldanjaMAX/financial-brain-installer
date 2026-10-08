@@ -175,7 +175,9 @@ try {
       !server.log.some((line) => /SEARCH UID 102:\*/.test(line)), server.log.join(" | "));
   check("more than 100 prior IMAP families stop at one aggregate removal review",
     review.code !== 0 && approval !== null &&
-      /101 stored document\(s\) would be removed/.test(review.output), review.output.slice(-1400));
+      /101 stored document\(s\) would be removed/.test(review.output) &&
+      /would remove 101 of 101 stored documents \(100\.0%\)/.test(review.output) &&
+      /Aggregate reasons:/.test(review.output), review.output.slice(-1400));
   check("the stopped review prints only an exact reusable approval fingerprint",
     /--approve-removals [0-9a-f]{64}/.test(review.output) &&
       !review.output.includes("scanner-sensitive-") && !review.output.includes(SYNTHETIC_KEY), review.output.slice(-1400));

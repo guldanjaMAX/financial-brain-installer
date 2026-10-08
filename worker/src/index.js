@@ -1594,13 +1594,15 @@ async function handleThink(
 // Every generic document writer uses the registry as the custody authority.
 // A failed lookup deliberately propagates before any staging or store mutation;
 // an envelope's provider markers cannot authorize their own admission.
+const OWNER_ONLY_SOURCE_KINDS = new Map([["quickbooks", "quickbooks_owner_required"]]);
+
 async function registeredSourceCustodyRefusal(env, source, principalKind, sourceKinds = new Map()) {
   if (principalKind === "owner") return null;
   if (!sourceKinds.has(source)) {
     const registered = await env.DB.prepare("SELECT kind FROM sources WHERE name=?1").bind(source).first();
     sourceKinds.set(source, registered?.kind ?? null);
   }
-  return sourceKinds.get(source) === "quickbooks" ? "quickbooks_owner_required" : null;
+  return OWNER_ONLY_SOURCE_KINDS.get(sourceKinds.get(source)) || null;
 }
 
 async function handleIngest(env, request, scope = { all: true }, {
@@ -2663,9 +2665,10 @@ async function handleSourceRegistration(env, request) {
   const receipts = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO sources (name, kind, status, created_at)
-       VALUES (?1,?2,'pending',?3)
+       SELECT ?1,?2,'pending',?3
+       WHERE ?4=0 OR NOT EXISTS (SELECT 1 FROM documents WHERE source=?1)
        ON CONFLICT(name) DO NOTHING`
-    ).bind(source, kind, at),
+    ).bind(source, kind, at, OWNER_ONLY_SOURCE_KINDS.has(kind) ? 1 : 0),
     env.DB.prepare(
       `INSERT INTO source_events (source_name,event,at,detail)
        SELECT ?1,'registered',?2,?3 WHERE changes()=1`
@@ -2692,6 +2695,14 @@ async function handleSourceRegistration(env, request) {
     registrationKind === kind && registration?.registry_event_recorded === 1;
   const existing = exactChange(receipts?.[0], 0) && exactChange(receipts?.[1], 0) &&
     registrationKind !== null && registration?.registry_event_recorded === 0;
+  // Existing documents have no proof that the owner-only custody gate guarded
+  // their admission. Registration must not retroactively grant that authority.
+  // Check document existence inside the insert transaction, not in a preflight.
+  if (OWNER_ONLY_SOURCE_KINDS.has(kind) && receipts?.length === 3 &&
+      exactChange(receipts[0], 0) && exactChange(receipts[1], 0) &&
+      Array.isArray(registrationRows) && registrationRows.length === 0) {
+    return jsonResponse({ error: "stored documents predate the owner-only source registration", code: "source_kind_conflict" }, 409);
+  }
   if (!Array.isArray(receipts) || receipts.length !== 3 || (!inserted && !existing)) {
     return jsonResponse({ error: "source registration did not produce an exact receipt" }, 500);
   }
