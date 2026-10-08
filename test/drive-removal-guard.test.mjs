@@ -69,6 +69,16 @@ function ids(prefix, count) {
   return Array.from({ length: count }, (_, index) => `${prefix}-${String(index).padStart(4, "0")}`);
 }
 
+function assertReviewListing(output, state) {
+  const records = state.drive_removal_review.source_deletion_candidates;
+  assert.equal(records.length, 1, "the listing fixture needs a nonempty two-walk plan");
+  assert.ok(records.every((record) => record.name && record.folder_path),
+    "every review item must have both stored labels");
+  assert.deepEqual(output.split("\n").filter((line) => line.startsWith("- ")),
+    records.map((record) => `- ${record.name} (folder: ${record.folder_path})`),
+    "the approval stop must list exactly its eligible items with their stored name and folder");
+}
+
 function errorMessage(plan, approval) {
   try {
     assertDriveRemovalPlanSafe(plan, approval);
@@ -1849,11 +1859,11 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
 
     const secondRun = resetLifecycle.rerun();
     assert.equal(secondRun.code, 1, secondRun.output);
-    assert.doesNotMatch(secondRun.output, /Owner tax return\.txt|Reviewed Root\/Tax/);
+    assertReviewListing(secondRun.output, resetLifecycle.state());
     assert.match(secondRun.output, /--approve-removals [0-9a-f]{64}/);
     const thirdRun = resetLifecycle.rerun();
     assert.equal(thirdRun.code, 1, thirdRun.output);
-    assert.doesNotMatch(thirdRun.output, /Owner tax return\.txt|Reviewed Root\/Tax/);
+    assertReviewListing(thirdRun.output, resetLifecycle.state());
     assert.match(thirdRun.output, /--approve-removals [0-9a-f]{64}/,
       "the reset-created review did not remain approvable on its third run");
     assert.equal(resetLifecycle.evidence().forgetRequests, 0);
@@ -2386,7 +2396,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   try {
     assert.equal(elapsedRepeat.code, 1, elapsedRepeat.output);
     assert.match(elapsedRepeat.output, /two walks at least seven days apart/i);
-    assert.doesNotMatch(elapsedRepeat.output, /Owner tax return\.txt|Reviewed Root\/Tax/);
+    assertReviewListing(elapsedRepeat.output, elapsedRepeat.state());
     elapsedApproval = /--approve-removals ([0-9a-f]{64})/.exec(elapsedRepeat.output)?.[1];
     assert.ok(elapsedApproval, "the elapsed approval stop did not print an approval fingerprint");
     assert.ok(

@@ -17924,7 +17924,11 @@ const cmdIngestRemoteRun = async (
         requireSourceApproval: eligibleCorroboratedPlanTargets.length > 0,
         notice: eligibleCorroboratedPlanTargets.length
           ? `Drive did not return ${eligibleCorroboratedPlanTargets.length} stored item(s) on two walks at least seven days apart.` +
-            (expiredDriveReviewApproval ? " The earlier approval fingerprint expired after 24 hours; review this fresh observation." : "")
+            (expiredDriveReviewApproval ? " The earlier approval fingerprint expired after 24 hours; review this fresh observation." : "") +
+            "\n" + eligibleCorroboratedPlanTargets.map((uid) => {
+              const record = pendingSourceDeletionDriveReview.get(uid);
+              return `- ${record.name} (folder: ${record.folder_path})`;
+            }).join("\n")
           : "",
         expiresAt: eligibleCorroboratedPlanTargets.length ? new Date(Math.min(
           ...eligibleCorroboratedPlanTargets.map((uid) => Date.parse(
