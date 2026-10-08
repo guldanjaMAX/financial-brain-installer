@@ -12,7 +12,7 @@ export function fakeQbdFrames(operation, plan) {
       'CurrentAppAccessRights.IsAutomaticLoginAllowed': 'false',
       'CurrentAppAccessRights.IsPersonalDataAccessAllowed': 'false',
     }];
-    if (entry.key === 'Account') rows = [{ ListID: 'AA-12', Name: 'Synthetic Bank', Balance: '12.34' }];
+    if (entry.key === 'Account') rows = [{ ListID: 'AA-12', TimeCreated: '2020-01-01T00:00:00-07:00', Name: 'Synthetic Bank', Balance: '12.34' }];
     return { protocol: 1, type: 'batch', request: entry.id, entity: entry.ret, rows };
   });
   frames.push({ protocol: 1, type: 'terminal', requests: requests.map((entry) => ({

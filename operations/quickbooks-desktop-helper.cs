@@ -23,6 +23,17 @@ using System.Xml;
 [DataContract] internal sealed class QbdReturn {
     [DataMember] public string name;
     [DataMember] public string[] fields;
+    [DataMember] public QbdRepeated[] repeated;
+}
+[DataContract] internal sealed class QbdRepeated {
+    [DataMember] public string field;
+    [DataMember] public string[] fields;
+    [DataMember] public int maxItems;
+}
+[DataContract] internal sealed class QbdProbeIdentity {
+    [DataMember] public string request;
+    [DataMember] public string[] fields;
+    [DataMember] public int maxRows;
 }
 [DataContract] internal sealed class QbdExit {
     [DataMember] public int value;
@@ -34,6 +45,7 @@ using System.Xml;
     [DataMember] public QbdRequest[] requests;
     [DataMember] public QbdReturn[] returns;
     [DataMember] public QbdExit[] exits;
+    [DataMember] public QbdProbeIdentity probeIdentity;
 }
 [DataContract] internal sealed class QbdPlan {
     [DataMember(IsRequired = true)] public string historySince;
@@ -220,7 +232,7 @@ internal static class QbdHelper {
         using (MemoryStream stream = new MemoryStream()) {
             DataContractJsonSerializerSettings settings = new DataContractJsonSerializerSettings();
             settings.UseSimpleDictionaryFormat = true;
-            settings.KnownTypes = new Type[] { typeof(List<string>) };
+            settings.KnownTypes = new Type[] { typeof(List<string>), typeof(List<Dictionary<string, string>>), typeof(Dictionary<string, string>) };
             new DataContractJsonSerializer(typeof(T), settings).WriteObject(stream, value);
             if (stream.Length > MaxFrameBytes || outputBytes + stream.Length + 4 > MaxTotalBytes) throw new QbdFailure("QB_PARTIAL_VIEW");
             int length = (int)stream.Length;
@@ -251,12 +263,12 @@ internal static class QbdHelper {
         using (XmlReader reader = XmlReader.Create(text, settings)) { document.Load(reader); }
         return document;
     }
-    private static string[] Fields(string name) {
-        foreach (QbdReturn ret in Contract.returns) if (ret.name == name) return ret.fields;
+    private static QbdReturn ReturnContract(string name) {
+        foreach (QbdReturn ret in Contract.returns) if (ret.name == name) return ret;
         throw new QbdFailure("QB_PARTIAL_VIEW");
     }
     private static void Leaf(XmlWriter writer, string name, string value) { writer.WriteElementString(name, value); }
-    internal static string Build(QbdRequest request, string version, string iterator, QbdPlan plan, int accountIndex) {
+    internal static string Build(QbdRequest request, string version, string iterator, QbdPlan plan, int accountIndex, bool identityOnly = false) {
         StringBuilder text = new StringBuilder();
         XmlWriterSettings settings = new XmlWriterSettings();
         settings.OmitXmlDeclaration = true;
@@ -308,7 +320,7 @@ internal static class QbdHelper {
             if (request.key == "Invoice" || request.key == "Bill" || request.key == "CreditMemo") Leaf(writer, "IncludeLineItems", "false");
             if (request.mode != "base" && request.mode != "postdated" && request.key != "TxnDeleted" && request.key != "ListDeleted") {
                 HashSet<string> included = new HashSet<string>(StringComparer.Ordinal);
-                foreach (string field in Fields(request.ret)) {
+                foreach (string field in identityOnly ? Contract.probeIdentity.fields : ReturnContract(request.ret).fields) {
                     string top = field.Split('.')[0];
                     if (included.Add(top)) Leaf(writer, "IncludeRetElement", top);
                 }
@@ -317,11 +329,31 @@ internal static class QbdHelper {
         }
         return text.ToString();
     }
-    private static void Project(XmlElement element, string prefix, HashSet<string> allowed, Dictionary<string, object> result) {
+    private static void Project(XmlElement element, string prefix, HashSet<string> allowed, Dictionary<string, object> result, QbdRepeated[] repeated = null) {
         foreach (XmlNode node in element.ChildNodes) {
             XmlElement child = node as XmlElement;
             if (child == null) continue;
             string path = prefix + child.Name;
+            QbdRepeated collection = null;
+            if (repeated != null) foreach (QbdRepeated rule in repeated) if (rule.field == path) { collection = rule; break; }
+            if (collection != null && allowed.Contains(path)) {
+                // Project each applied transaction independently. Flattening this
+                // aggregate would silently lose all but one of the linked bills.
+                if (!result.ContainsKey(path)) result[path] = new List<Dictionary<string, string>>();
+                List<Dictionary<string, string>> links = (List<Dictionary<string, string>>)result[path];
+                if (links.Count >= collection.maxItems) throw new QbdFailure("QB_PARTIAL_VIEW");
+                Dictionary<string, object> projected = new Dictionary<string, object>(StringComparer.Ordinal);
+                Project(child, "", new HashSet<string>(collection.fields, StringComparer.Ordinal), projected);
+                Dictionary<string, string> link = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (string field in collection.fields) {
+                    string value = Value(projected, field);
+                    if (value == null) throw new QbdFailure("QB_PARTIAL_VIEW");
+                    link[field] = value;
+                }
+                if (!Id.IsMatch(link["TxnID"])) throw new QbdFailure("QB_PARTIAL_VIEW");
+                links.Add(link);
+                continue;
+            }
             bool nested = false;
             foreach (string field in allowed) if (field.StartsWith(path + ".", StringComparison.Ordinal)) { nested = true; break; }
             if (nested) Project(child, path + ".", allowed, result);
@@ -391,6 +423,7 @@ internal static class QbdHelper {
         string ticket = null;
         string version = "1.0";
         List<QbdReceipt> receipts = new List<QbdReceipt>();
+        HashSet<string> identityIds = new HashSet<string>(StringComparer.Ordinal);
         outputBytes = 0;
         Func<Func<string>, string> call = callOverride ?? delegate(Func<string> action) {
             return nativeTimeouts ? Timed(action, timeout, operation == "probe2" ? "QB_GRANT_PROMPTS" : "QB_BUSY") : action();
@@ -403,7 +436,8 @@ internal static class QbdHelper {
             if (String.IsNullOrEmpty(ticket)) throw new QbdFailure("QB_NOT_OPEN");
             foreach (QbdRequest request in Contract.requests) {
                 if (operation == "probe2" && request.key != "Host") continue;
-                if (operation == "probe" && request.mode != "base") continue;
+                bool identityOnly = operation == "probe" && request.key == Contract.probeIdentity.request;
+                if (operation == "probe" && request.mode != "base" && !identityOnly) continue;
                 int repetitions = request.mode == "postdated" ? plan.accountListIds.Length : 1;
                 for (int index = 0; index < repetitions; index++) {
                     QbdReceipt receipt = new QbdReceipt();
@@ -412,7 +446,7 @@ internal static class QbdHelper {
                     int priorRemaining = Int32.MaxValue;
                     do {
                         if (++receipt.requestCount > 10000) throw new QbdFailure("QB_PARTIAL_VIEW");
-                        string xml = Build(request, version, iterator, plan, index);
+                        string xml = Build(request, version, iterator, plan, index, identityOnly);
                         XmlElement response = Response(Parse(call(delegate { return processor.Query(ticket, xml); })), request);
                         int remaining = 0;
                         if (request.iterator && (!Int32.TryParse(response.GetAttribute("iteratorRemainingCount"), NumberStyles.None, CultureInfo.InvariantCulture, out remaining) || remaining < 0 || remaining >= priorRemaining)) throw new QbdFailure("QB_PARTIAL_VIEW");
@@ -420,13 +454,20 @@ internal static class QbdHelper {
                         string next = response.GetAttribute("iteratorID");
                         if (remaining > 0 && (!Regex.IsMatch(next, "\\A\\{[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}\\}\\z") || (iterator != null && iterator != next))) throw new QbdFailure("QB_PARTIAL_VIEW");
                         List<Dictionary<string, object>> rows = new List<Dictionary<string, object>>();
-                        HashSet<string> allowed = new HashSet<string>(Fields(request.ret), StringComparer.Ordinal);
+                        QbdReturn contract = ReturnContract(request.ret);
+                        HashSet<string> allowed = new HashSet<string>(identityOnly ? Contract.probeIdentity.fields : contract.fields, StringComparer.Ordinal);
                         foreach (XmlNode child in response.ChildNodes) {
                             XmlElement ret = child as XmlElement;
                             if (ret == null) continue;
                             if (ret.Name != request.ret || request.mode == "postdated") throw new QbdFailure("QB_PARTIAL_VIEW");
                             Dictionary<string, object> row = new Dictionary<string, object>(StringComparer.Ordinal);
-                            Project(ret, "", allowed, row);
+                            Project(ret, "", allowed, row, identityOnly ? null : contract.repeated);
+                            if (identityOnly) {
+                                string id = Value(row, "ListID");
+                                if (id == null || !Id.IsMatch(id) || String.IsNullOrEmpty(Value(row, "TimeCreated")) ||
+                                    !identityIds.Add(id) || identityIds.Count > Contract.probeIdentity.maxRows)
+                                    throw new QbdFailure("QB_PARTIAL_VIEW");
+                            }
                             rows.Add(row);
                         }
                         if (request.iterator && rows.Count > 500) throw new QbdFailure("QB_PARTIAL_VIEW");
@@ -454,6 +495,7 @@ internal static class QbdHelper {
                         iterator = remaining > 0 ? next : null;
                         priorRemaining = remaining;
                     } while (receipt.iteratorRemainingCount > 0);
+                    if (identityOnly && receipt.rowCount == 0) throw new QbdFailure("QB_PARTIAL_VIEW");
                     receipts.Add(receipt);
                 }
             }

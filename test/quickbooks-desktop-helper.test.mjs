@@ -107,7 +107,8 @@ test('complete fake helper reaches registry, signatures, spawn and returns the f
 });
 
 test('probe and probe2 remain distinct one-session operations', () => {
-  for (const [operation, count] of [['probe', 3], ['probe2', 1]]) {
+  // The attended probe now includes the complete bounded account identity read.
+  for (const [operation, count] of [['probe', 4], ['probe2', 1]]) {
     const h = harness(); const result = h.run({ operation });
     assert.equal(result.ok, true); assert.equal(h.calls.launches, 1);
     assert.equal(result.frames.at(-1).requests.length, count);
