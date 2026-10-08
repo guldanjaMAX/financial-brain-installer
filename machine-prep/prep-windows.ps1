@@ -5,10 +5,10 @@ $ErrorActionPreference = "Stop"
 
 $NodeVersion = "24.13.1"
 $ClaudeMinVersion = "2.1.261"
-$BrainVersion = "0.4.9"
-$BrainKitUrl = "https://financialbrain.ai/kit/brain-installer-0.4.9-0555ad1972d7f8d6.tgz"
-$BrainKitSize = 6668013
-$BrainKitSha256 = "0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2"
+$BrainVersion = "0.4.10"
+$BrainKitUrl = "https://financialbrain.ai/kit/brain-installer-0.4.10-55824b383909c57b.tgz"
+$BrainKitSize = 6828366
+$BrainKitSha256 = "55824b383909c57b37f4db6179562bf603f670eaae3c7d315135dd290b0afdfe"
 $WranglerVersion = "4.131.1"
 # Official pages and the exact step on each, named to the owner when a
 # prerequisite needs action. Real mode never downloads or runs anything from

@@ -13,7 +13,7 @@ The native locations come from the [vendor setup guide](https://code.claude.com/
 
 Missing tools are visible owner actions because the launcher does not execute tool downloads it cannot authenticate first. When real mode stops for a required tool, it exits with code 2 before any download and says "Nothing was downloaded or installed", followed by one step for each tool needing action. Node's step selects a **v24** release and the "macOS Installer (.pkg)" or "Windows Installer (.msi)" at `https://nodejs.org/en/download`. Keep that explicit selection when the website changes its default LTS. The product engines and preflights accept Node >=22; this launcher retains its narrower existing 22/24 policy. Git keeps Apple's "Install the Command Line Tools package in Terminal" step on macOS and the Git for Windows download on Windows. Missing or unreadable Claude Code points to **Native Install (Recommended)** and the default command in the setup page's **Install Claude Code** section; a release below the floor has one step, `claude update`. No exact-version installation or Codex support request is needed. The final line asks the owner to reopen the launcher. No private path is printed.
 
-The Financial Brain **0.4.9 kit** remains pinned. Real mode downloads the exact Brain kit without redirects, requires its exact byte count and SHA-256, installs it with an isolated npm environment into a private staging prefix, and atomically promotes only a verified result. Every existing destination fails closed rather than being reused from version text alone. Wrangler is not installed globally. The Brain package owns its fixed `wrangler@4.131.1` runtime.
+The sealed Financial Brain **0.4.10 kit** is pinned. Real mode downloads the exact Brain kit without redirects, requires its exact byte count and SHA-256, installs it with an isolated npm environment into a private staging prefix, and atomically promotes only a verified result. Every existing destination fails closed rather than being reused from version text alone. Wrangler is not installed globally. The Brain package owns its fixed `wrangler@4.131.1` runtime.
 
 The scripts are intentionally outside the npm package allowlist. A prerequisite downloader cannot depend on the package it exists to prepare. Customer distribution needs separately reviewed, signed installer artifacts and physical clean-machine acceptance on Mac and Windows.
 
@@ -40,6 +40,6 @@ already available. It preserves normal-user, fixture refusal, verified-download
 and clean-prefix guards. It never opens setup or checks assistant logins.
 The visible launchers continue to use `--real` and the required Claude Code check; Codex remains optional.
 Both install modes use offline npm on the authenticated local archive; missing
-bundled dependencies are a failure. Hosted bootstrap receipts prove the current
-0.4.9 kit only. The clean smoke plan lists every constant to re-pin after the
-0.4.10 seal.
+bundled dependencies are a failure. The clean smoke plan records the sealed
+0.4.10 pins. Prior 0.4.9 hosted bootstrap receipts do not prove this kit; both
+platforms need rebuilt, signed artifacts and new bootstrap runs.

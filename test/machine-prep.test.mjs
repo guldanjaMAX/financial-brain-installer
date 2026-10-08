@@ -163,7 +163,7 @@ goto parse\r
 ${scenario === "install-failure" ? "exit /b 7" : ""}\r
 ${scenario === "destination-race" ? `mkdir "${prefix}"\r\necho foreign>"${join(prefix, "foreign.txt")}"` : ""}\r
 mkdir "%target%\\node_modules\\brain-installer"\r
-echo {^"version^":^"0.4.9^"}>"%target%\\node_modules\\brain-installer\\package.json"\r
+echo {^"version^":^"0.4.10^"}>"%target%\\node_modules\\brain-installer\\package.json"\r
 echo @echo off>"%target%\\brain.cmd"\r
 exit /b 0\r
 `);
@@ -239,7 +239,7 @@ case "${scenario}" in
     ;;
 esac
 mkdir -p "$prefix/lib/node_modules/brain-installer" "$prefix/bin"
-printf '%s\\n' '{' '  "version": "0.4.9"' '}' > "$prefix/lib/node_modules/brain-installer/package.json"
+printf '%s\\n' '{' '  "version": "0.4.10"' '}' > "$prefix/lib/node_modules/brain-installer/package.json"
 printf '%s\\n' '#!/usr/bin/env node' > "$prefix/lib/node_modules/brain-installer/brain.mjs"
 ln -s ../lib/node_modules/brain-installer/brain.mjs "$prefix/bin/brain"
 `);
@@ -377,7 +377,7 @@ test("Mac existing-install decision refuses version-only, changed, and redirecte
   try {
     mkdirSync(join(prefix, "lib", "node_modules", "brain-installer"), { recursive: true });
     mkdirSync(join(prefix, "bin"), { recursive: true });
-    writeFileSync(join(prefix, "lib", "node_modules", "brain-installer", "package.json"), '{\n  "version": "0.4.9"\n}\n');
+    writeFileSync(join(prefix, "lib", "node_modules", "brain-installer", "package.json"), '{\n  "version": "0.4.10"\n}\n');
     writeFileSync(join(prefix, "bin", "brain"), "#!/bin/sh\n");
     chmodSync(join(prefix, "bin", "brain"), 0o755);
     const versionOnly = runMac(["--verify-installed", prefix]);
@@ -407,14 +407,14 @@ test("Mac readiness requires exact Brain version equality", macRuntimeOptions(),
   const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-fixture-")));
   try {
     cpSync(join(FIXTURES, "mac-ready"), directory, { recursive: true });
-    for (const mutant of ["0.4.90", "0.4.9-modified"]) {
+    for (const mutant of ["0.4.100", "0.4.10-modified"]) {
       writeFileSync(join(directory, "brain.version"), `${mutant}\n`);
       const result = runMac(["--check"], directory);
       assert.equal(result.status, 1, combined(result));
       assert.match(combined(result), /WRONG_VERSION\s+Financial Brain CLI/);
       assert.match(combined(result), /CHECKS_REACHED=10/);
     }
-    writeFileSync(join(directory, "brain.version"), "0.4.9\n");
+    writeFileSync(join(directory, "brain.version"), "0.4.10\n");
     const control = runMac(["--check"], directory);
     assert.equal(control.status, 0, combined(control));
     assert.match(combined(control), /READY\s+Financial Brain CLI/);
@@ -1170,7 +1170,7 @@ test("Windows installed-Brain readback recognizes an exact existing install with
   const prefix = join(directory, "brain-prefix");
   try {
     mkdirSync(join(prefix, "node_modules", "brain-installer"), { recursive: true });
-    writeFileSync(join(prefix, "node_modules", "brain-installer", "package.json"), '{"version":"0.4.9"}\n');
+    writeFileSync(join(prefix, "node_modules", "brain-installer", "package.json"), '{"version":"0.4.10"}\n');
     writeFileSync(join(prefix, "brain.cmd"), "@echo off\r\n");
     const ready = runWindows(["--verify-installed", prefix]);
     assert.equal(ready.status, 2, combined(ready));
