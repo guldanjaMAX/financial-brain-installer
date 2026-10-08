@@ -44,6 +44,8 @@ const config :Workerd.Config = (services = [
     (name = "worker/src/lib/source-coverage.js", esModule = embed "../../../src/lib/source-coverage.js"),
     (name = "worker/src/lib/source-original-binding.js", esModule = embed "../../../src/lib/source-original-binding.js"),
     (name = "worker/src/lib/source-original-chunk.js", esModule = embed "../../../src/lib/source-original-chunk.js"),
+    (name = "worker/src/lib/quickbooks-label.js", esModule = embed "../../../src/lib/quickbooks-label.js"),
+    (name = "worker/src/lib/quickbooks-open-items.js", esModule = embed "../../../src/lib/quickbooks-open-items.js"),
     (name = "worker/src/lib/source-receipt.js", esModule = embed "../../../src/lib/source-receipt.js"),
     (name = "worker/src/lib/store-d1.js", esModule = embed "../../../src/lib/store-d1.js"),
     (name = "worker/src/lib/store.js", esModule = embed "../../../src/lib/store.js"),
