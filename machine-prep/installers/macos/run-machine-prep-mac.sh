@@ -34,9 +34,10 @@ say() {
 
 # Runs a child with its own lines on screen and its status markers hidden.
 # Only stdout is filtered: refusals and owner steps on stderr pass untouched,
-# and the child's exit code is returned, not the filter's.
+# and the child's exit code is returned, not the filter's. grep, not sed -l:
+# GNU sed reads -l as a line length, swallows -E, and would hide nothing.
 run_for_screen() {
-  "$@" | /usr/bin/sed -l -E "/$SCREEN_HIDDEN/d"
+  "$@" | /usr/bin/grep -v -E --line-buffered "$SCREEN_HIDDEN"
   return "${PIPESTATUS[0]}"
 }
 

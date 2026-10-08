@@ -1438,7 +1438,9 @@ test("Windows launcher mirrors the Mac screen: markers only in installer.log, pr
   // One hidden-line rule, case-sensitive on both platforms; stderr is never filtered.
   assert.ok(mac.includes("SCREEN_HIDDEN='^([A-Z][A-Z_]*([= ]|$)|Machine Prep for macOS$)'"));
   assert.ok(wrapper.includes("$ScreenHiddenPattern = '^([A-Z][A-Z_]*([= ]|$)|Machine Prep for Windows$)'"));
-  assert.match(mac, /run_for_screen\(\) \{\n  "\$@" \| \/usr\/bin\/sed -l -E "\/\$SCREEN_HIDDEN\/d"\n  return "\$\{PIPESTATUS\[0\]\}"\n\}/);
+  assert.match(mac, /run_for_screen\(\) \{\n  "\$@" \| \/usr\/bin\/grep -v -E --line-buffered "\$SCREEN_HIDDEN"\n  return "\$\{PIPESTATUS\[0\]\}"\n\}/);
+  // GNU sed takes -l as a line length and then ignores -E, so a sed filter hides nothing on Linux.
+  assert.doesNotMatch(mac, /\/usr\/bin\/sed /);
   assert.match(mac, /run_for_screen \/usr\/bin\/env -i HOME=/);
   assert.match(mac, /run_for_screen "\$HANDOFF_RUNNER"/);
   const relay = wrapper.slice(wrapper.indexOf("function Show-ChildOutput"), wrapper.indexOf("function Invoke-EmbeddedPowerShell"));
