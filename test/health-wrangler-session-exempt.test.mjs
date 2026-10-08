@@ -7,8 +7,8 @@
  * exemption list. A stale session then launched `npx wrangler whoami`, which
  * can rewrite the owner's login, before health ever looked at its manifest.
  *
- * The installed CLI is spawned with a stale synthetic session and a fake `npx`
- * that records every call. A paired control on a control-plane command proves
+ * The exported CLI credential boundary runs with a stale synthetic session
+ * and an injected refresh runner that records every call. A paired control proves
  * the fixture really reaches the refresh, so a pass cannot come from a fixture
  * that never triggers it.
  *
@@ -22,16 +22,74 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cmdHealth, runCliCommandWithCredentialBoundary, supportErrorCode } from "../brain.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { cliTestEnvironment } from "./helpers/cli-test-environment.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BRAIN = join(ROOT, "brain.mjs");
+const TRIPWIRE = new URL("./fixtures/cli-side-effect-tripwire.mjs", import.meta.url).href;
+
+// Keep the real boundary, session parser/refresh and health implementation.
+// Only the control-plane action is inert: verify itself has a separate native
+// credential ceremony unrelated to the entry-point exemption under test.
+const BOUNDARY_RUNNER = `
+import assert from "node:assert/strict";
+import { appendFileSync, readFileSync } from "node:fs";
+import { cmdHealth, resolveAdminKey, runCliCommandWithCredentialBoundary } from ${JSON.stringify(pathToFileURL(BRAIN).href)};
+import { readWranglerOAuthToken } from ${JSON.stringify(new URL("../operations/wrangler-oauth.mjs", import.meta.url).href)};
+import { renderCliCommands } from ${JSON.stringify(new URL("../operations/cli-guidance.mjs", import.meta.url).href)};
+const [command, manifestPath] = process.argv.slice(2);
+const stage = (name) => appendFileSync(process.env.SYNTHETIC_STAGE_LOG, name + "\\n");
+const resolveKey = (path) => {
+  stage("credential-read");
+  // The fixture is plaintext on every host; never ask Windows to use DPAPI.
+  return resolveAdminKey(path, {
+    platform: "linux", environment: {},
+    ...(process.platform === "win32" ? { readAdminKey: (file) => readFileSync(file, "utf8").trim() } : {}),
+  });
+};
+assert.equal(process.env.BRAIN_NO_WRANGLER_LOGIN, "1");
+try {
+  await runCliCommandWithCredentialBoundary(command, () => {
+    stage("command");
+    if (command === "verify") {
+      assert.ok(resolveKey(manifestPath) === readFileSync(process.env.BRAIN_ADMIN_KEY_FILE, "utf8").trim(),
+        "the control must read the adjacent fixture credential");
+      stage("control-complete");
+      return;
+    }
+    return cmdHealth(manifestPath, { resolveKey });
+  }, {
+    manifestPath,
+    wranglerOptions: {
+      // Simulate an opted-in session only through this injected dependency.
+      // The actual process retains the no-login guard for every other path.
+      env: process.env.SYNTHETIC_SESSION_LOOKUP === "1" ? {} : { BRAIN_NO_WRANGLER_LOGIN: "1" },
+      readWranglerOAuthToken: () => {
+        stage("session-read");
+        return readWranglerOAuthToken({
+          env: process.env, now: Date.parse("2026-10-07T00:00:00.000Z"),
+          run: (file, args) => {
+            assert.equal(file, "npx");
+            assert.equal(args[1], "whoami");
+            appendFileSync(process.env.SYNTHETIC_REFRESH_LOG, [file, ...args].join(" ") + "\\n");
+            return { status: 0, stdout: "", stderr: "" };
+          },
+        });
+      },
+    },
+  });
+} catch (error) {
+  console.error(renderCliCommands(error.message));
+  process.exitCode = 1;
+}
+`;
 
 const FRESH_SESSION = [
   'oauth_token = "synthetic-fresh-access"',
@@ -75,7 +133,8 @@ const STALE_SESSION = [
 ].join("\n");
 
 function fixture({ session: sessionText = STALE_SESSION, domain = true } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "brain-health-wrangler-exempt-"));
+  // The durable key reader refuses linked parents, including macOS /var.
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-health-wrangler-exempt-")));
   const home = join(root, "home");
   const config = join(root, "config");
   const session = join(config, ".wrangler", "config", "default.toml");
@@ -83,14 +142,9 @@ function fixture({ session: sessionText = STALE_SESSION, domain = true } = {}) {
   mkdirSync(home, { recursive: true });
   writeFileSync(session, sessionText, { mode: 0o600 });
 
-  const bin = join(root, "bin");
-  mkdirSync(bin);
   const log = join(root, "npx-calls.log");
-  // Records the call and succeeds without touching the session, so the
-  // product's re-read still finds it stale and continues without a token.
-  writeFileSync(join(bin, "npx"), `#!/bin/sh\necho "npx $*" >> '${log}'\nexit 0\n`);
-  chmodSync(join(bin, "npx"), 0o755);
-  writeFileSync(join(bin, "npx.cmd"), `@echo off\r\necho npx %* >> "${log}"\r\nexit /b 0\r\n`);
+  const keyPath = join(root, ".brain-admin-key");
+  writeFileSync(keyPath, "synthetic-admin-key-fixture-only", { mode: 0o600 });
 
   const manifest = join(root, "brain.manifest.json");
   writeFileSync(manifest, `${JSON.stringify({
@@ -103,41 +157,39 @@ function fixture({ session: sessionText = STALE_SESSION, domain = true } = {}) {
     sources: {},
   }, null, 2)}\n`);
 
-  // An explicit allowlist: nothing from the parent desktop environment, no
-  // proxy, no Cloudflare credential, and no opt-out of the Wrangler reader.
-  const env = {
-    PATH: [bin, dirname(process.execPath), ...(process.platform === "win32"
-      ? [join(process.env.SystemRoot || "C:\\Windows", "System32")]
-      : ["/usr/bin", "/bin"])].join(delimiter),
-    HOME: home,
-    USERPROFILE: home,
-    XDG_CONFIG_HOME: config,
-    TMPDIR: root,
-    TEMP: root,
-    TMP: root,
-    NO_COLOR: "1",
-  };
-  for (const name of ["SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"]) {
-    if (typeof process.env[name] === "string") env[name] = process.env[name];
-  }
+  const env = cliTestEnvironment(home, { NO_COLOR: "1" });
+  env.XDG_CONFIG_HOME = config;
+  env.BRAIN_ADMIN_KEY_FILE = keyPath;
+  env.SYNTHETIC_SESSION_LOOKUP = "1";
+  env.SYNTHETIC_REFRESH_LOG = log;
+  const stageLog = join(root, "stages.log");
+  env.SYNTHETIC_STAGE_LOG = stageLog;
   const fetchLog = join(root, "fetch-calls.log");
   const preload = join(root, "fetch-stub.mjs");
   writeFileSync(preload, FETCH_STUB);
   env.SYNTHETIC_FETCH_LOG = fetchLog;
-  env.NODE_OPTIONS = `--import=${pathToFileURL(preload).href}`;
-  return { root, session, log, fetchLog, manifest, env };
+  const runner = join(root, "boundary-runner.mjs");
+  writeFileSync(runner, BOUNDARY_RUNNER);
+  return { root, session, log, fetchLog, stageLog, manifest, env, preload, runner };
 }
 
 function runBrain(f, args) {
-  return spawnSync(process.execPath, [BRAIN, ...args], {
+  const result = spawnSync(process.execPath, [
+    "--import", TRIPWIRE, "--import", pathToFileURL(f.preload).href, f.runner, ...args,
+  ], {
     cwd: f.root, env: f.env, encoding: "utf8", timeout: 120_000,
   });
+  assert.notEqual(result.status, 86, "no native process or network boundary may be attempted");
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, /TEST_SIDE_EFFECT_BLOCKED|INTEGRATION_BOUNDARY_BLOCKED/);
+  assert.ok(stages(f).includes("command"), "the real credential boundary reached its command callback");
+  return result;
 }
 
 const fetchCalls = (f) => (existsSync(f.fetchLog)
   ? readFileSync(f.fetchLog, "utf8").trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
   : []);
 const npxCalls = (f) => (existsSync(f.log) ? readFileSync(f.log, "utf8").trim().split(/\r?\n/).filter(Boolean) : []);
+const stages = (f) => (existsSync(f.stageLog) ? readFileSync(f.stageLog, "utf8").trim().split(/\r?\n/).filter(Boolean) : []);
 
 // The dispatcher decision itself: health skips the entry-point session only
 // for a manifest with a saved brain.domain; every other manifest state keeps
@@ -226,7 +278,7 @@ const treated = fixture();
 const lookup = fixture({ session: FRESH_SESSION, domain: false });
 const staleLookup = fixture({ domain: false });
 const noAccess = fixture({ domain: false });
-noAccess.env.BRAIN_NO_WRANGLER_LOGIN = "1";
+noAccess.env.SYNTHETIC_SESSION_LOOKUP = "0";
 try {
   // Control: a control-plane command still reads the session at the entry
   // point, and the stale fixture makes that read launch the refresh.
@@ -236,12 +288,17 @@ try {
   assert.ok(controlCalls.length >= 1,
     "control: a stale Wrangler session must reach the fake npx refresh on a control-plane command");
   assert.match(controlCalls[0], /wrangler@[^ ]+ whoami/, "control: the refresh is a Wrangler whoami");
+  assert.equal(controlRun.status, 0, "the injected control completes successfully");
+  assert.deepEqual(stages(control), ["session-read", "command", "credential-read", "control-complete"]);
 
   // Treated: health with a saved domain.
   const healthRun = runBrain(treated, ["health", treated.manifest]);
   assert.notEqual(healthRun.error?.code, "ETIMEDOUT", "health must finish against an unreachable reserved host");
   assert.notEqual(healthRun.status, 0, "an unreachable reserved host cannot pass health");
   assert.deepEqual(npxCalls(treated), [], "health must not launch any npx or Wrangler process");
+  assert.deepEqual(stages(treated), ["command"], "saved-domain health bypasses the session reader");
+  assert.ok(fetchCalls(treated).some((call) => call.host === "synthetic-health.invalid"),
+    "the health request decision reached the injected transport");
   assert.equal(readFileSync(treated.session, "utf8"), STALE_SESSION,
     "health must leave the saved Wrangler session byte-identical");
   const output = `${healthRun.stdout}\n${healthRun.stderr}`;
@@ -267,6 +324,7 @@ try {
     "health probes the looked-up workers.dev address");
   assert.doesNotMatch(lookupOutput, /no saved brain\.domain/, "a usable session must not be refused");
   assert.deepEqual(npxCalls(lookup), [], "a fresh session needs no refresh");
+  assert.deepEqual(stages(lookup), ["session-read", "command"]);
   assert.equal(readFileSync(lookup.session, "utf8"), FRESH_SESSION, "the lookup leaves the session byte-identical");
   assert.doesNotMatch(lookupOutput, /synthetic-fresh-access|synthetic-refresh/, "no session value may reach output");
   assert.ok(!Object.hasOwn(JSON.parse(readFileSync(lookup.manifest, "utf8")).brain, "domain"),
@@ -280,6 +338,7 @@ try {
   assert.ok(npxCalls(staleLookup).some((call) => /wrangler@[^ ]+ whoami/.test(call)),
     "without a saved domain the entry point reads the session as it did before the exemption");
   assertTruthfulNoAccessRefusal(`${staleRun.stdout}\n${staleRun.stderr}`);
+  assert.deepEqual(stages(staleLookup), ["session-read", "command"]);
   assert.deepEqual(fetchCalls(staleLookup).filter((call) => call.host === "api.cloudflare.com"), [],
     "no Cloudflare request is made without a credential");
 
@@ -291,6 +350,7 @@ try {
   assert.deepEqual(npxCalls(noAccess), [], "the refusal must not launch any npx or Wrangler process");
   assert.equal(readFileSync(noAccess.session, "utf8"), STALE_SESSION, "the refusal leaves the session untouched");
   assert.deepEqual(fetchCalls(noAccess), [], "the refusal makes no network request");
+  assert.deepEqual(stages(noAccess), ["command"], "the no-access refusal reached health after the opt-out");
 } finally {
   for (const f of [control, treated, lookup, staleLookup, noAccess]) {
     rmSync(f.root, { recursive: true, force: true });
