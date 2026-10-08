@@ -183,7 +183,8 @@ try {
   );
   const publicStatusOutput = `${publicStatus.stdout || ""}${publicStatus.stderr || ""}`;
   check("public provider status never attempts an uninjected native or network action",
-    publicStatus.status !== 86 && !/TEST_SIDE_EFFECT_BLOCKED|INTEGRATION_BOUNDARY_BLOCKED/.test(publicStatusOutput));
+    publicStatus.status !== 86 && !/TEST_SIDE_EFFECT_BLOCKED|INTEGRATION_BOUNDARY_BLOCKED/.test(publicStatusOutput),
+    publicStatusOutput.match(/(?:TEST_SIDE_EFFECT|INTEGRATION_BOUNDARY)_BLOCKED:[^\r\n]*/)?.[0] || `exit ${publicStatus.status}`);
   const stageCount = (output, name) => output.split(`TEST_SCHEDULER_STAGE:${name}\n`).length - 1;
   check("public provider status reaches the injected scheduler on supported platforms",
     stageCount(publicStatusOutput, "provider") === (process.platform === "darwin" ? 1 : 0) &&

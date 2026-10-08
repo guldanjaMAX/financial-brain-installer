@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { cmdConnect, supportErrorCode } from "../brain.mjs";
 import { acquireSourceIngestLock, sourceIngestLockPath } from "../operations/source-ingest-lock.mjs";
 import { authorize } from "../connectors/google-auth.mjs";
@@ -229,7 +229,8 @@ test("executable connect renders timeout recovery; regression mutation is red an
         "--import", new URL("./fixtures/cli-side-effect-tripwire.mjs", import.meta.url).href,
         "--import", new URL("./fixtures/isolate-support-root.mjs", import.meta.url).href,
         "--import", new URL("./fixtures/support-journal-acl-preload.mjs", import.meta.url).href,
-        "--import", hook, fileURLToPath(new URL("../brain.mjs", import.meta.url)), "connect", "google",
+        // A raw Windows path such as C:\... is read as a URL scheme by --import.
+        "--import", pathToFileURL(hook).href, fileURLToPath(new URL("../brain.mjs", import.meta.url)), "connect", "google",
       ], {
         encoding: "utf8",
         timeout: 20_000,

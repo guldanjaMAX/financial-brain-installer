@@ -93,7 +93,8 @@ function cli(args, env = {}, options = {}) {
     encoding: "utf-8", env: e, cwd: userRoot, timeout: 30_000,
   });
   if (r.status === 86 || /TEST_SIDE_EFFECT_BLOCKED:/.test(r.stderr || "")) {
-    throw new Error("CLI fixture attempted an uninjected host action");
+    const boundary = String(r.stderr || "").match(/TEST_SIDE_EFFECT_BLOCKED:[^\r\n]*/)?.[0] || `exit ${r.status}`;
+    throw new Error(`CLI fixture attempted an uninjected host action (${boundary})`);
   }
   const journal = readSupportJournal(userRoot);
   if (!options.keepUserRoot) rmSync(userRoot, { recursive: true, force: true });
