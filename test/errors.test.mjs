@@ -452,7 +452,8 @@ function ingestExitCli(scenario) {
   const failed = cli(["status", missing], {}, { userRoot, keepUserRoot: true });
   const preview = cli(["support", "--preview"], {}, { userRoot, keepUserRoot: true });
   check("support preview returns the exact canonical bytes recorded by the failed command",
-    failed.code === 1 && preview.code === 0 && preview.out === failed.journal, preview.out);
+    // The preview channel is stdout; Windows test fixtures report on stderr.
+    failed.code === 1 && preview.code === 0 && preview.stdout === failed.journal, preview.out);
   if (process.platform !== "win32") {
     const legacyDirectories = [
       join(userRoot, ".brain"),
