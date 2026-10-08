@@ -419,7 +419,170 @@ test("bootstrap failure retains native removal and cannot pass the shell lifecyc
   }
 });
 
-test("bootstrap uses installed production preparation, guarded version, and same-user limited Windows token", () => {
+test("Windows bootstrap creates a distinct standard user instead of reusing the runner token", () => {
+  const source = read("machine-prep/installers/smoke/windows-limited.ps1");
+  assert.match(source, /Register-ScheduledTask/, "real task-registration decision reached");
+  assert.match(source, /New-LocalUser -Name \$state\.userName -Password \$securePassword/);
+  assert.match(source, /-LogonType Password -RunLevel Limited/);
+  assert.doesNotMatch(source, /-LogonType S4U/);
+});
+
+test("Windows installed payload and shortcut are read back within the child profile", () => {
+  const source = read("machine-prep/installers/smoke/windows.ps1");
+  assert.match(source, /'verifyInstalled' \{/, "installed-payload decision reached");
+  assert.match(source, /\$installedInProfile =/);
+  assert.match(source, /\$shortcutInProfile =/);
+  assert.match(source, /if \(-not \$installedInProfile -or -not \$shortcutInProfile\)/);
+  assert.match(source, /INSTALL_ROOT_IN_PROFILE=/);
+  assert.match(source, /START_MENU_SHORTCUT_IN_PROFILE=/);
+});
+
+const STANDARD_USER_BOUNDARIES = [
+  ["source", "New-LocalUser -Name $state.userName -Password $securePassword"],
+  ["source", "[Security.Cryptography.RandomNumberGenerator]::Create()"],
+  ["source", "Add-LocalGroupMember -Group $users -Member $user"],
+  ["source", "Get-LocalGroup -SID 'S-1-5-32-544'"],
+  ["source", "Get-LocalGroup -SID 'S-1-5-32-545'"],
+  ["source", "Get-LocalGroupMember -Group $administrators | Where-Object { $_.SID.Value -ceq $state.sid }"],
+  ["source", "$state.sid -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value"],
+  ["source", "if ($adminMembership -ne 0 -or $userMembership -ne 1 -or -not $distinct)"],
+  ["source", "-UserId $state.sid -LogonType Password -RunLevel Limited"],
+  ["source", "Register-ScheduledTask -TaskName $state.taskName -InputObject $task -User $qualifiedUser -Password $password"],
+  ["source", "$registered.Principal.LogonType -ne 'Password'"],
+  ["source", "$registered.Principal.UserId -notin @($state.sid, $qualifiedUser)"],
+  ["source", "$token = Read-SessionToken"],
+  ["source", "if ($context.githubActions -cne 'true' -or $context.runnerEnvironment -cne 'github-hosted')"],
+  ["source", "IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"],
+  ["source", "[BootstrapToken]::Read($identity.Token, 20)"],
+  ["source", "[BootstrapToken]::Read($identity.Token, 18)"],
+  ["source", "$sidMatches = $token.sid -ceq $context.sid"],
+  ["source", "if (-not $sidMatches -or $token.admin -or $token.elevated -ne 0 -or $token.elevationType -ne 1)"],
+  ["source", "if (-not $token.admin -or $token.elevated -ne 1 -or $token.elevationType -notin @(1, 2))"],
+  ["source", "ADMIN_CONTROL_DECISION_REACHED=1"],
+  ["source", "TOKEN_DECISION_REACHED=1"],
+  ["source", "PROFILE_DECISION_REACHED=1"],
+  ["source", "Registry::HKEY_USERS\\$($context.sid)\\$probeKey"],
+  ["source", "ProfileList\\$($context.sid)"],
+  ["source", "$env:LOCALAPPDATA -ieq $local -and $local -ieq (Join-Path $userProfileRoot 'AppData\\Local')"],
+  ["source", "if (-not $profileMatches -or -not $localMatches -or -not $roamingMatches -or -not $hkcuMatches)"],
+  ["source", "Get-ChildItem Env: | ForEach-Object { [Environment]::SetEnvironmentVariable($_.Name, $null, 'Process') }"],
+  ["source", "[Environment]::GetEnvironmentVariable('Path', 'Machine')"],
+  ["source", "Unregister-ScheduledTask -TaskName $State.taskName -Confirm:$false"],
+  ["source", "$profiles | Remove-CimInstance"],
+  ["source", "Remove-LocalUser -SID $user.SID"],
+  ["source", "$user.SID.Value -cne $State.sid"],
+  ["source", "Test-Path -LiteralPath $State.profilePath"],
+  ["source", "if ($failures -ne 0) { throw"],
+  ["source", "if ($securePassword) { $securePassword.Dispose() }\n  Remove-BootstrapAccount $state\n}"],
+  ["source", "if (Test-Path -LiteralPath $statePath) { Remove-BootstrapAccount"],
+  ["adapter", "$profilePrefix = [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\\') + '\\'"],
+  ["adapter", "(Get-Item -LiteralPath $InstallRoot).FullName.StartsWith($profilePrefix, [StringComparison]::OrdinalIgnoreCase)"],
+  ["adapter", "(Get-Item -LiteralPath $ShortcutPath).FullName.StartsWith($profilePrefix, [StringComparison]::OrdinalIgnoreCase)"],
+  ["adapter", "if (-not $installedInProfile -or -not $shortcutInProfile)"],
+];
+
+function assertStandardUserContract({ source, adapter, job }) {
+  assertNoReservedPowerShellLocals(source);
+  assertNoReservedPowerShellLocals(adapter);
+  for (const [file, boundary] of STANDARD_USER_BOUNDARIES) {
+    assert.ok(({ source, adapter })[file].includes(boundary), `missing standard-user boundary: ${boundary}`);
+  }
+  assert.equal(source.match(/\$token = Read-SessionToken/g)?.length, 2, "child and control use the same native reader");
+  assert.doesNotMatch(source, /S4U|MACHINE_PREP_TEST|Out-String|Start-Transcript|ErrorAction SilentlyContinue/);
+  const mask = source.indexOf('Write-Output "::add-mask::$password"');
+  const firstUse = source.indexOf("ConvertTo-SecureString $password");
+  assert.ok(mask > 0 && firstUse > mask, "mask precedes every password API use");
+  const passwordLines = source.split("\n").filter((line) => /\$(?:password|securePassword|random)\b/i.test(line)).map((line) => line.trim());
+  const allowed = new Set([
+    "$password = $null",
+    "$securePassword = $null",
+    "$random = New-Object byte[] 32",
+    "try { $rng.GetBytes($random) } finally { $rng.Dispose() }",
+    "$password = 'Aa1!' + [Convert]::ToBase64String($random)",
+    'Write-Output "::add-mask::$password"',
+    "$securePassword = ConvertTo-SecureString $password -AsPlainText -Force",
+    "$user = New-LocalUser -Name $state.userName -Password $securePassword -AccountNeverExpires",
+    "Register-ScheduledTask -TaskName $state.taskName -InputObject $task -User $qualifiedUser -Password $password | Out-Null",
+    "$securePassword.Dispose()",
+    "if ($securePassword) { $securePassword.Dispose() }",
+  ]);
+  assert.ok(passwordLines.length >= 5, "real password handling reached");
+  for (const line of passwordLines) assert.ok(allowed.has(line), "password may only be masked and passed to account/task APIs");
+  for (const mode of ["AdminControl", "Cleanup"]) {
+    const step = job.split(/\n      - /).find((part) => part.includes(`-LogDirectory`) && part.includes(`-${mode} `));
+    assert.ok(step, `${mode} step exists`);
+    assert.match(step, /if: always\(\)/);
+    assert.match(step, /if \(\$LASTEXITCODE -ne 0\) \{ throw/);
+    assert.doesNotMatch(step, /continue-on-error/);
+  }
+  assert.match(job, /installer-bootstrap-logs\/lifecycle\/\*\.log/);
+  assert.match(job, /installer-bootstrap-logs-control\/\*\.log/);
+  assert.doesNotMatch(job, /continue-on-error|\.json|\*\*|GITHUB_(?:ENV|OUTPUT)|S4U/);
+}
+
+test("Windows standard-user source boundaries reject disabled proofs with a green control", () => {
+  const sources = {
+    source: read("machine-prep/installers/smoke/windows-limited.ps1"),
+    adapter: read("machine-prep/installers/smoke/windows.ps1"),
+    job: read(".github/workflows/installer-signing.yml").split("\n  windows-bootstrap:\n")[1],
+  };
+  assertStandardUserContract(sources);
+  for (const [key, from] of STANDARD_USER_BOUNDARIES) {
+    assert.ok(sources[key].includes(from), "actual source decision reached before mutation");
+    const mutant = { ...sources, [key]: sources[key].replaceAll(from, "DISABLED_BOUNDARY") };
+    assert.notEqual(mutant[key], sources[key]);
+    assert.throws(() => assertStandardUserContract(mutant), `disabled boundary accepted: ${from}`);
+  }
+  for (const [key, from, to] of [
+    ["source", 'Write-Output "::add-mask::$password"', "# mask removed"],
+    ["source", "$password = $null", "Write-Output $password"],
+    ["source", "$password = $null", "$context.password = $password"],
+    ["source", "$securePassword = $null", "$context.password = $securePassword"],
+    ["source", "$random = New-Object byte[] 32", "Write-Output $random"],
+    ["job", "if: always()", "if: success()"],
+    ["job", "-AdminControl ", "-UnknownMode "],
+    ["job", "-Cleanup ", "-UnknownMode "],
+  ]) {
+    assert.ok(sources[key].includes(from), "mutation reached a real secret/control boundary");
+    const mutant = { ...sources, [key]: sources[key].replaceAll(from, to) };
+    assert.notEqual(mutant[key], sources[key]);
+    assert.throws(() => assertStandardUserContract(mutant));
+  }
+});
+
+test("Windows standard-user smoke scripts parse without executing account or installer APIs", { skip: process.platform !== "win32" }, () => {
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "standard-user-syntax-")));
+  const fixture = join(home, "parse.ps1");
+  writeFileSync(fixture, `param([string]$Bootstrap, [string]$Adapter)
+$ErrorActionPreference = 'Stop'
+foreach ($file in @($Bootstrap, $Adapter)) {
+  $tokens = $null; $parseErrors = $null
+  [Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors) | Out-Null
+  Write-Output 'PARSE_DECISION_REACHED=1'
+  if ($parseErrors.Count -ne 0) { throw 'Smoke script syntax is invalid' }
+  Write-Output 'PARSE_VERIFIED=1'
+}
+`);
+  try {
+    const result = spawnSync(join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fixture,
+      "-Bootstrap", join(ROOT, "machine-prep/installers/smoke/windows-limited.ps1"),
+      "-Adapter", join(ROOT, "machine-prep/installers/smoke/windows.ps1"),
+    ], {
+      cwd: home, encoding: "utf8", timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS,
+      env: {
+        SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR,
+        HOME: home, USERPROFILE: home, TEMP: home, TMP: home,
+        BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_TEST_LAUNCHCTL: join(home, "injected-launchctl"),
+      },
+    });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.equal(result.stdout.match(/^PARSE_DECISION_REACHED=1/gm)?.length, 2);
+    assert.equal(result.stdout.match(/^PARSE_VERIFIED=1/gm)?.length, 2);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("bootstrap uses installed production preparation and guarded version", () => {
   const bootstrap = read("machine-prep/installers/smoke/bootstrap.mjs");
   assert.match(bootstrap, /verifyPreparationPins\(readFileSync\(prep/);
   assert.match(bootstrap, /\[prep, "--prepare-cli"\]/);
@@ -428,13 +591,6 @@ test("bootstrap uses installed production preparation, guarded version, and same
   assert.match(bootstrap, /versionGuardArgs\(\{ prefix, entrypoint: join\(installed, "brain\.mjs"\) \}\)/);
   assert.match(bootstrap, /"--permission"/);
   assert.doesNotMatch(bootstrap, /MACHINE_PREP_TEST|--test-install-brain|\.\.\.process\.env/);
-  const limited = read("machine-prep/installers/smoke/windows-limited.ps1");
-  assert.match(limited, /-UserId \$context\.sid -LogonType S4U -RunLevel Limited/);
-  assert.match(limited, /\$identity\.User\.Value -cne \$context\.sid/);
-  assert.match(limited, /IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]::Administrator\)/);
-  assert.match(limited, /Unregister-ScheduledTask -TaskName \$taskName/);
-  assert.match(limited, /SAME_USER_LIMITED_TOKEN_VERIFIED=1/);
-  assert.doesNotMatch(limited, /-Password|-Credential|New-LocalUser|MACHINE_PREP_TEST/);
 });
 
 function assertSignedSmokeJobs(workflow) {
@@ -544,9 +700,31 @@ test("signed smoke native adapters retain signature, user scope, footprint, and 
   assert.match(mac, /"-target", "CurrentUserHomeDirectory"/);
   assert.match(mac, /"--volume", home/);
   assert.match(mac, /"--forget", identifier/);
+  // A fresh home holds no receipts and pkgutil then exits 1 with no output;
+  // only that exact case may read as "no receipts", every other failure stops.
+  assert.match(mac, /"receipt-list", "\/usr\/sbin\/pkgutil", \[\.\.\.receiptArgs, "--pkgs"\], \[0\], \{ emptyStatusOne: true \}/);
+  assert.match(mac, /emptyStatusOne && !result\.error && result\.status === 1 &&\s+!String\(result\.stdout \|\| ""\)\.trim\(\) && !String\(result\.stderr \|\| ""\)\.trim\(\)/);
+  assert.equal([...mac.matchAll(/emptyStatusOne: true/g)].length, 1, "only the receipt listing tolerates an empty status 1");
   assert.match(mac, /digest\(join\(installed, file\)\) !== digest\(join\(payload, file\)\)/);
   assert.match(mac, /BRAIN_NO_WRANGLER_LOGIN = "1"/);
   assert.doesNotMatch(mac, /\.\.\.process\.env/);
+  // Undiscarded Windows Installer COM results become extra pipeline rows.
+  const windowsSmoke = read("machine-prep/installers/smoke/windows.ps1");
+  assert.match(windowsSmoke, /^\s*\$null = \$view\.Execute\(\)\r?$/m);
+  assert.match(windowsSmoke, /\$null = \$view\.Close\(\)/);
+  assert.doesNotMatch(windowsSmoke, /^\s*\$view\.(?:Execute|Close)\(\)\s*$/m);
+  // Installer.Products is unreachable from PowerShell; registration is read per product.
+  assert.doesNotMatch(windowsSmoke, /\$script:Installer\.Products\b/);
+  // The build-number gate adds AppSearch and RegLocator; the smoke admits
+  // exactly that one read-only HKLM 64-bit raw lookup and nothing else.
+  assert.match(windowsSmoke, /'_Validation', 'AppSearch', 'RegLocator', 'Signature',/);
+  // MSI stores the launcher working directory as [INSTALLFOLDER], with a trailing separator.
+  assert.match(windowsSmoke, /\$shortcut\.WorkingDirectory\.TrimEnd\('\\'\) -ine \$InstallRoot/);
+  assert.match(windowsSmoke, /Read-Rows 'Signature' @\('Signature'\)\)\.Count -ne 0\) \{ throw 'Unexpected MSI file search' \}/);
+  assert.match(windowsSmoke, /\$searches\.Count -ne 1 -or \$searches\[0\]\.Property -cne 'WINDOWSBUILDNUMBER'/);
+  assert.match(windowsSmoke, /\$locators\[0\]\.Root -cne '2'/);
+  assert.match(windowsSmoke, /\$locators\[0\]\.Type -cne '18'/);
+  assert.match(windowsSmoke, /ProductState\(\$product\) -ne -1\) \{ throw 'MSI is already registered' \}/);
   const assertWindows = (source) => {
     assert.match(source, /Get-AuthenticodeSignature -LiteralPath \$Artifact/);
     assert.match(source, /\$signature\.Status -ne 'Valid'/);
@@ -754,7 +932,11 @@ test("Windows MSI is per-user, Windows 10+, and uses process-only policy bypass"
   assert.match(wix, /<Shortcut/);
   assert.doesNotMatch(wix, /<CustomAction|InstallExecuteSequence/);
   assert.doesNotMatch(wix, /ProgramFiles64Folder|UAC prompt/);
-  assert.match(wix, /VersionNT64 &gt;= 1000/);
+  // Windows Installer reports VersionNT64 = 603 on Windows 10/11; the gate
+  // must use the registry build number (10240 = first Windows 10 build).
+  assert.doesNotMatch(wix, /VersionNT64 &gt;= 1000/);
+  assert.match(wix, /Condition="Installed OR \(VersionNT64 AND WINDOWSBUILDNUMBER &gt;= 10240\)"/);
+  assert.match(wix, /Key="SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"\s+Name="CurrentBuildNumber"\s+Type="raw"\s+Bitness="always64"/);
   assert.match(wix, /macOS 13\.5 and Windows 10 are the supported minimums|Windows 10 or newer is required/);
   assert.match(wix, /ExecutionPolicy Bypass/);
   assert.match(wix, /ProgramMenuFolder/);

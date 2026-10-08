@@ -113,12 +113,32 @@ so missing bundled dependencies fail instead of reaching a registry.
 
 The workflow supplies pinned Node.js 24.13.1 using the existing pinned setup
 action. It does not prove Node installation on a bare consumer machine.
-Windows starts the whole install/bootstrap/removal run through a temporary
-Task Scheduler task with the same runner SID, S4U logon and `RunLevel Limited`.
-The child verifies SID equality and a non-administrator token. No password,
-new user, credential helper or test-mode override is used. A host that cannot
-provide this token fails; it must not fall back to elevated preparation. Task
-registration, completion and removal require readback and retained receipts.
+Windows creates a temporary local standard user, checks that it belongs to
+Users and not Administrators, and runs the whole install/bootstrap/removal
+sequence as that account. Task Scheduler uses password logon to load its real
+profile and HKCU. This is a background logon, so it does not prove an interactive
+desktop or Explorer behavior. `RunLevel Limited` alone cannot prove a standard
+user on hosted runners where UAC is off.
+
+The password is generated in memory and masked before use. It is passed only
+to the local account and task APIs, never to a command line, output variable,
+context file or uploaded artifact. The child reads its SID, effective
+Administrators membership, native token elevation and elevation type. It must
+match the new account and have neither an administrator nor an elevated token.
+It also verifies the account's registered profile, HKCU binding, LocalAppData
+and roaming folders. Installed files and the Start-menu shortcut must be read
+back inside that profile. Session receipts contain only counts and booleans,
+including the numeric Windows elevation type, never SIDs or profile paths.
+
+An always-running negative control uses the same token reader under the runner
+account and must detect an elevated administrator. A token reader that reports
+both accounts as standard fails the job. Existing signature, inventory,
+preparation and removal refusals remain active. A `finally` block removes the
+task, profile and account, and an `always()` cleanup step retries after failure.
+Removal requires readback; cleanup errors fail the job. Logs are uploaded even
+after refusal, without the account password or temporary invocation state.
+Watch job `windows-bootstrap`, displayed as **signed Windows shell and pinned
+kit CLI as a standard user**.
 
 A separate HTTPS witness download requires a direct 200 response, exact
 Content-Length, exact actual length and the pinned SHA-256 before extraction.
@@ -169,7 +189,7 @@ length, digest or content-addressed URL. Installer-shell version 0.2.0 and the
 Node/assistant/Wrangler prerequisite selections are separate constants; changing
 kit identity does not automatically change those versions.
 
-Native runner execution, public kit availability, S4U behavior, Apple receipts,
+Native runner execution, public kit availability, Windows password logon and profile loading, Apple receipts,
 PowerShell parsing, all GUI prompts and complete onboarding remain unverified
 by local offline contract tests.
 
