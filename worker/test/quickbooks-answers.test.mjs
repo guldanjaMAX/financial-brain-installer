@@ -1401,3 +1401,98 @@ for (const entity of ["Invoice", "Bill", "Customer", "Vendor", "CreditMemo", "Bi
     assert.equal(body.citations.length, 0);
   });
 }
+
+// Ordinary name punctuation must cross the same real connector/storage/route
+// boundary as hostile labels, with exact quoted subjects and monetary fields.
+const ordinaryLabels = [
+  "Northside, Inc.", "Builder’s Supply", "Builder's Supply", "A+ Supply",
+  "Northside #2", "Smith & Sons, LLC", "O’Brien Plumbing", "Cafe\u0301 Supply",
+];
+const labelQuestion = (entity) => entity === "Account" ? "What are the current QuickBooks account balances?"
+  : entity === "Invoice" ? "Who owes us money in QuickBooks?"
+    : entity === "Bill" ? "What bills do we owe in QuickBooks?" : "What did we pay vendors in QuickBooks?";
+const labelRow = (entity, label) => ({ ...FIXTURES.find(([kind]) => kind === entity)[1],
+  ...(entity === "Account" ? { Name: label }
+    : { [entity === "Invoice" ? "CustomerRef" : "VendorRef"]: { value: "party-one", name: label } }),
+});
+const labelClaim = (entity, label) => {
+  const quoted = JSON.stringify(label.normalize("NFKC"));
+  if (entity === "Account") return `${quoted} (Bank): balance USD 1,201.00 as of 2026-10-07 [1].`;
+  if (entity === "BillPayment") return `${quoted} was paid USD 75.00 by credit card on 2026-07-23 for bill "bill-one" [1].`;
+  return `${entity} "1016" ${entity === "Invoice" ? "to" : "from"} ${quoted}: ${entity === "Invoice" ? "owes USD 75.00" : "we owe USD 25.00"}, due 2026-08-22, as of 2026-10-07 [1].`;
+};
+const punctuationAttacks = [
+  // Commas/apostrophes cannot introduce a second monetary or state clause.
+  "Party One, owes USD 9999", "Party One, Inc. owes nine thousand", "Party One, remains a customer",
+  "Party’s balance is 9999", "Party's balance is 9999", "Party’s service is ongoing",
+  "Party ’Supply", "Party’ Supply", "Party’’Supply", "Party ’9", "Party “Supply”",
+  // The name suffix '+' is not a signed value or a Markdown/scale escape.
+  "A+9999 Supply", "A+ 9999", "Party +1201", "Party + 1201", "A++ Supply", "A+ Supply, owes nine thousand",
+  "Northside #2 owes USD 9999", "Northside #2, remains a customer", "Northside ##2", "Northside # 2",
+  "Northside #2 [99]", "Northside #2 50%", "Northside, 1,201.00", "Party’s CAD 1201", "A+ Supply million",
+  "Active Life Fitness", "Current Electric", "Balance Studio", "Dollar Tree",
+];
+for (const entity of ["Account", "Invoice", "Bill", "BillPayment"]) {
+  const options = { entity, question: labelQuestion(entity), balanceOnly: true };
+  for (const label of ordinaryLabels) {
+    test(`R10 ${entity} answers with ordinary quoted punctuation: ${label}`, async (t) => {
+      const expected = labelClaim(entity, label);
+      const body = await answerCase(t, { ...options, rows: [labelRow(entity, label)], answer: expected,
+        expectedDrafts: entity === "BillPayment" ? 1 : 0, expectedVerifiers: entity === "BillPayment" ? 1 : 0 });
+      assert.equal(body.evidence_gate.supported, true, body.evidence_gate.reason);
+      assert.equal(body.answer.split("\n")[0], expected);
+      assert.equal(body.citations.length, 1);
+      assert.equal(body.evidence_gate.method, entity === "Account" ? "quickbooks_observed_balances"
+        : entity === "BillPayment" ? undefined : "quickbooks_observed_open_items");
+    });
+  }
+  for (const label of punctuationAttacks) {
+    test(`R10 ${entity} punctuation cannot carry a claim: ${label}`, async (t) => {
+      const control = await answerCase(t, { ...options, rows: [labelRow(entity, "Party One")], answer: labelClaim(entity, "Party One"),
+        expectedDrafts: entity === "BillPayment" ? 1 : 0, expectedVerifiers: entity === "BillPayment" ? 1 : 0 });
+      assert.equal(control.evidence_gate.supported, true, "same entity and intent have a green control");
+      const body = await answerCase(t, { ...options, rows: [labelRow(entity, label)], answer: labelClaim(entity, label.replace(/\[\d+\]/g, "")),
+        expectedDrafts: 1, expectedVerifiers: 1 });
+      assert.equal(body.results.length, 1, "contaminated label reached retrieval and the affirmative verifier");
+      assert.equal(body.evidence_gate.supported, false);
+      assert.equal(body.citations.length, 0);
+    });
+  }
+}
+
+for (const label of ordinaryLabels) {
+  test(`R10 generated payment binds the complete punctuated party and account: ${label}`, async (t) => {
+    const rows = [{ ...labelRow("BillPayment", label),
+      CreditCardPayment: { CCAccountRef: { value: "card-one", name: label } } }];
+    const quote = JSON.stringify(label.normalize("NFKC"));
+    const exact = `Bill payment to ${quote} on 2026-07-23: USD 75.00 by credit card (${quote}), for bill "bill-one" [1].`;
+    const options = { entity: "BillPayment", rows, question: labelQuestion("BillPayment"), expectedDrafts: 1 };
+    assert.equal((await answerCase(t, { ...options, answer: exact })).evidence_gate.supported, true);
+    for (const wrong of [exact.replace(`to ${quote}`, 'to "Imaginary"'), exact.replace(`(${quote})`, '("Imaginary")'),
+      exact.replace("75.00", "9999.00"), exact.replace('"bill-one"', '"bill-two"')]) {
+      const body = await answerCase(t, { ...options, answer: wrong });
+      assert.equal(body.evidence_gate.supported, false, "punctuation never weakens exact subject or amount binding");
+      assert.equal(body.citations.length, 0);
+    }
+  });
+}
+
+for (const entity of ["Invoice", "Bill"]) {
+  test(`R10 ${entity} composed and decomposed subjects cannot hide competing money`, async (t) => {
+    const base = labelRow(entity, "Cafe\u0301 Supply");
+    const options = { entity, question: labelQuestion(entity), balanceOnly: true };
+    const control = await answerCase(t, { ...options, rows: [base], expectedDrafts: 0, expectedVerifiers: 0 });
+    assert.equal(control.evidence_gate.supported, true);
+    const body = await answerCase(t, { ...options, rows: [base, { ...labelRow(entity, "Café Supply"), Id: "competing", Balance: 0 }],
+      expectedDrafts: 1, answer: (prompt) => {
+        const suffix = createHash("sha256").update(`${entity}:${base.Id}`).digest("hex").slice(0, 12);
+        const line = prompt.split("\n").find((line) => line.startsWith("[") && line.endsWith(suffix));
+        assert.ok(line, "original record reached the numbered prompt alongside its competitor");
+        const n = /^\[(\d+)\]/.exec(line)[1];
+        return `${entity} "1016" ${entity === "Invoice" ? "to" : "from"} "Café Supply": open balance USD ${entity === "Invoice" ? "75.00 (unpaid)" : "25.00 (partially paid)"} as of 2026-10-07 [${n}].`;
+      } });
+    assert.equal(body.results.length, 2, "both canonically equivalent subjects reached admission");
+    assert.equal(body.evidence_gate.supported, false);
+    assert.equal(body.citations.length, 0);
+  });
+}
