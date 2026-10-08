@@ -36,6 +36,7 @@ const config :Workerd.Config = (services = [
     (name = "worker/src/lib/provenance-receipt.js", esModule = embed "../../../src/lib/provenance-receipt.js"),
     (name = "worker/src/lib/provider-sync.js", esModule = embed "../../../src/lib/provider-sync.js"),
     (name = "worker/src/lib/query-intent.js", esModule = embed "../../../src/lib/query-intent.js"),
+    (name = "worker/src/lib/query-timing.js", esModule = embed "../../../src/lib/query-timing.js"),
     (name = "worker/src/lib/retrieval-routing.js", esModule = embed "../../../src/lib/retrieval-routing.js"),
     (name = "worker/src/lib/retrieval-status.js", esModule = embed "../../../src/lib/retrieval-status.js"),
     (name = "worker/src/lib/secret-scan.js", esModule = embed "../../../src/lib/secret-scan.js"),
