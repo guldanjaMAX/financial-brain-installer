@@ -284,3 +284,110 @@ Focused suites are `test/financial-contract.test.mjs` and
 Schema migration, recovery, syntax, privacy, full host and CI verification remain
 required at integration. Real-provider semantics, a test Brain, exact-year tax
 review, UI verification and independent review are separate gates.
+
+## Tax check implementation seam
+
+The tax lane adds internal, dependency-injected modules without changing R1,
+B1, T1, the existing gross-receipts reconciliation, the OCR answer gate, or the
+reserved migration. It registers three focused suites in the offline chain.
+These functions do not register a CLI command, HTTP route, owner approval flow,
+or ordinary retrieval document. MAIN must connect the authenticated owner flow
+and exact-year map registry before exposing this capability.
+
+| Module | Entry point and boundary |
+| --- | --- |
+| `ingest/tax-pdf.mjs` | `extractTaxPdf({bytes,formMap,textSource})` parses local PDF bytes with the installed `unpdf` parser. Monetary rectangles and widget names come from an exact template map. It returns bounded candidates, never accepted tax amounts. |
+| `worker/src/lib/tax-check.js` | `confirmTaxLine(input,deps)` consumes an authenticated field review; `confirmTaxLines(inputs,deps)` preserves partial results from one scoped batch. `evaluateTaxCheck({rule_id,transfer},deps)` resolves current evidence and executes a T1 rule. |
+| `worker/src/lib/tax-check-rules.js` | `evaluateTaxRule(ruleId,transfer,{review,mapping})` is pure computation over already resolved evidence. It is not an authorization endpoint. |
+| `worker/src/lib/tax-check-document.js` | `createTaxCheckStore(deps).publish(request)` computes and stores a private `Tax check <year>` document; `.read({tenant,run_ref,current})` rechecks evidence and grants. |
+
+All PDF values require owner confirmation in this first implementation. Native
+AcroForm and layout text have distinct candidate confidence categories; repeated
+widgets, field/text disagreement, unsupported rotation, malformed money, missing
+pages and XFA fail closed. Blank remains blank. The parser does not inspect or
+certify appearance streams, render page crops, or perform OCR. A scan's separate
+confirmed value is `owner_stated`; neither original `text_source` nor
+`text_reliable` is promoted. No production form map ships with these modules.
+An exact-year registry must be reviewed against official forms/instructions and
+preparer policy; fixture maps are invented, not official tax mappings.
+
+The compatible extensions are local receipt/envelope contracts around unchanged
+T1. They are not additions to the shared JSON Schema or independently trusted
+claims:
+
+- `tax-pdf-map-1`: version, form, form revision, year, jurisdiction, USD currency,
+  page count, and monetary field entries with line/box, page, widget name,
+  rectangle, signed-value permission, US decimal format and rounding convention.
+- `tax-field-review-1`: authenticated principal and confirmation time, receipt
+  reference, confirmation kind and SHA-256 of the exact T1 line. Candidate review
+  also binds the candidate hash over document hash, map hash, provenance, locator,
+  state and exact value. `confirmTaxLine` requires an explicit tenant and current
+  authorized source custody. The authenticated review UI must issue this receipt
+  only after the owner reviews the exact field.
+- `tax-check-map-1`: reviewed version, content hash and unique rule entries for
+  measure, form/revision/line, year/jurisdiction, period, basis, currency, signed
+  values and rounding. The content hash is canonical JSON with `content_hash:null`.
+- `tax-check-review-1`: authenticated principal/time, receipt reference,
+  `binding_hash`, mapping hash, inventory revision, complete-for-rule source and
+  return inventories, reviewed corrections/allocations/adjustments, linked or
+  unlinked treatment, operative return hash, and optional reviewed absence locator.
+  `taxCheckBinding` binds the entire T1 input and rule ID, with confirmation null,
+  comparison `not_checked` and difference null to avoid a self-referential hash.
+  This receipt must come from server storage, never request JSON.
+
+Reviewed absence uses a separate locator on the trusted review receipt and leaves
+T1's numeric `tax_line` null. Its cited R1 evidence must be a current complete
+reviewed no-data report with an explicit zero cell. That cell records the bounded
+review inventory, not a zero tax line or a search result. Unsupported absence
+adapters stay not checked. A source aggregate must already have a verified R1
+cell. Raw document lists, original plus corrected forms, ordinary plus qualified
+dividends, and 1099-K plus already booked receipts are never automatically summed.
+Cross-report adjustments additionally require matching stable fences, generation
+and observation, reviewed mapping, and nonoverlapping roots.
+
+Supported rule implementations are T01, T05, T06, T09, T11, T12, T13, T14, T15,
+T16, T17, T18, T19 and T22. Six compare reviewed source/return amounts; eight
+ask about unlinked treatment without calculating a deduction. T01/T05/T06 flag
+only a reviewed excess. A larger return amount yields no signal only for that
+bounded comparison; it does not establish payer completeness. T09/T11/T18 compare
+both directions. The other eighteen catalog families are always visibly not
+checked. Every enabled family still requires a reviewed map and complete scope.
+US federal USD scopes with matching year/period are the bounded implementation;
+cross-year fiscal periods and unsupported jurisdictions refuse.
+
+The coordinator requires `now`, `readCitation`, `readReview`, `readMapping`,
+`readDocument` and `readMapHead`. `readCitation` must delegate to the financial
+store's current authorized read. `readDocument` must enforce tenant, entity and
+original source grants and return available/current status, exact original hash,
+text source and reliability. Review and mapping resolvers must read authenticated
+server records. Source retirement, replacement, grant loss, pending findings,
+unknown rounding, changed map or receipt, or a union above sixteen roots blocks
+the affected comparison. A plain client boolean cannot satisfy these adapters.
+
+The document store additionally takes a D1-compatible `db` and `authorizeRun`.
+Publish requests contain only `scope`, `tax_year`, `filing_unit_ref`,
+`jurisdiction`, `observed_at`, `implementation_sha` and `{rule_id,transfer}` entries.
+Unprovided rules are explicit gaps. The immutable document, all thirty-two
+outcomes, exact citation index, dependencies and input receipt share one
+`financial_run_events` row. A conditional insert fences the next sequence for
+the exact scope; readback verifies its hash, bytes, current sequence and freshly
+resolved evidence. Lost responses retry by content identity. Earlier rows remain
+immutable, and a later published sequence supersedes their current view even if
+source timestamps are identical. Historical rows remain stored; this adapter
+still refuses historical monetary rendering when current dependencies no longer
+validate. It does not silently revive an obsolete result.
+
+Every owner-facing section says **Possible miss, review with your preparer**.
+Money and differences use only integer minor units and cited typed values.
+Original identifiers, filenames, free-text labels and PDF text are excluded;
+suspicious identifier metadata is refused rather than altering citation identity.
+Source PDFs remain private custody material. This lane produces no unredacted
+page crop. A future crop UI must apply verified redaction geometry before showing
+an image. Saving a check never contacts a preparer or changes the books.
+
+The tests include real synthetic fillable/flattened PDFs, fourteen planted cases
+with fourteen controls, signed whole-dollar boundaries, one-cent and large-value
+comparisons, authenticated confirmation and scope refusals, receipt/source drift,
+SQLite persistence, concurrent publication, retries and privacy canaries. They
+are offline implementation evidence only. Official map review, owner UI wiring,
+MAIN's host/CI gates and synthetic live integration remain separate requirements.
