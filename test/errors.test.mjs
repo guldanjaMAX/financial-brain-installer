@@ -262,11 +262,13 @@ function ingestExitCli(scenario) {
   const args = scenario.startsWith("drive")
     ? ["ingest", manifest, "--from", "drive"]
     : ["ingest", manifest, "--path", source];
-  const result = spawnSync(process.execPath, ["--import", SIDE_EFFECT_TRIPWIRE, "--import", INGEST_EXIT_FETCH, CLI, ...args], {
+  env.BRAIN_TEST_USER_ROOT = userRoot;
+  const result = spawnSync(process.execPath, ["--import", SIDE_EFFECT_TRIPWIRE, "--import", SUPPORT_ACL, "--import", INGEST_EXIT_FETCH, CLI, ...args], {
     encoding: "utf-8", env, cwd: userRoot, timeout: 30_000,
   });
   if (result.status === 86 || /TEST_SIDE_EFFECT_BLOCKED:/.test(result.stderr || "")) {
-    throw new Error("Ingest fixture attempted an uninjected host action");
+    const boundary = String(result.stderr || "").match(/TEST_SIDE_EFFECT_BLOCKED:[^\r\n]*/)?.[0] || `exit ${result.status}`;
+    throw new Error(`Ingest fixture attempted an uninjected host action (${boundary})`);
   }
   const statePath = join(dir, `.brain-ingest-${scenario.startsWith("drive") ? "drive" : "upload"}.json`);
   check(`synthetic ${scenario} ingest reached its recovery-state write`,
