@@ -544,9 +544,31 @@ test("signed smoke native adapters retain signature, user scope, footprint, and 
   assert.match(mac, /"-target", "CurrentUserHomeDirectory"/);
   assert.match(mac, /"--volume", home/);
   assert.match(mac, /"--forget", identifier/);
+  // A fresh home holds no receipts and pkgutil then exits 1 with no output;
+  // only that exact case may read as "no receipts", every other failure stops.
+  assert.match(mac, /"receipt-list", "\/usr\/sbin\/pkgutil", \[\.\.\.receiptArgs, "--pkgs"\], \[0\], \{ emptyStatusOne: true \}/);
+  assert.match(mac, /emptyStatusOne && !result\.error && result\.status === 1 &&\s+!String\(result\.stdout \|\| ""\)\.trim\(\) && !String\(result\.stderr \|\| ""\)\.trim\(\)/);
+  assert.equal([...mac.matchAll(/emptyStatusOne: true/g)].length, 1, "only the receipt listing tolerates an empty status 1");
   assert.match(mac, /digest\(join\(installed, file\)\) !== digest\(join\(payload, file\)\)/);
   assert.match(mac, /BRAIN_NO_WRANGLER_LOGIN = "1"/);
   assert.doesNotMatch(mac, /\.\.\.process\.env/);
+  // Undiscarded Windows Installer COM results become extra pipeline rows.
+  const windowsSmoke = read("machine-prep/installers/smoke/windows.ps1");
+  assert.match(windowsSmoke, /^\s*\$null = \$view\.Execute\(\)\r?$/m);
+  assert.match(windowsSmoke, /\$null = \$view\.Close\(\)/);
+  assert.doesNotMatch(windowsSmoke, /^\s*\$view\.(?:Execute|Close)\(\)\s*$/m);
+  // Installer.Products is unreachable from PowerShell; registration is read per product.
+  assert.doesNotMatch(windowsSmoke, /\$script:Installer\.Products\b/);
+  // The build-number gate adds AppSearch and RegLocator; the smoke admits
+  // exactly that one read-only HKLM 64-bit raw lookup and nothing else.
+  assert.match(windowsSmoke, /'_Validation', 'AppSearch', 'RegLocator', 'Signature',/);
+  // MSI stores the launcher working directory as [INSTALLFOLDER], with a trailing separator.
+  assert.match(windowsSmoke, /\$shortcut\.WorkingDirectory\.TrimEnd\('\\'\) -ine \$InstallRoot/);
+  assert.match(windowsSmoke, /Read-Rows 'Signature' @\('Signature'\)\)\.Count -ne 0\) \{ throw 'Unexpected MSI file search' \}/);
+  assert.match(windowsSmoke, /\$searches\.Count -ne 1 -or \$searches\[0\]\.Property -cne 'WINDOWSBUILDNUMBER'/);
+  assert.match(windowsSmoke, /\$locators\[0\]\.Root -cne '2'/);
+  assert.match(windowsSmoke, /\$locators\[0\]\.Type -cne '18'/);
+  assert.match(windowsSmoke, /ProductState\(\$product\) -ne -1\) \{ throw 'MSI is already registered' \}/);
   const assertWindows = (source) => {
     assert.match(source, /Get-AuthenticodeSignature -LiteralPath \$Artifact/);
     assert.match(source, /\$signature\.Status -ne 'Valid'/);
@@ -754,7 +776,11 @@ test("Windows MSI is per-user, Windows 10+, and uses process-only policy bypass"
   assert.match(wix, /<Shortcut/);
   assert.doesNotMatch(wix, /<CustomAction|InstallExecuteSequence/);
   assert.doesNotMatch(wix, /ProgramFiles64Folder|UAC prompt/);
-  assert.match(wix, /VersionNT64 &gt;= 1000/);
+  // Windows Installer reports VersionNT64 = 603 on Windows 10/11; the gate
+  // must use the registry build number (10240 = first Windows 10 build).
+  assert.doesNotMatch(wix, /VersionNT64 &gt;= 1000/);
+  assert.match(wix, /Condition="Installed OR \(VersionNT64 AND WINDOWSBUILDNUMBER &gt;= 10240\)"/);
+  assert.match(wix, /Key="SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"\s+Name="CurrentBuildNumber"\s+Type="raw"\s+Bitness="always64"/);
   assert.match(wix, /macOS 13\.5 and Windows 10 are the supported minimums|Windows 10 or newer is required/);
   assert.match(wix, /ExecutionPolicy Bypass/);
   assert.match(wix, /ProgramMenuFolder/);

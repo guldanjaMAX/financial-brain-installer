@@ -62,14 +62,16 @@ function Open-Database {
 function Read-Rows([string]$Table, [string[]]$Columns) {
   $quoted = ($Columns | ForEach-Object { '`' + $_ + '`' }) -join ', '
   $view = $script:Database.OpenView(('SELECT {0} FROM `{1}`' -f $quoted, $Table))
-  $view.Execute()
+  # Windows Installer COM results would otherwise join this function's output
+  # as extra rows (the same defect verify-msi.ps1 had).
+  $null = $view.Execute()
   try {
     while ($record = $view.Fetch()) {
       $row = @{}
       for ($index = 0; $index -lt $Columns.Count; $index++) { $row[$Columns[$index]] = [string]$record.StringData($index + 1) }
       [pscustomobject]$row
     }
-  } finally { $view.Close() }
+  } finally { $null = $view.Close() }
 }
 function Read-Properties {
   $values = @{}
@@ -111,11 +113,22 @@ switch ($Phase) {
         $properties['Manufacturer'] -cne 'Financial Brain LLC') { throw 'Unexpected MSI scope or product metadata' }
     $tables = @(Read-Rows '_Tables' @('Name') | ForEach-Object { $_.Name })
     $allowedTables = @('Property', 'Directory', 'Feature', 'FeatureComponents', 'Component', 'File', 'Media', 'Registry',
-      'Shortcut', 'RemoveFile', 'Upgrade', 'LaunchCondition', 'MsiFileHash', '_Validation',
+      'Shortcut', 'RemoveFile', 'Upgrade', 'LaunchCondition', 'MsiFileHash', '_Validation', 'AppSearch', 'RegLocator', 'Signature',
       'AdminExecuteSequence', 'AdminUISequence', 'AdvtExecuteSequence', 'InstallExecuteSequence', 'InstallUISequence')
     foreach ($table in $tables) {
       if ($table -notin $allowedTables) { throw 'Unexpected MSI table outside the shell contract' }
     }
+    # The only search is the read-only Windows build-number lookup behind the
+    # launch condition: HKLM (root 2), raw value in the 64-bit view (type 2 + 16).
+    $searches = @(Read-Rows 'AppSearch' @('Property', 'Signature_'))
+    if ($searches.Count -ne 1 -or $searches[0].Property -cne 'WINDOWSBUILDNUMBER' -or
+        $searches[0].Signature_ -cne 'WindowsBuildNumberSearch') { throw 'Unexpected MSI search' }
+    # WiX emits the AppSearch companion Signature table; it must stay empty (no file searches).
+    if ('Signature' -in $tables -and @(Read-Rows 'Signature' @('Signature')).Count -ne 0) { throw 'Unexpected MSI file search' }
+    $locators = @(Read-Rows 'RegLocator' @('Signature_', 'Root', 'Key', 'Name', 'Type'))
+    if ($locators.Count -ne 1 -or $locators[0].Signature_ -cne 'WindowsBuildNumberSearch' -or $locators[0].Root -cne '2' -or
+        $locators[0].Key -cne 'SOFTWARE\Microsoft\Windows NT\CurrentVersion' -or $locators[0].Name -cne 'CurrentBuildNumber' -or
+        $locators[0].Type -cne '18') { throw 'Unexpected MSI registry search' }
     $directories = @{}
     Read-Rows 'Directory' @('Directory', 'Directory_Parent', 'DefaultDir') | ForEach-Object { $directories[$_.Directory] = $_ }
     foreach ($key in $directories.Keys) {
@@ -160,8 +173,9 @@ switch ($Phase) {
     foreach ($path in @($InstallRoot, $MenuRoot, $RegistryPath) + $Sentinels) { Assert-Absent $path }
     Open-Database
     $product = (Read-Properties)['ProductCode']
-    $products = @($script:Installer.Products | ForEach-Object { [string]$_ })
-    if ($product -in $products) { throw 'MSI is already registered' }
+    # Installer.Products is not reachable through PowerShell's COM binder;
+    # ProductState is, and returns -1 (unknown) for an unregistered product.
+    if ($script:Installer.ProductState($product) -ne -1) { throw 'MSI is already registered' }
     @{ product = $product } | ConvertTo-Json | Set-Content -LiteralPath $StateFile
     Write-Output 'INSTALL_SCOPE=current_user'
   }
@@ -171,8 +185,9 @@ switch ($Phase) {
     Assert-EqualSet (Get-Inventory $MenuRoot) @('Run Financial Brain Machine Prep.lnk')
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($ShortcutPath)
+    # MSI writes [INSTALLFOLDER] with its trailing separator into the launcher.
     $expectedTarget = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    if ($shortcut.TargetPath -ine $expectedTarget -or $shortcut.WorkingDirectory -ine $InstallRoot -or
+    if ($shortcut.TargetPath -ine $expectedTarget -or $shortcut.WorkingDirectory.TrimEnd('\') -ine $InstallRoot -or
         $shortcut.Arguments -cne ('-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}\run-machine-prep.ps1"' -f $InstallRoot)) { throw 'Installed launcher readback differs' }
     $installedMarkers = Get-ItemProperty -LiteralPath $RegistryPath
     foreach ($marker in $RegistryMarkers.Values) {
