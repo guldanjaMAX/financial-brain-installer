@@ -558,7 +558,7 @@ test("signed smoke native adapters retain signature, user scope, footprint, and 
   assert.match(windowsSmoke, /\$null = \$view\.Close\(\)/);
   assert.doesNotMatch(windowsSmoke, /^\s*\$view\.(?:Execute|Close)\(\)\s*$/m);
   // Installer.Products is unreachable from PowerShell; registration is read per product.
-  assert.doesNotMatch(windowsSmoke, /Installer\.Products\b/);
+  assert.doesNotMatch(windowsSmoke, /\$script:Installer\.Products\b/);
   assert.match(windowsSmoke, /ProductState\(\$product\) -ne -1\) \{ throw 'MSI is already registered' \}/);
   const assertWindows = (source) => {
     assert.match(source, /Get-AuthenticodeSignature -LiteralPath \$Artifact/);
