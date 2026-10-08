@@ -1,0 +1,538 @@
+{
+  "schema_version": 1,
+  "synthetic_only": true,
+  "company": "synthetic_company_01",
+  "currency": "USD",
+  "exponent": 2,
+  "clock": "2025-01-31T23:59:59.000Z",
+  "period": {
+    "start": "2025-01-01",
+    "end": "2025-01-31",
+    "basis": "accrual"
+  },
+  "accounts": {
+    "checking": {
+      "role": "asset",
+      "account_type": "Bank",
+      "account_subtype": "Checking"
+    },
+    "savings": {
+      "role": "asset",
+      "account_type": "Bank",
+      "account_subtype": "Savings"
+    },
+    "ar": {
+      "role": "asset",
+      "account_type": "Accounts Receivable",
+      "account_subtype": null
+    },
+    "undeposited": {
+      "role": "asset",
+      "account_type": "Other Current Asset",
+      "account_subtype": "UndepositedFunds"
+    },
+    "equipment": {
+      "role": "asset",
+      "account_type": "Fixed Asset",
+      "account_subtype": "OtherFixedAssets"
+    },
+    "ap": {
+      "role": "liability",
+      "account_type": "Accounts Payable",
+      "account_subtype": null
+    },
+    "card": {
+      "role": "liability",
+      "account_type": "Credit Card",
+      "account_subtype": null
+    },
+    "sales_tax": {
+      "role": "liability",
+      "account_type": "Other Current Liability",
+      "account_subtype": "OtherCurrentLiabilities"
+    },
+    "payroll": {
+      "role": "liability",
+      "account_type": "Other Current Liability",
+      "account_subtype": "OtherCurrentLiabilities"
+    },
+    "loan": {
+      "role": "liability",
+      "account_type": "Long Term Liability",
+      "account_subtype": "OtherLongTermLiabilities"
+    },
+    "capital": {
+      "role": "equity",
+      "account_type": "Equity",
+      "account_subtype": "OwnersEquity"
+    },
+    "draws": {
+      "role": "contra_equity",
+      "account_type": "Equity",
+      "account_subtype": "OwnersEquity"
+    },
+    "revenue": {
+      "role": "income",
+      "account_type": "Income",
+      "account_subtype": "ServiceFeeIncome"
+    },
+    "interest": {
+      "role": "income",
+      "account_type": "Other Income",
+      "account_subtype": "InterestEarned"
+    },
+    "rent": {
+      "role": "expense",
+      "account_type": "Expense",
+      "account_subtype": "RentOrLeaseOfBuildings"
+    },
+    "supplies": {
+      "role": "expense",
+      "account_type": "Expense",
+      "account_subtype": "SuppliesMaterials"
+    },
+    "wages": {
+      "role": "expense",
+      "account_type": "Expense",
+      "account_subtype": "PayrollExpenses"
+    },
+    "payroll_tax": {
+      "role": "expense",
+      "account_type": "Expense",
+      "account_subtype": "PayrollExpenses"
+    }
+  },
+  "events": [
+    {
+      "id": "S00",
+      "date": "2024-12-31",
+      "api_entity": "JournalEntry",
+      "postings": [
+        {
+          "account": "checking",
+          "side": "debit",
+          "minor": "1000000"
+        },
+        {
+          "account": "savings",
+          "side": "debit",
+          "minor": "500000"
+        },
+        {
+          "account": "capital",
+          "side": "credit",
+          "minor": "1500000"
+        }
+      ]
+    },
+    {
+      "id": "S01",
+      "date": "2025-01-05",
+      "api_entity": "Invoice",
+      "postings": [
+        {
+          "account": "ar",
+          "side": "debit",
+          "minor": "120000"
+        },
+        {
+          "account": "revenue",
+          "side": "credit",
+          "minor": "120000"
+        }
+      ],
+      "party": "customer_01",
+      "due": "2025-01-15"
+    },
+    {
+      "id": "S02",
+      "date": "2025-01-06",
+      "api_entity": "Invoice",
+      "postings": [
+        {
+          "account": "ar",
+          "side": "debit",
+          "minor": "80000"
+        },
+        {
+          "account": "revenue",
+          "side": "credit",
+          "minor": "80000"
+        }
+      ],
+      "party": "customer_02",
+      "due": "2025-02-15"
+    },
+    {
+      "id": "S03",
+      "date": "2025-01-07",
+      "api_entity": "Invoice",
+      "postings": [
+        {
+          "account": "ar",
+          "side": "debit",
+          "minor": "30000"
+        },
+        {
+          "account": "revenue",
+          "side": "credit",
+          "minor": "30000"
+        }
+      ],
+      "party": "customer_03",
+      "due": "2025-01-20"
+    },
+    {
+      "id": "S04",
+      "date": "2025-01-12",
+      "api_entity": "Payment",
+      "postings": [
+        {
+          "account": "checking",
+          "side": "debit",
+          "minor": "70000"
+        },
+        {
+          "account": "ar",
+          "side": "credit",
+          "minor": "70000"
+        }
+      ],
+      "party": "customer_01",
+      "linked": "S01"
+    },
+    {
+      "id": "S05",
+      "date": "2025-01-13",
+      "api_entity": "CreditMemo",
+      "postings": [
+        {
+          "account": "revenue",
+          "side": "debit",
+          "minor": "10000"
+        },
+        {
+          "account": "ar",
+          "side": "credit",
+          "minor": "10000"
+        }
+      ],
+      "party": "customer_01",
+      "apply_to": "S01"
+    },
+    {
+      "id": "S06",
+      "date": "2025-01-20",
+      "api_entity": "Payment",
+      "postings": [
+        {
+          "account": "undeposited",
+          "side": "debit",
+          "minor": "30000"
+        },
+        {
+          "account": "ar",
+          "side": "credit",
+          "minor": "30000"
+        }
+      ],
+      "party": "customer_03",
+      "linked": "S03"
+    },
+    {
+      "id": "S07",
+      "date": "2025-01-10",
+      "api_entity": "SalesReceipt",
+      "postings": [
+        {
+          "account": "checking",
+          "side": "debit",
+          "minor": "50000"
+        },
+        {
+          "account": "revenue",
+          "side": "credit",
+          "minor": "50000"
+        }
+      ],
+      "party": "customer_01"
+    },
+    {
+      "id": "S08",
+      "date": "2025-01-11",
+      "api_entity": "JournalEntry",
+      "postings": [
+        {
+          "account": "checking",
+          "side": "debit",
+          "minor": "108000"
+        },
+        {
+          "account": "revenue",
+          "side": "credit",
+          "minor": "100000"
+        },
+        {
+          "account": "sales_tax",
+          "side": "credit",
+          "minor": "8000"
+        }
+      ],
+      "fixture_kind": "synthetic_sales_tax_ledger_only"
+    },
+    {
+      "id": "S09",
+      "date": "2025-01-09",
+      "api_entity": "Bill",
+      "postings": [
+        {
+          "account": "rent",
+          "side": "debit",
+          "minor": "60000"
+        },
+        {
+          "account": "ap",
+          "side": "credit",
+          "minor": "60000"
+        }
+      ],
+      "party": "vendor_01",
+      "due": "2025-01-25"
+    },
+    {
+      "id": "S10",
+      "date": "2025-01-17",
+      "api_entity": "Bill",
+      "postings": [
+        {
+          "account": "supplies",
+          "side": "debit",
+          "minor": "20000"
+        },
+        {
+          "account": "ap",
+          "side": "credit",
+          "minor": "20000"
+        }
+      ],
+      "party": "vendor_02",
+      "due": "2025-02-20"
+    },
+    {
+      "id": "S11",
+      "date": "2025-01-24",
+      "api_entity": "BillPayment",
+      "postings": [
+        {
+          "account": "ap",
+          "side": "debit",
+          "minor": "25000"
+        },
+        {
+          "account": "checking",
+          "side": "credit",
+          "minor": "25000"
+        }
+      ],
+      "party": "vendor_01",
+      "linked": "S09"
+    },
+    {
+      "id": "S12",
+      "date": "2025-01-14",
+      "api_entity": "Purchase",
+      "postings": [
+        {
+          "account": "supplies",
+          "side": "debit",
+          "minor": "15000"
+        },
+        {
+          "account": "checking",
+          "side": "credit",
+          "minor": "15000"
+        }
+      ],
+      "party": "vendor_02"
+    },
+    {
+      "id": "S13",
+      "date": "2025-01-16",
+      "api_entity": "Purchase",
+      "postings": [
+        {
+          "account": "equipment",
+          "side": "debit",
+          "minor": "50000"
+        },
+        {
+          "account": "card",
+          "side": "credit",
+          "minor": "50000"
+        }
+      ],
+      "party": "vendor_02"
+    },
+    {
+      "id": "S14",
+      "date": "2025-01-22",
+      "api_entity": "JournalEntry",
+      "postings": [
+        {
+          "account": "card",
+          "side": "debit",
+          "minor": "20000"
+        },
+        {
+          "account": "checking",
+          "side": "credit",
+          "minor": "20000"
+        }
+      ],
+      "fixture_kind": "card_payment_ledger"
+    },
+    {
+      "id": "S15",
+      "date": "2025-01-21",
+      "api_entity": "Transfer",
+      "postings": [
+        {
+          "account": "savings",
+          "side": "debit",
+          "minor": "100000"
+        },
+        {
+          "account": "checking",
+          "side": "credit",
+          "minor": "100000"
+        }
+      ]
+    },
+    {
+      "id": "S16",
+      "date": "2025-01-23",
+      "api_entity": "JournalEntry",
+      "postings": [
+        {
+          "account": "draws",
+          "side": "debit",
+          "minor": "40000"
+        },
+        {
+          "account": "checking",
+          "side": "credit",
+          "minor": "40000"
+        }
+      ]
+    },
+    {
+      "id": "S17",
+      "date": "2025-01-24",
+      "api_entity": "Deposit",
+      "postings": [
+        {
+          "account": "checking",
+          "side": "debit",
+          "minor": "200000"
+        },
+        {
+          "account": "loan",
+          "side": "credit",
+          "minor": "200000"
+        }
+      ]
+    },
+    {
+      "id": "S18",
+      "date": "2025-01-25",
+      "api_entity": "JournalEntry",
+      "postings": [
+        {
+          "account": "wages",
+          "side": "debit",
+          "minor": "100000"
+        },
+        {
+          "account": "payroll_tax",
+          "side": "debit",
+          "minor": "10000"
+        },
+        {
+          "account": "checking",
+          "side": "credit",
+          "minor": "80000"
+        },
+        {
+          "account": "payroll",
+          "side": "credit",
+          "minor": "30000"
+        }
+      ],
+      "fixture_kind": "synthetic_payroll_ledger_only"
+    },
+    {
+      "id": "S19",
+      "date": "2025-01-28",
+      "api_entity": "Deposit",
+      "postings": [
+        {
+          "account": "checking",
+          "side": "debit",
+          "minor": "2500"
+        },
+        {
+          "account": "interest",
+          "side": "credit",
+          "minor": "2500"
+        }
+      ]
+    }
+  ],
+  "expected_minor": {
+    "checking": "1150500",
+    "savings": "600000",
+    "ar": "120000",
+    "undeposited": "30000",
+    "equipment": "50000",
+    "ap": "55000",
+    "card": "30000",
+    "sales_tax": "8000",
+    "payroll": "30000",
+    "loan": "200000",
+    "revenue": "370000",
+    "interest": "2500",
+    "expenses": "205000",
+    "profit": "167500",
+    "assets": "1950500",
+    "liabilities": "323000",
+    "equity": "1627500",
+    "bank_cash": "1750500",
+    "cash_change": "250500",
+    "trial_balance_debits": "2195500",
+    "trial_balance_credits": "2195500",
+    "bank_inflows": "530500",
+    "bank_outflows": "280000"
+  },
+  "expected_open_items": [
+    {
+      "id": "S01",
+      "minor": "40000",
+      "aging_bucket": "1-30"
+    },
+    {
+      "id": "S02",
+      "minor": "80000",
+      "aging_bucket": "current"
+    },
+    {
+      "id": "S09",
+      "minor": "35000",
+      "aging_bucket": "1-30"
+    },
+    {
+      "id": "S10",
+      "minor": "20000",
+      "aging_bucket": "current"
+    }
+  ]
+}

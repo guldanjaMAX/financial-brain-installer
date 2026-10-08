@@ -1,0 +1,744 @@
+{
+  "schema_version": 1,
+  "synthetic_only": true,
+  "execution": "MAIN only after sandbox capability and exact API schema verification",
+  "money_encoding": "decimal strings in this template must serialize as exact JSON numeric tokens, never binary floats",
+  "symbolic_refs": "Replace each $ref with a provider Id from the verified seed receipt; never match by display name alone",
+  "requests": [
+    {
+      "seed_id": "S00",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/journalentry",
+      "body": {
+        "TxnDate": "2024-12-31",
+        "PrivateNote": "Synthetic accuracy fixture S00",
+        "Line": [
+          {
+            "Amount": "10000.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Debit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.checking"
+                }
+              }
+            }
+          },
+          {
+            "Amount": "5000.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Debit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.savings"
+                }
+              }
+            }
+          },
+          {
+            "Amount": "15000.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Credit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.capital"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S01",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/invoice",
+      "body": {
+        "TxnDate": "2025-01-05",
+        "PrivateNote": "Synthetic accuracy fixture S01",
+        "CustomerRef": {
+          "value": {
+            "$ref": "customer_01"
+          }
+        },
+        "Line": [
+          {
+            "Amount": "1200.00",
+            "DetailType": "SalesItemLineDetail",
+            "SalesItemLineDetail": {
+              "ItemRef": {
+                "value": {
+                  "$ref": "item.service"
+                }
+              },
+              "Qty": 1,
+              "UnitPrice": "1200.00",
+              "TaxCodeRef": {
+                "value": {
+                  "$ref": "tax.non_taxable"
+                }
+              }
+            }
+          }
+        ],
+        "DueDate": "2025-01-15"
+      }
+    },
+    {
+      "seed_id": "S02",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/invoice",
+      "body": {
+        "TxnDate": "2025-01-06",
+        "PrivateNote": "Synthetic accuracy fixture S02",
+        "CustomerRef": {
+          "value": {
+            "$ref": "customer_02"
+          }
+        },
+        "Line": [
+          {
+            "Amount": "800.00",
+            "DetailType": "SalesItemLineDetail",
+            "SalesItemLineDetail": {
+              "ItemRef": {
+                "value": {
+                  "$ref": "item.service"
+                }
+              },
+              "Qty": 1,
+              "UnitPrice": "800.00",
+              "TaxCodeRef": {
+                "value": {
+                  "$ref": "tax.non_taxable"
+                }
+              }
+            }
+          }
+        ],
+        "DueDate": "2025-02-15"
+      }
+    },
+    {
+      "seed_id": "S03",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/invoice",
+      "body": {
+        "TxnDate": "2025-01-07",
+        "PrivateNote": "Synthetic accuracy fixture S03",
+        "CustomerRef": {
+          "value": {
+            "$ref": "customer_03"
+          }
+        },
+        "Line": [
+          {
+            "Amount": "300.00",
+            "DetailType": "SalesItemLineDetail",
+            "SalesItemLineDetail": {
+              "ItemRef": {
+                "value": {
+                  "$ref": "item.service"
+                }
+              },
+              "Qty": 1,
+              "UnitPrice": "300.00",
+              "TaxCodeRef": {
+                "value": {
+                  "$ref": "tax.non_taxable"
+                }
+              }
+            }
+          }
+        ],
+        "DueDate": "2025-01-20"
+      }
+    },
+    {
+      "seed_id": "S04",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/payment",
+      "body": {
+        "TxnDate": "2025-01-12",
+        "PrivateNote": "Synthetic accuracy fixture S04",
+        "CustomerRef": {
+          "value": {
+            "$ref": "customer_01"
+          }
+        },
+        "TotalAmt": "700.00",
+        "DepositToAccountRef": {
+          "value": {
+            "$ref": "account.checking"
+          }
+        },
+        "Line": [
+          {
+            "Amount": "700.00",
+            "LinkedTxn": [
+              {
+                "TxnId": {
+                  "$ref": "S01"
+                },
+                "TxnType": "Invoice"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S05",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/creditmemo",
+      "body": {
+        "TxnDate": "2025-01-13",
+        "PrivateNote": "Synthetic accuracy fixture S05",
+        "CustomerRef": {
+          "value": {
+            "$ref": "customer_01"
+          }
+        },
+        "Line": [
+          {
+            "Amount": "100.00",
+            "DetailType": "SalesItemLineDetail",
+            "SalesItemLineDetail": {
+              "ItemRef": {
+                "value": {
+                  "$ref": "item.service"
+                }
+              },
+              "Qty": 1,
+              "UnitPrice": "100.00",
+              "TaxCodeRef": {
+                "value": {
+                  "$ref": "tax.non_taxable"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S05-apply",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/payment",
+      "body": {
+        "TxnDate": "2025-01-13",
+        "CustomerRef": {
+          "value": {
+            "$ref": "customer_01"
+          }
+        },
+        "TotalAmt": "0.00",
+        "PrivateNote": "Synthetic credit application",
+        "Line": [
+          {
+            "Amount": "100.00",
+            "LinkedTxn": [
+              {
+                "TxnId": {
+                  "$ref": "S01"
+                },
+                "TxnType": "Invoice"
+              },
+              {
+                "TxnId": {
+                  "$ref": "S05"
+                },
+                "TxnType": "CreditMemo"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S06",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/payment",
+      "body": {
+        "TxnDate": "2025-01-20",
+        "PrivateNote": "Synthetic accuracy fixture S06",
+        "CustomerRef": {
+          "value": {
+            "$ref": "customer_03"
+          }
+        },
+        "TotalAmt": "300.00",
+        "DepositToAccountRef": {
+          "value": {
+            "$ref": "account.undeposited"
+          }
+        },
+        "Line": [
+          {
+            "Amount": "300.00",
+            "LinkedTxn": [
+              {
+                "TxnId": {
+                  "$ref": "S03"
+                },
+                "TxnType": "Invoice"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S07",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/salesreceipt",
+      "body": {
+        "TxnDate": "2025-01-10",
+        "PrivateNote": "Synthetic accuracy fixture S07",
+        "CustomerRef": {
+          "value": {
+            "$ref": "customer_01"
+          }
+        },
+        "Line": [
+          {
+            "Amount": "500.00",
+            "DetailType": "SalesItemLineDetail",
+            "SalesItemLineDetail": {
+              "ItemRef": {
+                "value": {
+                  "$ref": "item.service"
+                }
+              },
+              "Qty": 1,
+              "UnitPrice": "500.00",
+              "TaxCodeRef": {
+                "value": {
+                  "$ref": "tax.non_taxable"
+                }
+              }
+            }
+          }
+        ],
+        "DepositToAccountRef": {
+          "value": {
+            "$ref": "account.checking"
+          }
+        }
+      }
+    },
+    {
+      "seed_id": "S08",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/journalentry",
+      "body": {
+        "TxnDate": "2025-01-11",
+        "PrivateNote": "Synthetic accuracy fixture S08",
+        "Line": [
+          {
+            "Amount": "1080.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Debit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.checking"
+                }
+              }
+            }
+          },
+          {
+            "Amount": "1000.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Credit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.revenue"
+                }
+              }
+            }
+          },
+          {
+            "Amount": "80.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Credit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.sales_tax"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S09",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/bill",
+      "body": {
+        "TxnDate": "2025-01-09",
+        "PrivateNote": "Synthetic accuracy fixture S09",
+        "VendorRef": {
+          "value": {
+            "$ref": "vendor_01"
+          }
+        },
+        "DueDate": "2025-01-25",
+        "Line": [
+          {
+            "Amount": "600.00",
+            "DetailType": "AccountBasedExpenseLineDetail",
+            "AccountBasedExpenseLineDetail": {
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.rent"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S10",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/bill",
+      "body": {
+        "TxnDate": "2025-01-17",
+        "PrivateNote": "Synthetic accuracy fixture S10",
+        "VendorRef": {
+          "value": {
+            "$ref": "vendor_02"
+          }
+        },
+        "DueDate": "2025-02-20",
+        "Line": [
+          {
+            "Amount": "200.00",
+            "DetailType": "AccountBasedExpenseLineDetail",
+            "AccountBasedExpenseLineDetail": {
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.supplies"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S11",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/billpayment",
+      "body": {
+        "TxnDate": "2025-01-24",
+        "PrivateNote": "Synthetic accuracy fixture S11",
+        "VendorRef": {
+          "value": {
+            "$ref": "vendor_01"
+          }
+        },
+        "TotalAmt": "250.00",
+        "PayType": "Check",
+        "CheckPayment": {
+          "BankAccountRef": {
+            "value": {
+              "$ref": "account.checking"
+            }
+          }
+        },
+        "Line": [
+          {
+            "Amount": "250.00",
+            "LinkedTxn": [
+              {
+                "TxnId": {
+                  "$ref": "S09"
+                },
+                "TxnType": "Bill"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S12",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/purchase",
+      "body": {
+        "TxnDate": "2025-01-14",
+        "PrivateNote": "Synthetic accuracy fixture S12",
+        "AccountRef": {
+          "value": {
+            "$ref": "account.checking"
+          }
+        },
+        "PaymentType": "Cash",
+        "EntityRef": {
+          "value": {
+            "$ref": "vendor_02"
+          },
+          "type": "Vendor"
+        },
+        "Line": [
+          {
+            "Amount": "150.00",
+            "DetailType": "AccountBasedExpenseLineDetail",
+            "AccountBasedExpenseLineDetail": {
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.supplies"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S13",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/purchase",
+      "body": {
+        "TxnDate": "2025-01-16",
+        "PrivateNote": "Synthetic accuracy fixture S13",
+        "AccountRef": {
+          "value": {
+            "$ref": "account.card"
+          }
+        },
+        "PaymentType": "CreditCard",
+        "EntityRef": {
+          "value": {
+            "$ref": "vendor_02"
+          },
+          "type": "Vendor"
+        },
+        "Line": [
+          {
+            "Amount": "500.00",
+            "DetailType": "AccountBasedExpenseLineDetail",
+            "AccountBasedExpenseLineDetail": {
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.equipment"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S14",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/journalentry",
+      "body": {
+        "TxnDate": "2025-01-22",
+        "PrivateNote": "Synthetic accuracy fixture S14",
+        "Line": [
+          {
+            "Amount": "200.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Debit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.card"
+                }
+              }
+            }
+          },
+          {
+            "Amount": "200.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Credit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.checking"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S15",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/transfer",
+      "body": {
+        "TxnDate": "2025-01-21",
+        "PrivateNote": "Synthetic accuracy fixture S15",
+        "FromAccountRef": {
+          "value": {
+            "$ref": "account.checking"
+          }
+        },
+        "ToAccountRef": {
+          "value": {
+            "$ref": "account.savings"
+          }
+        },
+        "Amount": "1000.00"
+      }
+    },
+    {
+      "seed_id": "S16",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/journalentry",
+      "body": {
+        "TxnDate": "2025-01-23",
+        "PrivateNote": "Synthetic accuracy fixture S16",
+        "Line": [
+          {
+            "Amount": "400.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Debit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.draws"
+                }
+              }
+            }
+          },
+          {
+            "Amount": "400.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Credit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.checking"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S17",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/deposit",
+      "body": {
+        "TxnDate": "2025-01-24",
+        "PrivateNote": "Synthetic accuracy fixture S17",
+        "DepositToAccountRef": {
+          "value": {
+            "$ref": "account.checking"
+          }
+        },
+        "Line": [
+          {
+            "Amount": "2000.00",
+            "DetailType": "DepositLineDetail",
+            "DepositLineDetail": {
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.loan"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S18",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/journalentry",
+      "body": {
+        "TxnDate": "2025-01-25",
+        "PrivateNote": "Synthetic accuracy fixture S18",
+        "Line": [
+          {
+            "Amount": "1000.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Debit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.wages"
+                }
+              }
+            }
+          },
+          {
+            "Amount": "100.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Debit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.payroll_tax"
+                }
+              }
+            }
+          },
+          {
+            "Amount": "800.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Credit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.checking"
+                }
+              }
+            }
+          },
+          {
+            "Amount": "300.00",
+            "DetailType": "JournalEntryLineDetail",
+            "JournalEntryLineDetail": {
+              "PostingType": "Credit",
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.payroll"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "seed_id": "S19",
+      "method": "POST",
+      "path": "/v3/company/{sandbox_realm}/deposit",
+      "body": {
+        "TxnDate": "2025-01-28",
+        "PrivateNote": "Synthetic accuracy fixture S19",
+        "DepositToAccountRef": {
+          "value": {
+            "$ref": "account.checking"
+          }
+        },
+        "Line": [
+          {
+            "Amount": "25.00",
+            "DetailType": "DepositLineDetail",
+            "DepositLineDetail": {
+              "AccountRef": {
+                "value": {
+                  "$ref": "account.interest"
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
