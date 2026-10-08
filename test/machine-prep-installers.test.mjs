@@ -562,6 +562,8 @@ test("signed smoke native adapters retain signature, user scope, footprint, and 
   // The build-number gate adds AppSearch and RegLocator; the smoke admits
   // exactly that one read-only HKLM 64-bit raw lookup and nothing else.
   assert.match(windowsSmoke, /'_Validation', 'AppSearch', 'RegLocator', 'Signature',/);
+  // MSI stores the launcher working directory as [INSTALLFOLDER], with a trailing separator.
+  assert.match(windowsSmoke, /\$shortcut\.WorkingDirectory\.TrimEnd\('\\'\) -ine \$InstallRoot/);
   assert.match(windowsSmoke, /Read-Rows 'Signature' @\('Signature'\)\)\.Count -ne 0\) \{ throw 'Unexpected MSI file search' \}/);
   assert.match(windowsSmoke, /\$searches\.Count -ne 1 -or \$searches\[0\]\.Property -cne 'WINDOWSBUILDNUMBER'/);
   assert.match(windowsSmoke, /\$locators\[0\]\.Root -cne '2'/);

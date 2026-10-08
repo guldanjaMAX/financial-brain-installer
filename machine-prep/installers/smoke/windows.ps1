@@ -185,8 +185,9 @@ switch ($Phase) {
     Assert-EqualSet (Get-Inventory $MenuRoot) @('Run Financial Brain Machine Prep.lnk')
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($ShortcutPath)
+    # MSI writes [INSTALLFOLDER] with its trailing separator into the launcher.
     $expectedTarget = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    if ($shortcut.TargetPath -ine $expectedTarget -or $shortcut.WorkingDirectory -ine $InstallRoot -or
+    if ($shortcut.TargetPath -ine $expectedTarget -or $shortcut.WorkingDirectory.TrimEnd('\') -ine $InstallRoot -or
         $shortcut.Arguments -cne ('-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}\run-machine-prep.ps1"' -f $InstallRoot)) { throw 'Installed launcher readback differs' }
     $installedMarkers = Get-ItemProperty -LiteralPath $RegistryPath
     foreach ($marker in $RegistryMarkers.Values) {
