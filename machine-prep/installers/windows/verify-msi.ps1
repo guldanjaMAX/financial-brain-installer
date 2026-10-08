@@ -12,12 +12,14 @@ $database = $installer.OpenDatabase($resolved, 0)
 
 function Read-Column([string]$Sql) {
   $view = $database.OpenView($Sql)
-  $view.Execute()
+  # Windows Installer COM methods return a value that PowerShell would add to
+  # this function's output as an extra blank row. Discard them explicitly.
+  $null = $view.Execute()
   $values = @()
   while ($record = $view.Fetch()) {
     $values += [string]$record.StringData(1)
   }
-  $view.Close()
+  $null = $view.Close()
   return $values
 }
 
