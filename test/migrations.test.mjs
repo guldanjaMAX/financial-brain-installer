@@ -31,6 +31,18 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DIR = join(HERE, "..", "migrations", "d1");
+// cmdMigrate records each in-flight column change under ~/.brain/migration-intents
+// unless told otherwise. Give every migrate in this file its own folder so a
+// marker left by another run (or the same HOME reused by the hiccup lab) cannot
+// turn into a 15-minute wait. A crash and its resume share one folder.
+const freshIntentDirectory = () => mkdtempSync(join(tmpdir(), "brain-migrate-intents-"));
+// A synthetic crash after an ADD COLUMN looks like a slow Cloudflare apply, so
+// cmdMigrate polls before resuming. Run that poll on a virtual clock: the real
+// 30-second interval made the resume loop take minutes.
+const virtualMigrationClock = () => {
+  let clock = 0;
+  return { now: () => clock, sleep: async (milliseconds) => { clock += milliseconds; } };
+};
 // The terminal schema version is whatever the newest migration file says, so
 // adding 00NN never breaks a hardcoded pin here (found at 13 -> 14).
 const LATEST_SCHEMA = Math.max(
@@ -1050,7 +1062,9 @@ check("restart guard refuses an existing migration column with the wrong contrac
     silent: true,
     resolveAccount: async () => ({ id: "fixture-account" }),
     d1Query: adapterFor(probe, probeFault),
+    migrationIntentDirectory: freshIntentDirectory(),
     vectorDrainQuiesced: true,
+    migrationPoll: virtualMigrationClock(),
   });
   const commandMutationCount = probeFault.mutations;
   probe.close();
@@ -1059,13 +1073,16 @@ check("restart guard refuses an existing migration column with the wrong contrac
   let commandResumeDetail = `mutations=${commandMutationCount}`;
   for (let faultAfter = 1; faultAfter <= commandMutationCount && commandResumePassed; faultAfter++) {
     const candidate = makeCommandLegacy();
+    const iterationIntents = freshIntentDirectory();
     const fault = { after: faultAfter, mutations: 0 };
     try {
       await cmdMigrate(manifestPath, {
         silent: true,
         resolveAccount: async () => ({ id: "fixture-account" }),
         d1Query: adapterFor(candidate, fault),
+        migrationIntentDirectory: iterationIntents,
         vectorDrainQuiesced: true,
+        migrationPoll: virtualMigrationClock(),
       });
       commandResumePassed = false;
       commandResumeDetail = `fault ${faultAfter} did not interrupt`;
@@ -1095,7 +1112,9 @@ check("restart guard refuses an existing migration column with the wrong contrac
         silent: true,
         resolveAccount: async () => ({ id: "fixture-account" }),
         d1Query: adapterFor(candidate),
+        migrationIntentDirectory: iterationIntents,
         vectorDrainQuiesced: true,
+        migrationPoll: virtualMigrationClock(),
       });
       const state = candidate.prepare(
         `SELECT schema_version, outbox_generation,
@@ -1160,6 +1179,7 @@ check("restart guard refuses an existing migration column with the wrong contrac
     silent: true,
     resolveAccount: async () => ({ id: "fixture-account" }),
     d1Query: adapterFor(publishedSchema16),
+    migrationIntentDirectory: freshIntentDirectory(),
     vectorDrainQuiesced: true,
   });
   const publishedUpgrade = publishedSchema16.prepare(
@@ -1191,6 +1211,7 @@ check("restart guard refuses an existing migration column with the wrong contrac
       silent: true,
       resolveAccount: async () => ({ id: "fixture-account" }),
       d1Query: adapterFor(direct, directFault),
+      migrationIntentDirectory: freshIntentDirectory(),
     });
   } catch (error) { directError = error; }
   check("direct migrate refuses a live pre-lease brain before every mutation",
@@ -1241,6 +1262,7 @@ check("restart guard refuses an existing migration column with the wrong contrac
       silent: true,
       resolveAccount: async () => ({ id: "fixture-account" }),
       d1Query: adapterFor(schema32, schema32Fault),
+      migrationIntentDirectory: freshIntentDirectory(),
     });
   } catch (error) { schema32Error = error; }
   check("direct migrate refuses a live schema-32 brain before dropping its FTS writer",
@@ -1254,6 +1276,7 @@ check("restart guard refuses an existing migration column with the wrong contrac
     silent: true,
     resolveAccount: async () => ({ id: "fixture-account" }),
     d1Query: adapterFor(schema32, schema32QuiescedFault),
+    migrationIntentDirectory: freshIntentDirectory(),
     vectorDrainQuiesced: true,
   });
   const schema33Receipt = schema32.prepare(
@@ -1287,6 +1310,7 @@ check("restart guard refuses an existing migration column with the wrong contrac
       silent: true,
       resolveAccount: async () => ({ id: "fixture-account" }),
       d1Query: adapterFor(noStateTable, noStateFault),
+      migrationIntentDirectory: freshIntentDirectory(),
     });
   } catch (error) { noStateError = error; }
   check("absence of install_state cannot bypass cutover on a nonempty legacy database",
@@ -1308,6 +1332,7 @@ check("restart guard refuses an existing migration column with the wrong contrac
     silent: true,
     resolveAccount: async () => ({ id: "fixture-account" }),
     d1Query: adapterFor(missingSingleton),
+    migrationIntentDirectory: freshIntentDirectory(),
     vectorDrainQuiesced: true,
   });
   const seededSingleton = missingSingleton.prepare(
@@ -1335,6 +1360,7 @@ check("restart guard refuses an existing migration column with the wrong contrac
     silent: true,
     resolveAccount: async () => ({ id: "fixture-account" }),
     d1Query: adapterFor(fresh, freshFault),
+    migrationIntentDirectory: freshIntentDirectory(),
   });
   const freshOriginalKey = fresh.prepare(
     "SELECT signing_salt FROM source_original_id_key_state WHERE tenant_id='primary'",
