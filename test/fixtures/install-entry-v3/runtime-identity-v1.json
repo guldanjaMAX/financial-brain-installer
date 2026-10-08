@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "financial_brain_package_runtime_identity",
+  "source_sha": "b162d367096bb29b783fb336e71badeb73961e7e",
+  "package_filename": "brain-installer-0.4.10.tgz",
+  "package_version": "0.4.10",
+  "package_bytes": 40,
+  "package_file_count": 1,
+  "package_sha256": "7b09df077de85b1be73ee5ecb98d61dcb6a3bcffa7b9de5edd4ea23fd2de12ea",
+  "identity_scheme": "brain.runtime-payload.sha256.v1",
+  "runtime_payload_sha256": "47b8763a08d87c36243a8fb4453ed532b1e793101a59a2f89779525c1cc4fb18"
+}
