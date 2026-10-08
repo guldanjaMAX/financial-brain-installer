@@ -12423,16 +12423,32 @@ export async function cmdApplyIngestRemovals(m, manifestPath, flags, options = {
     die("Removal apply needs --source and the exact --apply-removals fingerprint, without dry-run, reset or limit.");
   }
   const sourceName = assertSourceName(flags.source);
+  // Desktop refresh holds its company-binding lease before its source lease.
+  // Exact apply must use the same order, including when dispatched directly.
+  if (sourceName === "quickbooks_desktop" && !options.desktopBindingLockHeld) {
+    return desktopLifecycle(manifestPath, options, locked => cmdApplyIngestRemovals(m, manifestPath, flags, locked));
+  }
   const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName });
   return runMutatingSourceIngest({ manifestPath, sourceName, statePath, dryRun: false, options,
     sharedRecord: PROVIDER_CONNECTOR_IDS.includes(flags.from) ? `provider:${flags.from}` : null,
-  }, async (assertOwned) => {
+  }, async (assertSourceOwned) => {
+    const assertOwned = () => { options.assertOwned?.(); assertSourceOwned?.(); };
+    assertOwned();
     const lib = await (options.ingestLib ?? ingestLib)();
     const state = lib.loadState(statePath);
     if (state.ingest_provider) {
       if (flags.from !== state.ingest_provider) die("Apply this provider plan with its original --from source.");
-      const oauth = options.oauth ?? await import("./connectors/provider-oauth.mjs");
-      const current = await oauth.loadProviderSyncState(state.ingest_provider, sourceName, options.storage || {});
+      let current;
+      if (state.ingest_provider === "quickbooks-desktop") {
+        if (sourceName !== "quickbooks_desktop" || !options.desktopBindingLockHeld) {
+          throw new DriveRemovalReviewRequired("Desktop removal requires its original company-bound source.");
+        }
+        const { desktopBindingStore } = await import("./connectors/quickbooks-desktop-binding.mjs");
+        current = await (options.bindingStore || desktopBindingStore(options.storage || {})).read();
+      } else {
+        const oauth = options.oauth ?? await import("./connectors/provider-oauth.mjs");
+        current = await oauth.loadProviderSyncState(state.ingest_provider, sourceName, options.storage || {});
+      }
       if (removalDigest(current) !== state.ingest_provider_checkpoint) {
         throw new DriveRemovalReviewRequired("Provider cursor state changed; run ingestion again before removal.");
       }
@@ -12451,7 +12467,7 @@ export async function cmdApplyIngestRemovals(m, manifestPath, flags, options = {
 async function cmdIngestUnlocked(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
   const flags = options.flags || parseFlags(process.argv.slice(4));
-  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags);
+  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags, options);
   // Remote sources reuse everything below the envelope: splitting, batching,
   // the credential gate, resume state and the skip report. Only the producer
   // differs. Calendar is the one exception: its connector already carries
@@ -30601,6 +30617,7 @@ export async function cmdDisconnectQuickBooksDesktop(manifestPath, flags = {}, o
 }
 
 export async function cmdIngestQuickBooksDesktop(m, manifestPath, flags = {}, options = {}) {
+  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags, options);
   const { qbdFailure, qbdOwnerMessage, desktopBindingStore } = await import("./connectors/quickbooks-desktop-binding.mjs");
   if ((options.platform || process.platform) !== "win32") throw qbdFailure("QB_NOT_INSTALLED");
   if (m.corpora?.quickbooks_desktop?.enabled !== true) throw qbdFailure("QB_NOT_CONNECTED");
@@ -30634,21 +30651,39 @@ export async function cmdIngestQuickBooksDesktop(m, manifestPath, flags = {}, op
         const pending = binding.pending_removals?.source_ids || [];
         const ids = [...new Set([...pending, ...result.deletions.map(row => row.source_id)])]
           .filter(id => !live.has(id) && stored.has(`${source}:${id}`)).sort();
-        const fingerprint = runtime.providerSnapshotRemovalFingerprint(source, ids.map(id => `${source}:${id}`));
-        const review = ids.length > 100 || (stored.size > 0 && ids.length / stored.size > 0.10);
-        if (review && flags["approve-removals"] !== fingerprint) {
-          binding = { ...binding, pending_removals: { fingerprint, company_fingerprint: binding.fingerprint, source_ids: ids } };
-          assertOwned(); await store.write(binding);
-          result = { ...result, deletions: [], code: "QB_REMOVALS_PENDING", walk_complete: false,
-            warnings: [...result.warnings, "QB_REMOVALS_PENDING"], outcome: ingestionOutcome("partial", { reason: "QB_REMOVALS_PENDING" }) };
-        } else result = { ...result, deletions: ids.map(source_id => ({ source_type: "quickbooks", source_id })) };
+        result = { ...result, deletions: ids.map(source_id => ({ source_type: "quickbooks", source_id })) };
       }
       const delivered = await runtime.runProviderConnector({ provider: "quickbooks", source, kind: "quickbooks",
         configurationFingerprint: providerConfigurationFingerprint("quickbooks", source, m.corpora.quickbooks_desktop, { qbo_company_fingerprint: binding.fingerprint }),
         sync: async () => result, resolveAccess: async () => ({}), listStoredFamilies: inventory,
         sendBatch: options.requestIngestBatch || requestIngestBatch, removeDocuments: options.applyDriveRemovals || applyDriveRemovals,
         postReceipt: options.postSourceReceipt || postSourceReceipt, base, adminKey, assertOwned,
-        approvedSnapshotFingerprint: flags["approve-removals"] || null, now: () => new Date(clock()),
+        now: () => new Date(clock()),
+        reviewRemovals: async ({ uids, storedFamilies, requiredApproval }) => {
+          // Save accepted delivery's pending scope before stopping. Bind apply
+          // to the whole company checkpoint; it must not advance that cursor.
+          binding = { ...binding, pending_removals: {
+            fingerprint: runtime.providerSnapshotRemovalFingerprint(source, uids),
+            company_fingerprint: binding.fingerprint,
+            source_ids: uids.map(uid => uid.slice(source.length + 1)).sort(),
+          } };
+          assertOwned(); await store.write(binding);
+          const lib = await (options.ingestLib ?? ingestLib)();
+          const path = canonicalSourceIngestStatePath({ manifestPath, sourceName: source });
+          const state = lib.loadState(path);
+          // Accepted additions can enlarge the next inventory. They cannot
+          // dilute a previously required approval for the same pending scope.
+          const priorApproval = state.ingest_removal_plan?.providerApproval;
+          const providerApproval = requiredApproval ||
+            (priorApproval === binding.pending_removals.fingerprint ? priorApproval : null);
+          state.ingest_provider = "quickbooks-desktop";
+          state.ingest_provider_checkpoint = removalDigest(binding);
+          const review = ingestRemovalReview(m, manifestPath, source, state,
+            () => { assertOwned(); lib.saveState(path, state); }, base, adminKey,
+            { ...options, removalSourceKind: "quickbooks" }, assertOwned);
+          await review.finish({ sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }),
+            providerApproval });
+        },
       });
       if (delivered.enumeration_complete) {
         assertOwned();
@@ -30662,7 +30697,12 @@ export async function cmdIngestQuickBooksDesktop(m, manifestPath, flags = {}, op
     };
     return (options.withSourceIngestLock || withSourceIngestLock)({ manifestPath, sourceName: source, ...(options.sourceIngestLockOptions || {}) }, lease =>
       work(() => { locked.assertOwned?.(); lease.assertOwned(); }));
-  }).catch(error => { throw Object.assign(new Fatal(qbdOwnerMessage(error?.code)), { code: /^QB_[A-Z_]{1,48}$/.test(error?.code || "") ? error.code : "QB_OPERATION_FAILED" }); });
+  }).catch(error => {
+    // The shared review contains the exact safe apply command. Other failures
+    // retain the existing sanitized owner boundary, including bridge errors.
+    if (error instanceof DriveRemovalReviewRequired) throw error;
+    throw Object.assign(new Fatal(qbdOwnerMessage(error?.code)), { code: /^QB_[A-Z_]{1,48}$/.test(error?.code || "") ? error.code : "QB_OPERATION_FAILED" });
+  });
 }
 
 export function providerConfigurationFingerprint(provider, source, configuration, identity = null) {

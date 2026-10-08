@@ -471,6 +471,13 @@ or a separately approved plan removes those exact members. Source deletions and
 replacement cleanup enter the same boundary. A nonempty plan always stops before
 removal and cursor advancement; accepted additions and updates remain durable.
 
+QuickBooks Desktop also persists its exact pending tombstones and binds the
+review to the complete company checkpoint. Its refresh and separate apply both
+take the company-binding lease before the source lease. Apply rechecks both
+leases at each mutation boundary and never advances the Desktop checkpoint.
+Repeated accepted additions cannot waive an existing aggregate approval for
+the same pending scope. This does not establish Desktop money freshness.
+
 `operations/ingest-removal-plan.mjs` binds the exact family selectors and physical
 document targets to the local checkpoint, manifest and external Drive exclusion
 policy, installed runtime bytes, and an authenticated Worker inventory marker.

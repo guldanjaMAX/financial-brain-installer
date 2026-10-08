@@ -436,6 +436,13 @@ Follow the one printed `brain ingest <manifest> --source <source>
 additional `--approve-removals` argument in that command. Then rerun normal ingest
 to finish the source cursor. A dry run cannot authorize removal.
 
+QuickBooks Desktop uses the same boundary for every stored tombstone, including
+small removals. Its printed command retains `--from quickbooks-desktop` and
+`--source quickbooks_desktop`. Apply checks the unchanged company binding and
+checkpoint under their leases, removes only the saved physical targets, and
+leaves the checkpoint unchanged. An aggregate approval on ordinary ingest does
+not apply removals. Desktop money freshness remains unverified.
+
 The plan requires migration 0052 and the `INGEST_VERSION` version metadata binding.
 A missing capability fails closed. Changed checkpoint, policy, runtime bytes,
 Worker generation, or stored document/chunk state invalidates approval. Physical

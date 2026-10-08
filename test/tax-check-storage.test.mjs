@@ -8,7 +8,7 @@ import { taxFixture, TAX_TIME } from './fixtures/tax-check.mjs';
 async function harness() {
   const fixture = await taxFixture();
   const db = new DatabaseSync(':memory:');
-  db.exec(readFileSync(new URL('../migrations/d1/0051_financial_evidence.sql', import.meta.url), 'utf8'));
+  db.exec(readFileSync(new URL('../migrations/d1/0053_financial_evidence.sql', import.meta.url), 'utf8'));
   const calls = [];
   const fault = { drop: false, lost: false, denied: false };
   const store = createTaxCheckStore({ ...fixture.deps,

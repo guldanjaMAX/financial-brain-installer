@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, lstatSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, mkdirSync, readFileSync, lstatSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { ingestPlanStore } from './helpers/ingest-plan-store.mjs';
 import { connectQuickBooksDesktop, disconnectQuickBooksDesktop, desktopBindingStore, makeDesktopBinding } from '../connectors/quickbooks-desktop-binding.mjs';
 import { desktopFixture, desktopBridge, SNAPSHOT } from './fixtures/quickbooks-desktop-qbxml.mjs';
 import { probeQuickBooksEdition, hasDesktopElevation } from '../connectors/quickbooks-edition-probe.mjs';
@@ -131,7 +133,7 @@ test('Worker time ignores a PC two hours fast and refuses missing date after a r
 
 test('binding is owner-only, exactly read back and rejects links without replacing them', async () => {
   const root = join(process.env.HOME, 'binding-tests'); mkdirSync(root, { recursive: true, mode: 0o700 });
-  const home = mkdtempSync(join(root, 'case-'));
+  const home = realpathSync.native(mkdtempSync(join(root, 'case-')));
   try {
     const store = desktopBindingStore({ home, platform: 'darwin' });
     const value = makeDesktopBinding({ accounts: desktopFixture().AccountRet, country: 'US' });
@@ -215,34 +217,112 @@ test('the CLI one-shot binds the verified current-user SID and injected executab
   assert.match(task.serialized, /<UserId>S-1-5-21-100<\/UserId>/);
 });
 
-test('ingest delivers live documents while preserving a company-bound large deletion review', async () => {
+// The real connector and SQLite removal route share this fixture. A legacy
+// family delete or a provider/credential request cannot leave the process.
+globalThis.fetch = async () => { throw new Error('unexpected network attempt'); };
+for (const large of [false, true]) test(`Desktop ${large ? 'large' : 'small'} removal saves accepted work and requires a separate exact apply`, async t => {
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'desktop-plan-')));
+  const path = join(home, 'manifest.json');
+  const keyFile = join(home, 'fixture-admin-key'); writeFileSync(keyFile, 'synthetic-fixture-key', { mode: 0o600 });
+  const m = { brain: { domain: 'brain.example.invalid' }, corpora: { quickbooks_desktop: { enabled: true } } };
+  writeFileSync(path, JSON.stringify(m));
   const rows = desktopFixture(); rows.TxnDeletedRet = [{ TxnDelType: 'Invoice', TxnID: 'FF-999' }];
   let binding = makeDesktopBinding({ accounts: rows.AccountRet, country: 'US' });
-  const stored = new Set(['quickbooks_desktop:invoice:FF-999']);
-  const receipts = []; const requests = []; const logs = []; let forgotten = 0; let inventories = 0;
-  const home = join(process.env.HOME, 'ingest-tests'); mkdirSync(home, { recursive: true, mode: 0o700 });
-  const keyFile = join(home, 'fixture-admin-key'); writeFileSync(keyFile, 'synthetic-fixture-key', { mode: 0o600 });
+  const store = ingestPlanStore(); store.put('quickbooks_desktop:invoice:FF-999');
+  if (!large) for (let i = 0; i < 20; i++) store.put(`quickbooks_desktop:payment:EE-${i}`);
+  t.after(() => { store.db.close(); rmSync(home, { recursive: true, force: true }); });
+  const receipts = []; const requests = []; const logs = []; const locks = [];
+  let bindingLeaseLost = false; let loseLeaseOnPreview = false;
+  let forgotten = 0; let bindingReads = 0; let bindingWrites = 0; let bridgeCalls = 0;
+  const bridge = desktopBridge(rows);
   const options = { platform: 'win32', lifecycleLockHeld: true, assertOwned() {},
-    withSourceIngestLock: async (_input, task) => task({ assertOwned() {} }),
-    bindingStore: { read: async () => binding, write: async next => { binding = next; } },
+    withSourceIngestLock: async (input, task) => {
+      const name = input.sharedRecord || input.sourceName; locks.push(name);
+      try { return await task({ assertOwned() {
+        assert.ok(locks.includes(name));
+        if (name === 'provider:quickbooks-desktop' && bindingLeaseLost) throw Object.assign(new Error('fixture lease lost'), { code: 'source_ingest_lock_lost' });
+      } }); }
+      finally { assert.equal(locks.pop(), name); }
+    },
+    bindingStore: { read: async () => { bindingReads++; assert.ok(locks.includes('provider:quickbooks-desktop')); return binding; },
+      write: async next => { bindingWrites++; assert.ok(locks.includes('provider:quickbooks-desktop')); binding = next; } },
     resolveAdminKey: () => readFileSync(keyFile, 'utf8'), resolveBaseUrl: async () => 'https://brain.example.invalid',
-    readWorkerDate: async () => 'Wed, 07 Oct 2026 12:00:00 GMT', monotonic: () => 0, bridge: desktopBridge(rows), log: value => logs.push(value),
-    listStoredSourceFamilies: async ({ base, source }) => { inventories++; assert.equal(base, 'https://brain.example.invalid'); assert.equal(source, 'quickbooks_desktop'); return new Set(stored); },
+    readWorkerDate: async () => 'Wed, 07 Oct 2026 12:00:00 GMT', monotonic: () => 0,
+    bridge: async input => { bridgeCalls++; return bridge(input); }, log: value => logs.push(value),
+    listStoredSourceFamilies: store.inventory,
+    removalPlanRequest: async input => {
+      assert.ok(locks.includes('provider:quickbooks-desktop'));
+      const result = await store.request(input);
+      if (loseLeaseOnPreview && input.body.action === 'preview') bindingLeaseLost = true;
+      return result;
+    },
+    removalPlanRuntime: () => 'fixture-runtime',
     postSourceReceipt: async (_base, _key, receipt) => { receipts.push(receipt); return {}; },
-    requestIngestBatch: async ({ base, docs }) => { requests.push({ base, docs }); return { results: docs.map(doc => ({ source_id: doc.source_id, status: 'created' })) }; },
-    applyDriveRemovals: async ({ uids }) => { forgotten++; for (const uid of uids) stored.delete(uid); return { applied: uids.length, pending: 0 }; },
+    requestIngestBatch: async ({ docs }) => {
+      requests.push(docs);
+      for (const doc of docs) store.put(`${doc.source_type}:${doc.source_id}`, doc.metadata);
+      return { results: docs.map(doc => ({ source_id: doc.source_id, status: 'created' })) };
+    },
+    applyDriveRemovals: async () => { forgotten++; throw new Error('legacy deletion reached'); },
   };
-  const m = { corpora: { quickbooks_desktop: { enabled: true } } };
-  const first = await cmdIngestQuickBooksDesktop(m, manifestPath, {}, options);
-  assert.equal(first.code, 'QB_REMOVALS_PENDING'); assert.equal(first.tally.created, 9);
-  assert.equal(forgotten, 0); assert.ok(inventories > 0); assert.equal(requests.length, 1);
-  assert.equal(binding.pending_removals.company_fingerprint, binding.fingerprint); assert.equal(receipts.at(-1).status, 'error');
+  const readState = () => JSON.parse(readFileSync(join(home, '.brain-ingest-quickbooks_desktop.json'), 'utf8'));
+  await assert.rejects(cmdIngestQuickBooksDesktop(m, path, {}, options), { code: 'SAFETY_REVIEW_REQUIRED' });
+  assert.equal(requests.length, 1); assert.equal(requests[0].length, 9);
+  assert.ok(store.calls.inventory > 0 && store.calls.preview > 0);
+  assert.equal(store.calls.apply, 0); assert.equal(forgotten, 0);
+  assert.ok(store.uids().includes(`quickbooks_desktop:${requests[0][0].source_id}`));
+  assert.equal(binding.pending_removals.company_fingerprint, binding.fingerprint);
   assert.equal(binding.last_complete_snapshot_at, null);
-  const second = await cmdIngestQuickBooksDesktop(m, manifestPath, { 'approve-removals': binding.pending_removals.fingerprint }, options);
-  assert.equal(second.removed, 1); assert.equal(forgotten, 1); assert.equal(stored.size, 0); assert.equal(binding.pending_removals, null);
-  assert.equal(requests.length, 2); assert.ok(logs.every(line => !line.includes('Vendor One')));
-  let bridgeCalls = 0; let sends = 0;
-  await assert.rejects(cmdIngestQuickBooksDesktop(m, manifestPath, {}, { ...options, readWorkerDate: async () => { bridgeCalls++; return null; },
-    requestIngestBatch: async () => { sends++; } }), { code: 'QB_CLOCK_UNVERIFIED' });
-  assert.equal(bridgeCalls, 1); assert.equal(sends, 0);
+  assert.equal(receipts.at(-1).status, 'error'); assert.equal(receipts.at(-1).docs_added, 9);
+  assert.deepEqual(readState().ingest_removal_plan.targets, ['quickbooks_desktop:invoice:FF-999']);
+  const approval = readState().ingest_removal_plan.providerApproval;
+  assert.equal(Boolean(approval), large);
+  // Aggregate consent on ordinary ingest is never authority to delete.
+  await assert.rejects(cmdIngestQuickBooksDesktop(m, path, { 'approve-removals': binding.pending_removals.fingerprint }, options),
+    { code: 'SAFETY_REVIEW_REQUIRED' });
+  assert.equal(requests.length, 2); assert.equal(store.calls.apply, 0); assert.equal(forgotten, 0);
+  const flags = { from: 'quickbooks-desktop', source: 'quickbooks_desktop',
+    'apply-removals': readState().ingest_removal_plan.fingerprint,
+    ...(approval ? { 'approve-removals': approval } : {}) };
+  const beforeBridge = bridgeCalls; const beforeWrites = bindingWrites;
+  // The public dispatcher takes the same exact apply path and keeps injection.
+  const apply = value => brain.cmdIngest(path, { ...options, flags: value });
+  await assert.rejects(apply({ ...flags, 'apply-removals': 'f'.repeat(64) }), { code: 'SAFETY_REVIEW_REQUIRED' });
+  if (large) await assert.rejects(apply({ ...flags, 'approve-removals': undefined }), { code: 'SAFETY_REVIEW_REQUIRED' });
+  const savedBinding = structuredClone(binding); const beforeReads = bindingReads;
+  binding = { ...binding, fingerprint: 'e'.repeat(64),
+    pending_removals: { ...binding.pending_removals, company_fingerprint: 'e'.repeat(64) } };
+  await assert.rejects(apply(flags), { code: 'SAFETY_REVIEW_REQUIRED' });
+  assert.ok(bindingReads > beforeReads, 'changed company check was reached under its lease');
+  assert.equal(store.calls.apply, 0); binding = savedBinding;
+  binding = { ...binding, last_complete_snapshot_at: SNAPSHOT };
+  await assert.rejects(apply(flags), { code: 'SAFETY_REVIEW_REQUIRED' });
+  assert.equal(store.calls.apply, 0); binding = savedBinding;
+  loseLeaseOnPreview = true; const previews = store.calls.preview;
+  await assert.rejects(apply(flags), { code: 'source_ingest_lock_lost' });
+  assert.ok(store.calls.preview > previews, 'shared lease loss followed the authenticated preview');
+  assert.equal(store.calls.apply, 0); bindingLeaseLost = false; loseLeaseOnPreview = false;
+  // Green control applies only the saved physical target and reads it back.
+  const applied = await apply(flags);
+  assert.equal(applied.removed, 1); assert.equal(store.calls.apply, 1);
+  assert.equal(store.uids().includes('quickbooks_desktop:invoice:FF-999'), false);
+  assert.ok(store.uids().includes(`quickbooks_desktop:${requests[0][0].source_id}`));
+  assert.equal(bridgeCalls, beforeBridge); assert.equal(bindingWrites, beforeWrites);
+  assert.equal(binding.last_complete_snapshot_at, null);
+  assert.equal(forgotten, 0); assert.equal(readState().ingest_removal_plan, undefined);
+  const resumed = await cmdIngestQuickBooksDesktop(m, path, {}, options);
+  assert.equal(resumed.tally.created, 9); assert.equal(resumed.removed, 0);
+  assert.equal(resumed.code, 'QB_FRESHNESS_UNVERIFIED');
+  assert.equal(binding.pending_removals, null); assert.equal(binding.last_complete_snapshot_at, null);
+  assert.equal(resumed.walk_complete, false); assert.ok(Object.values(binding.previous_counts).some(n => n > 0));
+  assert.equal(requests.length, 3); assert.ok(logs.every(line => !line.includes('Vendor One')));
+  let clockReads = 0; let sends = 0;
+  await assert.rejects(cmdIngestQuickBooksDesktop(m, path, {}, { ...options,
+    readWorkerDate: async () => { clockReads++; return null; }, requestIngestBatch: async () => { sends++; } }),
+    { code: 'QB_CLOCK_UNVERIFIED' });
+  assert.equal(clockReads, 1); assert.equal(sends, 0);
+  await assert.rejects(cmdIngestQuickBooksDesktop(m, path, {}, { ...options,
+    requestIngestBatch: async () => { sends++; throw Object.assign(new Error('private provider detail'), { code: 'SAFETY_REVIEW_REQUIRED' }); } }),
+    error => { assert.equal(error.code, 'QB_OPERATION_FAILED'); assert.doesNotMatch(error.message, /private provider detail/); return true; });
+  assert.equal(sends, 1, 'non-review errors still reach the sanitized owner boundary');
 });

@@ -415,6 +415,8 @@ const expected = [
   "worker/src/lib/tax-check-document.js",
   "worker/src/lib/tax-check-rules.js",
   "worker/src/lib/tax-check.js",
+  // Local digital tax-PDF field extraction (no network); reviewed 2026-10-08, fixtures invented.
+  "ingest/tax-pdf.mjs",
   "components/brain-mcp-timing.mjs",
   "connectors/gmail.mjs",
   "connectors/imap.mjs",
