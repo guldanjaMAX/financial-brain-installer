@@ -398,6 +398,12 @@ const expected = [
   // Shared closed schema used immediately before Worker JSON serialization
   // and again before the CLI accepts or renders a financial-picture receipt.
   "worker/src/lib/financial-picture-contract.js",
+  "worker/src/lib/financial-contract-schema.js",
+  "worker/src/lib/financial-money.js",
+  "worker/src/lib/financial-snapshot-contract.js",
+  "worker/src/lib/financial-answer-plan.js",
+  "worker/src/lib/financial-evidence-store.js",
+  "docs/FINANCIAL-CONTRACTS.md",
   "connectors/gmail.mjs",
   "connectors/imap.mjs",
   "connectors/imessage.mjs",
@@ -699,6 +705,23 @@ const expected = [
   "connectors/provider-oauth.mjs",
   "connectors/provider-runtime.mjs",
   "connectors/provider-sync.mjs",
+  // 0.4.11 QuickBooks Desktop, edition guard and refresh schedule. Reviewed
+  // 2026-10-08 at integration: synthetic fixtures only, no account, company,
+  // person or credential; the names scan matched only fragments inside code words.
+  "connectors/quickbooks-desktop-binding.mjs",
+  "connectors/quickbooks-desktop-map.mjs",
+  "connectors/quickbooks-desktop.mjs",
+  "connectors/quickbooks-edition-guard.mjs",
+  "connectors/quickbooks-edition-probe.mjs",
+  "connectors/quickbooks-guard.mjs",
+  "operations/quickbooks-desktop-bridge.mjs",
+  "operations/quickbooks-desktop-helper.cs",
+  "operations/quickbooks-desktop-requests.json",
+  "operations/quickbooks-desktop-signed.mjs",
+  "operations/quickbooks-schedule-state.mjs",
+  "operations/quickbooks-schedule.mjs",
+  "scripts/qbd-field-acceptance.mjs",
+  "scripts/qbd-helper-il-check.mjs",
   "connectors/quickbooks-online.mjs",
   "connectors/quickbooks-records.mjs",
   "connectors/slack.mjs",
@@ -735,6 +758,7 @@ const expected = [
   "migrations/d1/0050_bank_activity_refresh_generation.sql",
   "migrations/d1/0051_simplefin_window_revisions.sql",
   "migrations/d1/0052_ingest_removal_generation.sql",
+  "migrations/d1/0053_financial_evidence.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values

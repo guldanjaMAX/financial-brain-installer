@@ -616,8 +616,11 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
     recoveredBrain.close();
   });
 
-  assert.equal(sourceBrain.migrationFiles.at(-1), "0052_ingest_removal_generation.sql");
-  assert.equal(recoveredBrain.migrationFiles.at(-1), "0052_ingest_removal_generation.sql");
+  assert.equal(sourceBrain.migrationFiles.at(-1), "0053_financial_evidence.sql");
+  assert.equal(recoveredBrain.migrationFiles.at(-1), "0053_financial_evidence.sql");
+  for (const table of ["financial_snapshots", "financial_findings", "financial_run_events", "financial_snapshot_heads"]) {
+    assert.equal(RECOVERY_EXPORT_TABLES.includes(table), true);
+  }
   assert.equal(RECOVERY_EXPORT_TABLES.includes("bank_activity_refresh_state"), true);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("bank_activity_write_claims"), true);
   assert.equal(

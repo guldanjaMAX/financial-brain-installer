@@ -368,6 +368,11 @@ Run `node brain.mjs` with no arguments for the full command list.
 
 ## Two things about how this stores data
 
+The proposed 0.4.11 financial adapters share the closed
+[financial evidence contracts](./FINANCIAL-CONTRACTS.md) for exact money,
+report snapshots, Books findings and preparer review. Migration 0053 reserves
+their immutable storage; it does not enable new provider or answer routes.
+
 **There is no relevance floor.** Hybrid search always returns the
 least-irrelevant documents, however far away they are. A query on a topic the
 brain holds nothing about still returns rows. `/api/rag/think` is the only guard,

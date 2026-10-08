@@ -581,6 +581,14 @@ permanent daily task passes exact readback.
 
 ## D1, FTS5, Vectorize, and the outbox
 
+Financial contract v1 adds immutable observations, exact source bytes, findings
+and run events in migration 0053, with a separate fenced current-snapshot head.
+The shared pure modules live in `worker/src/lib/` so local connectors and the
+Worker validate the same data. Each read must resolve current source grants,
+custody and the owner-map revision through injected trusted adapters. See
+[financial evidence contracts](./FINANCIAL-CONTRACTS.md) for the bounded storage,
+recovery order and integration responsibilities; no new route is enabled.
+
 D1 is authoritative for documents, chunks, source metadata, freshness,
 migration state, and operations history. FTS5 is maintained from D1 chunk rows
 and provides keyword candidates.
