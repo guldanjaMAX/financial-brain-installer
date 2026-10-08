@@ -172,11 +172,15 @@
     },
     {
       "name": "CurrencyRet",
+      "fieldVerification": {
+        "IsUserDefined": "unverified against Intuit"
+      },
       "fields": [
         "ListID",
         "Name",
         "IsActive",
-        "CurrencyCode"
+        "CurrencyCode",
+        "IsUserDefined"
       ]
     },
     {
