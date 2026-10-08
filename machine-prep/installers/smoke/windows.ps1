@@ -113,7 +113,7 @@ switch ($Phase) {
         $properties['Manufacturer'] -cne 'Financial Brain LLC') { throw 'Unexpected MSI scope or product metadata' }
     $tables = @(Read-Rows '_Tables' @('Name') | ForEach-Object { $_.Name })
     $allowedTables = @('Property', 'Directory', 'Feature', 'FeatureComponents', 'Component', 'File', 'Media', 'Registry',
-      'Shortcut', 'RemoveFile', 'Upgrade', 'LaunchCondition', 'MsiFileHash', '_Validation', 'AppSearch', 'RegLocator',
+      'Shortcut', 'RemoveFile', 'Upgrade', 'LaunchCondition', 'MsiFileHash', '_Validation', 'AppSearch', 'RegLocator', 'Signature',
       'AdminExecuteSequence', 'AdminUISequence', 'AdvtExecuteSequence', 'InstallExecuteSequence', 'InstallUISequence')
     foreach ($table in $tables) {
       if ($table -notin $allowedTables) { throw 'Unexpected MSI table outside the shell contract' }
@@ -123,6 +123,8 @@ switch ($Phase) {
     $searches = @(Read-Rows 'AppSearch' @('Property', 'Signature_'))
     if ($searches.Count -ne 1 -or $searches[0].Property -cne 'WINDOWSBUILDNUMBER' -or
         $searches[0].Signature_ -cne 'WindowsBuildNumberSearch') { throw 'Unexpected MSI search' }
+    # WiX emits the AppSearch companion Signature table; it must stay empty (no file searches).
+    if ('Signature' -in $tables -and @(Read-Rows 'Signature' @('Signature')).Count -ne 0) { throw 'Unexpected MSI file search' }
     $locators = @(Read-Rows 'RegLocator' @('Signature_', 'Root', 'Key', 'Name', 'Type'))
     if ($locators.Count -ne 1 -or $locators[0].Signature_ -cne 'WindowsBuildNumberSearch' -or $locators[0].Root -cne '2' -or
         $locators[0].Key -cne 'SOFTWARE\Microsoft\Windows NT\CurrentVersion' -or $locators[0].Name -cne 'CurrentBuildNumber' -or
