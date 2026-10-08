@@ -606,6 +606,12 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "simplefin_assignment_requests",
   "simplefin_stage_accounts",
   "simplefin_stage_transactions",
+  // Schema 52: the removal-approval freshness fence. It is part of the
+  // reviewed table inventory but is never exported: migration 0052 seeds a
+  // fresh instance on the target, and the target's own document and chunk
+  // import advances it, so a removal plan approved against the source can
+  // never match the restored copy.
+  "ingest_removal_generation",
   // Schema 53 keeps exact source observations, findings and run receipts.
   // Restore all immutable generations before the separately fenced head.
   "financial_snapshots",
@@ -641,6 +647,7 @@ export const RECOVERY_EXPORT_TABLES = Object.freeze(
       table !== "source_original_result_family_recovery_state" &&
       table !== "bank_feed_link_sessions" &&
       table !== "custom_api_schedule_state" &&
+      table !== "ingest_removal_generation" &&
       table !== "oauth_clients" && table !== "oauth_codes" && table !== "oauth_tokens"),
 );
 
@@ -883,6 +890,7 @@ const SCHEMA_50_TABLES = Object.freeze([
   "bank_activity_refresh_state",
   "bank_activity_write_claims",
 ]);
+const SCHEMA_52_TABLES = Object.freeze(["ingest_removal_generation"]);
 const SCHEMA_53_TABLES = Object.freeze([
   "financial_snapshots", "financial_findings", "financial_run_events", "financial_snapshot_heads",
 ]);
@@ -909,7 +917,8 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
      ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
      ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES, ...SCHEMA_48_TABLES,
-     ...SCHEMA_49_TABLES, ...SCHEMA_50_TABLES, ...SCHEMA_53_TABLES].includes(table)
+     ...SCHEMA_49_TABLES, ...SCHEMA_50_TABLES, ...SCHEMA_52_TABLES,
+     ...SCHEMA_53_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -4423,6 +4432,7 @@ function expectedRecoveryTables(migrations) {
     (latest >= 48 || !SCHEMA_48_TABLES.includes(table)) &&
     (latest >= 49 || !SCHEMA_49_TABLES.includes(table)) &&
     (latest >= 50 || !SCHEMA_50_TABLES.includes(table)) &&
+    (latest >= 52 || !SCHEMA_52_TABLES.includes(table)) &&
     (latest >= 53 || !SCHEMA_53_TABLES.includes(table)));
 }
 

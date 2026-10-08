@@ -736,6 +736,11 @@ for (const table of BANK_ACTIVITY_RECOVERY_TABLES) {
   assert.equal(recoveryExportTables(appliedMigrations.slice(0, 49)).includes(table), false, table);
   assert.equal(recoveryExportTables(appliedMigrations).includes(table), true, table);
 }
+// Schema 52: the removal-approval freshness fence is in the reviewed table
+// inventory, but a restored Brain keeps its own migration-seeded instance.
+assert.equal(RECOVERY_DURABLE_TABLES.includes("ingest_removal_generation"), true);
+assert.equal(recoveryExportTables(appliedMigrations.slice(0, 51)).includes("ingest_removal_generation"), false);
+assert.equal(recoveryExportTables(appliedMigrations).includes("ingest_removal_generation"), false);
 assert.equal(
   recoveryExportTables(appliedMigrations, { excludeLlmCallLog: true })
     .includes("llm_call_log"),
@@ -1972,7 +1977,8 @@ function providerHarness({
     (version >= 47 || name !== "ocr_page_requests") &&
     (version >= 48 || !name.startsWith("custom_api_")) &&
     (version >= 49 || !simpleFinTables.has(name)) &&
-    (version >= 50 || !bankActivityTables.has(name)));
+    (version >= 50 || !bankActivityTables.has(name)) &&
+    (version >= 52 || name !== "ingest_removal_generation"));
 
   const runWrangler = async ({ command, args, env, cwd }) => {
     wranglerCalls.push({ command, args: [...args], env: { ...env }, cwd });
