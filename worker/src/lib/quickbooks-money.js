@@ -134,6 +134,13 @@ export function quickBooksMoneyPolicy({ question, draft, docs = [], candidates =
   const scoped = /\b(?:quick[\s-]*books|qbo)\b/i.test(`${question || ""} ${draft || ""}`) || candidates.some((doc) =>
     doc.source_kind === "quickbooks" || String(doc.date_source || "").startsWith("quickbooks:") || /\bQuickBooks (?:Account|Customer|Vendor|Invoice|Bill|CreditMemo|BillPayment)\./.test(textOf(doc)));
   if (!scoped) return null;
+  const sources = new Set(candidates.filter((doc) => doc.source_kind === "quickbooks" ||
+    String(doc.date_source || "").startsWith("quickbooks:") ||
+    /\bQuickBooks [A-Za-z][A-Za-z0-9]*\./.test(textOf(doc)))
+    .map((doc) => doc.source));
+  // No source namespace can settle a competing edition or company. The empty
+  // contract also discards an observed proposal, so it cannot bypass this veto.
+  if (sources.size > 1) return quickBooksMoneyPolicy({ question: "QuickBooks", now });
   const records = candidates.map(record).filter(Boolean);
   const statements = [];
   for (const doc of docs) {

@@ -1036,6 +1036,54 @@ permission change rewrites it, and storing it once made 80% of a corpus look
 like it was written this year, silently disabling staleness reporting. Drive's
 `createdTime` is the fallback, and a date in the filename beats both.
 
+### Opted-in QuickBooks refresh in 0.4.11
+
+The new QuickBooks paths use `operations.quickbooks_schedule.enabled` to opt
+into a separate refresh schedule. Existing owners who do not enable these
+paths retain their provider schedule. The optional `timezone` must match the
+computer's timezone. If omitted, the owner's manifest timezone is used, falling
+back to the computer's timezone. Windows defaults
+to `start: "07:00"`; macOS requires 07:00. `windowless` defaults to false and
+remains unavailable without a field-verified Windows host.
+
+`brain quickbooks schedule on|off|status <manifest>` manages this preference.
+`brain daily status <manifest>` also shows the QuickBooks window when enabled.
+Both status results include `effective_window` (under `quickbooks_schedule` in
+daily status), the timezone, an exclusive cutoff and the planned local start
+times. Status distinguishes a verified installation from a planned schedule
+that needs attention. Planned times are not a promise of a completed read.
+
+Windows schedules both editions every two hours from 07:00. macOS schedules
+Online at 07:00 and the latest even hour before the cutoff. The fixed native
+window uses the earliest UTC-midnight cutoff in the year, so daylight saving
+changes do not require seasonal re-registration. In New York the window ends
+at 18:30 local all year: Windows normally starts at 07:00, 09:00, 11:00, 13:00,
+15:00 and 17:00; macOS starts at 07:00 and 18:00. In Phoenix the window ends
+at 16:30, with the last regular Windows start at 15:00 and macOS start at 16:00.
+The cutoff is 30 minutes before UTC midnight because money answers currently
+render their "as of" date in UTC.
+
+A delayed or catch-up run checks the actual date again before each source
+read, including after process inspection and state writes. At or after that
+day's cutoff it skips with `QB_OUTSIDE_WINDOW`. In New York this read gate is
+18:30 in standard time and 19:30 in daylight time, although the native calendar
+window always ends at 18:30. A complete snapshot less than six hours old skips
+with `QB_FRESH`, unless the last run failed. Desktop also requires a running
+`QBW*.exe` process before any helper starts; otherwise it skips with
+`QB_NOT_OPEN`. Only an accepted, closed `ready` receipt advances the local
+snapshot time. Both editions have a one-day freshness expectation.
+
+A healthy QuickBooks schedule owns both QuickBooks keys in the daily plan.
+Configured but unconnected legs remain visibly skipped and do not block other
+daily sources. The daily task still binds the whole manifest the owner approved.
+Both editions' connect and disconnect paths must call
+`reregisterAfterManifestChange(manifestPath)` after changing the binding. That
+hook uses the existing owned daily-on transaction, then registers or removes
+the QuickBooks task, and requires exact readback before success. A failed
+replacement restores the previous definitions and reports that the daily
+schedule needs attention. Production Online and Desktop adapters must use
+this shared hook and return only accepted source receipts to the runner.
+
 ### Permanent daily imports on Windows and macOS
 
 `operations.daily_refresh` is the cross-platform product schedule. One manifest
