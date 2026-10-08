@@ -46,6 +46,8 @@ import { computeAnswerConfidence } from "../worker/src/lib/confidence.js";
 import { callLLM, visionMessages, workersAiRate } from "../worker/src/lib/core.js";
 import { DEFAULT_OCR_MODEL, handleOcr } from "../worker/src/lib/ocr.js";
 import { OCR_PREFLIGHT_DEFAULT_MODEL } from "../operations/ocr-preflight.mjs";
+import { readIngestRemovalRequest } from "../worker/src/lib/ingest-removal-plan.js";
+import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
 
 let fail = 0, ran = 0;
 const check = (n, c, d = "") => {
@@ -1449,6 +1451,13 @@ const ocrTimeout = () => Object.assign(
   let fileFetches = 0;
   let replacementIngestCalls = 0;
   let removalCalls = 0;
+  let removalPlanPreviews = 0;
+  let legacyForgetCalls = 0;
+  const reviewedFamilies = [];
+  // The real Worker removal-plan resolver over a migrated store that already
+  // holds the prior accepted revision of this file.
+  const removalPlanStore = ingestPlanStore();
+  removalPlanStore.put("drive:scan-fixture");
   const ingestedDocuments = [];
   const sourceReceipts = [];
   const savedStates = [];
@@ -1538,14 +1547,22 @@ const ocrTimeout = () => Object.assign(
       removalCalls++;
       return new Response(JSON.stringify({ removed: 1 }), { status: 200 });
     }
+    if (target.endsWith("/api/admin/brain/ingest-removal-plan")) {
+      const requestBody = await readIngestRemovalRequest(new Request(target, opts));
+      if (requestBody.action === "apply") removalCalls++;
+      else {
+        removalPlanPreviews++;
+        reviewedFamilies.push(...requestBody.families);
+      }
+      try {
+        return Response.json(await removalPlanStore.request({ body: requestBody }));
+      } catch {
+        return Response.json({ error: "Removal plan unavailable or changed." }, { status: 409 });
+      }
+    }
     if (target.endsWith("/api/admin/brain/forget")) {
-      return new Response(JSON.stringify({
-        dry_run: false,
-        documents: 0,
-        chunks: 0,
-        vectors: 0,
-        targets: [],
-      }), { status: 200, headers: { "Content-Type": "application/json" } });
+      legacyForgetCalls++;
+      throw new Error("ingest must not reach the unplanned legacy forget route");
     }
     if (target.endsWith("/api/admin/brain/documents")) {
       return new Response(JSON.stringify({
@@ -1602,11 +1619,16 @@ const ocrTimeout = () => Object.assign(
       JSON.parse(storedOcrReceipt?.response_json || "{}").acknowledged_at === storedOcrReceipt?.acknowledged_at,
     JSON.stringify({ acknowledgementCalls, storedOcrReceipt }));
   check("the recovered source run reaches the safe terminal decisions without a removal plan",
-    removalCalls === 0 && finalState.sync_token === "next-cursor" &&
+    removalCalls === 0 && legacyForgetCalls === 0 && removalPlanPreviews >= 1 &&
+      reviewedFamilies.some((family) => family.base_doc_uid === "drive:scan-fixture" &&
+        family.keep_doc_uids.includes("drive:scan-fixture")) &&
+      removalPlanStore.uids().includes("drive:scan-fixture") &&
+      finalState.ingest_removal_plan === undefined && finalState.ingest_pending_families === undefined &&
+      finalState.sync_token === "next-cursor" &&
       finalState.done["drive:scan-fixture"] !== "prior-accepted-revision" &&
       sourceReceipts.some((receipt) => receipt.status === "ready" && receipt.complete_sweep === true) &&
       !sourceReceipts.some((receipt) => receipt.status === "error"),
-    JSON.stringify({ removalCalls, finalState, sourceReceipts }));
+    JSON.stringify({ removalCalls, legacyForgetCalls, removalPlanPreviews, reviewedFamilies, finalState, sourceReceipts }));
 }
 
 {
