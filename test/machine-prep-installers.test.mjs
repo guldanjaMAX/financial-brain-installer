@@ -1561,7 +1561,8 @@ test("Windows launcher reaches one typed exit decision and starts setup only aft
   assert.match(control.log, /PREP_EXIT_CODE=0/);
   assert.match(control.log, /SETUP_WINDOW_STARTED=1/);
   assert.match(control.log, /INSTALLER_HANDOFF_STARTED=1/);
-  assert.ok(control.stdout.includes(`${WINDOWS_SCREEN.ready}\n${WINDOWS_SCREEN.handoff}\n${WINDOWS_SCREEN.done}\n`), control.stdout);
+  // Test mode reports the setup attempt between the ready and handoff lines.
+  assert.ok(control.stdout.includes(`${WINDOWS_SCREEN.ready}\nTEST_SETUP_ATTEMPTS=1\n${WINDOWS_SCREEN.handoff}\n${WINDOWS_SCREEN.done}\n`), control.stdout);
   for (const result of [refused, setupFailure, control]) assert.doesNotMatch(result.stdout, schemaMarkerOnScreen, result.stdout);
 });
 

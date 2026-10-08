@@ -747,16 +747,37 @@ function functionBody(source, start, end) {
   return source.slice(from, to);
 }
 
-// Mac values come from the shipped script itself; Windows has no PowerShell
-// here, so its double-quoted constants are read from source and expanded.
+const MAC_OWNER_NAMES = ["NODE_SOURCE", "GIT_SOURCE", "CLAUDE_SOURCE", "NODE_HOW", "GIT_HOW", "CLAUDE_HOW", "CLAUDE_UPDATE_HOW", "CLAUDE_CONFLICT_HOW"];
+
+// The Mac constants as written in the shipped script: one double-quoted line
+// each, with \" escapes and earlier $NAME references expanded.
+function macOwnerConstantsFromSource(source) {
+  const variables = {};
+  for (const name of ["CLAUDE_MIN_VERSION", ...MAC_OWNER_NAMES]) {
+    const match = source.match(new RegExp(`^${name}="((?:\\\\.|[^"\\\\])*)"$`, "m"));
+    assert.ok(match, `${name} must be one double-quoted line`);
+    variables[name] = match[1].replaceAll('\\"', '"').replace(/\$([A-Z_]+)/g, (whole, variable) => {
+      assert.ok(variable in variables, `${name} uses ${whole} before it is defined`);
+      return variables[variable];
+    });
+  }
+  return Object.fromEntries(MAC_OWNER_NAMES.map((name) => [name, variables[name]]));
+}
+
+// Mac values come from the shipped script itself. Where bash runs (macOS,
+// Linux), the script is sourced and must agree with the source reading;
+// Windows runners have no usable /usr/bin/bash, so only the source is read.
 function macOwnerConstants() {
-  const names = ["NODE_SOURCE", "GIT_SOURCE", "CLAUDE_SOURCE", "NODE_HOW", "GIT_HOW", "CLAUDE_HOW", "CLAUDE_UPDATE_HOW", "CLAUDE_CONFLICT_HOW"];
-  const result = spawnSync("bash", ["-c", `. "$1" --help >/dev/null; printf '%s\\n' ${names.map((name) => `"$${name}"`).join(" ")}`, "constants", MAC], {
+  const fromSource = macOwnerConstantsFromSource(readFileSync(MAC, "utf8").replaceAll("\r\n", "\n"));
+  if (process.platform === "win32") return fromSource;
+  const result = spawnSync("bash", ["-c", `. "$1" --help >/dev/null; printf '%s\\n' ${MAC_OWNER_NAMES.map((name) => `"$${name}"`).join(" ")}`, "constants", MAC], {
     cwd: ROOT, env: { PATH: "/usr/bin:/bin", HOME: process.env.HOME, BRAIN_NO_WRANGLER_LOGIN: "1" }, encoding: "utf8",
   });
   assert.equal(result.status, 0, result.stderr);
   const values = result.stdout.split("\n");
-  return Object.fromEntries(names.map((name, index) => [name, values[index]]));
+  const sourced = Object.fromEntries(MAC_OWNER_NAMES.map((name, index) => [name, values[index]]));
+  assert.deepEqual(fromSource, sourced, "the source reading must match what bash produces");
+  return sourced;
 }
 
 function windowsOwnerConstants(source) {
