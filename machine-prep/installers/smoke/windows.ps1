@@ -162,8 +162,9 @@ switch ($Phase) {
     foreach ($path in @($InstallRoot, $MenuRoot, $RegistryPath) + $Sentinels) { Assert-Absent $path }
     Open-Database
     $product = (Read-Properties)['ProductCode']
-    $products = @($script:Installer.Products | ForEach-Object { [string]$_ })
-    if ($product -in $products) { throw 'MSI is already registered' }
+    # Installer.Products is not reachable through PowerShell's COM binder;
+    # ProductState is, and returns -1 (unknown) for an unregistered product.
+    if ($script:Installer.ProductState($product) -ne -1) { throw 'MSI is already registered' }
     @{ product = $product } | ConvertTo-Json | Set-Content -LiteralPath $StateFile
     Write-Output 'INSTALL_SCOPE=current_user'
   }
