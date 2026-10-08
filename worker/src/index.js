@@ -1591,9 +1591,22 @@ async function handleThink(
   });
 }
 
+// Every generic document writer uses the registry as the custody authority.
+// A failed lookup deliberately propagates before any staging or store mutation;
+// an envelope's provider markers cannot authorize their own admission.
+async function registeredSourceCustodyRefusal(env, source, principalKind, sourceKinds = new Map()) {
+  if (principalKind === "owner") return null;
+  if (!sourceKinds.has(source)) {
+    const registered = await env.DB.prepare("SELECT kind FROM sources WHERE name=?1").bind(source).first();
+    sourceKinds.set(source, registered?.kind ?? null);
+  }
+  return sourceKinds.get(source) === "quickbooks" ? "quickbooks_owner_required" : null;
+}
+
 async function handleIngest(env, request, scope = { all: true }, {
   ownerNoteChannel = null,
   allowSourceOriginalReceipt = false,
+  principalKind = null,
 } = {}) {
   // Checked BEFORE the body is read. The batch route documents exactly this
   // hazard and guards against it; this route, which is the one a client reaches
@@ -1690,6 +1703,14 @@ async function handleIngest(env, request, scope = { all: true }, {
         error: `"${source_type}" is not a source in a zone you have access to. Ask the owner to place it in your zone first.`,
       }, 403);
     }
+  }
+
+  const custodyRefusal = await registeredSourceCustodyRefusal(env, source_type, principalKind);
+  if (custodyRefusal) {
+    return jsonResponse({
+      error: "Registered QuickBooks records require owner authorization; nothing was written.",
+      code: custodyRefusal,
+    }, 403);
   }
 
   // THE GATE. Nothing carrying a live provider credential enters the index,
@@ -1940,19 +1961,11 @@ async function handleIngestBatch(env, request, scope = { all: true }, {
       continue;
     }
 
-    if (principalKind !== "owner") {
-      // Trust the registry, never a caller's envelope kind or provider marker.
-      // Resolve all admissions before staging so a failed lookup writes nothing.
-      if (!sourceKinds.has(envelope.source_type)) {
-        const source = await env.DB.prepare("SELECT kind FROM sources WHERE name=?1")
-          .bind(envelope.source_type).first();
-        sourceKinds.set(envelope.source_type, source?.kind ?? null);
-      }
-      if (sourceKinds.get(envelope.source_type) === "quickbooks") {
-        tally.refused++;
-        results[inputIndex] = { ...slot, status: "refused", labels: ["quickbooks_owner_required"] };
-        continue;
-      }
+    const custodyRefusal = await registeredSourceCustodyRefusal(env, envelope.source_type, principalKind, sourceKinds);
+    if (custodyRefusal) {
+      tally.refused++;
+      results[inputIndex] = { ...slot, status: "refused", labels: [custodyRefusal] };
+      continue;
     }
 
     if (scannerOn) {
@@ -3171,6 +3184,7 @@ export default {
     // positively identified owner passkey principal. The handler rejects live
     // scoped principals and has no admin-key fallback.
     if (path.startsWith(OWNER_PATH_PREFIX)) {
+      // handleOwnerActions invokes this callback only after its owner-session gate.
       const ingestEnvelope = (envelope) => handleIngest(env, new Request(
         `${url.origin}/api/admin/brain/ingest`,
         {
@@ -3178,7 +3192,7 @@ export default {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(envelope),
         },
-      ));
+      ), { all: true }, { principalKind: "owner" });
       return handleOwnerActions(env, request, path, { ingestEnvelope });
     }
 
@@ -3261,7 +3275,7 @@ export default {
             env,
             internalJson(OWNER_NOTES_ROUTE, envelope),
             { all: true },
-            { ownerNoteChannel: "remote_mcp" },
+            { ownerNoteChannel: "remote_mcp", principalKind: "oauth_connector" },
           )).json();
         },
         diagnose: async () => diagnose(env),
@@ -3410,11 +3424,13 @@ export default {
       if (path === "/api/admin/brain/ingest" && request.method === "POST") {
         return await handleIngest(env, request, scope, {
           allowSourceOriginalReceipt: ownerKeyAuthorized,
+          principalKind: scopePrincipalKind,
         });
       }
       if (path === OWNER_NOTES_ROUTE && request.method === "POST") {
         return await handleIngest(env, request, scope, {
           ownerNoteChannel: "local_mcp",
+          principalKind: scopePrincipalKind,
         });
       }
       if (path === "/api/admin/brain/ingest/batch" && request.method === "POST") {

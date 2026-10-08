@@ -248,3 +248,56 @@ test("stored QuickBooks coverage gaps keep a generic label and name the Desktop 
     assert.ok(report.gaps.every((gap) => !gap.detail.includes("QuickBooks Online")));
   } finally { fixture.close(); }
 });
+
+// Port of the independent single-ingest custody probe, through the real router,
+// provider normalizer, SQLite store and subsequent money-answer route.
+for (const route of ["/api/admin/brain/ingest", "/api/admin/brain/ingest/batch"]) {
+  test(`registered QuickBooks custody covers ${route} and its following money answer`, async t => {
+    t.mock.method(Date, "now", () => NOW);
+    const fixture = await createProductFixture();
+    try {
+      fixture.raw("INSERT INTO sources(name,kind,status,created_at) VALUES ('ledger','quickbooks','ready',?)", SNAPSHOT);
+      const token = "synthetic-filing-grant";
+      fixture.raw("INSERT INTO grants(grant_id,display_name,capabilities,created_at,created_by) VALUES ('filer','Filer','[\"file\"]',?,'owner')", NOW);
+      fixture.raw("INSERT INTO grant_credentials(token_hash,grant_id,created_at) VALUES (?,'filer',?)", createHash("sha256").update(token).digest("hex"), NOW);
+      const [doc] = normalizeProviderResult("ledger", await collect("Invoice", [fixtureRow("Invoice")])).documents;
+      const send = (document, headers) => fixture.post(route, route.endsWith("/batch") ? { docs: [document] } : document, headers);
+      const grant = { "X-Admin-Key": token };
+      const before = fixture.seen.sql.length;
+      const response = await send(doc, grant);
+      const body = await response.json();
+      assert.equal(fixture.first("SELECT count(*) AS n FROM documents").n, 0, "a filing grant cannot persist QuickBooks evidence");
+      assert.ok(fixture.seen.sql.slice(before).some(sql => /SELECT kind FROM sources WHERE name=/.test(sql)), "registered-kind decision was reached");
+      if (route.endsWith("/batch")) {
+        assert.equal(response.status, 200); assert.equal(body.refused, 1);
+        assert.deepEqual(body.results[0].labels, ["quickbooks_owner_required"]);
+      } else {
+        assert.equal(response.status, 403); assert.equal(body.code, "quickbooks_owner_required");
+      }
+      const answerResponse = await fixture.post("/api/rag/think", { q: "Who owes us money in QuickBooks?" }, ADMIN);
+      assert.equal(answerResponse.status, 200);
+      const answer = await answerResponse.json();
+      assert.notEqual(answer.evidence_gate?.supported, true, "the refused write cannot support a money answer");
+      assert.equal(answer.citations.length, 0);
+      const owner = await send(doc, ADMIN);
+      assert.equal(owner.status, 200);
+      assert.equal(fixture.first("SELECT count(*) AS n FROM documents").n, 1, "owner control reaches storage");
+      const supported = await (await fixture.post("/api/rag/think", { q: "Who owes us money in QuickBooks?" }, ADMIN)).json();
+      assert.equal(supported.evidence_gate.supported, true);
+      assert.equal(supported.evidence_gate.method, "quickbooks_observed_open_items");
+      assert.equal(supported.citations.length, 1);
+      const stored = fixture.first("SELECT content_hash FROM documents").content_hash;
+      const overwriteBefore = fixture.seen.sql.length;
+      await send({ ...doc, content: doc.content + "\nUntrusted amendment." }, grant);
+      assert.ok(fixture.seen.sql.slice(overwriteBefore).some(sql => /SELECT kind FROM sources WHERE name=/.test(sql)), "overwrite reached custody decision");
+      assert.equal(fixture.first("SELECT content_hash FROM documents").content_hash, stored, "refused overwrite preserves the owner record");
+      fixture.control.failOn = /SELECT kind FROM sources WHERE name=/;
+      const failedBefore = fixture.seen.sql.length;
+      const failed = await send({ ...doc, source_id: "invoice:unavailable" }, grant);
+      assert.equal(failed.status, 500);
+      assert.ok(fixture.seen.sql.slice(failedBefore).some(sql => fixture.control.failOn.test(sql)), "failing registry lookup was attempted");
+      assert.equal(fixture.first("SELECT count(*) AS n FROM documents").n, 1);
+      assert.equal(fixture.first("SELECT content_hash FROM documents").content_hash, stored);
+    } finally { fixture.close(); }
+  });
+}

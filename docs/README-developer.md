@@ -1119,6 +1119,16 @@ with `QB_FRESH`, unless the last run failed. Desktop also requires a running
 `QB_NOT_OPEN`. Only an accepted, closed `ready` receipt advances the local
 snapshot time. Both editions have a one-day freshness expectation.
 
+Both native schedules bind the effective data-plane origin, the exact domain-based
+URL used by the CLI, the fallback Worker/account identity, and the durable admin-key
+locator. Unattended QuickBooks refresh requires `brain.domain`; it cannot discover
+a workers.dev origin using control-plane credentials. Before source planning or
+credential resolution, the runner compares the registered definition with the current
+manifest. Destination, locator, or source drift refuses with `SCHEDULE_RUN_FAILED`
+and reason `QB_SCHEDULE_REREGISTER_REQUIRED`. Re-register with `brain quickbooks
+schedule on <manifest>` after reviewing the changed destination. Existing opted-in
+QuickBooks tasks also need re-registration to adopt this binding.
+
 A healthy QuickBooks schedule owns both QuickBooks keys in the daily plan.
 Configured but unconnected legs remain visibly skipped and do not block other
 daily sources. The daily task still binds the whole manifest the owner approved.

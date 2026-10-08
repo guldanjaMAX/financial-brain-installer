@@ -12,6 +12,7 @@ import { existsSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { quickBooksAnnualWindow } from "./quickbooks-schedule.mjs";
+import { quickBooksScheduleBinding, quickBooksScheduleRegistrationRequired } from "./quickbooks-schedule-binding.mjs";
 import { fileURLToPath } from "node:url";
 import { printGuidance } from "./cli-guidance.mjs";
 import { recordSupportEvent } from "../support-journal.mjs";
@@ -105,7 +106,8 @@ export function createProviderSchedulerSpec(provider, options = {}) {
       token_store: reference.tokenStore,
       source_configuration: reference.sourceConfiguration,
       ...(key === "quickbooks" && reference.manifest.operations?.quickbooks_schedule?.enabled === true
-        ? { quickbooks_schedule: reference.manifest.operations.quickbooks_schedule } : {}),
+        ? { quickbooks_schedule: reference.manifest.operations.quickbooks_schedule,
+          destination_binding: quickBooksScheduleBinding(reference.manifest, "darwin") } : {}),
     }),
     childArgumentsOf: (plan) => key === "quickbooks" && plan.manifest.operations?.quickbooks_schedule?.enabled === true
       ? ["quickbooks-run", plan.path, "--provider-config-hash", plan.configHash]
@@ -153,8 +155,20 @@ export const pauseProviderScheduler = (provider, manifestPath, options = {}) =>
   pauseScheduler(manifestPath, optionsFor(provider, options));
 export const restoreProviderScheduler = (provider, manifestPath, snapshot, options = {}) =>
   restoreScheduler(manifestPath, snapshot, optionsFor(provider, options));
-export const runProviderScheduledIngest = (provider, manifestPath, options = {}) =>
-  runScheduledIngest(manifestPath, optionsFor(provider, options));
+export function runProviderScheduledIngest(provider, manifestPath, options = {}) {
+  const configured = optionsFor(provider, options);
+  try {
+    return runScheduledIngest(manifestPath, configured);
+  } catch (error) {
+    // The LaunchAgent checks its config before spawning the guarded CLI child.
+    // Preserve that early refusal and give it the same typed re-registration
+    // remedy as the inner runner, without exposing native output or paths.
+    if (provider === "quickbooks" && error?.message === configured.spec.configChangedError) {
+      throw quickBooksScheduleRegistrationRequired();
+    }
+    throw error;
+  }
+}
 
 function quickBooksLaunchctl(options) {
   return options.launchctl || (args => (options.spawn || spawnSync)("/bin/launchctl", args, {
@@ -323,6 +337,8 @@ if (IS_MAIN) {
     console.error(`${provider} scheduler stopped before it could confirm a complete result.`);
     if (receipt.errorCode === "SAFETY_REVIEW_REQUIRED") {
       console.error("The provider result may be uncertain. Please check its current state before retrying this action.");
+    } else if (error?.reason === "QB_SCHEDULE_REREGISTER_REQUIRED") {
+      console.error(quickBooksScheduleRegistrationRequired().message);
     } else {
       console.error("The previous schedule and source cursor remain available for review.");
     }

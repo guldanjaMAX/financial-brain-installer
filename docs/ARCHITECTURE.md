@@ -246,6 +246,13 @@ customer action.
 
 ## Ingest lifecycle
 
+Generic single-document, batch, owner-upload, and owner-note entry points share
+one registered-source custody check. Only an authenticated owner may file into a
+registered QuickBooks source, including overwrites. Non-owner admissions resolve
+the source kind from D1 before staging; a failed registry lookup aborts the write.
+Envelope metadata cannot confer provider authority. The reserved owner-note route,
+provenance, scope, and credential-scanning rules still apply independently.
+
 All producers converge on the same document envelope and batch write path:
 
 ```text

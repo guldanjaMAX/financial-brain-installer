@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { buildProviderSchedulerPlan } from '../operations/provider-scheduler.mjs';
+import { buildProviderSchedulerPlan, runProviderScheduledIngest } from '../operations/provider-scheduler.mjs';
 import * as brain from '../brain.mjs';
 import * as qb from '../operations/quickbooks-schedule.mjs';
-const root = mkdtempSync(join(tmpdir(), 'qb-schedule-'));
+const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'qb-schedule-')));
 const path = join(root, 'brain.manifest.json');
 const fixture = () => ({ client: { slug: 'fixture', timezone: 'America/Phoenix' },
   brain: { domain: 'brain.example.invalid' }, corpora: { quickbooks: { enabled: true, source: 'ledger', environment: 'sandbox' }, google_drive: { enabled: true } },
@@ -78,7 +78,7 @@ function nativeMemory(initial = null) {
 }
 
 test('real daily-on rebinds whole-manifest approval, is idempotent, and restores exact prior tasks if QuickBooks registration fails', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'qb-rebind-'));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'qb-rebind-')));
   const manifest = join(home, 'brain.manifest.json');
   const m = fixture(); writeFileSync(manifest, JSON.stringify(m));
   const daily = nativeMemory(); const quickbooks = nativeMemory();
@@ -112,7 +112,7 @@ test('real daily-on rebinds whole-manifest approval, is idempotent, and restores
 });
 
 test('macOS registration reads the loaded argv and restores the old plist after a failed exact readback', () => {
-  const home = mkdtempSync(join(tmpdir(), 'qb-provider-'));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'qb-provider-')));
   const manifest = join(home, 'brain.manifest.json'); writeFileSync(manifest, JSON.stringify(fixture()));
   let loaded = null; let prints = 0; let installs = 0; let failNextRead = false;
   const argumentsIn = xml => [...(xml.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/u)?.[1] || '').matchAll(/<string>([\s\S]*?)<\/string>/gu)].map(m => m[1]);
@@ -145,7 +145,7 @@ test('macOS registration reads the loaded argv and restores the old plist after 
 });
 
 test('macOS schedule-off verifies native removal and retains the previous definition when bootout did not stop it', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'qb-remove-'));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'qb-remove-')));
   const manifest = join(home, 'brain.manifest.json'); writeFileSync(manifest, JSON.stringify(fixture()));
   let loaded = null; let ignoredStops = 1; let stops = 0; let daily = 0;
   const options = { ...mac, home, quiet: true, localTimezone: 'America/Phoenix', nodePath: process.execPath,
@@ -254,7 +254,7 @@ test('QuickBooks CLI entry points do not enter the control-plane credential wrap
 });
 
 test('native Windows registration observes the real XML parser and refuses a changed trigger or foreign owner', () => {
-  const home = mkdtempSync(join(tmpdir(), 'qb-native-'));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'qb-native-')));
   let xml = null; let inspections = 0; let mutations = 0;
   const opts = { platform: 'win32', home, environment: { SystemRoot: String.raw`C:\Windows` },
     nodePath: String.raw`C:\Runtime\node.exe`, brainPath: String.raw`C:\Runtime\brain.mjs`, runnerPath: String.raw`C:\Runtime\operations\quickbooks-schedule.mjs`,
@@ -409,4 +409,133 @@ test('daily status visibly skips an unconnected leg and keeps the other sources 
     assert.equal(row.current_state, connected ? 'unknown' : 'skipped');
     if (!connected) assert.ok(lines.some(line => /quickbooks.*skipped.*not connected/u.test(line)));
   }
+});
+
+// Port of the independent destination-drift probe. The default source runner
+// reaches a fixture credential resolver and ingest boundary only after readback.
+for (const platform of ['win32', 'darwin']) {
+  for (const change of ['unchanged', 'domain', 'worker', 'locator', 'source']) {
+    test(`${platform} registered destination binding: ${change}`, async () => {
+      const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'qb-destination-')));
+      const manifest = join(home, 'brain.manifest.json');
+      const original = fixture();
+      original.brain.worker_name = 'fixture-worker';
+      original.infrastructure = { cloudflare: { account_id: 'fixture-account', d1_database_id: 'fixture-database' } };
+      writeFileSync(manifest, JSON.stringify(original));
+      const keyFile = join(home, 'fixture-admin-key');
+      writeFileSync(keyFile, 'synthetic-fixture-material', { mode: 0o600 });
+      let inspections = 0, credentials = 0, planning = 0, ingests = 0, leases = 0;
+      let loaded = null;
+      const native = { platform, principal: platform === 'win32' ? 'sid:S-1-5-21-100' : 'uid:501',
+        uid: 501, home, localTimezone: 'America/Phoenix', localTimeZone: 'America/Phoenix', now,
+        nodePath: platform === 'win32' ? String.raw`C:\Runtime\node.exe` : process.execPath,
+        runnerPath: platform === 'win32' ? String.raw`C:\Runtime\operations\quickbooks-schedule.mjs` : undefined,
+        nodeRealpath: p => p, runtimeUsable: () => true,
+        launchctl(args) {
+          if (args[0] === 'print') {
+            inspections++;
+            if (!loaded) return { status: 113 };
+            const block = loaded.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/u)[1];
+            const argv = [...block.matchAll(/<string>([\s\S]*?)<\/string>/gu)].map(m => m[1]);
+            return { status: 0, stdout: `state = waiting\narguments = {\n${argv.join('\n')}\n}\n` };
+          }
+          if (args[0] === 'bootstrap') { loaded = readFileSync(args[2], 'utf8'); return { status: 0 }; }
+          if (args[0] === 'bootout') { loaded = null; return { status: 0 }; }
+          assert.equal(args[0], 'enable'); return { status: 0 };
+        },
+      };
+      const registered = qb.planQuickBooksSchedule({ m: original, manifestPath: manifest, ...native });
+      let invocation;
+      if (platform === 'win32') {
+        const definition = qb.buildQuickBooksScheduleDefinition(registered, native);
+        native.adapter = { read() { inspections++; return { exists: true, owned: true, enabled: true, definition }; } };
+        invocation = { expectedDefinitionHash: definition.definition_hash };
+      } else {
+        const installed = installProviderScheduler('quickbooks', manifest, native);
+        assert.equal(installed.verified, true);
+        invocation = { expectedProviderConfigHash: installed.configHash };
+      }
+      const current = structuredClone(original);
+      if (change === 'domain') current.brain.domain = 'second.example.invalid';
+      if (change === 'worker') current.brain.worker_name = 'second-worker';
+      if (change === 'locator') current.operations.admin_key_secret = 'keychain://fixture-scheduler/admin';
+      if (change === 'source') current.corpora.quickbooks.source = 'second-ledger';
+      writeFileSync(manifest, JSON.stringify(current));
+      assert.deepEqual(qb.planQuickBooksSchedule({ m: current, manifestPath: manifest, ...native }).identity,
+        registered.identity, 'stable account/D1 and principal cannot hide destination drift');
+      const before = inspections;
+      const options = { ...native, ...invocation, lifecycleLockHeld: true,
+        lifecycleLease: { assertOwned() { leases++; } }, clock: () => now,
+        state: { read: () => null, write() {} },
+        resolveAdminKey() { credentials++; return readFileSync(keyFile, 'utf8'); },
+        cli: {
+          planLoad: async ({ options: dependencies }) => {
+            planning++; dependencies.resolveAdminKey(manifest);
+            return [{ key: 'quickbooks', status: 'ready' }];
+          },
+          cmdIngestProvider: async (m, p, flags, dependencies) => {
+            ingests++; assert.equal(m.brain.domain, original.brain.domain);
+            assert.equal(p, manifest); assert.equal(flags.from, 'quickbooks');
+            await dependencies.postSourceReceipt(null, null, { status: 'ready', completed_at: now.toISOString() });
+          },
+        }, postSourceReceipt: async () => ({}),
+      };
+      if (change === 'unchanged') {
+        const result = await qb.runQuickBooksScheduleCli(manifest, options);
+        assert.equal(result.status, 'ready'); assert.equal(planning, 1);
+        assert.equal(credentials, 1); assert.equal(ingests, 1); assert.ok(leases > 0);
+      } else {
+        await assert.rejects(qb.runQuickBooksScheduleCli(manifest, options), error => {
+          assert.equal(error.code, 'SCHEDULE_RUN_FAILED');
+          assert.equal(error.reason, 'QB_SCHEDULE_REREGISTER_REQUIRED');
+          assert.match(error.message, /re-register/i); return true;
+        });
+        assert.equal(credentials, 0); assert.equal(ingests, 0); assert.equal(planning, 0);
+      }
+      assert.ok(inspections > before, 'registered native definition comparison was reached');
+      if (platform === 'darwin') {
+        // A LaunchAgent first enters the provider wrapper before the guarded
+        // CLI child. Its earlier config refusal must carry the same remedy.
+        let configChecks = 0, children = 0;
+        const outerOptions = { ...native,
+          get expectedConfigHash() { configChecks++; return invocation.expectedProviderConfigHash; },
+          spawn(_command, args) { children++; assert.ok(args.includes('quickbooks-run')); return { status: 0 }; },
+        };
+        const runOuter = () => runProviderScheduledIngest('quickbooks', manifest, outerOptions);
+        if (change === 'unchanged') {
+          assert.equal(runOuter().status, 'complete'); assert.equal(children, 1);
+        } else {
+          assert.throws(runOuter, error => {
+            assert.equal(error.code, 'SCHEDULE_RUN_FAILED');
+            assert.equal(error.reason, 'QB_SCHEDULE_REREGISTER_REQUIRED');
+            assert.match(error.message, /re-register/i); return true;
+          });
+          assert.equal(children, 0); assert.equal(credentials, 0); assert.equal(ingests, 0);
+        }
+        assert.ok(configChecks > 0, 'the LaunchAgent config comparison was reached');
+      }
+
+    });
+  }
+}
+
+
+test('schedule destination matches the real CLI domain resolver and requires an unattended origin', async () => {
+  const m = fixture();
+  m.brain.worker_name = 'fixture-worker';
+  m.infrastructure = { cloudflare: { account_id: 'fixture-account', d1_database_id: 'fixture-database' } };
+  const native = { platform: 'win32', principal: 'sid:S-1-5-21-100', localTimezone: 'America/Phoenix', now };
+  const plan = qb.planQuickBooksSchedule({ m, manifestPath: path, ...native });
+  const actualBase = await brain.quickBooksScheduleDependencies().resolveBaseUrl(m, null);
+  assert.equal(plan.binding.data_plane.base_url, actualBase);
+  assert.equal(plan.binding.data_plane.origin, new URL(actualBase).origin);
+  assert.equal(plan.binding.worker_fallback.worker_name, 'fixture-worker');
+  assert.deepEqual(plan.binding.credential.locator, { relative_to: 'manifest_directory', name: '.brain-admin-key' });
+  assert.equal(plan.binding.credential.backend, 'dpapi-current-user');
+  assert.equal(plan.ready, true);
+  delete m.brain.domain;
+  const refused = qb.planQuickBooksSchedule({ m, manifestPath: path, ...native });
+  assert.equal(refused.binding.data_plane.origin, null, 'destination planning reached the missing-origin decision');
+  assert.equal(refused.ready, false, 'unattended runs cannot discover a destination through control-plane credentials');
+  assert.throws(() => qb.registerQuickBooksSchedule(refused, native), { code: 'SCHEDULE_INSTALL_FAILED' });
 });

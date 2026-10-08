@@ -732,6 +732,7 @@ const expected = [
   "operations/quickbooks-desktop-helper.cs",
   "operations/quickbooks-desktop-requests.json",
   "operations/quickbooks-desktop-signed.mjs",
+  "operations/quickbooks-schedule-binding.mjs",
   "operations/quickbooks-schedule-state.mjs",
   "operations/quickbooks-schedule.mjs",
   "scripts/qbd-field-acceptance.mjs",

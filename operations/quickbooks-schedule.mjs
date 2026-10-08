@@ -8,6 +8,7 @@ import { dailyRefreshIdentity, dailyRefreshPrincipal } from './daily-refresh-pla
 import { buildDailyRefreshDefinition, createNativeDailyRefreshAdapter, escapeTaskXml, observedWindowsContract, quoteWindowsTaskArgument, statusDailyRefreshSchedule, restoreDailyRefreshSchedule, removeDailyRefreshSchedule } from './daily-refresh-scheduler.mjs';
 import { acquireBrainLifecycleLock, withBrainLifecycleLock } from './brain-lifecycle-lock.mjs';
 import { quickBooksScheduleState } from './quickbooks-schedule-state.mjs';
+import { quickBooksScheduleBinding, quickBooksScheduleRegistrationRequired } from './quickbooks-schedule-binding.mjs';
 
 export const QUICKBOOKS_KEYS = Object.freeze(['quickbooks', 'quickbooks_desktop']);
 export const QUICKBOOKS_REFRESH_SECONDS = 86400;
@@ -60,10 +61,11 @@ export function planQuickBooksSchedule({ m, manifestPath, platform = process.pla
   const window = quickBooksAnnualWindow({ timezone, now, start });
   const sources = QUICKBOOKS_KEYS.filter(key => m?.corpora?.[key]?.enabled === true).map(key => ({ key,
     source: m.corpora[key].source || key, configuration_hash: digest(m.corpora[key]) }));
-  const configurationHash = digest({ sources, start, timezone, windowless: config.windowless === true });
+  const binding = quickBooksScheduleBinding(m, platform);
+  const configurationHash = digest({ sources, start, timezone, windowless: config.windowless === true, binding });
   return Object.freeze({ identity: dailyRefreshIdentity(m, principal), manifest_path: resolve(manifestPath), platform,
-    enabled: config.enabled === true, ready: ['win32', 'darwin'].includes(platform) && timezone === localTimezone,
-    configuration_hash: configurationHash, sources: Object.freeze(sources), timezone, start, window,
+    enabled: config.enabled === true, ready: ['win32', 'darwin'].includes(platform) && timezone === localTimezone && binding.data_plane.origin !== null,
+    configuration_hash: configurationHash, binding, sources: Object.freeze(sources), timezone, start, window,
     windowless: config.windowless === true, expected_refresh_seconds: QUICKBOOKS_REFRESH_SECONDS });
 }
 function describeWindow(plan) {
@@ -149,7 +151,7 @@ export function restoreQuickBooksSchedule(plan, snapshot, options = {}) {
   }
 }
 export function registerQuickBooksSchedule(plan, options = {}) {
-  if (!plan.ready || !plan.enabled || !plan.sources.length) throw failure('SCHEDULE_INSTALL_FAILED', 'An enabled QuickBooks plan in this machine timezone is required.');
+  if (!plan.ready || !plan.enabled || !plan.sources.length) throw failure('SCHEDULE_INSTALL_FAILED', 'An enabled QuickBooks plan with brain.domain in this machine timezone is required.');
   const definition = buildQuickBooksScheduleDefinition(plan, options);
   const adapter = adapterFor(options); const before = adapter.read(plan.identity); owned(before);
   if (exact(before, definition)) return { installed: true, verified: true, enabled: true, changed: false, definition };
@@ -402,11 +404,11 @@ export async function runQuickBooksScheduleCli(manifestPath, options = {}) {
   const plan = planQuickBooksSchedule({ m, manifestPath, ...options });
   if (plan.platform === 'win32') {
     const status = statusQuickBooksSchedule(plan, schedulingOptions(options));
-    if (!status.verified || status.definition.definition_hash !== options.expectedDefinitionHash) throw failure('SCHEDULE_RUN_FAILED', 'QuickBooks schedule changed after registration.');
+    if (!status.verified || status.definition.definition_hash !== options.expectedDefinitionHash) throw quickBooksScheduleRegistrationRequired();
   } else if (plan.platform === 'darwin') {
     const providers = options.providerScheduler || await import('./provider-scheduler.mjs');
     const status = providers.statusProviderScheduler('quickbooks', manifestPath, { ...options, ...(options.legacySchedulerOptions || {}) });
-    if (!status.definitionMatches || !status.loaded || status.configHash !== options.expectedProviderConfigHash) throw failure('SCHEDULE_RUN_FAILED', 'QuickBooks provider schedule changed after registration.');
+    if (!status.definitionMatches || !status.loaded || status.configHash !== options.expectedProviderConfigHash) throw quickBooksScheduleRegistrationRequired();
   }
   const runSource = options.runSource || (async source => {
     if (source.key === 'quickbooks_desktop') {
@@ -445,6 +447,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (process.platform === 'win32') process.title = QUICKBOOKS_CONSOLE_TITLE;
     runQuickBooksScheduleCli(path, { expectedDefinitionHash: hash }).then(result => {
       console.log(JSON.stringify(result)); process.exitCode = result.status === 'error' ? 1 : 0;
-    }).catch(() => { console.error('QuickBooks schedule needs attention. Issue code: SCHEDULE_RUN_FAILED'); process.exitCode = 1; });
+    }).catch(() => { console.error('QuickBooks schedule needs attention. Re-register the schedule before retrying. Issue code: SCHEDULE_RUN_FAILED'); process.exitCode = 1; });
   }
 }
