@@ -15,15 +15,6 @@ $CurrentVersion = if ($env:MACHINE_PREP_OS_VERSION_OVERRIDE) {
   [Environment]::OSVersion.Version
 }
 
-Write-Output "OS_DECISION_REACHED=1 current=$CurrentVersion minimum=10.0"
-if ($CurrentVersion.Major -lt 10) {
-  [Console]::Error.WriteLine("REFUSED Windows 10 or newer is required; no machine preparation started")
-  exit 2
-}
-if ($env:MACHINE_PREP_INSTALLER_TEST_MODE -eq "1") {
-  Write-Output "INSTALLER_TEST_GATE_REACHED=1"
-}
-
 $LocalRoot = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE "AppData\Local" }
 $LogDir = Join-Path $LocalRoot "FinancialBrainMachinePrep"
 $LogFile = Join-Path $LogDir "installer.log"
@@ -31,7 +22,7 @@ $LogFile = Join-Path $LogDir "installer.log"
 [IO.File]::WriteAllText($LogFile, "")
 
 function Write-SafeLog([string]$Line) {
-  if ($Line -notmatch '^(LOG_SCHEMA_DECISION_REACHED=1|INSTALLER_PROGRESS=|PREP_EXIT_CODE=|SETUP_LAUNCH_DECISION_REACHED=|SETUP_WINDOW_STARTED=|INSTALLER_HANDOFF_EXIT_CODE=|INSTALLER_HANDOFF_STARTED=)') {
+  if ($Line -notmatch '^(OS_DECISION_REACHED=|LOG_SCHEMA_DECISION_REACHED=1|INSTALLER_PROGRESS=|PREP_EXIT_CODE=|SETUP_LAUNCH_DECISION_REACHED=|SETUP_WINDOW_STARTED=|INSTALLER_HANDOFF_EXIT_CODE=|INSTALLER_HANDOFF_STARTED=)') {
     throw "non-schema installer log event refused"
   }
   [IO.File]::AppendAllText($LogFile, "$Line`r`n")
@@ -49,6 +40,17 @@ function Wait-OwnerBeforeClose {
   if ($env:MACHINE_PREP_INSTALLER_TEST_MODE -eq "1" -or [Console]::IsInputRedirected) { return }
   [Console]::Out.WriteLine("Press Enter to close this window.")
   [void][Console]::ReadLine()
+}
+
+# Keep the OS marker in the same log as every other installer decision.
+Write-SafeLog "OS_DECISION_REACHED=1 current=$CurrentVersion minimum=10.0"
+if ($CurrentVersion.Major -lt 10) {
+  Write-OwnerLine "This PC needs Windows 10 or newer. Nothing was downloaded or installed."
+  Wait-OwnerBeforeClose
+  exit 2
+}
+if ($env:MACHINE_PREP_INSTALLER_TEST_MODE -eq "1") {
+  Write-Output "INSTALLER_TEST_GATE_REACHED=1"
 }
 
 # Shows the prep child's own lines the way the macOS launcher does: status

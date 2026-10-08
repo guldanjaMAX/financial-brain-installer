@@ -128,7 +128,7 @@ test("Windows smoke executes per-user table refusals with a green control", { sk
       }
     }
   }
-  const home = mkdtempSync(join(ROOT, ".machine-prep-wix-tables-"));
+  const home = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-wix-tables-")));
   mkdirSync(join(home, "temp"));
   const fixture = join(home, "table-contract.ps1");
   // Only the pure table-check functions are executed. No installer, registry,
@@ -279,7 +279,7 @@ test("pinned-kit verifier rejects changed size, bytes and installed pins with gr
 
 test("pinned-kit provenance compares actual installed bytes instead of trusting version text", async () => {
   const { verifyPackageTree } = await import("../machine-prep/installers/smoke/bootstrap.mjs");
-  const root = mkdtempSync(join(tmpdir(), "kit-provenance-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "kit-provenance-")));
   const expected = join(root, "witness"), installed = join(root, "installed");
   for (const directory of [expected, installed]) {
     mkdirSync(directory);
@@ -298,7 +298,7 @@ test("pinned-kit provenance compares actual installed bytes instead of trusting 
 
 test("pinned-kit source inventory permits only npm shims named by authenticated dependency bins", async () => {
   const { verifyPackageTree } = await import("../machine-prep/installers/smoke/bootstrap.mjs");
-  const root = mkdtempSync(join(tmpdir(), "kit-bin-map-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "kit-bin-map-")));
   const expected = join(root, "witness"), installed = join(root, "installed");
   try {
     for (const directory of [expected, installed]) {
@@ -344,7 +344,7 @@ test("bootstrap version arguments use canonical Windows paths and an encoded ESM
 
 for (const fixtureKind of ["physical directory", "directory alias", "URL-reserved characters"]) {
   test(`bootstrap version guard denies network and child processes after reached decisions (${fixtureKind})`, () => {
-    const root = mkdtempSync(join(tmpdir(), "kit-version-guard-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "kit-version-guard-")));
     try {
       const fixture = join(root, fixtureKind === "URL-reserved characters" ? "fixture # 100%" : "fixture");
       mkdirSync(fixture);
@@ -652,7 +652,7 @@ test("both OS handoff launchers expose a no-side-effect decision probe and CLI f
 
 test("macOS installer refuses an unsupported release after reaching its OS gate", bashBehaviorOptions(), () => {
   const preinstall = join(MAC_INSTALLER, "scripts", "preinstall");
-  const home = mkdtempSync(join(ROOT, ".machine-prep-preinstall-home-"));
+  const home = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-preinstall-home-")));
   const environment = {
     PATH: "/usr/bin:/bin",
     HOME: home,
@@ -686,7 +686,7 @@ test("macOS installer refuses an unsupported release after reaching its OS gate"
 });
 
 test("macOS staging contains the real prep, handoff, support log wrapper, and uninstall notes", bashBehaviorOptions(), () => {
-  const staging = mkdtempSync(join(tmpdir(), "machine-prep-pkg-stage-"));
+  const staging = realpathSync.native(mkdtempSync(join(tmpdir(), "machine-prep-pkg-stage-")));
   try {
     const build = spawnSync("bash", [join(MAC_INSTALLER, "build-pkg.sh"), "--staging-only", staging], {
       cwd: ROOT,
@@ -729,7 +729,7 @@ test("macOS package has no privileged script phase and targets only the current 
 });
 
 test("macOS native tools build the reviewed unsigned package contents", { skip: process.platform !== "darwin" }, () => {
-  const output = mkdtempSync(join(tmpdir(), "machine-prep-pkg-build-"));
+  const output = realpathSync.native(mkdtempSync(join(tmpdir(), "machine-prep-pkg-build-")));
   try {
     const pkg = join(output, "FinancialBrainMachinePrep-unsigned.pkg");
     const build = spawnSync("bash", [join(MAC_INSTALLER, "build-pkg.sh"), pkg], {
@@ -796,7 +796,7 @@ test("Windows MSI is per-user, Windows 10+, and uses process-only policy bypass"
 test("Windows wrapper has an unsupported-OS decision gate, shareable log, real prep, and Claude handoff", () => {
   const wrapper = read("machine-prep/installers/windows/run-machine-prep.ps1");
   assert.match(wrapper, /OS_DECISION_REACHED=1/);
-  assert.match(wrapper, /REFUSED Windows 10 or newer is required/);
+  assert.match(wrapper, /This PC needs Windows 10 or newer/);
   assert.match(wrapper, /prep-windows\.ps1/);
   assert.match(wrapper, /Invoke-EmbeddedPowerShell \$prep @\("--real"\)/);
   assert.match(wrapper, /installer\.log/);
@@ -876,26 +876,31 @@ test("Windows package project names every reviewed payload file", () => {
 });
 
 test("Windows wrapper refuses an unsupported release before prep", { skip: process.platform !== "win32" }, () => {
-  const powerShell = process.env.SystemRoot
-    ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-    : "powershell.exe";
-  const result = spawnSync(powerShell, [
-    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-    "-File", join(WINDOWS_INSTALLER, "run-machine-prep.ps1"),
-  ], {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      MACHINE_PREP_OS_VERSION_OVERRIDE: "6.3",
-      MACHINE_PREP_INSTALLER_TEST_MODE: "1",
-    },
-    encoding: "utf8",
-  });
-  const out = `${result.stdout}${result.stderr}`.replaceAll("\r\n", "\n");
-  assert.equal(result.status, 2, out);
-  assert.match(out, /OS_DECISION_REACHED=1/);
-  assert.match(out, /REFUSED Windows 10 or newer is required/);
-  assert.doesNotMatch(out, /INSTALLER_TEST_GATE_REACHED|INSTALLER_PROGRESS/);
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-windows-os-")));
+  try {
+    const powerShell = join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const result = spawnSync(powerShell, [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+      "-File", join(WINDOWS_INSTALLER, "run-machine-prep.ps1"),
+    ], {
+      cwd: ROOT,
+      env: {
+        SystemRoot: process.env.SystemRoot, PATH: process.env.PATH,
+        HOME: directory, USERPROFILE: directory, LOCALAPPDATA: join(directory, "local"),
+        BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_TEST_LAUNCHCTL: join(directory, "injected-launchctl"),
+        MACHINE_PREP_OS_VERSION_OVERRIDE: "6.3", MACHINE_PREP_INSTALLER_TEST_MODE: "1",
+      },
+      encoding: "utf8",
+    });
+    const out = `${result.stdout}${result.stderr}`.replaceAll("\r\n", "\n");
+    const log = readFileSync(join(directory, "local", "FinancialBrainMachinePrep", "installer.log"), "utf8");
+    assert.equal(result.status, 2, out);
+    assert.match(log, /OS_DECISION_REACHED=1/);
+    assert.match(out, /This PC needs Windows 10 or newer/);
+    assert.doesNotMatch(out, /OS_DECISION_REACHED|INSTALLER_TEST_GATE_REACHED|INSTALLER_PROGRESS/);
+    assert.doesNotMatch(log, /PREP_EXIT_CODE|SETUP_LAUNCH_DECISION/);
+    // The supported-OS green control reaches setup in the wrapper matrix below.
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("machine-prep CI still builds review artifacts with pinned actions and no release path", () => {
@@ -960,7 +965,7 @@ function signingGateBody(workflow) {
 }
 
 function runSigningGate({ workflow = read(".github/workflows/installer-signing.yml"), missing = null, wixConfirmed = "true" } = {}) {
-  const directory = mkdtempSync(join(ROOT, ".signing-gate-test-"));
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".signing-gate-test-")));
   const output = join(directory, "output");
   const summary = join(directory, "summary");
   const settings = [...MAC_SIGNING_GATE_SETTINGS, ...WINDOWS_SIGNING_VARIABLES];
@@ -1080,7 +1085,7 @@ test("signing workflow performs the required Apple and Artifact Signing ceremoni
 });
 
 function runSigningCleanup({ owned, deleteFails = false, scriptPath = join(MAC_INSTALLER, "cleanup-signing-material.sh") }) {
-  const directory = mkdtempSync(join(ROOT, ".signing-cleanup-test-"));
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".signing-cleanup-test-")));
   const keychain = join(directory, "installer-signing.keychain-db");
   const marker = join(directory, "installer-signing.keychain-owner");
   const calls = join(directory, "security-calls.log");
@@ -1164,7 +1169,7 @@ test("signing cleanup ownership mutation turns the foreign-keychain control red"
   const source = readFileSync(sourcePath, "utf8");
   const from = 'if [ "$marker_value" != "$attempt_id" ]; then';
   assert.equal(source.includes(from), true, "missing cleanup ownership decision");
-  const directory = mkdtempSync(join(ROOT, ".signing-cleanup-mutant-"));
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".signing-cleanup-mutant-")));
   const mutant = join(directory, "cleanup-signing-material.sh");
   writeFileSync(mutant, source.replace(from, "if false; then"));
   const probe = runSigningCleanup({ owned: false, scriptPath: mutant });
@@ -1303,7 +1308,7 @@ test("installer security contracts detect one mutation per reviewed boundary", (
 });
 
 function runMacWrapper({ prepExit, openExit, handoffExit, prepBody = "", handoffBody = "" }) {
-  const directory = mkdtempSync(join(ROOT, ".machine-prep-wrapper-test-"));
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-wrapper-test-")));
   const counter = join(directory, "counter.log");
   const helper = (name, exitCode, body = "") => {
     const path = join(directory, name);
@@ -1374,17 +1379,17 @@ test("Mac launcher shows only plain lines on screen and keeps every status marke
   // The prep's own markers and banner are hidden; its stderr is untouched.
   const prepFailure = runMacWrapper({
     prepExit: 2, openExit: 0, handoffExit: 0,
-    prepBody: "printf 'Machine Prep for macOS\\nMODE real\\nPREREQUISITE_DECISION_REACHED=1\\n'\nprintf 'Financial Brain setup cannot start yet. Nothing was downloaded or installed.\\n- Node.js: not found.\\n' >&2",
+    prepBody: "printf 'Machine Prep for macOS\\nMODE real\\nPREREQUISITE_DECISION_REACHED=1\\nCodex CLI (optional): not found. Setup can continue without it.\\n'\nprintf 'Financial Brain setup cannot start yet. Nothing was downloaded or installed.\\n- Node.js: not found.\\n' >&2",
   });
   assert.equal(prepFailure.status, 2, prepFailure.stderr);
-  assert.equal(prepFailure.stdout, lines(MAC_SCREEN.start, "", MAC_SCREEN.failed));
+  assert.equal(prepFailure.stdout, lines(MAC_SCREEN.start, "Codex CLI (optional): not found. Setup can continue without it.", "", MAC_SCREEN.failed));
   assert.equal(prepFailure.stderr, lines("Financial Brain setup cannot start yet. Nothing was downloaded or installed.", "- Node.js: not found."));
   assert.equal(prepFailure.log, lines(...MAC_FAILURE_MARKERS));
 
   const control = runMacWrapper({
     prepExit: 0, openExit: 0, handoffExit: 0,
     prepBody: [
-      "printf 'Machine Prep for macOS\\nMODE real\\nPREREQUISITE_DECISION_REACHED=1\\nDOWNLOAD_STARTED=1 kit_version=0.4.9\\nVERIFIED checksum\\n'",
+      "printf 'Machine Prep for macOS\\nMODE real\\nPREREQUISITE_DECISION_REACHED=1\\nCodex CLI (optional): found, version 9.0.0.\\nDOWNLOAD_STARTED=1 kit_version=0.4.9\\nVERIFIED checksum\\n'",
       "printf 'added 1 package in 1s\\nBRAIN_INSTALL_VERIFIED=1 version=0.4.9\\nFinancial Brain CLI preparation completed\\n'",
       "printf 'npm warn example\\n' >&2",
     ].join("\n"),
@@ -1393,7 +1398,7 @@ test("Mac launcher shows only plain lines on screen and keeps every status marke
   assert.equal(control.status, 0, control.stderr);
   assert.deepEqual(control.calls, ["prep", "open", "handoff"]);
   assert.equal(control.stdout, lines(
-    MAC_SCREEN.start, "added 1 package in 1s", "Financial Brain CLI preparation completed",
+    MAC_SCREEN.start, "Codex CLI (optional): found, version 9.0.0.", "added 1 package in 1s", "Financial Brain CLI preparation completed",
     MAC_SCREEN.ready, MAC_SCREEN.handoff, MAC_SCREEN.done,
   ));
   assert.equal(control.stderr, "npm warn example\n");
@@ -1427,8 +1432,8 @@ test("Windows launcher mirrors the Mac screen: markers only in installer.log, pr
   const windowsLog = wrapper.slice(wrapper.indexOf("function Write-SafeLog"), wrapper.indexOf("\n}\n", wrapper.indexOf("function Write-SafeLog")));
   assert.match(windowsLog, /\[IO\.File\]::AppendAllText\(\$LogFile, "\$Line`r`n"\)/);
   assert.doesNotMatch(windowsLog, /Console|Write-Output|Write-Host/);
-  // The OS gate runs before installer.log exists; it alone stays on stdout.
-  assert.match(wrapper, /Write-Output "OS_DECISION_REACHED=1 current=\$CurrentVersion minimum=10\.0"/);
+  // The OS gate has the same private log boundary as other decisions.
+  assert.match(wrapper, /Write-SafeLog "OS_DECISION_REACHED=1 current=\$CurrentVersion minimum=10\.0"/);
 
   // One hidden-line rule, case-sensitive on both platforms; stderr is never filtered.
   assert.ok(mac.includes("SCREEN_HIDDEN='^([A-Z][A-Z_]*([= ]|$)|Machine Prep for macOS$)'"));
@@ -1456,7 +1461,7 @@ test("Windows launcher mirrors the Mac screen: markers only in installer.log, pr
   const macLines = [...mac.matchAll(/^\s*say '([^']*)'/gm)].map((match) => match[1]);
   const windowsLines = [...wrapper.matchAll(/^\s*Write-OwnerLine "([^"]*)"/gm)].map((match) => match[1]);
   assert.deepEqual(macLines, [MAC_SCREEN.start, "", MAC_SCREEN.failed, MAC_SCREEN.ready, MAC_SCREEN.windowFailed, MAC_SCREEN.handoff, MAC_SCREEN.handoffFailed, MAC_SCREEN.done]);
-  assert.deepEqual([...windowsLines].sort(), macLines.map(toWindowsScreen).sort());
+  assert.deepEqual([...windowsLines].sort(), [...macLines.map(toWindowsScreen), "This PC needs Windows 10 or newer. Nothing was downloaded or installed."].sort());
   assert.match(wrapper, new RegExp([
     'Write-SafeLog "SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed"',
     'Write-OwnerLine ""',
@@ -1471,7 +1476,7 @@ test("Windows launcher mirrors the Mac screen: markers only in installer.log, pr
   assert.match(wait, /if \(\$env:MACHINE_PREP_INSTALLER_TEST_MODE -eq "1" -or \[Console\]::IsInputRedirected\) \{ return \}/);
   assert.match(wait, /\[Console\]::Out\.WriteLine\("Press Enter to close this window\."\)/);
   assert.match(wait, /\[void\]\[Console\]::ReadLine\(\)/);
-  assert.equal(wrapper.split("Wait-OwnerBeforeClose").length - 1, 4, "defined once and used on the three failure paths");
+  assert.equal(wrapper.split("Wait-OwnerBeforeClose").length - 1, 5, "defined once and used on all four failure paths");
   for (const [owner, exit] of [
     [WINDOWS_SCREEN.windowFailed, "exit $setupExit"],
     [WINDOWS_SCREEN.handoffFailed, "exit $handoffResult.ExitCode"],
@@ -1502,7 +1507,7 @@ test("Windows launcher reaches one typed exit decision and starts setup only aft
     ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
     : "powershell.exe";
   const run = ({ prep, setup, handoff }) => {
-    const home = mkdtempSync(join(ROOT, ".machine-prep-windows-wrapper-"));
+    const home = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-windows-wrapper-")));
     try {
       const result = spawnSync(powerShell, [
         "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -1534,7 +1539,7 @@ test("Windows launcher reaches one typed exit decision and starts setup only aft
       rmSync(home, { recursive: true, force: true });
     }
   };
-  const schemaMarkerOnScreen = /^(?:LOG_SCHEMA_DECISION_REACHED|INSTALLER_PROGRESS|PREP_EXIT_CODE|SETUP_LAUNCH_DECISION_REACHED|SETUP_WINDOW_STARTED|INSTALLER_HANDOFF)/m;
+  const schemaMarkerOnScreen = /^(?:OS_DECISION_REACHED|LOG_SCHEMA_DECISION_REACHED|INSTALLER_PROGRESS|PREP_EXIT_CODE|SETUP_LAUNCH_DECISION_REACHED|SETUP_WINDOW_STARTED|INSTALLER_HANDOFF)/m;
 
   const refused = run({ prep: 7, setup: 0, handoff: 0 });
   assert.equal(refused.status, 7, `${refused.stdout}${refused.stderr}`);
@@ -1563,7 +1568,7 @@ test("Windows launcher concurrently drains oversized child output for zero and n
     ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
     : "powershell.exe";
   for (const exitCode of [0, 7]) {
-    const directory = mkdtempSync(join(ROOT, ".machine-prep-windows-runner-pipes-"));
+    const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-windows-runner-pipes-")));
     const child = join(directory, "large-output.ps1");
     mkdirSync(join(directory, "temp"), { recursive: true });
     writeFileSync(child, `$chunk = "x" * 1024\n1..256 | ForEach-Object { [Console]::Error.WriteLine($chunk) }\n1..256 | ForEach-Object { [Console]::Out.WriteLine($chunk) }\nexit ${exitCode}\n`);
@@ -1596,4 +1601,12 @@ test("Windows launcher concurrently drains oversized child output for zero and n
       rmSync(directory, { recursive: true, force: true });
     }
   }
+});
+
+// Even the OS decision belongs in the fixed-schema log, not the owner screen.
+test("Windows OS decision is logged before refusal and hidden from the owner", () => {
+  const source = read("machine-prep/installers/windows/run-machine-prep.ps1");
+  assert.match(source, /Write-SafeLog "OS_DECISION_REACHED=1 current=\$CurrentVersion minimum=10\.0"/);
+  assert.doesNotMatch(source, /Write-Output "OS_DECISION_REACHED/);
+  assert.ok(source.indexOf('Write-SafeLog "OS_DECISION_REACHED=') < source.indexOf('if ($CurrentVersion.Major -lt 10)'));
 });

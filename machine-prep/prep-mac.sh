@@ -4,8 +4,7 @@
 set -eu
 
 NODE_VERSION="24.13.1"
-CLAUDE_VERSION="2.1.261"
-CODEX_VERSION="0.155.0-alpha.16"
+CLAUDE_MIN_VERSION="2.1.261"
 BRAIN_VERSION="0.4.9"
 BRAIN_KIT_URL="https://financialbrain.ai/kit/brain-installer-0.4.9-0555ad1972d7f8d6.tgz"
 BRAIN_KIT_SIZE="6668013"
@@ -13,15 +12,16 @@ BRAIN_KIT_SHA256="0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409
 WRANGLER_VERSION="4.131.1"
 # Official pages and the exact step on each, named to the owner when a
 # prerequisite needs action. Real mode never downloads or runs anything from
-# them; the owner installs by hand. No official Codex installer produces the
-# layout the pinned check accepts, so Codex names support instead of a page.
+# them; the owner installs by hand. Claude uses a floor because native
+# installs auto-update. Codex is informational and never blocks preparation.
 NODE_SOURCE="https://nodejs.org/en/download"
 GIT_SOURCE="https://developer.apple.com/documentation/xcode/installing-the-command-line-tools"
-CLAUDE_SOURCE="https://code.claude.com/docs/en/setup#install-a-specific-version"
+CLAUDE_SOURCE="https://code.claude.com/docs/en/setup#install-claude-code"
 NODE_HOW="At the top of the page, choose a version that starts with v24 (marked LTS). Then, under \"Or get a prebuilt Node.js\", click \"macOS Installer (.pkg)\" and open the downloaded file. Download page: $NODE_SOURCE"
 GIT_HOW="Follow the section \"Install the Command Line Tools package in Terminal\". Apple's guide: $GIT_SOURCE"
-CLAUDE_HOW="Under \"Install a specific version\" on the setup page, run the command for a specific version number with $CLAUDE_VERSION in place of the example. Then reopen this launcher before you start Claude Code, which updates itself when it runs. Setup page: $CLAUDE_SOURCE"
-CODEX_HOW="No official Codex installer puts it where this check looks, so ask Financial Brain support to set it up."
+CLAUDE_HOW="Under \"Install Claude Code\" on the setup page, choose \"Native Install (Recommended)\" and run the default command for your system. Setup page: $CLAUDE_SOURCE"
+CLAUDE_UPDATE_HOW="Open a new terminal and run claude update."
+CLAUDE_CONFLICT_HOW="Open a new terminal and run claude doctor. Follow its installation warning to select the Native Install copy."
 MODE="${1:---real}"
 if [ "$MODE" = "--test-install-brain" ]; then
   [ "${MACHINE_PREP_TEST_MODE:-}" = "1" ] || { printf 'REFUSED test install seam outside test mode\n' >&2; exit 2; }
@@ -40,7 +40,7 @@ CHECK_FAILURES=0
 NODE_STATE="MISSING"
 GIT_STATE="MISSING"
 CLAUDE_STATE="MISSING"
-CODEX_STATE="MISSING"
+CODEX_DETAIL="not found. Setup can continue without it."
 BRAIN_STATE="MISSING"
 XCODE_STATE="MISSING"
 SESSION_STATE="READY"
@@ -125,6 +125,19 @@ owner_step() {
 "
 }
 
+# Compare numeric components, not strings (2.1.1000 is newer than 2.1.261).
+# Both callers validate the stable x.y.z shape before reaching this comparison.
+claude_meets_floor() {
+  /usr/bin/awk -v actual="$1" -v floor="$CLAUDE_MIN_VERSION" 'BEGIN {
+    split(actual, a, "."); split(floor, f, ".")
+    for (i = 1; i <= 3; i++) {
+      if (a[i] + 0 > f[i] + 0) exit 0
+      if (a[i] + 0 < f[i] + 0) exit 1
+    }
+    exit 0
+  }'
+}
+
 collect_checks() {
   CHECK_FAILURES=0
   OWNER_STEPS=""
@@ -171,57 +184,41 @@ collect_checks() {
     owner_step "Git" "not found" "Apple's Command Line Tools, any version" "$GIT_HOW"
   fi
 
-  claude_paths=$(tool_paths claude)
-  claude_count=$(printf '%s\n' "$claude_paths" | /usr/bin/awk 'NF { n += 1 } END { print n + 0 }')
+  claude_path=$(tool_paths claude | /usr/bin/head -n 1)
   claude_version=$(tool_version claude 2>/dev/null || true)
-  if [ "$claude_count" -gt 1 ]; then
+  # Only the selected copy can block setup. Later copies do not shadow it.
+  # The native launcher location is documented in the vendor setup guide.
+  if [ -n "$claude_path" ] && [ "$claude_path" != "$BIN_DIR/claude" ]; then
     CLAUDE_STATE="SHADOWED"
-    status_line "$CLAUDE_STATE" "Claude Code" "$claude_count PATH matches; OWNER ACTION: remove the extra copies and keep only pinned $CLAUDE_VERSION from the official installer"
-    owner_step "Claude Code" 'more than one copy is installed; keep only the "Native Install" copy and remove the others as shown under "Uninstall Claude Code" on the setup page' "exactly version $CLAUDE_VERSION" "$CLAUDE_HOW"
-  elif [ "$claude_count" -eq 1 ] && [ "$claude_paths" != "$BIN_DIR/claude" ]; then
-    CLAUDE_STATE="SHADOWED"
-    status_line "$CLAUDE_STATE" "Claude Code" "$claude_paths resolves first; OWNER ACTION: remove it and install pinned $CLAUDE_VERSION from the official installer"
-    owner_step "Claude Code" 'a copy installed another way than "Native Install" is in the way; remove it as shown under "Uninstall Claude Code" on the setup page' "exactly version $CLAUDE_VERSION" "$CLAUDE_HOW"
-  elif [ -z "$claude_version" ]; then
+    status_line "$CLAUDE_STATE" "Claude Code" "another install is selected; $CLAUDE_CONFLICT_HOW"
+    owner_step "Claude Code" "another install is selected instead of the Native Install copy" "version $CLAUDE_MIN_VERSION or newer from Native Install" "$CLAUDE_CONFLICT_HOW"
+  elif [ -z "$claude_path" ] || ! printf '%s' "$claude_version" | /usr/bin/grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+ \(Claude Code\)$'; then
     CLAUDE_STATE="MISSING"
-    status_line "$CLAUDE_STATE" "Claude Code" "OWNER ACTION: install pinned $CLAUDE_VERSION from the official signed installer"
-    if [ "$claude_count" -eq 0 ]; then problem="not found"; else problem="a copy was found, but its version could not be read"; fi
-    owner_step "Claude Code" "$problem" "exactly version $CLAUDE_VERSION" "$CLAUDE_HOW"
-  elif [ "$claude_version" = "$CLAUDE_VERSION (Claude Code)" ]; then
+    status_line "$CLAUDE_STATE" "Claude Code" "version $CLAUDE_MIN_VERSION or newer; $CLAUDE_HOW"
+    if [ -z "$claude_path" ]; then problem="not found"; else problem="a copy was found, but its version could not be read"; fi
+    owner_step "Claude Code" "$problem" "version $CLAUDE_MIN_VERSION or newer" "$CLAUDE_HOW"
+  elif claude_meets_floor "${claude_version%" (Claude Code)"}"; then
     CLAUDE_STATE="READY"
     status_line "$CLAUDE_STATE" "Claude Code" "$claude_version"
   else
     CLAUDE_STATE="WRONG_VERSION"
-    status_line "$CLAUDE_STATE" "Claude Code" "$claude_version; expected $CLAUDE_VERSION; OWNER ACTION: replace it with pinned $CLAUDE_VERSION from the official installer"
+    status_line "$CLAUDE_STATE" "Claude Code" "$claude_version; needs $CLAUDE_MIN_VERSION or newer; $CLAUDE_UPDATE_HOW"
     found=${claude_version%" (Claude Code)"}
-    owner_step "Claude Code" "version $found is installed" "exactly version $CLAUDE_VERSION" "$CLAUDE_HOW"
+    owner_step "Claude Code" "version $found is installed" "version $CLAUDE_MIN_VERSION or newer" "$CLAUDE_UPDATE_HOW"
   fi
 
-  codex_paths=$(tool_paths codex)
-  codex_count=$(printf '%s\n' "$codex_paths" | /usr/bin/awk 'NF { n += 1 } END { print n + 0 }')
+  codex_path=$(tool_paths codex | /usr/bin/head -n 1)
   codex_version=$(tool_version codex 2>/dev/null || true)
-  if [ "$codex_count" -gt 1 ]; then
-    CODEX_STATE="SHADOWED"
-    status_line "$CODEX_STATE" "Codex CLI" "$codex_count PATH matches; OWNER ACTION: remove the extra copies and keep only pinned $CODEX_VERSION from the official npm package with prefix ~/.local"
-    owner_step "Codex CLI" "more than one copy is installed" "exactly version $CODEX_VERSION" "$CODEX_HOW"
-  elif [ "$codex_count" -eq 1 ] && [ "$codex_paths" != "$BIN_DIR/codex" ]; then
-    CODEX_STATE="SHADOWED"
-    status_line "$CODEX_STATE" "Codex CLI" "$codex_paths resolves first; OWNER ACTION: remove it and install pinned $CODEX_VERSION from the official npm package with prefix ~/.local"
-    owner_step "Codex CLI" "a copy is installed in a place this check does not accept" "exactly version $CODEX_VERSION" "$CODEX_HOW"
-  elif [ -z "$codex_version" ]; then
-    CODEX_STATE="MISSING"
-    status_line "$CODEX_STATE" "Codex CLI" "OWNER ACTION: install pinned $CODEX_VERSION from the official package"
-    if [ "$codex_count" -eq 0 ]; then problem="not found"; else problem="a copy was found, but its version could not be read"; fi
-    owner_step "Codex CLI" "$problem" "exactly version $CODEX_VERSION" "$CODEX_HOW"
-  elif [ "$codex_version" = "codex-cli $CODEX_VERSION" ]; then
-    CODEX_STATE="READY"
-    status_line "$CODEX_STATE" "Codex CLI" "$codex_version"
+  if [ -z "$codex_path" ]; then
+    CODEX_DETAIL="not found. Setup can continue without it."
+  elif printf '%s' "$codex_version" | /usr/bin/grep -Eq '^codex-cli [0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$'; then
+    CODEX_DETAIL="found, version ${codex_version#"codex-cli "}."
   else
-    CODEX_STATE="WRONG_VERSION"
-    status_line "$CODEX_STATE" "Codex CLI" "$codex_version; expected $CODEX_VERSION; OWNER ACTION: replace it with pinned $CODEX_VERSION from the official npm package with prefix ~/.local"
-    found=${codex_version#"codex-cli "}
-    owner_step "Codex CLI" "version $found is installed" "exactly version $CODEX_VERSION" "$CODEX_HOW"
+    # Inspect known package metadata only. Never start an optional assistant
+    # just to get its version, and never echo unrecognized tool output.
+    CODEX_DETAIL="found; version unavailable. Setup can continue without it."
   fi
+  status_line "OPTIONAL" "Codex CLI" "$CODEX_DETAIL"
 
   brain_paths=$(tool_paths brain)
   brain_count=$(printf '%s\n' "$brain_paths" | /usr/bin/awk 'NF { n += 1 } END { print n + 0 }')
@@ -298,7 +295,7 @@ print_plan() {
   if [ "$CHECK_FAILURES" -eq 0 ]; then printf 'READINESS GREEN\n'; else printf 'READINESS RED\n'; fi
   printf '\nPLAN\n'
   printf "%s\n" \
-    "1. OWNER ACTION: install any missing Node.js, Git, Claude Code, or Codex prerequisite from its official signed installer, then rerun this launcher." \
+    "1. OWNER ACTION: install any missing Node.js, Git, or Claude Code tool from its official signed installer, then rerun this launcher." \
     "2. REFUSE: the launcher does not download or execute prerequisite installers whose bytes it cannot authenticate before execution." \
     "3. SKIP: do not install global Wrangler; Financial Brain owns wrangler@$WRANGLER_VERSION." \
     "4. DOWNLOAD: Financial Brain $BRAIN_VERSION from the one pinned HTTPS kit URL without following redirects." \
@@ -551,13 +548,16 @@ run_real() {
   collect_checks >/dev/null
   printf 'PREREQUISITE_DECISION_REACHED=1\n'
   if [ "$NODE_STATE" != "READY" ] || [ "$GIT_STATE" != "READY" ] || [ "$CLAUDE_STATE" != "READY" ] || \
-     [ "$CODEX_STATE" != "READY" ] || [ "$SESSION_STATE" != "READY" ]; then
+     [ "$SESSION_STATE" != "READY" ]; then
     printf 'Financial Brain setup cannot start yet. Nothing was downloaded or installed.\n' >&2
     printf 'What you need to do:\n' >&2
     printf '%s' "$OWNER_STEPS" >&2
     printf 'When everything above is done, open Run Financial Brain Machine Prep again.\n' >&2
+    # Keep optional information outside the required-action block on screen.
+    printf 'Codex CLI (optional): %s\n' "$CODEX_DETAIL"
     return 2
   fi
+  printf 'Codex CLI (optional): %s\n' "$CODEX_DETAIL"
   if [ -e "$BRAIN_PREFIX" ] || [ -L "$BRAIN_PREFIX" ]; then verify_installed_brain --verify-installed "$BRAIN_PREFIX"; return 2; fi
   install_brain || return 1
   printf 'Financial Brain CLI preparation completed\n'
