@@ -6,6 +6,7 @@ import { installRemovalPlanAdapter } from "./removal-plan-adapter.mjs";
  */
 
 import fs from "node:fs";
+import childProcess from "node:child_process";
 import net from "node:net";
 import os from "node:os";
 import tls from "node:tls";
@@ -24,6 +25,17 @@ if (!evidencePath || !userRoot || !statePath || !Number.isInteger(imapPort) || i
 const originalReadFileSync = fs.readFileSync.bind(fs);
 const originalWriteFileSync = fs.writeFileSync.bind(fs);
 const originalRenameSync = fs.renameSync.bind(fs);
+
+// This CLI scenario has only file-backed fixture credentials and an injected
+// mailbox. A credential helper or scheduler command is never part of the test.
+const blockHostProcess = () => {
+  fs.writeSync(2, "TEST_SIDE_EFFECT_BLOCKED:host_process\n");
+  process.exit(86);
+};
+for (const name of ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"]) {
+  childProcess[name] = blockHostProcess;
+}
+childProcess.ChildProcess.prototype.spawn = blockHostProcess;
 
 const blank = () => ({ stored_families: [], ingested_ids: [], forget_targets: [], events: [] });
 const readEvidence = () => {
