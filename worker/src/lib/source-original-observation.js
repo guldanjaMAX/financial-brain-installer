@@ -20,6 +20,7 @@ import {
   normalizeSourceOriginalSource,
 } from "./source-original-binding.js";
 import { backendOf, D1 } from "./store.js";
+import { structuralFamilyMember } from "./store-d1.js";
 import {
   buildSourceOriginalResultFamilyProof,
   handleSourceOriginalResultFamily,
@@ -392,7 +393,7 @@ function rowsOf(result) {
   return result.results;
 }
 
-async function currentDocumentSnapshot(env, source, locator) {
+async function currentDocumentSnapshot(env, source, locator, originalId) {
   const base = `${source}:${locator}`;
   const result = await env.DB.prepare(
     `SELECT d.doc_uid,d.source,d.source_id,d.ingested_at,d.content_hash,d.meta,d.text_source,d.text_reliable,
@@ -466,6 +467,16 @@ async function currentDocumentSnapshot(env, source, locator) {
       // A malformed binding is not readiness. Keep it out of the stable
       // document-set hash and let the exact verifier fail closed below.
     }
+    const boundOriginal = sourceOriginalBinding?.tenant_id === SOURCE_ORIGINAL_TENANT_ID &&
+      sourceOriginalBinding?.locator_kind === "source_relative_path"
+      ? sourceOriginalBinding.original_id : null;
+    // Use the same membership decision as cleanup and the final proof. An
+    // independent prefix-sharing original cannot obstruct this original's
+    // readiness. Retain exact-original anomalies for the completeness checks.
+    if (row.doc_uid !== base && row.source_id !== locator && boundOriginal !== originalId &&
+        metadata?.family_of !== base && !structuralFamilyMember({
+          ...row, meta: metadata, original_id: boundOriginal,
+        }, base, originalId)) continue;
     documents.push({
       doc_uid: String(row.doc_uid),
       source: String(row.source),
@@ -623,7 +634,7 @@ export async function sourceOriginalResultBindingReadiness(env, {
     source: normalizedSource,
     ...normalizedLocator,
   });
-  const snapshot = await currentDocumentSnapshot(env, normalizedSource, normalizedLocator.locator);
+  const snapshot = await currentDocumentSnapshot(env, normalizedSource, normalizedLocator.locator, originalId);
   const ready = await rawOriginalBindingEvidenceMatches({
     original_id: originalId,
     locator_kind: rawReceipt.locator_kind,
@@ -875,7 +886,7 @@ async function handleRecord(env, body) {
         "accepted outcomes require a result-family receipt and retrieval proof",
       );
     }
-    const snapshot = await currentDocumentSnapshot(env, binding.source, target.locator);
+    const snapshot = await currentDocumentSnapshot(env, binding.source, target.locator, target.original_id);
     if (!await observedOutcomeMatches(target, snapshot)) {
       refuse("source_original_outcome_unobserved", "claimed outcome does not match exact current document evidence", 409);
     }
@@ -1055,7 +1066,7 @@ async function handleAcceptedResolution(env, body, dependencies) {
     refuse("source_original_binding_mismatch", "target identity does not match the sealed one-original plan", 409);
   }
 
-  const before = await currentDocumentSnapshot(env, binding.source, target.locator);
+  const before = await currentDocumentSnapshot(env, binding.source, target.locator, target.original_id);
   if (!await acceptedEvidenceIsValid(target, before)) {
     refuse("source_original_outcome_unobserved", "accepted outcome does not match exact current document evidence", 409);
   }
@@ -1080,7 +1091,7 @@ async function handleAcceptedResolution(env, body, dependencies) {
   // The observation hash and the schema-44 family receipt use different
   // canonical projections. Re-read the observation projection after the
   // family/retrieval proof so both views describe the same bounded cut.
-  const snapshot = await currentDocumentSnapshot(env, binding.source, target.locator);
+  const snapshot = await currentDocumentSnapshot(env, binding.source, target.locator, target.original_id);
   if (snapshot.count !== before.count || snapshot.hash !== before.hash ||
       proof.documentCount !== snapshot.count || !await acceptedEvidenceIsValid(target, snapshot)) {
     refuse("source_original_result_family_changed", "the exact current result family changed during accepted-resolution proof", 409);
@@ -1266,7 +1277,7 @@ async function handleVerify(env, body) {
           target.resolves_observation_hash !== row.resolves_observation_hash) {
         status = "submitted_observation_mismatch";
       } else {
-        const snapshot = await currentDocumentSnapshot(env, binding.source, target.locator);
+        const snapshot = await currentDocumentSnapshot(env, binding.source, target.locator, target.original_id);
         if (snapshot.count !== Number(row.result_document_count) || snapshot.hash !== row.result_document_set_hash) {
           status = "current_result_changed";
         } else if (row.outcome === "gap") {

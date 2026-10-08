@@ -1,3 +1,4 @@
+import { readIngestRemovalRequest, previewIngestRemovals, applyIngestRemovals } from "./lib/ingest-removal-plan.js";
 /**
  * brain worker — the client-installable retrieval brain.
  *
@@ -3414,6 +3415,26 @@ export default {
           }, status));
         }
       }
+      if (path === "/api/admin/brain/ingest-removal-plan" && request.method === "POST") {
+        if (backendOf(env) !== D1 || !scopeIsUnrestricted(scope)) {
+          return privateNoStore(jsonResponse({ error: "Removal plans need the owner and the D1 backend." }, 403));
+        }
+        try {
+          const body = await readIngestRemovalRequest(request);
+          if (body?.action === "apply" && upgradePauseHolds(env)) return privateNoStore(jsonResponse(pausedCorpusRefusal(), 503));
+          const result = body?.action === "preview"
+            ? await previewIngestRemovals(env, body)
+            : body?.action === "apply"
+              ? await applyIngestRemovals(env, body)
+              : null;
+          if (!result) throw new Error("Choose preview or apply for a removal plan.");
+          return privateNoStore(jsonResponse(result));
+        } catch {
+          return privateNoStore(jsonResponse({
+            error: "Removal plan unavailable or changed. Verify the migration and runtime, then plan ingestion again.",
+          }, 409));
+        }
+      }
       if (path === "/api/admin/brain/source-families" && request.method === "POST") {
         return await handleSourceFamilies(env, request);
       }
@@ -3540,8 +3561,18 @@ export default {
           if (docUids.length || source || families.length > 50) {
             return jsonResponse({ error: "families must be used alone and contain at most 50 entries" }, 400);
           }
+          // Older orchestrators sent confirm:true during ordinary ingestion.
+          // It is not an owner decision about an exact stored-inventory plan.
+          // Explicit source forget uses its own guarded preview below; exact
+          // provenance repair now uses the inventory-fenced removal protocol.
+          if (confirm) {
+            return privateNoStore(jsonResponse({
+              code: "INGEST_REMOVAL_PLAN_REQUIRED",
+              error: "Nothing was removed. Update the CLI, then run ingestion again to review and explicitly apply its exact removal plan.",
+            }, 409));
+          }
           try {
-            return jsonResponse(await forgetFamilies(env, { families, dryRun: !confirm }));
+            return jsonResponse(await forgetFamilies(env, { families, dryRun: true }));
           } catch (error) {
             return jsonResponse({ error: error.message }, 400);
           }

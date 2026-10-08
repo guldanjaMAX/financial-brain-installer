@@ -4370,7 +4370,13 @@ async function postConfirmedSourceForget(env, source = "meeting") {
     families: [{ base_doc_uid: "drive:F1", keep_doc_uids: ["drive:F1#part1of2", "drive:F1#part2of2"] }],
     confirm: true,
   });
-  check("split-document families have an authenticated cleanup route", r.status === 200, String(r.status));
+  const refused = await r.json();
+  check("legacy split-document cleanup requires an exact removal plan",
+    r.status === 409 && refused.code === "INGEST_REMOVAL_PLAN_REQUIRED", String(r.status));
+  const preview = await post(env, "/api/admin/brain/forget", {
+    families: [{ base_doc_uid: "drive:F1", keep_doc_uids: ["drive:F1#part1of2", "drive:F1#part2of2"] }],
+  });
+  check("legacy split-document previews remain available", preview.status === 200, String(preview.status));
   check("a family keep id outside its base is refused",
     (await post(env, "/api/admin/brain/forget", { families: [{ base_doc_uid: "drive:F1", keep_doc_uids: ["drive:F2"] }] })).status === 400);
 }

@@ -1,3 +1,4 @@
+import { installRemovalPlanAdapter } from "./removal-plan-adapter.mjs";
 /** Offline Gmail incremental-policy and Worker fixture. Invented data only. */
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -84,6 +85,56 @@ const requireDefaultFilteredQuery = (url, since = null) => {
     throw new Error("Gmail full-list query did not match the declared date floor");
   }
 };
+
+function currentStoredFamilies() {
+    const storedByMode = {
+      "scanner-v5": ["gmail:migration-safe", "gmail:migration-sensitive"],
+      "scanner-v5-omitted": ["gmail:migration-omitted", "gmail:migration-safe"],
+      "scanner-v5-retained-untracked": ["gmail:migration-safe", "gmail:migration-unreadable"],
+      "scanner-v5-progress-missing": [],
+      "scanner-v5-mass-refusal": massRefusalIds.map((id) => `gmail:${id}`),
+      "scanner-v5-dilution-guard": dilutionOldIds.map((id) => `gmail:${id}`),
+      "credential-refusal": ["gmail:credential-refused"],
+      deleted: ["gmail:gone"],
+      relabeled: ["gmail:relabelled"],
+      "pending-restored": ["gmail:pending-restored"],
+      "pending-retained": ["gmail:pending-retained"],
+      "pending-absent-unreadable": [],
+      "pending-readback-failure": [
+        "gmail:pending-readback",
+        ...Array.from({ length: 9 }, (_, index) => `gmail:readback-decoy-${index + 1}`),
+      ],
+      "readback-stale": ["gmail:gone"],
+      unclassified: ["gmail:pending-removal", "gmail:unclassified"],
+      "since-safe-sweep": ["gmail:since-oldest"],
+      "since-removal-review": ["gmail:since-older", "gmail:since-retained"],
+      "since-incremental": ["gmail:since-incremental-older"],
+    };
+    const evidence = readEvidence();
+    const pendingReadbackAttempts = evidence.forget_targets.filter(
+      (uid) => uid === "gmail:pending-readback"
+    ).length;
+    if (mode === "pending-readback-failure" && pendingReadbackAttempts === 1 &&
+        evidence.receipts.indexing === 1) {
+      const error = new TypeError("fixture source-family readback connection reset");
+      error.code = "ECONNRESET";
+      throw error;
+    }
+    const stored = new Set([
+      ...(storedByMode[mode] || []),
+      ...evidence.ingested_ids
+        .filter(() => mode !== "worker-refusal")
+        .map((id) => `gmail:${id}`),
+    ]);
+    if (mode === "pending-readback-failure") {
+      // The first success-shaped forget is deliberately ineffective. The retry
+      // succeeds, proving the pending marker survived the failed readback.
+      if (pendingReadbackAttempts >= 2) stored.delete("gmail:pending-readback");
+    } else if (mode !== "readback-stale") {
+      for (const uid of evidence.forget_targets) stored.delete(uid);
+    }
+    return [...stored].sort();
+}
 
 globalThis.fetch = async (input, options = {}) => {
   const url = new URL(typeof input === "string" || input instanceof URL ? String(input) : input.url);
@@ -435,53 +486,7 @@ globalThis.fetch = async (input, options = {}) => {
   }
   if (url.hostname === "fixture.invalid" && url.pathname === "/api/admin/brain/source-families") {
     const request = bodyOf(options);
-    const storedByMode = {
-      "scanner-v5": ["gmail:migration-safe", "gmail:migration-sensitive"],
-      "scanner-v5-omitted": ["gmail:migration-omitted", "gmail:migration-safe"],
-      "scanner-v5-retained-untracked": ["gmail:migration-safe", "gmail:migration-unreadable"],
-      "scanner-v5-progress-missing": [],
-      "scanner-v5-mass-refusal": massRefusalIds.map((id) => `gmail:${id}`),
-      "scanner-v5-dilution-guard": dilutionOldIds.map((id) => `gmail:${id}`),
-      "credential-refusal": ["gmail:credential-refused"],
-      deleted: ["gmail:gone"],
-      relabeled: ["gmail:relabelled"],
-      "pending-restored": ["gmail:pending-restored"],
-      "pending-retained": ["gmail:pending-retained"],
-      "pending-absent-unreadable": [],
-      "pending-readback-failure": [
-        "gmail:pending-readback",
-        ...Array.from({ length: 9 }, (_, index) => `gmail:readback-decoy-${index + 1}`),
-      ],
-      "readback-stale": ["gmail:gone"],
-      unclassified: ["gmail:pending-removal", "gmail:unclassified"],
-      "since-safe-sweep": ["gmail:since-oldest"],
-      "since-removal-review": ["gmail:since-older", "gmail:since-retained"],
-      "since-incremental": ["gmail:since-incremental-older"],
-    };
-    const evidence = readEvidence();
-    const pendingReadbackAttempts = evidence.forget_targets.filter(
-      (uid) => uid === "gmail:pending-readback"
-    ).length;
-    if (mode === "pending-readback-failure" && pendingReadbackAttempts === 1 &&
-        evidence.receipts.indexing === 1) {
-      const error = new TypeError("fixture source-family readback connection reset");
-      error.code = "ECONNRESET";
-      throw error;
-    }
-    const stored = new Set([
-      ...(storedByMode[mode] || []),
-      ...evidence.ingested_ids
-        .filter(() => mode !== "worker-refusal")
-        .map((id) => `gmail:${id}`),
-    ]);
-    if (mode === "pending-readback-failure") {
-      // The first success-shaped forget is deliberately ineffective. The retry
-      // succeeds, proving the pending marker survived the failed readback.
-      if (pendingReadbackAttempts >= 2) stored.delete("gmail:pending-readback");
-    } else if (mode !== "readback-stale") {
-      for (const uid of evidence.forget_targets) stored.delete(uid);
-    }
-    const ordered = [...stored].sort();
+    const ordered = currentStoredFamilies();
     const limit = Math.max(1, Math.min(1000, Number(request.limit) || 1000));
     const start = request.cursor
       ? ordered.findIndex((uid) => uid > request.cursor)
@@ -498,3 +503,8 @@ globalThis.fetch = async (input, options = {}) => {
 
   throw new Error(`unexpected fixture request: ${options.method || "GET"} ${url.origin}${url.pathname}`);
 };
+
+installRemovalPlanAdapter({
+  inventory: currentStoredFamilies,
+  revision: () => readEvidence().ingested_ids.length + readEvidence().forget_targets.length,
+});

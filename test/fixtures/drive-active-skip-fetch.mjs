@@ -1,3 +1,4 @@
+import { installRemovalPlanAdapter } from "./removal-plan-adapter.mjs";
 /** Offline fixture for version-aware active Drive skip handling. */
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -188,3 +189,16 @@ globalThis.fetch = async (input, options = {}) => {
 
   throw new Error(`unexpected fixture request: ${options.method || "GET"} ${url.origin}${url.pathname}`);
 };
+
+installRemovalPlanAdapter({
+  record: (action) => {
+    const evidence = readEvidence();
+    const key = action === "preview" ? "planPreviews" : "planApplies";
+    evidence[key] = Number(evidence[key] || 0) + 1;
+    saveEvidence(evidence);
+  },
+  inventory: () => fixtureMode === "adjudicated-only"
+    ? (readEvidence().removedFamilies >= 4 ? [] : [MIGRATED])
+    : readEvidence().removedFamilies ? [MIGRATED] : [MIGRATED, STALE, SENSITIVE, MISSING].sort(),
+  revision: () => readEvidence().removedFamilies + readEvidence().ingestBatchWrites,
+});

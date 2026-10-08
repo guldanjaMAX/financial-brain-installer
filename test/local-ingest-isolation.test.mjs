@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { cmdIngestLocal } from "../brain.mjs";
+globalThis.fetch = async () => { throw new Error("unexpected unmocked request"); };
 import {
   batchStream,
   removedSinceLastRun,
@@ -23,7 +24,7 @@ test("one unexpected file preparation error is recorded while neighboring files 
   const savedStates = [];
   const receipts = [];
   const sent = [];
-  const reconciled = [];
+  const reviewed = [];
   const output = [];
   const priorLog = console.log;
   console.log = (...parts) => output.push(parts.join(" "));
@@ -73,9 +74,10 @@ test("one unexpected file preparation error is recorded while neighboring files 
           }
           return tally;
         },
-        reconcileDocumentFamilies: async ({ families }) => {
-          reconciled.push(...families);
-          return { reconciled: families.length };
+        removalPlanRequest: async ({ body }) => {
+          assert.equal(body.action, "preview");
+          reviewed.push(...body.families);
+          return { marker: { instance: "fixture", nonce: "fixture", generation: 1, runtime: "fixture" }, targets: [], documents: 0 };
         },
         listStoredSourceFamilies: async () => new Set(),
       },
@@ -86,7 +88,7 @@ test("one unexpected file preparation error is recorded while neighboring files 
       /1 file failed, so this ingest is incomplete/,
     );
     assert.deepEqual(sent, ["good-before.txt", "good-after.txt"]);
-    assert.equal(reconciled.length, 2);
+    assert.equal(reviewed.length, 2);
     assert.equal(receipts.at(-1)?.status, "error");
     assert.equal(receipts.at(-1)?.docs_failed, 1);
     assert.equal(receipts.at(-1)?.docs_refused, 1);
@@ -262,7 +264,10 @@ test("an isolated preparation failure keeps the credential-scanner upgrade unfin
       }
       return tally;
     },
-    reconcileDocumentFamilies: async ({ families }) => ({ reconciled: families.length }),
+    removalPlanRequest: async ({ body }) => {
+      assert.equal(body.action, "preview");
+      return { marker: { instance: "fixture", nonce: "fixture", generation: 1, runtime: "fixture" }, targets: [], documents: 0 };
+    },
     listStoredSourceFamilies: async () => new Set(),
   });
   const manifest = { brain: { domain: "brain.example.invalid" }, safety: { credential_scanner: { enabled: true } } };

@@ -11,6 +11,10 @@ import {
   runProviderConnector,
 } from "../connectors/provider-runtime.mjs";
 
+import { createIngestRemovalReview } from "../operations/ingest-removal-plan.mjs";
+import { buildDriveRemovalPlan } from "../operations/drive-removal-plan.mjs";
+import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
+
 let ran = 0;
 const check = (name, condition, detail = "") => {
   ran++;
@@ -387,33 +391,45 @@ async function runCalendarContract(syncImpl) {
   let inventoryCalls = 0;
   let removalCalls = 0;
   let stateSaves = 0;
-  const run = (approvedSnapshotFingerprint = null) => runProviderConnector({
+  const store = ingestPlanStore();
+  for (const uid of stored) store.put(uid);
+  const state = { done: {}, skipped: {} };
+  const review = createIngestRemovalReview({ state, saveState() {}, source: "microsoft", manifest: {},
+    manifestPath: "/fixture/manifest.json", base: "https://fixture.invalid",
+    request: async (input) => { if (input.body.action === "apply") removalCalls++; return store.request(input); },
+    runtime: () => "fixture-runtime" });
+  const run = () => runProviderConnector({
     provider: "microsoft",
     sync: async () => adapter,
     resolveAccess: async () => ({ accessToken: "offline-token", connection: {} }),
     loadState: () => ({ cursor }),
     saveState: () => { stateSaves++; },
     sendBatch: async () => ({ body: { results: [] } }),
-    removeDocuments: async ({ uids }) => {
-      removalCalls++;
-      for (const uid of uids) stored.delete(uid);
-      return { applied: uids.length, pending: 0 };
-    },
-    listStoredFamilies: async () => { inventoryCalls++; return new Set(stored); },
+    removeDocuments: async () => { throw new Error("unreviewed removal"); },
+    listStoredFamilies: async () => { inventoryCalls++; return new Set(store.uids()); },
+    reviewRemovals: ({ uids, storedFamilies, requiredApproval }) => review.finish({
+      sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }),
+      providerApproval: requiredApproval,
+    }),
     postReceipt: async () => {},
     base: "https://brain.invalid",
     adminKey: "offline-key",
-    approvedSnapshotFingerprint,
     now: () => new Date(NOW),
   });
-  await assert.rejects(run(), (error) => error?.code === "provider_removal_review_required");
-  check("calendar removal review is not diluted by unrelated mail families",
-    inventoryCalls > 0 && removalCalls === 0 && stateSaves === 0);
-
-  const fingerprint = providerSnapshotRemovalFingerprint("microsoft", ["microsoft:outlook:event:event-cap-1"]);
-  await run(fingerprint);
-  check("the exact approved calendar removal reaches deletion and cursor save as the green control",
-    removalCalls === 1 && stateSaves === 1 && !stored.has("microsoft:outlook:event:event-cap-1"));
+  try {
+    await assert.rejects(run(), (error) => error?.code === "SAFETY_REVIEW_REQUIRED");
+    check("calendar removal review is not diluted by unrelated mail families",
+      inventoryCalls > 0 && removalCalls === 0 && stateSaves === 0);
+    const fingerprint = providerSnapshotRemovalFingerprint("microsoft", ["microsoft:outlook:event:event-cap-1"]);
+    assert.equal(state.ingest_removal_plan.providerApproval, fingerprint);
+    assert.deepEqual(state.ingest_removal_plan.targets, ["microsoft:outlook:event:event-cap-1"]);
+    await assert.rejects(review.apply(state.ingest_removal_plan.fingerprint), { code: "SAFETY_REVIEW_REQUIRED" });
+    assert.equal(removalCalls, 0);
+    await review.apply(state.ingest_removal_plan.fingerprint, fingerprint);
+    await run();
+    check("the exact approved calendar removal reaches deletion and resumed cursor save as the green control",
+      removalCalls === 1 && stateSaves === 1 && !store.uids().includes("microsoft:outlook:event:event-cap-1"));
+  } finally { store.db.close(); }
 }
 
 await runCalendarContract(syncMicrosoftGraph);

@@ -21,6 +21,7 @@ import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import { syncBuiltinESMExports } from "node:module";
 
+import { previewIngestRemovals, applyIngestRemovals } from "../../worker/src/lib/ingest-removal-plan.js";
 import { forgetFamilies, listSourceFamilies } from "../../worker/src/lib/store-d1.js";
 
 const userRoot = String(process.env.BRAIN_FAMILY_REPRO_USER_ROOT || "");
@@ -83,14 +84,15 @@ const prepare = (sql) => {
 
 const workerEnv = {
   STORAGE: "d1",
+  INGEST_VERSION: { id: "fixture-runtime" },
   DB: {
     prepare,
     batch: async (statements) => {
       db.exec("BEGIN");
       try {
         const results = statements.map((statement) => {
-          const result = db.prepare(statement._sql).run(...statement._params);
-          return { success: true, results: [], meta: { changes: Number(result.changes || 0) } };
+          const results = db.prepare(statement._sql).all(...statement._params);
+          return { success: true, results, meta: { changes: results.length } };
         });
         db.exec("COMMIT");
         return results;
@@ -110,7 +112,7 @@ const storeDocument = (docUid, source, sourceId, title, metadata) => db.prepare(
   `INSERT OR REPLACE INTO documents (doc_uid, source, source_id, title, ingested_at, content_hash, meta)
    VALUES (?, ?, ?, ?, ?, ?, ?)`
 ).run(
-  docUid, source, sourceId, title || docUid, Date.now(), `hash:${docUid}`,
+  docUid, source, sourceId, title || docUid, 1790812800000, `hash:${docUid}`,
   JSON.stringify(metadata || {}),
 );
 
@@ -119,6 +121,8 @@ const storeDocument = (docUid, source, sourceId, title, metadata) => db.prepare(
 const initialEvidence = () => ({
   ingestBatches: 0,
   inventoryRequests: 0,
+  planPreviews: 0,
+  planApplies: 0,
   storedDocUids: [],
   forgetRequests: [],
   forgetResults: [],
@@ -196,6 +200,17 @@ globalThis.fetch = async (input, options = {}) => {
       cursor: body.cursor || "",
       limit: Number(body.limit || 500),
     });
+    save();
+    return json(out);
+  }
+
+  if (url.pathname === "/api/admin/brain/ingest-removal-plan") {
+    const body = parseBody(options);
+    if (body.action === "preview") evidence.planPreviews++;
+    else evidence.planApplies++;
+    const out = body.action === "preview"
+      ? await previewIngestRemovals(workerEnv, body)
+      : await applyIngestRemovals(workerEnv, body);
     save();
     return json(out);
   }

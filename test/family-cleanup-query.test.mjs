@@ -49,8 +49,13 @@ for (let index = 0; index < 2_000; index++) {
 
 const structuralBase = `gmail:${"a".repeat(80)}`;
 store(structuralBase, "gmail", "a".repeat(80));
-store(`${structuralBase}#part1of2`, "gmail", `${"a".repeat(80)}#part1of2`);
-store(`${structuralBase}#part2of2`, "gmail", `${"a".repeat(80)}#part2of2`);
+// Match the splitter's provenance contract; a bare prefix is not a family.
+store(`${structuralBase}#part1of2`, "gmail", `${"a".repeat(80)}#part1of2`, {
+  part_of: "a".repeat(80), part: 1, part_count: 2,
+});
+store(`${structuralBase}#part2of2`, "gmail", `${"a".repeat(80)}#part2of2`, {
+  part_of: "a".repeat(80), part: 2, part_count: 2,
+});
 store(`${structuralBase}#paru-neighbor`, "gmail", `${"a".repeat(80)}#paru-neighbor`);
 
 const declaredBase = "upload:synthetic-export.txt";

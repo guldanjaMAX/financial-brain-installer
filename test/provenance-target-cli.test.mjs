@@ -9,6 +9,8 @@ import {
   renderProvenanceTargetRepairReceipt,
 } from "../operations/provenance-target-cli.mjs";
 
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
+
 function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") {
@@ -709,7 +711,7 @@ await assert.rejects(
 );
 assert.deepEqual(staleFixture.state.mutations, []);
 
-/* A family mismatch stops before schema-45 admission and names only the stage. */
+/* A family mismatch stops before admission and gives private, actionable guidance. */
 const mismatchFixture = fixtureDependencies({ state: { familyMismatch: true } });
 const mismatchPreview = await previewProvenanceTargetRepair(invocation(), mismatchFixture.dependencies);
 let mismatchError = null;
@@ -726,6 +728,21 @@ assert.equal(mismatchError.stage, "result_family_verify_readback");
 assert.equal(mismatchError.receipt.complete, false);
 assert.equal(mismatchFixture.state.mutations.includes("accepted.record"), false);
 assert.equal(JSON.stringify(mismatchError).includes(TARGET), false);
+assert.ok(mismatchFixture.state.mutations.includes("result_family.verify"), "the incomplete decision was reached");
+for (const text of [mismatchError.message, renderProvenanceTargetRepairReceipt(mismatchError.receipt)]) {
+  assert.match(text, /Nothing was lost/);
+  assert.match(text, /read-only preview before retrying/i);
+  assert.equal(text.includes(mismatchError.stage), false);
+  for (const privateValue of [TARGET, ORIGINAL_ID, MANIFEST_PATH, PRIVATE_CONTENT]) {
+    assert.equal(text.includes(privateValue), false);
+  }
+  for (const platform of ["darwin", "win32"]) {
+    const options = { platform, nodePath: "C:\\runtime\\node.exe", scriptPath: "C:\\runtime\\brain.mjs", env: {}, existsSync: () => false };
+    assert.ok(renderCliCommands(text, options).includes(renderCliCommands(
+      "brain support --explain PROVENANCE_TARGET_REPAIR_INCOMPLETE", options)));
+  }
+}
+
 
 /* Losing ownership during a mutation yields an honest partial receipt. */
 const lostFixture = fixtureDependencies({ state: { loseDuring: "ingest.exact" } });

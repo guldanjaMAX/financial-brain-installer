@@ -1,0 +1,801 @@
+async function cmdIngestLocalRun(m, manifestPath, flags, context, options, assertLockOwned) {
+  const {
+    localRemovalApproval,
+    root,
+    sourceExplicit,
+    declaredSource,
+    sourceName,
+    feedMode,
+    appendOnlySource,
+    feedExclusions,
+    dry,
+    retired,
+    statePath,
+  } = context;
+  const {
+    walk,
+    prepare,
+    batchStream,
+    splitOversized,
+    loadState,
+    saveState: persistState,
+    removedSinceLastRun,
+  } = await (options.ingestLib ?? ingestLib)();
+  const saveState = (path, value) => {
+    assertLockOwned?.();
+    return persistState(path, value);
+  };
+  // Say where these documents are going BEFORE sending them, not after.
+  //
+  // This sentence already existed, buried inside the branch that only runs when
+  // the content sniffer recognises a WhatsApp or mbox export. Ingest a folder of
+  // PDFs and the run never told you which source they landed in, even though the
+  // value was computed here. One line, printed at the top, is what would have
+  // caught a duplicated corpus before it was sent rather than after.
+  info(
+    `filing into source "${sourceName}"` +
+    (declaredSource && !sourceExplicit ? " (declared for this folder in the manifest)"
+      : sourceExplicit ? " (from --source)"
+      : " (the default; the manifest declares none for this folder, and --source names it)")
+  );
+  if (appendOnlySource) {
+    info("feed safety: append-only; a missing, placeholder, or excluded file never removes Brain content");
+  }
+  // What the content sniffer recognised, so the run can say so at the end.
+  const messageExportsSeen = new Set();
+  // The complete directory walk is the last retired-folder identity defence.
+  // Keep it before resume state, credentials, and every network dependency so
+  // encountering a moved retired directory still has a truthful zero-effects
+  // refusal. `walk` returns the complete file list before preparation or send.
+  const privatePrefixes = m.safety?.private_path_prefixes || [];
+  info(`walking ${root}`);
+  let walkResult;
+  try {
+    walkResult = walk(root, {
+      privatePrefixes,
+      retiredDirectoryIdentity: retired?.retired_identity || null,
+      ...(feedMode ? { feedMode: true, exclude: feedExclusions } : {}),
+    });
+  } catch (error) {
+    if (error?.reason === "LOCAL_FOLDER_RETIRED:contains_retired") {
+      refuseRetiredLocalFolder(retired, "contains_retired");
+    }
+    throw error;
+  }
+  const { files, skipped: walkSkips, complete: walkComplete } = walkResult;
+  const placeholderCount = walkSkips.filter((skip) => skip?.reason_code === "local_feed_placeholder").length;
+  const exclusionCount = walkSkips.filter((skip) => skip?.adjudication === "feed_exclusion").length;
+  info(`${files.length} candidate file(s), ${walkSkips.length} skipped during the walk`);
+  if (privatePrefixes.length) {
+    info(`private prefixes enforced: ${privatePrefixes.join(", ")}`);
+  }
+  if (!walkComplete) {
+    await reportSkips(walkSkips);
+    die(
+      "the folder could not be read completely, so nothing was sent and no prior document was removed.\n" +
+        "      Fix the reported permission or filesystem error, then re-run the same command."
+    );
+  }
+  const limited = flags.limit ? files.slice(0, parseInt(flags.limit, 10)) : files;
+  if (flags.limit) warn(`--limit ${flags.limit}: only the first ${limited.length} file(s) will be considered`);
+
+  // A dry run sends nothing, so it must not demand credentials it will never
+  // use. Requiring a Cloudflare token to preview what WOULD be loaded turns the
+  // safest command in the tool into one of the hardest to reach.
+  const resolveIngestAccount = options.resolveAccount ?? resolveAccount;
+  const resolveBase = options.resolveBaseUrl ?? resolveBaseUrl;
+  const resolveKey = options.resolveAdminKey ?? resolveAdminKey;
+  const acct = dry ? null : m.brain?.domain ? null : await resolveIngestAccount(m);
+  const base = dry ? null : await resolveBase(m, acct);
+  const adminKey = dry ? null : resolveKey(manifestPath);
+  if (!adminKey && !flags["dry-run"]) {
+    die(
+      "no durable admin key was found. Re-run `brain setup <manifest>` to generate and persist one; " +
+      "do not paste the key into a shell command."
+    );
+  }
+  const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
+  const sendPreparedBatches = options.sendBatches ?? sendBatches;
+  const reconcilePreparedFamilies = options.reconcileDocumentFamilies ?? reconcileDocumentFamilies;
+  const listPreparedSourceFamilies = options.listStoredSourceFamilies ?? listStoredSourceFamilies;
+  const recordSourceReceipt = (receipt) => {
+    assertLockOwned?.();
+    return postReceipt(base, adminKey, receipt, undefined, { assertOwned: assertLockOwned });
+  };
+  const savedState = loadState(statePath);
+  const state = flags.reset
+    ? { version: 1, done: {}, skipped: {}, ...(savedState.removed ? { removed: savedState.removed } : {}) }
+    : savedState;
+  const previouslyKnownKeys = new Set(Object.keys(savedState.done || {}));
+  const scannerOn = m.safety?.credential_scanner?.enabled !== false;
+  const scannerFingerprint = credentialScannerFingerprint(scannerOn);
+  const scannerPolicyChanged = state.credential_scanner_fingerprint !== scannerFingerprint;
+  const alreadyDone = Object.keys(state.done).length;
+  if (alreadyDone && !flags.reset) info(`resuming: ${alreadyDone} file(s) already loaded`);
+
+  // A changed credential scanner means every document indexed under the old one
+  // has to be read again, which is correct. Saying so is the part that was
+  // missing. A state file written before 0.4.0 carries no fingerprint at all, so
+  // the comparison is `undefined !== <hash>` and EVERY document is re-sent.
+  //
+  // On 2026-09-09 a client upgrading 0.3.5 to 0.4.1 found this only because her
+  // agent ran a dry run first: 11,217 documents to send, 0 unchanged, on a brain
+  // already carrying a 164,000 chunk backlog. A watched folder would have acted
+  // on it unattended and roughly doubled the queue. The re-check is not the
+  // defect; discovering it by accident is.
+  if (scannerPolicyChanged && previouslyKnownKeys.size && !flags.reset) {
+    warn(
+      `the credential scanner changed, so all ${previouslyKnownKeys.size} document(s) already loaded from this source will be read and sent again.\n` +
+      "      This run will report them as sent rather than unchanged, and that is expected.\n" +
+      "      If a schedule or watched folder loads this source unattended, pause it until one full run finishes,\n" +
+      "      because until then every run re-sends everything."
+    );
+  }
+
+
+  // OCR, and what it will cost, decided ONCE per run and stated out loud
+  // before the first page is sent. The estimate lands while the owner can
+  // still say no; a bill that appears afterwards is not a choice they were
+  // offered. A dry run never gets a callback, so the safest command in the
+  // tool stays the cheapest one.
+  const ocrCfg = ocrPolicy(m);
+  let ocrPages = 0;
+  const ocrCallback = dry || !ocrCfg.enabled ? null : makeOcrCallback({
+    base, adminKey, model: ocrCfg.model, maxPages: ocrCfg.maxPages,
+    assertOwned: assertLockOwned,
+    onPage: ({ page, totalPages }) => {
+      ocrPages++;
+      // Per PAGE, not per file. A forty-page scan is forty model calls and
+      // over a minute of waiting; without this the run looks hung and the
+      // first client to see it kills it.
+      info(`  OCR page ${page}${totalPages ? ` of ${totalPages}` : ""} (${ocrPages} page(s) read so far this run)`);
+    },
+  });
+  if (ocrCfg.enabled && !dry) {
+    const { estimateOcrCost, describeOcrCost } = await ingestOcrLib();
+    info(`OCR is ON, model ${ocrCfg.model}, up to ${ocrCfg.maxPages} page(s) per document.`);
+    info(`  cost per 100 scanned pages: ${describeOcrCost(estimateOcrCost(100))}`);
+  } else if (ocrCfg.enabled && dry) {
+    info("OCR is ON, but a dry run never sends a page to a model and never spends anything.");
+  }
+
+  const skips = [...walkSkips];
+  const notes = [];
+  const adjudicatedRemovals = appendOnlySource
+    ? { policy: [], intentional: [] }
+    : localWalkRemovalCandidates(walkSkips, previouslyKnownKeys);
+  const privateRemovalKeys = adjudicatedRemovals.policy;
+  const intentionalRemovalKeys = new Set(adjudicatedRemovals.intentional);
+  const adjudicatedRemovalSet = new Set([...privateRemovalKeys, ...intentionalRemovalKeys]);
+  const candidateLocalKeys = new Set(files.map((file) => String(file.rel).split(sep).join("/")));
+  const missingScannerKeys = [...previouslyKnownKeys].filter(
+    (key) => !candidateLocalKeys.has(key) && !adjudicatedRemovalSet.has(key)
+  );
+  if (scannerPolicyChanged && missingScannerKeys.length && appendOnlySource) {
+    warn(
+      `${missingScannerKeys.length} previously-indexed feed file(s) are not present. ` +
+        "Their Brain content is preserved and no removal was planned."
+    );
+  } else if (scannerPolicyChanged && missingScannerKeys.length) {
+    // A dry run previews rather than acts, but it must preview the actual
+    // outcome. This gate used to be skipped outright under --dry-run, so the
+    // one command an owner reaches for to see what WOULD happen said nothing
+    // about the abort a real run would hit here -- the preview and reality
+    // disagreed. Warn instead of dying: a dry run still must not demand
+    // credentials or touch anything.
+    if (dry) {
+      warn(
+        `WARNING: ${missingScannerKeys.length} previously-indexed file(s) are not present under this folder, so the current scanner could not recheck them safely.\n` +
+          "      A real run (without --dry-run) would stop here. Nothing was removed by this dry run.\n" +
+          "      Use the original source folder, or forget this source explicitly before replacing it."
+      );
+    } else {
+      die(
+        `${missingScannerKeys.length} previously-indexed file(s) are not present under this folder, so the current scanner cannot recheck them safely.\n` +
+          "      Nothing was removed. Use the original source folder, or forget this source explicitly before replacing it."
+      );
+    }
+  }
+  const limitedLocalKeys = new Set(limited.map((file) => String(file.rel).split(sep).join("/")));
+  const limitedMissesPrior = [...previouslyKnownKeys].some(
+    (key) => candidateLocalKeys.has(key) && !adjudicatedRemovalSet.has(key) && !limitedLocalKeys.has(key)
+  );
+  if (!dry && scannerPolicyChanged && limitedMissesPrior) {
+    die(
+      "--limit cannot be used while previously-indexed files need a credential-scanner recheck.\n" +
+      "      Run without --limit so every prior document is rechecked before the new scanner is marked complete."
+    );
+  }
+  // Scanner safety above needs only eligible, normalized candidates. After its
+  // decisions are fixed, reuse that same Set for recovery protection by adding
+  // native aliases and walk-skipped paths. A real file named like a split part
+  // must not lose its current skip when another document family recovers.
+  for (const file of files) {
+    const raw = String(file.rel);
+    const normalized = raw.split(sep).join("/");
+    if (raw !== normalized) candidateLocalKeys.add(raw);
+  }
+  addLocalPathAliases(candidateLocalKeys, walkSkips, "path");
+  if (appendOnlySource) {
+    // A feed is a landing inbox, not a mirror. Keep every previously accepted
+    // identity in the active set even when the owner moves the source file.
+    for (const key of previouslyKnownKeys) candidateLocalKeys.add(key);
+  }
+  // A skipped link stands in for a whole subtree, so exact-path protection is
+  // not enough: every key that was previously indexed UNDER it must be shielded
+  // too, or the first run after a junction appears would read those children as
+  // deleted. This is the invariant the walk used to protect by refusing
+  // outright; protecting it here is what lets the send proceed.
+  const subtreeSkipPrefixes = walkSkips
+    .filter((skip) => skip?.subtree && skip?.path)
+    .map((skip) => String(skip.path).split(sep).join("/").replace(/\/+$/, ""))
+    .filter(Boolean);
+  if (subtreeSkipPrefixes.length) {
+    for (const key of previouslyKnownKeys) {
+      const normalized = String(key).split(sep).join("/");
+      if (subtreeSkipPrefixes.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`))) {
+        candidateLocalKeys.add(key);
+      }
+    }
+  }
+  const protectedLocalSkipKeys = candidateLocalKeys;
+  // Files this source loaded before and can no longer find.
+  //
+  // Only computed for a whole, complete walk. Under --limit the run has
+  // deliberately not looked at most of the folder, and an unexamined file is
+  // not a deleted one; a walk that could not be read completely already
+  // stopped the run above. Getting this wrong in the other direction is what
+  // an unattended lane must never do: a folder that mounted empty would
+  // otherwise read as "the client deleted everything".
+  const vanishedRemovalKeys = appendOnlySource
+    ? []
+    : flags.limit
+    ? []
+    : removedSinceLastRun(previouslyKnownKeys, protectedLocalSkipKeys)
+      .filter((key) => !adjudicatedRemovalSet.has(key));
+  const scannerRescanSkips = [];
+  let unchanged = 0;
+  let split = 0;
+  let scanned = 0;
+  const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0 };
+
+  const isolatePreparationError = (error, file) => {
+    // This classification must be the first action. A safety or systemic
+    // refusal must not write retry state or let a later file spend or mutate.
+    if (isSystemicIngestPreparationError(error)) throw error;
+    assertLockOwned?.();
+    const stateKey = String(file?.rel || file?.name || "unnamed document").split(sep).join("/");
+    const reason = "file preparation failed unexpectedly; it was left for retry";
+    recordLocalSkippedDocumentState(state, {
+      stateKey,
+      nativePath: file?.rel,
+      reason,
+    });
+    if (!dry) saveState(statePath, state);
+    skips.push({ path: safeIngestDisplay(file?.rel, file?.name), reason, failed: true });
+    tally.failed++;
+    return true;
+  };
+
+  // One file at a time, sent as each batch fills. Building the whole corpus
+  // first cost 584MB of live strings for 250 files, so a real folder OOMs with
+  // a raw V8 abort no handler can catch, and an interrupt during that silent
+  // phase threw away every minute of extraction. Peak memory here is one batch.
+  const prepareOne = async (f) => {
+    const r = await prepare(f, { sourceName, ocr: ocrCallback });
+    if (r.note) notes.push({ path: f.rel, note: r.note });
+    if (r.messageExport) messageExportsSeen.add(r.messageExport);
+
+    // A multi-document producer (a WhatsApp export, an SMS Backup & Restore
+    // .xml, a Google Voice Takeout page, each sessionized into many
+    // conversation documents from one file) has no single envelope identity to
+    // key state on, so the file's own path is the state key. Every other branch
+    // below is unchanged from the single-envelope path; this only widens what
+    // "one prepared unit" is allowed to mean.
+    if (r.envelopes) {
+      const key = String(f.rel).split(sep).join("/");
+      if (!scannerPolicyChanged && r.hash && state.done[key] === r.hash) {
+        recordAcceptedDocumentState(state, {
+          stateKey: key,
+          hash: r.hash,
+          skipKeys: [f.rel, ...r.envelopes.map((e) => e.source_id)],
+          legacyPartRoot: f.rel,
+          protectedSkipKeys: protectedLocalSkipKeys,
+        });
+        unchanged++;
+        return { unchanged: true };
+      }
+      const sanitized = r.envelopes.map((e) => sanitizeIngestEnvelope(e));
+      // One refused document is treated as a whole-file refusal rather than
+      // partially loading the rest. This is the same conservative posture as
+      // every other credential-gate refusal in this tool: nothing half-loads
+      // from a source that just tripped the scanner.
+      for (const envelope of sanitized) {
+        const refusal = credentialRefusalOf(envelope, scannerOn);
+        if (refusal) {
+          const skip = { path: safeIngestDisplay(envelope.title, f.rel), reason: refusal.reason };
+          recordLocalSkippedDocumentState(state, {
+            stateKey: key, nativePath: f.rel, reason: refusal.reason,
+          });
+          intentionalRemovalKeys.add(key);
+          return { skip };
+        }
+      }
+      return {
+        hash: r.hash,
+        envelopes: sanitized,
+        rel: f.rel,
+        stateKey: key,
+        deferState: true,
+        familyPlan: {
+          stateKey: key,
+          hash: r.hash,
+          expectedParts: sanitized.length,
+          // The family uid the documents themselves declare, and the doc_uids
+          // the brain will actually store. Both used to be built from
+          // `sourceName` and the file path, which is neither the namespace nor
+          // the identity a session document is stored under, so a fully
+          // successful ingest ended in a rejected cleanup. See
+          // declaredFamilyUid above for the options and the reasoning.
+          base_doc_uid: declaredFamilyUid(sanitized, { rel: f.rel }),
+          keep_doc_uids: sanitized.map((envelope) => `${envelope.source_type}:${envelope.source_id}`),
+          family_kind: "declared",
+          skipKeys: [key, f.rel, ...sanitized.map((envelope) => envelope.source_id)],
+          legacyPartRoot: [key, f.rel],
+          ocrPageRequestIds: Array.isArray(r.ocrPageRequestIds) ? [...r.ocrPageRequestIds] : [],
+        },
+      };
+    }
+
+    const key = r.envelope ? r.envelope.source_id : String(f.rel).split(sep).join("/");
+    if (!scannerPolicyChanged && r.hash && state.done[key] === r.hash) {
+      recordAcceptedDocumentState(state, {
+        stateKey: key,
+        hash: r.hash,
+        skipKeys: [r.envelope?.source_id, f.rel],
+        legacyPartRoot: [r.envelope?.source_id, f.rel],
+        protectedSkipKeys: protectedLocalSkipKeys,
+      });
+      unchanged++;
+      return { unchanged: true };
+    }
+    if (r.skip) {
+      // A slow OCR page is a transient extraction outcome, not a statement
+      // that the source document was removed. Clear the accepted hash so the
+      // same stable document identity is read again on the next pass while an
+      // older stored revision, if any, remains untouched.
+      if (r.skip.retryable === true) delete state.done[key];
+      recordLocalSkippedDocumentState(state, {
+        stateKey: key, nativePath: f.rel, reason: r.skip.reason,
+      });
+      if (scannerPolicyChanged && previouslyKnownKeys.has(key)) scannerRescanSkips.push(r.skip);
+      return { skip: r.skip };
+    }
+    const envelope = sanitizeIngestEnvelope(r.envelope);
+    const refusal = credentialRefusalOf(envelope, scannerOn);
+    if (refusal) {
+      const skip = { path: safeIngestDisplay(envelope.title, f.rel), reason: refusal.reason };
+      recordLocalSkippedDocumentState(state, {
+        stateKey: key, nativePath: f.rel, reason: refusal.reason,
+      });
+      intentionalRemovalKeys.add(key);
+      return { skip };
+    }
+    const envelopes = splitOversized(envelope);
+    return {
+      hash: r.hash,
+      envelopes,
+      rel: f.rel,
+      stateKey: key,
+      deferState: true,
+      familyPlan: {
+        stateKey: key,
+        hash: r.hash,
+        expectedParts: envelopes.length,
+        base_doc_uid: `${sourceName}:${key}`,
+        keep_doc_uids: envelopes.map((envelope) => `${sourceName}:${envelope.source_id}`),
+        family_kind: "structural",
+        skipKeys: [key, f.rel, ...envelopes.map((envelope) => envelope.source_id)],
+        legacyPartRoot: [key, f.rel],
+        ocrPageRequestIds: Array.isArray(r.ocrPageRequestIds) ? [...r.ocrPageRequestIds] : [],
+      },
+    };
+  };
+
+  if (flags["dry-run"]) {
+    // A dry run streams too, so it exercises the same code path rather than a
+    // parallel one that could quietly diverge.
+    const preview = [];
+    for await (const group of batchStream(limited, prepareOne, {
+      onSkip: (sk) => skips.push(sk),
+      onPrepareError: isolatePreparationError,
+      onProgress: (n) => { if (n % 250 === 0) process.stdout.write(`\r  scanned ${n}/${limited.length}...   `); },
+    })) {
+      for (const item of group) if (preview.length < 5) preview.push(item);
+      scanned += group.length;
+    }
+    process.stdout.write("\r");
+    const applyPreparedRemovals = options.applyDriveRemovals ?? applyDriveRemovals;
+    if (!appendOnlySource) {
+      await applyPreparedRemovals({
+        uids: [...new Set([...privateRemovalKeys, ...intentionalRemovalKeys])].map((key) => `${sourceName}:${key}`),
+        base, adminKey, state, dryRun: true, label: "local source truth",
+      });
+      await applyPreparedRemovals({
+        uids: vanishedRemovalKeys.map((key) => `${sourceName}:${key}`),
+        base, adminKey, state, dryRun: true, label: "Drive deletion",
+      });
+    }
+    info(`${scanned} document(s) would be sent; ${unchanged} unchanged; ${skips.length} not indexed; ${tally.failed} failed`);
+    reportNotes(notes);
+    console.log("");
+    ok("dry run, nothing was sent");
+    await reportSkips(skips);
+    if (preview.length) {
+      console.log(`\n  first few that WOULD be sent:`);
+      for (const r of preview) {
+        const d = r.envelope.occurred_at ? r.envelope.occurred_at.slice(0, 10) : "no date";
+        console.log(`    ${r.rel}  (${d}, ${r.envelope.content.length} chars)`);
+      }
+    }
+    // dry_run is stated on the returned shape rather than left to be inferred
+    // from a zero, so a sweep reporting this leg can never call a preview a load.
+    assertNoIngestFailures(tally, { noun: "file" });
+    return {
+      dry_run: true,
+      would_send: scanned,
+      unchanged,
+      skipped: skips.length,
+      failed: 0,
+      ...(feedMode ? { placeholders: placeholderCount, excluded: exclusionCount } : {}),
+    };
+  }
+
+  // Routine ingest is a data-plane operation. Once setup has saved the live
+  // Worker URL, recording source health must use the brain admin key instead
+  // of silently requiring a standing Cloudflare control-plane token.
+  const sourceRunId = `sync_${randomBytes(16).toString("hex")}`;
+  const sourceRunStartedAt = new Date().toISOString();
+  let sourceRunClosed = false;
+  await recordSourceReceipt({
+    source: sourceName,
+    kind: "upload",
+    status: "indexing",
+    run_id: sourceRunId,
+    lane: "manual",
+    started_at: sourceRunStartedAt,
+    detail: "local folder ingest started",
+  });
+
+  try {
+
+  const pendingLocalUids = Object.keys(state.removed || {});
+  if (pendingLocalUids.some((uid) => !uid.startsWith(`${sourceName}:`))) {
+    throw new Error("the local removal retry state contains a document outside this source");
+  }
+
+  const familyPlans = new Map();
+  const sentFamilyParts = new Map();
+  const acceptedFamilyParts = new Map();
+  const rejectedFamilyParts = new Map();
+  let batchNo = 0;
+  for await (const group of batchStream(limited, prepareOne, {
+    onSkip: (sk) => skips.push(sk),
+    onPrepareError: isolatePreparationError,
+    onProgress: (n) => {
+      scanned = n;
+      if (n % 100 === 0) process.stdout.write(`\r  scanned ${n}/${limited.length}, sent ${tally.created + tally.updated}   `);
+    },
+  })) {
+    batchNo++;
+    for (const item of group) if (item.familyPlan) familyPlans.set(item.familyPlan.stateKey, item.familyPlan);
+    let t;
+    try {
+      t = await sendPreparedBatches({
+        base, adminKey, groups: [group], state, statePath, skips, quiet: true,
+        saveState, assertOwned: assertLockOwned,
+        onResult: (item, result) => {
+          const key = item.familyPlan?.stateKey;
+          if (!key) return;
+          if (["created", "updated", "unchanged"].includes(result.status)) {
+            acceptedFamilyParts.set(key, (acceptedFamilyParts.get(key) || 0) + 1);
+          } else {
+            const statuses = rejectedFamilyParts.get(key) || [];
+            statuses.push(result.status);
+            rejectedFamilyParts.set(key, statuses);
+          }
+        },
+      });
+    } catch (error) {
+      // A storage failure PRESERVES the prior family and its retry. This used
+      // to send an empty keep list for every family the failed batch touched,
+      // which is not a cleanup instruction, it is "delete this whole family".
+      // That was inert while a message-export base matched nothing, and became
+      // destructive the moment families were keyed correctly: one failed
+      // session could take every already-stored conversation from that file
+      // with it. remoteFamilySettlement states the correct rule and the remote
+      // path follows it; the local path now agrees. The cursor is not advanced
+      // on this path, so the retry re-sends and reconciles for real.
+      throw error;
+    }
+    for (const k of Object.keys(tally)) tally[k] += t[k] || 0;
+    for (const item of group) {
+      const key = item.familyPlan?.stateKey;
+      if (key) sentFamilyParts.set(key, (sentFamilyParts.get(key) || 0) + 1);
+    }
+    const outcome = remoteFamilyOutcomes(familyPlans.values(), sentFamilyParts, acceptedFamilyParts);
+    // Only a FULLY ACCEPTED replacement may remove obsolete family members.
+    // An incomplete family is a storage failure, not a deletion instruction:
+    // emitting an empty keep list for it would delete every part that DID
+    // land. Its state key is cleared below, so the next run re-sends it.
+    const reconciliation = outcome.completed.map((plan) => ({
+      base_doc_uid: plan.base_doc_uid,
+      keep_doc_uids: plan.keep_doc_uids,
+      ...(plan.family_kind ? { family_kind: plan.family_kind } : {}),
+    }));
+    if (reconciliation.length) {
+      await reconcilePreparedFamilies({
+        families: reconciliation,
+        base,
+        adminKey,
+        assertOwned: assertLockOwned,
+      });
+    }
+    for (const plan of outcome.completed) {
+      await acknowledgeStoredOcrPages({
+        base,
+        adminKey,
+        requestIds: plan.ocrPageRequestIds,
+        assertOwned: assertLockOwned,
+      });
+    }
+    for (const plan of outcome.completed) {
+      recordAcceptedDocumentState(state, { ...plan, protectedSkipKeys: protectedLocalSkipKeys });
+    }
+    for (const plan of outcome.incomplete) {
+      delete state.done[plan.stateKey];
+      const statuses = [...new Set(rejectedFamilyParts.get(plan.stateKey) || ["failed"])];
+      state.skipped[plan.stateKey] = `logical document was not indexed because part status was ${statuses.join(", ")}`;
+    }
+    for (const plan of [...outcome.completed, ...outcome.incomplete]) {
+      familyPlans.delete(plan.stateKey);
+      sentFamilyParts.delete(plan.stateKey);
+      acceptedFamilyParts.delete(plan.stateKey);
+      rejectedFamilyParts.delete(plan.stateKey);
+    }
+    if (outcome.completed.length || outcome.incomplete.length) saveState(statePath, state);
+    process.stdout.write(`\r  batch ${batchNo}  loaded ${tally.created + tally.updated}  refused ${tally.refused}  failed ${tally.failed}   `);
+  }
+  process.stdout.write("\n");
+  reportNotes(notes);
+
+  // ONE decision covering every reason this source has to remove something,
+  // through the SAME aggregate guard the Drive lane uses. No removal call is
+  // allowed above this assertion.
+  //
+  // The stored set comes from the authenticated Worker, not this machine's
+  // resume file. A restored or copied state file may be stale in either
+  // direction; using it as deletion truth can shrink the denominator or hide
+  // a family that exists in D1. This matters most for the unattended folder
+  // lane, where a missing File Provider mount can otherwise look like the
+  // owner deleted everything.
+  if (!appendOnlySource) {
+    const storedLocalFamilies = await listPreparedSourceFamilies({
+      base, adminKey, source: sourceName,
+    });
+    const localRemovalPlan = buildDriveRemovalPlan({
+      storedFamilies: storedLocalFamilies,
+      activeFamilies: [...protectedLocalSkipKeys].map((key) => `${sourceName}:${key}`),
+      policyCandidates: privateRemovalKeys.map((key) => `${sourceName}:${key}`),
+      // A lost deletion response is re-planned against current authenticated
+      // truth. Restoration wins for this category, while a still-current policy
+      // or intentional refusal is assigned to its earlier, stronger category.
+      vanishedCandidates: [
+        ...vanishedRemovalKeys.map((key) => `${sourceName}:${key}`),
+        ...pendingLocalUids,
+      ],
+      intentionalCandidates: [...intentionalRemovalKeys].map((key) => `${sourceName}:${key}`),
+    });
+    // A local synced folder is not Google Drive. The review-required message
+    // this throws on an oversized plan used to say "Drive cleanup" regardless
+    // of source, which misnames the thing an owner is being asked to approve.
+    assertDriveRemovalPlanSafe(localRemovalPlan, localRemovalApproval, { sourceLabel: "Folder" });
+    if (localRemovalPlan.total) {
+      const percent = (localRemovalPlan.ratio * 100).toFixed(1);
+      const disposition = localRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
+      info(`folder cleanup plan ${disposition}: ${localRemovalPlan.total} of ${localRemovalPlan.stored} loaded documents (${percent}%)`);
+    }
+
+    // Only the exact targets intersected with authenticated storage and covered
+    // by the approval fingerprint may reach the destructive endpoint.
+    const localTruthTargets = [
+      ...localRemovalPlan.targets.source_policy,
+      ...localRemovalPlan.targets.intentional_skip,
+    ];
+    const applyPreparedRemovals = options.applyDriveRemovals ?? applyDriveRemovals;
+    await applyPreparedRemovals({
+      uids: localTruthTargets,
+      base, adminKey, state, dryRun: false, label: "local source truth",
+      assertOwned: assertLockOwned,
+    });
+    saveState(statePath, state);
+
+    const vanishedTargets = localRemovalPlan.targets.source_deleted;
+    if (vanishedTargets.length) {
+      const vanishedRemoval = await applyPreparedRemovals({
+        uids: vanishedTargets, base, adminKey, state, dryRun: false, label: "Drive deletion",
+        assertOwned: assertLockOwned,
+      });
+      saveState(statePath, state);
+      if (vanishedRemoval.applied) ok(`${vanishedRemoval.applied} document(s) removed because their file is gone from the folder`);
+    }
+
+    // An accepted HTTP receipt is necessary but not sufficient deletion proof.
+    // Read the authenticated inventory again before advancing local resume state.
+    const plannedLocalTargets = [...new Set([...localTruthTargets, ...vanishedTargets])];
+    if (plannedLocalTargets.length) {
+      const afterLocalRemoval = await listPreparedSourceFamilies({
+        base, adminKey, source: sourceName,
+      });
+      const stillStored = plannedLocalTargets.filter((uid) => afterLocalRemoval.has(uid));
+      const failedAt = new Date().toISOString();
+      for (const uid of plannedLocalTargets) {
+        if (afterLocalRemoval.has(uid)) {
+          state.removed = { ...(state.removed || {}), [uid]: failedAt };
+        } else {
+          delete state.done[uid.slice(sourceName.length + 1)];
+          if (state.removed) delete state.removed[uid];
+        }
+      }
+      saveState(statePath, state);
+      if (stillStored.length) {
+        throw new Error(
+          `${stillStored.length} planned local folder removal(s) remained after exact source-inventory readback. ` +
+            "No completed source state was recorded; re-running will retry them through the same approval gate."
+        );
+      }
+    }
+  }
+
+  const localCoverage = localReceiptCoverage(tally, skips);
+  if (scannerRescanSkips.length) {
+    saveState(statePath, state);
+    await recordSourceReceipt({
+      source: sourceName,
+      kind: "upload",
+      status: "error",
+      run_id: sourceRunId,
+      lane: "manual",
+      started_at: sourceRunStartedAt,
+      completed_at: new Date().toISOString(),
+      walk_complete: false,
+      files_seen: scanned,
+      docs_added: tally.created,
+      docs_updated: tally.updated,
+      docs_unchanged: unchanged + tally.unchanged,
+      docs_refused: localCoverage.docsRefused,
+      docs_failed: tally.failed + scannerRescanSkips.length,
+      error: `${scannerRescanSkips.length} previously-indexed file(s) could not be rechecked by the current credential scanner`,
+      detail: `local folder ingest stopped during credential recheck; skipped=${skips.length}; ` +
+        `coverage_gaps=${localCoverage.coverageGaps}; adjudicated_skips=${localCoverage.adjudicatedSkips}`,
+    });
+    sourceRunClosed = true;
+    die(
+      `${scannerRescanSkips.length} previously-indexed file(s) could not be rechecked by the current credential scanner.\n` +
+        "      Their prior revision was preserved, and the scanner upgrade was not marked complete. Fix the reported files and re-run."
+    );
+  }
+
+  // A file isolated as failed keeps its previously indexed revision in state.done.
+  // Committing the new scanner fingerprint now would let the next run short-circuit
+  // that revision as unchanged, so it would never meet the current scanner. The
+  // remote lanes already commit their fingerprint only on a failure-free run.
+  if (tally.failed === 0 && !(appendOnlySource && scannerPolicyChanged && missingScannerKeys.length)) {
+    state.credential_scanner_fingerprint = scannerFingerprint;
+  }
+  saveState(statePath, state);
+
+  const localCoverageGaps = localCoverage.coverageGaps;
+  const adjudicatedSkips = localCoverage.adjudicatedSkips;
+  const localRetryableOcrSkips = skips.filter(
+    (skip) => skip?.retryable === true && skip?.code === "ocr_page_timeout",
+  ).length;
+  const finalStatus = tally.failed || localRetryableOcrSkips ? "error" : "ready";
+  const localWalkComplete = !flags.limit && walkComplete;
+  await recordSourceReceipt({
+    source: sourceName,
+    kind: "upload",
+    status: finalStatus,
+    run_id: sourceRunId,
+    lane: "manual",
+    started_at: sourceRunStartedAt,
+    completed_at: new Date().toISOString(),
+    complete_sweep: localWalkComplete && tally.failed === 0 && localCoverage.docsRefused === 0,
+    walk_complete: localWalkComplete,
+    files_seen: scanned,
+    docs_added: tally.created,
+    docs_updated: tally.updated,
+    docs_unchanged: unchanged + tally.unchanged,
+    docs_refused: localCoverage.docsRefused,
+    docs_failed: tally.failed + localRetryableOcrSkips,
+    detail: `local folder ingest ${finalStatus === "ready" ? "completed" : "completed with document failures"}; ` +
+      `coverage_gaps=${localCoverageGaps}; adjudicated_skips=${adjudicatedSkips}`,
+    ...(tally.failed ? { error: `${tally.failed} document(s) failed` } : {}),
+  });
+  sourceRunClosed = true;
+
+  const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged` +
+    (tally.failed ? `, ${tally.failed} failed` : "");
+  if (tally.failed || localRetryableOcrSkips) info(summary);
+  else ok(summary);
+  if (tally.refused) warn(`${tally.refused} file(s) refused for carrying live credentials. They were NOT indexed.`);
+  reportOcrRetryStats(ocrCallback);
+  if (messageExportsSeen.size) {
+    // A zone is a sensitivity boundary. A file format is not. One WhatsApp
+    // export routinely holds an accountant and an oncologist in the same file,
+    // so filing it as one source guarantees a wrong zone whichever way it is
+    // set. Nothing here guesses: it says what was recognised, says where it
+    // went, and leaves the split to the person who knows who is in it.
+    const found = [...messageExportsSeen].sort().join(", ");
+    info(`recognised and loaded as conversations: ${found}`);
+    info(`  filed under source "${sourceName}"`);
+    warn(
+      "a message export usually spans more than one sensitivity zone, so one source\n" +
+      "  name may be the wrong unit for it. Splitting the export, or ingesting it under\n" +
+      "  its own --source, is what makes it zonable. Nothing was zoned automatically.\n" +
+      `  See what is unzoned: brain zone ${displayPath(manifestPath)}`,
+    );
+  }
+  await reportSkips(skips);
+
+  info(`progress saved to ${relative(process.cwd(), statePath)}`);
+  assertNoIngestFailures(tally, { noun: "file" });
+  await (options.reportBacklog ?? reportBacklog)(manifestPath);
+  // Returned only so a caller that ran this as one leg of a wider sweep can
+  // report a real count instead of "unknown". Reached only after
+  // assertNoIngestFailures, so these numbers describe a completed load.
+  return {
+    created: tally.created,
+    updated: tally.updated,
+    unchanged: unchanged + tally.unchanged,
+    refused: tally.refused,
+    docs_refused: localCoverage.docsRefused,
+    docs_excluded: adjudicatedSkips,
+    scanned,
+    skipped: skips.length,
+    ...(feedMode ? { placeholders: placeholderCount, excluded: exclusionCount } : {}),
+  };
+  } catch (error) {
+    // Do not leave a source looking perpetually "indexing" when extraction,
+    // transport, reconciliation, or the final acceptance check aborts. The
+    // original failure remains authoritative even if this best-effort receipt
+    // cannot be written.
+    if (!sourceRunClosed && error?.code !== "source_ingest_lock_lost") {
+      assertLockOwned?.();
+      try {
+        await recordSourceReceipt({
+          source: sourceName,
+          kind: "upload",
+          status: "error",
+          run_id: sourceRunId,
+          lane: "manual",
+          started_at: sourceRunStartedAt,
+          completed_at: new Date().toISOString(),
+          walk_complete: false,
+          files_seen: scanned,
+          docs_added: tally.created,
+          docs_updated: tally.updated,
+          docs_unchanged: unchanged + tally.unchanged,
+          error: String(error?.message || error).replace(/\s+/g, " ").slice(0, 500),
+          detail: "local folder ingest aborted before completion",
+        });
+        sourceRunClosed = true;
+      } catch (receiptError) {
+        warn(`the ingest failed and its error receipt could not be recorded: ${String(receiptError?.message || receiptError).slice(0, 160)}`);
+      }
+    }
+    throw error;
+  }
+}
+
+/** A destructive response is trusted only when it proves it is the forget API. */

@@ -537,18 +537,20 @@ rmSync(join(whatsapp.dir, "source", EXPORT_NAME));
 const deletionStopped = runIngest({
   label: "whatsapp-delete-plan", files: {}, dbPath: sharedDb, dir: whatsapp.dir,
 });
-const deletionFingerprint = /--approve-removals ([0-9a-f]{64})/.exec(deletionStopped.out)?.[1] || null;
+const deletionFingerprint = /--apply-removals ([0-9a-f]{64})/.exec(deletionStopped.out)?.[1] || null;
 check("a whole-family watched-folder deletion stops at the aggregate approval gate",
   deletionStopped.code === 1 && !!deletionFingerprint &&
   (deletionStopped.evidence?.forgetRequests || []).length === 0,
   deletionStopped.out.slice(-500));
 check("the deletion plan read authenticated family truth before asking for approval",
-  Number(deletionStopped.evidence?.inventoryRequests || 0) >= 1,
+  Number(deletionStopped.evidence?.inventoryRequests || 0) >= 1 &&
+  Number(deletionStopped.evidence?.planPreviews || 0) >= 1,
   JSON.stringify(deletionStopped.evidence));
 
 const deletionApproved = runIngest({
   label: "whatsapp-delete-approved", files: {}, dbPath: sharedDb, dir: whatsapp.dir,
-  args: ["--approve-removals", deletionFingerprint],
+  args: ["--source", "upload", "--apply-removals", deletionFingerprint,
+    "--approve-removals", /--approve-removals ([0-9a-f]{64})/.exec(deletionStopped.out)?.[1]],
 });
 const afterDeletion = new DatabaseSync(sharedDb)
   .prepare("SELECT doc_uid FROM documents WHERE deleted_at IS NULL ORDER BY doc_uid")
@@ -557,7 +559,8 @@ check("the exact approved watched-folder plan removes the declared message famil
   deletionApproved.code === 0 && afterDeletion.length === 0,
   `exit ${deletionApproved.code}; ${JSON.stringify(afterDeletion)}; ${deletionApproved.out.slice(-400)}`);
 check("watched-folder deletion performs authenticated post-delete readback",
-  Number(deletionApproved.evidence?.inventoryRequests || 0) >= 2,
+  Number(deletionApproved.evidence?.planPreviews || 0) >= 2 &&
+  Number(deletionApproved.evidence?.planApplies || 0) === 1,
   JSON.stringify(deletionApproved.evidence));
 
 /* ---- 6b. a .mbox ARCHIVE, the producer this file's own guard missed ---- */

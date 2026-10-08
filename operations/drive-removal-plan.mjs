@@ -9,10 +9,10 @@ export {
   isCanonicalStoredFamilyUid,
 };
 
-// A routine sync may clean up a few ordinary source changes without making an
-// unattended scheduler unusable. Crossing either boundary is no longer
-// routine: it may indicate a revoked permission, a bad listing, or a policy
-// mistake, and therefore needs an exact second look from the owner.
+// This is the additional aggregate source guard. The ingest removal collector
+// separately requires an exact apply decision for every nonempty physical
+// removal plan, including plans below these limits and obsolete family parts.
+// Crossing either boundary retains the stronger source-review requirement.
 export const DRIVE_REMOVAL_MAX_COUNT = 100;
 export const DRIVE_REMOVAL_MAX_RATIO = 0.10;
 
