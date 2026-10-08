@@ -843,6 +843,10 @@ test("Windows package project names every reviewed payload file", () => {
   assert.match(verifier, /LocalAppDataFolder/);
   assert.match(verifier, /MSI_SCOPE_VERIFIED=per_user/);
   assert.match(verifier, /MSI_VISIBLE_LAUNCHER_VERIFIED=1/);
+  // Undiscarded COM results become blank rows and broke the exact file count.
+  assert.match(verifier, /^\s*\$null = \$view\.Execute\(\)\r?$/m);
+  assert.match(verifier, /^\s*\$null = \$view\.Close\(\)\r?$/m);
+  assert.doesNotMatch(verifier, /^\s*\$view\.(?:Execute|Close)\(\)\s*$/m);
 });
 
 test("Windows wrapper refuses an unsupported release before prep", { skip: process.platform !== "win32" }, () => {
