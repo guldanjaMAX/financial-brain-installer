@@ -18,17 +18,24 @@
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="INSTALLFOLDER" Name="Financial Brain Machine Prep">
-        <Component Id="MachinePrepScripts" Guid="2A7B7F2E-02E5-4D01-8498-06E7ED27347E">
-          <File Id="PrepWindowsScript" Source="..\..\prep-windows.ps1" Name="prep-windows.ps1" KeyPath="yes" />
+        <!-- Profile components require distinct HKCU key paths (ICE38/ICE57)
+             and empty-folder cleanup (ICE64). Changing the key-path resource
+             from a file to a registry value also requires a new component GUID. -->
+        <Component Id="MachinePrepScripts" Guid="E2059FA2-DF08-4209-865D-3C259D9CFF86">
+          <File Id="PrepWindowsScript" Source="..\..\prep-windows.ps1" Name="prep-windows.ps1" />
           <File Id="RunMachinePrepScript" Source="run-machine-prep.ps1" Name="run-machine-prep.ps1" />
           <File Id="StartBrainSetupScript" Source="start-brain-setup.ps1" Name="start-brain-setup.ps1" />
           <File Id="UninstallNotes" Source="UNINSTALL.txt" Name="UNINSTALL.txt" />
+          <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+          <RegistryValue Id="MachinePrepScriptsInstalled" Root="HKCU" Key="Software\FinancialBrain\MachinePrep" Name="scriptsInstalled" Type="integer" Value="1" KeyPath="yes" />
         </Component>
         <Directory Id="HANDOFFFOLDER" Name="handoff">
-          <Component Id="ClaudeHandoff" Guid="790C6E7B-59DD-4CF0-BE88-944C25580963">
-            <File Id="ClaudeHandoffScript" Source="..\..\handoff\handoff-windows.ps1" Name="handoff-windows.ps1" KeyPath="yes" />
+          <Component Id="ClaudeHandoff" Guid="6839F543-80B2-428D-A11D-F2BD575612FB">
+            <File Id="ClaudeHandoffScript" Source="..\..\handoff\handoff-windows.ps1" Name="handoff-windows.ps1" />
             <File Id="ClaudeHandoffMessage" Source="..\..\handoff\message-windows.txt" Name="message-windows.txt" />
             <File Id="ClaudeHandoffUrl" Source="handoff-windows.url" Name="handoff-windows.url" />
+            <RemoveFolder Id="RemoveHandoffFolder" On="uninstall" />
+            <RegistryValue Id="ClaudeHandoffInstalled" Root="HKCU" Key="Software\FinancialBrain\MachinePrep" Name="handoffInstalled" Type="integer" Value="1" KeyPath="yes" />
           </Component>
         </Directory>
       </Directory>
@@ -36,11 +43,13 @@
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ApplicationProgramsFolder" Name="Financial Brain Machine Prep">
         <Component Id="MachinePrepShortcut" Guid="8C61DEEB-2749-4F62-9446-B5DA941E4DBF">
+          <!-- Match the x64 package and native Node/CLI runtime. No payload
+               depends on the 32-bit PowerShell filesystem redirector. -->
           <Shortcut
             Id="RunMachinePrepShortcut"
             Name="Run Financial Brain Machine Prep"
             Description="Check prerequisites and open Financial Brain setup"
-            Target="[SystemFolder]WindowsPowerShell\v1.0\powershell.exe"
+            Target="[System64Folder]WindowsPowerShell\v1.0\powershell.exe"
             Arguments="-NoLogo -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]run-machine-prep.ps1&quot;"
             WorkingDirectory="INSTALLFOLDER" />
           <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
