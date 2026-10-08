@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -282,8 +282,9 @@ function adapterHarness({ proofRefusalCode = null } = {}) {
             }),
           };
         },
-        async reconcileFamilies({ families, assertOwned: requestAssertOwned }) {
+        async reconcileFamilies({ families, approvalId, assertOwned: requestAssertOwned }) {
           guardedIo("network:reconcile");
+          assert.equal(approvalId, "a".repeat(64), "exact owner approval reaches the distinct repair adapter");
           assert.equal(requestAssertOwned, assertOwned);
           state.reconciliations.push(families);
           return 1;
@@ -404,6 +405,7 @@ test("real Brain adapter keeps admin state opaque and lease-guards complete exac
   };
   const reconciliation = await dependencies.reconcileFamily({
     family,
+    approvalId: "a".repeat(64),
     adminAccess,
     assertOwned,
   });
@@ -537,7 +539,7 @@ test("runtime inventory exactly matches the local npm pack and rejects nested sy
   assert.match(provenanceTargetRuntimePackageFingerprint({ root: ROOT }), /^[a-f0-9]{64}$/);
 
   if (process.platform === "win32") return;
-  const fixture = mkdtempSync(join(tmpdir(), "brain-runtime-inventory-"));
+  const fixture = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-runtime-inventory-")));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
   mkdirSync(join(fixture, "operations"));
   writeFileSync(join(fixture, "package.json"), JSON.stringify({

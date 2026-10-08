@@ -36,7 +36,7 @@ import { basename, delimiter, isAbsolute, join, dirname, relative, resolve, sep,
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { removalDigest, createIngestRemovalReview } from "./operations/ingest-removal-plan.mjs";
+import { removalDigest, createIngestRemovalReview, applyApprovedProvenanceFamily } from "./operations/ingest-removal-plan.mjs";
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { TextDecoder } from "node:util";
@@ -9996,10 +9996,10 @@ function sourceInventoryAccess(manifestPath, m, options = {}) {
     headers.delete("X-Admin-Key");
     return authenticatedRequest(target, { ...init, headers }, requestOptions);
   };
-  // These two closures let the exact-target executor reuse the established
-  // idempotent retry contracts without ever receiving or returning the saved
-  // administrator key itself. The source lease is rechecked before the first
-  // credential read and again by every retry inside each helper.
+  // The exact-target executor keeps the saved administrator key opaque. Batch
+  // writes retain their idempotent retries; separately approved family cleanup
+  // uses exact inventory-fenced removals. Neither grants ordinary ingest an
+  // implicit cleanup decision. Each helper rechecks the source lease.
   const requestBatch = ({ docs, assertOwned = null, ...requestOptions } = {}) => {
     assertOwned?.();
     return requestIngestBatch({
@@ -10013,7 +10013,7 @@ function sourceInventoryAccess(manifestPath, m, options = {}) {
   };
   const reconcileFamilies = ({ families, assertOwned = null, ...requestOptions } = {}) => {
     assertOwned?.();
-    return reconcileDocumentFamilies({
+    return applyApprovedProvenanceFamily({
       ...requestOptions,
       families,
       base,
@@ -10917,7 +10917,7 @@ export function provenanceTargetDependencies(options = {}) {
     return Object.freeze({ ...counters, results: Object.freeze(results) });
   };
 
-  const reconcileFamily = async ({ family, adminAccess, assertOwned }) => {
+  const reconcileFamily = async ({ family, approvalId, adminAccess, assertOwned }) => {
     const state = requireProvenanceTargetAdminState(adminAccess, adminStates);
     if (!family || family.scope !== "exact_structural_family" ||
         !Array.isArray(family.keep_doc_uids) || !family.keep_doc_uids.length) {
@@ -10925,6 +10925,7 @@ export function provenanceTargetDependencies(options = {}) {
     }
     await assertOwned();
     const removed = await state.reconcileFamilies({
+      approvalId,
       families: [{
         base_doc_uid: family.base_doc_uid,
         keep_doc_uids: family.keep_doc_uids,

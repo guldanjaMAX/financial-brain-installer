@@ -3561,8 +3561,18 @@ export default {
           if (docUids.length || source || families.length > 50) {
             return jsonResponse({ error: "families must be used alone and contain at most 50 entries" }, 400);
           }
+          // Older orchestrators sent confirm:true during ordinary ingestion.
+          // It is not an owner decision about an exact stored-inventory plan.
+          // Explicit source forget uses its own guarded preview below; exact
+          // provenance repair now uses the inventory-fenced removal protocol.
+          if (confirm) {
+            return privateNoStore(jsonResponse({
+              code: "INGEST_REMOVAL_PLAN_REQUIRED",
+              error: "Nothing was removed. Update the CLI, then run ingestion again to review and explicitly apply its exact removal plan.",
+            }, 409));
+          }
           try {
-            return jsonResponse(await forgetFamilies(env, { families, dryRun: !confirm }));
+            return jsonResponse(await forgetFamilies(env, { families, dryRun: true }));
           } catch (error) {
             return jsonResponse({ error: error.message }, 400);
           }

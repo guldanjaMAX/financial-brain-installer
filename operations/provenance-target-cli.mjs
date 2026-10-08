@@ -1112,7 +1112,7 @@ export async function applyProvenanceTargetRepair(input, dependencies = {}) {
         completed,
         lease.assertOwned,
         requiredCallback(dependencies, "reconcileFamily"),
-        { family: context.family },
+        { family: context.family, approvalId: invocation.approvalId },
       );
       try {
         reconciliation = Object.freeze({

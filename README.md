@@ -813,6 +813,8 @@ Apply refuses a changed local checkpoint, stored inventory, policy, or runtime.
 It removes only the exact approved document identities and verifies their absence.
 Then run ordinary ingestion again to complete the source refresh. A dry run
 still has no authenticated removal inventory and cannot produce this approval.
+An older CLI cannot remove families through the upgraded Brain's legacy cleanup
+route. The Brain refuses that request and tells the owner to update the CLI.
 To bound Gmail to recent mail, add `"since": "YYYY-MM-DD"` inside
 `corpora.gmail`. Changing that floor forces a full comparison; previously
 loaded older mail can leave the Brain only through the same removal-review gate.

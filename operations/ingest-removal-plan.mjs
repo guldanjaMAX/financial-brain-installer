@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, lstatSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync, lstatSync } from "node:fs";
+import { join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DriveRemovalReviewRequired, assertDriveRemovalPlanSafe } from "./drive-removal-plan.mjs";
 
@@ -16,13 +16,33 @@ const fail = (text) => { throw new DriveRemovalReviewRequired(text); };
 const validFingerprint = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 
 /** Bind code bytes, lockfile and installed dependencies, not a version label. */
-export function ingestRemovalRuntime() {
-  const root = fileURLToPath(new URL("../", import.meta.url));
-  const hash = createHash("sha256").update(`ingest-removal-runtime-v1:${process.version}`);
+export function ingestRemovalRuntime(root = fileURLToPath(new URL("../", import.meta.url))) {
+  if (lstatSync(root).isSymbolicLink()) throw new Error("Removal runtime contains an unverified link.");
+  const hash = createHash("sha256").update(`ingest-removal-runtime-v2:${process.version}`);
+  const present = relative => {
+    try { lstatSync(join(root, relative)); return true; }
+    catch (error) { if (error.code === "ENOENT") return false; throw error; }
+  };
+  const visited = new Set();
+  const checkedPath = (relative) => {
+    // package.files is a literal allowlist in this product. Never silently
+    // interpret a future glob, parent traversal or absolute path as coverage.
+    if (typeof relative !== "string" || !relative ||
+        relative.split("/").some(part => !part || part === "." || part === "..") ||
+        /[\\:*?\[\]{}!]/.test(relative)) throw new Error("Removal runtime manifest has an unsupported path.");
+    const parts = relative.split("/");
+    for (let i = 1; i <= parts.length; i++) {
+      const stat = lstatSync(join(root, ...parts.slice(0, i)));
+      if (stat.isSymbolicLink()) throw new Error("Removal runtime contains an unverified link.");
+      if (i < parts.length && !stat.isDirectory()) throw new Error("Removal runtime contains a non-directory parent.");
+    }
+    return join(root, relative);
+  };
   const visit = (relative) => {
-    const path = join(root, relative);
+    if (visited.has(relative)) return;
+    const path = checkedPath(relative);
     const stat = lstatSync(path);
-    if (stat.isSymbolicLink()) throw new Error("Removal runtime contains an unverified link.");
+    visited.add(relative);
     if (stat.isDirectory()) {
       for (const name of readdirSync(path).sort()) visit(`${relative}/${name}`);
     } else if (stat.isFile()) {
@@ -30,15 +50,57 @@ export function ingestRemovalRuntime() {
       hash.update(readFileSync(path));
     } else throw new Error("Removal runtime contains a non-file entry.");
   };
-  for (const name of [...readdirSync(root).filter((name) => name.endsWith(".mjs")).sort(),
-    "package.json", "operations", "connectors", "ingest", "worker/src"]) visit(name);
+  const pkg = JSON.parse(readFileSync(checkedPath("package.json"), "utf8"));
+  if (!Array.isArray(pkg.files) || !pkg.files.length) throw new Error("Removal runtime needs the complete package file manifest.");
+  const exportedFiles = value => typeof value === "string" ? [value]
+    : value && typeof value === "object" ? Object.values(value).flatMap(exportedFiles) : [];
+  const entries = ["package.json", ...pkg.files,
+    ...exportedFiles(pkg.exports),
+    ...readdirSync(root).filter(name => /^(?:readme|licen[cs]e|copying|notice)(?:\.|$)/i.test(name)),
+    ...(pkg.main ? [pkg.main] : []),
+    ...(typeof pkg.bin === "string" ? [pkg.bin] : Object.values(pkg.bin || {}))];
+  for (const name of [...new Set(entries.map(entry => {
+    if (typeof entry !== "string") throw new Error("Removal runtime manifest has an unsupported path.");
+    return entry.replace(/^\.\//, "").replace(/\/$/, "");
+  }))].sort()) visit(name);
   // npm intentionally omits the project lockfile from a packed installation.
   // Installed dependency bytes still bind the runtime in that environment.
-  if (existsSync(join(root, "package-lock.json"))) visit("package-lock.json");
+  if (present("package-lock.json")) visit("package-lock.json");
   else hash.update("package-lock:absent");
-  // npm's .bin entries are generated links, not executable module payloads.
-  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  for (const name of Object.keys(pkg.dependencies || {}).sort()) visit(`node_modules/${name}`);
+  // Bind the installed production dependency closure, including hoisted and
+  // optional peers. The root .bin wrappers are not imported module payloads.
+  // Dependencies outside this installation are unverifiable and fail closed.
+  const packages = new Set();
+  const dependencies = (manifest, parent = "") => {
+    const names = new Set([...Object.keys(manifest.dependencies || {}),
+      ...Object.keys(manifest.optionalDependencies || {}), ...Object.keys(manifest.peerDependencies || {})]);
+    for (const name of [...names].sort()) {
+      if (!/^(?:@[a-z0-9._-]+\/)?[a-z0-9._-]+$/i.test(name) || name === "." || name === "..") {
+        throw new Error("Removal runtime has an invalid dependency name.");
+      }
+      let directory = parent;
+      let found;
+      for (;;) {
+        const candidate = [directory, "node_modules", name].filter(Boolean).join("/");
+        if (present(candidate)) { found = candidate; break; }
+        if (!directory) break;
+        directory = posix.dirname(directory);
+        if (directory === ".") directory = "";
+      }
+      if (!found) {
+        if (Object.hasOwn(manifest.optionalDependencies || {}, name) || manifest.peerDependenciesMeta?.[name]?.optional === true) {
+          hash.update(JSON.stringify([parent, name, "optional:absent"]));
+          continue;
+        }
+        throw new Error("Removal runtime is missing an installed dependency.");
+      }
+      if (packages.has(found)) continue;
+      packages.add(found);
+      visit(found);
+      dependencies(JSON.parse(readFileSync(checkedPath(`${found}/package.json`), "utf8")), found);
+    }
+  };
+  dependencies(pkg);
   return hash.digest("hex");
 }
 
@@ -68,6 +130,79 @@ function checkedPreview(value) {
     fail("The Brain did not return an exact authenticated removal inventory.");
   }
   return value;
+}
+
+function checkedApply(result, targets, marker) {
+  if (result?.documents !== targets.length || !result.marker ||
+      result.marker.instance !== marker.instance || result.marker.runtime !== marker.runtime ||
+      typeof result.marker.nonce !== "string" || !result.marker.nonce ||
+      !Number.isSafeInteger(result.marker.generation) || result.marker.generation <= marker.generation) {
+    fail("Exact removal receipt was not verified. Run ingestion again before retrying.");
+  }
+  return result.marker;
+}
+
+// Every exact writer uses this ordering. An exact-target approval does not
+// replace the independent aggregate source review, even for structural repair.
+async function applyGuardedTargets({ plan, sourceApproval, send, verifyLocal = () => {} }) {
+  verifyLocal();
+  if (plan.sourcePlan) assertDriveRemovalPlanSafe(plan.sourcePlan,
+    plan.providerApproval && sourceApproval === plan.providerApproval ? plan.sourcePlan.fingerprint : sourceApproval,
+    { sourceLabel: "Source" });
+  if ((plan.requireSourceApproval && sourceApproval !== plan.sourcePlan?.fingerprint) ||
+      (plan.providerApproval && sourceApproval !== plan.providerApproval)) {
+    fail("The additional source removal approval is missing or changed. Review the saved plan's command.");
+  }
+  let marker = plan.marker;
+  let removed = 0;
+  for (let index = 0; index < plan.targets.length; index += 50) {
+    verifyLocal();
+    const targets = plan.targets.slice(index, index + 50);
+    const result = await send({ action: "apply", targets, marker });
+    marker = checkedApply(result, targets, marker);
+    removed += result.documents;
+  }
+  return { marker, removed };
+}
+
+/** Called only after the exact-target repair executor verifies its independent
+ * owner approval. Ordinary ingest must use the persisted review below instead.
+ * The approval permits one structural replacement family, never source removal.
+ * Worker mutations use exact identities and the same inventory transaction fence.
+ */
+export async function applyApprovedProvenanceFamily({
+  families, approvalId, base, adminKey, assertOwned,
+  sourcePlan = null, sourceApproval,
+  fetchImpl = fetch, request = requestIngestRemovalPlan,
+}) {
+  if (!validFingerprint(approvalId) || !Array.isArray(families) || families.length !== 1 ||
+      typeof families[0]?.base_doc_uid !== "string" || !families[0].base_doc_uid ||
+      !Array.isArray(families[0].keep_doc_uids) || !families[0].keep_doc_uids.length ||
+      (families[0].family_kind !== undefined && families[0].family_kind !== "structural")) {
+    fail("Exact family cleanup needs a separately approved provenance repair.");
+  }
+  const selectors = [{ ...families[0], family_kind: "structural" }];
+  const send = body => {
+    assertOwned?.();
+    return request({ base, adminKey, body, fetchImpl });
+  };
+  const observed = checkedPreview(await send({ action: "preview", families: selectors }));
+  // The current provenance executor only repairs local uploads. A caller
+  // extending it to Drive must also supply the reviewed aggregate inventory
+  // covering this family; absent or unrelated context cannot waive that gate.
+  const baseUid = selectors[0].base_doc_uid;
+  if (observed.targets.length && baseUid.startsWith("drive:") &&
+      !Object.values(sourcePlan?.targets || {}).flat().includes(baseUid)) {
+    fail("Drive family cleanup needs an aggregate source removal plan covering this family.");
+  }
+  const { marker } = await applyGuardedTargets({
+    plan: { ...observed, sourcePlan }, sourceApproval, send,
+  });
+  const after = checkedPreview(await send({ action: "preview", families: selectors, marker }));
+  if (after.targets.length || removalDigest(after.marker) !== removalDigest(marker)) {
+    fail("Exact family cleanup readback changed. Review a fresh provenance repair.");
+  }
+  return observed.targets.length;
 }
 
 /** One boundary shared by folder, remote and provider ingestion. */
@@ -162,30 +297,9 @@ export function createIngestRemovalReview({
       }
     };
     verifyLocal();
-    if (plan.sourcePlan) assertDriveRemovalPlanSafe(plan.sourcePlan,
-      plan.providerApproval && sourceApproval === plan.providerApproval ? plan.sourcePlan.fingerprint : sourceApproval,
-      { sourceLabel: "Source" });
-    if ((plan.requireSourceApproval && sourceApproval !== plan.sourcePlan?.fingerprint) ||
-        (plan.providerApproval && sourceApproval !== plan.providerApproval)) {
-      fail("The additional source removal approval is missing or changed. Review the saved plan's command.");
-    }
     const observed = await preview(plan.families, plan.marker);
     if (removalDigest(observed.targets) !== removalDigest(plan.targets)) fail("Exact removal targets changed; run ingestion again.");
-    let marker = observed.marker;
-    let removed = 0;
-    for (let index = 0; index < plan.targets.length; index += 50) {
-      verifyLocal();
-      const targets = plan.targets.slice(index, index + 50);
-      const result = await send({ action: "apply", targets, marker });
-      if (result?.documents !== targets.length || !result.marker ||
-          result.marker.instance !== marker.instance || result.marker.runtime !== marker.runtime ||
-          typeof result.marker.nonce !== "string" || !result.marker.nonce ||
-          !Number.isSafeInteger(result.marker.generation) || result.marker.generation <= marker.generation) {
-        fail("Exact removal receipt was not verified. Run ingestion again before retrying.");
-      }
-      marker = result.marker;
-      removed += result.documents;
-    }
+    const { marker, removed } = await applyGuardedTargets({ plan, sourceApproval, send, verifyLocal });
     const after = await preview(plan.families, marker);
     if (after.targets.length) fail("Removal readback found remaining targets. Run ingestion again.");
     verifyLocal();

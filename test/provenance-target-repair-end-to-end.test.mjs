@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { prepare, walk } from "../ingest/run.mjs";
+import { applyApprovedProvenanceFamily } from "../operations/ingest-removal-plan.mjs";
 import { RECOVERY_EXPORT_TABLES } from "../operations/cloudflare-recovery-adapter.mjs";
 import { collectPrivateLocalProvenanceAssessment } from
   "../operations/provenance-source-assessment.mjs";
@@ -161,7 +162,7 @@ function currentAcceptedCount(fixture) {
 }
 
 function localInstall(t, label) {
-  const base = mkdtempSync(join(tmpdir(), `brain-target-e2e-${label}-`));
+  const base = realpathSync.native(mkdtempSync(join(tmpdir(), `brain-target-e2e-${label}-`)));
   const root = join(base, "source");
   const manifestPath = join(base, "brain.manifest.json");
   const filePath = join(root, LOCATOR);
@@ -202,6 +203,7 @@ function localInstall(t, label) {
  * was already acquired and remains held.
  */
 function orchestratorHarness(fixture, install) {
+  fixture.env.INGEST_VERSION = { id: "fixture-runtime-one" };
   const state = {
     events: [],
     requests: [],
@@ -394,30 +396,26 @@ function orchestratorHarness(fixture, install) {
       state.captures.ingestResponse = value;
       return value;
     },
-    reconcileFamily: async ({ family, adminAccess, assertOwned }) => {
+    reconcileFamily: async ({ family, approvalId, adminAccess, assertOwned }) => {
       state.stages.push("family.reconcile");
       await assertOwned();
-      const { value } = await requestJson({
-        path: "/api/admin/brain/forget",
-        body: {
-          families: [{
-            base_doc_uid: family.base_doc_uid,
-            keep_doc_uids: [...family.keep_doc_uids],
-          }],
-          confirm: true,
-        },
-        adminAccess,
-        label: "exact structural-family reconciliation",
+      const removed = await applyApprovedProvenanceFamily({
+        families: [{ base_doc_uid: family.base_doc_uid, keep_doc_uids: [...family.keep_doc_uids] }],
+        approvalId,
+        assertOwned,
+        request: async ({ body }) => (await requestJson({
+          path: "/api/admin/brain/ingest-removal-plan", body, adminAccess,
+          label: "exact structural-family reconciliation",
+        })).value,
       });
-      assert.equal(value.dry_run, false);
-      state.captures.reconcileResponse = value;
+      state.captures.reconcileResponse = { documents: removed };
       return {
         complete: true,
         scope: family.scope,
         source: family.source,
         base_doc_uid: family.base_doc_uid,
         keep_doc_uids: [...family.keep_doc_uids],
-        removed_count: Number(value.documents),
+        removed_count: removed,
       };
     },
     drainVectorOutbox: async ({ scope, adminAccess, assertOwned }) => {
@@ -567,13 +565,22 @@ function assertNoSourceWideControlMutation(requests) {
   for (const request of requests) {
     assert.equal(Object.hasOwn(request.body || {}, "cursor"), false,
       "complete single-page inventories must not write or reuse a cursor");
-    if (request.path === "/api/admin/brain/forget") {
+    assert.notEqual(request.path, "/api/admin/brain/forget", "repair cannot use legacy deletion authority");
+    if (request.path === "/api/admin/brain/ingest-removal-plan") {
       assert.equal(Object.hasOwn(request.body || {}, "source"), false,
         "repair must not invoke whole-source removal");
       assert.equal(Object.hasOwn(request.body || {}, "doc_uids"), false,
         "repair must reconcile through one exact family boundary");
-      assert.equal(request.body.families.length, 1);
-      assert.equal(request.body.families[0].base_doc_uid, `${SOURCE}:${LOCATOR}`);
+      if (request.body.action === "preview") {
+        assert.equal(request.body.families.length, 1);
+        assert.equal(request.body.families[0].base_doc_uid, `${SOURCE}:${LOCATOR}`);
+        assert.equal(request.body.families[0].family_kind, "structural");
+      } else {
+        assert.equal(request.body.action, "apply");
+        assert.ok(request.body.targets.length > 0);
+        assert.ok(request.body.targets.every(uid => uid === `${SOURCE}:${LOCATOR}` || uid.startsWith(`${SOURCE}:${LOCATOR}#part`)));
+        assert.ok(request.body.marker.nonce);
+      }
     }
   }
 }
@@ -602,8 +609,8 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
     recoveredBrain.close();
   });
 
-  assert.match(sourceBrain.migrationFiles.at(-1), /^0051_/);
-  assert.match(recoveredBrain.migrationFiles.at(-1), /^0051_/);
+  assert.equal(sourceBrain.migrationFiles.at(-1), "0052_ingest_removal_generation.sql");
+  assert.equal(recoveredBrain.migrationFiles.at(-1), "0052_ingest_removal_generation.sql");
   assert.equal(RECOVERY_EXPORT_TABLES.includes("bank_activity_refresh_state"), true);
   assert.equal(RECOVERY_EXPORT_TABLES.includes("bank_activity_write_claims"), true);
   assert.equal(

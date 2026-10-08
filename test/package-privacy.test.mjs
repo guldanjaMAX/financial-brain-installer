@@ -539,6 +539,9 @@ const expected = [
   // behind the leased, authenticated boundary and prints a closed receipt.
   "operations/provenance-target-repair.mjs",
   "operations/provenance-target-cli.mjs",
+  // Saved exact-removal approval and runtime binding shared by ingest and
+  // independently approved structural repair. No instance state ships.
+  "operations/ingest-removal-plan.mjs",
   "operations/provenance-source-assessment.mjs",
   // Held Windows x64 first-source lane. The pure orchestrator owns no I/O; its
   // public receipts omit manifest, source, locator, query, and content. The
@@ -731,6 +734,7 @@ const expected = [
   "migrations/d1/0049_simplefin_bank_feed.sql",
   "migrations/d1/0050_bank_activity_refresh_generation.sql",
   "migrations/d1/0051_simplefin_window_revisions.sql",
+  "migrations/d1/0052_ingest_removal_generation.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values
@@ -867,6 +871,8 @@ const expected = [
   "worker/src/lib/evidence-authority.js",
   "worker/src/lib/evidence-lineage.js",
   "worker/src/lib/ingest-envelope.js",
+  // Authenticated exact-target preview and transaction-fenced deletion.
+  "worker/src/lib/ingest-removal-plan.js",
   "worker/src/lib/provenance-receipt.js",
   "worker/src/lib/source-original-binding.js",
   "worker/src/lib/source-original-chunk.js",

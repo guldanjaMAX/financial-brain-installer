@@ -474,6 +474,11 @@ removal and cursor advancement; accepted additions and updates remain durable.
 `operations/ingest-removal-plan.mjs` binds the exact family selectors and physical
 document targets to the local checkpoint, manifest and external Drive exclusion
 policy, installed runtime bytes, and an authenticated Worker inventory marker.
+The runtime digest covers the complete literal package allowlist, package entry
+points and metadata, the optional lockfile, and installed production dependencies
+including hoisted dependencies and optional peers. An absent or unsupported
+manifest, missing required file, link, or special file refuses approval. Changes
+in components, build helpers, scripts, or other shipped subtrees invalidate apply.
 `--apply-removals` applies only a saved matching plan. Existing aggregate and
 workload gates require their additional `--approve-removals` fingerprint, and
 repeated Drive absence observations still expire after 24 hours.
@@ -490,6 +495,16 @@ outbox. Exact readback must prove absence and the returned generation. Drift or 
 lost response requires a fresh plan; the client never adopts a newer marker to
 continue an old approval. Apply keeps the source cursor unchanged. An ordinary
 refresh after apply completes the source checkpoint.
+
+The legacy family arm of `POST /api/admin/brain/forget` is preview-only. A bare
+`confirm: true` returns HTTP 409 with `INGEST_REMOVAL_PLAN_REQUIRED` and guidance
+to update the CLI, including for an older ordinary-ingest orchestrator. Explicit
+source forget retains its separate exact-preview confirmation. Exact-target
+provenance repair retains its independently verified owner approval and passes
+that approval to a dedicated structural-family adapter. That adapter previews
+the authenticated inventory, applies only those exact physical targets through
+the fenced route, and reads back absence. It cannot use the legacy family writer
+or widen a repair into whole-source removal.
 
 ### Connector status
 

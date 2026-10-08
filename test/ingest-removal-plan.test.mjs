@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import worker from "../worker/src/index.js";
-import { createIngestRemovalReview } from "../operations/ingest-removal-plan.mjs";
+import { createIngestRemovalReview, applyApprovedProvenanceFamily } from "../operations/ingest-removal-plan.mjs";
 import { buildDriveRemovalPlan } from "../operations/drive-removal-plan.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
@@ -243,7 +243,7 @@ test("a lost successful apply response preserves the checkpoint and cannot repla
 
 
 test("runtime binding works in a packed installation without a lockfile and covers root modules", async () => {
-  const root = mkdtempSync(join(tmpdir(), "removal-runtime-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "removal-runtime-")));
   try {
     for (const folder of ["operations", "connectors", "ingest", "worker/src/lib"]) mkdirSync(join(root, folder), { recursive: true });
     for (const path of ["operations/ingest-removal-plan.mjs", "operations/drive-removal-plan.mjs", "worker/src/lib/stored-family-identity.js"]) {
@@ -251,7 +251,8 @@ test("runtime binding works in a packed installation without a lockfile and cove
       writeFileSync(join(root, path), bytes);
       console.log(`copied-runtime-source ${path} sha256=${createHash("sha256").update(bytes).digest("hex")}`);
     }
-    writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module", dependencies: {} }));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module", dependencies: {},
+      files: ["brain.mjs", "support-recovery.mjs", "operations/", "connectors/", "ingest/", "worker/src/"] }));
     writeFileSync(join(root, "brain.mjs"), "// synthetic dispatcher\n");
     const helper = join(root, "support-recovery.mjs");
     writeFileSync(helper, "// first helper revision\n");
@@ -261,4 +262,127 @@ test("runtime binding works in a packed installation without a lockfile and cove
     writeFileSync(helper, "// second helper revision\n");
     assert.notEqual(ingestRemovalRuntime(), first, "a root runtime module change must invalidate approval");
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("legacy family previews remain read-only and bare confirmation has no deletion authority", async () => {
+  const store = ingestPlanStore();
+  const key = randomBytes(32).toString("hex");
+  store.env.ADMIN_KEY = key;
+  let requests = 0;
+  const route = body => {
+    requests++;
+    return worker.fetch(new Request("https://fixture.invalid/api/admin/brain/forget", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Key": key }, body: JSON.stringify(body),
+    }), store.env, { waitUntil() {} });
+  };
+  try {
+    store.put("drive:old");
+    const families = [{ base_doc_uid: "drive:old", keep_doc_uids: [] }];
+    const preview = await route({ families });
+    assert.equal(preview.status, 200);
+    assert.deepEqual((await preview.json()).targets, ["drive:old"]);
+    assert.equal(store.calls.batches, 0);
+    for (const extra of [{}, { authorization: "provenance-repair" }, { approvalId: "a".repeat(64) }]) {
+      const response = await route({ families, confirm: true, ...extra });
+      assert.equal(response.status, 409);
+      const refusal = await response.json();
+      assert.equal(refusal.code, "INGEST_REMOVAL_PLAN_REQUIRED");
+      assert.match(refusal.error, /update.*CLI/i);
+      assert.equal(store.calls.batches, 0);
+      assert.deepEqual(store.uids(), ["drive:old"]);
+    }
+    assert.equal(requests, 4, "authenticated route and nonempty preview were reached");
+    const explicitForget = await route({ doc_uids: ["drive:old"], confirm: true });
+    assert.equal(explicitForget.status, 200);
+    assert.equal((await explicitForget.json()).documents, 1);
+    assert.deepEqual(store.uids(), []);
+  } finally { store.db.close(); }
+});
+
+test("separately approved provenance cleanup fences exact structural targets and retains replacements", async () => {
+  const store = ingestPlanStore();
+  try {
+    store.put("upload:original");
+    store.put("upload:original#part1of2");
+    store.put("upload:original#part2of2");
+    const families = [{ base_doc_uid: "upload:original", keep_doc_uids: ["upload:original#part1of2", "upload:original#part2of2"] }];
+    const input = { families, request: store.request, assertOwned() {} };
+    await assert.rejects(applyApprovedProvenanceFamily(input), /separately approved/);
+    assert.equal(store.calls.preview, 0);
+    let reached = 0;
+    await assert.rejects(applyApprovedProvenanceFamily({ ...input, approvalId: "a".repeat(64), request: async input => {
+      const result = await store.request(input);
+      if (input.body.action === "preview") {
+        assert.deepEqual(result.targets, ["upload:original"]);
+        reached++;
+        store.put("upload:neighbor");
+      }
+      return result;
+    } }), /changed/);
+    assert.equal(reached, 1);
+    assert.equal(store.calls.batches, 0);
+    assert.ok(store.uids().includes("upload:original"));
+    assert.equal(await applyApprovedProvenanceFamily({ ...input, approvalId: "a".repeat(64) }), 1);
+    assert.deepEqual(store.uids(), ["upload:neighbor", "upload:original#part1of2", "upload:original#part2of2"]);
+    assert.equal(store.calls.batches, 1);
+  } finally { store.db.close(); }
+});
+
+test("approved structural Drive cleanup runs the aggregate guard before exact deletion", async () => {
+  const store = ingestPlanStore();
+  try {
+    store.put("drive:original");
+    store.put("drive:original#part1of2");
+    store.put("drive:original#part2of2");
+    store.put("drive:neighbor");
+    const families = [{ base_doc_uid: "drive:original",
+      keep_doc_uids: ["drive:original#part1of2", "drive:original#part2of2"] }];
+    const sourcePlan = buildDriveRemovalPlan({
+      storedFamilies: ["drive:original", "drive:neighbor"],
+      intentionalCandidates: ["drive:original"],
+    });
+    assert.equal(sourcePlan.total, 1);
+    assert.equal(sourcePlan.tooLarge, true);
+    let previews = 0;
+    const input = { families, approvalId: "a".repeat(64), request: async input => {
+      const result = await store.request(input);
+      if (input.body.action === "preview" && !input.body.marker) {
+        previews++;
+        assert.deepEqual(result.targets, ["drive:original"]);
+      }
+      return result;
+    } };
+    for (const approval of [undefined, "f".repeat(64)]) {
+      const before = previews;
+      await assert.rejects(applyApprovedProvenanceFamily({
+        ...input, sourcePlan, sourceApproval: approval,
+      }), { code: "SAFETY_REVIEW_REQUIRED" });
+      assert.equal(previews, before + 1, "the nonempty exact inventory must reach the guard");
+      assert.equal(store.calls.apply, 0);
+      assert.ok(store.uids().includes("drive:original"));
+    }
+    // Omitting or substituting the aggregate plan cannot bypass its gate.
+    for (const aggregate of [null, buildDriveRemovalPlan({
+      storedFamilies: ["drive:original", "drive:neighbor"],
+      intentionalCandidates: ["drive:neighbor"],
+    })]) {
+      const before = previews;
+      await assert.rejects(applyApprovedProvenanceFamily({
+        ...input, sourcePlan: aggregate, sourceApproval: aggregate?.fingerprint,
+      }), { code: "SAFETY_REVIEW_REQUIRED" });
+      assert.equal(previews, before + 1);
+      assert.equal(store.calls.apply, 0);
+    }
+    const actions = [];
+    assert.equal(await applyApprovedProvenanceFamily({
+      ...input, sourcePlan, sourceApproval: sourcePlan.fingerprint,
+      request: async input => {
+        actions.push(input.body.action);
+        return store.request(input);
+      },
+    }), 1);
+    assert.deepEqual(actions, ["preview", "apply", "preview"]);
+    assert.equal(store.calls.apply, 1);
+    assert.deepEqual(store.uids(), ["drive:neighbor", "drive:original#part1of2", "drive:original#part2of2"]);
+  } finally { store.db.close(); }
 });
