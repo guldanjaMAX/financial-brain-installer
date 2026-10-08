@@ -122,6 +122,86 @@ The v1 store accepts absence only from a complete no-data report with a cited
 explicit zero cell. Subset searches need a separately reviewed receipt adapter;
 caller-supplied zero-match counts on nonempty reports are refused.
 
+### Books transaction matching seam
+
+`books-match.js` adds `matchBooksSnapshots({scope, quickbooks, bank},
+{resolveSnapshot})` and `verifyBooksAbsenceReceipt(receipt, {resolveSnapshot})`.
+The two input references use the existing `snapshot_ref` contract. The resolver
+must return the currently authorized R1 snapshot after checking custody, current
+head, source grants and the active owner map. Snapshot hashes are verified again.
+Supplying request JSON as that resolver's authority is prohibited.
+
+The smallest adapter extension is the internal `BooksTransactions` R1 profile.
+This is a normalized inventory profile, not a claim that a provider exposes a
+report with that name. No provider reader or new route is enabled here. It uses
+the existing money, scope, coverage, row and citation schemas unchanged:
+
+- `source_kind` is `quickbooks_report` or `bank_report`, respectively. Both sides
+  have the exact same entity, company, owner-map head, basis, currency, timezone,
+  fiscal-year end and filters. A nonempty `account_filter` names reviewed owner
+  account IDs; adapters must bind each native account to that map before using
+  `group_ref: {kind: 'account', id: <owner account ID>}`. Labels cannot map accounts.
+- Each detail row carries native entity ID, version, and optional line ID.
+  `amount` is exact nonnegative wire money, with `inflow` or `outflow` cell role.
+  Required text/date columns are `posted_on`, `direction`, `reference`,
+  `linked_entity_id`, `linked_line_id`, `transfer_ref` and `record_state`.
+  Reference/link/transfer cells use explicit blank when unknown. Other fields
+  must be present. IDs and references are compared verbatim, with no trimming.
+- `linked_entity_id` and optional `linked_line_id` name the opposite side's
+  native identity. Adapters must document those links, never infer them from
+  amount or label. `transfer_ref` is a documented common transfer identity across
+  the reviewed internal accounts. Intercompany transfers require a separate
+  adapter and remain unsupported by this same-entity profile.
+- `record_state` is `settled`, `pending`, `removed` or `superseded`. Excluded rows
+  remain visible and block absence proof. Identical active ID/version replays
+  retain every citation but contribute one record. Conflicting active versions
+  refuse. This bounded profile accepts at most 500 physical rows per snapshot;
+  overflow refuses without truncation. A graph exceeding 10,000 candidate edges
+  also refuses as a whole, keeping dense ambiguity from producing an unbounded
+  response. No partial candidate selection is returned on either bound.
+
+The matcher builds the complete graph before allocating records. Explicit links
+reserve their endpoints against weaker guesses. Contradictory links and all
+competing candidates survive in their connected component. A heuristic exact
+pair requires mutual uniqueness, identical documented reference, account,
+currency, direction, amount and date. Unknown references cannot certify identity.
+A date shift within three calendar days is a timing candidate. Amount differences
+use BigInt and shared wire money. Each component retains all records and candidate
+edges; no amount is selected for an ambiguous component. Duplicate candidates
+remain review-only. A transfer allocation requires two equal, opposite legs on
+distinct reviewed accounts on each side, and a unique compatible cross-source
+partner for each leg. A missing or inconsistent leg never becomes a net zero.
+
+`books-match-search-1` is a separate, replayable subset absence receipt. Its closed
+shape is the exact output of the matcher: `schema_version`, `policy_version`,
+`scope`, `present` (a real citation), `quickbooks` and `bank` snapshot references,
+`predicate_hash`, `search_start`, `search_end`, `opposite_side`,
+`opposite_coverage`, `searched_record_count` and `match_count: 0`.
+The predicate hash covers canonical JSON of policy version, scope, present
+citation and both snapshot references. No absent record or zero-money citation
+is fabricated. Both complete inventories must cover the period plus three days
+on each boundary, agree on observation, generation and stable mutation fence,
+and have no exclusions. The final covered day must have ended in the company
+timezone by observation time. Future or still-open days cannot establish absence. Records used
+only in the search margin remain visible under `boundary_only`. A counterpart
+reserved by another link still blocks a zero-match receipt.
+
+Verification resolves both current snapshots again and repeats the entire
+deterministic search, then compares every receipt field exactly. A changed source,
+revoked grant, stale map, changed count, changed policy or extra field refuses.
+This receipt is not yet the B1 store's narrower `search_receipt` object. The
+BOOKS-DOCUMENT integration must invoke this verifier and provide a reviewed
+persistence adapter; it must not paste a subset zero into the whole-report B1
+slot. Existing B1/T1 schemas and storage acceptance remain unchanged.
+
+Results expose `checked`, `groups`, `excluded`, `boundary_only`, and
+`checks_completed|needs_review|incomplete`. All results are review-only and set
+`financial_authority:false` and `mutated_source_records:false`. The legacy bounded
+reconciliation route also uses the complete candidate graph; its unmatched rows
+remain incomplete because its coverage labels cannot supply these receipts.
+Its existing amount/date-only exact groups are legacy present-record comparisons,
+not B02 identity or absence proof. Books rules must use the R1 matching seam.
+
 T1 carries typed metrics, signed bridge adjustments, report hashes, unresolved
 finding references, exact mapping version and optional authenticated confirmation
 reference. A transfer with `confirmation:null` is valid only as `not_checked`.

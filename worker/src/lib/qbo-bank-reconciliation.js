@@ -7,8 +7,11 @@
  * claims plus review-only exceptions, and never selects or mutates a winner.
  */
 
+import { booksCandidateComponents } from './books-candidate-graph.js';
+import { moneyFromMinor, moneyToSafeInteger } from './financial-money.js';
+import { validFinancialDate } from './financial-snapshot-contract.js';
+
 const SAFE_SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const CURRENCY = /^[A-Z]{3}$/;
 const DIRECTIONS = new Set(["inflow", "outflow"]);
 const QBO_COVERAGE = new Set(["complete", "present_snapshot_partial", "unavailable"]);
@@ -31,7 +34,7 @@ function fail(code, message, options) {
 
 function dateValue(value, noun) {
   const text = String(value || "").trim();
-  if (!DATE.test(text) || Number.isNaN(Date.parse(`${text}T00:00:00Z`))) {
+  if (!validFinancialDate(text)) {
     fail("invalid_reconciliation_scope", `${noun} must be an ISO date`);
   }
   return text;
@@ -48,7 +51,7 @@ function stableId(prefix, parts) {
 
 function checkedScope(input = {}, { requireCompany = true } = {}) {
   const accountSlug = String(input.account_slug || "").trim();
-  const qboAccountId = String(input.qbo_account_id || "").trim();
+  const qboAccountId = typeof input.qbo_account_id === 'string' ? input.qbo_account_id : '';
   const periodStart = dateValue(input.period_start, "period_start");
   const periodEnd = dateValue(input.period_end, "period_end");
   const direction = String(input.direction || "").trim().toLowerCase();
@@ -85,15 +88,15 @@ function checkedQboLines(lines, scope) {
   const seen = new Set();
   return lines.map((raw) => {
     const line = {
-      line_uid: String(raw?.line_uid || "").trim(),
-      qbo_account_id: String(raw?.qbo_account_id || "").trim(),
+      line_uid: typeof raw?.line_uid === 'string' ? raw.line_uid : '',
+      qbo_account_id: typeof raw?.qbo_account_id === 'string' ? raw.qbo_account_id : '',
       qbo_company_fingerprint: String(raw?.qbo_company_fingerprint || "").trim().toLowerCase(),
       posted_on: String(raw?.posted_on || "").trim(),
-      amount_minor: Number(raw?.amount_minor),
+      amount_minor: raw?.amount_minor,
       direction: String(raw?.direction || "").trim(),
       currency: String(raw?.currency || "").trim().toUpperCase(),
-      source_doc_uid: String(raw?.source_doc_uid || "").trim(),
-      source_locator: String(raw?.source_locator || "").trim(),
+      source_doc_uid: typeof raw?.source_doc_uid === 'string' ? raw.source_doc_uid : '',
+      source_locator: typeof raw?.source_locator === 'string' ? raw.source_locator : '',
     };
     if (!line.line_uid || seen.has(line.line_uid) || line.line_uid.length > 240) {
       fail("invalid_qbo_evidence", "every QuickBooks line needs a unique bounded line_uid");
@@ -101,7 +104,7 @@ function checkedQboLines(lines, scope) {
     seen.add(line.line_uid);
     if (line.qbo_account_id !== scope.qbo_account_id ||
         line.qbo_company_fingerprint !== scope.qbo_company_fingerprint || line.direction !== scope.direction ||
-        line.currency !== scope.currency || !DATE.test(line.posted_on) ||
+        line.currency !== scope.currency || !validFinancialDate(line.posted_on) ||
         line.posted_on < scope.period_start || line.posted_on > scope.period_end ||
         !Number.isSafeInteger(line.amount_minor) || line.amount_minor < 0 ||
         !line.source_doc_uid || !line.source_locator) {
@@ -147,72 +150,32 @@ function classified(classification, qbo, bank, evidenceState, deltaMinor = null)
 
 /** Classify present source records without choosing a winner. */
 export function classifyQuickBooksBankLines({ qboLines, bankLines, bankCoverage, qboCoverage }) {
-  const qboRemaining = new Map(qboLines.map((line) => [line.line_uid, line]));
-  const bankRemaining = new Map(bankLines.map((line) => [line.txn_uid, line]));
-  const results = [];
-  const qboGroups = new Map();
-  const bankGroups = new Map();
-  for (const line of qboLines) qboGroups.set(exactKey(line), [...(qboGroups.get(exactKey(line)) || []), line]);
-  for (const line of bankLines) bankGroups.set(exactKey(line), [...(bankGroups.get(exactKey(line)) || []), line]);
-
-  for (const key of [...qboGroups.keys()].sort()) {
-    const qbo = qboGroups.get(key);
-    const bank = bankGroups.get(key) || [];
-    if (!bank.length) continue;
-    if (qbo.length === 1 && bank.length === 1) {
-      results.push(classified("exact_unique", qbo, bank, "exact", 0));
-    } else {
-      results.push(classified("ambiguous_duplicates", qbo, bank, "ambiguous", null));
-    }
-    for (const line of qbo) qboRemaining.delete(line.line_uid);
-    for (const line of bank) bankRemaining.delete(line.txn_uid);
-  }
-
-  for (const qbo of [...qboRemaining.values()].sort((a, b) => a.line_uid.localeCompare(b.line_uid))) {
-    const sameDate = [...bankRemaining.values()].filter((bank) =>
-      bank.posted_on === qbo.posted_on && bank.direction === qbo.direction && bank.currency === qbo.currency);
-    if (sameDate.length === 1) {
-      const bank = sameDate[0];
-      results.push(classified("amount_mismatch", [qbo], [bank], "confirmed_conflict", qbo.amount_minor - bank.amount_minor));
-      bankRemaining.delete(bank.txn_uid);
-      qboRemaining.delete(qbo.line_uid);
-      continue;
-    }
-    if (sameDate.length > 1) {
-      results.push(classified("ambiguous_duplicates", [qbo], sameDate, "ambiguous", null));
-      for (const bank of sameDate) bankRemaining.delete(bank.txn_uid);
-      qboRemaining.delete(qbo.line_uid);
-      continue;
-    }
-    const nearbyAmount = [...bankRemaining.values()].filter((bank) =>
-      bank.amount_minor === qbo.amount_minor && bank.direction === qbo.direction &&
-      bank.currency === qbo.currency && dateDistance(bank.posted_on, qbo.posted_on) <= 3);
-    if (nearbyAmount.length === 1) {
-      const bank = nearbyAmount[0];
-      results.push(classified("date_mismatch", [qbo], [bank], "confirmed_conflict", 0));
-      bankRemaining.delete(bank.txn_uid);
-      qboRemaining.delete(qbo.line_uid);
-      continue;
-    }
-    if (nearbyAmount.length > 1) {
-      results.push(classified("ambiguous_duplicates", [qbo], nearbyAmount, "ambiguous", null));
-      for (const bank of nearbyAmount) bankRemaining.delete(bank.txn_uid);
-      qboRemaining.delete(qbo.line_uid);
+  for (const [rows, key] of [[qboLines, 'line_uid'], [bankLines, 'txn_uid']]) {
+    if (!Array.isArray(rows) || rows.length > MAX_LINES ||
+        new Set(rows.map(row => row[key])).size !== rows.length || rows.some(row =>
+          typeof row[key] !== 'string' || !row[key] || !Number.isSafeInteger(row.amount_minor) || row.amount_minor < 0 ||
+          !validFinancialDate(row.posted_on) || !DIRECTIONS.has(row.direction) || !CURRENCY.test(row.currency))) {
+      fail('invalid_reconciliation_evidence', 'comparison requires unique identities and exact safe minor units');
     }
   }
-
-  const coverageComplete = bankCoverage === "complete" && qboCoverage === "complete";
-  for (const qbo of qboRemaining.values()) {
-    results.push(classified("qbo_only", [qbo], [], coverageComplete ? "confirmed_conflict" : "incomplete_coverage"));
-  }
-  for (const bank of bankRemaining.values()) {
-    results.push(classified("bank_only", [], [bank], coverageComplete ? "confirmed_conflict" : "incomplete_coverage"));
-  }
-  return results.sort((a, b) => {
-    const ad = a.quickbooks[0]?.posted_on || a.bank[0]?.posted_on || "";
-    const bd = b.quickbooks[0]?.posted_on || b.bank[0]?.posted_on || "";
-    return ad.localeCompare(bd) || a.classification.localeCompare(b.classification);
+  const ordered = (rows, key) => [...rows].sort((a, b) => a[key].localeCompare(b[key]));
+  const groups = booksCandidateComponents(ordered(qboLines, 'line_uid'), ordered(bankLines, 'txn_uid'), (qbo, bank) => {
+    if (qbo.direction !== bank.direction || qbo.currency !== bank.currency) return false;
+    if (qbo.posted_on === bank.posted_on) return 'same_date';
+    return qbo.amount_minor === bank.amount_minor && dateDistance(bank.posted_on, qbo.posted_on) <= 3 ? 'nearby_amount' : false;
   });
+  return groups.map(({ left: qbo, right: bank }) => {
+    if (!qbo.length || !bank.length) {
+      // A coverage label is not an opposite-side search receipt. The snapshot
+      // matcher supplies that proof; the legacy route cannot claim absence.
+      return classified(qbo.length ? 'qbo_only' : 'bank_only', qbo, bank, 'incomplete_coverage');
+    }
+    if (qbo.length !== 1 || bank.length !== 1) return classified('ambiguous_duplicates', qbo, bank, 'ambiguous');
+    if (exactKey(qbo[0]) === exactKey(bank[0])) return classified('exact_unique', qbo, bank, 'exact', 0);
+    if (qbo[0].posted_on !== bank[0].posted_on) return classified('date_mismatch', qbo, bank, 'timing_candidate', 0);
+    return classified('amount_mismatch', qbo, bank, 'confirmed_conflict',
+      moneyToSafeInteger(moneyFromMinor(BigInt(qbo[0].amount_minor) - BigInt(bank[0].amount_minor), qbo[0].currency)));
+  }).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 }
 
 async function first(env, sql, binds) {
@@ -232,8 +195,9 @@ function coverageState(row, scope) {
 }
 
 function exceptionFor(scope, reconciliationUid, item, now) {
-  const qbo = item.quickbooks[0] || null;
-  const bank = item.bank[0] || null;
+  const ambiguous = item.evidence_state === 'ambiguous';
+  const qbo = ambiguous ? null : item.quickbooks[0] || null;
+  const bank = ambiguous ? null : item.bank[0] || null;
   const amount = item.delta_minor === null
     ? qbo?.amount_minor ?? bank?.amount_minor ?? null
     : Math.abs(item.delta_minor);
@@ -491,8 +455,8 @@ export async function runQuickBooksBankReconciliation(env, input = {}, options =
     error_code: null,
     scope,
     coverage: { quickbooks: scope.qbo_coverage, bank: bankCoverage },
-    qbo_total_minor: qboLines.reduce((sum, line) => sum + line.amount_minor, 0),
-    bank_total_minor: bankLines.reduce((sum, line) => sum + Number(line.amount_minor), 0),
+    qbo_total_minor: moneyToSafeInteger(moneyFromMinor(qboLines.reduce((sum, line) => sum + BigInt(line.amount_minor), 0n), scope.currency)),
+    bank_total_minor: moneyToSafeInteger(moneyFromMinor(bankLines.reduce((sum, line) => sum + BigInt(line.amount_minor), 0n), scope.currency)),
     qbo_line_count: qboLines.length,
     bank_line_count: bankLines.length,
     classifications,

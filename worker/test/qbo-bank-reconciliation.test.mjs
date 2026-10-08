@@ -69,6 +69,32 @@ function d1(db, { fail = false } = {}) {
   };
 }
 
+// FIN-001: persistence must retain all candidates without using the first
+// opaque ID as a headline amount or transaction identity.
+{
+  const db = freshDb();
+  seedAccount(db, 'graph-checking');
+  bank(db, 'graph-bank', 'graph-checking', '2026-07-15', 300);
+  const qboLines = [qbo(db, 'graph-one', '2026-07-15', 100), qbo(db, 'graph-two', '2026-07-15', 200)];
+  const before = db.prepare('SELECT * FROM fin_transactions ORDER BY txn_uid').all();
+  const result = await runQuickBooksBankReconciliation(d1(db), {
+    account_slug: 'graph-checking', qbo_account_id: 'qbo-35', qbo_company_fingerprint: QBO_COMPANY,
+    period_start: '2026-07-01', period_end: '2026-07-31', direction: 'outflow', currency: 'USD',
+    qbo_coverage: 'complete', qbo_lines: qboLines,
+  }, { now: NOW });
+  assert.equal(result.classifications.length, 1);
+  assert.equal(result.classifications[0].quickbooks.length, 2);
+  assert.equal(result.classifications[0].bank.length, 1);
+  assert.equal(result.status, 'insufficient_evidence');
+  const exceptions = db.prepare('SELECT * FROM fin_exceptions').all();
+  assert.equal(exceptions.length, 1, 'the persistence decision was reached');
+  assert.equal(exceptions[0].amount_minor, null);
+  assert.equal(exceptions[0].txn_uid, null);
+  assert.equal(JSON.parse(exceptions[0].detail).citations.length, 3);
+  assert.deepEqual(db.prepare('SELECT * FROM fin_transactions ORDER BY txn_uid').all(), before);
+  db.close();
+}
+
 function seedAccount(db, slug, coverage = "complete") {
   db.prepare(`INSERT INTO fin_entities
     (tenant_id, entity_slug, legal_name, kind, provenance, basis_state, recorded_at)
