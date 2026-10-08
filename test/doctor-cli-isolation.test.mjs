@@ -147,7 +147,7 @@ for (const failAcl of [false, true]) test(`Windows support journal reaches the i
   `], { BRAIN_TEST_SUPPORT_ACL_FAIL: failAcl ? "1" : "0" }, [], { hostPlatform: "win32" });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /TEST_JOURNAL_REACHED/);
-  assert.match(result.stdout, /TEST_SUPPORT_ACL_REACHED/);
+  assert.match(result.stderr, /TEST_SUPPORT_ACL_REACHED/);
   assert.match(result.stdout, failAcl ? /TEST_JOURNAL_REFUSED/ : /TEST_JOURNAL_SAVED/);
   assert.doesNotMatch(result.stdout, failAcl ? /TEST_JOURNAL_SAVED/ : /TEST_JOURNAL_REFUSED/);
   assert.doesNotMatch(result.stderr, /TEST_SIDE_EFFECT_BLOCKED/);

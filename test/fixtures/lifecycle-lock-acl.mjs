@@ -20,7 +20,7 @@ export function restrictWindowsDirectoryToCurrentUser(path, options = {}) {
     runAcl(_command, args) {
       assert.equal(args[0], path);
       assert.deepEqual(args.slice(1), ["/inheritance:r", "/grant:r", "fixture-user:(OI)(CI)F"]);
-      writeSync(1, "TEST_LIFECYCLE_ACL_REACHED\n");
+      writeSync(2, "TEST_LIFECYCLE_ACL_REACHED\n");
       return { status: 0 };
     },
   });
