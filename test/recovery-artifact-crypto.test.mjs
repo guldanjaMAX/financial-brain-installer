@@ -552,6 +552,172 @@ test("cleanup distinguishes large Windows file IDs that collide as Numbers", asy
   }
 });
 
+for (const identityKind of ["native", "large", "zero", "zero-number", "zero-bigint", "missing-device"]) {
+  for (const operation of ["encrypt", "decrypt", "consume"]) {
+    test(`${identityKind} identity: ${operation} preserves an unrelated destination`, async () => {
+      const directory = privateDirectory();
+      const source = join(directory, "source.sql");
+      const encrypted = join(directory, "source.fbrenc");
+      const nonce = Buffer.alloc(12, 87).toString("hex");
+      const destination = join(directory, operation === "consume"
+        ? `${RECOVERY_ARTIFACT_PLAINTEXT_PREFIX}${nonce}` : "destination.sql");
+      const key = generateRecoveryArtifactKey();
+      const originals = { fstatSync: fs.fstatSync, lstatSync: fs.lstatSync };
+      const identities = new Map();
+      const usable = identityKind === "native" || identityKind === "large";
+      let openedIdentities = 0;
+      let replacements = 0;
+      let writes = 0;
+      let consumers = 0;
+      const cleanup = [];
+      function replaceDestination() {
+        if (existsSync(destination)) unlinkSync(destination);
+        writeFileSync(destination, "unrelated replacement", { mode: 0o600 });
+        replacements++;
+      }
+      try {
+        writeFileSync(source, "synthetic source", { mode: 0o600 });
+        await encryptRecoveryArtifact(source, encrypted, key);
+        for (const name of Object.keys(originals)) {
+          fs[name] = (target, options) => {
+            const stat = originals[name](target, options);
+            const native = originals[name](target, { bigint: true });
+            const signature = `${native.dev}:${native.ino}`;
+            if (!identities.has(signature)) identities.set(signature, 2n ** 60n + BigInt(identities.size));
+            if (identityKind === "large") {
+              stat.ino = options?.bigint ? identities.get(signature) : Number(identities.get(signature));
+            } else if (identityKind === "zero" ||
+                (identityKind === "zero-number" && !options?.bigint) ||
+                (identityKind === "zero-bigint" && options?.bigint)) {
+              stat.ino = options?.bigint ? 0n : 0;
+            } else if (identityKind === "missing-device") {
+              delete stat.dev;
+            }
+            if (name === "fstatSync" && options?.bigint && ++openedIdentities === 1 && !usable) {
+              // The new guard precedes write/consumer callbacks. Race the
+              // destination at the opened-identity decision so preservation
+              // cannot pass merely because no unrelated file ever existed.
+              replaceDestination();
+            }
+            return stat;
+          };
+        }
+        syncBuiltinESMExports();
+        const options = {
+          randomBytesImpl: (length) => Buffer.alloc(length, 87),
+          writeSyncImpl(...args) {
+            writes++;
+            if (operation === "consume") return writeSync(...args);
+            replaceDestination();
+            throw new Error("synthetic destination race");
+          },
+          cleanupUnlinkSyncImpl(path) { cleanup.push(path); unlinkSync(path); },
+          unlinkSyncImpl(path) { cleanup.push(path); unlinkSync(path); },
+        };
+        let failure;
+        try {
+          if (operation === "consume") {
+            await withDecryptedRecoveryArtifact(encrypted, directory, key, (path) => {
+              consumers++;
+              assert.equal(path, destination);
+              replaceDestination();
+            }, options);
+          } else {
+            const run = operation === "encrypt" ? encryptRecoveryArtifact : decryptRecoveryArtifact;
+            await run(operation === "encrypt" ? source : encrypted, destination, key, options);
+          }
+        } catch (error) { failure = error; }
+        assert.ok(openedIdentities > 0, "the opened staging identity decision was reached");
+        assert.ok(identities.size > 1, "the real filesystem supplied distinct identities");
+        assert.ok(replacements > 0, "an unrelated destination existed at the refusal boundary");
+        assert.equal(existsSync(destination), true, "cleanup must preserve the unrelated destination");
+        assert.equal(readFileSync(destination, "utf8"), "unrelated replacement");
+        assert.ok(failure, "the operation must refuse rather than return success");
+        if (usable) {
+          assert.equal(writes, 1, "the real write callback was reached");
+          assert.equal(consumers, operation === "consume" ? 1 : 0);
+          assert.equal(replacements, 1);
+          assert.equal(cleanup.length, 1, "only owned staging was removed");
+          assert.notEqual(cleanup[0], destination);
+          assert.match(failure.message, operation === "consume"
+            ? /temporary plaintext copy could not be removed/ : /synthetic destination race/);
+          if (identityKind === "large") {
+            assert.equal(new Set([...identities.values()].map(Number)).size, 1,
+              "distinct exact IDs collide as Numbers");
+          }
+        } else {
+          assert.equal(failure.code, "RECOVERY_ENCRYPTED_PROVENANCE_ARTIFACT_REFUSED");
+          assert.match(failure.message, /this folder cannot prove which file is which/);
+          assert.match(failure.message, /empty staging file.*manual review/);
+          assert.equal(openedIdentities, 1);
+          assert.equal(writes, 0, "no ciphertext or plaintext bytes were written");
+          assert.equal(consumers, 0, "no consumer received an unproven file");
+          assert.deepEqual(cleanup, [], "unusable identity never authorizes unlink");
+          const staging = readdirSync(directory).filter((name) =>
+            ![basename(source), basename(encrypted), basename(destination)].includes(name));
+          assert.equal(staging.length, 1, "only the refused empty staging file remains");
+          const path = join(directory, staging[0]);
+          assert.equal(isRecoveryArtifactResiduePathComponent(staging[0]), true);
+          assert.equal(readFileSync(path).length, 0, "staging residue contains no plaintext");
+          if (process.platform !== "win32") assert.equal(originals.lstatSync(path).mode & 0o777, 0o600);
+        }
+      } finally {
+        Object.assign(fs, originals);
+        syncBuiltinESMExports();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+test("zero identities refuse before a consumer can replace its plaintext", async () => {
+  const directory = privateDirectory();
+  const source = join(directory, "source.sql");
+  const encrypted = join(directory, "source.fbrenc");
+  const key = generateRecoveryArtifactKey();
+  const originals = { fstatSync: fs.fstatSync, lstatSync: fs.lstatSync };
+  let openedIdentities = 0;
+  let consumers = 0;
+  let writes = 0;
+  try {
+    writeFileSync(source, "synthetic source", { mode: 0o600 });
+    await encryptRecoveryArtifact(source, encrypted, key);
+    for (const name of Object.keys(originals)) {
+      fs[name] = (target, options) => {
+        const stat = originals[name](target, options);
+        stat.ino = options?.bigint ? 0n : 0;
+        if (name === "fstatSync" && options?.bigint) openedIdentities++;
+        return stat;
+      };
+    }
+    syncBuiltinESMExports();
+    let failure;
+    try {
+      await withDecryptedRecoveryArtifact(encrypted, directory, key, (path) => {
+        consumers++;
+        unlinkSync(path);
+        writeFileSync(path, "unrelated replacement", { mode: 0o600 });
+      }, {
+        writeSyncImpl(...args) { writes++; return writeSync(...args); },
+      });
+    } catch (error) { failure = error; }
+    assert.ok(openedIdentities > 0, "the opened staging identity decision was reached");
+    assert.equal(consumers, 0, "the original replacement callback is refused before dispatch");
+    assert.equal(writes, 0, "no plaintext was produced");
+    assert.equal(failure?.code, "RECOVERY_ENCRYPTED_PROVENANCE_ARTIFACT_REFUSED");
+    assert.match(failure.message, /this folder cannot prove which file is which/);
+    const residue = recoveryPlaintextResidues(directory);
+    assert.equal(residue.length, 1);
+    assert.ok(residue[0].startsWith(`${RECOVERY_ARTIFACT_PLAINTEXT_PREFIX}staging-`));
+    assert.equal(readFileSync(join(directory, residue[0])).length, 0);
+    if (process.platform !== "win32") assert.equal(originals.lstatSync(join(directory, residue[0])).mode & 0o777, 0o600);
+  } finally {
+    Object.assign(fs, originals);
+    syncBuiltinESMExports();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("encrypted-source mutation during plaintext publication is refused", async () => {
   const directory = privateDirectory();
   const source = join(directory, "source.sql");
