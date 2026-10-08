@@ -172,8 +172,12 @@ try {
   writeFileSync(publicCliEnvironment.BRAIN_ADMIN_KEY_FILE, "synthetic-admin-key-fixture-only", { mode: 0o600 });
   const schedulerPreload = join(folder, "scheduler-preload.mjs");
   writeFileSync(schedulerPreload, SCHEDULER_PRELOAD);
+  // Windows support notes restrict their own file; that ACL child is a fixture.
+  publicCliEnvironment.BRAIN_TEST_USER_ROOT = folder;
   const statusArguments = [
-    "--import", TRIPWIRE, "--import", pathToFileURL(schedulerPreload).href,
+    "--import", TRIPWIRE,
+    "--import", new URL("./fixtures/support-journal-acl-preload.mjs", import.meta.url).href,
+    "--import", pathToFileURL(schedulerPreload).href,
     brainCli, "schedule", manifestPath, "--provider", "slack", "--status",
   ];
   const publicStatus = spawnSync(
@@ -183,7 +187,8 @@ try {
   );
   const publicStatusOutput = `${publicStatus.stdout || ""}${publicStatus.stderr || ""}`;
   check("public provider status never attempts an uninjected native or network action",
-    publicStatus.status !== 86 && !/TEST_SIDE_EFFECT_BLOCKED|INTEGRATION_BOUNDARY_BLOCKED/.test(publicStatusOutput));
+    publicStatus.status !== 86 && !/TEST_SIDE_EFFECT_BLOCKED|INTEGRATION_BOUNDARY_BLOCKED/.test(publicStatusOutput),
+    publicStatusOutput.match(/(?:TEST_SIDE_EFFECT|INTEGRATION_BOUNDARY)_BLOCKED:[^\r\n]*/)?.[0] || `exit ${publicStatus.status}`);
   const stageCount = (output, name) => output.split(`TEST_SCHEDULER_STAGE:${name}\n`).length - 1;
   check("public provider status reaches the injected scheduler on supported platforms",
     stageCount(publicStatusOutput, "provider") === (process.platform === "darwin" ? 1 : 0) &&
@@ -266,7 +271,12 @@ try {
   writeFileSync(cliEnvironment.BRAIN_ADMIN_KEY_FILE, "synthetic-admin-key-fixture-only", { mode: 0o600 });
   const missingManifest = join(folder, "RAW_SCHEDULE_MANIFEST_SENTINEL.json");
   const schedulerCli = fileURLToPath(new URL("../operations/provider-scheduler.mjs", import.meta.url));
-  const cliFailure = spawnSync(process.execPath, ["--import", TRIPWIRE, schedulerCli, "slack", "install", missingManifest], {
+  cliEnvironment.BRAIN_TEST_USER_ROOT = cliRoot;
+  const cliFailure = spawnSync(process.execPath, [
+    "--import", TRIPWIRE,
+    "--import", new URL("./fixtures/support-journal-acl-preload.mjs", import.meta.url).href,
+    schedulerCli, "slack", "install", missingManifest,
+  ], {
     cwd: cliRoot,
     encoding: "utf8",
     env: cliEnvironment,
@@ -274,7 +284,8 @@ try {
   });
   const cliOutput = `${cliFailure.stdout || ""}${cliFailure.stderr || ""}`;
   check("the scheduler refusal never attempts a native or network action",
-    cliFailure.status !== 86 && !/TEST_SIDE_EFFECT_BLOCKED|INTEGRATION_BOUNDARY_BLOCKED/.test(cliOutput));
+    cliFailure.status !== 86 && !/TEST_SIDE_EFFECT_BLOCKED|INTEGRATION_BOUNDARY_BLOCKED/.test(cliOutput),
+    cliOutput.match(/(?:TEST_SIDE_EFFECT|INTEGRATION_BOUNDARY)_BLOCKED:[^\r\n]*/)?.[0] || `exit ${cliFailure.status}`);
   const cliEvents = previewSupportJournal({ root: cliRoot });
   check("scheduled provider CLI output keeps raw failure detail private",
     cliFailure.status === 1 && /slack scheduler stopped.*complete result/is.test(cliOutput) &&

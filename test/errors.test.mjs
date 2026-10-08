@@ -93,7 +93,8 @@ function cli(args, env = {}, options = {}) {
     encoding: "utf-8", env: e, cwd: userRoot, timeout: 30_000,
   });
   if (r.status === 86 || /TEST_SIDE_EFFECT_BLOCKED:/.test(r.stderr || "")) {
-    throw new Error("CLI fixture attempted an uninjected host action");
+    const boundary = String(r.stderr || "").match(/TEST_SIDE_EFFECT_BLOCKED:[^\r\n]*/)?.[0] || `exit ${r.status}`;
+    throw new Error(`CLI fixture attempted an uninjected host action (${boundary})`);
   }
   const journal = readSupportJournal(userRoot);
   if (!options.keepUserRoot) rmSync(userRoot, { recursive: true, force: true });
@@ -261,11 +262,13 @@ function ingestExitCli(scenario) {
   const args = scenario.startsWith("drive")
     ? ["ingest", manifest, "--from", "drive"]
     : ["ingest", manifest, "--path", source];
-  const result = spawnSync(process.execPath, ["--import", SIDE_EFFECT_TRIPWIRE, "--import", INGEST_EXIT_FETCH, CLI, ...args], {
+  env.BRAIN_TEST_USER_ROOT = userRoot;
+  const result = spawnSync(process.execPath, ["--import", SIDE_EFFECT_TRIPWIRE, "--import", SUPPORT_ACL, "--import", INGEST_EXIT_FETCH, CLI, ...args], {
     encoding: "utf-8", env, cwd: userRoot, timeout: 30_000,
   });
   if (result.status === 86 || /TEST_SIDE_EFFECT_BLOCKED:/.test(result.stderr || "")) {
-    throw new Error("Ingest fixture attempted an uninjected host action");
+    const boundary = String(result.stderr || "").match(/TEST_SIDE_EFFECT_BLOCKED:[^\r\n]*/)?.[0] || `exit ${result.status}`;
+    throw new Error(`Ingest fixture attempted an uninjected host action (${boundary})`);
   }
   const statePath = join(dir, `.brain-ingest-${scenario.startsWith("drive") ? "drive" : "upload"}.json`);
   check(`synthetic ${scenario} ingest reached its recovery-state write`,
@@ -449,7 +452,8 @@ function ingestExitCli(scenario) {
   const failed = cli(["status", missing], {}, { userRoot, keepUserRoot: true });
   const preview = cli(["support", "--preview"], {}, { userRoot, keepUserRoot: true });
   check("support preview returns the exact canonical bytes recorded by the failed command",
-    failed.code === 1 && preview.code === 0 && preview.out === failed.journal, preview.out);
+    // The preview channel is stdout; Windows test fixtures report on stderr.
+    failed.code === 1 && preview.code === 0 && preview.stdout === failed.journal, preview.out);
   if (process.platform !== "win32") {
     const legacyDirectories = [
       join(userRoot, ".brain"),
