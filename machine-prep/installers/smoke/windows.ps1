@@ -113,11 +113,20 @@ switch ($Phase) {
         $properties['Manufacturer'] -cne 'Financial Brain LLC') { throw 'Unexpected MSI scope or product metadata' }
     $tables = @(Read-Rows '_Tables' @('Name') | ForEach-Object { $_.Name })
     $allowedTables = @('Property', 'Directory', 'Feature', 'FeatureComponents', 'Component', 'File', 'Media', 'Registry',
-      'Shortcut', 'RemoveFile', 'Upgrade', 'LaunchCondition', 'MsiFileHash', '_Validation',
+      'Shortcut', 'RemoveFile', 'Upgrade', 'LaunchCondition', 'MsiFileHash', '_Validation', 'AppSearch', 'RegLocator',
       'AdminExecuteSequence', 'AdminUISequence', 'AdvtExecuteSequence', 'InstallExecuteSequence', 'InstallUISequence')
     foreach ($table in $tables) {
       if ($table -notin $allowedTables) { throw 'Unexpected MSI table outside the shell contract' }
     }
+    # The only search is the read-only Windows build-number lookup behind the
+    # launch condition: HKLM (root 2), raw value in the 64-bit view (type 2 + 16).
+    $searches = @(Read-Rows 'AppSearch' @('Property', 'Signature_'))
+    if ($searches.Count -ne 1 -or $searches[0].Property -cne 'WINDOWSBUILDNUMBER' -or
+        $searches[0].Signature_ -cne 'WindowsBuildNumberSearch') { throw 'Unexpected MSI search' }
+    $locators = @(Read-Rows 'RegLocator' @('Signature_', 'Root', 'Key', 'Name', 'Type'))
+    if ($locators.Count -ne 1 -or $locators[0].Signature_ -cne 'WindowsBuildNumberSearch' -or $locators[0].Root -cne '2' -or
+        $locators[0].Key -cne 'SOFTWARE\Microsoft\Windows NT\CurrentVersion' -or $locators[0].Name -cne 'CurrentBuildNumber' -or
+        $locators[0].Type -cne '18') { throw 'Unexpected MSI registry search' }
     $directories = @{}
     Read-Rows 'Directory' @('Directory', 'Directory_Parent', 'DefaultDir') | ForEach-Object { $directories[$_.Directory] = $_ }
     foreach ($key in $directories.Keys) {

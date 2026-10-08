@@ -559,6 +559,12 @@ test("signed smoke native adapters retain signature, user scope, footprint, and 
   assert.doesNotMatch(windowsSmoke, /^\s*\$view\.(?:Execute|Close)\(\)\s*$/m);
   // Installer.Products is unreachable from PowerShell; registration is read per product.
   assert.doesNotMatch(windowsSmoke, /\$script:Installer\.Products\b/);
+  // The build-number gate adds AppSearch and RegLocator; the smoke admits
+  // exactly that one read-only HKLM 64-bit raw lookup and nothing else.
+  assert.match(windowsSmoke, /'_Validation', 'AppSearch', 'RegLocator',/);
+  assert.match(windowsSmoke, /\$searches\.Count -ne 1 -or \$searches\[0\]\.Property -cne 'WINDOWSBUILDNUMBER'/);
+  assert.match(windowsSmoke, /\$locators\[0\]\.Root -cne '2'/);
+  assert.match(windowsSmoke, /\$locators\[0\]\.Type -cne '18'/);
   assert.match(windowsSmoke, /ProductState\(\$product\) -ne -1\) \{ throw 'MSI is already registered' \}/);
   const assertWindows = (source) => {
     assert.match(source, /Get-AuthenticodeSignature -LiteralPath \$Artifact/);
