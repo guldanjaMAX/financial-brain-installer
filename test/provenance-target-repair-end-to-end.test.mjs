@@ -1434,8 +1434,8 @@ for (const shape of ["control", "prefix", "part-syntax", "conflicting-binding"])
     install.invocation(preview.publicPlan.approval_id),harness.dependencies); }
   catch(caught) { error=caught; receipt=caught.receipt; }
   assert.ok(receipt,'legitimate owner approval reached executor receipt');
-  if(error) assert.equal(error.stage,'result_family_record','a preserved outsider cannot become target-family proof');
-  else assert.equal(receipt.complete,true);
+  assert.equal(error, undefined, 'an independent original does not obstruct exact-family proof');
+  assert.equal(receipt.complete, true);
   assert.ok(harness.state.stages.includes('family.reconcile'));
   const exactWrites = harness.state.requests.filter(r=>r.path==='/api/admin/brain/ingest-removal-plan'&&r.body.action==='apply');
   const independentRemains = !!fixture.first('SELECT doc_uid FROM documents WHERE doc_uid=?',uid);
@@ -1453,8 +1453,7 @@ for (const shape of ["control", "prefix", "part-syntax", "conflicting-binding"])
     assert.equal(text.includes(other), false);
     assert.equal(text.includes(independentBinding.original_id), false);
   }
-  if (collision) assert.equal(error.stage, 'result_family_record', 'inconsistent family proof refuses');
-  else assert.equal(receipt.complete, true, 'the independent nonmatching control completes');
+  assert.equal(receipt.complete, true, 'all-and-only the approved original is proven');
   assert.equal(independentRemains,true,'one-original approval must preserve independent prefix-sharing original');
  });
 }

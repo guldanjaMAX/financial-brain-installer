@@ -11396,7 +11396,8 @@ export class ProvenanceRepairIncompleteError extends Fatal {
   constructor(message, receipt = null) {
     super(message);
     this.name = "ProvenanceRepairIncompleteError";
-    this.code = "PROVENANCE_REPAIR_INCOMPLETE";
+    this.code = receipt?.operation === "provenance-target-repair"
+      ? "PROVENANCE_TARGET_REPAIR_INCOMPLETE" : "PROVENANCE_REPAIR_INCOMPLETE";
     this.receipt = receipt;
   }
 }

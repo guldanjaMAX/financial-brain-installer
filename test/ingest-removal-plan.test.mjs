@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import worker from "../worker/src/index.js";
+import { splitOversized, MAX_DOC_CHARS } from "../ingest/envelope-batching.mjs";
 import { createIngestRemovalReview, applyApprovedProvenanceFamily } from "../operations/ingest-removal-plan.mjs";
 import { buildDriveRemovalPlan } from "../operations/drive-removal-plan.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
@@ -246,7 +247,8 @@ test("runtime binding works in a packed installation without a lockfile and cove
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "removal-runtime-")));
   try {
     for (const folder of ["operations", "connectors", "ingest", "worker/src/lib"]) mkdirSync(join(root, folder), { recursive: true });
-    for (const path of ["operations/ingest-removal-plan.mjs", "operations/drive-removal-plan.mjs", "worker/src/lib/stored-family-identity.js"]) {
+    for (const path of ["operations/ingest-removal-plan.mjs", "operations/drive-removal-plan.mjs",
+      "operations/cli-guidance.mjs", "operations/command-display.mjs", "worker/src/lib/stored-family-identity.js"]) {
       const bytes = readFileSync(new URL(`../${path}`, import.meta.url));
       writeFileSync(join(root, path), bytes);
       console.log(`copied-runtime-source ${path} sha256=${createHash("sha256").update(bytes).digest("hex")}`);
@@ -422,7 +424,6 @@ test("structural membership requires exact part syntax and provenance; inconsist
       ["#part01of2", { part_of: "records/original.txt" }],
       ["#part0of2", { part_of: "records/original.txt" }],
       ["#part3of2", { part_of: "records/original.txt" }],
-      ["#part1of1", { part_of: "records/original.txt" }],
       ["#part1of2.txt", { part_of: "records/original.txt" }],
       ["#part1of2\n", { part_of: "records/original.txt" }],
       ["#part1of2", {}],
@@ -445,4 +446,73 @@ test("structural membership requires exact part syntax and provenance; inconsist
     assert.equal(store.uids().includes(valid), false);
     assert.ok(rejected.every(([suffix]) => store.uids().includes(base + suffix)));
   } finally { store.db.close(); }
+});
+
+
+test("the exact character ceiling never creates a one-part split", () => {
+  for (const content of ["x".repeat(MAX_DOC_CHARS), "x".repeat(MAX_DOC_CHARS - 1) + "é"]) {
+    assert.equal(content.length, MAX_DOC_CHARS, "the split decision reaches the exact ceiling");
+    const envelope = { source_type: "upload", source_id: "records/limit.txt", content };
+    const result = splitOversized(envelope);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].source_id, envelope.source_id, "no synthetic one-part identity");
+    assert.equal(result[0].metadata.part_of, undefined);
+    assert.equal(result[0].content, content);
+    const oversized = splitOversized({ ...envelope, content: content + "x" });
+    assert.equal(oversized.length, 2, "the above-ceiling control still splits");
+    assert.deepEqual(oversized.map(part => part.metadata.part_count), [2, 2]);
+    assert.equal(oversized.map(part => part.content).join(""), content + "x");
+  }
+});
+
+test("an existing one-part split is reviewable while an unrelated one-part identity is preserved", async () => {
+  const store = ingestPlanStore();
+  try {
+    const base = "upload:records/legacy.txt";
+    const legacy = `${base}#part1of1`;
+    store.put(base);
+    store.put(legacy, { part_of: "records/legacy.txt", part: 1, part_count: 1 });
+    const families = [{ base_doc_uid: base, keep_doc_uids: [base], family_kind: "structural" }];
+    const observed = await store.request({ body: { action: "preview", families } });
+    assert.equal(store.calls.preview, 1, "the authenticated review decision was reached");
+    assert.deepEqual(observed.targets, [legacy]);
+    assert.equal(observed.excluded_documents, 0);
+    const result = await applyIngestRemovals(store.env, observed);
+    assert.equal(result.documents, 1);
+    assert.equal(store.calls.batches, 1);
+    assert.deepEqual(store.uids(), [base]);
+    store.put(legacy, { part_of: "records/independent.txt", part: 1, part_count: 1 });
+    const excluded = await store.request({ body: { action: "preview", families } });
+    assert.equal(store.calls.preview, 2);
+    assert.deepEqual(excluded.targets, []);
+    assert.equal(excluded.excluded_documents, 1);
+    assert.deepEqual(store.uids(), [base, legacy]);
+  } finally { store.db.close(); }
+});
+
+test("excluded-family warning offers safe next steps through the native command renderer", async () => {
+  const store = ingestPlanStore();
+  const warnings = [];
+  const previous = console.warn;
+  console.warn = text => warnings.push(text);
+  try {
+    const base = "upload:records/overlap.txt";
+    store.put(base);
+    store.put(`${base}#partner.txt`);
+    const state = { done: { original: "accepted" }, skipped: {} };
+    const review = createIngestRemovalReview({ state, saveState: () => {}, source: "upload",
+      manifest: {}, manifestPath: "/fixture/manifest.json", base: "https://fixture.invalid",
+      request: store.request, runtime: () => "fixture-runtime" });
+    review.remember([{ base_doc_uid: base, keep_doc_uids: [base], family_kind: "structural",
+      stateKey: "original", hash: "accepted" }]);
+    await review.finish();
+    assert.equal(store.calls.preview, 1, "the real exclusion decision was reached");
+    assert.equal(store.calls.apply, 0);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /preserved 1 stored document/);
+    assert.match(warnings[0], /Nothing was lost/);
+    assert.match(warnings[0], /review.*support.*retry/i);
+    assert.ok(warnings[0].includes(renderCliCommands("brain support --explain SAFETY_REVIEW_REQUIRED")));
+    assert.doesNotMatch(warnings[0], /records\/|partner|result_family|fixture\.invalid/);
+  } finally { console.warn = previous; store.db.close(); }
 });

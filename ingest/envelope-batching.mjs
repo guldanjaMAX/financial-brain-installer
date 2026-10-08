@@ -29,7 +29,9 @@ export function splitOversized(envelope, maxChars = MAX_DOC_CHARS) {
   const bytes = Buffer.byteLength(text, "utf8");
   const ratio = text.length ? bytes / text.length : 1;
   const effective = ratio > 1.05 ? Math.max(20_000, Math.floor(maxChars / ratio)) : maxChars;
-  if (bytes <= effective * ratio && text.length <= effective) return [rootedEnvelope];
+  // effective already accounts for bytes. Multiplying the ratio back can
+  // round below bytes at the exact ceiling and invent a #part1of1 family.
+  if (text.length <= effective) return [rootedEnvelope];
 
   const parts = [];
   for (let i = 0; i < text.length; i += effective) parts.push(text.slice(i, i + effective));

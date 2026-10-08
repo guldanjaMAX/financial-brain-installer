@@ -961,7 +961,9 @@ function publicIncompleteReceipt(source, stage, completedStages) {
 
 export class ProvenanceTargetCliError extends Error {
   constructor(stage, source, completedStages, privateCause = null) {
-    super(`One-file provenance repair stopped at ${stage}. It is incomplete and did not claim success.`);
+    super("One-file provenance repair is incomplete. Nothing was lost. " +
+      "Run a new read-only preview before retrying.\n" +
+      "For help, run: brain support --explain PROVENANCE_TARGET_REPAIR_INCOMPLETE");
     this.name = "ProvenanceTargetCliError";
     this.code = "PROVENANCE_TARGET_REPAIR_INCOMPLETE";
     this.stage = stage;
@@ -1298,7 +1300,8 @@ export function renderProvenanceTargetRepairReceipt(receipt) {
     return [
       "One-file provenance repair is incomplete.",
       ...exclusions,
-      `It stopped at ${receipt.failed_stage}. No whole-source completion claim was made.`,
+      "Nothing was lost. Run a new read-only preview before retrying.",
+      "For help, run: brain support --explain PROVENANCE_TARGET_REPAIR_INCOMPLETE",
     ].join("\n");
   }
   const reverified = receipt.workflow === "accepted_resolution_reverification";

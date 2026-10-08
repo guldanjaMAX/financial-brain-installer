@@ -3,6 +3,7 @@ import { readFileSync, readdirSync, lstatSync } from "node:fs";
 import { join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DriveRemovalReviewRequired, assertDriveRemovalPlanSafe } from "./drive-removal-plan.mjs";
+import { renderCliCommands } from "./cli-guidance.mjs";
 
 const canonical = (value) => Array.isArray(value) ? value.map(canonical)
   : value && typeof value === "object"
@@ -259,7 +260,9 @@ export function createIngestRemovalReview({
     }
     const observed = await preview(families);
     if (observed.excluded_documents) {
-      console.warn(`Source ${source}: preserved ${observed.excluded_documents} stored document(s) whose names overlap a family but whose membership was not verified.`);
+      console.warn(renderCliCommands(`Source ${source}: preserved ${observed.excluded_documents} stored document(s) whose names overlap a family but whose membership was not verified.\n` +
+        "Nothing was lost. Review the preserved documents with support before retrying.\n" +
+        "For help, run: brain support --explain SAFETY_REVIEW_REQUIRED"));
     }
     if (!observed.targets.length) {
       delete state.ingest_removal_plan;

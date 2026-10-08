@@ -7790,10 +7790,31 @@ function structuralPart(uid, base) {
   if (!match || match[0] !== suffix) return null;
   const part = Number(match[1]);
   const count = Number(match[2]);
-  return Number.isSafeInteger(part) && Number.isSafeInteger(count) && count >= 2 && part <= count
+  // Older splitters could emit #part1of1 at the character ceiling. Its exact
+  // provenance still permits recovery, even though new writers never emit it.
+  return Number.isSafeInteger(part) && Number.isSafeInteger(count) && part <= count
     ? { part, count } : null;
 }
 const isStructuralFamilyMember = (uid, base) => uid === base || structuralPart(uid, base) !== null;
+
+/** Shared by removal review and result proof. meta is parsed; original_id must
+ * come from a revision/content/receipt-matched authenticated binding join.
+ * A conflicting or broken binding cannot fall back to weaker mutable metadata.
+ */
+export function structuralFamilyMember(row, base, originalId) {
+  const uid = String(row.doc_uid);
+  const part = structuralPart(uid, base);
+  const source = base.slice(0, base.indexOf(":"));
+  const locator = base.slice(source.length + 1);
+  const partOf = row.meta?.part_of;
+  const metadataMatches = part && (partOf === locator || partOf === base) &&
+    (row.meta.part === undefined || row.meta.part === part.part) &&
+    (row.meta.part_count === undefined || row.meta.part_count === part.count);
+  const structural = row.source === source && (uid === base || metadataMatches);
+  const identityMatches = row.source_original_binding_hash == null ||
+    (row.original_id != null && row.original_id === originalId);
+  return Boolean(structural && identityMatches);
+}
 
 /**
  * Reconcile only verified family members after replacements land. Structural
@@ -7914,20 +7935,9 @@ export async function forgetFamilies(env, { families = [], dryRun = true } = {})
         }
         if (family.kind === "declared" || row.family_of !== null ||
             (row.uid !== family.base && !row.uid.startsWith(`${family.base}#part`))) continue;
-        const part = structuralPart(row.uid, family.base);
-        const source = family.base.slice(0, family.base.indexOf(":"));
-        const locator = family.base.slice(source.length + 1);
-        const partOf = row.meta?.part_of;
-        const metadataMatches = part && (partOf === locator || partOf === family.base) &&
-          (row.meta.part === undefined || row.meta.part === part.part) &&
-          (row.meta.part_count === undefined || row.meta.part_count === part.count);
-        const structural = row.source === source && (row.uid === family.base || metadataMatches);
-        // A conflicting or broken authenticated binding cannot fall back to
-        // weaker metadata, even if the filename and part_of look plausible.
-        const bound = row.source_original_binding_hash != null;
-        const identityMatches = !bound ||
-          (row.original_id != null && row.original_id === await originalIdentity(family));
-        if (structural && identityMatches) members.add(row.uid);
+        const expectedOriginal = row.source_original_binding_hash == null
+          ? null : await originalIdentity(family);
+        if (structuralFamilyMember(row, family.base, expectedOriginal)) members.add(row.uid);
         else excluded.add(row.uid);
       }
       const existing = new Set(rows.map((row) => row.uid));

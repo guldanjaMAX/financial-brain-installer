@@ -174,6 +174,17 @@ try {
   assert.equal(Object.hasOwn(safetyStop, "removalFingerprint"), false);
   assert.equal(Object.hasOwn(safetyStop, "documentIds"), false);
 
+  const repairStop = previewSupportEvent({
+    command: "provenance-repair", source: "local",
+    errorCode: "PROVENANCE_TARGET_REPAIR_INCOMPLETE",
+    failed_stage: malicious, target: malicious, original_id: malicious,
+  }, options(sandbox, 10));
+  assert.equal(repairStop.error_code, "PROVENANCE_TARGET_REPAIR_INCOMPLETE");
+  assert.equal(JSON.stringify(repairStop).includes("THIS_MUST_NEVER_APPEAR"), false);
+  for (const field of ["failed_stage", "target", "original_id"]) {
+    assert.equal(Object.hasOwn(repairStop, field), false);
+  }
+
   const root = freshRoot("privacy");
   const eventInput = {
     command: "ingest",

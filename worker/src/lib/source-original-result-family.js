@@ -18,7 +18,7 @@ import {
   normalizeSourceOriginalReceipt,
   normalizeSourceOriginalSource,
 } from "./source-original-binding.js";
-import { vectorReadiness } from "./store-d1.js";
+import { structuralFamilyMember, vectorReadiness } from "./store-d1.js";
 
 export const SOURCE_ORIGINAL_RESULT_FAMILY_CONTRACT_VERSION = 1;
 export const SOURCE_ORIGINAL_RESULT_FAMILY_UNRELATED_BACKLOG_CODE =
@@ -168,7 +168,7 @@ function familyComplete(documents, source, base) {
 async function exactFamilySnapshot(env, request, originalId) {
   const base = `${request.source}:${request.locator}`;
   const result = await env.DB.prepare(
-    `SELECT d.doc_uid,d.source_id,d.title AS document_title,d.meta,
+    `SELECT d.doc_uid,d.source,d.source_id,d.title AS document_title,d.meta,
             d.document_revision_id,d.source_original_binding_hash,
             d.content_hash,d.provenance_receipt_digest,
             bound.contract_version AS binding_contract_version,
@@ -228,6 +228,17 @@ async function exactFamilySnapshot(env, request, originalId) {
       } catch {
         // A malformed structural contract can never become a family receipt.
       }
+      const boundOriginal = row.binding_tenant_id === SOURCE_ORIGINAL_TENANT_ID &&
+        row.binding_locator_kind === request.locator_kind
+        ? row.binding_original_id : null;
+      // Prefix/metadata matches are candidates only, just as in removal review.
+      // Keep exact-original anomalies as evidence: an extra authenticated
+      // revision or declared export must still fail the completeness checks.
+      // A different original must neither be deleted nor enter this proof.
+      if (docUid !== base && row.source_id !== request.locator && boundOriginal !== originalId &&
+          metadata?.family_of !== base && !structuralFamilyMember({
+            ...row, meta: metadata, original_id: boundOriginal,
+          }, base, originalId)) continue;
       documentsByUid.set(docUid, {
         doc_uid: docUid,
         source_id: String(row.source_id || ""),

@@ -35,6 +35,17 @@ It gives the same five answers for every problem: what happened, what stayed
 protected, whether retrying is safe, what to try next, and when a technician
 can help. The longer entries below add the provider-specific detail.
 
+For `PROVENANCE_TARGET_REPAIR_INCOMPLETE`, the one-file repair could not verify
+its complete result. Nothing was lost. Accepted progress is saved and the
+original file is unchanged. Run a new read-only preview before retrying. If
+documents were preserved because their family membership could not be verified,
+review them with support. The message reports counts without private paths or
+document identities. Get the next step with:
+
+```
+brain support --explain PROVENANCE_TARGET_REPAIR_INCOMPLETE
+```
+
 **The one command that answers "is it broken":**
 
 ```
