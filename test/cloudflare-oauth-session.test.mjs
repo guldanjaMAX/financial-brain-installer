@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
@@ -723,7 +723,7 @@ test("error 10007 on any other preflight read stays an ordinary refused request"
 });
 
 test("setup with no registered workers.dev subdomain says how to register one and never offers the token path", async () => {
-  const root = mkdtempSync(resolve(tmpdir(), "brain-unregistered-subdomain-"));
+  const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-unregistered-subdomain-")));
   try {
     const manifestPath = resolve(root, "brain.manifest.json");
     const resumeCommand = `brain setup ${commandPath(manifestPath)}`;
@@ -853,7 +853,7 @@ async function namedProfileRoutine(manifestPath, paths, { fetchImpl = unregister
 }
 
 test("a named-profile update of a custom-domain Brain continues when the subdomain read is refused", async () => {
-  const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-refused-subdomain-"));
+  const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-custom-domain-refused-subdomain-")));
   try {
     const paths = [];
     const result = await namedProfileRoutine(
@@ -877,7 +877,7 @@ test("a named-profile update of a custom-domain Brain continues when the subdoma
 });
 
 test("a named-profile update with a saved workers.dev address continues when the subdomain read is refused", async () => {
-  const root = mkdtempSync(resolve(tmpdir(), "brain-saved-workers-dev-refused-subdomain-"));
+  const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-saved-workers-dev-refused-subdomain-")));
   try {
     const paths = [];
     const result = await namedProfileRoutine(
@@ -900,7 +900,7 @@ test("a named-profile update with a saved workers.dev address continues when the
 });
 
 test("the update command uses a saved workers.dev address without requiring the account subdomain read", async () => {
-  const root = mkdtempSync(resolve(tmpdir(), "brain-update-saved-workers-dev-"));
+  const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-update-saved-workers-dev-")));
   try {
     const manifestPath = namedProfileManifest(root, {
       domain: "fixture-brain.fixture-owner.workers.dev",
@@ -949,7 +949,7 @@ test("the update command uses a saved workers.dev address without requiring the 
 // and names the Windows route instead.
 const SUBDOMAIN_SCOPE_CAUSE = /This browser sign-in cannot read this account's workers\.dev address/;
 const VECTORIZE_SCOPE_CAUSE = /cannot request the Vectorize permission this install requires/;
-const WINDOWS_SAVED_KEY_ROUTE = /On Windows the route is the saved Cloudflare key, not a browser sign-in; this command will not ask you to type a key\./;
+const WINDOWS_RECOVERY_LIMIT = /Windows has no saved Cloudflare-token recovery or supported hidden token entry in this release\. Stop here and ask the technician for an approved recovery plan; this command will not ask you to type a key\./;
 
 function assertKeptScopeRefusal(result, platform, cause) {
   const resolved = platform ?? process.platform;
@@ -959,7 +959,8 @@ function assertKeptScopeRefusal(result, platform, cause) {
   assert.match(result.error.message, /Issue: CLOUDFLARE_OAUTH_SCOPE_MISSING\./, `${resolved}: the issue code must be kept`);
   if (resolved === "win32") {
     assert.deepEqual(result.prompts, [], "win32 must not offer a recovery its hidden prompt would refuse");
-    assert.match(result.error.message, WINDOWS_SAVED_KEY_ROUTE, "win32 must name its own route");
+    assert.match(result.error.message, WINDOWS_RECOVERY_LIMIT, "win32 must state the actual recovery limit");
+    assert.doesNotMatch(result.error.message, /the route is the saved Cloudflare key/);
   } else {
     assert.equal(result.prompts.length, 1, `${resolved}: the declined recovery offer must be made once`);
     assert.doesNotMatch(result.error.message, /On Windows/, `${resolved}: the Windows route is Windows-only`);
@@ -968,7 +969,7 @@ function assertKeptScopeRefusal(result, platform, cause) {
 
 for (const { suffix, platform } of failClosedPlatformArms()) {
   test(`a named-profile setup with no saved address still requires the subdomain read${suffix}`, async () => {
-    const root = mkdtempSync(resolve(tmpdir(), "brain-no-domain-refused-subdomain-"));
+    const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-no-domain-refused-subdomain-")));
     try {
       const paths = [];
       const result = await namedProfileRoutine(
@@ -988,7 +989,7 @@ for (const { suffix, platform } of failClosedPlatformArms()) {
   });
 
   test(`an unreadable manifest still requires the subdomain read${suffix}`, async () => {
-    const root = mkdtempSync(resolve(tmpdir(), "brain-unreadable-domain-refused-subdomain-"));
+    const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-unreadable-domain-refused-subdomain-")));
     try {
       const manifestPath = resolve(root, "brain.manifest.json");
       writeFileSync(manifestPath, "{not-json");
@@ -1011,7 +1012,7 @@ for (const { suffix, platform } of failClosedPlatformArms()) {
 }
 
 test("a custom-domain Brain treats any subdomain 403 as the same unused scope refusal", async () => {
-  const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-refused-subdomain-code-"));
+  const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-custom-domain-refused-subdomain-code-")));
   try {
     const paths = [];
     const result = await namedProfileRoutine(
@@ -1090,7 +1091,7 @@ for (const failure of [
   },
 ]) {
   test(`a custom-domain Brain stops on a subdomain ${failure.label}`, async () => {
-    const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-subdomain-failure-"));
+    const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-custom-domain-subdomain-failure-")));
     const paths = [];
     let actionCalls = 0;
     let observedOAuthCode = null;
@@ -1142,7 +1143,7 @@ for (const failure of [
 
 for (const { suffix, platform } of failClosedPlatformArms()) {
   test(`a custom-domain Brain still fails closed on a Vectorize 403 after the tolerated subdomain refusal${suffix}`, async () => {
-    const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-vectorize-refusal-"));
+    const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-custom-domain-vectorize-refusal-")));
     try {
       const paths = [];
       const result = await namedProfileRoutine(
@@ -1184,7 +1185,7 @@ for (const { suffix, platform } of failClosedPlatformArms()) {
 }
 
 async function requiredSubdomainScopeRefusal({ interactive, platform }) {
-  const root = mkdtempSync(resolve(tmpdir(), "brain-required-subdomain-refusal-"));
+  const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-required-subdomain-refusal-")));
   const paths = [];
   const prompts = [];
   let actionCalls = 0;
@@ -1257,7 +1258,7 @@ test("a Brain with no saved address gets a specific subdomain refusal and the ex
 });
 
 test("the no-address refusal enters the existing explicit recovery credential ceremony", async () => {
-  const root = mkdtempSync(resolve(tmpdir(), "brain-subdomain-recovery-control-"));
+  const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-subdomain-recovery-control-")));
   const paths = [];
   const prompts = [];
   const tokenRequests = [];
@@ -1322,7 +1323,7 @@ for (const { suffix, platform } of failClosedPlatformArms()) {
 }
 
 test("a named-profile update of a custom-domain Brain is not refused for a missing workers.dev subdomain", async () => {
-  const root = mkdtempSync(resolve(tmpdir(), "brain-custom-domain-"));
+  const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-custom-domain-")));
   try {
     const paths = [];
     const result = await namedProfileRoutine(namedProfileManifest(root, { domain: "brain.example.invalid" }), paths);
@@ -1338,7 +1339,7 @@ test("a named-profile update of a custom-domain Brain is not refused for a missi
 });
 
 test("a named-profile Brain with no saved address is still refused for a missing subdomain", async () => {
-  const root = mkdtempSync(resolve(tmpdir(), "brain-workers-dev-"));
+  const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-workers-dev-")));
   try {
     const paths = [];
     const result = await namedProfileRoutine(namedProfileManifest(root, {}), paths);
@@ -2441,7 +2442,7 @@ test("win32 refuses an unusable Vectorize recovery offer before asking the owner
       assert.match(error.message, VECTORIZE_SCOPE_CAUSE);
       assert.match(error.message, /Workers Scripts Edit[\s\S]*D1 Edit[\s\S]*Vectorize Edit[\s\S]*Workers AI Read/i);
       assert.match(error.message, /Nothing was changed/);
-      assert.match(error.message, WINDOWS_SAVED_KEY_ROUTE);
+      assert.match(error.message, WINDOWS_RECOVERY_LIMIT);
       assert.match(error.message, /Issue: CLOUDFLARE_OAUTH_SCOPE_MISSING\./);
       assert.doesNotMatch(error.message, /it asks before using any recovery key|opens the protected recovery flow/i,
         "Windows must not be sent back to a hidden prompt this command refuses");
@@ -2611,7 +2612,7 @@ for (const scenario of [
       assert.match(run.error.message, /Workers Scripts Edit[\s\S]*D1 Edit[\s\S]*Vectorize Edit[\s\S]*Workers AI Read/i);
       if (scenario.nothingChanged) assert.match(run.error.message, /Nothing was changed/);
       else assert.doesNotMatch(run.error.message, /Nothing was changed/, "setup made progress, so it must not claim otherwise");
-      assert.match(run.error.message, WINDOWS_SAVED_KEY_ROUTE);
+      assert.match(run.error.message, WINDOWS_RECOVERY_LIMIT);
       assert.match(run.error.message, /Issue: CLOUDFLARE_OAUTH_SCOPE_MISSING\./);
       assert.doesNotMatch(run.error.message, /it asks before using any recovery key|opens the protected recovery flow/i,
         "Windows must not be sent back to a hidden prompt this command refuses");
@@ -2867,7 +2868,7 @@ test("a token-lane action failure also propagates unchanged exactly once", async
 
 test("Zoom connect and disconnect use the manifest's exact saved Cloudflare profile", async () => {
   const profile = cloudflareOAuthProfileName(INSTALL_ID);
-  const root = mkdtempSync(resolve(tmpdir(), "brain-zoom-oauth-dispatch-"));
+  const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-zoom-oauth-dispatch-")));
   const manifestPath = resolve(root, "brain.manifest.json");
   const manifest = JSON.parse(readFileSync(resolve("templates/brain.manifest.json"), "utf8"));
   manifest.infrastructure.cloudflare.account_id = ACCOUNT_A;
@@ -2919,7 +2920,7 @@ test("Zoom connect and disconnect use the manifest's exact saved Cloudflare prof
 
 test("plain doctor runs deployed migration checks inside the saved browser profile without reauthorization", async () => {
   const profile = cloudflareOAuthProfileName(INSTALL_ID);
-  const root = mkdtempSync(resolve(tmpdir(), "brain-doctor-oauth-dispatch-"));
+  const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-doctor-oauth-dispatch-")));
   const manifestPath = resolve(root, "brain.manifest.json");
   const manifest = JSON.parse(readFileSync(resolve("templates/brain.manifest.json"), "utf8"));
   manifest.infrastructure.cloudflare.account_id = ACCOUNT_A;
@@ -2983,7 +2984,7 @@ test("plain doctor runs deployed migration checks inside the saved browser profi
 });
 
 test("plain doctor keeps the Codex alternative off for empty, invalid, incomplete, and pre-provision manifests", async () => {
-  const root = mkdtempSync(resolve(tmpdir(), "brain-doctor-unprovisioned-gate-"));
+  const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-doctor-unprovisioned-gate-")));
   const manifestPath = resolve(root, "brain.manifest.json");
   const preProvision = readFileSync(resolve("templates/brain.manifest.json"), "utf8");
   const cases = [
@@ -3066,7 +3067,7 @@ test("manifest-path identity is canonical, bounded, and does not disclose a long
  * directory, and the operator is told the sign-in did not complete.
  */
 test("the Wrangler sign-in child runs in this install's directory, never the caller's", () => {
-  const installDir = mkdtempSync(resolve(tmpdir(), "fb-oauth-cwd-"));
+  const installDir = realpathSync.native(mkdtempSync(resolve(tmpdir(), "fb-oauth-cwd-")));
   try {
     const runner = processRecorder();
     createCloudflareOAuthProfile({
@@ -3150,7 +3151,7 @@ test("a genuine unfinished browser step keeps the sign-in-did-not-complete wordi
 });
 
 test("adoption tells the owner the sign-in completed but could not be saved", async () => {
-  const sandbox = mkdtempSync(resolve(tmpdir(), "fb-oauth-adopt-"));
+  const sandbox = realpathSync.native(mkdtempSync(resolve(tmpdir(), "fb-oauth-adopt-")));
   const priorLog = console.log;
   const priorTty = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
   try {
@@ -3216,7 +3217,7 @@ test("adoption tells the owner the sign-in completed but could not be saved", as
 test("adopting a browser sign-in applies the same workers.dev need as routine commands", async () => {
   const priorLog = console.log;
   const run = async (brain) => {
-    const root = mkdtempSync(resolve(tmpdir(), "fb-oauth-adopt-domain-"));
+    const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "fb-oauth-adopt-domain-")));
     const manifestPath = resolve(root, "brain.manifest.json");
     writeFileSync(manifestPath, JSON.stringify({
       brain: { worker_name: "fixture-brain", ...brain },

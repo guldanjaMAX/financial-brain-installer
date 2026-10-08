@@ -20,10 +20,33 @@ Written so you can fix it yourself. Every entry has what you see, why it happens
 The installer reads the brain admin key from its durable local storage. Keep
 `.brain-admin-key` in that storage rather than copying it into your shell. On Windows that file is a DPAPI
 CurrentUser ciphertext envelope, not the key itself. A Cloudflare token is
-needed only for account-changing commands such as verify, provision, deploy,
-and secrets. The supported `brain setup` and `brain update` paths ask for it in
-a hidden terminal prompt. Low-level automation uses an approved secret manager,
+needed only for explicitly selected recovery or automation on account-changing
+commands such as verify, provision, deploy, and secrets. Normal setup and update
+use browser sign-in. Windows has no saved Cloudflare-token recovery or supported
+hidden token entry in this release. Low-level automation uses an approved secret manager,
 so the token or key stays out of shell commands and history.
+
+`CLOUDFLARE_KEYRING_UNAVAILABLE` means the encrypted-storage step stopped before
+the browser opened. `binding_missing` means Wrangler's Windows native binding is
+absent or cannot load; `npx_unavailable` means the Node.js launcher is unavailable;
+`timeout` means the step ran out of time; `other` needs the visible console result
+reviewed by a technician. Captured Wrangler output is wiped, never copied into
+the support journal. Run `brain support --explain CLOUDFLARE_KEYRING_UNAVAILABLE`
+for the same guidance.
+
+On Windows, in a visible PowerShell window as the same user, run:
+
+```powershell
+$env:CLOUDFLARE_AUTH_USE_KEYRING='true'; & npx.cmd --yes wrangler@4.131.1 auth keyring enable --env-file=NUL
+Remove-Item Env:CLOUDFLARE_AUTH_USE_KEYRING
+```
+
+Then retry the same Brain command. For `npx_unavailable`, repair the supported
+Node.js installation first. The binding download needs npm registry access;
+Windows Smart App Control may block its native binary. Each Windows user repeats
+this once. If the command remains blocked, stop for technician review. A browser
+permission refusal later in sign-in is a separate issue and is not fixed by
+reinstalling the binding.
 
 When the installer prints an issue code, start with its short recovery guide:
 

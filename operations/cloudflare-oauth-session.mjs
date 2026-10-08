@@ -17,6 +17,7 @@ import { spawnSync } from "node:child_process";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { REVIEWED_WRANGLER_SPEC } from "./wrangler-runtime-contract.mjs";
+import { cloudflareKeyringFailureMessage } from "./cloudflare-keyring-guidance.mjs";
 
 export const CLOUDFLARE_OAUTH_WRANGLER_PACKAGE = REVIEWED_WRANGLER_SPEC;
 export const CLOUDFLARE_OAUTH_CALLBACK_HOST = "localhost";
@@ -228,6 +229,21 @@ function quoteWindowsArgument(value) {
   return /[\s"^&|<>()]/.test(text) ? `"${text.replaceAll('"', '\\"')}"` : text;
 }
 
+// CI may exercise only this credential-free subcommand, on a real Windows
+// host, with a separate explicit opt-in. No auth create/token call qualifies.
+export function isWindowsKeyringEnableTest(args, {
+  allowWindowsKeyringEnableTest = false,
+  platformName = process.platform,
+  hostPlatform = process.platform,
+  environment = process.env,
+} = {}) {
+  return allowWindowsKeyringEnableTest === true && hostPlatform === "win32" &&
+    platformName === "win32" && environment.BRAIN_TEST_WINDOWS_KEYRING_ENABLE === "1" &&
+    args.length === 5 && args[0] === "--yes" &&
+    args[1] === CLOUDFLARE_OAUTH_WRANGLER_PACKAGE &&
+    args[2] === "auth" && args[3] === "keyring" && args[4] === "enable";
+}
+
 function runWrangler(args, {
   processRunner,
   platformName = process.platform,
@@ -240,10 +256,15 @@ function runWrangler(args, {
   tmpDirectory = null,
   statImpl = statSync,
   accessImpl = accessSync,
+  allowWindowsKeyringEnableTest = false,
+  windowsHide = true,
 } = {}) {
+  const keyringTest = isWindowsKeyringEnableTest(args, {
+    allowWindowsKeyringEnableTest, platformName, environment,
+  });
   if (!processRunner && (
     environment?.BRAIN_TEST_CHAIN === "1" || process.env.BRAIN_TEST_CHAIN === "1"
-  )) {
+  ) && !keyringTest) {
     throw new Error(
       "BRAIN_TEST_CHAIN refused real Wrangler authentication without an injected process runner",
     );
@@ -256,15 +277,21 @@ function runWrangler(args, {
     return run("npx", argv, {
       cwd: cloudflareOAuthWorkingDirectory({ workingDirectory, tmpDirectory, statImpl, accessImpl }),
       encoding: null,
-      env: cloudflareOAuthChildEnvironment({ environment, accountId }),
+      env: {
+        ...cloudflareOAuthChildEnvironment({ environment, accountId }),
+        // The CI probe has no Cloudflare account and must send no telemetry.
+        ...(keyringTest ? { WRANGLER_SEND_METRICS: "false" } : {}),
+      },
       maxBuffer,
       shell: useShell,
       stdio,
       timeout: timeoutMs,
-      windowsHide: true,
+      windowsHide,
     });
-  } catch {
-    return { status: null, error: true, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  } catch (error) {
+    // Keep only a closed error-code vocabulary, never the exception's text.
+    const code = ["ENOENT", "ETIMEDOUT"].includes(error?.code) ? error.code : "UNKNOWN";
+    return { status: null, error: { code }, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
   }
 }
 
@@ -277,32 +304,79 @@ function processSucceeded(result) {
   return result?.status === 0 && !result?.error && !result?.signal;
 }
 
+function keyringFailureReason(result) {
+  if (result?.error?.code === "ETIMEDOUT") return "timeout";
+  // cmd.exe reports a missing command as 9009; POSIX launchers use ENOENT/127.
+  if (result?.error?.code === "ENOENT" || [127, 9009].includes(result?.status)) return "npx_unavailable";
+  const missing = "`@napi-rs/keyring` is required for OS keyring storage on Windows but is not installed.";
+  if ([result?.stdout, result?.stderr].some((bytes) => Buffer.isBuffer(bytes) && bytes.includes(missing))) {
+    return "binding_missing";
+  }
+  return "other";
+}
+
+function releaseOwnerConsole(input, suspendPrompts = () => () => {}) {
+  const wasRaw = Boolean(input.isRaw);
+  const wasFlowing = input.readableFlowing;
+  const restorePrompts = suspendPrompts(input);
+  const restore = () => {
+    try {
+      if (typeof input.setRawMode === "function") input.setRawMode(wasRaw);
+    } finally {
+      restorePrompts();
+      if (wasFlowing === true) input.resume?.();
+      else input.pause?.();
+    }
+  };
+  try {
+    input.pause?.();
+    if (typeof input.setRawMode === "function") input.setRawMode(false);
+  } catch (error) {
+    restore();
+    throw error;
+  }
+  return restore;
+}
+
 /**
  * Require Wrangler's encrypted credential backend before a profile is created
  * or read. A missing macOS Keychain or Windows Credential Manager is a hard
  * stop; there is no plaintext credential-file fallback.
  */
 export function enableCloudflareOAuthKeyring(options = {}) {
-  const result = runWrangler([
-    CLOUDFLARE_OAUTH_WRANGLER_PACKAGE,
-    "auth", "keyring", "enable",
-  ], {
-    ...options,
-    accountId: null,
-    timeoutMs: options.keyringTimeoutMs ?? 120_000,
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: MAX_TOKEN_JSON_BYTES,
-  });
+  const platformName = options.platformName ?? process.platform;
+  const input = options.input ?? process.stdin;
+  const output = options.output ?? process.stdout;
+  const ownerConsole = platformName === "win32" && Boolean(input.isTTY && output.isTTY);
+  const restoreConsole = ownerConsole ? releaseOwnerConsole(input, options.suspendPrompts) : () => {};
+  let result;
   try {
+    result = runWrangler([
+      ...(platformName === "win32" ? ["--yes"] : []),
+      CLOUDFLARE_OAUTH_WRANGLER_PACKAGE,
+      "auth", "keyring", "enable",
+    ], {
+      ...options,
+      accountId: null,
+      timeoutMs: options.keyringTimeoutMs ?? 120_000,
+      stdio: ownerConsole ? "inherit" : ["ignore", "pipe", "pipe"],
+      windowsHide: !ownerConsole,
+      maxBuffer: MAX_TOKEN_JSON_BYTES,
+    });
     if (!processSucceeded(result)) {
-      throw oauthError(
+      const reason = keyringFailureReason(result);
+      const error = oauthError(
         "CLOUDFLARE_KEYRING_UNAVAILABLE",
         "keyring",
-        "Wrangler could not enable encrypted OS-keyring credential storage",
+        cloudflareKeyringFailureMessage(reason, platformName),
       );
+      error.reason = reason;
+      error.platformName = platformName;
+      throw error;
     }
   } finally {
     wipeProcessOutput(result);
+    restoreConsole();
   }
 }
 

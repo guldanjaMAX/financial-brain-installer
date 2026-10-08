@@ -13,6 +13,8 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node --test test/windows-keyring-console.test.mjs",
+  "node --test test/windows-keyring-real.test.mjs",
   "node test/migration-slow-apply.test.mjs",
   "node --test test/oauth-lock-recovery.test.mjs",
   "node --test test/doctor-cli-isolation.test.mjs",
@@ -439,6 +441,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/client-experience-packet.test.mjs",
   "node --no-warnings test/cloudflare-account-bootstrap.test.mjs",
   "node --no-warnings test/cloudflare-oauth-session.test.mjs",
+  "node --test test/windows-keyring-console.test.mjs",
+  "node --test test/windows-keyring-real.test.mjs",
   "node --no-warnings test/field-prepare.test.mjs",
   "node --no-warnings test/full-history-privacy.test.mjs",
   "node --no-warnings test/gmail-incremental-policy.test.mjs",
