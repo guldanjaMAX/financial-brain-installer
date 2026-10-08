@@ -1,5 +1,5 @@
 /** Non-generative open-item answers. No model draft enters this module. */
-import { quickBooksLabel, quickBooksLabelText } from "./quickbooks-label.js";
+import { quickBooksLabel, quickBooksLabelText, QUICKBOOKS_LABEL_PATTERN } from "./quickbooks-label.js";
 const identity = (value) => quickBooksLabelText(value).toLowerCase();
 
 // Match the whole request. A filtered, historical, net-credit, total or compound
@@ -17,7 +17,7 @@ export function quickBooksOpenItemsRequest(question) {
 const MONEY = "([A-Z]{3}) (-?(?:[1-9]\\d{0,2}(?:,\\d{3})+|0|[1-9]\\d*)(?:\\.\\d{2,6}))";
 const STAMP = "(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z)";
 const DAY = "(\\d{4}-\\d{2}-\\d{2})";
-const NAME = "([\\p{L}\\p{N}][\\p{L}\\p{N} '&()/.\\-]{0,179})";
+const NAME = `(${QUICKBOOKS_LABEL_PATTERN})`;
 const NUMBER = "([\\p{L}\\p{N}][\\p{L}\\p{N}_/\\-]{0,79})";
 const OPENING = new RegExp(`^(Invoice|Bill) ${NUMBER} (to|from) ${NAME}: total ${MONEY}, open balance ${MONEY} \\((unpaid|paid|partially paid|credit balance)\\) as of ${STAMP}; dated ${DAY}(?:, due ${DAY})?(?:, terms ${NAME})?\\. QuickBooks (Invoice|Bill)\\. Balance observed during this sync; the provider queries are not an atomic ledger snapshot\\.(?: |$)`, "u");
 const exactTime = (value) => {
@@ -37,7 +37,9 @@ function observedItem(doc, entity, now) {
       !new RegExp(`^${entity.toLowerCase()}:[A-Za-z0-9._~-]{1,128}$`).test(doc.ref || "")) return null;
   // Only the complete leading connector opening supplies facts. Never search
   // its arbitrary memo, description, Details or title for monetary markers.
-  const text = String(doc.snippet || "").replace(/^\[[^\]\r\n]*\]\s*/, "");
+  // Compose accents before the lexical match, without replacing controls or
+  // broadening record punctuation. Captured labels retain the full veto.
+  const text = String(doc.snippet || "").normalize("NFC").replace(/^\[[^\]\r\n]*\]\s*/, "");
   if ([...text.matchAll(/\bQuickBooks (?:Invoice|Bill)\./g)].length !== 1) return null;
   const match = OPENING.exec(text);
   if (!match) return null;

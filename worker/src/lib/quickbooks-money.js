@@ -7,14 +7,16 @@
  * Anything outside this finite language is ambiguous and is refused, including
  * every generated Account balance. The separate Account renderer is unchanged.
  */
-import { quickBooksLabel, quickBooksLabelText } from "./quickbooks-label.js";
+import { quickBooksLabel, quickBooksLabelText, QUICKBOOKS_LABEL_PATTERN } from "./quickbooks-label.js";
 const MONEY = "([A-Z]{3} -?(?:[1-9]\\d{0,2}(?:,\\d{3})+|0|[1-9]\\d*)(?:\\.\\d{2,6}))";
 const STAMP = "(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z)";
 const DAY = "(\\d{4}-\\d{2}-\\d{2})";
-const NAME = "([\\p{L}\\p{N}][\\p{L}\\p{N} '&()/.\\-]{0,179})";
+const NAME = `(${QUICKBOOKS_LABEL_PATTERN})`;
 const ID = "([\\p{L}\\p{N}][\\p{L}\\p{N}_/\\-]{0,79})";
 const identity = (value) => quickBooksLabelText(value).toLowerCase();
-const textOf = (doc) => String(doc?.snippet || "").replace(/^\[[^\]\r\n]*\]\s*/, "");
+// Match canonically composed accents before parsing field boundaries. Keep
+// raw controls/formatting subject to the existing lexical refusal.
+const textOf = (doc) => String(doc?.snippet || "").normalize("NFC").replace(/^\[[^\]\r\n]*\]\s*/, "");
 const pattern = (value) => new RegExp(`^${value}$`, "u");
 const exactTime = (value) => {
   const time = Date.parse(value);
