@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import worker from "../worker/src/index.js";
 import { splitOversized, MAX_DOC_CHARS } from "../ingest/envelope-batching.mjs";
 import { createIngestRemovalReview, applyApprovedProvenanceFamily } from "../operations/ingest-removal-plan.mjs";
-import { buildDriveRemovalPlan } from "../operations/drive-removal-plan.mjs";
+import { buildDriveRemovalPlan, DriveRemovalReviewRequired } from "../operations/drive-removal-plan.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
 import { previewIngestRemovals, applyIngestRemovals } from "../worker/src/lib/ingest-removal-plan.js";
@@ -515,4 +515,66 @@ test("excluded-family warning offers safe next steps through the native command 
     assert.ok(warnings[0].includes(renderCliCommands("brain support --explain SAFETY_REVIEW_REQUIRED")));
     assert.doesNotMatch(warnings[0], /records\/|partner|result_family|fixture\.invalid/);
   } finally { console.warn = previous; store.db.close(); }
+});
+
+function unverifyStoredBinding(store, uid) {
+  store.db.exec("INSERT INTO source_original_id_key_state (tenant_id, signing_salt) VALUES ('primary', lower(hex(randomblob(32))))");
+  store.db.prepare("UPDATE documents SET document_revision_id='rev-v1:' || lower(hex(randomblob(32))), source_original_binding_hash=? WHERE doc_uid=?")
+    .run("sha256:" + "ab".repeat(32), uid);
+}
+
+test("an excluded source target refuses before an empty preview can commit progress", async () => {
+  const f = fixture();
+  try {
+    unverifyStoredBinding(f.store, "drive:item0");
+    const sourcePlan = buildDriveRemovalPlan({ storedFamilies: f.store.uids(), vanishedCandidates: ["drive:item0"] });
+    assert.equal(sourcePlan.total, 1, "nonempty source decision reached");
+    await assert.rejects(f.review.finish({ sourcePlan }), (error) =>
+      error instanceof DriveRemovalReviewRequired && error.code === "SAFETY_REVIEW_REQUIRED");
+    assert.equal(f.store.calls.preview, 2, "combined and source-only previews reached");
+    assert.equal(f.state.ingest_removal_plan, undefined);
+    assert.equal(f.store.calls.apply, 0);
+    assert.ok(f.store.uids().includes("drive:item0"));
+    // With the unverifiable row resolved, the same review can complete.
+    f.store.db.prepare("DELETE FROM documents WHERE doc_uid=?").run("drive:item0");
+    await f.review.finish({ sourcePlan });
+    assert.equal(f.store.calls.preview, 3);
+  } finally { f.store.db.close(); }
+});
+
+test("an exclusion confined to a replacement family still warns and completes", async () => {
+  const f = fixture();
+  const warnings = [];
+  const priorWarn = console.warn;
+  console.warn = (message) => warnings.push(message);
+  try {
+    const uid = "drive:item0#part1of2";
+    f.store.put(uid, { part_of: "item0", part: 1, part_count: 2 });
+    unverifyStoredBinding(f.store, uid);
+    const replacement = { stateKey: "item0", hash: "accepted", base_doc_uid: "drive:item0",
+      keep_doc_uids: ["drive:item0"], family_kind: "structural" };
+    f.state.done.item0 = "accepted";
+    f.review.remember([replacement]);
+    await f.review.finish();
+    assert.equal(f.store.calls.preview, 1);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /preserved 1 stored document/);
+    assert.equal(f.state.ingest_removal_plan, undefined);
+    assert.equal(f.store.calls.apply, 0);
+    assert.ok(f.store.uids().includes(uid));
+    // A now-absent source target must not inherit a replacement-only refusal
+    // when the combined preview causes the source-only recheck to run.
+    const sourcePlan = buildDriveRemovalPlan({ storedFamilies: f.store.uids(), vanishedCandidates: ["drive:item1"] });
+    f.store.db.prepare("DELETE FROM documents WHERE doc_uid=?").run("drive:item1");
+    f.review.remember([replacement]);
+    await f.review.finish({ sourcePlan });
+    assert.equal(f.store.calls.preview, 3);
+    assert.equal(warnings.length, 2);
+    assert.equal(f.state.ingest_removal_plan, undefined);
+    // Verifiable obsolete members must still enter the saved removal plan.
+    f.store.db.prepare("UPDATE documents SET document_revision_id=NULL, source_original_binding_hash=NULL WHERE doc_uid=?").run(uid);
+    f.review.remember([replacement]);
+    await assert.rejects(f.review.finish(), { code: "SAFETY_REVIEW_REQUIRED" });
+    assert.deepEqual(f.state.ingest_removal_plan.targets, [uid]);
+  } finally { console.warn = priorWarn; f.store.db.close(); }
 });

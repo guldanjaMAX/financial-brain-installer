@@ -1028,13 +1028,38 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
   check("a limited local run cannot falsely commit a scanner migration",
     /scannerPolicyChanged && limitedMissesPrior/.test(local || "") &&
       /--limit cannot be used/.test(local || ""), String(local).slice(0, 1800));
-  const localCleanupConfirmed = String(local).indexOf('const afterLocalRemoval = await listPreparedSourceFamilies');
-  const localCleanupReadbackApplied = String(local).indexOf('const stillStored = plannedLocalTargets.filter', localCleanupConfirmed);
-  const localScannerCommitted = String(local).indexOf('state.credential_scanner_fingerprint = scannerFingerprint');
-  check("local scanner policy commits only after confirmed refusal cleanup",
-    localCleanupConfirmed !== -1 && localCleanupReadbackApplied > localCleanupConfirmed &&
-      localScannerCommitted > localCleanupReadbackApplied,
-    `inventory=${localCleanupConfirmed} proof=${localCleanupReadbackApplied} commit=${localScannerCommitted}`);
+  // Plan-first removal contract (0.4.11): ingest never deletes in line. The
+  // shared boundary previews every planned removal against the authenticated
+  // Worker and refuses unverifiable source targets; any verified target saves
+  // an exact plan and throws SAFETY_REVIEW_REQUIRED. The separate exact apply
+  // runs the aggregate guard first, reads back absence, and never commits
+  // scanner progress, so the next clean ingest is the commit point.
+  const removalBoundary = await fs.readFile(new URL("../operations/ingest-removal-plan.mjs", import.meta.url), "utf-8");
+  const boundaryFinish = removalBoundary.slice(removalBoundary.indexOf("const finish = async"),
+    removalBoundary.indexOf("const apply = async"));
+  const boundaryGuard = removalBoundary.search(/\n\s*if \(plan\.sourcePlan\) assertDriveRemovalPlanSafe\(plan\.sourcePlan,/);
+  const boundaryFirstApply = removalBoundary.indexOf('action: "apply"');
+  const boundaryPreview = boundaryFinish.indexOf("const observed = await preview(families);");
+  const boundaryExclusionRefusal = boundaryFinish.indexOf("if (sourceObserved.excluded_documents) fail(");
+  const boundaryEmptyReturn = boundaryFinish.indexOf("if (!observed.targets.length)");
+  check("the removal boundary refuses excluded source targets before empty-preview completion and guards exact apply with readback",
+    boundaryPreview >= 0 && boundaryExclusionRefusal > boundaryPreview && boundaryEmptyReturn > boundaryExclusionRefusal &&
+      /state\.ingest_removal_plan = plan;\s*saveState\(\);[\s\S]*?fail\(/.test(boundaryFinish) &&
+      !/action: "apply"|applyGuardedTargets/.test(boundaryFinish) &&
+      boundaryGuard !== -1 && boundaryFirstApply > boundaryGuard &&
+      /applyGuardedTargets\(\{ plan, sourceApproval, send, verifyLocal \}\);\s*const after = await preview\(plan\.families, marker\);\s*if \(after\.targets\.length\) fail\(/.test(removalBoundary) &&
+      !/credential_scanner/.test(removalBoundary),
+    `guard=${boundaryGuard} apply=${boundaryFirstApply}`);
+  const localInventory = String(local).indexOf("const storedLocalFamilies = await listPreparedSourceFamilies");
+  const localPlanReviewed = String(local).indexOf("await removalReview.finish({ sourcePlan: localRemovalPlan", localInventory);
+  const localScannerCommitted = String(local).indexOf("state.credential_scanner_fingerprint = scannerFingerprint");
+  check("local scanner policy commits only after the authenticated removal review finds nothing left to remove",
+    localInventory !== -1 && localPlanReviewed > localInventory &&
+      localScannerCommitted > localPlanReviewed &&
+      !/commitCredentialScannerProgress\(/.test(String(local)) &&
+      (String(local).match(/credential_scanner_fingerprint\s*=/g) || []).length === 1 &&
+      !/dryRun: false/.test(String(local)),
+    `inventory=${localInventory} review=${localPlanReviewed} commit=${localScannerCommitted}`);
   check("remote ingest opens freshness through the Worker before reading Google",
     /status: "indexing"/.test(remote || "") && /postSourceReceipt/.test(remote || ""), String(remote).slice(0, 200));
   check("a thrown Drive or Gmail fetch posts an error receipt",
@@ -1058,11 +1083,16 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
   check("remote IMAP scanner upgrades force each saved folder through a full reread",
     /folderSyncDecision\(\{[\s\S]*policyChanged: imapPolicyChanged,[\s\S]*scannerPolicyChanged,[\s\S]*\}\)/.test(remote || ""),
     String(remote).slice(0, 2600));
-  const remoteCleanupConfirmed = String(remote).indexOf('assertDriveRemovalPlanSafe(driveRemovalPlan');
-  const remoteScannerCommitted = String(remote).indexOf('commitCredentialScannerProgress(state, scannerFingerprint)');
-  check("remote scanner progress commits only after the aggregate Drive removal plan is approved",
-    remoteCleanupConfirmed !== -1 && remoteScannerCommitted > remoteCleanupConfirmed,
-    `cleanup=${remoteCleanupConfirmed} commit=${remoteScannerCommitted}`);
+  const remoteDrivePlanReviewed = String(remote).search(/await removalReview\.finish\(\{\s*sourcePlan: driveRemovalPlan,/);
+  const remoteScannerCommitted = String(remote).indexOf("commitCredentialScannerProgress(state, scannerFingerprint)");
+  const remoteFinalReview = String(remote).lastIndexOf("await removalReview.finish();", remoteScannerCommitted);
+  check("remote scanner progress commits only after the aggregate Drive removal plan clears the saved-plan review",
+    remoteDrivePlanReviewed !== -1 && remoteFinalReview > remoteDrivePlanReviewed &&
+      remoteScannerCommitted > remoteFinalReview &&
+      String(remote).split("commitCredentialScannerProgress(").length === 2 &&
+      !/credential_scanner_fingerprint\s*=/.test(String(remote)) &&
+      !/dryRun: false/.test(String(remote)),
+    `review=${remoteDrivePlanReviewed} final=${remoteFinalReview} commit=${remoteScannerCommitted}`);
   const versionCheck = String(remote).indexOf("state.done[key] === listedVersion");
   const driveDownload = String(remote).indexOf("drive.toEnvelope");
   check("a Drive sweep checks listing metadata before downloading bytes",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,7 +13,7 @@ import { batchStream, splitOversized, prefetch, removedSinceLastRun } from "../i
 globalThis.fetch = async () => { throw new Error("unexpected network attempt"); };
 
 test("ordinary Drive ingest preserves additions and stops before a small removal", async () => {
-  const root = mkdtempSync(join(tmpdir(), "ingest-plan-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ingest-plan-")));
   const manifestPath = join(root, "manifest.json");
   const manifest = {
     brain: { domain: "fixture.invalid" },
@@ -103,7 +103,7 @@ test("ordinary Drive ingest preserves additions and stops before a small removal
 
 for (const source of ["upload", "gmail", "microsoft"]) {
   test(`${source} ingest saves accepted work before source/family removal and exact apply`, async () => {
-    const root = mkdtempSync(join(tmpdir(), "ingest-source-plan-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ingest-source-plan-")));
     const manifestPath = join(root, "manifest.json");
     const manifest = {
       brain: { domain: "fixture.invalid" },
@@ -196,7 +196,7 @@ for (const source of ["upload", "gmail", "microsoft"]) {
 }
 
 test("a changed scan with OCR off preserves its old family and accepts a neighboring addition", async () => {
-  const root = mkdtempSync(join(tmpdir(), "ingest-scan-plan-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ingest-scan-plan-")));
   const manifestPath = join(root, "manifest.json");
   const manifest = { brain: { domain: "fixture.invalid" },
     safety: { ocr: { enabled: false }, credential_scanner: { enabled: true } } };
@@ -242,7 +242,7 @@ test("a changed scan with OCR off preserves its old family and accepts a neighbo
 
 test("Calendar cancellation saves an addition but requires a separate exact apply", async () => {
   const store = ingestPlanStore();
-  const root = mkdtempSync(join(tmpdir(), "ingest-calendar-plan-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ingest-calendar-plan-")));
   const path = join(root, "manifest.json");
   const manifest = { brain: { domain: "fixture.invalid" } };
   writeFileSync(path, JSON.stringify(manifest));
@@ -287,3 +287,112 @@ test("Calendar cancellation saves an addition but requires a separate exact appl
     assert.equal(state.primary.sync_token, "prior");
   } finally { store.db.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+// Exercise the scanner migration through the real CLI orchestrators and real
+// Worker preview resolver. Provider data and storage are synthetic and local.
+for (const source of ["upload", "drive"]) {
+  for (const unverified of [false, true]) {
+    test(`${source} credential-refused stored row holds scanner and cursor (unverified=${unverified})`, async () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), "ingest-refused-plan-")));
+      const manifestPath = join(root, "manifest.json");
+      const manifest = { brain: { domain: "fixture.invalid" },
+        corpora: { google_drive: { root_folder_ids: ["fixture-root"] } },
+        safety: { credential_scanner: { enabled: true }, ocr: { enabled: false } } };
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+      const store = ingestPlanStore();
+      const files = [...Array.from({ length: 11 }, (_, i) => `item${i}.txt`), "secret.txt"];
+      const refusedUid = `${source}:secret.txt`;
+      for (const rel of files) store.put(`${source}:${rel}`);
+      if (unverified) {
+        store.db.exec("INSERT INTO source_original_id_key_state (tenant_id, signing_salt) VALUES ('primary', lower(hex(randomblob(32))))");
+        store.db.prepare("UPDATE documents SET document_revision_id='rev-v1:' || lower(hex(randomblob(32))), source_original_binding_hash=? WHERE doc_uid=?")
+          .run("sha256:" + "ab".repeat(32), refusedUid);
+      }
+      const PRE = "pre-upgrade-scanner-fingerprint";
+      const CURRENT = credentialScannerFingerprint(true);
+      let state = { version: 1,
+        done: Object.fromEntries(files.map((rel) => [source === "upload" ? rel : `${source}:${rel}`, "old-version"])),
+        skipped: {}, credential_scanner_fingerprint: PRE, sync_token: "prior-cursor" };
+      const key = randomBytes(32).toString("hex");
+      const credential = ["sk", "a".repeat(32)].join("-");
+      let prepared = 0;
+      let accepted = 0;
+      const previews = [];
+      const envelope = (rel) => {
+        prepared++;
+        return { source_type: source, source_id: rel, title: "Synthetic document",
+          content: rel === "secret.txt" ? `Synthetic scanner fixture ${credential}` : "Readable synthetic fixture content." };
+      };
+      const options = {
+        withSourceIngestLock: async (_input, run) => run({ assertOwned() {} }),
+        resolveBaseUrl: async () => "https://fixture.invalid", resolveAdminKey: () => key,
+        getAccessToken: async () => key,
+        removalPlanRequest: async (request) => {
+          const result = await store.request(request);
+          if (request.body.action === "preview") previews.push({ families: request.body.families, result });
+          return result;
+        },
+        removalPlanRuntime: () => "fixture-runtime",
+        ingestLib: async () => ({ batchStream, splitOversized, prefetch, removedSinceLastRun,
+          loadState: () => state, saveState: (_path, next) => { state = structuredClone(next); },
+          walk: () => ({ files: files.map((rel) => ({ rel, name: rel })), skipped: [], complete: true }),
+          prepare: async (file) => ({ hash: `new-${file.rel}`, envelope: envelope(file.rel) }),
+        }),
+        drive: {
+          startPageToken: async () => "next-cursor",
+          listRootedFiles: async function* () {
+            for (const id of files) yield { id, name: id, mimeType: "text/plain", parents: ["fixture-root"] };
+          },
+          updateFolderIndex: () => ({}), folderPathFor: () => "fixture-folder",
+          exclusionReason: () => null, driveVersion: (file) => `new-${file.id}`,
+          toEnvelope: async (_token, file) => ({ version: `new-${file.id}`, envelope: envelope(file.id) }),
+        },
+        listStoredSourceFamilies: async (request) => {
+          const inventory = await store.inventory(request);
+          return request.includeLabels ? { families: inventory, labels: new Map(), labelsAvailable: true, uidFilterAvailable: true } : inventory;
+        },
+        sendBatches: async ({ groups, onResult }) => {
+          for (const item of groups.flat()) {
+            accepted++;
+            store.put(`${source}:${item.envelope.source_id}`, item.envelope.metadata, "v2");
+            onResult(item, { status: "updated" });
+          }
+          return { updated: groups.flat().length };
+        },
+        applyDriveRemovals: async () => { throw new Error("unreviewed removal reached"); },
+        reconcileDocumentFamilies: async () => { throw new Error("unreviewed reconciliation reached"); },
+        postSourceReceipt: async () => ({}), reportBacklog: async () => ({}),
+      };
+      const run = () => source === "upload"
+        ? cmdIngestLocal(manifest, manifestPath, { source, path: root }, options)
+        : cmdIngestRemote(manifest, manifestPath, { from: "drive" }, options);
+      try {
+        let error;
+        try { await run(); } catch (caught) { error = caught; }
+        assert.equal(prepared, files.length, "scanner reached every synthetic source document");
+        assert.equal(accepted, files.length - 1, "non-refused updates were saved before the decision");
+        assert.ok(store.calls.inventory > 0);
+        assert.ok(previews.some(({ families, result }) =>
+          families.some((family) => family.base_doc_uid === refusedUid && !family.keep_doc_uids.length) &&
+          (unverified ? result.excluded_documents === 1 : result.targets.includes(refusedUid))),
+        "the refused stored source target reached the Worker decision");
+        assert.equal(error?.code, "SAFETY_REVIEW_REQUIRED");
+        assert.equal(state.credential_scanner_fingerprint, PRE);
+        assert.equal(state.sync_token, "prior-cursor");
+        assert.ok(store.uids().includes(refusedUid));
+        assert.equal(store.calls.apply, 0);
+        assert.ok(state.skipped[source === "upload" ? "secret.txt" : refusedUid]);
+        if (unverified) assert.equal(state.ingest_removal_plan, undefined);
+        else assert.deepEqual(state.ingest_removal_plan.targets, [refusedUid]);
+        // Model the stored refusal being resolved outside ingestion. A fresh
+        // scan with no remaining stored target must be allowed to commit.
+        store.db.prepare("DELETE FROM documents WHERE doc_uid=?").run(refusedUid);
+        await run();
+        assert.equal(state.credential_scanner_fingerprint, CURRENT);
+        assert.equal(state.sync_token, source === "drive" ? "next-cursor" : "prior-cursor");
+        assert.equal(state.ingest_removal_plan, undefined);
+        assert.equal(store.calls.apply, 0);
+      } finally { store.db.close(); rmSync(root, { recursive: true, force: true }); }
+    });
+  }
+}

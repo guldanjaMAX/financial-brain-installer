@@ -465,18 +465,34 @@ try {
       /removedSinceLastRun\(previouslyKnownKeys, protectedLocalSkipKeys\)/.test(local), "helper call not found");
     check("deletions are refused under --limit, where an unseen file is not a deleted one",
       /flags\.limit\s*\n?\s*\?\s*\[\]/.test(local), "limit guard not found");
+    // 0.4.11 plan-first contract: ingest builds ONE plan and hands it to the
+    // persisted removal review, which stops before any removal. Only the
+    // separate exact apply may remove, and it runs the aggregate guard first.
     const planIndex = local.indexOf("buildDriveRemovalPlan({");
-    const assertIndex = local.indexOf("assertDriveRemovalPlanSafe(", planIndex);
-    // Removal runs through the injectable applyPreparedRemovals seam (or the direct call); either must follow approval.
-    const applyIndex = [local.indexOf("applyDriveRemovals({", assertIndex), local.indexOf("applyPreparedRemovals(", assertIndex)]
-      .filter((index) => index >= 0)
-      .reduce((first, index) => (first < 0 || index < first ? index : first), -1);
+    const reviewIndex = local.indexOf("removalReview.finish({ sourcePlan: localRemovalPlan", planIndex);
+    // Every removal call left in the ingest lane must be a dry-run preview.
+    const removalCalls = [...local.matchAll(/\b(?:applyDriveRemovals|applyPreparedRemovals)\(\{([\s\S]*?)\}\)/g)];
+    const removalCallSites = (local.match(/\b(?:applyDriveRemovals|applyPreparedRemovals)\(/g) || []).length;
+    const destructiveInIngest = removalCalls.filter(([, args]) => !/\bdryRun:\s*true\b/.test(args)).length +
+      (removalCallSites - removalCalls.length) +
+      (local.match(/dryRun:\s*false|\/api\/admin\/brain\/forget|action:\s*"apply"|removalReview\.apply\(|applyApprovedProvenanceFamily\(|cmdApplyIngestRemovals\(/g) || []).length;
+    const review = readFileSync(new URL("../operations/ingest-removal-plan.mjs", import.meta.url), "utf8");
+    const finishBody = review.slice(review.indexOf("const finish = async"), review.indexOf("const apply = async"));
+    const guarded = review.slice(review.indexOf("async function applyGuardedTargets("),
+      review.indexOf("export async function applyApprovedProvenanceFamily"));
+    const guardIndex = guarded.indexOf("assertDriveRemovalPlanSafe(plan.sourcePlan");
+    const sendIndex = guarded.indexOf('send({ action: "apply"');
     check("every removal reason goes into one plan",
-      planIndex > 0 && ["storedFamilies", "activeFamilies", "policyCandidates", "vanishedCandidates", "intentionalCandidates"]
-        .every((field) => new RegExp(`\\b${field}\\b`).test(local.slice(planIndex, assertIndex))),
+      planIndex > 0 && reviewIndex > planIndex &&
+        ["storedFamilies", "activeFamilies", "policyCandidates", "vanishedCandidates", "intentionalCandidates"]
+          .every((field) => new RegExp(`\\b${field}\\b`).test(local.slice(planIndex, reviewIndex))),
       "aggregate plan is missing a category");
     check("and the plan is approved BEFORE anything is removed",
-      assertIndex > planIndex && applyIndex > assertIndex, JSON.stringify({ planIndex, assertIndex, applyIndex }));
+      planIndex > 0 && reviewIndex > planIndex && removalCalls.length > 0 && destructiveInIngest === 0 &&
+        finishBody.length > 0 && !/action:\s*"apply"|applyGuardedTargets\(|\bapply\(/.test(finishBody) &&
+        /applyGuardedTargets\(\{ plan, sourceApproval/.test(review.slice(review.indexOf("const apply = async"))) &&
+        guardIndex >= 0 && sendIndex > guardIndex,
+      JSON.stringify({ planIndex, reviewIndex, removalCalls: removalCalls.length, destructiveInIngest, guardIndex, sendIndex }));
     check("the folder lane's tick argv is the documented ingest command",
       /"ingest", plan\.path, "--path", plan\.folderPath, "--source", plan\.folderSource/
         .test(readFileSync(new URL("../operations/folder-scheduler.mjs", import.meta.url), "utf8")));

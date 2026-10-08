@@ -259,6 +259,15 @@ export function createIngestRemovalReview({
       return;
     }
     const observed = await preview(families);
+    // An excluded source target is still stored. Recheck only source removals
+    // so unrelated replacement-family exclusions cannot block cursor progress.
+    if (observed.excluded_documents && sourceTargets.length) {
+      const sourceObserved = await preview(sourceTargets.map((uid) => ({ base_doc_uid: uid, keep_doc_uids: [], family_kind: familyKind })));
+      if (sourceObserved.excluded_documents) fail(
+        `Source ${source}: ${sourceObserved.excluded_documents} stored document(s) planned for removal could not be verified, so they were kept.\n` +
+        "Nothing was removed. Accepted additions and updates are saved; the source cursor and scanner progress were kept.\n" +
+        "For help, run: brain support --explain SAFETY_REVIEW_REQUIRED");
+    }
     if (observed.excluded_documents) {
       console.warn(renderCliCommands(`Source ${source}: preserved ${observed.excluded_documents} stored document(s) whose names overlap a family but whose membership was not verified.\n` +
         "Nothing was lost. Review the preserved documents with support before retrying.\n" +

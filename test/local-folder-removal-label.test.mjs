@@ -1,15 +1,8 @@
 /**
- * Local-folder cleanup review must say "Folder", not "Drive".
- *
- * WHY THIS EXISTS. assertDriveRemovalPlanSafe's oversized-plan refusal names
- * whichever source is cleaning up, defaulting to "Drive" when the caller
- * passes no sourceLabel. The local synced-folder ingest lane (brain.mjs,
- * cmdIngestLocalRun) used to call it with no label at all, so an owner
- * approving a LOCAL FOLDER cleanup read "Drive cleanup would remove ...
- * stored documents" for a source that was never Google Drive. The real
- * Drive lane must keep saying Drive.
- *
- * Every identifier here is a fictional fixture; none names a real source.
+ * From 0.4.11 every ingest lane uses createIngestRemovalReview, labelled
+ * "Source". A local folder must never read "Drive". The underlying aggregate
+ * primitive still defaults to "Drive" and accepts an explicit "Folder" label.
+ * Every identifier below belongs to a synthetic fixture.
  */
 
 import assert from "node:assert/strict";
@@ -58,7 +51,7 @@ function refusalMessage(plan, options) {
     driveMessage);
 
   const folderMessage = refusalMessage(plan, { sourceLabel: "Folder" });
-  check("a local folder's review-required message says Folder cleanup, not Drive cleanup",
+  check("the primitive accepts an explicit Folder label for its review-required message",
     /^Folder cleanup would remove 150 of 150 stored documents \(100\.0%\)\./.test(folderMessage || ""),
     folderMessage);
 
@@ -67,28 +60,89 @@ function refusalMessage(plan, options) {
 }
 
 /* ----------------------------------------------------------- the wiring */
-/* Prove brain.mjs actually passes the label, not just that the underlying
-   primitive supports one. */
+/* 0.4.11 plan-first contract (slice 41ca8b0b): no ingest lane calls the
+   aggregate guard directly any more. Every lane hands its aggregate plan to
+   the shared removal review (operations/ingest-removal-plan.mjs), whose ONE
+   guard call names the source generically ("Source"), so no lane can fall
+   back to the "Drive" default. Prove the wiring AND the text an owner reads. */
 
 {
   const cli = readFileSync(new URL("../brain.mjs", import.meta.url), "utf8");
+  const shared = readFileSync(new URL("../operations/ingest-removal-plan.mjs", import.meta.url), "utf8");
   const localStart = cli.indexOf("export async function cmdIngestLocal(");
   const localEnd = cli.indexOf("\nexport function validateForgetReceipt", localStart);
   assert.notEqual(localStart, -1, "local folder ingest must exist");
   assert.ok(localEnd > localStart, "local folder ingest must be inspectable");
   const local = cli.slice(localStart, localEnd);
   check(
-    "cmdIngestLocalRun labels its removal review \"Folder\"",
-    local.includes('assertDriveRemovalPlanSafe(localRemovalPlan, localRemovalApproval, { sourceLabel: "Folder" });'),
-    "expected call site not found in the local ingest lane",
+    "cmdIngestLocalRun hands its aggregate plan to the shared removal review",
+    local.includes('await removalReview.finish({ sourcePlan: localRemovalPlan, familyKind: "hybrid" });'),
+    "expected removal-review call site not found in the local ingest lane",
   );
-
-  const driveCallSite = 'assertDriveRemovalPlanSafe(driveRemovalPlan, removalApproval);';
   check(
-    "the real Drive lane still calls the guard with no override, so it keeps the \"Drive\" default",
-    cli.includes(driveCallSite),
-    "drive call site not found, or it now overrides the label",
+    "the real Drive lane hands its aggregate plan to the same shared removal review",
+    /await removalReview\.finish\(\{\s*sourcePlan: driveRemovalPlan,/.test(cli),
+    "drive removal-review call site not found",
   );
+  check(
+    "no lane in brain.mjs calls the aggregate guard directly, so none can fall back to the \"Drive\" default",
+    !/\bassertDriveRemovalPlanSafe\(/.test(cli),
+    "a direct assertDriveRemovalPlanSafe( call is back in brain.mjs",
+  );
+  const guardCalls = shared.match(/\bassertDriveRemovalPlanSafe\([\s\S]*?\);/g) || [];
+  check(
+    "the shared removal review calls the guard exactly once, and labels it \"Source\"",
+    guardCalls.length === 1 && guardCalls[0].includes('{ sourceLabel: "Source" }'),
+    JSON.stringify(guardCalls),
+  );
+}
+
+/* ------------------------------------------- what the owner actually reads */
+
+{
+  const { createIngestRemovalReview } = await import("../operations/ingest-removal-plan.mjs");
+  const { ingestPlanStore } = await import("./helpers/ingest-plan-store.mjs");
+  for (const [source, familyKind] of [["upload", "hybrid"], ["drive", "structural"]]) {
+    const store = ingestPlanStore();
+    try {
+      const uids = Array.from({ length: 20 }, (_, i) => `${source}:doc-${String(i).padStart(4, "0")}`);
+      for (const uid of uids) store.put(uid);
+      const state = { version: 1, done: {}, skipped: {} };
+      const review = createIngestRemovalReview({
+        state, saveState() {}, source, manifest: {}, manifestPath: "/fixture/manifest.json",
+        base: "https://fixture.invalid", request: store.request, runtime: () => "fixture-runtime",
+      });
+      // 5 of 20 (25%) is over the 10% ratio, so the aggregate review is required.
+      const sourcePlan = buildDriveRemovalPlan({ storedFamilies: uids, vanishedCandidates: uids.slice(0, 5) });
+      check(`${source}: the fixture plan is oversized`, sourcePlan.tooLarge === true, JSON.stringify(sourcePlan));
+
+      let stop = null;
+      try { await review.finish({ sourcePlan, familyKind }); } catch (error) { stop = error; }
+      check(`${source}: the ingest run stops and names its own source, not Drive's default`,
+        stop instanceof DriveRemovalReviewRequired &&
+          stop.message.startsWith(`Source ${source}: 5 stored document(s) would be removed`),
+        stop?.message);
+      check(`${source}: the stop asks for the additional aggregate approval by exact fingerprint`,
+        (stop?.message || "").includes(`--approve-removals ${sourcePlan.fingerprint}`), stop?.message);
+
+      let refusal = null;
+      try { await review.apply(state.ingest_removal_plan?.fingerprint); } catch (error) { refusal = error; }
+      check(`${source}: applying without that approval says "Source cleanup", never the "Drive" default`,
+        refusal instanceof DriveRemovalReviewRequired &&
+          /^Source cleanup would remove 5 of 20 stored documents \(25\.0%\)\./.test(refusal.message),
+        refusal?.message);
+      check(`${source}: nothing was removed without the aggregate approval`, store.calls.apply === 0 && store.calls.preview > 0 && state.ingest_removal_plan?.targets.length === 5,
+        JSON.stringify(store.calls));
+      await review.apply(state.ingest_removal_plan?.fingerprint, sourcePlan.fingerprint);
+      check(`${source}: exact aggregate approval removes only the five reviewed targets`,
+        store.calls.apply === 1 && store.uids().length === 15 &&
+          uids.slice(0, 5).every((uid) => !store.uids().includes(uid)));
+      if (source === "upload") {
+        check("a local folder's removal review never says Drive anywhere",
+          !/drive/i.test(`${stop?.message}\n${refusal?.message}`), `${stop?.message}\n${refusal?.message}`);
+      }
+    } finally { store.db.close(); }
+  }
 }
 
 console.log(`\n${ran - fail}/${ran} checks passed`);
