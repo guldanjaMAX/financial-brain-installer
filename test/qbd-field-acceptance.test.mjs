@@ -6,6 +6,11 @@ import {
   STEP_SCHEMA, validateStep, collectStep, compareOracle, parseReportCsv,
   assertPrivate, captureStep, writeBundle, buildReceipt, runKit,
 } from '../scripts/qbd-field-acceptance.mjs';
+import * as kit from '../scripts/qbd-field-acceptance.mjs';
+import { desktopFixture, desktopBridge, SNAPSHOT } from './fixtures/quickbooks-desktop-qbxml.mjs';
+import { createQuickBooksGuardForTest, PROVEN_SIGN_TYPES } from '../connectors/quickbooks-guard.mjs';
+import { QBD_CONTRACT } from '../operations/quickbooks-desktop-bridge.mjs';
+import { createHash } from 'node:crypto';
 import { fakeQbdFrames } from './fixtures/qbd-fake-helper.mjs';
 import { qbdPlan, runQuickBooksDesktop } from '../operations/quickbooks-desktop-bridge.mjs';
 
@@ -70,7 +75,7 @@ test('CSV reader accepts quoted commas, escaped quotes and parentheses without f
 });
 
 test('every required step and every field is typed, missing fields never pass', () => {
-  assert.deepEqual(Object.keys(STEP_SCHEMA), ['A0', 'A1', 'A2', 'A3', 'A4', 'B1', 'S1', 'E1', 'E2', 'E3', 'N1', 'W1', 'W2', 'R1', 'T1', 'I1', 'X1']);
+  assert.deepEqual(Object.keys(STEP_SCHEMA), ['A0', 'A1', 'A2', 'A3', 'A4', 'B1', 'S1', 'E1', 'E2', 'E3', 'N1', 'W1', 'W2', 'R1', 'T1', 'I1', 'F1', 'X1']);
   for (const step of Object.keys(STEP_SCHEMA)) {
     const control = values(step);
     assert.equal(validateStep(step, control).ok, true);
@@ -151,14 +156,14 @@ test('capture refuses ARM, missing fixture attestation and write operations befo
 
 test('receipt counts all steps, rejects missing data and never equates synthetic proof with field approval', () => {
   const good = buildReceipt({ observations: observations(), captures: [], oracle: compareOracle({ rendered, expected }) }, { now });
-  assert.equal(good.observationCount, 17); assert.equal(good.observationsComplete, true);
-  assert.equal(good.status, 'NOT_READY'); assert.ok(good.blockers.includes('PACKET07_MAPPING_UNAVAILABLE'));
+  assert.equal(good.observationCount, 18); assert.equal(good.observationsComplete, true);
+  assert.equal(good.status, 'NOT_READY'); assert.ok(good.blockers.includes('PRODUCTION_FRESHNESS_IMPLEMENTATION_REQUIRED'));
   assert.equal(good.proposals.applied, false);
   assert.deepEqual(good.proposals.signTypes.desktop, []);
   for (const step of Object.keys(STEP_SCHEMA)) {
     const incomplete = observations(); delete incomplete[step];
     const result = buildReceipt({ observations: incomplete, captures: [] }, { now });
-    assert.equal(result.observationCount, 16); assert.equal(result.observationsComplete, false);
+    assert.equal(result.observationCount, 17); assert.equal(result.observationsComplete, false);
     assert.ok(result.invalidSteps.includes(step));
   }
 });
@@ -271,4 +276,201 @@ test('current production bridge reaches the unadopted pin boundary without any n
     ...deps, bridge: () => { fakeReads++; return { ok: true, frames: frames(), code: null }; },
   });
   assert.equal(fakeReads, 1); assert.equal(control.capture.ok, true);
+});
+
+// Round 2 probes use the actual connector fixtures and mapper, without native calls.
+async function replayInput() {
+  const rows = desktopFixture();
+  const bridge = desktopBridge(rows);
+  const request = { operation: 'snapshot', historySince: '2024-10-07T12:00:00Z', accountListIds: ['AA-12'], storedTxnIds: [] };
+  const contractSha256 = createHash('sha256').update(JSON.stringify(QBD_CONTRACT)).digest('hex');
+  const fixture = async operation => ({ schema: 2, operation, capturedAt: SNAPSHOT, contractSha256,
+    plan: qbdPlan(operation === 'probe' ? { operation } : request, now()), frames: (await bridge(operation === 'probe' ? { operation } : request)).frames });
+  return { inventedOnly: true, probe: await fixture('probe'), snapshot: await fixture('snapshot') };
+}
+
+test('replay CLI runs real mapping and connector; emitted fixtures keep the production hold', async t => {
+  const directory = folder(t); const source = join(directory, 'input.json');
+  writeFileSync(source, JSON.stringify(await replayInput())); const output = [];
+  const status = await runKit(['replay', '--input', source, '--out', join(directory, 'replay')], { identities, now, output: value => output.push(value) });
+  assert.equal(status, 0);
+  const replay = JSON.parse(readFileSync(join(directory, 'replay', 'replay.json')));
+  assert.equal(replay.records.length, 9); assert.equal(replay.connector.documents.length, 9);
+  assert.equal(replay.connector.code, 'QB_FRESHNESS_UNVERIFIED');
+  assert.ok(replay.cells.some(cell => cell.surface === 'money' && cell.amount === '75.00'));
+  assert.ok(replay.records.find(record => record.record === 'account:AA-12').refusalReasons.includes('QB_SHARED_GUARD'));
+  assert.deepEqual(PROVEN_SIGN_TYPES.desktop, []);
+  assert.ok(!output.join('').includes('Customer One'));
+});
+
+test('mapped oracle covers every emitted cell; one cent, omissions and duplicate selectors refuse', async () => {
+  const replay = await kit.replayFixtures(await replayInput());
+  const selections = replay.cells.map((cell, i) => ({ cell: cell.id, posting: 'P5', report: 'ar_aging', key: String(i) }));
+  const expected = replay.cells.map((cell, i) => ({ report: 'ar_aging', key: String(i), currency: cell.currency, amount: cell.amount }));
+  const good = kit.compareReplay({ replay, selections, expected });
+  assert.equal(good.ok, true); assert.equal(good.compared, replay.cells.length); assert.ok(good.compared > 10);
+  for (const change of [
+    { expected: expected.map((row, i) => i ? row : { ...row, amount: '0.01' }) },
+    { selections: selections.slice(1) }, { selections: [...selections, selections[0]] },
+  ]) {
+    const bad = kit.compareReplay({ replay, selections, expected, ...change });
+    assert.ok(bad.checked > 0); assert.equal(bad.ok, false);
+  }
+});
+
+test('captured fixtures replay through the connector test seam; corrupt terminal and plan reach refusal', async () => {
+  const fixture = await replayInput();
+  const seam = { guardRecord: createQuickBooksGuardForTest({ desktopSignTypes: ['Bank'], desktopFreshnessVerified: true }) };
+  const good = await kit.replayFixtures(fixture, seam);
+  assert.equal(good.connector.complete, true); assert.equal(good.connector.documents.length, 9);
+  assert.ok(good.cells.some(cell => cell.surface === 'balance' && cell.amount === '1201.00'));
+  for (const mutate of [
+    value => value.snapshot.frames.pop(),
+    value => { value.snapshot.plan.accountListIds = []; },
+    value => { value.snapshot.contractSha256 = '0'.repeat(64); },
+    value => { value.probe.frames.find(frame => frame.entity === 'AccountRet').rows[0].ListID = 'AF-90'; },
+  ]) {
+    const bad = structuredClone(fixture); mutate(bad); const stages = [];
+    await assert.rejects(kit.replayFixtures(bad, { ...seam, onStage: stage => stages.push(stage) }), /KIT_REPLAY_/);
+    assert.ok(stages.includes('fixture_validation'));
+  }
+});
+
+test('P08 typed controls discriminate a source discovery pass from guessed paths and untested variants', () => {
+  const control = { tested: true, source: 'session_api', openFileBound: true, fingerprintMatched: true, renameStable: true,
+    switchDetected: true, sameFingerprintCopyDetected: true, restoreDetected: true, closedFileRefused: true,
+    statBeforeAfterMatched: true, writeTimeAdvanced: true, networkFileVerified: true, leastPrivilege: true,
+    noPathPersisted: true, noNetwork: true };
+  assert.equal(validateStep('F1', control).ok, true);
+  assert.equal(kit.evaluateFreshnessDiscovery(control).ok, true);
+  for (const key of ['source', 'sameFingerprintCopyDetected', 'statBeforeAfterMatched', 'closedFileRefused']) {
+    const result = kit.evaluateFreshnessDiscovery({ ...control, [key]: key === 'source' ? 'none' : false });
+    assert.ok(result.checked > 0); assert.equal(result.ok, false);
+  }
+});
+
+
+test('bill open-item comparison actually reaches the matching renderer request', async () => {
+  const replay = await kit.replayFixtures(await replayInput());
+  const bill = replay.records.find(record => record.ret === 'BillRet');
+  assert.ok(bill.row.Balance, 'the real mapped bill has an open balance');
+  assert.match(bill.surfaces.open_items, /we owe USD 25.00/);
+  assert.ok(replay.cells.some(cell => cell.record === bill.record && cell.surface === 'open_items'));
+});
+
+test('field inventory distinguishes helper-uncapturable currency flag from observed provider data', async () => {
+  const fixture = await replayInput();
+  fixture.snapshot.frames.find(frame => frame.entity === 'CurrencyRet').rows[0].IsUserDefined = 'true';
+  const replay = await kit.replayFixtures(fixture);
+  const unsupported = replay.fieldCoverage.find(row => row.ret === 'CurrencyRet' && row.field === 'IsUserDefined');
+  const control = replay.fieldCoverage.find(row => row.ret === 'CurrencyRet' && row.field === 'CurrencyCode');
+  assert.equal(control.observedRows, 1); assert.equal(control.transport, 'supported');
+  assert.equal(unsupported.observedRows, 0); assert.equal(unsupported.transport, 'uncapturable');
+  assert.ok(replay.blockers.includes('HELPER_FIELD_UNCAPTURABLE'));
+  assert.equal(replay.fieldAcceptance, 'NOT_READY');
+});
+
+
+test('mapped comparison CLI catches exactly one cent and retains complete replay evidence', async t => {
+  const directory = folder(t); const source = join(directory, 'input.json');
+  const fixture = await replayInput(); const replay = await kit.replayFixtures(fixture);
+  const selections = replay.cells.map((cell, i) => ({ cell: cell.id, report: 'transaction_detail', key: `cell-${i}`, posting: cell.record.startsWith('account:') ? 'P1' : 'P5' }));
+  const invoice = replay.records.find(row => row.ret === 'InvoiceRet');
+  assert.match(invoice.surfaces.opening, /total USD 75.00, open balance USD 75.00/);
+  for (const [label, delta, expectedStatus] of [['control', 0n, 0], ['cent', 1n, 2]]) {
+    const amounts = replay.cells.map(cell => cell.amount);
+    const changed = BigInt(amounts[0].replace('.', '')) + delta;
+    amounts[0] = `${changed / 100n}.${String(changed % 100n).padStart(2, '0')}`;
+    const csv = 'Record,Currency,Amount\n' + replay.cells.map((cell, i) => `cell-${i},${cell.currency},${amounts[i]}`).join('\n') + '\n';
+    writeFileSync(source, JSON.stringify({ ...fixture, selections, reports: [{ report: 'transaction_detail', csv,
+      keyColumn: 'Record', currencyColumn: 'Currency', amountColumn: 'Amount' }] }));
+    const output = [];
+    const status = await runKit(['mapped-compare', '--input', source, '--out', join(directory, label)], { identities, now, output: text => output.push(text) });
+    assert.equal(status, expectedStatus);
+    const oracle = JSON.parse(readFileSync(join(directory, label, 'oracle.json')));
+    assert.equal(oracle.compared, replay.cells.length); assert.ok(oracle.compared > 10);
+    assert.equal(oracle.mismatches.length, Number(delta));
+    if (delta) assert.equal(oracle.mismatches[0].differenceCents, '-1');
+    assert.ok(oracle.blockers.includes('HELPER_FIELD_UNCAPTURABLE'));
+    if (!delta) assert.equal(oracle.signCandidates[0].type, 'Bank');
+    else assert.equal(oracle.signCandidates.length, 0, 'a mismatched raw sign cannot be proposed');
+    assert.equal(oracle.idPatterns.TxnID.observed, oracle.idPatterns.TxnID.conforming);
+    const saved = JSON.parse(readFileSync(join(directory, label, 'connector-fixture.json')));
+    assert.equal((await kit.replayFixtures(saved)).records.length, 9);
+    assert.ok(!output.join('').includes('Customer One'));
+  }
+});
+
+test('real captures create schema-2 fixtures the replay can consume without edits', async t => {
+  const directory = folder(t); const fixture = await replayInput(); let captures = 0;
+  for (const [step, which] of [['A0', 'probe'], ['P', 'snapshot']]) {
+    const part = fixture[which];
+    const request = which === 'probe' ? { operation: 'probe' } : { operation: 'snapshot', historySince: part.plan.historySince, accountListIds: part.plan.accountListIds, storedTxnIds: [] };
+    const result = captureStep({ step, input: request, inventedOnly: true, out: join(directory, which) }, {
+      identities, now, platform: 'win32', architecture: 'x64', environment: {}, bridge: () => { captures++; return { ok: true, frames: part.frames }; },
+    });
+    assert.equal(result.capture.ok, true);
+    fixture[which] = JSON.parse(readFileSync(join(directory, which, 'fixture.json')));
+  }
+  assert.equal(captures, 2);
+  assert.equal((await kit.replayFixtures(fixture)).connector.documents.length, 9);
+});
+
+test('fake fixture flags never select the connector proof seam through the CLI', async t => {
+  const directory = folder(t), source = join(directory, 'input.json');
+  const fixture = { ...await replayInput(), guardRecord: { desktopFreshnessVerified: true }, desktopSignTypes: ['Bank'], usSingleCurrencyBinding: true };
+  writeFileSync(source, JSON.stringify(fixture));
+  assert.equal(await runKit(['replay', '--input', source, '--out', join(directory, 'held')], { identities, now, output: () => {} }), 0);
+  const replay = JSON.parse(readFileSync(join(directory, 'held', 'replay.json')));
+  assert.deepEqual(replay.connector.calls, ['probe', 'snapshot']);
+  assert.equal(replay.connector.code, 'QB_FRESHNESS_UNVERIFIED');
+  assert.deepEqual(PROVEN_SIGN_TYPES.desktop, []);
+  assert.ok(!replay.cells.some(cell => cell.surface === 'balance'));
+  const control = await kit.replayFixtures(fixture, { guardRecord: createQuickBooksGuardForTest({ desktopSignTypes: ['Bank'], desktopFreshnessVerified: true }) });
+  assert.ok(control.cells.some(cell => cell.surface === 'balance'));
+});
+
+test('capture inventory identifies only the known transport gap and covers bounded repeated links', async t => {
+  const directory = folder(t);
+  assert.equal(await runKit(['plan', '--out', join(directory, 'plan')], { identities, output: () => {} }), 0);
+  const plan = JSON.parse(readFileSync(join(directory, 'plan', 'field-plan.json')));
+  assert.ok(Object.values(plan.fields).flat().length > 80);
+  const replay = await kit.replayFixtures(await replayInput());
+  assert.deepEqual(replay.fieldCoverage.filter(row => row.transport === 'uncapturable').map(row => `${row.ret}.${row.field}`), ['CurrencyRet.IsUserDefined']);
+  assert.equal(replay.fieldCoverage.find(row => row.ret === 'BillPaymentCheckRet' && row.field === 'AppliedToTxnRet.TxnID').observedRows, 1);
+  const mappedNames = readFileSync(new URL('../connectors/quickbooks-desktop-map.mjs', import.meta.url), 'utf8');
+  const fields = new Set([...Object.values(plan.fields).flat(), ...plan.contexts.commonReads, 'AppliedToTxnRet']);
+  for (const match of mappedNames.matchAll(/input(?:\.([A-Za-z]+)|\['([^']+)'\])/g)) assert.ok(fields.has(match[1] || match[2]), 'every direct mapper input read is inventoried');
+});
+
+test('SAC, elevation and certificate behavioral failures cannot hide inside complete typed observations', () => {
+  const observed = observations();
+  Object.assign(observed.A1, { promptAppeared: false });
+  Object.assign(observed.N1, { fileLocked: false });
+  Object.assign(observed.S1, { elapsedHours: 72 });
+  Object.assign(observed.T1, { years: 3 });
+  const good = kit.evaluateFieldSteps(observed);
+  for (const step of ['W1', 'E1', 'S1', 'N1', 'T1', 'R1']) assert.equal(good[step].ok, true);
+  for (const [step, field, value] of [['W1', 'sacEnforced', false], ['E1', 'beforeConsent', false], ['S1', 'certificate', 'expired'], ['N1', 'fileLocked', true], ['R1', 'addDecisionReached', false]]) {
+    const bad = structuredClone(observed); bad[step][field] = value;
+    assert.equal(validateStep(step, bad[step]).ok, true);
+    const result = kit.evaluateFieldSteps(bad)[step];
+    assert.ok(result.checked > 0); assert.equal(result.ok, false);
+    assert.ok(buildReceipt({ observations: bad }, { now }).blockers.includes(`${step}_PASS_BAR_UNMET`));
+  }
+});
+
+
+test('raw sign matches never propose a permanently excluded account type', async () => {
+  for (const type of ['Bank', 'Income', 'OtherIncome', 'Expense', 'OtherExpense', 'CostOfGoodsSold', 'NonPosting']) {
+    const fixture = await replayInput();
+    fixture.snapshot.frames.find(frame => frame.entity === 'AccountRet').rows[0].AccountType = type;
+    const replay = await kit.replayFixtures(fixture);
+    assert.equal(replay.records.filter(record => record.ret === 'AccountRet').length, 1);
+    const selections = replay.cells.map((cell, i) => ({ cell: cell.id, report: 'balance_sheet', key: String(i), posting: 'P1' }));
+    const expected = replay.cells.map((cell, i) => ({ report: 'balance_sheet', key: String(i), currency: cell.currency, amount: cell.amount }));
+    const oracle = kit.compareReplay({ replay, selections, expected });
+    assert.equal(oracle.ok, true); assert.ok(oracle.compared > 0);
+    assert.equal(oracle.signCandidates.length, type === 'Bank' ? 1 : 0);
+  }
 });
