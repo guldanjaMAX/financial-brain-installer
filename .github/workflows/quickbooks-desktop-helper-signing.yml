@@ -1,0 +1,199 @@
+# Build once, ship identical signed bytes across releases. Re-sign only for a
+# security fix: rebuilding may change the identity QuickBooks displays and may
+# revoke owners' grants. Artifact adoption and pins require a separate review.
+# x64 is deliberately absent until the Desktop field gate proves a 64-bit
+# registration. Never select x64 merely because Windows itself is 64-bit.
+name: quickbooks-desktop-helper-signing
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    environment: artifact-signing
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1; SHA unverified offline
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0; SHA unverified offline
+        with:
+          node-version: '22'
+
+      - name: require signing configuration
+        env:
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          ARTIFACT_SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+        run: |
+          foreach ($name in @('AZURE_TENANT_ID','AZURE_CLIENT_ID','AZURE_SUBSCRIPTION_ID','ARTIFACT_SIGNING_ENDPOINT','ARTIFACT_SIGNING_ACCOUNT','ARTIFACT_SIGNING_PROFILE')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw 'required signing configuration is absent'
+            }
+          }
+
+      - name: validate source and compile x86 with the embedded contract
+        run: |
+          $env:HOME = Join-Path $env:GITHUB_WORKSPACE 'home-06'
+          $env:BRAIN_NO_WRANGLER_LOGIN = '1'
+          New-Item -ItemType Directory -Path $env:HOME -Force | Out-Null
+          node --test test/quickbooks-desktop-helper.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Node bridge gate failed' }
+          node scripts/qbd-helper-il-check.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'source gate failed' }
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          if (-not (Test-Path -LiteralPath $csc -PathType Leaf)) { throw 'compiler unavailable' }
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $common = @('/nologo','/target:exe','/platform:x86','/optimize+','/reference:System.Runtime.Serialization.dll','/reference:System.Xml.dll','/reference:System.Core.dll','/resource:operations\quickbooks-desktop-requests.json,QbdContract','operations\quickbooks-desktop-helper.cs')
+          & $csc @common /out:dist\quickbooks-desktop-helper.exe
+          if ($LASTEXITCODE -ne 0) { throw 'helper compile failed' }
+          & $csc @common /main:QbdHelperTests /out:dist\qbd-helper-tests.exe test\fixtures\qbd-helper-tests.cs
+          if ($LASTEXITCODE -ne 0) { throw 'stub compile failed' }
+          & .\dist\qbd-helper-tests.exe
+          if ($LASTEXITCODE -ne 0) { throw 'stub lifecycle gate failed' }
+
+      - name: inspect compiled metadata without executing the helper
+        run: |
+          # ReflectionOnlyLoadFrom cannot invoke the helper or its static initializers.
+          # Framework reflection runs in Windows PowerShell, not PowerShell Core.
+          $script = @'
+          $ErrorActionPreference = 'Stop'
+          [AppDomain]::CurrentDomain.add_ReflectionOnlyAssemblyResolve({
+            param($sender, $event)
+            [Reflection.Assembly]::ReflectionOnlyLoad($event.Name)
+          })
+          $assembly = [Reflection.Assembly]::ReflectionOnlyLoadFrom((Resolve-Path dist\quickbooks-desktop-helper.exe))
+          $module = $assembly.ManifestModule
+          $types = @()
+          $members = @()
+          foreach ($table in @(0x01000000, 0x0A000000)) {
+            for ($rid = 1; $rid -lt 65536; $rid++) {
+              try {
+                if ($table -eq 0x01000000) {
+                  $type = $module.ResolveType($table -bor $rid)
+                  $types += $type.FullName
+                } else {
+                  $member = $module.ResolveMember($table -bor $rid)
+                  $type = $member.DeclaringType
+                  if ($type.IsGenericType) { $type = $type.GetGenericTypeDefinition() }
+                  $members += @{ type = $type.FullName; name = $member.Name }
+                }
+              } catch [ArgumentOutOfRangeException] { break }
+            }
+          }
+          $native = @()
+          foreach ($type in $assembly.GetTypes()) {
+            foreach ($method in $type.GetMethods([Reflection.BindingFlags]'Static,Instance,Public,NonPublic,DeclaredOnly')) {
+              foreach ($attribute in $method.GetCustomAttributesData()) {
+                if ($attribute.AttributeType.FullName -eq 'System.Runtime.InteropServices.DllImportAttribute') {
+                  $entry = $method.Name
+                  foreach ($arg in $attribute.NamedArguments) {
+                    if ($arg.MemberName -eq 'EntryPoint') { $entry = [string]$arg.TypedValue.Value }
+                  }
+                  $native += ([string]$attribute.ConstructorArguments[0].Value + '::' + $entry)
+                }
+              }
+            }
+          }
+          @{ format = 'qbd-metadata-v1'; types = $types; members = $members; pinvokes = $native; assemblies = @($assembly.GetReferencedAssemblies() | ForEach-Object { $_.Name }) } |
+            ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 dist\qbd-helper-metadata.json
+          '@
+          $script | Set-Content -Encoding UTF8 dist\inspect-metadata.ps1
+          & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -File dist\inspect-metadata.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'metadata extraction failed' }
+          node scripts/qbd-helper-il-check.mjs --il dist/qbd-helper-metadata.json
+          if ($LASTEXITCODE -ne 0) { throw 'compiled metadata gate failed' }
+
+      - name: sign in with GitHub OIDC
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0; SHA unverified offline
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: sign reviewed x86 bytes
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0; SHA unverified offline
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\dist\quickbooks-desktop-helper.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: verify organization and timestamp and print the pin
+        run: |
+          $helper = Resolve-Path dist\quickbooks-desktop-helper.exe
+          $signature = Get-AuthenticodeSignature -LiteralPath $helper
+          if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate) {
+            throw 'valid timestamped signature required'
+          }
+          $subject = $signature.SignerCertificate.SubjectName.Decode([System.Security.Cryptography.X509Certificates.X500DistinguishedNameFlags]::UseNewLines)
+          if ($subject -cnotmatch '(?m)^O=Financial Brain LLC\r?$') { throw 'unexpected signer organization' }
+          # Inspect the signed attribute OID as well as the timestamp certificate.
+          # RFC 3161 uses 1.3.6.1.4.1.311.3.3.1; a legacy countersignature is insufficient.
+          Add-Type -AssemblyName System.Security.Cryptography.Pkcs
+          $bytes = [IO.File]::ReadAllBytes($helper)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+          if ($pe -lt 64 -or $pe + 256 -gt $bytes.Length) { throw 'invalid PE header' }
+          $optional = $pe + 24
+          $magic = [BitConverter]::ToUInt16($bytes, $optional)
+          if ($magic -ne 0x10b) { throw 'x86 PE image required' }
+          $certificateDirectory = $optional + 96 + 4 * 8
+          $offset = [BitConverter]::ToUInt32($bytes, $certificateDirectory)
+          $size = [BitConverter]::ToUInt32($bytes, $certificateDirectory + 4)
+          if ($size -lt 8 -or [long]$offset + $size -gt $bytes.Length) { throw 'certificate table absent' }
+          $length = [BitConverter]::ToUInt32($bytes, $offset)
+          if ($length -lt 8 -or $length -gt $size -or [BitConverter]::ToUInt16($bytes, $offset + 6) -ne 2) { throw 'invalid certificate table' }
+          $payload = New-Object byte[] ($length - 8)
+          [Array]::Copy($bytes, $offset + 8, $payload, 0, $length - 8)
+          $cms = [Security.Cryptography.Pkcs.SignedCms]::new()
+          $cms.Decode($payload)
+          if ($cms.SignerInfos.Count -eq 0) { throw 'signature absent' }
+          foreach ($signer in $cms.SignerInfos) {
+            $rfc3161 = @($signer.UnsignedAttributes | Where-Object { $_.Oid.Value -eq '1.3.6.1.4.1.311.3.3.1' })
+            if ($rfc3161.Count -ne 1) { throw 'RFC 3161 timestamp required' }
+          }
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'signature verifier unavailable' }
+          & $signtool.FullName verify /pa /all /tw $helper
+          if ($LASTEXITCODE -ne 0) { throw 'timestamp verification failed' }
+          $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant()
+          "$sha256  quickbooks-desktop-helper.exe" | Set-Content -Encoding ascii dist\quickbooks-desktop-helper.sha256
+          "Signed helper SHA-256: $sha256" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: upload only the signed artifact and review evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1; SHA unverified offline
+        with:
+          name: quickbooks-desktop-helper-signed-x86
+          path: |
+            dist/quickbooks-desktop-helper.exe
+            dist/quickbooks-desktop-helper.sha256
+            dist/qbd-helper-metadata.json
+          if-no-files-found: error
+          retention-days: 5
