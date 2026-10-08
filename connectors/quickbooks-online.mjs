@@ -6,6 +6,7 @@ import {
   createPaginationGuard, providerEnvelope, providerJson, providerSyncResult,
 } from "./provider-sync.mjs";
 import { renderQuickBooksRecord } from "./quickbooks-records.mjs";
+import { guardQuickBooksRecord } from "./quickbooks-guard.mjs";
 
 export const QBO_DEFAULT_ENTITIES = Object.freeze([
   "Account", "Customer", "Vendor", "Invoice", "Payment", "Bill", "Purchase",
@@ -70,7 +71,7 @@ export function quickBooksReconciliationLines(entity, row) {
   const id = String(row?.Id || "").trim();
   const postedOn = String(row?.TxnDate || "").trim();
   const minor = amountMinor(row?.TotalAmt);
-  const currency = String(row?.CurrencyRef?.value || "USD").trim().toUpperCase();
+  const currency = String(row?.CurrencyRef?.value || "").trim().toUpperCase();
   if (!id || !/^\d{4}-\d{2}-\d{2}$/.test(postedOn) || minor === null || !/^[A-Z]{3}$/.test(currency)) {
     return [];
   }
@@ -145,6 +146,8 @@ export async function syncQuickBooksOnline({
   }
   const documents = [];
   let detailsOmitted = false;
+  const withheldCounts = new Map();
+  let missingCurrencyCount = 0;
   for (const entityValue of entities) {
     const entity = String(entityValue);
     const guard = createPaginationGuard("quickbooks", { maxPages: 10_000 });
@@ -163,9 +166,14 @@ export async function syncQuickBooksOnline({
         if (!id) continue;
         const changed = row?.MetaData?.LastUpdatedTime || row?.TxnDate || null;
         const sourceId = `${entity.toLowerCase()}:${id}`;
-        const reconciliationLines = quickBooksReconciliationLines(entity, row)
+        const guarded = guardQuickBooksRecord(entity, row, { edition: "online" });
+        for (const field of guarded.withheld) withheldCounts.set(field, (withheldCounts.get(field) || 0) + 1);
+        if (QBO_RECONCILIATION_ENTITIES.includes(entity) && !String(row?.CurrencyRef?.value || "").trim()) {
+          missingCurrencyCount++;
+        }
+        const reconciliationLines = quickBooksReconciliationLines(entity, guarded.row)
           .map((line) => ({ ...line, qbo_company_fingerprint: companyFingerprint }));
-        const rendered = renderQuickBooksRecord(entity, row, snapshotAt);
+        const rendered = renderQuickBooksRecord(entity, guarded.row, snapshotAt);
         detailsOmitted ||= rendered.detailsOmitted;
         const document = providerEnvelope("quickbooks", sourceId, {
           title: rendered.title,
@@ -202,6 +210,8 @@ export async function syncQuickBooksOnline({
         "QuickBooks query snapshots are idempotent for present records but do not prove which previously loaded records were deleted.",
         "QuickBooks search results cover matching individual records. They cannot prove a complete list of receivables, bills or account balances; check the complete list in QuickBooks.",
         ...(detailsOmitted ? ["Some QuickBooks records have additional details omitted from the bounded readable view; consult those provider records for the complete details."] : []),
+        ...[...withheldCounts].map(([field, count]) => `QuickBooks: ${count} ${field} field(s) withheld by the shared record guard.`),
+        ...(missingCurrencyCount ? [`QuickBooks: ${missingCurrencyCount} record(s): reconciliation lines without a provider currency were omitted.`] : []),
       ],
     }),
     qbo_company_fingerprint: companyFingerprint,
