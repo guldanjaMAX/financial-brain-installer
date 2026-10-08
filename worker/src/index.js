@@ -594,7 +594,7 @@ function statusPolarity(value) {
 }
 
 function documentDirectlySupportsStatus(sentence, doc, question = "") {
-  const source = String(doc?.source || "").toLowerCase();
+  const source = String(doc?.source_kind ?? doc?.source ?? "").toLowerCase();
   const relationshipClaim = isRelationshipStatusClaim(sentence, question);
   // A Stripe Customer, invoice, subscription or accounting customer record is a
   // billing identity, not proof that the human/business relationship is active.
@@ -1804,6 +1804,7 @@ const BATCH_MAX_BYTES = 1_000_000;
 
 async function handleIngestBatch(env, request, scope = { all: true }, {
   allowSourceOriginalReceipt = false,
+  principalKind = null,
 } = {}) {
   let body;
   try {
@@ -1884,6 +1885,7 @@ async function handleIngestBatch(env, request, scope = { all: true }, {
   // complete. Large message and email migrations use distinct source ids, so
   // this safety fallback does not dilute the high-volume path it protects.
   const identityCounts = new Map();
+  const sourceKinds = new Map();
   for (let inputIndex = 0; inputIndex < docs.length; inputIndex++) {
     const rawEnvelope = docs[inputIndex];
     if (hasSensitiveTransportIdentity(rawEnvelope)) {
@@ -1907,6 +1909,21 @@ async function handleIngestBatch(env, request, scope = { all: true }, {
       tally.failed++;
       results[inputIndex] = { ...slot, status: "failed", error: validationError };
       continue;
+    }
+
+    if (principalKind !== "owner") {
+      // Trust the registry, never a caller's envelope kind or provider marker.
+      // Resolve all admissions before staging so a failed lookup writes nothing.
+      if (!sourceKinds.has(envelope.source_type)) {
+        const source = await env.DB.prepare("SELECT kind FROM sources WHERE name=?1")
+          .bind(envelope.source_type).first();
+        sourceKinds.set(envelope.source_type, source?.kind ?? null);
+      }
+      if (sourceKinds.get(envelope.source_type) === "quickbooks") {
+        tally.refused++;
+        results[inputIndex] = { ...slot, status: "refused", labels: ["quickbooks_owner_required"] };
+        continue;
+      }
     }
 
     if (scannerOn) {
@@ -3368,6 +3385,7 @@ export default {
       if (path === "/api/admin/brain/ingest/batch" && request.method === "POST") {
         return await handleIngestBatch(env, request, scope, {
           allowSourceOriginalReceipt: ownerKeyAuthorized,
+          principalKind: scopePrincipalKind,
         });
       }
       if (path === "/api/admin/brain/source-receipt" && request.method === "POST") {
