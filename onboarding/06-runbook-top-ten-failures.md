@@ -26,11 +26,13 @@ use browser sign-in. Windows has no saved Cloudflare-token recovery or supported
 hidden token entry in this release. Low-level automation uses an approved secret manager,
 so the token or key stays out of shell commands and history.
 
-`CLOUDFLARE_KEYRING_UNAVAILABLE` means the encrypted-storage step stopped before
+On Windows, `CLOUDFLARE_KEYRING_UNAVAILABLE` means the encrypted-storage step stopped before
 the browser opened. `binding_missing` means Wrangler's Windows native binding is
 absent or cannot load; `npx_unavailable` means the Node.js launcher is unavailable;
-`timeout` means the step ran out of time; `other` needs the visible console result
-reviewed by a technician. Captured Wrangler output is wiped, never copied into
+`timeout` means the step ran out of time. For `other`, an owner-console run points
+to Wrangler's output above for technician review. A run without a console gives
+the PowerShell command below; technician review follows only if that visible run
+still fails. Captured Wrangler output is wiped, never copied into
 the support journal. Run `brain support --explain CLOUDFLARE_KEYRING_UNAVAILABLE`
 for the same guidance.
 

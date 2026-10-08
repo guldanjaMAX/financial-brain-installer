@@ -14,7 +14,7 @@ import {
 } from "../brain.mjs";
 import {
   enableCloudflareOAuthKeyring, captureCloudflareOAuthToken, cloudflareOAuthProfileName,
-  isWindowsKeyringEnableTest, withCloudflareOAuthSession,
+  isWindowsKeyringEnableTest, withCloudflareOAuthSession, CloudflareOAuthSessionError,
 } from "../operations/cloudflare-oauth-session.mjs";
 import { renderSupportRecovery, supportRecovery } from "../support-recovery.mjs";
 import { cliTestEnvironment } from "./helpers/cli-test-environment.mjs";
@@ -24,6 +24,47 @@ const CLEANUP = "Remove-Item Env:CLOUDFLARE_AUTH_USE_KEYRING";
 const MISSING = "`@napi-rs/keyring` is required for OS keyring storage on Windows but is not installed.";
 const accountId = "a".repeat(32);
 const ok = () => ({ status: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) });
+
+// Count immediate recovery routes, treating cleanup/retry as part of the one
+// keyring installation sequence. A conditional escalation is not a second
+// immediate instruction. Include the contradictory routes caught by review.
+function assertOneNextStep(message, expected) {
+  const immediate = message.replace(/If [^\n]+/g, "")
+    .replace("Finish creating or joining the account in Cloudflare, then rerun the same command.",
+      "Finish creating or joining the account in Cloudflare.");
+  const routes = [
+    ["retry", /[Rr]erun the same command|rerun the sign-in/g],
+    ["account", /Sign in as an owner|Finish creating or joining/g],
+    ["manifest", /Use the original manifest/g],
+    ["stop", /Stop here and ask the technician/g],
+    ["adopt", /and run `brain update <manifest> --adopt-cloudflare-profile`/g],
+    ["install", /In a visible PowerShell window, as the same Windows user, run:/g],
+    ["console_review", /Review that output with a technician/g],
+    ["unseen_console", /Review the visible console result/g],
+    ["token", /Continue only with a separately approved|To continue, use a separate account-scoped recovery API token/g],
+    ["launcher", /Restore the supported Node\.js installation/g],
+    ["network", /Check access to the npm registry/g],
+  ].flatMap(([route, pattern]) => [...immediate.matchAll(pattern)].map(() => route));
+  assert.deepEqual(routes, [expected], "exactly one imperative next step, with no contradictory immediate route");
+}
+
+const profile = cloudflareOAuthProfileName("fixture-keyring-install-identity");
+const successfulSession = ({ action }) => action({
+  token: Buffer.alloc(24, 1), profile, account: { id: accountId }, preflight: {},
+});
+
+// Frozen owner-facing strings from 5626440. Do not derive the expected text
+// from the current formatter: that would miss the non-Windows regression.
+const BASE_KEYRING_MESSAGE = "Cloudflare sign-in could not use this computer's protected credential store. Close other setup windows, confirm macOS Keychain or Windows Credential Manager is available, and rerun the same command. Issue: CLOUDFLARE_KEYRING_UNAVAILABLE. If browser sign-in remains unavailable, the installer can offer recovery API-token access.";
+const BASE_AUTH_EXPLAIN = [
+  "", "AUTH_REQUIRED · A sign-in or credential is still needed", "",
+  "What happened: This step reached a protected service without a usable authorization.",
+  "What stayed protected: The installer paused before relying on missing access.",
+  "Safe to retry: Yes, after the step below is complete.", "", "Next step:",
+  "  1. Return to the matching technician step for Cloudflare, Google, Zoom, or IMAP.",
+  "  2. Enter any sensitive value only in the provider page or hidden terminal prompt, then retry.",
+  "", "A technician can help when: It is unclear which account or provider step is missing.", "",
+].join("\n");
 
 function streams() {
   const input = new PassThrough();
@@ -95,6 +136,7 @@ for (const [reason, result] of [
       assert.ok(error.message.includes(COMMAND));
       assert.ok(error.message.includes(CLEANUP));
       assert.doesNotMatch(error.message, /private detail/);
+      assertOneNextStep(error.message, "install");
       return true;
     });
     assert.equal(calls, 1, "the actual keyring decision must be reached");
@@ -138,7 +180,12 @@ test("CLI releases its real shared readline for keyring and restores the next qu
           return { status: 1 };
         },
       },
-    }), (error) => error.code === "CLOUDFLARE_KEYRING_UNAVAILABLE");
+    }), (error) => {
+      assert.equal(error.code, "CLOUDFLARE_KEYRING_UNAVAILABLE");
+      assert.match(error.message, /The console output above shows Wrangler's reason/);
+      assertOneNextStep(error.message, "console_review");
+      return true;
+    });
     assert.equal(calls, 1);
     assert.deepEqual(during, { prompts: false, raw: false, stdio: "inherit" });
     assert.equal(restored, true, "keyring must restore readline before the outer CLI handles failure");
@@ -182,6 +229,7 @@ test("brain update preserves the reached keyring refusal and one runnable Window
       assert.match(error.message, /binding_missing/);
       assert.equal(error.message.split(COMMAND).length, 2, "one runnable install command");
       assert.doesNotMatch(error.message, /hidden token entry|saved Cloudflare key/);
+      assertOneNextStep(error.message, "install");
       return true;
     });
     assert.equal(keyringCalls, 1);
@@ -202,7 +250,7 @@ test("brain update preserves the reached keyring refusal and one runnable Window
 });
 
 test("support explains all bounded keyring reasons and the exact Windows command", () => {
-  const guide = supportRecovery("CLOUDFLARE_KEYRING_UNAVAILABLE");
+  const guide = supportRecovery("CLOUDFLARE_KEYRING_UNAVAILABLE", { platformName: "win32" });
   assert.ok(guide, "the typed issue must have a recovery catalog entry");
   const text = renderCliCommands(renderSupportRecovery(guide));
   for (const reason of ["binding_missing", "npx_unavailable", "timeout", "other"]) assert.ok(text.includes(reason));
@@ -233,6 +281,7 @@ test("the real support CLI exposes the typed keyring recovery", () => {
   try {
     const result = spawnSync(process.execPath, [
       "--import", new URL("./fixtures/cli-side-effect-tripwire.mjs", import.meta.url).href,
+      "--import", "data:text/javascript," + encodeURIComponent('Object.defineProperty(process, "platform", { value: "win32" });'),
       fileURLToPath(new URL("../brain.mjs", import.meta.url)),
       "support", "--explain", "CLOUDFLARE_KEYRING_UNAVAILABLE",
     ], { env: cliTestEnvironment(root), encoding: "utf8", timeout: 30_000 });
@@ -316,3 +365,183 @@ test("Windows CI runs the missing-binding arm and its real preinstalled CONTROL"
   assert.doesNotMatch(job, /BRAIN_NO_WRANGLER_LOGIN:\s*|continue-on-error/);
   for (const action of job.matchAll(/uses: ([^\s]+)/g)) assert.match(action[1], /@[a-f0-9]{40}$/);
 });
+
+for (const [code, supportCode, nextStep] of [
+  ["CLOUDFLARE_OAUTH_REAUTH_REQUIRED", "AUTH_EXPIRED", "retry"],
+  ["CLOUDFLARE_OAUTH_WORKDIR_UNWRITABLE", "AUTH_REQUIRED", "retry"],
+  ["CLOUDFLARE_ACCOUNT_SELECTION_CANCELLED", "CONFIG_INVALID", "retry"],
+  ["CLOUDFLARE_OAUTH_REQUEST_FAILED", "NETWORK_UNREACHABLE", "retry"],
+  ["CLOUDFLARE_ACCOUNT_NONE", "AUTH_REQUIRED", "account"],
+  ["CLOUDFLARE_ACCOUNT_BINDING_MISMATCH", "CONFIG_INVALID", "account"],
+  ["CLOUDFLARE_OAUTH_PROFILE_MISMATCH", "CONFIG_INVALID", "manifest"],
+]) {
+  test(`Windows ${code} has one next step and only conditional escalation`, async () => {
+    let reached = 0, actions = 0, prompts = 0;
+    const options = {
+      authProfile: profile, accountId, platform: "win32", interactive: false,
+      allowTokenRecovery: false, allowBrowserReauth: false,
+      askFn: async () => { prompts++; return "n"; },
+      withOAuthSession: async () => {
+        reached++;
+        throw new CloudflareOAuthSessionError(code, "authorize", "fixture refusal");
+      },
+    };
+    const action = () => { actions++; return "complete"; };
+    await assert.rejects(withCloudflareControlCredential(action, options), (error) => {
+      assert.equal(error.code, supportCode);
+      assertOneNextStep(error.message, nextStep);
+      assert.match(error.message, /If the same command fails again, stop and ask the technician; this command will not ask you to type a key\./);
+      return true;
+    });
+    assert.equal(reached, 1);
+    assert.equal(actions, 0);
+    assert.equal(prompts, 0);
+    assert.equal(await withCloudflareControlCredential(action, { ...options, withOAuthSession: successfulSession }), "complete");
+    assert.equal(actions, 1);
+  });
+}
+
+test("Windows token failure gives only the browser adoption next step", async () => {
+  let reached = 0, actions = 0;
+  const action = () => { actions++; return "complete"; };
+  const options = {
+    authProfile: null, accountId, platform: "win32", interactive: false,
+    withToken: async () => { reached++; throw new Error("fixture unavailable"); },
+  };
+  await assert.rejects(withCloudflareControlCredential(action, options), (error) => {
+    assert.equal(error.code, "AUTH_REQUIRED");
+    assert.ok(renderCliCommands(error.message).includes(renderCliCommands("brain update <manifest> --adopt-cloudflare-profile")));
+    assertOneNextStep(error.message, "adopt");
+    assert.doesNotMatch(error.message, /Stop here/);
+    return true;
+  });
+  assert.equal(reached, 1);
+  assert.equal(actions, 0);
+  assert.equal(await withCloudflareControlCredential(action, {
+    ...options, withToken: async (run) => { reached++; return run(); },
+  }), "complete");
+  assert.equal(reached, 2);
+  assert.equal(actions, 1);
+});
+
+for (const interactive of [false, true]) {
+  test(`Windows other keyring failure uses ${interactive ? "visible console" : "piped"} guidance`, () => {
+    const { input, output } = streams();
+    input.isTTY = output.isTTY = interactive;
+    let reached = 0;
+    try {
+      assert.throws(() => enableCloudflareOAuthKeyring({
+        platformName: "win32", input, output, environment: {},
+        processRunner: (_command, _args, options) => {
+          reached++;
+          assert.deepEqual(options.stdio, interactive ? "inherit" : ["ignore", "pipe", "pipe"]);
+          return { status: 1, stdout: null, stderr: interactive ? null : Buffer.from("fixture refusal") };
+        },
+      }), (error) => {
+        assert.equal(error.reason, "other");
+        const message = cloudflareOAuthFailureMessage(error, { platformName: "win32" });
+        assert.equal(message, `${error.message} Issue: CLOUDFLARE_KEYRING_UNAVAILABLE.`);
+        assertOneNextStep(message, interactive ? "console_review" : "install");
+        if (interactive) {
+          assert.match(message, /The console output above shows Wrangler's reason/);
+          assert.ok(!message.includes(COMMAND));
+        } else {
+          assert.ok(message.includes(COMMAND));
+          assert.doesNotMatch(message, /console result|console output above/);
+          assert.match(message, /If that visible run still fails, ask a technician/);
+        }
+        return true;
+      });
+      assert.equal(reached, 1);
+      enableCloudflareOAuthKeyring({ platformName: "win32", input, output, environment: {},
+        processRunner: () => { reached++; return ok(); } });
+      assert.equal(reached, 2);
+    } finally { input.destroy(); output.destroy(); }
+  });
+}
+
+for (const platformName of ["darwin", "linux"]) {
+  test(`${platformName} keyring failure and support explanation are byte-identical to 5626440`, async () => {
+    let reached = 0, actions = 0;
+    const options = {
+      authProfile: profile, accountId, platform: platformName, interactive: false,
+      allowTokenRecovery: false, allowBrowserReauth: false,
+      oauthOptions: {
+        platformName, environment: {}, input: { isTTY: false }, output: { isTTY: false },
+        processRunner: () => { reached++; return { status: 1, stderr: Buffer.from("fixture refusal") }; },
+      },
+    };
+    const action = () => { actions++; return "complete"; };
+    await assert.rejects(withCloudflareControlCredential(action, options), (error) => {
+      assert.equal(error.code, "AUTH_REQUIRED");
+      assert.equal(error.message, BASE_KEYRING_MESSAGE);
+      assert.equal(renderSupportRecovery(supportRecovery(error.code, { platformName })), BASE_AUTH_EXPLAIN);
+      return true;
+    });
+    assert.equal(reached, 1);
+    assert.equal(actions, 0);
+    assert.throws(() => enableCloudflareOAuthKeyring(options.oauthOptions), (error) => {
+      assert.equal(error.code, "CLOUDFLARE_KEYRING_UNAVAILABLE");
+      assert.equal(error.message, "Wrangler could not enable encrypted OS-keyring credential storage");
+      return true;
+    });
+    assert.equal(reached, 2);
+    assert.equal(await withCloudflareControlCredential(action, { ...options, withOAuthSession: successfulSession }), "complete");
+    assert.equal(actions, 1);
+    // Directly looking up the new Windows code elsewhere must not prescribe
+    // a Windows command either, even though those failures map to AUTH_REQUIRED.
+    assert.doesNotMatch(renderSupportRecovery(supportRecovery("CLOUDFLARE_KEYRING_UNAVAILABLE", { platformName })), /npx\.cmd|PowerShell/);
+  });
+
+  test(`${platformName} real support CLI keeps the 5626440 AUTH_REQUIRED bytes`, () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-keyring-support-base-")));
+    try {
+      const result = spawnSync(process.execPath, [
+        "--import", new URL("./fixtures/cli-side-effect-tripwire.mjs", import.meta.url).href,
+        "--import", "data:text/javascript," + encodeURIComponent(`Object.defineProperty(process, "platform", { value: ${JSON.stringify(platformName)} });`),
+        fileURLToPath(new URL("../brain.mjs", import.meta.url)),
+        "support", "--explain", "AUTH_REQUIRED",
+      ], { env: cliTestEnvironment(root), encoding: "utf8", timeout: 30_000 });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, renderCliCommands(BASE_AUTH_EXPLAIN, { platform: platformName }));
+      assert.equal(result.stderr, "");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
+for (const surface of ["vectorize", "workers_subdomain"]) {
+  for (const mode of ["routine-no-console", "setup-browser-no-console", "interactive"]) {
+    test(`Windows ${surface} scope refusal has one supported next step in ${mode}`, async () => {
+      let reached = 0, actions = 0, prompts = 0, tokens = 0;
+      const error = new CloudflareOAuthSessionError("CLOUDFLARE_OAUTH_SCOPE_MISSING", "preflight", "fixture refusal");
+      error.requiredSurface = surface;
+      error.selectedAccountId = accountId;
+      const options = {
+        accountId, authProfile: mode === "setup-browser-no-console" ? null : profile,
+        freshOAuth: mode === "setup-browser-no-console", installIdentity: "fixture-keyring-install-identity",
+        interactive: mode !== "routine-no-console", allowTokenRecovery: mode === "interactive",
+        allowBrowserReauth: false,
+        // Cover callers that select the platform only through oauthOptions.
+        oauthOptions: { platformName: "win32", environment: {} },
+        resumeCommand: "brain setup <manifest>", recoveryCommand: "brain setup <manifest> --cloudflare-token",
+        withOAuthSession: async () => { reached++; throw error; },
+        askFn: async () => { prompts++; return "n"; },
+        withToken: async () => { tokens++; },
+      };
+      const action = () => { actions++; return "complete"; };
+      await assert.rejects(withCloudflareControlCredential(action, options), (failure) => {
+        assert.equal(failure.code, "REMOTE_PERMISSION_DENIED");
+        assert.match(failure.message, surface === "vectorize" ? /cannot request the Vectorize permission/ : /cannot read this account's workers\.dev address/);
+        assertOneNextStep(failure.message, "stop");
+        assert.doesNotMatch(failure.message, /--cloudflare-token|recovery API.token|Continue only with|To continue, use/);
+        return true;
+      });
+      assert.equal(reached, 1);
+      assert.equal(actions, 0);
+      assert.equal(prompts, 0);
+      assert.equal(tokens, 0);
+      assert.equal(await withCloudflareControlCredential(action, { ...options, withOAuthSession: successfulSession }), "complete");
+      assert.equal(actions, 1);
+    });
+  }
+}

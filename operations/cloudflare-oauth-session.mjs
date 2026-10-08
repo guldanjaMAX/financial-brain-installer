@@ -368,10 +368,11 @@ export function enableCloudflareOAuthKeyring(options = {}) {
       const error = oauthError(
         "CLOUDFLARE_KEYRING_UNAVAILABLE",
         "keyring",
-        cloudflareKeyringFailureMessage(reason, platformName),
+        cloudflareKeyringFailureMessage(reason, platformName, { ownerConsole }),
       );
       error.reason = reason;
       error.platformName = platformName;
+      error.ownerConsole = ownerConsole;
       throw error;
     }
   } finally {

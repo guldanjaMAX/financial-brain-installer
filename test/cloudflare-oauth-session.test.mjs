@@ -1232,7 +1232,12 @@ for (const { suffix, platform } of failClosedPlatformArms()) {
     assert.equal(result.paths.at(-1), `/client/v4/accounts/${ACCOUNT_A}/workers/subdomain`,
       "the refusal must reach the exact required subdomain read");
     assert.match(result.error.message, /This browser sign-in cannot read this account's workers\.dev address, which this Brain needs for its web address/i);
-    assert.match(result.error.message, /recovery API token from the Cloudflare dashboard/i);
+    if ((platform ?? process.platform) === "win32") {
+      assert.doesNotMatch(result.error.message, /recovery API.token|--cloudflare-token/i,
+        "Windows must not prescribe a token route its entry flow refuses");
+    } else {
+      assert.match(result.error.message, /recovery API token from the Cloudflare dashboard/i);
+    }
     assert.match(result.error.message, /Nothing was changed/);
     assertKeptScopeRefusal(result, platform, SUBDOMAIN_SCOPE_CAUSE);
   });
