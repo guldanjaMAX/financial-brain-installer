@@ -6,6 +6,16 @@ const digest=value=>hash(JSON.stringify(value));
 const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const scopeKeys=['entity','start','end','basis','currency','exponent','class_filter','account_filter','department_filter'];
 const sameScope=(a,b)=>a&&b&&scopeKeys.every(k=>Object.hasOwn(a,k)&&Object.hasOwn(b,k)&&equal(a[k],b[k]));
+export function requireSupportedCases(cases,stage='evaluator') {
+  if(!Array.isArray(cases))throw Error('ORACLE_CASES_INVALID');
+  // Validate the entire denominator before reading responses. Equal unsupported
+  // scopes are not truth, and missing responses must not hide unreviewed cases.
+  // Canonical bank movements also use accrual scope; they are not CashFlow.
+  for(const c of cases){
+    requireAccrualBasis(c?.scope?.basis,stage);
+    for(const claim of c.claims)requireAccrualBasis(claim?.scope?.basis,stage);
+  }
+}
 export function buildCases(fixture,options={}) {
   const {repeats=1,paraphrases=1,unit='major',period=fixture.period}=options;
   if(!Number.isInteger(repeats)||repeats<1||repeats>3||!Number.isInteger(paraphrases)||paraphrases<1||paraphrases>4)throw Error('ORACLE_CASES_OPTIONS');
@@ -125,6 +135,9 @@ export function evaluatePerturbation({before,after,delta,refused=false,reached=f
 }
 
 export function evaluate(input) {
-  try { return evaluateChecked(input); }
-  catch { return {schema_version:1,ready:false,release_ready:false,release_ready:false,observed_only:true,harness_error:1,reason:'Malformed evaluator input',cases:[]}; }
+  try { requireSupportedCases(input?.cases); return evaluateChecked(input); }
+  catch(error) {
+    if(error?.code==='ORACLE_BASIS_UNSUPPORTED')return {schema_version:1,ready:false,release_ready:false,observed_only:true,harness_error:1,code:error.code,reason:error.reason,stage:error.stage,claims_checked:0,citations_checked:0,cases:[]};
+    return {schema_version:1,ready:false,release_ready:false,observed_only:true,harness_error:1,reason:'Malformed evaluator input',cases:[]};
+  }
 }

@@ -9,6 +9,33 @@ const control=()=>recordedControl(buildCases(fixture));
 test('synthetic G12: ten useful exact answers and two reached correct refusals',()=>{
  const c=control();const r=evaluate(c);assert.equal(r.ready,true);assert.equal(r.supported_correct,10);assert.equal(r.correct_refusal,2);assert.equal(r.wrong_money,0);assert.equal(r.citations_checked,17);
 });
+test('FOR-01: library evaluator refuses every unsupported expected scope before any comparisons',()=>{
+ const green=evaluate(control());assert.equal(green.ready,true);assert.equal(green.claims_checked,17);assert.equal(green.citations_checked,17);
+ const wrong=control();wrong.responses[0].annotation.claims[0].minor='1';
+ const red=evaluate(wrong);assert.equal(red.ready,false);assert.ok(red.wrong_money>0&&red.claims_checked>0);
+ const locations=control().cases.flatMap((c,i)=>[[i,null],...c.claims.map((_,j)=>[i,j])]);
+ // Every case (including expected refusals) and every claim must be inspected.
+ for(const basis of ['cash','CashFlow','unknown','',null,undefined,'Cash',' accrual ',false,0,{}]){
+  for(const [caseIndex,claimIndex] of locations){
+   const input=control(),c=input.cases[caseIndex],target=claimIndex===null?c:c.claims[claimIndex];
+   let basisReads=0,responseReads=0;
+   target.scope={...target.scope};
+   Object.defineProperty(target.scope,'basis',{get(){basisReads++;return basis;},enumerable:true});
+   const responses=input.responses;
+   Object.defineProperty(input,'responses',{get(){responseReads++;return responses;},enumerable:true});
+   const result=evaluate(input);
+   assert.ok(basisReads>0,'expected scope decision reached');
+   assert.equal(result.ready,false);assert.equal(result.release_ready,false);
+   assert.equal(result.code,'ORACLE_BASIS_UNSUPPORTED');assert.equal(result.reason,'unsupported_basis');assert.equal(result.stage,'evaluator');
+   assert.equal(result.claims_checked,0);assert.equal(result.citations_checked,0);assert.equal(responseReads,0,'all scopes validated before response access');
+  }
+ }
+ // The review reproduction supplies matching cash expectations and captures.
+ const cases=buildCases(fixture);
+ for(const c of cases){c.scope.basis='cash';for(const claim of c.claims)claim.scope.basis='cash';}
+ const matched=recordedControl(cases);assert.equal(matched.cases.find(c=>c.base_id==='G05').claims[0].minor,'370000');
+ const refused=evaluate(matched);assert.equal(refused.code,'ORACLE_BASIS_UNSUPPORTED');assert.equal(refused.claims_checked,0);
+});
 test('case builder refuses unsupported period or option basis instead of labeling it accrual',()=>{
  const good=buildCases(fixture);assert.equal(good.length,12);assert.equal(evaluate(recordedControl(good)).ready,true);
  assert.deepEqual(buildCases(fixture,{period:{...fixture.period,basis:'accrual'}}),good);
