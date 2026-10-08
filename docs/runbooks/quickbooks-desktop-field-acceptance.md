@@ -1,17 +1,18 @@
 # QuickBooks Desktop field acceptance notebook
 
-**NOT READY for complete field acceptance: CurrencyRet.IsUserDefined cannot be
-captured through the current helper contract. Signed helper adoption is also pending.**
+**The offline kit has complete mapper transport coverage. Live field acceptance
+and signed helper adoption remain pending.**
 It records local observations and tests comparisons using invented books. Only
 the maintainer or an authorized operator may run it on a dedicated test PC.
 Never use an owner's PC, real books, or an existing company file.
 
-The repaired helper contract and packet 07 mapper are present, with one remaining
-premise gap: the mapper reads CurrencyRet.IsUserDefined but the contract drops it.
-Stop that field-verification item. The owning lane must verify the provider field
-and extend the reviewed helper projection, or replace that guard with a verified
-currency-binding rule. Do not add it only to a fixture or treat its absence as false. The signed helper
-is still unadopted. Production Desktop signs remain empty and file freshness is
+The repaired helper contract and packet 07 mapper are present. The contract now
+retains CurrencyRet.IsUserDefined through the bridge, closing the transport gap.
+Its provider meaning remains marked "unverified against Intuit". Synthetic false
+and true controls prove transport and mapper refusal of a user-defined currency;
+they do not prove that QuickBooks returns the field. Capture that evidence below.
+Do not fabricate a provider observation or treat a missing flag as proof of false.
+The signed helper is still unadopted. Production Desktop signs remain empty and file freshness is
 unverified. This kit collects decision evidence and creates replayable fixtures;
 it does not turn either guard off. Owners who leave Desktop disabled have no
 behavior change: the kit has no CLI dispatcher, manifest or scheduler hook.
@@ -216,8 +217,9 @@ node scripts/qbd-field-acceptance.mjs plan --out C:\QbdField\field-plan
 ```
 
 The inventory comes from `connectors/quickbooks-desktop-map.mjs`. Transport coverage
-is checked against `operations/quickbooks-desktop-requests.json`; uncapturable
-fields produce HELPER_FIELD_UNCAPTURABLE in replay and receipt. Presence means
+is checked against `operations/quickbooks-desktop-requests.json`; the current
+inventory has zero transport gaps. A future uncapturable field still produces
+HELPER_FIELD_UNCAPTURABLE in replay and receipt. Presence means
 observed, not proven. `fieldCoverage` reports observed row counts and missing
 fields. For each field below, retain a populated provider control and the listed
 mutation or absence. Every negative must reach a mapped record or connector
@@ -234,7 +236,7 @@ Do not add fields to a captured frame to claim the provider returned them.
 |---|---|---|
 | HostRet | Country | US control; non-US only if licensed variant exists. Missing country refuses context. |
 | PreferencesRet | MultiCurrencyPreferences.IsMultiCurrencyOn, MultiCurrencyPreferences.HomeCurrencyRef.ListID | Single-currency control; P15 on copy; missing home ID. |
-| CurrencyRet | ListID, CurrencyCode, IsUserDefined | Exact home-ID join, real ISO code, non-user-defined control; unknown/duplicate ID and user-defined currency refuse. IsUserDefined is currently UNCAPTURABLE (helper allowlist omission); stop this item. Missing is not false. |
+| CurrencyRet | ListID, CurrencyCode, IsUserDefined | Exact home-ID join, real ISO code, non-user-defined control; unknown/duplicate ID and user-defined currency refuse. IsUserDefined is retained by the helper and bridge but unverified against Intuit. Retain real populated false/true controls if supported; missing or unavailable provider evidence leaves this field unproven. |
 | AccountRet | ListID, TimeModified, Name, AccountType, Balance, TotalBalance | P1/P2/P7/P9/P10; all 16 type values considered; only individually proved balance types may be proposed. |
 | CustomerRet | ListID, TimeModified, Name, Balance, TotalBalance, Sublevel | P8 top-level control; P14 child and parent rollup withholds. |
 | VendorRet | ListID, TimeModified, Name, Balance | P8 owed and credit-balance cases; preserve sign. |

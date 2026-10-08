@@ -279,8 +279,10 @@ test('current production bridge reaches the unadopted pin boundary without any n
 });
 
 // Round 2 probes use the actual connector fixtures and mapper, without native calls.
-async function replayInput() {
+async function replayInput(isUserDefined = 'false') {
   const rows = desktopFixture();
+  // Synthetic provider input enters before the real bridge projection.
+  rows.CurrencyRet[0].IsUserDefined = isUserDefined;
   const bridge = desktopBridge(rows);
   const request = { operation: 'snapshot', historySince: '2024-10-07T12:00:00Z', accountListIds: ['AA-12'], storedTxnIds: [] };
   const contractSha256 = createHash('sha256').update(JSON.stringify(QBD_CONTRACT)).digest('hex');
@@ -358,16 +360,39 @@ test('bill open-item comparison actually reaches the matching renderer request',
   assert.ok(replay.cells.some(cell => cell.record === bill.record && cell.surface === 'open_items'));
 });
 
-test('field inventory distinguishes helper-uncapturable currency flag from observed provider data', async () => {
-  const fixture = await replayInput();
-  fixture.snapshot.frames.find(frame => frame.entity === 'CurrencyRet').rows[0].IsUserDefined = 'true';
-  const replay = await kit.replayFixtures(fixture);
-  const unsupported = replay.fieldCoverage.find(row => row.ret === 'CurrencyRet' && row.field === 'IsUserDefined');
-  const control = replay.fieldCoverage.find(row => row.ret === 'CurrencyRet' && row.field === 'CurrencyCode');
-  assert.equal(control.observedRows, 1); assert.equal(control.transport, 'supported');
-  assert.equal(unsupported.observedRows, 0); assert.equal(unsupported.transport, 'uncapturable');
-  assert.ok(replay.blockers.includes('HELPER_FIELD_UNCAPTURABLE'));
-  assert.equal(replay.fieldAcceptance, 'NOT_READY');
+test('field inventory captures the currency flag through the real bridge and mapper refuses user-defined currency', async () => {
+  for (const flag of ['false', 'true']) {
+    const fixture = await replayInput(flag);
+    assert.equal(fixture.snapshot.frames.find(frame => frame.entity === 'CurrencyRet').rows[0].IsUserDefined, flag);
+    const replay = await kit.replayFixtures(fixture);
+    assert.deepEqual(replay.connector.calls, ['probe', 'snapshot']);
+    assert.equal(replay.connector.documents.length, 9); assert.equal(replay.records.length, 9);
+    for (const field of ['CurrencyCode', 'IsUserDefined']) {
+      const observed = replay.fieldCoverage.find(row => row.ret === 'CurrencyRet' && row.field === field);
+      assert.equal(observed.observedRows, 1); assert.equal(observed.transport, 'supported');
+      assert.equal(observed.status, 'observed_not_proven');
+    }
+    assert.deepEqual(replay.fieldCoverage.filter(row => row.transport === 'uncapturable'), []);
+    assert.deepEqual(replay.blockers, []);
+    assert.equal(replay.fieldAcceptance, 'NOT_READY');
+    if (flag === 'false') {
+      assert.deepEqual(replay.currency, { code: 'USD', source: 'home_currency_ref' });
+      for (const record of replay.records) {
+        assert.deepEqual(record.row.CurrencyRef, { value: 'USD' });
+        assert.ok(!record.refusalReasons.includes('QB_CURRENCY_UNVERIFIED'));
+      }
+      assert.ok(replay.cells.some(cell => cell.surface === 'money' && cell.amount === '75.00'));
+    } else {
+      assert.deepEqual(replay.currency, { code: null, source: 'unverified' });
+      for (const record of replay.records) {
+        assert.equal(record.row.CurrencyRef, undefined);
+        assert.ok(record.refusalReasons.includes('QB_CURRENCY_UNVERIFIED'));
+      }
+      assert.equal(replay.cells.length, 0, 'the reached mapper refuses money for a user-defined currency');
+    }
+  }
+  const contract = QBD_CONTRACT.returns.find(row => row.name === 'CurrencyRet');
+  assert.equal(contract.fieldVerification.IsUserDefined, 'unverified against Intuit');
 });
 
 
@@ -391,12 +416,20 @@ test('mapped comparison CLI catches exactly one cent and retains complete replay
     assert.equal(oracle.compared, replay.cells.length); assert.ok(oracle.compared > 10);
     assert.equal(oracle.mismatches.length, Number(delta));
     if (delta) assert.equal(oracle.mismatches[0].differenceCents, '-1');
-    assert.ok(oracle.blockers.includes('HELPER_FIELD_UNCAPTURABLE'));
+    assert.deepEqual(oracle.blockers, []);
+    assert.deepEqual(oracle.fieldCoverage.filter(row => row.transport === 'uncapturable'), []);
+    const flag = oracle.fieldCoverage.find(row => row.ret === 'CurrencyRet' && row.field === 'IsUserDefined');
+    assert.equal(flag.observedRows, 1); assert.equal(flag.transport, 'supported');
+    assert.equal(oracle.fieldAcceptance, 'NOT_READY');
     if (!delta) assert.equal(oracle.signCandidates[0].type, 'Bank');
     else assert.equal(oracle.signCandidates.length, 0, 'a mismatched raw sign cannot be proposed');
     assert.equal(oracle.idPatterns.TxnID.observed, oracle.idPatterns.TxnID.conforming);
     const saved = JSON.parse(readFileSync(join(directory, label, 'connector-fixture.json')));
-    assert.equal((await kit.replayFixtures(saved)).records.length, 9);
+    assert.equal(saved.snapshot.frames.find(frame => frame.entity === 'CurrencyRet').rows[0].IsUserDefined, 'false');
+    const replayed = await kit.replayFixtures(saved);
+    assert.equal(replayed.records.length, 9);
+    assert.deepEqual(replayed.fieldCoverage, oracle.fieldCoverage);
+    assert.deepEqual(replayed.currency, { code: 'USD', source: 'home_currency_ref' });
     assert.ok(!output.join('').includes('Customer One'));
   }
 });
@@ -430,14 +463,24 @@ test('fake fixture flags never select the connector proof seam through the CLI',
   assert.ok(control.cells.some(cell => cell.surface === 'balance'));
 });
 
-test('capture inventory identifies only the known transport gap and covers bounded repeated links', async t => {
+test('capture inventory has zero transport gaps and covers bounded repeated links', async t => {
   const directory = folder(t);
   assert.equal(await runKit(['plan', '--out', join(directory, 'plan')], { identities, output: () => {} }), 0);
   const plan = JSON.parse(readFileSync(join(directory, 'plan', 'field-plan.json')));
   assert.ok(Object.values(plan.fields).flat().length > 80);
   const replay = await kit.replayFixtures(await replayInput());
-  assert.deepEqual(replay.fieldCoverage.filter(row => row.transport === 'uncapturable').map(row => `${row.ret}.${row.field}`), ['CurrencyRet.IsUserDefined']);
-  assert.equal(replay.fieldCoverage.find(row => row.ret === 'BillPaymentCheckRet' && row.field === 'AppliedToTxnRet.TxnID').observedRows, 1);
+  assert.deepEqual(replay.fieldCoverage.filter(row => row.transport === 'uncapturable'), []);
+  const flag = replay.fieldCoverage.find(row => row.ret === 'CurrencyRet' && row.field === 'IsUserDefined');
+  assert.equal(flag.observedRows, 1); assert.equal(flag.transport, 'supported');
+  for (const ret of ['BillPaymentCheckRet', 'BillPaymentCreditCardRet']) {
+    for (const field of ['AppliedToTxnRet.TxnID', 'AppliedToTxnRet.TxnType']) {
+      const observed = replay.fieldCoverage.find(row => row.ret === ret && row.field === field);
+      assert.equal(observed.observedRows, 1); assert.equal(observed.transport, 'supported');
+    }
+    const contract = QBD_CONTRACT.returns.find(row => row.name === ret).repeated.find(row => row.field === 'AppliedToTxnRet');
+    assert.equal(contract.maxItems, 500); assert.deepEqual(contract.fields, ['TxnID', 'TxnType', 'Amount']);
+    assert.deepEqual(replay.records.find(row => row.ret === ret).row.LinkedTxn, [{ TxnId: 'DD-15', TxnType: 'Bill' }]);
+  }
   const mappedNames = readFileSync(new URL('../connectors/quickbooks-desktop-map.mjs', import.meta.url), 'utf8');
   const fields = new Set([...Object.values(plan.fields).flat(), ...plan.contexts.commonReads, 'AppliedToTxnRet']);
   for (const match of mappedNames.matchAll(/input(?:\.([A-Za-z]+)|\['([^']+)'\])/g)) assert.ok(fields.has(match[1] || match[2]), 'every direct mapper input read is inventoried');
