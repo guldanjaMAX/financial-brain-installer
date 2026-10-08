@@ -172,8 +172,12 @@ try {
   writeFileSync(publicCliEnvironment.BRAIN_ADMIN_KEY_FILE, "synthetic-admin-key-fixture-only", { mode: 0o600 });
   const schedulerPreload = join(folder, "scheduler-preload.mjs");
   writeFileSync(schedulerPreload, SCHEDULER_PRELOAD);
+  // Windows support notes restrict their own file; that ACL child is a fixture.
+  publicCliEnvironment.BRAIN_TEST_USER_ROOT = folder;
   const statusArguments = [
-    "--import", TRIPWIRE, "--import", pathToFileURL(schedulerPreload).href,
+    "--import", TRIPWIRE,
+    "--import", new URL("./fixtures/support-journal-acl-preload.mjs", import.meta.url).href,
+    "--import", pathToFileURL(schedulerPreload).href,
     brainCli, "schedule", manifestPath, "--provider", "slack", "--status",
   ];
   const publicStatus = spawnSync(
