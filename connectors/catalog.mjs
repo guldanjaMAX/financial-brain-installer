@@ -69,8 +69,14 @@ export const CONNECTOR_EXPANSION_CATALOG = Object.freeze([
     current_boundary: "Text, PDF text layers, Office, email, PNG, and JPEG share owner scope, credential scanning, extraction provenance, common receipts, and crash recovery. Scanned PDF page OCR is absent.",
     next_acceptance: "On a disposable Worker, upload every supported format and prove private OCR, retry recovery, retrieval, and deletion.",
   }),
+  row({
+    id: "quickbooks-desktop", label: "QuickBooks Desktop", build: "field_gate_held",
+    automated_proof: "offline_scripted_helper_and_sqlite", rehearsal_available: false, installed_connection: true,
+    current_boundary: "Same Windows PC only. No live Mac or hosted connection; use report uploads there. Money answers are US-only and currently withheld because open-file freshness is unverified. Card and liability balances remain held until proven. A signed, pinned helper and a field-verified attended grant are required.",
+    next_acceptance: "Verify the signed helper, attended grant, company identity, open-file freshness, accounting fields, deletion coverage and both task readbacks on a disposable US Desktop file.",
+  }),
   ...[
-    ["salesforce", "Salesforce"], ["quickbooks-desktop", "QuickBooks Desktop"],
+    ["salesforce", "Salesforce"],
     ["linkedin-live", "Live LinkedIn"], ["facebook-official", "Official Facebook"],
     ["whatsapp-official", "Official WhatsApp"],
   ].map(([id, label]) => row({
