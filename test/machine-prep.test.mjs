@@ -484,6 +484,421 @@ test("Mac real mode refuses fixtures before any action", macRuntimeOptions(), ()
   assert.doesNotMatch(out, /ACTION_EXECUTED|MODE real/);
 });
 
+// Owner-facing copy for the real-mode prerequisite block. Each page was
+// checked as an official page answering HTTP 200 on 2026-10-08; the named
+// buttons and sections were read from those pages the same day. Codex has no
+// page: no official Codex installer produces the layout the pinned check
+// accepts, so its line sends the owner to support instead of a dead end.
+const OWNER_SOURCES = {
+  node: "https://nodejs.org/en/download",
+  macGit: "https://developer.apple.com/documentation/xcode/installing-the-command-line-tools",
+  windowsGit: "https://git-scm.com/install/windows",
+  claude: "https://code.claude.com/docs/en/setup#install-a-specific-version",
+};
+const OWNER_HEADER = [
+  "Financial Brain setup cannot start yet. Nothing was downloaded or installed.",
+  "What you need to do:",
+];
+const MAC_REOPEN_LINE = "When everything above is done, open Run Financial Brain Machine Prep again.";
+const WINDOWS_REOPEN_LINE = "When everything above is done, open Run Financial Brain Machine Prep again from the Start menu.";
+const NODE_HOW_MAC = `At the top of the page, choose a version that starts with v24 (marked LTS). Then, under "Or get a prebuilt Node.js", click "macOS Installer (.pkg)" and open the downloaded file. Download page: ${OWNER_SOURCES.node}`;
+const NODE_HOW_WINDOWS = NODE_HOW_MAC.replace('"macOS Installer (.pkg)"', '"Windows Installer (.msi)"');
+const GIT_HOW_MAC = `Follow the section "Install the Command Line Tools package in Terminal". Apple's guide: ${OWNER_SOURCES.macGit}`;
+const GIT_HOW_WINDOWS = `Use the "Click here to download" link at the top of the page and open the downloaded file. Download page: ${OWNER_SOURCES.windowsGit}`;
+const CLAUDE_HOW = `Under "Install a specific version" on the setup page, run the command for a specific version number with 2.1.261 in place of the example. Then reopen this launcher before you start Claude Code, which updates itself when it runs. Setup page: ${OWNER_SOURCES.claude}`;
+const CODEX_HOW = "No official Codex installer puts it where this check looks, so ask Financial Brain support to set it up.";
+const NODE_NEED = `Needs version 24 or 22. ${NODE_HOW_MAC}`;
+const GIT_NEED = `Needs Apple's Command Line Tools, any version. ${GIT_HOW_MAC}`;
+const CLAUDE_NEED = `Needs exactly version 2.1.261. ${CLAUDE_HOW}`;
+const CODEX_NEED = `Needs exactly version 0.155.0-alpha.16. ${CODEX_HOW}`;
+const CLAUDE_ELSEWHERE = 'a copy installed another way than "Native Install" is in the way; remove it as shown under "Uninstall Claude Code" on the setup page';
+const CLAUDE_SEVERAL = 'more than one copy is installed; keep only the "Native Install" copy and remove the others as shown under "Uninstall Claude Code" on the setup page';
+const CODEX_ELSEWHERE = "a copy is installed in a place this check does not accept";
+// Words a non-technical owner should never have to decode on the real-mode screen.
+const OWNER_JARGON = /OWNER ACTION|prerequisite|run --real|\bPATH\b|SHADOWED|WRONG_VERSION|MISSING|turned off|Get it from|learn\.chatgpt\.com|\/fixture\/home|executed/;
+
+function macRealBlock(...steps) {
+  return [...OWNER_HEADER, ...steps, MAC_REOPEN_LINE, ""].join("\n");
+}
+
+// Source the real script in help mode, then replace only tool discovery and the
+// Brain install. run_real, collect_checks and the prerequisite gate run as shipped.
+const MAC_REAL_PROBE = [
+  '. "$1" --help >/dev/null',
+  'tool_paths() { v=$(/bin/cat "$PROBE_DIR/$1.paths" 2>/dev/null || true); [ "$v" != MISSING ] || return 0; printf \'%s\\n\' "$v" | /usr/bin/awk \'NF && !seen[$0]++\'; }',
+  'tool_version() { v=$(/bin/cat "$PROBE_DIR/$1.version" 2>/dev/null || true); { [ -n "$v" ] && [ "$v" != MISSING ]; } || return 1; printf \'%s\\n\' "$v"; }',
+  "install_brain() { printf 'PROBE_INSTALL_BRAIN_REACHED=1\\n'; }",
+  "run_real",
+].join("\n");
+
+function runMacRealProbe(changes = {}) {
+  const directory = mkdtempSync(join(ROOT, ".machine-prep-real-probe-"));
+  const state = join(directory, "state");
+  const home = join(directory, "home");
+  cpSync(join(FIXTURES, "mac-ready"), state, { recursive: true });
+  // Keep the host's Command Line Tools out of the decision: /usr/bin/git is
+  // only trusted after xcode-select, which a fixture cannot replace.
+  writeFileSync(join(state, "git.paths"), "/opt/homebrew/bin/git\n");
+  for (const [name, value] of Object.entries(changes)) writeFileSync(join(state, name), `${value}\n`);
+  mkdirSync(home);
+  try {
+    return spawnSync("bash", ["-c", MAC_REAL_PROBE, "probe", MAC], {
+      cwd: ROOT,
+      env: { PATH: "/usr/bin:/bin", HOME: home, MACHINE_PREP_HOME: "/fixture/home", PROBE_DIR: state, BRAIN_NO_WRANGLER_LOGIN: "1" },
+      encoding: "utf8",
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+const FRESH_MAC = {
+  "node.paths": "MISSING", "node.version": "MISSING", "npm.paths": "MISSING", "npm.version": "MISSING",
+  "git.paths": "/usr/bin/git", "git.version": "MISSING", "xcode.status": "missing",
+  "claude.paths": "MISSING", "claude.version": "MISSING", "codex.paths": "MISSING", "codex.version": "MISSING",
+  "brain.paths": "MISSING", "brain.version": "MISSING",
+};
+
+test("Mac real mode names every missing prerequisite with its version and the exact official step, then says to reopen", macInstallOrchestrationOptions(), () => {
+  const fresh = runMacRealProbe(FRESH_MAC);
+  assert.equal(fresh.status, 2, `${fresh.stdout}${fresh.stderr}`);
+  assert.equal(fresh.stdout, "Machine Prep for macOS\nMODE real\nPREREQUISITE_DECISION_REACHED=1\n");
+  assert.equal(fresh.stderr, macRealBlock(
+    `- Node.js: not found. ${NODE_NEED}`,
+    `- Git: not found. ${GIT_NEED}`,
+    `- Claude Code: not found. ${CLAUDE_NEED}`,
+    `- Codex CLI: not found. ${CODEX_NEED}`,
+  ));
+  assert.doesNotMatch(fresh.stderr, OWNER_JARGON);
+  assert.doesNotMatch(fresh.stderr, /\.machine-prep-real-probe-/);
+
+  const control = runMacRealProbe();
+  assert.equal(control.status, 0, `${control.stdout}${control.stderr}`);
+  assert.match(control.stdout, /PREREQUISITE_DECISION_REACHED=1\nPROBE_INSTALL_BRAIN_REACHED=1\nFinancial Brain CLI preparation completed\n$/);
+  assert.equal(control.stderr, "");
+});
+
+test("Mac real mode lists only the tool that needs action, with a concrete step for wrong and duplicate copies", macInstallOrchestrationOptions(), () => {
+  const cases = [
+    ["node-v26", { "node.version": "v26.1.0" }, `- Node.js: version v26.1.0 is installed. ${NODE_NEED}`],
+    ["git-stub-only", { "git.paths": "/usr/bin/git", "git.version": "MISSING", "xcode.status": "missing" }, `- Git: not found. ${GIT_NEED}`],
+    ["claude-wrong", { "claude.version": "2.1.300 (Claude Code)" }, `- Claude Code: version 2.1.300 is installed. ${CLAUDE_NEED}`],
+    ["claude-unreadable", { "claude.version": "MISSING" }, `- Claude Code: a copy was found, but its version could not be read. ${CLAUDE_NEED}`],
+    ["claude-elsewhere", { "claude.paths": "/opt/homebrew/bin/claude" }, `- Claude Code: ${CLAUDE_ELSEWHERE}. ${CLAUDE_NEED}`],
+    ["claude-several", { "claude.paths": "/fixture/home/.local/bin/claude\n/usr/local/bin/claude" }, `- Claude Code: ${CLAUDE_SEVERAL}. ${CLAUDE_NEED}`],
+    ["codex-wrong", { "codex.version": "codex-cli 0.160.0" }, `- Codex CLI: version 0.160.0 is installed. ${CODEX_NEED}`],
+    ["codex-missing", { "codex.paths": "MISSING", "codex.version": "MISSING" }, `- Codex CLI: not found. ${CODEX_NEED}`],
+    ["codex-elsewhere", { "codex.paths": "/opt/homebrew/bin/codex" }, `- Codex CLI: ${CODEX_ELSEWHERE}. ${CODEX_NEED}`],
+    ["codex-several", { "codex.paths": "/fixture/home/.local/bin/codex\n/usr/local/bin/codex" }, `- Codex CLI: more than one copy is installed. ${CODEX_NEED}`],
+  ];
+  for (const [name, changes, line] of cases) {
+    const result = runMacRealProbe(changes);
+    assert.equal(result.status, 2, `${name}\n${result.stdout}${result.stderr}`);
+    assert.equal(result.stderr, macRealBlock(line), name);
+    assert.doesNotMatch(result.stderr, OWNER_JARGON, name);
+    assert.doesNotMatch(result.stdout, /PROBE_INSTALL_BRAIN_REACHED/, name);
+  }
+});
+
+// Same shipped run_real, but tool discovery and version reads are the real
+// ones, against install layouts the official pages actually produce. Only the
+// Brain install is replaced. Scratch folders stand in for /usr/local/bin
+// (npm's default global folder with the Node .pkg) and /opt/homebrew/bin.
+const MAC_REAL_DISCOVERY_PROBE = [
+  '. "$1" --help >/dev/null',
+  "install_brain() { printf 'PROBE_INSTALL_BRAIN_REACHED=1\\n'; }",
+  "run_real",
+].join("\n");
+
+function runMacRealDiscovery(layout) {
+  const directory = mkdtempSync(join(ROOT, ".machine-prep-real-discovery-"));
+  const home = join(directory, "home");
+  const bin = join(home, ".local", "bin");
+  const npmGlobal = join(directory, "npm-global-bin");
+  const homebrew = join(directory, "homebrew-bin");
+  const tools = join(directory, "tools-bin");
+  const script = (path, body) => {
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, `#!/bin/sh\n${body}\n`);
+    chmodSync(path, 0o755);
+  };
+  for (const folder of [bin, npmGlobal, homebrew, tools]) mkdirSync(folder, { recursive: true });
+  script(join(tools, "node"), "echo v24.21.0");
+  script(join(tools, "npm"), "echo 11.19.0");
+  script(join(tools, "git"), "echo git version 2.50.1");
+  const nativeClaude = (version) => {
+    const target = join(home, ".local", "share", "claude", "versions", version);
+    script(target, `echo "${version} (Claude Code)"`);
+    symlinkSync(target, join(bin, "claude"));
+  };
+  const npmPrefixCodex = (version) => {
+    const packageDir = join(home, ".local", "lib", "node_modules", "@openai", "codex");
+    script(join(packageDir, "bin", "codex.js"), `echo "codex-cli ${version}"`);
+    writeFileSync(join(packageDir, "package.json"), `{\n  "name": "@openai/codex",\n  "version": "${version}"\n}\n`);
+    symlinkSync("../lib/node_modules/@openai/codex/bin/codex.js", join(bin, "codex"));
+  };
+  layout({ home, bin, npmGlobal, homebrew, script, nativeClaude, npmPrefixCodex });
+  try {
+    const result = spawnSync("bash", ["-c", MAC_REAL_DISCOVERY_PROBE, "probe", MAC], {
+      cwd: ROOT,
+      env: {
+        PATH: [join(home, ".financial-brain", "bin"), bin, npmGlobal, homebrew, tools, "/usr/bin", "/bin"].join(":"),
+        HOME: home,
+        MACHINE_PREP_HOME: home,
+        BRAIN_NO_WRANGLER_LOGIN: "1",
+      },
+      encoding: "utf8",
+    });
+    return { ...result, directory };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("Mac real mode gives an honest next step for the layouts the official Codex and Claude Code installers produce", macInstallOrchestrationOptions(), () => {
+  const control = runMacRealDiscovery(({ nativeClaude, npmPrefixCodex }) => {
+    nativeClaude("2.1.261");
+    npmPrefixCodex("0.155.0-alpha.16");
+  });
+  assert.equal(control.status, 0, `${control.stdout}${control.stderr}`);
+  assert.match(control.stdout, /PREREQUISITE_DECISION_REACHED=1\nPROBE_INSTALL_BRAIN_REACHED=1\nFinancial Brain CLI preparation completed\n$/);
+  assert.equal(control.stderr, "");
+
+  const cases = [
+    // Codex's own installer script, even asked for the pinned release, links
+    // ~/.local/bin/codex into its own package folder with no npm package.json.
+    ["codex-standalone-installer", ({ home, bin, script, nativeClaude }) => {
+      nativeClaude("2.1.261");
+      const target = join(home, ".codex", "packages", "standalone", "current", "codex");
+      script(target, "echo codex-cli 0.155.0-alpha.16");
+      symlinkSync(target, join(bin, "codex"));
+    }, `- Codex CLI: a copy was found, but its version could not be read. ${CODEX_NEED}`],
+    ["codex-npm-default-global", ({ npmGlobal, script, nativeClaude }) => {
+      nativeClaude("2.1.261");
+      script(join(npmGlobal, "codex"), "echo codex-cli 0.155.0-alpha.16");
+    }, `- Codex CLI: ${CODEX_ELSEWHERE}. ${CODEX_NEED}`],
+    ["codex-homebrew", ({ homebrew, script, nativeClaude }) => {
+      nativeClaude("2.1.261");
+      script(join(homebrew, "codex"), "echo codex-cli 0.161.0");
+    }, `- Codex CLI: ${CODEX_ELSEWHERE}. ${CODEX_NEED}`],
+    // The setup page's main command installs the latest release.
+    ["claude-native-latest", ({ nativeClaude, npmPrefixCodex }) => {
+      nativeClaude("2.1.294");
+      npmPrefixCodex("0.155.0-alpha.16");
+    }, `- Claude Code: version 2.1.294 is installed. ${CLAUDE_NEED}`],
+    ["claude-homebrew", ({ homebrew, script, npmPrefixCodex }) => {
+      script(join(homebrew, "claude"), "echo 2.1.294 (Claude Code)");
+      npmPrefixCodex("0.155.0-alpha.16");
+    }, `- Claude Code: ${CLAUDE_ELSEWHERE}. ${CLAUDE_NEED}`],
+  ];
+  for (const [name, layout, line] of cases) {
+    const result = runMacRealDiscovery(layout);
+    assert.equal(result.status, 2, `${name}\n${result.stdout}${result.stderr}`);
+    assert.equal(result.stderr, macRealBlock(line), name);
+    assert.doesNotMatch(result.stderr, OWNER_JARGON, name);
+    assert.ok(!result.stderr.includes(result.directory), `${name} printed a private path`);
+    assert.doesNotMatch(result.stdout, /PROBE_INSTALL_BRAIN_REACHED/, name);
+  }
+});
+
+test("Mac check rows give a concrete prerequisite fix instead of a dead-end real-mode rerun", macRuntimeOptions(), () => {
+  const directory = mkdtempSync(join(ROOT, ".machine-prep-fixture-"));
+  try {
+    cpSync(join(FIXTURES, "mac-ready"), directory, { recursive: true });
+    writeFileSync(join(directory, "claude.version"), "2.1.300 (Claude Code)\n");
+    writeFileSync(join(directory, "codex.version"), "codex-cli 0.160.0\n");
+    writeFileSync(join(directory, "brain.paths"), "MISSING\n");
+    const wrong = combined(runMac(["--check"], directory));
+    assert.match(wrong, /WRONG_VERSION  Claude Code             2\.1\.300 \(Claude Code\); expected 2\.1\.261; OWNER ACTION: replace it with pinned 2\.1\.261 from the official installer\n/);
+    assert.match(wrong, /WRONG_VERSION  Codex CLI               codex-cli 0\.160\.0; expected 0\.155\.0-alpha\.16; OWNER ACTION: replace it with pinned 0\.155\.0-alpha\.16 from the official npm package with prefix ~\/\.local\n/);
+    // Real mode does install the pinned CLI, so this is the one honest rerun.
+    assert.match(wrong, /MISSING        Financial Brain CLI     install pinned 0\.4\.9 kit; fix: run --real\n/);
+    assert.equal(wrong.match(/run --real/g).length, 1, wrong);
+    assert.doesNotMatch(wrong, /automatic updates/);
+
+    writeFileSync(join(directory, "claude.version"), "2.1.261 (Claude Code)\n");
+    writeFileSync(join(directory, "codex.version"), "codex-cli 0.155.0-alpha.16\n");
+    writeFileSync(join(directory, "claude.paths"), "/opt/homebrew/bin/claude\n");
+    writeFileSync(join(directory, "codex.paths"), "/fixture/home/.local/bin/codex\n/usr/local/bin/codex\n");
+    const shadowed = combined(runMac(["--check"], directory));
+    assert.match(shadowed, /SHADOWED       Claude Code             \/opt\/homebrew\/bin\/claude resolves first; OWNER ACTION: remove it and install pinned 2\.1\.261 from the official installer\n/);
+    assert.match(shadowed, /SHADOWED       Codex CLI               2 PATH matches; OWNER ACTION: remove the extra copies and keep only pinned 0\.155\.0-alpha\.16 from the official npm package with prefix ~\/\.local\n/);
+    assert.doesNotMatch(shadowed, /first on PATH|\/fixture\/home/);
+
+    writeFileSync(join(directory, "claude.paths"), "/fixture/home/.local/bin/claude\n/usr/local/bin/claude\n");
+    writeFileSync(join(directory, "codex.paths"), "/opt/homebrew/bin/codex\n");
+    const swapped = combined(runMac(["--check"], directory));
+    assert.match(swapped, /SHADOWED       Claude Code             2 PATH matches; OWNER ACTION: remove the extra copies and keep only pinned 2\.1\.261 from the official installer\n/);
+    assert.match(swapped, /SHADOWED       Codex CLI               \/opt\/homebrew\/bin\/codex resolves first; OWNER ACTION: remove it and install pinned 0\.155\.0-alpha\.16 from the official npm package with prefix ~\/\.local\n/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function functionBody(source, start, end) {
+  const from = source.indexOf(start);
+  const to = source.indexOf(end, from + start.length);
+  assert.ok(from >= 0 && to > from, `function ${start} not found`);
+  return source.slice(from, to);
+}
+
+// Mac values come from the shipped script itself; Windows has no PowerShell
+// here, so its double-quoted constants are read from source and expanded.
+function macOwnerConstants() {
+  const names = ["NODE_SOURCE", "GIT_SOURCE", "CLAUDE_SOURCE", "NODE_HOW", "GIT_HOW", "CLAUDE_HOW", "CODEX_HOW"];
+  const result = spawnSync("bash", ["-c", `. "$1" --help >/dev/null; printf '%s\\n' ${names.map((name) => `"$${name}"`).join(" ")}`, "constants", MAC], {
+    cwd: ROOT, env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" }, encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const values = result.stdout.split("\n");
+  return Object.fromEntries(names.map((name, index) => [name, values[index]]));
+}
+
+function windowsOwnerConstants(source) {
+  const variables = { ClaudeVersion: "2.1.261", CodexVersion: "0.155.0-alpha.16" };
+  const names = ["NodeSource", "GitSource", "ClaudeSource", "NodeHow", "GitHow", "ClaudeHow", "CodexHow"];
+  for (const name of names) {
+    const match = source.match(new RegExp(`^\\$${name} = "((?:[^"]|"")*)"$`, "m"));
+    assert.ok(match, `$${name} must be one double-quoted line`);
+    variables[name] = match[1].replaceAll('""', '"').replace(/\$([A-Za-z]+)/g, (whole, variable) => {
+      assert.ok(variable in variables, `$${name} uses ${whole} before it is defined`);
+      return variables[variable];
+    });
+  }
+  return variables;
+}
+
+// Arguments may be "double-quoted" (bash \" or PowerShell "" escapes),
+// 'single-quoted', or a bare PowerShell variable.
+function ownerStepCalls(source, name) {
+  const placeholders = [
+    ["CLAUDE_VERSION", "ClaudeVersion", "{claude}"], ["CODEX_VERSION", "CodexVersion", "{codex}"],
+    ["NODE_HOW", "NodeHow", "{node-how}"], ["GIT_HOW", "GitHow", "{git-how}"],
+    ["CLAUDE_HOW", "ClaudeHow", "{claude-how}"], ["CODEX_HOW", "CodexHow", "{codex-how}"],
+  ];
+  return source.split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(`${name} `))
+    .map((line) => [...line.slice(name.length).matchAll(/"((?:\\.|""|[^"\\])*)"|'([^']*)'|(\$[A-Za-z_]+)/g)].map((match) => {
+      let value = match[1] !== undefined ? match[1].replaceAll('\\"', '"').replaceAll('""', '"') : (match[2] ?? match[3]);
+      for (const [macName, windowsName, placeholder] of placeholders) {
+        value = value.replaceAll(`$${macName}`, placeholder).replaceAll(`$${windowsName}`, placeholder);
+      }
+      return value;
+    }));
+}
+
+test("Windows prerequisite rows and owner steps mirror the Mac source line for line", () => {
+  const mac = readFileSync(MAC, "utf8").replaceAll("\r\n", "\n");
+  const windows = readFileSync(WINDOWS, "utf8").replaceAll("\r\n", "\n");
+  const macCopy = macOwnerConstants();
+  const windowsCopy = windowsOwnerConstants(windows);
+  assert.equal(macCopy.NODE_SOURCE, OWNER_SOURCES.node);
+  assert.equal(macCopy.GIT_SOURCE, OWNER_SOURCES.macGit);
+  assert.equal(macCopy.CLAUDE_SOURCE, OWNER_SOURCES.claude);
+  assert.equal(macCopy.NODE_HOW, NODE_HOW_MAC);
+  assert.equal(macCopy.GIT_HOW, GIT_HOW_MAC);
+  assert.equal(macCopy.CLAUDE_HOW, CLAUDE_HOW);
+  assert.equal(macCopy.CODEX_HOW, CODEX_HOW);
+  assert.equal(windowsCopy.NodeSource, OWNER_SOURCES.node);
+  assert.equal(windowsCopy.GitSource, OWNER_SOURCES.windowsGit);
+  assert.equal(windowsCopy.ClaudeSource, OWNER_SOURCES.claude);
+  assert.equal(windowsCopy.NodeHow, NODE_HOW_WINDOWS);
+  assert.equal(windowsCopy.GitHow, GIT_HOW_WINDOWS);
+  assert.equal(windowsCopy.ClaudeHow, CLAUDE_HOW);
+  assert.equal(windowsCopy.CodexHow, CODEX_HOW);
+  // Codex names support, never a page that cannot satisfy the pinned check.
+  for (const source of [mac, windows]) assert.doesNotMatch(source, /learn\.chatgpt\.com|CODEX_SOURCE|\$CodexSource/);
+
+  const macChecks = functionBody(mac, "collect_checks() {", "\n}\n");
+  const windowsChecks = functionBody(windows, "function Invoke-Checks {", "\n}\n");
+  const macSteps = ownerStepCalls(macChecks, "owner_step");
+  const windowsSteps = ownerStepCalls(windowsChecks, "Add-OwnerStep");
+  assert.equal(macSteps.length, 12, JSON.stringify(macSteps));
+  assert.equal(windowsSteps.length, 11, JSON.stringify(windowsSteps));
+  for (const steps of [macSteps, windowsSteps]) {
+    for (const args of steps) assert.equal(args.length, 4, `owner step needs tool, problem, need and next step: ${JSON.stringify(args)}`);
+  }
+  const isGit = (args) => args[0] === "Git";
+  assert.deepEqual(macSteps.filter(isGit), [["Git", "not found", "Apple's Command Line Tools, any version", "{git-how}"]]);
+  assert.deepEqual(windowsSteps.filter(isGit), [["Git", "not found", "Git for Windows, any version", "{git-how}"]]);
+  assert.deepEqual(macSteps.filter((args) => args[0] === "macOS session"), [[
+    "macOS session", "this launcher was started with administrator rights (sudo)", "your own normal account",
+    "Close this window and double-click the launcher again.",
+  ]]);
+  assert.deepEqual(
+    macSteps.filter((args) => !isGit(args) && args[0] !== "macOS session"),
+    windowsSteps.filter((args) => !isGit(args)),
+  );
+  const codexSteps = macSteps.filter((args) => args[0] === "Codex CLI");
+  assert.equal(codexSteps.length, 4);
+  for (const args of codexSteps) {
+    assert.equal(args[3], "{codex-how}");
+    assert.doesNotMatch(args[1], /remove|different installer/, "Codex steps must not undo what the owner just installed");
+  }
+  for (const literal of [CLAUDE_ELSEWHERE, CLAUDE_SEVERAL, CODEX_ELSEWHERE, "exactly version {claude}", "exactly version {codex}"]) {
+    assert.ok(JSON.stringify(macSteps).includes(literal.replaceAll('"', '\\"')), literal);
+  }
+  // A copy at the official location whose version cannot be read is not
+  // reported as "not found" on either platform.
+  for (const body of [macChecks, windowsChecks]) {
+    assert.equal(body.split('"not found"').length - 1, 4, "Node, Git, and the two no-copy assistant cases");
+    assert.equal(body.split('"a copy was found, but its version could not be read"').length - 1, 2);
+  }
+  assert.equal(macSteps.filter((args) => args[1] === "$problem").length, 2);
+  assert.equal(windowsSteps.filter((args) => args[1] === "$problem").length, 2);
+
+  // Every failing prerequisite branch records exactly one owner step.
+  for (const [body, pattern, call] of [
+    [macChecks, /^\s*(?:NODE|GIT|CLAUDE|CODEX|SESSION)_STATE="(?:MISSING|WRONG_VERSION|SHADOWED)"$/, "owner_step "],
+    [windowsChecks, /^\s*\$script:(?:Node|Git|Claude|Codex)State = "(?:MISSING|WRONG_VERSION|SHADOWED)"$/, "Add-OwnerStep "],
+  ]) {
+    const lines = body.split("\n");
+    const branches = lines.flatMap((line, index) => pattern.test(line) ? [index] : []);
+    assert.equal(branches.length, call === "owner_step " ? 12 : 11);
+    for (const index of branches) {
+      const window = lines.slice(index + 1, index + 5).join("\n");
+      assert.equal(window.split(call).length - 1, 1, `${lines[index]} must record one owner step`);
+    }
+  }
+
+  // Rows: no prerequisite tells the owner to rerun real mode or edit PATH, and
+  // no row promises an update setting the check never reads.
+  for (const source of [mac, windows]) {
+    const assistantRows = source.split("\n").filter((line) => /(?:status_line|Write-Status) .*"(?:Claude Code|Codex CLI)"/.test(line));
+    assert.equal(assistantRows.length, 10);
+    for (const row of assistantRows) assert.doesNotMatch(row, /run --real|first on PATH|\$BIN_DIR|\$canonical|automatic updates/, row);
+    assert.equal(source.match(/fix: run --real/g).length, 1, "only the Financial Brain CLI row may point at real mode");
+  }
+  assert.doesNotMatch(windows, /Git for Windows 2\.54\.0/);
+
+  // Real mode prints a plain header, the recorded steps, then the reopen line.
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const macReal = functionBody(mac, "run_real() {", "\n}\n");
+  assert.match(macReal, new RegExp([
+    "collect_checks >/dev/null",
+    "printf 'PREREQUISITE_DECISION_REACHED=1\\\\n'",
+    ...OWNER_HEADER.map((line) => `printf '${escape(line)}\\\\n' >&2`),
+    "printf '%s' \"\\$OWNER_STEPS\" >&2",
+    `printf '${escape(MAC_REOPEN_LINE)}\\\\n' >&2`,
+    "return 2",
+  ].join("[\\s\\S]*?")));
+  assert.match(macReal, /install_brain \|\| return 1/);
+  const windowsReal = functionBody(windows, "function Invoke-Real {", "\n}\n");
+  assert.match(windowsReal, new RegExp([
+    "Invoke-Checks \\| Out-Null",
+    'Write-Output "PREREQUISITE_DECISION_REACHED=1"',
+    ...OWNER_HEADER.map((line) => `\\[Console\\]::Error\\.WriteLine\\("${escape(line)}"\\)`),
+    "foreach \\(\\$step in \\$script:OwnerSteps\\) \\{ \\[Console\\]::Error\\.WriteLine\\(\\$step\\) \\}",
+    `\\[Console\\]::Error\\.WriteLine\\("${escape(WINDOWS_REOPEN_LINE)}"\\)`,
+    "\\$script:RealExitCode = 2",
+  ].join("[\\s\\S]*?")));
+  for (const body of [macReal, windowsReal]) assert.doesNotMatch(body, /OWNER ACTION|prerequisite was downloaded/);
+  // Mirror install_brain || return 1: report the reason without PowerShell's
+  // script-path trailer, which would put the owner's profile path on screen.
+  assert.match(windowsReal, /try \{ Install-Brain \} catch \{\s*\[Console\]::Error\.WriteLine\(\[string\]\$_\.Exception\.Message\)\s*\$script:RealExitCode = 1\s*return\s*\}/);
+});
+
 test("Mac install orchestration platform guard keeps Darwin coverage active", () => {
   assert.deepEqual(macRuntimeOptions("darwin"), { skip: false });
   assert.deepEqual(macRuntimeOptions("linux"), { skip: false });

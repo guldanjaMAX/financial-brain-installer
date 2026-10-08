@@ -1302,12 +1302,12 @@ test("installer security contracts detect one mutation per reviewed boundary", (
   }
 });
 
-function runMacWrapper({ prepExit, openExit, handoffExit }) {
+function runMacWrapper({ prepExit, openExit, handoffExit, prepBody = "", handoffBody = "" }) {
   const directory = mkdtempSync(join(ROOT, ".machine-prep-wrapper-test-"));
   const counter = join(directory, "counter.log");
-  const helper = (name, exitCode) => {
+  const helper = (name, exitCode, body = "") => {
     const path = join(directory, name);
-    writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' ${name} >> "${counter}"\nexit ${exitCode}\n`);
+    writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' ${name} >> "${counter}"\n${body}\nexit ${exitCode}\n`);
     chmodSync(path, 0o755);
     return path;
   };
@@ -1318,33 +1318,183 @@ function runMacWrapper({ prepExit, openExit, handoffExit }) {
       HOME: directory,
       BRAIN_NO_WRANGLER_LOGIN: "1",
       BRAIN_TEST_LAUNCHCTL: join(directory, "injected-launchctl"),
-      MACHINE_PREP_RUNNER: helper("prep", prepExit),
+      MACHINE_PREP_RUNNER: helper("prep", prepExit, prepBody),
       MACHINE_PREP_OPEN: helper("open", openExit),
-      MACHINE_PREP_HANDOFF: helper("handoff", handoffExit),
+      MACHINE_PREP_HANDOFF: helper("handoff", handoffExit, handoffBody),
       MACHINE_PREP_LOG_DIR: join(directory, "log"),
     },
     encoding: "utf8",
   });
   const calls = existsSync(counter) ? readFileSync(counter, "utf8").trim().split("\n").filter(Boolean) : [];
+  const logFile = join(directory, "log", "installer.log");
+  const log = existsSync(logFile) ? readFileSync(logFile, "utf8") : null;
   rmSync(directory, { recursive: true, force: true });
-  return { ...result, calls };
+  return { ...result, calls, log };
 }
+
+// What the owner reads in the launcher window. Status markers live only in
+// installer.log; these lines never enter it.
+const MAC_SCREEN = {
+  start: "Financial Brain Machine Prep: checking this Mac for the tools setup needs.",
+  failed: "Financial Brain setup has not started yet: follow the steps above, then open Run Financial Brain Machine Prep again.",
+  ready: "This Mac is ready. Opening Financial Brain setup in a new Terminal window.",
+  windowFailed: "The Financial Brain setup window did not open. Ask Financial Brain support for help.",
+  handoff: "Opening Claude to guide your next steps.",
+  handoffFailed: "Claude did not open. Continue in the Financial Brain setup window.",
+  done: "Done. Continue in the Financial Brain setup window.",
+};
+const toWindowsScreen = (line) => line
+  .replace("This Mac", "This PC").replace("this Mac", "this PC")
+  .replace("new Terminal window", "new PowerShell window")
+  .replace(/Machine Prep again\.$/, "Machine Prep again from the Start menu.");
+const WINDOWS_SCREEN = Object.fromEntries(Object.entries(MAC_SCREEN).map(([key, line]) => [key, toWindowsScreen(line)]));
+const SCREEN_MARKER_LINE = /^[A-Z][A-Z_]*(?:[= ]|$)/m;
+const MAC_FAILURE_MARKERS = [
+  "LOG_SCHEMA_DECISION_REACHED=1",
+  "INSTALLER_PROGRESS=1/4 Preparing tools and Financial Brain",
+  "PREP_EXIT_CODE=2",
+  "INSTALLER_PROGRESS=2/4 Prep needs attention; setup was not opened",
+  "SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed",
+];
+const MAC_SUCCESS_MARKERS = [
+  "LOG_SCHEMA_DECISION_REACHED=1",
+  "INSTALLER_PROGRESS=1/4 Preparing tools and Financial Brain",
+  "PREP_EXIT_CODE=0",
+  "INSTALLER_PROGRESS=2/4 Tool and CLI checks completed",
+  "SETUP_LAUNCH_DECISION_REACHED=1",
+  "SETUP_WINDOW_STARTED=1",
+  "INSTALLER_PROGRESS=3/4 Opening the local Claude handoff",
+  "INSTALLER_HANDOFF_EXIT_CODE=0",
+  "INSTALLER_HANDOFF_STARTED=1",
+  "INSTALLER_PROGRESS=4/4 Installer handoff completed",
+];
+const lines = (...items) => `${items.join("\n")}\n`;
+
+test("Mac launcher shows only plain lines on screen and keeps every status marker in installer.log", bashBehaviorOptions(), () => {
+  // The prep's own markers and banner are hidden; its stderr is untouched.
+  const prepFailure = runMacWrapper({
+    prepExit: 2, openExit: 0, handoffExit: 0,
+    prepBody: "printf 'Machine Prep for macOS\\nMODE real\\nPREREQUISITE_DECISION_REACHED=1\\n'\nprintf 'Financial Brain setup cannot start yet. Nothing was downloaded or installed.\\n- Node.js: not found.\\n' >&2",
+  });
+  assert.equal(prepFailure.status, 2, prepFailure.stderr);
+  assert.equal(prepFailure.stdout, lines(MAC_SCREEN.start, "", MAC_SCREEN.failed));
+  assert.equal(prepFailure.stderr, lines("Financial Brain setup cannot start yet. Nothing was downloaded or installed.", "- Node.js: not found."));
+  assert.equal(prepFailure.log, lines(...MAC_FAILURE_MARKERS));
+
+  const control = runMacWrapper({
+    prepExit: 0, openExit: 0, handoffExit: 0,
+    prepBody: [
+      "printf 'Machine Prep for macOS\\nMODE real\\nPREREQUISITE_DECISION_REACHED=1\\nDOWNLOAD_STARTED=1 kit_version=0.4.9\\nVERIFIED checksum\\n'",
+      "printf 'added 1 package in 1s\\nBRAIN_INSTALL_VERIFIED=1 version=0.4.9\\nFinancial Brain CLI preparation completed\\n'",
+      "printf 'npm warn example\\n' >&2",
+    ].join("\n"),
+    handoffBody: "printf 'HANDOFF_DECISION_REACHED=1\\nHANDOFF_DESKTOP_OPENED=1\\n'",
+  });
+  assert.equal(control.status, 0, control.stderr);
+  assert.deepEqual(control.calls, ["prep", "open", "handoff"]);
+  assert.equal(control.stdout, lines(
+    MAC_SCREEN.start, "added 1 package in 1s", "Financial Brain CLI preparation completed",
+    MAC_SCREEN.ready, MAC_SCREEN.handoff, MAC_SCREEN.done,
+  ));
+  assert.equal(control.stderr, "npm warn example\n");
+  assert.equal(control.log, lines(...MAC_SUCCESS_MARKERS));
+
+  const launchFailure = runMacWrapper({ prepExit: 0, openExit: 9, handoffExit: 0 });
+  assert.equal(launchFailure.status, 9, launchFailure.stderr);
+  assert.equal(launchFailure.stdout, lines(MAC_SCREEN.start, MAC_SCREEN.ready, MAC_SCREEN.windowFailed));
+  assert.equal(launchFailure.log, lines(...MAC_SUCCESS_MARKERS.slice(0, 5), "SETUP_WINDOW_STARTED=0"));
+
+  const handoffFailure = runMacWrapper({ prepExit: 0, openExit: 0, handoffExit: 4, handoffBody: "printf 'HANDOFF_DECISION_REACHED=1\\n'\nprintf 'REFUSED missing Claude handoff URL\\n' >&2" });
+  assert.equal(handoffFailure.status, 4, handoffFailure.stderr);
+  assert.equal(handoffFailure.stdout, lines(MAC_SCREEN.start, MAC_SCREEN.ready, MAC_SCREEN.handoff, MAC_SCREEN.handoffFailed));
+  assert.equal(handoffFailure.stderr, "REFUSED missing Claude handoff URL\n");
+  assert.equal(handoffFailure.log, lines(...MAC_SUCCESS_MARKERS.slice(0, 7), "INSTALLER_HANDOFF_EXIT_CODE=4", "INSTALLER_HANDOFF_STARTED=0"));
+
+  for (const result of [prepFailure, control, launchFailure, handoffFailure]) {
+    assert.doesNotMatch(result.stdout, SCREEN_MARKER_LINE, result.stdout);
+  }
+});
+
+test("Windows launcher mirrors the Mac screen: markers only in installer.log, prep markers hidden, waits only for an interactive owner", () => {
+  const wrapper = read("machine-prep/installers/windows/run-machine-prep.ps1").replaceAll("\r\n", "\n");
+  const mac = read("machine-prep/installers/macos/run-machine-prep-mac.sh");
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  // Markers are written to installer.log only, on both platforms.
+  const macEmit = mac.slice(mac.indexOf("emit_status() {"), mac.indexOf("\n}\n", mac.indexOf("emit_status() {")));
+  assert.match(macEmit, /printf '%s\\n' "\$1" >> "\$LOG_FILE"/);
+  assert.doesNotMatch(macEmit, /tee|\/dev\/stdout/);
+  const windowsLog = wrapper.slice(wrapper.indexOf("function Write-SafeLog"), wrapper.indexOf("\n}\n", wrapper.indexOf("function Write-SafeLog")));
+  assert.match(windowsLog, /\[IO\.File\]::AppendAllText\(\$LogFile, "\$Line`r`n"\)/);
+  assert.doesNotMatch(windowsLog, /Console|Write-Output|Write-Host/);
+  // The OS gate runs before installer.log exists; it alone stays on stdout.
+  assert.match(wrapper, /Write-Output "OS_DECISION_REACHED=1 current=\$CurrentVersion minimum=10\.0"/);
+
+  // One hidden-line rule, case-sensitive on both platforms; stderr is never filtered.
+  assert.ok(mac.includes("SCREEN_HIDDEN='^([A-Z][A-Z_]*([= ]|$)|Machine Prep for macOS$)'"));
+  assert.ok(wrapper.includes("$ScreenHiddenPattern = '^([A-Z][A-Z_]*([= ]|$)|Machine Prep for Windows$)'"));
+  assert.match(mac, /run_for_screen\(\) \{\n  "\$@" \| \/usr\/bin\/sed -l -E "\/\$SCREEN_HIDDEN\/d"\n  return "\$\{PIPESTATUS\[0\]\}"\n\}/);
+  assert.match(mac, /run_for_screen \/usr\/bin\/env -i HOME=/);
+  assert.match(mac, /run_for_screen "\$HANDOFF_RUNNER"/);
+  const relay = wrapper.slice(wrapper.indexOf("function Show-ChildOutput"), wrapper.indexOf("function Invoke-EmbeddedPowerShell"));
+  assert.match(relay, /if \(\$line -cnotmatch \$ScreenHiddenPattern\) \{ \[Console\]::Out\.WriteLine\(\$line\) \}/);
+  assert.match(relay, /if \(\$Result\.Errors\) \{ \[Console\]::Error\.Write\(\$Result\.Errors\) \}/);
+  assert.doesNotMatch(relay, /\s-(?:i?notmatch|i?match)\s/, "PowerShell -match ignores case and would hide owner lines");
+
+  // The child streams are still drained concurrently, then handed back.
+  assert.match(wrapper, /return \[pscustomobject\]@\{ ExitCode = \[int\]\$process\.ExitCode; Output = \$stdoutTask\.Result; Errors = \$stderrTask\.Result \}/);
+  assert.match(wrapper, /return \[pscustomobject\]@\{ ExitCode = \$code; Output = ""; Errors = "" \}/);
+  const prepCall = wrapper.indexOf('$prepResult = Invoke-EmbeddedPowerShell $prep @("--real")');
+  const shown = wrapper.indexOf("Show-ChildOutput $prepResult");
+  const exitLogged = wrapper.indexOf('Write-SafeLog "PREP_EXIT_CODE=');
+  assert.ok(prepCall > 0 && prepCall < shown && shown < exitLogged, "prep output is relayed before its exit marker");
+  assert.equal(wrapper.split("Show-ChildOutput $").length - 1, 1, "only the prep child is relayed; the pipe test child and handoff are not");
+
+  // Same plain lines with Windows place names. The Windows script writes its
+  // success branch before its failure branch, so compare the sets; the Mac
+  // order is pinned here and the screen order by the behavior tests.
+  const macLines = [...mac.matchAll(/^\s*say '([^']*)'/gm)].map((match) => match[1]);
+  const windowsLines = [...wrapper.matchAll(/^\s*Write-OwnerLine "([^"]*)"/gm)].map((match) => match[1]);
+  assert.deepEqual(macLines, [MAC_SCREEN.start, "", MAC_SCREEN.failed, MAC_SCREEN.ready, MAC_SCREEN.windowFailed, MAC_SCREEN.handoff, MAC_SCREEN.handoffFailed, MAC_SCREEN.done]);
+  assert.deepEqual([...windowsLines].sort(), macLines.map(toWindowsScreen).sort());
+  assert.match(wrapper, new RegExp([
+    'Write-SafeLog "SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed"',
+    'Write-OwnerLine ""',
+    `Write-OwnerLine "${escape(WINDOWS_SCREEN.failed)}"`,
+    "Wait-OwnerBeforeClose",
+    "exit \\$prepResult\\.ExitCode",
+  ].join("\\s*(?:if [^\\n]*\\n\\s*)?")));
+  assert.doesNotMatch(wrapper, /OWNER ACTION/);
+
+  // The Start Menu window closes on exit, so every failure waits for Enter.
+  const wait = wrapper.slice(wrapper.indexOf("function Wait-OwnerBeforeClose"), wrapper.indexOf("function Show-ChildOutput"));
+  assert.match(wait, /if \(\$env:MACHINE_PREP_INSTALLER_TEST_MODE -eq "1" -or \[Console\]::IsInputRedirected\) \{ return \}/);
+  assert.match(wait, /\[Console\]::Out\.WriteLine\("Press Enter to close this window\."\)/);
+  assert.match(wait, /\[void\]\[Console\]::ReadLine\(\)/);
+  assert.equal(wrapper.split("Wait-OwnerBeforeClose").length - 1, 4, "defined once and used on the three failure paths");
+  for (const [owner, exit] of [
+    [WINDOWS_SCREEN.windowFailed, "exit $setupExit"],
+    [WINDOWS_SCREEN.handoffFailed, "exit $handoffResult.ExitCode"],
+  ]) {
+    assert.match(wrapper, new RegExp(`Write-OwnerLine "${escape(owner)}"; Wait-OwnerBeforeClose; ${escape(exit)}`));
+  }
+});
 
 test("Mac launcher reaches prep and setup decisions, propagates failures, and hands off only after success", bashBehaviorOptions(), () => {
   const prepFailure = runMacWrapper({ prepExit: 7, openExit: 0, handoffExit: 0 });
   assert.equal(prepFailure.status, 7, prepFailure.stderr);
   assert.deepEqual(prepFailure.calls, ["prep"]);
-  assert.match(prepFailure.stdout, /SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed/);
+  assert.match(prepFailure.log, /SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed/);
 
   const launchFailure = runMacWrapper({ prepExit: 0, openExit: 9, handoffExit: 0 });
   assert.equal(launchFailure.status, 9, launchFailure.stderr);
   assert.deepEqual(launchFailure.calls, ["prep", "open"]);
-  assert.match(launchFailure.stdout, /SETUP_WINDOW_STARTED=0/);
+  assert.match(launchFailure.log, /SETUP_WINDOW_STARTED=0/);
 
   const control = runMacWrapper({ prepExit: 0, openExit: 0, handoffExit: 0 });
   assert.equal(control.status, 0, control.stderr);
   assert.deepEqual(control.calls, ["prep", "open", "handoff"]);
-  assert.match(control.stdout, /INSTALLER_HANDOFF_STARTED=1/);
+  assert.match(control.log, /INSTALLER_HANDOFF_STARTED=1/);
 });
 
 test("Windows launcher reaches one typed exit decision and starts setup only after prep succeeds", { skip: process.platform !== "win32" }, () => {
@@ -1354,7 +1504,7 @@ test("Windows launcher reaches one typed exit decision and starts setup only aft
   const run = ({ prep, setup, handoff }) => {
     const home = mkdtempSync(join(ROOT, ".machine-prep-windows-wrapper-"));
     try {
-      return spawnSync(powerShell, [
+      const result = spawnSync(powerShell, [
         "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
         "-File", join(WINDOWS_INSTALLER, "run-machine-prep.ps1"),
       ], {
@@ -1377,27 +1527,35 @@ test("Windows launcher reaches one typed exit decision and starts setup only aft
         },
         encoding: "utf8",
       });
+      const logFile = join(home, "local", "FinancialBrainMachinePrep", "installer.log");
+      const log = existsSync(logFile) ? readFileSync(logFile, "utf8").replaceAll("\r\n", "\n") : "";
+      return { ...result, stdout: result.stdout.replaceAll("\r\n", "\n"), log };
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   };
+  const schemaMarkerOnScreen = /^(?:LOG_SCHEMA_DECISION_REACHED|INSTALLER_PROGRESS|PREP_EXIT_CODE|SETUP_LAUNCH_DECISION_REACHED|SETUP_WINDOW_STARTED|INSTALLER_HANDOFF)/m;
 
   const refused = run({ prep: 7, setup: 0, handoff: 0 });
   assert.equal(refused.status, 7, `${refused.stdout}${refused.stderr}`);
-  assert.match(refused.stdout, /PREP_EXIT_CODE=7/);
+  assert.match(refused.log, /PREP_EXIT_CODE=7/);
   assert.match(refused.stdout, /TEST_SETUP_ATTEMPTS=0/);
-  assert.match(refused.stdout, /OWNER ACTION: install any missing prerequisite/);
+  assert.ok(refused.stdout.includes(`${WINDOWS_SCREEN.start}\n\n${WINDOWS_SCREEN.failed}\n`), refused.stdout);
+  assert.doesNotMatch(refused.stdout, /OWNER ACTION|Press Enter/);
 
   const setupFailure = run({ prep: 0, setup: 9, handoff: 0 });
   assert.equal(setupFailure.status, 9, `${setupFailure.stdout}${setupFailure.stderr}`);
   assert.match(setupFailure.stdout, /TEST_SETUP_ATTEMPTS=1/);
-  assert.match(setupFailure.stdout, /SETUP_WINDOW_STARTED=0/);
+  assert.match(setupFailure.log, /SETUP_WINDOW_STARTED=0/);
+  assert.ok(setupFailure.stdout.includes(`${WINDOWS_SCREEN.windowFailed}\n`), setupFailure.stdout);
 
   const control = run({ prep: 0, setup: 0, handoff: 0 });
   assert.equal(control.status, 0, `${control.stdout}${control.stderr}`);
-  assert.match(control.stdout, /PREP_EXIT_CODE=0/);
-  assert.match(control.stdout, /SETUP_WINDOW_STARTED=1/);
-  assert.match(control.stdout, /INSTALLER_HANDOFF_STARTED=1/);
+  assert.match(control.log, /PREP_EXIT_CODE=0/);
+  assert.match(control.log, /SETUP_WINDOW_STARTED=1/);
+  assert.match(control.log, /INSTALLER_HANDOFF_STARTED=1/);
+  assert.ok(control.stdout.includes(`${WINDOWS_SCREEN.ready}\n${WINDOWS_SCREEN.handoff}\n${WINDOWS_SCREEN.done}\n`), control.stdout);
+  for (const result of [refused, setupFailure, control]) assert.doesNotMatch(result.stdout, schemaMarkerOnScreen, result.stdout);
 });
 
 test("Windows launcher concurrently drains oversized child output for zero and nonzero exits", { skip: process.platform !== "win32", timeout: 300_000 }, () => {

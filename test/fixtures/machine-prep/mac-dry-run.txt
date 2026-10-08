@@ -6,7 +6,7 @@ WRONG_VERSION  Node.js                 v20.11.1; OWNER ACTION: install supported
 READY          npm                     10.2.4
 MISSING        Git                     OWNER ACTION: install Apple's signed Command Line Tools
 MISSING        Claude Code             OWNER ACTION: install pinned 2.1.261 from the official signed installer
-WRONG_VERSION  Codex CLI               codex-cli 0.154.0; expected 0.155.0-alpha.16; fix: run --real
+WRONG_VERSION  Codex CLI               codex-cli 0.154.0; expected 0.155.0-alpha.16; OWNER ACTION: replace it with pinned 0.155.0-alpha.16 from the official npm package with prefix ~/.local
 SHADOWED       Financial Brain CLI     2 PATH matches; fix: remove the earlier PATH entry and reopen the shell
 READY          Wrangler                package pin 4.131.1; no global install needed
 READY          Python 3                not required by standard machine prep
