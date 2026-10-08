@@ -155,6 +155,20 @@ export async function planDailyRefresh({
     .map(([key, configured]) => {
       const entry = byKey.get(key);
       const decision = classify(entry, configured);
+      // Configuration alone is not a connection. Keep an unconnected leg
+      // visible without withholding other imports. The full manifest still
+      // participates in the daily definition's owner approval.
+      const quickBooks = key === "quickbooks" || key === "quickbooks_desktop";
+      if (quickBooks && configured?.enabled === true && (
+        entry?.connection_required === true ||
+        entry?.reason?.startsWith("enabled, but not connected on this machine:") ||
+        (key === "quickbooks_desktop" && !entry?.daily_class && entry?.status !== "ready")
+      )) {
+        Object.assign(decision, { class: "connect-required", owner: "none", status: "skipped", reason: "not connected on this machine" });
+      }
+      if (quickBooks && configured?.enabled === true && new Set(existingSchedulerOwners || []).has(key)) {
+        Object.assign(decision, { class: "machine-pull", owner: "existing-local-scheduler", status: "skipped", reason: "owned by the QuickBooks schedule" });
+      }
       if (decision.class === "machine-pull" && existingSchedulerOwners !== undefined) {
         decision.owner = new Set(existingSchedulerOwners).has(key)
           ? "existing-local-scheduler"
@@ -180,7 +194,7 @@ export async function planDailyRefresh({
   const unavailableDaily = sources.filter((source) =>
     source.class === "machine-pull" && source.owner === "daily-task" && source.status !== "ready"
   );
-  const sourcePlanHash = digest(sources.map(({ key, run_key, enabled, class: sourceClass, owner, status, source_names }) => ({
+  const sourcePlanHash = digest(sources.filter((source) => source.class !== "connect-required").map(({ key, run_key, enabled, class: sourceClass, owner, status, source_names }) => ({
     key, run_key, enabled, class: sourceClass, owner, status, source_names,
   })));
   return Object.freeze({

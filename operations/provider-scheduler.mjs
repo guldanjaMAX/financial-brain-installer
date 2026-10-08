@@ -8,6 +8,10 @@
  */
 
 import { resolve } from "node:path";
+import { existsSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { quickBooksAnnualWindow } from "./quickbooks-schedule.mjs";
 import { fileURLToPath } from "node:url";
 import { printGuidance } from "./cli-guidance.mjs";
 import { recordSupportEvent } from "../support-journal.mjs";
@@ -20,6 +24,7 @@ import {
   runScheduledIngest,
   safeIngestEnvironment,
   statusScheduler,
+  launchctlChildEnvironment,
 } from "./drive-scheduler.mjs";
 import { providerOAuthConfig } from "../connectors/provider-oauth.mjs";
 
@@ -39,7 +44,7 @@ const DEFAULT_CRONS = Object.freeze({
 const sourceConfig = (manifest, provider) => manifest?.corpora?.[provider] || null;
 const storeEnvironmentName = (provider) => `BRAIN_${provider.toUpperCase()}_TOKEN_STORE`;
 
-export function createProviderSchedulerSpec(provider) {
+export function createProviderSchedulerSpec(provider, options = {}) {
   const config = providerOAuthConfig(provider);
   const key = config.provider;
   if (!SCHEDULED_PROVIDER_IDS.includes(key)) throw new TypeError(`unsupported scheduled provider ${key}`);
@@ -52,7 +57,16 @@ export function createProviderSchedulerSpec(provider) {
       key: `operations.provider_crons.${key}`,
       noun: `${config.label} ingest cron`,
     }),
-    cronOf: (manifest) => manifest?.operations?.provider_crons?.[key] || DEFAULT_CRONS[key],
+    cronOf: (manifest) => {
+      if (key === "quickbooks" && manifest.operations?.quickbooks_schedule?.enabled === true) {
+        const start = manifest.operations.quickbooks_schedule.start ?? "07:00";
+        if (start !== "07:00") throw new Error("macOS QuickBooks refresh starts at 07:00");
+        const window = quickBooksAnnualWindow({ timezone: manifest.operations.quickbooks_schedule.timezone || manifest.client?.timezone || options.localTimeZone,
+          now: options.now || new Date(), start });
+        return `0 7,${window.last_even_hour} * * *`;
+      }
+      return manifest?.operations?.provider_crons?.[key] || DEFAULT_CRONS[key];
+    },
     cronMissingError: `operations.provider_crons.${key} must be a five-field cron expression`,
     requireEnabled(manifest) {
       if (sourceConfig(manifest, key)?.enabled !== true) {
@@ -71,6 +85,10 @@ export function createProviderSchedulerSpec(provider) {
       sourceConfiguration: sourceConfig(manifest, key),
     }),
     validateExtras(reference) {
+      if (key === "quickbooks" && reference.manifest.operations?.quickbooks_schedule?.enabled === true &&
+          (reference.manifest.operations.quickbooks_schedule.timezone || reference.timeZone || reference.localTimeZone) !== reference.localTimeZone) {
+        throw new Error("QuickBooks schedule timezone must match this machine");
+      }
       if (!TOKEN_STORES.has(reference.tokenStore)) {
         throw new Error(`operations.provider_token_stores.${key} must be auto, keychain or file`);
       }
@@ -86,8 +104,12 @@ export function createProviderSchedulerSpec(provider) {
       admin_key_secret: reference.manifest?.operations?.admin_key_secret || null,
       token_store: reference.tokenStore,
       source_configuration: reference.sourceConfiguration,
+      ...(key === "quickbooks" && reference.manifest.operations?.quickbooks_schedule?.enabled === true
+        ? { quickbooks_schedule: reference.manifest.operations.quickbooks_schedule } : {}),
     }),
-    childArgumentsOf: (plan) => ["ingest", plan.path, "--from", key],
+    childArgumentsOf: (plan) => key === "quickbooks" && plan.manifest.operations?.quickbooks_schedule?.enabled === true
+      ? ["quickbooks-run", plan.path, "--provider-config-hash", plan.configHash]
+      : ["ingest", plan.path, "--from", key],
     childEnvironmentOf: (plan, environment) => {
       const child = safeIngestEnvironment(environment);
       if (plan.tokenStore === "auto") delete child[tokenEnv];
@@ -100,14 +122,31 @@ export function createProviderSchedulerSpec(provider) {
   });
 }
 
-const optionsFor = (provider, options = {}) => ({ ...options, spec: createProviderSchedulerSpec(provider) });
+const optionsFor = (provider, options = {}) => ({ ...options, spec: createProviderSchedulerSpec(provider, options) });
 
+const refreshExpectation = (provider, result) => provider === "quickbooks" && result.manifest?.operations?.quickbooks_schedule?.enabled === true
+  ? { ...result, expectedRefreshSeconds: 86400 } : result;
 export const buildProviderSchedulerPlan = (provider, manifestPath, options = {}) =>
-  buildSchedulerPlan(manifestPath, optionsFor(provider, options));
-export const installProviderScheduler = (provider, manifestPath, options = {}) =>
-  installScheduler(manifestPath, optionsFor(provider, options));
+  refreshExpectation(provider, buildSchedulerPlan(manifestPath, optionsFor(provider, options)));
+export const installProviderScheduler = (provider, manifestPath, options = {}) => {
+  const plan = buildProviderSchedulerPlan(provider, manifestPath, options);
+  if (provider !== "quickbooks" || plan.manifest.operations?.quickbooks_schedule?.enabled !== true) {
+    return installScheduler(manifestPath, optionsFor(provider, options));
+  }
+  const before = snapshotQuickBooksProviderScheduler(manifestPath, options);
+  if (before.verified) return { ...before, changed: false };
+  try {
+    installScheduler(manifestPath, optionsFor(provider, options));
+    const after = snapshotQuickBooksProviderScheduler(manifestPath, options);
+    if (!after.verified) throw new Error("QuickBooks provider exact readback failed");
+    return { ...after, changed: true };
+  } catch (error) {
+    restoreQuickBooksProviderSnapshot(manifestPath, before, options);
+    throw error;
+  }
+};
 export const statusProviderScheduler = (provider, manifestPath, options = {}) =>
-  statusScheduler(manifestPath, optionsFor(provider, options));
+  refreshExpectation(provider, statusScheduler(manifestPath, optionsFor(provider, options)));
 export const removeProviderScheduler = (provider, manifestPath, options = {}) =>
   removeScheduler(manifestPath, optionsFor(provider, options));
 export const pauseProviderScheduler = (provider, manifestPath, options = {}) =>
@@ -116,6 +155,83 @@ export const restoreProviderScheduler = (provider, manifestPath, snapshot, optio
   restoreScheduler(manifestPath, snapshot, optionsFor(provider, options));
 export const runProviderScheduledIngest = (provider, manifestPath, options = {}) =>
   runScheduledIngest(manifestPath, optionsFor(provider, options));
+
+function quickBooksLaunchctl(options) {
+  return options.launchctl || (args => (options.spawn || spawnSync)("/bin/launchctl", args, {
+    encoding: "utf8", env: launchctlChildEnvironment(options.environment || process.env), timeout: 15000,
+  }));
+}
+function plistArguments(serialized) {
+  const block = serialized.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/u)?.[1] || "";
+  return [...block.matchAll(/<string>([\s\S]*?)<\/string>/gu)].map(m => m[1].replaceAll("&quot;", '\"').replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&amp;", "&"));
+}
+function loadedArguments(output) {
+  const block = String(output || "").match(/arguments\s*=\s*\{([\s\S]*?)^\s*\}/mu)?.[1];
+  return block ? block.split(/\r?\n/u).map(s => s.trim().replace(/^\d+\s*=\s*/u, "")).filter(Boolean) : [];
+}
+export function snapshotQuickBooksProviderScheduler(manifestPath, options = {}) {
+  let inspection;
+  const launchctl = quickBooksLaunchctl(options);
+  const status = statusProviderScheduler("quickbooks", manifestPath, { ...options, launchctl: args => {
+    const result = launchctl(args); if (args[0] === "print") inspection = result; return result;
+  } });
+  if (inspection?.error || ![0, 113].includes(inspection?.status)) throw new Error("QuickBooks provider schedule inspection is unavailable");
+  let serialized = null;
+  if (status.installed) {
+    const info = lstatSync(status.plistPath);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new Error("QuickBooks provider definition is unsafe");
+    serialized = readFileSync(status.plistPath, "utf8");
+    const args = plistArguments(serialized);
+    // Preserve stale, owned definitions for rollback without adopting a job by
+    // label alone. Every executable argument is bound to this installed runner.
+    const expected = [status.nodePath, status.schedulerPath, "quickbooks", "run", status.path, "--brain", status.brainPath, "--config-hash"];
+    if (args.length !== expected.length + 1 || expected.some((value, index) => args[index] !== value) ||
+        !/^[a-f0-9]{64}$/u.test(args.at(-1))) throw new Error("A foreign provider definition occupies the QuickBooks schedule");
+  } else if (status.loaded) throw new Error("QuickBooks is loaded without an owned definition");
+  const loaded = loadedArguments(inspection?.stdout);
+  const expected = serialized ? plistArguments(serialized) : [];
+  const loadedMatches = loaded.length === expected.length && loaded.every((value, index) => value === expected[index]);
+  return { ...status, serialized, enabled: status.loaded, verified: status.installed && status.loaded && status.definitionMatches &&
+    status.interpreterPresent && !status.scheduleError && loadedMatches };
+}
+export function restoreQuickBooksProviderSnapshot(manifestPath, snapshot, options = {}) {
+  const current = snapshotQuickBooksProviderScheduler(manifestPath, options);
+  const launchctl = quickBooksLaunchctl(options);
+  if (current.loaded && launchctl(["bootout", current.service])?.status !== 0) throw new Error("QuickBooks provider rollback could not stop the replacement");
+  if (snapshot?.installed) {
+    const staged = `${current.plistPath}.${randomBytes(8).toString("hex")}.rollback`;
+    writeFileSync(staged, snapshot.serialized, { mode: 0o600, flag: "wx" });
+    renameSync(staged, current.plistPath);
+    if (snapshot.loaded && (launchctl(["enable", current.service])?.status !== 0 ||
+        launchctl(["bootstrap", current.domain, current.plistPath])?.status !== 0)) throw new Error("QuickBooks provider rollback could not reload the previous definition");
+  } else if (existsSync(current.plistPath)) unlinkSync(current.plistPath);
+  const result = launchctl(["print", current.service]);
+  if ((snapshot?.loaded ? result?.status !== 0 || JSON.stringify(loadedArguments(result.stdout)) !== JSON.stringify(plistArguments(snapshot.serialized)) : result?.status !== 113) ||
+      (snapshot?.installed ? readFileSync(current.plistPath, "utf8") !== snapshot.serialized : existsSync(current.plistPath))) {
+    throw new Error("QuickBooks provider rollback did not pass exact readback");
+  }
+  return { restored: true, verified: true };
+}
+
+export function removeQuickBooksProviderScheduler(manifestPath, options = {}) {
+  const before = snapshotQuickBooksProviderScheduler(manifestPath, options);
+  const launchctl = quickBooksLaunchctl(options);
+  try {
+    // Keep the owned plist available for rollback until native readback proves
+    // the job stopped. A successful bootout exit alone is insufficient.
+    if (before.loaded && (launchctl(['bootout', before.service])?.status !== 0 ||
+        launchctl(['print', before.service])?.status !== 113)) {
+      throw new Error('QuickBooks provider removal did not stop the loaded job');
+    }
+    const result = removeScheduler(manifestPath, optionsFor('quickbooks', { ...options, launchctl }));
+    const after = snapshotQuickBooksProviderScheduler(manifestPath, { ...options, launchctl });
+    if (after.installed || after.loaded) throw new Error('QuickBooks provider removal did not pass exact readback');
+    return { ...result, verified: true };
+  } catch (error) {
+    restoreQuickBooksProviderSnapshot(manifestPath, before, options);
+    throw error;
+  }
+}
 
 function optionValue(args, name) {
   const index = args.indexOf(name);

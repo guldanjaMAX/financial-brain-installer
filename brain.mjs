@@ -26244,9 +26244,18 @@ export function schedulePlatformLimitation(
   return lines.join("\n");
 }
 
-async function existingDailySourceOwners(m, manifestPath, options = {}) {
+export async function existingDailySourceOwners(m, manifestPath, options = {}) {
   if (options.existingSchedulerOwners !== undefined) return options.existingSchedulerOwners;
-  if ((options.platform ?? process.platform) !== "darwin") return [];
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") {
+    if (m.operations?.quickbooks_schedule?.enabled !== true) return [];
+    const scheduler = options.quickBooksScheduler ?? await import("./operations/quickbooks-schedule.mjs");
+    const plan = scheduler.planQuickBooksSchedule({ m, manifestPath, ...options, platform });
+    const status = scheduler.statusQuickBooksSchedule(plan, { ...options, ...(options.quickBooksSchedulerOptions || {}) });
+    return status.installed === true && status.enabled === true && status.verified === true
+      ? ["quickbooks", "quickbooks_desktop"] : [];
+  }
+  if (platform !== "darwin") return [];
   const owned = [];
   const schedulerOptions = options.legacySchedulerOptions || {};
   const healthy = (status) => status?.installed === true &&
@@ -26264,7 +26273,13 @@ async function existingDailySourceOwners(m, manifestPath, options = {}) {
   if (configuredProviders.length) {
     const providers = options.providerScheduler ?? await import("./operations/provider-scheduler.mjs");
     for (const provider of configuredProviders) {
-      if (healthy(providers.statusProviderScheduler(provider, manifestPath, schedulerOptions))) owned.push(provider);
+      const status = provider === "quickbooks" && m.operations?.quickbooks_schedule?.enabled === true
+        ? providers.snapshotQuickBooksProviderScheduler(manifestPath, schedulerOptions)
+        : providers.statusProviderScheduler(provider, manifestPath, schedulerOptions);
+      if (healthy(status) && (provider !== "quickbooks" || m.operations?.quickbooks_schedule?.enabled !== true || status.verified === true)) {
+        owned.push(provider);
+        if (provider === "quickbooks" && m.operations?.quickbooks_schedule?.enabled === true) owned.push("quickbooks_desktop");
+      }
     }
   }
   return owned;
@@ -26445,7 +26460,8 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       .find((outcome) => outcomes.includes(outcome)) || "missing_history";
     const measuredCount = (field) => latestRuns.every((run) => Number.isSafeInteger(run?.[field]))
       ? latestRuns.reduce((sum, run) => sum + run[field], 0) : null;
-    const currentState = source.class === "snapshot" ? "snapshot"
+    const currentState = source.class === "connect-required" ? "skipped"
+      : source.class === "snapshot" ? "snapshot"
       : source.class === "disabled" ? "skipped"
         : states.includes("broken") ? "broken"
           : states.includes("review") || ["refused", "empty"].includes(lastRunOutcome) ? "review"
@@ -26484,7 +26500,8 @@ function renderDailyFreshnessRows(rows, log = console.log) {
   for (const row of rows) {
     log(`${row.source} | ${row.current_state} | ${row.last_successful_run_at || "never"} | ${row.next_run} | ${row.owner}` +
       (["partial", "refused", "empty"].includes(row.last_run_outcome)
-        ? ` | ${row.last_run_outcome}; ${row.docs_refused ?? "unknown"} refused` : ""));
+        ? ` | ${row.last_run_outcome}; ${row.docs_refused ?? "unknown"} refused` : "") +
+      (row.current_state === "skipped" && row.reason === "not connected on this machine" ? ` | ${row.reason}` : ""));
   }
 }
 
@@ -26571,7 +26588,9 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
       const runnable = plan.sources.filter((source) =>
         source.class === "machine-pull" && source.owner === "daily-task" && source.status === "ready"
       );
-      if (!runnable.length) die("this manifest has no connected machine-pull source for the daily task; nothing was scheduled");
+      const quickBooksOnly = options.allowQuickBooksOnly === true &&
+        ["quickbooks", "quickbooks_desktop"].some((key) => m.corpora?.[key]);
+      if (!runnable.length && !quickBooksOnly) die("this manifest has no connected machine-pull source for the daily task; nothing was scheduled");
       schedule = installDailyRefreshSchedule(plan, schedulerOptions);
       scheduleMutated = schedule.changed !== false;
       await syncDailySourceExpectations(m, manifestPath, plan, 86_400, options);
@@ -26629,13 +26648,17 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
     warn(`local schedule status is available, but source freshness could not be read: ${String(error?.message || error).slice(0, 160)}`);
   }
   const sources = dailyFreshnessRows(plan, inventory, schedule);
+  const quickBooksSchedule = action === "status" && m.operations?.quickbooks_schedule?.enabled === true
+    ? await cmdQuickBooks(["schedule", "status", manifestPath], { ...options, quiet: true }) : null;
   const result = Object.freeze({
     contract_version: 1,
     kind: "daily_refresh_status",
     plan,
     schedule,
     sources,
+    ...(quickBooksSchedule ? { quickbooks_schedule: quickBooksSchedule } : {}),
   });
+  if (options.quiet) return result;
   if (options.json) console.log(JSON.stringify(result, null, 2));
   else {
     if (schedule.attention) warn(schedule.attention);
@@ -26646,9 +26669,29 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
     else if (!schedule.verified) warn("Daily imports are installed, but their definition no longer matches this manifest.");
     else ok("Daily imports are on and match this manifest.");
     if (action === "status") renderDailyObservation(schedule, options.log || console.log);
+    if (quickBooksSchedule) (options.log || console.log)(`${quickBooksSchedule.window_description} ` +
+      (quickBooksSchedule.verified ? "The QuickBooks schedule passed exact readback." : "The QuickBooks schedule needs attention; these are planned times."));
     renderDailyFreshnessRows(sources, options.log || console.log);
   }
   return result;
+}
+
+// Dedicated QuickBooks commands keep parsed arguments and dependencies outside
+// the dispatcher; legacy provider paths remain unchanged until opted in.
+export function quickBooksScheduleDependencies() {
+  return { resolveBaseUrl, readManifest: (path) => loadManifest(path).m };
+}
+export async function cmdQuickBooks(argv, options = {}) {
+  const scheduler = options.quickBooksScheduler ?? await import("./operations/quickbooks-schedule.mjs");
+  return scheduler.commandQuickBooksSchedule(argv, { ...quickBooksScheduleDependencies(), ...options });
+}
+export async function cmdQuickBooksRun(manifestPath, options = {}) {
+  const scheduler = options.quickBooksScheduler ?? await import("./operations/quickbooks-schedule.mjs");
+  return scheduler.runQuickBooksScheduleCli(manifestPath, { ...quickBooksScheduleDependencies(), ...options });
+}
+export async function reregisterQuickBooksAfterManifestChange(manifestPath, options = {}) {
+  const scheduler = options.quickBooksScheduler ?? await import("./operations/quickbooks-schedule.mjs");
+  return scheduler.reregisterAfterManifestChange(manifestPath, { ...quickBooksScheduleDependencies(), ...options });
 }
 
 export async function cmdDaily(argv = process.argv.slice(3), options = {}) {
@@ -30658,7 +30701,7 @@ export async function cmdConnectProvider(provider, manifestPath, flags = {}, opt
   if (options.providerRecordLease?.held !== true) {
     const lockTask = options.withSourceIngestLock ?? withSourceIngestLock;
     try {
-      return await lockTask(
+      const result = await lockTask(
         {
           sourceName: provider,
           sharedRecord: `provider:${provider}`,
@@ -30667,8 +30710,16 @@ export async function cmdConnectProvider(provider, manifestPath, flags = {}, opt
         ({ assertOwned }) => cmdConnectProvider(provider, manifestPath, flags, {
           ...options,
           providerRecordLease: { held: true, assertOwned },
+          deferQuickBooksRebind: true,
         }),
       );
+      if (result.schedule_rebind_required === true) {
+        await (options.reregisterAfterManifestChange || reregisterQuickBooksAfterManifestChange)(manifestPath, options);
+        if (!options.quiet) ok("QuickBooks is connected and both refresh schedules passed exact readback.");
+        const { schedule_rebind_required: _pending, ...connected } = result;
+        return connected;
+      }
+      return result;
     } catch (error) {
       if (error instanceof SourceIngestLockError) die(error.message);
       if (error?.code === "callback_timeout" && error?.phase === "callback") {
@@ -30787,12 +30838,17 @@ export async function cmdConnectProvider(provider, manifestPath, flags = {}, opt
       environment: configuration.environment,
     });
   }
-  if (!options.quiet) {
+  const rebindRequired = provider === "quickbooks" && m.operations?.quickbooks_schedule !== undefined;
+  if (rebindRequired && options.deferQuickBooksRebind !== true) {
+    await (options.reregisterAfterManifestChange || reregisterQuickBooksAfterManifestChange)(manifestPath, options);
+  }
+  if (!options.quiet && !(rebindRequired && options.deferQuickBooksRebind === true)) {
     ok(`connected. Credential stored in ${oauth.providerCredentialDescription(provider, storage)} (on this machine only)`);
     info(`now run: brain ingest ${manifestPath} --from ${provider} --dry-run`);
     info(`after review: brain schedule ${manifestPath} --provider ${provider} --install`);
   }
-  return { provider, connected: true, storage: oauth.providerCredentialDescription(provider, storage) };
+  return { provider, connected: true, storage: oauth.providerCredentialDescription(provider, storage),
+    ...(rebindRequired && options.deferQuickBooksRebind === true ? { schedule_rebind_required: true } : {}) };
 }
 
 export async function cmdDisconnectProvider(provider, manifestPath, flags = {}, options = {}) {
@@ -30802,14 +30858,16 @@ export async function cmdDisconnectProvider(provider, manifestPath, flags = {}, 
   const { m } = loadManifest(manifestPath);
   const configuration = m?.corpora?.[provider] || {};
   const source = assertSourceName(configuration.source || provider);
-  const scheduler = options.scheduler ?? await import("./operations/provider-scheduler.mjs");
-  try {
-    const removed = scheduler.removeProviderScheduler(provider, manifestPath, options.schedulerOptions || {});
-    ok(removed.removed || removed.loaded
-      ? `${provider} refresh schedule removed`
-      : `${provider} refresh schedule was not installed`);
-  } catch (error) {
-    warn(`the ${provider} schedule could not be inspected or removed: ${String(error?.message || error).slice(0, 180)}`);
+  if (!(provider === "quickbooks" && m.operations?.quickbooks_schedule !== undefined)) {
+    const scheduler = options.scheduler ?? await import("./operations/provider-scheduler.mjs");
+    try {
+      const removed = scheduler.removeProviderScheduler(provider, manifestPath, options.schedulerOptions || {});
+      ok(removed.removed || removed.loaded
+        ? `${provider} refresh schedule removed`
+        : `${provider} refresh schedule was not installed`);
+    } catch (error) {
+      warn(`the ${provider} schedule could not be inspected or removed: ${String(error?.message || error).slice(0, 180)}`);
+    }
   }
 
   const oauth = options.oauth ?? await import("./connectors/provider-oauth.mjs");
@@ -30820,6 +30878,9 @@ export async function cmdDisconnectProvider(provider, manifestPath, flags = {}, 
       ? { source, environment: configuration.environment }
       : {}),
   });
+  if (provider === "quickbooks" && m.operations?.quickbooks_schedule !== undefined) {
+    await (options.reregisterAfterManifestChange || reregisterQuickBooksAfterManifestChange)(manifestPath, options);
+  }
   if (result.already_disconnected) ok(`${oauth.providerOAuthConfig(provider).label} was already disconnected locally`);
   else if (result.remote_revoked) ok(`${oauth.providerOAuthConfig(provider).label} grant revoked, then local credentials removed`);
   else ok(`${oauth.providerOAuthConfig(provider).label} local credentials removed`);
@@ -31811,6 +31872,17 @@ const commands = {
   rollback: dispatchRollback,
   schedule: cmdSchedule,
   daily: (_path) => cmdDaily(process.argv.slice(3)),
+  quickbooks: () => cmdQuickBooks(process.argv.slice(3)),
+  "quickbooks-run": (path) => {
+    const args = process.argv.slice(4);
+    if (args.length !== 2 || !["--definition-hash", "--provider-config-hash"].includes(args[0])) die("invalid QuickBooks scheduled invocation");
+    return cmdQuickBooksRun(path, args[0] === "--definition-hash"
+      ? { expectedDefinitionHash: args[1] } : { expectedProviderConfigHash: args[1] }).then((result) => {
+        console.log(JSON.stringify(result));
+        if (result.status === "error") process.exitCode = 1;
+        return result;
+      });
+  },
   folder: (path) => cmdFolder(path, process.argv.slice(4)),
   support: cmdSupport,
   tools: cmdLocalToolsInteractive,
@@ -31843,6 +31915,8 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "folder",
   "schedule",
   "daily",
+  "quickbooks",
+  "quickbooks-run",
 ]);
 
 // Health proves the Brain over HTTPS with the admin key and must never refresh
@@ -31923,6 +31997,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain migrate    <manifest>            apply pending schema migrations
     brain deploy     <manifest>            upload the worker with its bindings
     brain health     <manifest>            prove the install actually works
+    brain quickbooks schedule on|off|status <manifest>
+                                           QuickBooks refresh while this user is signed in
     brain daily      on|off|status <manifest>
                                            install, remove, or inspect one manifest-derived
                                            per-Brain/per-user daily import definition
