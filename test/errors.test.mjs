@@ -59,6 +59,7 @@ const INGEST_EXIT_FETCH = pathToFileURL(join(HERE, "fixtures", "ingest-exit-fetc
 const ISOLATE_SUPPORT_ROOT = pathToFileURL(join(HERE, "fixtures", "isolate-support-root.mjs")).href;
 const SIDE_EFFECT_TRIPWIRE = new URL("./fixtures/cli-side-effect-tripwire.mjs", import.meta.url).href;
 const DOCTOR_DEPENDENCIES = new URL("./fixtures/doctor-cli-preload.mjs", import.meta.url).href;
+const SUPPORT_ACL = new URL("./fixtures/support-journal-acl-preload.mjs", import.meta.url).href;
 const UNEXPECTED_CRASH = pathToFileURL(join(HERE, "fixtures", "unexpected-crash.mjs")).href;
 const UNWRITABLE_SUPPORT = pathToFileURL(join(HERE, "fixtures", "unwritable-support.mjs")).href;
 let fail = 0, ran = 0;
@@ -86,7 +87,7 @@ function cli(args, env = {}, options = {}) {
   // `wrangler login` on the machine running the suite is a credential, so pin
   // it off rather than letting the result depend on who is signed in.
   e.BRAIN_NO_WRANGLER_LOGIN = "1";
-  const imports = [SIDE_EFFECT_TRIPWIRE, ISOLATE_SUPPORT_ROOT, ...(options.imports || [])];
+  const imports = [SIDE_EFFECT_TRIPWIRE, ISOLATE_SUPPORT_ROOT, SUPPORT_ACL, ...(options.imports || [])];
   const nodeArguments = imports.flatMap((specifier) => ["--import", specifier]);
   const r = spawnSync(process.execPath, [...nodeArguments, CLI, ...args], {
     encoding: "utf-8", env: e, cwd: userRoot, timeout: 30_000,

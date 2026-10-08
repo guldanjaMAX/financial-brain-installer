@@ -286,11 +286,15 @@ async function writeAtomically(
   const fd = openSync(temporary, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
   let descriptorOpen = true;
   let openedInfo = null;
+  let openedIdentity = null;
   let writtenInfo = null;
   let publicationHandedOff = false;
   try {
     if (process.platform !== "win32") fchmodSync(fd, 0o600);
     openedInfo = fstatSync(fd);
+    // Windows file IDs can exceed Number's exact range. Cleanup authority
+    // must retain the native identity, never a rounded numeric inode.
+    openedIdentity = fstatSync(fd, { bigint: true });
     const openedPath = lstatSync(temporary);
     if (!isPrivateRegularFile(openedInfo, 1) ||
         !sameFile(openedInfo, openedPath)) {
@@ -375,6 +379,7 @@ async function writeAtomically(
           destination,
           descriptor: fd,
           publishedInfo: verified.info,
+          publishedIdentity: openedIdentity,
         }));
       } catch (error) {
         consumerFailed = true;
@@ -390,8 +395,8 @@ async function writeAtomically(
       }
       let consumptionError = null;
       try {
-        const consumedInfo = fstatSync(fd);
-        if (!sameInode(verified.info, consumedInfo) || consumedInfo.nlink !== 0) {
+        const consumedInfo = fstatSync(fd, { bigint: true });
+        if (!sameInode(openedIdentity, consumedInfo) || consumedInfo.nlink !== 0n) {
           refuse("the provenance-protection output was not consumed");
         }
       } catch (error) {
@@ -438,13 +443,12 @@ async function writeAtomically(
     return { destination, publishedInfo: verified.info };
   } catch (error) {
     const cleanupErrors = [];
-    const ownedInfo = writtenInfo ?? openedInfo;
     if (!publicationHandedOff) {
       for (const path of [destination, temporary]) {
-        if (!ownedInfo) break;
+        if (!openedIdentity) break;
         try {
-          const current = lstatSync(path);
-          if (sameInode(current, ownedInfo)) cleanupUnlinkSyncImpl(path);
+          const current = lstatSync(path, { bigint: true });
+          if (sameInode(current, openedIdentity)) cleanupUnlinkSyncImpl(path);
         } catch (cleanupError) {
           if (cleanupError?.code !== "ENOENT") cleanupErrors.push(cleanupError);
         }
@@ -741,7 +745,7 @@ export async function withDecryptedRecoveryArtifact(sourcePath, directory, key, 
     plaintext,
     key,
     options,
-    async ({ destination, descriptor, publishedInfo }) => {
+    async ({ destination, descriptor, publishedInfo, publishedIdentity }) => {
       let callbackFailed = false;
       let callbackError = null;
       let callbackResult;
@@ -768,12 +772,12 @@ export async function withDecryptedRecoveryArtifact(sourcePath, directory, key, 
       const cleanupErrors = [];
       let current = null;
       try {
-        current = lstatSync(destination);
+        current = lstatSync(destination, { bigint: true });
       } catch (error) {
         if (error?.code !== "ENOENT") cleanupErrors.push(error);
       }
       if (current) {
-        if (!sameInode(publishedInfo, current)) {
+        if (!sameInode(publishedIdentity, current)) {
           cleanupErrors.push(new Error("the temporary plaintext pathname changed before cleanup"));
         } else {
           try {
@@ -790,8 +794,8 @@ export async function withDecryptedRecoveryArtifact(sourcePath, directory, key, 
         if (error?.code !== "ENOENT") cleanupErrors.push(error);
       }
       try {
-        const after = fstatSync(descriptor);
-        if (!sameInode(publishedInfo, after) || after.nlink !== 0) {
+        const after = fstatSync(descriptor, { bigint: true });
+        if (!sameInode(publishedIdentity, after) || after.nlink !== 0n) {
           cleanupErrors.push(new Error("the temporary plaintext inode remains linked"));
         }
       } catch (error) {

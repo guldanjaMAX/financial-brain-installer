@@ -1,22 +1,29 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { cliTestEnvironment } from "./helpers/cli-test-environment.mjs";
 import { tokenStorageStatus } from "../connectors/google-auth.mjs";
+import { previewSupportJournal } from "../support-journal.mjs";
 
 const fixture = (name) => new URL(`./fixtures/${name}.mjs`, import.meta.url).href;
-function child(args, environment = {}, imports = []) {
+function child(args, environment = {}, imports = [], { hostPlatform = null, captureJournal = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "doctor-isolation-"));
   try {
-    return spawnSync(process.execPath, [
+    const result = spawnSync(process.execPath, [
+      ...(hostPlatform ? ["--import", "data:text/javascript," + encodeURIComponent(
+        `Object.defineProperty(process, "platform", { value: ${JSON.stringify(hostPlatform)} });`,
+      )] : []),
       "--import", fixture("cli-side-effect-tripwire"),
       "--import", fixture("isolate-support-root"),
+      "--import", fixture("support-journal-acl-preload"),
       ...imports.flatMap((name) => ["--import", fixture(name)]), ...args,
-    ], { encoding: "utf8", timeout: 20_000, cwd: root, env: cliTestEnvironment(root, environment) });
+    ], { encoding: "utf8", timeout: 20_000, cwd: root, env: cliTestEnvironment(root, { USERNAME: "fixture-user", SystemRoot: "C:\\Windows", ...environment }) });
+    if (captureJournal) result.journal = previewSupportJournal({ root });
+    return result;
   } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
@@ -78,16 +85,18 @@ test("scratch HOME still selects Keychain; an explicit fixture file selects no n
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+for (const hostPlatform of [...new Set([process.platform, "win32"])])
 for (const platform of ["darwin", "win32"]) {
-  for (const state of ["missing", "ready"]) test(`real doctor CLI isolates ${platform} ${state} diagnostics`, () => {
+  for (const state of ["missing", "ready"]) test(`real doctor CLI isolates ${platform} ${state} diagnostics on ${hostPlatform}`, () => {
     const result = child([fileURLToPath(new URL("../brain.mjs", import.meta.url)), "doctor"], {
       BRAIN_TEST_DOCTOR: state, BRAIN_TEST_DOCTOR_PLATFORM: platform,
-    }, ["doctor-cli-preload"]);
+    }, ["doctor-cli-preload"], { hostPlatform });
     const output = `${result.stdout}${result.stderr}`;
     assert.match(output, /TEST_DOCTOR_STAGE:dispatch/);
     assert.match(output, /TEST_DOCTOR_STAGE:local/);
     assert.match(output, /TEST_DOCTOR_STAGE:network/);
     assert.doesNotMatch(output, /TEST_SIDE_EFFECT_BLOCKED/);
+    if (hostPlatform === "win32" && state === "missing") assert.match(output, /TEST_SUPPORT_ACL_REACHED/);
     assert.equal(result.status, state === "ready" ? 0 : 1, output);
     const count = (stage) => output.split(`TEST_DOCTOR_STAGE:${stage}\n`).length - 1;
     assert.equal(count("google-storage"), 1);
@@ -122,6 +131,55 @@ test("tripwire permits a harmless child control", () => {
   assert.equal(result.stderr, "");
 });
 
+for (const failAcl of [false, true]) test(`Windows support journal reaches the injected ACL, failure=${failAcl}`, () => {
+  const module = new URL("../support-journal.mjs", import.meta.url).href;
+  const result = child(["--input-type=module", "-e", `
+    import { recordSupportEvent } from ${JSON.stringify(module)};
+    console.log('TEST_JOURNAL_REACHED');
+    try {
+      const event = recordSupportEvent({ command: 'doctor', source: 'installer', errorCode: 'COMMAND_FAILED',
+        productRelativeLocation: 'doctor.mjs' });
+      console.log(/^evt_[0-9a-f]{32}$/.test(event.event_id) ? 'TEST_JOURNAL_SAVED' : 'TEST_JOURNAL_INVALID');
+    } catch (error) {
+      if (error.code !== 'SUPPORT_JOURNAL_UNSAFE_PATH') throw error;
+      console.log('TEST_JOURNAL_REFUSED');
+    }
+  `], { BRAIN_TEST_SUPPORT_ACL_FAIL: failAcl ? "1" : "0" }, [], { hostPlatform: "win32" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /TEST_JOURNAL_REACHED/);
+  assert.match(result.stdout, /TEST_SUPPORT_ACL_REACHED/);
+  assert.match(result.stdout, failAcl ? /TEST_JOURNAL_REFUSED/ : /TEST_JOURNAL_SAVED/);
+  assert.doesNotMatch(result.stdout, failAcl ? /TEST_JOURNAL_SAVED/ : /TEST_JOURNAL_REFUSED/);
+  assert.doesNotMatch(result.stderr, /TEST_SIDE_EFFECT_BLOCKED/);
+});
+
+test("support ACL injection does not permit unrelated Windows host actions", () => {
+  const module = new URL("../operations/current-user-file.mjs", import.meta.url).href;
+  const result = child(["--input-type=module", "-e", `
+    import { restrictWindowsFileToCurrentUser } from ${JSON.stringify(module)};
+    console.log('TEST_OTHER_ACL_REACHED');
+    restrictWindowsFileToCurrentUser(process.env.HOME);
+  `], {}, [], { hostPlatform: "win32" });
+  assert.match(result.stdout, /TEST_OTHER_ACL_REACHED/);
+  assert.equal(result.status, 86);
+  assert.equal(result.stderr.trim(), "TEST_SIDE_EFFECT_BLOCKED:child_process.spawnSync");
+});
+
+test("the errors crash fixture writes its Windows support note through the injected ACL", () => {
+  const result = child([fileURLToPath(new URL("../brain.mjs", import.meta.url)), "whatsnew"],
+    {}, ["unexpected-crash"], { hostPlatform: "win32", captureJournal: true });
+  const output = `${result.stdout}${result.stderr}`;
+  assert.equal(result.status, 1, output);
+  assert.match(output, /unexpected error|bug in the installer/);
+  assert.match(output, /TEST_SUPPORT_ACL_REACHED/);
+  assert.match(output, /INTERNAL_ERROR/);
+  assert.doesNotMatch(output, /TEST_SIDE_EFFECT_BLOCKED/);
+  const events = result.journal.trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(events.length, 1);
+  assert.equal(events[0].error_code, "INTERNAL_ERROR");
+  assert.doesNotMatch(result.journal, /RAW_UNEXPECTED_CRASH_SENTINEL/);
+});
+
 test("owner doctor defaults still reach the real local diagnostics boundary", () => {
   const result = child([fileURLToPath(new URL("../brain.mjs", import.meta.url)), "doctor"]);
   assert.match(result.stdout, /Node/);
@@ -129,27 +187,38 @@ test("owner doctor defaults still reach the real local diagnostics boundary", ()
   assert.equal(result.stderr.trim(), "TEST_SIDE_EFFECT_BLOCKED:child_process.spawnSync");
 });
 
-test("the errors ingest preload keeps Google file reads away from Windows DPAPI", () => {
+for (const mode of [0o600, 0o666])
+test(`the errors ingest preload keeps Google file reads away from Windows DPAPI with mode ${mode.toString(8)}`, () => {
   const root = mkdtempSync(join(tmpdir(), "ingest-storage-isolation-"));
   try {
     mkdirSync(join(root, ".brain"));
     writeFileSync(join(root, ".brain", "google-tokens.json"), JSON.stringify({ google: { scopes: ["drive"] } }), { mode: 0o600 });
+    chmodSync(join(root, ".brain", "google-tokens.json"), mode);
     const keyPath = join(root, ".brain-admin-key");
     writeFileSync(keyPath, "fixture-admin", { mode: 0o600 });
     const storage = new URL("../connectors/google-auth.mjs", import.meta.url).href;
     const result = child(["--input-type=module", "-e", `
       Object.defineProperty(process, 'platform', { value: 'win32' });
-      const { loadTokens } = await import(${JSON.stringify(storage)});
+      const { loadTokens, saveTokens } = await import(${JSON.stringify(storage)});
+      const { readFileSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const path = join(process.env.BRAIN_INGEST_EXIT_USER_ROOT, '.brain', 'google-tokens.json');
+      const before = readFileSync(path);
       console.log('TEST_STORAGE_READ_REACHED');
       const record = loadTokens();
       console.log(record.google.scopes.length === 1 ? 'TEST_STORAGE_READ_OK' : 'TEST_STORAGE_READ_FAILED');
+      console.log(before.equals(readFileSync(path)) ? 'TEST_STORAGE_READ_UNCHANGED' : 'TEST_STORAGE_READ_MUTATED');
+      saveTokens({ google: { scopes: ['drive', 'gmail'] } });
+      console.log(loadTokens().google.scopes.length === 2 ? 'TEST_STORAGE_WRITE_OK' : 'TEST_STORAGE_WRITE_FAILED');
     `], {
       BRAIN_INGEST_EXIT_TEST: "drive-failed", BRAIN_INGEST_EXIT_USER_ROOT: root,
       BRAIN_TEST_ADMIN_KEY_FILE: keyPath, BRAIN_GOOGLE_TOKEN_STORE: "file",
-    }, ["ingest-exit-fetch"]);
+    }, ["ingest-exit-fetch"], { hostPlatform: "win32" });
     assert.match(result.stdout, /TEST_STORAGE_READ_REACHED/);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /TEST_STORAGE_READ_OK/);
+    assert.match(result.stdout, /TEST_STORAGE_READ_UNCHANGED/);
+    assert.match(result.stdout, /TEST_STORAGE_WRITE_OK/);
     assert.doesNotMatch(result.stderr, /TEST_SIDE_EFFECT_BLOCKED/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

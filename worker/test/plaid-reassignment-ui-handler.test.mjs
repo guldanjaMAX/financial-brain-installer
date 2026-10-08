@@ -30,14 +30,16 @@ const textOf = (node) => [node.textContent, ...node.children.map(textOf)].filter
 const button = (node, label) => findAll(node, "BUTTON").find((value) => value.textContent === label);
 const jsonCopy = (value) => JSON.parse(JSON.stringify(value));
 async function until(check, message) {
-  for (let tick = 0; tick < 100; tick += 1) {
+  const deadline = performance.now() + 5_000;
+  do {
     if (check()) return;
-    await new Promise((resolve) => setImmediate(resolve));
-  }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  } while (performance.now() < deadline);
+  if (check()) return;
   assert.fail(message);
 }
 
-async function connectedPage({ onReply = null } = {}) {
+async function connectedPage({ onReply = null, beforeRequest = null } = {}) {
   const fixture = await createProductFixture({ env: ENV });
   seedOwnedEntity(fixture, "household", "Household");
   seedOwnedEntity(fixture, "business-a", "Business A");
@@ -93,6 +95,7 @@ async function connectedPage({ onReply = null } = {}) {
         method: init.method || "GET", headers: { Cookie: owner.Cookie, ...init.headers }, body: init.body,
       });
       const body = path.endsWith("/reassign") ? JSON.parse(init.body) : null;
+      await beforeRequest?.(body);
       const response = await fixture.worker.fetch(request, fixture.env, ctx);
       if (body) {
         const reply = await response.clone().json();
@@ -287,9 +290,17 @@ test("a source-owner change after preview reaches the real refusal guard and wri
 test("a delayed real preview cannot replace a later reviewed target", async () => {
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
-  const state = await connectedPage({ onReply: async (call) => {
-    if (call.request.mode === "preview" && call.request.to_entity_slug === "business-a") await gate;
-  } });
+  const state = await connectedPage({
+    beforeRequest: async (body) => {
+      // Real I/O can take longer than hundreds of immediate event-loop turns.
+      if (body?.mode === "preview" && body.to_entity_slug === "business-a") {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    },
+    onReply: async (call) => {
+      if (call.request.mode === "preview" && call.request.to_entity_slug === "business-a") await gate;
+    },
+  });
   try {
     state.select.value = "business-a";
     const oldReview = state.review.onclick();

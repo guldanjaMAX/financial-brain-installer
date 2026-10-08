@@ -57,7 +57,8 @@ export function verifyWindowsDpapiSignature({
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
       env: { SystemRoot: systemRoot, BRAIN_DPAPI_SIGNATURE_FILE: helper.path },
       shell: false, stdio: ["ignore", "pipe", "pipe"], encoding: null,
-      timeout: 30_000, windowsHide: true,
+      // A cold Windows runner needs about 36 s to build and check the chain.
+      timeout: 120_000, windowsHide: true,
     });
   const valid = result?.status === 0 && !result?.error;
   if (Buffer.isBuffer(result?.stdout)) result.stdout.fill(0);

@@ -640,7 +640,12 @@ test("Windows bridge stays disabled with owner guidance when permanent daily imp
     assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
     assert.equal(native.mutations().some(({ args }) => args[0] === "/Delete"), false);
     assert.match(harness.finish[0], /old.*task.*paused/i);
-    assert.ok(harness.finish[0].includes(renderCliCommands("brain daily on <manifest>")));
+    // The callback receives raw copy; the terminal boundary renders commands.
+    for (const platform of ["darwin", "win32"]) {
+      assert.ok(renderCliCommands(harness.finish[0], { platform }).includes(
+        renderCliCommands("brain daily on <manifest>", { platform }),
+      ));
+    }
     assert.equal(bridgeArchive(manifestPath).bridge_snapshots[0].state, "paused");
   });
 });
@@ -707,7 +712,11 @@ test("Windows older manifest without a permanent task keeps the paused bridge an
       home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
     }), null, "completion removes the fence that would block a later daily on");
     assert.equal(bridgeArchive(manifestPath).bridge_snapshots[0].state, "paused");
-    assert.ok(harness.finish[0].includes(renderCliCommands("brain daily on <manifest>")));
+    for (const platform of ["darwin", "win32"]) {
+      assert.ok(renderCliCommands(harness.finish[0], { platform }).includes(
+        renderCliCommands("brain daily on <manifest>", { platform }),
+      ));
+    }
   });
 });
 

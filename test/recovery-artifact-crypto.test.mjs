@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 import {
   chmodSync,
@@ -483,6 +485,71 @@ test("a raced decryption destination is never deleted or overwritten", async () 
   assert.equal(readFileSync(restored, "utf8"), "raced owner file");
   assert.deepEqual(recoveryArtifactResidues(directory), []);
   unlinkSync(restored);
+});
+
+test("cleanup distinguishes large Windows file IDs that collide as Numbers", async () => {
+  const directory = privateDirectory();
+  const source = join(directory, "source.sql");
+  const encrypted = join(directory, "source.sql.fbrenc");
+  const restored = join(directory, "restored.sql");
+  const key = generateRecoveryArtifactKey((length) => Buffer.alloc(length, 84));
+  writeFileSync(source, "synthetic source", { mode: 0o600 });
+  await encryptRecoveryArtifact(source, encrypted, key);
+  const originals = { fstatSync: fs.fstatSync, lstatSync: fs.lstatSync };
+  const identities = new Map();
+  const base = 2n ** 60n;
+  let writes = 0;
+  let cleanupCalls = 0;
+  // NTFS file IDs can exceed Number's precision. Model that native stat
+  // contract while preserving every other field from the real filesystem.
+  for (const name of Object.keys(originals)) {
+    fs[name] = (target, options) => {
+      const stat = originals[name](target, options);
+      const native = originals[name](target, { bigint: true });
+      const identity = `${native.dev}:${native.ino}`;
+      if (!identities.has(identity)) identities.set(identity, base + BigInt(identities.size));
+      const exact = identities.get(identity);
+      stat.ino = options?.bigint ? exact : Number(exact);
+      return stat;
+    };
+  }
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(decryptRecoveryArtifact(encrypted, restored, key, {
+      writeSyncImpl() {
+        writes++;
+        writeFileSync(restored, "raced owner file", { mode: 0o600 });
+        throw new Error("synthetic destination race");
+      },
+      cleanupUnlinkSyncImpl(path) { cleanupCalls++; unlinkSync(path); },
+    }), /synthetic destination race/);
+    assert.equal(writes, 1, "the real decryption reached the destination race");
+    assert.ok(identities.size > 1);
+    assert.equal(new Set([...identities.values()].map(Number)).size, 1,
+      "distinct exact identities collide in the legacy Number representation");
+    assert.equal(readFileSync(restored, "utf8"), "raced owner file");
+    assert.equal(cleanupCalls, 1, "only the staging file was removed");
+    assert.deepEqual(recoveryArtifactResidues(directory), []);
+    unlinkSync(restored);
+    await decryptRecoveryArtifact(encrypted, restored, key);
+    assert.equal(readFileSync(restored, "utf8"), "synthetic source", "large-ID publication control succeeds");
+    let consumerPath;
+    await assert.rejects(withDecryptedRecoveryArtifact(encrypted, directory, key, (path) => {
+      consumerPath = path;
+      unlinkSync(path);
+      writeFileSync(path, "replacement owner file", { mode: 0o600 });
+    }), /temporary plaintext copy could not be removed/);
+    assert.ok(consumerPath, "the real consumer reached the replacement boundary");
+    assert.equal(readFileSync(consumerPath, "utf8"), "replacement owner file");
+    unlinkSync(consumerPath);
+    assert.equal(await withDecryptedRecoveryArtifact(encrypted, directory, key,
+      (path) => readFileSync(path, "utf8")), "synthetic source",
+    "large-ID consumption control cleans up its own plaintext");
+  } finally {
+    Object.assign(fs, originals);
+    syncBuiltinESMExports();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("encrypted-source mutation during plaintext publication is refused", async () => {

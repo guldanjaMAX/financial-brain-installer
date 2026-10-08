@@ -10,6 +10,7 @@ import { cmdConnect, supportErrorCode } from "../brain.mjs";
 import { acquireSourceIngestLock, sourceIngestLockPath } from "../operations/source-ingest-lock.mjs";
 import { authorize } from "../connectors/google-auth.mjs";
 import { ProviderOAuthError, authorizeProvider } from "../connectors/provider-oauth.mjs";
+import { cliTestEnvironment } from "./helpers/cli-test-environment.mjs";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "oauth-lock-recovery-"));
@@ -199,11 +200,11 @@ test("executable connect renders timeout recovery; regression mutation is red an
     registerHooks({ load(url, context, next) {
       const result = next(url, context);
       if (!url.endsWith("/connectors/google-auth.mjs") && !url.endsWith("/brain.mjs")) return result;
-      let source = String(result.source);
+      let source = String(result.source).replace(/\r?\n/g, process.env.FIXTURE_NEWLINE === "crlf" ? "\r\n" : "\n");
       if (url.endsWith("/connectors/google-auth.mjs")) {
         source = 'import { appendFileSync as recordFixtureDecision } from "node:fs";\n' + source;
         const inject = (name, code) => {
-          const pattern = new RegExp('export (?:async )?function ' + name + '\\([^\\n]*\\{\\n');
+          const pattern = new RegExp('export (?:async )?function ' + name + '\\([^\\n]*\\{\\r?\\n');
           if (!pattern.test(source)) throw new Error("fixture injection point missing");
           source = source.replace(pattern, (header) => header + code + '\n');
         };
@@ -222,12 +223,19 @@ test("executable connect renders timeout recovery; regression mutation is red an
   }
   writeFileSync(hook, 'import { registerHooks } from "node:module";\n(' + installFixtureHooks.toString() + ')();\n');
   try {
-    for (const mode of ["regression", "timeout", "success"]) {
+    for (const newline of ["lf", "crlf"]) for (const mode of ["regression", "timeout", "success"]) {
       writeFileSync(events, "");
-      const child = spawnSync(process.execPath, ["--import", hook, fileURLToPath(new URL("../brain.mjs", import.meta.url)), "connect", "google"], {
+      const child = spawnSync(process.execPath, [
+        "--import", new URL("./fixtures/cli-side-effect-tripwire.mjs", import.meta.url).href,
+        "--import", new URL("./fixtures/isolate-support-root.mjs", import.meta.url).href,
+        "--import", new URL("./fixtures/support-journal-acl-preload.mjs", import.meta.url).href,
+        "--import", hook, fileURLToPath(new URL("../brain.mjs", import.meta.url)), "connect", "google",
+      ], {
         encoding: "utf8",
-        env: { HOME: f.home, BRAIN_NO_WRANGLER_LOGIN: "1", FIXTURE_EVENTS: events, FIXTURE_MODE: mode },
+        timeout: 20_000,
+        env: cliTestEnvironment(f.home, { FIXTURE_EVENTS: events, FIXTURE_MODE: mode, FIXTURE_NEWLINE: newline }),
       });
+      assert.doesNotMatch(child.stderr, /TEST_SIDE_EFFECT_BLOCKED/);
       const decisions = readFileSync(events, "utf8").trim().split("\n");
       assert.deepEqual(decisions, mode === "success" ? ["authorize", "save"] : ["authorize"], child.stderr.match(/^(?:[A-Za-z]*Error): .*/m)?.[0] || child.stdout.replace(/\x1b\[[0-9;]*m/g, "").split("\n").find(line => /fail|unexpected/.test(line)));
       assert.equal(child.status, mode === "success" ? 0 : 1);

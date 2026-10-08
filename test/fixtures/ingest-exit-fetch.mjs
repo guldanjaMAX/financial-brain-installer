@@ -29,10 +29,11 @@ os.homedir = () => userRoot;
 syncBuiltinESMExports();
 
 // A file selector alone still migrates plaintext through native DPAPI on
-// Windows. Inject the storage options, preserving the real file reader and
-// writer while keeping this rendering/ingest fixture off every native store.
+// Windows. Read the fixture with native filesystem rules, without migrating
+// a read. Explicit writes use an in-memory protection double and ACL adapter.
 const googleStorage = new URL("../../connectors/google-auth.mjs", import.meta.url).href;
-const storageOptions = { backend: "file", platform: "linux", path: join(userRoot, ".brain", "google-tokens.json"), env: {} };
+const storageOptions = { backend: "file", platform: process.platform, migrateLegacy: false,
+  path: join(userRoot, ".brain", "google-tokens.json"), env: {} };
 registerHooks({
   load(url, context, nextLoad) {
     if (url !== googleStorage) return nextLoad(url, context);
@@ -43,6 +44,21 @@ registerHooks({
       source: `export * from ${JSON.stringify(original)};
         import * as original from ${JSON.stringify(original)};
         const options = ${JSON.stringify(storageOptions)};
+        const protectedRecords = new Map();
+        options.username = "fixture-user";
+        options.environment = { SystemRoot: "C:\\\\Windows" };
+        options.runAcl = () => ({ status: 0 });
+        options.runPowerShell = (_command, args, run) => {
+          const operation = args[args.indexOf("-Operation") + 1];
+          if (operation === "protect") {
+            const id = "fixture-protected-record-" + protectedRecords.size;
+            protectedRecords.set(id, Buffer.from(run.input));
+            return { status: 0, stdout: Buffer.from(id) };
+          }
+          const bytes = protectedRecords.get(run.input.toString());
+          if (operation !== "unprotect" || !bytes) throw new Error("fixture protection record missing");
+          return { status: 0, stdout: Buffer.from(bytes) };
+        };
         ${readers.map((name) => `export const ${name} = () => original.${name}(options);`).join("\n")}
         export const saveTokens = (store) => original.saveTokens(store, options);`,
     };

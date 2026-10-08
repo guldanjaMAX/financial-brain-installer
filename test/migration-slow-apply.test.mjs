@@ -454,7 +454,11 @@ test("slow migration support guidance matches the bounded retry contract", () =>
   assert.equal(recovery.retry, "safe_after_step");
   assert.match(recovery.title, /still applying a database change/i);
   assert.ok(recovery.next_steps.some((step) => /wait about 10 minutes/i.test(step)));
-  assert.ok(recovery.next_steps.some((step) => step.includes(renderCliCommands("brain update once more"))));
+  for (const platform of ["darwin", "win32"]) {
+    assert.ok(recovery.next_steps.some((step) => renderCliCommands(step, { platform }).includes(
+      renderCliCommands("brain update once more", { platform }),
+    )));
+  }
 });
 
 test("a recovered column must pass the same exact CHECK definition", async () => {
@@ -717,9 +721,11 @@ test("update preserves slow-migration wording and typed support code", async () 
   migrationError.supportCode = "MIGRATION_STILL_APPLYING";
   const error = await capturedUpgradeFailure(migrationError);
   assert.equal(error?.supportCode, "MIGRATION_STILL_APPLYING");
-  assert.ok((error?.message || "").startsWith(
-    renderCliCommands("Cloudflare is still applying a large database change. Your Brain is working normally. Nothing was lost. Wait about 10 minutes, then run brain update once more."),
-  ));
+  for (const platform of ["darwin", "win32"]) {
+    assert.ok(renderCliCommands(error?.message || "", { platform }).startsWith(
+      renderCliCommands("Cloudflare is still applying a large database change. Your Brain is working normally. Nothing was lost. Wait about 10 minutes, then run brain update once more.", { platform }),
+    ));
+  }
   assert.match(error?.message || "", /For your installer:/);
   assert.match(error?.message || "", /D1 recovery bookmark: fixture-bookmark/);
 });
@@ -741,9 +747,11 @@ test("update says documents remain paused only after the pause was installed", a
   migrationError.supportCode = "MIGRATION_STILL_APPLYING";
   const error = await capturedUpgradeFailure(migrationError, { paused: true });
   assert.equal(error?.supportCode, "MIGRATION_STILL_APPLYING");
-  assert.ok((error?.message || "").startsWith(
-    renderCliCommands("Cloudflare is still applying a large database change. Your Brain can still answer questions but won't take new documents until the update finishes. Nothing was lost. Wait about 10 minutes, then run brain update once more."),
-  ));
+  for (const platform of ["darwin", "win32"]) {
+    assert.ok(renderCliCommands(error?.message || "", { platform }).startsWith(
+      renderCliCommands("Cloudflare is still applying a large database change. Your Brain can still answer questions but won't take new documents until the update finishes. Nothing was lost. Wait about 10 minutes, then run brain update once more.", { platform }),
+    ));
+  }
 });
 
 test("update installer detail keeps the first slow-migration failure without network advice", async () => {
@@ -773,9 +781,11 @@ test("update installer detail keeps the first slow-migration failure without net
 test("ordinary update migration failures keep their existing rendering", async () => {
   const error = await capturedUpgradeFailure(new Error("ordinary migration failure"));
   assert.equal(error?.supportCode, undefined);
-  assert.ok((error?.message || "").startsWith(
-    renderCliCommands("The update stopped before its last check. Your Brain is working normally and nothing was lost. Run brain update once more; it picks up where it stopped."),
-  ));
+  for (const platform of ["darwin", "win32"]) {
+    assert.ok(renderCliCommands(error?.message || "", { platform }).startsWith(
+      renderCliCommands("The update stopped before its last check. Your Brain is working normally and nothing was lost. Run brain update once more; it picks up where it stopped.", { platform }),
+    ));
+  }
   assert.match(error?.message || "", /update stopped during migration: ordinary migration failure/);
 });
 

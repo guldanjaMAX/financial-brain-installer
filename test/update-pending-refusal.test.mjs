@@ -13,6 +13,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   classifyCliCredentialBoundary,
+  buildConfiguredDailyPlan,
   cmdUpdate,
   dispatchUpdateCli,
   readUpdateBacklog,
@@ -341,7 +342,8 @@ test("an empty backlog reaches the paused-deployment stage", async () => {
   });
 });
 
-test("verified update prints one mail handover line without an extra approval", async () => {
+for (const platform of ["darwin", "win32", "linux"])
+test(`verified update prints one mail handover line without an extra approval on ${platform}`, async () => {
   await withFixture(async ({ manifestPath }) => {
     const configured = fixtureManifest();
     configured.corpora = { microsoft: { enabled: true, mail_start_at: "2026-10-01T07:00:00.000Z" } };
@@ -355,16 +357,20 @@ test("verified update prints one mail handover line without an extra approval", 
     const result = await cmdUpdate(manifestPath, {
       ...updateHarness(manifestPath, async () => ({ pending: 0 }), events),
       dailyRefreshOptions: {
-        platform: "darwin",
+        platform,
+        principal: platform === "win32" ? "sid:S-1-5-21-fixture" : "uid:501",
         providerOAuth: {
           providerCredentialStatus: () => { credentialProbes++; return { connected: true }; },
         },
         legacySchedulerOptions: {
+          platform,
+          uid: 501,
           home: fixtureHome,
           launchctl: () => { schedulerReads++; return { status: 1, stdout: "", stderr: "" }; },
         },
         schedulerAdapter: { read: () => ({ exists: false }) },
         schedulerOptions: { home: fixtureHome, machineLockRoot: join(fixtureHome, "locks") },
+        bridgeOptions: { adapter: { inventory: () => ({ entries: [], ignored: 0 }) } },
       },
       askFn: async () => { approvals++; throw new Error("unexpected additional approval"); },
       reportUpdateFinish: (line) => finish.push(line),
@@ -375,9 +381,45 @@ test("verified update prints one mail handover line without an extra approval", 
     assert.equal(finish[0].split("\n").filter((line) => line.startsWith("Outlook mail")).length, 1);
     assert.match(finish[0], /2026-10-01T07:00:00.000Z.*earlier exported mail stays available with its existing citations/);
     assert.equal(approvals, 0);
-    assert.ok(schedulerReads > 0, "scheduler inspection used only the injected host adapter");
-    assert.ok(credentialProbes > 0, "provider inspection used only the injected credential status");
+    if (platform === "darwin") assert.ok(schedulerReads > 0, "scheduler inspection used only the injected host adapter");
+    else assert.equal(schedulerReads, 0, "this platform has no legacy LaunchAgent owner");
+    if (platform !== "linux") assert.ok(credentialProbes > 0, "provider inspection used only the injected credential status");
   });
+});
+
+test("legacy daily owner inventory skips unsupported platforms and preserves macOS inspection failures", async () => {
+  const manifest = fixtureManifest();
+  manifest.corpora = { microsoft: { enabled: true } };
+  let inspections = 0;
+  let plans = 0;
+  let failInspection = false;
+  const options = {
+    providerScheduler: {
+      statusProviderScheduler(provider) {
+        assert.equal(provider, "microsoft");
+        inspections++;
+        if (failInspection) throw new Error("fixture scheduler inspection failed");
+        return { installed: true, definitionMatches: true, loaded: true };
+      },
+    },
+    planDailyRefresh({ existingSchedulerOwners }) {
+      plans++;
+      return { sources: [{ key: "microsoft" }], owners: existingSchedulerOwners };
+    },
+  };
+  for (const platform of ["linux", "win32", "darwin"]) {
+    const plan = await buildConfiguredDailyPlan(manifest, "fixture.manifest.json", { ...options, platform });
+    assert.equal(plan.sources.length, 1, "the configured source reached the daily planner");
+    assert.deepEqual(plan.owners, platform === "darwin" ? ["microsoft"] : []);
+    assert.equal(inspections, platform === "darwin" ? 1 : 0);
+  }
+  assert.equal(plans, 3);
+  failInspection = true;
+  await assert.rejects(buildConfiguredDailyPlan(manifest, "fixture.manifest.json", {
+    ...options, platform: "darwin",
+  }), /fixture scheduler inspection failed/);
+  assert.equal(inspections, 2, "the failing macOS inspection reached the same healthy control boundary");
+  assert.equal(plans, 3, "an inspection error never becomes an empty ownership inventory");
 });
 
 test("production update integration restores daily imports only from explicit final-state proof", async () => {
