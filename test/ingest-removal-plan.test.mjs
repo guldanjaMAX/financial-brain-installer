@@ -303,8 +303,8 @@ test("separately approved provenance cleanup fences exact structural targets and
   const store = ingestPlanStore();
   try {
     store.put("upload:original");
-    store.put("upload:original#part1of2");
-    store.put("upload:original#part2of2");
+    store.put("upload:original#part1of2", { part: 1, part_count: 2, part_of: "original" });
+    store.put("upload:original#part2of2", { part: 2, part_count: 2, part_of: "original" });
     const families = [{ base_doc_uid: "upload:original", keep_doc_uids: ["upload:original#part1of2", "upload:original#part2of2"] }];
     const input = { families, request: store.request, assertOwned() {} };
     await assert.rejects(applyApprovedProvenanceFamily(input), /separately approved/);
@@ -332,8 +332,8 @@ test("approved structural Drive cleanup runs the aggregate guard before exact de
   const store = ingestPlanStore();
   try {
     store.put("drive:original");
-    store.put("drive:original#part1of2");
-    store.put("drive:original#part2of2");
+    store.put("drive:original#part1of2", { part: 1, part_count: 2, part_of: "original" });
+    store.put("drive:original#part2of2", { part: 2, part_count: 2, part_of: "original" });
     store.put("drive:neighbor");
     const families = [{ base_doc_uid: "drive:original",
       keep_doc_uids: ["drive:original#part1of2", "drive:original#part2of2"] }];
@@ -384,5 +384,65 @@ test("approved structural Drive cleanup runs the aggregate guard before exact de
     assert.deepEqual(actions, ["preview", "apply", "preview"]);
     assert.equal(store.calls.apply, 1);
     assert.deepEqual(store.uids(), ["drive:neighbor", "drive:original#part1of2", "drive:original#part2of2"]);
+  } finally { store.db.close(); }
+});
+
+
+for (const collision of [false, true]) {
+  test(`structural cleanup preserves independent originals, collision=${collision}`, async () => {
+    const store = ingestPlanStore();
+    try {
+      const base = "upload:records/original.txt";
+      const independent = collision ? `${base}#partner.txt` : `${base}.other.txt`;
+      store.put(base);
+      for (let part = 1; part <= 2; part++) {
+        store.put(`${base}#part${part}of2`, { part, part_count: 2, part_of: "records/original.txt" });
+      }
+      store.put(independent);
+      const families = [{ base_doc_uid: base, keep_doc_uids: [base], family_kind: "structural" }];
+      const observed = await previewIngestRemovals(store.env, { families });
+      assert.equal(observed.targets.length >= 2, true, "nonempty obsolete family reached the decision");
+      assert.deepEqual(observed.targets, [`${base}#part1of2`, `${base}#part2of2`]);
+      assert.equal(observed.excluded_documents, collision ? 1 : 0);
+      const result = await applyIngestRemovals(store.env, observed);
+      assert.equal(result.documents, 2);
+      assert.equal(store.calls.batches, 1);
+      assert.deepEqual(store.uids(), [base, independent].sort());
+    } finally { store.db.close(); }
+  });
+}
+
+test("structural membership requires exact part syntax and provenance; inconsistent keep refuses", async () => {
+  const store = ingestPlanStore();
+  try {
+    const base = "upload:records/original.txt";
+    store.put(base);
+    const rejected = [
+      ["#partner.txt", { part_of: "records/original.txt" }],
+      ["#part01of2", { part_of: "records/original.txt" }],
+      ["#part0of2", { part_of: "records/original.txt" }],
+      ["#part3of2", { part_of: "records/original.txt" }],
+      ["#part1of1", { part_of: "records/original.txt" }],
+      ["#part1of2.txt", { part_of: "records/original.txt" }],
+      ["#part1of2\n", { part_of: "records/original.txt" }],
+      ["#part1of2", {}],
+      ["#part2of2", { part_of: "records/neighbor.txt" }],
+      ["#part1of3", { part_of: "records/original.txt ", part: 1 }],
+      ["#part2of3", { part_of: "records/original.txt", part: 1 }],
+    ];
+    for (const [suffix, meta] of rejected) store.put(base + suffix, meta);
+    const valid = `${base}#part3of3`;
+    store.put(valid, { part: 3, part_count: 3, part_of: base });
+    const family = { base_doc_uid: base, keep_doc_uids: [base], family_kind: "structural" };
+    const observed = await previewIngestRemovals(store.env, { families: [family] });
+    assert.deepEqual(observed.targets, [valid], "a verified obsolete part reaches the plan");
+    assert.equal(observed.excluded_documents, rejected.length);
+    await assert.rejects(previewIngestRemovals(store.env, { families: [{ ...family,
+      keep_doc_uids: [base, `${base}#part1of2`] }] }), /keep.*belong/);
+    assert.equal(store.calls.batches, 0, "inconsistent keep stops before writes");
+    await applyIngestRemovals(store.env, observed);
+    assert.equal(store.calls.batches, 1);
+    assert.equal(store.uids().includes(valid), false);
+    assert.ok(rejected.every(([suffix]) => store.uids().includes(base + suffix)));
   } finally { store.db.close(); }
 });

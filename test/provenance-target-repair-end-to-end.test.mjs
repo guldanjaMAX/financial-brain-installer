@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { prepare, walk } from "../ingest/run.mjs";
+import { prepare, walk, splitOversized } from "../ingest/run.mjs";
 import { applyApprovedProvenanceFamily } from "../operations/ingest-removal-plan.mjs";
 import { RECOVERY_EXPORT_TABLES } from "../operations/cloudflare-recovery-adapter.mjs";
 import { collectPrivateLocalProvenanceAssessment } from
@@ -22,6 +22,7 @@ import {
   ProvenanceTargetCliError,
   applyProvenanceTargetRepair,
   previewProvenanceTargetRepair,
+  renderProvenanceTargetRepairReceipt,
 } from "../operations/provenance-target-cli.mjs";
 import {
   formatPrivateProvenanceAcceptedResolutionRequest,
@@ -400,7 +401,8 @@ function orchestratorHarness(fixture, install) {
       state.stages.push("family.reconcile");
       await assertOwned();
       const removed = await applyApprovedProvenanceFamily({
-        families: [{ base_doc_uid: family.base_doc_uid, keep_doc_uids: [...family.keep_doc_uids] }],
+        families: [{ base_doc_uid: family.base_doc_uid, original_id: family.original_id, keep_doc_uids: [...family.keep_doc_uids] }],
+        onExcluded: count => { state.captures.excluded = count; },
         approvalId,
         assertOwned,
         request: async ({ body }) => (await requestJson({
@@ -416,26 +418,31 @@ function orchestratorHarness(fixture, install) {
         base_doc_uid: family.base_doc_uid,
         keep_doc_uids: [...family.keep_doc_uids],
         removed_count: removed,
+        excluded_count: state.captures.excluded,
       };
     },
     drainVectorOutbox: async ({ scope, adminAccess, assertOwned }) => {
       state.stages.push("vectors.drain");
       assert.equal(scope, "global");
       await assertOwned();
-      const { value: drain } = await requestJson({
-        path: "/api/admin/brain/drain",
-        body: {},
-        adminAccess,
-        label: "global vector drain",
-      });
-      const { value: documents } = await requestJson({
-        method: "GET",
-        path: "/api/admin/brain/documents",
-        adminAccess,
-        label: "post-drain vector readiness",
-      });
-      state.captures.drainResponse = drain;
-      return { complete: drain.remaining === 0, readiness: documents.vector_readiness };
+      // Deletes can require a second confirmation pass after the replacement
+      // upsert. Exercise the real drain until its exact readback is ready.
+      for (let round = 0; round < 10; round++) {
+        await assertOwned();
+        const { value: drain } = await requestJson({
+          path: "/api/admin/brain/drain", body: {}, adminAccess,
+          label: "global vector drain",
+        });
+        const { value: documents } = await requestJson({
+          method: "GET", path: "/api/admin/brain/documents", adminAccess,
+          label: "post-drain vector readiness",
+        });
+        state.captures.drainResponse = drain;
+        if (drain.remaining === 0 && documents.vector_readiness.ready === true) {
+          return { complete: true, readiness: documents.vector_readiness };
+        }
+      }
+      throw new Error("synthetic vector provider did not confirm the exact family drain");
     },
     recordResultFamily: async ({ request, adminAccess, assertOwned }) => {
       state.stages.push("result-family.record");
@@ -650,7 +657,7 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
     LOCATOR,
     CONTENT,
     digest(CONTENT),
-    preview.privateContext.privatePlan.seal.original_id,
+    preview.privateContext.privatePlan.seal.targets[0].original_id,
   ]) {
     assert.equal(serializedPreview.includes(privateValue), false, "public preview leaked private target data");
   }
@@ -1375,4 +1382,124 @@ test("a newer adjudicated exclusion demotes acceptance across CLI replay and rec
     "source_original_accepted_resolution_history_advanced",
   );
   assert.equal(currentAcceptedCount(recoveredBrain), 0);
+});
+
+for (const shape of ["control", "prefix", "part-syntax", "conflicting-binding"]) {
+ const collision = shape !== "control";
+ test(`R3 approved real provenance repair preserves an independent original, shape=${shape}`, async t => {
+  const fixture = await createProductFixture();
+  t.after(() => fixture.close());
+  const install = localInstall(t, collision ? 'collision' : 'control');
+  attachVectorIndex(fixture);
+  const harness = orchestratorHarness(fixture, install);
+  await registerSyntheticSource(fixture,harness);
+  const other = shape === "control" ? `${LOCATOR}.other.txt`
+    : shape === "prefix" ? `${LOCATOR}#partner.txt` : `${LOCATOR}#part1of2`;
+  // The Worker upload protocol also accepts IDs without a filename extension.
+  // Prepare supported text first, then assign that independent upload identity.
+  const preparedLocator = shape === "part-syntax" || shape === "conflicting-binding"
+    ? `${LOCATOR}.other.txt` : other;
+  const otherPath = join(install.root,preparedLocator);
+  writeFileSync(otherPath,'Independent synthetic document with its own original identity.');
+  const otherFile = walk(install.root).files.find(file=>file.rel===preparedLocator);
+  assert.ok(otherFile,'independent original discovered by real local walker');
+  const prepared = await prepare(otherFile,{sourceName:SOURCE});
+  assert.ok(prepared.envelope,'real preparation accepted independent original');
+  prepared.envelope.source_id = other;
+  assert.equal(prepared.envelope.metadata?.part_of,undefined);
+  const { value: seed } = await harness.adminPost('/api/admin/brain/ingest/batch',
+    {docs:[prepared.envelope]},'seed independent original');
+  assert.equal(seed.created,1);
+  const uid = `${SOURCE}:${other}`;
+  const independent = fixture.first('SELECT doc_uid,meta FROM documents WHERE doc_uid=?',uid);
+  assert.ok(independent);
+  assert.equal(JSON.parse(independent.meta).part_of,undefined);
+  const independentBinding=fixture.first('SELECT b.original_id FROM source_original_result_bindings b JOIN documents d ON d.document_revision_id=b.document_revision_id WHERE d.doc_uid=?',uid);
+  assert.ok(independentBinding,'Worker bound the independent raw original');
+  if (shape === "conflicting-binding") {
+    // Even matching mutable metadata cannot override the authenticated original.
+    fixture.raw("UPDATE documents SET meta=? WHERE doc_uid=?", JSON.stringify({
+      ...JSON.parse(independent.meta), part_of: LOCATOR, part: 1, part_count: 2,
+    }), uid);
+  }
+  await harness.adminPost('/api/admin/brain/drain',{},'seed drain');
+  const preview = await previewProvenanceTargetRepair(install.invocation(),harness.dependencies);
+  assert.equal(preview.publicPlan.can_apply,true);
+  assert.equal(preview.publicPlan.target_count,1);
+  assert.notEqual(independentBinding.original_id,preview.privateContext.privatePlan.seal.targets[0].original_id,'independent document belongs to a different authenticated original');
+  assert.equal(preview.privateContext.family.base_doc_uid,`${SOURCE}:${LOCATOR}`);
+  assert.deepEqual(preview.privateContext.family.keep_doc_uids,[`${SOURCE}:${LOCATOR}`]);
+  let receipt,error;
+  try { receipt = await applyProvenanceTargetRepair(
+    install.invocation(preview.publicPlan.approval_id),harness.dependencies); }
+  catch(caught) { error=caught; receipt=caught.receipt; }
+  assert.ok(receipt,'legitimate owner approval reached executor receipt');
+  if(error) assert.equal(error.stage,'result_family_record','a preserved outsider cannot become target-family proof');
+  else assert.equal(receipt.complete,true);
+  assert.ok(harness.state.stages.includes('family.reconcile'));
+  const exactWrites = harness.state.requests.filter(r=>r.path==='/api/admin/brain/ingest-removal-plan'&&r.body.action==='apply');
+  const independentRemains = !!fixture.first('SELECT doc_uid FROM documents WHERE doc_uid=?',uid);
+  assert.ok(fixture.first('SELECT doc_uid FROM documents WHERE doc_uid=?',`${SOURCE}:${LOCATOR}`),'approved original is retained');
+  console.log(`R3 evidence: collision=${collision} complete=${receipt.complete} exact_apply_calls=${exactWrites.length} removed=${harness.state.captures.reconcileResponse.documents} independent_remaining=${independentRemains}`);
+  assert.equal(exactWrites.length, 0, 'neither arm has obsolete verified members');
+  const previews = harness.state.requests.filter(r =>
+    r.path === '/api/admin/brain/ingest-removal-plan' && r.body.action === 'preview');
+  assert.equal(previews.length, 2, 'the authenticated family decision and readback were reached');
+  assert.equal(harness.state.captures.excluded, collision ? 1 : 0);
+  assert.equal(receipt.reconciliation.excluded_count, collision ? 1 : 0);
+  if (collision) {
+    const text = renderProvenanceTargetRepairReceipt(receipt);
+    assert.match(text, /preserved 1 stored document/);
+    assert.equal(text.includes(other), false);
+    assert.equal(text.includes(independentBinding.original_id), false);
+  }
+  if (collision) assert.equal(error.stage, 'result_family_record', 'inconsistent family proof refuses');
+  else assert.equal(receipt.complete, true, 'the independent nonmatching control completes');
+  assert.equal(independentRemains,true,'one-original approval must preserve independent prefix-sharing original');
+ });
+}
+
+
+test("approved provenance repair removes authenticated obsolete parts of its sealed original", async t => {
+  const fixture = await createProductFixture();
+  t.after(() => fixture.close());
+  const install = localInstall(t, "verified-parts");
+  attachVectorIndex(fixture);
+  const harness = orchestratorHarness(fixture, install);
+  await registerSyntheticSource(fixture, harness);
+  const file = walk(install.root).files.find(file => file.rel === LOCATOR);
+  const prepared = await prepare(file, { sourceName: SOURCE });
+  const parts = splitOversized(prepared.envelope, Math.ceil(prepared.envelope.content.length / 2));
+  assert.equal(parts.length, 2);
+  const { value: seeded } = await harness.adminPost("/api/admin/brain/ingest/batch",
+    { docs: parts }, "seed verified obsolete parts");
+  assert.equal(seeded.created, 2);
+  await harness.adminPost("/api/admin/brain/drain", {}, "seed drain");
+  const preview = await previewProvenanceTargetRepair(install.invocation(), harness.dependencies);
+  assert.equal(preview.publicPlan.can_apply, true);
+  const sealed = preview.privateContext.family.original_id;
+  assert.equal(sealed, preview.privateContext.privatePlan.seal.targets[0].original_id);
+  const bindings = fixture.rows("SELECT DISTINCT original_id FROM source_original_result_bindings");
+  assert.equal(bindings.length, 1);
+  assert.equal(bindings[0].original_id, sealed);
+  const families = [{ base_doc_uid: `${SOURCE}:${LOCATOR}`, keep_doc_uids: [],
+    family_kind: "structural", original_id: sealed }];
+  const validPlan = await harness.adminPost("/api/admin/brain/ingest-removal-plan",
+    { action: "preview", families }, "verified nonempty obsolete family");
+  assert.equal(validPlan.value.documents, 2);
+  const refused = await harness.adminPost("/api/admin/brain/ingest-removal-plan",
+    { action: "preview", families: [{ ...families[0], original_id: `hmac-sha256:${"0".repeat(64)}` }] },
+    "mismatched original seal", null);
+  assert.equal(refused.response.status, 409);
+  assert.equal(fixture.rows("SELECT doc_uid FROM documents").length, 2);
+  assert.equal(harness.state.requests.some(r => r.body?.action === "apply"), false);
+  const receipt = await applyProvenanceTargetRepair(
+    install.invocation(preview.publicPlan.approval_id), harness.dependencies);
+  assert.equal(receipt.complete, true);
+  assert.equal(receipt.reconciliation.removed_count, 2);
+  const writes = harness.state.requests.filter(r =>
+    r.path === "/api/admin/brain/ingest-removal-plan" && r.body.action === "apply");
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].body.targets, parts.map(p => `${SOURCE}:${p.source_id}`).sort());
+  assert.deepEqual(fixture.rows("SELECT doc_uid FROM documents").map(row => row.doc_uid), [`${SOURCE}:${LOCATOR}`]);
 });

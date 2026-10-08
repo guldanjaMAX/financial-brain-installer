@@ -126,7 +126,9 @@ function checkedPreview(value) {
       typeof value.marker.nonce !== "string" || !value.marker.nonce ||
       !Number.isSafeInteger(value.marker.generation) || value.marker.generation < 0 ||
       !Array.isArray(value.targets) || value.targets.some((uid) => typeof uid !== "string" || !uid) ||
-      new Set(value.targets).size !== value.targets.length || value.documents !== value.targets.length) {
+      new Set(value.targets).size !== value.targets.length || value.documents !== value.targets.length ||
+      (value.excluded_documents !== undefined &&
+        (!Number.isSafeInteger(value.excluded_documents) || value.excluded_documents < 0))) {
     fail("The Brain did not return an exact authenticated removal inventory.");
   }
   return value;
@@ -172,7 +174,7 @@ async function applyGuardedTargets({ plan, sourceApproval, send, verifyLocal = (
  */
 export async function applyApprovedProvenanceFamily({
   families, approvalId, base, adminKey, assertOwned,
-  sourcePlan = null, sourceApproval,
+  sourcePlan = null, sourceApproval, onExcluded = () => {},
   fetchImpl = fetch, request = requestIngestRemovalPlan,
 }) {
   if (!validFingerprint(approvalId) || !Array.isArray(families) || families.length !== 1 ||
@@ -187,6 +189,7 @@ export async function applyApprovedProvenanceFamily({
     return request({ base, adminKey, body, fetchImpl });
   };
   const observed = checkedPreview(await send({ action: "preview", families: selectors }));
+  onExcluded(observed.excluded_documents ?? 0);
   // The current provenance executor only repairs local uploads. A caller
   // extending it to Drive must also supply the reviewed aggregate inventory
   // covering this family; absent or unrelated context cannot waive that gate.
@@ -230,13 +233,15 @@ export function createIngestRemovalReview({
   const preview = async (families, expectedMarker = null) => {
     let marker = expectedMarker;
     const targets = new Set();
+    let excluded = 0;
     for (let index = 0; index < families.length || index === 0; index += 50) {
       const part = checkedPreview(await send({ action: "preview", families: families.slice(index, index + 50), marker }));
       if (marker && removalDigest(marker) !== removalDigest(part.marker)) fail("Stored inventory or runtime changed; run ingestion again.");
       marker = part.marker;
+      excluded += part.excluded_documents ?? 0;
       for (const uid of part.targets) targets.add(uid);
     }
-    return { marker, targets: [...targets].sort() };
+    return { marker, targets: [...targets].sort(), excluded_documents: excluded };
   };
 
   const finish = async ({ sourcePlan = null, requireSourceApproval = false, familyKind = "structural", providerApproval = null, expiresAt = null, notice = "" } = {}) => {
@@ -253,6 +258,9 @@ export function createIngestRemovalReview({
       return;
     }
     const observed = await preview(families);
+    if (observed.excluded_documents) {
+      console.warn(`Source ${source}: preserved ${observed.excluded_documents} stored document(s) whose names overlap a family but whose membership was not verified.`);
+    }
     if (!observed.targets.length) {
       delete state.ingest_removal_plan;
       delete state.ingest_pending_families;

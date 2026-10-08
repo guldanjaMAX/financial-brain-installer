@@ -49,7 +49,7 @@ export async function previewIngestRemovals(env, { families = [], marker = null 
   const result = await forgetFamilies(env, { families, dryRun: true });
   const after = await ingestRemovalMarker(env);
   if (!same(before, after)) throw new Error("Stored inventory changed during preview; plan ingestion again.");
-  return { marker: after, targets: [...result.targets].sort(), documents: result.documents };
+  return { marker: after, targets: [...result.targets].sort(), documents: result.documents, excluded_documents: result.excluded_documents || 0 };
 }
 
 /** Apply exact physical identities, never a freshly expanded family selector. */

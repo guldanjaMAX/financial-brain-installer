@@ -10924,10 +10924,13 @@ export function provenanceTargetDependencies(options = {}) {
       throw new TypeError("the exact structural family plan is invalid");
     }
     await assertOwned();
+    let excluded = 0;
     const removed = await state.reconcileFamilies({
+      onExcluded: (count) => { excluded = count; },
       approvalId,
       families: [{
         base_doc_uid: family.base_doc_uid,
+        ...(family.original_id ? { original_id: family.original_id } : {}),
         keep_doc_uids: family.keep_doc_uids,
       }],
       assertOwned,
@@ -10946,6 +10949,7 @@ export function provenanceTargetDependencies(options = {}) {
       base_doc_uid: family.base_doc_uid,
       keep_doc_uids: family.keep_doc_uids,
       removed_count: removed,
+      excluded_count: excluded,
     });
   };
 

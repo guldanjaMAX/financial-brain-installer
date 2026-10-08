@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
+import worker from "../worker/src/index.js";
+import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -401,6 +404,7 @@ test("real Brain adapter keeps admin state opaque and lease-guards complete exac
     scope: "exact_structural_family",
     source: SOURCE,
     base_doc_uid: `${SOURCE}:records/report.txt`,
+    original_id: `hmac-sha256:${"a".repeat(64)}`,
     keep_doc_uids: envelopes.map((item) => `${item.source_type}:${item.source_id}`),
   };
   const reconciliation = await dependencies.reconcileFamily({
@@ -412,6 +416,7 @@ test("real Brain adapter keeps admin state opaque and lease-guards complete exac
   assert.equal(reconciliation.removed_count, 1);
   assert.deepEqual(state.reconciliations, [[{
     base_doc_uid: family.base_doc_uid,
+    original_id: family.original_id,
     keep_doc_uids: family.keep_doc_uids,
   }]]);
 
@@ -554,3 +559,57 @@ test("runtime inventory exactly matches the local npm pack and rejects nested sy
     /symbolic link/,
   );
 });
+
+
+for (const collision of [false, true]) {
+  test(`production structural adapter deletes only verified parts, collision=${collision}`, async t => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-structural-adapter-")));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const keyPath = join(root, "fixture-admin-key");
+    writeFileSync(keyPath, randomBytes(32).toString("hex"), { mode: 0o600 });
+    const key = () => readFileSync(keyPath, "utf8");
+    const store = ingestPlanStore();
+    t.after(() => store.db.close());
+    store.env.ADMIN_KEY = key();
+    const base = "localdocs:records/original.txt";
+    const independent = collision ? `${base}#partner.txt` : `${base}.other.txt`;
+    store.put(base);
+    for (let part = 1; part <= 2; part++) {
+      store.put(`${base}#part${part}of2`, { part, part_count: 2, part_of: "records/original.txt" });
+    }
+    store.put(independent);
+    store.put("localdocs:declared-neighbor", { family_of: base });
+    const calls = [];
+    let leaseChecks = 0;
+    const assertOwned = () => { leaseChecks++; };
+    const dependencies = provenanceTargetDependencies({
+      resolveAdminKey: key,
+      launchctl() { throw new Error("injected scheduler refusal"); },
+      fetchImpl: async (url, init) => {
+        assert.equal(new URL(url).host, "fixture.invalid");
+        assert.equal(new URL(url).pathname, "/api/admin/brain/ingest-removal-plan");
+        calls.push(JSON.parse(init.body));
+        return worker.fetch(new Request(url, init), store.env, { waitUntil() {} });
+      },
+    });
+    const manifest = { brain: { domain: "fixture.invalid" } };
+    const manifestPath = join(root, "manifest.json");
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const adminAccess = await dependencies.resolveDurableAdminAccess({ manifest, manifestPath, assertOwned });
+    const family = { scope: "exact_structural_family", source: "localdocs",
+      base_doc_uid: base, keep_doc_uids: [base] };
+    await assert.rejects(dependencies.reconcileFamily({ family, adminAccess, assertOwned }), /separately approved/);
+    assert.equal(calls.length, 0);
+    const result = await dependencies.reconcileFamily({
+      family, approvalId: "a".repeat(64), adminAccess, assertOwned,
+    });
+    assert.equal(result.complete, true);
+    assert.ok(leaseChecks > 3);
+    assert.deepEqual(calls.map(call => call.action), ["preview", "apply", "preview"]);
+    assert.deepEqual(calls[1].targets, [`${base}#part1of2`, `${base}#part2of2`]);
+    assert.equal(result.removed_count, 2);
+    assert.equal(result.excluded_count, collision ? 1 : 0);
+    assert.deepEqual(store.uids(), [base, independent, "localdocs:declared-neighbor"].sort());
+    assert.equal(store.calls.batches, 1);
+  });
+}

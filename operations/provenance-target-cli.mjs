@@ -855,6 +855,7 @@ async function buildPrivateContext(requestedInvocation, dependencies, lease) {
       source: invocation.source,
       locator: invocation.target,
       base_doc_uid: `${invocation.source}:${invocation.target}`,
+      original_id: sealedOriginalId(privatePlan),
       keep_doc_uids: Object.freeze(envelopes.map((envelope) =>
         `${envelope.source_type}:${envelope.source_id}`)),
     }),
@@ -926,7 +927,9 @@ function validateReconciliation(value, family) {
   if (!plainObject(value) || value.complete !== true || value.scope !== family.scope ||
       value.source !== family.source || value.base_doc_uid !== family.base_doc_uid ||
       !exactJson(value.keep_doc_uids, family.keep_doc_uids) ||
-      !Number.isSafeInteger(value.removed_count) || value.removed_count < 0) {
+      !Number.isSafeInteger(value.removed_count) || value.removed_count < 0 ||
+      (value.excluded_count !== undefined &&
+        (!Number.isSafeInteger(value.excluded_count) || value.excluded_count < 0))) {
     throw new TypeError("structural reconciliation did not prove the exact target family boundary");
   }
   return value;
@@ -1000,6 +1003,7 @@ function publicSuccessReceipt(context, ingest, reconciliation, familyRecord, acc
       performed: reconciliation.performed === true,
       exact_structural_family: reconciliation.performed === true,
       removed_count: reconciliation.removed_count,
+      excluded_count: reconciliation.excluded_count ?? 0,
     }),
     result_family: Object.freeze({
       recorded_or_replayed: familyRecord.recorded || familyRecord.replayed,
@@ -1033,6 +1037,7 @@ export async function applyProvenanceTargetRepair(input, dependencies = {}) {
   const lease = await acquireInvocationLease(invocation, dependencies);
   const completed = [];
   let context = null;
+  let reconciliation = Object.freeze({ performed: false, removed_count: 0, excluded_count: 0 });
   try {
     await lease.assertOwned();
     context = await buildPrivateContext(invocation, dependencies, lease);
@@ -1082,10 +1087,6 @@ export async function applyProvenanceTargetRepair(input, dependencies = {}) {
       created: 0,
       updated: 0,
       unchanged: 0,
-    });
-    let reconciliation = Object.freeze({
-      performed: false,
-      removed_count: 0,
     });
     if (!reverificationOnly) {
       const ingestResponse = await guardedMutation(
@@ -1266,7 +1267,15 @@ export async function applyProvenanceTargetRepair(input, dependencies = {}) {
     completed.push(APPLY_STAGES[7]);
     return publicSuccessReceipt(context, ingest, reconciliation, familyRecord, acceptedRecord);
   } catch (error) {
-    if (error instanceof ProvenanceTargetCliError) throw error;
+    if (error instanceof ProvenanceTargetCliError) {
+      if (reconciliation.excluded_count > 0) {
+        error.receipt = Object.freeze({ ...error.receipt, reconciliation: Object.freeze({
+          performed: reconciliation.performed, removed_count: reconciliation.removed_count,
+          excluded_count: reconciliation.excluded_count,
+        }) });
+      }
+      throw error;
+    }
     throw new ProvenanceTargetCliError(
       context ? "apply_orchestration" : "preview_recompute",
       invocation.source,
@@ -1282,9 +1291,13 @@ export function renderProvenanceTargetRepairReceipt(receipt) {
   if (!plainObject(receipt) || receipt.operation !== "provenance-target-repair") {
     throw new TypeError("provenance target repair receipt is invalid");
   }
+  const exclusions = receipt.reconciliation?.excluded_count > 0
+    ? [`Source ${receipt.source.id}: preserved ${receipt.reconciliation.excluded_count} stored document(s) whose family membership was not verified.`]
+    : [];
   if (receipt.complete !== true) {
     return [
       "One-file provenance repair is incomplete.",
+      ...exclusions,
       `It stopped at ${receipt.failed_stage}. No whole-source completion claim was made.`,
     ].join("\n");
   }
@@ -1294,6 +1307,7 @@ export function renderProvenanceTargetRepairReceipt(receipt) {
       ? "One-file provenance proof refresh is complete."
       : "One-file provenance repair is complete.",
     `Source ${receipt.source.id}: ${receipt.result_family.document_count} current document(s), ${receipt.result_family.chunk_count} cited chunk(s).`,
+    ...exclusions,
     reverified
       ? "The existing exact result family and accepted resolution were reverified without reingest, family cleanup, or a vector-queue drain."
       : "The exact result family was recorded and reverified, then its one-target accepted resolution was recorded and reverified.",
