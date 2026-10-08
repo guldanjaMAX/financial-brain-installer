@@ -9,6 +9,21 @@ const control=()=>recordedControl(buildCases(fixture));
 test('synthetic G12: ten useful exact answers and two reached correct refusals',()=>{
  const c=control();const r=evaluate(c);assert.equal(r.ready,true);assert.equal(r.supported_correct,10);assert.equal(r.correct_refusal,2);assert.equal(r.wrong_money,0);assert.equal(r.citations_checked,17);
 });
+test('case builder refuses unsupported period or option basis instead of labeling it accrual',()=>{
+ const good=buildCases(fixture);assert.equal(good.length,12);assert.equal(evaluate(recordedControl(good)).ready,true);
+ assert.deepEqual(buildCases(fixture,{period:{...fixture.period,basis:'accrual'}}),good);
+ assert.deepEqual(buildCases(fixture,{basis:'accrual'}),good);
+ for(const basis of ['cash','unknown','',null,undefined]){
+  for(const location of ['period','options']){
+   let reads=0;
+   const options=location==='period'?{basis:'accrual',period:{start:fixture.period.start,end:fixture.period.end}}:{period:{...fixture.period}};
+   // Preserve the getter to prove that the requested decision was reached.
+   Object.defineProperty(location==='period'?options.period:options,'basis',{get(){reads++;return basis;}});
+   assert.throws(()=>buildCases(fixture,options),{code:'ORACLE_BASIS_UNSUPPORTED',reason:'unsupported_basis',stage:'basis'});
+   assert.ok(reads>0,'basis request inspected before generating claims');
+  }
+ }
+});
 test('five required mutants fail independently after their comparison stages, with green base',()=>{
  const base=control();assert.equal(evaluate(base).ready,true);
  const arms=[['wrong-total',c=>c.responses[0].annotation.claims[0].minor='120001','wrong_money'],['wrong-sign',c=>c.responses[7].annotation.claims[0].minor='-30000','wrong_money'],['missing-item',c=>c.responses[0].annotation.claims.pop(),'missing_claim'],['stale-asof',c=>c.responses[2].annotation.claims[0].scope.end='2025-01-30','wrong_scope'],['uncited-number',c=>c.responses[2].annotation.claims[0].citations=[],'wrong_citation']];

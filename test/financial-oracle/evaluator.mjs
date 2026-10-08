@@ -1,15 +1,18 @@
 // Independent offline scorer. Inputs are captured responses and a separately
 // reviewed annotation sidecar, never the answer model's self-reported score.
-import { calculate, decimalMinor } from './ledger.mjs';
+import { calculate, decimalMinor, requireAccrualBasis } from './ledger.mjs';
 import { hash } from './reports.mjs';
 const digest=value=>hash(JSON.stringify(value));
 const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const scopeKeys=['entity','start','end','basis','currency','exponent','class_filter','account_filter','department_filter'];
 const sameScope=(a,b)=>a&&b&&scopeKeys.every(k=>Object.hasOwn(a,k)&&Object.hasOwn(b,k)&&equal(a[k],b[k]));
-export function buildCases(fixture,{repeats=1,paraphrases=1,unit='major',period=fixture.period}={}) {
+export function buildCases(fixture,options={}) {
+  const {repeats=1,paraphrases=1,unit='major',period=fixture.period}=options;
   if(!Number.isInteger(repeats)||repeats<1||repeats>3||!Number.isInteger(paraphrases)||paraphrases<1||paraphrases>4)throw Error('ORACLE_CASES_OPTIONS');
+  // Validate both locations so an option cannot mask an unsupported period.
+  if(Object.hasOwn(options,'basis'))requireAccrualBasis(options.basis);
   const truth=calculate(fixture,period),v=truth.values;
-  const scope={entity:fixture.company,start:period.start,end:period.end,basis:'accrual',currency:'USD',exponent:2,class_filter:[],account_filter:[],department_filter:[]};
+  const scope={entity:fixture.company,...truth.scope,currency:'USD',exponent:2,class_filter:[],account_filter:[],department_filter:[]};
   const claim=(metric,minor,role,extra={})=>({metric,minor,role,scope:structuredClone(scope),unit,...extra});
   const intents=[
     ['Who owes the company at the cutoff?', [claim('ar',v.ar,'asset'),...truth.open_items.filter(i=>i.kind==='ar').map(i=>claim(`ar:${i.id}`,i.minor,'asset',{party:i.party,aging_bucket:i.aging_bucket}))]],
@@ -29,7 +32,7 @@ export function buildCases(fixture,{repeats=1,paraphrases=1,unit='major',period=
   intents.forEach(([question,claims,gate],index)=>{
     const id=`G${String(index+1).padStart(2,'0')}`;
     const variants=[question,`Using only cited source evidence, ${question[0].toLowerCase()}${question.slice(1)}`,`Please answer this for the stated company and dates: ${question}`,`Explain the supported result and its limits: ${question}`];
-    for(let p=0;p<paraphrases;p++)for(let r=0;r<repeats;r++)out.push({id:paraphrases===1&&repeats===1?id:`${id}-p${p+1}-r${r+1}`,base_id:id,family:gate?'refusal':'differential',question:`${variants[p]} Company ${scope.entity}; ${scope.start} through ${scope.end}; USD accrual. Units: ${unit}.`,claims,expected_status:gate?'refused':'answered',gate:gate||'money',complete:!gate,scope,required_qualifiers:index===6?['includes_transfers','includes_card_settlements','includes_draws']:index===9?['report_equality_only']:[],control_id:gate==='coverage'?'G01':gate==='tax-policy'?'G06':null});
+    for(let p=0;p<paraphrases;p++)for(let r=0;r<repeats;r++)out.push({id:paraphrases===1&&repeats===1?id:`${id}-p${p+1}-r${r+1}`,base_id:id,family:gate?'refusal':'differential',question:`${variants[p]} Company ${scope.entity}; ${scope.start} through ${scope.end}; USD ${scope.basis}. Units: ${unit}.`,claims,expected_status:gate?'refused':'answered',gate:gate||'money',complete:!gate,scope,required_qualifiers:index===6?['includes_transfers','includes_card_settlements','includes_draws']:index===9?['report_equality_only']:[],control_id:gate==='coverage'?'G01':gate==='tax-policy'?'G06':null});
   });
   return out;
 }

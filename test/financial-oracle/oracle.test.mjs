@@ -20,6 +20,39 @@ test('truth is recomputed without trusting fixture expectations and order', () =
   altered.events.reverse();
   assert.equal(calculate(altered).values.checking, '1150500');
 });
+test('explicit cash and unknown bases refuse at the reached basis gate with an accrual control', () => {
+  const control = calculate(fixture, {...fixture.period, basis:'accrual'});
+  assert.equal(control.events_checked, 20);
+  assert.deepEqual(control.values, fixture.expected_minor);
+  for (const basis of ['cash', 'unknown', '', 'Accrual', ' accrual ', null, undefined, false, 0, {}]) {
+    let reads = 0;
+    const period = {...fixture.period, get basis() { reads++; return basis; }};
+    assert.throws(() => calculate(fixture, period), {
+      code:'ORACLE_BASIS_UNSUPPORTED', reason:'unsupported_basis', stage:'basis',
+    });
+    assert.ok(reads > 0, 'the requested basis was inspected');
+  }
+});
+test('an unsupported fixture basis cannot be hidden by an omitted or accrual period override', () => {
+  assert.equal(calculate(fixture).events_checked, 20);
+  for (const basis of ['cash', 'unknown', null]) {
+    const changed = structuredClone(fixture); changed.period.basis = basis;
+    for (const period of [undefined, {start:fixture.period.start, end:fixture.period.end}, {...fixture.period}]) {
+      assert.throws(() => calculate(changed, period), {
+        code:'ORACLE_BASIS_UNSUPPORTED', reason:'unsupported_basis', stage:'basis',
+      });
+    }
+  }
+});
+test('default, explicit and inherited accrual keep all truths and return their dated basis scope', () => {
+  const control = calculate(fixture);
+  assert.equal(control.events_checked, 20);
+  assert.deepEqual(control.scope, fixture.period);
+  assert.deepEqual(calculate(fixture, {...fixture.period, basis:'accrual'}), control);
+  assert.deepEqual(calculate(fixture, {start:fixture.period.start, end:fixture.period.end}), control);
+  assert.deepEqual(control.values, fixture.expected_minor);
+  assert.deepEqual(control.open_items.map(({id, minor, aging_bucket}) => ({id, minor, aging_bucket})), fixture.expected_open_items);
+});
 test('30 independent expense perturbations move cash and profit by exact deltas', () => {
   const before = calculate(fixture);
   for (let delta = 1n; delta <= 30n; delta++) {

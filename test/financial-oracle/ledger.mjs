@@ -18,8 +18,18 @@ export function minorDecimal(value, exponent = 2) {
   return `${n<0n?'-':''}${exponent?`${digits.slice(0,-exponent)}.${digits.slice(-exponent)}`:digits}`;
 }
 const sum = values => values.reduce((s,v)=>s+v,0n);
+export function requireAccrualBasis(basis) {
+  if (basis !== 'accrual') throw Object.assign(new Error('ORACLE_BASIS_UNSUPPORTED'), {
+    code:'ORACLE_BASIS_UNSUPPORTED', reason:'unsupported_basis', stage:'basis',
+  });
+  return basis;
+}
 export function calculate(fixture, period = fixture.period) {
   requireThat(fixture.synthetic_only === true && fixture.currency === 'USD' && fixture.exponent === 2, 'FIXTURE');
+  // Cash recognition needs a separately reviewed model. A date-only override
+  // inherits the fixture basis; an explicit unknown basis never defaults.
+  const fixtureBasis = requireAccrualBasis(fixture.period?.basis);
+  const basis = requireAccrualBasis(Object.hasOwn(period, 'basis') ? period.basis : fixtureBasis);
   day(period.start); day(period.end); requireThat(period.start <= period.end, 'PERIOD');
   const balances = Object.fromEntries(Object.keys(fixture.accounts).map(a=>[a,0n]));
   const opening = {...balances}; const activity={...balances}; const ids=new Set();
@@ -74,7 +84,7 @@ export function calculate(fixture, period = fixture.period) {
   const transferEvents=fixture.events.filter(e=>e.api_entity==='Transfer'&&e.date>=period.start&&e.date<=period.end);
   const transfer=sum(transferEvents.flatMap(e=>e.postings).filter(p=>bank.includes(p.account)&&p.side==='debit').map(p=>BigInt(p.minor)));
   const transferNet=sum(transferEvents.flatMap(e=>e.postings).filter(p=>bank.includes(p.account)).map(p=>BigInt(p.minor)*(p.side==='debit'?1n:-1n)));
-  return {values:Object.fromEntries(Object.entries(values).map(([k,v])=>[k,String(v)])),open_items,total_income:String(income),transfer:String(transfer),transfer_net:String(transferNet),events_checked:ids.size};
+  return {scope:{start:period.start,end:period.end,basis},values:Object.fromEntries(Object.entries(values).map(([k,v])=>[k,String(v)])),open_items,total_income:String(income),transfer:String(transfer),transfer_net:String(transferNet),events_checked:ids.size};
 }
 export function perturbExpense(fixture,delta) {
   const f=structuredClone(fixture); const expense=f.events.find(e=>e.id==='S12');

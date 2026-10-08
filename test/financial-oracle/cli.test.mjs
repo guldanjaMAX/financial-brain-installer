@@ -30,6 +30,17 @@ test('real evaluate command emits a failure receipt and nonzero code for a wrong
  assert.equal(await main(['evaluate','--input',join(dir,'input.json'),'--out',join(dir,'result.json')]),1);
  const r=JSON.parse(readFileSync(join(dir,'result.json')));assert.equal(r.wrong_money,1);assert.ok(r.claims_checked>0);
 });
+test('campaign and score commands retain unsupported coverage in their readback receipts',async()=>{
+ const dir=area();const campaignPath=join(dir,'campaign.json');
+ assert.equal(await main(['campaign','--out',campaignPath]),0);
+ const campaign=JSON.parse(readFileSync(campaignPath));assert.equal(campaign.expected_responses,583);
+ const captures=Object.fromEntries(campaign.phases.map(p=>[p.id,recordedControl(p.cases)]));
+ save(join(dir,'captures.json'),captures);
+ assert.equal(await main(['score-campaign','--input',join(dir,'captures.json'),'--out',join(dir,'score.json')]),0);
+ const score=JSON.parse(readFileSync(join(dir,'score.json')));assert.equal(score.phases_checked,34);
+ assert.equal(score.release_ready,false);assert.deepEqual(score.coverage,campaign.coverage);
+ assert.deepEqual(score.coverage.unsupported.map(c=>c.capability),['cash_basis','native_statement_of_cash_flows']);
+});
 test('journal lock prevents overlapping writers and refuses stale unknown locks',async()=>{
  const path=join(area(),'journal.json');const store=privateJournal(path);await store.writeJournal({first:true});assert.deepEqual(await store.readJournal(),{first:true});
  assert.throws(()=>privateJournal(path),/ORACLE/);store.close();const second=privateJournal(path);assert.deepEqual(await second.readJournal(),{first:true});second.close();

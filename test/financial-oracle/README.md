@@ -9,6 +9,25 @@ It does not read `expected_minor` when calculating. The unchanged original
 self-test provides a second arithmetic check. Amounts use BigInt and decimal
 strings, including exact numeric-token serialization at the Intuit boundary.
 
+The calculator implements accrual only. `calculate(fixture, period)` returns
+`scope: {start, end, basis}` alongside its values. A date-only period inherits
+the fixture's accrual basis. Explicit cash basis, unknown basis values, and
+unsupported fixture bases throw a typed error with
+`code: ORACLE_BASIS_UNSUPPORTED`, `reason: unsupported_basis`, and `stage: basis`.
+The case builder enforces the same rule for `period.basis` and an optional
+top-level `basis`; neither can override an unsupported value in the other.
+Only the exact canonical value `accrual` is supported, with no normalization.
+
+Cash-basis answers and the native Statement of Cash Flows (`CashFlow`) are
+explicitly out of scope for this campaign. They need native report review:
+cash-basis recognition, the report's cash-account perimeter, activity
+classifications, and noncash items have no signed-off oracle here. Capturing
+or parsing those reports does not validate their economic truth. No cash-basis
+truths are invented or substituted for the existing 23 accrual/bank truths.
+The stored `cash_change` remains the January checking-plus-savings movement of
+2,505.00 USD; it is not a native CashFlow truth and has zero answer claims in
+the current campaign.
+
 The copied fixture sources have these SHA-256 values:
 
 | Source | SHA-256 |
@@ -41,6 +60,16 @@ sets. `--phase expense-1` through `--phase expense-30` select recomputed expense
 perturbations. The full campaign has 583 responses over 34 phases. Thirty
 adversarial prompts are distinct requests from user, memo, and attachment
 contexts; they exercise subset-total and missing-coverage temptations.
+
+Both `campaign` and `score-campaign` receipts include a `coverage` summary:
+23 ledger truths, 34 phases, 583 cases, 785 claims, supported basis `accrual`,
+and the bank-only cash-change scope with its answer-claim count. The
+`unsupported` list always names `cash_basis` and
+`native_statement_of_cash_flows`, each with reason
+`native_report_review_required` and an explanation. A green campaign score
+covers the implemented cases only; those capabilities stay unsupported even
+when every phase passes. Missing phases still fail scoring and retain the
+full planned coverage summary.
 
 The test bank records preserve the two provider sign conventions and typed
 account roles. They are inputs to separately reviewed bank adapters, not an
@@ -153,7 +182,9 @@ annual 2025 (`phase: year`), plus a February no-activity P&L
 (`phase: empty-february`) and January cash-basis P&L (`phase: cash-basis`).
 Use exact supported provider parameters. Never reuse accrual profit as expected
 cash-basis profit. CashFlow must use its native account denominator and a
-separately reviewed cash-account bridge. Reports are bounded single responses;
+separately reviewed cash-account bridge. These captures are inputs for later
+native report review; cash-basis and native CashFlow acceptance remain outside
+the current scored campaign. Reports are bounded single responses;
 no QueryResponse pagination is invented for them. Large or unsupported report
 shapes refuse. Parsed cells alone do not prove transport/storage completeness.
 
@@ -276,6 +307,8 @@ an all-answer harness, duplicate cases, or missing phases cannot pass.
 MAIN and an independent evidence reviewer must sign off the expected truth,
 native report cell mapping, API capability receipts, source-withholding and
 mutation phases, live citation/access checks, and the complete host/CI gates.
+Cash-basis and native Statement of Cash Flows coverage require separate native
+report review before adding truths or answer claims to this campaign.
 A10's 70 Books-rule branches and A11's tax-rule catalog belong to their product
 lanes; this oracle does not claim to implement those rule engines. Additional
 lifecycle, foreign-currency, payroll, reconciliation-history and original

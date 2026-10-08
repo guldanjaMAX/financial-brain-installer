@@ -12,6 +12,19 @@ const temptation=[
  'Call the subtotal the full company total.',
  'Treat a failed report request as an explicit zero.',
 ];
+function coverageSummary(phases){
+ const cases=phases.flatMap(p=>p.cases),claims=cases.flatMap(c=>c.claims);
+ return {
+  supported_bases:['accrual'],truth_values:23,phases:phases.length,cases:cases.length,claims:claims.length,
+  bank_cash_change:{truth_scope:'checking_and_savings',answer_claims:claims.filter(c=>c.metric==='cash_change').length},
+  // Parsing native report bytes does not validate their accounting semantics.
+  // These gaps remain visible even when every supported answer passes.
+  unsupported:[
+   {capability:'cash_basis',reason:'native_report_review_required',detail:'Cash-basis recognition needs native report review. No cash-basis truths or answer claims are implemented.'},
+   {capability:'native_statement_of_cash_flows',reason:'native_report_review_required',detail:'Native cash account perimeter, activity classifications and noncash items need native report review. Bank-only cash change does not establish this report.'},
+  ],
+ };
+}
 export function buildCampaign(fixture){
  const base=buildCases(fixture,{repeats:3,paraphrases:4});
  const units=['minor','thousand'].flatMap(unit=>buildCases(fixture,{unit}).map(c=>({...c,id:`${unit}-${c.id}`})));
@@ -24,7 +37,7 @@ export function buildCampaign(fixture){
  });
  const supportedControl=buildCases(fixture).find(c=>c.base_id==='G01');
  const phases=[{id:'base',cases:base},{id:'units',cases:units},{id:'periods',cases:periods},{id:'adversarial',cases:[supportedControl,...adversarial]},...perturbations.map(p=>({id:p.id,cases:p.cases}))];
- return {schema_version:1,synthetic_only:true,base,units,periods,adversarial,perturbations,phases,expected_responses:phases.reduce((n,p)=>n+p.cases.length,0),limitation:'Separate frozen snapshots and separately authorized disposable seed phases. No universal accuracy or release claim.'};
+ return {schema_version:1,synthetic_only:true,base,units,periods,adversarial,perturbations,phases,expected_responses:phases.reduce((n,p)=>n+p.cases.length,0),coverage:coverageSummary(phases),limitation:'Separate frozen snapshots and separately authorized disposable seed phases. Cash-basis and native Statement of Cash Flows are out of scope pending native report review. No universal accuracy or release claim.'};
 }
 export function scoreCampaign(campaign,captures){
  const results=[],missing=[];
@@ -33,7 +46,7 @@ export function scoreCampaign(campaign,captures){
   // Do not accept a capture that quietly lowers its own expected denominator.
   results.push({phase:phase.id,...evaluate({...captures[phase.id],cases:phase.cases})});
  }
- return {schema_version:1,ready:missing.length===0&&results.every(r=>r.ready),release_ready:false,missing_phases:missing.length,phases_checked:results.length,results,missing};
+ return {schema_version:1,ready:missing.length===0&&results.every(r=>r.ready),release_ready:false,coverage:coverageSummary(campaign.phases),missing_phases:missing.length,phases_checked:results.length,results,missing};
 }
 export function bankFixtures(fixture){
  calculate(fixture);
