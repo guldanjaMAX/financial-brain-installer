@@ -11,9 +11,9 @@ const ROOT = resolve(import.meta.dirname, "..");
 const HANDOFF = join(ROOT, "machine-prep", "handoff");
 const MAC_INSTALLER = join(ROOT, "machine-prep", "installers", "macos");
 const WINDOWS_INSTALLER = join(ROOT, "machine-prep", "installers", "windows");
-const KIT_URL = "https://financialbrain.ai/kit/brain-installer-0.4.9-0555ad1972d7f8d6.tgz";
-const KIT_SHA256 = "0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2";
-const KIT_SIZE = "6668013";
+const KIT_URL = "https://financialbrain.ai/kit/brain-installer-0.4.10-55824b383909c57b.tgz";
+const KIT_SHA256 = "55824b383909c57b37f4db6179562bf603f670eaae3c7d315135dd290b0afdfe";
+const KIT_SIZE = "6828366";
 const WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS = 120_000;
 const BASH_BEHAVIOR_ON_WINDOWS_SKIP_REASON =
   "requires Unix shell semantics and remains active on the macOS and Linux CI lanes";
@@ -243,7 +243,7 @@ test("pinned-kit proof reaches every refusal and cleans after preparation with a
   const control = await run();
   assert.equal(control.error, undefined);
   assert.deepEqual(control.calls, phases);
-  assert.match(control.events.at(-1), /PINNED_KIT_BOOTSTRAP_VERIFIED=1 version=0\.4\.9/);
+  assert.match(control.events.at(-1), /PINNED_KIT_BOOTSTRAP_VERIFIED=1 version=0\.4\.10/);
   for (const phase of phases) {
     const refused = await run(phase);
     assert.ok(refused.error);
@@ -283,12 +283,12 @@ test("pinned-kit provenance compares actual installed bytes instead of trusting 
   const expected = join(root, "witness"), installed = join(root, "installed");
   for (const directory of [expected, installed]) {
     mkdirSync(directory);
-    writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.9", bin: { brain: "./brain.mjs" } }));
-    writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.9');\n");
+    writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.10", bin: { brain: "./brain.mjs" } }));
+    writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.10');\n");
   }
   try {
     assert.equal(verifyPackageTree(expected, installed), 2, "green installed identity and bytes reached");
-    writeFileSync(join(installed, "brain.mjs"), "console.log('0.4.9'); // changed bytes\n");
+    writeFileSync(join(installed, "brain.mjs"), "console.log('0.4.10'); // changed bytes\n");
     assert.throws(() => verifyPackageTree(expected, installed), /bytes differ/);
     writeFileSync(join(installed, "brain.mjs"), readFileSync(join(expected, "brain.mjs")));
     writeFileSync(join(installed, "extra.mjs"), "synthetic\n");
@@ -303,8 +303,8 @@ test("pinned-kit source inventory permits only npm shims named by authenticated 
   try {
     for (const directory of [expected, installed]) {
       mkdirSync(join(directory, "node_modules", "synthetic-tool"), { recursive: true });
-      writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.9", bin: { brain: "./brain.mjs" } }));
-      writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.9');\n");
+      writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.10", bin: { brain: "./brain.mjs" } }));
+      writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.10');\n");
       writeFileSync(join(directory, "node_modules", "synthetic-tool", "package.json"), JSON.stringify({ name: "synthetic-tool", bin: { "synthetic-tool": "run.js" } }));
       writeFileSync(join(directory, "node_modules", "synthetic-tool", "run.js"), "// synthetic dependency\n");
     }
@@ -373,9 +373,9 @@ for (const fixtureKind of ["physical directory", "directory alias", "URL-reserve
           env: { HOME: directory, USERPROFILE: directory, BRAIN_NO_WRANGLER_LOGIN: "1" },
         });
       };
-      const control = execute("console.log('VERSION_DECISION_REACHED=1'); console.log('0.4.9');\n");
+      const control = execute("console.log('VERSION_DECISION_REACHED=1'); console.log('0.4.10');\n");
       assert.equal(control.status, 0, control.stderr);
-      assert.match(control.stdout, /VERSION_DECISION_REACHED=1\n0\.4\.9/);
+      assert.match(control.stdout, /VERSION_DECISION_REACHED=1\n0\.4\.10/);
       const network = execute("console.log('VERSION_DECISION_REACHED=1'); await fetch('https://example.invalid');\n");
       assert.notEqual(network.status, 0);
       assert.match(network.stdout, /VERSION_DECISION_REACHED=1/);
@@ -768,7 +768,7 @@ test("Claude handoff messages are local notes with no remote instructions", () =
   }
 });
 
-test("both prep scripts pin, verify, and locally install the published 0.4.9 kit", () => {
+test("both prep scripts pin, verify, and locally install the published 0.4.10 kit", () => {
   for (const source of [read("machine-prep/prep-mac.sh"), read("machine-prep/prep-windows.ps1")]) {
     assert.match(source, new RegExp(KIT_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(source, new RegExp(KIT_SHA256));
@@ -1545,8 +1545,8 @@ test("Mac launcher shows only plain lines on screen and keeps every status marke
   const control = runMacWrapper({
     prepExit: 0, openExit: 0, handoffExit: 0,
     prepBody: [
-      "printf 'Machine Prep for macOS\\nMODE real\\nPREREQUISITE_DECISION_REACHED=1\\nCodex CLI (optional): found, version 9.0.0.\\nDOWNLOAD_STARTED=1 kit_version=0.4.9\\nVERIFIED checksum\\n'",
-      "printf 'added 1 package in 1s\\nBRAIN_INSTALL_VERIFIED=1 version=0.4.9\\nFinancial Brain CLI preparation completed\\n'",
+      "printf 'Machine Prep for macOS\\nMODE real\\nPREREQUISITE_DECISION_REACHED=1\\nCodex CLI (optional): found, version 9.0.0.\\nDOWNLOAD_STARTED=1 kit_version=0.4.10\\nVERIFIED checksum\\n'",
+      "printf 'added 1 package in 1s\\nBRAIN_INSTALL_VERIFIED=1 version=0.4.10\\nFinancial Brain CLI preparation completed\\n'",
       "printf 'npm warn example\\n' >&2",
     ].join("\n"),
     handoffBody: "printf 'HANDOFF_DECISION_REACHED=1\\nHANDOFF_DESKTOP_OPENED=1\\n'",

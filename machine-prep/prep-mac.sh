@@ -5,10 +5,10 @@ set -eu
 
 NODE_VERSION="24.13.1"
 CLAUDE_MIN_VERSION="2.1.261"
-BRAIN_VERSION="0.4.9"
-BRAIN_KIT_URL="https://financialbrain.ai/kit/brain-installer-0.4.9-0555ad1972d7f8d6.tgz"
-BRAIN_KIT_SIZE="6668013"
-BRAIN_KIT_SHA256="0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2"
+BRAIN_VERSION="0.4.10"
+BRAIN_KIT_URL="https://financialbrain.ai/kit/brain-installer-0.4.10-55824b383909c57b.tgz"
+BRAIN_KIT_SIZE="6828366"
+BRAIN_KIT_SHA256="55824b383909c57b37f4db6179562bf603f670eaae3c7d315135dd290b0afdfe"
 WRANGLER_VERSION="4.131.1"
 # Official pages and the exact step on each, named to the owner when a
 # prerequisite needs action. Real mode never downloads or runs anything from

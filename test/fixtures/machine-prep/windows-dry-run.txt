@@ -19,8 +19,8 @@ PLAN
 2. OWNER ACTION: install any missing Node.js, Git, or Claude Code tool from its official signed installer, then rerun this launcher.
 3. REFUSE: the launcher does not download or execute prerequisite installers whose bytes it cannot authenticate before execution.
 4. SKIP: do not install global Wrangler; Financial Brain owns wrangler@4.131.1.
-5. DOWNLOAD: Financial Brain 0.4.9 from the one pinned HTTPS kit URL without following redirects.
-6. VERIFY: require exactly 6668013 bytes and SHA-256 0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2 before npm sees the local file.
+5. DOWNLOAD: Financial Brain 0.4.10 from the one pinned HTTPS kit URL without following redirects.
+6. VERIFY: require exactly 6828366 bytes and SHA-256 55824b383909c57b37f4db6179562bf603f670eaae3c7d315135dd290b0afdfe before npm sees the local file.
 7. INSTALL: use an isolated npm environment and private staging prefix, then atomically promote to clean per-user C:\Users\Fixture\AppData\Local\FinancialBrain.
 8. VERIFY: rerun --check and show the operator the green/red list.
 
