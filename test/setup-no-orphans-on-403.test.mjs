@@ -408,7 +408,9 @@ test("on win32 a mid-setup search-index refusal keeps its real refusal and offer
   assert.match(run.error.message, /Workers Scripts Edit[\s\S]*D1 Edit[\s\S]*Vectorize Edit[\s\S]*Workers AI Read/i);
   assert.doesNotMatch(run.error.message, /Nothing was changed/, "setup made progress, so it must not claim otherwise");
   assert.match(run.error.message,
-    /On Windows the route is the saved Cloudflare key, not a browser sign-in; this command will not ask you to type a key\./);
+    /Windows has no saved Cloudflare-token recovery or supported hidden token entry in this release\. Stop here and ask the technician for an approved recovery plan; this command will not ask you to type a key\./);
+  assert.doesNotMatch(run.error.message, /--cloudflare-token|recovery API token|saved Cloudflare key/,
+    "Windows must not be offered a token route it refuses");
   assert.match(run.error.message, /Issue: CLOUDFLARE_OAUTH_SCOPE_MISSING\./);
   assert.doesNotMatch(run.error.message, /opens the protected recovery flow/,
     "Windows must not be sent to a recovery switch whose hidden prompt it refuses");

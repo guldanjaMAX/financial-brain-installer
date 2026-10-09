@@ -52,6 +52,7 @@ import {
   cmdUpgrade as cmdUpgradeWithRealQuiescence,
   commitManifestVersion,
   pinUpdateManifest,
+  renderCliCommands,
   compareSemver,
   documentsReceiptVerdict,
   healthProbeVerdict,
@@ -3400,21 +3401,20 @@ function packedProcessDetail(result) {
         writeFileSync(manifestPath, JSON.stringify(installedFixture));
         // `brain update` reads the authenticated documents backlog before any
         // adoption, verification, or deployment. This preload is the fake
-        // Worker for that one route: every other request reaches real fetch
-        // unchanged, and every request is logged so a test can prove which
-        // stage the launcher reached.
+        // Worker for that one route: every other request is refused locally,
+        // and every request is logged so a test can prove which stage the
+        // launcher reached.
         const fakeWorker = join(sandbox, "fake-worker.mjs");
         const fakeWorkerAdminKey = ["fixture-", "packed-la", "uncher-ad", "min-key-", "0001"].join("");
         writeFileSync(fakeWorker, `
 import { appendFileSync } from "node:fs";
 const documentsRoute = "https://brain.example.invalid/api/admin/brain/documents";
 const adminKey = ${JSON.stringify(fakeWorkerAdminKey)};
-const realFetch = globalThis.fetch;
 globalThis.fetch = async (input, init = {}) => {
   const url = String(input?.url ?? input);
   const authenticated = new Headers(init.headers || {}).get("x-admin-key") === adminKey;
   appendFileSync(process.env.FAKE_WORKER_LOG, JSON.stringify({ url, authenticated }) + "\\n");
-  if (url !== documentsRoute) return realFetch(input, init);
+  if (url !== documentsRoute) throw new Error("unexpected fixture route");
   if (!authenticated) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
   const pending = Number(process.env.FAKE_WORKER_PENDING || 0);
   const ready = pending === 0;
@@ -3444,6 +3444,7 @@ globalThis.fetch = async (input, init = {}) => {
           USERPROFILE: fakeHome,
           LOCALAPPDATA: fakeLocalAppData,
           NO_COLOR: "1",
+          BRAIN_NO_WRANGLER_LOGIN: "1",
           ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
           ...(process.env.WINDIR ? { WINDIR: process.env.WINDIR } : {}),
         };
@@ -3482,6 +3483,26 @@ globalThis.fetch = async (input, init = {}) => {
           setupReceipt.stderr || setupReceipt.stdout,
         );
 
+        const expectedAuthRefusal = (result) => {
+          // Fatal guidance is on stdout, deliberately avoiding PowerShell's
+          // NativeCommandError wrapper. The informational preamble is no proof.
+          const output = String(result.stdout || "").replace(/\x1b\[[0-9;]*m/g, "");
+          const failureOutput = output.match(/(?:^|\n)fail {2}([\s\S]*)$/)?.[1] || "";
+          const shown = (text) => renderCliCommands(text, {
+            scriptPath: join(installedRoot, "brain.mjs"), env: isolatedEnvironment,
+          });
+          const adoption = shown("brain update <manifest> --adopt-cloudflare-profile");
+          return result.status === 1 && /Cloudflare access is not available/.test(failureOutput) &&
+            failureOutput.includes(shown("brain support --explain AUTH_REQUIRED")) &&
+            (process.platform === "win32"
+              ? failureOutput.split(adoption).length === 2 &&
+                /visible PowerShell window as the same Windows user/i.test(failureOutput) &&
+                /will not ask you to type a key/.test(failureOutput) &&
+                !/--cloudflare-token|--browser-sign-in|hidden token entry|recovery API.token|Stop here/i.test(failureOutput)
+              : /terminal cannot prompt securely/i.test(failureOutput) &&
+                failureOutput.includes(shown("brain update <manifest>")));
+        };
+
         const reopenedLog = join(sandbox, "fake-worker-reopened.jsonl");
         const reopened = setupReceipt.status === 0
           ? spawnSync(installedLauncher, ["update"], {
@@ -3495,8 +3516,7 @@ globalThis.fetch = async (input, init = {}) => {
         const reopenedOutput = `${reopened.stdout || ""}\n${reopened.stderr || ""}`;
         check(
           "the installed launcher rediscovers the manifest after Terminal reopens anywhere",
-          reopened.status !== 0 &&
-            /terminal cannot prompt securely/i.test(reopenedOutput) &&
+          expectedAuthRefusal(reopened) &&
             !/no installed Brain was found|no manifest found/i.test(reopenedOutput),
           reopenedOutput,
         );
@@ -3529,10 +3549,18 @@ globalThis.fetch = async (input, init = {}) => {
         const afterReinstallOutput = `${afterReinstall.stdout || ""}\n${afterReinstall.stderr || ""}`;
         check(
           "the reinstalled launcher keeps the remembered manifest in a fresh process and folder",
-          afterReinstall.status !== 0 &&
-            /terminal cannot prompt securely/i.test(afterReinstallOutput) &&
+          expectedAuthRefusal(afterReinstall) &&
             !/no installed Brain was found|no manifest found/i.test(afterReinstallOutput),
           afterReinstallOutput,
+        );
+
+        const reinstalledRequests = fakeWorkerRequests(afterReinstallLog);
+        check(
+          "the reinstalled launcher also reached the exact authenticated backlog read",
+          reinstalledRequests.length === 1 &&
+            reinstalledRequests[0].url === "https://brain.example.invalid/api/admin/brain/documents" &&
+            reinstalledRequests[0].authenticated === true,
+          JSON.stringify(reinstalledRequests),
         );
 
         // Same installed launcher, same remembered manifest, but the fake
@@ -3563,7 +3591,7 @@ globalThis.fetch = async (input, init = {}) => {
           pendingRequests.length === 1 &&
             pendingRequests[0].url === "https://brain.example.invalid/api/admin/brain/documents" &&
             pendingRequests[0].authenticated === true &&
-            !/terminal cannot prompt securely|deploy/i.test(pendingOutput),
+            !/Cloudflare access is not available|terminal cannot prompt securely|deploy/i.test(pendingOutput),
           JSON.stringify({ pendingRequests, pendingOutput }),
         );
       }
