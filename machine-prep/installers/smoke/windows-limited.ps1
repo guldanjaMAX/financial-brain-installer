@@ -42,37 +42,100 @@ public static class BootstrapToken {
   } finally { $identity.Dispose() }
 }
 
-function Remove-BootstrapAccount($State) {
+function Get-BootstrapProcesses([string]$Sid) {
+  if (-not $Sid) { throw 'Disposable SID required' }
+  foreach ($candidate in @(Get-CimInstance Win32_Process)) {
+    try { $owner = Invoke-CimMethod -InputObject $candidate -MethodName GetOwnerSid } catch {
+      # A process can exit between enumeration and the owner query. Only a
+      # confirmed disappearance permits ignoring a provider failure.
+      if (@(Get-CimInstance Win32_Process -Filter "ProcessId=$($candidate.ProcessId)").Count -eq 0) { continue }
+      throw
+    }
+    # Protected/system processes may deny owner lookup. They never authorize
+    # termination; profile unload/readback remains the cleanup success fence.
+    if ($owner.ReturnValue -eq 0 -and $owner.Sid -ceq $Sid) { $candidate }
+  }
+}
+
+function Stop-BootstrapProcess($Candidate, [string]$Sid) {
+  if (-not $Sid) { throw 'Disposable SID required' }
+  $process = Get-Process | Where-Object { $_.Id -eq $Candidate.ProcessId }
+  if (-not $process) { return }
+  try {
+    # Pin the process handle before fresh identity checks. Kill uses that
+    # handle, so a PID reused after enumeration cannot select another owner.
+    $null = $process.Handle
+    if ($process.HasExited) { return }
+    $current = @(Get-CimInstance Win32_Process -Filter "ProcessId=$($Candidate.ProcessId)")
+    if ($current.Count -eq 0) { return }
+    if ($current.Count -ne 1) { throw 'Ambiguous process identity' }
+    if ($current[0].CreationDate -ne $Candidate.CreationDate) { return }
+    $owner = Invoke-CimMethod -InputObject $current[0] -MethodName GetOwnerSid
+    if ($owner.ReturnValue -ne 0) { throw 'Process owner unavailable' }
+    if ($owner.Sid -cne $Sid) { return }
+    $process.Kill()
+    if (-not $process.WaitForExit(10000)) { throw 'Process remains' }
+  } finally { $process.Dispose() }
+}
+
+function Wait-BootstrapProcesses([string]$Sid) {
+  # Give task descendants 30 seconds to finish naturally before terminating
+  # only fresh matches for this attempt's SID. Never kill by name or tree.
+  for ($attempt = 0; $attempt -lt 15; $attempt++) {
+    if (@(Get-BootstrapProcesses $Sid).Count -eq 0) { return }
+    Start-Sleep -Seconds 2
+  }
+  foreach ($candidate in @(Get-BootstrapProcesses $Sid)) { Stop-BootstrapProcess $candidate $Sid }
+  if (@(Get-BootstrapProcesses $Sid).Count -ne 0) { throw 'Owned processes remain' }
+}
+
+function Remove-BootstrapAccount($State, [scriptblock]$Now = { [DateTime]::UtcNow }) {
   $failures = 0
+  $taskCleanupComplete = $false
+  $taskCleanupError = 'OTHER'
   try {
     # Enumerate and match exactly: suppressing lookup errors would turn a
     # provider/permission failure into false proof that a resource is absent.
-    $task = Get-ScheduledTask | Where-Object { $_.TaskName -ceq $State.taskName -and $_.TaskPath -ceq '\' }
+    $task = @(Get-ScheduledTask | Where-Object { $_.TaskName -ceq $State.taskName -and $_.TaskPath -ceq '\' })
+    if ($task.Count -gt 1) { $taskCleanupError = 'AMBIGUOUS_TASK'; throw 'Ambiguous task identity' }
     if ($task) {
-      if ($task.State -eq 'Running') { Stop-ScheduledTask -TaskName $State.taskName }
+      Stop-ScheduledTask -TaskName $State.taskName
       Unregister-ScheduledTask -TaskName $State.taskName -Confirm:$false
     }
-    if (Get-ScheduledTask | Where-Object { $_.TaskName -ceq $State.taskName -and $_.TaskPath -ceq '\' }) { throw 'Task remains' }
+    if (Get-ScheduledTask | Where-Object { $_.TaskName -ceq $State.taskName -and $_.TaskPath -ceq '\' }) {
+      $taskCleanupError = 'TASK_REMAINS'; throw 'Task remains'
+    }
+    $taskCleanupComplete = $true
     'STANDARD_TASK_REMOVED=1' | Add-Content -LiteralPath (Join-Path $control 'cleanup.log')
-  } catch { $failures++ }
+  } catch {
+    $failures++
+    "STANDARD_TASK_CLEANUP_ERROR=$taskCleanupError" | Add-Content -LiteralPath (Join-Path $control 'cleanup.log')
+  }
   # Save intent before account creation so always() can recover a partial run.
   # Resolve only this attempt's random account; never search by profile path.
+  $profileCleanupError = 'OTHER'
   try {
-    $user = Get-LocalUser | Where-Object { $_.Name -ceq $State.userName }
+    if (-not $taskCleanupComplete) { throw 'Task cleanup incomplete' }
+    $user = @(Get-LocalUser | Where-Object { $_.Name -ceq $State.userName })
+    if ($user.Count -gt 1) { $profileCleanupError = 'IDENTITY_CHANGED'; throw 'Ambiguous account identity' }
     if ($user) {
-      if ($State.sid -and $user.SID.Value -cne $State.sid) { throw 'Account identity changed' }
+      $user = $user[0]
+      if ($State.sid -and $user.SID.Value -cne $State.sid) {
+        $profileCleanupError = 'IDENTITY_CHANGED'; throw 'Account identity changed'
+      }
       $State.sid = $user.SID.Value
       $State | ConvertTo-Json | Set-Content -LiteralPath $statePath
     }
     if ($State.sid) {
-      $deadline = [DateTime]::UtcNow.AddSeconds(60)
+      Wait-BootstrapProcesses $State.sid
+      $deadline = (& $Now).AddSeconds(60)
       do {
         $profiles = @(Get-CimInstance Win32_UserProfile -Filter "SID='$($State.sid)'")
+        if ($profiles.Count -gt 1) { $profileCleanupError = 'AMBIGUOUS_PROFILE'; throw 'Ambiguous profile identity' }
         if (@($profiles | Where-Object { $_.Loaded }).Count -eq 0) { break }
-        if ([DateTime]::UtcNow -ge $deadline) { throw 'Profile remains loaded' }
+        if ((& $Now) -ge $deadline) { $profileCleanupError = 'PROFILE_LOADED'; throw 'Profile remains loaded' }
         Start-Sleep -Seconds 2
       } while ($true)
-      if ($profiles.Count -gt 1) { throw 'Ambiguous profile identity' }
       if ($profiles.Count -eq 1) {
         $State.profilePath = $profiles[0].LocalPath
         $State | ConvertTo-Json | Set-Content -LiteralPath $statePath
@@ -80,20 +143,33 @@ function Remove-BootstrapAccount($State) {
       $profiles | Remove-CimInstance
       if (@(Get-CimInstance Win32_UserProfile -Filter "SID='$($State.sid)'").Count -ne 0 -or
           (Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($State.sid)") -or
-          ($State.profilePath -and (Test-Path -LiteralPath $State.profilePath))) { throw 'Profile remains' }
+          ($State.profilePath -and (Test-Path -LiteralPath $State.profilePath))) {
+        $profileCleanupError = 'PROFILE_REMAINS'; throw 'Profile remains'
+      }
     }
     'STANDARD_PROFILE_REMOVED=1' | Add-Content -LiteralPath (Join-Path $control 'cleanup.log')
-  } catch { $failures++ }
+  } catch {
+    $failures++
+    "STANDARD_PROFILE_CLEANUP_ERROR=$profileCleanupError" | Add-Content -LiteralPath (Join-Path $control 'cleanup.log')
+  }
   # A profile-removal error must not leave a usable local account behind.
+  $userCleanupError = 'OTHER'
   try {
-    $user = Get-LocalUser | Where-Object { $_.Name -ceq $State.userName }
+    $user = @(Get-LocalUser | Where-Object { $_.Name -ceq $State.userName })
+    if ($user.Count -gt 1) { $userCleanupError = 'AMBIGUOUS_USER'; throw 'Ambiguous account identity' }
     if ($user) {
-      if ($State.sid -and $user.SID.Value -cne $State.sid) { throw 'Account identity changed' }
+      $user = $user[0]
+      if ($State.sid -and $user.SID.Value -cne $State.sid) {
+        $userCleanupError = 'IDENTITY_CHANGED'; throw 'Account identity changed'
+      }
       Remove-LocalUser -SID $user.SID
     }
-    if (Get-LocalUser | Where-Object { $_.Name -ceq $State.userName }) { throw 'Account remains' }
+    if (Get-LocalUser | Where-Object { $_.Name -ceq $State.userName }) { $userCleanupError = 'USER_REMAINS'; throw 'Account remains' }
     'STANDARD_USER_REMOVED=1' | Add-Content -LiteralPath (Join-Path $control 'cleanup.log')
-  } catch { $failures++ }
+  } catch {
+    $failures++
+    "STANDARD_USER_CLEANUP_ERROR=$userCleanupError" | Add-Content -LiteralPath (Join-Path $control 'cleanup.log')
+  }
   $contextPath = Join-Path $control 'context.json'
   if (Test-Path -LiteralPath $contextPath) { Remove-Item -LiteralPath $contextPath -Force }
   "CLEANUP_FAILURES=$failures" | Add-Content -LiteralPath (Join-Path $control 'cleanup.log')
@@ -301,6 +377,21 @@ try {
   if ($registered.Principal.LogonType -ne 'Password' -or $registered.Principal.RunLevel -ne 'Limited' -or
       $registeredSid -cne $state.sid -or $principalSid -cne $state.sid) { throw 'Task principal readback failed' }
   'STANDARD_TASK_REGISTERED=1' | Set-Content -LiteralPath (Join-Path $control 'task-registration.log')
+  $phase = 'msiserver'
+  # A standard batch token cannot be relied on to activate the service. The
+  # admin parent establishes it before launching the unchanged MSI client.
+  try {
+    Start-Service msiserver
+    $msiService = Get-Service -Name msiserver
+    $msiService.WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+    $msiService.Refresh()
+    if ($msiService.Status -ne 'Running') { throw 'Windows Installer service is not running' }
+  } finally {
+    $msiStatus = 'Unavailable'
+    try { $msiStatus = [string](Get-Service -Name msiserver).Status } catch { $msiStatus = 'Unavailable' }
+    "STANDARD_MSISERVER_STATUS=$msiStatus" | Set-Content -LiteralPath (Join-Path $control 'msiserver.log')
+  }
+  if ($msiStatus -cne 'Running') { throw 'Windows Installer service readback failed' }
   $phase = 'run'
   $previousRun = (Get-ScheduledTaskInfo -TaskName $state.taskName).LastRunTime
   Start-ScheduledTask -TaskName $state.taskName
