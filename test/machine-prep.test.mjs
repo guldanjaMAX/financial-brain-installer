@@ -747,6 +747,166 @@ function functionBody(source, start, end) {
   return source.slice(from, to);
 }
 
+test("Windows Claude version fallback is canonical, bounded, and isolated", () => {
+  const source = readFileSync(WINDOWS, "utf8").replaceAll("\r\n", "\n");
+  const version = functionBody(source, "function Get-ToolVersion(", "\n}\n");
+  assert.match(version, /VersionInfo\.ProductVersion/, "production metadata decision reached");
+  assert.match(version, /Read-Fixture "claude\.product-version"/);
+  assert.match(version, /Invoke-ClaudeVersion \$canonical/);
+  const canonicalGuard = version.indexOf("[StringComparison]::OrdinalIgnoreCase");
+  assert.ok(canonicalGuard >= 0 && canonicalGuard < version.indexOf("Invoke-ClaudeVersion $canonical"));
+  const probe = functionBody(source, "function Invoke-ClaudeVersion(", "\n}\n");
+  for (const boundary of [
+    "$info.FileName = $Canonical", '$info.Arguments = "--version"',
+    "$info.UseShellExecute = $false", "$info.RedirectStandardInput = $true",
+    "$process.StandardInput.Close()",
+    "$timeoutMs = 20000", "$process.WaitForExit($remaining)", "$process.Kill()",
+    "$process.StandardOutput.ReadLineAsync()", "$process.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)",
+    "$process.ExitCode -ne 0", "$process.Dispose()",
+  ]) assert.ok(probe.includes(boundary), boundary);
+  assert.doesNotMatch(probe, /cmd\.exe|powershell\.exe|Get-Command|WaitForExit\(\)|ReadToEnd\(\)/);
+  // The probe runs exactly as the owner's own `claude --version` would: no stripped environment.
+  assert.doesNotMatch(probe, /EnvironmentVariables/, "the version probe inherits the owner environment");
+});
+
+test("Windows Claude metadata and stdout fixtures reach the real readiness decisions", { skip: process.platform !== "win32" }, () => {
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-claude-version-")));
+  const state = join(directory, "state");
+  const home = join(directory, "home");
+  const probe = join(directory, "probe.ps1");
+  mkdirSync(join(home, "temp"), { recursive: true });
+  cpSync(join(FIXTURES, "windows-ready"), state, { recursive: true });
+  const cases = [
+    { name: "metadata", product: "2.1.295", state: "READY", calls: 0 },
+    { name: "metadata-zero-revision", product: "2.1.295.0", state: "READY", calls: 0 },
+    { name: "stdout", product: "", output: "2.1.295 (Claude Code)", state: "READY", calls: 1 },
+    { name: "blank-lines", product: "", output: "\r\n\r\n2.1.295 (Claude Code)\r\nignored", state: "READY", calls: 1 },
+    { name: "invalid-metadata-fallback", product: "2.1.295.1", output: "2.1.295 (Claude Code)", state: "READY", calls: 1 },
+    { name: "decorated-metadata-fallback", product: "2.1.295-beta", output: "2.1.295 (Claude Code)", state: "READY", calls: 1 },
+    { name: "metadata-old", product: "2.1.260", output: "2.1.295 (Claude Code)", state: "WRONG_VERSION", calls: 0 },
+    { name: "stdout-old", product: "", output: "2.1.260 (Claude Code)", state: "WRONG_VERSION", calls: 1 },
+    ...["", "garbage", "garbage\n2.1.295 (Claude Code)", "2.1.295 (claude code)", " 2.1.295 (Claude Code)", "2.1.295 (Claude Code) ", "2.1.295.0 (Claude Code)"].map((output, index) => ({
+      name: `unreadable-${index}`, product: "", output, state: "MISSING", calls: 1,
+    })),
+    { name: "timeout", product: "", output: "2.1.295 (Claude Code)", status: "timeout", state: "MISSING", calls: 1 },
+    { name: "failed-process", product: "", output: "2.1.295 (Claude Code)", status: "failed", state: "MISSING", calls: 1 },
+    { name: "shadowed", product: "", output: "2.1.295 (Claude Code)", paths: "C:\\other\\claude.exe\nC:\\Users\\Fixture\\.local\\bin\\claude.exe", state: "SHADOWED", calls: 0 },
+    { name: "unused-copy", product: "", output: "2.1.295 (Claude Code)", paths: "C:\\Users\\Fixture\\.local\\bin\\claude.exe\nC:\\other\\claude.exe", state: "READY", calls: 1 },
+  ];
+  writeFileSync(probe, `param([string]$Source, [string]$State)
+$ErrorActionPreference = 'Stop'
+$sourceText = [IO.File]::ReadAllText($Source)
+. ([scriptblock]::Create($sourceText.Substring(0, $sourceText.IndexOf('switch ($Mode)'))))
+$FixtureDir = $State
+$PrepHome = 'C:\\Users\\Fixture'
+$LocalRoot = Join-Path $PrepHome 'AppData\\Local'
+$BrainPrefix = Join-Path $LocalRoot 'FinancialBrain'
+$nativeProbe = (Get-Command Invoke-ClaudeVersion).ScriptBlock
+function Invoke-ClaudeVersion([string]$Canonical) {
+  $script:probeCalls++
+  if ($Canonical -cne (Join-Path $PrepHome '.local\\bin\\claude.exe')) { throw 'noncanonical probe' }
+  & $nativeProbe $Canonical
+}
+$cases = @'
+${JSON.stringify(cases)}
+'@ | ConvertFrom-Json
+foreach ($case in $cases) {
+  $script:probeCalls = 0
+  $paths = if ($case.PSObject.Properties['paths']) { $case.paths } else { 'C:\\Users\\Fixture\\.local\\bin\\claude.exe' }
+  $output = if ($case.PSObject.Properties['output']) { $case.output } else { 'garbage' }
+  $status = if ($case.PSObject.Properties['status']) { $case.status } else { 'ok' }
+  [IO.File]::WriteAllText((Join-Path $State 'claude.paths'), $paths)
+  [IO.File]::WriteAllText((Join-Path $State 'claude.product-version'), $case.product)
+  [IO.File]::WriteAllText((Join-Path $State 'claude.version-output'), $output)
+  [IO.File]::WriteAllText((Join-Path $State 'claude.version-status'), $status)
+  $rows = @(Invoke-Checks)
+  if (@($rows | Where-Object { $_ -match 'Claude Code' }).Count -ne 1) { throw 'Claude decision not reached' }
+  if ($script:ClaudeState -cne $case.state -or $script:probeCalls -ne $case.calls) { throw ('wrong version decision: ' + $case.name) }
+  if ($case.state -ceq 'READY') {
+    if ($script:CheckFailures -ne 0 -or $script:OwnerSteps.Count -ne 0) { throw 'green control failed' }
+    if (($rows -join '\n') -notmatch '2.1.295 \\(Claude Code\\)') { throw 'version not normalized' }
+  } else {
+    if ($script:CheckFailures -ne 1 -or $script:OwnerSteps.Count -ne 1) { throw 'refusal not reached' }
+    if ($case.state -ceq 'MISSING' -and $script:OwnerSteps[0] -notmatch 'a copy was found, but its version could not be read') { throw 'wrong unreadable owner step' }
+  }
+  Write-Output ('CLAUDE_VERSION_ARM_VERIFIED=' + $case.name)
+}
+`);
+  try {
+    const result = runWindowsScratch(probe, [WINDOWS, state], home, { timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS });
+    assert.equal(result.status, 0, combined(result));
+    assert.equal(result.stdout.match(/^CLAUDE_VERSION_ARM_VERIFIED=/gm)?.length, cases.length);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("Windows canonical Claude probe closes stdin, drains pipes, and kills a timeout", { skip: process.platform !== "win32", timeout: 150_000 }, () => {
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-claude-process-")));
+  const home = join(directory, "home");
+  const probe = join(directory, "probe.ps1");
+  mkdirSync(join(home, "temp"), { recursive: true });
+  writeFileSync(probe, `param([string]$Source)
+$ErrorActionPreference = 'Stop'
+$sourceText = [IO.File]::ReadAllText($Source)
+. ([scriptblock]::Create($sourceText.Substring(0, $sourceText.IndexOf('switch ($Mode)'))))
+$FixtureDir = ''
+$canonical = Join-Path $PrepHome '.local\\bin\\claude.exe'
+$bin = Split-Path -Parent $canonical
+New-Item -ItemType Directory -Path $bin -Force | Out-Null
+Add-Type -OutputAssembly $canonical -OutputType ConsoleApplication -TypeDefinition @'
+using System;
+using System.IO;
+using System.Threading;
+[assembly: System.Reflection.AssemblyInformationalVersion("unavailable")]
+public static class SyntheticVersion {
+  public static int Main(string[] args) {
+    string root = AppDomain.CurrentDomain.BaseDirectory;
+    File.WriteAllText(Path.Combine(root, "started"), System.Diagnostics.Process.GetCurrentProcess().Id.ToString());
+    if (args.Length != 1 || args[0] != "--version") return 10;
+    if (Console.Read() != -1) return 11;
+    if (Environment.GetEnvironmentVariable("SYNTHETIC_PROBE_SENTINEL") != null) return 12;
+    string mode = File.ReadAllText(Path.Combine(root, "scenario"));
+    if (mode == "timeout") { Thread.Sleep(60000); return 13; }
+    if (mode == "stderr-only") { Console.Error.WriteLine("2.1.295 (Claude Code)"); return 0; }
+    if (mode == "garbage-first") Console.WriteLine("garbage");
+    Console.Error.Write(new string('x', 200000));
+    Console.WriteLine();
+    Console.WriteLine("2.1.295 (Claude Code)");
+    Console.Write(new string('x', 200000));
+    return mode == "failed" ? 9 : 0;
+  }
+}
+'@
+function Get-ToolPaths([string]$Name) { return @($canonical) }
+if ((Get-Item -LiteralPath $canonical).VersionInfo.ProductVersion -cne 'unavailable') { throw 'native fixture metadata must force fallback' }
+$env:SYNTHETIC_PROBE_SENTINEL = 'must-not-inherit'
+foreach ($mode in @('good', 'stderr-only', 'garbage-first', 'failed', 'timeout')) {
+  $started = Join-Path $bin 'started'
+  if (Test-Path -LiteralPath $started) { Remove-Item -LiteralPath $started }
+  [IO.File]::WriteAllText((Join-Path $bin 'scenario'), $mode)
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  $version = Get-ToolVersion 'claude'
+  if (-not (Test-Path -LiteralPath $started)) { throw 'native process decision not reached' }
+  $elapsed = $clock.ElapsedMilliseconds
+  if ($mode -ceq 'good') {
+    if ($version -cne '2.1.295 (Claude Code)') { throw 'native green control failed' }
+  } elseif ($null -ne $version) { throw ('native refusal failed: ' + $mode) }
+  if ($mode -ceq 'timeout' -and ($elapsed -lt 18000 -or $elapsed -gt 30000)) { throw 'timeout deadline not respected' }
+  $childId = [int]([IO.File]::ReadAllText($started))
+  $child = $null
+  try { $child = [Diagnostics.Process]::GetProcessById($childId) } catch [ArgumentException] { }
+  if ($child) {
+    try { if (-not $child.WaitForExit(5000)) { $child.Kill(); throw 'version child survived deadline' } } finally { $child.Dispose() }
+  }
+  Write-Output ('CLAUDE_PROCESS_ARM_VERIFIED=' + $mode)
+}
+`);
+  try {
+    const result = runWindowsScratch(probe, [WINDOWS], home, { timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS });
+    assert.equal(result.status, 0, combined(result));
+    assert.equal(result.stdout.match(/^CLAUDE_PROCESS_ARM_VERIFIED=/gm)?.length, 5);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 const MAC_OWNER_NAMES = ["NODE_SOURCE", "GIT_SOURCE", "CLAUDE_SOURCE", "NODE_HOW", "GIT_HOW", "CLAUDE_HOW", "CLAUDE_UPDATE_HOW", "CLAUDE_CONFLICT_HOW"];
 
 // The Mac constants as written in the shipped script: one double-quoted line

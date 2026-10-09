@@ -253,10 +253,25 @@ try {
   @('[Unicode]', 'Unicode=yes', '[Version]', 'signature="$CHICAGO$"', 'Revision=1', '[Privilege Rights]', "SeBatchLogonRight = $batchValue") |
     Set-Content -LiteralPath $rightsApply -Encoding Unicode
   & secedit.exe /configure /db $rightsDb /cfg $rightsApply /areas USER_RIGHTS /quiet | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'User-rights grant failed' }
+  $configureExitCode = $LASTEXITCODE
+  "STANDARD_BATCH_RIGHT_CONFIGURE_EXIT=$configureExitCode" | Set-Content -LiteralPath (Join-Path $control 'logon-right.log')
+  if ($configureExitCode -ne 0) { throw 'User-rights grant failed' }
   & secedit.exe /export /cfg $rightsExport /areas USER_RIGHTS /quiet | Out-Null
-  $granted = @(Get-Content -LiteralPath $rightsExport | Where-Object { $_ -match '^SeBatchLogonRight\s*=' -and $_.Contains($batchEntry) }).Count -eq 1
-  "STANDARD_BATCH_RIGHT_GRANTED=$([int]$granted)" | Set-Content -LiteralPath (Join-Path $control 'logon-right.log')
+  if ($LASTEXITCODE -ne 0) { throw 'User-rights readback export failed' }
+  $batchLines = @(Get-Content -LiteralPath $rightsExport | Where-Object { $_ -match '^SeBatchLogonRight\s*=' })
+  $batchQualifiedUser = "$env:COMPUTERNAME\$($state.userName)"
+  # secedit may resolve a local SID to its qualified or bare account name.
+  # Compare whole comma-separated entries; a SID/name prefix is not proof.
+  $granted = $false
+  if ($batchLines.Count -eq 1) {
+    $entries = ($batchLines[0] -split '=', 2)[1] -split ',' | ForEach-Object { $_.Trim() }
+    $granted = @($entries | Where-Object {
+      $_ -ceq $batchEntry -or
+      [string]::Equals($_, $batchQualifiedUser, [StringComparison]::OrdinalIgnoreCase) -or
+      [string]::Equals($_, $state.userName, [StringComparison]::OrdinalIgnoreCase)
+    }).Count -gt 0
+  }
+  "STANDARD_BATCH_RIGHT_GRANTED=$([int]$granted)" | Add-Content -LiteralPath (Join-Path $control 'logon-right.log')
   if (-not $granted) { throw 'User-rights readback failed' }
   $phase = 'register'
   $executable = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
