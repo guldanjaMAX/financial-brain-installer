@@ -130,12 +130,12 @@ function fakeBatchReceipt(documents, status = "created") {
 }
 
 function emptyInventory() {
-  return { version: "0.4.10", backend: "d1", vector_drain_mode: "active", rows: [] };
+  return { version: "0.4.11", backend: "d1", vector_drain_mode: "active", rows: [] };
 }
 
 function completeInventory(fixture = disposableRecoveryFixture()) {
   return {
-    version: "0.4.10",
+    version: "0.4.11",
     backend: "d1",
     vector_drain_mode: "active",
     vector_backlog: {
@@ -168,7 +168,7 @@ function completeInventory(fixture = disposableRecoveryFixture()) {
 
 function prefixInventory(documents, fixture = disposableRecoveryFixture()) {
   return {
-    version: "0.4.10",
+    version: "0.4.11",
     backend: "d1",
     vector_drain_mode: "active",
     rows: [{
@@ -776,18 +776,20 @@ test("every campaign version pin is the one version this package ships", () => {
 test("a Worker or receipt reporting any other version is refused under the shipped bytes", async () => {
   const shippedEmpty = () => ({ ...emptyInventory(), version: SHIPPED_VERSION });
   const shippedComplete = () => ({ ...completeInventory(), version: SHIPPED_VERSION });
-  const otherVersions = ["0.4.8", "0.4.9", "0.5.0", "1.0.0", `v${SHIPPED_VERSION}`, ""]
+  const otherVersions = ["0.4.8", "0.4.9", "0.4.10", "0.5.0", "1.0.0", `v${SHIPPED_VERSION}`, ""]
     .filter((version) => version !== SHIPPED_VERSION);
 
   for (const version of otherVersions) {
     let writes = 0;
+    let reads = 0;
     await assert.rejects(seedDisposableRecoveryFixture({
       ingestBatch: async () => { writes++; },
-      readInventory: async () => ({ ...shippedEmpty(), version }),
+      readInventory: async () => { reads++; return { ...shippedEmpty(), version }; },
       now: () => FIXED_TIME,
     }), (error) => error instanceof DisposableRecoverySeedError &&
       error.code === "inventory_contract_mismatch" &&
       error.may_have_written === false);
+    assert.equal(reads, 1, "the mismatched inventory must reach the version decision");
     assert.equal(writes, 0);
   }
 

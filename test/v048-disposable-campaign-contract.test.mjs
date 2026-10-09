@@ -162,7 +162,7 @@ test("wrong role, resource name, account, locator, version, and slug are refused
     "utf8",
   )).version;
   assert.equal(V048_DISPOSABLE_CAMPAIGN.version, shippedVersion);
-  for (const version of ["0.4.8", "0.4.9", "0.5.0", "1.0.0", `v${shippedVersion}`, ""]) {
+  for (const version of ["0.4.8", "0.4.9", "0.4.10", "0.5.0", "1.0.0", `v${shippedVersion}`, ""]) {
     if (version === shippedVersion) continue;
     const otherVersion = campaignManifest("source");
     otherVersion.brain.version = version;

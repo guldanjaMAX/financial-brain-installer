@@ -4,6 +4,49 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.11 (2026-10-09)
+
+Candidate only. This version has not been released. The changes below still
+need the full host gate, CI and separately reviewed field acceptance for the
+exact sealed package.
+
+- **Imports ask before removing stored records.** When an import needs to
+  remove records, it stops with a plan showing how much of the source would
+  go and why. Applying that plan requires a separate explicit approval.
+- **Split documents keep the right records.** Removal checks exact membership
+  so a repair cannot delete an independent original with a similar name.
+  A document with only one remaining part no longer stalls the import.
+- **Drive removal approvals are easier to review.** Both comparison walks
+  list the affected items, and approval is checked again before each removal.
+- **Direct contact facts can come with a direct citation.** When a source
+  explicitly states a contact detail, the Brain can answer from that evidence
+  without asking a writing model to reconstruct it.
+- **Slow answers are easier to diagnose.** Support can see how long each
+  answer stage took without logging the question's contents.
+- **Windows browser sign-in works in the owner's separate console.** Its
+  required credential-storage component can install there, and a failed
+  sign-in gives one next step.
+- **Machine Prep gives clearer setup guidance.** Missing tools have one
+  official next step, current Claude Code versions are recognized, and Codex
+  remains optional. The Mac launcher keeps internal log markers off screen.
+
+### Known issues
+
+- Removal of rows the Worker cannot verify still needs the technician.
+- After a failed `brain update`, run `brain health`: two failure messages can
+  misleadingly say the Brain is working normally or still applying a change.
+  Fixes are planned for the next release.
+
+### This release does NOT cover
+
+- **UPDATE-012:** Windows x64 is the only supported Windows runtime in this
+  release. Windows ARM64 ships unproven.
+- **UPDATE-044:** Bank breadth ships unproven. Bank invitations stay closed.
+- QuickBooks Desktop money answers and owner readiness still need field
+  acceptance. Financial contracts, the test-only oracle, books-match and
+  tax-check remain internal libraries, with no owner CFO surface or tax
+  workflow. SimpleFIN proof remains held.
+
 ## 0.4.10 (2026-10-06)
 
 - **Known Windows issue:** on a clean Windows user profile, browser sign-in can
