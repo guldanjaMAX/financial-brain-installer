@@ -69,6 +69,25 @@ function Get-ToolPaths([string]$Name) {
 }
 
 function Get-ToolVersion([string]$Name) {
+  if ($Name -eq "claude") {
+    $paths = @(Get-ToolPaths $Name)
+    if ($paths.Count -eq 0) { return $null }
+    $canonical = Join-Path $PrepHome ".local\bin\claude.exe"
+    if (-not [string]::Equals([IO.Path]::GetFullPath($paths[0]), [IO.Path]::GetFullPath($canonical), [StringComparison]::OrdinalIgnoreCase)) { return $null }
+    # Keep older fixtures intact; the new input exercises the metadata reading
+    # through the same validation used for the native executable.
+    if ($FixtureDir -and -not (Test-Path -LiteralPath (Join-Path $FixtureDir "claude.product-version") -PathType Leaf)) {
+      return Read-Fixture "claude.version"
+    }
+    $fileVersion = $null
+    if ($FixtureDir) { $fileVersion = Read-Fixture "claude.product-version" } else {
+      try { $fileVersion = (Get-Item -LiteralPath $canonical).VersionInfo.ProductVersion } catch { $fileVersion = $null }
+    }
+    # Native builds have reported X.Y.Z.0 here; X.Y.Z is accepted too. Anything
+    # else reads as "version could not be read". Nothing is run to compensate.
+    if ($fileVersion -cmatch '\A([0-9]+\.[0-9]+\.[0-9]+)(?:\.0)?\z') { return "$($Matches[1]) (Claude Code)" }
+    return $null
+  }
   if ($FixtureDir) {
     $value = Read-Fixture "$Name.version"
     if (-not $value -or $value -eq "MISSING") { return $null }
@@ -87,13 +106,6 @@ function Get-ToolVersion([string]$Name) {
     if (-not [string]::Equals([IO.Path]::GetFullPath($paths[0]), [IO.Path]::GetFullPath($canonical), [StringComparison]::OrdinalIgnoreCase) -or
         -not (Test-Path -LiteralPath $packageJson -PathType Leaf)) { return $null }
     return "codex-cli $([string](([IO.File]::ReadAllText($packageJson) | ConvertFrom-Json).version))"
-  }
-  if ($Name -eq "claude") {
-    $canonical = Join-Path $PrepHome ".local\bin\claude.exe"
-    if (-not [string]::Equals([IO.Path]::GetFullPath($paths[0]), [IO.Path]::GetFullPath($canonical), [StringComparison]::OrdinalIgnoreCase)) { return $null }
-    $fileVersion = (Get-Item -LiteralPath $canonical).VersionInfo.ProductVersion
-    if (-not $fileVersion) { return $null }
-    return "$fileVersion (Claude Code)"
   }
   $output = @(& $paths[0] --version 2>$null)
   if ($output.Count -eq 0) { return $null }

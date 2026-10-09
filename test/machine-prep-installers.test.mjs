@@ -454,6 +454,15 @@ const STANDARD_USER_BOUNDARIES = [
   ["source", "STANDARD_USER_PARENT_PHASE=$phase"],
   ["source", "SeBatchLogonRight = $batchValue"],
   ["source", "STANDARD_BATCH_RIGHT_GRANTED=$([int]$granted)"],
+  ["source", "$configureExitCode = $LASTEXITCODE"],
+  ["source", "STANDARD_BATCH_RIGHT_CONFIGURE_EXIT=$configureExitCode"],
+  ["source", "if ($configureExitCode -ne 0) { throw 'User-rights grant failed' }"],
+  ["source", "if ($LASTEXITCODE -ne 0) { throw 'User-rights readback export failed' }"],
+  ["source", "$batchLines.Count -eq 1"],
+  ["source", "-split ',' | ForEach-Object { $_.Trim() }"],
+  ["source", "$_ -ceq $batchEntry"],
+  ["source", "[string]::Equals($_, $batchQualifiedUser, [StringComparison]::OrdinalIgnoreCase)"],
+  ["source", "[string]::Equals($_, $state.userName, [StringComparison]::OrdinalIgnoreCase)"],
   ["source", "STANDARD_TASK_LAST_RESULT=0x{0:X8}"],
   ["source", "$token = Read-SessionToken"],
   ["source", "if ($context.githubActions -cne 'true' -or $context.runnerEnvironment -cne 'github-hosted')"],
@@ -584,6 +593,96 @@ foreach ($file in @($Bootstrap, $Adapter)) {
     assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
     assert.equal(result.stdout.match(/^PARSE_DECISION_REACHED=1/gm)?.length, 2);
     assert.equal(result.stdout.match(/^PARSE_VERIFIED=1/gm)?.length, 2);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("Windows batch-right readback accepts exact SID and local names with refusal controls", { skip: process.platform !== "win32" }, () => {
+  const source = read("machine-prep/installers/smoke/windows-limited.ps1");
+  const start = source.indexOf("  $phase = 'logon-right'");
+  const end = source.indexOf("  $phase = 'register'", start);
+  assert.ok(start > 0 && end > start, "real grant and readback block extracted");
+  const block = source.slice(start, end);
+  const cases = [
+    { name: "sid", value: "*S-1-5-21-100-200-300-400", accept: true },
+    { name: "qualified", value: "FIXTURE-PC\\fixture-user", accept: true },
+    { name: "qualified-case", value: "fixture-pc\\FIXTURE-USER", accept: true },
+    { name: "bare", value: "fixture-user", accept: true },
+    { name: "bare-case", value: "FIXTURE-USER", accept: true },
+    { name: "list-whitespace", value: " *S-1-5-32-544, FIXTURE-PC\\fixture-user , *S-1-5-32-551 ", accept: true },
+    { name: "bare-list", value: "*S-1-5-32-544, fixture-user", accept: true },
+    ...["*S-1-5-21-100-200-300-4000", "S-1-5-21-100-200-300-400", "other-fixture-user", "fixture-user-extra", "OTHER-PC\\fixture-user", "FIXTURE-PC\\fixture-user-extra", "", "*S-1-5-32-544"].map((value, index) => ({ name: `wrong-entry-${index}`, value, accept: false })),
+    { name: "wrong-right", value: "fixture-user", right: "SeDenyBatchLogonRight", accept: false },
+    { name: "duplicate-lines", value: "fixture-user", duplicate: true, accept: false },
+    { name: "configure-failed", value: "fixture-user", configure: 5, accept: false },
+    { name: "export-failed", value: "fixture-user", readback: 5, accept: false },
+  ];
+  const home = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-batch-right-")));
+  const fixture = join(home, "readback.ps1");
+  // Execute only the shipped grant/readback block. The native secedit boundary
+  // is replaced; account creation, privileges and task APIs are never called.
+  writeFileSync(fixture, `Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$state = @{ sid = 'S-1-5-21-100-200-300-400'; userName = 'fixture-user' }
+$env:COMPUTERNAME = 'FIXTURE-PC'
+$control = $env:HOME
+function secedit.exe {
+  if ($args[0] -ceq '/configure') {
+    $script:configureCalls++
+    $global:LASTEXITCODE = if ($case.PSObject.Properties['configure']) { $case.configure } else { 0 }
+    return
+  }
+  if ($args[0] -cne '/export') { throw 'unexpected secedit call' }
+  $script:exportCalls++
+  $lines = @('SeBatchLogonRight = *S-1-5-32-544')
+  $global:LASTEXITCODE = 0
+  if ($script:exportCalls -eq 2) {
+    $right = if ($case.PSObject.Properties['right']) { $case.right } else { 'SeBatchLogonRight' }
+    $lines = @($right + ' = ' + $case.value)
+    if ($case.PSObject.Properties['duplicate']) { $lines += $lines[0] }
+    if ($case.PSObject.Properties['readback']) { $global:LASTEXITCODE = $case.readback }
+  }
+  $lines | Set-Content -LiteralPath $rightsExport -Encoding Unicode
+}
+$cases = @'
+${JSON.stringify(cases)}
+'@ | ConvertFrom-Json
+foreach ($case in $cases) {
+  $script:configureCalls = 0; $script:exportCalls = 0
+  $accepted = $false
+  try {
+${block}
+    $accepted = $true
+  } catch {
+    if ($_.Exception.Message -notmatch '^User-rights (grant|readback|readback export) failed$') { throw }
+  }
+  if ($script:configureCalls -ne 1) { throw 'configure decision not reached' }
+  $expectedExports = if ($case.PSObject.Properties['configure']) { 1 } else { 2 }
+  if ($script:exportCalls -ne $expectedExports) { throw 'readback decision not reached' }
+  if ($accepted -ne $case.accept) { throw ('wrong batch-right decision: ' + $case.name) }
+  $applied = Get-Content -LiteralPath $rightsApply
+  if ($applied -notcontains 'SeBatchLogonRight = *S-1-5-32-544,*S-1-5-21-100-200-300-400') { throw 'existing rights not preserved' }
+  $receipt = @(Get-Content -LiteralPath (Join-Path $control 'logon-right.log'))
+  $configureCode = if ($case.PSObject.Properties['configure']) { $case.configure } else { 0 }
+  if ($receipt -notcontains "STANDARD_BATCH_RIGHT_CONFIGURE_EXIT=$configureCode") { throw 'configure receipt missing' }
+  if (-not $case.PSObject.Properties['configure'] -and -not $case.PSObject.Properties['readback']) {
+    if ($receipt -notcontains "STANDARD_BATCH_RIGHT_GRANTED=$([int]$case.accept)") { throw 'grant receipt incorrect' }
+  } elseif ($receipt -contains 'STANDARD_BATCH_RIGHT_GRANTED=1') { throw 'failed command accepted stale proof' }
+  Write-Output ('BATCH_RIGHT_ARM_VERIFIED=' + $case.name)
+}
+`);
+  try {
+    const result = spawnSync(join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fixture,
+    ], {
+      cwd: home, encoding: "utf8", timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS,
+      env: {
+        SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR,
+        HOME: home, USERPROFILE: home, TEMP: home, TMP: home,
+        BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_TEST_LAUNCHCTL: join(home, "injected-launchctl"),
+      },
+    });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.equal(result.stdout.match(/^BATCH_RIGHT_ARM_VERIFIED=/gm)?.length, cases.length);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 

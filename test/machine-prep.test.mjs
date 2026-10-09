@@ -747,6 +747,138 @@ function functionBody(source, start, end) {
   return source.slice(from, to);
 }
 
+test("Windows Claude version reads the canonical copy's metadata and runs nothing", () => {
+  const source = readFileSync(WINDOWS, "utf8").replaceAll("\r\n", "\n");
+  const version = functionBody(source, "function Get-ToolVersion(", "\n}\n");
+  const claude = version.slice(0, version.indexOf('\n  if ($FixtureDir) {\n    $value = Read-Fixture "$Name.version"'));
+  assert.match(claude, /if \(\$Name -eq "claude"\)/, "Claude branch reached");
+  assert.match(claude, /VersionInfo\.ProductVersion/, "production metadata decision reached");
+  assert.match(claude, /Read-Fixture "claude\.product-version"/);
+  const canonicalGuard = claude.indexOf("[StringComparison]::OrdinalIgnoreCase");
+  assert.ok(canonicalGuard >= 0 && canonicalGuard < claude.indexOf("VersionInfo.ProductVersion"), "only the canonical copy is read");
+  // Four-part X.Y.Z.0 (seen in the field as 2.1.295.0) and three-part X.Y.Z are the only accepted shapes.
+  assert.ok(claude.includes(String.raw`$fileVersion -cmatch '\A([0-9]+\.[0-9]+\.[0-9]+)(?:\.0)?\z'`));
+  // Nothing is executed to read the version: no process, no call operator, no --version,
+  // and the branch ends in its own refusal instead of falling through to the generic probe.
+  assert.doesNotMatch(claude, /Diagnostics\.Process|Start-Process|Start-Job|Invoke-Command|Invoke-Expression|cmd(\.exe)?\b|powershell|pwsh|--version|Invoke-ClaudeVersion|& |\. \$/i);
+  assert.match(claude, /\n    return \$null\n  \}$/, "the Claude branch ends in its own refusal");
+  assert.doesNotMatch(source, /function Invoke-ClaudeVersion/);
+});
+
+test("Windows Claude metadata fixtures reach the real readiness decisions", { skip: process.platform !== "win32" }, () => {
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-claude-version-")));
+  const state = join(directory, "state");
+  const home = join(directory, "home");
+  const probe = join(directory, "probe.ps1");
+  mkdirSync(join(home, "temp"), { recursive: true });
+  cpSync(join(FIXTURES, "windows-ready"), state, { recursive: true });
+  const cases = [
+    { name: "metadata", product: "2.1.295", state: "READY" },
+    { name: "metadata-zero-revision", product: "2.1.295.0", state: "READY" },
+    { name: "metadata-old", product: "2.1.260", state: "WRONG_VERSION" },
+    { name: "metadata-old-zero-revision", product: "2.1.260.0", state: "WRONG_VERSION" },
+    ...["", "garbage", "2.1.295.1", "2.1.295-beta", "2.1.295 ", " 2.1.295", "2.1", "2.1.295.0.0", "2.1.295 (Claude Code)"].map((product, index) => ({
+      name: `unreadable-${index}`, product, state: "MISSING",
+    })),
+    { name: "shadowed", product: "2.1.295.0", paths: "C:\\other\\claude.exe\nC:\\Users\\Fixture\\.local\\bin\\claude.exe", state: "SHADOWED" },
+    { name: "unused-copy", product: "2.1.295.0", paths: "C:\\Users\\Fixture\\.local\\bin\\claude.exe\nC:\\other\\claude.exe", state: "READY" },
+  ];
+  writeFileSync(probe, `param([string]$Source, [string]$State)
+$ErrorActionPreference = 'Stop'
+$sourceText = [IO.File]::ReadAllText($Source)
+. ([scriptblock]::Create($sourceText.Substring(0, $sourceText.IndexOf('switch ($Mode)'))))
+$FixtureDir = $State
+$PrepHome = 'C:\\Users\\Fixture'
+$LocalRoot = Join-Path $PrepHome 'AppData\\Local'
+$BrainPrefix = Join-Path $LocalRoot 'FinancialBrain'
+$cases = @'
+${JSON.stringify(cases)}
+'@ | ConvertFrom-Json
+foreach ($case in $cases) {
+  $paths = if ($case.PSObject.Properties['paths']) { $case.paths } else { 'C:\\Users\\Fixture\\.local\\bin\\claude.exe' }
+  [IO.File]::WriteAllText((Join-Path $State 'claude.paths'), $paths)
+  [IO.File]::WriteAllText((Join-Path $State 'claude.product-version'), $case.product)
+  $rows = @(Invoke-Checks)
+  if (@($rows | Where-Object { $_ -match 'Claude Code' }).Count -ne 1) { throw 'Claude decision not reached' }
+  if ($script:ClaudeState -cne $case.state) { throw ('wrong version decision: ' + $case.name) }
+  if ($case.state -ceq 'READY') {
+    if ($script:CheckFailures -ne 0 -or $script:OwnerSteps.Count -ne 0) { throw 'green control failed' }
+    if (($rows -join '\n') -notmatch '2.1.295 \\(Claude Code\\)') { throw 'version not normalized' }
+  } else {
+    if ($script:CheckFailures -ne 1 -or $script:OwnerSteps.Count -ne 1) { throw 'refusal not reached' }
+    if ($case.state -ceq 'MISSING' -and $script:OwnerSteps[0] -notmatch 'a copy was found, but its version could not be read') { throw 'wrong unreadable owner step' }
+  }
+  Write-Output ('CLAUDE_VERSION_ARM_VERIFIED=' + $case.name)
+}
+`);
+  try {
+    const result = runWindowsScratch(probe, [WINDOWS, state], home, { timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS });
+    assert.equal(result.status, 0, combined(result));
+    assert.equal(result.stdout.match(/^CLAUDE_VERSION_ARM_VERIFIED=/gm)?.length, cases.length);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("Windows Claude version is read from a real executable's metadata without running it", { skip: process.platform !== "win32", timeout: 150_000 }, () => {
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-claude-native-")));
+  const home = join(directory, "home");
+  const probe = join(directory, "probe.ps1");
+  mkdirSync(join(home, "temp"), { recursive: true });
+  // product: the ProductVersion stamped into the synthetic claude.exe; null = no file at all.
+  const arms = [
+    { name: "four-part", product: "2.1.295.0", expected: "2.1.295 (Claude Code)" },
+    { name: "three-part", product: "2.1.295", expected: "2.1.295 (Claude Code)" },
+    { name: "nonzero-revision", product: "2.1.295.1", expected: null },
+    { name: "unavailable", product: "unavailable", expected: null },
+    { name: "missing-file", product: null, expected: null },
+  ];
+  writeFileSync(probe, `param([string]$Source, [string]$Root)
+$ErrorActionPreference = 'Stop'
+$sourceText = [IO.File]::ReadAllText($Source)
+. ([scriptblock]::Create($sourceText.Substring(0, $sourceText.IndexOf('switch ($Mode)'))))
+$FixtureDir = ''
+function Get-ToolPaths([string]$Name) { return @(Join-Path $PrepHome '.local\\bin\\claude.exe') }
+$arms = @'
+${JSON.stringify(arms)}
+'@ | ConvertFrom-Json
+$index = 0
+foreach ($arm in $arms) {
+  $index++
+  $PrepHome = Join-Path $Root $arm.name
+  $canonical = Join-Path $PrepHome '.local\\bin\\claude.exe'
+  $bin = Split-Path -Parent $canonical
+  New-Item -ItemType Directory -Path $bin -Force | Out-Null
+  $started = Join-Path $bin 'started'
+  if ($null -ne $arm.product) {
+    Add-Type -OutputAssembly $canonical -OutputType ConsoleApplication -TypeDefinition (@'
+using System;
+using System.IO;
+[assembly: System.Reflection.AssemblyInformationalVersion("PRODUCT")]
+public static class SyntheticClaudeINDEX {
+  public static int Main(string[] args) {
+    File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "started"), "ran");
+    Console.WriteLine("2.1.295 (Claude Code)");
+    return 0;
+  }
+}
+'@).Replace('PRODUCT', $arm.product).Replace('INDEX', [string]$index)
+    # The decision must see the stamped metadata, or the arm proves nothing.
+    if ((Get-Item -LiteralPath $canonical).VersionInfo.ProductVersion -cne $arm.product) { throw ('synthetic metadata not stamped: ' + $arm.name) }
+  } elseif (Test-Path -LiteralPath $canonical) { throw 'missing-file arm has a file' }
+  $version = Get-ToolVersion 'claude'
+  if (Test-Path -LiteralPath $started) { throw ('claude.exe was executed: ' + $arm.name) }
+  if ($null -eq $arm.expected) {
+    if ($null -ne $version) { throw ('unreadable metadata accepted: ' + $arm.name) }
+  } elseif ($version -cne $arm.expected) { throw ('metadata not accepted: ' + $arm.name) }
+  Write-Output ('CLAUDE_NATIVE_ARM_VERIFIED=' + $arm.name)
+}
+`);
+  try {
+    const result = runWindowsScratch(probe, [WINDOWS, directory], home, { timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS });
+    assert.equal(result.status, 0, combined(result));
+    assert.equal(result.stdout.match(/^CLAUDE_NATIVE_ARM_VERIFIED=/gm)?.length, arms.length);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 const MAC_OWNER_NAMES = ["NODE_SOURCE", "GIT_SOURCE", "CLAUDE_SOURCE", "NODE_HOW", "GIT_HOW", "CLAUDE_HOW", "CLAUDE_UPDATE_HOW", "CLAUDE_CONFLICT_HOW"];
 
 // The Mac constants as written in the shipped script: one double-quoted line
