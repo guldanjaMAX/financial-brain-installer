@@ -5,8 +5,8 @@ READINESS
 WRONG_VERSION  Node.js                 v20.11.1; OWNER ACTION: install supported major 22 or 24
 READY          npm                     10.2.4
 READY          Git                     git version 2.54.0.windows.1
-MISSING        Claude Code             OWNER ACTION: install pinned 2.1.261 from the official signed installer
-WRONG_VERSION  Codex CLI               codex-cli 0.154.0; expected 0.155.0-alpha.16; fix: run --real
+MISSING        Claude Code             version 2.1.261 or newer; Under "Install Claude Code" on the setup page, choose "Native Install (Recommended)" and run the default command for your system. Setup page: https://code.claude.com/docs/en/setup#install-claude-code
+OPTIONAL       Codex CLI               found, version 0.154.0.
 SHADOWED       Financial Brain CLI     2 PATH matches; fix: remove the earlier PATH entry and reopen PowerShell
 READY          Wrangler                package pin 4.131.1; no global install needed
 READY          Python 3                not required by standard machine prep
@@ -16,7 +16,7 @@ READINESS RED
 
 PLAN
 1. ADMIN: no Administrator session is needed or allowed; keep this normal current-user PowerShell window.
-2. OWNER ACTION: install any missing Node.js, Git, Claude Code, or Codex prerequisite from its official signed installer, then rerun this launcher.
+2. OWNER ACTION: install any missing Node.js, Git, or Claude Code tool from its official signed installer, then rerun this launcher.
 3. REFUSE: the launcher does not download or execute prerequisite installers whose bytes it cannot authenticate before execution.
 4. SKIP: do not install global Wrangler; Financial Brain owns wrangler@4.131.1.
 5. DOWNLOAD: Financial Brain 0.4.9 from the one pinned HTTPS kit URL without following redirects.
