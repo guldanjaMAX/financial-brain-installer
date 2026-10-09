@@ -327,27 +327,46 @@ try {
    * 5. the AUTH_REQUIRED copy points at update, and at explicit consent
    * --------------------------------------------------------------------- */
 
-  let authFailure = null;
-  try {
-    await brain.withCloudflareControlCredential(async () => "never reached", {
-      withToken: async () => { throw new Error("fixture: no Cloudflare credential in this shell"); },
-    });
-  } catch (error) { authFailure = error; }
-  const authMessage = String(authFailure?.message || "");
+  for (const platform of new Set([process.platform, "win32", "darwin", "linux"])) {
+    let authFailure = null, tokenCalls = 0, actionCalls = 0;
+    const action = async () => { actionCalls++; return "authorized-control"; };
+    try {
+      await quiet(() => brain.withCloudflareControlCredential(action, {
+        platform,
+        withToken: async () => { tokenCalls++; throw new Error("fixture: no Cloudflare credential in this shell"); },
+      }));
+    } catch (error) { authFailure = error; }
+    const authMessage = brain.renderCliCommands(String(authFailure?.message || ""), { platform });
+    const shown = (text) => brain.renderCliCommands(text, { platform });
 
-  check("the no-credential failure is still classified AUTH_REQUIRED",
-    authFailure?.code === "AUTH_REQUIRED", JSON.stringify({ code: authFailure?.code }));
-  check("AUTH_REQUIRED never offers `brain setup` as the way out",
-    !/brain setup/.test(authMessage), authMessage);
-  check("AUTH_REQUIRED names `brain update <manifest>` from an interactive terminal",
-    /brain update <manifest>/.test(authMessage) && /interactive terminal/i.test(authMessage),
-    authMessage);
-  check("and it names only the explicit consent flag a non-interactive session needs",
-    /--adopt-cloudflare-profile/.test(authMessage) &&
-      !/BRAIN_ADOPT_CLOUDFLARE_PROFILE=1/.test(authMessage),
-    authMessage);
-  check("and that consent is described as the owner's, not something to assume",
-    /approv/i.test(authMessage), authMessage);
+    check(`${platform}: missing access reaches the credential decision without running the action`,
+      tokenCalls === 1 && actionCalls === 0);
+    check(`${platform}: the no-credential failure is still classified AUTH_REQUIRED`,
+      authFailure?.code === "AUTH_REQUIRED", JSON.stringify({ code: authFailure?.code }));
+    check(`${platform}: AUTH_REQUIRED never offers setup as the way out`,
+      !authMessage.includes(shown("brain setup")), authMessage);
+    check(`${platform}: AUTH_REQUIRED names the supported update command and owner terminal`,
+      authMessage.includes(shown(platform === "win32"
+        ? "brain update <manifest> --adopt-cloudflare-profile" : "brain update <manifest>")) &&
+        (platform === "win32" ? /visible PowerShell window as the same Windows user/i : /interactive terminal/i).test(authMessage),
+      authMessage);
+    check(`${platform}: it names explicit consent without an environment bypass`,
+      /--adopt-cloudflare-profile/.test(authMessage) &&
+        !/BRAIN_ADOPT_CLOUDFLARE_PROFILE=1/.test(authMessage), authMessage);
+    check(`${platform}: consent is described as the owner's, not something to assume`,
+      /approv/i.test(authMessage), authMessage);
+    if (platform === "win32") {
+      check("Windows gives one adoption command and no token-entry or setup route",
+        authMessage.split(shown("brain update <manifest> --adopt-cloudflare-profile")).length === 2 &&
+          /will not ask you to type a key/.test(authMessage) &&
+          !/--browser-sign-in|--cloudflare-token|recovery.only hidden token entry|Stop here/i.test(authMessage), authMessage);
+    }
+    const control = await quiet(() => brain.withCloudflareControlCredential(action, {
+      platform, withToken: async (run) => { tokenCalls++; return run(); },
+    }));
+    check(`${platform}: authorized control reaches the same decision and runs the action once`,
+      control === "authorized-control" && tokenCalls === 2 && actionCalls === 1);
+  }
 
   /* ------------------------------------------------------------------------
    * 6. doctor never sends a stuck brain to setup either

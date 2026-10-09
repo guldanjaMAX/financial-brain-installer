@@ -786,6 +786,7 @@ const expected = [
   // instance inputs.
   "operations/continuous-observation-clock.mjs",
   "operations/cloudflare-account-bootstrap.mjs",
+  "operations/cloudflare-keyring-guidance.mjs",
   "operations/cloudflare-oauth-session.mjs",
   "operations/command-display.mjs",
   "operations/zone-assignment-retry.mjs",

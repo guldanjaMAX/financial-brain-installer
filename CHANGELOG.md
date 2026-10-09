@@ -6,6 +6,37 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.10 (2026-10-06)
 
+- **Known Windows issue:** on a clean Windows user profile, browser sign-in can
+  stop before opening the browser because Wrangler's keyring binding is absent
+  and the installer does not give that step an interactive console. Token entry
+  is also unavailable on Windows. The 0.4.10.1 fix below remains gated by Windows
+  CI and a separate owner-present browser-sign-in check.
+
+### 0.4.10.1 fix (unreleased; release gates pending)
+
+- Windows browser sign-in can now install Wrangler's encrypted-storage binding
+  in the owner's visible console. The shared question reader releases the
+  terminal during that step and returns afterward. Encrypted storage stays
+  required. A session without a console gives one PowerShell install command
+  when the binding is missing; after that per-user install it can reuse the
+  binding without a console.
+- A Windows keyring refusal now names a bounded reason: `binding_missing`,
+  `npx_unavailable`, `timeout`, or `other`. Failed Windows update adoption keeps
+  that diagnosis and its next step. `brain support --explain CLOUDFLARE_KEYRING_UNAVAILABLE` explains the reasons. Windows guidance no
+  longer promises a saved-token or hidden-token-entry recovery route.
+- Windows failures give one next step. Scope refusals require technician review,
+  including in sessions without a console. Other sign-in failures keep their
+  retry guidance and call for review only if that retry fails. A keyring failure
+  with visible output points to that output; a session with captured output
+  gives the PowerShell command to make the reason visible. macOS and Linux keep
+  their existing messages and support guidance.
+- Before release, require the real Windows CI missing-binding and preinstalled
+  control to pass. Then verify browser sign-in in a clean Windows user profile.
+  The one-time install needs npm registry access and may be blocked by Windows
+  Smart App Control. Each Windows user needs their own binding installation.
+
+### 0.4.10 changes
+
 - Daily refresh now advances its success date when files are refused,
   unsupported, or excluded by rule when the run has no failures and verifies
   accepted or unchanged documents. Empty or entirely refused runs keep the prior

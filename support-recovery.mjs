@@ -8,6 +8,7 @@
  */
 
 import { SUPPORT_ERROR_CODES } from "./support-journal.mjs";
+import { WINDOWS_KEYRING_RECOVERY } from "./operations/cloudflare-keyring-guidance.mjs";
 
 const RETRY_STATES = new Set(["safe_now", "safe_after_step", "review_first"]);
 
@@ -59,6 +60,7 @@ const CATALOG = [
   entry("AUTH_DENIED", "Sign-in was not approved", "The provider or account owner declined the sign-in request.", "The connection was left unchanged.", "safe_after_step", ["Open the sign-in step again when the owner is ready.", "Approve only the access shown on the provider screen, then retry the same Brain step."], "The provider keeps declining a request the owner has approved."),
   entry("AUTH_EXPIRED", "The connection needs a fresh sign-in", "A previously approved session or token is no longer accepted.", "Stored documents remain in place while the connector waits.", "safe_after_step", ["Run the matching connection step and complete sign-in again.", "Retry the same refresh after the connection check passes."], "A fresh sign-in succeeds but the Brain still reports this code."),
   entry("AUTH_REQUIRED", "A sign-in or credential is still needed", "This step reached a protected service without a usable authorization.", "The installer paused before relying on missing access.", "safe_after_step", ["Return to the matching technician step for Cloudflare, Google, Zoom, or IMAP.", "Enter any sensitive value only in the provider page or hidden terminal prompt, then retry."], "It is unclear which account or provider step is missing."),
+  entry("CLOUDFLARE_KEYRING_UNAVAILABLE", "Cloudflare protected storage needs attention", "The keyring step could not use this computer's protected credential store.", "No new browser profile was recorded and encrypted storage remains required.", "safe_after_step", ["Confirm this computer's protected credential store is available.", "Then retry the same command."], "The protected credential store remains unavailable after retrying."),
   entry("BRAIN_DOMAIN_MISSING", "The Brain address is not saved", "The manifest has no verified Brain hostname for this source command.", "The command stopped before reading a credential or contacting any address.", "safe_after_step", ["Restore brain.domain from a known-good manifest backup, or use brain health in an interactive terminal to prove the deployed hostname.", "Retry the same source command after the verified hostname is saved."], "The manifest backup and brain health disagree about the deployed hostname."),
   entry("CLOUDFLARE_TOKEN_NOT_ACTIVE", "Cloudflare did not accept the access key", "Cloudflare code 9109 usually means the key's start date is later than now or its end date has passed.", "Nothing in the Brain changed because the request was refused.", "safe_after_step", ["In Cloudflare open My Profile > API Tokens, set the start date to today or earlier and the end date at least a week away.", "If you made a new key, first run brain token <manifest> --forget, then run the same command again."], "Cloudflare still returns code 9109 after the dates and the saved key are confirmed."),
   entry("CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED", "This Cloudflare account has no workers.dev subdomain yet", "Cloudflare sign-in worked, but the account has not registered the workers.dev subdomain that this Brain's address lives on.", "Setup stopped before creating anything, so there is nothing to undo.", "safe_after_step", ["In the Cloudflare dashboard, open Workers & Pages and register a workers.dev subdomain for this account.", "Then rerun the same brain setup, brain update, or brain deploy command with the same manifest."], "Workers & Pages already shows a registered workers.dev subdomain for the account this Brain uses."),
@@ -108,7 +110,13 @@ if (CATALOG.length !== SUPPORT_ERROR_CODES.length ||
   throw new Error("support recovery catalog does not match the support issue schema");
 }
 
-export function supportRecovery(code) {
+// Keep Windows recovery routes out of the existing macOS/Linux explanations.
+const WINDOWS_RECOVERY = Object.freeze(Object.fromEntries([
+  entry("AUTH_REQUIRED", "A sign-in or credential is still needed", "This step reached a protected service without a usable authorization.", "The installer paused before relying on missing access.", "safe_after_step", ["Return to the matching technician step for Cloudflare, Google, Zoom, or IMAP.", "For Cloudflare on Windows, approve browser sign-in with brain update <manifest> --adopt-cloudflare-profile in a visible PowerShell window. Windows has no saved Cloudflare-token recovery or supported hidden token entry in this release.", "Enter sensitive values only in a provider page or a supported protected entry flow."], "It is unclear which account or provider step is missing."),
+  entry("CLOUDFLARE_KEYRING_UNAVAILABLE", "Cloudflare protected storage needs attention", "The keyring step stopped before browser sign-in. Reasons: binding_missing means the Windows binding is missing or cannot load; npx_unavailable means the Node.js launcher is unavailable; timeout means the step exceeded its time limit; other means a different keyring failure.", "No new browser profile was recorded and encrypted storage remains required.", "safe_after_step", [WINDOWS_KEYRING_RECOVERY, "For npx_unavailable, restore the supported Node.js installation first. For timeout, check npm registry access."], "The visible command still fails, or Windows blocks the native binding."),
+].map((item) => [item.code, item])));
+
+export function supportRecovery(code, { platformName = process.platform } = {}) {
   const normalized = String(code || "").trim().toUpperCase();
   const result = SUPPORT_RECOVERY_CATALOG[normalized];
   if (!result) {
@@ -116,7 +124,7 @@ export function supportRecovery(code) {
     error.code = "CONFIG_INVALID";
     throw error;
   }
-  return result;
+  return platformName === "win32" ? (WINDOWS_RECOVERY[normalized] ?? result) : result;
 }
 
 export function renderSupportRecovery(recovery) {

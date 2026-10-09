@@ -318,6 +318,7 @@ import {
   cloudflareOAuthProfileName,
   withCloudflareOAuthSession,
 } from "./operations/cloudflare-oauth-session.mjs";
+import { cloudflareKeyringFailureMessage } from "./operations/cloudflare-keyring-guidance.mjs";
 import {
   assessZoneReadiness,
   collectAnswers,
@@ -1172,24 +1173,31 @@ export async function promptForCloudflareOAuthAccount(request, options = {}) {
   return String(await askFn("Cloudflare account id", "")).trim();
 }
 
-// The Windows route, in one plain line. On Windows a known scope refusal is
-// never answered with a recovery offer (hidden entry cannot be trusted there),
-// so the owner is told where the route is instead of being sent back to a
-// prompt this command will refuse.
-const CLOUDFLARE_WINDOWS_SAVED_KEY_ROUTE =
-  "On Windows the route is the saved Cloudflare key, not a browser sign-in; this command will not ask you to type a key.";
+// Windows has neither a saved Cloudflare-token backend nor proven hidden
+// token entry. A scope refusal must not advertise either as an owner remedy.
+const CLOUDFLARE_WINDOWS_RECOVERY_LIMIT =
+  "Windows has no saved Cloudflare-token recovery or supported hidden token entry in this release. " +
+  "Stop here and ask the technician for an approved recovery plan; this command will not ask you to type a key.";
+const CLOUDFLARE_WINDOWS_REQUIRED_ACCESS =
+  "This install requires Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read. ";
 
 /** Human recovery copy for a bounded Wrangler OAuth failure. */
 export function cloudflareOAuthFailureMessage(error, {
   resumeCommand = null,
   recoveryCommand = null,
-  windowsSavedKeyRoute = false,
+  platformName = error?.platformName ?? process.platform,
 } = {}) {
   const code = error instanceof CloudflareOAuthSessionError
     ? error.code
     : "CLOUDFLARE_OAUTH_UNAVAILABLE";
   const vectorizeScopeMissing = isWranglerVectorizeScopeMissing(error);
   const workersSubdomainScopeMissing = isWranglerWorkersSubdomainScopeMissing(error);
+  // The Windows limitation does not depend on whether this invocation was
+  // allowed to offer recovery. Agent-driven setup and update have it too.
+  const windowsRecoveryUnavailable = platformName === "win32";
+  if (code === "CLOUDFLARE_KEYRING_UNAVAILABLE" && platformName === "win32") {
+    return `${cloudflareKeyringFailureMessage(error.reason, platformName, { ownerConsole: error.ownerConsole })} Issue: ${code}.`;
+  }
   if (code === "CLOUDFLARE_WORKERS_SUBDOMAIN_UNREGISTERED") {
     // Sign-in worked. Neither the network nor a different credential would
     // change this answer, so neither is suggested.
@@ -1210,18 +1218,20 @@ export function cloudflareOAuthFailureMessage(error, {
       vectorizeScopeMissing
         ? "Cloudflare sign-in completed, but Wrangler 4.131.1 cannot request the Vectorize permission this install requires. " +
           (error?.recoverySafeAfterProvisionRefusal === true ? "" : "Nothing was changed. ") +
-          "Continue only with a separately approved, account-scoped API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read. " +
           // Both ordinary routes below end at the hidden prompt, which this
           // command refuses on Windows, so Windows names its own route instead.
-          (windowsSavedKeyRoute
-            ? CLOUDFLARE_WINDOWS_SAVED_KEY_ROUTE
-            : recoveryCommand
+          (windowsRecoveryUnavailable
+            ? CLOUDFLARE_WINDOWS_REQUIRED_ACCESS + CLOUDFLARE_WINDOWS_RECOVERY_LIMIT
+            : "Continue only with a separately approved, account-scoped API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read. " +
+              (recoveryCommand
               ? `Resume with ${recoveryCommand}; the switch takes no value and opens the protected recovery flow.`
-              : `${resumeCommand ? `Resume with ${resumeCommand}, or r` : "R"}erun in an interactive terminal; it asks before using any recovery key.`)
+              : `${resumeCommand ? `Resume with ${resumeCommand}, or r` : "R"}erun in an interactive terminal; it asks before using any recovery key.`))
         : workersSubdomainScopeMissing
           ? "This browser sign-in cannot read this account's workers.dev address, which this Brain needs for its web address. " +
-            "Nothing was changed. To continue, use a separate account-scoped recovery API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read." +
-            (windowsSavedKeyRoute ? ` ${CLOUDFLARE_WINDOWS_SAVED_KEY_ROUTE}` : "")
+            "Nothing was changed. " +
+            (windowsRecoveryUnavailable
+              ? CLOUDFLARE_WINDOWS_REQUIRED_ACCESS + CLOUDFLARE_WINDOWS_RECOVERY_LIMIT
+              : "To continue, use a separate account-scoped recovery API token from the Cloudflare dashboard with Workers Scripts Edit, D1 Edit, Vectorize Edit, and Workers AI Read.")
         : "Cloudflare sign-in completed, but the approved access could not reach every required Workers, D1, Vectorize, and Workers AI surface. Review the selected account and rerun the sign-in.",
     CLOUDFLARE_ACCOUNT_NONE:
       "That Cloudflare login does not have an account ready for installation yet. Finish creating or joining the account in Cloudflare, then rerun the same command.",
@@ -1234,12 +1244,17 @@ export function cloudflareOAuthFailureMessage(error, {
   }[code] ||
     "Cloudflare sign-in could not be verified safely. Nothing was changed. Check the network and the selected Cloudflare account, then rerun the same command.";
   if (vectorizeScopeMissing || workersSubdomainScopeMissing) return `${recovery} Issue: ${code}.`;
-  return `${recovery} Issue: ${code}. If browser sign-in remains unavailable, the installer can offer recovery API-token access.`;
+  return `${recovery} Issue: ${code}. ` + (platformName === "win32"
+    ? "If the same command fails again, stop and ask the technician; this command will not ask you to type a key."
+    : "If browser sign-in remains unavailable, the installer can offer recovery API-token access.");
 }
 
 function throwCloudflareOAuthFailure(error, messageOptions = {}) {
   const oauthCode = String(error?.code || "");
-  const supportCode = oauthCode === "CLOUDFLARE_OAUTH_REAUTH_REQUIRED"
+  const platformName = messageOptions.platformName ?? error?.platformName ?? process.platform;
+  const supportCode = oauthCode === "CLOUDFLARE_KEYRING_UNAVAILABLE" && platformName === "win32"
+    ? "CLOUDFLARE_KEYRING_UNAVAILABLE"
+    : oauthCode === "CLOUDFLARE_OAUTH_REAUTH_REQUIRED"
     ? "AUTH_EXPIRED"
     : oauthCode === "CLOUDFLARE_OAUTH_SCOPE_MISSING"
       ? "REMOTE_PERMISSION_DENIED"
@@ -1279,7 +1294,17 @@ function recoverableProvisionActionError(error) {
   throw error.cause;
 }
 
-function throwCloudflareTokenFailure() {
+function throwCloudflareTokenFailure(platformName = process.platform) {
+  if (platformName === "win32") {
+    const failure = new Fatal(
+      "Cloudflare access is not available. Open a visible PowerShell window as the same Windows user " +
+      "and run `brain update <manifest> --adopt-cloudflare-profile` to approve this Brain's browser sign-in. " +
+      "If keyring enable stops, follow its one-time binding install command. " +
+      "This command will not ask you to type a key.",
+    );
+    failure.code = "AUTH_REQUIRED";
+    throw failure;
+  }
   const failure = new Fatal(
     "Cloudflare access is not available, and this terminal cannot prompt securely for recovery access.\n" +
       "      Run `brain update <manifest>` in an interactive terminal. It reuses the saved browser sign-in,\n" +
@@ -1332,7 +1357,7 @@ export async function withCloudflareControlCredential(action, options = {}) {
       if (error?.message === CLOUDFLARE_WINDOWS_HIDDEN_ENTRY_REFUSAL) {
         throw new Fatal(error.message);
       }
-      throwCloudflareTokenFailure();
+      throwCloudflareTokenFailure(options.platform ?? options.oauthOptions?.platformName ?? process.platform);
     }
   };
   // A saved profile is authoritative for that Brain. An unrelated ambient
@@ -1353,7 +1378,11 @@ export async function withCloudflareControlCredential(action, options = {}) {
     // stops the token lane from looking like the only lane.
     if (!forceToken && !authProfile && !cloudflareTokenAvailable()) {
       info(
-        "this manifest records no browser sign-in for this Brain, so it is using the token lane.\n" +
+        (options.platform ?? options.oauthOptions?.platformName ?? process.platform) === "win32"
+          ? "this manifest records no browser sign-in for this Brain. " +
+            "Use `brain update <manifest> --adopt-cloudflare-profile` in a visible PowerShell window to approve one. " +
+            "Windows has no saved Cloudflare-token recovery or supported hidden token entry in this release."
+          : "this manifest records no browser sign-in for this Brain, so it is using the token lane.\n" +
         "  That is the recovery path, not the ordinary one. If this computer can sign in\n" +
         "  through a browser, `--adopt-cloudflare-profile` records one for this Brain and\n" +
         "  later commands stop asking for a token. Some machines cannot: Wrangler is not\n" +
@@ -1383,6 +1412,7 @@ export async function withCloudflareControlCredential(action, options = {}) {
   const accountPrompt = options.accountPrompt ?? ((request) =>
     promptForCloudflareOAuthAccount(request, { askFn: options.askFn ?? ask }));
   const oauthSessionOptions = { ...(options.oauthOptions || {}) };
+  oauthSessionOptions.suspendPrompts ??= suspendSharedPromptsForHiddenInput;
   for (const reserved of ["profile", "installIdentity", "expectedAccountId", "reauthorize", "prompt", "action"]) {
     delete oauthSessionOptions[reserved];
   }
@@ -1440,13 +1470,14 @@ export async function withCloudflareControlCredential(action, options = {}) {
   const failureOptions = {
     resumeCommand: options.resumeCommand || null,
     recoveryCommand: options.recoveryCommand || null,
+    platformName: options.platform ?? oauthSessionOptions.platformName ?? process.platform,
   };
   const offerTokenRecovery = async (error) => {
     // An account setting answered by a working sign-in, whichever attempt met
     // it: a recovery token reads the same account and cannot change it.
     if (isUnregisteredWorkersSubdomain(error)) throw error;
     if (options.allowTokenRecovery !== true || options.interactive === false) throw error;
-    if ((options.platform ?? process.platform) === "win32" &&
+    if (failureOptions.platformName === "win32" &&
         !options.environment?.BRAIN_ALLOW_WINDOWS_ECHO_RISK &&
         !process.env.BRAIN_ALLOW_WINDOWS_ECHO_RISK) {
       if (!isKnownOAuthScopeRecovery(error)) throw error;
@@ -1455,7 +1486,7 @@ export async function withCloudflareControlCredential(action, options = {}) {
       // the Windows route. Replacing it with the hidden-entry refusal told the
       // owner neither what failed nor where to go next.
       closePrompts();
-      throwCloudflareOAuthFailure(error, { ...failureOptions, windowsSavedKeyRoute: true });
+      throwCloudflareOAuthFailure(error, failureOptions);
     }
     const vectorizeScopeMissing = isWranglerVectorizeScopeMissing(error);
     const workersSubdomainScopeMissing = isWranglerWorkersSubdomainScopeMissing(error);
@@ -27142,8 +27173,9 @@ export function updateCommandTarget(positional, flags = {}) {
  *
  * Every automation escape is preserved by refusing to act: an explicit token
  * run and an injected CLOUDFLARE_API_TOKEN return null and leave the manifest
- * untouched, whatever else was asked for. So does any failure — this is an
- * opportunistic repair, never a new way for an update to die.
+ * untouched, whatever else was asked for. Failed adoption normally leaves
+ * existing access available. On Windows, a keyring failure without existing
+ * access stops with its typed repair step because token entry cannot recover.
  *
  * A session with no terminal refuses too, unless the owner said otherwise.
  * That gate shipped as an unconditional refusal, which read as "automation
@@ -27210,6 +27242,7 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
 
   const profile = cloudflareOAuthProfileName(cloudflareOAuthInstallIdentity(manifestPath));
   const oauthOptions = { ...(options.oauthOptions || {}) };
+  oauthOptions.suspendPrompts ??= suspendSharedPromptsForHiddenInput;
   for (const reserved of ["profile", "installIdentity", "expectedAccountId", "reauthorize", "prompt", "action"]) {
     delete oauthOptions[reserved];
   }
@@ -27230,6 +27263,13 @@ export async function adoptCloudflareAuthProfile(manifestPath, options = {}) {
       prompt: (request) => promptForCloudflareOAuthAccount(request, { askFn }),
     });
   } catch (error) {
+    // Without existing access Windows cannot recover through the token prompt.
+    // Preserve the reached keyring diagnosis before update pins or mutates the
+    // manifest, instead of replacing it with an unrelated AUTH_REQUIRED.
+    if (error?.code === "CLOUDFLARE_KEYRING_UNAVAILABLE" &&
+        (oauthOptions.platformName ?? process.platform) === "win32" && !cloudflareTokenAvailable()) {
+      throwCloudflareOAuthFailure(error, { platformName: "win32" });
+    }
     // A sign-in that finished at Cloudflare and then could not be written down
     // is a different problem from one the owner never finished, and only one of
     // them is fixed by moving to a writable directory.
@@ -28590,7 +28630,11 @@ async function cmdToken(manifestPath) {
   info(hasStoredCloudflareToken(accountId)
     ? `this older install has a recovery token stored for its account: ${storedTokenReference(accountId)}.\n` +
       "      Provisioning commands load it automatically. Remove it with --forget after custody is no longer needed."
-    : `this older install has no stored recovery token (${storedTokenReference(accountId)}). The next interactive control-plane command offers hidden entry.`);
+    : process.platform === "win32"
+      ? "this older install has no saved Cloudflare-token recovery on Windows. " +
+        "Run `brain update <manifest> --adopt-cloudflare-profile` in a visible PowerShell window to approve browser sign-in. " +
+        "Hidden Cloudflare-token entry is unavailable in this release."
+      : `this older install has no stored recovery token (${storedTokenReference(accountId)}). The next interactive control-plane command offers hidden entry.`);
 }
 
 const UPDATE_SKILL_REFRESH_WARNING =
