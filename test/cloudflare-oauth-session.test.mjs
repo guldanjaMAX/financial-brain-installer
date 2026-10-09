@@ -809,11 +809,11 @@ function namedProfileManifest(root, brain) {
 }
 
 // No platform pin by default: the recovery decision is the host's own, so a
-// Windows host runs the win32 rule here. The fail-closed tests below also
-// name win32 and darwin explicitly, so every host covers both rules.
+// Windows host runs the win32 rule here. The session and recovery decision
+// share that platform; explicit arms cover all three platforms on every host.
 function failClosedPlatformArms() {
   const arms = [{ suffix: "", platform: undefined }];
-  for (const platformName of ["win32", "darwin"]) {
+  for (const platformName of ["win32", "darwin", "linux"]) {
     if (platformName !== process.platform) {
       arms.push({ suffix: ` [${platformName} decision]`, platform: platformName });
     }
@@ -826,6 +826,7 @@ async function namedProfileRoutine(manifestPath, paths, { fetchImpl = unregister
     ? okProcessResult({ stdout: tokenOutput() })
     : okProcessResult());
   let actionCalls = 0;
+  let tokenCalls = 0;
   let actionSession = null;
   const prompts = [];
   const outcome = await withCloudflareControlCredential((session) => {
@@ -841,15 +842,15 @@ async function namedProfileRoutine(manifestPath, paths, { fetchImpl = unregister
     allowTokenRecovery: true,
     ...(platform ? { platform } : {}),
     askFn: async (question) => { prompts.push(question); return "n"; },
-    withToken: async () => { throw new Error("token lane must not run"); },
+    withToken: async () => { tokenCalls++; throw new Error("token lane must not run"); },
     oauthOptions: {
       processRunner: runner,
-      platformName: "darwin",
+      platformName: platform ?? process.platform,
       environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
       fetchImpl,
     },
   }).then((value) => ({ value }), (error) => ({ error }));
-  return { ...outcome, actionCalls, actionSession, prompts };
+  return { ...outcome, actionCalls, tokenCalls, actionSession, prompts };
 }
 
 test("a named-profile update of a custom-domain Brain continues when the subdomain read is refused", async () => {
@@ -951,8 +952,17 @@ const SUBDOMAIN_SCOPE_CAUSE = /This browser sign-in cannot read this account's w
 const VECTORIZE_SCOPE_CAUSE = /cannot request the Vectorize permission this install requires/;
 const WINDOWS_RECOVERY_LIMIT = /Windows has no saved Cloudflare-token recovery or supported hidden token entry in this release\. Stop here and ask the technician for an approved recovery plan; this command will not ask you to type a key\./;
 
+// A scope limitation has one immediate route on Windows, with no token or
+// retry command competing with technician review.
+function assertWindowsScopeNextStep(message) {
+  assert.match(message, WINDOWS_RECOVERY_LIMIT);
+  assert.equal(message.match(/Stop here and ask the technician/g)?.length, 1);
+  assert.doesNotMatch(message, /--cloudflare-token|recovery API.token|Resume with|rerun|Continue only with|To continue, use/i);
+}
+
 function assertKeptScopeRefusal(result, platform, cause) {
   const resolved = platform ?? process.platform;
+  assert.equal(result.tokenCalls, 0, `${resolved}: refused or declined recovery must not enter the token lane`);
   assert.equal(result.error?.code, "REMOTE_PERMISSION_DENIED", `${resolved}: ${result.error?.message}`);
   assert.match(result.error.message, cause, `${resolved}: the refused access must still be named`);
   assert.match(result.error.message, /Nothing was changed/, `${resolved}: the owner must be told nothing changed`);
@@ -961,6 +971,7 @@ function assertKeptScopeRefusal(result, platform, cause) {
     assert.deepEqual(result.prompts, [], "win32 must not offer a recovery its hidden prompt would refuse");
     assert.match(result.error.message, WINDOWS_RECOVERY_LIMIT, "win32 must state the actual recovery limit");
     assert.doesNotMatch(result.error.message, /the route is the saved Cloudflare key/);
+    assertWindowsScopeNextStep(result.error.message);
   } else {
     assert.equal(result.prompts.length, 1, `${resolved}: the declined recovery offer must be made once`);
     assert.doesNotMatch(result.error.message, /On Windows/, `${resolved}: the Windows route is Windows-only`);
@@ -968,6 +979,32 @@ function assertKeptScopeRefusal(result, platform, cause) {
 }
 
 for (const { suffix, platform } of failClosedPlatformArms()) {
+  test(`a named-profile setup with no saved address continues after a successful subdomain read${suffix}`, async () => {
+    const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-subdomain-control-")));
+    try {
+      const paths = [];
+      const otherReads = refusedSubdomainFetch(paths);
+      const result = await namedProfileRoutine(namedProfileManifest(root, {}), paths, {
+        platform,
+        fetchImpl: async (url) => {
+          const parsed = new URL(url);
+          if (parsed.pathname.endsWith("/workers/subdomain")) {
+            paths.push(parsed.pathname + parsed.search);
+            return jsonResponse(envelope({ subdomain: "fixture-owner" }));
+          }
+          return otherReads(url);
+        },
+      });
+      assert.equal(result.error, undefined);
+      assert.equal(result.value, "done");
+      assert.equal(result.actionCalls, 1);
+      assert.equal(result.tokenCalls, 0);
+      assert.deepEqual(result.prompts, []);
+      assert.equal(paths.filter((path) => path.endsWith("/workers/subdomain")).length, 1);
+      assert.ok(paths.some((path) => path.includes("/vectorize/")));
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   test(`a named-profile setup with no saved address still requires the subdomain read${suffix}`, async () => {
     const root = realpathSync.native(mkdtempSync(resolve(tmpdir(), "brain-no-domain-refused-subdomain-")));
     try {
@@ -1175,9 +1212,20 @@ for (const { suffix, platform } of failClosedPlatformArms()) {
       assert.equal(result.actionCalls, 0, "the action must not run after the Vectorize refusal");
       assert.ok(result.error, "the Vectorize refusal must remain fatal");
       assert.equal(result.error.code, "REMOTE_PERMISSION_DENIED");
-      assert.ok(paths.some((path) => path.includes("/vectorize/")),
+      const subdomainRead = paths.findIndex((path) => path.endsWith("/workers/subdomain"));
+      const vectorizeRead = paths.findIndex((path) => path.includes("/vectorize/"));
+      assert.equal(paths.filter((path) => path.endsWith("/workers/subdomain")).length, 1);
+      assert.ok(subdomainRead >= 0 && vectorizeRead > subdomainRead,
         "the Vectorize decision point must be reached after the tolerated subdomain refusal");
       assertKeptScopeRefusal(result, platform, VECTORIZE_SCOPE_CAUSE);
+      const controlPaths = [];
+      const control = await namedProfileRoutine(
+        namedProfileManifest(root, { domain: "brain.example.invalid" }), controlPaths,
+        { fetchImpl: refusedSubdomainFetch(controlPaths), platform },
+      );
+      assert.equal(control.error, undefined);
+      assert.equal(control.value, "done");
+      assert.equal(control.actionCalls, 1, "a successful Vectorize read must reach the action");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1210,7 +1258,7 @@ async function requiredSubdomainScopeRefusal({ interactive, platform }) {
       withToken: async () => { tokenCalls += 1; throw new Error("declined recovery must not run"); },
       oauthOptions: {
         processRunner: runner,
-        platformName: "darwin",
+        platformName: platform ?? process.platform,
         environment: { PATH: "/fixture/bin", HOME: "/fixture/home" },
         fetchImpl: refusedSubdomainFetch(paths),
       },
@@ -1949,60 +1997,88 @@ test("an interactive Vectorize create refusal reuses the explicit recovery-token
   assert.match(prompts[0], /Workers Scripts Edit[\s\S]*D1 Edit[\s\S]*Vectorize Edit[\s\S]*Workers AI Read/i);
 });
 
-test("a non-interactive Vectorize create refusal names the recovery switch and four permissions", async () => {
-  const profile = cloudflareOAuthProfileName(INSTALL_ID);
-  let actionCalls = 0;
-  await assert.rejects(
-    withCloudflareControlCredential(() => {
-      actionCalls += 1;
-      throw recoverableProvisionCreateRefusal();
-    }, {
+for (const { suffix, platform } of failClosedPlatformArms()) {
+  const platformName = platform ?? process.platform;
+  test(`a non-interactive Vectorize create refusal names the supported next step and four permissions${suffix}`, async () => {
+    const profile = cloudflareOAuthProfileName(INSTALL_ID);
+    let actionCalls = 0, oauthCalls = 0, tokenCalls = 0, prompts = 0;
+    const options = {
       authProfile: profile,
       accountId: ACCOUNT_A,
+      platform: platformName,
       interactive: false,
       allowBrowserReauth: false,
       allowTokenRecovery: false,
       resumeCommand: "brain setup /fixture/brain.manifest.json",
       recoveryCommand: "brain setup /fixture/brain.manifest.json --cloudflare-token",
-      withOAuthSession: async (request) => request.action({
-        token: Buffer.from(TOKEN),
-        profile,
-        account: { id: ACCOUNT_A, name: "Selected" },
-        preflight: { status: "ready", checks: ["account", "workers", "d1", "vectorize", "workers_ai"] },
-      }),
-    }),
-    (error) => {
-      assert.match(error.message, /--cloudflare-token/);
+      askFn: async () => { prompts++; return "n"; },
+      withToken: async () => { tokenCalls++; throw new Error("unexpected recovery"); },
+      withOAuthSession: async (request) => {
+        oauthCalls++;
+        return request.action({
+          token: Buffer.from(TOKEN),
+          profile,
+          account: { id: ACCOUNT_A, name: "Selected" },
+          preflight: { status: "ready", checks: ["account", "workers", "d1", "vectorize", "workers_ai"] },
+        });
+      },
+    };
+    await assert.rejects(withCloudflareControlCredential(() => {
+      actionCalls++;
+      throw recoverableProvisionCreateRefusal();
+    }, options), (error) => {
+      assert.equal(error.code, "REMOTE_PERMISSION_DENIED");
+      assert.match(error.message, VECTORIZE_SCOPE_CAUSE);
+      if (platformName === "win32") assertWindowsScopeNextStep(error.message);
+      else assert.ok(renderCliCommands(error.message).includes(renderCliCommands(
+        "brain setup /fixture/brain.manifest.json --cloudflare-token",
+      )));
       assert.match(error.message, /Workers Scripts Edit[\s\S]*D1 Edit[\s\S]*Vectorize Edit[\s\S]*Workers AI Read/i);
       return true;
-    },
-  );
-  assert.equal(actionCalls, 1, "the create refusal must come from the real action boundary");
-});
-
-test("only setup recovery text names the recovery switch", () => {
-  const refusal = vectorizeScopeError();
-  for (const resumeCommand of [
-    "brain update /fixture/brain.manifest.json",
-    "brain provision /fixture/brain.manifest.json",
-  ]) {
-    const message = cloudflareOAuthFailureMessage(refusal, { resumeCommand });
-    const rendered = renderCliCommands(message);
-    assert.ok(rendered.includes(renderCliCommands(resumeCommand)),
-      `the owner must still see the exact resume command ${resumeCommand}`);
-    assert.doesNotMatch(message, /--cloudflare-token/,
-      "non-setup commands must never be given a switch they do not accept");
-    assert.match(message, /Nothing was changed/);
-    assert.match(message, /rerun in an interactive terminal; it asks before using any recovery key/i);
-  }
-
-  const setupCommand = "brain setup /fixture/brain.manifest.json --cloudflare-token";
-  const setupMessage = cloudflareOAuthFailureMessage(refusal, {
-    resumeCommand: "brain setup /fixture/brain.manifest.json",
-    recoveryCommand: setupCommand,
+    });
+    assert.equal(actionCalls, 1, "the create refusal must come from the real action boundary");
+    assert.equal(oauthCalls, 1);
+    assert.equal(tokenCalls, 0);
+    assert.equal(prompts, 0);
+    assert.equal(await withCloudflareControlCredential(() => {
+      actionCalls++;
+      return "created";
+    }, options), "created");
+    assert.equal(actionCalls, 2, "the successful control reaches the same action boundary");
+    assert.equal(oauthCalls, 2);
   });
-  assert.ok(renderCliCommands(setupMessage).includes(renderCliCommands(setupCommand)));
-});
+
+  test(`only supported setup recovery text names the recovery switch${suffix}`, () => {
+    const refusal = vectorizeScopeError();
+    for (const resumeCommand of [
+      "brain update /fixture/brain.manifest.json",
+      "brain provision /fixture/brain.manifest.json",
+    ]) {
+      const message = cloudflareOAuthFailureMessage(refusal, { resumeCommand, platformName });
+      const rendered = renderCliCommands(message);
+      if (platformName === "win32") {
+        assertWindowsScopeNextStep(message);
+        assert.ok(!rendered.includes(renderCliCommands(resumeCommand)), "Windows must not prescribe an unsupported retry");
+      } else {
+        assert.ok(rendered.includes(renderCliCommands(resumeCommand)),
+          `the owner must still see the exact resume command ${resumeCommand}`);
+        assert.match(message, /rerun in an interactive terminal; it asks before using any recovery key/i);
+      }
+      assert.doesNotMatch(message, /--cloudflare-token/,
+        "non-setup commands must never be given a switch they do not accept");
+      assert.match(message, /Nothing was changed/);
+    }
+
+    const setupCommand = "brain setup /fixture/brain.manifest.json --cloudflare-token";
+    const setupMessage = cloudflareOAuthFailureMessage(refusal, {
+      resumeCommand: "brain setup /fixture/brain.manifest.json",
+      recoveryCommand: setupCommand,
+      platformName,
+    });
+    if (platformName === "win32") assertWindowsScopeNextStep(setupMessage);
+    else assert.ok(renderCliCommands(setupMessage).includes(renderCliCommands(setupCommand)));
+  });
+}
 
 test("a mid-setup create refusal does not claim that nothing changed", async () => {
   const profile = cloudflareOAuthProfileName(INSTALL_ID);

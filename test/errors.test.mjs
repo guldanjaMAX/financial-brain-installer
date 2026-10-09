@@ -15,6 +15,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -28,7 +29,7 @@ import { cliTestEnvironment } from "./helpers/cli-test-environment.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const CLI = join(ROOT, "brain.mjs");
-const shown = (text) => renderCliCommands(text, { scriptPath: fileURLToPath(new URL("../brain.mjs", import.meta.url)) });
+const shown = (text, platform = process.platform) => renderCliCommands(text, { platform, scriptPath: fileURLToPath(new URL("../brain.mjs", import.meta.url)) });
 function filesBelow(directory, suffix) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
@@ -77,7 +78,7 @@ function readSupportJournal(userRoot) {
   catch { return null; }
 }
 function cli(args, env = {}, options = {}) {
-  const userRoot = options.userRoot || mkdtempSync(join(tmpdir(), "brain-support-cli-"));
+  const userRoot = options.userRoot || realpathSync.native(mkdtempSync(join(tmpdir(), "brain-support-cli-")));
   const e = cliTestEnvironment(userRoot, env);
   delete e.CLOUDFLARE_API_TOKEN;
   delete e.ADMIN_KEY;
@@ -314,28 +315,50 @@ function ingestExitCli(scenario) {
 }
 
 /* ---- expected failures explain themselves and stay quiet about internals ---- */
-{
-  const r = cli(["verify", join(HERE, "..", "templates", "brain.manifest.json")]);
+for (const platform of new Set([process.platform, "win32", "darwin", "linux"])) {
+  // Only the platform decision changes. Native processes and network remain
+  // blocked by the CLI tripwire; the journal ACL is already a fixture.
+  const options = {
+    imports: ["data:text/javascript," + encodeURIComponent(
+      `Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });`,
+    )],
+  };
+  const r = cli(["verify", join(HERE, "..", "templates", "brain.manifest.json")], {}, options);
   const events = journalEvents(r.journal);
-  check("a missing token is an explained failure", r.code === 1 && /CLOUDFLARE_API_TOKEN/.test(r.out), r.out.slice(0, 160));
+  // Anticipated failures use stdout to avoid PowerShell NativeCommandError.
+  // Ignore the informational preamble so it cannot satisfy this assertion.
+  const failureOutput = r.stdout.match(/(?:^|\n)fail {2}([\s\S]*)$/)?.[1] || "";
+  check(`${platform}: missing Cloudflare access is an explained failure`,
+    r.code === 1 && /Cloudflare access is not available/.test(failureOutput) &&
+      (platform === "win32" ? /will not ask you to type a key/ : /CLOUDFLARE_API_TOKEN/).test(failureOutput),
+    failureOutput.slice(0, 260));
   // This used to require `brain setup` to be NAMED as the first way out. Over a
   // brain that is paused mid-upgrade that is the one instruction that must never
   // be followed: setup reruns the compatibility cutover and pauses it again. The
   // safe next step is `brain update` in an interactive terminal; the
   // shell-history guard below is unchanged.
   check("and it gives a safe next step instead of a shell-history command",
-    (r.out.includes(shown("brain update <manifest>")) && /interactive terminal/i.test(r.out) &&
-      /hidden token entry/i.test(r.out)) &&
+    (platform === "win32"
+      ? failureOutput.includes(shown("brain update <manifest> --adopt-cloudflare-profile", platform)) &&
+        /visible PowerShell window as the same Windows user/i.test(failureOutput) &&
+        !/hidden token entry|--cloudflare-token|recovery API.token/i.test(failureOutput)
+      : failureOutput.includes(shown("brain update <manifest>", platform)) &&
+        /interactive terminal/i.test(failureOutput) && /hidden token entry/i.test(failureOutput)) &&
       !/export\s+CLOUDFLARE_API_TOKEN|CLOUDFLARE_API_TOKEN\s*=\s*['\"]/i.test(r.out), r.out.slice(0, 400));
   // A session with no TTY cannot answer a browser prompt, so the copy has to
   // name the explicit owner-approved browser lanes. A generic environment
   // consent bypass must not come back.
   check("and it names the explicit consent switch a non-interactive session needs",
     /--adopt-cloudflare-profile/.test(r.out) &&
-      /--browser-sign-in/.test(r.out) &&
+      (platform === "win32" ? !/--browser-sign-in/.test(r.out) : /--browser-sign-in/.test(r.out)) &&
       !/BRAIN_ADOPT_CLOUDFLARE_PROFILE=1/.test(r.out) && /approv/i.test(r.out), r.out.slice(0, 600));
   check("and it never offers setup as the way out of a missing credential",
-    !r.out.includes(shown("brain setup")) && !/brain setup/.test(r.out), r.out.slice(0, 400));
+    !r.out.includes(shown("brain setup", platform)) && !/brain setup/.test(r.out), r.out.slice(0, 400));
+  if (platform === "win32") {
+    check("Windows failure gives exactly one adoption next step before its support hint",
+      failureOutput.split(shown("brain update <manifest> --adopt-cloudflare-profile", platform)).length === 2 &&
+        !/Stop here|rerun the same command/i.test(failureOutput), failureOutput);
+  }
   // Fatal is anticipated, so it must NOT be dressed up as an installer bug.
   check("an anticipated failure is not reported as a bug", !/This is a bug in the installer/.test(r.out));
   check("anticipated auth failures create one private typed note and send no raw credential guidance",
@@ -345,8 +368,12 @@ function ingestExitCli(scenario) {
       /^loc_[0-9a-f]{24}$/.test(events[0]?.fingerprint || "") &&
       events[0]?.fingerprint !== observedConfigFingerprint &&
       !r.journal.includes("CLOUDFLARE_API_TOKEN") &&
-      r.out.includes(shown("Need help with this? Run: brain support --explain AUTH_REQUIRED")) &&
+      r.out.includes(shown("Need help with this? Run: brain support --explain AUTH_REQUIRED", platform)) &&
       !/Private issue note evt_/.test(r.out), r.journal);
+  const control = cli(["support", "--explain", "AUTH_REQUIRED"], {}, options);
+  check(`${platform}: the prescribed support command succeeds without credentials`,
+    control.code === 0 && /AUTH_REQUIRED.*A sign-in or credential is still needed/.test(control.out) &&
+      control.journal === "", control.out);
 }
 
 /* ---- public remediation must never teach people to paste a secret ---- */
