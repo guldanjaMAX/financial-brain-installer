@@ -192,6 +192,7 @@ $state = @{
 $state | ConvertTo-Json | Set-Content -LiteralPath $statePath
 $password = $null
 $securePassword = $null
+$phase = 'account'
 try {
   $random = New-Object byte[] 32
   $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -212,6 +213,7 @@ try {
   @('ACCOUNT_DECISION_REACHED=1', "ADMIN_GROUP_MEMBERSHIPS=$adminMembership", "USERS_GROUP_MEMBERSHIPS=$userMembership",
     "DISTINCT_USER_SID=$([int]$distinct)") | Set-Content -LiteralPath (Join-Path $control 'account.log')
   if ($adminMembership -ne 0 -or $userMembership -ne 1 -or -not $distinct) { throw 'Local standard-user membership readback failed' }
+  $phase = 'stage'
   # Stage readable inputs outside the runner profile. Only disposable output
   # directories receive Modify rights; no runner credentials are inherited.
   Copy-Item -LiteralPath $PSScriptRoot -Destination (Join-Path $control 'smoke') -Recurse
@@ -221,8 +223,10 @@ try {
     $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($user.SID, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
     Set-Acl -LiteralPath $directory -AclObject $acl
   }
-  $node = (Get-Command node -CommandType Application).Source
-  $pwsh = (Get-Command pwsh -CommandType Application).Source
+  $phase = 'context'
+  # A runner can expose several node/pwsh executables on PATH; use the first, as the shell would.
+  $node = (Get-Command node -CommandType Application | Select-Object -First 1).Source
+  $pwsh = (Get-Command pwsh -CommandType Application | Select-Object -First 1).Source
   $context = @{
     sid = $state.sid
     githubActions = $env:GITHUB_ACTIONS
@@ -233,6 +237,7 @@ try {
   }
   $contextPath = Join-Path $control 'context.json'
   $context | ConvertTo-Json | Set-Content -LiteralPath $contextPath
+  $phase = 'register'
   $executable = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
   $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ArtifactDirectory "{1}" -LogDirectory "{2}" -ContextFile "{3}"' -f (Join-Path $control 'smoke\windows-limited.ps1'), (Join-Path $control 'signed-input'), $LogDirectory, $contextPath
   $action = New-ScheduledTaskAction -Execute $executable -Argument $arguments
@@ -246,11 +251,21 @@ try {
   $password = $null
   $securePassword.Dispose()
   $securePassword = $null
+  $phase = 'readback'
   $registered = Get-ScheduledTask -TaskName $state.taskName
   $registeredSid = ([Security.Principal.NTAccount]::new($qualifiedUser)).Translate([Security.Principal.SecurityIdentifier]).Value
+  # Task Scheduler may report a local principal as a SID, COMPUTER\name or a bare name; compare by SID.
+  $principalUserId = [string]$registered.Principal.UserId
+  $principalForm = if ($principalUserId -match '^S-1-') { 'sid' } elseif ($principalUserId.Contains('\')) { 'qualified' } else { 'bare' }
+  "STANDARD_TASK_PRINCIPAL_FORM=$principalForm" | Set-Content -LiteralPath (Join-Path $control 'task-principal.log')
+  $principalSid = if ($principalForm -eq 'sid') { $principalUserId } else {
+    $principalName = if ($principalForm -eq 'qualified') { $principalUserId } else { "$env:COMPUTERNAME\$principalUserId" }
+    ([Security.Principal.NTAccount]::new($principalName)).Translate([Security.Principal.SecurityIdentifier]).Value
+  }
   if ($registered.Principal.LogonType -ne 'Password' -or $registered.Principal.RunLevel -ne 'Limited' -or
-      $registeredSid -cne $state.sid -or $registered.Principal.UserId -notin @($state.sid, $qualifiedUser)) { throw 'Task principal readback failed' }
+      $registeredSid -cne $state.sid -or $principalSid -cne $state.sid) { throw 'Task principal readback failed' }
   'STANDARD_TASK_REGISTERED=1' | Set-Content -LiteralPath (Join-Path $control 'task-registration.log')
+  $phase = 'run'
   $previousRun = (Get-ScheduledTaskInfo -TaskName $state.taskName).LastRunTime
   Start-ScheduledTask -TaskName $state.taskName
   $deadline = [DateTime]::UtcNow.AddMinutes(31)
@@ -267,13 +282,15 @@ try {
     if ([DateTime]::UtcNow -ge $deadline) { throw 'Standard-user bootstrap task did not exit' }
     Start-Sleep -Seconds 1
   }
+  $phase = 'result'
   $result = [IO.File]::ReadAllText($resultFile)
   $nativeResult = (Get-ScheduledTaskInfo -TaskName $state.taskName).LastTaskResult
   "STANDARD_TASK_EXIT=$result native=$nativeResult" | Set-Content -LiteralPath (Join-Path $control 'task.log')
   if ($result -cne '0' -or $nativeResult -ne 0) { throw 'Standard-user bootstrap failed' }
 } catch {
   # Native account/task exceptions must never serialize a password-bearing call.
-  'STANDARD_USER_PARENT_FAILED=1' | Set-Content -LiteralPath (Join-Path $control 'parent-failure.log')
+  # Only the phase name is recorded: no exception text, which could carry a password-bearing call.
+  @('STANDARD_USER_PARENT_FAILED=1', "STANDARD_USER_PARENT_PHASE=$phase") | Set-Content -LiteralPath (Join-Path $control 'parent-failure.log')
   throw 'Standard-user bootstrap failed; inspect retained receipts'
 } finally {
   $password = $null
