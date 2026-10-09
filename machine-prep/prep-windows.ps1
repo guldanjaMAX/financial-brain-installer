@@ -68,65 +68,13 @@ function Get-ToolPaths([string]$Name) {
   return @($found | Where-Object { $_ } | Select-Object -Unique)
 }
 
-function Invoke-ClaudeVersion([string]$Canonical) {
-  if ($FixtureDir) {
-    if ((Read-Fixture "claude.version-status") -ne "ok") { return $null }
-    return Read-Fixture "claude.version-output"
-  }
-  $info = [Diagnostics.ProcessStartInfo]::new()
-  $info.FileName = $Canonical
-  $info.Arguments = "--version"
-  $info.UseShellExecute = $false
-  $info.CreateNoWindow = $true
-  $info.RedirectStandardInput = $true
-  $info.RedirectStandardOutput = $true
-  $info.RedirectStandardError = $true
-  # The child inherits this script's environment: run-machine-prep.ps1's
-  # allowlist in the Start-menu path, the owner's own when prep runs directly.
-  # No further stripping here; claude --version needs nothing beyond that.
-  $process = $null
-  $timeoutMs = 20000
-  $clock = [Diagnostics.Stopwatch]::StartNew()
-  try {
-    $process = [Diagnostics.Process]::Start($info)
-    $process.StandardInput.Close()
-    # Drain stderr without inspecting or displaying it. A full pipe must not
-    # deadlock this read-only check. One deadline covers stdout, exit and drains.
-    $stderrTask = $process.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
-    $firstLine = $null
-    while ($null -eq $firstLine) {
-      $lineTask = $process.StandardOutput.ReadLineAsync()
-      $remaining = [Math]::Max(0, $timeoutMs - [int]$clock.ElapsedMilliseconds)
-      if (-not $lineTask.Wait($remaining)) { return $null }
-      $line = $lineTask.GetAwaiter().GetResult()
-      if ($null -eq $line) { break }
-      if ($line.Length -gt 0) { $firstLine = $line }
-    }
-    $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
-    $remaining = [Math]::Max(0, $timeoutMs - [int]$clock.ElapsedMilliseconds)
-    if (-not $process.WaitForExit($remaining)) { return $null }
-    $remaining = [Math]::Max(0, $timeoutMs - [int]$clock.ElapsedMilliseconds)
-    if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdoutTask, $stderrTask), $remaining)) { return $null }
-    if ($process.ExitCode -ne 0) { return $null }
-    return $firstLine
-  } catch {
-    return $null
-  } finally {
-    if ($process) {
-      # The child can exit between HasExited and Kill. Cleanup must not turn an
-      # unreadable version into an uncaught error containing an owner path.
-      try { if (-not $process.HasExited) { $process.Kill() } } catch { } finally { $process.Dispose() }
-    }
-  }
-}
-
 function Get-ToolVersion([string]$Name) {
   if ($Name -eq "claude") {
     $paths = @(Get-ToolPaths $Name)
     if ($paths.Count -eq 0) { return $null }
     $canonical = Join-Path $PrepHome ".local\bin\claude.exe"
     if (-not [string]::Equals([IO.Path]::GetFullPath($paths[0]), [IO.Path]::GetFullPath($canonical), [StringComparison]::OrdinalIgnoreCase)) { return $null }
-    # Keep older fixtures intact; the new inputs exercise metadata and fallback
+    # Keep older fixtures intact; the new input exercises the metadata reading
     # through the same validation used for the native executable.
     if ($FixtureDir -and -not (Test-Path -LiteralPath (Join-Path $FixtureDir "claude.product-version") -PathType Leaf)) {
       return Read-Fixture "claude.version"
@@ -135,12 +83,9 @@ function Get-ToolVersion([string]$Name) {
     if ($FixtureDir) { $fileVersion = Read-Fixture "claude.product-version" } else {
       try { $fileVersion = (Get-Item -LiteralPath $canonical).VersionInfo.ProductVersion } catch { $fileVersion = $null }
     }
+    # Native builds have reported X.Y.Z.0 here; X.Y.Z is accepted too. Anything
+    # else reads as "version could not be read". Nothing is run to compensate.
     if ($fileVersion -cmatch '\A([0-9]+\.[0-9]+\.[0-9]+)(?:\.0)?\z') { return "$($Matches[1]) (Claude Code)" }
-    # Some native releases have no usable ProductVersion. Never consult or
-    # execute another PATH copy to compensate for missing metadata.
-    $output = Invoke-ClaudeVersion $canonical
-    $firstLine = @($output -split "`r?`n" | Where-Object { $_.Length -gt 0 } | Select-Object -First 1)
-    if ($firstLine.Count -eq 1 -and $firstLine[0] -cmatch '\A[0-9]+\.[0-9]+\.[0-9]+ \(Claude Code\)\z') { return $firstLine[0] }
     return $null
   }
   if ($FixtureDir) {
