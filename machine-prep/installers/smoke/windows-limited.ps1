@@ -237,6 +237,27 @@ try {
   }
   $contextPath = Join-Path $control 'context.json'
   $context | ConvertTo-Json | Set-Content -LiteralPath $contextPath
+  $phase = 'logon-right'
+  # Windows Server grants "Log on as a batch job" only to Administrators, Backup
+  # Operators and Performance Log Users. A Password-logon task for a new standard
+  # user needs it, so grant it to this disposable account's SID alone.
+  $rightsExport = Join-Path $control 'rights-export.inf'
+  $rightsApply = Join-Path $control 'rights-apply.inf'
+  $rightsDb = Join-Path $control 'rights.sdb'
+  & secedit.exe /export /cfg $rightsExport /areas USER_RIGHTS /quiet | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'User-rights export failed' }
+  $batchLine = @(Get-Content -LiteralPath $rightsExport | Where-Object { $_ -match '^SeBatchLogonRight\s*=' }) | Select-Object -First 1
+  $batchValue = if ($batchLine) { ($batchLine -split '=', 2)[1].Trim() } else { '' }
+  $batchEntry = "*$($state.sid)"
+  $batchValue = if ($batchValue) { "$batchValue,$batchEntry" } else { $batchEntry }
+  @('[Unicode]', 'Unicode=yes', '[Version]', 'signature="$CHICAGO$"', 'Revision=1', '[Privilege Rights]', "SeBatchLogonRight = $batchValue") |
+    Set-Content -LiteralPath $rightsApply -Encoding Unicode
+  & secedit.exe /configure /db $rightsDb /cfg $rightsApply /areas USER_RIGHTS /quiet | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'User-rights grant failed' }
+  & secedit.exe /export /cfg $rightsExport /areas USER_RIGHTS /quiet | Out-Null
+  $granted = @(Get-Content -LiteralPath $rightsExport | Where-Object { $_ -match '^SeBatchLogonRight\s*=' -and $_.Contains($batchEntry) }).Count -eq 1
+  "STANDARD_BATCH_RIGHT_GRANTED=$([int]$granted)" | Set-Content -LiteralPath (Join-Path $control 'logon-right.log')
+  if (-not $granted) { throw 'User-rights readback failed' }
   $phase = 'register'
   $executable = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
   $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ArtifactDirectory "{1}" -LogDirectory "{2}" -ContextFile "{3}"' -f (Join-Path $control 'smoke\windows-limited.ps1'), (Join-Path $control 'signed-input'), $LogDirectory, $contextPath
@@ -273,6 +294,8 @@ try {
   while (-not (Test-Path -LiteralPath $resultFile)) {
     $info = Get-ScheduledTaskInfo -TaskName $state.taskName
     if ($info.LastRunTime -gt $previousRun -and (Get-ScheduledTask -TaskName $state.taskName).State -ne 'Running' -and $info.LastTaskResult -ne 0) {
+      # The native task result is a status code, never output, so it is safe to retain.
+      ('STANDARD_TASK_LAST_RESULT=0x{0:X8}' -f [uint32]$info.LastTaskResult) | Set-Content -LiteralPath (Join-Path $control 'task-result.log')
       throw 'Standard-user bootstrap task failed before its completion receipt'
     }
     if ([DateTime]::UtcNow -ge $deadline) { throw 'Standard-user bootstrap task did not produce a receipt before its deadline' }
