@@ -81,8 +81,9 @@ function Invoke-ClaudeVersion([string]$Canonical) {
   $info.RedirectStandardInput = $true
   $info.RedirectStandardOutput = $true
   $info.RedirectStandardError = $true
-  # The owner's own environment, exactly as `claude --version` sees it in an
-  # ordinary PowerShell window; a stripped environment is a new way to fail.
+  # The child inherits this script's environment: run-machine-prep.ps1's
+  # allowlist in the Start-menu path, the owner's own when prep runs directly.
+  # No further stripping here; claude --version needs nothing beyond that.
   $process = $null
   $timeoutMs = 20000
   $clock = [Diagnostics.Stopwatch]::StartNew()

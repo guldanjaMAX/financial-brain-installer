@@ -863,7 +863,7 @@ public static class SyntheticVersion {
     File.WriteAllText(Path.Combine(root, "started"), System.Diagnostics.Process.GetCurrentProcess().Id.ToString());
     if (args.Length != 1 || args[0] != "--version") return 10;
     if (Console.Read() != -1) return 11;
-    if (Environment.GetEnvironmentVariable("SYNTHETIC_PROBE_SENTINEL") != null) return 12;
+    if (Environment.GetEnvironmentVariable("SYNTHETIC_PROBE_SENTINEL") != "owner-env") return 12;
     string mode = File.ReadAllText(Path.Combine(root, "scenario"));
     if (mode == "timeout") { Thread.Sleep(60000); return 13; }
     if (mode == "stderr-only") { Console.Error.WriteLine("2.1.295 (Claude Code)"); return 0; }
@@ -878,7 +878,8 @@ public static class SyntheticVersion {
 '@
 function Get-ToolPaths([string]$Name) { return @($canonical) }
 if ((Get-Item -LiteralPath $canonical).VersionInfo.ProductVersion -cne 'unavailable') { throw 'native fixture metadata must force fallback' }
-$env:SYNTHETIC_PROBE_SENTINEL = 'must-not-inherit'
+# The probe inherits the launcher's environment; the synthetic exe refuses without it.
+$env:SYNTHETIC_PROBE_SENTINEL = 'owner-env'
 foreach ($mode in @('good', 'stderr-only', 'garbage-first', 'failed', 'timeout')) {
   $started = Join-Path $bin 'started'
   if (Test-Path -LiteralPath $started) { Remove-Item -LiteralPath $started }
