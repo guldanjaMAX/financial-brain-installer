@@ -361,7 +361,9 @@ for (const platform of new Set([process.platform, "win32", "darwin", "linux"])) 
   }
   // Fatal is anticipated, so it must NOT be dressed up as an installer bug.
   check("an anticipated failure is not reported as a bug", !/This is a bug in the installer/.test(r.out));
-  check("anticipated auth failures create one private typed note and send no raw credential guidance",
+  // The private note is written with the real host's file protections, so it is
+  // checked once, on the host platform (as before the platform loop existed).
+  if (platform === process.platform) check("anticipated auth failures create one private typed note and send no raw credential guidance",
     events.length === 1 &&
       events[0]?.command === "verify" &&
       events[0]?.error_code === "AUTH_REQUIRED" &&
