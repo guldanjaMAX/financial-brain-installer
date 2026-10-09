@@ -4,13 +4,24 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $NodeVersion = "24.13.1"
-$ClaudeVersion = "2.1.261"
-$CodexVersion = "0.155.0-alpha.16"
-$BrainVersion = "0.4.9"
-$BrainKitUrl = "https://financialbrain.ai/kit/brain-installer-0.4.9-0555ad1972d7f8d6.tgz"
-$BrainKitSize = 6668013
-$BrainKitSha256 = "0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2"
+$ClaudeMinVersion = "2.1.261"
+$BrainVersion = "0.4.10"
+$BrainKitUrl = "https://financialbrain.ai/kit/brain-installer-0.4.10-55824b383909c57b.tgz"
+$BrainKitSize = 6828366
+$BrainKitSha256 = "55824b383909c57b37f4db6179562bf603f670eaae3c7d315135dd290b0afdfe"
 $WranglerVersion = "4.131.1"
+# Official pages and the exact step on each, named to the owner when a
+# prerequisite needs action. Real mode never downloads or runs anything from
+# them; the owner installs by hand. Claude uses a floor because native
+# installs auto-update. Codex is informational and never blocks preparation.
+$NodeSource = "https://nodejs.org/en/download"
+$GitSource = "https://git-scm.com/install/windows"
+$ClaudeSource = "https://code.claude.com/docs/en/setup#install-claude-code"
+$NodeHow = "At the top of the page, choose a version that starts with v24 (marked LTS). Then, under ""Or get a prebuilt Node.js"", click ""Windows Installer (.msi)"" and open the downloaded file. Download page: $NodeSource"
+$GitHow = "Use the ""Click here to download"" link at the top of the page and open the downloaded file. Download page: $GitSource"
+$ClaudeHow = "Under ""Install Claude Code"" on the setup page, choose ""Native Install (Recommended)"" and run the default command for your system. Setup page: $ClaudeSource"
+$ClaudeUpdateHow = "Open a new terminal and run claude update."
+$ClaudeConflictHow = "Open a new terminal and run claude doctor. Follow its installation warning to select the Native Install copy."
 $Mode = if ($args.Count -gt 0) { [string]$args[0] } else { "--real" }
 if ($Mode -eq "--test-install-brain") {
   if ($env:MACHINE_PREP_TEST_MODE -ne "1") { throw "test install seam outside test mode" }
@@ -29,9 +40,10 @@ $script:CheckFailures = 0
 $script:NodeState = "MISSING"
 $script:GitState = "MISSING"
 $script:ClaudeState = "MISSING"
-$script:CodexState = "MISSING"
+$script:CodexDetail = "not found. Setup can continue without it."
 $script:BrainState = "MISSING"
 $script:SessionState = "READY"
+$script:OwnerSteps = @()
 $script:ChecksumExitCode = 0
 $script:RealExitCode = 0
 $script:InstalledBrainReady = $false
@@ -93,6 +105,13 @@ function Write-Status([string]$State, [string]$Label, [string]$Detail) {
   if ($State -in @("MISSING", "WRONG_VERSION", "SHADOWED")) { $script:CheckFailures++ }
 }
 
+# Records one plain-language line for a prerequisite that blocks real mode:
+# the tool, what is wrong, what the check needs, and the one next step.
+# Only Invoke-Real prints these, so check and dry-run output stay unchanged.
+function Add-OwnerStep([string]$Tool, [string]$Problem, [string]$Need, [string]$NextStep) {
+  $script:OwnerSteps += "- {0}: {1}. Needs {2}. {3}" -f $Tool, $Problem, $Need, $NextStep
+}
+
 function Test-StandardSession {
   if ($FixtureDir) { return (Read-Fixture "session.status") -eq "standard" }
   if (-not $env:LOCALAPPDATA) { return $false }
@@ -121,18 +140,34 @@ public static class FinancialBrainMachinePrepPackageContext {
   }
 }
 
+# Mirror the numeric component comparison on macOS. Validation happens first;
+# no lexical comparison or exact pin can reject a newer stable native release.
+function Test-ClaudeFloor([string]$Actual) {
+  $actualParts = $Actual.Split('.')
+  $floorParts = $ClaudeMinVersion.Split('.')
+  for ($i = 0; $i -lt 3; $i++) {
+    if ([double]$actualParts[$i] -gt [double]$floorParts[$i]) { return $true }
+    if ([double]$actualParts[$i] -lt [double]$floorParts[$i]) { return $false }
+  }
+  return $true
+}
+
 function Invoke-Checks {
   $script:CheckFailures = 0
+  $script:OwnerSteps = @()
   $node = Get-ToolVersion "node"
   if (-not $node) {
     $script:NodeState = "MISSING"
     Write-Status $script:NodeState "Node.js" "OWNER ACTION: install supported Node.js from its official signed installer"
+    Add-OwnerStep "Node.js" "not found" "version 24 or 22" $NodeHow
   } elseif ($node -match '^v(22|24)\.') {
     $script:NodeState = "READY"
     Write-Status $script:NodeState "Node.js" $node
   } else {
     $script:NodeState = "WRONG_VERSION"
     Write-Status $script:NodeState "Node.js" "$node; OWNER ACTION: install supported major 22 or 24"
+    $found = $node
+    Add-OwnerStep "Node.js" "version $found is installed" "version 24 or 22" $NodeHow
   }
 
   $npm = Get-ToolVersion "npm"
@@ -144,48 +179,47 @@ function Invoke-Checks {
     Write-Status $script:GitState "Git" $git
   } else {
     $script:GitState = "MISSING"
-    Write-Status $script:GitState "Git" "OWNER ACTION: install Git for Windows 2.54.0 from its official signed installer"
+    Write-Status $script:GitState "Git" "OWNER ACTION: install Git for Windows (any version) from its official signed installer"
+    Add-OwnerStep "Git" "not found" "Git for Windows, any version" $GitHow
   }
 
   $claudePaths = @(Get-ToolPaths "claude")
   $claude = Get-ToolVersion "claude"
   $canonicalClaude = Join-Path $PrepHome ".local\bin\claude.exe"
-  if ($claudePaths.Count -gt 1) {
+  # Only the selected copy can block setup. Later copies do not shadow it.
+  # The native launcher location is documented in the vendor setup guide.
+  if ($claudePaths.Count -gt 0 -and -not [string]::Equals([IO.Path]::GetFullPath($claudePaths[0]), [IO.Path]::GetFullPath($canonicalClaude), [StringComparison]::OrdinalIgnoreCase)) {
     $script:ClaudeState = "SHADOWED"
-    Write-Status $script:ClaudeState "Claude Code" "$($claudePaths.Count) PATH matches; fix: keep only the official per-user path"
-  } elseif ($claudePaths.Count -eq 1 -and -not [string]::Equals([IO.Path]::GetFullPath($claudePaths[0]), [IO.Path]::GetFullPath($canonicalClaude), [StringComparison]::OrdinalIgnoreCase)) {
-    $script:ClaudeState = "SHADOWED"
-    Write-Status $script:ClaudeState "Claude Code" "$($claudePaths[0]) resolves first; fix: put $canonicalClaude first on PATH"
-  } elseif (-not $claude) {
+    Write-Status $script:ClaudeState "Claude Code" "another install is selected; $ClaudeConflictHow"
+    Add-OwnerStep "Claude Code" "another install is selected instead of the Native Install copy" "version $ClaudeMinVersion or newer from Native Install" $ClaudeConflictHow
+  } elseif ($claudePaths.Count -eq 0 -or -not $claude -or $claude -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+ \(Claude Code\)$') {
     $script:ClaudeState = "MISSING"
-    Write-Status $script:ClaudeState "Claude Code" "OWNER ACTION: install pinned $ClaudeVersion from the official signed installer"
-  } elseif ($claude -ceq "$ClaudeVersion (Claude Code)") {
+    Write-Status $script:ClaudeState "Claude Code" "version $ClaudeMinVersion or newer; $ClaudeHow"
+    $problem = if ($claudePaths.Count -eq 0) { "not found" } else { "a copy was found, but its version could not be read" }
+    Add-OwnerStep "Claude Code" "$problem" "version $ClaudeMinVersion or newer" $ClaudeHow
+  } elseif (Test-ClaudeFloor ($claude -creplace ' \(Claude Code\)$', '')) {
     $script:ClaudeState = "READY"
     Write-Status $script:ClaudeState "Claude Code" $claude
   } else {
     $script:ClaudeState = "WRONG_VERSION"
-    Write-Status $script:ClaudeState "Claude Code" "$claude; expected $ClaudeVersion; fix: run --real"
+    Write-Status $script:ClaudeState "Claude Code" "$claude; needs $ClaudeMinVersion or newer; $ClaudeUpdateHow"
+    $found = $claude -creplace ' \(Claude Code\)$', ''
+    Add-OwnerStep "Claude Code" "version $found is installed" "version $ClaudeMinVersion or newer" $ClaudeUpdateHow
   }
 
   $codexPaths = @(Get-ToolPaths "codex")
-  $codex = Get-ToolVersion "codex"
-  $canonicalCodex = Join-Path $NpmPrefix "codex.cmd"
-  if ($codexPaths.Count -gt 1) {
-    $script:CodexState = "SHADOWED"
-    Write-Status $script:CodexState "Codex CLI" "$($codexPaths.Count) PATH matches; fix: keep only the managed per-user path"
-  } elseif ($codexPaths.Count -eq 1 -and -not [string]::Equals([IO.Path]::GetFullPath($codexPaths[0]), [IO.Path]::GetFullPath($canonicalCodex), [StringComparison]::OrdinalIgnoreCase)) {
-    $script:CodexState = "SHADOWED"
-    Write-Status $script:CodexState "Codex CLI" "$($codexPaths[0]) resolves first; fix: put $canonicalCodex first on PATH"
-  } elseif (-not $codex) {
-    $script:CodexState = "MISSING"
-    Write-Status $script:CodexState "Codex CLI" "OWNER ACTION: install pinned $CodexVersion from the official package"
-  } elseif ($codex -ceq "codex-cli $CodexVersion") {
-    $script:CodexState = "READY"
-    Write-Status $script:CodexState "Codex CLI" $codex
+  # Optional metadata may be absent or unreadable without blocking setup.
+  try { $codex = Get-ToolVersion "codex" } catch { $codex = $null }
+  if ($codexPaths.Count -eq 0) {
+    $script:CodexDetail = "not found. Setup can continue without it."
+  } elseif ($codex -and $codex -cmatch '^codex-cli [0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$') {
+    $script:CodexDetail = "found, version $($codex -creplace '^codex-cli ', '')."
   } else {
-    $script:CodexState = "WRONG_VERSION"
-    Write-Status $script:CodexState "Codex CLI" "$codex; expected $CodexVersion; fix: run --real"
+    # Inspect known package metadata only. Never start an optional assistant
+    # just to get its version, and never echo unrecognized tool output.
+    $script:CodexDetail = "found; version unavailable. Setup can continue without it."
   }
+  Write-Status "OPTIONAL" "Codex CLI" $script:CodexDetail
 
   $brainPaths = @(Get-ToolPaths "brain")
   $brain = Get-ToolVersion "brain"
@@ -241,7 +275,7 @@ function Show-Plan {
   Write-Output ""
   Write-Output "PLAN"
   Write-Output "1. ADMIN: no Administrator session is needed or allowed; keep this normal current-user PowerShell window."
-  Write-Output "2. OWNER ACTION: install any missing Node.js, Git, Claude Code, or Codex prerequisite from its official signed installer, then rerun this launcher."
+  Write-Output "2. OWNER ACTION: install any missing Node.js, Git, or Claude Code tool from its official signed installer, then rerun this launcher."
   Write-Output "3. REFUSE: the launcher does not download or execute prerequisite installers whose bytes it cannot authenticate before execution."
   Write-Output "4. SKIP: do not install global Wrangler; Financial Brain owns wrangler@$WranglerVersion."
   Write-Output "5. DOWNLOAD: Financial Brain $BrainVersion from the one pinned HTTPS kit URL without following redirects."
@@ -547,13 +581,26 @@ function Invoke-Real {
   Write-Output "MODE real"
   Invoke-Checks | Out-Null
   Write-Output "PREREQUISITE_DECISION_REACHED=1"
-  if ($script:GitState -ne "READY" -or $script:NodeState -ne "READY" -or $script:ClaudeState -ne "READY" -or $script:CodexState -ne "READY") {
-    [Console]::Error.WriteLine("OWNER ACTION: install the missing prerequisite from its official signed installer, then rerun. No prerequisite was downloaded or executed.")
+  if ($script:GitState -ne "READY" -or $script:NodeState -ne "READY" -or $script:ClaudeState -ne "READY") {
+    [Console]::Error.WriteLine("Financial Brain setup cannot start yet. Nothing was downloaded or installed.")
+    [Console]::Error.WriteLine("What you need to do:")
+    foreach ($step in $script:OwnerSteps) { [Console]::Error.WriteLine($step) }
+    [Console]::Error.WriteLine("When everything above is done, open Run Financial Brain Machine Prep again from the Start menu.")
+    # Keep optional information outside the required-action block on screen.
+    Write-Output "Codex CLI (optional): $script:CodexDetail"
     $script:RealExitCode = 2
     return
   }
+  Write-Output "Codex CLI (optional): $script:CodexDetail"
   if (Test-Path -LiteralPath $BrainPrefix) { Test-InstalledBrain $BrainPrefix; $script:RealExitCode = 2; return }
-  Install-Brain
+  # Mirrors install_brain || return 1 on macOS: the launcher shows this output,
+  # and an uncaught error would add PowerShell's script path, which names the
+  # owner's profile folder.
+  try { Install-Brain } catch {
+    [Console]::Error.WriteLine([string]$_.Exception.Message)
+    $script:RealExitCode = 1
+    return
+  }
   Write-Output "Financial Brain CLI preparation completed"
 }
 

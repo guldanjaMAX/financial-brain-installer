@@ -8,10 +8,10 @@ import { assertExactPaths, assertHostedRunner } from "./contract.mjs";
 // Independent witness pins, deliberately kept separate from installed script
 // constants. Re-pin all four values only after the next kit is sealed.
 export const KIT = Object.freeze({
-  version: "0.4.9",
-  url: "https://financialbrain.ai/kit/brain-installer-0.4.9-0555ad1972d7f8d6.tgz",
-  size: 6668013,
-  sha256: "0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2",
+  version: "0.4.10",
+  url: "https://financialbrain.ai/kit/brain-installer-0.4.10-55824b383909c57b.tgz",
+  size: 6828366,
+  sha256: "55824b383909c57b37f4db6179562bf603f670eaae3c7d315135dd290b0afdfe",
 });
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 

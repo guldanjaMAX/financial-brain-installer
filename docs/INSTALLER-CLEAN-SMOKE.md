@@ -5,7 +5,7 @@
 The signed artifacts currently contain only the machine-preparation shell,
 version 0.2.0. The Mac payload has eight files and the Windows payload has seven
 files plus a Start Menu shortcut. Neither bundles Node or the Brain CLI. The
-preparation scripts later download a separately pinned 0.4.9 kit. Running a
+preparation scripts later download a separately pinned 0.4.10 kit. Running a
 checkout's CLI, using runner Node, or mocking preparation would not prove a
 bundled CLI. The shell jobs keep that distinction explicit. Separate bootstrap jobs prove the installed CLI from the pinned kit when they pass; they do not turn it into a bundled CLI.
 
@@ -168,10 +168,16 @@ required; the old artifact cannot satisfy the corrected contract.
 
 ## Re-pin after the 0.4.10 seal
 
-All current kit proof is for **0.4.9**, exactly **6,668,013 bytes**, SHA-256
-`0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2`.
-It is not proof of the 0.4.10 candidate or a newly changed helper.
-After the seal supplies the actual URL, length and digest, update together:
+The preparation scripts and bootstrap witness now pin the sealed **0.4.10**
+kit from source commit `ffb9c80e`:
+
+- URL: `https://financialbrain.ai/kit/brain-installer-0.4.10-55824b383909c57b.tgz`
+- Size: **6,828,366 bytes**
+- SHA-256: `55824b383909c57b37f4db6179562bf603f670eaae3c7d315135dd290b0afdfe`
+- Runtime payload SHA-256: `d2df2e53b9a5e1a7ae66a23b599c557751d958fdcd885747a564ffd21bd506b9`
+- Package file count: **627**
+
+The coordinated re-pin covers:
 
 - `machine-prep/prep-mac.sh`: `BRAIN_VERSION`, `BRAIN_KIT_URL`,
   `BRAIN_KIT_SIZE`, `BRAIN_KIT_SHA256`.
@@ -181,11 +187,12 @@ After the seal supplies the actual URL, length and digest, update together:
   `KIT.size`, `KIT.sha256`.
 - `test/machine-prep-installers.test.mjs`: `KIT_URL`, `KIT_SIZE`, `KIT_SHA256`
   and the version expectations/synthetic package fixtures. Update the matching
-  0.4.9 fixtures/snapshots in `test/machine-prep.test.mjs` and
+  0.4.10 fixtures/snapshots in `test/machine-prep.test.mjs` and
   `test/fixtures/machine-prep/` as part of the same reviewed version change.
 
-Rebuild, sign and rerun both platforms after re-pinning. Do not guess the new
-length, digest or content-addressed URL. Installer-shell version 0.2.0 and the
+Prior 0.4.9 bootstrap receipts do not prove this kit. Rebuild, sign and rerun
+both platforms against the pins above. Future re-pins must use a new seal's
+actual length, digest and content-addressed URL. Installer-shell version 0.2.0 and the
 Node/assistant/Wrangler prerequisite selections are separate constants; changing
 kit identity does not automatically change those versions.
 

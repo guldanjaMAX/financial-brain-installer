@@ -11,9 +11,9 @@ const ROOT = resolve(import.meta.dirname, "..");
 const HANDOFF = join(ROOT, "machine-prep", "handoff");
 const MAC_INSTALLER = join(ROOT, "machine-prep", "installers", "macos");
 const WINDOWS_INSTALLER = join(ROOT, "machine-prep", "installers", "windows");
-const KIT_URL = "https://financialbrain.ai/kit/brain-installer-0.4.9-0555ad1972d7f8d6.tgz";
-const KIT_SHA256 = "0555ad1972d7f8d6c1ded78a9fc4265f873cc4f4ce8c11fd04198cc5599409b2";
-const KIT_SIZE = "6668013";
+const KIT_URL = "https://financialbrain.ai/kit/brain-installer-0.4.10-55824b383909c57b.tgz";
+const KIT_SHA256 = "55824b383909c57b37f4db6179562bf603f670eaae3c7d315135dd290b0afdfe";
+const KIT_SIZE = "6828366";
 const WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS = 120_000;
 const BASH_BEHAVIOR_ON_WINDOWS_SKIP_REASON =
   "requires Unix shell semantics and remains active on the macOS and Linux CI lanes";
@@ -128,7 +128,7 @@ test("Windows smoke executes per-user table refusals with a green control", { sk
       }
     }
   }
-  const home = mkdtempSync(join(ROOT, ".machine-prep-wix-tables-"));
+  const home = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-wix-tables-")));
   mkdirSync(join(home, "temp"));
   const fixture = join(home, "table-contract.ps1");
   // Only the pure table-check functions are executed. No installer, registry,
@@ -243,7 +243,7 @@ test("pinned-kit proof reaches every refusal and cleans after preparation with a
   const control = await run();
   assert.equal(control.error, undefined);
   assert.deepEqual(control.calls, phases);
-  assert.match(control.events.at(-1), /PINNED_KIT_BOOTSTRAP_VERIFIED=1 version=0\.4\.9/);
+  assert.match(control.events.at(-1), /PINNED_KIT_BOOTSTRAP_VERIFIED=1 version=0\.4\.10/);
   for (const phase of phases) {
     const refused = await run(phase);
     assert.ok(refused.error);
@@ -279,16 +279,16 @@ test("pinned-kit verifier rejects changed size, bytes and installed pins with gr
 
 test("pinned-kit provenance compares actual installed bytes instead of trusting version text", async () => {
   const { verifyPackageTree } = await import("../machine-prep/installers/smoke/bootstrap.mjs");
-  const root = mkdtempSync(join(tmpdir(), "kit-provenance-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "kit-provenance-")));
   const expected = join(root, "witness"), installed = join(root, "installed");
   for (const directory of [expected, installed]) {
     mkdirSync(directory);
-    writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.9", bin: { brain: "./brain.mjs" } }));
-    writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.9');\n");
+    writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.10", bin: { brain: "./brain.mjs" } }));
+    writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.10');\n");
   }
   try {
     assert.equal(verifyPackageTree(expected, installed), 2, "green installed identity and bytes reached");
-    writeFileSync(join(installed, "brain.mjs"), "console.log('0.4.9'); // changed bytes\n");
+    writeFileSync(join(installed, "brain.mjs"), "console.log('0.4.10'); // changed bytes\n");
     assert.throws(() => verifyPackageTree(expected, installed), /bytes differ/);
     writeFileSync(join(installed, "brain.mjs"), readFileSync(join(expected, "brain.mjs")));
     writeFileSync(join(installed, "extra.mjs"), "synthetic\n");
@@ -298,13 +298,13 @@ test("pinned-kit provenance compares actual installed bytes instead of trusting 
 
 test("pinned-kit source inventory permits only npm shims named by authenticated dependency bins", async () => {
   const { verifyPackageTree } = await import("../machine-prep/installers/smoke/bootstrap.mjs");
-  const root = mkdtempSync(join(tmpdir(), "kit-bin-map-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "kit-bin-map-")));
   const expected = join(root, "witness"), installed = join(root, "installed");
   try {
     for (const directory of [expected, installed]) {
       mkdirSync(join(directory, "node_modules", "synthetic-tool"), { recursive: true });
-      writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.9", bin: { brain: "./brain.mjs" } }));
-      writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.9');\n");
+      writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "brain-installer", version: "0.4.10", bin: { brain: "./brain.mjs" } }));
+      writeFileSync(join(directory, "brain.mjs"), "console.log('0.4.10');\n");
       writeFileSync(join(directory, "node_modules", "synthetic-tool", "package.json"), JSON.stringify({ name: "synthetic-tool", bin: { "synthetic-tool": "run.js" } }));
       writeFileSync(join(directory, "node_modules", "synthetic-tool", "run.js"), "// synthetic dependency\n");
     }
@@ -344,7 +344,7 @@ test("bootstrap version arguments use canonical Windows paths and an encoded ESM
 
 for (const fixtureKind of ["physical directory", "directory alias", "URL-reserved characters"]) {
   test(`bootstrap version guard denies network and child processes after reached decisions (${fixtureKind})`, () => {
-    const root = mkdtempSync(join(tmpdir(), "kit-version-guard-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "kit-version-guard-")));
     try {
       const fixture = join(root, fixtureKind === "URL-reserved characters" ? "fixture # 100%" : "fixture");
       mkdirSync(fixture);
@@ -373,9 +373,9 @@ for (const fixtureKind of ["physical directory", "directory alias", "URL-reserve
           env: { HOME: directory, USERPROFILE: directory, BRAIN_NO_WRANGLER_LOGIN: "1" },
         });
       };
-      const control = execute("console.log('VERSION_DECISION_REACHED=1'); console.log('0.4.9');\n");
+      const control = execute("console.log('VERSION_DECISION_REACHED=1'); console.log('0.4.10');\n");
       assert.equal(control.status, 0, control.stderr);
-      assert.match(control.stdout, /VERSION_DECISION_REACHED=1\n0\.4\.9/);
+      assert.match(control.stdout, /VERSION_DECISION_REACHED=1\n0\.4\.10/);
       const network = execute("console.log('VERSION_DECISION_REACHED=1'); await fetch('https://example.invalid');\n");
       assert.notEqual(network.status, 0);
       assert.match(network.stdout, /VERSION_DECISION_REACHED=1/);
@@ -768,7 +768,7 @@ test("Claude handoff messages are local notes with no remote instructions", () =
   }
 });
 
-test("both prep scripts pin, verify, and locally install the published 0.4.9 kit", () => {
+test("both prep scripts pin, verify, and locally install the published 0.4.10 kit", () => {
   for (const source of [read("machine-prep/prep-mac.sh"), read("machine-prep/prep-windows.ps1")]) {
     assert.match(source, new RegExp(KIT_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(source, new RegExp(KIT_SHA256));
@@ -808,7 +808,7 @@ test("both OS handoff launchers expose a no-side-effect decision probe and CLI f
 
 test("macOS installer refuses an unsupported release after reaching its OS gate", bashBehaviorOptions(), () => {
   const preinstall = join(MAC_INSTALLER, "scripts", "preinstall");
-  const home = mkdtempSync(join(ROOT, ".machine-prep-preinstall-home-"));
+  const home = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-preinstall-home-")));
   const environment = {
     PATH: "/usr/bin:/bin",
     HOME: home,
@@ -842,7 +842,7 @@ test("macOS installer refuses an unsupported release after reaching its OS gate"
 });
 
 test("macOS staging contains the real prep, handoff, support log wrapper, and uninstall notes", bashBehaviorOptions(), () => {
-  const staging = mkdtempSync(join(tmpdir(), "machine-prep-pkg-stage-"));
+  const staging = realpathSync.native(mkdtempSync(join(tmpdir(), "machine-prep-pkg-stage-")));
   try {
     const build = spawnSync("bash", [join(MAC_INSTALLER, "build-pkg.sh"), "--staging-only", staging], {
       cwd: ROOT,
@@ -885,7 +885,7 @@ test("macOS package has no privileged script phase and targets only the current 
 });
 
 test("macOS native tools build the reviewed unsigned package contents", { skip: process.platform !== "darwin" }, () => {
-  const output = mkdtempSync(join(tmpdir(), "machine-prep-pkg-build-"));
+  const output = realpathSync.native(mkdtempSync(join(tmpdir(), "machine-prep-pkg-build-")));
   try {
     const pkg = join(output, "FinancialBrainMachinePrep-unsigned.pkg");
     const build = spawnSync("bash", [join(MAC_INSTALLER, "build-pkg.sh"), pkg], {
@@ -952,7 +952,7 @@ test("Windows MSI is per-user, Windows 10+, and uses process-only policy bypass"
 test("Windows wrapper has an unsupported-OS decision gate, shareable log, real prep, and Claude handoff", () => {
   const wrapper = read("machine-prep/installers/windows/run-machine-prep.ps1");
   assert.match(wrapper, /OS_DECISION_REACHED=1/);
-  assert.match(wrapper, /REFUSED Windows 10 or newer is required/);
+  assert.match(wrapper, /This PC needs Windows 10 or newer/);
   assert.match(wrapper, /prep-windows\.ps1/);
   assert.match(wrapper, /Invoke-EmbeddedPowerShell \$prep @\("--real"\)/);
   assert.match(wrapper, /installer\.log/);
@@ -1032,26 +1032,31 @@ test("Windows package project names every reviewed payload file", () => {
 });
 
 test("Windows wrapper refuses an unsupported release before prep", { skip: process.platform !== "win32" }, () => {
-  const powerShell = process.env.SystemRoot
-    ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-    : "powershell.exe";
-  const result = spawnSync(powerShell, [
-    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-    "-File", join(WINDOWS_INSTALLER, "run-machine-prep.ps1"),
-  ], {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      MACHINE_PREP_OS_VERSION_OVERRIDE: "6.3",
-      MACHINE_PREP_INSTALLER_TEST_MODE: "1",
-    },
-    encoding: "utf8",
-  });
-  const out = `${result.stdout}${result.stderr}`.replaceAll("\r\n", "\n");
-  assert.equal(result.status, 2, out);
-  assert.match(out, /OS_DECISION_REACHED=1/);
-  assert.match(out, /REFUSED Windows 10 or newer is required/);
-  assert.doesNotMatch(out, /INSTALLER_TEST_GATE_REACHED|INSTALLER_PROGRESS/);
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-windows-os-")));
+  try {
+    const powerShell = join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const result = spawnSync(powerShell, [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+      "-File", join(WINDOWS_INSTALLER, "run-machine-prep.ps1"),
+    ], {
+      cwd: ROOT,
+      env: {
+        SystemRoot: process.env.SystemRoot, PATH: process.env.PATH,
+        HOME: directory, USERPROFILE: directory, LOCALAPPDATA: join(directory, "local"),
+        BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_TEST_LAUNCHCTL: join(directory, "injected-launchctl"),
+        MACHINE_PREP_OS_VERSION_OVERRIDE: "6.3", MACHINE_PREP_INSTALLER_TEST_MODE: "1",
+      },
+      encoding: "utf8",
+    });
+    const out = `${result.stdout}${result.stderr}`.replaceAll("\r\n", "\n");
+    const log = readFileSync(join(directory, "local", "FinancialBrainMachinePrep", "installer.log"), "utf8");
+    assert.equal(result.status, 2, out);
+    assert.match(log, /OS_DECISION_REACHED=1/);
+    assert.match(out, /This PC needs Windows 10 or newer/);
+    assert.doesNotMatch(out, /OS_DECISION_REACHED|INSTALLER_TEST_GATE_REACHED|INSTALLER_PROGRESS/);
+    assert.doesNotMatch(log, /PREP_EXIT_CODE|SETUP_LAUNCH_DECISION/);
+    // The supported-OS green control reaches setup in the wrapper matrix below.
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("machine-prep CI still builds review artifacts with pinned actions and no release path", () => {
@@ -1116,7 +1121,7 @@ function signingGateBody(workflow) {
 }
 
 function runSigningGate({ workflow = read(".github/workflows/installer-signing.yml"), missing = null, wixConfirmed = "true" } = {}) {
-  const directory = mkdtempSync(join(ROOT, ".signing-gate-test-"));
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".signing-gate-test-")));
   const output = join(directory, "output");
   const summary = join(directory, "summary");
   const settings = [...MAC_SIGNING_GATE_SETTINGS, ...WINDOWS_SIGNING_VARIABLES];
@@ -1236,7 +1241,7 @@ test("signing workflow performs the required Apple and Artifact Signing ceremoni
 });
 
 function runSigningCleanup({ owned, deleteFails = false, scriptPath = join(MAC_INSTALLER, "cleanup-signing-material.sh") }) {
-  const directory = mkdtempSync(join(ROOT, ".signing-cleanup-test-"));
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".signing-cleanup-test-")));
   const keychain = join(directory, "installer-signing.keychain-db");
   const marker = join(directory, "installer-signing.keychain-owner");
   const calls = join(directory, "security-calls.log");
@@ -1320,7 +1325,7 @@ test("signing cleanup ownership mutation turns the foreign-keychain control red"
   const source = readFileSync(sourcePath, "utf8");
   const from = 'if [ "$marker_value" != "$attempt_id" ]; then';
   assert.equal(source.includes(from), true, "missing cleanup ownership decision");
-  const directory = mkdtempSync(join(ROOT, ".signing-cleanup-mutant-"));
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".signing-cleanup-mutant-")));
   const mutant = join(directory, "cleanup-signing-material.sh");
   writeFileSync(mutant, source.replace(from, "if false; then"));
   const probe = runSigningCleanup({ owned: false, scriptPath: mutant });
@@ -1458,12 +1463,12 @@ test("installer security contracts detect one mutation per reviewed boundary", (
   }
 });
 
-function runMacWrapper({ prepExit, openExit, handoffExit }) {
-  const directory = mkdtempSync(join(ROOT, ".machine-prep-wrapper-test-"));
+function runMacWrapper({ prepExit, openExit, handoffExit, prepBody = "", handoffBody = "" }) {
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-wrapper-test-")));
   const counter = join(directory, "counter.log");
-  const helper = (name, exitCode) => {
+  const helper = (name, exitCode, body = "") => {
     const path = join(directory, name);
-    writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' ${name} >> "${counter}"\nexit ${exitCode}\n`);
+    writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' ${name} >> "${counter}"\n${body}\nexit ${exitCode}\n`);
     chmodSync(path, 0o755);
     return path;
   };
@@ -1474,33 +1479,185 @@ function runMacWrapper({ prepExit, openExit, handoffExit }) {
       HOME: directory,
       BRAIN_NO_WRANGLER_LOGIN: "1",
       BRAIN_TEST_LAUNCHCTL: join(directory, "injected-launchctl"),
-      MACHINE_PREP_RUNNER: helper("prep", prepExit),
+      MACHINE_PREP_RUNNER: helper("prep", prepExit, prepBody),
       MACHINE_PREP_OPEN: helper("open", openExit),
-      MACHINE_PREP_HANDOFF: helper("handoff", handoffExit),
+      MACHINE_PREP_HANDOFF: helper("handoff", handoffExit, handoffBody),
       MACHINE_PREP_LOG_DIR: join(directory, "log"),
     },
     encoding: "utf8",
   });
   const calls = existsSync(counter) ? readFileSync(counter, "utf8").trim().split("\n").filter(Boolean) : [];
+  const logFile = join(directory, "log", "installer.log");
+  const log = existsSync(logFile) ? readFileSync(logFile, "utf8") : null;
   rmSync(directory, { recursive: true, force: true });
-  return { ...result, calls };
+  return { ...result, calls, log };
 }
+
+// What the owner reads in the launcher window. Status markers live only in
+// installer.log; these lines never enter it.
+const MAC_SCREEN = {
+  start: "Financial Brain Machine Prep: checking this Mac for the tools setup needs.",
+  failed: "Financial Brain setup has not started yet: follow the steps above, then open Run Financial Brain Machine Prep again.",
+  ready: "This Mac is ready. Opening Financial Brain setup in a new Terminal window.",
+  windowFailed: "The Financial Brain setup window did not open. Ask Financial Brain support for help.",
+  handoff: "Opening Claude to guide your next steps.",
+  handoffFailed: "Claude did not open. Continue in the Financial Brain setup window.",
+  done: "Done. Continue in the Financial Brain setup window.",
+};
+const toWindowsScreen = (line) => line
+  .replace("This Mac", "This PC").replace("this Mac", "this PC")
+  .replace("new Terminal window", "new PowerShell window")
+  .replace(/Machine Prep again\.$/, "Machine Prep again from the Start menu.");
+const WINDOWS_SCREEN = Object.fromEntries(Object.entries(MAC_SCREEN).map(([key, line]) => [key, toWindowsScreen(line)]));
+const SCREEN_MARKER_LINE = /^[A-Z][A-Z_]*(?:[= ]|$)/m;
+const MAC_FAILURE_MARKERS = [
+  "LOG_SCHEMA_DECISION_REACHED=1",
+  "INSTALLER_PROGRESS=1/4 Preparing tools and Financial Brain",
+  "PREP_EXIT_CODE=2",
+  "INSTALLER_PROGRESS=2/4 Prep needs attention; setup was not opened",
+  "SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed",
+];
+const MAC_SUCCESS_MARKERS = [
+  "LOG_SCHEMA_DECISION_REACHED=1",
+  "INSTALLER_PROGRESS=1/4 Preparing tools and Financial Brain",
+  "PREP_EXIT_CODE=0",
+  "INSTALLER_PROGRESS=2/4 Tool and CLI checks completed",
+  "SETUP_LAUNCH_DECISION_REACHED=1",
+  "SETUP_WINDOW_STARTED=1",
+  "INSTALLER_PROGRESS=3/4 Opening the local Claude handoff",
+  "INSTALLER_HANDOFF_EXIT_CODE=0",
+  "INSTALLER_HANDOFF_STARTED=1",
+  "INSTALLER_PROGRESS=4/4 Installer handoff completed",
+];
+const lines = (...items) => `${items.join("\n")}\n`;
+
+test("Mac launcher shows only plain lines on screen and keeps every status marker in installer.log", bashBehaviorOptions(), () => {
+  // The prep's own markers and banner are hidden; its stderr is untouched.
+  const prepFailure = runMacWrapper({
+    prepExit: 2, openExit: 0, handoffExit: 0,
+    prepBody: "printf 'Machine Prep for macOS\\nMODE real\\nPREREQUISITE_DECISION_REACHED=1\\nCodex CLI (optional): not found. Setup can continue without it.\\n'\nprintf 'Financial Brain setup cannot start yet. Nothing was downloaded or installed.\\n- Node.js: not found.\\n' >&2",
+  });
+  assert.equal(prepFailure.status, 2, prepFailure.stderr);
+  assert.equal(prepFailure.stdout, lines(MAC_SCREEN.start, "Codex CLI (optional): not found. Setup can continue without it.", "", MAC_SCREEN.failed));
+  assert.equal(prepFailure.stderr, lines("Financial Brain setup cannot start yet. Nothing was downloaded or installed.", "- Node.js: not found."));
+  assert.equal(prepFailure.log, lines(...MAC_FAILURE_MARKERS));
+
+  const control = runMacWrapper({
+    prepExit: 0, openExit: 0, handoffExit: 0,
+    prepBody: [
+      "printf 'Machine Prep for macOS\\nMODE real\\nPREREQUISITE_DECISION_REACHED=1\\nCodex CLI (optional): found, version 9.0.0.\\nDOWNLOAD_STARTED=1 kit_version=0.4.10\\nVERIFIED checksum\\n'",
+      "printf 'added 1 package in 1s\\nBRAIN_INSTALL_VERIFIED=1 version=0.4.10\\nFinancial Brain CLI preparation completed\\n'",
+      "printf 'npm warn example\\n' >&2",
+    ].join("\n"),
+    handoffBody: "printf 'HANDOFF_DECISION_REACHED=1\\nHANDOFF_DESKTOP_OPENED=1\\n'",
+  });
+  assert.equal(control.status, 0, control.stderr);
+  assert.deepEqual(control.calls, ["prep", "open", "handoff"]);
+  assert.equal(control.stdout, lines(
+    MAC_SCREEN.start, "Codex CLI (optional): found, version 9.0.0.", "added 1 package in 1s", "Financial Brain CLI preparation completed",
+    MAC_SCREEN.ready, MAC_SCREEN.handoff, MAC_SCREEN.done,
+  ));
+  assert.equal(control.stderr, "npm warn example\n");
+  assert.equal(control.log, lines(...MAC_SUCCESS_MARKERS));
+
+  const launchFailure = runMacWrapper({ prepExit: 0, openExit: 9, handoffExit: 0 });
+  assert.equal(launchFailure.status, 9, launchFailure.stderr);
+  assert.equal(launchFailure.stdout, lines(MAC_SCREEN.start, MAC_SCREEN.ready, MAC_SCREEN.windowFailed));
+  assert.equal(launchFailure.log, lines(...MAC_SUCCESS_MARKERS.slice(0, 5), "SETUP_WINDOW_STARTED=0"));
+
+  const handoffFailure = runMacWrapper({ prepExit: 0, openExit: 0, handoffExit: 4, handoffBody: "printf 'HANDOFF_DECISION_REACHED=1\\n'\nprintf 'REFUSED missing Claude handoff URL\\n' >&2" });
+  assert.equal(handoffFailure.status, 4, handoffFailure.stderr);
+  assert.equal(handoffFailure.stdout, lines(MAC_SCREEN.start, MAC_SCREEN.ready, MAC_SCREEN.handoff, MAC_SCREEN.handoffFailed));
+  assert.equal(handoffFailure.stderr, "REFUSED missing Claude handoff URL\n");
+  assert.equal(handoffFailure.log, lines(...MAC_SUCCESS_MARKERS.slice(0, 7), "INSTALLER_HANDOFF_EXIT_CODE=4", "INSTALLER_HANDOFF_STARTED=0"));
+
+  for (const result of [prepFailure, control, launchFailure, handoffFailure]) {
+    assert.doesNotMatch(result.stdout, SCREEN_MARKER_LINE, result.stdout);
+  }
+});
+
+test("Windows launcher mirrors the Mac screen: markers only in installer.log, prep markers hidden, waits only for an interactive owner", () => {
+  const wrapper = read("machine-prep/installers/windows/run-machine-prep.ps1").replaceAll("\r\n", "\n");
+  const mac = read("machine-prep/installers/macos/run-machine-prep-mac.sh");
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  // Markers are written to installer.log only, on both platforms.
+  const macEmit = mac.slice(mac.indexOf("emit_status() {"), mac.indexOf("\n}\n", mac.indexOf("emit_status() {")));
+  assert.match(macEmit, /printf '%s\\n' "\$1" >> "\$LOG_FILE"/);
+  assert.doesNotMatch(macEmit, /tee|\/dev\/stdout/);
+  const windowsLog = wrapper.slice(wrapper.indexOf("function Write-SafeLog"), wrapper.indexOf("\n}\n", wrapper.indexOf("function Write-SafeLog")));
+  assert.match(windowsLog, /\[IO\.File\]::AppendAllText\(\$LogFile, "\$Line`r`n"\)/);
+  assert.doesNotMatch(windowsLog, /Console|Write-Output|Write-Host/);
+  // The OS gate has the same private log boundary as other decisions.
+  assert.match(wrapper, /Write-SafeLog "OS_DECISION_REACHED=1 current=\$CurrentVersion minimum=10\.0"/);
+
+  // One hidden-line rule, case-sensitive on both platforms; stderr is never filtered.
+  assert.ok(mac.includes("SCREEN_HIDDEN='^([A-Z][A-Z_]*([= ]|$)|Machine Prep for macOS$)'"));
+  assert.ok(wrapper.includes("$ScreenHiddenPattern = '^([A-Z][A-Z_]*([= ]|$)|Machine Prep for Windows$)'"));
+  assert.match(mac, /run_for_screen\(\) \{\n  "\$@" \| \/usr\/bin\/grep -v -E --line-buffered "\$SCREEN_HIDDEN"\n  return "\$\{PIPESTATUS\[0\]\}"\n\}/);
+  // GNU sed takes -l as a line length and then ignores -E, so a sed filter hides nothing on Linux.
+  assert.doesNotMatch(mac, /\/usr\/bin\/sed /);
+  assert.match(mac, /run_for_screen \/usr\/bin\/env -i HOME=/);
+  assert.match(mac, /run_for_screen "\$HANDOFF_RUNNER"/);
+  const relay = wrapper.slice(wrapper.indexOf("function Show-ChildOutput"), wrapper.indexOf("function Invoke-EmbeddedPowerShell"));
+  assert.match(relay, /if \(\$line -cnotmatch \$ScreenHiddenPattern\) \{ \[Console\]::Out\.WriteLine\(\$line\) \}/);
+  assert.match(relay, /if \(\$Result\.Errors\) \{ \[Console\]::Error\.Write\(\$Result\.Errors\) \}/);
+  assert.doesNotMatch(relay, /\s-(?:i?notmatch|i?match)\s/, "PowerShell -match ignores case and would hide owner lines");
+
+  // The child streams are still drained concurrently, then handed back.
+  assert.match(wrapper, /return \[pscustomobject\]@\{ ExitCode = \[int\]\$process\.ExitCode; Output = \$stdoutTask\.Result; Errors = \$stderrTask\.Result \}/);
+  assert.match(wrapper, /return \[pscustomobject\]@\{ ExitCode = \$code; Output = ""; Errors = "" \}/);
+  const prepCall = wrapper.indexOf('$prepResult = Invoke-EmbeddedPowerShell $prep @("--real")');
+  const shown = wrapper.indexOf("Show-ChildOutput $prepResult");
+  const exitLogged = wrapper.indexOf('Write-SafeLog "PREP_EXIT_CODE=');
+  assert.ok(prepCall > 0 && prepCall < shown && shown < exitLogged, "prep output is relayed before its exit marker");
+  assert.equal(wrapper.split("Show-ChildOutput $").length - 1, 1, "only the prep child is relayed; the pipe test child and handoff are not");
+
+  // Same plain lines with Windows place names. The Windows script writes its
+  // success branch before its failure branch, so compare the sets; the Mac
+  // order is pinned here and the screen order by the behavior tests.
+  const macLines = [...mac.matchAll(/^\s*say '([^']*)'/gm)].map((match) => match[1]);
+  const windowsLines = [...wrapper.matchAll(/^\s*Write-OwnerLine "([^"]*)"/gm)].map((match) => match[1]);
+  assert.deepEqual(macLines, [MAC_SCREEN.start, "", MAC_SCREEN.failed, MAC_SCREEN.ready, MAC_SCREEN.windowFailed, MAC_SCREEN.handoff, MAC_SCREEN.handoffFailed, MAC_SCREEN.done]);
+  assert.deepEqual([...windowsLines].sort(), [...macLines.map(toWindowsScreen), "This PC needs Windows 10 or newer. Nothing was downloaded or installed."].sort());
+  assert.match(wrapper, new RegExp([
+    'Write-SafeLog "SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed"',
+    'Write-OwnerLine ""',
+    `Write-OwnerLine "${escape(WINDOWS_SCREEN.failed)}"`,
+    "Wait-OwnerBeforeClose",
+    "exit \\$prepResult\\.ExitCode",
+  ].join("\\s*(?:if [^\\n]*\\n\\s*)?")));
+  assert.doesNotMatch(wrapper, /OWNER ACTION/);
+
+  // The Start Menu window closes on exit, so every failure waits for Enter.
+  const wait = wrapper.slice(wrapper.indexOf("function Wait-OwnerBeforeClose"), wrapper.indexOf("function Show-ChildOutput"));
+  assert.match(wait, /if \(\$env:MACHINE_PREP_INSTALLER_TEST_MODE -eq "1" -or \[Console\]::IsInputRedirected\) \{ return \}/);
+  assert.match(wait, /\[Console\]::Out\.WriteLine\("Press Enter to close this window\."\)/);
+  assert.match(wait, /\[void\]\[Console\]::ReadLine\(\)/);
+  assert.equal(wrapper.split("Wait-OwnerBeforeClose").length - 1, 5, "defined once and used on all four failure paths");
+  for (const [owner, exit] of [
+    [WINDOWS_SCREEN.windowFailed, "exit $setupExit"],
+    [WINDOWS_SCREEN.handoffFailed, "exit $handoffResult.ExitCode"],
+  ]) {
+    assert.match(wrapper, new RegExp(`Write-OwnerLine "${escape(owner)}"; Wait-OwnerBeforeClose; ${escape(exit)}`));
+  }
+});
 
 test("Mac launcher reaches prep and setup decisions, propagates failures, and hands off only after success", bashBehaviorOptions(), () => {
   const prepFailure = runMacWrapper({ prepExit: 7, openExit: 0, handoffExit: 0 });
   assert.equal(prepFailure.status, 7, prepFailure.stderr);
   assert.deepEqual(prepFailure.calls, ["prep"]);
-  assert.match(prepFailure.stdout, /SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed/);
+  assert.match(prepFailure.log, /SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed/);
 
   const launchFailure = runMacWrapper({ prepExit: 0, openExit: 9, handoffExit: 0 });
   assert.equal(launchFailure.status, 9, launchFailure.stderr);
   assert.deepEqual(launchFailure.calls, ["prep", "open"]);
-  assert.match(launchFailure.stdout, /SETUP_WINDOW_STARTED=0/);
+  assert.match(launchFailure.log, /SETUP_WINDOW_STARTED=0/);
 
   const control = runMacWrapper({ prepExit: 0, openExit: 0, handoffExit: 0 });
   assert.equal(control.status, 0, control.stderr);
   assert.deepEqual(control.calls, ["prep", "open", "handoff"]);
-  assert.match(control.stdout, /INSTALLER_HANDOFF_STARTED=1/);
+  assert.match(control.log, /INSTALLER_HANDOFF_STARTED=1/);
 });
 
 test("Windows launcher reaches one typed exit decision and starts setup only after prep succeeds", { skip: process.platform !== "win32" }, () => {
@@ -1508,9 +1665,9 @@ test("Windows launcher reaches one typed exit decision and starts setup only aft
     ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
     : "powershell.exe";
   const run = ({ prep, setup, handoff }) => {
-    const home = mkdtempSync(join(ROOT, ".machine-prep-windows-wrapper-"));
+    const home = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-windows-wrapper-")));
     try {
-      return spawnSync(powerShell, [
+      const result = spawnSync(powerShell, [
         "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
         "-File", join(WINDOWS_INSTALLER, "run-machine-prep.ps1"),
       ], {
@@ -1533,27 +1690,36 @@ test("Windows launcher reaches one typed exit decision and starts setup only aft
         },
         encoding: "utf8",
       });
+      const logFile = join(home, "local", "FinancialBrainMachinePrep", "installer.log");
+      const log = existsSync(logFile) ? readFileSync(logFile, "utf8").replaceAll("\r\n", "\n") : "";
+      return { ...result, stdout: result.stdout.replaceAll("\r\n", "\n"), log };
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   };
+  const schemaMarkerOnScreen = /^(?:OS_DECISION_REACHED|LOG_SCHEMA_DECISION_REACHED|INSTALLER_PROGRESS|PREP_EXIT_CODE|SETUP_LAUNCH_DECISION_REACHED|SETUP_WINDOW_STARTED|INSTALLER_HANDOFF)/m;
 
   const refused = run({ prep: 7, setup: 0, handoff: 0 });
   assert.equal(refused.status, 7, `${refused.stdout}${refused.stderr}`);
-  assert.match(refused.stdout, /PREP_EXIT_CODE=7/);
+  assert.match(refused.log, /PREP_EXIT_CODE=7/);
   assert.match(refused.stdout, /TEST_SETUP_ATTEMPTS=0/);
-  assert.match(refused.stdout, /OWNER ACTION: install any missing prerequisite/);
+  assert.ok(refused.stdout.includes(`${WINDOWS_SCREEN.start}\n\n${WINDOWS_SCREEN.failed}\n`), refused.stdout);
+  assert.doesNotMatch(refused.stdout, /OWNER ACTION|Press Enter/);
 
   const setupFailure = run({ prep: 0, setup: 9, handoff: 0 });
   assert.equal(setupFailure.status, 9, `${setupFailure.stdout}${setupFailure.stderr}`);
   assert.match(setupFailure.stdout, /TEST_SETUP_ATTEMPTS=1/);
-  assert.match(setupFailure.stdout, /SETUP_WINDOW_STARTED=0/);
+  assert.match(setupFailure.log, /SETUP_WINDOW_STARTED=0/);
+  assert.ok(setupFailure.stdout.includes(`${WINDOWS_SCREEN.windowFailed}\n`), setupFailure.stdout);
 
   const control = run({ prep: 0, setup: 0, handoff: 0 });
   assert.equal(control.status, 0, `${control.stdout}${control.stderr}`);
-  assert.match(control.stdout, /PREP_EXIT_CODE=0/);
-  assert.match(control.stdout, /SETUP_WINDOW_STARTED=1/);
-  assert.match(control.stdout, /INSTALLER_HANDOFF_STARTED=1/);
+  assert.match(control.log, /PREP_EXIT_CODE=0/);
+  assert.match(control.log, /SETUP_WINDOW_STARTED=1/);
+  assert.match(control.log, /INSTALLER_HANDOFF_STARTED=1/);
+  // Test mode reports the setup attempt between the ready and handoff lines.
+  assert.ok(control.stdout.includes(`${WINDOWS_SCREEN.ready}\nTEST_SETUP_ATTEMPTS=1\n${WINDOWS_SCREEN.handoff}\n${WINDOWS_SCREEN.done}\n`), control.stdout);
+  for (const result of [refused, setupFailure, control]) assert.doesNotMatch(result.stdout, schemaMarkerOnScreen, result.stdout);
 });
 
 test("Windows launcher concurrently drains oversized child output for zero and nonzero exits", { skip: process.platform !== "win32", timeout: 300_000 }, () => {
@@ -1561,7 +1727,7 @@ test("Windows launcher concurrently drains oversized child output for zero and n
     ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
     : "powershell.exe";
   for (const exitCode of [0, 7]) {
-    const directory = mkdtempSync(join(ROOT, ".machine-prep-windows-runner-pipes-"));
+    const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-windows-runner-pipes-")));
     const child = join(directory, "large-output.ps1");
     mkdirSync(join(directory, "temp"), { recursive: true });
     writeFileSync(child, `$chunk = "x" * 1024\n1..256 | ForEach-Object { [Console]::Error.WriteLine($chunk) }\n1..256 | ForEach-Object { [Console]::Out.WriteLine($chunk) }\nexit ${exitCode}\n`);
@@ -1594,4 +1760,12 @@ test("Windows launcher concurrently drains oversized child output for zero and n
       rmSync(directory, { recursive: true, force: true });
     }
   }
+});
+
+// Even the OS decision belongs in the fixed-schema log, not the owner screen.
+test("Windows OS decision is logged before refusal and hidden from the owner", () => {
+  const source = read("machine-prep/installers/windows/run-machine-prep.ps1");
+  assert.match(source, /Write-SafeLog "OS_DECISION_REACHED=1 current=\$CurrentVersion minimum=10\.0"/);
+  assert.doesNotMatch(source, /Write-Output "OS_DECISION_REACHED/);
+  assert.ok(source.indexOf('Write-SafeLog "OS_DECISION_REACHED=') < source.indexOf('if ($CurrentVersion.Major -lt 10)'));
 });
