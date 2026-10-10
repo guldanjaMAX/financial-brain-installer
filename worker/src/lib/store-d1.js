@@ -4525,13 +4525,32 @@ const inventoryDocumentCtesSql = ({ includeCurrentCustomApi = true, bounded = fa
       LEFT JOIN chunk_per_document c ON c.doc_uid=a.doc_uid
   )`;
 
+// Seek the most recent start through (source,started_at), then resolve only
+// that start's ties. LIMIT precedes aggregation/sorting: a pathological tied
+// start is refused by the marker rather than turning into a lifetime scan.
+export const inventoryLatestRunsSql = `WITH heads AS MATERIALIZED (
+  SELECT s.name, (SELECT json_group_array(run_id) FROM (
+    SELECT run_id FROM sync_runs INDEXED BY idx_sync_runs_source
+      WHERE source=s.name AND started_at=(
+        SELECT MAX(started_at) FROM sync_runs INDEXED BY idx_sync_runs_source WHERE source=s.name)
+      LIMIT 5001)) AS candidates FROM sources s
+) SELECT sr.*, CASE WHEN json_array_length(h.candidates)>5000 THEN 1 ELSE 0 END AS inventory_head_unproven
+  FROM heads h JOIN sync_runs sr ON sr.run_id=(SELECT MAX(value) FROM json_each(h.candidates))
+  ORDER BY h.name`;
+
 // Exported so the scale regression can run this exact statement against a
 // synthetic corpus and diff its rows with the 0.4.8 SQL it replaced.
 export const sourceInventorySql = ({
   includeFailureEvidence = true,
   includeCurrentCustomApi = true,
   bounded = false,
+  pagedReceipts = false,
 } = {}) => `${inventoryDocumentCtesSql({ includeCurrentCustomApi, bounded })},
+  ${pagedReceipts ? `inventory_event_page AS MATERIALIZED (
+    SELECT id,source_name,event,at FROM source_events WHERE id > ?4 ORDER BY id LIMIT 5000
+  ), inventory_run_page AS MATERIALIZED (
+    SELECT * FROM sync_runs WHERE rowid > ?5 ORDER BY rowid LIMIT 5000
+  ),` : ""}
   source_names AS (
     SELECT name FROM sources
     UNION
@@ -4583,7 +4602,7 @@ export const sourceInventorySql = ({
     SELECT source_name AS source,
            MIN(CASE WHEN event='ingest' THEN at END) AS first_ingest_event_at,
            MAX(CASE WHEN event='ingest' THEN at END) AS last_ingest_event_at
-      FROM source_events
+      FROM ${pagedReceipts ? "inventory_event_page" : "source_events"}
      GROUP BY source_name
   ),
   run_rollup AS (
@@ -4599,7 +4618,7 @@ export const sourceInventorySql = ({
                          AND COALESCE(docs_failed,0)=0
                          AND (metrics_version<>1 OR docs_added>0 OR docs_updated>0 OR docs_unchanged>0)
                     THEN finished_at END) AS last_successful_run_at
-      FROM sync_runs
+      FROM ${pagedReceipts ? "inventory_run_page" : "sync_runs"}
      GROUP BY source
   ),
   latest_runs AS (
@@ -4613,7 +4632,7 @@ export const sourceInventorySql = ({
                ROW_NUMBER() OVER (
                  PARTITION BY source ORDER BY started_at DESC, run_id DESC
                ) AS source_rank
-          FROM sync_runs sr
+          FROM ${pagedReceipts ? `(${inventoryLatestRunsSql})` : "sync_runs"} sr
       )
      WHERE source_rank=1
   )
@@ -4729,34 +4748,33 @@ export async function sourceInventory(env, options = {}) {
   if (!Number.isFinite(now) || now < 0 || !Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows > SOURCE_INVENTORY_MAX_ROWS) {
     throw new TypeError("source inventory options are invalid");
   }
-  const { sourceInventoryScanPage } = await import("./source-inventory-scan.js");
+  const { sourceInventoryScanPage, missingInventoryFence } = await import("./source-inventory-scan.js");
   const { createInventoryAccumulator } = await import("./source-inventory-merge.js");
-  const accumulator = createInventoryAccumulator();
-  let after = 0, snapshot = null;
-  for (let pageNumber = 0; pageNumber < 1000; pageNumber++) {
-    let page;
-    try { page = await sourceInventoryScanPage(env, { after, snapshot, now }); }
-    catch (error) {
-      if (pageNumber !== 0 || !/no such (?:column: source_original_retrieval_generation|table: source_original_result_family_recovery_state)/.test(String(error?.message))) throw error;
-      // Pre-45 databases lack the durable mutation fence. Keep their one-query
-      // compatibility read only when the entire corpus fits one bounded page.
-      const bound = await env.DB.prepare("SELECT COUNT(*) AS n FROM (SELECT rowid FROM documents LIMIT 5001)").first();
-      if (!bound || bound.n > 5000) throw Object.assign(new Error("source inventory needs the bounded schema"), { code: "source_inventory_too_large" });
-      const legacy = await sourceInventorySlice(env, { ...options, documentPage: { after: 0, limit: 5000 } });
-      return { rows: legacy.rows, total: legacy.total };
+  // A legacy source-page client cannot resume internal work. One invocation
+  // performs at most one work page (including adaptive chunk probes).
+  let page;
+  try { page = await sourceInventoryScanPage(env, { now }); }
+  catch (error) {
+    if (!missingInventoryFence(error)) throw error;
+    // Pre-45 databases cannot fabricate a mutation fence. Bound every input
+    // before their single-query historical aggregate, including chunk text.
+    for (const [table, ceiling] of [["documents", 5000], ["source_events", 5000], ["sync_runs", 5000], ["chunks", 50000]]) {
+      const proof = await env.DB.prepare(`SELECT COUNT(*) AS n FROM (SELECT rowid FROM ${table} LIMIT ?1)`)
+        .bind(ceiling + 1).first();
+      if (!proof || !Number.isSafeInteger(proof.n) || proof.n > ceiling) throw Object.assign(
+        new Error("source inventory needs the bounded schema"), { code: "source_inventory_too_large" });
     }
-    accumulator.add({ sources: page.rows, families: page.families });
-    if (page.complete) {
-      const rows = accumulator.finish();
-      if (rows.length > (options.maxRows ?? SOURCE_INVENTORY_MAX_ROWS)) {
-        throw Object.assign(new Error("source inventory exceeds the safe row limit"), { code: "source_inventory_too_large" });
-      }
-      return { rows, total: rows.length };
-    }
-    after = page.scan.through;
-    snapshot = page.snapshot;
+    const legacy = await sourceInventorySlice(env, { ...options, documentPage: { after: 0, limit: 5000 } });
+    return { rows: legacy.rows, total: legacy.total };
   }
-  throw Object.assign(new Error("source inventory exceeds the safe page limit"), { code: "source_inventory_too_large" });
+  if (!page.complete) throw Object.assign(
+    new Error("source inventory requires a client that supports work pages"), { code: "source_inventory_upgrade_required" });
+  const accumulator = createInventoryAccumulator();
+  accumulator.add({ sources: page.rows, families: page.families, retirements: page.retirements });
+  const rows = accumulator.finish();
+  if (rows.length > maxRows) throw Object.assign(
+    new Error("source inventory exceeds the safe row limit"), { code: "source_inventory_too_large" });
+  return { rows, total: rows.length };
 }
 
 /** Return every source row for one bounded D1 snapshot, in stable id order. */
@@ -4764,6 +4782,7 @@ export async function sourceInventorySlice(env, {
   now = Date.now(),
   maxRows = SOURCE_INVENTORY_MAX_ROWS,
   documentPage = { after: 0, limit: 5000 },
+  receiptPage = null,
 } = {}) {
   if (!Number.isFinite(now) || now < 0) throw new TypeError("source inventory time is invalid");
   if (!Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows > SOURCE_INVENTORY_MAX_ROWS) {
@@ -4774,10 +4793,15 @@ export async function sourceInventorySlice(env, {
       !Number.isSafeInteger(documentPage.limit) || documentPage.limit < 0 || documentPage.limit > 5000) {
     throw new TypeError("source inventory document page is invalid");
   }
+  if (receiptPage && (![receiptPage.events, receiptPage.runs].every(value => Number.isSafeInteger(value) && value >= 0))) {
+    throw new TypeError("source inventory receipt page is invalid");
+  }
+  const binds = [maxRows + 1, documentPage.after, documentPage.limit,
+    ...(receiptPage ? [receiptPage.events, receiptPage.runs] : [])];
   const readInventory = async (includeCurrentCustomApi) => {
     try {
-      return await env.DB.prepare(sourceInventorySql({ includeCurrentCustomApi, bounded: documentPage !== null }))
-        .bind(maxRows + 1, ...(documentPage ? [documentPage.after, documentPage.limit] : [])).all();
+      return await env.DB.prepare(sourceInventorySql({ includeCurrentCustomApi, bounded: true, pagedReceipts: !!receiptPage }))
+        .bind(...binds).all();
     } catch (error) {
       if (!missingFailureEvidenceColumn(error)) throw error;
       // Schema 39 remains readable while migration 0040 is pending. Missing
@@ -4786,8 +4810,9 @@ export async function sourceInventorySlice(env, {
       return env.DB.prepare(sourceInventorySql({
         includeFailureEvidence: false,
         includeCurrentCustomApi,
-        bounded: documentPage !== null,
-      })).bind(maxRows + 1, ...(documentPage ? [documentPage.after, documentPage.limit] : [])).all();
+        bounded: true,
+        pagedReceipts: !!receiptPage,
+      })).bind(...binds).all();
     }
   };
   // Custom-source version tables arrive after the v3 inventory contract. An
@@ -4795,22 +4820,25 @@ export async function sourceInventorySlice(env, {
   // referencing tables that do not exist yet.
   const result = await readWithCustomApiVisibility(env, readInventory, { probe: false });
   const rawRows = Array.isArray(result?.results) ? result.results : [];
-  // Keep the v3 inventory statement byte-for-byte stable. Retirement is a
-  // small indexed companion read, like the other post-inventory operational
-  // lookups below, and does not widen the published row contract.
-  const retirementResult = await env.DB.prepare(
-    `SELECT s.name AS source_name,
+  // Retirement is an append-only event decision by id, not event timestamp.
+  // Page that history too, and apply its final decision only after collection.
+  const retirementSql = receiptPage
+    ? `WITH events AS MATERIALIZED (
+        SELECT id,source_name,event,at FROM source_events WHERE id > ?1 ORDER BY id LIMIT 5000
+      ) SELECT source_name,id AS event_id,CASE WHEN event='retired' THEN at ELSE NULL END AS retired_at
+        FROM events JOIN sources s ON s.name=events.source_name
+        WHERE id IN (SELECT MAX(id) FROM events
+          WHERE event IN ('retired','unretired','ingest','error','registered','forget') GROUP BY source_name)`
+    : `SELECT s.name AS source_name,
             (SELECT CASE WHEN e.event='retired' THEN e.at ELSE NULL END
                FROM source_events e
-              WHERE e.id=(
-                SELECT MAX(latest.id)
-                  FROM source_events latest
+              WHERE e.id=(SELECT MAX(latest.id) FROM source_events latest
                  WHERE latest.source_name=s.name
-                   AND latest.event IN ('retired','unretired','ingest','error','registered','forget')
-              )) AS retired_at
-       FROM sources s`
-  ).all();
-  const retirements = new Map((retirementResult?.results || []).map((row) => [
+                   AND latest.event IN ('retired','unretired','ingest','error','registered','forget'))) AS retired_at
+       FROM sources s`;
+  const retirementStatement = env.DB.prepare(retirementSql);
+  const retirementResult = await (receiptPage ? retirementStatement.bind(receiptPage.events) : retirementStatement).all();
+  const retirements = new Map((receiptPage ? [] : retirementResult?.results || []).map((row) => [
     String(row.source_name), sourceRetirementState(row),
   ]));
   const activeCustomJobs = await activeCustomApiJobStarts(env, rawRows.map((row) => ({
@@ -5098,7 +5126,9 @@ export async function sourceInventorySlice(env, {
     throw new Error("source inventory did not return the complete bounded snapshot");
   }
   const families = documentPage ? await inventoryFamilyDigests(env, rawRows) : undefined;
-  return { total, rows, ...(documentPage ? { families } : {}) };
+  return { total, rows, ...(documentPage ? { families } : {}),
+    ...(receiptPage ? { retirements: (retirementResult?.results || []).map(row =>
+      [row.source_name, row.event_id, sourceRetirementState(row).retiredAt]) } : {}) };
 }
 
 async function inventoryFamilyDigests(env, rawRows) {

@@ -10,8 +10,6 @@ import { jsonResponse, privateNoStore, validateAdminKey } from "./core.js";
 import { backendOf, D1 } from "./store.js";
 import { ownerSessionPrincipal } from "./owner-auth.js";
 import { sourceInventory, sourceRecoveryCandidates } from "./store-d1.js";
-import { sourceInventoryScanPage, sourceFreshnessPage, missingInventoryFence } from "./source-inventory-scan.js";
-import { recoveryPlanSummary, createInventoryAccumulator } from "./source-inventory-merge.js";
 
 export const SOURCE_INVENTORY_PATH = "/api/admin/brain/sources";
 export const SOURCE_INVENTORY_CONTRACT_VERSION = 3;
@@ -57,22 +55,19 @@ function decodeCursor(value, mode) {
   try { cursor = JSON.parse(decoded); } catch { return undefined; }
   if (!cursor || typeof cursor !== "object" || Array.isArray(cursor)) return undefined;
   const fields = Object.keys(cursor).sort().join(",");
-  const workPage = mode === "bounded" || mode === "freshness";
-  if (fields !== (workPage ? "after,as_of,events_after,mode,page,runs_after,snapshot,source,v" : "after,as_of,mode,snapshot,source,v")) return undefined;
-  if (workPage && (![cursor.events_after, cursor.runs_after].every(value => Number.isSafeInteger(value) && value >= 0))) return undefined;
-  if (workPage && (!Number.isSafeInteger(cursor.page) || cursor.page < 1 || cursor.page >= 1000)) return undefined;
+  if (fields !== "after,as_of,mode,snapshot,source,v") return undefined;
   if (cursor.v !== SOURCE_INVENTORY_CONTRACT_VERSION) return undefined;
   if (cursor.mode !== mode) return undefined;
   if (mode === "inventory" &&
       (typeof cursor.after !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(cursor.after))) {
     return undefined;
   }
-  if ((mode === "recovery" || workPage) && (!Number.isSafeInteger(cursor.after) || cursor.after < (workPage ? 0 : 1))) return undefined;
+  if (mode === "recovery" && (!Number.isSafeInteger(cursor.after) || cursor.after < 1)) return undefined;
   if (!(cursor.source === null ||
         (typeof cursor.source === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(cursor.source)))) {
     return undefined;
   }
-  if (mode !== "recovery" && cursor.source !== null) return undefined;
+  if (mode === "inventory" && cursor.source !== null) return undefined;
   if (typeof cursor.snapshot !== "string" || !/^[a-f0-9]{64}$/.test(cursor.snapshot)) return undefined;
   if (!validAsOf(cursor.as_of)) return undefined;
   return cursor;
@@ -105,19 +100,15 @@ async function inventoryBody(request) {
     return { error: "source inventory request has unknown fields", status: 400 };
   }
   const mode = body.mode === undefined ? "inventory" : body.mode;
-  if (!["inventory", "recovery", "bounded", "freshness"].includes(mode)) {
-    return { error: "mode must be inventory, bounded, freshness, or recovery", status: 400 };
+  if (!["inventory", "recovery"].includes(mode)) {
+    return { error: "mode must be inventory or recovery", status: 400 };
   }
-  const maximum = mode === "bounded" ? 5000 : SOURCE_INVENTORY_MAX_PAGE_SIZE;
-  const limit = body.limit === undefined ? (mode === "bounded" ? 5000 : SOURCE_INVENTORY_DEFAULT_PAGE_SIZE) : body.limit;
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximum) {
+  const limit = body.limit === undefined ? SOURCE_INVENTORY_DEFAULT_PAGE_SIZE : body.limit;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > SOURCE_INVENTORY_MAX_PAGE_SIZE) {
     return {
-      error: `limit must be an integer from 1 to ${maximum}`,
+      error: `limit must be an integer from 1 to ${SOURCE_INVENTORY_MAX_PAGE_SIZE}`,
       status: 400,
     };
-  }
-  if (mode === "freshness" && body.limit !== undefined) {
-    return { error: "freshness reads do not accept a limit", status: 400 };
   }
   const cursor = decodeCursor(body.cursor, mode);
   if (cursor === undefined) return { error: "cursor is not valid for this inventory", status: 400 };
@@ -125,7 +116,7 @@ async function inventoryBody(request) {
       (typeof body.source !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.source))) {
     return { error: "source must be a normalized source id", status: 400 };
   }
-  if (mode !== "recovery" && body.source !== undefined) {
+  if (mode === "inventory" && body.source !== undefined) {
     return { error: "source is available only in recovery mode", status: 400 };
   }
   if (body.source_group_cursor !== undefined &&
@@ -167,6 +158,79 @@ function sourceRecoveryLimitations() {
     raw_locator_disclosure: "not_available",
     entity_year_coverage: "not_available",
     meaning: "This is a bounded recovery preview from stored provenance and text receipts. Empty text is an OCR candidate, not proof that the original is a scan.",
+  };
+}
+
+const RECOVERY_REASON_CODES = Object.freeze([
+  "no_stored_chunks",
+  "blank_only_chunks",
+  "ocr_partial_review",
+  "provenance_receipt_unassessed",
+  "extraction_method_missing",
+  "text_reliability_missing",
+  "source_record_id_missing",
+  "derivation_lineage_missing",
+  "lineage_contract_unrecognized",
+]);
+
+function recoveryPlanSummary(sources) {
+  const reasonCounts = Object.fromEntries(RECOVERY_REASON_CODES.map((code) => [code, 0]));
+  const sourceGroups = [];
+  const blockingSignals = new Set();
+  let candidates = 0;
+  for (const source of sources) {
+    const plan = source?.recovery_plan;
+    if (!plan || !Number.isSafeInteger(plan.candidate_documents) || plan.candidate_documents < 0) {
+      throw new Error("source inventory returned an invalid recovery summary");
+    }
+    candidates += plan.candidate_documents;
+    for (const code of RECOVERY_REASON_CODES) {
+      const count = Number(plan.reason_counts?.[code]);
+      if (!Number.isSafeInteger(count) || count < 0) {
+        throw new Error("source inventory returned an invalid recovery reason count");
+      }
+      reasonCounts[code] += count;
+    }
+    for (const signal of plan.blocking_signals || []) blockingSignals.add(String(signal));
+    if (plan.candidate_documents > 0) {
+      sourceGroups.push({
+        source_id: source.source_id,
+        source_kind: source.kind,
+        zone: source.zone,
+        candidate_documents: plan.candidate_documents,
+        reason_counts: plan.reason_counts,
+        blocking_signals: plan.blocking_signals,
+        priority: plan.priority,
+        priority_basis: plan.priority_basis,
+      });
+    }
+  }
+  const boundedSourceGroups = sourceGroups.slice(0, SOURCE_INVENTORY_MAX_PAGE_SIZE);
+  return {
+    status: candidates ? "review_needed" : "no_candidates",
+    read_only: true,
+    candidate_documents: candidates,
+    candidate_source_groups: sourceGroups.length,
+    source_groups_returned: boundedSourceGroups.length,
+    source_groups_truncated: boundedSourceGroups.length < sourceGroups.length,
+    source_groups_cursor: boundedSourceGroups.length < sourceGroups.length
+      ? boundedSourceGroups[boundedSourceGroups.length - 1]?.source_id || null
+      : null,
+    source_group_details: "complete_in_sources_pages",
+    candidate_pages_at_max_size: Math.ceil(candidates / SOURCE_INVENTORY_MAX_PAGE_SIZE),
+    maximum_page_size: SOURCE_INVENTORY_MAX_PAGE_SIZE,
+    priority: sourceGroups.some((group) => group.priority === "high")
+      ? "high"
+      : candidates
+        ? "review"
+        : "none",
+    blocking_signals: [
+      "records_without_readable_text",
+      "partial_ocr_receipts",
+      "incomplete_provenance_receipts",
+    ].filter((signal) => blockingSignals.has(signal)),
+    reason_counts: reasonCounts,
+    source_groups: boundedSourceGroups,
   };
 }
 
@@ -241,57 +305,8 @@ export async function handleSourceInventoryApi(env, request) {
   const parsed = await inventoryBody(request);
   if (!parsed.body) return respond({ error: parsed.error }, parsed.status);
 
-  let { limit, cursor, mode, source, sourceGroupCursor } = parsed.body;
+  const { limit, cursor, mode, source, sourceGroupCursor } = parsed.body;
   const asOf = cursor?.as_of || new Date().toISOString();
-  if (mode === "bounded" || mode === "freshness") {
-    try {
-      const read = mode === "freshness" ? sourceFreshnessPage : sourceInventoryScanPage;
-      const inventory = await read(env, {
-        after: cursor?.after || 0, limit: mode === "freshness" ? 5000 : limit,
-        eventsAfter: cursor?.events_after || 0, runsAfter: cursor?.runs_after || 0,
-        now: Date.parse(asOf), snapshot: cursor?.snapshot ?? null,
-      });
-      const page = (cursor?.page || 0) + 1;
-      if (!inventory.complete && page >= 1000) throw new Error("inventory page limit");
-      const { after: _after, through: _through, ...scan } = inventory.scan;
-      const nextCursor = inventory.complete ? null : encodeBase64Url(JSON.stringify({
-        v: SOURCE_INVENTORY_CONTRACT_VERSION, mode, page, after: inventory.scan.through,
-        events_after: inventory.receiptThrough.events, runs_after: inventory.receiptThrough.runs,
-        snapshot: inventory.snapshot, as_of: asOf, source: null,
-      }));
-      if (mode === "freshness" && page === 1 && inventory.complete) {
-        const accumulator = createInventoryAccumulator();
-        accumulator.add({ sources: inventory.rows, families: inventory.families, retirements: inventory.retirements });
-        return respond({ contract_version: 3, kind: "source_freshness", as_of: asOf,
-          sources: freshnessRows(accumulator.finish()) });
-      }
-      return respond({ contract_version: 3, kind: mode === "freshness" ? "source_freshness_scan" : "source_inventory_scan",
-        complete: inventory.complete, truncated: !inventory.complete, cursor: nextCursor,
-        as_of: asOf, snapshot: inventory.snapshot, scan: { ...scan, page },
-        sources: inventory.rows, families: inventory.families, retirements: inventory.retirements,
-        limitations: sourceInventoryLimitations(),
-      });
-    } catch (error) {
-      if (missingInventoryFence(error) && !cursor) {
-        // A pre-45 database has no generation to fabricate. Reuse its existing
-        // single-page compatibility guard, then return the complete v3 shape.
-        if (mode === "freshness") {
-          try {
-            const inventory = await sourceInventory(env, { now: Date.parse(asOf) });
-            return respond({ contract_version: 3, kind: "source_freshness", as_of: asOf,
-              sources: freshnessRows(inventory.rows.filter(row => row.registered)) });
-          } catch { return respond({ error: "source freshness is unavailable", code: "source_inventory_unavailable" }, 503); }
-        }
-        mode = "inventory";
-        limit = SOURCE_INVENTORY_MAX_PAGE_SIZE;
-      } else {
-        const changed = error?.code === "source_inventory_changed";
-        return respond({ error: changed ? "source inventory changed; restart from the first page"
-          : "bounded source inventory is unavailable", code: changed ? "source_inventory_changed"
-          : "source_inventory_unavailable" }, changed ? 409 : 503);
-      }
-    }
-  }
   if (mode === "recovery") {
     let recovery;
     try {
@@ -372,14 +387,13 @@ export async function handleSourceInventoryApi(env, request) {
   try {
     inventory = await sourceInventory(env, { now: Date.parse(asOf) });
   } catch (error) {
-    const code = ["source_inventory_too_large", "source_inventory_upgrade_required"].includes(error?.code)
-      ? error.code : "source_inventory_unavailable";
+    const code = error?.code === "source_inventory_too_large"
+      ? "source_inventory_too_large"
+      : "source_inventory_unavailable";
     const detail = inventoryFailureDetail(error);
     logInventoryFailure("inventory", detail);
     return respond({
-      error: code === "source_inventory_upgrade_required"
-        ? "source inventory requires a CLI with bounded work-page support; update the local CLI"
-        : code === "source_inventory_too_large"
+      error: code === "source_inventory_too_large"
         ? "source inventory is too large for one safe snapshot"
         : "source inventory is unavailable",
       code,
@@ -444,15 +458,5 @@ export async function handleSourceInventoryApi(env, request) {
     sources,
     recovery_plan_summary: recoverySummary,
     limitations: sourceInventoryLimitations(),
-  });
-}
-
-function freshnessRows(rows) {
-  return rows.map(row => {
-    const { coverage: _coverage, ...freshness } = row.freshness;
-    return { name: row.name, kind: row.kind, freshness, receipt: {
-      last_successful_run_at: row.receipt?.last_successful_run_at ?? null,
-      latest_run: row.receipt?.latest_run ?? null,
-    } };
   });
 }

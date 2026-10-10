@@ -9815,6 +9815,14 @@ export async function collectSourceInventoryPages(requestPage, { limit = 250, bo
     const response = await requestPage({ ...(bounded ? { mode: "bounded", limit: 5000 } : { limit }), ...(cursor ? { cursor } : {}) });
     let body = null;
     try { body = JSON.parse(await response.text()); } catch { /* handled below */ }
+    // Only the base Worker's exact unsupported-mode response permits a
+    // protocol downgrade. Auth, malformed requests and outages stay failures.
+    if (bounded && pageNumber === 0 && response.status === 400 &&
+        body?.error === "mode must be inventory or recovery" && body?.code === undefined) {
+      bounded = false;
+      pageNumber--;
+      continue;
+    }
     if (!response.ok) {
       const knownCode = typeof body?.code === "string" && /^[a-z0-9_]{1,64}$/.test(body.code)
         ? body.code
@@ -9824,7 +9832,8 @@ export async function collectSourceInventoryPages(requestPage, { limit = 250, bo
         response.status === 401 || response.status === 403
           ? "the Brain did not accept this computer's saved owner credential. Run `brain setup <manifest>` to repair it; do not paste a key into the command."
           : `the Brain could not provide a source inventory (HTTP ${response.status}; ${knownCode})`,
-        { retryable: response.status === 404 || isRetryableHttpStatus(response.status) },
+        { retryable: knownCode !== "source_inventory_upgrade_required" &&
+          (response.status === 404 || isRetryableHttpStatus(response.status)) },
       );
     }
     if (body?.kind === "source_inventory_scan") {
@@ -9916,7 +9925,7 @@ async function collectSourceInventoryWithReadinessRetry(requestPage, options = {
   };
   return retryTransient(() => collectSourceInventoryPages(boundedRequest, { bounded: true,
     onProgress: options.silent ? () => {} : options.onInventoryProgress ?? ((progress) =>
-      console.error(`Source inventory: ${progress.scanned} rows checked; page ${progress.pages}/${progress.maxPages} (limit ${progress.maxDocuments} rows).`)),
+      console.error(`Source inventory: ${progress.scanned} document rows and ${progress.receiptsScanned} receipt rows checked; page ${progress.pages}/${progress.maxPages} (limit ${progress.maxDocuments} rows).`)),
   }), {
     attempts: 4,
     delayMs: 250,
@@ -10104,6 +10113,10 @@ export async function readSourceFreshness(manifestPath, options = {}) {
   if (!response.ok) throw new SourceInventoryClientError("source_inventory_unavailable", "source freshness is unavailable");
   let body;
   try { body = await response.json(); } catch { /* validate below */ }
+  if (body?.kind === "source_freshness_scan") {
+    const { collectBoundedInventory } = await import("./operations/source-inventory-pages.mjs");
+    body = await collectBoundedInventory(body, requestPage, { now: options.sourceInventoryNow ?? Date.now });
+  }
   if (body?.contract_version !== 3 || body.kind !== "source_freshness" ||
       !Array.isArray(body.sources) || body.sources.length > 10000) {
     throw new SourceInventoryClientError("inventory_contract_invalid", "source freshness receipt is invalid");

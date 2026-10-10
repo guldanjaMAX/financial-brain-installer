@@ -2025,24 +2025,40 @@ CLI emits its existing v3 source receipt. Progress goes to stderr. One command,
 including readiness retries, stops after 1,000 requests or ten minutes; a
 partial scan never becomes a complete inventory.
 
-The existing schema-45 document/chunk mutation generation and bounded source,
-run, event and custom-job receipts fence each page. A change refuses the page
-or continuation. Recovery import, which suppresses that generation, is refused.
-Source metadata is limited to 10,000 rows and each receipt table to 65,536 rows;
-overflow is explicit. These are work bounds, not a larger-corpus backend tier.
-The legacy v3 source-page API also uses bounded document statements internally.
-A pre-45 database without the mutation fence can use only its one-page legacy
-compatibility read, capped at 5,000 physical rows. The exported historical SQL
-shape remains a regression comparison, not the runtime inventory query.
+The existing schema-45 document/chunk generation, current source/run heads,
+append-only event high-water mark, and current custom-job state fence each page.
+All supported sync-run mutations append a source event in the same transaction.
+Historical events and runs are separately read through rowid ranges of at most
+5,000 entries per request; their exact first/successful dates and retirement
+choices are merged only after every page completes. Settled custom-job history
+is not part of the mutable marker. Current run heads seek the existing
+(source, started_at) index, with at most 5,000 equal-start ties; an ambiguous
+larger tie group is explicitly refused. No history table is materialized or
+hashed in full on each document page. Source metadata remains limited to
+10,000 rows, and the shared 1,000-request/ten-minute collection limit includes
+receipt work. A changed marker refuses the page or continuation. Verified
+recovery import, which suppresses the document generation, remains refused.
 
-Daily on/run use `mode: "freshness"` to read registered-source run receipts
-without visiting document rows. This response omits storage and document
-coverage fields. If that read is unavailable, the approved native schedule and
-eligible ingest legs still proceed. Their receipt records unknown freshness
-with `source_inventory_unavailable`; it never advances proof of freshness.
-Lifecycle recovery, source ownership, held sources and removal refusals retain
-their existing decisions. The daily run still reports failure when source
-execution fails or freshness cannot be proved.
+The CLI tries bounded mode first. Only the base Worker's exact unsupported-mode
+response permits a downgrade to the existing v3 source-page request. Auth,
+outage and snapshot errors do not negotiate. The legacy v3 API executes at most
+one internal work page. Larger inventories return
+`source_inventory_upgrade_required` before exhausting a Worker request's D1
+query budget; an updated CLI continues work over separate requests. Pre-45
+schemas retain their single-page compatibility read through either request
+mode, capped at 5,000 physical documents, 5,000 entries per receipt history,
+and 50,000 chunks. They never fabricate a mutation generation. The exported
+historical SQL remains a regression comparison, not the modern runtime query.
+
+Daily on/run use `mode: "freshness"` to read registered-source receipts without
+visiting document rows. Large receipt histories use the same private work
+cursors. The final response omits storage and document coverage fields. An old
+Worker that lacks freshness mode reports unavailable. If the read is unavailable,
+the approved native schedule and eligible ingest legs still proceed. Their
+receipt records unknown freshness with `source_inventory_unavailable`; it never
+advances proof of freshness. Lifecycle recovery, source ownership, held sources
+and removal refusals retain their existing decisions. The daily run reports
+failure when source execution fails or freshness cannot be proved.
 
 Each inventory row includes `last_failure`. It is `null` unless the newest run
 has a Gmail failure receipt that passes the closed source-failure validator.
