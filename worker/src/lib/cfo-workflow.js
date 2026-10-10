@@ -1,7 +1,9 @@
 import { taxReadiness } from './cfo-tax-evidence.js';
 
 const QUESTIONS = 'Select one entity and ask “Check tax readiness for 2025.”, “Show my weekly cash brief.” or “Check books against bank from 2026-09-01 to 2026-09-30.”';
-const CFO_TOPIC = /\b(?:check|review)\s+(?:my\s+)?books\b|\b(?:cfo|tax[\s-]+readiness|ready[\s-]+(?:to[\s-]+file|for[\s-]+tax)|cash[\s-]+brief|weekly[\s-]+cash|books[\s-]+(?:check|against|versus|vs\.?))\b/i;
+// Clarify attempted workflow actions, including compound clauses. A role or
+// topic mention in a document question is not a request to run a workflow.
+const CFO_REQUEST = /(?:^|[.!?;]\s+|\b(?:and|then)\s+)(?:please\s+|(?:can|could|would)\s+you\s+)?(?:(?:check|review)\s+(?:my\s+)?(?:tax[\s-]+readiness|books)\b|(?:show|run|review|check)\s+(?:my\s+)?(?:weekly[\s-]+cash(?:[\s-]+brief)?|cash[\s-]+brief)\b)/i;
 function calendarDate(value) {
   const date = new Date(`${value}T00:00:00Z`);
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
@@ -25,7 +27,7 @@ export function parseCfoQuestion(question) {
       return { kind: 'books_check', periodStart: match[1], periodEnd: match[2], accountRef };
     }
   }
-  return CFO_TOPIC.test(text) ? { kind: 'clarification' } : null;
+  return CFO_REQUEST.test(text) ? { kind: 'clarification' } : null;
 }
 
 export function cfoEnvelope({ entityScope, asOf, kind, status, answer, gaps = [], metadata = {} }) {
