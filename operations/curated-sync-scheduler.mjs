@@ -78,8 +78,14 @@ const HISTORICAL_RAW_DRIVE_KEYS = new Set([
   "checksum_matches", "presence_unverified", "checksum_mismatches", "deletion_eligible",
 ]);
 
+class CuratedSchedulerError extends Error {}
+
 function fail(message) {
-  throw new Error(message);
+  throw new CuratedSchedulerError(message);
+}
+
+function publicFailure(error) {
+  return error instanceof CuratedSchedulerError ? error.message : "curated scheduler operation could not be completed safely";
 }
 
 function currentUid() {
@@ -344,6 +350,8 @@ export function reinstallScheduledCuratedSync(planPath, options = {}) {
   const staged = stageCuratedPlist(plan.plistPath, desired);
   let wasLoaded = false;
   let replacing = false;
+  let priorArguments = null;
+  let bootoutAcknowledged = false;
   const requireSuccess = args => {
     const result = launchctl(args);
     if (result?.error || result?.status !== 0) fail("curated scheduler service operation failed");
@@ -356,6 +364,7 @@ export function reinstallScheduledCuratedSync(planPath, options = {}) {
     if (wasLoaded && !prior) fail("curated scheduler cannot adopt a service without its reviewed plist");
     if (wasLoaded) {
       const active = launchArguments(status.stdout);
+      priorArguments = active;
       if (JSON.stringify(active.slice(0, -1)) !== JSON.stringify(plan.programArguments.slice(0, -1)) ||
           !/^[0-9a-f]{64}$/.test(active.at(-1) ?? "")) {
         fail("curated scheduler loaded service does not belong to this plan and runtime");
@@ -369,8 +378,13 @@ export function reinstallScheduledCuratedSync(planPath, options = {}) {
     const lock = preparePrivateLock(plan.lockPath);
     closeSync(lock);
     (options.rotateLogs ?? rotateDriveSchedulerLogs)(plan, options);
-    if (wasLoaded) requireSuccess(["bootout", plan.service]);
+    // An unsuccessful acknowledgement can still have unloaded the job.
+    // Enter recovery before the first external mutation, including throws.
     replacing = true;
+    if (wasLoaded) {
+      requireSuccess(["bootout", plan.service]);
+      bootoutAcknowledged = true;
+    }
     staged.commit();
     if (readFileSync(plan.plistPath, "utf8") !== desired) fail("curated scheduler plist readback failed");
     // A plan or manifest changed while preparing the service is never adopted.
@@ -388,15 +402,32 @@ export function reinstallScheduledCuratedSync(planPath, options = {}) {
     if (!replacing) throw error;
     try {
       const status = launchctl(["print", plan.service]);
-      if (status?.status === 0) requireSuccess(["bootout", plan.service]);
-      else if (status?.error || status?.status !== 113) fail("rollback inspection failed");
+      if (status?.error || ![0, 113].includes(status?.status)) fail("rollback inspection failed");
+      let priorStillLoaded = false;
+      if (status.status === 0) {
+        const active = launchArguments(status.stdout);
+        // Never unload a different service encountered during recovery.
+        if (JSON.stringify(active.slice(0, -1)) !== JSON.stringify(plan.programArguments.slice(0, -1)) ||
+            !/^[0-9a-f]{64}$/.test(active.at(-1) ?? "")) fail("rollback identity changed");
+        priorStillLoaded = !bootoutAcknowledged && wasLoaded && JSON.stringify(active) === JSON.stringify(priorArguments);
+        if (!priorStillLoaded) {
+          if (/\bstate\s*=\s*running\b|\bpid\s*=\s*[1-9][0-9]*/.test(status.stdout)) fail("rollback service is running");
+          requireSuccess(["bootout", plan.service]);
+        }
+      }
       if (prior === null) unlinkSync(plan.plistPath);
       else {
         const rollback = stageCuratedPlist(plan.plistPath, prior);
         try { rollback.commit(); } finally { rollback.discard(); }
         if (readFileSync(plan.plistPath, "utf8") !== prior) fail("rollback readback failed");
       }
-      if (wasLoaded) requireSuccess(["bootstrap", plan.domain, plan.plistPath]);
+      if (wasLoaded) {
+        if (!priorStillLoaded) requireSuccess(["bootstrap", plan.domain, plan.plistPath]);
+        const restored = requireSuccess(["print", plan.service]);
+        if (JSON.stringify(launchArguments(restored.stdout)) !== JSON.stringify(priorArguments)) {
+          fail("rollback loaded arguments did not read back exactly");
+        }
+      }
     } catch {
       fail("curated scheduler replacement failed and rollback needs review");
     }
@@ -675,6 +706,7 @@ export async function executeScheduledCuratedSync(planPath, options = {}) {
     planDirectory: plan.planDirectory,
     planPath: plan.path,
     expectedTargetFingerprints: plan.targetManifestFingerprints,
+    home: plan.home,
   });
   if (!report?.ok) fail("curated scheduled sync did not confirm every required target");
   const now = options.now instanceof Date ? options.now : new Date(options.now ?? Date.now());
@@ -869,7 +901,7 @@ async function main(argv = process.argv.slice(2)) {
       console.log(`[${new Date().toISOString()}] curated sync ${result.status}`);
       return result.code;
     } catch (error) {
-      console.error(`Curated scheduler failed: ${String(error?.message || "unknown failure")}`);
+      console.error(`Curated scheduler failed: ${publicFailure(error)}`);
       const eventId = recordCuratedSchedulerFailure();
       printSupportReceipt(eventId);
       return eventId ? CHILD_FAILURE_JOURNALED_EXIT : CHILD_FAILURE_UNJOURNALED_EXIT;
@@ -888,7 +920,7 @@ async function main(argv = process.argv.slice(2)) {
 const IS_MAIN = process.argv[1] && resolve(process.argv[1]) === resolve(DEFAULT_SCHEDULER_PATH);
 if (IS_MAIN) {
   main().then((code) => { process.exitCode = code; }).catch((error) => {
-    console.error(`Curated scheduler failed: ${String(error?.message || "unknown failure")}`);
+    console.error(`Curated scheduler failed: ${publicFailure(error)}`);
     printSupportReceipt(recordCuratedSchedulerFailure());
     process.exitCode = 1;
   });

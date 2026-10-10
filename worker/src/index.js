@@ -26,6 +26,7 @@ import { createQueryTiming, queryTimingResponse, measureQueryStage, startQuerySt
  * entire users/sessions stack, which is the single largest simplification.
  */
 
+import { handleCuratedVerify } from "./lib/curated-verify.js";
 import { WORKER_VERSION } from "./lib/version.js";
 import { jsonResponse, privateNoStore, validateAdminKey, validateReadKey, callLLM } from "./lib/core.js";
 import { resolvePrincipal, principalMay, scopeIsUnrestricted } from "./lib/grants.js";
@@ -3514,6 +3515,11 @@ export default {
             error: "Removal plan unavailable or changed. Verify the migration and runtime, then plan ingestion again.",
           }, 409));
         }
+      }
+      if (path === "/api/admin/brain/curated-verify") {
+        if (!ownerKeyAuthorized) return privateNoStore(jsonResponse({ error: "full administrator authorization required" }, 403));
+        if (request.method !== "POST") return privateNoStore(jsonResponse({ error: "use a private JSON POST body" }, 405));
+        return await handleCuratedVerify(env, request);
       }
       if (path === "/api/admin/brain/source-families" && request.method === "POST") {
         return await handleSourceFamilies(env, request);

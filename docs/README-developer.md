@@ -1525,7 +1525,7 @@ belong in the package. When present, `legacy_target.backend` must be
 `legacy_notes_supabase`; `cloudflare_target.backend` must be `cloudflare_d1`.
 
 The operation has four explicit modes. `--preview` prints only JSON counts:
-`documents`, `roles`, `adds`, `updates`, and `unchanged`. It reads no credentials,
+`documents`, `roles`, `adds`, `updates`, `unchanged`, and `removed`. It reads no credentials,
 contacts no service, and leaves the coverage ledger unchanged. Counts compare
 local envelope hashes against the existing ledger, not remote records. With no
 ledger, every document is an add; an older ledger without envelope hashes treats
@@ -1560,7 +1560,16 @@ authenticated fetch uses manual redirect handling. A redirect is a target
 failure, never an invitation to forward a key. Cloudflare POST receipts must
 echo the exact deterministic document identity, then the operation reads the
 curated source-family inventory back from the same origin and confirms every
-identity. The legacy endpoint has no equivalent exact identity readback, so its
+identity. Each confirmed Cloudflare write also requires authenticated
+`POST /api/admin/brain/curated-verify` readback. That read-only, full-admin route
+compares the current D1 content marker, title and normalized metadata with the
+submitted envelope, then binds its reply to the envelope hash. It uses a primary
+D1 session when sessions are available. Missing routes, mismatched revisions,
+redirects and unavailable verification fail closed; an older Worker must be
+updated through the separately approved upgrade workflow before this runtime
+can report a successful sync. This proof is current durable storage at readback,
+not semantic-index completion or a promise against later external writes.
+The legacy endpoint has no equivalent exact identity readback, so its
 bounded document receipt remains the strongest available proof. After a valid
 preflight, failure of one target cannot suppress the other. The command exits
 unsuccessfully unless every target receipt is complete, so rerunning is the
@@ -1572,7 +1581,15 @@ bounded target receipt states and aggregate raw Drive history findings. The
 corpus fingerprint includes the envelope hash, so a title-only or metadata-only
 change cannot hide behind unchanged content. The ledger contains no filenames,
 paths, source IDs, URLs, document content or credentials. Before replacement,
-an existing ledger must parse as a supported schema. The ledger path must not
+an existing ledger must parse as a supported schema. Preview compares identities
+in both directions. A nonzero `removed` count means a prior identity is absent
+from the local inventory and may still be searchable remotely. Sync, audit and
+dry-run refuse before credentials, target writes or ledger writes, preserving the previous ledger
+until separate reviewed reconciliation. No document is deleted automatically;
+do not remove the ledger to bypass this refusal. All ledger-writing modes share
+a local lease over the canonical ledger path, including direct and scheduled
+runs. A busy lease refuses a second writer; authenticated revision readback
+remains necessary for other machines or producers. The ledger path must not
 alias the plan, a corpus source, either target manifest, an adjacent admin-key
 sidecar, or the raw Drive state file, including through a real-path or hard-link
 collision.
@@ -1639,7 +1656,11 @@ raw Drive settings and scheduler settings. Keep the plan owner-only. Dropping a
 target changes the configuration hash, so the old job continues refusing before
 credentials until reinstallation. Reinstall stages the plist, refuses an active
 or unrelated job, verifies the saved bytes and loaded arguments, and restores
-the prior plist/service if replacement fails. It reads no admin credential
+the prior plist/service if replacement fails. Recovery starts before unload so
+an ambiguous timeout cannot silently leave the prior service absent. Restoration
+requires loaded-argument readback; unprovable recovery reports that rollback
+needs review. CLI failures print bounded messages without raw filesystem or
+process errors. It reads no admin credential
 itself, but bootstrap uses `RunAtLoad`, so the new job may immediately read its
 configured credentials and sync. A changed runtime/plan locator is deliberately
 refused when replacing an existing service; review that migration separately.

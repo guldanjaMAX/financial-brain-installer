@@ -932,6 +932,7 @@ const expected = [
   "worker/src/lib/memory-supersession.js",
   "worker/src/lib/oauth.js",
   "worker/src/lib/owner-note-contract.js",
+  "worker/src/lib/curated-verify.js",
   "worker/src/lib/owner-notes.js",
   "worker/src/lib/remember-contract.js",
   "worker/src/lib/ocr-idempotency.js",

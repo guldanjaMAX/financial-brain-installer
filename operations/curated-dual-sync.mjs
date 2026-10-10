@@ -13,6 +13,7 @@
  * become another copy of filenames, source IDs, URLs, content, or credentials.
  */
 
+import { acquireSourceIngestLock } from "./source-ingest-lock.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import {
   constants as fsConstants,
@@ -997,6 +998,23 @@ async function listCloudflareFamilies(source, resolved, options = {}) {
   return { ok: false, families: new Set() };
 }
 
+async function verifyCloudflareRevision(document, resolved, options) {
+  if (!resolved) return false;
+  try {
+    const response = await (options.fetch ?? globalThis.fetch)(`${resolved.baseUrl}/api/admin/brain/curated-verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Admin-Key": resolved.adminKey },
+      body: JSON.stringify(document.cloudflareEnvelope),
+      redirect: "manual",
+      signal: options.abortSignal?.() ?? AbortSignal.timeout(options.targetTimeoutMs ?? TARGET_TIMEOUT_MS),
+    });
+    const body = await parseJsonResponse(response);
+    return response.ok && responseStayedOnOrigin(response, resolved.origin) &&
+      body?.confirmed === true && body?.doc_uid === `curated:${document.cloudflareEnvelope.source_id}` &&
+      body?.envelope_sha256 === document.envelopeHash;
+  } catch { return false; }
+}
+
 function rawDriveStatuses(prepared, mapped, live) {
   const statuses = new Map();
   for (const document of prepared.documents) {
@@ -1226,6 +1244,29 @@ export function writeCuratedCoverageLedger(path, ledger, options = {}) {
  *   sync:    independent legacy and Cloudflare writes plus historical evidence.
  */
 export async function runCuratedDualSync(planInput, options = {}) {
+  if (!["preview", "dry-run", "audit", "sync"].includes(options.mode)) {
+    fail("curated sync mode must be preview, dry-run, audit, or sync");
+  }
+  if (options.mode === "preview") return runCuratedSyncHeld(planInput, options);
+  const plan = planInput?.schemaVersion === CURATED_SYNC_PLAN_VERSION
+    ? planInput : validateCuratedSyncPlan(planInput);
+  const ledgerPath = resolveFromPlan(options.planDirectory ?? process.cwd(), plan.ledgerFile);
+  // Every ledger-writing entry point uses one canonical local lease. The
+  // scheduler's launchd lock alone cannot serialize supervised direct runs.
+  let lease;
+  try {
+    lease = acquireSourceIngestLock({
+      sourceName: "curated", statePath: pathIdentity(ledgerPath).real, home: options.home,
+    });
+  } catch {
+    fail("curated sync already running or local lock could not be acquired safely");
+  }
+  try {
+    return await runCuratedSyncHeld(plan, { ...options, assertLeaseOwned: lease.assertOwned });
+  } finally { lease.release(); }
+}
+
+async function runCuratedSyncHeld(planInput, options = {}) {
   const mode = String(options.mode ?? "");
   if (!new Set(["preview", "dry-run", "audit", "sync"]).has(mode)) {
     fail("curated sync mode must be preview, dry-run, audit, or sync");
@@ -1257,13 +1298,15 @@ export async function runCuratedDualSync(planInput, options = {}) {
   assertCuratedEnvelopesCredentialSafe(prepared, options);
   verifyCuratedSourceSnapshot(prepared, options);
 
+  const prior = existsSync(ledgerPath)
+    ? validateExistingLedger(JSON.parse(readFileSync(ledgerPath, "utf8"))) : null;
+  const byIdentity = new Map((prior?.documents ?? []).map(document => [document.logical_fingerprint, document]));
+  const currentIdentities = new Set(prepared.documents.map(document => document.logicalFingerprint));
+  const removed = [...byIdentity.keys()].filter(identity => !currentIdentities.has(identity)).length;
   if (mode === "preview") {
-    // These are local envelope differences, not promises about remote state.
+    // Both directions matter: omitted identities can remain searchable remotely.
     // Never replace the evidence ledger while merely previewing a change.
-    const prior = existsSync(ledgerPath)
-      ? validateExistingLedger(JSON.parse(readFileSync(ledgerPath, "utf8"))) : null;
-    const byIdentity = new Map((prior?.documents ?? []).map(document => [document.logical_fingerprint, document]));
-    const preview = { documents: prepared.documents.length, roles: { ...prepared.plan.expectedRoles }, adds: 0, updates: 0, unchanged: 0 };
+    const preview = { documents: prepared.documents.length, roles: { ...prepared.plan.expectedRoles }, adds: 0, updates: 0, unchanged: 0, removed };
     for (const document of prepared.documents) {
       const previous = byIdentity.get(document.logicalFingerprint);
       if (!previous) preview.adds++;
@@ -1272,6 +1315,10 @@ export async function runCuratedDualSync(planInput, options = {}) {
     }
     return { ok: true, mode, preview };
   }
+
+  // Keep the last ledger intact until removals have a separate reviewed
+  // reconciliation. Even audit/dry-run must not erase unresolved identities.
+  if (removed) fail(`curated inventory has ${removed} removed identities requiring reconciliation; coverage ledger preserved`);
 
   // Production manifests are identity-only inspected before Keychain access.
   // Injected resolvers are validated from their returned backend and origin.
@@ -1301,14 +1348,15 @@ export async function runCuratedDualSync(planInput, options = {}) {
       prepared.plan.legacyTarget ? postOneTargetSafely("legacy", prepared, targetOptions) : legacyResult,
       postOneTargetSafely("cloudflare", prepared, targetOptions),
     ]);
-    // D1 exposes exact stored source families, so a POST receipt is not final
-    // confirmation until the same target can read back every expected identity.
+    // Identity presence cannot prove the current revision: another writer may
+    // have replaced it after the POST. Confirm content, title and metadata too.
     if ([...cloudflareResult.statuses.values()].some((value) => value === "confirmed")) {
       const readback = await listCloudflareFamilies("curated", resolvedTargets.cloudflare, options);
       for (const document of prepared.documents) {
         if (cloudflareResult.statuses.get(document.logicalFingerprint) !== "confirmed") continue;
         const expected = `curated:${document.cloudflareEnvelope.source_id}`;
-        if (!readback.ok || !readback.families.has(expected)) {
+        if (!readback.ok || !readback.families.has(expected) ||
+            !await verifyCloudflareRevision(document, resolvedTargets.cloudflare, options)) {
           cloudflareResult.statuses.set(document.logicalFingerprint, "invalid_receipt");
         }
       }
@@ -1320,6 +1368,7 @@ export async function runCuratedDualSync(planInput, options = {}) {
     cloudflare: cloudflareResult.statuses,
     rawDrive,
   });
+  options.assertLeaseOwned?.();
   const writer = options.writeLedger ?? writeCuratedCoverageLedger;
   writer(ledgerPath, ledger, { ...options, protectedPaths });
 
