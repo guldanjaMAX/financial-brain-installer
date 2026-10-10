@@ -4,6 +4,10 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.12 (unreleased)
+
+- Curated collections can sync to Cloudflare alone after retiring a legacy target; preview counts and unresolved removals, reinstall the daily schedule, and check freshness after stored revisions are verified.
+
 ## 0.4.11 (2026-10-09)
 
 Candidate only. This version has not been released. The changes below still

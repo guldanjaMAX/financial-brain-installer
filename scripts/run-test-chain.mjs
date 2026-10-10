@@ -13,6 +13,7 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node --test test/curated-cloudflare-only.test.mjs",
   "node --test test/query-mcp-timing.test.mjs",
   "node --test test/query-spans-probe.test.mjs",
   "node --test worker/test/query-timing.test.mjs",
@@ -359,6 +360,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node --test test/ingest-plan-compatibility.test.mjs",
   "node --test test/ingest-removal-runtime.test.mjs",
   "node --no-warnings test/ingestion-contract.test.mjs",
+  "node --test test/curated-cloudflare-only.test.mjs",
   "node test/curated-dual-sync.test.mjs",
   "node test/curated-sync-scheduler.test.mjs",
   "node --test test/package-bundle-verifier.test.mjs",
