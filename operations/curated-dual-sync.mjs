@@ -33,6 +33,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { userInfo } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   adminKeyPersistencePlan,
@@ -807,8 +808,13 @@ export function inspectCuratedTargetContracts(planInput, options = {}) {
 
 async function defaultResolveTarget(target, planDirectory, options = {}, name, inspected = null) {
   const { manifestPath, manifest, baseUrl, origin } = inspected ?? readTargetManifest(target, planDirectory);
-  const persistence = adminKeyPersistencePlan(manifestPath, manifest, options);
-  const adminKey = readAdminKeyDurably(persistence, options);
+  // The Windows file preflight requires an identity even when only reading.
+  // Resolve it from the OS so CLI runs do not depend on ambient USERNAME.
+  const persistenceOptions = (options.platform ?? process.platform) === "win32"
+    ? { ...options, username: options.username ?? (options.userInfo ?? userInfo)().username }
+    : options;
+  const persistence = adminKeyPersistencePlan(manifestPath, manifest, persistenceOptions);
+  const adminKey = readAdminKeyDurably(persistence, persistenceOptions);
   if (!adminKey) fail("target durable admin key is unavailable");
   return { name, backend: target.backend, baseUrl, origin, adminKey };
 }
