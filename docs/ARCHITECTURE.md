@@ -272,9 +272,14 @@ Gmail can also advance after every failed stored part is covered by a durable
 logical-message retry identity. It retries those identities before new mail,
 including during reset and full sweeps, and clears them only through the
 existing acceptance or typed source-policy decisions. Temporary finalization
-failures have a shared five-attempt budget. The private per-source retry list
-stores ids only; the receipt stays incomplete until it is empty. A newly held
+failures have up to five attempts per batch, with four retries shared across
+the source run. This limits added retry backoff to 30 seconds rather than
+resetting it per held group. Every later group still gets an initial attempt
+and unresolved members require the same durable coverage before cursor advance.
+The private per-source retry list stores ids only; the receipt stays incomplete until it is empty. A newly held
 failure exits nonzero, while an unchanged backlog reports its held count.
+The shared load report treats either an explicit incomplete result or a nonzero
+held count as partial with no successful refresh.
 Other source cursors and removal approval boundaries retain their existing
 rules.
 
