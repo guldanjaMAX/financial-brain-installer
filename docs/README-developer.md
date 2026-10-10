@@ -1149,6 +1149,41 @@ connector list. It classifies every manifest corpus as machine pull, Worker
 managed, push, resident capture, snapshot, disabled, or unsupported before it
 touches a native scheduler. An enabled unsupported source fails visibly.
 
+To keep one source enabled while its daily import awaits safety review, set
+`operations.daily_refresh.sources` to an explicit reviewed selection:
+
+```json
+{
+  "gmail": { "state": "selected" },
+  "calendar": { "state": "selected" },
+  "google_drive": { "state": "held", "reason": "safety review pending" }
+}
+```
+
+Use exact `corpora` keys, including `google_drive` rather than its load alias.
+When this object is present, every enabled machine-pull source owned by the
+daily task needs a `selected` or `held` decision. Include approved `upload` or
+`local_folder` entries when they are daily-owned. Unknown keys, malformed
+decisions, missing decisions, and selections of unsupported, disabled or
+independently managed sources refuse. A hold cannot stop a separate scheduler;
+review that scheduler separately before selecting or holding its source here.
+Omitting `sources` retains the existing automatic all-source behavior. Setup
+does not invent selections or holds.
+
+Hold reasons must be non-empty, at most 240 characters, and contain no control
+characters or surrounding whitespace. Holds keep the corpus enabled, appear
+in `daily status` text and JSON, and receive a held source receipt without
+advancing freshness. A successful selected run with a held source reports
+partial coverage. Selected sources still need their existing readiness and
+freshness proof; this selection does not change quiet-day verification.
+
+Review `brain daily status <manifest> --json` after editing the manifest, then
+use `brain daily on <manifest>` to reconcile the approved schedule. Both the
+selection and hold reason participate in the source-plan hash and native
+definition hash. A registered run refuses changed selection, reason, or
+manifest content until reconciliation passes exact readback. Holds do not change
+manual load behavior or provider consent.
+
 ```bash
 node brain.mjs daily on ./brain.manifest.json
 node brain.mjs daily status ./brain.manifest.json

@@ -1011,6 +1011,35 @@
           "type": "object",
           "description": "One manifest-derived per-Brain, per-user daily import definition for Windows Task Scheduler or a macOS LaunchAgent. When enabled is omitted, the installer turns it on only when the current manifest has at least one connected machine-pull source. Server cron, push, resident-capture, snapshot, disabled, and unsupported sources are reported but never duplicated by this task.",
           "properties": {
+            "sources": {
+              "type": "object",
+              "description": "Optional reviewed selection by exact corpora key, without aliases. When present, every enabled daily-owned machine-pull source requires selected or held. Independently scheduled, unsupported and disabled sources cannot be selected or held here. Omit this object to retain automatic all-source planning. Review daily status, then daily on to reconcile the approved definition after any edit.",
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "required": ["state"],
+                    "properties": { "state": { "const": "selected" } },
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "required": ["state", "reason"],
+                    "properties": {
+                      "state": { "const": "held" },
+                      "reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 240,
+                        "pattern": "^(?!\\s)(?![\\s\\S]*[\\u0000-\\u001f\\u007f])[\\s\\S]*\\S$",
+                        "description": "Owner-reviewed hold reason, with no control characters or surrounding whitespace. A hold leaves the corpus enabled and appears in daily status and receipts without claiming freshness."
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
             "_comment": {
               "type": "string"
             },

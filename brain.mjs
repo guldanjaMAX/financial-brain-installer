@@ -26536,7 +26536,8 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       .find((outcome) => outcomes.includes(outcome)) || "missing_history";
     const measuredCount = (field) => latestRuns.every((run) => Number.isSafeInteger(run?.[field]))
       ? latestRuns.reduce((sum, run) => sum + run[field], 0) : null;
-    const currentState = source.class === "connect-required" ? "skipped"
+    const currentState = source.class === "held" ? "held"
+      : source.class === "connect-required" ? "skipped"
       : source.class === "snapshot" ? "snapshot"
       : source.class === "disabled" ? "skipped"
         : states.includes("broken") ? "broken"
@@ -26568,6 +26569,7 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       next_run: nextRun,
       owner: effectiveOwner,
       reason: source.reason,
+      ...(source.selection === undefined ? {} : { selection: source.selection, hold_reason: source.hold_reason }),
     });
   });
 }
@@ -26577,7 +26579,8 @@ function renderDailyFreshnessRows(rows, log = console.log) {
     log(`${row.source} | ${row.current_state} | ${row.last_successful_run_at || "never"} | ${row.next_run} | ${row.owner}` +
       (["partial", "refused", "empty"].includes(row.last_run_outcome)
         ? ` | ${row.last_run_outcome}; ${row.docs_refused ?? "unknown"} refused` : "") +
-      (row.current_state === "skipped" && row.reason === "not connected on this machine" ? ` | ${row.reason}` : ""));
+      (row.current_state === "held" || (row.current_state === "skipped" && row.reason === "not connected on this machine")
+        ? ` | ${row.reason}` : ""));
   }
 }
 
