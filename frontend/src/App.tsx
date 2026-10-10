@@ -240,7 +240,7 @@ export function OwnerWorkspace({ owner, me, view, setView, refresh }: {
             including a page waiting for a financial-entity choice. */}
         {(scopeChoiceMade || (view === "ask" && scopeGate === null)) && (
           <div className={view === "ask" ? "" : "hidden"}>
-            <Ask />
+            <Ask owner={me.principal?.kind === "owner" && me.principal.grant_id === null} />
           </div>
         )}
       </main>

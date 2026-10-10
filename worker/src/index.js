@@ -177,7 +177,7 @@ function invalidRagParameters(code, parameter = null) {
  * The small URL-like shape lets the mature ranking code keep one parameter
  * contract while the real HTTP request remains a no-store authenticated POST.
  */
-async function privateRagParameters(request) {
+async function privateRagParameters(request, { allowWorkflow = false } = {}) {
   let body;
   try {
     body = await request.json();
@@ -185,6 +185,13 @@ async function privateRagParameters(request) {
     return null;
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  // Preserve typed fields for the workflow validator. The ordinary question
+  // parser and its allowlist remain unchanged; search cannot run an action.
+  if (allowWorkflow && Object.hasOwn(body, "workflow")) {
+    const searchParams = new URLSearchParams();
+    if (typeof body.entity === "string") searchParams.set("entity_slug", body.entity);
+    return { searchParams, action: body };
+  }
   if (Object.keys(body).some((key) => !RAG_PARAMETER_KEYS.has(key))) {
     return invalidRagParameters("unsupported_retrieval_parameter");
   }
@@ -879,19 +886,21 @@ async function handleThink(
   cfoCapability = null, cfoReauthorize = async () => false,
 ) {
   const unsupportedAnswer = "The documents do not answer the question.";
-  const url = await privateRagParameters(request);
+  const url = await privateRagParameters(request, { allowWorkflow: true });
   if (!url) return jsonResponse({ error: "Expected a JSON request body" }, 400);
   if (url.parameter_error) return jsonResponse(url.parameter_error, 400);
   const q = (url.searchParams.get("q") || "").trim();
-  if (!q) return jsonResponse({ error: "Missing q" }, 400);
+  if (!q && url.action === undefined) return jsonResponse({ error: "Missing q" }, 400);
   const scope = await measureQueryStage(timing, "scope", () => applyBusinessScope(env, url));
   if (!scope.ok) return scope.response;
   const entityScope = scope.entityScope;
-  const cfo = await dispatchCfoWorkflow({
-    question: q, entityScope, ownerCapability: cfoCapability,
-    filters: filtersFrom(url), reauthorize: cfoReauthorize,
-  }, { tax: { env } });
-  if (cfo) return jsonResponse(cfo);
+  if (url.action !== undefined) {
+    const cfo = await measureQueryStage(timing, "cfo_workflow", () => dispatchCfoWorkflow({
+      action: url.action, entityScope, ownerCapability: cfoCapability,
+      filters: filtersFrom(url), reauthorize: cfoReauthorize,
+    }, { tax: { env } }));
+    return jsonResponse(cfo);
+  }
   const taxQuestion = measureQueryStage(timing, "premise_temporal", () => taxQuestionScopeAssessment(q));
   if (taxQuestion.applicable && !taxQuestion.resolved) {
     return jsonResponse({
