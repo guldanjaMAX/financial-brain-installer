@@ -390,7 +390,9 @@ test("F1 ambiguous bootout recovers and proves the prior loaded definition", t =
   }
 });
 
-test("F2 real reinstall CLI bounds filesystem and child-process errors", t => {
+// The real reinstall CLI path drives macOS LaunchAgents; on other platforms
+// the scheduler refuses before any of these filesystem faults are reached.
+test("F2 real reinstall CLI bounds filesystem and child-process errors", { skip: process.platform !== "darwin" && "curated scheduling is macOS LaunchAgents only" }, t => {
   const f = fixture(t);
   const hookPath = join(f.root, "cli-isolation.mjs");
   const countersPath = join(f.root, "counters.json");
