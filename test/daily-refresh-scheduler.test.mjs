@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync as makeTempDirectory, realpathSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,6 +18,8 @@ import {
 } from "../operations/daily-refresh-scheduler.mjs";
 import { runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
 import { cmdScheduleAllConfigured, dailyFreshnessRows } from "../brain.mjs";
+
+const mkdtempSync = (...args) => realpathSync.native(makeTempDirectory(...args));
 
 const basePlan = Object.freeze({
   identity: { id: "v1-0123456789abcdef", principal: "uid:501" },
@@ -1494,4 +1496,45 @@ test("update remote mutation intent is monotonic and older or malformed receipts
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("daily on preserves verified installation when the freshness inventory is unavailable", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "daily-cli-"));
+  const manifestPath = join(directory, "brain.manifest.json");
+  writeFileSync(manifestPath, JSON.stringify({
+    client: { slug: "owner-brain", timezone: "America/Phoenix" },
+    brain: { worker_name: "owner-brain", domain: "brain.example.invalid" },
+    infrastructure: { cloudflare: { account_id: "account", d1_database_id: "database" } },
+    corpora: { google_drive: { enabled: true } },
+    operations: { daily_refresh: { enabled: true, cron: "0 9 * * *", max_runtime_minutes: 45 } },
+  }));
+  let inventoryCalls = 0;
+  const adapter = memoryAdapter();
+  const lines = [];
+  const plan = {
+    ...basePlan,
+    platform: "win32",
+    timezone_matches_machine: true,
+    unsupported_sources: 0,
+    sources: [{
+      key: "google_drive", class: "machine-pull", owner: "daily-task", status: "ready",
+      source_names: ["drive"],
+    }],
+  };
+  const result = await cmdScheduleAllConfigured(manifestPath, "install", {
+    platform: "win32",
+    planDailyRefresh: async () => plan,
+    schedulerAdapter: adapter,
+    schedulerOptions: WINDOWS_DEFINITION_OPTIONS,
+    syncSourceExpectations: false,
+    readSourceInventory: async () => { inventoryCalls++; throw new Error("synthetic inventory outage"); },
+    quiet: true,
+    log: (line) => lines.push(line),
+  });
+  assert.equal(result.schedule.verified, true);
+  assert.equal(inventoryCalls, 1, "inventory decision reached after native readback");
+  assert.equal(result.freshness.state, "unknown");
+  assert.equal(result.freshness.reason_code, "source_inventory_unavailable");
+  assert.equal(result.sources[0].current_state, "unknown");
+  assert.ok(adapter.calls.some(([name]) => name === "install"), "the native install decision point was reached");
 });

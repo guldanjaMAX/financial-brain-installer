@@ -793,6 +793,7 @@ const expected = [
   // Bounded retry for one inventory page. Takes only an injected request,
   // sleep and status predicate, with no filesystem or credential inputs.
   "operations/source-family-inventory-retry.mjs",
+  "operations/source-inventory-pages.mjs",
   // Response-shape classifier for a Cloudflare D1 reset. Takes only a
   // response body, with no filesystem, credential, network, or instance inputs.
   "operations/d1-transient-fault.mjs",
@@ -846,6 +847,8 @@ const expected = [
   // Owner-only D1 source inventory. Reviewed for raw locator, credential,
   // entity/year inference, and package identity disclosure before allowlisting.
   "worker/src/lib/source-inventory-api.js",
+  "worker/src/lib/source-inventory-scan.js",
+  "worker/src/lib/source-inventory-merge.js",
   "worker/src/lib/source-original-observation.js",
   // Sealed owner map with opaque row references and passkey-only activation.
   "worker/src/lib/owner-financial-map.js",

@@ -2015,13 +2015,34 @@ fallback or escalation for harder evidence conflicts. That is synthetic
 behavioral evidence only, not live Brain proof. Do not pin `gpt-5.6-sol` or
 infer completeness from the selected model.
 
-The default request mode returns stable source-id pages. The source set and
-all aggregates are read from one bounded D1 statement, hashed with an as-of
-receipt, and sorted by source id. A continuation cursor binds its last source,
-as-of time, total, and snapshot hash. If any returned source field changes,
-the next page returns `source_inventory_changed` instead of combining moments.
-The CLI collects every source page before printing JSON and refuses incomplete,
-duplicated, unordered, or privacy-invalid output.
+The CLI requests `mode: "bounded"` work pages. A materialized rowid range reads
+at most 5,000 physical rows, including tombstones, before any metadata parsing.
+Chunk reads seek `idx_chunks_doc`; a 50,001-entry probe halves a dense page
+until it fits the 50,000-chunk bound, or refuses a single oversized document.
+No migration or index build is needed. Raw rowids stay inside private cursors.
+Family HMACs allow exact deduplication across pages and are removed before the
+CLI emits its existing v3 source receipt. Progress goes to stderr. One command,
+including readiness retries, stops after 1,000 requests or ten minutes; a
+partial scan never becomes a complete inventory.
+
+The existing schema-45 document/chunk mutation generation and bounded source,
+run, event and custom-job receipts fence each page. A change refuses the page
+or continuation. Recovery import, which suppresses that generation, is refused.
+Source metadata is limited to 10,000 rows and each receipt table to 65,536 rows;
+overflow is explicit. These are work bounds, not a larger-corpus backend tier.
+The legacy v3 source-page API also uses bounded document statements internally.
+A pre-45 database without the mutation fence can use only its one-page legacy
+compatibility read, capped at 5,000 physical rows. The exported historical SQL
+shape remains a regression comparison, not the runtime inventory query.
+
+Daily on/run use `mode: "freshness"` to read registered-source run receipts
+without visiting document rows. This response omits storage and document
+coverage fields. If that read is unavailable, the approved native schedule and
+eligible ingest legs still proceed. Their receipt records unknown freshness
+with `source_inventory_unavailable`; it never advances proof of freshness.
+Lifecycle recovery, source ownership, held sources and removal refusals retain
+their existing decisions. The daily run still reports failure when source
+execution fails or freshness cannot be proved.
 
 Each inventory row includes `last_failure`. It is `null` unless the newest run
 has a Gmail failure receipt that passes the closed source-failure validator.

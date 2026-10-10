@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync as makeTempDirectory, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { buildDailyRefreshDefinition } from "../operations/daily-refresh-scheduler.mjs";
 import { runDailyRefresh, runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
+
+const mkdtempSync = (...args) => realpathSync.native(makeTempDirectory(...args));
 
 const plan = Object.freeze({
   ready: true,
@@ -639,7 +641,8 @@ test("daily CLI carries partial loader permission and durable refusal evidence t
         calls.push(options);
         return { partial: 1, excluded: 2 };
       },
-      cmdSources: async () => ({ sources: [{ name: "drive", receipt: {
+      cmdSources: async () => assert.fail("daily must not request the complete inventory"),
+      readSourceFreshness: async () => ({ sources: [{ name: "drive", receipt: {
         last_successful_run_at: ++reads === 1 ? "2026-10-06T12:00:00.000Z" : "2026-10-07T11:00:00.000Z",
         latest_run: { docs_added: 9, docs_updated: 22, docs_unchanged: 0, outcome: "partial", docs_refused: 228, docs_failed: 0 },
       }, freshness: { state: "ok" } }] }),
@@ -788,3 +791,71 @@ for (const status of ["complete", "partial", "failed"]) {
     else assert.equal(observed.record.error, "One or more daily sources failed or did not prove freshness.");
   });
 }
+
+test("inventory outages run eligible legs, retain holds and never claim fresh", async () => {
+  for (const unavailable of [false, true]) {
+    const calls = []; let reads = 0;
+    const result = await runDailyRefresh({
+      plan: { ...plan, sources: [...plan.sources,
+        { key: "held", class: "machine-pull", owner: "daily-task", status: "skipped" }] },
+      acquireLock: () => ({ assertOwned() {}, release: () => calls.push("release") }),
+      runSource: async (source) => { calls.push(source.key); return { status: "complete" }; },
+      readFreshness: async () => {
+        reads++;
+        if (unavailable) throw Object.assign(new Error("private detail"), { code: "source_inventory_unavailable" });
+        return { drive: { last_successful_run_at: reads === 1 ? "2026-10-01T00:00:00Z" : "2026-10-02T00:00:00Z" } };
+      },
+      now: () => new Date("2026-10-02T00:00:00Z"),
+    });
+    assert.equal(reads, 2, "both freshness decisions were reached");
+    assert.deepEqual(calls, ["drive", "release"], "eligible leg runs but held leg stays held");
+    const source = result.sources.find((row) => row.source === "drive");
+    assert.equal(source.freshness_advanced, !unavailable);
+    if (unavailable) {
+      assert.equal(source.freshness_state, "unknown");
+      assert.equal(source.reason_code, "source_inventory_unavailable");
+      assert.notEqual(result.status, "complete");
+      assert.ok(!JSON.stringify(result).includes("private detail"));
+    }
+  }
+});
+
+test("an inventory outage never bypasses a removal refusal and later eligible legs still run", async () => {
+  const runs = []; let reads = 0;
+  const result = await runDailyRefresh({
+    plan: { ...plan, sources: [plan.sources[0], { ...plan.sources[0], key: "mail" }] },
+    acquireLock: () => ({ assertOwned() {}, release() {} }),
+    readFreshness: async () => { reads++; throw new Error("synthetic inventory outage"); },
+    runSource: async (source) => {
+      runs.push(source.key);
+      if (source.key === "drive") throw Object.assign(new Error("synthetic removal approval required"), { code: "removal_approval_required" });
+      return { status: "complete" };
+    },
+    now: () => new Date("2026-10-01T00:00:00.000Z"),
+  });
+  assert.deepEqual(runs, ["drive", "mail"], "both eligible execution decisions reached");
+  assert.equal(reads, 2, "baseline and successful-leg freshness decisions reached");
+  assert.equal(result.sources[0].status, "failed");
+  assert.equal(result.sources[1].freshness_state, "unknown");
+  assert.equal(result.status, "failed");
+  assert.ok(result.sources.every((row) => row.freshness_advanced === false));
+});
+
+test("an explicit loader refusal cannot borrow an advancing freshness receipt", async () => {
+  const outcomes = [];
+  for (const status of ["complete", "refused"]) {
+    let runs = 0; let reads = 0;
+    const result = await runDailyRefresh({
+      plan,
+      acquireLock: () => ({ assertOwned() {}, release() {} }),
+      runSource: async () => { runs++; return { status }; },
+      readFreshness: async () => ({ drive: { last_successful_run_at: ++reads === 1
+        ? "2026-10-01T00:00:00Z" : "2026-10-02T00:00:00Z" } }),
+      now: () => new Date("2026-10-02T00:00:00Z"),
+    });
+    assert.equal(runs, 1, "the source execution decision was reached");
+    assert.equal(reads, 2, "both receipt decisions were reached");
+    outcomes.push([result.status, result.sources[0].freshness_advanced]);
+  }
+  assert.deepEqual(outcomes, [["complete", true], ["failed", false]]);
+});

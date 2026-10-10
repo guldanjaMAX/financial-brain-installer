@@ -4,6 +4,14 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.12 (unreleased)
+
+- Source inventory checks large libraries in bounded pages and shows progress.
+  Daily imports read run receipts independently of document counts. If freshness
+  cannot be verified, eligible imports still run and freshness stays unknown;
+  held sources and removal approvals remain protected. Check daily status after
+  the next run for a verified success date or an explicit unknown result.
+
 ## 0.4.11 (2026-10-09)
 
 Candidate only. This version has not been released. The changes below still
