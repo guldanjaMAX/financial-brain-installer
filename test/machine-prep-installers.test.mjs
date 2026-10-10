@@ -427,6 +427,56 @@ test("Windows bootstrap creates a distinct standard user instead of reusing the 
   assert.doesNotMatch(source, /-LogonType S4U/);
 });
 
+test("Windows bootstrap starts and verifies msiserver after account creation and before task run", () => {
+  const source = read("machine-prep/installers/smoke/windows-limited.ps1");
+  const account = source.indexOf("$user = New-LocalUser");
+  const run = source.indexOf("Start-ScheduledTask -TaskName $state.taskName");
+  assert.ok(account > 0 && run > account, "real account and task decisions reached");
+  const service = source.indexOf("Start-Service msiserver");
+  assert.ok(service > account && service < run, "admin starts msiserver before the batch task");
+  assert.match(source.slice(account, service), /\$phase = 'msiserver'/);
+  assert.match(source.slice(service, run), /WaitForStatus\('Running', \[TimeSpan\]::FromSeconds\(30\)\)/);
+  assert.match(source.slice(service, run), /\$msiService\.Status -ne 'Running'/);
+  assert.match(source.slice(service, run), /finally \{/);
+  assert.match(source.slice(service, run), /STANDARD_MSISERVER_STATUS=\$msiStatus/);
+  const adapter = read("machine-prep/installers/smoke/windows.ps1");
+  assert.match(adapter, /'install' \{ Invoke-Msi '\/i' 'msi-install\.log' \}/);
+  const job = read(".github/workflows/installer-signing.yml").split("\n  windows-bootstrap:\n")[1];
+  assert.match(job, /if: always\(\)[\s\S]*installer-bootstrap-logs\/lifecycle\/\*\.log/);
+});
+
+test("Windows cleanup reports bounded reasons and drains only the exact disposable SID", () => {
+  const source = read("machine-prep/installers/smoke/windows-limited.ps1");
+  const cleanup = source.slice(source.indexOf("function Remove-BootstrapAccount("), source.indexOf("if ($ContextFile)"));
+  const stop = cleanup.indexOf("Stop-ScheduledTask -TaskName $State.taskName");
+  const profile = cleanup.indexOf("$profiles | Remove-CimInstance");
+  assert.ok(stop > 0 && profile > stop, "task stop and profile removal decisions reached");
+  const drain = cleanup.indexOf("Wait-BootstrapProcesses $State.sid");
+  assert.ok(drain > stop && drain < profile, "owned processes drain before profile removal");
+  assert.match(cleanup, /if \(-not \$taskCleanupComplete\)/);
+  for (const resource of ["TASK", "PROFILE", "USER"]) {
+    assert.ok(cleanup.includes(`STANDARD_${resource}_CLEANUP_ERROR=`), `${resource} catch retains a reason`);
+  }
+  for (const code of ["PROFILE_LOADED", "PROFILE_REMAINS", "AMBIGUOUS_PROFILE", "IDENTITY_CHANGED", "OTHER"]) {
+    assert.ok(cleanup.includes(`'${code}'`), `profile cleanup reason: ${code}`);
+  }
+  assert.doesNotMatch(cleanup, /\$_\.Exception|\$_\s*\||catch \{ \$failures\+\+ \}/);
+  assert.match(source, /\$owner\.ReturnValue -eq 0 -and \$owner\.Sid -ceq \$Sid/);
+  const terminate = source.slice(source.indexOf("function Stop-BootstrapProcess("), source.indexOf("function Wait-BootstrapProcesses("));
+  assert.match(terminate, /\$null = \$process\.Handle/);
+  assert.match(terminate, /\$current\[0\]\.CreationDate -ne \$Candidate\.CreationDate/);
+  assert.match(terminate, /if \(\$owner\.Sid -cne \$Sid\) \{ return \}/);
+  assert.ok(terminate.indexOf("$owner.Sid -cne $Sid") < terminate.indexOf("$process.Kill()"));
+  assert.match(terminate, /WaitForExit\(10000\)/);
+  assert.match(terminate, /finally \{ \$process\.Dispose\(\) \}/);
+  assert.doesNotMatch(terminate, /Stop-Process|taskkill|Invoke-Expression/);
+  const wait = source.slice(source.indexOf("function Wait-BootstrapProcesses("), source.indexOf("function Remove-BootstrapAccount("));
+  assert.match(wait, /\$attempt -lt 15/);
+  assert.match(wait, /Start-Sleep -Seconds 2/);
+  assert.ok(wait.indexOf("Start-Sleep -Seconds 2") < wait.indexOf("Stop-BootstrapProcess $candidate $Sid"));
+  assert.match(wait, /Get-BootstrapProcesses \$Sid/);
+});
+
 test("Windows installed payload and shortcut are read back within the child profile", () => {
   const source = read("machine-prep/installers/smoke/windows.ps1");
   assert.match(source, /'verifyInstalled' \{/, "installed-payload decision reached");
@@ -452,6 +502,11 @@ const STANDARD_USER_BOUNDARIES = [
   ["source", "$principalSid -cne $state.sid"],
   ["source", "STANDARD_TASK_PRINCIPAL_FORM=$principalForm"],
   ["source", "STANDARD_USER_PARENT_PHASE=$phase"],
+  ["source", "$phase = 'msiserver'"],
+  ["source", "Start-Service msiserver"],
+  ["source", "$msiService.WaitForStatus('Running', [TimeSpan]::FromSeconds(30))"],
+  ["source", "STANDARD_MSISERVER_STATUS=$msiStatus"],
+  ["source", "if ($msiStatus -cne 'Running')"],
   ["source", "SeBatchLogonRight = $batchValue"],
   ["source", "STANDARD_BATCH_RIGHT_GRANTED=$([int]$granted)"],
   ["source", "$configureExitCode = $LASTEXITCODE"],
@@ -482,6 +537,29 @@ const STANDARD_USER_BOUNDARIES = [
   ["source", "Get-ChildItem Env: | ForEach-Object { [Environment]::SetEnvironmentVariable($_.Name, $null, 'Process') }"],
   ["source", "[Environment]::GetEnvironmentVariable('Path', 'Machine')"],
   ["source", "Unregister-ScheduledTask -TaskName $State.taskName -Confirm:$false"],
+  ["source", "Stop-ScheduledTask -TaskName $State.taskName"],
+  ["source", "STANDARD_TASK_CLEANUP_ERROR=$taskCleanupError"],
+  ["source", "STANDARD_PROFILE_CLEANUP_ERROR=$profileCleanupError"],
+  ["source", "STANDARD_USER_CLEANUP_ERROR=$userCleanupError"],
+  ["source", "$taskCleanupError = 'AMBIGUOUS_TASK'"],
+  ["source", "$taskCleanupError = 'TASK_REMAINS'"],
+  ["source", "$profileCleanupError = 'PROFILE_LOADED'"],
+  ["source", "$profileCleanupError = 'PROFILE_REMAINS'"],
+  ["source", "$profileCleanupError = 'AMBIGUOUS_PROFILE'"],
+  ["source", "$profileCleanupError = 'IDENTITY_CHANGED'"],
+  ["source", "$userCleanupError = 'IDENTITY_CHANGED'"],
+  ["source", "$userCleanupError = 'AMBIGUOUS_USER'"],
+  ["source", "$userCleanupError = 'USER_REMAINS'"],
+  ...["task", "profile", "user"].map((resource) => ["source", `$${resource}CleanupError = 'OTHER'`]),
+  ["source", "if (-not $taskCleanupComplete)"],
+  ["source", "Wait-BootstrapProcesses $State.sid"],
+  ["source", "$owner.ReturnValue -eq 0 -and $owner.Sid -ceq $Sid"],
+  ["source", "$null = $process.Handle"],
+  ["source", "$current[0].CreationDate -ne $Candidate.CreationDate"],
+  ["source", "if ($owner.Sid -cne $Sid) { return }"],
+  ["source", "if ($owner.ReturnValue -ne 0)"],
+  ["source", "$process.WaitForExit(10000)"],
+  ["source", "if (@(Get-BootstrapProcesses $Sid).Count -ne 0)"],
   ["source", "$profiles | Remove-CimInstance"],
   ["source", "Remove-LocalUser -SID $user.SID"],
   ["source", "$user.SID.Value -cne $State.sid"],
@@ -684,6 +762,277 @@ ${block}
     assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
     assert.equal(result.stdout.match(/^BATCH_RIGHT_ARM_VERIFIED=/gm)?.length, cases.length);
   } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+// Run extracted production blocks with replaced OS boundaries, never account,
+// service, process-termination or installer APIs. The Windows 5.1 parser and
+// runtime still exercise the real control flow without administrator rights.
+function runStandardUserFixture(body) {
+  const home = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-standard-user-")));
+  const fixture = join(home, "decisions.ps1");
+  writeFileSync(fixture, `Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n$control = $env:HOME\n${body}\n`);
+  try {
+    const result = spawnSync(join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fixture,
+    ], {
+      cwd: home, encoding: "utf8", timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS,
+      env: {
+        SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR,
+        HOME: home, USERPROFILE: home, TEMP: home, TMP: home,
+        BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_TEST_LAUNCHCTL: join(home, "injected-launchctl"),
+      },
+    });
+    assert.equal(result.error, undefined, String(result.error));
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    return result.stdout;
+  } finally { rmSync(home, { recursive: true, force: true }); }
+}
+
+test("Windows msiserver gate exercises startup, timeout and readback failures with a green control", { skip: process.platform !== "win32" }, () => {
+  const source = read("machine-prep/installers/smoke/windows-limited.ps1");
+  const start = source.indexOf("  $phase = 'msiserver'");
+  const end = source.indexOf("  $phase = 'run'", start);
+  assert.ok(start > 0 && end > start, "real parent service gate extracted");
+  const cases = [
+    { name: "running", status: "Running", accept: true, waits: 1 },
+    { name: "start-failed", status: "Stopped", accept: false, waits: 0 },
+    { name: "timeout", status: "StartPending", accept: false, waits: 1 },
+    { name: "stopped", status: "Stopped", accept: false, waits: 1 },
+    { name: "missing", status: "Unavailable", accept: false, waits: 0 },
+    { name: "stopped-at-readback", status: "Stopped", accept: false, waits: 1 },
+  ];
+  const stdout = runStandardUserFixture(`
+function Start-Service($Name) {
+  if ($Name -cne 'msiserver') { throw 'unexpected service' }
+  $script:starts++
+  if ($case.name -ceq 'start-failed') { throw 'synthetic service failure' }
+}
+function Get-Service($Name) {
+  if ($Name -cne 'msiserver') { throw 'unexpected service' }
+  $script:reads++
+  if ($case.name -ceq 'missing') { throw 'synthetic service missing' }
+  $status = if ($case.name -ceq 'stopped-at-readback' -and $script:reads -eq 1) { 'Running' } else { $case.status }
+  $service = [pscustomobject]@{ Status = $status }
+  $service | Add-Member ScriptMethod WaitForStatus {
+    param($Desired, $Timeout)
+    $script:waits++
+    if ($Desired -cne 'Running' -or $Timeout.TotalSeconds -ne 30) { throw 'unbounded service wait' }
+    if ($case.name -ceq 'timeout') { throw 'synthetic service timeout' }
+  }
+  $service | Add-Member ScriptMethod Refresh { $script:refreshes++ }
+  return $service
+}
+$cases = @'
+${JSON.stringify(cases)}
+'@ | ConvertFrom-Json
+foreach ($case in $cases) {
+  $script:starts = 0; $script:waits = 0; $script:reads = 0; $script:refreshes = 0
+  $accepted = $false
+  try {
+${source.slice(start, end)}
+    $accepted = $true
+  } catch { }
+  if ($phase -cne 'msiserver' -or $script:starts -ne 1 -or $script:waits -ne $case.waits -or $script:reads -lt 1) { throw 'service decision not reached' }
+  if ($accepted -ne $case.accept) { throw ('wrong service decision: ' + $case.name) }
+  $receipt = @(Get-Content -LiteralPath (Join-Path $control 'msiserver.log'))
+  if ($receipt.Count -ne 1 -or $receipt[0] -cne ('STANDARD_MSISERVER_STATUS=' + $case.status)) { throw 'wrong service receipt' }
+  Write-Output ('SERVICE_ARM_VERIFIED=' + $case.name)
+}
+`);
+  assert.equal(stdout.match(/^SERVICE_ARM_VERIFIED=/gm)?.length, cases.length);
+});
+
+test("Windows process cleanup waits and terminates only fresh exact SID matches with green controls", { skip: process.platform !== "win32" }, () => {
+  const source = read("machine-prep/installers/smoke/windows-limited.ps1");
+  const start = source.indexOf("function Get-BootstrapProcesses(");
+  const end = source.indexOf("function Remove-BootstrapAccount(");
+  assert.ok(start > 0 && end > start, "real process cleanup functions extracted");
+  const cases = ["natural-exit", "terminate", "near-sid", "changed-owner", "reused-pid", "owner-unavailable", "kill-failed", "wait-failed", "still-running"];
+  const stdout = runStandardUserFixture(`
+${source.slice(start, end)}
+$targetSid = 'S-1-5-21-100-200-300-400'
+$created = [DateTime]'2026-01-01T00:00:00Z'
+function Get-CimInstance($ClassName, $Filter) {
+  if ($ClassName -cne 'Win32_Process') { throw 'unexpected CIM class' }
+  $script:queries++
+  if ($Filter) {
+    if ($Filter -cne 'ProcessId=4242') { throw 'unexpected process query' }
+    $when = if ($case -ceq 'reused-pid') { $created.AddSeconds(1) } else { $created }
+    return [pscustomobject]@{ ProcessId = 4242; CreationDate = $when; Current = $true }
+  }
+  if ($script:alive) { [pscustomobject]@{ ProcessId = 4242; CreationDate = $created; Current = $false } }
+  # A near SID is always present; broad name, prefix or process-tree cleanup
+  # would kill it and fail both the positive and refusal arms.
+  [pscustomobject]@{ ProcessId = 4343; CreationDate = $created; Current = $false }
+}
+function Invoke-CimMethod($InputObject, $MethodName) {
+  if ($MethodName -cne 'GetOwnerSid') { throw 'unexpected CIM method' }
+  $script:ownerReads++
+  $ownerSid = $targetSid; $code = 0
+  if ($InputObject.ProcessId -eq 4343 -or $case -ceq 'near-sid' -or ($InputObject.Current -and $case -ceq 'changed-owner')) { $ownerSid += '0' }
+  if ($InputObject.Current -and $case -ceq 'owner-unavailable') { $code = 2 }
+  [pscustomobject]@{ ReturnValue = $code; Sid = $ownerSid }
+}
+function Get-Process {
+  $process = [pscustomobject]@{ Id = 4242; HasExited = $false }
+  $process | Add-Member ScriptProperty Handle { $script:handles++; return 1 }
+  $process | Add-Member ScriptMethod Kill {
+    $script:kills++
+    if ($script:handles -ne 1 -or $script:ownerReads -lt 2) { throw 'identity checks not reached' }
+    if ($case -ceq 'kill-failed') { throw 'synthetic termination failure' }
+    if ($case -cne 'still-running') { $script:alive = $false }
+  }
+  $process | Add-Member ScriptMethod WaitForExit {
+    param($Milliseconds)
+    if ($Milliseconds -ne 10000) { throw 'unbounded termination wait' }
+    return $case -cne 'wait-failed'
+  }
+  $process | Add-Member ScriptMethod Dispose { $script:disposes++ }
+  return $process
+}
+function Start-Sleep($Seconds) {
+  if ($Seconds -ne 2) { throw 'unexpected process delay' }
+  $script:sleeps++
+  if ($case -ceq 'natural-exit') { $script:alive = $false }
+}
+foreach ($case in @('${cases.join("', '")}')) {
+  $script:queries = 0; $script:ownerReads = 0; $script:sleeps = 0; $script:kills = 0
+  $script:handles = 0; $script:disposes = 0; $script:alive = $true
+  $accepted = $false
+  try { Wait-BootstrapProcesses $targetSid; $accepted = $true } catch { }
+  if ($script:queries -lt 1 -or $script:ownerReads -lt 2) { throw 'owner decision not reached' }
+  $expectedAccept = $case -in @('natural-exit', 'terminate', 'near-sid')
+  if ($accepted -ne $expectedAccept) { throw ('wrong process decision: ' + $case) }
+  $expectedKills = if ($case -in @('terminate', 'kill-failed', 'wait-failed', 'still-running')) { 1 } else { 0 }
+  $expectedSleeps = if ($case -ceq 'near-sid') { 0 } elseif ($case -ceq 'natural-exit') { 1 } else { 15 }
+  $expectedHandles = if ($expectedSleeps -eq 15) { 1 } else { 0 }
+  if ($script:kills -ne $expectedKills -or $script:sleeps -ne $expectedSleeps -or $script:handles -ne $expectedHandles -or $script:disposes -ne $expectedHandles) { throw ('wrong cleanup scope: ' + $case) }
+  Write-Output ('PROCESS_ARM_VERIFIED=' + $case)
+}
+`);
+  assert.equal(stdout.match(/^PROCESS_ARM_VERIFIED=/gm)?.length, cases.length);
+});
+
+test("Windows cleanup reason codes retain failed state and still remove the account with a green control", { skip: process.platform !== "win32" }, () => {
+  const source = read("machine-prep/installers/smoke/windows-limited.ps1");
+  const start = source.indexOf("function Remove-BootstrapAccount(");
+  const end = source.indexOf("if ($ContextFile)", start);
+  assert.ok(start > 0 && end > start, "real account cleanup function extracted");
+  const cases = [
+    { name: "green", errors: [], processes: 1, removals: 1, users: 1 },
+    { name: "task-error", errors: ["TASK:OTHER", "PROFILE:OTHER"], processes: 0, removals: 0, users: 1 },
+    { name: "task-remains", errors: ["TASK:TASK_REMAINS", "PROFILE:OTHER"], processes: 0, removals: 0, users: 1 },
+    { name: "task-ambiguous", errors: ["TASK:AMBIGUOUS_TASK", "PROFILE:OTHER"], processes: 0, removals: 0, users: 1 },
+    { name: "profile-loaded", errors: ["PROFILE:PROFILE_LOADED"], processes: 1, removals: 0, users: 1 },
+    { name: "profile-remains", errors: ["PROFILE:PROFILE_REMAINS"], processes: 1, removals: 1, users: 1 },
+    { name: "profile-path-remains", errors: ["PROFILE:PROFILE_REMAINS"], processes: 1, removals: 1, users: 1 },
+    { name: "registry-remains", errors: ["PROFILE:PROFILE_REMAINS"], processes: 1, removals: 1, users: 1 },
+    { name: "profile-ambiguous", errors: ["PROFILE:AMBIGUOUS_PROFILE"], processes: 1, removals: 0, users: 1 },
+    { name: "profile-error", errors: ["PROFILE:OTHER"], processes: 1, removals: 0, users: 1 },
+    { name: "identity-changed", errors: ["PROFILE:IDENTITY_CHANGED", "USER:IDENTITY_CHANGED"], processes: 0, removals: 0, users: 0 },
+    { name: "process-error", errors: ["PROFILE:OTHER"], processes: 1, removals: 0, users: 1 },
+    { name: "user-error", errors: ["USER:OTHER"], processes: 1, removals: 1, users: 1 },
+    { name: "user-remains", errors: ["USER:USER_REMAINS"], processes: 1, removals: 1, users: 1 },
+    { name: "user-ambiguous", errors: ["PROFILE:IDENTITY_CHANGED", "USER:AMBIGUOUS_USER"], processes: 0, removals: 0, users: 0 },
+    { name: "already-absent", errors: [], processes: 1, removals: 0, users: 0 },
+  ];
+  const stdout = runStandardUserFixture(`
+${source.slice(start, end)}
+$targetSid = 'S-1-5-21-100-200-300-400'
+$statePath = Join-Path $control 'state.json'
+function Get-ScheduledTask {
+  $script:taskReads++
+  if (-not $script:taskGone) {
+    $task = [pscustomobject]@{ TaskName = 'fixture-task'; TaskPath = '\\'; State = 'Running' }
+    $task
+    if ($case.name -ceq 'task-ambiguous') { $task }
+  }
+  [pscustomobject]@{ TaskName = 'fixture-task-extra'; TaskPath = '\\'; State = 'Running' }
+}
+function Stop-ScheduledTask($TaskName) {
+  if ($TaskName -cne 'fixture-task') { throw 'wrong task stopped' }
+  $script:stops++
+  if ($case.name -ceq 'task-error') { throw 'synthetic private exception detail' }
+}
+function Unregister-ScheduledTask($TaskName, $Confirm) {
+  if ($TaskName -cne 'fixture-task' -or $script:stops -ne 1) { throw 'task stop not reached' }
+  if ($case.name -cne 'task-remains') { $script:taskGone = $true }
+}
+function Get-LocalUser {
+  $script:userReads++
+  if (-not $script:userGone) {
+    $value = if ($case.name -ceq 'identity-changed') { $targetSid + '0' } else { $targetSid }
+    $user = [pscustomobject]@{ Name = 'fixture-user'; SID = [pscustomobject]@{ Value = $value } }
+    $user
+    if ($case.name -ceq 'user-ambiguous') { $user }
+  }
+  [pscustomobject]@{ Name = 'fixture-user-extra'; SID = [pscustomobject]@{ Value = $targetSid + '0' } }
+}
+function Remove-LocalUser($SID) {
+  if ($SID.Value -cne $targetSid) { throw 'wrong account removed' }
+  $script:userRemovals++
+  if ($case.name -ceq 'user-error') { throw 'synthetic private exception detail' }
+  if ($case.name -cne 'user-remains') { $script:userGone = $true }
+}
+function Wait-BootstrapProcesses($Sid) {
+  $script:processCalls++
+  if ($Sid -cne $targetSid -or -not $script:taskGone) { throw 'process cleanup outside stopped task' }
+  if ($case.name -ceq 'process-error') { throw 'synthetic private exception detail' }
+}
+function Get-CimInstance($ClassName, $Filter) {
+  $script:profileReads++
+  if ($ClassName -cne 'Win32_UserProfile' -or $Filter -cne "SID='$targetSid'" -or $script:processCalls -ne 1) { throw 'wrong profile query order or identity' }
+  if ($case.name -ceq 'profile-error') { throw 'synthetic private exception detail' }
+  if (-not $script:profileGone) {
+    $record = [pscustomobject]@{ Loaded = ($case.name -ceq 'profile-loaded'); LocalPath = (Join-Path $control 'synthetic-profile') }
+    $record
+    if ($case.name -ceq 'profile-ambiguous') { $record }
+  }
+}
+function Remove-CimInstance {
+  param([Parameter(ValueFromPipeline = $true)]$InputObject)
+  process {
+    if ($InputObject.Loaded -or $script:processCalls -ne 1) { throw 'profile removed before unload' }
+    $script:profileRemovals++
+    if ($case.name -cne 'profile-remains') { $script:profileGone = $true }
+  }
+}
+function Test-Path($LiteralPath) {
+  return ($case.name -ceq 'profile-path-remains' -and $LiteralPath -ceq (Join-Path $control 'synthetic-profile')) -or
+    ($case.name -ceq 'registry-remains' -and $LiteralPath.StartsWith('HKLM:'))
+}
+function Start-Sleep($Seconds) { $script:clock = $script:clock.AddSeconds($Seconds) }
+$cases = @'
+${JSON.stringify(cases)}
+'@ | ConvertFrom-Json
+foreach ($case in $cases) {
+  $script:taskReads = 0; $script:userReads = 0; $script:stops = 0; $script:processCalls = 0
+  $script:profileReads = 0; $script:profileRemovals = 0; $script:userRemovals = 0
+  $script:taskGone = $case.name -ceq 'already-absent'; $script:userGone = $script:taskGone; $script:profileGone = $script:taskGone
+  $script:clock = [DateTime]'2026-01-01T00:00:00Z'
+  $state = @{ taskName = 'fixture-task'; userName = 'fixture-user'; sid = $targetSid; profilePath = '' }
+  $state | ConvertTo-Json | Set-Content -LiteralPath $statePath
+  [IO.File]::WriteAllText((Join-Path $control 'cleanup.log'), '')
+  $accepted = $false
+  try { Remove-BootstrapAccount $state { $script:clock }; $accepted = $true } catch { }
+  if ($script:taskReads -lt 1 -or $script:userReads -lt 1) { throw 'cleanup decision not reached' }
+  if ($script:processCalls -ne $case.processes -or $script:profileRemovals -ne $case.removals -or $script:userRemovals -ne $case.users) { throw ('cleanup boundary not reached: ' + $case.name) }
+  if ($case.name -ceq 'profile-loaded' -and ($script:profileReads -ne 31 -or $script:clock -ne [DateTime]'2026-01-01T00:01:00Z')) { throw 'profile unload deadline changed' }
+  $receipt = @(Get-Content -LiteralPath (Join-Path $control 'cleanup.log'))
+  $actualErrors = @($receipt | Where-Object { $_ -match '^STANDARD_(TASK|PROFILE|USER)_CLEANUP_ERROR=' })
+  $expectedErrors = @($case.errors | ForEach-Object { $parts = $_ -split ':'; 'STANDARD_' + $parts[0] + '_CLEANUP_ERROR=' + $parts[1] })
+  if (($actualErrors -join ',') -cne ($expectedErrors -join ',')) { throw ('wrong reason codes: ' + $case.name) }
+  if ($receipt -contains 'synthetic private exception detail' -or ($receipt -join ',') -match 'fixture-user|S-1-5-21') { throw 'private detail in receipt' }
+  if ($receipt -notcontains ('CLEANUP_FAILURES=' + $case.errors.Count)) { throw 'wrong failure count' }
+  if ($accepted -ne ($case.errors.Count -eq 0) -or [IO.File]::Exists($statePath) -ne (-not $accepted)) { throw 'wrong cleanup outcome or retry state' }
+  foreach ($resource in @('TASK', 'PROFILE', 'USER')) {
+    $failed = @($case.errors | Where-Object { $_.StartsWith($resource + ':') }).Count -gt 0
+    if (($receipt -contains ('STANDARD_' + $resource + '_REMOVED=1')) -eq $failed) { throw 'wrong removal proof' }
+  }
+  Write-Output ('CLEANUP_ARM_VERIFIED=' + $case.name)
+}
+`);
+  assert.equal(stdout.match(/^CLEANUP_ARM_VERIFIED=/gm)?.length, cases.length);
 });
 
 test("bootstrap uses installed production preparation and guarded version", () => {
