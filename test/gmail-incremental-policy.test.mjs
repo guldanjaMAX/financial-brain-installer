@@ -375,7 +375,7 @@ if (process.platform !== "win32") {
       result.evidence.final_receipt?.issue_code === "INGEST_FAILED" &&
       result.evidence.final_receipt?.docs_refused === 1 &&
       result.evidence.final_receipt?.docs_failed === 1 &&
-      result.state.gmail_retry?.["gmail:refusal-failure-worker"] === "history-current",
+      result.state.gmail_retry?.["gmail:refusal-failure-worker"] === true,
       `${result.output.slice(-1_200)}\n${JSON.stringify(result.state)}\n${JSON.stringify(result.evidence.final_receipt)}`);
   } finally { rmSync(result.directory, { recursive: true, force: true }); }
 }
@@ -469,7 +469,7 @@ if (process.platform !== "win32") {
       first.evidence.batch_attempts?.["retry-failed"] === 1 &&
       first.evidence.batch_attempts?.["retry-clean"] === 1 &&
       first.state.history_id === "history-current" &&
-      first.state.gmail_retry?.["gmail:retry-failed"] === "history-current" &&
+      first.state.gmail_retry?.["gmail:retry-failed"] === true &&
       first.state.done["gmail:retry-clean"] === "history-current" &&
       !Object.hasOwn(first.state.done, "gmail:retry-failed") &&
       first.evidence.final_receipt?.status === "error" &&

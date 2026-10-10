@@ -13,6 +13,8 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node --test test/gmail-finalization.test.mjs",
+  "node --test test/gmail-finalization-mutations.test.mjs",
   "node --test test/query-mcp-timing.test.mjs",
   "node --test test/query-spans-probe.test.mjs",
   "node --test worker/test/query-timing.test.mjs",
@@ -520,6 +522,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/field-prepare.test.mjs",
   "node --no-warnings test/full-history-privacy.test.mjs",
   "node --no-warnings test/gmail-incremental-policy.test.mjs",
+  "node --test test/gmail-finalization.test.mjs",
+  "node --test test/gmail-finalization-mutations.test.mjs",
   "node --no-warnings test/family-cleanup-query.test.mjs",
   "node --no-warnings test/linkedin-export.test.mjs",
   "node --no-warnings test/migration-checksum-pin.test.mjs",
