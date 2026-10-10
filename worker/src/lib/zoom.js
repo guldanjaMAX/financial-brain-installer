@@ -331,8 +331,14 @@ export async function listZoomRecordingsPage({ token, from, to, nextPageToken = 
     `https://api.zoom.us/v2/users/me/recordings?${query}`,
     { accessToken: token, fetchImpl, ...requestOptions },
   );
+  if (!Array.isArray(data?.meetings) ||
+      (data.next_page_token !== undefined && typeof data.next_page_token !== "string")) {
+    throw new ProviderSyncError("zoom", "the recordings page did not prove provider enumeration", {
+      kind: "retryable", code: "recordings_page_invalid",
+    });
+  }
   return {
-    meetings: Array.isArray(data?.meetings) ? data.meetings : [],
+    meetings: data.meetings,
     nextPageToken: String(data?.next_page_token || "").trim() || null,
   };
 }

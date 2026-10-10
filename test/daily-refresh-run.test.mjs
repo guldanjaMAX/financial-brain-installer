@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync as makeTempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { buildDailyRefreshDefinition } from "../operations/daily-refresh-scheduler.mjs";
 import { runDailyRefresh, runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
+
+const mkdtempSync = prefix => realpathSync.native(makeTempSync(prefix));
 
 const plan = Object.freeze({
   ready: true,
@@ -548,11 +550,16 @@ test("daily CLI records a planner authorization failure before source execution"
   assert.equal(planned, 1);
   const identity = dailyRefreshIdentity(manifest, options.principal);
   assert.equal(readDailyObservation(identity, { home }).record?.result, "failed");
+  let reads = 0;
+  let runs = 0;
   await runDailyRefreshCli(manifestPath, { ...options,
-    buildPlan: async () => ({ ...plan, identity, sources: [], manifest_path: manifestPath }),
+    buildPlan: async () => ({ ...plan, identity, manifest_path: manifestPath }),
     acquireLock: () => ({ assertOwned() {}, release() {} }),
-    readUpdateTransaction: () => null, readFreshness: async () => ({}), runSource: async () => {}, writeReceipt: () => {},
+    readUpdateTransaction: () => null,
+    readFreshness: async () => ({ drive: { last_successful_run_at: ++reads === 1 ? "2026-10-08T12:00:00.000Z" : "2026-10-10T12:00:00.000Z" } }),
+    runSource: async () => { runs++; }, writeReceipt: () => {},
   });
+  assert.equal(runs, 1, "the green journal control executes verified work");
   assert.equal(readDailyObservation(identity, { home }).record.result, "complete");
 });
 

@@ -616,8 +616,24 @@ test("lease-first target repair crosses native prepare, Worker schema 44/45, rep
     recoveredBrain.close();
   });
 
-  assert.equal(sourceBrain.migrationFiles.at(-1), "0053_financial_evidence.sql");
-  assert.equal(recoveredBrain.migrationFiles.at(-1), "0053_financial_evidence.sql");
+  assert.equal(sourceBrain.migrationFiles.at(-1), "0054_daily_evidence.sql");
+  assert.equal(recoveredBrain.migrationFiles.at(-1), "0054_daily_evidence.sql");
+  // Both sides must actually apply the candidate schema before recovery runs.
+  // A filename alone cannot prove that its column and index were created.
+  for (const fixture of [sourceBrain, recoveredBrain]) {
+    assert.deepEqual(
+      fixture.rows("PRAGMA table_info(sync_runs)")
+        .filter(row => row.name === "provider_check_complete")
+        .map(({ type, notnull, dflt_value }) => ({ type, notnull, dflt_value })),
+      [{ type: "INTEGER", notnull: 1, dflt_value: "0" }],
+      "quiet-day completion proof must start unverified in both fixtures",
+    );
+    assert.deepEqual(
+      fixture.rows("PRAGMA index_info(zoom_deliveries_status)").map(row => row.name),
+      ["status"],
+      "both fixtures must have the delivery status index",
+    );
+  }
   for (const table of ["financial_snapshots", "financial_findings", "financial_run_events", "financial_snapshot_heads"]) {
     assert.equal(RECOVERY_EXPORT_TABLES.includes(table), true);
   }

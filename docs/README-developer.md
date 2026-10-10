@@ -1295,8 +1295,8 @@ prints one stable line per manifest source:
 
 The owner is `daily-task`, `existing-local-scheduler`, `worker-cron`, `push`,
 `resident-capture`, `snapshot`, or `none`. Scheduler success never invents
-source success: every named leg must have a valid
-`receipt.last_successful_run_at`, and every prior timestamp must advance. A
+source success: every named leg needs either advancing
+`receipt.last_successful_run_at` or a new verified no-change provider check. A
 missing or unknown leg makes the aggregate line unknown instead of allowing a
 current sibling to hide it.
 
@@ -1305,7 +1305,24 @@ failures and positive accepted or verified unchanged work, even when other files
 were refused or unsupported. An all-refused run is `refused`; a measured run with
 all accepted, unchanged, refused and failed counters zero is `empty`. Both retain
 the prior success and complete-history dates and request source review. Neither
-invents imported work or a transient document failure. A successful run with
+invents imported work or a transient document failure. The narrow daily
+exception is a measured, completed Drive, Gmail, IMAP or Calendar enumeration
+with zero seen, accepted, unchanged, refused and failed items. Its `empty`
+durable outcome remains intact, while `receipt.last_check_at` and daily
+`no_change`/`check_verified` record the separate check. Empty upload folders
+cannot prove upstream acquisition. Daily execution requires the check to
+start during this invocation, finish by readback, advance beyond the prior
+receipt, and leave ingest freshness unchanged. Skipped invocations, empty
+plans, failed walks and missing measurements cannot borrow older success.
+Daily status labels a check `checked` for at most 24 hours and prints its
+timestamp separately from last ingest. This does not extend historical or
+semantic coverage. Calendar additionally requires `provider_check_complete`,
+earned only from valid events pages and a terminal sync token. Migration 0054
+defaults that field to false for old runs; their walk flag alone is insufficient.
+An empty incremental check may earn it without claiming complete history.
+A later source error takes precedence over quiet-check and Zoom labels in both
+source and daily status, while the prior check time remains visible separately.
+A successful run with
 omissions is `partial` and carries `docs_refused`; it does not extend
 `complete_history_through`. A measured failure is `failed`, retains the prior
 success timestamp, and makes source freshness broken. A source with no run receipt has `missing_history` in daily status.
@@ -1317,13 +1334,31 @@ walk gaps for deletion safety; neither omissions nor a recent success date
 are proof of complete history.
 
 Daily execution permits a partial loader result only when every source leg ran
-without failures and every named source's durable success timestamp advances.
+without failures and every named source has advancing work or a verified check.
 The ordinary load command still requires a complete sweep. Daily status adds
 `last_run_outcome`, `docs_refused`, and `docs_failed` to JSON; its text line adds
 the refusal count for partial runs. Historical coverage and vector readiness
 remain independent checks. Update readiness must stop on actual run failures,
 stale or missing freshness, or vector debt; a current partial receipt alone is
 a coverage warning, not a failed refresh.
+
+Zoom's registered source inventory includes `receipt.zoom`: a closed state,
+last completed rolling-window check, pagination-pending flag, and aggregate
+delivery counts by state. It exposes no recording IDs, page tokens, provider
+errors or credentials. Missing configuration, incomplete credentials, failed
+reconciliation, unsettled debt and checks older than 24 hours remain distinct.
+The same evidence is visible in source and daily text status. Reconciliation
+never updates the last ingest receipt. `history.state` stays `unproven`, even
+after every rolling page completes; this change adds no historical backfill
+and does not widen the initial 30-day or subsequent two-day windows.
+Migration 0054 adds a covering status index for delivery aggregates. Inventory
+requires that index and groups by status, avoiding a recording-table scan and
+temporary grouping sort. Lifetime totals still scan retained index entries.
+There are no delivery counter triggers: D1 includes trigger writes in
+`meta.changes`, and delivery leases require exactly one changed row. Until the
+index exists, `counts_available` is false and counts are null; the display
+reports unavailable evidence rather than implying zero debt. Non-schema read
+failures still fail closed.
 
 ### Connector-specific Drive refresh on macOS
 

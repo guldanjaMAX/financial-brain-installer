@@ -38,6 +38,23 @@ export const SOURCE_RECEIPT_ISSUE_CODES = Object.freeze([
 const ISSUE_CODES = new Set(SOURCE_RECEIPT_ISSUE_CODES);
 export const DEFAULT_SOURCE_RECEIPT_ISSUE_CODE = "INGEST_FAILED";
 
+/** A completed empty provider walk is a check, never an ingest or history proof. */
+export function providerNoChangeCheckAt(kind, run) {
+  // Restrict this to connector receipts whose terminal walk flag proves provider
+  // enumeration. Re-reading an empty export folder cannot prove upstream work.
+  if (!["drive", "gmail", "imap", "calendar"].includes(kind)) return null;
+  if (run?.outcome !== "empty" || run.walk_complete !== true || run.metrics_version !== 1) return null;
+  // Older Calendar walks could terminate without a valid nextSyncToken.
+  // Only the dedicated, persisted boundary proof certifies a quiet check.
+  if (kind === "calendar" && run.provider_check_complete !== true) return null;
+  if (!["files_seen", "docs_added", "docs_updated", "docs_unchanged", "docs_refused", "docs_failed"]
+    .every(field => run[field] === 0)) return null;
+  const started = typeof run.started_at === "string" ? Date.parse(run.started_at) : NaN;
+  const finished = typeof run.finished_at === "string" ? Date.parse(run.finished_at) : NaN;
+  if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) return null;
+  return new Date(finished).toISOString();
+}
+
 export const SOURCE_FAILURE_EVIDENCE_VERSION = 1;
 export const GMAIL_FAILURE_OPERATION_CLASSES = Object.freeze([
   "gmail_profile_read",

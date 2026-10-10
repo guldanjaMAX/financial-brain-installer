@@ -289,3 +289,52 @@ export const zoomDeliveryStore = Object.freeze({
   claimReconciliation: claimZoomReconciliation,
   checkpointReconciliation: checkpointZoomReconciliation,
 });
+
+/** Read aggregate operational evidence without exposing recording IDs or cursors. */
+export async function zoomSourceStatus(env, { now = Date.now() } = {}) {
+  const db = requireDatabase(env);
+  const row = await db.prepare(
+    `SELECT status, completed_at_ms,
+            CASE WHEN next_page_token IS NULL THEN 0 ELSE 1 END AS pagination_pending
+       FROM zoom_reconciliation WHERE id=1`,
+  ).first();
+  let counts;
+  try {
+    counts = await db.prepare(`SELECT status, COUNT(*) AS count
+      FROM zoom_deliveries INDEXED BY zoom_deliveries_status GROUP BY status`).all();
+  } catch (error) {
+    // Require the covering index even during an upgrade. Its absence means
+    // unknown counts, never an unindexed history scan or zero delivery debt.
+    if (!/no such index:\s*zoom_deliveries_status\b/i.test(String(error?.message))) throw error;
+  }
+  const countsAvailable = Array.isArray(counts?.results) && counts.results.every(item =>
+    Number.isSafeInteger(item.count) && item.count >= 0);
+  const deliveries = Object.fromEntries(["pending", "processing", "retryable", "completed", "refused", "unavailable"]
+    .map(status => [status, countsAvailable ? 0 : null]));
+  for (const item of countsAvailable ? counts.results : []) {
+    if (Object.hasOwn(deliveries, item.status)) deliveries[item.status] = Number(item.count);
+  }
+  const configured = [env.ZOOM_ACCOUNT_ID, env.ZOOM_CLIENT_ID, env.ZOOM_CLIENT_SECRET, env.ZOOM_WEBHOOK_SECRET_TOKEN].filter(Boolean).length;
+  const completed = Number.isSafeInteger(row?.completed_at_ms) && row.completed_at_ms >= 0 && row.completed_at_ms <= now
+    ? row.completed_at_ms : null;
+  const paginationPending = row?.pagination_pending === 1;
+  const state = configured === 0 ? "not_configured" : configured !== 4 ? "credentials_missing"
+    : !row ? "unknown"
+    : ["retryable", "unavailable", "refused"].includes(row.status) ? row.status
+    : !countsAvailable ? "unknown"
+    : deliveries.refused > 0 || deliveries.unavailable > 0 ? "needs_attention"
+    : paginationPending || deliveries.pending > 0 || deliveries.retryable > 0 ? "pending"
+    : row.status === "processing" || deliveries.processing > 0 ? "processing"
+    : completed === null ? "never_checked"
+    : now - completed > 24 * 60 * 60 * 1000 ? "stale" : "checked";
+  return {
+    state,
+    last_check_at: completed === null ? null : new Date(completed).toISOString(),
+    pagination_pending: paginationPending,
+    counts_available: countsAvailable,
+    deliveries,
+    // The rolling reconciliation window is not an approved historical range.
+    // Neither an empty page nor zero delivery debt proves historical coverage.
+    history: { state: "unproven", complete_through: null },
+  };
+}

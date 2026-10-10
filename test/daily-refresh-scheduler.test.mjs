@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync as makeTempSync, realpathSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import * as dailySchedulerModule from "../operations/daily-refresh-scheduler.mjs";
+
+const mkdtempSync = prefix => realpathSync.native(makeTempSync(prefix));
 
 import {
   buildDailyRefreshDefinition,
@@ -1239,11 +1241,15 @@ test("scheduled execution reuses the installed ownership plan before checking it
   const manifestPath = join(directory, "brain.manifest.json");
   writeFileSync(manifestPath, JSON.stringify({ client: { slug: "fixture" }, corpora: {} }));
   let planCalls = 0;
-  const definition = buildDailyRefreshDefinition(basePlan, DARWIN_DEFINITION_OPTIONS);
+  let sourceCalls = 0;
+  let reads = 0;
+  const runnablePlan = { ...basePlan, sources: [{ key: "calendar", run_key: "calendar",
+    class: "machine-pull", owner: "daily-task", status: "ready" }] };
+  const definition = buildDailyRefreshDefinition(runnablePlan, DARWIN_DEFINITION_OPTIONS);
   const schedulerAdapter = memoryAdapter({ exists: true, owned: true, enabled: true, definition });
   const result = await runDailyRefreshCli(manifestPath, {
     brainModule: {},
-    buildPlan: async () => { planCalls += 1; return basePlan; },
+    buildPlan: async () => { planCalls += 1; return runnablePlan; },
     expectedDefinitionHash: definition.definition_hash,
     platform: "darwin",
     definitionOptions: {
@@ -1255,12 +1261,13 @@ test("scheduled execution reuses the installed ownership plan before checking it
     },
     schedulerAdapter,
     acquireLock: () => ({ assertOwned: () => true, release: () => {} }),
-    runSource: async () => assert.fail("the fixture has no daily-owned source"),
-    readFreshness: async () => ({}),
+    runSource: async () => { sourceCalls++; },
+    readFreshness: async () => ({ calendar: { last_successful_run_at: ++reads === 1 ? "2026-10-08T12:00:00.000Z" : "2026-10-10T12:00:00.000Z" } }),
     writeReceipt: () => {},
     silent: true,
   });
   assert.equal(planCalls, 1, "execution reached the same shared planning decision used by installation");
+  assert.equal(sourceCalls, 1, "the hash-bound plan also reached real source work");
   assert.equal(result.status, "complete");
 });
 
