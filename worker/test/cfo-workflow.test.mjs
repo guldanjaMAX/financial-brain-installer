@@ -188,6 +188,83 @@ test('R156-01 unsupported and compound workflow actions still require clarificat
   }
 });
 
+const unsupportedActions = [
+  ['polite tax request', 'Can you please check tax readiness for 2025?'],
+  ['run tax request', 'Run tax readiness for 2025.'],
+  ['leading year', 'For 2025, check tax readiness.'],
+  ['comma compound', 'Summarize the project notes, check tax readiness for 2025.'],
+  ['polite cash request', 'Could you please show my weekly cash brief?'],
+  ['polite Books request', 'Please could you review my books for 2025?'],
+  ['action following quotation', 'Find the note titled "Project notes"; can you please check tax readiness for 2025?'],
+  ['action following possessive', "Summarize the owner's notes, check tax readiness for 2025."],
+];
+
+function genericModel(f) {
+  f.env.AI.run = async model => {
+    f.calls.model++;
+    return String(model).includes('bge-') ? { data: [[0.1, 0.2, 0.3]] } : { response: 'The documents do not answer the question.' };
+  };
+}
+
+for (const [label, q] of unsupportedActions) test(`R156-04 ${label} withholds real monetary snippets`, async t => {
+  const f = await cfoFixture(t);
+  // Keep actual scoped FTS evidence available. An empty corpus could conceal
+  // accidental fallthrough even when generic Ask withholds its final answer.
+  f.raw(`INSERT INTO chunks (chunk_uid,doc_uid,chunk_ix,text,source,title)
+    VALUES ('fixture-tax-chunk','fixture-2025-0',0,?,'fixture-source','Synthetic workflow memo')`,
+  `${q} Synthetic tax readiness cash brief books amount $987654.32.`);
+  assert.equal(f.first('SELECT COUNT(*) AS n FROM chunks').n, 1);
+  await green(f);
+  genericModel(f);
+  reset(f);
+  const document = await ask(f, { q: 'Find the synthetic workflow memo about tax readiness cash brief books.' });
+  assert.ok(scopeReads(f) > 0);
+  assert.equal(document.body.workflow, undefined);
+  assert.ok(document.body.results.some(row => row.snippet?.includes('987654.32')), 'real amount-bearing corpus evidence reached');
+  assert.ok(f.calls.model > 0);
+
+  reset(f); f.calls.model = 0; f.calls.provider = 0; f.seen.vectorQueries.length = 0;
+  const result = await ask(f, { q });
+  assert.equal(result.status, 200);
+  assert.ok(scopeReads(f) > 0, 'real entity scope decision reached');
+  assert.doesNotMatch(JSON.stringify(result.body), /987654\.32|\$/, 'workflow request withholds amounts in every result field');
+  assert.equal(result.body.workflow?.kind, 'clarification', 'unsupported action decision reached');
+  assert.ok(codes(result.body).includes('cfo_question_scope_required'));
+  assert.equal(result.body.entity_scope.entity_slug, ENTITY);
+  assert.equal(result.body.financial_authority, false);
+  assert.deepEqual(result.body.results, []);
+  assert.deepEqual(result.body.citations, []);
+  assert.equal(inventoryReads(f), 0);
+  assert.equal(f.calls.model, 0);
+  assert.equal(f.calls.provider, 0);
+});
+
+const quotedDocumentQuestions = [
+  ['compound quotation', 'What did the CFO mean by "Check tax readiness for 2025 and then review books"?'],
+  ['compound title', 'Find the note titled "Check tax readiness for 2025; review books".'],
+  ['curly quotation', 'What did the CFO mean by “Check tax readiness for 2025; review books”?'],
+  ['single quotation', "Find the note titled 'Check tax readiness for 2025; review books'."],
+  ['inline code quotation', 'Explain the phrase `Check tax readiness for 2025; review books`.'],
+];
+for (const [label, q] of quotedDocumentQuestions) test(`R156-01 ${label} keeps document retrieval`, async t => {
+  const f = await cfoFixture(t);
+  await green(f);
+  // Same compound content outside the quotation is an attempted action.
+  reset(f);
+  const action = await ask(f, { q: 'Check tax readiness for 2025; review books.' });
+  assert.ok(scopeReads(f) > 0);
+  assert.equal(action.body.workflow?.kind, 'clarification');
+  assert.equal(f.calls.model, 0);
+  genericModel(f);
+  reset(f);
+  const result = await ask(f, { q });
+  assert.equal(result.status, 200);
+  assert.ok(scopeReads(f) > 0, 'real entity scope decision reached');
+  assert.equal(result.body.workflow, undefined, 'quoted action remains a document question');
+  assert.ok(f.calls.model > 0 || f.seen.vectorQueries.length > 0, 'generic retrieval reached');
+  assert.equal(inventoryReads(f), 0);
+});
+
 test('request fields cannot supply confirmation or trusted map', async t => {
   const f = await cfoFixture(t);
   for (const forged of [{ confirmed: true }, { ownerCapability: 'full_admin' }, { map: { authoritative: true } }, { amount: '9999.00' }]) {

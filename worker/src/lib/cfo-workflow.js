@@ -3,7 +3,15 @@ import { taxReadiness } from './cfo-tax-evidence.js';
 const QUESTIONS = 'Select one entity and ask “Check tax readiness for 2025.”, “Show my weekly cash brief.” or “Check books against bank from 2026-09-01 to 2026-09-30.”';
 // Clarify attempted workflow actions, including compound clauses. A role or
 // topic mention in a document question is not a request to run a workflow.
-const CFO_REQUEST = /(?:^|[.!?;]\s+|\b(?:and|then)\s+)(?:please\s+|(?:can|could|would)\s+you\s+)?(?:(?:check|review)\s+(?:my\s+)?(?:tax[\s-]+readiness|books)\b|(?:show|run|review|check)\s+(?:my\s+)?(?:weekly[\s-]+cash(?:[\s-]+brief)?|cash[\s-]+brief)\b)/i;
+const CFO_REQUEST = /(?:^|[.!?;,:]\s*|\b(?:and|then)\s+)(?:(?:please|(?:can|could|would)\s+you)\s+)*(?:(?:check|review|run)\s+(?:my\s+)?(?:tax[\s-]+readiness|books)\b|(?:show|run|review|check)\s+(?:my\s+)?(?:weekly[\s-]+cash(?:[\s-]+brief)?|cash[\s-]+brief)\b)/i;
+
+// Quoted commands in a document question are data. Preserve a non-word marker
+// so removing a title cannot join its surrounding words into a new command.
+// Match only paired delimiters; a possessive apostrophe must not hide a later
+// action. Exact supported commands (including opaque account refs) parse first.
+function unquotedClauses(text) {
+  return text.replace(/"(?:\\[\s\S]|[^"\\])*"|“[^”]*”|(?<![\p{L}\p{N}])'(?:\\[\s\S]|[^'\\])*'(?![\p{L}\p{N}])|‘[^’]*’|`[^`]*`/gu, ' \ufffc ');
+}
 function calendarDate(value) {
   const date = new Date(`${value}T00:00:00Z`);
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
@@ -27,7 +35,7 @@ export function parseCfoQuestion(question) {
       return { kind: 'books_check', periodStart: match[1], periodEnd: match[2], accountRef };
     }
   }
-  return CFO_REQUEST.test(text) ? { kind: 'clarification' } : null;
+  return CFO_REQUEST.test(unquotedClauses(text)) ? { kind: 'clarification' } : null;
 }
 
 export function cfoEnvelope({ entityScope, asOf, kind, status, answer, gaps = [], metadata = {} }) {
