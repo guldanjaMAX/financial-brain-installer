@@ -12,12 +12,22 @@ const WINDOWS_ACL_SCRIPT = `
 $ErrorActionPreference = 'Stop'
 try {
   $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
-  $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+  $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+  $sid = $identity.User
   $item = Get-Item -LiteralPath $request.path -Force
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
       [bool]$item.PSIsContainer -ne [bool]$request.directory) { throw 'unsafe path' }
   $acl = Get-Acl -LiteralPath $request.path
-  if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { throw 'wrong owner' }
+  $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
+  if ($owner.Value -ne $sid.Value) {
+    # Elevated Windows creators can default to the Administrators group owner.
+    # Only protection may replace that owner, and only for an elevated token.
+    # Verification still requires the individual SID, never the group owner.
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    if ($request.verifyOnly -or
+        -not $owner.IsWellKnown([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid) -or
+        -not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'wrong owner' }
+  }
   $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
   if ($request.directory) { $inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' }
   if (-not $request.verifyOnly) {

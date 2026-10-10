@@ -16,7 +16,8 @@ the brain, not for whoever built it: what changed for them, and what to check.
   `~/.brain/upgrade-bookmarks/` receipts for recovery review. A different
   capitalization of the same home folder is accepted. On Windows, receipt
   access is restricted to your account and verified before the update continues,
-  including when your home folder name contains non-English characters. On Mac,
+  including when your home folder name contains non-English characters or the
+  update runs from an administrator session. On Mac,
   inherited access is removed from receipts and unsafe folder permissions stop
   the update before deployment.
 

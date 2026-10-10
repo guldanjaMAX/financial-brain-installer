@@ -183,6 +183,50 @@ test("R152-02: Windows native ACL boundary requires proof and uses an allowliste
   assert.equal(calls, 2, "both denied and verified ACL boundaries ran");
 });
 
+test("CI Windows: an elevated creator can privatize an Administrators-owned receipt", async (t) => {
+  for (const groupOwned of [false, true]) {
+    const f = fixture(t);
+    let calls = 0, ownershipChecks = 0, writes = 0;
+    const result = await runFaultUpgrade(f, { bookmarkOptions: {
+      platform: "win32",
+      io: { ...fs, writeFileSync(...args) { writes++; return fs.writeFileSync(...args); } },
+      windowsAcl(path, options) {
+        secureWindowsUpgradeBookmarkPath(path, { ...options, environment: { SystemRoot: "C:\\Windows" },
+          run(_command, args, options) {
+            calls++;
+            const request = JSON.parse(options.input);
+            const script = Buffer.from(args.at(-1), "base64").toString("utf16le");
+            // Static contract for the native ownership exception, with the
+            // elevated runner's default owner modeled at the process seam.
+            // The native Windows suite proves the actual ACL behavior.
+            const precheck = script.slice(0, script.indexOf("$inheritance ="));
+            ownershipChecks++;
+            const canAdoptGroupOwner =
+              /\$identity = \[System\.Security\.Principal\.WindowsIdentity\]::GetCurrent\(\)/.test(precheck) &&
+              /\$sid = \$identity\.User/.test(precheck) &&
+              /\$owner = \$acl\.GetOwner\(\[System\.Security\.Principal\.SecurityIdentifier\]\)/.test(precheck) &&
+              /if \(\$owner\.Value -ne \$sid\.Value\)\s*\{/.test(precheck) &&
+              /\$principal = New-Object System\.Security\.Principal\.WindowsPrincipal\(\$identity\)/.test(precheck) &&
+              /if \(\$request\.verifyOnly -or\s*-not \$owner\.IsWellKnown\(\[System\.Security\.Principal\.WellKnownSidType\]::BuiltinAdministratorsSid\) -or\s*-not \$principal\.IsInRole\(\[System\.Security\.Principal\.WindowsBuiltInRole\]::Administrator\)\) \{ throw 'wrong owner' \}/.test(precheck);
+            // An existing individual-owner receipt is the unchanged control.
+            // Group ownership occurs on creation, never accepted at readback.
+            const refused = groupOwned && !request.verifyOnly && !canAdoptGroupOwner;
+            assert.match(script, /\$acl\.SetOwner\(\$sid\)/);
+            assert.match(script, /\$acl\.GetOwner\(\[System\.Security\.Principal\.SecurityIdentifier\]\)\.Value -ne \$sid\.Value -or/);
+            return { status: refused ? 1 : 0, stdout: Buffer.from(refused ? "" : "private"), stderr: Buffer.alloc(0) };
+          },
+        });
+      },
+    } });
+    assert.ok(calls > 0 && ownershipChecks > 0, "native ownership decision was reached");
+    assert.equal(result.error, null, groupOwned ? "elevated group-owner receipt must save" : "individual-owner control");
+    assert.equal(calls, 4);
+    assert.equal(writes, 1);
+    assert.ok(result.events.includes("health:active"));
+    assert.equal(result.history.at(-1).status, "verified");
+  }
+});
+
 test("R152-03: non-UTF-8 Windows stdin preserves ASCII and Unicode receipt paths", async (t) => {
   for (const folder of ["ascii-home", "caf\u00e9-\u4e2d-\ud83d\udcc1"]) {
     const f = fixture(t);

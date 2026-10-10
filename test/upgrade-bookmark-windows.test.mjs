@@ -9,15 +9,29 @@ import { windowsFileChildEnvironment } from "../operations/current-user-file.mjs
 
 // Native tests touch only synthetic receipt paths. They never invoke a
 // credential helper, account endpoint, scheduler, or the installer CLI.
-function acl(path, broaden = false) {
+function acl(path, broaden = false, administratorOwner = false) {
   const env = windowsFileChildEnvironment();
   const script = `
     $ErrorActionPreference = 'Stop'
     try {
       $reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [Text.Encoding]::UTF8)
       $request = $reader.ReadToEnd() | ConvertFrom-Json
-      $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+      $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+      $sid = $identity.User
       $acl = Get-Acl -LiteralPath $request.path
+      if ($request.administratorOwner) {
+        $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+        if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+          [Console]::Out.Write('{"elevated":false}')
+          exit 0
+        }
+        $owner = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+        $acl.SetOwner($owner)
+        Set-Acl -LiteralPath $request.path -AclObject $acl
+        $acl = Get-Acl -LiteralPath $request.path
+        [Console]::Out.Write((@{ elevated = $true; administratorOwned = ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -eq $owner.Value) } | ConvertTo-Json -Compress))
+        exit 0
+      }
       if ($request.broaden) {
         $everyone = New-Object System.Security.Principal.SecurityIdentifier('S-1-1-0')
         $flags = [System.Security.AccessControl.InheritanceFlags]::None
@@ -35,7 +49,7 @@ function acl(path, broaden = false) {
   `;
   const result = spawnSync(win32.join(env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
-      input: JSON.stringify({ path, broaden }), encoding: "utf8", env, shell: false,
+      input: JSON.stringify({ path, broaden, administratorOwner }), encoding: "utf8", env, shell: false,
       timeout: 15_000, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     });
   assert.equal(result.status, 0, "native fixture ACL operation completed");
@@ -48,6 +62,48 @@ const record = {
 };
 const now = () => new Date("2026-10-10T12:00:00.000Z");
 const privateAcl = { broad: 0, protected: true, owner: true, rules: 1 };
+
+test("CI native Windows: elevated group owner becomes the individual owner before receipt bytes", {
+  skip: process.platform !== "win32" ? "requires native Windows DACLs" : false,
+}, (t) => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(join(tmpdir(), "receipt-admin-owner-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const directory = join(root, "bookmarks");
+  fs.mkdirSync(directory);
+  const starting = acl(directory, false, true);
+  if (!starting.elevated) return t.skip("requires an elevated Windows token");
+  assert.equal(starting.administratorOwned, true, "reproduced the runner's group ownership");
+  assert.ok(acl(directory, true).broad > 0, "unrelated read grant was installed");
+  let writes = 0, readbacks = 0, groupOwnedFiles = 0;
+  const path = saveUpgradeBookmark(record, { directory, now,
+    windowsAcl(target, options) {
+      if (!options.directory && !options.verifyOnly) {
+        assert.equal(acl(target, false, true).administratorOwned, true);
+        groupOwnedFiles++;
+      }
+      secureWindowsUpgradeBookmarkPath(target, options);
+    },
+    io: { ...fs, writeFileSync(fd, bytes) {
+      writes++;
+      assert.deepEqual(acl(directory), privateAcl);
+      assert.deepEqual(acl(join(directory, fs.readdirSync(directory)[0])), privateAcl);
+      return fs.writeFileSync(fd, bytes);
+    }, readFileSync(fd) { readbacks++; return fs.readFileSync(fd); } },
+  });
+  assert.equal(groupOwnedFiles, 1);
+  assert.equal(writes, 1);
+  assert.equal(readbacks, 1);
+  assert.equal(JSON.parse(fs.readFileSync(path)).bookmark, record.bookmark);
+  assert.deepEqual(acl(path), privateAcl);
+  assert.equal(acl(path, false, true).administratorOwned, true, "owner drift was installed before verification");
+  let verifyCalls = 0;
+  assert.throws(() => secureWindowsUpgradeBookmarkPath(path, { verifyOnly: true,
+    run(...args) { verifyCalls++; return spawnSync(...args); },
+  }), /could not be protected and verified/);
+  assert.equal(verifyCalls, 1, "native verification rejected group ownership");
+  secureWindowsUpgradeBookmarkPath(path);
+  assert.deepEqual(acl(path), privateAcl, "protect control restores individual ownership");
+});
 
 for (const inheritedBroadAccess of [true, false]) {
   test(`R152-02 native Windows: ${inheritedBroadAccess ? "broad inherited" : "private"} ACL control`, {

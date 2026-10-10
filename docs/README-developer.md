@@ -237,7 +237,10 @@ Missing native tools, denied changes and ambiguous ACL listings stop the update.
 Windows creates protected DACLs on the
 receipt directory and new empty file, removes other inherited and explicit
 grants, and reads the owner SID and exact grants back before writing receipt
-contents. It verifies the ACLs again at readback. Missing PowerShell, denied ACL
+contents. An elevated token may replace the default Administrators group owner
+with its individual user SID during protection. Other starting owners are
+refused; verification always requires the individual owner and its sole grant.
+It verifies the ACLs again at readback. Missing PowerShell, denied ACL
 changes or unverified ACLs stop the update before deployment. Paths cross the
 PowerShell stdin boundary as ASCII-escaped JSON so non-ASCII profile names
 survive the console input code page. Windows flushes
