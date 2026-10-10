@@ -873,7 +873,7 @@ function refusingEnv(db, error) {
   const prepare = env.DB.prepare.bind(env.DB);
   env.DB = {
     prepare(sql) {
-      if (/WITH live_documents/.test(sql)) throw error;
+      if (/live_documents AS MATERIALIZED/.test(sql)) throw error;
       return prepare(sql);
     },
     async batch() { throw new Error("source inventory must never execute a write batch"); },
@@ -1128,3 +1128,142 @@ for (const arm of [
     } finally {db.close();}
   });
 }
+
+test("bounded inventory transport reaches indexed pages and matches the complete control", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const { env, seen } = d1Env(db);
+  const response = await call(env, post({ mode: "bounded", limit: 2 }, { "X-Admin-Key": env.ADMIN_KEY }));
+  assert.equal(response.status, 200);
+  const page = await response.json();
+  assert.equal(page.kind, "source_inventory_scan");
+  assert.equal(page.scan.scanned, 2);
+  assert.equal(page.truncated, true);
+  assert.ok(seen.prepared.some((sql) => sql.includes("inventory_document_page AS MATERIALIZED")), "bounded decision reached");
+  assert.equal(seen.runs, 0);
+  db.close();
+});
+
+test("bounded transport and CLI preserve exact family counts across pages and detect mutation", async () => {
+  const { collectSourceInventoryPages } = await import("../../brain.mjs");
+  const { sourceInventorySlice } = await import("../src/lib/store-d1.js");
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  // An assessed family member on a later page must not count a second family.
+  db.exec(`INSERT INTO documents (doc_uid,source,source_id,title,ingested_at,content_hash,meta,
+    text_source,text_reliable,provenance_receipt_version,provenance_receipt_status,
+    provenance_receipt_reason,provenance_receipt_digest)
+    SELECT 'alpha:two#part2',source,source_id||'#part2',title,ingested_at,content_hash,meta,text_source,
+    text_reliable,provenance_receipt_version,provenance_receipt_status,provenance_receipt_reason,
+    provenance_receipt_digest FROM documents WHERE doc_uid='alpha:two'`);
+  const { env } = d1Env(db);
+  let reached = 0; const progress = [];
+  const request = async (body) => { reached++; return call(env, post({ ...body, limit: 2 }, { "X-Admin-Key": env.ADMIN_KEY })); };
+  const result = await collectSourceInventoryPages(request, { bounded: true, onProgress: (p) => progress.push(p) });
+  const control = await sourceInventorySlice(env, { now: Date.parse(result.as_of), documentPage: { after: 0, limit: 5000 } });
+  assert.deepEqual(result.sources, control.rows);
+  assert.equal(result.sources.find((row) => row.name === "alpha").storage.logical_documents, 2);
+  assert.equal(result.sources.find((row) => row.name === "alpha").storage.physical_documents, 3);
+  assert.equal(reached, 3, "every work page reached the real Worker");
+  assert.equal(progress.at(-1).scanned, 5);
+  assert.doesNotMatch(JSON.stringify(result), /hmac-sha256|alpha:two|part2/);
+  const first = await (await request({ mode: "bounded" })).json();
+  db.exec("UPDATE documents SET text_reliable=0 WHERE doc_uid='alpha:one'");
+  const changed = await request({ mode: "bounded", cursor: first.cursor });
+  assert.equal(changed.status, 409, "same-count mutation refuses the next page");
+  assert.equal(reached, 5, "mutation decision reached after the green control");
+  db.close();
+});
+
+test("large fake D1 rejects whole-corpus JSON work but executes indexed bounded pages", async () => {
+  const { collectSourceInventoryPages } = await import("../../brain.mjs");
+  const { sourceInventorySql } = await import("../src/lib/store-d1.js");
+  const db = migratedDb();
+  db.exec(`INSERT INTO sources (name,kind,status,created_at) VALUES ('archive','drive','ready','2026-01-01');
+    WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<200001)
+    INSERT INTO documents (doc_uid,source,source_id,title,ingested_at,content_hash,meta)
+      SELECT 'archive:'||i,'archive',CAST(i AS TEXT),'Synthetic',1,'fixture','{}' FROM n`);
+  const { env, seen } = d1Env(db);
+  const prepare = env.DB.prepare;
+  let decision = 0, rejected = 0, bounded = 0;
+  env.DB.prepare = (sql) => {
+    if (sql.includes("live_documents AS MATERIALIZED")) {
+      decision++;
+      if (!sql.includes("inventory_document_page AS MATERIALIZED")) {
+        rejected++;
+        throw new Error("D1_ERROR: D1 DB exceeded its CPU time limit and was reset");
+      }
+      bounded++;
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(10001, 0, 5000);
+      assert.ok(plan.some((row) => /SEARCH documents USING INTEGER PRIMARY KEY \(rowid>\?\)/.test(row.detail)), "document range uses the rowid B-tree");
+      assert.ok(plan.some((row) => /SEARCH chunks USING INDEX idx_chunks_doc/.test(row.detail)), "chunks use document index seeks");
+    }
+    return prepare(sql);
+  };
+  assert.throws(() => env.DB.prepare(sourceInventorySql()), /CPU time limit/);
+  assert.equal(rejected, 1, "whole-corpus mutation reached CPU refusal");
+  let requests = 0;
+  const result = await collectSourceInventoryPages(async (body) => {
+    requests++;
+    return call(env, post(body, { "X-Admin-Key": env.ADMIN_KEY }));
+  }, { bounded: true });
+  assert.equal(result.sources[0].storage.physical_documents, 200001);
+  assert.equal(result.sources[0].storage.logical_documents, 200001);
+  assert.equal(requests, 41);
+  assert.equal(bounded, 41);
+  assert.equal(decision, 42, "control and every page reached the CPU decision");
+  assert.equal(seen.runs, 0);
+  assert.equal(seen.batches, 0);
+  db.close();
+});
+
+test("daily freshness reads receipts without visiting corpus rows", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const { env, seen } = d1Env(db);
+  const prepare = env.DB.prepare; const documentBounds = [];
+  env.DB.prepare = (sql) => {
+    const statement = prepare(sql);
+    if (!sql.includes("live_documents AS MATERIALIZED")) return statement;
+    return { ...statement, bind: (...args) => {
+      documentBounds.push(args[2]); return statement.bind(...args);
+    } };
+  };
+  const response = await call(env, post({ mode: "freshness" }, { "X-Admin-Key": env.ADMIN_KEY }));
+  assert.equal(response.status, 200);
+  const receipt = await response.json();
+  assert.equal(receipt.kind, "source_freshness");
+  assert.equal(receipt.sources.length, 2, "both registered source decisions reached");
+  assert.equal(receipt.sources.find((row) => row.name === "alpha").receipt.latest_run.outcome, "completed");
+  assert.equal(receipt.sources.find((row) => row.name === "beta").receipt.latest_run.outcome, "failed");
+  assert.ok(seen.prepared.some((sql) => /inventory_document_page AS MATERIALIZED/.test(sql)), "bounded reader reached");
+  assert.ok(receipt.sources.every((row) => !('storage' in row)), "receipt-only mode cannot misrepresent zero storage");
+  assert.deepEqual(documentBounds, [0], "the actual SQL bind visits zero corpus rows");
+  assert.equal(seen.runs, 0);
+  db.close();
+});
+
+test("bounded inventory shrinks dense pages and refuses a receipt-only mutation", async () => {
+  const { sourceInventoryScanPage } = await import("../src/lib/source-inventory-scan.js");
+  const db = migratedDb(); await addInventoryFixture(db);
+  const { env } = d1Env(db); const prepare = env.DB.prepare;
+  let limits = [];
+  env.DB.prepare = (sql) => {
+    if (sql.includes("LIMIT 50001")) return { bind: (_after, limit) => ({ first: async () => {
+      limits.push(limit); return { n: limit > 2 ? 50001 : 2 };
+    } }) };
+    return prepare(sql);
+  };
+  const page = await sourceInventoryScanPage(env, { limit: 4, now: Date.parse("2026-10-01T00:00:00Z") });
+  assert.deepEqual(limits, [4, 2], "the chunk budget decision reduced the page");
+  assert.equal(page.scan.scanned, 2);
+  assert.equal(page.scan.limit, 2);
+  const before = db.prepare("SELECT source_original_retrieval_generation AS n FROM install_state").get().n;
+  db.exec("UPDATE sync_runs SET docs_added=7 WHERE source='alpha'");
+  assert.equal(db.prepare("SELECT source_original_retrieval_generation AS n FROM install_state").get().n, before,
+    "this mutation must exercise the receipt fence independently of the document fence");
+  await assert.rejects(() => sourceInventoryScanPage(env, { after: page.scan.through, snapshot: page.snapshot }),
+    { code: "source_inventory_changed" });
+  assert.equal(limits.length, 2, "changed receipt refused before another document scan");
+  db.close();
+});

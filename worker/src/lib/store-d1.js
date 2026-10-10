@@ -4383,6 +4383,10 @@ THEN 1 ELSE 0 END`;
 /**
  * The per-document CTEs both source statements open with.
  *
+ * Inventory runtime calls use `bounded`: the materialized rowid page precedes
+ * JSON and chunk work. The unbounded shape is retained for recovery (a separate
+ * endpoint) and historical SQL regression comparisons, never inventory runtime.
+ *
  * `brain sources` failed on a large brain with an opaque 503 while strictly
  * heavier aggregates over the same rows still returned. The cause was memory,
  * not time: D1 holds a materialised CTE in RAM, and these CTEs pushed two
@@ -4410,9 +4414,12 @@ THEN 1 ELSE 0 END`;
  * `sourceRecoverySql` keeps its own two for the reason documented there. Every
  * statement still returns the same rows in the same order.
  */
-const inventoryDocumentCtesSql = ({ includeCurrentCustomApi = true } = {}) => `
-  WITH live_documents AS MATERIALIZED (
-    SELECT d.rowid AS document_rowid,
+const inventoryDocumentCtesSql = ({ includeCurrentCustomApi = true, bounded = false } = {}) => `
+  WITH ${bounded ? `inventory_document_page AS MATERIALIZED (
+    SELECT rowid AS inventory_rowid, * FROM documents
+     WHERE rowid > ?2 ORDER BY rowid LIMIT ?3
+  ),` : ""} live_documents AS MATERIALIZED (
+    SELECT ${bounded ? "d.inventory_rowid" : "d.rowid"} AS document_rowid,
            d.doc_uid,
            d.source AS physical_source,
            d.source_id,
@@ -4439,7 +4446,7 @@ const inventoryDocumentCtesSql = ({ includeCurrentCustomApi = true } = {}) => `
              (json_type(d.meta,'$.family_of')='text' AND length(trim(json_extract(d.meta,'$.family_of'))) > 0)
              OR (json_type(d.meta,'$.part_of')='text' AND length(trim(json_extract(d.meta,'$.part_of'))) > 0)
            ) THEN 1 ELSE 0 END AS family_lineage
-      FROM documents d
+      FROM ${bounded ? "inventory_document_page" : "documents"} d
      WHERE d.deleted_at IS NULL${customApiVisibilitySql("d", includeCurrentCustomApi)}
   ),
   attributed_documents AS (
@@ -4481,6 +4488,7 @@ const inventoryDocumentCtesSql = ({ includeCurrentCustomApi = true } = {}) => `
            COUNT(chunk_uid) AS chunk_count,
            COALESCE(SUM(CASE WHEN trim(text) != '' THEN 1 ELSE 0 END),0) AS nonblank_chunk_count
       FROM chunks
+     ${bounded ? "WHERE doc_uid IN (SELECT doc_uid FROM live_documents)" : ""}
      GROUP BY doc_uid
   ),
   document_flags AS (
@@ -4522,7 +4530,8 @@ const inventoryDocumentCtesSql = ({ includeCurrentCustomApi = true } = {}) => `
 export const sourceInventorySql = ({
   includeFailureEvidence = true,
   includeCurrentCustomApi = true,
-} = {}) => `${inventoryDocumentCtesSql({ includeCurrentCustomApi })},
+  bounded = false,
+} = {}) => `${inventoryDocumentCtesSql({ includeCurrentCustomApi, bounded })},
   source_names AS (
     SELECT name FROM sources
     UNION
@@ -4532,6 +4541,7 @@ export const sourceInventorySql = ({
     SELECT inventory_source AS source,
            COUNT(*) AS physical_documents,
            COUNT(DISTINCT family_doc_uid) AS logical_documents,
+           ${bounded ? "json_group_array(DISTINCT family_doc_uid) AS inventory_families," : ""}
            MIN(ingested_at) AS first_stored_ingest_at,
            MAX(ingested_at) AS last_stored_ingest_at,
            SUM(chunk_count) AS chunks,
@@ -4623,6 +4633,7 @@ export const sourceInventorySql = ({
          CASE WHEN s.name IS NULL THEN 0 ELSE 1 END AS registered,
          COALESCE(d.physical_documents,0) AS physical_documents,
          COALESCE(d.logical_documents,0) AS logical_documents,
+         ${bounded ? "d.inventory_families," : ""}
          d.first_stored_ingest_at,
          d.last_stored_ingest_at,
          COALESCE(d.readable_documents,0) AS readable_documents,
@@ -4711,19 +4722,62 @@ const inventoryNullableCount = (value) => {
   return Number.isFinite(number) && number >= 0 ? Math.floor(number) : null;
 };
 
+/** Legacy v3 callers also use bounded SQL; modern clients page over HTTP. */
+export async function sourceInventory(env, options = {}) {
+  const now = options.now ?? Date.now();
+  const maxRows = options.maxRows ?? SOURCE_INVENTORY_MAX_ROWS;
+  if (!Number.isFinite(now) || now < 0 || !Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows > SOURCE_INVENTORY_MAX_ROWS) {
+    throw new TypeError("source inventory options are invalid");
+  }
+  const { sourceInventoryScanPage } = await import("./source-inventory-scan.js");
+  const { createInventoryAccumulator } = await import("./source-inventory-merge.js");
+  const accumulator = createInventoryAccumulator();
+  let after = 0, snapshot = null;
+  for (let pageNumber = 0; pageNumber < 1000; pageNumber++) {
+    let page;
+    try { page = await sourceInventoryScanPage(env, { after, snapshot, now }); }
+    catch (error) {
+      if (pageNumber !== 0 || !/no such (?:column: source_original_retrieval_generation|table: source_original_result_family_recovery_state)/.test(String(error?.message))) throw error;
+      // Pre-45 databases lack the durable mutation fence. Keep their one-query
+      // compatibility read only when the entire corpus fits one bounded page.
+      const bound = await env.DB.prepare("SELECT COUNT(*) AS n FROM (SELECT rowid FROM documents LIMIT 5001)").first();
+      if (!bound || bound.n > 5000) throw Object.assign(new Error("source inventory needs the bounded schema"), { code: "source_inventory_too_large" });
+      const legacy = await sourceInventorySlice(env, { ...options, documentPage: { after: 0, limit: 5000 } });
+      return { rows: legacy.rows, total: legacy.total };
+    }
+    accumulator.add({ sources: page.rows, families: page.families });
+    if (page.complete) {
+      const rows = accumulator.finish();
+      if (rows.length > (options.maxRows ?? SOURCE_INVENTORY_MAX_ROWS)) {
+        throw Object.assign(new Error("source inventory exceeds the safe row limit"), { code: "source_inventory_too_large" });
+      }
+      return { rows, total: rows.length };
+    }
+    after = page.scan.through;
+    snapshot = page.snapshot;
+  }
+  throw Object.assign(new Error("source inventory exceeds the safe page limit"), { code: "source_inventory_too_large" });
+}
+
 /** Return every source row for one bounded D1 snapshot, in stable id order. */
-export async function sourceInventory(env, {
+export async function sourceInventorySlice(env, {
   now = Date.now(),
   maxRows = SOURCE_INVENTORY_MAX_ROWS,
+  documentPage = { after: 0, limit: 5000 },
 } = {}) {
   if (!Number.isFinite(now) || now < 0) throw new TypeError("source inventory time is invalid");
   if (!Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows > SOURCE_INVENTORY_MAX_ROWS) {
     throw new TypeError("source inventory row limit is invalid");
   }
 
+  if (!documentPage || !Number.isSafeInteger(documentPage.after) || documentPage.after < 0 ||
+      !Number.isSafeInteger(documentPage.limit) || documentPage.limit < 0 || documentPage.limit > 5000) {
+    throw new TypeError("source inventory document page is invalid");
+  }
   const readInventory = async (includeCurrentCustomApi) => {
     try {
-      return await env.DB.prepare(sourceInventorySql({ includeCurrentCustomApi })).bind(maxRows + 1).all();
+      return await env.DB.prepare(sourceInventorySql({ includeCurrentCustomApi, bounded: documentPage !== null }))
+        .bind(maxRows + 1, ...(documentPage ? [documentPage.after, documentPage.limit] : [])).all();
     } catch (error) {
       if (!missingFailureEvidenceColumn(error)) throw error;
       // Schema 39 remains readable while migration 0040 is pending. Missing
@@ -4732,7 +4786,8 @@ export async function sourceInventory(env, {
       return env.DB.prepare(sourceInventorySql({
         includeFailureEvidence: false,
         includeCurrentCustomApi,
-      })).bind(maxRows + 1).all();
+        bounded: documentPage !== null,
+      })).bind(maxRows + 1, ...(documentPage ? [documentPage.after, documentPage.limit] : [])).all();
     }
   };
   // Custom-source version tables arrive after the v3 inventory contract. An
@@ -5042,7 +5097,19 @@ export async function sourceInventory(env, {
   if (rows.length !== total) {
     throw new Error("source inventory did not return the complete bounded snapshot");
   }
-  return { total, rows };
+  const families = documentPage ? await inventoryFamilyDigests(env, rawRows) : undefined;
+  return { total, rows, ...(documentPage ? { families } : {}) };
+}
+
+async function inventoryFamilyDigests(env, rawRows) {
+  const key = await sourceRecoveryPrivacyKey(env);
+  const families = [];
+  for (const row of rawRows) {
+    for (const family of JSON.parse(row.inventory_families || "[]")) {
+      families.push([row.name, await opaqueInventoryRecordId(key, family)]);
+    }
+  }
+  return families;
 }
 
 const sourceRecoveryMarkerSql = `

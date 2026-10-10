@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync as makeTempDirectory, realpathSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -14,6 +14,8 @@ import {
   supportErrorCode,
 } from "../brain.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+
+const mkdtempSync = (...args) => realpathSync.native(makeTempDirectory(...args));
 
 const WINDOWS_RENDER_OPTIONS = Object.freeze({
   platform: "win32",
@@ -226,7 +228,7 @@ test("source inventory CLI uses only the internal durable credential and collect
     }));
 
     assert.equal(resolverCalls, 1);
-    assert.deepEqual(bodies, [{ limit: 250 }, { limit: 250, cursor: "opaque-next-page" }]);
+    assert.deepEqual(bodies, [{ mode: "bounded", limit: 5000 }, { limit: 250, cursor: "opaque-next-page" }]);
     assert.deepEqual(value.sources.map((source) => source.source_id), ["alpha", "beta"]);
     assert.equal(value.complete, true);
     assert.equal(value.returned, 2);
@@ -691,4 +693,28 @@ test("shipped source guidance uses v3 JSON or the actual concise human columns",
   const shownInventory = escapeForRegExp(renderCliCommands("brain sources <manifest> --json"));
   assert.match(scheduler, new RegExp(`${shownInventory}.*\`contract_version: 3\`.*receipt\\.last_successful_run_at`, "is"));
   assert.doesNotMatch(scheduler, /last-ingest time moving|`last ingest` column/i);
+});
+
+test("daily receipt reader requests freshness only and rejects unavailable or malformed receipts", async () => {
+  const { readSourceFreshness } = await import("../brain.mjs");
+  await withManifest(async (manifest) => {
+    const outcomes = [];
+    for (const arm of ["control", "unavailable", "malformed"]) {
+      let reads = 0;
+      const run = () => readSourceFreshness(manifest, {
+        resolveAdminKey: () => OWNER_PROOF,
+        fetchImpl: async (_url, init) => {
+          reads++;
+          assert.deepEqual(JSON.parse(init.body), { mode: "freshness" });
+          if (arm === "unavailable") return Response.json({ code: "source_inventory_unavailable" }, { status: 503 });
+          return Response.json({ contract_version: 3, kind: arm === "malformed" ? "source_inventory" : "source_freshness",
+            sources: [{ name: "drive", receipt: { last_successful_run_at: AS_OF }, freshness: { state: "ok" } }] });
+        },
+      });
+      if (arm === "control") { assert.equal((await run()).sources.length, 1); outcomes.push("observed"); }
+      else { await assert.rejects(run); outcomes.push("unknown"); }
+      assert.equal(reads, 1, "every arm reached the authenticated receipt reader");
+    }
+    assert.deepEqual(outcomes, ["observed", "unknown", "unknown"]);
+  });
 });

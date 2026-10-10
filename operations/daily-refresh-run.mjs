@@ -106,7 +106,14 @@ export async function runDailyRefresh({
       await writeReceipt(receipt);
       return receipt;
     }
-    const baseline = await readFreshness();
+    // Inventory is evidence about a run, not permission to start an approved
+    // ingest leg. Keep outages separate from source/removal refusals.
+    const observeFreshness = async (source) => {
+      try { return { inventory: await readFreshness(source), unavailable: false }; }
+      catch { return { inventory: null, unavailable: true }; }
+    };
+    const baselineObservation = await observeFreshness();
+    const baseline = baselineObservation.inventory;
     for (const source of plan.sources.filter((entry) =>
       entry.class === "machine-pull" && entry.owner === "daily-task" && entry.status !== "ready"
     )) {
@@ -153,7 +160,9 @@ export async function runDailyRefresh({
       try {
         runResult = await runSource(source, { assertOwned: lock.assertOwned });
         lock.assertOwned();
-        const afterInventory = await readFreshness(source);
+        const afterObservation = await observeFreshness(source);
+        const afterInventory = afterObservation.inventory;
+        const freshnessUnknown = baselineObservation.unavailable || afterObservation.unavailable;
         const afterBySource = sourceFreshness(afterInventory, source);
         const freshness = compareFreshness(beforeBySource, afterBySource);
         const afterValues = Object.values(afterBySource).filter(Boolean).sort();
@@ -170,7 +179,8 @@ export async function runDailyRefresh({
             Number.isSafeInteger(run?.docs_failed))) &&
             ![run?.docs_added, run?.docs_updated, run?.docs_unchanged]
               .some((count) => Number.isSafeInteger(count) && count > 0)));
-        const freshnessAdvanced = freshness.advanced && !failedRun && !unverifiedRun;
+        const loaderRefused = ["failed", "refused"].includes(runResult?.status);
+        const freshnessAdvanced = !freshnessUnknown && !loaderRefused && freshness.advanced && !failedRun && !unverifiedRun;
         const docsExcluded = Number.isSafeInteger(runResult?.excluded) ? runResult.excluded : null;
         if (freshnessAdvanced && (latestRuns.some((run) => run?.outcome === "partial") ||
             runResult?.partial > 0 || docsExcluded > 0)) outcome = "partial";
@@ -181,6 +191,16 @@ export async function runDailyRefresh({
             : freshness.missing.length
             ? "the source claimed success, but one or more freshness receipts were missing or invalid"
             : "the source claimed success, but last_successful_run_at did not advance for every source leg";
+        }
+        if (freshnessUnknown) {
+          outcome = "unavailable";
+          reason = "source freshness is unknown because the source inventory could not be read";
+        }
+        // An explicit loader refusal remains a failure even when its freshness
+        // observation is unavailable. Inventory fallback never approves removal.
+        if (loaderRefused || (freshnessUnknown && (failedRun || unverifiedRun))) {
+          outcome = "failed";
+          reason = "the source refresh failed or refused its work";
         }
         const receipt = Object.freeze({
           schema_version: 1,
@@ -193,6 +213,10 @@ export async function runDailyRefresh({
           last_successful_run_at_before: before,
           last_successful_run_at_after: after,
           freshness_advanced: freshnessAdvanced,
+          ...(freshnessUnknown ? {
+            freshness_state: "unknown",
+            reason_code: "source_inventory_unavailable",
+          } : {}),
           docs_refused: docsRefused,
           docs_excluded: docsExcluded,
           missing_freshness_sources: freshness.missing,
@@ -324,7 +348,7 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
         scheduleAttention.push("daily schedule needs refresh (Node changed)");
       }
     }
-    const readFreshness = options.readFreshness ?? (async () => freshnessMap(await brain.cmdSources(path, {
+    const readFreshness = options.readFreshness ?? (async () => freshnessMap(await (brain.readSourceFreshness ?? brain.cmdSources)(path, {
       flags: { json: true },
       silent: true,
     })));

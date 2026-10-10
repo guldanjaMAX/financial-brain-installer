@@ -59,6 +59,7 @@ function d1(db) {
   });
   return {
     prepared,
+    SESSION_SIGNING_KEY: "fixture-inventory-privacy-key",
     DB: {
       prepare(sql) {
         prepared.push(sql);

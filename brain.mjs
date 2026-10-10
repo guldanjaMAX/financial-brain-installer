@@ -9798,7 +9798,7 @@ function validateSourceRecoveryPage(body) {
  * snapshot. `requestPage` is already authenticated by the caller and receives
  * only the private JSON body.
  */
-export async function collectSourceInventoryPages(requestPage, { limit = 250 } = {}) {
+export async function collectSourceInventoryPages(requestPage, { limit = 250, bounded = false, onProgress, ...bounds } = {}) {
   if (typeof requestPage !== "function") throw new TypeError("a source inventory request function is required");
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) {
     throw new TypeError("source inventory page limit must be an integer from 1 to 250");
@@ -9812,7 +9812,7 @@ export async function collectSourceInventoryPages(requestPage, { limit = 250 } =
   const ids = new Set();
   const cursors = new Set();
   for (let pageNumber = 0; pageNumber <= 40; pageNumber++) {
-    const response = await requestPage({ limit, ...(cursor ? { cursor } : {}) });
+    const response = await requestPage({ ...(bounded ? { mode: "bounded", limit: 5000 } : { limit }), ...(cursor ? { cursor } : {}) });
     let body = null;
     try { body = JSON.parse(await response.text()); } catch { /* handled below */ }
     if (!response.ok) {
@@ -9827,6 +9827,25 @@ export async function collectSourceInventoryPages(requestPage, { limit = 250 } =
         { retryable: response.status === 404 || isRetryableHttpStatus(response.status) },
       );
     }
+    if (body?.kind === "source_inventory_scan") {
+      const { collectBoundedInventory } = await import("./operations/source-inventory-pages.mjs");
+      try {
+        const result = await collectBoundedInventory(body, requestPage, { ...bounds, onProgress,
+          validateRows: (rows) => validateSourceInventoryPage({
+            contract_version: 3, kind: "source_inventory", total: rows.length, returned: rows.length,
+            sources: rows, complete: true, truncated: false, cursor: null,
+            as_of: body.as_of, snapshot: { id: `sha256:${body.snapshot}`, as_of: body.as_of, stable: true, total: rows.length },
+            recovery_plan_summary: {},
+          }),
+        });
+        return validateSourceInventoryPage(result);
+      } catch (error) {
+        if (error instanceof SourceInventoryClientError) throw error;
+        throw new SourceInventoryClientError(error?.code || "inventory_contract_invalid",
+          "the bounded source inventory could not be completed; freshness remains unknown");
+      }
+    }
+    bounded = false; // A v3 compatibility response keeps its source-page request shape.
     const page = validateSourceInventoryPage(body);
     const pageSnapshot = `${page.snapshot.id}|${page.snapshot.as_of}|${page.snapshot.total}`;
     if (snapshot === null) {
@@ -9884,7 +9903,21 @@ export async function collectSourceInventoryPages(requestPage, { limit = 250 } =
 async function collectSourceInventoryWithReadinessRetry(requestPage, options = {}) {
   const sleep = options.sourceInventorySleep ??
     ((milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)));
-  return retryTransient(() => collectSourceInventoryPages(requestPage), {
+  const now = options.sourceInventoryNow ?? Date.now;
+  const deadline = now() + 600_000;
+  let requests = 0;
+  const boundedRequest = async (payload) => {
+    if (++requests > 1000 || now() >= deadline) {
+      throw new SourceInventoryClientError("inventory_total_limit", "source inventory reached its total request or time bound");
+    }
+    const response = await requestPage(payload);
+    if (now() >= deadline) throw new SourceInventoryClientError("inventory_total_limit", "source inventory reached its total time bound");
+    return response;
+  };
+  return retryTransient(() => collectSourceInventoryPages(boundedRequest, { bounded: true,
+    onProgress: options.silent ? () => {} : options.onInventoryProgress ?? ((progress) =>
+      console.error(`Source inventory: ${progress.scanned} rows checked; page ${progress.pages}/${progress.maxPages} (limit ${progress.maxDocuments} rows).`)),
+  }), {
     attempts: 4,
     delayMs: 250,
     maxDelayMs: 1_000,
@@ -10061,6 +10094,30 @@ function sourceInventoryAccess(manifestPath, m, options = {}) {
     requestBatch,
     reconcileFamilies,
   };
+}
+
+/** Read only source/run receipts for daily scheduling, without a corpus walk. */
+export async function readSourceFreshness(manifestPath, options = {}) {
+  const { m } = loadManifest(manifestPath);
+  const { requestPage } = sourceInventoryAccess(manifestPath, m, options);
+  const response = await requestPage({ mode: "freshness" });
+  if (!response.ok) throw new SourceInventoryClientError("source_inventory_unavailable", "source freshness is unavailable");
+  let body;
+  try { body = await response.json(); } catch { /* validate below */ }
+  if (body?.contract_version !== 3 || body.kind !== "source_freshness" ||
+      !Array.isArray(body.sources) || body.sources.length > 10000) {
+    throw new SourceInventoryClientError("inventory_contract_invalid", "source freshness receipt is invalid");
+  }
+  const names = new Set();
+  for (const row of body.sources) {
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(row?.name || "") || names.has(row.name) ||
+        !row.receipt || !row.freshness) {
+      throw new SourceInventoryClientError("inventory_contract_invalid", "source freshness row is invalid");
+    }
+    names.add(row.name);
+    assertSourceInventoryPrivacy(row);
+  }
+  return body;
 }
 
 function sourceInventoryFailure(json, error) {
@@ -26567,7 +26624,9 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       last_successful_run_at: newest,
       next_run: nextRun,
       owner: effectiveOwner,
-      reason: source.reason,
+      reason: inventory?.freshness_unavailable
+        ? "source freshness is unknown because the source inventory could not be read"
+        : source.reason,
     });
   });
 }
@@ -26714,14 +26773,11 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
 
   let inventory = null;
   try {
-    const readInventory = options.readSourceInventory ?? ((path) => cmdSources(path, {
-      flags: { json: true },
-      silent: true,
-    }));
+    const readInventory = options.readSourceInventory ?? ((path) => readSourceFreshness(path));
     inventory = await readInventory(manifestPath);
   } catch (error) {
-    if (action !== "status") throw error;
-    warn(`local schedule status is available, but source freshness could not be read: ${String(error?.message || error).slice(0, 160)}`);
+    inventory = { sources: [], freshness_unavailable: true };
+    if (!options.quiet) warn("Local schedule status is available, but source freshness is unknown because the source inventory could not be read.");
   }
   const sources = dailyFreshnessRows(plan, inventory, schedule);
   const quickBooksSchedule = action === "status" && m.operations?.quickbooks_schedule?.enabled === true
@@ -26732,6 +26788,9 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
     plan,
     schedule,
     sources,
+    freshness: inventory?.freshness_unavailable
+      ? { state: "unknown", reason_code: "source_inventory_unavailable" }
+      : { state: "observed", reason_code: null },
     ...(quickBooksSchedule ? { quickbooks_schedule: quickBooksSchedule } : {}),
   });
   if (options.quiet) return result;

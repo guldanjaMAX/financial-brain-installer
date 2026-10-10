@@ -10,6 +10,8 @@ import { jsonResponse, privateNoStore, validateAdminKey } from "./core.js";
 import { backendOf, D1 } from "./store.js";
 import { ownerSessionPrincipal } from "./owner-auth.js";
 import { sourceInventory, sourceRecoveryCandidates } from "./store-d1.js";
+import { sourceInventoryScanPage, sourceFreshnessPage } from "./source-inventory-scan.js";
+import { recoveryPlanSummary } from "./source-inventory-merge.js";
 
 export const SOURCE_INVENTORY_PATH = "/api/admin/brain/sources";
 export const SOURCE_INVENTORY_CONTRACT_VERSION = 3;
@@ -55,19 +57,20 @@ function decodeCursor(value, mode) {
   try { cursor = JSON.parse(decoded); } catch { return undefined; }
   if (!cursor || typeof cursor !== "object" || Array.isArray(cursor)) return undefined;
   const fields = Object.keys(cursor).sort().join(",");
-  if (fields !== "after,as_of,mode,snapshot,source,v") return undefined;
+  if (fields !== (mode === "bounded" ? "after,as_of,mode,page,snapshot,source,v" : "after,as_of,mode,snapshot,source,v")) return undefined;
+  if (mode === "bounded" && (!Number.isSafeInteger(cursor.page) || cursor.page < 1 || cursor.page >= 1000)) return undefined;
   if (cursor.v !== SOURCE_INVENTORY_CONTRACT_VERSION) return undefined;
   if (cursor.mode !== mode) return undefined;
   if (mode === "inventory" &&
       (typeof cursor.after !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(cursor.after))) {
     return undefined;
   }
-  if (mode === "recovery" && (!Number.isSafeInteger(cursor.after) || cursor.after < 1)) return undefined;
+  if (["recovery", "bounded"].includes(mode) && (!Number.isSafeInteger(cursor.after) || cursor.after < 1)) return undefined;
   if (!(cursor.source === null ||
         (typeof cursor.source === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(cursor.source)))) {
     return undefined;
   }
-  if (mode === "inventory" && cursor.source !== null) return undefined;
+  if (mode !== "recovery" && cursor.source !== null) return undefined;
   if (typeof cursor.snapshot !== "string" || !/^[a-f0-9]{64}$/.test(cursor.snapshot)) return undefined;
   if (!validAsOf(cursor.as_of)) return undefined;
   return cursor;
@@ -100,15 +103,19 @@ async function inventoryBody(request) {
     return { error: "source inventory request has unknown fields", status: 400 };
   }
   const mode = body.mode === undefined ? "inventory" : body.mode;
-  if (!["inventory", "recovery"].includes(mode)) {
-    return { error: "mode must be inventory or recovery", status: 400 };
+  if (!["inventory", "recovery", "bounded", "freshness"].includes(mode)) {
+    return { error: "mode must be inventory, bounded, freshness, or recovery", status: 400 };
   }
-  const limit = body.limit === undefined ? SOURCE_INVENTORY_DEFAULT_PAGE_SIZE : body.limit;
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > SOURCE_INVENTORY_MAX_PAGE_SIZE) {
+  const maximum = mode === "bounded" ? 5000 : SOURCE_INVENTORY_MAX_PAGE_SIZE;
+  const limit = body.limit === undefined ? (mode === "bounded" ? 5000 : SOURCE_INVENTORY_DEFAULT_PAGE_SIZE) : body.limit;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximum) {
     return {
-      error: `limit must be an integer from 1 to ${SOURCE_INVENTORY_MAX_PAGE_SIZE}`,
+      error: `limit must be an integer from 1 to ${maximum}`,
       status: 400,
     };
+  }
+  if (mode === "freshness" && (body.cursor !== undefined || body.limit !== undefined)) {
+    return { error: "freshness reads do not accept a cursor or limit", status: 400 };
   }
   const cursor = decodeCursor(body.cursor, mode);
   if (cursor === undefined) return { error: "cursor is not valid for this inventory", status: 400 };
@@ -116,7 +123,7 @@ async function inventoryBody(request) {
       (typeof body.source !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.source))) {
     return { error: "source must be a normalized source id", status: 400 };
   }
-  if (mode === "inventory" && body.source !== undefined) {
+  if (mode !== "recovery" && body.source !== undefined) {
     return { error: "source is available only in recovery mode", status: 400 };
   }
   if (body.source_group_cursor !== undefined &&
@@ -158,79 +165,6 @@ function sourceRecoveryLimitations() {
     raw_locator_disclosure: "not_available",
     entity_year_coverage: "not_available",
     meaning: "This is a bounded recovery preview from stored provenance and text receipts. Empty text is an OCR candidate, not proof that the original is a scan.",
-  };
-}
-
-const RECOVERY_REASON_CODES = Object.freeze([
-  "no_stored_chunks",
-  "blank_only_chunks",
-  "ocr_partial_review",
-  "provenance_receipt_unassessed",
-  "extraction_method_missing",
-  "text_reliability_missing",
-  "source_record_id_missing",
-  "derivation_lineage_missing",
-  "lineage_contract_unrecognized",
-]);
-
-function recoveryPlanSummary(sources) {
-  const reasonCounts = Object.fromEntries(RECOVERY_REASON_CODES.map((code) => [code, 0]));
-  const sourceGroups = [];
-  const blockingSignals = new Set();
-  let candidates = 0;
-  for (const source of sources) {
-    const plan = source?.recovery_plan;
-    if (!plan || !Number.isSafeInteger(plan.candidate_documents) || plan.candidate_documents < 0) {
-      throw new Error("source inventory returned an invalid recovery summary");
-    }
-    candidates += plan.candidate_documents;
-    for (const code of RECOVERY_REASON_CODES) {
-      const count = Number(plan.reason_counts?.[code]);
-      if (!Number.isSafeInteger(count) || count < 0) {
-        throw new Error("source inventory returned an invalid recovery reason count");
-      }
-      reasonCounts[code] += count;
-    }
-    for (const signal of plan.blocking_signals || []) blockingSignals.add(String(signal));
-    if (plan.candidate_documents > 0) {
-      sourceGroups.push({
-        source_id: source.source_id,
-        source_kind: source.kind,
-        zone: source.zone,
-        candidate_documents: plan.candidate_documents,
-        reason_counts: plan.reason_counts,
-        blocking_signals: plan.blocking_signals,
-        priority: plan.priority,
-        priority_basis: plan.priority_basis,
-      });
-    }
-  }
-  const boundedSourceGroups = sourceGroups.slice(0, SOURCE_INVENTORY_MAX_PAGE_SIZE);
-  return {
-    status: candidates ? "review_needed" : "no_candidates",
-    read_only: true,
-    candidate_documents: candidates,
-    candidate_source_groups: sourceGroups.length,
-    source_groups_returned: boundedSourceGroups.length,
-    source_groups_truncated: boundedSourceGroups.length < sourceGroups.length,
-    source_groups_cursor: boundedSourceGroups.length < sourceGroups.length
-      ? boundedSourceGroups[boundedSourceGroups.length - 1]?.source_id || null
-      : null,
-    source_group_details: "complete_in_sources_pages",
-    candidate_pages_at_max_size: Math.ceil(candidates / SOURCE_INVENTORY_MAX_PAGE_SIZE),
-    maximum_page_size: SOURCE_INVENTORY_MAX_PAGE_SIZE,
-    priority: sourceGroups.some((group) => group.priority === "high")
-      ? "high"
-      : candidates
-        ? "review"
-        : "none",
-    blocking_signals: [
-      "records_without_readable_text",
-      "partial_ocr_receipts",
-      "incomplete_provenance_receipts",
-    ].filter((signal) => blockingSignals.has(signal)),
-    reason_counts: reasonCounts,
-    source_groups: boundedSourceGroups,
   };
 }
 
@@ -307,6 +241,38 @@ export async function handleSourceInventoryApi(env, request) {
 
   const { limit, cursor, mode, source, sourceGroupCursor } = parsed.body;
   const asOf = cursor?.as_of || new Date().toISOString();
+  if (mode === "freshness") {
+    try {
+      const sources = await sourceFreshnessPage(env, { now: Date.parse(asOf) });
+      return respond({ contract_version: 3, kind: "source_freshness", as_of: asOf, sources });
+    } catch {
+      return respond({ error: "source freshness is unavailable", code: "source_inventory_unavailable" }, 503);
+    }
+  }
+  if (mode === "bounded") {
+    try {
+      const inventory = await sourceInventoryScanPage(env, {
+        after: cursor?.after || 0, limit, now: Date.parse(asOf), snapshot: cursor?.snapshot ?? null,
+      });
+      const page = (cursor?.page || 0) + 1;
+      if (!inventory.complete && page >= 1000) throw new Error("inventory page limit");
+      const { after: _after, through: _through, ...scan } = inventory.scan;
+      const nextCursor = inventory.complete ? null : encodeBase64Url(JSON.stringify({
+        v: SOURCE_INVENTORY_CONTRACT_VERSION, mode, page, after: inventory.scan.through,
+        snapshot: inventory.snapshot, as_of: asOf, source: null,
+      }));
+      return respond({ contract_version: 3, kind: "source_inventory_scan",
+        complete: inventory.complete, truncated: !inventory.complete, cursor: nextCursor,
+        as_of: asOf, snapshot: inventory.snapshot, scan: { ...scan, page },
+        sources: inventory.rows, families: inventory.families, limitations: sourceInventoryLimitations(),
+      });
+    } catch (error) {
+      const changed = error?.code === "source_inventory_changed";
+      return respond({ error: changed ? "source inventory changed; restart from the first page"
+        : "bounded source inventory is unavailable", code: changed ? "source_inventory_changed"
+        : "source_inventory_unavailable" }, changed ? 409 : 503);
+    }
+  }
   if (mode === "recovery") {
     let recovery;
     try {
