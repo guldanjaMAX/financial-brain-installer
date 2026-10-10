@@ -156,9 +156,45 @@ function Trust({ answer }: { answer: Answer }) {
   );
 }
 
-export function Ask() {
+// The action is separate from the question draft. Only the structured fields
+// select a workflow; the existing Ask button always sends an ordinary question.
+export function taxEvidenceAction(entity: string | null, year: string) {
+  if (!entity || !/^\d{4}$/.test(year) || Number(year) < 1900 || Number(year) > 2200) return null;
+  return { workflow: "tax_evidence_checklist" as const, entity, year: Number(year) };
+}
+
+export function TaxEvidenceControl({ owner, scope, year, busy, onYear, onCheck }: {
+  owner: boolean; scope: string | null; year: string; busy: boolean;
+  onYear: (year: string) => void; onCheck: () => void;
+}) {
+  if (!owner) return null;
+  return (
+    <div className="mt-4 rounded-xl border border-line p-3">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="text-[13px] text-ink-soft">
+          Tax year
+          <input type="number" min={1900} max={2200} step={1} value={year}
+            onChange={(event) => onYear(event.target.value)} disabled={busy}
+            placeholder="YYYY" aria-describedby="tax-evidence-limits"
+            className="mt-1 block w-28 rounded-lg border border-line bg-card px-3 py-2 text-ink" />
+        </label>
+        <button type="button" onClick={onCheck} disabled={busy || !taxEvidenceAction(scope, year)}
+          className="rounded-xl border border-line bg-card px-4 py-2.5 font-semibold disabled:opacity-45">
+          Tax evidence checklist
+        </button>
+      </div>
+      <p id="tax-evidence-limits" className="mt-2 text-[13px] text-ink-soft">
+        {scope ? "Uses the selected financial entity." : "Select one financial entity above to continue."}
+        {" "}Tax amounts and filing readiness are not checked.
+      </p>
+    </div>
+  );
+}
+
+export function Ask({ owner = false }: { owner?: boolean }) {
   const { activeLabel, scope } = useFinanceScope();
   const [question, setQuestion] = useState(readAskDraft);
+  const [taxYear, setTaxYear] = useState("");
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -167,16 +203,22 @@ export function Ask() {
   async function ask() {
     const q = question.trim();
     if (!q || busy) return;
+    await submit({ q, limit: 12, ...(scope ? { entity_slug: scope } : {}) });
+  }
+
+  async function checkTaxEvidence() {
+    const action = taxEvidenceAction(scope, taxYear);
+    if (!owner || !action || busy) return;
+    await submit(action);
+  }
+
+  async function submit(body: Record<string, unknown>) {
     setBusy(true);
     setError(null);
     setAnswer(null);
     setAnswerLabel(null);
     try {
-      const next = await api<Answer>("/api/rag/think", {
-        q,
-        limit: 12,
-        ...(scope ? { entity_slug: scope } : {}),
-      });
+      const next = await api<Answer>("/api/rag/think", body);
       const label = scopedAnswerLabel(scope, next.entity_scope, activeLabel, next.filter_not_applied);
       if (!label) {
         setError(`The Brain could not prove that this answer was narrowed to ${activeLabel}. No whole-Brain answer is being shown as narrowed to that selection.`);
@@ -226,6 +268,9 @@ export function Ask() {
         </button>
         <span className="text-[13px] text-ink-soft">⌘ + Enter</span>
       </div>
+
+      <TaxEvidenceControl owner={owner} scope={scope} year={taxYear} busy={busy}
+        onYear={setTaxYear} onCheck={() => void checkTaxEvidence()} />
 
       {error && <div className="mt-4"><Attention>{error}</Attention></div>}
 

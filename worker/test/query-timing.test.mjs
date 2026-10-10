@@ -1,7 +1,10 @@
+import '../../test/fixtures/cli-side-effect-tripwire.mjs';
 import assert from 'node:assert/strict';
 import { test, before, after } from 'node:test';
 import { fixture, ANCHOR } from './query-timing-fixture.mjs';
-import { createQueryTiming, measureQueryStage, QUERY_STAGES } from '../src/lib/query-timing.js';
+import { createQueryTiming, measureQueryStage, projectQueryTiming, QUERY_STAGES } from '../src/lib/query-timing.js';
+import { createMcpQueryTiming } from '../../components/brain-mcp-timing.mjs';
+import { runQuerySpansProbe } from '../../scripts/query-spans-probe.mjs';
 import { embedText } from '../src/lib/supabase.js';
 
 const NativeDate = Date;
@@ -15,6 +18,112 @@ before(() => {
   globalThis.fetch = async () => { networkCalls++; throw new Error('network forbidden'); };
 });
 after(() => { globalThis.Date = NativeDate; globalThis.fetch = nativeFetch; assert.equal(networkCalls, 0); });
+
+// Version 1 predates CFO actions. Keep the required wire keys independent of
+// the current collector so adding a span cannot silently change this contract.
+const VERSION_1_REQUIRED_STAGES = [
+  'scope', 'retrieval', 'embedding', 'keyword', 'vector', 'vector_query', 'projection_readiness',
+  'authority_lineage', 'answer_llm', 'verifier_llm', 'evidence_gate',
+  'premise_temporal', 'coverage', 'gaps', 'rerank', 'financial_map',
+  'legacy_hybrid', 'mcp_wrapping', 'mcp_backend', 'mcp_retry_wait',
+];
+function version1Receipt(body, withWorkflow) {
+  const receipt = structuredClone(body.timing);
+  delete receipt.stages.cfo_workflow;
+  assert.deepEqual(Object.keys(receipt.stages), VERSION_1_REQUIRED_STAGES);
+  if (withWorkflow) receipt.stages.cfo_workflow = { calls: 1, errors: 0, ms: 0 };
+  return receipt;
+}
+
+test('R156-08 generic Worker diagnostics omit the unused optional workflow span', async () => {
+  const f = fixture();
+  const { response, body } = await f.request();
+  assert.equal(response.status, 200);
+  assert.equal(f.counts.answer, 1);
+  assert.equal(f.counts.verifier, 1);
+  assert.equal(body.citations.length, 1);
+  assert.deepEqual(Object.keys(body.timing.stages), VERSION_1_REQUIRED_STAGES);
+  const measured = createQueryTiming({ route: 'think', now: () => 0 });
+  let workflowCalls = 0;
+  measureQueryStage(measured, 'cfo_workflow', () => { workflowCalls++; });
+  assert.equal(workflowCalls, 1);
+  assert.deepEqual(measured.finish().stages.cfo_workflow, { calls: 1, errors: 0, ms: 0 });
+});
+
+test('R156-08 projector accepts older version-1 receipts without relaxing present or required stages', async () => {
+  const f = fixture();
+  const { body } = await f.request();
+  assert.equal(f.counts.verifier, 1);
+  for (const withWorkflow of [true, false]) {
+    const receipt = version1Receipt(body, withWorkflow);
+    assert.deepEqual(projectQueryTiming(receipt), receipt);
+    for (const key of VERSION_1_REQUIRED_STAGES) {
+      const missing = structuredClone(receipt);
+      delete missing.stages[key];
+      assert.equal(projectQueryTiming(missing), null, `missing required stage: ${key}`);
+    }
+    for (const stage of [null, undefined, {}, { calls: 1, errors: 2, ms: 0 },
+      { calls: -1, errors: 0, ms: 0 }, { calls: 1, errors: 0, ms: NaN },
+      { calls: 1, errors: 0, ms: 86_400_001 }, { calls: '1', errors: 0, ms: 0 }]) {
+      const malformed = structuredClone(receipt);
+      malformed.stages.cfo_workflow = stage;
+      assert.equal(Object.hasOwn(malformed.stages, 'cfo_workflow'), true);
+      assert.equal(projectQueryTiming(malformed), null, 'present optional stages remain validated');
+    }
+    const untrusted = structuredClone(receipt);
+    untrusted.stages.untrusted = { calls: 1, errors: 0, ms: 0 };
+    if (withWorkflow) untrusted.stages.cfo_workflow.content = 'synthetic-private-marker';
+    assert.deepEqual(projectQueryTiming(untrusted), receipt);
+  }
+});
+
+test('R156-08 MCP wrapper retains older version-1 backend diagnostics with a current control', async () => {
+  const f = fixture();
+  const { response, body } = await f.request();
+  assert.equal(response.status, 200);
+  assert.equal(f.counts.verifier, 1);
+  assert.equal(body.citations.length, 1);
+  for (const withWorkflow of [true, false]) {
+    const receipt = version1Receipt(body, withWorkflow);
+    const trace = createMcpQueryTiming({ route: 'mcp.brain_think', now: () => 0 });
+    let calls = 0;
+    await trace.backend(async () => { calls++; return { ...body, timing: receipt }; });
+    const result = trace.finish();
+    assert.equal(calls, 1);
+    assert.equal(result.stages.mcp_backend.calls, 1);
+    assert.equal(result.backend.length, 1, 'successful backend diagnostics must be retained');
+    assert.deepEqual(result.backend[0], receipt);
+  }
+});
+
+test('R156-08 operator probe completes all older version-1 Worker responses with a current control', async () => {
+  for (const withWorkflow of [true, false]) {
+    const f = fixture();
+    let calls = 0, keyReads = 0;
+    const result = await runQuerySpansProbe({ url: 'https://fixture.invalid', adminKeyFile: 'fixture-key-file' }, {
+      now: f.clock.now,
+      readKeyFile: async path => { keyReads++; assert.equal(path, 'fixture-key-file'); return f.env.ADMIN_KEY; },
+      fetchImpl: async (url, options) => {
+        assert.equal(options.headers['X-Admin-Key'] === f.env.ADMIN_KEY, true);
+        const route = new URL(url).pathname.split('/').at(-1);
+        const { response, body } = await f.request(route, { body: JSON.parse(options.body) });
+        calls++;
+        assert.equal(response.status, 200);
+        assert.ok(body.results.length > 0);
+        return Response.json({ ...body, timing: version1Receipt(body, withWorkflow) });
+      },
+    });
+    assert.equal(keyReads, 1);
+    assert.ok(calls > 0, 'actual Worker responses reached the probe');
+    assert.equal(result.ok, true, 'valid older diagnostics must not stop a successful probe');
+    assert.equal(calls, 6);
+    assert.equal(f.counts.keyword, 6);
+    assert.equal(f.counts.verifier, 3);
+    assert.equal(result.samples.length, 6);
+    assert.ok(result.samples.every(sample => sample.http_status === 200 && !sample.error));
+    assert.ok(result.samples.every(sample => Object.hasOwn(sample.timing.stages, 'cfo_workflow') === withWorkflow));
+  }
+});
 
 test('real think route records stages after a supported answer and verifier decision', async () => {
   const f = fixture();
@@ -45,7 +154,8 @@ test('real think route records stages after a supported answer and verifier deci
 
 function assertCoherent(timing) {
   assert.match(timing.request_id, /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
-  assert.deepEqual(Object.keys(timing.stages), QUERY_STAGES);
+  assert.deepEqual(Object.keys(timing.stages), VERSION_1_REQUIRED_STAGES);
+  assert.deepEqual(QUERY_STAGES.filter(key => key !== 'cfo_workflow'), VERSION_1_REQUIRED_STAGES);
   const total = Object.values(timing.stages).reduce((n, stage) => n + stage.ms, 0);
   assert.ok(Math.abs(total - timing.overlap_ms - timing.covered_ms) < 0.025);
   assert.ok(Math.abs(timing.covered_ms + timing.unattributed_ms - timing.total_ms) < 0.025);

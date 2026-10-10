@@ -164,3 +164,31 @@ describe("citation provenance", () => {
     })).toBe("");
   });
 });
+
+describe("explicit tax evidence action", () => {
+  it("sends only the chosen entity and typed year, never the draft question", async () => {
+    const { taxEvidenceAction } = await import("./Ask");
+    expect(taxEvidenceAction("fixture-entity", "2025")).toEqual({
+      workflow: "tax_evidence_checklist", entity: "fixture-entity", year: 2025,
+    });
+    for (const year of ["", "2025.5", "2e3", "2025 text", "1899", "2201"]) {
+      expect(taxEvidenceAction("fixture-entity", year)).toBeNull();
+    }
+    expect(taxEvidenceAction(null, "2025")).toBeNull();
+  });
+
+  it("shows the action only to an owner and requires entity and year choices", async () => {
+    const { TaxEvidenceControl } = await import("./Ask");
+    const props = { owner: true, scope: "fixture-entity", year: "2025", busy: false,
+      onYear: () => undefined, onCheck: () => undefined };
+    const owner = renderToStaticMarkup(<TaxEvidenceControl {...props} />);
+    expect(owner).toContain("Tax evidence checklist");
+    expect(owner).toContain("Tax year");
+    expect(owner).toContain("Tax amounts and filing readiness are not checked");
+    expect(owner).not.toContain('disabled=""');
+    expect(renderToStaticMarkup(<TaxEvidenceControl {...props} owner={false} />)).toBe("");
+    for (const patch of [{ scope: null }, { year: "" }, { busy: true }]) {
+      expect(renderToStaticMarkup(<TaxEvidenceControl {...props} {...patch} />)).toContain('disabled=""');
+    }
+  });
+});
