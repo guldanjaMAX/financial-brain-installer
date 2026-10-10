@@ -51,7 +51,11 @@ export function secureWindowsUpgradeBookmarkPath(path, {
   try {
     result = run(win32.join(env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(WINDOWS_ACL_SCRIPT, "utf16le").toString("base64")], {
-        input: JSON.stringify({ path, directory, verifyOnly }), encoding: null, env,
+        // PowerShell's Console reader can use an OEM code page even when the
+        // script uses -EncodedCommand. JSON escapes survive every ASCII code
+        // page, including surrogate pairs in non-BMP profile names.
+        input: JSON.stringify({ path, directory, verifyOnly }).replace(/[\u007f-\uffff]/g,
+          (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`), encoding: null, env,
         shell: false, stdio: ["pipe", "pipe", "pipe"], timeout: 15_000, windowsHide: true,
       });
     if (result?.status !== 0 || result.error || result.signal || String(result.stdout) !== "private") {
@@ -65,6 +69,46 @@ export function secureWindowsUpgradeBookmarkPath(path, {
   }
 }
 
+// POSIX modes do not override macOS ACL grants. Ancestors are read-only:
+// accept only deny entries and known read/traverse grants, never ACL writers.
+// On our owned directory and empty file, remove ACLs and prove their absence.
+export function secureMacUpgradeBookmarkPath(path, {
+  ancestor = false, verifyOnly = false, run = spawnSync,
+} = {}) {
+  const invoke = (command, args) => {
+    let result;
+    try {
+      result = run(command, args, {
+        env: { PATH: "/usr/bin:/bin", LC_ALL: "C" }, encoding: null,
+        shell: false, stdio: ["ignore", "pipe", "pipe"], timeout: 15_000,
+      });
+      if (result?.status !== 0 || result.error || result.signal) throw new Error("ACL unavailable");
+      return String(result.stdout);
+    } finally {
+      if (Buffer.isBuffer(result?.stdout)) result.stdout.fill(0);
+      if (Buffer.isBuffer(result?.stderr)) result.stderr.fill(0);
+    }
+  };
+  try {
+    if (!ancestor && !verifyOnly) invoke("/bin/chmod", ["-N", path]);
+    // -b escapes embedded newlines in the path; they cannot masquerade as
+    // ACL records. -e includes ACLs even when xattrs occupy the mode marker.
+    const [header, ...lines] = invoke("/bin/ls", ["-ldeb", path]).trimEnd().split("\n");
+    if (!/^[d-][rwxStTs-]{9}[+@ ]?\s/.test(header)) throw new Error("unverified ACL listing");
+    const safe = new Set(["read", "list", "execute", "search", "readattr", "readextattr", "readsecurity",
+      "file_inherit", "directory_inherit", "limit_inherit", "only_inherit"]);
+    for (const line of lines) {
+      const entry = /^\s+\d+: .+ (allow|deny) ([a-z_,]+)$/.exec(line);
+      if (!entry || !ancestor || (entry[1] === "allow" && entry[2].split(",").some((right) => !safe.has(right)))) {
+        throw new Error("untrusted ACL");
+      }
+    }
+    if (header[10] === "+" && lines.length === 0) throw new Error("missing ACL entries");
+  } catch {
+    throw new Error("recovery receipt macOS ACL could not be protected and verified");
+  }
+}
+
 /** Keep the pre-change restore point even if deployment kills the process.
  * Local storage also covers legacy databases without upgrade_runs. Every
  * attempt gets its own immutable receipt; a retry never replaces the earlier
@@ -75,6 +119,7 @@ export function saveUpgradeBookmark(record, {
   now = () => new Date(),
   io = fs,
   windowsAcl = secureWindowsUpgradeBookmarkPath,
+  macAcl = secureMacUpgradeBookmarkPath,
   platform = process.platform,
 } = {}) {
   const sameFile = (left, right) => left.dev === right.dev && left.ino === right.ino;
@@ -86,6 +131,7 @@ export function saveUpgradeBookmark(record, {
          ((stat.mode & 0o022) !== 0 && !(stat.uid === 0 && (stat.mode & 0o1000))))) {
       throw new Error("untrusted recovery directory ancestor");
     }
+    if (platform === "darwin") macAcl(path, { ancestor: true });
     return stat;
   };
   const syncDirectory = (path) => {
@@ -125,6 +171,7 @@ export function saveUpgradeBookmark(record, {
     throw new Error("recovery directory must be private and owned by this user");
   }
   if (platform === "win32") windowsAcl(directory, { directory: true });
+  if (platform === "darwin") macAcl(directory);
   const path = join(directory, `${randomUUID()}.json`);
   const fd = io.openSync(path, "wx", 0o600);
   let writtenStat;
@@ -140,6 +187,7 @@ export function saveUpgradeBookmark(record, {
     writtenStat = io.fstatSync(fd);
     assertReceipt(writtenStat);
     if (platform === "win32") windowsAcl(path, { directory: false });
+    if (platform === "darwin") macAcl(path);
     if (!sameFile(writtenStat, io.lstatSync(path))) throw new Error("recovery bookmark identity changed");
     io.writeFileSync(fd, bytes);
     io.fsyncSync(fd);
@@ -159,6 +207,10 @@ export function saveUpgradeBookmark(record, {
     if (platform === "win32") {
       windowsAcl(path, { directory: false, verifyOnly: true });
       windowsAcl(directory, { directory: true, verifyOnly: true });
+    }
+    if (platform === "darwin") {
+      macAcl(path, { verifyOnly: true });
+      macAcl(directory, { verifyOnly: true });
     }
   } finally { io.closeSync(readFd); }
   return path;

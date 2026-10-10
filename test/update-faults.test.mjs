@@ -183,6 +183,36 @@ test("R152-02: Windows native ACL boundary requires proof and uses an allowliste
   assert.equal(calls, 2, "both denied and verified ACL boundaries ran");
 });
 
+test("R152-03: non-UTF-8 Windows stdin preserves ASCII and Unicode receipt paths", async (t) => {
+  for (const folder of ["ascii-home", "caf\u00e9-\u4e2d-\ud83d\udcc1"]) {
+    const f = fixture(t);
+    let calls = 0, lookups = 0, writes = 0;
+    const result = await runFaultUpgrade(f, { bookmarkOptions: {
+      directory: join(f.root, folder, "bookmarks"), platform: "win32",
+      io: { ...fs, writeFileSync(...args) { writes++; return fs.writeFileSync(...args); } },
+      windowsAcl(path, options) {
+        secureWindowsUpgradeBookmarkPath(path, { ...options, environment: { SystemRoot: "C:\\Windows" },
+          run(_command, _args, options) {
+            calls++;
+            // A non-UTF-8 console decodes high bytes differently. ASCII JSON
+            // escapes retain the exact path under either console code page.
+            const request = JSON.parse(Buffer.from(options.input, "utf8").toString("latin1"));
+            lookups++;
+            const found = fs.existsSync(request.path);
+            return { status: found ? 0 : 1, stdout: Buffer.from(found ? "private" : ""), stderr: Buffer.alloc(0) };
+          },
+        });
+      },
+    } });
+    assert.ok(calls > 0 && lookups > 0, "console decoding and filesystem lookup reached");
+    assert.equal(result.error, null);
+    assert.equal(calls, 4);
+    assert.equal(writes, 1);
+    assert.ok(result.events.includes("health:active"));
+    assert.equal(result.history.at(-1).status, "verified");
+  }
+});
+
 test("R152-02: replacing the receipt inode before readback is refused", async (t) => {
   const f = fixture(t);
   let swap = 0;

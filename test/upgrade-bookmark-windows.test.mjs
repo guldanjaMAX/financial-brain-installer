@@ -14,7 +14,8 @@ function acl(path, broaden = false) {
   const script = `
     $ErrorActionPreference = 'Stop'
     try {
-      $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+      $reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [Text.Encoding]::UTF8)
+      $request = $reader.ReadToEnd() | ConvertFrom-Json
       $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
       $acl = Get-Acl -LiteralPath $request.path
       if ($request.broaden) {
@@ -82,5 +83,36 @@ for (const inheritedBroadAccess of [true, false]) {
       } },
     }), /could not be protected and verified/);
     assert.equal(readbacks, 1, "revocation was exercised during readback");
+  });
+}
+
+for (const folder of ["ascii-profile", "caf\u00e9-\u4e2d-\ud83d\udcc1"]) {
+  test(`R152-03 native Windows: OEM 437 stdin with ${folder === "ascii-profile" ? "ASCII" : "Unicode"} path`, {
+    skip: process.platform !== "win32" ? "requires native Windows PowerShell" : false,
+  }, (t) => {
+    const root = fs.realpathSync.native(fs.mkdtempSync(join(tmpdir(), "receipt-codepage-")));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const directory = join(root, folder, "bookmarks");
+    let nativeCalls = 0, writes = 0;
+    const path = saveUpgradeBookmark(record, { directory, now,
+      windowsAcl(target, options) {
+        secureWindowsUpgradeBookmarkPath(target, { ...options, run(command, args, options) {
+          nativeCalls++;
+          const script = Buffer.from(args.at(-1), "base64").toString("utf16le");
+          const prefix = "[Console]::InputEncoding = [Text.Encoding]::GetEncoding(437); if ([Console]::InputEncoding.CodePage -ne 437) { exit 2 };\n";
+          return spawnSync(command, [...args.slice(0, -1), Buffer.from(prefix + script, "utf16le").toString("base64")], options);
+        } });
+      },
+      io: { ...fs, writeFileSync(fd, bytes) {
+        writes++;
+        assert.deepEqual(acl(directory), privateAcl);
+        assert.deepEqual(acl(join(directory, fs.readdirSync(directory)[0])), privateAcl);
+        return fs.writeFileSync(fd, bytes);
+      } },
+    });
+    assert.equal(nativeCalls, 4, "native protect and verify gates used OEM input encoding");
+    assert.equal(writes, 1);
+    assert.equal(JSON.parse(fs.readFileSync(path)).bookmark, record.bookmark);
+    assert.deepEqual(acl(path), privateAcl);
   });
 }

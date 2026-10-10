@@ -228,11 +228,19 @@ Directory components must be real directories, and native path spelling is
 accepted only when the canonical path identifies the same directory. POSIX
 ancestors must be owned by the current user or root and refuse other writers
 except root-owned sticky temporary directories. The receipt directory and file
-must be private to the current user. Windows creates protected DACLs on the
+must be private to the current user. On macOS, ancestor ACLs must grant no
+write, delete or permission-changing rights; unknown grants are refused. Ordinary
+read/traverse grants and deny entries on ancestors remain unchanged. The owned
+receipt directory and empty file have their ACLs removed and read back before
+identifying bytes are written, then checked again after content readback.
+Missing native tools, denied changes and ambiguous ACL listings stop the update.
+Windows creates protected DACLs on the
 receipt directory and new empty file, removes other inherited and explicit
 grants, and reads the owner SID and exact grants back before writing receipt
 contents. It verifies the ACLs again at readback. Missing PowerShell, denied ACL
-changes or unverified ACLs stop the update before deployment. Windows flushes
+changes or unverified ACLs stop the update before deployment. Paths cross the
+PowerShell stdin boundary as ASCII-escaped JSON so non-ASCII profile names
+survive the console input code page. Windows flushes
 the file; native power-loss durability remains a field gate.
 
 The accelerated bootstrap keeps two separate time boundaries. Its six-hour
