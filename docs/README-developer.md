@@ -224,7 +224,16 @@ earlier restore point. These are private recovery records, never package inputs.
 If an abrupt stop left no D1 history row, the installer can inspect the matching
 local receipt for the bookmark; `doctor --rollback` still reads D1 history and
 does not automatically select a local receipt. Restore requires separate review.
-Windows flushes the file; native power-loss durability remains a field gate.
+Directory components must be real directories, and native path spelling is
+accepted only when the canonical path identifies the same directory. POSIX
+ancestors must be owned by the current user or root and refuse other writers
+except root-owned sticky temporary directories. The receipt directory and file
+must be private to the current user. Windows creates protected DACLs on the
+receipt directory and new empty file, removes other inherited and explicit
+grants, and reads the owner SID and exact grants back before writing receipt
+contents. It verifies the ACLs again at readback. Missing PowerShell, denied ACL
+changes or unverified ACLs stop the update before deployment. Windows flushes
+the file; native power-loss durability remains a field gate.
 
 The accelerated bootstrap keeps two separate time boundaries. Its six-hour
 wall-clock deadline remains a hard stop. Its fifteen-minute no-movement budget

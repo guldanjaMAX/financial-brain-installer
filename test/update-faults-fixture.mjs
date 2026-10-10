@@ -39,7 +39,9 @@ export async function runFaultUpgrade(f, { fault, afterPause, bookmarkOptions = 
   const query = async (sql, params = []) => ({ results: db.prepare(sql).all(...params) });
   try {
     await cmdUpgrade(f.manifestPath, {
-      bookmarkOptions: { directory: join(f.root, "bookmarks"), now: () => new Date("2026-10-10T12:00:00.000Z"), ...bookmarkOptions },
+      // Lifecycle fault arms inject native ACL work just like provider work.
+      // Real DACL behavior has its own Windows-native receipt regression.
+      bookmarkOptions: { directory: join(f.root, "bookmarks"), now: () => new Date("2026-10-10T12:00:00.000Z"), windowsAcl: () => {}, ...bookmarkOptions },
       resolveAccount: async () => ({ id: "fixture-account" }),
       d1Query: async (account, database, sql, params = []) => {
         if (account !== "fixture-account" || database !== "fixture-db") throw new Error("identity drift");

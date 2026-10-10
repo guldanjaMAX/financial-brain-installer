@@ -13,7 +13,9 @@ the brain, not for whoever built it: what changed for them, and what to check.
 - Updates save and verify the rollback bookmark on this computer before
   deployment or migration starts. It survives an interrupted update, including
   one stopped without an error message. Keep the private
-  `~/.brain/upgrade-bookmarks/` receipts for recovery review.
+  `~/.brain/upgrade-bookmarks/` receipts for recovery review. A different
+  capitalization of the same home folder is accepted. On Windows, receipt
+  access is restricted to your account and verified before the update continues.
 
 ## 0.4.11 (2026-10-09)
 
