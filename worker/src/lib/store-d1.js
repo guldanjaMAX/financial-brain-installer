@@ -4522,6 +4522,7 @@ const inventoryDocumentCtesSql = ({ includeCurrentCustomApi = true } = {}) => `
 // synthetic corpus and diff its rows with the 0.4.8 SQL it replaced.
 export const sourceInventorySql = ({
   includeFailureEvidence = true,
+  includeProviderCheck = true,
   includeCurrentCustomApi = true,
 } = {}) => `${inventoryDocumentCtesSql({ includeCurrentCustomApi })},
   source_names AS (
@@ -4598,7 +4599,8 @@ export const sourceInventorySql = ({
            docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
            confirmed_from,confirmed_through,target_from,target_through,proposed_deletes,
            delete_action,refusal_reason,error,
-           ${includeFailureEvidence ? "failure_evidence" : "NULL AS failure_evidence"}
+           ${includeFailureEvidence ? "failure_evidence" : "NULL AS failure_evidence"},
+           ${includeProviderCheck ? "provider_check_complete" : "0 AS provider_check_complete"}
       FROM (
         SELECT sr.*,
                ROW_NUMBER() OVER (
@@ -4657,6 +4659,7 @@ export const sourceInventorySql = ({
          r.started_at AS run_started_at,
          r.finished_at AS run_finished_at,
          r.walk_complete AS run_walk_complete,
+         r.provider_check_complete AS run_provider_check_complete,
          r.files_seen AS run_files_seen,
          r.docs_added AS run_docs_added,
          r.docs_updated AS run_docs_updated,
@@ -4723,17 +4726,21 @@ export async function sourceInventory(env, {
   }
 
   const readInventory = async (includeCurrentCustomApi) => {
-    try {
-      return await env.DB.prepare(sourceInventorySql({ includeCurrentCustomApi })).bind(maxRows + 1).all();
-    } catch (error) {
-      if (!missingFailureEvidenceColumn(error)) throw error;
-      // Schema 39 remains readable while migration 0040 is pending. Missing
-      // failure evidence is unknown; every older receipt and coverage field
-      // keeps its exact meaning, and malformed/non-schema errors never retry.
-      return env.DB.prepare(sourceInventorySql({
-        includeFailureEvidence: false,
-        includeCurrentCustomApi,
-      })).bind(maxRows + 1).all();
+    let includeFailureEvidence = true;
+    let includeProviderCheck = true;
+    for (;;) {
+      try {
+        return await env.DB.prepare(sourceInventorySql({
+          includeCurrentCustomApi, includeFailureEvidence, includeProviderCheck,
+        })).bind(maxRows + 1).all();
+      } catch (error) {
+        // Older schemas remain readable, but cannot certify a new Calendar
+        // check. Only exact missing-column failures enter a bounded retry.
+        if (includeFailureEvidence && missingFailureEvidenceColumn(error)) includeFailureEvidence = false;
+        else if (includeProviderCheck && /no such column:\s*(?:\w+\.)?provider_check_complete\b/i.test(String(error?.message))) {
+          includeProviderCheck = false;
+        } else throw error;
+      }
     }
   };
   // Custom-source version tables arrive after the v3 inventory contract. An
@@ -4743,9 +4750,8 @@ export async function sourceInventory(env, {
   const rawRows = Array.isArray(result?.results) ? result.results : [];
   const zoomStatus = rawRows.some(row => row.name === "zoom" && row.kind === "zoom" && Number(row.registered) === 1)
     ? await zoomSourceStatus(env, { now }) : null;
-  // Keep the v3 inventory statement byte-for-byte stable. Retirement is a
-  // small indexed companion read, like the other post-inventory operational
-  // lookups below, and does not widen the published row contract.
+  // Retirement stays a small indexed companion read, like the other
+  // post-inventory operational lookups below, without widening its contract.
   const retirementResult = await env.DB.prepare(
     `SELECT s.name AS source_name,
             (SELECT CASE WHEN e.event='retired' THEN e.at ELSE NULL END
@@ -4818,6 +4824,7 @@ export async function sourceInventory(env, {
           started_at: inventoryTimestamp(row.run_started_at),
           finished_at: inventoryTimestamp(row.run_finished_at),
           walk_complete: row.run_walk_complete === 1 || row.run_walk_complete === true,
+          provider_check_complete: row.run_provider_check_complete === 1 || row.run_provider_check_complete === true,
           files_seen: inventoryCount(row.run_files_seen),
           docs_added: inventoryCount(row.run_docs_added),
           docs_updated: inventoryCount(row.run_docs_updated),

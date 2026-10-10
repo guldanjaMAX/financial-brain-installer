@@ -1316,7 +1316,13 @@ receipt, and leave ingest freshness unchanged. Skipped invocations, empty
 plans, failed walks and missing measurements cannot borrow older success.
 Daily status labels a check `checked` for at most 24 hours and prints its
 timestamp separately from last ingest. This does not extend historical or
-semantic coverage. A successful run with
+semantic coverage. Calendar additionally requires `provider_check_complete`,
+earned only from valid events pages and a terminal sync token. Migration 0054
+defaults that field to false for old runs; their walk flag alone is insufficient.
+An empty incremental check may earn it without claiming complete history.
+A later source error takes precedence over quiet-check and Zoom labels in both
+source and daily status, while the prior check time remains visible separately.
+A successful run with
 omissions is `partial` and carries `docs_refused`; it does not extend
 `complete_history_through`. A measured failure is `failed`, retains the prior
 success timestamp, and makes source freshness broken. A source with no run receipt has `missing_history` in daily status.
@@ -1345,6 +1351,14 @@ The same evidence is visible in source and daily text status. Reconciliation
 never updates the last ingest receipt. `history.state` stays `unproven`, even
 after every rolling page completes; this change adds no historical backfill
 and does not widen the initial 30-day or subsequent two-day windows.
+Migration 0054 adds a covering status index for delivery aggregates. Inventory
+requires that index and groups by status, avoiding a recording-table scan and
+temporary grouping sort. Lifetime totals still scan retained index entries.
+There are no delivery counter triggers: D1 includes trigger writes in
+`meta.changes`, and delivery leases require exactly one changed row. Until the
+index exists, `counts_available` is false and counts are null; the display
+reports unavailable evidence rather than implying zero debt. Non-schema read
+failures still fail closed.
 
 ### Connector-specific Drive refresh on macOS
 

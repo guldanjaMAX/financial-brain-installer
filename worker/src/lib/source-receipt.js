@@ -44,6 +44,9 @@ export function providerNoChangeCheckAt(kind, run) {
   // enumeration. Re-reading an empty export folder cannot prove upstream work.
   if (!["drive", "gmail", "imap", "calendar"].includes(kind)) return null;
   if (run?.outcome !== "empty" || run.walk_complete !== true || run.metrics_version !== 1) return null;
+  // Older Calendar walks could terminate without a valid nextSyncToken.
+  // Only the dedicated, persisted boundary proof certifies a quiet check.
+  if (kind === "calendar" && run.provider_check_complete !== true) return null;
   if (!["files_seen", "docs_added", "docs_updated", "docs_unchanged", "docs_refused", "docs_failed"]
     .every(field => run[field] === 0)) return null;
   const started = typeof run.started_at === "string" ? Date.parse(run.started_at) : NaN;

@@ -9,7 +9,7 @@ import { runDailyRefresh, runDailyRefreshCli } from "../operations/daily-refresh
 import worker from "../worker/src/index.js";
 import { sourceInventory } from "../worker/src/lib/store-d1.js";
 import { runZoomDeliveryMaintenance } from "../worker/src/lib/zoom.js";
-import { persistZoomDelivery } from "../worker/src/lib/zoom-deliveries.js";
+import { persistZoomDelivery, claimZoomDeliveries, finishZoomDelivery } from "../worker/src/lib/zoom-deliveries.js";
 import { providerNoChangeCheckAt } from "../worker/src/lib/source-receipt.js";
 
 const BEFORE = "2026-10-08T12:00:00.000Z";
@@ -17,7 +17,7 @@ const NOW = "2026-10-10T12:00:00.000Z";
 const ORIGIN = "https://brain.example.invalid";
 globalThis.fetch = async () => { throw new Error("unmocked request refused"); };
 
-function fixture(t) {
+function fixture(t, { throughMigration = Infinity } = {}) {
   t.mock.timers.enable({ apis: ["Date"], now: Date.parse(NOW) });
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "daily-evidence-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -25,19 +25,30 @@ function fixture(t) {
   writeFileSync(keyPath, "synthetic-owner-proof", { mode: 0o600 });
   const db = new DatabaseSync(":memory:");
   t.after(() => db.close());
-  for (const name of readdirSync(new URL("../migrations/d1/", import.meta.url)).filter(n => n.endsWith(".sql")).sort()) {
+  for (const name of readdirSync(new URL("../migrations/d1/", import.meta.url))
+    .filter(n => n.endsWith(".sql") && Number(n.slice(0, 4)) <= throughMigration).sort()) {
     for (const statement of splitStatements(readFileSync(new URL(`../migrations/d1/${name}`, import.meta.url), "utf8"))) db.exec(statement);
   }
   db.exec("INSERT INTO install_state (id,client_slug,product_version,installed_at) VALUES (1,'owner','0.0.0-test','2026-01-01')");
   db.exec("UPDATE zoom_reconciliation SET window_from='2026-09-10', updated_at_ms=0");
-  const seen = { reads: 0, writes: 0, receipts: 0, provider: 0, plans: 0, runs: 0, token: 0 };
+  const seen = { reads: 0, writes: 0, receipts: 0, provider: 0, plans: 0, runs: 0, token: 0, sql: [], runChanges: [] };
   const env = { STORAGE: "d1", ADMIN_KEY: readFileSync(keyPath, "utf8"), DB: {
     prepare(sql) {
+      seen.sql.push(sql);
       const shape = (args = []) => ({
         bind: (...values) => shape(values),
         all: async () => { seen.reads++; return { results: db.prepare(sql).all(...args) }; },
         first: async () => { seen.reads++; return db.prepare(sql).get(...args) ?? null; },
-        run: async () => { seen.writes++; return { meta: db.prepare(sql).run(...args) }; },
+        run: async () => {
+          seen.writes++;
+          // D1 includes trigger writes in meta.changes. SQLite's run().changes
+          // excludes them and would hide a committed lease reported as lost.
+          const before = db.prepare("SELECT total_changes() AS count").get().count;
+          const meta = db.prepare(sql).run(...args);
+          const changes = db.prepare("SELECT total_changes() AS count").get().count - before;
+          seen.runChanges.push({ sql, changes });
+          return { meta: { ...meta, changes } };
+        },
       });
       return shape();
     },
@@ -56,7 +67,8 @@ function fixture(t) {
 }
 
 async function dailyCase(t, { mutate = x => x, inventoryMutation = x => x, runMutation = x => x,
-  priorAt = BEFORE, skip = false, emptyPlan = false, providerFailure = false } = {}) {
+  priorAt = BEFORE, skip = false, emptyPlan = false, providerFailure = false,
+  providerPages = [{ items: [], nextSyncToken: "synthetic-next" }], calendarState = {} } = {}) {
   const f = fixture(t);
   const m = { client: { slug: "owner", timezone: "UTC" }, brain: { domain: "brain.example.invalid" },
     corpora: { calendar: { enabled: true }, upload: { enabled: false } }, operations: { daily_refresh: { enabled: true, timezone: "UTC" } },
@@ -73,11 +85,13 @@ async function dailyCase(t, { mutate = x => x, inventoryMutation = x => x, runMu
     getAccessToken: async () => "synthetic-provider-proof",
     fetchImpl: async url => {
       assert.equal(new URL(url).hostname, "www.googleapis.com");
+      if (calendarState.primary?.sync_token) assert.equal(new URL(url).searchParams.get("syncToken"), calendarState.primary.sync_token);
       f.seen.provider++;
-      return Response.json(providerFailure ? { error: { message: "fixture failure" } } : { items: [], nextSyncToken: "synthetic-next" },
+      assert.ok(providerFailure || providerPages.length > 0, "provider fixture pages cannot silently repeat");
+      return Response.json(providerFailure ? { error: { message: "fixture failure" } } : providerPages.shift(),
         { status: providerFailure ? 403 : 200 });
     },
-    loadCalendarState: () => ({}), saveCalendarState() {},
+    loadCalendarState: () => calendarState, saveCalendarState() {},
     postSourceReceipt: async (_base, _key, row) => f.postReceipt(mutate(row)),
   }) };
   const probes = { calendar: async () => ({ connected: true }) };
@@ -112,6 +126,303 @@ async function dailyCase(t, { mutate = x => x, inventoryMutation = x => x, runMu
   return { ...f, result, inventory, manifestPath, readSources: options => brainModule.cmdSources(manifestPath, options) };
 }
 
+for (const [name, page] of [
+  ["missing page shape", {}], ["missing events", { nextSyncToken: "synthetic-next" }],
+  ["malformed events", { items: {}, nextSyncToken: "synthetic-next" }],
+  ["string events", { items: "", nextSyncToken: "synthetic-next" }],
+  ["missing terminal token", { items: [] }],
+  ["malformed terminal token", { items: [], nextSyncToken: {} }],
+  ["empty terminal token", { items: [], nextSyncToken: "" }],
+  ["malformed page token", { items: [], nextPageToken: 1, nextSyncToken: "synthetic-next" }],
+  ["conflicting tokens", { items: [], nextPageToken: "synthetic-page", nextSyncToken: "synthetic-next" }],
+]) {
+  test(`Calendar completion evidence refuses ${name}`, async t => {
+    const f = await dailyCase(t, { providerPages: [page] });
+    assert.equal(f.seen.provider, 1);
+    assert.equal(f.seen.runs, 1);
+    assert.equal(f.seen.receipts, 3, "the terminal decision reached the durable receipt route");
+    assert.equal(f.result.status, "failed");
+    assert.equal(f.result.sources[0].check_verified, false);
+    assert.equal(f.inventory.rows[0].receipt.last_ingest_receipt_at, BEFORE);
+    if (name === "empty terminal token") {
+      assert.equal(f.inventory.rows[0].receipt.status, "error", "an explicit invalid token is a malformed page");
+    }
+  });
+}
+
+test("Calendar quiet incremental completion has its own durable proof without full history", async t => {
+  const f = await dailyCase(t, { calendarState: { primary: { sync_token: "synthetic-prior" } } });
+  assert.equal(f.seen.provider, 1);
+  assert.equal(f.seen.receipts, 3);
+  assert.equal(f.result.status, "complete");
+  assert.equal(f.inventory.rows[0].receipt.latest_run.provider_check_complete, true);
+  assert.equal(f.inventory.rows[0].receipt.complete_history_through, null);
+  assert.equal(f.inventory.rows[0].receipt.last_ingest_receipt_at, BEFORE);
+});
+
+test("Calendar legacy walk completion cannot stand in for terminal provider proof", async t => {
+  const f = await dailyCase(t, { mutate: ({ provider_check_complete, ...row }) => row });
+  assert.equal(f.seen.provider, 1);
+  assert.equal(f.seen.receipts, 3);
+  assert.equal(f.result.status, "failed");
+  assert.equal(f.result.sources[0].check_verified, false);
+});
+
+test("a later legacy failure stays visible after a quiet Calendar check", async t => {
+  const f = await dailyCase(t);
+  const project = rows => dailyFreshnessRows({ sources: [{ key: "calendar" }] }, { sources: rows, as_of: NOW })[0];
+  assert.equal(project(f.inventory.rows).current_state, "checked", "quiet green control");
+  await f.postReceipt({ source: "calendar", kind: "calendar", status: "error",
+    completed_at: "2026-10-10T12:00:01.000Z" });
+  const inventory = await sourceInventory(f.env, { now: Date.parse(NOW) + 1000 });
+  assert.equal(f.seen.receipts, 4);
+  assert.equal(inventory.rows[0].receipt.status, "error");
+  assert.equal(inventory.rows[0].freshness.state, "broken");
+  assert.equal(inventory.rows[0].receipt.latest_run.outcome, "empty");
+  const lines = [];
+  t.mock.method(console, "log", line => lines.push(String(line)));
+  await f.readSources({ flags: {} });
+  assert.match(lines.join("\n"), /calendar\s+calendar[^\n]+broken/);
+  assert.equal(project(inventory.rows).current_state, "broken");
+  assert.equal(project(inventory.rows).last_check_at, NOW, "retain separate earlier check evidence");
+});
+
+for (const throughMigration of [53, Infinity]) {
+  const schema = throughMigration === 53 ? "legacy green control" : "current migrations";
+  test(`D1 trigger-inclusive delivery claim succeeds with ${schema}`, async t => {
+    const f = fixture(t, { throughMigration });
+    const nowMs = Date.parse(NOW);
+    await persistZoomDelivery(f.env, { uuid: "synthetic-claim", eventType: "recording.completed", receivedAtMs: nowMs });
+    const claimed = await claimZoomDeliveries(f.env, { nowMs, ownerToken: "synthetic-lease" });
+    const writes = f.seen.runChanges.filter(row => /UPDATE zoom_deliveries/.test(row.sql));
+    assert.equal(writes.length, 1, "one candidate reached the conditional claim update");
+    assert.equal(f.db.prepare("SELECT status FROM zoom_deliveries").get().status, "processing", "claim committed");
+    assert.equal(claimed.length, 1, "a committed lease must not be silently skipped");
+    assert.equal(writes[0].changes, 1, "claim changes must remain exact under D1 semantics");
+  });
+
+  test(`D1 trigger-inclusive delivery outcome succeeds with ${schema}`, async t => {
+    const f = fixture(t, { throughMigration });
+    const nowMs = Date.parse(NOW);
+    await persistZoomDelivery(f.env, { uuid: "synthetic-outcome", eventType: "recording.completed", receivedAtMs: nowMs });
+    // Seed the lease so a broken claim cannot prevent reaching the outcome CAS.
+    f.db.prepare("UPDATE zoom_deliveries SET status='processing',lease_owner='synthetic-lease',lease_expires_at_ms=?")
+      .run(nowMs + 1000);
+    let outcomeError;
+    try {
+      await finishZoomDelivery(f.env, { recording_uuid: "synthetic-outcome", ownerToken: "synthetic-lease" },
+        { outcome: { kind: "completed" }, nowMs });
+    } catch (error) { outcomeError = error; }
+    const writes = f.seen.runChanges.filter(row => /UPDATE zoom_deliveries/.test(row.sql));
+    assert.equal(writes.length, 1, "the leased delivery reached the conditional outcome update");
+    assert.equal(f.db.prepare("SELECT status FROM zoom_deliveries").get().status, "completed", "outcome committed");
+    assert.equal(outcomeError, undefined, "a committed outcome must not report a lost lease");
+    assert.equal(writes[0].changes, 1, "outcome changes must remain exact under D1 semantics");
+  });
+}
+
+test("Zoom inventory groups retained deliveries through the covering status index", async t => {
+  const f = await zoomCase(t, { pages: [{ meetings: [] }] });
+  assert.equal(f.seen.provider, 1);
+  assert.equal(f.row.receipt.zoom.state, "checked", "quiet green control");
+  f.db.exec(`WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<2000)
+    INSERT INTO zoom_deliveries
+      (recording_uuid,event_type,received_at_ms,status,next_attempt_at_ms,created_at_ms,updated_at_ms,completed_at_ms)
+    SELECT 'synthetic-'||n,'recording.completed',0,'completed',0,0,0,0 FROM ids`);
+  f.seen.sql.length = 0;
+  const inventory = await sourceInventory(f.env, { now: Date.parse(NOW) });
+  assert.equal(inventory.rows[0].receipt.zoom.deliveries.completed, 2000);
+  const queries = f.seen.sql.filter(sql => /zoom_deliver/.test(sql));
+  assert.ok(queries.length > 0, "the inventory reached delivery evidence");
+  for (const sql of queries) {
+    const plan = f.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map(row => row.detail).join("\n");
+    assert.match(plan, /SCAN zoom_deliveries USING COVERING INDEX zoom_deliveries_status/);
+    assert.doesNotMatch(plan, /TEMP B-TREE/);
+  }
+});
+
+test("Zoom source failures take precedence over reconciliation in daily and source text", async t => {
+  const f = await zoomCase(t, { pages: [{ meetings: [] }] });
+  assert.equal(f.row.receipt.zoom.state, "checked");
+  await f.postReceipt({ source: "zoom", kind: "zoom", status: "error", completed_at: NOW });
+  const inventory = await sourceInventory(f.env, { now: Date.parse(NOW) });
+  const row = inventory.rows[0];
+  assert.equal(f.seen.receipts, 1);
+  assert.equal(row.freshness.state, "broken");
+  assert.equal(row.receipt.zoom.state, "checked", "separate reconciliation evidence remains available");
+  const [daily] = dailyFreshnessRows({ sources: [{ key: "zoom", class: "push" }] }, { sources: [row], as_of: NOW });
+  assert.equal(daily.current_state, "broken");
+  assert.equal(daily.last_check_at, NOW);
+  const manifestPath = join(f.root, "brain.manifest.json");
+  writeFileSync(manifestPath, JSON.stringify({ brain: { domain: "brain.example.invalid" } }));
+  const lines = [];
+  t.mock.method(console, "log", line => lines.push(String(line)));
+  await cmdSources(manifestPath, { flags: {}, resolveAdminKey: () => readFileSync(f.keyPath, "utf8"),
+    fetchImpl: (_url, init) => f.call(new Request(`${ORIGIN}/api/admin/brain/sources`, init)) });
+  assert.match(lines.join("\n"), /zoom\s+zoom[^\n]+broken/);
+});
+
+test("Zoom delivery totals follow real claims, duplicates, retries, failures, rollback and deletion", async t => {
+  const f = await zoomCase(t, { pages: [{ meetings: [] }] });
+  const nowMs = Date.parse(NOW);
+  const checkCounts = async expected => {
+    const inventory = await sourceInventory(f.env, { now: nowMs });
+    const deliveries = inventory.rows[0].receipt.zoom.deliveries;
+    assert.equal(inventory.rows[0].receipt.zoom.counts_available, true);
+    for (const [status, count] of Object.entries(deliveries)) assert.equal(count, expected[status] || 0, status);
+  };
+  await checkCounts({});
+  for (const status of ["completed", "refused", "unavailable", "retryable"]) {
+    const delivery = { uuid: `synthetic-${status}`, eventType: "recording.completed", receivedAtMs: nowMs };
+    await persistZoomDelivery(f.env, delivery);
+    await persistZoomDelivery(f.env, delivery);
+    const claimed = await claimZoomDeliveries(f.env, { nowMs, ownerToken: "synthetic-lease" });
+    assert.equal(claimed.length, 1, "duplicate webhook creates exactly one claim");
+    await finishZoomDelivery(f.env, claimed[0], { outcome: { kind: status }, nowMs, retryDelayMs: 1000 });
+  }
+  await checkCounts({ completed: 1, refused: 1, unavailable: 1, retryable: 1 });
+  f.db.exec("BEGIN");
+  await persistZoomDelivery(f.env, { uuid: "synthetic-rollback", eventType: "recording.completed", receivedAtMs: nowMs });
+  await checkCounts({ completed: 1, refused: 1, unavailable: 1, retryable: 1, pending: 1 });
+  f.db.exec("ROLLBACK");
+  await checkCounts({ completed: 1, refused: 1, unavailable: 1, retryable: 1 });
+  const claimed = await claimZoomDeliveries(f.env, { nowMs: nowMs + 1000, ownerToken: "synthetic-next-lease" });
+  assert.equal(claimed.length, 1);
+  await checkCounts({ completed: 1, refused: 1, unavailable: 1, processing: 1 });
+  const writes = f.seen.writes;
+  await assert.rejects(finishZoomDelivery(f.env, { ...claimed[0], ownerToken: "synthetic-wrong-lease" },
+    { outcome: { kind: "completed" }, nowMs }), /lease was lost/);
+  assert.equal(f.seen.writes, writes + 1, "the refused lease reached its conditional update");
+  await checkCounts({ completed: 1, refused: 1, unavailable: 1, processing: 1 });
+  await finishZoomDelivery(f.env, claimed[0], { outcome: { kind: "completed" }, nowMs });
+  await checkCounts({ completed: 2, refused: 1, unavailable: 1 });
+  f.db.exec("DELETE FROM zoom_deliveries WHERE status='completed'");
+  await checkCounts({ refused: 1, unavailable: 1 });
+});
+
+test("daily evidence migration indexes retained debt and legacy readers cannot fabricate new proof", async t => {
+  const f = fixture(t, { throughMigration: 53 });
+  f.db.exec("INSERT INTO sources (name,kind,status,created_at) VALUES ('zoom','zoom','ready','2026-01-01')");
+  Object.assign(f.env, { ZOOM_ACCOUNT_ID: "synthetic-account", ZOOM_CLIENT_ID: "synthetic-client",
+    ZOOM_CLIENT_SECRET: "synthetic-secret", ZOOM_WEBHOOK_SECRET_TOKEN: "synthetic-webhook" });
+  await persistZoomDelivery(f.env, { uuid: "synthetic-existing", eventType: "recording.completed", receivedAtMs: Date.parse(NOW) });
+  const legacy = await sourceInventory(f.env, { now: Date.parse(NOW) });
+  assert.equal(legacy.rows[0].receipt.zoom.state, "unknown");
+  assert.equal(legacy.rows[0].receipt.zoom.counts_available, false);
+  assert.equal(legacy.rows[0].receipt.zoom.deliveries.pending, null);
+  assert.ok(f.seen.sql.some(sql => /0 AS provider_check_complete/.test(sql)), "legacy column fallback reached");
+  assert.ok(f.seen.sql.some(sql => /INDEXED BY zoom_deliveries_status/.test(sql)), "legacy index lookup reached");
+  const migration = readFileSync(new URL("../migrations/d1/0054_daily_evidence.sql", import.meta.url), "utf8");
+  for (const statement of splitStatements(migration)) f.db.exec(statement);
+  const upgraded = await sourceInventory(f.env, { now: Date.parse(NOW) });
+  assert.equal(upgraded.rows[0].receipt.zoom.deliveries.pending, 1);
+  assert.equal(upgraded.rows[0].receipt.zoom.counts_available, true);
+  assert.equal(upgraded.rows[0].receipt.zoom.state, "pending");
+  // The migration runner skips an already present column on an interrupted
+  // retry. Every following statement must remain safe to replay as it does.
+  for (const statement of splitStatements(migration).slice(1)) f.db.exec(statement);
+  const replayed = await sourceInventory(f.env, { now: Date.parse(NOW) });
+  assert.deepEqual(replayed.rows[0].receipt.zoom, upgraded.rows[0].receipt.zoom);
+});
+
+test("non-Zoom inventory never requests Zoom totals", async t => {
+  const f = await dailyCase(t);
+  assert.equal(f.result.status, "complete");
+  f.seen.sql.length = 0;
+  const inventory = await sourceInventory(f.env, { now: Date.parse(NOW) });
+  assert.equal(inventory.rows.length, 1, "nonempty inventory green control");
+  assert.ok(f.seen.sql.length > 0);
+  assert.equal(f.seen.sql.some(sql => /zoom_deliver/.test(sql)), false);
+});
+
+test("Zoom migration captures deliveries arriving between independently committed statements", async t => {
+  const f = fixture(t, { throughMigration: 53 });
+  f.db.exec("INSERT INTO sources (name,kind,status,created_at) VALUES ('zoom','zoom','ready','2026-01-01')");
+  const statements = splitStatements(readFileSync(new URL("../migrations/d1/0054_daily_evidence.sql", import.meta.url), "utf8"));
+  let arrivals = 0;
+  for (const statement of statements) {
+    f.db.exec(statement);
+    arrivals++;
+    await persistZoomDelivery(f.env, { uuid: `synthetic-arrival-${arrivals}`, eventType: "recording.completed", receivedAtMs: Date.parse(NOW) });
+  }
+  assert.ok(arrivals > 1, "every migration boundary received a real delivery write");
+  const inventory = await sourceInventory(f.env, { now: Date.parse(NOW) });
+  assert.equal(inventory.rows[0].receipt.zoom.deliveries.pending, arrivals);
+});
+
+test("Zoom incomplete migration reports unknown totals until the index exists", async t => {
+  const f = fixture(t, { throughMigration: 53 });
+  f.db.exec("INSERT INTO sources (name,kind,status,created_at) VALUES ('zoom','zoom','ready','2026-01-01')");
+  const statements = splitStatements(readFileSync(new URL("../migrations/d1/0054_daily_evidence.sql", import.meta.url), "utf8"));
+  for (const statement of statements.slice(0, -1)) f.db.exec(statement);
+  const inventory = await sourceInventory(f.env, { now: Date.parse(NOW) });
+  assert.equal(inventory.rows.length, 1);
+  assert.ok(f.seen.sql.some(sql => /INDEXED BY zoom_deliveries_status/.test(sql)), "index decision reached");
+  assert.equal(inventory.rows[0].receipt.zoom.counts_available, false);
+  f.db.exec(statements.at(-1));
+  const complete = await sourceInventory(f.env, { now: Date.parse(NOW) });
+  assert.equal(complete.rows[0].receipt.zoom.counts_available, true, "completed migration green control");
+});
+
+test("daily evidence migration adds no delivery triggers or counter table", t => {
+  const f = fixture(t);
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('sync_runs') WHERE name='provider_check_complete'")
+    .get().count, 1, "current migration reached and added its provider proof column");
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE type='index' AND name='zoom_deliveries_status'")
+    .get().count, 1, "covering index green control");
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE type='trigger' AND tbl_name='zoom_deliveries'")
+    .get().count, 0, "all applied migrations must preserve exact delivery write receipts");
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE name='zoom_delivery_counts'")
+    .get().count, 0);
+});
+
+test("Zoom malformed count evidence stays unknown after the aggregate is reached", async t => {
+  const f = await zoomCase(t, { pages: [{ meetings: [] }] });
+  assert.equal(f.row.receipt.zoom.counts_available, true, "valid empty aggregate green control");
+  const prepare = f.env.DB.prepare.bind(f.env.DB);
+  let aggregates = 0;
+  f.env.DB.prepare = sql => {
+    const statement = prepare(sql);
+    if (/INDEXED BY zoom_deliveries_status/.test(sql)) {
+      const all = statement.all;
+      statement.all = async () => {
+        await all();
+        aggregates++;
+        return { results: [{ status: "pending", count: -1 }] };
+      };
+    }
+    return statement;
+  };
+  const inventory = await sourceInventory(f.env, { now: Date.parse(NOW) });
+  assert.equal(aggregates, 1);
+  assert.equal(inventory.rows[0].receipt.zoom.counts_available, false);
+  assert.equal(inventory.rows[0].receipt.zoom.deliveries.pending, null);
+  assert.equal(inventory.rows[0].receipt.zoom.state, "unknown");
+});
+
+test("Zoom aggregate storage failures propagate after the indexed decision is reached", async t => {
+  const f = await zoomCase(t, { pages: [{ meetings: [] }] });
+  assert.equal(f.row.receipt.zoom.state, "checked", "indexed quiet green control");
+  const prepare = f.env.DB.prepare.bind(f.env.DB);
+  let aggregates = 0;
+  f.env.DB.prepare = sql => {
+    const statement = prepare(sql);
+    if (/INDEXED BY zoom_deliveries_status/.test(sql)) {
+      const all = statement.all;
+      statement.all = async () => {
+        await all();
+        aggregates++;
+        throw new Error("synthetic storage read failure");
+      };
+    }
+    return statement;
+  };
+  const outcome = await sourceInventory(f.env, { now: Date.parse(NOW) })
+    .then(() => null, error => error);
+  assert.equal(aggregates, 1);
+  assert.match(outcome?.message || "", /synthetic storage read failure/);
+});
+
 for (const [name, options] of [
   ["static upload", { inventoryMutation: body => ({ ...body, sources: body.sources.map(row => ({ ...row, kind: "upload" })) }) }],
   ["borrowed ingest", { inventoryMutation: body => ({ ...body, sources: body.sources.map(row => ({ ...row,
@@ -133,7 +444,7 @@ for (const [name, options] of [
 }
 
 test("provider check validator requires every terminal field independently", () => {
-  const run = { outcome: "empty", walk_complete: true, metrics_version: 1,
+  const run = { outcome: "empty", walk_complete: true, provider_check_complete: true, metrics_version: 1,
     files_seen: 0, docs_added: 0, docs_updated: 0, docs_unchanged: 0, docs_refused: 0, docs_failed: 0,
     started_at: NOW, finished_at: NOW };
   let decisions = 0;
@@ -315,7 +626,7 @@ test("Zoom checks expire and losing one credential cannot borrow a prior quiet c
 
 test("daily requires each source leg and keeps mixed ingest and checks distinct", async () => {
   const quiet = { kind: "calendar", last_successful_run_at: BEFORE, latest_run: {
-    outcome: "empty", walk_complete: true, metrics_version: 1, started_at: NOW, finished_at: NOW,
+    outcome: "empty", walk_complete: true, provider_check_complete: true, metrics_version: 1, started_at: NOW, finished_at: NOW,
     files_seen: 0, docs_added: 0, docs_updated: 0, docs_unchanged: 0, docs_refused: 0, docs_failed: 0,
   } };
   const work = { ...quiet, last_successful_run_at: NOW, latest_run: { ...quiet.latest_run, outcome: "completed", files_seen: 1, docs_added: 1 } };

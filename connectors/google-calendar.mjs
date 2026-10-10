@@ -984,7 +984,15 @@ export async function listEvents({ calendar, syncToken = null, config, ctx }) {
     const params = buildListParams({ syncToken, pageToken, config: cfg });
     const body = await calendarGet(`/calendars/${encodeURIComponent(calendar.id)}/events`, params, ctx);
     pages += 1;
-    if (Array.isArray(body.items)) events.push(...body.items);
+    // A 200 alone is not enumeration evidence. Reject malformed page shapes
+    // and opaque tokens before they can manufacture a terminal empty walk.
+    if (!Array.isArray(body?.items) ||
+        [body.nextPageToken, body.nextSyncToken].some(token => token !== undefined &&
+          (typeof token !== "string" || token.length === 0)) ||
+        (body.nextPageToken !== undefined && body.nextSyncToken !== undefined)) {
+      throw new CalendarApiError("calendar API returned an invalid events page");
+    }
+    events.push(...body.items);
     pageToken = body.nextPageToken || null;
     nextSyncToken = body.nextSyncToken || null;
   } while (pageToken);

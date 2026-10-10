@@ -917,14 +917,20 @@ test("source statements preserve shipped rows except the specified refresh outco
     assert.ok(refused.last_successful_run_at < refused.run_finished_at);
     assert.equal(failed.run_docs_failed, 1, "failure decision was reached");
     assert.equal(failed.run_outcome, "partial");
-    const expected = before.map((row) => row.name === "imessage"
+    const corrected = before.map((row) => row.name === "imessage"
       ? { ...row, last_successful_run_at: Date.parse("2026-09-09T00:01:00.000Z") }
       : row.name === "message" ? { ...row, run_outcome: "failed" } : row);
+    // Migration 0054 adds explicit provider evidence. These historical runs
+    // must read false (or null when no run exists), while every pre-existing
+    // field and its order stay exact.
+    assert.ok(corrected.some(row => row.run_lane === null), "the comparison reaches a source with no run");
+    const expected = corrected.map(row => Object.fromEntries(Object.entries(row).flatMap(entry =>
+      entry[0] === "run_walk_complete" ? [entry, ["run_provider_check_complete", row.run_lane === null ? null : 0]] : [entry])));
     assert.equal(
       JSON.stringify(after), JSON.stringify(expected),
       `inventory rows changed beyond the specified refresh corrections (failure evidence ${includeFailureEvidence})`,
     );
-    assert.deepEqual(Object.keys(after[0]), Object.keys(before[0]), "column order changed");
+    assert.deepEqual(Object.keys(after[0]), Object.keys(expected[0]), "column order changed beyond the additive provider proof");
   }
 
   const recoveryBinds = [

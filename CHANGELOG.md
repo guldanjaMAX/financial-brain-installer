@@ -6,6 +6,11 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.12 (unreleased)
 
+- **Daily evidence stays honest after errors.** Calendar quiet checks require
+  a validated provider completion token, and later source failures stay visible.
+  Zoom status shows delivery totals without interrupting transcript delivery.
+  After updating, verify quiet checks and any pending debt.
+
 - **Quiet daily checks have their own evidence.** A completed provider check
   with no changes can finish successfully without changing the last ingest
   date. Daily status shows when it checked. Zoom source status also shows

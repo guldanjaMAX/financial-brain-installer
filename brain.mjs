@@ -10334,10 +10334,11 @@ export async function cmdSources(manifestPath, options = {}) {
       for (const row of inventory.sources) {
         const noChangeAt = providerNoChangeCheckAt(row.kind, row.receipt?.latest_run);
         const checkAge = noChangeAt ? Date.parse(inventory.as_of) - Date.parse(noChangeAt) : NaN;
+        const sourceFailed = row.receipt?.status === "error" || row.freshness.state === "broken";
         const checkLabel = checkAge >= 0 && checkAge <= 24 * 60 * 60 * 1000 ? "checked (no changes)" : null;
         console.log(
           `  ${row.name.padEnd(nameWidth)}  ${row.kind.padEnd(kindWidth)}  ${String(row.zone || "unassigned").padEnd(12)}  ` +
-            `${num(row.storage.physical_documents).padStart(9)}  ${num(row.storage.readable_documents).padStart(10)}  ${row.receipt?.zoom?.state || checkLabel || row.freshness.state}`,
+            `${num(row.storage.physical_documents).padStart(9)}  ${num(row.storage.readable_documents).padStart(10)}  ${sourceFailed ? "broken" : row.receipt?.zoom?.state || checkLabel || row.freshness.state}`,
         );
         if (noChangeAt) {
           console.log(`    checked ${row.receipt.last_check_at}; no changes; last ingest ${row.receipt.last_ingest_receipt_at || "never"}`);
@@ -10346,7 +10347,8 @@ export async function cmdSources(manifestPath, options = {}) {
           const zoom = row.receipt.zoom;
           const pending = zoom.deliveries.pending + zoom.deliveries.processing + zoom.deliveries.retryable;
           console.log(`    Zoom ${zoom.state}; last check ${zoom.last_check_at || "never"}; ` +
-            `${pending} pending, ${zoom.deliveries.refused} refused, ${zoom.deliveries.unavailable} unavailable; history unproven`);
+            (zoom.counts_available === false ? "delivery counts unavailable" :
+              `${pending} pending, ${zoom.deliveries.refused} refused, ${zoom.deliveries.unavailable} unavailable`) + "; history unproven");
         }
       }
       const failures = inventory.sources.filter((row) => row.last_failure !== null);
@@ -14546,6 +14548,7 @@ async function cmdIngestCalendarRun(
     docs_refused: sent.refused.length + result.summary.skipped,
     docs_failed: sent.errors.length,
     walk_complete: walkComplete,
+    provider_check_complete: authoritativeSnapshot,
     complete_sweep: completeSweep,
     ...(completeSweep ? {
       confirmed_range: { from: configuredFrom, through: null },
@@ -26557,9 +26560,9 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
     const currentState = source.class === "connect-required" ? "skipped"
       : source.class === "snapshot" ? "snapshot"
       : source.class === "disabled" ? "skipped"
+        : receiptRows.some(row => row?.receipt?.status === "error") || states.includes("broken") ? "broken"
         : zoom ? zoom.state
         : checked ? "checked"
-        : states.includes("broken") ? "broken"
           : states.includes("review") || ["refused", "empty"].includes(lastRunOutcome) ? "review"
           : states.includes("unknown") ? "unknown"
             : states.includes("stale") ? "stale"
