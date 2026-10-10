@@ -107,6 +107,22 @@ export async function runDailyRefresh({
       return receipt;
     }
     const baseline = await readFreshness();
+    for (const source of plan.sources.filter((entry) => entry.class === "held")) {
+      const receipt = Object.freeze({
+        schema_version: 1,
+        kind: "daily_refresh_source",
+        identity: plan.identity.id,
+        source: source.source_names?.[0] || source.key,
+        status: "held",
+        started_at: startedAt,
+        completed_at: timestamp(now),
+        freshness_advanced: false,
+        reason_code: "source_held",
+        reason: source.hold_reason,
+      });
+      sourceResults.push(receipt);
+      await writeReceipt(receipt);
+    }
     for (const source of plan.sources.filter((entry) =>
       entry.class === "machine-pull" && entry.owner === "daily-task" && entry.status !== "ready"
     )) {
@@ -222,8 +238,8 @@ export async function runDailyRefresh({
       schema_version: 1,
       kind: "daily_refresh",
       identity: plan.identity.id,
-      status: sourceResults.some((entry) => !["complete", "partial"].includes(entry.status)) ? "failed"
-        : sourceResults.some((entry) => entry.status === "partial") ? "partial" : "complete",
+      status: sourceResults.some((entry) => !["complete", "partial", "held"].includes(entry.status)) ? "failed"
+        : sourceResults.some((entry) => ["partial", "held"].includes(entry.status)) ? "partial" : "complete",
       started_at: startedAt,
       completed_at: timestamp(now),
       schedule_attention: Object.freeze([...scheduleAttention]),
@@ -352,10 +368,13 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
     if (!options.silent) {
       const log = options.log || console.log;
       for (const attention of result.schedule_attention) log(attention);
-      log(`daily refresh ${result.status}: ${result.sources.length} source(s) attempted`);
+      const heldCount = result.sources.filter((source) => source.status === "held").length;
+      log(`daily refresh ${result.status}: ${result.sources.length - heldCount} source(s) attempted` +
+        (heldCount ? `; ${heldCount} held` : ""));
       for (const source of result.sources) {
         log(`${source.source} | ${source.status} | ${source.last_successful_run_at_after || "never"}` +
           (source.status === "partial" ? ` | ${source.docs_refused ?? "unknown"} refused` : "") +
+          (source.status === "held" ? ` | ${source.reason}` : "") +
           (source.docs_excluded > 0 ? ` | ${source.docs_excluded} excluded by rule` : ""));
       }
     }

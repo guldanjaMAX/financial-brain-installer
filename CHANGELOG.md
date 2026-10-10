@@ -4,6 +4,15 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.12 (unreleased)
+
+- **Daily imports can keep a source visibly on hold.** A reviewed manifest
+  selection lets approved sources run while another enabled source awaits
+  safety review. Daily status and run receipts show the held source and its
+  reason without claiming fresh data. Review the selection with `brain daily
+  status`, then reconcile it with `brain daily on`; changes require a new
+  verified schedule.
+
 ## 0.4.11 (2026-10-09)
 
 Candidate only. This version has not been released. The changes below still

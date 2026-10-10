@@ -130,6 +130,57 @@ function dailyConfiguration(m, localTimezone) {
   return { configured, cron, timezone, maxRuntime, error: null };
 }
 
+function selectDailySources(sources, configured) {
+  if (configured.sources === undefined) return { sources, error: null };
+  const selection = configured.sources;
+  const refuse = (reason) => ({ sources, error: `operations.daily_refresh.sources ${reason}` });
+  if (!selection || typeof selection !== "object" || Array.isArray(selection)) {
+    return refuse("must be an object of exact manifest source keys");
+  }
+  const byKey = new Map(sources.map((source) => [source.key, source]));
+  for (const [key, choice] of Object.entries(selection)) {
+    const source = byKey.get(key);
+    if (!source) return refuse("contains an unknown source key; aliases and whitespace are not accepted");
+    // Selection cannot adopt unsupported, disabled, or independently managed
+    // sources, nor claim to hold a writer owned by another scheduler.
+    if (!source.enabled || source.class !== "machine-pull" || source.owner !== "daily-task") {
+      return refuse("can select or hold only enabled machine-pull sources owned by the daily task");
+    }
+    if (!choice || typeof choice !== "object" || Array.isArray(choice) ||
+        Object.keys(choice).some((field) => !["state", "reason"].includes(field)) ||
+        !["selected", "held"].includes(choice.state)) {
+      return refuse("entries require state selected or held and no unknown properties");
+    }
+    if (choice.state === "held") {
+      if (typeof choice.reason !== "string" || !choice.reason || choice.reason.length > 240 ||
+          choice.reason !== choice.reason.trim() || /[\u0000-\u001f\u007f]/u.test(choice.reason)) {
+        return refuse("held entries require a non-empty, single-line reason of at most 240 characters without surrounding whitespace");
+      }
+    } else if (Object.hasOwn(choice, "reason")) {
+      return refuse("selected entries cannot carry a hold reason");
+    }
+  }
+  if (sources.some((source) => source.enabled && source.class === "machine-pull" &&
+      source.owner === "daily-task" && !Object.hasOwn(selection, source.key))) {
+    return refuse("must explicitly select or hold every enabled daily-owned machine-pull source");
+  }
+  return {
+    error: null,
+    sources: sources.map((source) => {
+      const choice = selection[source.key];
+      if (!Object.hasOwn(selection, source.key)) return source;
+      return Object.freeze({
+        ...source,
+        selection: choice.state,
+        hold_reason: choice.state === "held" ? choice.reason : null,
+        ...(choice.state === "held"
+          ? { class: "held", owner: "none", status: "held", run_key: null, reason: choice.reason }
+          : {}),
+      });
+    }),
+  };
+}
+
 export async function planDailyRefresh({
   m,
   manifestPath,
@@ -150,7 +201,7 @@ export async function planDailyRefresh({
     ...planLoadOptions,
   });
   const byKey = new Map((loadEntries || []).map((entry) => [entry.key, entry]));
-  const sources = Object.entries(m.corpora || {})
+  const classified = Object.entries(m.corpora || {})
     .filter(([key]) => !key.startsWith("_"))
     .map(([key, configured]) => {
       const entry = byKey.get(key);
@@ -186,6 +237,8 @@ export async function planDailyRefresh({
     });
   const daily = dailyConfiguration(m, localTimezone);
   const configured = daily.configured;
+  const selected = selectDailySources(classified, configured);
+  const sources = selected.sources;
   const eligible = sources.some((source) => source.class === "machine-pull" && source.owner === "daily-task" && source.status === "ready");
   const enabled = configured.enabled === undefined ? eligible : configured.enabled === true;
   const timezone = daily.timezone || "UTC";
@@ -194,8 +247,12 @@ export async function planDailyRefresh({
   const unavailableDaily = sources.filter((source) =>
     source.class === "machine-pull" && source.owner === "daily-task" && source.status !== "ready"
   );
-  const sourcePlanHash = digest(sources.filter((source) => source.class !== "connect-required").map(({ key, run_key, enabled, class: sourceClass, owner, status, source_names }) => ({
-    key, run_key, enabled, class: sourceClass, owner, status, source_names,
+  const sourcePlanHash = digest(sources.filter((source) => source.class !== "connect-required").map(({ key, run_key, enabled, class: sourceClass, owner, status, source_names, selection, hold_reason }) => ({
+    key, run_key, enabled, class: sourceClass, owner, status,
+    // A held connector's local readiness may change its discovered legs. It
+    // has no authorized work, so that observation cannot block selected work.
+    source_names: selection === "held" ? [] : source_names,
+    ...(selection === undefined ? {} : { selection, hold_reason }),
   })));
   return Object.freeze({
     schema_version: 1,
@@ -211,9 +268,9 @@ export async function planDailyRefresh({
     local_timezone: localTimezone,
     timezone_matches_machine: timezoneMatches,
     max_runtime_minutes: daily.maxRuntime || 45,
-    ready: unsupported.length === 0 && unavailableDaily.length === 0 && timezoneMatches && !daily.error,
+    ready: unsupported.length === 0 && unavailableDaily.length === 0 && timezoneMatches && !daily.error && !selected.error,
     unsupported_sources: unsupported.length,
-    configuration_error: daily.error || (unsupported.length
+    configuration_error: daily.error || selected.error || (unsupported.length
       ? null
       : unavailableDaily.length
         ? `enabled daily source(s) are unavailable: ${unavailableDaily.map((source) => source.key).join(", ")}`
