@@ -1280,6 +1280,7 @@ async function captureCurrentState(env, signer) {
     generation: Number(markerRows[0].generation),
     inventory,
     head,
+    entityRows,
   };
 }
 
@@ -1338,10 +1339,21 @@ function readStateBody(state) {
  * throws, because a caller that cannot tell "no map" from "could not look"
  * would turn the second into the first.
  */
-export async function readOwnerFinancialMapState(env) {
+export async function readOwnerFinancialMapState(env, { entitySlug } = {}) {
   if (backendOf(env) !== D1 || !env?.DB) return null;
   const signer = await signingContext(env);
-  return readStateBody(await captureCurrentState(env, signer));
+  const state = await captureCurrentState(env, signer);
+  const body = readStateBody(state);
+  if (entitySlug !== undefined) {
+    // Resolve the exact ledger identity inside the same captured inventory.
+    // Map references have a different namespace from Financial Picture refs;
+    // neither labels nor matching array positions establish entity identity.
+    const row = state.entityRows.find(row => row.entity_slug === entitySlug);
+    body.selected_entity_ref = row ? await signer.hmac("entity-ref", {
+      tenant_id: TENANT_ID, id: Number(row.id), entity_slug: row.entity_slug,
+    }) : null;
+  }
+  return body;
 }
 
 async function readOrPreviewPrincipal(request, env) {
