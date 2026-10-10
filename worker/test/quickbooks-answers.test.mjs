@@ -141,6 +141,19 @@ async function answerCase(t, { mutate = (doc) => doc, source = "quickbooks", kin
     assert.equal(verifierCalls, expectedVerifiers, "the draft reached the expected evidence-verifier decision point");
     if (expectedVerifiers) assert.equal(body.evidence_gate?.error, undefined, "a thrown gate is not a valid refusal");
     if (expectedDrafts !== undefined) assert.equal(draftCalls, expectedDrafts, "generation attempts are bounded");
+    // Timing must describe the real model boundary, including a failed repair,
+    // while observed answers still reach the shared gate without either call.
+    assert.equal(body.timing.stages.answer_llm.calls, draftCalls);
+    assert.equal(body.timing.stages.verifier_llm.calls, verifierCalls);
+    if (body.evidence_gate?.method?.startsWith("quickbooks_observed_")) {
+      assert.equal(draftCalls, 0);
+      assert.equal(verifierCalls, 0);
+      assert.equal(body.timing.stages.evidence_gate.calls, 1);
+      assert.ok(body.timing.stages.premise_temporal.calls >= 4,
+        "observed admission and shared checks are both timed");
+      assert.equal(body.timing.stages.premise_temporal.errors, 0);
+      assert.equal(body.timing.stages.evidence_gate.errors, 0);
+    }
     return body;
   } finally { fixture.close(); }
 }
@@ -620,6 +633,8 @@ test("a failed citation repair cannot expose its unverified first draft", async 
   assert.equal(body.answer, null);
   assert.equal(body.citations.length, 0);
   assert.equal(body.evidence_gate, undefined);
+  assert.equal(body.timing.stages.answer_llm.errors, 1);
+  assert.equal(body.timing.stages.evidence_gate.calls, 0);
 });
 
 test("a balance table is never generated when exact Account rendering is available", async (t) => {

@@ -246,6 +246,13 @@ customer action.
 
 ## Ingest lifecycle
 
+Generic single-document, batch, owner-upload, and owner-note entry points share
+one registered-source custody check. Only an authenticated owner may file into a
+registered QuickBooks source, including overwrites. Non-owner admissions resolve
+the source kind from D1 before staging; a failed registry lookup aborts the write.
+Envelope metadata cannot confer provider authority. The reserved owner-note route,
+provenance, scope, and credential-scanning rules still apply independently.
+
 All producers converge on the same document envelope and batch write path:
 
 ```text
@@ -464,17 +471,54 @@ Repeated identities in one request deliberately use the
 original sequential path because revision order is part of their correctness
 contract.
 
-Drive and watched-folder removal candidates from policy, source deletion, and
-intentional quality skips are intersected with the current authenticated
-stored-family inventory and approved as one deterministic plan. Stored-family
-inventory derives declared `family_of` relationships as well as structural
-`part_of` families, even when a message row belongs to an upload file's family.
-After a deletion receipt, the client reads that inventory again and refuses to
-record completion while any exact target remains. Crossing either the
-100-document limit or the 10% stored-corpus limit stops before planned deletion
-and cursor or source-state completion. Approval binds to an opaque fingerprint
-of the exact categorized target set, so a changed plan requires a new decision
-without exposing source identifiers.
+Folder, Drive, Gmail, IMAP, Calendar, and generic provider ingestion separate accepted
+writes from removals. Completed replacement families remain in resumable state
+until the authenticated removal preview proves that they have no obsolete members
+or a separately approved plan removes those exact members. Source deletions and
+replacement cleanup enter the same boundary. A nonempty plan always stops before
+removal and cursor advancement; accepted additions and updates remain durable.
+
+QuickBooks Desktop also persists its exact pending tombstones and binds the
+review to the complete company checkpoint. Its refresh and separate apply both
+take the company-binding lease before the source lease. Apply rechecks both
+leases at each mutation boundary and never advances the Desktop checkpoint.
+Repeated accepted additions cannot waive an existing aggregate approval for
+the same pending scope. This does not establish Desktop money freshness.
+
+`operations/ingest-removal-plan.mjs` binds the exact family selectors and physical
+document targets to the local checkpoint, manifest and external Drive exclusion
+policy, installed runtime bytes, and an authenticated Worker inventory marker.
+The runtime digest covers the complete literal package allowlist, package entry
+points and metadata, the optional lockfile, and installed production dependencies
+including hoisted dependencies and optional peers. An absent or unsupported
+manifest, missing required file, link, or special file refuses approval. Changes
+in components, build helpers, scripts, or other shipped subtrees invalidate apply.
+`--apply-removals` applies only a saved matching plan. Existing aggregate and
+workload gates require their additional `--approve-removals` fingerprint, and
+repeated Drive absence observations still expire after 24 hours.
+
+The owner-only `POST /api/admin/brain/ingest-removal-plan` route previews with the
+same family resolver used by forget. Its apply action accepts at most 50 exact
+physical document identities. Migration 0052 changes a corpus generation and
+random nonce on every document or chunk mutation, including metadata-only edits.
+The nonce also distinguishes divergent histories after a database restore.
+A version metadata binding identifies the deployed Worker generation. Each
+bounded D1 deletion transaction checks the inventory fence before any mutation,
+returns its own resulting marker, and queues vector cleanup in the existing
+outbox. Exact readback must prove absence and the returned generation. Drift or a
+lost response requires a fresh plan; the client never adopts a newer marker to
+continue an old approval. Apply keeps the source cursor unchanged. An ordinary
+refresh after apply completes the source checkpoint.
+
+The legacy family arm of `POST /api/admin/brain/forget` is preview-only. A bare
+`confirm: true` returns HTTP 409 with `INGEST_REMOVAL_PLAN_REQUIRED` and guidance
+to update the CLI, including for an older ordinary-ingest orchestrator. Explicit
+source forget retains its separate exact-preview confirmation. Exact-target
+provenance repair retains its independently verified owner approval and passes
+that approval to a dedicated structural-family adapter. That adapter previews
+the authenticated inventory, applies only those exact physical targets through
+the fenced route, and reads back absence. It cannot use the legacy family writer
+or widen a repair into whole-source removal.
 
 ### Connector status
 
@@ -550,6 +594,14 @@ it disabled. A completed update retires the recorded bridge only after the
 permanent daily task passes exact readback.
 
 ## D1, FTS5, Vectorize, and the outbox
+
+Financial contract v1 adds immutable observations, exact source bytes, findings
+and run events in migration 0053, with a separate fenced current-snapshot head.
+The shared pure modules live in `worker/src/lib/` so local connectors and the
+Worker validate the same data. Each read must resolve current source grants,
+custody and the owner-map revision through injected trusted adapters. See
+[financial evidence contracts](./FINANCIAL-CONTRACTS.md) for the bounded storage,
+recovery order and integration responsibilities; no new route is enabled.
 
 D1 is authoritative for documents, chunks, source metadata, freshness,
 migration state, and operations history. FTS5 is maintained from D1 chunk rows

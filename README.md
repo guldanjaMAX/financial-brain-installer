@@ -13,7 +13,7 @@ whichever supported clients are present without placing a key in their config.
 
 ## Install it
 
-This package identifies itself as brain-installer 0.4.10. Its version alone does
+This package identifies itself as brain-installer 0.4.11. Its version alone does
 not establish whether it is approved for installation. Before installing or
 updating, use the current guided page at https://financialbrain.ai/install and
 match the exact approved package version, byte count and SHA-256. If the page
@@ -177,7 +177,7 @@ reviewed step at a time with `--run tools`, `cloudflare`, `smoke`, `google`, `zo
 `imap`, `passkey`, or `verify`. The owner still handles login, 2FA, OAuth consent,
 and the physical passkey gesture. For the supported Google, Zoom, and IMAP
 steps, tokens and app secrets go only into hidden terminal prompts or provider
-pages. The 0.4.10 candidate Windows path refuses those three credential ceremonies until
+pages. The 0.4.11 candidate Windows path refuses those three credential ceremonies until
 its secure secret-entry bridge is physically proven. Its first owner source is
 one explicitly approved local folder, previewed first and loaded manually.
 
@@ -800,15 +800,21 @@ That one-file lane excludes OCR, removal, reconciliation, scheduling, and a
 full-source walk. Documentation of the required boundary is not implementation,
 test, package, CI, physical Windows, or live-Brain proof.
 
-Drive, Gmail, IMAP, and local-folder refreshes may discover material that was
+Drive, Gmail, IMAP, Calendar, and local-folder refreshes may discover material that was
 deleted, newly excluded, or no longer readable. Each refresh combines every
-removal reason into one plan. Up to 100 documents and 10% of what that source
-loaded can be reconciled as routine source changes. One current Gmail deletion
-or policy exclusion is also routine, so a small mailbox can converge. A plan
-crossing the applicable limit stops before deleting anything or advancing the
-source cursor. It prints aggregate counts and an opaque approval fingerprint,
-never filenames or document IDs. Review the cause, then add the exact
-`--approve-removals <fingerprint>` value only when the plan is expected.
+removal reason into one authenticated plan, including obsolete parts of replaced
+files. Accepted additions and updates are saved, but no removal runs automatically.
+A nonempty plan stops with counts, the source name, and one command:
+`brain ingest <manifest> --source <source> --apply-removals <fingerprint>`.
+Use the exact command printed by that run. Plans crossing the existing Drive
+100-document or 10% limit also require the printed `--approve-removals` value.
+Microsoft workload and repeated Drive absence reviews remain additional gates.
+Apply refuses a changed local checkpoint, stored inventory, policy, or runtime.
+It removes only the exact approved document identities and verifies their absence.
+Then run ordinary ingestion again to complete the source refresh. A dry run
+still has no authenticated removal inventory and cannot produce this approval.
+An older CLI cannot remove families through the upgraded Brain's legacy cleanup
+route. The Brain refuses that request and tells the owner to update the CLI.
 To bound Gmail to recent mail, add `"since": "YYYY-MM-DD"` inside
 `corpora.gmail`. Changing that floor forces a full comparison; previously
 loaded older mail can leave the Brain only through the same removal-review gate.
@@ -844,9 +850,10 @@ capability signal. A family still missing either label is reported as
 `label_unavailable`, remains protected and retained, and is excluded from every
 approval fingerprint and deletion plan without stopping the completed Drive
 cursor. The fingerprint binds the eligible labels and exact observation, and
-it expires after 24 hours. The item is deleted only after the owner supplies the exact
-`brain ingest <manifest> --from drive --approve-removals <fingerprint>`
-approval, and its review entry clears only after deletion readback. Visible
+it expires after 24 hours. The stopped ingest prints a separate `--apply-removals`
+command with both exact fingerprints. An expired observation requires a fresh
+walk before apply. The review entry clears on the next ingest after exact
+deletion readback. Visible
 trash and a visible move outside the reviewed roots remain direct source proof.
 When the walk completed and its cursor advanced, these protected review states
 warn and exit successfully. A Drive run exits non-zero only when the walk

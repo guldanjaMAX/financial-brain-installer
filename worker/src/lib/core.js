@@ -1,3 +1,4 @@
+import { measureQueryStage, measureQueryModel } from "./query-timing.js";
 // core.js — HTTP helpers, auth, and the LLM call with its spend cap.
 //
 // Extracted from a single-tenant worker and genericized. Every
@@ -300,7 +301,11 @@ export function visionMessages(system, messages, image, env = {}) {
   ];
 }
 
-export async function callLLM(env, { model, system, messages, max_tokens, label, timeoutMs, image }) {
+export function callLLM(env, options) {
+  return measureQueryStage(options.timing, options.timingStage, () => callLLMImpl(env, options));
+}
+
+async function callLLMImpl(env, { model, system, messages, max_tokens, label, timeoutMs, image, timing = null, timingStage }) {
   const apiKey = env.ANTHROPIC_API_KEY;
   if (!apiKey && !env.AI) {
     const e = new Error("no LLM key configured");
@@ -367,13 +372,13 @@ export async function callLLM(env, { model, system, messages, max_tokens, label,
       ? model
       : env.WORKERS_AI_ANSWER_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
     try {
-      const data = await env.AI.run(workersModel, {
+      const data = await measureQueryModel(timing, timingStage, "cloudflare-workers-ai", workersModel, () => env.AI.run(workersModel, {
         messages: image === undefined
           ? [{ role: "system", content: system }, ...(messages || [])]
           : visionMessages(system, messages, image, env),
         max_tokens: max_tokens || 1000,
         temperature: 0,
-      });
+      }));
       const rawResponse = data?.response;
       let text = typeof rawResponse === "string" ? rawResponse.trim() : "";
       // Not every Workers AI model replies in the same shape, and reading only
@@ -443,24 +448,26 @@ export async function callLLM(env, { model, system, messages, max_tokens, label,
     throw e;
   }
   const anthropicModel = model;
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ model: anthropicModel, max_tokens: max_tokens || 1000, system, messages }),
-    signal: AbortSignal.timeout(timeoutMs || 45_000),
+  const data = await measureQueryModel(timing, timingStage, "anthropic", anthropicModel, async () => {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model: anthropicModel, max_tokens: max_tokens || 1000, system, messages }),
+      signal: AbortSignal.timeout(timeoutMs || 45_000),
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      await logCall(env, { label, model, status: "error", micros: 0 });
+      throw new Error(`Anthropic ${res.status}: ${text.slice(0, 300)}`);
+    }
+
+    return res.json();
   });
-
-  if (!res.ok) {
-    const text = await res.text();
-    await logCall(env, { label, model, status: "error", micros: 0 });
-    throw new Error(`Anthropic ${res.status}: ${text.slice(0, 300)}`);
-  }
-
-  const data = await res.json();
   // Rough cost estimate. Precision is not the point; catching a runaway is.
   const inTok = data?.usage?.input_tokens || 0;
   const outTok = data?.usage?.output_tokens || 0;

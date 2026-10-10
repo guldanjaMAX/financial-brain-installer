@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -22,6 +22,9 @@ import {
 import {
   CLAUDE_TECHNICIAN_SKILL_MARKER,
   installClaudeTechnicianSkill,
+  reviewedSkillContent,
+  inspectTechnicianSkillEverywhere,
+  repairTechnicianSkillEverywhere,
 } from "../operations/claude-skill.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
@@ -33,7 +36,7 @@ import { renderCliCommands } from "../operations/cli-guidance.mjs";
 const escapeForRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const renderedCommand = (text) => escapeForRegExp(renderCliCommands(text));
 
-const sandbox = mkdtempSync(join(tmpdir(), "brain-technician-test-"));
+const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-technician-test-")));
 const manifestPath = join(sandbox, "brain.manifest.json");
 const fixtureScriptPath = resolve("/fixture/brain.mjs");
 const fixtureNodePath = resolve("/fixture/node");
@@ -1223,4 +1226,54 @@ test("the technician skill defaults to Claude and includes Codex only when alrea
   assert.equal(mixed[0].status, "verified", "a later failure must not undo an earlier success");
   assert.equal(mixed[1].status, "failed");
   assert.ok(mixed[1].error, "a failure must carry its reason");
+});
+
+for (const ending of ['\n', '\r\n']) test(`Windows rendered skill survives install and readback with ${JSON.stringify(ending)} source`, () => {
+  const sourcePath = join(sandbox, ending === '\n' ? 'skill-lf.md' : 'skill-crlf.md');
+  const source = readFileSync(new URL('../skills/financial-brain-technician/SKILL.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  writeFileSync(sourcePath, source.replace(/\n/g, ending));
+  const windows = { platform: 'win32', nodePath: String.raw`C:\Program Files\nodejs\node.exe`,
+    scriptPath: String.raw`C:\Users\Owner\AppData\Local\FinancialBrain\lib\node_modules\brain-installer\brain.mjs`,
+    env: { PATH: '' }, existsSync: () => false };
+  const desiredContent = reviewedSkillContent(sourcePath, windows);
+  assert.ok(Buffer.byteLength(source) < 64 * 1024, 'reviewed source fits the source bound');
+  assert.ok(Buffer.byteLength(desiredContent) > 64 * 1024, 'Windows command expansion reaches the old refusal');
+  assert.ok(desiredContent.includes(renderCliCommands('brain technician', windows)));
+  const options = { home: join(sandbox, ending === '\n' ? 'render-lf' : 'render-crlf'), desiredContent };
+  const first = installClaudeTechnicianSkill(options);
+  assert.equal(first.status, 'installed');
+  assert.equal(readFileSync(first.path, 'utf8'), desiredContent);
+  assert.equal(installClaudeTechnicianSkill(options).status, 'verified');
+  assert.equal(inspectTechnicianSkillEverywhere({ home: options.home, agentRoots: ['.claude'] })[0].status, 'installer_owned_outdated');
+  for (const invalid of ['x'.repeat(256 * 1024) + CLAUDE_TECHNICIAN_SKILL_MARKER, 'unmarked']) {
+    assert.throws(() => installClaudeTechnicianSkill({ ...options, desiredContent: invalid }), /content is invalid/);
+    assert.equal(readFileSync(first.path, 'utf8'), desiredContent, 'refusal preserves the verified control');
+  }
+  writeFileSync(sourcePath, 'x'.repeat(64 * 1024) + CLAUDE_TECHNICIAN_SKILL_MARKER);
+  assert.throws(() => reviewedSkillContent(sourcePath, windows), /identity check/);
+  assert.equal(readFileSync(first.path, 'utf8'), desiredContent, 'the packaged-source bound remains independent');
+});
+
+test('large rendered repair remains inspectable and rolls back both destinations after a late failure', () => {
+  const home = join(sandbox, 'large-repair'); mkdirSync(home);
+  const sourcePath = join(sandbox, 'large-repair.md');
+  writeFileSync(sourcePath, `${CLAUDE_TECHNICIAN_SKILL_MARKER}\n${'brain tools\n'.repeat(1000)}`);
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  try {
+    const desired = reviewedSkillContent(sourcePath);
+    assert.ok(Buffer.byteLength(desired) > 64 * 1024, 'real rendering reaches the former installed-size bound');
+    const options = { home, sourcePath, agentRoots: ['.claude', '.codex'] };
+    const observations = inspectTechnicianSkillEverywhere(options);
+    assert.equal(observations.filter(item => item.will_change).length, 2);
+    let writes = 0;
+    assert.throws(() => repairTechnicianSkillEverywhere({ ...options, observations,
+      installSkill(input) { const result = installClaudeTechnicianSkill(input); if (++writes === 2) throw Error('fixture late failure'); return result; },
+    }), /Every completed skill write was rolled back/);
+    assert.equal(writes, 2, 'both large destinations were written before the refusal');
+    assert.ok(observations.every(item => !existsSync(item.path)), 'both exact writes rolled back');
+    assert.equal(repairTechnicianSkillEverywhere(options).changed.length, 2);
+    assert.ok(inspectTechnicianSkillEverywhere(options).every(item => item.status === 'current'));
+    assert.equal(repairTechnicianSkillEverywhere(options).changed.length, 0);
+  } finally { Object.defineProperty(process, 'platform', platform); }
 });

@@ -6,14 +6,14 @@
  */
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { credentialScannerFingerprint } from "../brain.mjs";
+import { credentialScannerFingerprint, resolveAdminKey } from "../brain.mjs";
 import { BULK_POLICY, imapPolicyFingerprint } from "../connectors/imap.mjs";
 import { Folder, ScriptedImapServer } from "./fixtures/imap-server.mjs";
 
@@ -45,14 +45,18 @@ const versionOf = (raw) => `sha256:${createHash("sha256").update(raw).digest("he
 const stateKeyOf = (messageId) => `${SOURCE}:mid:${messageId.toLowerCase()}`;
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 
-function runCli({ manifestPath, evidencePath, statePath, userRoot, port, run, approval = null }) {
+function cliEnvironment({ evidencePath, statePath, userRoot, port, run }) {
   const environment = {};
   for (const name of ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR"]) {
     if (process.env[name] !== undefined) environment[name] = process.env[name];
   }
   Object.assign(environment, {
     NO_COLOR: "1",
-    ADMIN_KEY: "fixture-admin",
+    HOME: userRoot,
+    USERPROFILE: userRoot,
+    BRAIN_NO_WRANGLER_LOGIN: "1",
+    BRAIN_TEST_USER_ROOT: userRoot,
+    BRAIN_LIFECYCLE_LOCK_ROOT: join(userRoot, "lifecycle-locks"),
     BRAIN_IMAP_CREDENTIAL_STORE: "file",
     BRAIN_IMAP_SCANNER_EVIDENCE_PATH: evidencePath,
     BRAIN_IMAP_SCANNER_USER_ROOT: userRoot,
@@ -60,19 +64,37 @@ function runCli({ manifestPath, evidencePath, statePath, userRoot, port, run, ap
     BRAIN_IMAP_SCANNER_PORT: String(port),
     BRAIN_IMAP_SCANNER_RUN: String(run),
   });
+  return environment;
+}
+
+async function runCli({ manifestPath, evidencePath, statePath, userRoot, port, run, approval = null, apply = null, platform = process.platform }) {
+  const environment = cliEnvironment({ evidencePath, statePath, userRoot, port, run });
+  if (platform === "win32") {
+    environment.BRAIN_IMAP_SCANNER_PLATFORM = "win32";
+    environment.SystemRoot ||= "C:\\Windows";
+  }
   const args = ["--import", FIXTURE, CLI, "ingest", manifestPath, "--from", "imap", "--source", SOURCE];
   if (approval) args.push("--approve-removals", approval);
+  if (apply) args.push("--apply-removals", apply);
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, { cwd: ROOT, env: environment, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     child.stdout.on("data", (chunk) => { output += chunk; });
     child.stderr.on("data", (chunk) => { output += chunk; });
     child.once("error", reject);
-    child.once("close", (code, signal) => resolve({ code, signal, output: strip(output) }));
+    child.once("close", (code, signal) => {
+      if (code === 86) {
+        const diagnostic = output.match(/^TEST_SIDE_EFFECT_BLOCKED:host_process:[A-Za-z.]+:[A-Za-z0-9_.-]{1,80}$/m)?.[0];
+        reject(new Error(`the IMAP fixture reached a forbidden host process${diagnostic ? ` (${diagnostic})` : ""}`));
+      }
+      else resolve({ code, signal, output: strip(output) });
+    });
   });
 }
 
-const directory = mkdtempSync(join(tmpdir(), "brain-imap-scanner-removal-"));
+// The real credential reader rejects linked parent directories, including the
+// system temporary-directory alias on macOS. Exercise a physical fixture path.
+const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-imap-scanner-removal-")));
 const manifestPath = join(directory, "fixture.manifest.json");
 const statePath = join(directory, `.brain-ingest-${SOURCE}.json`);
 const evidencePath = join(directory, "evidence.json");
@@ -112,7 +134,8 @@ try {
   const replayKey = stateKeyOf(replayId);
   const replayVersion = versionOf(replayRaw);
 
-  await server.listen();
+  const adminKey = randomBytes(32).toString("hex");
+  writeFileSync(join(directory, ".brain-admin-key"), adminKey, { mode: 0o600 });
   mkdirSync(credentialRoot, { recursive: true, mode: 0o700 });
   writeFileSync(manifestPath, JSON.stringify({
     client: { slug: "fixture" },
@@ -120,14 +143,84 @@ try {
     infrastructure: { cloudflare: { account_id: "fixture-account", d1_database_id: "fixture-db" } },
     safety: { credential_scanner: { enabled: true }, private_path_prefixes: [] },
   }), { mode: 0o600 });
-  writeFileSync(join(credentialRoot, "imap-credentials.json"), JSON.stringify({
-    imap: {
-      host: "mail.example.invalid",
-      port: server.port,
-      username: server.username,
-      password: server.password,
-    },
+  // A credential-fixture refusal must not masquerade as a missing IMAP SEARCH.
+  // Compare only a boolean so a failed assertion can never print key bytes.
+  check("the isolated file credential passes the real reader before IMAP begins",
+    resolveAdminKey(manifestPath, { ignoreEnvironment: true }) === adminKey);
+  const writeMailboxCredential = (port) => writeFileSync(join(credentialRoot, "imap-credentials.json"), JSON.stringify({
+    imap: { host: "mail.example.invalid", port, username: server.username, password: server.password },
   }), { mode: 0o600 });
+  writeMailboxCredential(993);
+
+  // Exercise the real Windows lock boundary even on POSIX. Only the reviewed
+  // scratch ACL dependency is injected; every other native child still exits
+  // through the fixture's tripwire before any executable can start.
+  const lockModule = new URL("../operations/brain-lifecycle-lock.mjs", import.meta.url).href;
+  const lockProbe = `
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const { acquireBrainLifecycleLock } = await import(${JSON.stringify(lockModule)});
+    const lease = acquireBrainLifecycleLock({ manifestPath: ${JSON.stringify(manifestPath)}, operation: 'ingest' });
+    lease.assertOwned(); lease.release();
+  `;
+  const probeEnv = cliEnvironment({ evidencePath, statePath, userRoot, port: 1, run: 1 });
+  for (const forbidden of [false, true]) {
+    const result = spawnSync(process.execPath, ["--import", FIXTURE, "--input-type=module", "-e",
+      lockProbe + (forbidden ? `
+        (await import('node:child_process')).spawnSync(
+          'C:\\\\synthetic-private-dir\\\\fixture-forbidden-child.exe', ['synthetic-private-argument']);
+      ` : "")],
+    { env: probeEnv, encoding: "utf8", timeout: 30000 });
+    check("the Windows fixture reaches the bounded lifecycle ACL", /TEST_LIFECYCLE_ACL_REACHED/.test(result.stderr));
+    check(forbidden ? "the native-child tripwire stays active after the ACL control" : "the injected Windows lock acquires and releases without a host process",
+      result.status === (forbidden ? 86 : 0) &&
+      /TEST_SIDE_EFFECT_BLOCKED:host_process/.test(result.stderr) === forbidden);
+    if (forbidden) check("the tripwire reports only the API name and executable basename",
+      result.stderr.trim().split(/\r?\n/).at(-1) ===
+        "TEST_SIDE_EFFECT_BLOCKED:host_process:spawnSync:fixture-forbidden-child.exe" &&
+      !/synthetic-private/.test(result.stderr));
+  }
+  const credentialProbe = `
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const { loadImapCredentials } = await import(${JSON.stringify(new URL("../connectors/imap.mjs", import.meta.url).href)});
+    const record = loadImapCredentials({ sourceName: 'mailbox' });
+    if (record?.host !== 'mail.example.invalid' || record?.port !== 993) process.exit(1);
+    process.stderr.write('TEST_IMAP_CREDENTIAL_READ_COMPLETE\\n');
+  `;
+  const credentialResult = spawnSync(process.execPath,
+    ["--import", FIXTURE, "--input-type=module", "-e", credentialProbe], {
+      env: { ...probeEnv, SystemRoot: probeEnv.SystemRoot || "C:\\Windows" }, encoding: "utf8", timeout: 30000,
+    });
+  check("the Windows IMAP reader reaches its credential decision with zero host-process hits",
+    credentialResult.status === 0 && /TEST_IMAP_CREDENTIAL_READ_COMPLETE/.test(credentialResult.stderr) &&
+      !/TEST_SIDE_EFFECT_BLOCKED/.test(credentialResult.stderr), credentialResult.stderr);
+  check("the Windows fixture exercises real legacy migration, ACL staging, and DPAPI readback",
+    /TEST_IMAP_DPAPI_REACHED:protect/.test(credentialResult.stderr) &&
+      /TEST_IMAP_DPAPI_REACHED:unprotect/.test(credentialResult.stderr) &&
+      /TEST_IMAP_CREDENTIAL_ACL_REACHED/.test(credentialResult.stderr) &&
+      readFileSync(join(credentialRoot, "imap-credentials.json"), "utf8").startsWith("BRAIN-GOOGLE-TOKENS-DPAPI-V1\n"));
+  // Reading the now-migrated fixture must still hit the same refusal for every
+  // child-process API. Shell strings and both path spellings must redact to
+  // one basename, and prototype spawning must not evade the top-level hooks.
+  for (const api of ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork", "ChildProcess.spawn"]) {
+    const executable = api === "exec" || api === "execSync"
+      ? '"C:\\synthetic-private-dir with spaces\\fixture-forbidden-child.exe" synthetic-private-argument'
+      : "/synthetic-private-dir/fixture-forbidden-child.exe";
+    const call = api === "ChildProcess.spawn"
+      ? `new cp.ChildProcess().spawn({ file: ${JSON.stringify(executable)}, args: ['synthetic-private-argument'] })`
+      : `cp[${JSON.stringify(api)}](${JSON.stringify(executable)}, ['synthetic-private-argument'])`;
+    const result = spawnSync(process.execPath, ["--import", FIXTURE, "--input-type=module", "-e",
+      credentialProbe + `const cp = await import('node:child_process'); ${call};`], {
+        env: { ...probeEnv, SystemRoot: probeEnv.SystemRoot || "C:\\Windows" }, encoding: "utf8", timeout: 30000,
+      });
+    const diagnostics = result.stderr.split(/\r?\n/).filter((line) => line.startsWith("TEST_SIDE_EFFECT_BLOCKED:"));
+    check(`${api} stays blocked after the Windows credential control with a sanitized diagnostic`,
+      result.status === 86 && /TEST_IMAP_CREDENTIAL_READ_COMPLETE/.test(result.stderr) &&
+        diagnostics.length === 1 &&
+        diagnostics[0] === `TEST_SIDE_EFFECT_BLOCKED:host_process:${api}:fixture-forbidden-child.exe` &&
+        !/synthetic-private/.test(result.stderr));
+  }
+  await server.listen();
+  writeMailboxCredential(server.port);
 
   const scannerV4 = credentialScannerFingerprint(true, 4);
   const scannerV5 = credentialScannerFingerprint(true, 5);
@@ -151,18 +244,30 @@ try {
   }), { mode: 0o600 });
 
   const review = await runCli({
-    manifestPath, evidencePath, statePath, userRoot, port: server.port, run: 1,
+    manifestPath, evidencePath, statePath, userRoot, port: server.port, run: 1, platform: "win32",
   });
   const approval = /--approve-removals ([0-9a-f]{64})/.exec(review.output)?.[1] || null;
   const reviewEvidence = readJson(evidencePath);
   const reviewState = readJson(statePath);
+  check("the Windows CLI reaches a nonempty removal decision with zero host-process hits",
+    review.code !== 0 && reviewState.ingest_removal_plan?.targets.length === 101 &&
+      reviewEvidence.events.some((entry) => entry.run === 1 && entry.kind === "plan_preview") &&
+      /TEST_LIFECYCLE_ACL_REACHED/.test(review.output) &&
+      /TEST_IMAP_DPAPI_REACHED:protect/.test(review.output) &&
+      /TEST_IMAP_CREDENTIAL_ACL_REACHED/.test(review.output) &&
+      !/TEST_SIDE_EFFECT_BLOCKED/.test(review.output));
+  // Subsequent scenarios keep the host platform. Restore the same synthetic
+  // record because a POSIX reader deliberately refuses a Windows envelope.
+  if (process.platform !== "win32") writeMailboxCredential(server.port);
 
   check("scanner v5 rereads the complete IMAP folder instead of starting after its saved UID",
     server.log.some((line) => /SEARCH ALL/.test(line)) &&
       !server.log.some((line) => /SEARCH UID 102:\*/.test(line)), server.log.join(" | "));
   check("more than 100 prior IMAP families stop at one aggregate removal review",
     review.code !== 0 && approval !== null &&
-      /IMAP cleanup would remove 101 of 101 stored documents \(100\.0%\)/.test(review.output), review.output.slice(-1400));
+      /101 stored document\(s\) would be removed/.test(review.output) &&
+      /would remove 101 of 101 stored documents \(100\.0%\)/.test(review.output) &&
+      /Aggregate reasons:/.test(review.output), review.output.slice(-1400));
   check("the stopped review prints only an exact reusable approval fingerprint",
     /--approve-removals [0-9a-f]{64}/.test(review.output) &&
       !review.output.includes("scanner-sensitive-") && !review.output.includes(SYNTHETIC_KEY), review.output.slice(-1400));
@@ -181,8 +286,21 @@ try {
     JSON.stringify({ ingested: reviewEvidence.ingested_ids, events: reviewEvidence.events }));
 
   server.log.length = 0;
-  const approved = await runCli({
+  assert.ok(reviewState.ingest_removal_plan?.targets.length > 0,
+    "separate apply must name a saved nonempty plan");
+  const applied = await runCli({
     manifestPath, evidencePath, statePath, userRoot, port: server.port, run: 2, approval,
+    apply: reviewState.ingest_removal_plan.fingerprint,
+  });
+  const appliedState = readJson(statePath);
+  const appliedEvidence = readJson(evidencePath);
+  check("separate scanner cleanup applies the nonempty plan and preserves the old checkpoint",
+    applied.code === 0 && reviewState.ingest_removal_plan.targets.length === 101 &&
+      appliedEvidence.forget_targets.length === 101 && server.log.length === 0 &&
+      appliedState.credential_scanner_fingerprint === scannerV4 &&
+      appliedState.imap_folders.INBOX.last_uid === 101);
+  const approved = await runCli({
+    manifestPath, evidencePath, statePath, userRoot, port: server.port, run: 2,
   });
   const approvedEvidence = readJson(evidencePath);
   const approvedState = readJson(statePath);
@@ -212,6 +330,106 @@ try {
       approvedEvidence.stored_families[0] === replayKey &&
       approvedEvidence.ingested_ids.length === 1,
     JSON.stringify({ stored: approvedEvidence.stored_families, ingested: approvedEvidence.ingested_ids }));
+
+  // Once the scanner migration is complete, both removal kinds must preserve
+  // the saved UID on review/apply and resume incrementally after exact apply.
+  // Obsolete parts and source refusals take different paths to the boundary.
+  for (const [index, kind] of ["family", "source"].entries()) {
+    const beforeState = readJson(statePath);
+    const beforeEvidence = readJson(evidencePath);
+    const savedUid = beforeState.imap_folders.INBOX.last_uid;
+    const itemId = `incremental-${kind}@example.invalid`;
+    const itemKey = stateKeyOf(itemId);
+    const removalTarget = kind === "family" ? `${itemKey}#part1of2` : itemKey;
+    const addedId = `incremental-${kind}-addition@example.invalid`;
+    const addedKey = stateKeyOf(addedId);
+    // Keep the source plan strictly below both aggregate approval thresholds.
+    beforeEvidence.stored_families = [...new Set([
+      ...beforeEvidence.stored_families, removalTarget,
+      ...Array.from({ length: 20 }, (_, n) => `${SOURCE}:mid:baseline-${n}@example.invalid`),
+    ])].sort();
+    writeFileSync(evidencePath, JSON.stringify(beforeEvidence), { mode: 0o600 });
+    const changedRaw = message({ messageId: itemId, subject: "Synthetic incremental revision",
+      body: kind === "family"
+        ? "This accepted synthetic revision replaces an obsolete split representation."
+        : `This invented message contains a synthetic credential-shaped value ${SYNTHETIC_KEY}.`,
+    });
+    const addedRaw = message({ messageId: addedId, subject: "Synthetic incremental addition",
+      body: "This accepted synthetic addition must remain durable while removal waits for review.",
+    });
+    inbox.add(changedRaw, { internaldate: "31-Aug-2026 16:06:00 +0000" });
+    inbox.add(addedRaw, { internaldate: "31-Aug-2026 16:07:00 +0000" });
+    const run = 8 + index * 4;
+    const args = { manifestPath, evidencePath, statePath, userRoot, port: server.port };
+    server.log.length = 0;
+    const stopped = await runCli({ ...args, run });
+    const stoppedState = readJson(statePath);
+    const stoppedEvidence = readJson(evidencePath);
+    const plan = stoppedState.ingest_removal_plan;
+    check(`${kind} removal review reads only after the saved UID and reaches a nonempty exact plan`,
+      stopped.code !== 0 && plan?.targets.length === 1 && plan.targets[0] === removalTarget &&
+        server.log.some((line) => line === `UID SEARCH UID ${savedUid + 1}:*`) &&
+        !server.log.some((line) => /SEARCH ALL/.test(line)) &&
+        stoppedEvidence.events.some((entry) => entry.run === run && entry.kind === "plan_preview") &&
+        plan.sourcePlan.tooLarge === false);
+    check(`${kind} removal review saves accepted work without forgetting or advancing the checkpoint`,
+      stoppedEvidence.ingested_ids.includes(`mid:${addedId}`) &&
+        stoppedState.done[addedKey] === versionOf(addedRaw) &&
+        (kind !== "family" || stoppedState.done[itemKey] === versionOf(changedRaw)) &&
+        stoppedEvidence.forget_targets.length === beforeEvidence.forget_targets.length &&
+        stoppedState.imap_folders.INBOX.last_uid === savedUid &&
+        stoppedState.credential_scanner_fingerprint === scannerV5);
+
+    const mismatch = await runCli({ ...args, run: run + 1,
+      apply: (plan.fingerprint[0] === "0" ? "1" : "0") + plan.fingerprint.slice(1) });
+    const mismatchEvidence = readJson(evidencePath);
+    check(`${kind} removal refuses a mismatched fingerprint after the plan decision was reached`,
+      mismatch.code !== 0 && /No matching saved removal plan/.test(mismatch.output) &&
+        readJson(statePath).ingest_removal_plan.fingerprint === plan.fingerprint &&
+        mismatchEvidence.forget_targets.length === beforeEvidence.forget_targets.length &&
+        !mismatchEvidence.events.some((entry) => entry.run === run + 1 && entry.kind === "plan_apply"));
+
+    server.log.length = 0;
+    const applied = await runCli({ ...args, run: run + 2, apply: plan.fingerprint });
+    const appliedState = readJson(statePath);
+    const appliedEvidence = readJson(evidencePath);
+    check(`${kind} matching apply removes exactly the reviewed item while preserving the saved UID`,
+      applied.code === 0 && server.log.length === 0 &&
+        appliedEvidence.events.some((entry) => entry.run === run + 2 && entry.kind === "plan_apply") &&
+        appliedEvidence.forget_targets.length === beforeEvidence.forget_targets.length + 1 &&
+        appliedEvidence.forget_targets.at(-1) === removalTarget &&
+        appliedEvidence.stored_families.includes(addedKey) &&
+        appliedState.imap_folders.INBOX.last_uid === savedUid &&
+        appliedState.credential_scanner_fingerprint === scannerV5);
+
+    const resumed = await runCli({ ...args, run: run + 3 });
+    const resumedState = readJson(statePath);
+    const resumedEvidence = readJson(evidencePath);
+    check(`${kind} refresh resumes after the saved UID and commits only after removal readback`,
+      resumed.code === 0 &&
+        server.log.some((line) => line === `UID SEARCH UID ${savedUid + 1}:*`) &&
+        !server.log.some((line) => /SEARCH ALL/.test(line)) &&
+        resumedState.imap_folders.INBOX.last_uid === savedUid + 2 &&
+        resumedState.credential_scanner_fingerprint === scannerV5 &&
+        !resumedState.ingest_removal_plan &&
+        resumedEvidence.ingested_ids.length === stoppedEvidence.ingested_ids.length &&
+        resumedEvidence.forget_targets.length === appliedEvidence.forget_targets.length);
+  }
+
+  server.log.length = 0;
+  const settledUid = readJson(statePath).imap_folders.INBOX.last_uid;
+  const settledEvidence = readJson(evidencePath);
+  const noChanges = await runCli({
+    manifestPath, evidencePath, statePath, userRoot, port: server.port, run: 16,
+  });
+  const noChangesEvidence = readJson(evidencePath);
+  check("a zero-removal incremental refresh keeps its UID and does not fetch the prior messages again",
+    noChanges.code === 0 &&
+      server.log.some((line) => line === `UID SEARCH UID ${settledUid + 1}:*`) &&
+      !server.log.some((line) => /SEARCH ALL|UID FETCH/.test(line)) &&
+      readJson(statePath).imap_folders.INBOX.last_uid === settledUid &&
+      noChangesEvidence.ingested_ids.length === settledEvidence.ingested_ids.length &&
+      noChangesEvidence.forget_targets.length === settledEvidence.forget_targets.length);
 
   // A prior removal receipt can be pending when the source message reappears.
   // If its current bytes no longer yield a stable identity, the pending family

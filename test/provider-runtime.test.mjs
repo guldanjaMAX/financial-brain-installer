@@ -6,6 +6,9 @@ import {
   runProviderConnector,
 } from "../connectors/provider-runtime.mjs";
 import { SourceIngestLockError } from "../operations/source-ingest-lock.mjs";
+import { createIngestRemovalReview } from "../operations/ingest-removal-plan.mjs";
+import { buildDriveRemovalPlan } from "../operations/drive-removal-plan.mjs";
+import { ingestPlanStore } from "./helpers/ingest-plan-store.mjs";
 
 let ran = 0;
 const check = (name, value, detail = "") => {
@@ -33,7 +36,6 @@ function harness(overrides = {}) {
   const states = [];
   const calls = { syncCursor: undefined, deletions: [] };
   let tick = 0;
-  let familyRead = 0;
   return {
     receipts, states, calls,
     options: {
@@ -54,7 +56,7 @@ function harness(overrides = {}) {
         raw: JSON.stringify({ results: docs.map((doc) => ({ source_id: doc.source_id, status: "unchanged" })) }),
       }),
       removeDocuments: async ({ uids }) => { calls.deletions.push(...uids); return { applied: uids.length, pending: 0 }; },
-      listStoredFamilies: async () => ++familyRead === 1 ? new Set(["fixture:gone"]) : new Set(),
+      listStoredFamilies: async () => new Set(),
       postReceipt: async (_base, _key, receipt) => { receipts.push(receipt); return receipt; },
       approvedSnapshotFingerprint: providerSnapshotRemovalFingerprint("fixture", ["fixture:gone"]),
       ...overrides,
@@ -66,6 +68,38 @@ const lostSourceLease = () => new SourceIngestLockError(
   "the fixture source lease changed",
   { code: "source_ingest_lock_lost" },
 );
+
+{
+  const store = ingestPlanStore();
+  const state = { done: {}, skipped: {} };
+  for (let index = 0; index < 100; index++) store.put(`fixture:item${index}`);
+  const snapshot = { ...completeResult(), documents: [],
+    deletions: [0, 1].map(index => ({ source_type: "fixture-provider", source_id: `item${index}` })),
+    removal_review_scopes: [{ label: "mail", prior_source_ids: ["item0", "item1"], deletion_source_ids: ["item0", "item1"] }] };
+  const review = createIngestRemovalReview({ state, source: "fixture", kind: "upload", manifest: {},
+    manifestPath: "/fixture/manifest.json", base: "https://fixture.invalid", saveState() {},
+    request: store.request, runtime: () => "fixture-runtime" });
+  let reached = 0;
+  const h = harness({ sync: async () => snapshot, listStoredFamilies: async () => new Set(store.uids()),
+    reviewRemovals: async ({ uids, storedFamilies, requiredApproval, notice }) => {
+      reached++;
+      return review.finish({ sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }), providerApproval: requiredApproval, notice });
+    } });
+  try {
+    await assert.rejects(runProviderConnector(h.options), error => {
+      assert.match(error.message, /from 2 stored families/);
+      assert.match(error.message, /would remove 2 of 100 stored documents \(2\.0%\)/);
+      assert.match(error.message, /Aggregate reasons:/);
+      return error.code === "SAFETY_REVIEW_REQUIRED";
+    });
+    assert.equal(reached, 1);
+    assert.equal(state.ingest_removal_plan.targets.length, 2);
+    assert.equal(store.calls.apply, 0);
+    await review.apply(state.ingest_removal_plan.fingerprint, state.ingest_removal_plan.providerApproval);
+    assert.equal(store.uids().length, 98);
+    check("provider approval prints the workload denominator beside the aggregate source review", true);
+  } finally { store.db.close(); }
+}
 
 {
   const conflict = completeResult();
@@ -97,13 +131,13 @@ const lostSourceLease = () => new SourceIngestLockError(
   const h = harness({
     approvedSnapshotFingerprint: null,
     listStoredFamilies: async () => new Set(["fixture:gone"]),
-    sendBatch: async () => { batchesSent++; throw new Error("review gate must run before document delivery"); },
+    sendBatch: async ({ docs }) => { batchesSent++; return { results: docs.map((doc) => ({ source_id: doc.source_id, status: "unchanged" })) }; },
   });
   let error;
   try { await runProviderConnector(h.options); } catch (caught) { error = caught; }
-  check("a provider tombstone set crossing the aggregate ratio gate needs exact approval before any document write",
-    error?.code === "provider_removal_review_required" && /--approve-removals [0-9a-f]{64}/.test(error.message) &&
-    batchesSent === 0 && h.receipts.map((receipt) => receipt.status).join(",") === "indexing,error");
+  check("a provider tombstone set stops before removal after preserving accepted document work",
+    error?.code === "provider_removal_review_required" && /separate apply command/.test(error.message) &&
+    batchesSent === 1 && h.calls.deletions.length === 0 && h.receipts.map((receipt) => receipt.status).join(",") === "indexing,error");
 }
 
 {
@@ -119,17 +153,25 @@ const lostSourceLease = () => new SourceIngestLockError(
       : new Set(["fixture:one"]),
     approvedSnapshotFingerprint: providerSnapshotRemovalFingerprint("fixture", ["fixture:stale"]),
   });
-  const result = await runProviderConnector(h.options);
-  check("an authoritative baseline reconciles stored families absent from the complete inventory",
-    result.snapshot_reconciled === true && h.calls.deletions.join(",") === "fixture:stale");
+  let reviewed = null;
+  h.options.reviewRemovals = async (plan) => {
+    reviewed = plan;
+    throw new ProviderDeliveryError("Exact apply required", { code: "provider_removal_review_required" });
+  };
+  await assert.rejects(runProviderConnector(h.options), { code: "provider_removal_review_required" });
+  check("an authoritative baseline plans stored families absent from the complete inventory",
+    reviewed.uids.join(",") === "fixture:stale" && h.calls.deletions.length === 0 && h.states.length === 0);
+  check("the provider aggregate safety fingerprint remains an additional review input",
+    reviewed.requiredApproval === providerSnapshotRemovalFingerprint("fixture", ["fixture:stale"]));
 }
 
 {
   const h = harness({ listStoredFamilies: async () => new Set(["fixture:gone"]) });
   let error;
   try { await runProviderConnector(h.options); } catch (caught) { error = caught; }
-  check("a success-shaped delete receipt cannot advance a cursor when exact family readback still finds the document",
-    error?.code === "provider_deletion_not_confirmed" && h.states.length === 0 && h.receipts.at(-1).status === "error");
+  check("a supplied old deletion approval cannot advance a cursor while the stored family still needs review",
+    error?.code === "provider_removal_review_required" && h.calls.deletions.length === 0 &&
+    h.states.length === 0 && h.receipts.at(-1).status === "error");
 }
 
 {
@@ -226,14 +268,14 @@ const lostSourceLease = () => new SourceIngestLockError(
   check("provider delivery reuses the saved opaque cursor", h.calls.syncCursor.page === "opaque-old");
   check("stable unchanged documents count as accepted idempotent retries",
     result.tally.unchanged === 1 && result.tally.failed === 0);
-  check("exact provider tombstones are scoped to the selected source",
-    h.calls.deletions.join(",") === "fixture:gone");
+  check("an already absent provider tombstone never sends a deletion",
+    h.calls.deletions.length === 0);
   check("the terminal cursor commits only after document and deletion receipts",
     h.states.length === 1 && h.states[0].cursor.page === "opaque-next" && result.cursor_advanced === true);
   check("common source receipts close indexing as ready with proof fields",
     h.receipts.map((receipt) => receipt.status).join(",") === "indexing,ready" &&
     h.receipts[1].outcome_kind === "completed" && h.receipts[1].deletion_authority === "authoritative" &&
-    h.receipts[1].files_seen === 2 && h.receipts[1].complete_sweep === false);
+    h.receipts[1].files_seen === 1 && h.receipts[1].complete_sweep === false);
 }
 
 {
@@ -287,6 +329,7 @@ const lostSourceLease = () => new SourceIngestLockError(
 
 {
   const h = harness({
+    listStoredFamilies: async () => new Set(["fixture:gone"]),
     sendBatch: async ({ docs }) => ({
       res: { ok: true },
       raw: JSON.stringify({ results: docs.map((doc) => ({ source_id: doc.source_id, status: "failed" })) }),
@@ -310,13 +353,20 @@ const lostSourceLease = () => new SourceIngestLockError(
 }
 
 {
+  let reviewReached = 0;
   const h = harness({
-    removeDocuments: async () => ({ applied: 0, pending: 1 }),
+    listStoredFamilies: async () => new Set(["fixture:gone"]),
+    reviewRemovals: async ({ uids }) => {
+      reviewReached++;
+      assert.deepEqual(uids, ["fixture:gone"]);
+      throw new ProviderDeliveryError("Removal inventory not confirmed", { code: "provider_delivery_incomplete" });
+    },
+    removeDocuments: async () => { throw new Error("a missing removal proof reached deletion"); },
   });
   let error;
   try { await runProviderConnector(h.options); } catch (caught) { error = caught; }
   check("an unconfirmed provider deletion fails the run and withholds the cursor",
-    error?.code === "provider_delivery_incomplete" && h.states.length === 0 && h.receipts.at(-1).status === "error");
+    error?.code === "provider_delivery_incomplete" && reviewReached === 1 && h.states.length === 0 && h.receipts.at(-1).status === "error");
   check("an unconfirmed provider deletion keeps traversal distinct from delivery completion",
     h.receipts.at(-1).walk_complete === true && h.receipts.at(-1).complete_sweep === false &&
       h.receipts.at(-1).docs_refused === 0 && h.receipts.at(-1).docs_failed === 0,

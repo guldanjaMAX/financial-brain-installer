@@ -205,7 +205,7 @@ export async function runProviderConnector({
   now = () => new Date(),
   runId = providerRunId(),
   reset = false,
-  approvedSnapshotFingerprint = null,
+  reviewRemovals = null,
   assertOwned = null,
 } = {}) {
   const sourceName = clean(source).toLowerCase();
@@ -243,6 +243,8 @@ export async function runProviderConnector({
     assertOwned?.();
     let storedFamiliesBefore = null;
     let snapshotNeedsRemovalReview = false;
+    let requiredRemovalApproval = null;
+    let removalReviewNotice = "";
     if (normalized.authoritative_snapshot === true) {
       if (typeof listStoredFamilies !== "function") {
         throw new ProviderDeliveryError("an authoritative provider snapshot needs stored-family reconciliation", {
@@ -301,43 +303,50 @@ export async function runProviderConnector({
       }
       const reviewUids = aggregateReviewRequired ? plannedUids : scopedReview?.plannedUids || [];
       const fingerprint = providerSnapshotRemovalFingerprint(sourceName, reviewUids);
-      if ((aggregateReviewRequired || scopedReview) && approvedSnapshotFingerprint !== fingerprint) {
-        const denominator = aggregateReviewRequired ? storedFamiliesBefore.size : scopedReview.storedCount;
-        const label = aggregateReviewRequired ? "provider" : scopedReview.label;
-        throw new ProviderDeliveryError(
-          `${reviewUids.length} ${label} document family or families are planned for removal from ` +
-          `${denominator} stored families in that scope; review the aggregate scope and re-run with ` +
-          `--approve-removals ${fingerprint}`,
-          { code: "provider_removal_review_required" },
-        );
-      }
+      if (aggregateReviewRequired || scopedReview) requiredRemovalApproval = fingerprint;
+      removalReviewNotice = scopedReview
+        ? `Provider workload cleanup would remove ${scopedReview.plannedUids.length} from ${scopedReview.storedCount} stored families.`
+        : `Provider cleanup would remove ${planned.length} from ${storedFamiliesBefore.size} stored families.`;
       normalized = { ...normalized, deletions: planned };
     }
     const tally = await deliverProviderDocuments(normalized.documents, {
       sendBatch, base, adminKey, assertOwned,
     });
-    const removal = await applyProviderDeletions(sourceName, normalized.deletions, {
-      removeDocuments, base, adminKey, assertOwned,
-    });
-    let deletionReadbackVerified = normalized.deletions.length === 0;
-    if (normalized.deletions.length && removal.pending === 0) {
-      if (typeof listStoredFamilies !== "function") {
-        throw new ProviderDeliveryError("provider tombstones need exact source-family readback before cursor advancement", {
-          code: "provider_deletion_readback_unavailable",
+    terminalEvidence = {
+      files_seen: normalized.documents.length + normalized.deletions.length,
+      docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
+      docs_refused: tally.refused, docs_failed: tally.failed,
+      walk_complete: normalized.walk_complete === true ||
+        (normalized.walk_complete === undefined && normalized.outcome.kind === "completed"),
+      complete_sweep: false, outcome_kind: normalized.outcome.kind,
+      deletion_authority: normalized.deletion_authority,
+    };
+    assertOwned?.();
+    if (tally.failed || tally.refused) {
+      throw new ProviderDeliveryError("Provider document delivery is incomplete; the cursor was kept.", {
+        code: "provider_delivery_incomplete", tally,
+      });
+    }
+    if (normalized.deletions.length) {
+      if (typeof reviewRemovals !== "function") {
+        throw new ProviderDeliveryError("Source removals need a saved exact plan and a separate apply command.", {
+          code: "provider_removal_review_required", tally,
         });
       }
-      const afterRemoval = await listStoredFamilies({ base, adminKey, source: sourceName });
-      const deletedUids = [...new Set(normalized.deletions.map((item) => `${sourceName}:${String(item.source_id || "")}`))];
-      const stillStored = deletedUids.filter((uid) => afterRemoval.has(uid));
-      if (stillStored.length) {
-        throw new ProviderDeliveryError(
-          `${stillStored.length} provider tombstone family or families remained after exact source-inventory readback`,
-          { code: "provider_deletion_not_confirmed" },
-        );
-      }
-      deletionReadbackVerified = true;
+      await reviewRemovals({
+        uids: normalized.deletions.map((item) => `${sourceName}:${item.source_id}`),
+        storedFamilies: storedFamiliesBefore,
+        requiredApproval: requiredRemovalApproval,
+        notice: removalReviewNotice,
+      });
+      // A review returning normally proved zero actual stored removals. Never
+      // re-expand tombstones after that proof; only exact apply may delete.
+      normalized = { ...normalized, deletions: [] };
     }
-    const deliveryComplete = tally.failed === 0 && tally.refused === 0 && removal.pending === 0 && deletionReadbackVerified;
+    // All nonempty removals leave through the separate exact-plan command.
+    const removal = { applied: 0, pending: 0 };
+    const deletionReadbackVerified = normalized.deletions.length === 0;
+    const deliveryComplete = tally.failed === 0 && tally.refused === 0;
     const sourceComplete = normalized.outcome.kind === "completed";
     const sourceWalkComplete = normalized.walk_complete === true ||
       (normalized.walk_complete === undefined && sourceComplete);

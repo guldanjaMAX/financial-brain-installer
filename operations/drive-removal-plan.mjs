@@ -9,10 +9,10 @@ export {
   isCanonicalStoredFamilyUid,
 };
 
-// A routine sync may clean up a few ordinary source changes without making an
-// unattended scheduler unusable. Crossing either boundary is no longer
-// routine: it may indicate a revoked permission, a bad listing, or a policy
-// mistake, and therefore needs an exact second look from the owner.
+// This is the additional aggregate source guard. The ingest removal collector
+// separately requires an exact apply decision for every nonempty physical
+// removal plan, including plans below these limits and obsolete family parts.
+// Crossing either boundary retains the stronger source-review requirement.
 export const DRIVE_REMOVAL_MAX_COUNT = 100;
 export const DRIVE_REMOVAL_MAX_RATIO = 0.10;
 
@@ -119,6 +119,13 @@ export function buildDriveRemovalPlan(input = {}, options = {}) {
   };
 }
 
+/** Aggregate owner review text contains no document identities or source text. */
+export function formatDriveRemovalPlan(plan) {
+  const percent = (Number(plan.ratio || 0) * 100).toFixed(1);
+  return `${plan.total} of ${plan.stored} stored documents (${percent}%).\n` +
+    `      Aggregate reasons: source policy ${plan.counts.source_policy}; source deletion ${plan.counts.source_deleted}; intentional skip ${plan.counts.intentional_skip}.`;
+}
+
 /** Refuse a surprising plan without disclosing any source identifier. */
 export function assertDriveRemovalPlanSafe(plan, approval, options = {}) {
   const sourceLabel = String(options.sourceLabel || "Drive");
@@ -127,10 +134,8 @@ export function assertDriveRemovalPlanSafe(plan, approval, options = {}) {
   }
   if (!plan.tooLarge || approval === plan.fingerprint) return plan;
 
-  const percent = (Number(plan.ratio || 0) * 100).toFixed(1);
   throw new DriveRemovalReviewRequired(
-    `${sourceLabel} cleanup would remove ${plan.total} of ${plan.stored} stored documents (${percent}%).\n` +
-      `      Aggregate reasons: source policy ${plan.counts.source_policy}; source deletion ${plan.counts.source_deleted}; intentional skip ${plan.counts.intentional_skip}.\n` +
+    `${sourceLabel} cleanup would remove ${formatDriveRemovalPlan(plan)}\n` +
       "      Nothing in this removal plan was removed. The source cursor was not advanced.\n" +
       "      Review the source and policy, then approve this exact plan by re-running with:\n" +
       `      --approve-removals ${plan.fingerprint}`

@@ -25,6 +25,64 @@ export class DailyRefreshInspectionError extends Error {
 const hash = (value) => `sha256:${createHash("sha256").update(String(value)).digest("hex")}`;
 const xml = (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 
+export const escapeTaskXml = xml;
+
+/** Quote one argv element for the Windows executable parser, without a shell. */
+export function quoteWindowsTaskArgument(value) {
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new TypeError("task arguments must be strings without control characters");
+  }
+  return `"${value.replace(/(\\*)"/gu, '$1$1\\"').replace(/(\\+)$/u, "$1$1")}"`;
+}
+
+/**
+ * Build only the attended invocation. Registration and starting the task belong
+ * to the caller, after its own approval and ownership checks. No shell, secret
+ * environment or credential-file argument is part of this contract.
+ */
+export function buildOneShotTask({ name, args, startNow = true, expiresMinutes = 15 } = {}, options = {}) {
+  const refuse = (message) => {
+    const error = new TypeError(message);
+    error.code = "ONE_SHOT_TASK_INVALID";
+    throw error;
+  };
+  if (typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,119}$/u.test(name) || name.endsWith(" ")) {
+    refuse("one-shot task name must be a simple name under Financial Brain");
+  }
+  if (startNow !== true || !Number.isInteger(expiresMinutes) || expiresMinutes < 1 || expiresMinutes > 15) {
+    refuse("one-shot tasks start now and expire within 15 minutes");
+  }
+  if (!Array.isArray(args) || args.length === 0 || args.some((arg) =>
+    typeof arg !== "string" || /[\u0000-\u001f\u007f]/u.test(arg) ||
+    /(?:^--[^=]*(?:token|password|secret|credential|key)|\.brain-admin-key|(?:^|[\\/])[^\\/]*(?:tokens|credentials|secrets)\.(?:json|txt)|\.(?:pem|p12|key)$|^[a-z][a-z0-9+.-]*:\/\/)/iu.test(arg)
+  )) {
+    refuse("one-shot task arguments must contain no credentials, credential locators or URLs");
+  }
+  // The runner is an explicit script argument to Node. Do not accept Node's
+  // -e/--eval or other runtime switches through this attended-probe surface.
+  if (!win32Path.isAbsolute(args[0]) || !/\.(?:mjs|cjs|js)$/iu.test(args[0])) {
+    refuse("one-shot task arguments must begin with an absolute script path");
+  }
+  const nodePath = options.nodePath ?? process.execPath;
+  if (typeof nodePath !== "string" || !win32Path.isAbsolute(nodePath) || /[\u0000-\u001f\u007f"]/u.test(nodePath)) {
+    refuse("one-shot tasks require an absolute Node executable path");
+  }
+  const now = options.now instanceof Date ? options.now : new Date(options.now ?? Date.now());
+  if (!Number.isFinite(now.getTime())) refuse("one-shot tasks require a valid start time");
+  const end = new Date(now.getTime() + expiresMinutes * 60_000);
+  if (!Number.isFinite(end.getTime())) refuse("one-shot tasks require a valid expiry time");
+  const principal = options.principal ?? null;
+  if (principal !== null && !/^sid:S-1-[0-9-]+$/u.test(principal)) {
+    refuse("one-shot tasks require a Windows user SID");
+  }
+  const taskName = `\\Financial Brain\\${name}`;
+  const argumentsList = Object.freeze([...args]);
+  const serialized = `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>Financial Brain attended connect probe</Description></RegistrationInfo><Triggers><TimeTrigger><StartBoundary>${xml(now.toISOString())}</StartBoundary><EndBoundary>${xml(end.toISOString())}</EndBoundary><Enabled>true</Enabled></TimeTrigger></Triggers><Principals><Principal id="Owner">${principal ? `<UserId>${xml(principal.slice(4))}</UserId>` : ""}<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><WakeToRun>false</WakeToRun><ExecutionTimeLimit>PT${expiresMinutes}M</ExecutionTimeLimit><DeleteExpiredTaskAfter>PT0S</DeleteExpiredTaskAfter></Settings><Actions Context="Owner"><Exec><Command>${xml(nodePath)}</Command><Arguments>${xml(argumentsList.map(quoteWindowsTaskArgument).join(" "))}</Arguments></Exec></Actions></Task>
+`;
+  return Object.freeze({ name: taskName, command: nodePath, arguments: argumentsList, serialized, start_now: true });
+}
+
 function immutableNativeContract(platform, contract) {
   if (platform !== "win32") return contract;
   const { task_enabled: _mutableEnabledState, ...immutable } = contract;
@@ -470,9 +528,10 @@ export function createNativeDailyRefreshAdapter({
   uid = typeof process.getuid === "function" ? process.getuid() : null,
   spawn = spawnSync,
   environment = process.env,
+  taskSpec = null,
 } = {}) {
   if (platform === "darwin") return macAdapter({ home, uid, spawn });
-  if (platform === "win32") return windowsAdapter({ home, spawn, environment });
+  if (platform === "win32") return windowsAdapter({ home, spawn, environment, taskSpec });
   throw new Error(`daily refresh scheduling is not supported on ${platform}`);
 }
 
@@ -745,7 +804,7 @@ function sameNames(actual, expected) {
   return actual.length === expected.length && actual.every((name, index) => name === expected[index]);
 }
 
-function observedWindowsContract(serialized) {
+export function observedWindowsContract(serialized, { repetition = false } = {}) {
   const text = String(serialized || "");
   const actions = text.match(/<Actions(?:\s[^>]*)?>([\s\S]*?)<\/Actions>/iu)?.[1] || "";
   const triggers = text.match(/<Triggers(?:\s[^>]*)?>([\s\S]*?)<\/Triggers>/iu)?.[1] || "";
@@ -768,7 +827,11 @@ function observedWindowsContract(serialized) {
     sameNames(directChildNames(actions), ["Exec"]) &&
     sameNames(directChildNames(exec), ["Command", "Arguments"]) &&
     sameNames(directChildNames(triggers), ["CalendarTrigger"]) &&
-    sameNames(directChildNames(calendar), ["StartBoundary", "Enabled", "ScheduleByDay"]) &&
+    sameNames(directChildNames(calendar), repetition
+      ? ["Repetition", "StartBoundary", "Enabled", "ScheduleByDay"]
+      : ["StartBoundary", "Enabled", "ScheduleByDay"]) &&
+    (!repetition || (exactlyOne(calendar, ["Repetition", "Interval", "Duration", "StopAtDurationEnd"]) &&
+      sameNames(directChildNames(tag(calendar, "Repetition")), ["Interval", "Duration", "StopAtDurationEnd"]))) &&
     sameNames(directChildNames(scheduleByDay), ["DaysInterval"]) &&
     sameNames(directChildNames(principals), ["Principal"]) &&
     sameNames(principalNames, expectedPrincipalNames) &&
@@ -801,6 +864,8 @@ function observedWindowsContract(serialized) {
     run_only_if_idle: boolTag(settings, "RunOnlyIfIdle"),
     wake_to_run: boolTag(settings, "WakeToRun"),
     priority: Number(tag(settings, "Priority")),
+    ...(repetition ? { repetition_interval: tag(calendar, "Interval"), repetition_duration: tag(calendar, "Duration"),
+      stop_at_duration_end: boolTag(calendar, "StopAtDurationEnd") } : {}),
   };
   return { valid, contract };
 }
@@ -1072,8 +1137,8 @@ export function parseWindowsTaskInventory(output) {
   return Object.freeze(names);
 }
 
-function windowsAdapter({ home, spawn, environment }) {
-  const taskName = (identity) => `\\Financial Brain\\Daily ${identity.id}`;
+function windowsAdapter({ home, spawn, environment, taskSpec = null }) {
+  const taskName = taskSpec?.name || ((identity) => `\\Financial Brain\\Daily ${identity.id}`);
   const systemRoot = environment.SystemRoot || environment.SYSTEMROOT || environment.WINDIR;
   // Unit tests on another host inject the process runner. A real Windows process
   // must use the OS-owned executable directly because the allowlisted child
@@ -1109,13 +1174,13 @@ function windowsAdapter({ home, spawn, environment }) {
       throw new DailyRefreshInspectionError();
     }
     const serialized = String(result.stdout || "");
-    const marker = markerOf(serialized);
+    const marker = taskSpec ? taskSpec.marker(serialized) : markerOf(serialized);
     const disabled = /<Enabled>\s*false\s*<\/Enabled>/iu.test(serialized);
     return {
       exists: true,
       owned: marker?.identity === identity.id,
       enabled: !disabled,
-      definition: definitionFromNative(identity, serialized, "win32"),
+      definition: taskSpec ? taskSpec.observe(identity, serialized) : definitionFromNative(identity, serialized, "win32"),
     };
   };
   return {

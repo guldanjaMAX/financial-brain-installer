@@ -416,7 +416,7 @@ const RECOVERY_TEST_HUMAN_FIELD_GATES = Object.freeze([
 const RECOVERY_TEST_FIELD_IDENTITY = Object.freeze({
   clientSlug: "v048-field-proof",
   clientDisplayName: "Synthetic Field Gate v0.4.8",
-  productVersion: "0.4.10",
+  productVersion: "0.4.11",
   sourceResource: "brain-test-v048-field-source-recovery-gate-a48f1101",
   targetResource: "brain-test-v048-field-target-recovery-gate-a48f1102",
   sourceAdminKeySecret:
@@ -606,6 +606,18 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "simplefin_assignment_requests",
   "simplefin_stage_accounts",
   "simplefin_stage_transactions",
+  // Schema 52: the removal-approval freshness fence. It is part of the
+  // reviewed table inventory but is never exported: migration 0052 seeds a
+  // fresh instance on the target, and the target's own document and chunk
+  // import advances it, so a removal plan approved against the source can
+  // never match the restored copy.
+  "ingest_removal_generation",
+  // Schema 53 keeps exact source observations, findings and run receipts.
+  // Restore all immutable generations before the separately fenced head.
+  "financial_snapshots",
+  "financial_findings",
+  "financial_run_events",
+  "financial_snapshot_heads",
 ]);
 
 /**
@@ -635,6 +647,7 @@ export const RECOVERY_EXPORT_TABLES = Object.freeze(
       table !== "source_original_result_family_recovery_state" &&
       table !== "bank_feed_link_sessions" &&
       table !== "custom_api_schedule_state" &&
+      table !== "ingest_removal_generation" &&
       table !== "oauth_clients" && table !== "oauth_codes" && table !== "oauth_tokens"),
 );
 
@@ -877,6 +890,10 @@ const SCHEMA_50_TABLES = Object.freeze([
   "bank_activity_refresh_state",
   "bank_activity_write_claims",
 ]);
+const SCHEMA_52_TABLES = Object.freeze(["ingest_removal_generation"]);
+const SCHEMA_53_TABLES = Object.freeze([
+  "financial_snapshots", "financial_findings", "financial_run_events", "financial_snapshot_heads",
+]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -900,7 +917,8 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_36_TABLES, ...SCHEMA_37_TABLES, ...SCHEMA_41_TABLES,
      ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
      ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES, ...SCHEMA_48_TABLES,
-     ...SCHEMA_49_TABLES, ...SCHEMA_50_TABLES].includes(table)
+     ...SCHEMA_49_TABLES, ...SCHEMA_50_TABLES, ...SCHEMA_52_TABLES,
+     ...SCHEMA_53_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -1542,7 +1560,7 @@ function inspectNpmPackedExecutionInventory(raw, code) {
       }
     }
     if (!packageJson || typeof packageJson !== "object" || Array.isArray(packageJson) ||
-        packageJson.name !== "brain-installer" || packageJson.version !== "0.4.10") refuse(code);
+        packageJson.name !== "brain-installer" || packageJson.version !== "0.4.11") refuse(code);
     return Object.freeze({
       name: packageJson.name,
       version: packageJson.version,
@@ -1818,7 +1836,7 @@ function inspectTestBootstrapCandidateEvidence(request, plan, pins) {
   ], code);
   if (!/^[0-9a-f]{40}$/.test(String(source.head_sha || "")) ||
       !/^[0-9a-f]{40}$/.test(String(source.tree_sha || "")) ||
-      source.package_name !== "brain-installer" || source.package_version !== "0.4.10" ||
+      source.package_name !== "brain-installer" || source.package_version !== "0.4.11" ||
       !SHA256_RE.test(String(source.package_json_sha256 || "")) ||
       !SHA256_RE.test(String(source.package_lock_sha256 || "")) ||
       source.working_tree_clean !== true || source.shallow_repository !== false ||
@@ -3049,7 +3067,7 @@ function readCompletedTestBootstrapCheckpoint(pins, plan) {
         candidateEvidence.seedVectorCount !== candidateEvidence.seedChunkCount ||
         candidateEvidence.seedReplayUnchangedDocuments !==
           DISPOSABLE_RECOVERY_SEED_DOCUMENTS ||
-        candidateEvidence.packageFilename !== "brain-installer-0.4.10.tgz" ||
+        candidateEvidence.packageFilename !== "brain-installer-0.4.11.tgz" ||
         candidateEvidence.wranglerRuntimeDirectory !==
           LOCKED_WRANGLER_RUNTIME_DIRECTORY ||
         candidateEvidence.wranglerRuntimeEntrypoint !== LOCKED_WRANGLER_ENTRYPOINT ||
@@ -4413,7 +4431,9 @@ function expectedRecoveryTables(migrations) {
     (latest >= 47 || !SCHEMA_47_TABLES.includes(table)) &&
     (latest >= 48 || !SCHEMA_48_TABLES.includes(table)) &&
     (latest >= 49 || !SCHEMA_49_TABLES.includes(table)) &&
-    (latest >= 50 || !SCHEMA_50_TABLES.includes(table)));
+    (latest >= 50 || !SCHEMA_50_TABLES.includes(table)) &&
+    (latest >= 52 || !SCHEMA_52_TABLES.includes(table)) &&
+    (latest >= 53 || !SCHEMA_53_TABLES.includes(table)));
 }
 
 // The v0.4.8 disposal proof is a frozen campaign contract. Later product

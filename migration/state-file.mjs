@@ -119,8 +119,10 @@ function durableTemp(path, text, label) {
   }
 }
 
-function syncDirectory(path) {
-  if (isWindows) return;
+// Windows has no directory-fsync primitive through Node. Callers still sync
+// their file before rename and verify the committed bytes afterward.
+export function syncDirectory(path, { platform = process.platform } = {}) {
+  if (platform === "win32") return;
   let fd;
   try {
     fd = openSync(path, fsConstants.O_RDONLY);

@@ -1,3 +1,5 @@
+import { readIngestRemovalRequest, previewIngestRemovals, applyIngestRemovals } from "./lib/ingest-removal-plan.js";
+import { createQueryTiming, queryTimingResponse, measureQueryStage, startQueryStage } from "./lib/query-timing.js";
 /**
  * brain worker — the client-installable retrieval brain.
  *
@@ -131,6 +133,7 @@ import {
   CUSTOM_API_RUN_PATH, customApiOwnerMessage, runCustomApiWorker,
 } from "./lib/custom-api.js";
 import { supplementalRetrievalFilters } from "./lib/retrieval-routing.js";
+import { entityFactAnswer } from "./lib/entity-fact-answer.js";
 
 /* ------------------------------------------------------------ retrieval */
 
@@ -328,7 +331,7 @@ function citationForDocument(document) {
 
 async function unifiedRetrieve(env, url, {
   limit, access = null, scope = { all: true }, scopePrincipalKind = "owner",
-  projectionReadiness = null,
+  projectionReadiness = null, timing = null,
 }) {
   const q = url.searchParams.get("q");
   const rrfK = Math.min(Math.max(parseInt(url.searchParams.get("rrf_k")) || 60, 1), 1e3);
@@ -337,7 +340,7 @@ async function unifiedRetrieve(env, url, {
   // Which store answers is isolated from the routes. D1 plus Vectorize is the
   // standard product backend; the legacy adapter remains for migration checks
   // and temporary rollback only.
-  const r = await storeFor(env).search(env, {
+  const r = await measureQueryStage(timing, "retrieval", () => storeFor(env).search(env, {
     query: q,
     // Both public routes ask the store for the same ranking window. The D1
     // backend's modality pool is fixed separately; this depth only leaves room
@@ -354,9 +357,10 @@ async function unifiedRetrieve(env, url, {
     access,
     scope,
     projectionReadiness,
-  });
+    timing,
+  }));
 
-  const matches = normalizeRetrievedDocuments(r.results);
+  const matches = measureQueryStage(timing, "authority_lineage", () => normalizeRetrievedDocuments(r.results));
   return {
     matches,
     evidenceAuthority: strongestEvidenceAuthority(matches),
@@ -414,7 +418,7 @@ export function demoteScaffolding(results) {
  * Falls back to the original ranking on ANY error, so search never breaks
  * because the reranker had a bad day.
  */
-async function rerank(env, q, results, limit) {
+async function rerank(env, q, results, limit, timing = null) {
   const candidates = results.slice(0, 30);
   const list = candidates
     .map((r, i) => `[${i}] (${r.source || "?"}) ${(r.title || "untitled").slice(0, 120)}\n${(r.snippet || "").replace(/\s+/g, " ").slice(0, 300)}`)
@@ -433,6 +437,7 @@ async function rerank(env, q, results, limit) {
       max_tokens: 700,
       system,
       label: "rag-rerank",
+      timing, timingStage: "rerank",
       timeoutMs: 8000,
       messages: [{ role: "user", content: `Question: ${q}\n\nResults:\n${list}` }],
     });
@@ -593,7 +598,7 @@ function statusPolarity(value) {
 }
 
 function documentDirectlySupportsStatus(sentence, doc, question = "") {
-  const source = String(doc?.source || "").toLowerCase();
+  const source = String(doc?.source_kind ?? doc?.source ?? "").toLowerCase();
   const relationshipClaim = isRelationshipStatusClaim(sentence, question);
   // A Stripe Customer, invoice, subscription or accounting customer record is a
   // billing identity, not proof that the human/business relationship is active.
@@ -648,14 +653,14 @@ function modelRefusedAnswer(answer) {
 /* -------------------------------------------------------------- routes */
 
 async function handleUnified(
-  env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner",
+  env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner", timing = null,
 ) {
   const url = await privateRagParameters(request);
   if (!url) return jsonResponse({ error: "Expected a JSON request body" }, 400);
   if (url.parameter_error) return jsonResponse(url.parameter_error, 400);
   const q = url.searchParams.get("q");
   if (!q || !q.trim()) return jsonResponse({ error: "Missing q" }, 400);
-  const scope = await applyBusinessScope(env, url);
+  const scope = await measureQueryStage(timing, "scope", () => applyBusinessScope(env, url));
   if (!scope.ok) return scope.response;
   const entityScope = scope.entityScope;
 
@@ -666,18 +671,18 @@ async function handleUnified(
 
   const {
     matches: retrieved, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
-  } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind });
+  } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind, timing });
   const accessStatus = {
     retrieval_scope: retrievalScope,
     degraded_reason: degradedReason || undefined,
     access: accessSummary,
   };
   const ignored = ignoredFilters.length ? { ignored_filters: ignoredFilters } : {};
-  const coverage = await coverageForRead(env, {
+  const coverage = await measureQueryStage(timing, "coverage", () => coverageForRead(env, {
     access,
     scope: grantScope,
     requestedSource: filtersFrom(url).source || null,
-  });
+  }));
   const sourceCoverageGaps = coverage.unavailable
     ? [{
         type: "coverage_unavailable",
@@ -719,7 +724,7 @@ async function handleUnified(
   let matches = retrieved;
 
   if (doRerank && Array.isArray(matches) && matches.length > 1) {
-    matches = await rerank(env, q, matches, limit);
+    matches = await rerank(env, q, matches, limit, timing);
   }
   if (Array.isArray(matches)) matches = matches.slice(0, limit);
 
@@ -869,7 +874,7 @@ function financialMapStateFor(env, question, {
 }
 
 async function handleThink(
-  env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner",
+  env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner", timing = null,
 ) {
   const unsupportedAnswer = "The documents do not answer the question.";
   const url = await privateRagParameters(request);
@@ -877,10 +882,10 @@ async function handleThink(
   if (url.parameter_error) return jsonResponse(url.parameter_error, 400);
   const q = (url.searchParams.get("q") || "").trim();
   if (!q) return jsonResponse({ error: "Missing q" }, 400);
-  const scope = await applyBusinessScope(env, url);
+  const scope = await measureQueryStage(timing, "scope", () => applyBusinessScope(env, url));
   if (!scope.ok) return scope.response;
   const entityScope = scope.entityScope;
-  const taxQuestion = taxQuestionScopeAssessment(q);
+  const taxQuestion = measureQueryStage(timing, "premise_temporal", () => taxQuestionScopeAssessment(q));
   if (taxQuestion.applicable && !taxQuestion.resolved) {
     return jsonResponse({
       mode: "think",
@@ -901,27 +906,27 @@ async function handleThink(
   }
   const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit")) || 8, 1), 20);
 
-  const mapState = financialMapStateFor(env, q, {
+  const mapState = measureQueryStage(timing, "financial_map", () => financialMapStateFor(env, q, {
     access, grantScope, scopePrincipalKind, entityScope,
-  });
+  }));
 
   const {
     matches, evidenceAuthority, degraded, degradedReason, retrievalScope, access: accessSummary, ignoredFilters,
-  } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind });
+  } = await unifiedRetrieve(env, url, { limit, access, scope: grantScope, scopePrincipalKind, timing });
   const results = Array.isArray(matches) ? matches : [];
   const requestedFilters = filtersFrom(url);
   const [coverage, taxDocumentCoverage] = await Promise.all([
-    coverageForRead(env, {
+    measureQueryStage(timing, "coverage", () => coverageForRead(env, {
       access,
       scope: grantScope,
       requestedSource: requestedFilters.source || null,
-    }),
-    taxDocumentCoverageForRead(env, {
+    })),
+    measureQueryStage(timing, "coverage", () => taxDocumentCoverageForRead(env, {
       question: q,
       filters: requestedFilters,
       access,
       scope: grantScope,
-    }),
+    })),
   ]);
   const sourceCoverageGaps = coverage.unavailable
     ? [{
@@ -996,7 +1001,7 @@ async function handleThink(
     });
   }
 
-  const gaps = computeGaps(results);
+  const gaps = measureQueryStage(timing, "gaps", () => computeGaps(results));
 
   // Coverage staleness goes in FRONT of the content gaps, because it qualifies
   // all of them. "The newest thing I found is 40 days old" reads very
@@ -1072,6 +1077,7 @@ async function handleThink(
   let evidenceGate = null;
   const owner = env.BRAIN_OWNER || "the owner";
   const currentOptions = { filters: filtersFrom(url), owner: env.BRAIN_OWNER || null };
+  const finishCurrentChecks = startQueryStage(timing, "premise_temporal");
   const allCurrentEvidence = currentEvidenceCandidates(q, docs, currentOptions);
   const operativeCandidates = allCurrentEvidence.filter((doc) => doc.authority?.operative_section);
   const newestOperativeCandidates = newestCurrentEvidence(q, operativeCandidates, currentOptions);
@@ -1126,6 +1132,8 @@ async function handleThink(
     }
   }
 
+  finishCurrentChecks();
+
   // Owner name is templated per install. A hardcoded source-instance name here
   // would otherwise ship to every client.
   const system = [
@@ -1164,23 +1172,39 @@ async function handleThink(
   // Direct observed amounts need no generated prose. This replaces only the
   // model calls and free-text temporal inference. Citation and authority
   // checks remain shared; admission itself binds observation time and money.
+  const finishObservedChecks = startQueryStage(timing, "premise_temporal");
   const balanceAnswer = quickBooksBalanceAnswer({ question: q, results, docs });
   const openItemsAnswer = balanceAnswer ? null : quickBooksOpenItemsAnswer({
     question: q, candidates: results.map(citationCandidateForResult), citationCount: docs.length,
   });
   const observedAnswer = balanceAnswer || openItemsAnswer;
-  let answer = observedAnswer?.answer || null;
+  // Contact extraction cannot replace a money observation or certify a money
+  // request that failed observation admission. Both paths share the gate below.
+  const asksForBindingAgreement = /\b(?:bound by|legally binding|executed agreement|signed agreement|governing agreement)\b/i.test(q);
+  const asksOwnerSpecificHighRiskFact = /\b(?:term sheet|parental leave|jury duty|i-9|401\s*\(?k\)?|office lease|ownership agreements?|blood type|soc\s*2|security certification|tpt license|vat|gst)\b/i.test(q);
+  let factAnswer = observedAnswer || moneyPolicy || taxQuestion.applicable || asksForBindingAgreement || asksOwnerSpecificHighRiskFact
+    ? null : entityFactAnswer({
+      question: q, results, docs, owner: env.BRAIN_OWNER || null,
+      filters: requestedFilters, gaps, coverageGaps: sourceCoverageGaps,
+      degraded, operativeConflict, newerAuthoritativeEvidence, currentEvidence,
+    });
+  // Status language can describe a relationship even inside a name or role.
+  // Leave it to the general verifier plus the shared present-status gate.
+  if (factAnswer && explicitCurrentIntent && PRESENT_STATUS_ASSERTION.test(factAnswer.answer)) factAnswer = null;
+  finishObservedChecks();
+  let answer = observedAnswer?.answer || factAnswer?.answer || null;
   let answerError = null;
   let model = null;
   let modelDeclaredNoEvidence = false;
   try {
     let repairInstruction = "";
-    for (let attempt = 0; !observedAnswer && attempt < 2; attempt++) {
+    for (let attempt = 0; !observedAnswer && !factAnswer && attempt < 2; attempt++) {
       const data = await callLLM(env, {
         model: env.ANSWER_MODEL || "claude-sonnet-4-5",
         max_tokens: 1000,
         system,
         label: attempt === 0 ? "rag-think" : "rag-think-repair",
+        timing, timingStage: "answer_llm",
         timeoutMs: 45_000,
         messages: [{ role: "user", content: attempt === 0 ? userMsg : `${userMsg}\n\nREGENERATION REQUIREMENTS:\n${repairInstruction}` }],
       });
@@ -1218,6 +1242,7 @@ async function handleThink(
   // the exact question. Verify the concrete draft against only the documents
   // it cited, then fail closed before a plausible fact from another entity can
   // be returned as the owner's fact.
+  const finishEvidenceGate = startQueryStage(answer && !answerError ? timing : null, "evidence_gate");
   if (answer && !answerError) {
     if (modelRefusedAnswer(answer)) {
       modelDeclaredNoEvidence = true;
@@ -1234,10 +1259,11 @@ async function handleThink(
           ? "draft cited an unavailable document" : "draft made claims without document citations" };
       } else {
         try {
-          const check = observedAnswer ? null : await callLLM(env, {
+          const check = (observedAnswer || factAnswer) ? null : await callLLM(env, {
             model: env.ANSWER_MODEL || "claude-sonnet-4-5",
             max_tokens: 300,
             label: "rag-evidence-gate",
+            timing, timingStage: "verifier_llm",
             timeoutMs: 45_000,
             system: [
               "You verify a proposed answer against its cited documents. You do not rewrite the answer.",
@@ -1270,12 +1296,15 @@ async function handleThink(
             ? { supported: true, complete: true, evidence: observedAnswer.evidence, reason: balanceAnswer
               ? "exact observed account balances; full inventory explicitly not established"
               : "exact observed open items; full inventory and net amounts explicitly not established" }
-            : start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
+            : factAnswer
+              ? { supported: true, complete: true, evidence: factAnswer.evidence, reason: "exact native contact field with dated direct evidence" }
+              : start >= 0 && end > start ? JSON.parse(raw.slice(start, end + 1)) : null;
           const allowed = new Set((Array.isArray(verdict?.evidence) ? verdict.evidence : [])
             .map(Number)
             .filter((n) => citedDocs.some((doc) => doc.n === n)));
           evidenceGate = {
-            ...(observedAnswer ? { method: balanceAnswer ? "quickbooks_observed_balances" : "quickbooks_observed_open_items" } : {}),
+            ...(observedAnswer ? { method: balanceAnswer ? "quickbooks_observed_balances" : "quickbooks_observed_open_items" }
+              : factAnswer ? { method: "exact_contact_fact", fact_span: factAnswer.fact_span } : {}),
             supported: verdict?.supported === true || String(verdict?.supported).toLowerCase() === "true",
             complete: verdict?.complete === true || String(verdict?.complete).toLowerCase() === "true",
             evidence: [...allowed],
@@ -1286,7 +1315,7 @@ async function handleThink(
             evidenceGate.supported = false;
             evidenceGate.reason = "verifier did not approve every citation in the proposed answer";
           }
-          const asksForBindingAgreement = /\b(?:bound by|legally binding|executed agreement|signed agreement|governing agreement)\b/i.test(q);
+          const finishPremiseChecks = startQueryStage(timing, "premise_temporal");
           const allowedDocs = citedDocs.filter((doc) => allowed.has(doc.n));
           const mismatchedTaxEvidence = taxDocumentCoverage.applicable && allowedDocs.some((doc) =>
             doc.authority?.tax_scope?.matched !== true
@@ -1303,7 +1332,6 @@ async function handleThink(
             evidenceGate.supported = false;
             evidenceGate.reason = "the matching tax filing was not read from a reliable native text layer";
           }
-          const asksOwnerSpecificHighRiskFact = /\b(?:term sheet|parental leave|jury duty|i-9|401\s*\(?k\)?|office lease|ownership agreements?|blood type|soc\s*2|security certification|tpt license|vat|gst)\b/i.test(q);
           const ownerTokens = String(owner).toLowerCase().match(/[a-z0-9]+/g)?.filter((token) =>
             !new Set(["the", "owner", "brain", "shadow", "company", "inc", "llc"]).has(token)
           ) || [];
@@ -1421,6 +1449,7 @@ async function handleThink(
             evidenceGate.supported = false;
             evidenceGate.reason = moneyRefusal;
           }
+          finishPremiseChecks();
           if (!evidenceGate.supported || !allowed.size) {
             answer = unsupportedAnswer;
             approvedDocs = [];
@@ -1484,6 +1513,7 @@ async function handleThink(
   if ((observedAnswer || moneyPolicy) && evidenceGate?.supported && approvedDocs.length && gaps.length) {
     answer += `\n\nHeads up: ${gaps.map((gap) => String(gap.detail || "").replace(/\[\d+\]/g, "")).filter(Boolean).join(" ")}`;
   }
+  finishEvidenceGate(Boolean(answerError));
 
   // Trust metadata beside the answer, never inside it: the refusal sentence
   // is a verbatim contract (worker tests and the eval refusal scorer both pin
@@ -1561,9 +1591,24 @@ async function handleThink(
   });
 }
 
+// Every generic document writer uses the registry as the custody authority.
+// A failed lookup deliberately propagates before any staging or store mutation;
+// an envelope's provider markers cannot authorize their own admission.
+const OWNER_ONLY_SOURCE_KINDS = new Map([["quickbooks", "quickbooks_owner_required"]]);
+
+async function registeredSourceCustodyRefusal(env, source, principalKind, sourceKinds = new Map()) {
+  if (principalKind === "owner") return null;
+  if (!sourceKinds.has(source)) {
+    const registered = await env.DB.prepare("SELECT kind FROM sources WHERE name=?1").bind(source).first();
+    sourceKinds.set(source, registered?.kind ?? null);
+  }
+  return OWNER_ONLY_SOURCE_KINDS.get(sourceKinds.get(source)) || null;
+}
+
 async function handleIngest(env, request, scope = { all: true }, {
   ownerNoteChannel = null,
   allowSourceOriginalReceipt = false,
+  principalKind = null,
 } = {}) {
   // Checked BEFORE the body is read. The batch route documents exactly this
   // hazard and guards against it; this route, which is the one a client reaches
@@ -1660,6 +1705,14 @@ async function handleIngest(env, request, scope = { all: true }, {
         error: `"${source_type}" is not a source in a zone you have access to. Ask the owner to place it in your zone first.`,
       }, 403);
     }
+  }
+
+  const custodyRefusal = await registeredSourceCustodyRefusal(env, source_type, principalKind);
+  if (custodyRefusal) {
+    return jsonResponse({
+      error: "Registered QuickBooks records require owner authorization; nothing was written.",
+      code: custodyRefusal,
+    }, 403);
   }
 
   // THE GATE. Nothing carrying a live provider credential enters the index,
@@ -1803,6 +1856,7 @@ const BATCH_MAX_BYTES = 1_000_000;
 
 async function handleIngestBatch(env, request, scope = { all: true }, {
   allowSourceOriginalReceipt = false,
+  principalKind = null,
 } = {}) {
   let body;
   try {
@@ -1883,6 +1937,7 @@ async function handleIngestBatch(env, request, scope = { all: true }, {
   // complete. Large message and email migrations use distinct source ids, so
   // this safety fallback does not dilute the high-volume path it protects.
   const identityCounts = new Map();
+  const sourceKinds = new Map();
   for (let inputIndex = 0; inputIndex < docs.length; inputIndex++) {
     const rawEnvelope = docs[inputIndex];
     if (hasSensitiveTransportIdentity(rawEnvelope)) {
@@ -1905,6 +1960,13 @@ async function handleIngestBatch(env, request, scope = { all: true }, {
     if (validationError) {
       tally.failed++;
       results[inputIndex] = { ...slot, status: "failed", error: validationError };
+      continue;
+    }
+
+    const custodyRefusal = await registeredSourceCustodyRefusal(env, envelope.source_type, principalKind, sourceKinds);
+    if (custodyRefusal) {
+      tally.refused++;
+      results[inputIndex] = { ...slot, status: "refused", labels: [custodyRefusal] };
       continue;
     }
 
@@ -2603,9 +2665,10 @@ async function handleSourceRegistration(env, request) {
   const receipts = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO sources (name, kind, status, created_at)
-       VALUES (?1,?2,'pending',?3)
+       SELECT ?1,?2,'pending',?3
+       WHERE ?4=0 OR NOT EXISTS (SELECT 1 FROM documents WHERE source=?1)
        ON CONFLICT(name) DO NOTHING`
-    ).bind(source, kind, at),
+    ).bind(source, kind, at, OWNER_ONLY_SOURCE_KINDS.has(kind) ? 1 : 0),
     env.DB.prepare(
       `INSERT INTO source_events (source_name,event,at,detail)
        SELECT ?1,'registered',?2,?3 WHERE changes()=1`
@@ -2632,6 +2695,14 @@ async function handleSourceRegistration(env, request) {
     registrationKind === kind && registration?.registry_event_recorded === 1;
   const existing = exactChange(receipts?.[0], 0) && exactChange(receipts?.[1], 0) &&
     registrationKind !== null && registration?.registry_event_recorded === 0;
+  // Existing documents have no proof that the owner-only custody gate guarded
+  // their admission. Registration must not retroactively grant that authority.
+  // Check document existence inside the insert transaction, not in a preflight.
+  if (OWNER_ONLY_SOURCE_KINDS.has(kind) && receipts?.length === 3 &&
+      exactChange(receipts[0], 0) && exactChange(receipts[1], 0) &&
+      Array.isArray(registrationRows) && registrationRows.length === 0) {
+    return jsonResponse({ error: "stored documents predate the owner-only source registration", code: "source_kind_conflict" }, 409);
+  }
   if (!Array.isArray(receipts) || receipts.length !== 3 || (!inserted && !existing)) {
     return jsonResponse({ error: "source registration did not produce an exact receipt" }, 500);
   }
@@ -2901,7 +2972,13 @@ function pausedDeletionRefusal() {
 }
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env, ctx, timingOptions = {}) {
+    const timingPath = new URL(request.url).pathname;
+    const timingRoute = timingPath === "/api/rag/think" ? "think"
+      : timingPath === "/api/rag/unified" ? "unified" : timingPath === "/mcp" ? "mcp" : null;
+    const timing = timingRoute ? createQueryTiming({ route: timingRoute, now: timingOptions.now }) : null;
+    if (timingRoute !== "mcp" && validateAdminKey(request, env)) timing?.expose();
+    const response = await (async () => {
     const requestStartedAt = Date.now();
     const url = new URL(request.url);
     const path = url.pathname;
@@ -3118,6 +3195,7 @@ export default {
     // positively identified owner passkey principal. The handler rejects live
     // scoped principals and has no admin-key fallback.
     if (path.startsWith(OWNER_PATH_PREFIX)) {
+      // handleOwnerActions invokes this callback only after its owner-session gate.
       const ingestEnvelope = (envelope) => handleIngest(env, new Request(
         `${url.origin}/api/admin/brain/ingest`,
         {
@@ -3125,7 +3203,7 @@ export default {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(envelope),
         },
-      ));
+      ), { all: true }, { principalKind: "owner" });
       return handleOwnerActions(env, request, path, { ingestEnvelope });
     }
 
@@ -3196,9 +3274,9 @@ export default {
           body: JSON.stringify(body),
         });
       return handleMcp(env, request, url, {
-        grant,
-        think: async (body) => (await handleThink(env, internalJson("/api/rag/think", body))).json(),
-        search: async (body) => (await handleUnified(env, internalJson("/api/rag/unified", body))).json(),
+        grant, timing,
+        think: async (body) => (await handleThink(env, internalJson("/api/rag/think", body), null, { all: true }, "owner", timing)).json(),
+        search: async (body) => (await handleUnified(env, internalJson("/api/rag/unified", body), null, { all: true }, "owner", timing)).json(),
         // Writes take the dedicated owner-note lifecycle around the ordinary
         // ingest guards. The credential scanner and storage contract stay the
         // same, while source registration and exact readback cannot be skipped.
@@ -3208,7 +3286,7 @@ export default {
             env,
             internalJson(OWNER_NOTES_ROUTE, envelope),
             { all: true },
-            { ownerNoteChannel: "remote_mcp" },
+            { ownerNoteChannel: "remote_mcp", principalKind: "oauth_connector" },
           )).json();
         },
         diagnose: async () => diagnose(env),
@@ -3323,10 +3401,10 @@ export default {
         }, 405));
       }
       if (path === "/api/rag/unified" && request.method === "POST") {
-        return privateNoStore(await handleUnified(env, request, readAccess, scope, scopePrincipalKind));
+        return privateNoStore(await handleUnified(env, request, readAccess, scope, scopePrincipalKind, timing));
       }
       if (path === "/api/rag/think" && request.method === "POST") {
-        return privateNoStore(await handleThink(env, request, readAccess, scope, scopePrincipalKind));
+        return privateNoStore(await handleThink(env, request, readAccess, scope, scopePrincipalKind, timing));
       }
       if (path === "/api/admin/auth/invite" && request.method === "POST") {
         return handleAdminInvite(env, url);
@@ -3357,16 +3435,19 @@ export default {
       if (path === "/api/admin/brain/ingest" && request.method === "POST") {
         return await handleIngest(env, request, scope, {
           allowSourceOriginalReceipt: ownerKeyAuthorized,
+          principalKind: scopePrincipalKind,
         });
       }
       if (path === OWNER_NOTES_ROUTE && request.method === "POST") {
         return await handleIngest(env, request, scope, {
           ownerNoteChannel: "local_mcp",
+          principalKind: scopePrincipalKind,
         });
       }
       if (path === "/api/admin/brain/ingest/batch" && request.method === "POST") {
         return await handleIngestBatch(env, request, scope, {
           allowSourceOriginalReceipt: ownerKeyAuthorized,
+          principalKind: scopePrincipalKind,
         });
       }
       if (path === "/api/admin/brain/source-receipt" && request.method === "POST") {
@@ -3412,6 +3493,26 @@ export default {
             code,
             retryable: error?.retryable === true,
           }, status));
+        }
+      }
+      if (path === "/api/admin/brain/ingest-removal-plan" && request.method === "POST") {
+        if (backendOf(env) !== D1 || !scopeIsUnrestricted(scope)) {
+          return privateNoStore(jsonResponse({ error: "Removal plans need the owner and the D1 backend." }, 403));
+        }
+        try {
+          const body = await readIngestRemovalRequest(request);
+          if (body?.action === "apply" && upgradePauseHolds(env)) return privateNoStore(jsonResponse(pausedCorpusRefusal(), 503));
+          const result = body?.action === "preview"
+            ? await previewIngestRemovals(env, body)
+            : body?.action === "apply"
+              ? await applyIngestRemovals(env, body)
+              : null;
+          if (!result) throw new Error("Choose preview or apply for a removal plan.");
+          return privateNoStore(jsonResponse(result));
+        } catch {
+          return privateNoStore(jsonResponse({
+            error: "Removal plan unavailable or changed. Verify the migration and runtime, then plan ingestion again.",
+          }, 409));
         }
       }
       if (path === "/api/admin/brain/source-families" && request.method === "POST") {
@@ -3540,8 +3641,18 @@ export default {
           if (docUids.length || source || families.length > 50) {
             return jsonResponse({ error: "families must be used alone and contain at most 50 entries" }, 400);
           }
+          // Older orchestrators sent confirm:true during ordinary ingestion.
+          // It is not an owner decision about an exact stored-inventory plan.
+          // Explicit source forget uses its own guarded preview below; exact
+          // provenance repair now uses the inventory-fenced removal protocol.
+          if (confirm) {
+            return privateNoStore(jsonResponse({
+              code: "INGEST_REMOVAL_PLAN_REQUIRED",
+              error: "Nothing was removed. Update the CLI, then run ingestion again to review and explicitly apply its exact removal plan.",
+            }, 409));
+          }
           try {
-            return jsonResponse(await forgetFamilies(env, { families, dryRun: !confirm }));
+            return jsonResponse(await forgetFamilies(env, { families, dryRun: true }));
           } catch (error) {
             return jsonResponse({ error: error.message }, 400);
           }
@@ -3722,6 +3833,8 @@ export default {
       }
       return response;
     }
+    })();
+    return queryTimingResponse(timing, response);
   },
 
   /**

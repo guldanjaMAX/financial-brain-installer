@@ -1,0 +1,509 @@
+{
+  "protocol": 1,
+  "minimumVersion": "13.0",
+  "requests": [
+    {
+      "key": "Host",
+      "request": "HostQueryRq",
+      "response": "HostQueryRs",
+      "ret": "HostRet",
+      "mode": "base",
+      "iterator": false
+    },
+    {
+      "key": "Company",
+      "request": "CompanyQueryRq",
+      "response": "CompanyQueryRs",
+      "ret": "CompanyRet",
+      "mode": "base",
+      "iterator": false
+    },
+    {
+      "key": "Preferences",
+      "request": "PreferencesQueryRq",
+      "response": "PreferencesQueryRs",
+      "ret": "PreferencesRet",
+      "mode": "base",
+      "iterator": false
+    },
+    {
+      "key": "Currency",
+      "request": "CurrencyQueryRq",
+      "response": "CurrencyQueryRs",
+      "ret": "CurrencyRet",
+      "mode": "balance",
+      "iterator": true
+    },
+    {
+      "key": "Account",
+      "request": "AccountQueryRq",
+      "response": "AccountQueryRs",
+      "ret": "AccountRet",
+      "mode": "balance",
+      "iterator": true
+    },
+    {
+      "key": "Customer",
+      "request": "CustomerQueryRq",
+      "response": "CustomerQueryRs",
+      "ret": "CustomerRet",
+      "mode": "balance",
+      "iterator": true
+    },
+    {
+      "key": "Vendor",
+      "request": "VendorQueryRq",
+      "response": "VendorQueryRs",
+      "ret": "VendorRet",
+      "mode": "balance",
+      "iterator": true
+    },
+    {
+      "key": "Invoice",
+      "request": "InvoiceQueryRq",
+      "response": "InvoiceQueryRs",
+      "ret": "InvoiceRet",
+      "mode": "balance",
+      "iterator": true
+    },
+    {
+      "key": "Bill",
+      "request": "BillQueryRq",
+      "response": "BillQueryRs",
+      "ret": "BillRet",
+      "mode": "balance",
+      "iterator": true
+    },
+    {
+      "key": "CreditMemo",
+      "request": "CreditMemoQueryRq",
+      "response": "CreditMemoQueryRs",
+      "ret": "CreditMemoRet",
+      "mode": "balance",
+      "iterator": true
+    },
+    {
+      "key": "Transaction",
+      "request": "TransactionQueryRq",
+      "response": "TransactionQueryRs",
+      "ret": "TransactionRet",
+      "mode": "balance",
+      "iterator": true
+    },
+    {
+      "key": "BillPaymentCheck",
+      "request": "BillPaymentCheckQueryRq",
+      "response": "BillPaymentCheckQueryRs",
+      "ret": "BillPaymentCheckRet",
+      "mode": "history",
+      "iterator": true
+    },
+    {
+      "key": "BillPaymentCreditCard",
+      "request": "BillPaymentCreditCardQueryRq",
+      "response": "BillPaymentCreditCardQueryRs",
+      "ret": "BillPaymentCreditCardRet",
+      "mode": "history",
+      "iterator": true
+    },
+    {
+      "key": "ReceivePayment",
+      "request": "ReceivePaymentQueryRq",
+      "response": "ReceivePaymentQueryRs",
+      "ret": "ReceivePaymentRet",
+      "mode": "history",
+      "iterator": true
+    },
+    {
+      "key": "TxnDeleted",
+      "request": "TxnDeletedQueryRq",
+      "response": "TxnDeletedQueryRs",
+      "ret": "TxnDeletedRet",
+      "mode": "history",
+      "iterator": false
+    },
+    {
+      "key": "ListDeleted",
+      "request": "ListDeletedQueryRq",
+      "response": "ListDeletedQueryRs",
+      "ret": "ListDeletedRet",
+      "mode": "history",
+      "iterator": false
+    },
+    {
+      "key": "Postdated",
+      "request": "TransactionQueryRq",
+      "response": "TransactionQueryRs",
+      "ret": "TransactionRet",
+      "mode": "postdated",
+      "iterator": false
+    }
+  ],
+  "returns": [
+    {
+      "name": "HostRet",
+      "fields": [
+        "ProductName",
+        "MajorVersion",
+        "MinorVersion",
+        "Country",
+        "SupportedQBXMLVersion"
+      ]
+    },
+    {
+      "name": "CompanyRet",
+      "fields": [
+        "CompanyName",
+        "LegalCompanyName",
+        "IsSampleCompanyFile",
+        "CompanyTimeCreated"
+      ]
+    },
+    {
+      "name": "PreferencesRet",
+      "fields": [
+        "CurrentAppAccessRights.IsReadOnly",
+        "CurrentAppAccessRights.IsAutomaticLoginAllowed",
+        "CurrentAppAccessRights.IsPersonalDataAccessAllowed",
+        "MultiCurrencyPreferences.IsMultiCurrencyOn",
+        "MultiCurrencyPreferences.HomeCurrencyRef.ListID",
+        "MultiCurrencyPreferences.HomeCurrencyRef.FullName"
+      ]
+    },
+    {
+      "name": "CurrencyRet",
+      "fieldVerification": {
+        "IsUserDefined": "unverified against Intuit"
+      },
+      "fields": [
+        "ListID",
+        "Name",
+        "IsActive",
+        "CurrencyCode",
+        "IsUserDefined"
+      ]
+    },
+    {
+      "name": "AccountRet",
+      "fieldVerification": {
+        "ListID": "unverified against Intuit",
+        "TimeCreated": "unverified against Intuit"
+      },
+      "fields": [
+        "ListID",
+        "TimeCreated",
+        "TimeModified",
+        "Name",
+        "FullName",
+        "IsActive",
+        "AccountType",
+        "Balance",
+        "TotalBalance",
+        "CurrencyRef.ListID",
+        "CurrencyRef.FullName"
+      ]
+    },
+    {
+      "name": "CustomerRet",
+      "fields": [
+        "ListID",
+        "TimeCreated",
+        "TimeModified",
+        "Name",
+        "FullName",
+        "IsActive",
+        "Balance",
+        "TotalBalance",
+        "CurrencyRef.ListID",
+        "CurrencyRef.FullName",
+        "Sublevel"
+      ],
+      "fieldVerification": {
+        "Sublevel": "unverified against Intuit"
+      }
+    },
+    {
+      "name": "VendorRet",
+      "fields": [
+        "ListID",
+        "TimeCreated",
+        "TimeModified",
+        "Name",
+        "IsActive",
+        "Balance",
+        "CurrencyRef.ListID",
+        "CurrencyRef.FullName"
+      ]
+    },
+    {
+      "name": "InvoiceRet",
+      "fields": [
+        "TxnID",
+        "TimeCreated",
+        "TimeModified",
+        "TxnNumber",
+        "CustomerRef.ListID",
+        "ARAccountRef.ListID",
+        "TxnDate",
+        "RefNumber",
+        "DueDate",
+        "Subtotal",
+        "SalesTaxTotal",
+        "AppliedAmount",
+        "BalanceRemaining",
+        "IsPaid",
+        "CurrencyRef.ListID",
+        "ExchangeRate",
+        "IsPending",
+        "CustomerRef.FullName",
+        "TermsRef.FullName"
+      ],
+      "fieldVerification": {
+        "IsPending": "unverified against Intuit",
+        "CustomerRef.FullName": "unverified against Intuit",
+        "TermsRef.FullName": "unverified against Intuit"
+      }
+    },
+    {
+      "name": "BillRet",
+      "fields": [
+        "TxnID",
+        "TimeCreated",
+        "TimeModified",
+        "TxnNumber",
+        "VendorRef.ListID",
+        "APAccountRef.ListID",
+        "TxnDate",
+        "RefNumber",
+        "DueDate",
+        "AmountDue",
+        "IsPaid",
+        "CurrencyRef.ListID",
+        "ExchangeRate",
+        "OpenAmount",
+        "IsPending",
+        "VendorRef.FullName"
+      ],
+      "fieldVerification": {
+        "OpenAmount": "unverified against Intuit",
+        "IsPending": "unverified against Intuit",
+        "VendorRef.FullName": "unverified against Intuit"
+      }
+    },
+    {
+      "name": "CreditMemoRet",
+      "fields": [
+        "TxnID",
+        "TimeCreated",
+        "TimeModified",
+        "TxnNumber",
+        "CustomerRef.ListID",
+        "ARAccountRef.ListID",
+        "TxnDate",
+        "RefNumber",
+        "Subtotal",
+        "SalesTaxTotal",
+        "CreditRemaining",
+        "CurrencyRef.ListID",
+        "ExchangeRate",
+        "TotalAmount",
+        "IsPending",
+        "CustomerRef.FullName"
+      ],
+      "fieldVerification": {
+        "TotalAmount": "unverified against Intuit",
+        "IsPending": "unverified against Intuit",
+        "CustomerRef.FullName": "unverified against Intuit"
+      }
+    },
+    {
+      "name": "TransactionRet",
+      "fields": [
+        "TxnID",
+        "TimeModified",
+        "TxnType",
+        "TxnDate",
+        "Amount",
+        "AccountRef.ListID",
+        "CurrencyRef.ListID"
+      ],
+      "fieldVerification": {
+        "CurrencyRef.ListID": "unverified against Intuit"
+      }
+    },
+    {
+      "name": "BillPaymentCheckRet",
+      "fields": [
+        "TxnID",
+        "TimeCreated",
+        "TimeModified",
+        "PayeeEntityRef.ListID",
+        "APAccountRef.ListID",
+        "BankAccountRef.ListID",
+        "TxnDate",
+        "Amount",
+        "CurrencyRef.ListID",
+        "ExchangeRate",
+        "PayeeEntityRef.FullName",
+        "BankAccountRef.FullName",
+        "AppliedToTxnRet"
+      ],
+      "fieldVerification": {
+        "PayeeEntityRef.FullName": "unverified against Intuit",
+        "BankAccountRef.FullName": "unverified against Intuit",
+        "AppliedToTxnRet": "unverified against Intuit",
+        "AppliedToTxnRet.TxnID": "unverified against Intuit",
+        "AppliedToTxnRet.TxnType": "unverified against Intuit",
+        "AppliedToTxnRet.Amount": "unverified against Intuit"
+      },
+      "repeated": [
+        {
+          "field": "AppliedToTxnRet",
+          "fields": [
+            "TxnID",
+            "TxnType",
+            "Amount"
+          ],
+          "maxItems": 500
+        }
+      ]
+    },
+    {
+      "name": "BillPaymentCreditCardRet",
+      "fields": [
+        "TxnID",
+        "TimeCreated",
+        "TimeModified",
+        "PayeeEntityRef.ListID",
+        "APAccountRef.ListID",
+        "CreditCardAccountRef.ListID",
+        "TxnDate",
+        "Amount",
+        "CurrencyRef.ListID",
+        "ExchangeRate",
+        "PayeeEntityRef.FullName",
+        "CreditCardAccountRef.FullName",
+        "AppliedToTxnRet"
+      ],
+      "fieldVerification": {
+        "PayeeEntityRef.FullName": "unverified against Intuit",
+        "CreditCardAccountRef.FullName": "unverified against Intuit",
+        "AppliedToTxnRet": "unverified against Intuit",
+        "AppliedToTxnRet.TxnID": "unverified against Intuit",
+        "AppliedToTxnRet.TxnType": "unverified against Intuit",
+        "AppliedToTxnRet.Amount": "unverified against Intuit"
+      },
+      "repeated": [
+        {
+          "field": "AppliedToTxnRet",
+          "fields": [
+            "TxnID",
+            "TxnType",
+            "Amount"
+          ],
+          "maxItems": 500
+        }
+      ]
+    },
+    {
+      "name": "ReceivePaymentRet",
+      "fields": [
+        "TxnID",
+        "TimeCreated",
+        "TimeModified",
+        "CustomerRef.ListID",
+        "ARAccountRef.ListID",
+        "TxnDate",
+        "TotalAmount",
+        "CurrencyRef.ListID",
+        "ExchangeRate"
+      ]
+    },
+    {
+      "name": "TxnDeletedRet",
+      "fields": [
+        "TxnDelType",
+        "TxnID",
+        "TimeCreated",
+        "TimeDeleted"
+      ]
+    },
+    {
+      "name": "ListDeletedRet",
+      "fields": [
+        "ListDelType",
+        "ListID",
+        "TimeCreated",
+        "TimeDeleted"
+      ]
+    }
+  ],
+  "exits": [
+    {
+      "value": 10,
+      "code": "QB_NOT_INSTALLED"
+    },
+    {
+      "value": 11,
+      "code": "QB_NOT_OPEN"
+    },
+    {
+      "value": 12,
+      "code": "QB_NOT_AUTHORIZED"
+    },
+    {
+      "value": 13,
+      "code": "QB_ELEVATED"
+    },
+    {
+      "value": 14,
+      "code": "QB_BUSY"
+    },
+    {
+      "value": 15,
+      "code": "QB_GRANT_TOO_BROAD"
+    },
+    {
+      "value": 16,
+      "code": "QB_GRANT_PROMPTS"
+    },
+    {
+      "value": 17,
+      "code": "QB_READ_ONLY_SUBSCRIPTION"
+    },
+    {
+      "value": 18,
+      "code": "QB_UNSUPPORTED_EDITION"
+    },
+    {
+      "value": 19,
+      "code": "QB_SAMPLE_COMPANY"
+    },
+    {
+      "value": 20,
+      "code": "QB_FILE_VERSION"
+    },
+    {
+      "value": 21,
+      "code": "QB_PARTIAL_VIEW"
+    },
+    {
+      "value": 22,
+      "code": "QB_HELPER_UNAVAILABLE"
+    },
+    {
+      "value": 23,
+      "code": "QB_PROCESSOR_UNTRUSTED"
+    }
+  ],
+  "probeIdentity": {
+    "request": "Account",
+    "fields": [
+      "ListID",
+      "TimeCreated"
+    ],
+    "maxRows": 10000,
+    "verification": "unverified against Intuit",
+    "purpose": "Complete bounded identity tuples for the connector to select the earliest account. Account permanence, creation-time ordering and stable ties require field verification; never use a name or path."
+  }
+}

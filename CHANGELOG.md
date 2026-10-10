@@ -4,38 +4,51 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.11 (2026-10-09)
+
+Candidate only. This version has not been released. The changes below still
+need the full host gate, CI and separately reviewed field acceptance for the
+exact sealed package.
+
+- **Imports ask before removing stored records.** When an import needs to
+  remove records, it stops with a plan showing how much of the source would
+  go and why. Applying that plan requires a separate explicit approval.
+- **Split documents keep the right records.** Removal checks exact membership
+  so a repair cannot delete an independent original with a similar name.
+- **Direct contact facts can come with a direct citation.** When a source
+  explicitly states a contact detail, the Brain can answer from that evidence
+  without asking a writing model to reconstruct it.
+- **Slow answers are easier to diagnose.** Support can see how long each
+  answer stage took without logging the question's contents.
+- **Windows browser sign-in works on a clean Windows user.** Sign-in can now
+  install its encrypted credential-storage component in your own visible
+  console, and a failed sign-in gives one next step. The first time, each
+  Windows user needs internet access to the npm registry for that one-time
+  install, and Windows Smart App Control may block it. If sign-in still stops,
+  `brain support --explain CLOUDFLARE_KEYRING_UNAVAILABLE` explains why.
+
+### Known issues
+
+- Removal of rows the Worker cannot verify still needs the technician. Until
+  then, that source's import stops at the same point on every run.
+- Still open: a partial answer can drop a name that ends in an abbreviation
+  such as "Co.". The figure and its citation are unchanged. To check, open the
+  cited source to see whom a kept figure belongs to.
+- After a failed `brain update`, run `brain health`: two failure messages can
+  misleadingly say the Brain is working normally or still applying a change.
+  Fixes are planned for the next release.
+
+### This release does NOT cover
+
+- **UPDATE-012:** Windows x64 is the only supported Windows runtime in this
+  release. Windows ARM64 ships unproven.
+- **UPDATE-044:** Bank breadth ships unproven. Bank invitations stay closed.
+- QuickBooks Desktop money answers and owner readiness still need field
+  acceptance. Financial contracts, the test-only oracle, books-match and
+  tax-check remain internal libraries, with no owner CFO surface or tax
+  workflow. SimpleFIN proof remains held.
+
 ## 0.4.10 (2026-10-06)
-
-- **Known Windows issue:** on a clean Windows user profile, browser sign-in can
-  stop before opening the browser because Wrangler's keyring binding is absent
-  and the installer does not give that step an interactive console. Token entry
-  is also unavailable on Windows. The 0.4.10.1 fix below remains gated by Windows
-  CI and a separate owner-present browser-sign-in check.
-
-### 0.4.10.1 fix (unreleased; release gates pending)
-
-- Windows browser sign-in can now install Wrangler's encrypted-storage binding
-  in the owner's visible console. The shared question reader releases the
-  terminal during that step and returns afterward. Encrypted storage stays
-  required. A session without a console gives one PowerShell install command
-  when the binding is missing; after that per-user install it can reuse the
-  binding without a console.
-- A Windows keyring refusal now names a bounded reason: `binding_missing`,
-  `npx_unavailable`, `timeout`, or `other`. Failed Windows update adoption keeps
-  that diagnosis and its next step. `brain support --explain CLOUDFLARE_KEYRING_UNAVAILABLE` explains the reasons. Windows guidance no
-  longer promises a saved-token or hidden-token-entry recovery route.
-- Windows failures give one next step. Scope refusals require technician review,
-  including in sessions without a console. Other sign-in failures keep their
-  retry guidance and call for review only if that retry fails. A keyring failure
-  with visible output points to that output; a session with captured output
-  gives the PowerShell command to make the reason visible. macOS and Linux keep
-  their existing messages and support guidance.
-- Before release, require the real Windows CI missing-binding and preinstalled
-  control to pass. Then verify browser sign-in in a clean Windows user profile.
-  The one-time install needs npm registry access and may be blocked by Windows
-  Smart App Control. Each Windows user needs their own binding installation.
-
-### 0.4.10 changes
 
 - Daily refresh now advances its success date when files are refused,
   unsupported, or excluded by rule when the run has no failures and verifies

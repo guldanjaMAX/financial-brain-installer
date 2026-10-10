@@ -25,7 +25,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -249,13 +249,18 @@ try {
   const archPattern = /process\.arch|\bx86_64\b|["'`]x64["'`]|["'`]ia32["'`]/;
   const inDirectory = (relative, extension) => readdirSync(join(ROOT, relative))
     .filter((name) => name.endsWith(extension)).map((name) => join(relative, name));
-  // brain.mjs's static import closure, by directory. connectors/ is reached
-  // only through dynamic import from a named provider command, never from
-  // update; google-auth is the one connector brain.mjs loads at module level.
+  // Keep the broad architecture scan and independently walk static edges
+  // below: a directory list alone cannot prove transitive import isolation.
   const dynamicFirstSourceArchitectureFiles = new Set([
     join("operations", "first-source-file.mjs"),
     join("operations", "windows-native-architecture.mjs"),
   ]);
+  // The bridge also loads on macOS through the lazy connect and apply-removals
+  // binding module, but refuses before running architecture code. Its one
+  // architecture literal names a Windows registry view, not process.arch.
+  // Static isolation from update and the macOS refusal are both proved below.
+  const quickBooksDesktopBridge = join("operations", "quickbooks-desktop-bridge.mjs");
+  const dynamicWindowsOnlyFiles = new Set([quickBooksDesktopBridge]);
   const updatePathFiles = [
     "brain.mjs", "doctor.mjs", "support-journal.mjs", "support-recovery.mjs",
     "acceptance.mjs", "report.mjs", join("connectors", "google-auth.mjs"),
@@ -263,7 +268,8 @@ try {
     ...inDirectory("components", ".mjs"),
     ...inDirectory("ingest", ".mjs"),
     ...inDirectory(join("worker", "src", "lib"), ".js"),
-  ].filter((relativePath) => !dynamicFirstSourceArchitectureFiles.has(relativePath));
+  ].filter((relativePath) => !dynamicFirstSourceArchitectureFiles.has(relativePath) &&
+    !dynamicWindowsOnlyFiles.has(relativePath));
   // support-journal.mjs is the single allowed reader: it RECORDS the value in a
   // support event and never decides anything on it. That is asserted below by
   // calling it, not by trusting the exemption.
@@ -285,6 +291,66 @@ try {
     !/(?:firstSourceFileLib|windowsNativeArchitectureLib|firstSourceArchitectureIdentity|inspectArchitecture)/u
       .test(updateEntrypoints),
     "an update entrypoint references the first-source architecture route");
+
+  const bridgeSource = readFileSync(join(ROOT, quickBooksDesktopBridge), "utf8");
+  const bridgeArchHits = bridgeSource.match(new RegExp(archPattern.source, "g")) || [];
+  check("the Desktop bridge's one architecture literal is the Windows registry-view label, never process.arch",
+    bridgeArchHits.length === 1 && bridgeArchHits[0] === "'x64'" &&
+      /for \(const \[view, architecture\] of \[\[32, 'x86'\], \[64, 'x64'\]\]\)/u.test(bridgeSource),
+    JSON.stringify(bridgeArchHits));
+  const staticDesktopImporters = updatePathFiles.filter((relativePath) =>
+    /^\s*(?:import|export)\b[^;]*?\bfrom\s*["'][^"']*quickbooks-desktop[^"']*\.mjs["']/mu
+      .test(readFileSync(join(ROOT, relativePath), "utf8")));
+  const staticSpecifiers = (source) => [...source.matchAll(
+    /^\s*(?:import\s+(?:[\w$]+\s*,?\s*)?(?:\{[^}]*\}|\*\s+as\s+[\w$]+)?\s*from\s*|import\s*|export\s+(?:\{[^}]*\}|\*(?:\s+as\s+[\w$]+)?)\s+from\s*)["']([^"']+)["']/gm,
+  )].map((match) => match[1]);
+  const staticClosure = (entry, readSource) => {
+    const reached = new Set();
+    const visit = (file) => {
+      if (reached.has(file)) return;
+      reached.add(file);
+      for (const specifier of staticSpecifiers(readSource(file))) {
+        if (specifier.startsWith(".")) visit(join(dirname(file), specifier));
+      }
+    };
+    visit(entry);
+    return reached;
+  };
+  const closure = staticClosure("brain.mjs", (file) => readFileSync(join(ROOT, file), "utf8"));
+  const signedModule = join("operations", "quickbooks-desktop-signed.mjs");
+  // A multiline import through another directory must expose both forbidden
+  // modules. Side-effect imports and re-exports are edges; lazy imports are not.
+  const graph = new Map([
+    ["brain.mjs", 'import {\n probe\n} from "./operations/probe.mjs";\nimport("./lazy.mjs");'],
+    [join("operations", "probe.mjs"), 'export {\n probe\n} from "../connectors/probe.mjs";'],
+    [join("connectors", "probe.mjs"), 'import "../operations/quickbooks-desktop-bridge.mjs";'],
+    [quickBooksDesktopBridge, 'export * from "./quickbooks-desktop-signed.mjs";'],
+    [signedModule, "export const probe = true;"],
+  ]);
+  const control = staticClosure("brain.mjs", (file) => {
+    if (!graph.has(file)) throw new Error("static import fixture reached an unexpected module");
+    return graph.get(file);
+  });
+  check(`the static import walk excludes both Desktop modules (${closure.size} modules reached)`,
+    staticDesktopImporters.length === 0 &&
+      closure.has(join("operations", "ingest-removal-plan.mjs")) &&
+      !closure.has(quickBooksDesktopBridge) && !closure.has(signedModule) &&
+      control.size === 5 && control.has(quickBooksDesktopBridge) && control.has(signedModule) &&
+      /await import\("\.\/operations\/quickbooks-desktop-bridge\.mjs"\)/u.test(brainSource),
+    JSON.stringify({ staticDesktopImporters, desktopReached: [...closure].filter((file) => /quickbooks-desktop/.test(file)) }));
+  check("the update entrypoints cannot reach the QuickBooks Desktop route",
+    !/(?:quickbooks-desktop|QuickBooksDesktop|desktopCommandDependencies|desktopLifecycle)/u.test(updateEntrypoints),
+    "an update entrypoint references the QuickBooks Desktop route");
+  const { runQuickBooksDesktop } = await import("../operations/quickbooks-desktop-bridge.mjs");
+  let desktopSteps = 0;
+  const desktopSpy = () => { desktopSteps++; return { status: 1 }; };
+  const macDesktop = runQuickBooksDesktop({ operation: "probe" }, {
+    platform: "darwin", spawnSync: desktopSpy, registryRun: desktopSpy, signatureRun: desktopSpy,
+    onStage: () => { desktopSteps++; },
+  });
+  check("on macOS the Desktop bridge refuses before its registry-view branch and runs nothing",
+    macDesktop.ok === false && macDesktop.code === "QB_NOT_INSTALLED" && desktopSteps === 0,
+    JSON.stringify({ macDesktop, desktopSteps }));
 
   const { previewSupportEvent } = await import("../support-journal.mjs");
   const armEvent = previewSupportEvent(

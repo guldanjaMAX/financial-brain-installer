@@ -8,7 +8,7 @@ store. Pinned Wrangler 4.131.1 cannot request Vectorize permission for that
 profile, so the read-only preflight routes that exact refusal to an explicit,
 account-scoped recovery API-token choice before any mutation.
 
-**Package identity: brain-installer 0.4.10, schema48.** Publication, supported
+**Package identity: brain-installer 0.4.11, schema48.** Publication, supported
 platforms and field acceptance are established by the reviewed evidence for
 the exact package bytes, not by this README or its version number. Before an
 install or update, match the package to the current approved guide and release
@@ -22,7 +22,7 @@ until reviewed evidence closes it; a deferred capability remains unproven.
 Earlier candidate identities and their planning records remain historical and
 must not be reused as proof for changed bytes.
 
-The 41-row release audit has 37 unresolved incidents, two 0.4.10 deferrals, and four
+The 41-row release audit has 37 unresolved incidents, two 0.4.11 deferrals, and four
 rows closed on reviewed evidence.
 
 Engineering changes follow [the code, test, documentation, and tracking
@@ -368,11 +368,35 @@ Run `node brain.mjs` with no arguments for the full command list.
 
 ## Two things about how this stores data
 
+The proposed 0.4.11 financial adapters share the closed
+[financial evidence contracts](./FINANCIAL-CONTRACTS.md) for exact money,
+report snapshots, Books findings and preparer review. Migration 0053 reserves
+their immutable storage; it does not enable new provider or answer routes.
+
 **There is no relevance floor.** Hybrid search always returns the
 least-irrelevant documents, however far away they are. A query on a topic the
 brain holds nothing about still returns rows. `/api/rag/think` is the only guard,
 and it holds. Never show raw `/api/rag/unified` output as proof the brain "found
 something".
+
+For a narrow contact lookup, `/think` can extract an address, email, phone,
+company, or role directly from one explicitly labelled contact record or a
+matching owner-confirmed operative section. It requires a matching subject,
+reliable native text, known direct lineage, and a reliable date within the
+existing thirty-day stale boundary. Historical requests, ambiguous identities,
+conflicts, incomplete coverage, shortened excerpts, and unsupported premises
+use ordinary answer generation and verification. Financial, legal, medical,
+and relationship-status reasoning receive no shortcut.
+
+An accepted extraction makes zero generative calls and still runs the shared
+citation, authority, temporal, and operative-conflict checks. Its answer includes
+the exact as-of day. `evidence_gate.method` is `exact_contact_fact`, and
+`evidence_gate.fact_span` identifies the numbered result, field, and half-open
+UTF-16 offsets into that result's returned `snippet`. Retrieval can normalize
+whitespace; these offsets describe the returned excerpt, not the original file.
+All normal gaps, citation provenance, access scope, and confidence remain in the
+response. Other record shapes continue through the general path. Synthetic
+virtual timing proves avoided model calls, not a live latency guarantee.
 
 **A chunk is keyword-searchable before it is semantically searchable.** There is
 no transaction across D1 and Vectorize, so ingest writes the text and queues the
@@ -403,6 +427,28 @@ retry loop.
 ---
 
 ## Loading material
+
+Ordinary folder, Drive, Gmail, IMAP, Calendar, and provider ingest saves accepted additions
+and updates, then stops if authenticated storage contains any planned removal.
+This includes obsolete split parts and declared message-export family members.
+Follow the one printed `brain ingest <manifest> --source <source>
+--apply-removals <fingerprint>` command to apply the saved exact plan. Keep any
+additional `--approve-removals` argument in that command. Then rerun normal ingest
+to finish the source cursor. A dry run cannot authorize removal.
+
+QuickBooks Desktop uses the same boundary for every stored tombstone, including
+small removals. Its printed command retains `--from quickbooks-desktop` and
+`--source quickbooks_desktop`. Apply checks the unchanged company binding and
+checkpoint under their leases, removes only the saved physical targets, and
+leaves the checkpoint unchanged. An aggregate approval on ordinary ingest does
+not apply removals. Desktop money freshness remains unverified.
+
+The plan requires migration 0052 and the `INGEST_VERSION` version metadata binding.
+A missing capability fails closed. Changed checkpoint, policy, runtime bytes,
+Worker generation, or stored document/chunk state invalidates approval. Physical
+targets are previewed from authenticated storage, checked again at apply, fenced
+inside each D1 transaction, and read back after removal. Accepted non-destructive
+progress remains resumable on a review stop or failed apply.
 
 `brain ingest` walks a folder, extracts text, and sends it in batches.
 
@@ -584,7 +630,7 @@ because `15234.11` on its own is unretrievable while `Balance: 15234.11` answers
 a question about a balance.
 
 A local-folder run also reconciles DELETIONS: a file this source loaded before
-and can no longer find is removed, through the same aggregate removal plan and
+and can no longer find becomes a removal candidate, through the same aggregate removal plan and
 the same safety limits Drive uses. The plan denominator comes from the
 authenticated Worker inventory, not the local resume file, and exact targets
 are read back after deletion before completed source state is recorded. Pending
@@ -594,13 +640,13 @@ deletions re-enter the current plan rather than bypassing it. Suppressed under
 **`safety.private_path_prefixes` is enforced on local-folder and Google Drive
 ingest**, per path segment. Drive also enforces `corpora.google_drive` exact
 file-id, path-prefix and filename-part exclusions before downloading content.
-An excluded document already present in the brain is removed rather than left
-stranded. Gmail has no folder path and does not use these rules.
+An excluded document already present in the brain enters the separate removal
+review. Gmail has no folder path and does not use these rules.
 
 Flags: `--dry-run`, `--source <name>`, `--limit <n>`, `--reset`, Drive-only
 `--dry-run --json` for a bounded aggregate assistant preview, and the
-exact-plan acknowledgement `--approve-removals <fingerprint>` when a Drive,
-Gmail, IMAP, or local-folder cleanup exceeds its routine safety limits.
+separate `--apply-removals <fingerprint>` command. Keep the additional
+`--approve-removals <fingerprint>` argument when the printed command includes it.
 
 ---
 
@@ -852,18 +898,17 @@ changed rather than to the corpus. Promotions, Social, and Forums are excluded;
 Updates remains included because statements, confirmations, and reminders are
 commonly classified there.
 
-**Drive, Gmail, and IMAP deletions are applied.** Each connector intersects
-source-policy, source-deletion, and intentional-skip candidates with the
-authenticated stored-family inventory, deduplicates them, and checks one
-aggregate plan. More than 100 removals or more than 10% of the stored source
-corpus stops before any planned deletion or cursor advancement. One current
-typed Gmail deletion or policy exclusion remains routine so a small mailbox can
-converge. The refusal shows category counts and an opaque SHA-256 fingerprint,
-never source IDs. Only the exact `--approve-removals <fingerprint>` value can
-authorize that exact plan. Pending deletions return through the same gate, and
-a currently accepted message wins over a stale pending marker. A complete IMAP
-pass also compares its stable message identities with D1 and reads every planned
-removal back before committing folder watermarks.
+**Drive, Gmail, and IMAP deletions require separate apply.** Each connector
+intersects source-policy, source-deletion, and intentional-skip candidates with
+authenticated stored families. Obsolete replacement members join the exact
+physical removal plan. Every nonempty plan stops after accepted additions and
+updates are saved, and before removal or cursor advancement. More than 100
+removals or more than 10% of the stored source remains an additional gate.
+The typed single-message Gmail exception changes only that additional gate;
+it never permits automatic deletion. The printed command includes the exact
+`--apply-removals` fingerprint and any required `--approve-removals` value.
+Pending deletions return through the same boundary. A fresh ordinary pass can
+clear restored candidates; a changed stored inventory invalidates saved apply.
 
 Any account-wide changed item is rebuilt through the reviewed-root traversal
 before content is read.
@@ -925,9 +970,10 @@ distinct-run observations, including the last, plus a cumulative
 `observation_count`. Seven-day proof continues to use the retained first and
 last valid server-anchored endpoints without unbounded local-state growth.
 Even one such candidate stops for the exact `brain ingest
-<manifest> --from drive --approve-removals <fingerprint>` owner approval and
-shows its name and folder from durable local state, with the authenticated D1
-family inventory as the fallback. Every run backfills missing labels from those
+<manifest> --source drive --apply-removals <fingerprint>` owner approval,
+with the printed additional `--approve-removals` value. Its private review state
+keeps the name and folder, with authenticated D1 family inventory as the fallback;
+the approval command prints aggregate counts only. Every run backfills missing labels from those
 two sources. A family still missing either label is recorded as
 `label_unavailable`, retained, protected from every deletion reason, and left
 out of the approval target set while the completed cursor advances. The
@@ -966,8 +1012,8 @@ and cleanup both pass.
 
 Oversized Drive documents are reconciled as a family. A revision that changes
 from one document to several parts, changes its part count, or becomes small
-again removes only the obsolete representation after every replacement part is
-accepted. A document-level failure leaves the Drive cursor unadvanced so the
+again plans only the obsolete representation after every replacement part is
+accepted. Removing that representation requires the separate exact apply. A document-level failure leaves the Drive cursor unadvanced so the
 same change is retried instead of being acknowledged and lost.
 
 Calendar uses the same completion boundary. Its new sync token is saved only
@@ -1035,6 +1081,64 @@ A Google Doc is exported as text, a Sheet as CSV, and a Google Form not at all.
 permission change rewrites it, and storing it once made 80% of a corpus look
 like it was written this year, silently disabling staleness reporting. Drive's
 `createdTime` is the fallback, and a date in the filename beats both.
+
+### Opted-in QuickBooks refresh in 0.4.11
+
+The new QuickBooks paths use `operations.quickbooks_schedule.enabled` to opt
+into a separate refresh schedule. Existing owners who do not enable these
+paths retain their provider schedule. The optional `timezone` must match the
+computer's timezone. If omitted, the owner's manifest timezone is used, falling
+back to the computer's timezone. Windows defaults
+to `start: "07:00"`; macOS requires 07:00. `windowless` defaults to false and
+remains unavailable without a field-verified Windows host.
+
+`brain quickbooks schedule on|off|status <manifest>` manages this preference.
+`brain daily status <manifest>` also shows the QuickBooks window when enabled.
+Both status results include `effective_window` (under `quickbooks_schedule` in
+daily status), the timezone, an exclusive cutoff and the planned local start
+times. Status distinguishes a verified installation from a planned schedule
+that needs attention. Planned times are not a promise of a completed read.
+
+Windows schedules both editions every two hours from 07:00. macOS schedules
+Online at 07:00 and the latest even hour before the cutoff. The fixed native
+window uses the earliest UTC-midnight cutoff in the year, so daylight saving
+changes do not require seasonal re-registration. In New York the window ends
+at 18:30 local all year: Windows normally starts at 07:00, 09:00, 11:00, 13:00,
+15:00 and 17:00; macOS starts at 07:00 and 18:00. In Phoenix the window ends
+at 16:30, with the last regular Windows start at 15:00 and macOS start at 16:00.
+The cutoff is 30 minutes before UTC midnight because money answers currently
+render their "as of" date in UTC.
+
+A delayed or catch-up run checks the actual date again before each source
+read, including after process inspection and state writes. At or after that
+day's cutoff it skips with `QB_OUTSIDE_WINDOW`. In New York this read gate is
+18:30 in standard time and 19:30 in daylight time, although the native calendar
+window always ends at 18:30. A complete snapshot less than six hours old skips
+with `QB_FRESH`, unless the last run failed. Desktop also requires a running
+`QBW*.exe` process before any helper starts; otherwise it skips with
+`QB_NOT_OPEN`. Only an accepted, closed `ready` receipt advances the local
+snapshot time. Both editions have a one-day freshness expectation.
+
+Both native schedules bind the effective data-plane origin, the exact domain-based
+URL used by the CLI, the fallback Worker/account identity, and the durable admin-key
+locator. Unattended QuickBooks refresh requires `brain.domain`; it cannot discover
+a workers.dev origin using control-plane credentials. Before source planning or
+credential resolution, the runner compares the registered definition with the current
+manifest. Destination, locator, or source drift refuses with `SCHEDULE_RUN_FAILED`
+and reason `QB_SCHEDULE_REREGISTER_REQUIRED`. Re-register with `brain quickbooks
+schedule on <manifest>` after reviewing the changed destination. Existing opted-in
+QuickBooks tasks also need re-registration to adopt this binding.
+
+A healthy QuickBooks schedule owns both QuickBooks keys in the daily plan.
+Configured but unconnected legs remain visibly skipped and do not block other
+daily sources. The daily task still binds the whole manifest the owner approved.
+Both editions' connect and disconnect paths must call
+`reregisterAfterManifestChange(manifestPath)` after changing the binding. That
+hook uses the existing owned daily-on transaction, then registers or removes
+the QuickBooks task, and requires exact readback before success. A failed
+replacement restores the previous definitions and reports that the daily
+schedule needs attention. Production Online and Desktop adapters must use
+this shared hook and return only accepted source receipts to the runner.
 
 ### Permanent daily imports on Windows and macOS
 
@@ -1345,8 +1449,8 @@ reachable when the folder is later deleted, so a loaded agent is never stranded.
 
 **Deletions.** The local ingest lane now reconciles files that are gone, through
 the same `buildDriveRemovalPlan` / `assertDriveRemovalPlanSafe` aggregate guard
-the Drive lane uses, with the same 100-document and 10% limits and the same
-`--approve-removals <fingerprint>` acknowledgement. `removedSinceLastRun` in
+the Drive lane uses, with the same 100-document and 10% additional limits. Every
+nonempty plan requires the separate `--apply-removals` command. `removedSinceLastRun` in
 `ingest/run.mjs` computes the candidates from the resume state and the set of
 paths the walk saw — including paths it SKIPPED, so a file skipped this run for
 being empty, oversized or private is not mistaken for a deleted one. It is
@@ -1396,8 +1500,8 @@ complete coverage. The cutoff applies to first load, saved deltas, moved old
 messages, and reset. Missing or invalid received times fail the run before
 delivery and cursor promotion. With a cutoff configured, mail tombstones are
 counted but retained, and the bounded inventory cannot trigger absence-based
-snapshot removals. Exact drive/calendar tombstones retain their existing
-behavior. Any mail deletion is a separate explicit owner decision.
+snapshot removals. Exact drive/calendar tombstones enter the separate authenticated removal plan.
+Any mail deletion is also a separate explicit owner decision.
 
 `brain sources <manifest>` shows the source, UTC boundary and retention rule;
 `--json` adds `mail_transition` from local manifest configuration, separate from

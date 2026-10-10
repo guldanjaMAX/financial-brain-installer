@@ -285,6 +285,15 @@
             }
           }
         },
+        "quickbooks_desktop": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Opt-in attended QuickBooks Desktop on the same Windows PC. Money freshness is unverified; money answers are withheld pending the field gate.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "source": { "type": "string", "const": "quickbooks_desktop", "default": "quickbooks_desktop" }
+          }
+        },
         "quickbooks": {
           "type": "object",
           "description": "QuickBooks Online accounting records queried read-only at runtime. Intuit's Accounting OAuth consent can authorize broader read and update access. Sandbox localhost OAuth is available; production stops before credential or browser access until the client-owned HTTPS callback is implemented. OAuth credentials and raw company identity remain in the local provider store. Disconnect retains imported documents, and query snapshots do not prove hard deletion.",

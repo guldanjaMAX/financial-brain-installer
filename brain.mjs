@@ -36,6 +36,7 @@ import { basename, delimiter, isAbsolute, join, dirname, relative, resolve, sep,
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { removalDigest, createIngestRemovalReview, applyApprovedProvenanceFamily } from "./operations/ingest-removal-plan.mjs";
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { TextDecoder } from "node:util";
@@ -2937,6 +2938,7 @@ export function workerBindings(m, cfg, options = {}) {
   return [
       { type: "d1", name: "DB", id: cfg.d1_database_id },
       { type: "ai", name: "AI" },
+      { type: "version_metadata", name: "INGEST_VERSION" },
       // Explicit, never inferred. The worker CAN guess its backend from which
       // bindings are present, but a guess that silently picks the wrong store
       // returns an empty brain rather than an error, so the manifest states it.
@@ -8479,7 +8481,7 @@ function assertSourceName(name) {
 export const VALUE_FLAGS = new Set([
   "path", "source", "limit", "from", "manifest", "scopes", "port", "host", "user", "run", "confirm-host", "kind", "add", "bookmark", "export", "explain", "backup", "provider",
   "golden", "profile", "k", "repeat", "baseline", "save", "artifacts",
-  "corpus-contract", "approve-removals", "only", "skip",
+  "corpus-contract", "approve-removals", "apply-removals", "only", "skip",
   "pace-vectors-per-minute",
   "approve", "target",
   "can", "zones", "exclude-zones", "until", "as", "subject",
@@ -10025,10 +10027,10 @@ function sourceInventoryAccess(manifestPath, m, options = {}) {
     headers.delete("X-Admin-Key");
     return authenticatedRequest(target, { ...init, headers }, requestOptions);
   };
-  // These two closures let the exact-target executor reuse the established
-  // idempotent retry contracts without ever receiving or returning the saved
-  // administrator key itself. The source lease is rechecked before the first
-  // credential read and again by every retry inside each helper.
+  // The exact-target executor keeps the saved administrator key opaque. Batch
+  // writes retain their idempotent retries; separately approved family cleanup
+  // uses exact inventory-fenced removals. Neither grants ordinary ingest an
+  // implicit cleanup decision. Each helper rechecks the source lease.
   const requestBatch = ({ docs, assertOwned = null, ...requestOptions } = {}) => {
     assertOwned?.();
     return requestIngestBatch({
@@ -10042,7 +10044,7 @@ function sourceInventoryAccess(manifestPath, m, options = {}) {
   };
   const reconcileFamilies = ({ families, assertOwned = null, ...requestOptions } = {}) => {
     assertOwned?.();
-    return reconcileDocumentFamilies({
+    return applyApprovedProvenanceFamily({
       ...requestOptions,
       families,
       base,
@@ -10946,16 +10948,20 @@ export function provenanceTargetDependencies(options = {}) {
     return Object.freeze({ ...counters, results: Object.freeze(results) });
   };
 
-  const reconcileFamily = async ({ family, adminAccess, assertOwned }) => {
+  const reconcileFamily = async ({ family, approvalId, adminAccess, assertOwned }) => {
     const state = requireProvenanceTargetAdminState(adminAccess, adminStates);
     if (!family || family.scope !== "exact_structural_family" ||
         !Array.isArray(family.keep_doc_uids) || !family.keep_doc_uids.length) {
       throw new TypeError("the exact structural family plan is invalid");
     }
     await assertOwned();
+    let excluded = 0;
     const removed = await state.reconcileFamilies({
+      onExcluded: (count) => { excluded = count; },
+      approvalId,
       families: [{
         base_doc_uid: family.base_doc_uid,
+        ...(family.original_id ? { original_id: family.original_id } : {}),
         keep_doc_uids: family.keep_doc_uids,
       }],
       assertOwned,
@@ -10974,6 +10980,7 @@ export function provenanceTargetDependencies(options = {}) {
       base_doc_uid: family.base_doc_uid,
       keep_doc_uids: family.keep_doc_uids,
       removed_count: removed,
+      excluded_count: excluded,
     });
   };
 
@@ -11420,7 +11427,8 @@ export class ProvenanceRepairIncompleteError extends Fatal {
   constructor(message, receipt = null) {
     super(message);
     this.name = "ProvenanceRepairIncompleteError";
-    this.code = "PROVENANCE_REPAIR_INCOMPLETE";
+    this.code = receipt?.operation === "provenance-target-repair"
+      ? "PROVENANCE_TARGET_REPAIR_INCOMPLETE" : "PROVENANCE_REPAIR_INCOMPLETE";
     this.receipt = receipt;
   }
 }
@@ -12426,9 +12434,71 @@ async function cmdOcrPreflightInteractive(manifestPath) {
  * step. Nothing is ever skipped silently; the run ends with a breakdown by
  * reason, and those reasons are kept in the state file.
  */
-async function cmdIngestUnlocked(manifestPath) {
+function ingestRemovalReview(m, manifestPath, sourceName, state, saveState, base, adminKey, options, assertOwned) {
+  return createIngestRemovalReview({
+    manifest: m, manifestPath: resolve(manifestPath), source: sourceName,
+    state, saveState, base, adminKey, assertOwned,
+    kind: options.removalSourceKind || state.ingest_removal_plan?.kind || "upload",
+    policy: () => (options.removalSourceKind || state.ingest_removal_plan?.kind) === "drive"
+      ? driveConnectorConfig(m, manifestPath) : null,
+    ...(options.removalPlanRequest ? { request: options.removalPlanRequest } : {}),
+    ...(options.removalPlanRuntime ? { runtime: options.removalPlanRuntime } : {}),
+  });
+}
+
+export async function cmdApplyIngestRemovals(m, manifestPath, flags, options = {}) {
+  if (typeof flags["apply-removals"] !== "string" || !/^[a-f0-9]{64}$/.test(flags["apply-removals"])) {
+    die("--apply-removals needs the exact lowercase 64-character fingerprint from the stopped ingest.");
+  }
+  if (flags["dry-run"] || flags.reset || flags.limit || !flags.source) {
+    die("Removal apply needs --source and the exact --apply-removals fingerprint, without dry-run, reset or limit.");
+  }
+  const sourceName = assertSourceName(flags.source);
+  // Desktop refresh holds its company-binding lease before its source lease.
+  // Exact apply must use the same order, including when dispatched directly.
+  if (sourceName === "quickbooks_desktop" && !options.desktopBindingLockHeld) {
+    return desktopLifecycle(manifestPath, options, locked => cmdApplyIngestRemovals(m, manifestPath, flags, locked));
+  }
+  const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName });
+  return runMutatingSourceIngest({ manifestPath, sourceName, statePath, dryRun: false, options,
+    sharedRecord: PROVIDER_CONNECTOR_IDS.includes(flags.from) ? `provider:${flags.from}` : null,
+  }, async (assertSourceOwned) => {
+    const assertOwned = () => { options.assertOwned?.(); assertSourceOwned?.(); };
+    assertOwned();
+    const lib = await (options.ingestLib ?? ingestLib)();
+    const state = lib.loadState(statePath);
+    if (state.ingest_provider) {
+      if (flags.from !== state.ingest_provider) die("Apply this provider plan with its original --from source.");
+      let current;
+      if (state.ingest_provider === "quickbooks-desktop") {
+        if (sourceName !== "quickbooks_desktop" || !options.desktopBindingLockHeld) {
+          throw new DriveRemovalReviewRequired("Desktop removal requires its original company-bound source.");
+        }
+        const { desktopBindingStore } = await import("./connectors/quickbooks-desktop-binding.mjs");
+        current = await (options.bindingStore || desktopBindingStore(options.storage || {})).read();
+      } else {
+        const oauth = options.oauth ?? await import("./connectors/provider-oauth.mjs");
+        current = await oauth.loadProviderSyncState(state.ingest_provider, sourceName, options.storage || {});
+      }
+      if (removalDigest(current) !== state.ingest_provider_checkpoint) {
+        throw new DriveRemovalReviewRequired("Provider cursor state changed; run ingestion again before removal.");
+      }
+    }
+    const base = await (options.resolveBaseUrl ?? resolveBaseUrl)(m, m.brain?.domain ? null : await (options.resolveAccount ?? resolveAccount)(m));
+    const adminKey = (options.resolveAdminKey ?? resolveAdminKey)(manifestPath);
+    if (!adminKey) die("Removal apply needs this Brain's durable admin key.");
+    const review = ingestRemovalReview(m, manifestPath, sourceName, state,
+      () => { assertOwned?.(); lib.saveState(statePath, state); }, base, adminKey, options, assertOwned);
+    const result = await review.apply(flags["apply-removals"], flags["approve-removals"]);
+    ok(`${result.removed} planned document(s) removed from source ${sourceName}; exact readback passed. Run ingestion again to complete the source refresh.`);
+    return result;
+  });
+}
+
+async function cmdIngestUnlocked(manifestPath, options = {}) {
   const { m } = loadManifest(manifestPath);
-  const flags = parseFlags(process.argv.slice(4));
+  const flags = options.flags || parseFlags(process.argv.slice(4));
+  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags, options);
   // Remote sources reuse everything below the envelope: splitting, batching,
   // the credential gate, resume state and the skip report. Only the producer
   // differs. Calendar is the one exception: its connector already carries
@@ -12445,6 +12515,9 @@ async function cmdIngestUnlocked(manifestPath) {
   }
   // Provider LaunchAgents run this public command. Route them before the
   // Drive/Gmail/IMAP producer or an unattended provider job can never start.
+  if (["quickbooks-desktop", "quickbooks_desktop"].includes(String(flags.from).toLowerCase())) {
+    return (options.ingestQuickBooksDesktop || cmdIngestQuickBooksDesktop)(m, manifestPath, flags, options);
+  }
   if (PROVIDER_CONNECTOR_IDS.includes(String(flags.from).toLowerCase())) {
     return cmdIngestProvider(m, manifestPath, flags);
   }
@@ -12452,14 +12525,14 @@ async function cmdIngestUnlocked(manifestPath) {
   return cmdIngestLocal(m, manifestPath, flags);
 }
 
-async function cmdIngest(manifestPath, options = {}) {
-  if (options.lifecycleLockHeld === true) return cmdIngestUnlocked(manifestPath);
+export async function cmdIngest(manifestPath, options = {}) {
+  if (options.lifecycleLockHeld === true) return cmdIngestUnlocked(manifestPath, options);
   const lockTask = options.withBrainLifecycleLock ?? withBrainLifecycleLock;
   return lockTask({
     manifestPath,
     operation: "ingest",
     ...(options.lifecycleLockOptions || {}),
-  }, () => cmdIngestUnlocked(manifestPath));
+  }, lease => cmdIngestUnlocked(manifestPath, { ...options, lifecycleLockHeld: true, assertOwned: () => lease.assertOwned() }));
 }
 
 /**
@@ -12607,13 +12680,12 @@ function retiredLocalFolderVariant(m, root, flags, options = {}) {
 }
 
 function localIngestContext(m, manifestPath, flags, options = {}) {
-  // A local folder now reconciles its own deletions, so it has the same
-  // approval gate Drive does. It stays invalid on every OTHER remote source,
-  // which is checked in cmdIngestRemote.
+  // Legacy source approvals remain an additional review input. Only the
+  // separate apply-removals command can perform a saved removal plan.
   const localRemovalApproval = flags["approve-removals"] === undefined
     ? undefined
-    : String(flags["approve-removals"] || "").trim().toLowerCase();
-  if (localRemovalApproval !== undefined && !/^[0-9a-f]{64}$/.test(localRemovalApproval)) {
+    : flags["approve-removals"];
+  if (localRemovalApproval !== undefined && (typeof localRemovalApproval !== "string" || !/^[0-9a-f]{64}$/.test(localRemovalApproval))) {
     die("--approve-removals needs the exact 64-character fingerprint the refusal printed.");
   }
 
@@ -12696,6 +12768,7 @@ function localIngestContext(m, manifestPath, flags, options = {}) {
 }
 
 export async function cmdIngestLocal(m, manifestPath, flags, options = {}) {
+  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags, options);
   const context = localIngestContext(m, manifestPath, flags, options);
   return runMutatingSourceIngest({
     manifestPath,
@@ -12812,7 +12885,6 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   }
   const postReceipt = options.postSourceReceipt ?? postSourceReceipt;
   const sendPreparedBatches = options.sendBatches ?? sendBatches;
-  const reconcilePreparedFamilies = options.reconcileDocumentFamilies ?? reconcileDocumentFamilies;
   const listPreparedSourceFamilies = options.listStoredSourceFamilies ?? listStoredSourceFamilies;
   const recordSourceReceipt = (receipt) => {
     assertLockOwned?.();
@@ -12822,6 +12894,8 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
   const state = flags.reset
     ? { version: 1, done: {}, skipped: {}, ...(savedState.removed ? { removed: savedState.removed } : {}) }
     : savedState;
+  const removalReview = ingestRemovalReview(m, manifestPath, sourceName, state,
+    () => saveState(statePath, state), base, adminKey, options, assertLockOwned);
   const previouslyKnownKeys = new Set(Object.keys(savedState.done || {}));
   const scannerOn = m.safety?.credential_scanner?.enabled !== false;
   const scannerFingerprint = credentialScannerFingerprint(scannerOn);
@@ -13244,19 +13318,7 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
     // An incomplete family is a storage failure, not a deletion instruction:
     // emitting an empty keep list for it would delete every part that DID
     // land. Its state key is cleared below, so the next run re-sends it.
-    const reconciliation = outcome.completed.map((plan) => ({
-      base_doc_uid: plan.base_doc_uid,
-      keep_doc_uids: plan.keep_doc_uids,
-      ...(plan.family_kind ? { family_kind: plan.family_kind } : {}),
-    }));
-    if (reconciliation.length) {
-      await reconcilePreparedFamilies({
-        families: reconciliation,
-        base,
-        adminKey,
-        assertOwned: assertLockOwned,
-      });
-    }
+    removalReview.remember(outcome.completed);
     for (const plan of outcome.completed) {
       await acknowledgeStoredOcrPages({
         base,
@@ -13312,65 +13374,10 @@ async function cmdIngestLocalRun(m, manifestPath, flags, context, options, asser
       ],
       intentionalCandidates: [...intentionalRemovalKeys].map((key) => `${sourceName}:${key}`),
     });
-    // A local synced folder is not Google Drive. The review-required message
-    // this throws on an oversized plan used to say "Drive cleanup" regardless
-    // of source, which misnames the thing an owner is being asked to approve.
-    assertDriveRemovalPlanSafe(localRemovalPlan, localRemovalApproval, { sourceLabel: "Folder" });
-    if (localRemovalPlan.total) {
-      const percent = (localRemovalPlan.ratio * 100).toFixed(1);
-      const disposition = localRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-      info(`folder cleanup plan ${disposition}: ${localRemovalPlan.total} of ${localRemovalPlan.stored} loaded documents (${percent}%)`);
-    }
-
-    // Only the exact targets intersected with authenticated storage and covered
-    // by the approval fingerprint may reach the destructive endpoint.
-    const localTruthTargets = [
-      ...localRemovalPlan.targets.source_policy,
-      ...localRemovalPlan.targets.intentional_skip,
-    ];
-    const applyPreparedRemovals = options.applyDriveRemovals ?? applyDriveRemovals;
-    await applyPreparedRemovals({
-      uids: localTruthTargets,
-      base, adminKey, state, dryRun: false, label: "local source truth",
-      assertOwned: assertLockOwned,
-    });
-    saveState(statePath, state);
-
-    const vanishedTargets = localRemovalPlan.targets.source_deleted;
-    if (vanishedTargets.length) {
-      const vanishedRemoval = await applyPreparedRemovals({
-        uids: vanishedTargets, base, adminKey, state, dryRun: false, label: "Drive deletion",
-        assertOwned: assertLockOwned,
-      });
-      saveState(statePath, state);
-      if (vanishedRemoval.applied) ok(`${vanishedRemoval.applied} document(s) removed because their file is gone from the folder`);
-    }
-
-    // An accepted HTTP receipt is necessary but not sufficient deletion proof.
-    // Read the authenticated inventory again before advancing local resume state.
-    const plannedLocalTargets = [...new Set([...localTruthTargets, ...vanishedTargets])];
-    if (plannedLocalTargets.length) {
-      const afterLocalRemoval = await listPreparedSourceFamilies({
-        base, adminKey, source: sourceName,
-      });
-      const stillStored = plannedLocalTargets.filter((uid) => afterLocalRemoval.has(uid));
-      const failedAt = new Date().toISOString();
-      for (const uid of plannedLocalTargets) {
-        if (afterLocalRemoval.has(uid)) {
-          state.removed = { ...(state.removed || {}), [uid]: failedAt };
-        } else {
-          delete state.done[uid.slice(sourceName.length + 1)];
-          if (state.removed) delete state.removed[uid];
-        }
-      }
-      saveState(statePath, state);
-      if (stillStored.length) {
-        throw new Error(
-          `${stillStored.length} planned local folder removal(s) remained after exact source-inventory readback. ` +
-            "No completed source state was recorded; re-running will retry them through the same approval gate."
-        );
-      }
-    }
+    await removalReview.finish({ sourcePlan: localRemovalPlan, familyKind: "hybrid" });
+  } else {
+    // Append-only source policy still permits replacement-family review.
+    await removalReview.finish();
   }
 
   const localCoverage = localReceiptCoverage(tally, skips);
@@ -14311,10 +14318,11 @@ function saveCalendarState(path, state) {
  * family-plan machinery, built for a very different shape (files that must
  * be split and batched), would risk the well-tested Drive and Gmail paths
  * for no real gain. Reuse where it fits (postSourceReceipt for `brain
- * sources` visibility, applyDriveRemovals for cancelled-event cleanup);
+ * sources` visibility, saved removal plans for cancelled-event cleanup);
  * write new code only for what is actually new (the sync-token state file).
  */
 export async function cmdIngestCalendar(m, manifestPath, flags, options = {}) {
+  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags, options);
   const sourceName = assertSourceName(flags.source === true || !flags.source ? "calendar" : flags.source);
   const dry = !!flags["dry-run"];
   const statePath = canonicalSourceIngestStatePath({ manifestPath, sourceName });
@@ -14373,7 +14381,7 @@ async function cmdIngestCalendarRun(
     assertLockOwned?.();
     return postReceipt(base, adminKey, receipt, undefined, { assertOwned: assertLockOwned });
   };
-  const removeDocs = options.applyDriveRemovals ?? applyDriveRemovals;
+  const listFamilies = options.listStoredSourceFamilies ?? listStoredSourceFamilies;
   const loadState = options.loadCalendarState ?? loadCalendarState;
   const persistState = options.saveCalendarState ?? saveCalendarState;
   const saveState = (path, value) => {
@@ -14463,16 +14471,25 @@ async function cmdIngestCalendarRun(
     assertOwned: assertLockOwned,
   });
 
-  let removed = 0;
+  const removed = 0;
   let removalPending = 0;
-  if (result.deletions.length) {
+  let removalError = null;
+  if (result.deletions.length && !sent.errors.length && !sent.refused.length) {
     const uids = result.deletions.map((d) => `${sourceName}:${d.source_id}`);
-    const removal = await removeDocs({
-      uids, base, adminKey, state: { done: {}, removed: {} }, dryRun: false, label: "calendar cancellation",
-      assertOwned: assertLockOwned,
-    });
-    removed = removal.applied;
-    removalPending = removal.pending;
+    // Calendar keeps per-calendar cursors. Preserve those exact prior tokens
+    // alongside the common removal checkpoint until separate apply completes.
+    state.done ||= {};
+    state.skipped ||= {};
+    const review = ingestRemovalReview(m, manifestPath, sourceName, state,
+      () => saveState(statePath, state), base, adminKey,
+      { ...options, removalSourceKind: "calendar" }, assertLockOwned);
+    try {
+      const storedFamilies = await listFamilies({ base, adminKey, source: sourceName, assertOwned: assertLockOwned });
+      await review.finish({ sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }) });
+    } catch (error) {
+      removalError = error;
+      removalPending = uids.length;
+    }
   }
 
   // Provider-level partial failure is tracked per calendar in result.state, so
@@ -14527,6 +14544,7 @@ async function cmdIngestCalendarRun(
       (completeSweep
         ? "every configured calendar completed a full traversal and returned an authoritative sync token"
         : "this run did not prove the configured history in full"),
+    ...(removalError?.code === "SAFETY_REVIEW_REQUIRED" ? { issue_code: "SAFETY_REVIEW_REQUIRED" } : {}),
     ...(finalStatus === "error" ? { error: incompleteReason || "calendar sync incomplete" } : {}),
   });
 
@@ -14538,6 +14556,7 @@ async function cmdIngestCalendarRun(
   }
   if (sent.errors.length) warn(`${sent.errors.length} event(s) failed to send and will be retried on the next run`);
   if (removalPending) warn(`${removalPending} cancellation removal(s) remain pending and will be retried on the next run`);
+  if (removalError) throw removalError;
   return { result, sent, removed, removalPending };
 }
 
@@ -15421,6 +15440,7 @@ export function normalizeLoadKey(value) {
 }
 
 const PROVIDER_LOAD_METADATA = Object.freeze({
+  quickbooks_desktop: Object.freeze({ label: "QuickBooks Desktop", scope: "attended reads on the same Windows PC; money freshness unverified" }),
   quickbooks: Object.freeze({
     label: "QuickBooks Online",
     scope: "read-only accounting snapshots from the bound sandbox company",
@@ -15780,6 +15800,9 @@ export function defaultLoadProbes(options = {}) {
         };
       }
     },
+    quickbooks_desktop: ({ platform }) => platform === "win32"
+      ? { connected: true }
+      : { connected: false, reason: "QuickBooks Desktop requires the same Windows PC; Mac and hosted editions use report uploads." },
     ...Object.fromEntries(PROVIDER_CONNECTOR_IDS.map((provider) => [
       provider,
       providerConnection(provider),
@@ -15931,6 +15954,11 @@ export function loadSourceRegistry(commands = {}) {
       }],
     },
     ...providerSources,
+    quickbooks_desktop: {
+      order: 65, ...PROVIDER_LOAD_METADATA.quickbooks_desktop, dailyClass: "machine-pull", dailyOwner: "quickbooks-schedule",
+      legs: ({ m, manifestPath, flags, options }) => [{ source: "quickbooks_desktop",
+        run: () => (commands.ingestQuickBooksDesktop || cmdIngestQuickBooksDesktop)(m, manifestPath, { ...flags, from: "quickbooks-desktop" }, options) }],
+    },
     iphone_backup: {
       order: 70,
       label: "iPhone backup (one-time snapshot)",
@@ -16090,7 +16118,7 @@ export async function planLoad({ m, manifestPath, flags = {}, registry, probes, 
         // abort a sweep the other seven sources were about to be part of.
         let legs;
         try {
-          legs = descriptor.legs({ m, manifestPath, flags });
+          legs = descriptor.legs({ m, manifestPath, flags, options });
         } catch (error) {
           legs = {
             unavailable: {
@@ -16342,7 +16370,7 @@ export async function cmdLoad(manifestPath, options = {}) {
       manifestPath,
       operation: "load",
       ...(options.lifecycleLockOptions || {}),
-    }, () => cmdLoad(manifestPath, { ...options, lifecycleLockHeld: true }));
+    }, lease => cmdLoad(manifestPath, { ...options, lifecycleLockHeld: true, assertOwned: () => lease.assertOwned() }));
   }
   const { m } = loadManifest(manifestPath);
   const flags = options.flags || parseFlags(process.argv.slice(4));
@@ -16650,6 +16678,7 @@ export function gmailFailureEvidence(error, statePath, beforeState) {
 }
 
 export async function cmdIngestRemote(m, manifestPath, flags, options = {}) {
+  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags, options);
   const which = String(flags.from).toLowerCase();
   if (!["drive", "gmail", "imap"].includes(which)) {
     die(`--from ${which} is not a source. Available: drive, gmail, imap.`);
@@ -16790,7 +16819,6 @@ const cmdIngestRemoteRun = async (
     return persistState(path, value);
   };
   const sendPreparedBatches = options.sendBatches ?? sendBatches;
-  const reconcilePreparedFamilies = options.reconcileDocumentFamilies ?? reconcileDocumentFamilies;
   const listPreparedSourceFamilies = options.listStoredSourceFamilies ?? listStoredSourceFamilies;
   const applyPreparedRemovals = options.applyDriveRemovals ?? applyDriveRemovals;
   const paceSleep = options.paceSleep ?? ((milliseconds) =>
@@ -16861,6 +16889,8 @@ const cmdIngestRemoteRun = async (
         ),
       }
     : savedState;
+  const removalReview = ingestRemovalReview(m, manifestPath, sourceName, state,
+    () => saveState(statePath, state), base, adminKey, { ...options, removalSourceKind: which }, assertLockOwned);
   const scannerOn = m.safety?.credential_scanner?.enabled !== false;
   const scannerFingerprint = credentialScannerFingerprint(scannerOn);
   const scannerPolicyChanged = state.credential_scanner_fingerprint !== scannerFingerprint;
@@ -17377,13 +17407,7 @@ const cmdIngestRemoteRun = async (
 
     const outcome = remoteFamilyOutcomes(familyPlans.values(), sentFamilyParts, acceptedFamilyParts);
     const settlement = remoteFamilySettlement(outcome, rejectedFamilyParts);
-    if (settlement.reconciliations.length) {
-      const staleParts = await reconcilePreparedFamilies({
-        families: settlement.reconciliations, base, adminKey,
-        assertOwned: assertLockOwned,
-      });
-      if (staleParts) ok(`${staleParts} obsolete split-document part(s) removed`);
-    }
+    removalReview.remember(outcome.completed);
     for (const plan of outcome.completed) {
       await acknowledgeStoredOcrPages({
         base,
@@ -17926,85 +17950,23 @@ const cmdIngestRemoteRun = async (
           })),
       });
       saveState(statePath, state);
-      if (eligibleCorroboratedPlanTargets.length && removalApproval !== driveRemovalPlan.fingerprint) {
-        const localDetails = eligibleCorroboratedPlanTargets.map((uid) => {
-          const record = pendingSourceDeletionDriveReview.get(uid);
-          const name = safeIngestDisplay(record.name);
-          const folder = safeIngestDisplay(record.folder_path);
-          return `      - ${name} (folder: ${folder})`;
-        }).join("\n");
-        throw new DriveRemovalReviewRequired(
-          `Drive did not return ${eligibleCorroboratedPlanTargets.length} stored item(s) ` +
-            "on two walks at least seven days apart.\n" +
-            `${localDetails}\n` +
-            (expiredDriveReviewApproval
-              ? "      The earlier approval fingerprint expired after 24 hours; review this fresh observation before approving.\n"
-              : "") +
-            "      Nothing from this removal plan was removed. The source cursor was not advanced.\n" +
-            "      Confirm this exact source-deletion plan by re-running:\n" +
-            `      brain ingest <manifest> --from drive --approve-removals ${driveRemovalPlan.fingerprint}`
-        );
-      }
-      assertDriveRemovalPlanSafe(driveRemovalPlan, removalApproval);
-      // Every candidate list is filtered through excludeProtectedDriveUids
-      // before buildDriveRemovalPlan, which only intersects, deduplicates and
-      // sorts those inputs. It cannot add a protected UID, so a second check
-      // here would be unreachable rather than an independently useful guard.
-
-      const currentlyPlanned = new Set(Object.values(driveRemovalPlan.targets).flat());
-      let clearedRestoredPending = false;
-      for (const uid of pendingDriveUids) {
-        if (storedUids.has(uid) && seenUids.has(uid) && !currentlyPlanned.has(uid)) {
-          delete state.removed[uid];
-          clearedRestoredPending = true;
-        }
-      }
-      if (clearedRestoredPending) saveState(statePath, state);
-
-      if (driveRemovalPlan.total) {
-        const percent = (driveRemovalPlan.ratio * 100).toFixed(1);
-        const disposition = driveRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-        info(`Drive cleanup plan ${disposition}: ${driveRemovalPlan.total} of ${driveRemovalPlan.stored} stored documents (${percent}%)`);
-      }
-
-      const categories = [
-        ["source_policy", "source policy", "document(s) removed to enforce the Drive source policy"],
-        ["source_deleted", "Drive source deletion", "stale document(s) removed to match Drive source truth"],
-        ["intentional_skip", "intentional source skip", "previously-indexed document(s) removed because the source now skips them"],
-      ];
-      for (const [category, label, success] of categories) {
-        const result = await applyPreparedRemovals({
-          uids: excludeProtectedDriveUids(driveRemovalPlan.targets[category]),
-          base, adminKey, state, dryRun: false, label,
-          familyKind: "structural",
-          assertOwned: assertLockOwned,
-        });
-        if (result.applied) ok(`${result.applied} ${success}`);
-        if (driveRemovalPlan.targets[category].length) saveState(statePath, state);
-      }
-      if (driveRemovalPlan.total) {
-        const afterRemoval = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
-        const plannedTargets = Object.values(driveRemovalPlan.targets).flat();
-        const stillStored = plannedTargets.filter((uid) => afterRemoval.has(uid));
-        const failedAt = new Date().toISOString();
-        for (const uid of plannedTargets) {
-          if (afterRemoval.has(uid)) {
-            state.removed = { ...(state.removed || {}), [uid]: failedAt };
-          } else {
-            if (state.done) delete state.done[uid];
-            if (state.removed) delete state.removed[uid];
-            dropDriveRemovalReviewUid(uid);
-          }
-        }
-        updateDriveRemovalReview();
-        saveState(statePath, state);
-        if (stillStored.length) {
-          throw new Error(
-            `${stillStored.length} planned Drive removal(s) remained after exact source-inventory readback. ` +
-              "The source cursor was not advanced; re-running will retry them through the same approval gate."
-          );
-        }
-      }
+      await removalReview.finish({
+        sourcePlan: driveRemovalPlan,
+        requireSourceApproval: eligibleCorroboratedPlanTargets.length > 0,
+        notice: eligibleCorroboratedPlanTargets.length
+          ? `Drive did not return ${eligibleCorroboratedPlanTargets.length} stored item(s) on two walks at least seven days apart.` +
+            (expiredDriveReviewApproval ? " The earlier approval fingerprint expired after 24 hours; review this fresh observation." : "") +
+            "\n" + eligibleCorroboratedPlanTargets.map((uid) => {
+              const record = pendingSourceDeletionDriveReview.get(uid);
+              return `- ${safeIngestDisplay(record.name)} (folder: ${safeIngestDisplay(record.folder_path)})`;
+            }).join("\n")
+          : "",
+        expiresAt: eligibleCorroboratedPlanTargets.length ? new Date(Math.min(
+          ...eligibleCorroboratedPlanTargets.map((uid) => Date.parse(
+            pendingSourceDeletionDriveReview.get(uid).approval_observed_at,
+          ) + 24 * 60 * 60 * 1000),
+        )).toISOString() : null,
+      });
       intentionalRemovalUids.length = 0;
     }
     if (assistantJson) {
@@ -18399,52 +18361,8 @@ const cmdIngestRemoteRun = async (
           ratioFloorCount: oneTypedRoutineRemoval ? 1 : 0,
           fingerprintContext: oneTypedRoutineRemoval ? "gmail-current-typed" : "gmail-strict",
         });
-        assertDriveRemovalPlanSafe(gmailRemovalPlan, removalApproval, { sourceLabel: "Gmail" });
-
-        if (gmailRemovalPlan.total) {
-          const percent = (gmailRemovalPlan.ratio * 100).toFixed(1);
-          const disposition = gmailRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-          info(`Gmail cleanup plan ${disposition}: ${gmailRemovalPlan.total} of ${gmailRemovalPlan.stored} stored documents (${percent}%)`);
-        }
-        const categories = [
-          ["source_policy", "Gmail source policy", "message(s) removed to enforce the Gmail source policy"],
-          ["source_deleted", "Gmail source deletion", "message(s) removed to match Gmail source truth"],
-          ["intentional_skip", "intentional Gmail skip", "message(s) removed because the current source revision is ineligible"],
-        ];
-        for (const [category, label, success] of categories) {
-          const result = await applyPreparedRemovals({
-            uids: gmailRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
-            familyKind: "structural",
-            assertOwned: assertLockOwned,
-          });
-          if (result.applied) ok(`${result.applied} ${success}`);
-          if (gmailRemovalPlan.targets[category].length) saveState(statePath, state);
-        }
-        if (gmailRemovalPlan.total) {
-          const afterRemoval = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
-          const plannedTargets = Object.values(gmailRemovalPlan.targets).flat();
-          const stillStored = plannedTargets.filter((uid) => afterRemoval.has(uid));
-          const failedAt = new Date().toISOString();
-          for (const uid of plannedTargets) {
-            if (afterRemoval.has(uid)) {
-              state.removed = { ...(state.removed || {}), [uid]: failedAt };
-            } else {
-              if (state.done) delete state.done[uid];
-              if (state.removed) delete state.removed[uid];
-              if (gmailRemovalPlan.targets.source_deleted.includes(uid)) delete state.skipped[uid];
-              clearGmailRetry(state, uid);
-            }
-          }
-          saveState(statePath, state);
-          if (stillStored.length) {
-            throw new Error(
-              `${stillStored.length} planned Gmail removal(s) remained after exact source-inventory readback. ` +
-                "The history cursor and scanner migration were not committed; re-running will retry them through the same approval gate."
-            );
-          }
-        }
+        await removalReview.finish({ sourcePlan: gmailRemovalPlan });
       }
-      saveState(statePath, state);
     }
     intentionalRemovalUids.length = 0;
     pendingCursor = {
@@ -18771,48 +18689,7 @@ const cmdIngestRemoteRun = async (
         safetyBaselineCount: imapRemovalSafetyCount ?? storedImapUids.size,
         fingerprintContext: "imap-strict",
       });
-      assertDriveRemovalPlanSafe(imapRemovalPlan, removalApproval, { sourceLabel: "IMAP" });
-
-      if (imapRemovalPlan.total) {
-        const percent = (imapRemovalPlan.ratio * 100).toFixed(1);
-        const disposition = imapRemovalPlan.tooLarge ? "approved" : "within the unattended safety limits";
-        info(`IMAP cleanup plan ${disposition}: ${imapRemovalPlan.total} of ${imapRemovalPlan.stored} stored documents (${percent}%)`);
-      }
-      const categories = [
-        ["source_policy", "IMAP source policy", "message(s) removed to enforce the IMAP source policy"],
-        ["source_deleted", "IMAP source deletion", "message(s) removed to match the complete IMAP snapshot"],
-        ["intentional_skip", "intentional IMAP skip", "message(s) removed because the current source revision is ineligible"],
-      ];
-      for (const [category, label, success] of categories) {
-        const result = await applyPreparedRemovals({
-          uids: imapRemovalPlan.targets[category], base, adminKey, state, dryRun: false, label,
-          familyKind: "structural",
-        });
-        if (result.applied) ok(`${result.applied} ${success}`);
-        if (imapRemovalPlan.targets[category].length) saveState(statePath, state);
-      }
-      if (imapRemovalPlan.total) {
-        const afterRemoval = await listPreparedSourceFamilies({ base, adminKey, source: sourceName });
-        const plannedTargets = Object.values(imapRemovalPlan.targets).flat();
-        const stillStored = plannedTargets.filter((uid) => afterRemoval.has(uid));
-        const failedAt = new Date().toISOString();
-        for (const uid of plannedTargets) {
-          if (afterRemoval.has(uid)) {
-            state.removed = { ...(state.removed || {}), [uid]: failedAt };
-          } else {
-            if (state.done) delete state.done[uid];
-            if (state.removed) delete state.removed[uid];
-          }
-        }
-        saveState(statePath, state);
-        if (stillStored.length) {
-          throw new Error(
-            `${stillStored.length} planned IMAP removal(s) remained after exact source-inventory readback. ` +
-            "The folder cursor and scanner migration were not committed; re-running will retry them through the same approval gate."
-          );
-        }
-      }
-      saveState(statePath, state);
+      await removalReview.finish({ sourcePlan: imapRemovalPlan });
     }
     intentionalRemovalUids.length = 0;
 
@@ -18852,6 +18729,8 @@ const cmdIngestRemoteRun = async (
     ok("dry run, nothing was sent");
     return { dry_run: true, would_send: prepared, unchanged, skipped: skips.length, failed: 0 };
   }
+
+  await removalReview.finish();
 
   // Gmail may advance past a failed Worker part only after the exact logical
   // message identity is durable in its retry list. Other sources retain the
@@ -19242,6 +19121,18 @@ export async function cmdConnect(target, options = {}) {
   const flags = parseFlags(argv.slice(3));
   const which = (target || "").toLowerCase();
   const manifestPath = argv[4];
+  if (which === "quickbooks-desktop") return cmdConnectQuickBooksDesktop(manifestPath, flags, options.desktopOptions || {});
+  if (which === "quickbooks") {
+    const probe = options.probeQuickBooksEdition || (await import("./connectors/quickbooks-edition-probe.mjs")).probeQuickBooksEdition;
+    const edition = await probe(options.editionProbeOptions || {});
+    if (edition === "windows-desktop") return cmdConnectQuickBooksDesktop(manifestPath, flags, options.desktopOptions || {});
+    if (["mac-desktop", "hosted"].includes(edition)) {
+      const { DESKTOP_BOUNDARY } = await import("./connectors/quickbooks-edition-probe.mjs");
+      (options.log || info)(DESKTOP_BOUNDARY[edition]);
+      return { status: "unavailable", edition, upload_available: true };
+    }
+    return (options.connectOnline || cmdConnectProvider)("quickbooks", manifestPath, flags, options.providerOptions || {});
+  }
   if (which === "custom-api") {
     const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
     const connectCustomApi = options.connectCustomApi ?? cmdConnectCustomApi;
@@ -20137,6 +20028,7 @@ export async function cmdDisconnect(target, options = {}) {
   const flags = parseFlags(argv.slice(3));
   const which = (target || "").toLowerCase();
   const manifestPath = argv[4];
+  if (which === "quickbooks-desktop") return cmdDisconnectQuickBooksDesktop(manifestPath, flags, options.desktopOptions || {});
   if (which === "whatsapp") return cmdDisconnectWhatsapp(manifestPath, flags);
   if (which === "zoom") {
     const runManifestControl = options.withManifestControl ?? withManifestCloudflareControl;
@@ -26428,9 +26320,18 @@ export function schedulePlatformLimitation(
   return lines.join("\n");
 }
 
-async function existingDailySourceOwners(m, manifestPath, options = {}) {
+export async function existingDailySourceOwners(m, manifestPath, options = {}) {
   if (options.existingSchedulerOwners !== undefined) return options.existingSchedulerOwners;
-  if ((options.platform ?? process.platform) !== "darwin") return [];
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") {
+    if (m.operations?.quickbooks_schedule?.enabled !== true) return [];
+    const scheduler = options.quickBooksScheduler ?? await import("./operations/quickbooks-schedule.mjs");
+    const plan = scheduler.planQuickBooksSchedule({ m, manifestPath, ...options, platform });
+    const status = scheduler.statusQuickBooksSchedule(plan, { ...options, ...(options.quickBooksSchedulerOptions || {}) });
+    return status.installed === true && status.enabled === true && status.verified === true
+      ? ["quickbooks", "quickbooks_desktop"] : [];
+  }
+  if (platform !== "darwin") return [];
   const owned = [];
   const schedulerOptions = options.legacySchedulerOptions || {};
   const healthy = (status) => status?.installed === true &&
@@ -26448,7 +26349,13 @@ async function existingDailySourceOwners(m, manifestPath, options = {}) {
   if (configuredProviders.length) {
     const providers = options.providerScheduler ?? await import("./operations/provider-scheduler.mjs");
     for (const provider of configuredProviders) {
-      if (healthy(providers.statusProviderScheduler(provider, manifestPath, schedulerOptions))) owned.push(provider);
+      const status = provider === "quickbooks" && m.operations?.quickbooks_schedule?.enabled === true
+        ? providers.snapshotQuickBooksProviderScheduler(manifestPath, schedulerOptions)
+        : providers.statusProviderScheduler(provider, manifestPath, schedulerOptions);
+      if (healthy(status) && (provider !== "quickbooks" || m.operations?.quickbooks_schedule?.enabled !== true || status.verified === true)) {
+        owned.push(provider);
+        if (provider === "quickbooks" && m.operations?.quickbooks_schedule?.enabled === true) owned.push("quickbooks_desktop");
+      }
     }
   }
   return owned;
@@ -26629,7 +26536,8 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       .find((outcome) => outcomes.includes(outcome)) || "missing_history";
     const measuredCount = (field) => latestRuns.every((run) => Number.isSafeInteger(run?.[field]))
       ? latestRuns.reduce((sum, run) => sum + run[field], 0) : null;
-    const currentState = source.class === "snapshot" ? "snapshot"
+    const currentState = source.class === "connect-required" ? "skipped"
+      : source.class === "snapshot" ? "snapshot"
       : source.class === "disabled" ? "skipped"
         : states.includes("broken") ? "broken"
           : states.includes("review") || ["refused", "empty"].includes(lastRunOutcome) ? "review"
@@ -26668,7 +26576,8 @@ function renderDailyFreshnessRows(rows, log = console.log) {
   for (const row of rows) {
     log(`${row.source} | ${row.current_state} | ${row.last_successful_run_at || "never"} | ${row.next_run} | ${row.owner}` +
       (["partial", "refused", "empty"].includes(row.last_run_outcome)
-        ? ` | ${row.last_run_outcome}; ${row.docs_refused ?? "unknown"} refused` : ""));
+        ? ` | ${row.last_run_outcome}; ${row.docs_refused ?? "unknown"} refused` : "") +
+      (row.current_state === "skipped" && row.reason === "not connected on this machine" ? ` | ${row.reason}` : ""));
   }
 }
 
@@ -26755,7 +26664,9 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
       const runnable = plan.sources.filter((source) =>
         source.class === "machine-pull" && source.owner === "daily-task" && source.status === "ready"
       );
-      if (!runnable.length) die("this manifest has no connected machine-pull source for the daily task; nothing was scheduled");
+      const quickBooksOnly = options.allowQuickBooksOnly === true &&
+        ["quickbooks", "quickbooks_desktop"].some((key) => m.corpora?.[key]);
+      if (!runnable.length && !quickBooksOnly) die("this manifest has no connected machine-pull source for the daily task; nothing was scheduled");
       schedule = installDailyRefreshSchedule(plan, schedulerOptions);
       scheduleMutated = schedule.changed !== false;
       await syncDailySourceExpectations(m, manifestPath, plan, 86_400, options);
@@ -26813,13 +26724,17 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
     warn(`local schedule status is available, but source freshness could not be read: ${String(error?.message || error).slice(0, 160)}`);
   }
   const sources = dailyFreshnessRows(plan, inventory, schedule);
+  const quickBooksSchedule = action === "status" && m.operations?.quickbooks_schedule?.enabled === true
+    ? await cmdQuickBooks(["schedule", "status", manifestPath], { ...options, quiet: true }) : null;
   const result = Object.freeze({
     contract_version: 1,
     kind: "daily_refresh_status",
     plan,
     schedule,
     sources,
+    ...(quickBooksSchedule ? { quickbooks_schedule: quickBooksSchedule } : {}),
   });
+  if (options.quiet) return result;
   if (options.json) console.log(JSON.stringify(result, null, 2));
   else {
     if (schedule.attention) warn(schedule.attention);
@@ -26830,9 +26745,40 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
     else if (!schedule.verified) warn("Daily imports are installed, but their definition no longer matches this manifest.");
     else ok("Daily imports are on and match this manifest.");
     if (action === "status") renderDailyObservation(schedule, options.log || console.log);
+    if (quickBooksSchedule) (options.log || console.log)(`${quickBooksSchedule.window_description} ` +
+      (quickBooksSchedule.verified ? "The QuickBooks schedule passed exact readback." : "The QuickBooks schedule needs attention; these are planned times."));
     renderDailyFreshnessRows(sources, options.log || console.log);
   }
   return result;
+}
+
+// Dedicated QuickBooks commands keep parsed arguments and dependencies outside
+// the dispatcher; legacy provider paths remain unchanged until opted in.
+export function quickBooksScheduleDependencies() {
+  return { resolveBaseUrl, readManifest: (path) => loadManifest(path).m,
+    runDesktopSource: async (m, path, source, options) => {
+      let receipt = null;
+      const result = await cmdIngestQuickBooksDesktop(m, path, { from: "quickbooks-desktop" }, { ...options,
+        postSourceReceipt: async (...args) => {
+          const response = await (options.postSourceReceipt || postSourceReceipt)(...args);
+          if (["ready", "error"].includes(args[2]?.status)) receipt = args[2];
+          return response;
+        },
+      });
+      return result?.code === "QB_NOT_CONNECTED" ? { status: "skipped", code: "QB_CONNECT_REQUIRED" } : { receipt };
+    } };
+}
+export async function cmdQuickBooks(argv, options = {}) {
+  const scheduler = options.quickBooksScheduler ?? await import("./operations/quickbooks-schedule.mjs");
+  return scheduler.commandQuickBooksSchedule(argv, { ...quickBooksScheduleDependencies(), ...options });
+}
+export async function cmdQuickBooksRun(manifestPath, options = {}) {
+  const scheduler = options.quickBooksScheduler ?? await import("./operations/quickbooks-schedule.mjs");
+  return scheduler.runQuickBooksScheduleCli(manifestPath, { ...quickBooksScheduleDependencies(), ...options });
+}
+export async function reregisterQuickBooksAfterManifestChange(manifestPath, options = {}) {
+  const scheduler = options.quickBooksScheduler ?? await import("./operations/quickbooks-schedule.mjs");
+  return scheduler.reregisterAfterManifestChange(manifestPath, { ...quickBooksScheduleDependencies(), ...options });
 }
 
 export async function cmdDaily(argv = process.argv.slice(3), options = {}) {
@@ -27094,6 +27040,12 @@ export function cloudflareAdoptionConsent(flags = {}, env = process.env) {
  */
 export function classifyCliCredentialBoundary(command, argv = []) {
   const name = String(command || "");
+  // Edition routing and Desktop data-plane commands never need the outer
+  // Wrangler session. Classify before a credential helper can be reached.
+  if (Array.isArray(argv) && ((name === "connect" && ["quickbooks", "quickbooks-desktop"].includes(argv[0])) ||
+      (name === "disconnect" && argv[0] === "quickbooks-desktop") ||
+      (["ingest", "load"].includes(name) && argv.some((arg, index) =>
+        ["quickbooks-desktop", "quickbooks_desktop"].includes(arg) && ["--from", "--only"].includes(argv[index - 1]))))) return "quickbooks-desktop-data";
   if (name === "ingest-file") {
     if (!Array.isArray(argv) || argv.length !== 10 ||
         argv.some((value) => typeof value !== "string" || !value ||
@@ -30604,6 +30556,209 @@ async function dispatchDoctor(manifestPath) {
    these, are deliberately NOT ported: they route through the field line's
    account-first Cloudflare OAuth ceremony, which this port keeps out. */
 
+/** Observation time comes only from a Worker response and a monotonic clock. */
+export async function quickBooksWorkerClock({ readWorkerDate, monotonic = () => performance.now() }) {
+  const value = await readWorkerDate();
+  const time = Date.parse(value || "");
+  const started = monotonic();
+  if (!Number.isFinite(time) || !Number.isFinite(started)) throw Object.assign(new Error("QB_CLOCK_UNVERIFIED"), { code: "QB_CLOCK_UNVERIFIED" });
+  return () => {
+    const elapsed = monotonic() - started;
+    if (!Number.isFinite(elapsed) || elapsed < 0) throw Object.assign(new Error("QB_CLOCK_UNVERIFIED"), { code: "QB_CLOCK_UNVERIFIED" });
+    return new Date(time + Math.floor(elapsed)).toISOString();
+  };
+}
+
+async function desktopCommandDependencies(manifestPath, options) {
+  const binding = await import("./connectors/quickbooks-desktop-binding.mjs");
+  const platform = options.platform || process.platform;
+  if (platform !== "win32") throw binding.qbdFailure("QB_NOT_INSTALLED");
+  const bridgeModule = await import("./operations/quickbooks-desktop-bridge.mjs");
+  const signatures = await import("./operations/quickbooks-desktop-signed.mjs");
+  const probe = await import("./connectors/quickbooks-edition-probe.mjs");
+  const scheduling = await import("./operations/quickbooks-schedule.mjs");
+  const { dailyRefreshPrincipal } = await import("./operations/daily-refresh-plan.mjs");
+  let access;
+  const readManifest = options.readManifest || (path => loadManifest(path).m);
+  const dataPlane = async () => {
+    if (!access) {
+      const m = readManifest(manifestPath);
+      const adminKey = (options.resolveAdminKey || resolveAdminKey)(manifestPath);
+      if (!adminKey) throw binding.qbdFailure("QB_OWNER_CREDENTIAL_MISSING");
+      access = { base: await (options.resolveBaseUrl || resolveBaseUrl)(m, null), adminKey };
+    }
+    return access;
+  };
+  return { platform, brainPath: options.brainPath || fileURLToPath(import.meta.url), nodePath: options.nodePath || process.execPath,
+    get principal() { return options.principal || (options.resolvePrincipal || dailyRefreshPrincipal)({ platform }); }, now: options.now || (() => new Date()),
+    monotonic: options.monotonic || (() => performance.now()), sleep: options.sleep || (ms => new Promise(done => setTimeout(done, ms))),
+    log: options.log || info, readManifest,
+    writeManifest: options.writeManifest || ((path, m) => writeManifestAtomically(path, m, { backupLabel: "quickbooks-desktop" })),
+    bindingStore: options.bindingStore || binding.desktopBindingStore(options.storage || {}),
+    bridge: options.bridge || (input => bridgeModule.runQuickBooksDesktop(input)),
+    verifyHelper: options.verifyHelper || (() => {
+      for (const artifact of Object.values(signatures.QBD_HELPERS)) {
+        const result = signatures.verifyQuickBooksDesktopHelper(artifact, { environment: process.env });
+        if (result.ok) return result;
+      }
+      return { ok: false };
+    }),
+    hasElevation: options.hasElevation || (() => probe.hasDesktopElevation()),
+    listProcesses: options.listProcesses || scheduling.listQuickBooksProcesses,
+    startTask: options.startTask || binding.startDesktopConnectTask,
+    listQuickBooksSources: options.listQuickBooksSources || (async () => {
+      const { base, adminKey } = await dataPlane();
+      const inventory = await collectSourceInventoryPages(payload => http(`${base}/api/admin/brain/sources`, {
+        method: "POST", redirect: "error", headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      }));
+      const rows = [];
+      // The registry alone misses documents written under an unregistered name.
+      // Never adopt those documents into the Desktop owner-only custody boundary.
+      if (!inventory.sources.some(row => row.name === "quickbooks_desktop" && row.kind === "quickbooks")) {
+        const families = await listStoredSourceFamilies({ base, adminKey, source: "quickbooks_desktop" });
+        if (families.size) throw binding.qbdFailure("QB_BINDING_RECOVERY_REQUIRED");
+      }
+      for (const row of inventory.sources.filter(row => row.kind === "quickbooks")) {
+        const families = await listStoredSourceFamilies({ base, adminKey, source: row.name });
+        rows.push({ name: row.name, kind: row.kind, family_count: families.size });
+      }
+      return rows;
+    }),
+    registerSource: options.registerSource || (async expectation => {
+      const { base, adminKey } = await dataPlane();
+      await postSourceRegistration(base, adminKey, { source: expectation.source, kind: expectation.kind });
+      await postSourceExpectation(base, adminKey, expectation);
+    }),
+    reregister: options.reregister || (path => reregisterQuickBooksAfterManifestChange(path, { ...options, lifecycleLockHeld: true })),
+    runSnapshot: options.runSnapshot || (() => cmdIngestQuickBooksDesktop(readManifest(manifestPath), manifestPath, {}, { ...options, lifecycleLockHeld: true })),
+    previewForget: options.previewForget || (async ({ source }) => { const { base, adminKey } = await dataPlane(); return previewSourceForget(base, adminKey, source); }),
+    forget: options.forget || (async ({ source, preview }) => { const { base, adminKey } = await dataPlane(); return purgeDocuments(base, adminKey, source, preview); }),
+    assertOwned: options.assertOwned,
+  };
+}
+
+async function desktopLifecycle(manifestPath, options, run) {
+  const shared = locked => locked.desktopBindingLockHeld ? run(locked)
+    : (options.withSourceIngestLock || withSourceIngestLock)({ sourceName: "quickbooks_desktop", sharedRecord: "provider:quickbooks-desktop", ...(options.sourceIngestLockOptions || {}) }, lease =>
+      run({ ...locked, desktopBindingLockHeld: true, assertOwned: () => { locked.assertOwned?.(); lease.assertOwned(); } }));
+  if (options.lifecycleLockHeld) return shared(options);
+  const lock = options.waitForLifecycle ? options.withBrainLifecycleLockWait || withBrainLifecycleLockWait
+    : options.withBrainLifecycleLock || withBrainLifecycleLock;
+  return lock({ manifestPath, operation: "quickbooks-desktop", ...(options.lifecycleLockOptions || {}),
+    ...(options.waitForLifecycle ? { waitMs: 30000 } : {}) }, lease =>
+    shared({ ...options, lifecycleLockHeld: true, assertOwned: () => lease.assertOwned() }));
+}
+export async function cmdConnectQuickBooksDesktop(manifestPath, flags = {}, options = {}) {
+  if (!manifestPath) throw new TypeError("A manifest is required for QuickBooks Desktop connect");
+  const binding = await import("./connectors/quickbooks-desktop-binding.mjs");
+  if ((options.platform || process.platform) !== "win32") throw Object.assign(new Fatal(binding.qbdOwnerMessage("QB_NOT_INSTALLED")), { code: "QB_NOT_INSTALLED" });
+  return desktopLifecycle(manifestPath, { ...options, waitForLifecycle: Boolean(flags["attended-probe"]) }, async locked => {
+    const result = await binding.connectQuickBooksDesktop({ manifestPath, flags }, await desktopCommandDependencies(manifestPath, locked));
+    (options.log || info)([result.code, result.notice, ...(result.summary || [])].filter(Boolean).join("\n"));
+    return result;
+  }).catch(error => { throw Object.assign(new Fatal(binding.qbdOwnerMessage(error?.code)), { code: /^QB_[A-Z_]{1,48}$/.test(error?.code || "") ? error.code : "QB_OPERATION_FAILED" }); });
+}
+export async function cmdDisconnectQuickBooksDesktop(manifestPath, flags = {}, options = {}) {
+  if (!manifestPath) throw new TypeError("A manifest is required for QuickBooks Desktop disconnect");
+  const binding = await import("./connectors/quickbooks-desktop-binding.mjs");
+  return desktopLifecycle(manifestPath, options, async locked => {
+    const result = await binding.disconnectQuickBooksDesktop({ manifestPath, flags }, await desktopCommandDependencies(manifestPath, locked));
+    (options.log || info)(result.fingerprint
+      ? renderCliCommands(`QuickBooks Desktop removal preview: ${result.documents} document(s). Approve the exact company-bound scope with brain disconnect quickbooks-desktop ${commandPath(manifestPath)} --approve-removals ${result.fingerprint}`)
+      : result.notice);
+    return result;
+  }).catch(error => { throw Object.assign(new Fatal(binding.qbdOwnerMessage(error?.code)), { code: /^QB_[A-Z_]{1,48}$/.test(error?.code || "") ? error.code : "QB_OPERATION_FAILED" }); });
+}
+
+export async function cmdIngestQuickBooksDesktop(m, manifestPath, flags = {}, options = {}) {
+  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags, options);
+  const { qbdFailure, qbdOwnerMessage, desktopBindingStore } = await import("./connectors/quickbooks-desktop-binding.mjs");
+  if ((options.platform || process.platform) !== "win32") throw qbdFailure("QB_NOT_INSTALLED");
+  if (m.corpora?.quickbooks_desktop?.enabled !== true) throw qbdFailure("QB_NOT_CONNECTED");
+  if ((m.corpora.quickbooks_desktop.source || "quickbooks_desktop") !== "quickbooks_desktop" || flags.source || flags.limit) throw qbdFailure("QB_SOURCE_INVALID");
+  return desktopLifecycle(manifestPath, options, async locked => {
+    const source = "quickbooks_desktop";
+    const store = options.bindingStore || desktopBindingStore(options.storage || {});
+    let binding = await store.read();
+    if (!binding) return { status: "skipped", code: "QB_NOT_CONNECTED" };
+    const work = async assertOwned => {
+      const adminKey = (options.resolveAdminKey || resolveAdminKey)(manifestPath);
+      if (!adminKey) throw qbdFailure("QB_OWNER_CREDENTIAL_MISSING");
+      const base = await (options.resolveBaseUrl || resolveBaseUrl)(m, null);
+      const inventory = options.listStoredSourceFamilies || listStoredSourceFamilies;
+      const clock = await quickBooksWorkerClock({ monotonic: options.monotonic,
+        readWorkerDate: options.readWorkerDate || (async () => {
+          const response = await http(`${base}/api/admin/brain/source-families`, { method: "POST", redirect: "error",
+            headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" }, body: JSON.stringify({ source, limit: 1 }) });
+          if (!response.ok) throw qbdFailure("QB_CLOCK_UNVERIFIED");
+          const date = response.headers.get("date"); await response.arrayBuffer(); return date;
+        }) });
+      const snapshotAt = clock();
+      const runtime = await import("./connectors/provider-runtime.mjs");
+      const { syncQuickBooksDesktop } = await import("./connectors/quickbooks-desktop.mjs");
+      const bridge = options.bridge || (await import("./operations/quickbooks-desktop-bridge.mjs")).runQuickBooksDesktop;
+      const stored = await inventory({ base, adminKey, source });
+      let result = await syncQuickBooksDesktop({ bridge, binding, snapshotAt, listStoredFamilies: async () => stored, now: () => clock() });
+      if (flags["dry-run"]) return { dry_run: true, result };
+      const live = new Set(result.documents.map(doc => doc.source_id));
+      if (result.enumeration_complete) {
+        const pending = binding.pending_removals?.source_ids || [];
+        const ids = [...new Set([...pending, ...result.deletions.map(row => row.source_id)])]
+          .filter(id => !live.has(id) && stored.has(`${source}:${id}`)).sort();
+        result = { ...result, deletions: ids.map(source_id => ({ source_type: "quickbooks", source_id })) };
+      }
+      const delivered = await runtime.runProviderConnector({ provider: "quickbooks", source, kind: "quickbooks",
+        configurationFingerprint: providerConfigurationFingerprint("quickbooks", source, m.corpora.quickbooks_desktop, { qbo_company_fingerprint: binding.fingerprint }),
+        sync: async () => result, resolveAccess: async () => ({}), listStoredFamilies: inventory,
+        sendBatch: options.requestIngestBatch || requestIngestBatch, removeDocuments: options.applyDriveRemovals || applyDriveRemovals,
+        postReceipt: options.postSourceReceipt || postSourceReceipt, base, adminKey, assertOwned,
+        now: () => new Date(clock()),
+        reviewRemovals: async ({ uids, storedFamilies, requiredApproval, notice }) => {
+          // Save accepted delivery's pending scope before stopping. Bind apply
+          // to the whole company checkpoint; it must not advance that cursor.
+          binding = { ...binding, pending_removals: {
+            fingerprint: runtime.providerSnapshotRemovalFingerprint(source, uids),
+            company_fingerprint: binding.fingerprint,
+            source_ids: uids.map(uid => uid.slice(source.length + 1)).sort(),
+          } };
+          assertOwned(); await store.write(binding);
+          const lib = await (options.ingestLib ?? ingestLib)();
+          const path = canonicalSourceIngestStatePath({ manifestPath, sourceName: source });
+          const state = lib.loadState(path);
+          // Accepted additions can enlarge the next inventory. They cannot
+          // dilute a previously required approval for the same pending scope.
+          const priorApproval = state.ingest_removal_plan?.providerApproval;
+          const providerApproval = requiredApproval ||
+            (priorApproval === binding.pending_removals.fingerprint ? priorApproval : null);
+          state.ingest_provider = "quickbooks-desktop";
+          state.ingest_provider_checkpoint = removalDigest(binding);
+          const review = ingestRemovalReview(m, manifestPath, source, state,
+            () => { assertOwned(); lib.saveState(path, state); }, base, adminKey,
+            { ...options, removalSourceKind: "quickbooks" }, assertOwned);
+          await review.finish({ sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }),
+            providerApproval, notice });
+        },
+      });
+      if (delivered.enumeration_complete) {
+        assertOwned();
+        await store.write({ ...binding, previous_counts: delivered.observation.counts,
+          previous_max_time_modified: delivered.observation.max_time_modified,
+          last_complete_snapshot_at: delivered.walk_complete ? snapshotAt : binding.last_complete_snapshot_at,
+          pending_removals: delivered.code === "QB_REMOVALS_PENDING" ? binding.pending_removals : null });
+      }
+      (options.log || info)(`${delivered.code || "QB_READY"}: ${delivered.tally.created} created, ${delivered.tally.updated} updated, ${delivered.removed} removed`);
+      return delivered;
+    };
+    return (options.withSourceIngestLock || withSourceIngestLock)({ manifestPath, sourceName: source, ...(options.sourceIngestLockOptions || {}) }, lease =>
+      work(() => { locked.assertOwned?.(); lease.assertOwned(); }));
+  }).catch(error => {
+    // The shared review contains the exact safe apply command. Other failures
+    // retain the existing sanitized owner boundary, including bridge errors.
+    if (error instanceof DriveRemovalReviewRequired) throw error;
+    throw Object.assign(new Fatal(qbdOwnerMessage(error?.code)), { code: /^QB_[A-Z_]{1,48}$/.test(error?.code || "") ? error.code : "QB_OPERATION_FAILED" });
+  });
+}
+
 export function providerConfigurationFingerprint(provider, source, configuration, identity = null) {
   const canonical = (value) => {
     if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -30667,6 +30822,7 @@ function providerAdapterOptions(provider, configuration, connection) {
 
 /** Run one OAuth provider through common receipts, retries, tombstones, and cursor custody. */
 export async function cmdIngestProvider(m, manifestPath, flags, options = {}) {
+  if (flags["apply-removals"] !== undefined) return cmdApplyIngestRemovals(m, manifestPath, flags, options);
   const provider = String(flags.from || "").toLowerCase();
   if (!PROVIDER_CONNECTOR_IDS.includes(provider)) throw new TypeError(`unsupported provider connector ${provider}`);
   if (flags.limit) die(`--limit is unsafe for ${provider}; it would skip records covered by the provider cursor.`);
@@ -30820,9 +30976,21 @@ async function cmdIngestProviderRun(
       adminKey,
       assertOwned: assertLockOwned,
       reset: Boolean(flags.reset),
-      approvedSnapshotFingerprint: flags["approve-removals"] === true || !flags["approve-removals"]
-        ? null
-        : String(flags["approve-removals"]).toLowerCase(),
+      reviewRemovals: async ({ uids, storedFamilies, requiredApproval, notice }) => {
+        const lib = await (options.ingestLib ?? ingestLib)();
+        const path = canonicalSourceIngestStatePath({ manifestPath, sourceName });
+        const reviewState = lib.loadState(path);
+        reviewState.ingest_provider = provider;
+        reviewState.ingest_provider_checkpoint = removalDigest(await loadState());
+        const review = ingestRemovalReview(m, manifestPath, sourceName, reviewState,
+          () => { assertLockOwned?.(); lib.saveState(path, reviewState); },
+          base, adminKey, options, assertLockOwned);
+        await review.finish({
+          sourcePlan: buildDriveRemovalPlan({ storedFamilies, vanishedCandidates: uids }),
+          providerApproval: requiredApproval,
+          notice,
+        });
+      },
     });
   } catch (error) {
     if (["provider_snapshot_removal_review_required", "provider_removal_review_required"].includes(error?.code)) die(error.message);
@@ -30843,7 +31011,7 @@ export async function cmdConnectProvider(provider, manifestPath, flags = {}, opt
   if (options.providerRecordLease?.held !== true) {
     const lockTask = options.withSourceIngestLock ?? withSourceIngestLock;
     try {
-      return await lockTask(
+      const result = await lockTask(
         {
           sourceName: provider,
           sharedRecord: `provider:${provider}`,
@@ -30852,8 +31020,16 @@ export async function cmdConnectProvider(provider, manifestPath, flags = {}, opt
         ({ assertOwned }) => cmdConnectProvider(provider, manifestPath, flags, {
           ...options,
           providerRecordLease: { held: true, assertOwned },
+          deferQuickBooksRebind: true,
         }),
       );
+      if (result.schedule_rebind_required === true) {
+        await (options.reregisterAfterManifestChange || reregisterQuickBooksAfterManifestChange)(manifestPath, options);
+        if (!options.quiet) ok("QuickBooks is connected and both refresh schedules passed exact readback.");
+        const { schedule_rebind_required: _pending, ...connected } = result;
+        return connected;
+      }
+      return result;
     } catch (error) {
       if (error instanceof SourceIngestLockError) die(error.message);
       if (error?.code === "callback_timeout" && error?.phase === "callback") {
@@ -30972,12 +31148,17 @@ export async function cmdConnectProvider(provider, manifestPath, flags = {}, opt
       environment: configuration.environment,
     });
   }
-  if (!options.quiet) {
+  const rebindRequired = provider === "quickbooks" && m.operations?.quickbooks_schedule !== undefined;
+  if (rebindRequired && options.deferQuickBooksRebind !== true) {
+    await (options.reregisterAfterManifestChange || reregisterQuickBooksAfterManifestChange)(manifestPath, options);
+  }
+  if (!options.quiet && !(rebindRequired && options.deferQuickBooksRebind === true)) {
     ok(`connected. Credential stored in ${oauth.providerCredentialDescription(provider, storage)} (on this machine only)`);
     info(`now run: brain ingest ${manifestPath} --from ${provider} --dry-run`);
     info(`after review: brain schedule ${manifestPath} --provider ${provider} --install`);
   }
-  return { provider, connected: true, storage: oauth.providerCredentialDescription(provider, storage) };
+  return { provider, connected: true, storage: oauth.providerCredentialDescription(provider, storage),
+    ...(rebindRequired && options.deferQuickBooksRebind === true ? { schedule_rebind_required: true } : {}) };
 }
 
 export async function cmdDisconnectProvider(provider, manifestPath, flags = {}, options = {}) {
@@ -30987,14 +31168,16 @@ export async function cmdDisconnectProvider(provider, manifestPath, flags = {}, 
   const { m } = loadManifest(manifestPath);
   const configuration = m?.corpora?.[provider] || {};
   const source = assertSourceName(configuration.source || provider);
-  const scheduler = options.scheduler ?? await import("./operations/provider-scheduler.mjs");
-  try {
-    const removed = scheduler.removeProviderScheduler(provider, manifestPath, options.schedulerOptions || {});
-    ok(removed.removed || removed.loaded
-      ? `${provider} refresh schedule removed`
-      : `${provider} refresh schedule was not installed`);
-  } catch (error) {
-    warn(`the ${provider} schedule could not be inspected or removed: ${String(error?.message || error).slice(0, 180)}`);
+  if (!(provider === "quickbooks" && m.operations?.quickbooks_schedule !== undefined)) {
+    const scheduler = options.scheduler ?? await import("./operations/provider-scheduler.mjs");
+    try {
+      const removed = scheduler.removeProviderScheduler(provider, manifestPath, options.schedulerOptions || {});
+      ok(removed.removed || removed.loaded
+        ? `${provider} refresh schedule removed`
+        : `${provider} refresh schedule was not installed`);
+    } catch (error) {
+      warn(`the ${provider} schedule could not be inspected or removed: ${String(error?.message || error).slice(0, 180)}`);
+    }
   }
 
   const oauth = options.oauth ?? await import("./connectors/provider-oauth.mjs");
@@ -31005,6 +31188,9 @@ export async function cmdDisconnectProvider(provider, manifestPath, flags = {}, 
       ? { source, environment: configuration.environment }
       : {}),
   });
+  if (provider === "quickbooks" && m.operations?.quickbooks_schedule !== undefined) {
+    await (options.reregisterAfterManifestChange || reregisterQuickBooksAfterManifestChange)(manifestPath, options);
+  }
   if (result.already_disconnected) ok(`${oauth.providerOAuthConfig(provider).label} was already disconnected locally`);
   else if (result.remote_revoked) ok(`${oauth.providerOAuthConfig(provider).label} grant revoked, then local credentials removed`);
   else ok(`${oauth.providerOAuthConfig(provider).label} local credentials removed`);
@@ -31996,6 +32182,17 @@ const commands = {
   rollback: dispatchRollback,
   schedule: cmdSchedule,
   daily: (_path) => cmdDaily(process.argv.slice(3)),
+  quickbooks: () => cmdQuickBooks(process.argv.slice(3)),
+  "quickbooks-run": (path) => {
+    const args = process.argv.slice(4);
+    if (args.length !== 2 || !["--definition-hash", "--provider-config-hash"].includes(args[0])) die("invalid QuickBooks scheduled invocation");
+    return cmdQuickBooksRun(path, args[0] === "--definition-hash"
+      ? { expectedDefinitionHash: args[1] } : { expectedProviderConfigHash: args[1] }).then((result) => {
+        console.log(JSON.stringify(result));
+        if (result.status === "error") process.exitCode = 1;
+        return result;
+      });
+  },
   folder: (path) => cmdFolder(path, process.argv.slice(4)),
   support: cmdSupport,
   tools: cmdLocalToolsInteractive,
@@ -32014,6 +32211,7 @@ const versionRequested = VERSION_ARGUMENTS.has(cmd);
 // Keep this one set beside the actual dispatcher wrapper so tests exercise the
 // same decision the installed CLI uses.
 const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
+  "quickbooks-desktop-data",
   "sources",
   "financial-picture",
   "machine-continuity",
@@ -32028,6 +32226,8 @@ const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
   "folder",
   "schedule",
   "daily",
+  "quickbooks",
+  "quickbooks-run",
 ]);
 
 // Health proves the Brain over HTTPS with the admin key and must never refresh
@@ -32108,6 +32308,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain migrate    <manifest>            apply pending schema migrations
     brain deploy     <manifest>            upload the worker with its bindings
     brain health     <manifest>            prove the install actually works
+    brain quickbooks schedule on|off|status <manifest>
+                                           QuickBooks refresh while this user is signed in
     brain daily      on|off|status <manifest>
                                            install, remove, or inspect one manifest-derived
                                            per-Brain/per-user daily import definition
@@ -32161,6 +32363,7 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain ingest-file <manifest> --source <id> --file <direct-name> --expect-runtime-sha256 <64hex> --apply --approve <64hex>
                                            ingest only that unchanged approved item and prove
                                            Received, Saved, Search ready, and Answer checked
+    brain ingest     <manifest> --source <source> --apply-removals <fingerprint>  apply a saved exact removal plan
     brain ingest     <manifest> --from drive  load from a connected remote source
                                            add --dry-run --json for one bounded,
                                            aggregate-only assistant preview
@@ -32249,9 +32452,10 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain support    --clear --yes         clear private local issue notes
 
   brain ingest takes --source <name>, --limit <n>, --dry-run, and --reset. It is
-  resumable: re-run the same command to continue an interrupted load. A large
-  Drive, Gmail, or IMAP cleanup stops first and prints the exact
-  --approve-removals fingerprint.
+  resumable: re-run the same command to continue an interrupted load. Folder,
+  Drive, Gmail, IMAP and provider removals always stop for a separate
+  --apply-removals command. Larger or protected plans also need the printed
+  --approve-removals fingerprint. Accepted additions and updates are saved.
 
   brain load is install day in one command. It reads the manifest, runs every
   source that is both enabled AND connected, and skips the rest with a stated

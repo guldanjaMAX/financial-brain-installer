@@ -34,6 +34,11 @@ export const CLAUDE_TECHNICIAN_SKILL_NAME = "financial-brain-technician";
 export const CLAUDE_TECHNICIAN_SKILL_MARKER =
   "<!-- financial-brain-installer:claude-skill:v1 -->";
 const LOCAL_ASSISTANT_REPAIR_SKILL_ROOTS = Object.freeze([".claude", ".codex"]);
+const MAX_SOURCE_SKILL_BYTES = 64 * 1024;
+// Windows replaces each command with this install's absolute executable paths.
+// Bound that expansion separately; install, inspection and rollback must accept
+// the same rendered bytes or a successful install becomes unrepairable.
+const MAX_INSTALLED_SKILL_BYTES = 256 * 1024;
 
 // POSIX permission bits are not an ACL proof on Windows. Node reports the
 // writable attribute through mode bits there, while access is inherited from
@@ -75,7 +80,7 @@ function ensureOwnedDirectory(path) {
 
 export function reviewedSkillContent(sourcePath = PACKAGED_SKILL_PATH, options = {}) {
   const content = readFileSync(sourcePath, "utf8");
-  if (!content.includes(CLAUDE_TECHNICIAN_SKILL_MARKER) || content.length > 64 * 1024) {
+  if (!content.includes(CLAUDE_TECHNICIAN_SKILL_MARKER) || Buffer.byteLength(content, "utf8") > MAX_SOURCE_SKILL_BYTES) {
     throw new Error("the packaged Financial Brain Claude skill did not pass its identity check");
   }
   // The owner's own assistant reads this file and then runs what it names, in
@@ -217,7 +222,7 @@ function inspectedSkill(root, options = {}) {
   }
 
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 ||
-      before.size > 64 * 1024 ||
+      before.size > MAX_INSTALLED_SKILL_BYTES ||
       (typeof process.getuid === "function" && before.uid !== process.getuid())) {
     return Object.freeze({
       root,
@@ -341,7 +346,7 @@ function restoreSkillSnapshot(snapshot) {
     return error?.code === "ENOENT" && !snapshot.exists;
   }
   if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1 ||
-      current.size > 64 * 1024 ||
+      current.size > MAX_INSTALLED_SKILL_BYTES ||
       (typeof process.getuid === "function" && current.uid !== process.getuid())) {
     return false;
   }
@@ -656,7 +661,7 @@ export function installTechnicianSkillEverywhere(options = {}) {
 export function installClaudeTechnicianSkill(options = {}) {
   const target = claudeTechnicianSkillPath(options);
   const content = options.desiredContent ?? reviewedSkillContent(options.sourcePath);
-  if (typeof content !== "string" || content.length > 64 * 1024 ||
+  if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_INSTALLED_SKILL_BYTES ||
       !content.includes(CLAUDE_TECHNICIAN_SKILL_MARKER)) {
     throw new Error("the approved Financial Brain technician skill content is invalid");
   }

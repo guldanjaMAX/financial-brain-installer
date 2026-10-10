@@ -257,10 +257,17 @@ function makeEnv({
   db.close();
 }
 
-const insertDocument = (db, uid, source = "drive") => db.prepare(
-  `INSERT INTO documents (doc_uid, source, source_id, title, ingested_at, content_hash)
-   VALUES (?, ?, ?, ?, ?, ?)`
-).run(uid, source, uid, uid, Date.now(), `hash:${uid}`);
+const insertDocument = (db, uid, source = "drive", meta = null) => db.prepare(
+  `INSERT INTO documents (doc_uid, source, source_id, title, ingested_at, content_hash, meta)
+   VALUES (?, ?, ?, ?, ?, ?, ?)`
+).run(uid, source, uid, uid, Date.now(), `hash:${uid}`, meta === null ? null : JSON.stringify(meta));
+
+/* The provenance splitOversized (ingest/envelope-batching.mjs) stores on every
+   structural part. Family cleanup proves membership from it, not from a prefix. */
+const splitPartMeta = (uid) => {
+  const match = /^([^:]+):(.*)#part([1-9][0-9]*)of([1-9][0-9]*)$/.exec(uid);
+  return match ? { part_of: match[2], part: Number(match[3]), part_count: Number(match[4]) } : null;
+};
 
 const insertChunk = (db, uid, doc, ix, vectorId = uid) => {
   const result = db.prepare(
@@ -968,7 +975,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
     "drive:file", "drive:file#part1of3", "drive:file#part2of3", "drive:file#part3of3",
     "drive:file#part1of2", "drive:file#part2of2", "drive:other",
   ]) {
-    insertDocument(db, uid);
+    insertDocument(db, uid, "drive", splitPartMeta(uid));
     insertChunk(db, `${uid}#0`, uid, 0);
   }
   const cleaned = await forgetFamilies(env, {
@@ -1001,7 +1008,7 @@ const markAllOutboxSubmitted = (env, db, submittedAt = 1_000) => {
     new TextEncoder().encode(longBase).length > 50, String(new TextEncoder().encode(longBase).length));
 
   for (const uid of [longBase, keep, stale, prefixCollision, siblingCollision, "drive:unrelated"]) {
-    insertDocument(db, uid);
+    insertDocument(db, uid, "drive", splitPartMeta(uid));
     insertChunk(db, `${uid}#0`, uid, 0);
   }
 

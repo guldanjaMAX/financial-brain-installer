@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { supportErrorCode } from "../brain.mjs";
+import { ProvenanceRepairIncompleteError, supportErrorCode } from "../brain.mjs";
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { SUPPORT_ERROR_CODES } from "../support-journal.mjs";
 import {
@@ -272,4 +272,21 @@ test("callback timeout recovery is distinct from connectivity and installer defe
   assert.match(guide.protection, /Nothing changed/);
   assert.match(guide.next_steps.join(" "), /same command again/);
   assert.equal(supportErrorCode(new Error("fixture"), { unexpected: true }), "INTERNAL_ERROR");
+});
+
+
+test("one-file incomplete guidance is explainable by the real CLI and retains its typed code", () => {
+  const code = "PROVENANCE_TARGET_REPAIR_INCOMPLETE";
+  const result = spawnSync(process.execPath, [join(ROOT, "brain.mjs"), "support", "--explain", code], {
+    cwd: ROOT, env: safeCliEnvironment(), encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Nothing was lost/);
+  assert.match(result.stdout, /read-only preview before retrying/i);
+  assert.doesNotMatch(result.stdout, /result_family_record|exact_original_ingest/);
+  const error = new ProvenanceRepairIncompleteError("mutable description", {
+    operation: "provenance-target-repair", complete: false,
+  });
+  assert.equal(supportErrorCode(error, { command: "provenance-repair" }), code);
+  assert.equal(supportRecovery(code).retry, "review_first");
 });

@@ -1246,3 +1246,6 @@ test('every module that names the release repository names the same one', async 
     }
   }
 });
+
+// Exercise the shared site fixtures in the existing offline release test chain.
+await import('./install-entry-fixtures.test.mjs');

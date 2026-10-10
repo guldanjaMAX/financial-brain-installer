@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -24,6 +25,7 @@ import {
   listStoredSourceFamilies,
   renderMalformedDriveIdentities,
   remoteFamilySettlement,
+  safeIngestDisplay,
   VALUE_FLAGS,
 } from "../brain.mjs";
 import { driveVersion } from "../connectors/google-drive.mjs";
@@ -67,6 +69,16 @@ assert.equal(isRetryableDriveError({ name: "OtherError", retryable: true }), fal
 
 function ids(prefix, count) {
   return Array.from({ length: count }, (_, index) => `${prefix}-${String(index).padStart(4, "0")}`);
+}
+
+function assertReviewListing(output, state) {
+  const records = state.drive_removal_review.source_deletion_candidates;
+  assert.equal(records.length, 1, "the listing fixture needs a nonempty two-walk plan");
+  assert.ok(records.every((record) => record.name && record.folder_path),
+    "every review item must have both stored labels");
+  assert.deepEqual(output.split("\n").filter((line) => line.startsWith("- ")),
+    records.map((record) => `- ${safeIngestDisplay(record.name)} (folder: ${safeIngestDisplay(record.folder_path)})`),
+    "the approval stop must list exactly its eligible items with their stored name and folder");
 }
 
 function errorMessage(plan, approval) {
@@ -615,7 +627,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
  * source-policy decision while still preserving the credential outcome.
  */
 {
-  const directory = mkdtempSync(join(tmpdir(), "brain-drive-active-skips-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-drive-active-skips-")));
   const manifestPath = join(directory, "fixture.manifest.json");
   const statePath = join(directory, ".brain-ingest-drive.json");
   const evidencePath = join(directory, "active-skip-evidence.json");
@@ -641,6 +653,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   Object.assign(environment, {
     NO_COLOR: "1",
     BRAIN_GOOGLE_TOKEN_STORE: "file",
+    HOME: userRoot,
+    BRAIN_NO_WRANGLER_LOGIN: "1",
     BRAIN_DRIVE_SKIP_USER_ROOT: userRoot,
     BRAIN_DRIVE_SKIP_EVIDENCE: evidencePath,
     BRAIN_DRIVE_SKIP_MODE: "mixed",
@@ -661,6 +675,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
 
   try {
     mkdirSync(tokenRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(join(directory, ".brain-admin-key"), "fixture-admin", { mode: 0o600 });
     writeFileSync(manifestPath, JSON.stringify({
       client: { slug: "fixture" },
       brain: { domain: "fixture.invalid" },
@@ -696,7 +711,11 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const approval = /--approve-removals ([0-9a-f]{64})/.exec(review.output)?.[1] || null;
     assert.ok(approval, `Drive active-skip review omitted its exact approval:\n${review.output.slice(-1_200)}`);
 
-    const accepted = run(["--approve-removals", approval]);
+    const applyFingerprint = /--apply-removals ([0-9a-f]{64})/.exec(review.output)?.[1];
+    assert.ok(applyFingerprint);
+    const applied = run(["--source", "drive", "--apply-removals", applyFingerprint, "--approve-removals", approval]);
+    assert.equal(applied.code, 0, applied.output);
+    const accepted = run();
     assert.equal(accepted.code, 0, accepted.output.slice(-1_200));
     const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
     assert.equal(evidence.ingestBatchWrites, 0, "an adjudicated or locally refused file reached Worker ingest");
@@ -718,7 +737,11 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const adjudicatedApproval = /--approve-removals ([0-9a-f]{64})/.exec(adjudicatedReview.output)?.[1] || null;
     assert.ok(adjudicatedApproval,
       `Drive adjudicated-only review omitted its exact approval:\n${adjudicatedReview.output.slice(-1_200)}`);
-    const adjudicatedAccepted = run(["--reset", "--approve-removals", adjudicatedApproval]);
+    const adjudicatedApply = /--apply-removals ([0-9a-f]{64})/.exec(adjudicatedReview.output)?.[1];
+    assert.ok(adjudicatedApply);
+    const adjudicatedApplied = run(["--source", "drive", "--apply-removals", adjudicatedApply, "--approve-removals", adjudicatedApproval]);
+    assert.equal(adjudicatedApplied.code, 0, adjudicatedApplied.output);
+    const adjudicatedAccepted = run(["--reset"]);
     assert.equal(adjudicatedAccepted.code, 0, adjudicatedAccepted.output.slice(-1_200));
     const adjudicatedEvidence = JSON.parse(readFileSync(evidencePath, "utf8"));
     assert.deepEqual(adjudicatedEvidence.lastFinalReceipt, {
@@ -742,7 +765,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
  * partial-write retry has to build and approve a fresh aggregate plan.
  */
 {
-  const directory = mkdtempSync(join(tmpdir(), "brain-drive-removal-guard-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-drive-removal-guard-")));
   const manifestPath = join(directory, "fixture.manifest.json");
   const statePath = join(directory, ".brain-ingest-drive.json");
   const evidencePath = join(directory, "guard-evidence.json");
@@ -799,6 +822,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   Object.assign(environment, {
     NO_COLOR: "1",
     BRAIN_GOOGLE_TOKEN_STORE: "file",
+    HOME: userRoot,
+    BRAIN_NO_WRANGLER_LOGIN: "1",
     BRAIN_DRIVE_GUARD_USER_ROOT: userRoot,
     BRAIN_DRIVE_GUARD_EVIDENCE: evidencePath,
     ADMIN_KEY: "fixture-admin",
@@ -816,6 +841,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
 
   try {
     mkdirSync(tokenRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(join(directory, ".brain-admin-key"), "fixture-admin", { mode: 0o600 });
     writeFileSync(manifestPath, JSON.stringify({
       client: { slug: "fixture" },
       brain: { domain: "fixture.invalid" },
@@ -845,6 +871,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(stopped.code, 1, safeDiagnostic(stopped.output));
     assertNoFamilyLeak(stopped.output);
     assert.match(stopped.output, /review required/i);
+    assert.match(stopped.output, /would remove 101 of 101 stored documents \(100\.0%\)/);
+    assert.match(stopped.output, /Aggregate reasons:/);
     assert.doesNotMatch(stopped.output, /unexpected error|This is a bug in the installer/i);
     const initialApproval = approvalFrom(stopped.output);
     const supportBytes = previewSupportJournal({ root: userRoot });
@@ -882,20 +910,20 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     assert.equal(evidence.removalRequests, 0, "a wrong fingerprint made a removal write");
     assert.equal(evidence.reconciliationRequests, 0, "a wrong fingerprint made a reconciliation write");
 
-    // The first exact approval is valid, but its first bounded deletion gets a
-    // synthetic 503. Later groups succeed, creating the mixed-write state that
-    // must remain cursor-safe and retry through the aggregate guard.
-    const interrupted = run(["--approve-removals", initialApproval]);
+    // A committed first group survives a failed second group. No later group
+    // may run after an uncertain result; the remaining targets need a new plan.
+    const interrupted = run(["--source", "drive", "--apply-removals", readState().ingest_removal_plan.fingerprint,
+      "--approve-removals", initialApproval]);
     assert.equal(interrupted.code, 1, safeDiagnostic(interrupted.output));
     assertNoFamilyLeak(interrupted.output);
-    assert.match(interrupted.output, /source cursor was not advanced/i);
+    assert.match(interrupted.output, /removal plan.*unavailable|changed/i);
     const interruptedState = assertCursorWithheld();
-    assert.equal(Object.keys(interruptedState.removed || {}).length, 50, "failed removals were not retained for retry");
+    assert.equal(interruptedState.ingest_removal_plan.targets.length, 101, "the uncertain plan was not retained for recovery");
     evidence = readEvidence();
-    assert.equal(evidence.forgetRequests, 3, "the approved plan did not use bounded removal groups");
-    assert.equal(evidence.removalRequests, 3, "approved deletion calls were not classified as removals");
+    assert.equal(evidence.forgetRequests, 2, "a failed bounded group did not stop later writes");
+    assert.equal(evidence.removalRequests, 2, "approved deletion calls were not classified as removals");
     assert.equal(evidence.reconciliationRequests, 0, "the removal path performed an unrelated reconciliation");
-    assert.equal(evidence.successfulRemovalFamilies, 51, "successful partial removals were not preserved");
+    assert.equal(evidence.successfulRemovalFamilies, 50, "successful partial removals were not preserved");
     assert.equal(evidence.failedRemovalFamilies, 50, "the failed bounded group was not recorded by the fixture");
 
     const retryStopped = run();
@@ -904,12 +932,16 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const retryApproval = approvalFrom(retryStopped.output);
     assert.notEqual(retryApproval, initialApproval, "partial writes did not produce a fresh exact-plan fingerprint");
     const retryState = assertCursorWithheld();
-    assert.equal(Object.keys(retryState.removed || {}).length, 50, "a guarded retry discarded pending removals");
+    assert.equal(retryState.ingest_removal_plan.targets.length, 51, "a guarded retry did not preserve the exact remaining targets");
     evidence = readEvidence();
-    assert.equal(evidence.forgetRequests, 3, "a failed removal retry bypassed the approval guard");
+    assert.equal(evidence.forgetRequests, 2, "a failed removal retry bypassed the approval guard");
     assert.equal(evidence.reconciliationRequests, 0, "a failed removal retry bypassed the guard through reconciliation");
 
-    const completed = run(["--approve-removals", retryApproval]);
+    const applied = run(["--source", "drive", "--apply-removals", readState().ingest_removal_plan.fingerprint,
+      "--approve-removals", retryApproval]);
+    assert.equal(applied.code, 0, safeDiagnostic(applied.output));
+    assertCursorWithheld();
+    const completed = run();
     assert.equal(completed.code, 0, safeDiagnostic(completed.output));
     assertNoFamilyLeak(completed.output);
     const completedState = readState();
@@ -975,6 +1007,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
 
   const runScopeScenario = (mode, {
     full = false,
+    clockAnchor = null,
     pendingRemoval = false,
     priorReview = false,
     priorNotReturnedDays = null,
@@ -995,14 +1028,15 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     win32 = false,
     args = [],
   } = {}) => {
-    const directory = mkdtempSync(join(tmpdir(), `brain-drive-scope-${mode}-`));
+    const fixtureNow = () => clockAnchor ?? Date.now();
+    const directory = realpathSync.native(mkdtempSync(join(tmpdir(), `brain-drive-scope-${mode}-`)));
     const manifestPath = join(directory, "fixture.manifest.json");
     const statePath = join(directory, ".brain-ingest-drive.json");
     const evidencePath = join(directory, "scope-evidence.json");
     const userRoot = join(directory, "isolated-user-root");
     const tokenRoot = join(userRoot, ".brain");
     const priorCursor = `fixture-prior-${mode}`;
-    const priorFullSweep = full ? "2000-01-01T00:00:00.000Z" : new Date().toISOString();
+    const priorFullSweep = full ? "2000-01-01T00:00:00.000Z" : new Date(fixtureNow()).toISOString();
     const environment = {};
     for (const name of ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR"]) {
       if (process.env[name] !== undefined) environment[name] = process.env[name];
@@ -1010,9 +1044,12 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     Object.assign(environment, {
       NO_COLOR: "1",
       BRAIN_GOOGLE_TOKEN_STORE: "file",
+      HOME: userRoot,
+      BRAIN_NO_WRANGLER_LOGIN: "1",
       BRAIN_DRIVE_SCOPE_USER_ROOT: userRoot,
       BRAIN_DRIVE_SCOPE_EVIDENCE: evidencePath,
       BRAIN_DRIVE_SCOPE_MODE: mode,
+      ...(clockAnchor === null ? {} : { BRAIN_DRIVE_SCOPE_NOW: String(clockAnchor) }),
       BRAIN_DRIVE_SCOPE_LABELS: inventoryLabels ? inventoryLabelMode : "none",
       BRAIN_DRIVE_SCOPE_DATE: inventoryDate ? "server" : "none",
       BRAIN_DRIVE_SCOPE_UID_FILTER: inventoryUidFilterMode,
@@ -1024,6 +1061,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     });
 
     mkdirSync(tokenRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(join(directory, ".brain-admin-key"), "fixture-admin", { mode: 0o600 });
     writeFileSync(manifestPath, JSON.stringify({
       client: { slug: "fixture" },
       brain: { domain: "fixture.invalid" },
@@ -1074,7 +1112,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       },
       removed: pendingRemoval ? { "drive:missing-sensitive": "2026-09-01T00:00:00.000Z" } : {},
       ...(Number.isFinite(priorMaturedDays) ? (() => {
-        const firstObservedAt = new Date(Date.now() - (priorMaturedDays * 24 * 60 * 60 * 1000));
+        const firstObservedAt = new Date(fixtureNow() - (priorMaturedDays * 24 * 60 * 60 * 1000));
         return {
           drive_removal_review: {
             schema_version: 5,
@@ -1115,7 +1153,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
           },
         };
       })() : Number.isFinite(priorChangeFeedDays) ? (() => {
-        const firstObservedAt = new Date(Date.now() - (priorChangeFeedDays * 24 * 60 * 60 * 1000));
+        const firstObservedAt = new Date(fixtureNow() - (priorChangeFeedDays * 24 * 60 * 60 * 1000));
         return {
           drive_removal_review: {
             schema_version: 3,
@@ -1154,7 +1192,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
           uids: ["drive:missing-sensitive"],
         },
       } : Number.isFinite(priorNotReturnedDays) ? (() => {
-        const firstObservedAt = new Date(Date.now() - (priorNotReturnedDays * 24 * 60 * 60 * 1000));
+        const firstObservedAt = new Date(fixtureNow() - (priorNotReturnedDays * 24 * 60 * 60 * 1000));
         return {
           drive_removal_review: {
             schema_version: 3,
@@ -1180,8 +1218,8 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
                   server_observed_at: firstObservedAt.toISOString(),
                 }, ...(Number.isFinite(priorConsistentObservationDays) ? [{
                   run_id: "sync_fixture_later_consistent_observation",
-                  observed_at: new Date(Date.now() - priorConsistentObservationDays * 24 * 60 * 60 * 1000).toISOString(),
-                  server_observed_at: new Date(Date.now() - priorConsistentObservationDays * 24 * 60 * 60 * 1000).toISOString(),
+                  observed_at: new Date(fixtureNow() - priorConsistentObservationDays * 24 * 60 * 60 * 1000).toISOString(),
+                  server_observed_at: new Date(fixtureNow() - priorConsistentObservationDays * 24 * 60 * 60 * 1000).toISOString(),
                 }] : [])],
               } : {}),
               ...(priorNotReturnedNamed ? {
@@ -1203,7 +1241,7 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
           '{ value: "win32", configurable: true });\n',
         { mode: 0o600 });
     }
-    const execute = (runArgs = []) => {
+    const executeDirect = (runArgs = []) => {
       const result = spawnSync(process.execPath, [
         ...(win32 ? ["--import", pathToFileURL(win32Preload).href] : []),
         "--import", DRIVE_SCOPE_FETCH,
@@ -1217,6 +1255,18 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
         output: stripAnsi(`${result.stdout || ""}${result.stderr || ""}`),
       };
     };
+    const execute = (runArgs = []) => {
+      const approvalIndex = runArgs.indexOf("--approve-removals");
+      if (approvalIndex < 0 || runArgs.includes("--apply-removals")) return executeDirect(runArgs);
+      let plan = JSON.parse(readFileSync(statePath, "utf8")).ingest_removal_plan;
+      let stopped;
+      if (!plan) { stopped = executeDirect(runArgs); plan = JSON.parse(readFileSync(statePath, "utf8")).ingest_removal_plan; }
+      if (!plan || plan.sourcePlan.fingerprint !== runArgs[approvalIndex + 1]) return stopped || executeDirect(runArgs);
+      const applied = executeDirect(["--source", "drive", "--apply-removals", plan.fingerprint,
+        "--approve-removals", runArgs[approvalIndex + 1]]);
+      if (applied.code !== 0) return applied;
+      return executeDirect();
+    };
     const result = execute(args);
     return {
       code: result.code,
@@ -1229,6 +1279,14 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
       writeState: (nextState) => writeFileSync(statePath, JSON.stringify(nextState), { mode: 0o600 }),
       evidence: () => JSON.parse(readFileSync(evidencePath, "utf8")),
       rerun: (runArgs = []) => execute(runArgs),
+      apply: () => {
+        const plan = JSON.parse(readFileSync(statePath, "utf8")).ingest_removal_plan;
+        assert.ok(plan && plan.targets.length > 0, "exact apply control needs a nonempty saved plan");
+        const applied = executeDirect(["--source", "drive", "--apply-removals", plan.fingerprint,
+          ...(plan.sourcePlan.tooLarge || plan.requireSourceApproval ? ["--approve-removals", plan.sourcePlan.fingerprint] : [])]);
+        assert.equal(applied.code, 0, applied.output);
+        return executeDirect();
+      },
       cleanup: () => rmSync(directory, { recursive: true, force: true }),
     };
   };
@@ -1817,11 +1875,11 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
 
     const secondRun = resetLifecycle.rerun();
     assert.equal(secondRun.code, 1, secondRun.output);
-    assert.match(secondRun.output, /Owner tax return\.txt \(folder: Reviewed Root\/Tax\)/);
+    assertReviewListing(secondRun.output, resetLifecycle.state());
     assert.match(secondRun.output, /--approve-removals [0-9a-f]{64}/);
     const thirdRun = resetLifecycle.rerun();
     assert.equal(thirdRun.code, 1, thirdRun.output);
-    assert.match(thirdRun.output, /Owner tax return\.txt \(folder: Reviewed Root\/Tax\)/);
+    assertReviewListing(thirdRun.output, resetLifecycle.state());
     assert.match(thirdRun.output, /--approve-removals [0-9a-f]{64}/,
       "the reset-created review did not remain approvable on its third run");
     assert.equal(resetLifecycle.evidence().forgetRequests, 0);
@@ -1904,13 +1962,17 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
 
   const unresolvedBatch = runScopeScenario("incremental-unresolved-batch");
   try {
-    assert.equal(unresolvedBatch.code, 0, unresolvedBatch.output);
-    assert.match(unresolvedBatch.output, /Drive review required: 3 stored item\(s\)/i);
+    assert.equal(unresolvedBatch.code, 1, unresolvedBatch.output);
+    assert.equal(unresolvedBatch.evidence().forgetRequests, 0);
+    assert.equal(unresolvedBatch.state().ingest_removal_plan.targets.length, 7);
+    const applied = unresolvedBatch.apply();
+    assert.equal(applied.code, 0, applied.output);
+    assert.match(applied.output, /Drive review required: 3 stored item\(s\)/i);
     const evidence = unresolvedBatch.evidence();
-    assert.equal(evidence.absenceMetadataReads, 10, "the classifier stopped before all absence candidates were reviewed");
+    assert.equal(evidence.absenceMetadataReads, 13, "the initial ten candidates and three remaining review candidates must be classified");
     assert.equal(evidence.forgetRequests, 1, "confirmed deletions did not reach the guarded removal plan");
     assert.equal(evidence.removedFamilies, 7, "an unresolved absence was deleted or a confirmed deletion was retained");
-    assert.equal(evidence.receipts.error, 1);
+    assert.equal(evidence.receipts.error, 2);
     assert.equal(evidence.receipts.ready, 0);
     assert.deepEqual(evidence.lastErrorReceipt, {
       issue_code: "SAFETY_REVIEW_REQUIRED",
@@ -2216,8 +2278,10 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     const evidence = fullSweepApprovedReview.evidence();
     assert.equal(evidence.forgetRequests, 1,
       "an approved full-sweep repeated absence did not reach one bounded forget");
-    assert.equal(evidence.inventoryReads, 5,
-      "the two full inventories, two targeted label reads, and post-forget readback did not all run");
+    assert.equal(evidence.inventoryReads, 3,
+      "the initial and resumed inventories plus targeted label read must run");
+    assert.ok(evidence.planPreviews >= 3, "exact plan, preflight and final readback must run");
+    assert.equal(evidence.planApplies, 1);
     assert.equal(evidence.removedFamilies, 1);
     assert.equal(fullSweepApprovedReview.state().drive_removal_review, undefined);
   } finally {
@@ -2339,6 +2403,23 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
     missingServerDate.cleanup();
   }
 
+  const invoiceListing = runScopeScenario("full-unresolved", {
+    clockAnchor: Date.parse("2026-10-08T12:00:00.000Z"),
+    full: true, priorNotReturnedDays: 8, priorObservation: true,
+    localDoneLabels: false, priorNotReturnedNamed: false, inventoryLabelMode: "invoice",
+  });
+  try {
+    assert.equal(invoiceListing.code, 1);
+    const state = invoiceListing.state();
+    assertReviewListing(invoiceListing.output, state);
+    assert.equal(state.ingest_removal_plan.sourceTargets.length, 1);
+    const record = state.drive_removal_review.source_deletion_candidates[0];
+    assert.ok(record.name.includes("invoice.stripe.com"), "the raw stored label still binds the plan");
+    assert.notEqual(safeIngestDisplay(record.name), record.name, "fixture reaches the URL cleaner");
+    assert.ok(!invoiceListing.output.includes(record.name), "raw hosted invoice URL must not reach output");
+    assert.equal(invoiceListing.evidence().forgetRequests, 0);
+  } finally { invoiceListing.cleanup(); }
+
   const elapsedRepeat = runScopeScenario("full-unresolved", {
     full: true,
     priorNotReturnedDays: 8,
@@ -2348,12 +2429,12 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   try {
     assert.equal(elapsedRepeat.code, 1, elapsedRepeat.output);
     assert.match(elapsedRepeat.output, /two walks at least seven days apart/i);
-    assert.match(elapsedRepeat.output, /Owner tax return\.txt \(folder: Reviewed Root\/Tax\)/);
+    assertReviewListing(elapsedRepeat.output, elapsedRepeat.state());
     elapsedApproval = /--approve-removals ([0-9a-f]{64})/.exec(elapsedRepeat.output)?.[1];
     assert.ok(elapsedApproval, "the elapsed approval stop did not print an approval fingerprint");
     assert.ok(
       elapsedRepeat.output.includes(renderCliCommands(
-        `brain ingest <manifest> --from drive --approve-removals ${elapsedApproval}`,
+        `brain ingest <manifest> --from drive --source drive --apply-removals ${elapsedRepeat.state().ingest_removal_plan.fingerprint} --approve-removals ${elapsedApproval}`,
       )),
       "the elapsed approval stop did not show the exact platform-rendered retry command",
     );
@@ -2412,14 +2493,20 @@ for (const malformed of [undefined, true, "", "not-a-sha256", wrongFingerprint, 
   for (const mode of ["incremental-trash", "incremental-left-scope"]) {
     const confirmed = runScopeScenario(mode);
     try {
-      assert.equal(confirmed.code, 0, confirmed.output);
+      assert.equal(confirmed.code, 1, confirmed.output);
+      assert.equal(confirmed.evidence().forgetRequests, 0);
+      assert.equal(confirmed.state().ingest_removal_plan.targets.length, 1);
+      const applied = confirmed.apply();
+      assert.equal(applied.code, 0, applied.output);
       const evidence = confirmed.evidence();
       assert.equal(evidence.absenceMetadataReads, 1, `${mode} did not classify the removed file`);
       assert.equal(evidence.rootedWalks, 0, `${mode} unexpectedly required a full walk`);
       assert.equal(evidence.forgetRequests, 1, `${mode} did not reach the guarded removal plan`);
       assert.equal(evidence.removedFamilies, 1);
       assert.equal(evidence.inventoryReads, 3,
-        "confirmed removal lacked its base inventory, targeted label read, or exact readback");
+        "confirmed removal lacked the initial and resumed inventories or targeted label read");
+      assert.ok(evidence.planPreviews >= 3, "exact plan, apply preflight, and readback must run");
+      assert.equal(evidence.planApplies, 1);
       assert.equal(evidence.ingestBatchWrites, 0);
       const state = confirmed.state();
       assert.equal(state.sync_token, `fixture-next-${mode}`);
@@ -2462,53 +2549,26 @@ const buildMatch = /const\s+([A-Za-z_$][\w$]*)\s*=\s*buildDriveRemovalPlan\s*\(\
 assert.ok(buildMatch, "Drive ingest must build one aggregate removal plan");
 const planName = buildMatch[1];
 const buildIndex = buildMatch.index;
-const assertIndex = remote.indexOf(`assertDriveRemovalPlanSafe(${planName}`, buildIndex);
-const firstTargetUseIndex = remote.indexOf(`${planName}.targets`, buildIndex);
-const targetUseIndex = remote.indexOf(`${planName}.targets[category]`, assertIndex);
-assert.match(
-  remote,
-  /const applyPreparedRemovals = options\.applyDriveRemovals \?\? applyDriveRemovals;/,
-  "the injectable removal seam must default to the guarded production operation",
-);
-assert.match(
-  remote,
-  /const listPreparedSourceFamilies = options\.listStoredSourceFamilies \?\? listStoredSourceFamilies;/,
-  "the injectable readback seam must default to the production inventory operation",
-);
-const applicationIndex = remote.lastIndexOf("applyPreparedRemovals(", targetUseIndex);
-assert.ok(assertIndex > buildIndex, "the aggregate Drive removal plan must be checked");
-assert.ok(firstTargetUseIndex > assertIndex, "plan targets must not be read before the guard passes");
-assert.ok(
-  applicationIndex > assertIndex && applicationIndex < targetUseIndex,
-  "only guarded plan targets may reach Drive removal",
-);
-const readbackIndex = remote.indexOf("const afterRemoval = await listPreparedSourceFamilies", targetUseIndex);
-const cursorPlanIndex = remote.indexOf("pendingCursor = {", readbackIndex);
-assert.ok(
-  readbackIndex > targetUseIndex,
-  "planned Drive removals must be checked against a fresh stored-family inventory",
-);
-assert.ok(
-  cursorPlanIndex > readbackIndex,
-  "the Drive cursor plan must remain withheld until deletion readback succeeds",
-);
-
-const buildCall = remote.slice(buildIndex, assertIndex);
+const boundaryIndex = remote.indexOf("await removalReview.finish({", buildIndex);
+const cursorPlanIndex = remote.indexOf("pendingCursor = {", boundaryIndex);
+assert.ok(boundaryIndex > buildIndex, "Drive source removal must enter the saved-plan boundary");
+assert.ok(cursorPlanIndex > boundaryIndex, "a removal stop must withhold the source cursor");
+assert.match(remote.slice(boundaryIndex, cursorPlanIndex), /sourcePlan: driveRemovalPlan/);
+const buildCall = remote.slice(buildIndex, boundaryIndex);
 for (const field of ["storedFamilies", "activeFamilies", "policyCandidates", "vanishedCandidates", "intentionalCandidates"]) {
   assert.match(buildCall, new RegExp(`\\b${field}\\b`), `aggregate Drive removal plan is missing ${field}`);
 }
-const approvalCall = remote.slice(assertIndex, targetUseIndex);
-assert.match(approvalCall, /(?:flags\["approve-removals"\]|removalApproval)/,
-  "the CLI approval value must reach the aggregate guard");
-if (/\bremovalApproval\b/.test(approvalCall)) {
-  const approvalAssignment = remote.indexOf('const removalApproval = flags["approve-removals"]');
-  const approvalValidation = remote.indexOf("typeof removalApproval", approvalAssignment);
-  assert.ok(
-    approvalAssignment !== -1 && approvalAssignment < approvalValidation && approvalValidation < buildIndex &&
-      remote.slice(approvalValidation, buildIndex).includes("/^[0-9a-f]{64}$/"),
-    "the approval alias must be the validated lowercase SHA-256 CLI value",
-  );
-}
+assert.doesNotMatch(remote, /reconcilePreparedFamilies\(/,
+  "remote obsolete-family cleanup must not bypass the separate decision");
+assert.match(remote, /removalReview\.remember\(outcome\.completed\)/,
+  "accepted families must retain their review checkpoint");
+const boundarySource = readFileSync(new URL("../operations/ingest-removal-plan.mjs", import.meta.url), "utf8");
+const approvalIndex = boundarySource.indexOf("assertDriveRemovalPlanSafe(plan.sourcePlan");
+const applyIndex = boundarySource.indexOf('action: "apply"');
+assert.ok(approvalIndex > 0 && applyIndex > approvalIndex,
+  "the additional aggregate guard must run before any approved deletion");
+assert.match(boundarySource.slice(applyIndex), /preview\(plan\.families, marker\)/,
+  "an exact readback must prove absence after the approved deletions");
 
 const outerCatchIndex = remote.lastIndexOf("} catch (error) {");
 assert.notEqual(outerCatchIndex, -1, "cmdIngestRemote must keep its outer failure receipt path");
@@ -2535,41 +2595,19 @@ assert.match(
 );
 const localInventoryIndex = local.indexOf("const storedLocalFamilies = await listPreparedSourceFamilies", pendingIndex);
 const localBuildIndex = local.indexOf("const localRemovalPlan = buildDriveRemovalPlan", localInventoryIndex);
-const localGuardIndex = local.indexOf("assertDriveRemovalPlanSafe(localRemovalPlan", localBuildIndex);
-const localTargetsIndex = local.indexOf("const localTruthTargets", localGuardIndex);
-const localApplyIndex = local.indexOf("uids: localTruthTargets", localTargetsIndex);
-const localReadbackIndex = local.indexOf("const afterLocalRemoval = await listPreparedSourceFamilies", localApplyIndex);
+const localBoundaryIndex = local.indexOf("await removalReview.finish({ sourcePlan: localRemovalPlan", localBuildIndex);
 assert.ok(
   pendingIndex !== -1 && localInventoryIndex > pendingIndex && localBuildIndex > localInventoryIndex,
   "local removal retries must re-enter a plan built from authenticated stored families",
 );
-assert.doesNotMatch(
-  local.slice(pendingIndex, localBuildIndex),
-  /applyDriveRemovals\s*\(/,
-  "a pending local removal must not bypass the current authenticated plan",
-);
-assert.match(
-  local.slice(localBuildIndex, localGuardIndex),
-  /storedFamilies:\s*storedLocalFamilies/,
-  "local deletion must not use the resume file as its stored-family denominator",
-);
-assert.ok(
-  localGuardIndex > localBuildIndex && localTargetsIndex > localGuardIndex && localApplyIndex > localTargetsIndex,
-  "only guarded local plan targets may reach the destructive endpoint",
-);
-assert.match(
-  local.slice(localTargetsIndex, localApplyIndex),
-  /localRemovalPlan\.targets\.source_policy[\s\S]*localRemovalPlan\.targets\.intentional_skip/,
-  "local source-truth deletion must use the exact categorized plan targets",
-);
-assert.ok(
-  localReadbackIndex > localApplyIndex,
-  "local folder deletion must read authenticated storage back before recording completion",
-);
-assert.match(
-  local.slice(localReadbackIndex),
-  /stillStored[\s\S]*state\.removed[\s\S]*throw new Error/,
-  "a failed local deletion readback must retain retry state and fail the source run",
-);
+assert.doesNotMatch(local.slice(pendingIndex, localBuildIndex), /applyDriveRemovals\s*\(/,
+  "a pending local removal must not bypass the current authenticated plan");
+assert.match(local.slice(localBuildIndex, localBoundaryIndex), /storedFamilies:\s*storedLocalFamilies/,
+  "local deletion must not use the resume file as its stored-family denominator");
+assert.ok(localBoundaryIndex > localBuildIndex,
+  "local source removals must enter the separate saved-plan decision");
+assert.doesNotMatch(local, /reconcilePreparedFamilies\(/,
+  "local replacement cleanup must not bypass the separate decision");
+assert.match(local, /removalReview\.remember\(outcome\.completed\)/);
 
 console.log("drive removal guard: all focused tests passed");

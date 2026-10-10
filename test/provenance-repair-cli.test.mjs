@@ -415,7 +415,7 @@ test("public whatsnew copy matches the fail-closed provenance repair command", a
     /(?:^|\n)## 0\.4\.9\s*\n([\s\S]*?)(?=\n## |\s*$)/,
   )?.[1] || "";
   const currentEntry = normalizedOutput.match(
-    /(?:^|\n)## 0\.4\.10(?: \(\d{4}-\d{2}-\d{2}\))?\s*\n([\s\S]*?)(?=\n## |\s*$)/,
+    /(?:^|\n)## 0\.4\.11(?: \(\d{4}-\d{2}-\d{2}\))?\s*\n([\s\S]*?)(?=\n## |\s*$)/,
   )?.[1] || "";
   assert.ok(shippedEntry, "the shipped 0.4.9 changelog section must be present");
   assert.ok(currentEntry, "the current whatsnew entry must be present before applying its negative guard");

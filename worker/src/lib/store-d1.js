@@ -1,3 +1,4 @@
+import { measureQueryStage, startQueryStage } from "./query-timing.js";
 /**
  * store-d1 — retrieval over Cloudflare alone: D1 for text and keywords,
  * Vectorize for vectors, fusion in the Worker.
@@ -71,6 +72,7 @@ import {
   publicMutationMarker,
   scanChunkPages,
 } from "./diagnose-scan.js";
+import { deriveSourceOriginalId, loadSourceOriginalSigningKey } from "./source-original-binding.js";
 import { sourceOriginalChunkReceiptHash } from "./source-original-chunk.js";
 import {
   customApiLogicalSourceId, customApiOwnerMessage, customApiVisibilitySql,
@@ -105,7 +107,7 @@ const HISTORICAL_SOURCE_LABELS = Object.freeze({
   slack: "Slack",
   notion: "Notion",
   hubspot: "HubSpot",
-  quickbooks: "QuickBooks Online",
+  quickbooks: "QuickBooks",
   plaid: "Plaid",
   custom_api: "custom business API",
   upload: "uploaded file",
@@ -734,7 +736,7 @@ export async function unchunkedTaxDocumentCandidates(env, {
 }
 
 /** Vector search over Vectorize, hydrated and filtered in D1. */
-export async function searchVector(env, embedding, { limit, filters = {}, scope = null } = {}) {
+export async function searchVector(env, embedding, { limit, filters = {}, scope = null, timing = null } = {}) {
   const topK = Math.min(limit, VECTOR_TOPK_MAX);
   const vectorFilter = await vectorFilterFor(filters);
   const hasFilter = Object.keys(vectorFilter).length > 0;
@@ -744,14 +746,14 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
   // drift. If an upgraded install is missing a metadata index, the fallback
   // widens the candidate pool before D1 narrows it.
   const query = (withFilter) =>
-    env.VECTORIZE.query(embedding, {
+    measureQueryStage(timing, "vector_query", () => env.VECTORIZE.query(embedding, {
       topK: !withFilter && hasFilter ? VECTOR_TOPK_MAX : topK,
       returnValues: false,
       // Metadata is deliberately not returned. It halves topK from 100 to 50, and
       // everything needed is in D1 anyway, keyed by the same chunk_uid.
       returnMetadata: "none",
       ...(withFilter && hasFilter ? { filter: vectorFilter } : {}),
-    });
+    }));
 
   let res;
   try {
@@ -837,7 +839,7 @@ export async function searchVector(env, embedding, { limit, filters = {}, scope 
  */
 export async function search(env, {
   query, embedding, limit = 10, filters = {}, weights = {}, rrfK = RRF_K, access = null, scope = null,
-  projectionReadiness = null, supplementalFilters = [], now = Date.now(),
+  projectionReadiness = null, supplementalFilters = [], now = Date.now(), timing = null,
 }) {
   // Refuse malformed or schema-skewed scope before the first D1 or Vectorize
   // call. If each modality caught this independently, the invalid scope could
@@ -857,17 +859,17 @@ export async function search(env, {
   const vectorEligible = Boolean(embedding) && access?.kind !== "grant" && scopeIsUnrestricted(scope);
   const hintAttemptsPromise = Promise.all(supplementalFilters.map(async (hint) => {
     const [keyword, vector] = await Promise.all([
-      settleModality(searchKeyword(env, query, { limit: pool, filters: hint, access, scope })),
+      settleModality(measureQueryStage(timing, "keyword", () => searchKeyword(env, query, { limit: pool, filters: hint, access, scope }))),
       vectorEligible
-        ? settleModality(searchVector(env, embedding, { limit: pool, filters: hint, scope }))
+        ? settleModality(measureQueryStage(timing, "vector", () => searchVector(env, embedding, { limit: pool, filters: hint, scope, timing })))
         : Promise.resolve({ attempted: false, results: [], error: null }),
     ]);
     return { keyword, vector };
   }));
   const [keywordAttempt, vectorAttempt, projection, hintAttempts] = await Promise.all([
-    settleModality(searchKeyword(env, query, { limit: pool, filters, access, scope })),
+    settleModality(measureQueryStage(timing, "keyword", () => searchKeyword(env, query, { limit: pool, filters, access, scope }))),
     vectorEligible
-      ? settleModality(searchVector(env, embedding, { limit: pool, filters, scope }))
+      ? settleModality(measureQueryStage(timing, "vector", () => searchVector(env, embedding, { limit: pool, filters, scope, timing })))
       : Promise.resolve({ attempted: false, results: [], error: null }),
     // Vectorize may return some old/current candidates while a newer accepted
     // changeset is still processing. Non-empty semantic results therefore do
@@ -876,7 +878,7 @@ export async function search(env, {
     // advertises partial projection instead of looking fully healthy.
     vectorEligible
       ? projectionReadiness === null
-        ? vectorReadiness(env).catch(() => ({ ready: false }))
+        ? measureQueryStage(timing, "projection_readiness", () => vectorReadiness(env)).catch(() => ({ ready: false }))
         : Promise.resolve(projectionReadiness)
       : Promise.resolve(null),
     hintAttemptsPromise,
@@ -891,6 +893,7 @@ export async function search(env, {
   ]
     .find((error) => memorySupersessionIntegrityFailure(error));
   if (integrityFailure) throw integrityFailure;
+  const finishAuthority = startQueryStage(timing, "authority_lineage");
   const kw = keywordAttempt.results.map(assessStoredProvenance);
   const vec = vectorAttempt.results.map(assessStoredProvenance);
   const keywordFailed = keywordAttempt.attempted && Boolean(keywordAttempt.error);
@@ -1110,6 +1113,7 @@ export async function search(env, {
     }, lineage));
   }
   await annotateLineageFamilyTokens(documents);
+  finishAuthority();
 
   return {
     results: documents.slice(0, limit),
@@ -3608,7 +3612,7 @@ function sourceOwnerRemedy(source, concern = "refresh") {
     slack: "Reconnect Slack if access has expired, then traverse every accessible channel without bounded thread limits. Removed or inaccessible conversations remain an explicit connector limitation.",
     notion: "Reconnect Notion if access has expired, share the intended pages with the integration, then traverse those pages without block limits. Pages removed from integration access remain an explicit limitation.",
     hubspot: "Reconnect HubSpot if access has expired, then capture every intended object type. Permanently deleted objects remain an explicit connector limitation.",
-    quickbooks: "Reconnect the intended QuickBooks company if access has expired, then capture every intended entity type. Deleted records remain an explicit connector limitation.",
+    quickbooks: "Reconnect the intended QuickBooks company if access has expired, then capture every intended entity type. Deleted records remain an explicit connector limitation. For QuickBooks Desktop, open QuickBooks on the connected PC so the next scheduled read can run.",
     zoom: "Reconnect Zoom if access has expired, then run a full Zoom sync with no --limit.",
     plaid: "Reconnect the intended financial institutions, resolve any account that needs attention, then run the bank sync again.",
     custom_api: "Check the custom API key and endpoint contract, then run the custom API pull again.",
@@ -7388,6 +7392,7 @@ export async function forget(env, {
   source = null,
   sourceHighWater = null,
   corpusMutationGeneration = null,
+  ingestRemovalFence = null,
   dryRun = true,
 } = {}) {
   let targets = docUids;
@@ -7477,6 +7482,7 @@ export async function forget(env, {
   // D1 first. The FTS index follows via the delete trigger, and ON DELETE
   // CASCADE removes the chunks with their document.
   const queuedAt = Date.now();
+  let removalMarker = ingestRemovalFence;
   let deletedDocuments = 0;
   let deletedChunks = 0;
   for (const group of groups) {
@@ -7485,7 +7491,14 @@ export async function forget(env, {
     const groupSources = [...new Set(documentRows
       .filter((row) => groupSet.has(row.doc_uid))
       .map((row) => row.source))];
+    const fenceStatements = removalMarker ? [env.DB.prepare(
+      `SELECT CASE WHEN EXISTS (
+         SELECT 1 FROM ingest_removal_generation
+          WHERE id=1 AND instance=?1 AND generation=?2 AND nonce=?3
+       ) THEN 1 ELSE json('ingest removal inventory changed') END AS verified`,
+    ).bind(removalMarker.instance, removalMarker.generation, removalMarker.nonce)] : [];
     const receipts = await env.DB.batch([
+      ...fenceStatements,
       env.DB.prepare(
         `INSERT INTO vector_outbox (chunk_uid, vector_id, op, queued_at, attempts, last_error)
          SELECT chunk_uid, COALESCE(vector_id, chunk_uid), 'delete', ?${group.length + 1}, 0, NULL
@@ -7510,7 +7523,17 @@ export async function forget(env, {
          ON CONFLICT(source) DO UPDATE SET
            documents=excluded.documents, chunks=excluded.chunks`
       ).bind(src)),
+      ...(removalMarker ? [env.DB.prepare(
+        "SELECT instance, nonce, generation FROM ingest_removal_generation WHERE id=1",
+      )] : []),
     ]);
+    if (removalMarker) {
+      const next = receipts.at(-1)?.results?.[0];
+      if (!next || !Number.isSafeInteger(next.generation)) throw new Error("Removal generation receipt missing");
+      removalMarker = { ...next, runtime: removalMarker.runtime };
+      receipts.shift();
+      receipts.pop();
+    }
     if (!Array.isArray(receipts) || receipts.length < 3) {
       throw new Error("the forget delete receipts were incomplete");
     }
@@ -7550,6 +7573,7 @@ export async function forget(env, {
     vectors,
     vector_cleanup_queued: deletedChunks,
     dry_run: false, vector_error: null, targets,
+    ...(removalMarker ? { ingest_removal_marker: removalMarker } : {}),
   };
 }
 
@@ -7761,48 +7785,54 @@ export async function listSourceFamilies(env, {
   };
 }
 
-/** True when `uid` is the base itself or one of its oversized `#part` slices. */
-const isStructuralFamilyMember = (uid, base) => uid === base || uid.startsWith(`${base}#part`);
+/** A prefix is only an indexed candidate lookup, never deletion authority. */
+function structuralPart(uid, base) {
+  if (!uid.startsWith(base)) return null;
+  const suffix = uid.slice(base.length);
+  const match = /^#part([1-9][0-9]*)of([1-9][0-9]*)$/.exec(suffix);
+  if (!match || match[0] !== suffix) return null;
+  const part = Number(match[1]);
+  const count = Number(match[2]);
+  // Older splitters could emit #part1of1 at the character ceiling. Its exact
+  // provenance still permits recovery, even though new writers never emit it.
+  return Number.isSafeInteger(part) && Number.isSafeInteger(count) && part <= count
+    ? { part, count } : null;
+}
+const isStructuralFamilyMember = (uid, base) => uid === base || structuralPart(uid, base) !== null;
+
+/** Shared by removal review and result proof. meta is parsed; original_id must
+ * come from a revision/content/receipt-matched authenticated binding join.
+ * A conflicting or broken binding cannot fall back to weaker mutable metadata.
+ */
+export function structuralFamilyMember(row, base, originalId) {
+  const uid = String(row.doc_uid);
+  const part = structuralPart(uid, base);
+  const source = base.slice(0, base.indexOf(":"));
+  const locator = base.slice(source.length + 1);
+  const partOf = row.meta?.part_of;
+  const metadataMatches = part && (partOf === locator || partOf === base) &&
+    (row.meta.part === undefined || row.meta.part === part.part) &&
+    (row.meta.part_count === undefined || row.meta.part_count === part.count);
+  const structural = row.source === source && (uid === base || metadataMatches);
+  const identityMatches = row.source_original_binding_hash == null ||
+    (row.original_id != null && row.original_id === originalId);
+  return Boolean(structural && identityMatches);
+}
 
 /**
- * Remove stale members of a document family after every replacement part has
- * landed. This covers all three transitions: one-to-many, many-to-one and a
- * changed part count.
+ * Reconcile only verified family members after replacements land. Structural
+ * candidates need exact part syntax and stored part_of provenance; a current
+ * authenticated binding, when present, must agree with the original identity.
+ * Declared message-export families use exact family_of membership separately:
+ * one file can become several conversations with independent message identities,
+ * so those names cannot prove which export owns them. Fully qualified family_of
+ * avoids guessing the source for those stored declarations.
  *
- * WHAT A FAMILY IS. Two different producers put many documents under one base:
- *
- *   STRUCTURAL. splitOversized slices one oversized document into
- *   `<base>#part1of3`. The base is a literal prefix of every member, so
- *   membership is readable from the name alone.
- *
- *   DECLARED. A message export (WhatsApp .txt, SMS Backup & Restore .xml,
- *   Google Voice Takeout) is one file that becomes many conversation-session
- *   documents. Those keep their own `message:<first message id>` identity so a
- *   citation still points at the conversation, which means NOTHING in their
- *   names points back at the file. They say so instead: each row carries
- *   `meta.family_of` holding the fully qualified uid of the file it came from.
- *   Fully qualified deliberately, so no source-prefixing rule has to be
- *   re-derived here and mis-derived (`listSourceFamilies` has to guess at that
- *   for the older bare `part_of` values, and this format removes the guess).
- *
- * THE INVARIANT THIS ENFORCES, and why it is at least as strong as the exact
- * `#part` prefix test it replaces:
- *
- *   Every keep_doc_uid must belong to the family named by base_doc_uid, proven
- *   either structurally OR by the stored row's own declaration.
- *
- * The delete set is (everything in the family) minus (the keep list). A keep
- * uid that is not in the family protects nothing, so a caller whose family
- * model is wrong does not merely no-op: its keep list is inert while the scope
- * is real, and cleanup deletes the very revision it was called to reconcile.
- * The old prefix test was a syntactic PROXY for "inside the scope", correct
- * only while every family was structural. It now measures the real thing:
- * anything the old test rejected is still rejected unless the stored document
- * itself declares membership, which is stronger evidence than a matching name.
- *
- * Refusing is also the only honest option, because a wrong family key cannot be
- * repaired here: the scope is derived from the base alone, so an accepted-but
- * wrong base silently reaches no member at all.
+ * A keep list outside the verified scope protects nothing. Accepting it could
+ * delete the replacement just ingested, so validate every keep list against
+ * the selected rows before the single writer, including across query batches.
+ * A matching filename alone cannot rescue a conflicting stored declaration.
+ * Legacy ambiguous rows remain stored and are reported as exclusions.
  */
 export async function forgetFamilies(env, { families = [], dryRun = true } = {}) {
   const normalized = [];
@@ -7816,11 +7846,29 @@ export async function forgetFamilies(env, { families = [], dryRun = true } = {})
     if (kind === "structural" && keep.some((uid) => !isStructuralFamilyMember(uid, base))) {
       throw new Error("each document family needs a base_doc_uid and any keep_doc_uids must belong to it");
     }
-    normalized.push({ base, keep, kind });
+    const originalId = family.original_id;
+    if (originalId !== undefined && !/^hmac-sha256:[a-f0-9]{64}$/.test(originalId)) {
+      throw new Error("family original identity is invalid");
+    }
+    normalized.push({ base, keep, kind, originalId });
   }
   if (!normalized.length) return { documents: 0, chunks: 0, vectors: 0, dry_run: dryRun, targets: [] };
 
   const stale = [];
+  const excluded = new Set();
+  const verified = new Set();
+  let signingKey;
+  const originalIdentity = async (family) => {
+    if (!family.expectedOriginalId) {
+      signingKey ??= await loadSourceOriginalSigningKey(env);
+      const colon = family.base.indexOf(":");
+      family.expectedOriginalId = await deriveSourceOriginalId(signingKey, {
+        source: family.base.slice(0, colon), locator_kind: "source_relative_path",
+        locator: family.base.slice(colon + 1),
+      });
+    }
+    return family.expectedOriginalId;
+  };
   for (let i = 0; i < normalized.length; i += 25) {
     const group = normalized.slice(i, i + 25);
     const structuralClauses = [];
@@ -7829,9 +7877,8 @@ export async function forgetFamilies(env, { families = [], dryRun = true } = {})
     for (const family of group) {
       if (family.kind !== "declared") {
         const n = binds.push(family.base);
-        // D1 rejects long LIKE/GLOB patterns. A primary-key range is exact for
-        // the structural suffix and stays indexed regardless of base length:
-        // every string beginning "#part" sorts before the next prefix "#paru".
+        // D1 rejects long LIKE/GLOB patterns. The indexed range finds all
+        // candidates; exact syntax and provenance are checked below.
         structuralClauses.push(
           `(doc_uid = ?${n}` +
           ` OR (doc_uid >= ?${n} || '#part' AND doc_uid < ?${n} || '#paru'))`
@@ -7851,45 +7898,65 @@ export async function forgetFamilies(env, { families = [], dryRun = true } = {})
     const selects = [];
     if (structuralClauses.length) {
       selects.push(
-        `SELECT doc_uid, NULL AS family_of FROM documents` +
+        `SELECT doc_uid, source, meta, source_original_binding_hash, NULL AS family_of,` +
+        ` (SELECT b.original_id FROM source_original_result_bindings b` +
+        ` WHERE b.binding_hash=documents.source_original_binding_hash` +
+        ` AND b.document_revision_id=documents.document_revision_id` +
+        ` AND b.source=documents.source AND b.tenant_id='primary'` +
+        ` AND b.locator_kind='source_relative_path'` +
+        ` AND b.document_content_hash=documents.content_hash` +
+        ` AND b.provenance_receipt_digest=documents.provenance_receipt_digest) AS original_id` +
+        ` FROM documents` +
         ` WHERE ${structuralClauses.join(" OR ")}`
       );
     }
     if (declaredClauses.length) {
       selects.push(
-        `SELECT doc_uid, json_extract(meta,'$.family_of') AS family_of` +
+        `SELECT doc_uid, source, meta, source_original_binding_hash,` +
+        ` json_extract(meta,'$.family_of') AS family_of, NULL AS original_id` +
         ` FROM documents WHERE ${declaredClauses.join(" OR ")}`
       );
     }
     const { results } = await env.DB.prepare(
       selects.join(" UNION ALL ")
     ).bind(...binds).all();
-    const rows = (results || []).map((row) => ({
-      uid: String(row.doc_uid),
-      declaredFamily: row.family_of == null ? null : String(row.family_of),
-    }));
-
-    // Validate against what the family actually contains, one family at a
-    // time, BEFORE anything is deleted. forget() below is the only mutation in
-    // this function, so a refusal here leaves every group untouched.
+    const rows = (results || []).map((row) => {
+      let meta;
+      try { meta = JSON.parse(row.meta); } catch { /* malformed provenance never authorizes deletion */ }
+      return { ...row, uid: String(row.doc_uid), meta };
+    });
+    const groupMembers = new Set();
     for (const family of group) {
-      const members = new Set(
-        rows.filter((row) => row.declaredFamily === family.base).map((row) => row.uid)
-      );
-      const stray = family.keep.filter(
-        (uid) => !isStructuralFamilyMember(uid, family.base) && !members.has(uid)
-      );
+      if (family.originalId && family.originalId !== await originalIdentity(family)) {
+        throw new Error("family original identity changed; review the exact target again");
+      }
+      const members = new Set();
+      for (const row of rows) {
+        if (family.kind !== "structural" && row.family_of === family.base) {
+          members.add(row.uid);
+          continue;
+        }
+        if (family.kind === "declared" || row.family_of !== null ||
+            (row.uid !== family.base && !row.uid.startsWith(`${family.base}#part`))) continue;
+        const expectedOriginal = row.source_original_binding_hash == null
+          ? null : await originalIdentity(family);
+        if (structuralFamilyMember(row, family.base, expectedOriginal)) members.add(row.uid);
+        else excluded.add(row.uid);
+      }
+      const existing = new Set(rows.map((row) => row.uid));
+      const stray = family.keep.filter((uid) => !members.has(uid) &&
+        (existing.has(uid) || family.kind === "declared" || !isStructuralFamilyMember(uid, family.base)));
       if (stray.length) {
-        // Deliberately no uid in the message: this reaches an HTTP response,
-        // and a doc_uid carries a file path.
+        // No identity in errors: this crosses an owner-visible HTTP boundary.
         throw new Error("each document family needs a base_doc_uid and any keep_doc_uids must belong to it");
       }
+      for (const uid of members) { groupMembers.add(uid); verified.add(uid); }
     }
-
     const keep = new Set(group.flatMap((family) => family.keep));
-    stale.push(...rows.map((row) => row.uid).filter((uid) => !keep.has(uid)));
+    stale.push(...[...groupMembers].filter((uid) => !keep.has(uid)));
   }
-  return forget(env, { docUids: [...new Set(stale)], dryRun });
+  const result = await forget(env, { docUids: [...new Set(stale)], dryRun });
+  return { ...result, excluded_documents: [...excluded].filter(uid => !verified.has(uid)).length };
 }
 
 async function requireVectorRetryStateTable(env) {

@@ -60,6 +60,17 @@ It gives the same five answers for every problem: what happened, what stayed
 protected, whether retrying is safe, what to try next, and when a technician
 can help. The longer entries below add the provider-specific detail.
 
+For `PROVENANCE_TARGET_REPAIR_INCOMPLETE`, the one-file repair could not verify
+its complete result. Nothing was lost. Accepted progress is saved and the
+original file is unchanged. Run a new read-only preview before retrying. If
+documents were preserved because their family membership could not be verified,
+review them with support. The message reports counts without private paths or
+document identities. Get the next step with:
+
+```
+brain support --explain PROVENANCE_TARGET_REPAIR_INCOMPLETE
+```
+
 **The one command that answers "is it broken":**
 
 ```
@@ -749,8 +760,14 @@ possible causes, and the owner action depends on which one the message names:
 
 1. **The cleanup plan crossed 100 documents or 10% of what the source had
    loaded.** Nothing in the plan was removed, and the source cursor was not
-   advanced. Review the aggregate reason counts. If the change is expected,
-   rerun with the exact `--approve-removals <fingerprint>` value it printed. If
+   advanced. Review the printed "X of Y stored documents (Z%)" ratio and
+   "Aggregate reasons" counts for source policy, source deletion, and intentional
+   skips. Provider workload reviews also show "from N stored families" for the
+   affected workload. If the change is expected,
+   run the exact printed `--apply-removals <fingerprint>` command, including
+   its `--from` selector when shown, `--source`, and additional
+   `--approve-removals <fingerprint>` value. Replace `<manifest>` with the same
+   manifest used for that ingest. If
    it is surprising, do not approve it. Check the connection and source policy,
    then rerun so a fresh comparison produces a new plan.
 2. **Drive stopped returning an item.** A bare 404 is never deletion evidence,
@@ -766,13 +783,15 @@ possible causes, and the owner action depends on which one the message names:
    least seven days apart can create a deletion candidate. The local and server
    clocks must agree within 24 hours. If a private inventory response has no
    valid server time, that run warns and keeps syncing, but its absence
-   observation cannot advance this proof. That later approval stop shows the locally
-   saved name and folder, using the Brain's stored document inventory if local
-   ingest state no longer has them. If either label is still missing, the item
+   observation cannot advance this proof. That later approval stop lists each
+   eligible item as `- name (folder: ...)`, using locally saved labels or the
+   Brain's stored document inventory if local ingest state no longer has them.
+   If either label is still missing, the item
    is listed as `label_unavailable`, remains protected and retained, and cannot
    enter an approval fingerprint or deletion plan. The completed cursor still
-   advances. Review the displayed labels, then use the exact fingerprint within
-   24 hours only if the owner expects deletion. Nothing is deleted until that
+   advances. Review the displayed labels, then run the exact printed
+   `--apply-removals` command with its additional `--approve-removals` value
+   within 24 hours only if the owner expects deletion. Nothing is deleted until that
    exact approval, and the review record clears only after deletion readback.
 3. **Drive found the item under a reviewed folder after the completed walk
    omitted it.** The message says `present on Drive under a reviewed folder; retained because the completed walk omitted it.` The indexed copy
@@ -783,6 +802,18 @@ possible causes, and the owner action depends on which one the message names:
    The indexed copy remains in place and outside every deletion plan. Restore
    this credential's access to the file, then rerun Drive ingestion. There is no
    deletion approval to give for this stop.
+5. **Stored documents planned for removal could not be verified.** Those rows
+   remain stored, and this run cannot produce an exact apply approval. An old
+   removal checkpoint alone does not cause this refusal: verifiable legacy rows
+   still enter the ordinary review plan. Repeating ingestion while the stored
+   membership remains unverifiable will stop again. Keep the checkpoint and ask
+   for technician review using `brain support --explain SAFETY_REVIEW_REQUIRED`.
+   This release has no owner command that reviews and removes only those
+   unverifiable rows. `brain forget <manifest> --source <source>` previews the
+   whole source, and `--yes` removes that whole source; it is a separate,
+   broader decision. One-file provenance repair covers an accessible registered
+   local upload, not an absent remote item. Do not clear checkpoint markers or
+   remove rows directly to make the review pass.
 
 When Drive completed the walk and saved its cursor, protected 403, 404,
 temporary, grace-window, clock, and missing-label states warn but exit
