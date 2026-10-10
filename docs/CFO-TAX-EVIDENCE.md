@@ -46,9 +46,19 @@ string, decoded exactly without trimming or case folding, limited to 256
 characters and excluding control characters. Cash and Books currently return
 unavailable placeholders. They cannot fall through to generic retrieval.
 Unsupported or compound requests to check tax readiness, review books or show a
-cash brief ask for scoped clarification. Mentioning the CFO role or one of those
-topics in a document question does not invoke a workflow. For example, asking
-what the CFO decided about a project keeps the existing Ask behavior. Extra
+cash brief ask for scoped clarification before retrieving evidence or calling a
+model. This includes polite requests such as “Can you please check tax readiness
+for 2025?”, “Run tax readiness for 2025.”, and actions after a comma, such as
+“For 2025, check tax readiness.” These variants do not expand the supported
+whole-question grammar above, and clarification returns no evidence snippets.
+
+Mentioning the CFO role or one of those topics in a document question does not
+invoke a workflow. Quoted titles and reported commands, including compound
+commands inside straight quotes, curly quotes or backticks, retain normal
+document retrieval. For example, `Find the note titled "Check tax readiness for
+2025; review books".` searches documents. An action outside the quotation still
+requires clarification. Quote handling never rewrites an opaque Books account
+reference in a supported question. Extra
 source, category, platform, folder and date filters are refused for CFO requests.
 
 ## What the checklist means
