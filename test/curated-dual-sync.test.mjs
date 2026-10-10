@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   utimesSync,
@@ -23,12 +24,12 @@ import {
   loadCuratedSyncPlan,
   prepareCuratedCorpus,
   readStableRegularSource,
-  runCuratedDualSync,
+  runCuratedDualSync as runCuratedSync,
   validateCuratedSyncPlan,
   writeCuratedCoverageLedger,
 } from "../operations/curated-dual-sync.mjs";
 
-const sandbox = mkdtempSync(join(tmpdir(), "brain-curated-dual-sync-"));
+const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-curated-dual-sync-")));
 const corpus = join(sandbox, "corpus");
 const stateFile = join(sandbox, ".brain-ingest-drive.json");
 const ledgerFile = join(sandbox, ".brain-curated-sync-ledger.json");
@@ -101,6 +102,22 @@ function plan(overrides = {}) {
     ledger_file: ".brain-curated-sync-ledger.json",
     ...overrides,
   };
+}
+
+// Existing fixtures model writes and family inventory; revision verification
+// is a separate authenticated read. Its adversarial storage cases live in
+// curated-cloudflare-only.test.mjs and do not alter these write counters.
+function runCuratedDualSync(input, options) {
+  if (!options?.fetch) return runCuratedSync(input, options);
+  return runCuratedSync(input, { ...options, fetch: (url, args) => {
+    if (new URL(url).pathname === "/api/admin/brain/curated-verify") {
+      const envelope = JSON.parse(args.body);
+      const document = prepareCuratedCorpus(input, options).documents
+        .find(item => item.cloudflareEnvelope.source_id === envelope.source_id);
+      return response(200, { confirmed: true, doc_uid: `curated:${envelope.source_id}`, envelope_sha256: document.envelopeHash });
+    }
+    return options.fetch(url, args);
+  } });
 }
 
 function response(status, body) {

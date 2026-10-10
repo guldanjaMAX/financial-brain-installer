@@ -16,6 +16,7 @@ the brain, not for whoever built it: what changed for them, and what to check.
   receive an explicit update request when an inventory needs multiple work
   pages; daily imports still run if freshness cannot yet be verified.
 - Curated collections can sync to Cloudflare alone after retiring a legacy target; preview the local counts, reinstall the daily schedule, and check freshness after the next successful run.
+- Curated collections can sync to Cloudflare alone after retiring a legacy target; preview counts and unresolved removals, reinstall the daily schedule, and check freshness after stored revisions are verified.
 
 ## 0.4.11 (2026-10-09)
 
