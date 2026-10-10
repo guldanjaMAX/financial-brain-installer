@@ -15,6 +15,11 @@ the brain, not for whoever built it: what changed for them, and what to check.
   different versions. Long refresh histories are read in pages. Older clients
   receive an explicit update request when an inventory needs multiple work
   pages; daily imports still run if freshness cannot yet be verified.
+- Gmail retries temporary storage finalization failures, including D1 CPU
+  resets. Messages still failing after bounded retries stay in a private retry
+  list while newer mail advances. Each run reports how many are held for retry;
+  existing held messages keep the source incomplete without repeating a new
+  failure exit. Check that the held count returns to zero after recovery.
 
 ## 0.4.11 (2026-10-09)
 
