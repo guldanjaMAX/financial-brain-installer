@@ -268,6 +268,16 @@ list or walk
   -> advance a remote cursor only after the run is complete
 ```
 
+Gmail can also advance after every failed stored part is covered by a durable
+logical-message retry identity. It retries those identities before new mail,
+including during reset and full sweeps, and clears them only through the
+existing acceptance or typed source-policy decisions. Temporary finalization
+failures have a shared five-attempt budget. The private per-source retry list
+stores ids only; the receipt stays incomplete until it is empty. A newly held
+failure exits nonzero, while an unchanged backlog reports its held count.
+Other source cursors and removal approval boundaries retain their existing
+rules.
+
 Local OCR planning stops before the mutating half of this lifecycle. `brain
 ocr-preflight <manifest> --path <folder> --json` runs the same link-refusing
 walker and PDF extraction boundary with an explicit null OCR callback. The PDF
