@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, realpathSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -873,7 +874,7 @@ function refusingEnv(db, error) {
   const prepare = env.DB.prepare.bind(env.DB);
   env.DB = {
     prepare(sql) {
-      if (/WITH live_documents/.test(sql)) throw error;
+      if (/live_documents AS MATERIALIZED/.test(sql)) throw error;
       return prepare(sql);
     },
     async batch() { throw new Error("source inventory must never execute a write batch"); },
@@ -1128,3 +1129,418 @@ for (const arm of [
     } finally {db.close();}
   });
 }
+
+test("bounded inventory transport reaches indexed pages and matches the complete control", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const { env, seen } = d1Env(db);
+  const response = await call(env, post({ mode: "bounded", limit: 2 }, { "X-Admin-Key": env.ADMIN_KEY }));
+  assert.equal(response.status, 200);
+  const page = await response.json();
+  assert.equal(page.kind, "source_inventory_scan");
+  assert.equal(page.scan.scanned, 2);
+  assert.equal(page.truncated, true);
+  assert.ok(seen.prepared.some((sql) => sql.includes("inventory_document_page AS MATERIALIZED")), "bounded decision reached");
+  assert.equal(seen.runs, 0);
+  db.close();
+});
+
+test("bounded transport and CLI preserve exact family counts across pages and detect mutation", async () => {
+  const { collectSourceInventoryPages } = await import("../../brain.mjs");
+  const { sourceInventorySlice } = await import("../src/lib/store-d1.js");
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  // An assessed family member on a later page must not count a second family.
+  db.exec(`INSERT INTO documents (doc_uid,source,source_id,title,ingested_at,content_hash,meta,
+    text_source,text_reliable,provenance_receipt_version,provenance_receipt_status,
+    provenance_receipt_reason,provenance_receipt_digest)
+    SELECT 'alpha:two#part2',source,source_id||'#part2',title,ingested_at,content_hash,meta,text_source,
+    text_reliable,provenance_receipt_version,provenance_receipt_status,provenance_receipt_reason,
+    provenance_receipt_digest FROM documents WHERE doc_uid='alpha:two'`);
+  const { env } = d1Env(db);
+  let reached = 0; const progress = [];
+  const request = async (body) => { reached++; return call(env, post({ ...body, limit: 2 }, { "X-Admin-Key": env.ADMIN_KEY })); };
+  const result = await collectSourceInventoryPages(request, { bounded: true, onProgress: (p) => progress.push(p) });
+  const control = await sourceInventorySlice(env, { now: Date.parse(result.as_of), documentPage: { after: 0, limit: 5000 } });
+  assert.deepEqual(result.sources, control.rows);
+  assert.equal(result.sources.find((row) => row.name === "alpha").storage.logical_documents, 2);
+  assert.equal(result.sources.find((row) => row.name === "alpha").storage.physical_documents, 3);
+  assert.equal(reached, 3, "every work page reached the real Worker");
+  assert.equal(progress.at(-1).scanned, 5);
+  assert.doesNotMatch(JSON.stringify(result), /hmac-sha256|alpha:two|part2/);
+  const first = await (await request({ mode: "bounded" })).json();
+  db.exec("UPDATE documents SET text_reliable=0 WHERE doc_uid='alpha:one'");
+  const changed = await request({ mode: "bounded", cursor: first.cursor });
+  assert.equal(changed.status, 409, "same-count mutation refuses the next page");
+  assert.equal(reached, 5, "mutation decision reached after the green control");
+  db.close();
+});
+
+test("large fake D1 rejects whole-corpus JSON work but executes indexed bounded pages", async () => {
+  const { collectSourceInventoryPages } = await import("../../brain.mjs");
+  const { sourceInventorySql } = await import("../src/lib/store-d1.js");
+  const db = migratedDb();
+  db.exec(`INSERT INTO sources (name,kind,status,created_at) VALUES ('archive','drive','ready','2026-01-01');
+    WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<200001)
+    INSERT INTO documents (doc_uid,source,source_id,title,ingested_at,content_hash,meta)
+      SELECT 'archive:'||i,'archive',CAST(i AS TEXT),'Synthetic',1,'fixture','{}' FROM n`);
+  const { env, seen } = d1Env(db);
+  const prepare = env.DB.prepare;
+  let decision = 0, rejected = 0, bounded = 0;
+  env.DB.prepare = (sql) => {
+    if (sql.includes("live_documents AS MATERIALIZED")) {
+      decision++;
+      if (!sql.includes("inventory_document_page AS MATERIALIZED")) {
+        rejected++;
+        throw new Error("D1_ERROR: D1 DB exceeded its CPU time limit and was reset");
+      }
+      bounded++;
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(10001, 0, 5000, 0, 0);
+      assert.ok(plan.some((row) => /SEARCH documents USING INTEGER PRIMARY KEY \(rowid>\?\)/.test(row.detail)), "document range uses the rowid B-tree");
+      assert.ok(plan.some((row) => /SEARCH chunks USING INDEX idx_chunks_doc/.test(row.detail)), "chunks use document index seeks");
+    }
+    return prepare(sql);
+  };
+  assert.throws(() => env.DB.prepare(sourceInventorySql()), /CPU time limit/);
+  assert.equal(rejected, 1, "whole-corpus mutation reached CPU refusal");
+  let requests = 0;
+  const result = await collectSourceInventoryPages(async (body) => {
+    requests++;
+    return call(env, post(body, { "X-Admin-Key": env.ADMIN_KEY }));
+  }, { bounded: true });
+  assert.equal(result.sources[0].storage.physical_documents, 200001);
+  assert.equal(result.sources[0].storage.logical_documents, 200001);
+  assert.equal(requests, 41);
+  assert.equal(bounded, 41);
+  assert.equal(decision, 42, "control and every page reached the CPU decision");
+  assert.equal(seen.runs, 0);
+  assert.equal(seen.batches, 0);
+  db.close();
+});
+
+test("daily freshness reads receipts without visiting corpus rows", async () => {
+  const db = migratedDb();
+  await addInventoryFixture(db);
+  const { env, seen } = d1Env(db);
+  const prepare = env.DB.prepare; const documentBounds = [];
+  env.DB.prepare = (sql) => {
+    const statement = prepare(sql);
+    if (!sql.includes("live_documents AS MATERIALIZED")) return statement;
+    return { ...statement, bind: (...args) => {
+      documentBounds.push(args[2]); return statement.bind(...args);
+    } };
+  };
+  const response = await call(env, post({ mode: "freshness" }, { "X-Admin-Key": env.ADMIN_KEY }));
+  assert.equal(response.status, 200);
+  const receipt = await response.json();
+  assert.equal(receipt.kind, "source_freshness");
+  assert.equal(receipt.sources.length, 2, "both registered source decisions reached");
+  assert.equal(receipt.sources.find((row) => row.name === "alpha").receipt.latest_run.outcome, "completed");
+  assert.equal(receipt.sources.find((row) => row.name === "beta").receipt.latest_run.outcome, "failed");
+  assert.ok(seen.prepared.some((sql) => /inventory_document_page AS MATERIALIZED/.test(sql)), "bounded reader reached");
+  assert.ok(receipt.sources.every((row) => !('storage' in row)), "receipt-only mode cannot misrepresent zero storage");
+  assert.deepEqual(documentBounds, [0], "the actual SQL bind visits zero corpus rows");
+  assert.equal(seen.runs, 0);
+  db.close();
+});
+
+test("bounded inventory shrinks dense pages and refuses a receipt-only mutation", async () => {
+  const { sourceInventoryScanPage } = await import("../src/lib/source-inventory-scan.js");
+  const db = migratedDb(); await addInventoryFixture(db);
+  const { env } = d1Env(db); const prepare = env.DB.prepare;
+  let limits = [];
+  env.DB.prepare = (sql) => {
+    if (sql.includes("LIMIT 50001")) return { bind: (_after, limit) => ({ first: async () => {
+      limits.push(limit); return { n: limit > 2 ? 50001 : 2 };
+    } }) };
+    return prepare(sql);
+  };
+  const page = await sourceInventoryScanPage(env, { limit: 4, now: Date.parse("2026-10-01T00:00:00Z") });
+  assert.deepEqual(limits, [4, 2], "the chunk budget decision reduced the page");
+  assert.equal(page.scan.scanned, 2);
+  assert.equal(page.scan.limit, 2);
+  const before = db.prepare("SELECT source_original_retrieval_generation AS n FROM install_state").get().n;
+  db.exec("UPDATE sync_runs SET docs_added=7 WHERE source='alpha'");
+  assert.equal(db.prepare("SELECT source_original_retrieval_generation AS n FROM install_state").get().n, before,
+    "this mutation must exercise the receipt fence independently of the document fence");
+  await assert.rejects(() => sourceInventoryScanPage(env, { after: page.scan.through, snapshot: page.snapshot }),
+    { code: "source_inventory_changed" });
+  assert.equal(limits.length, 2, "changed receipt refused before another document scan");
+  db.close();
+});
+
+// Frozen base handler exercises the actual old request parser during updates.
+async function baseInventoryHandler() {
+  const source = readFileSync(join(HERE, "fixtures/source-inventory-v3-api.txt"), "utf8")
+    .replace(/from "\.\/([^"\n]+)"/g, (_, name) => `from "${new URL(`../src/lib/${name}`, import.meta.url).href}"`);
+  return (await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`)).handleSourceInventoryApi;
+}
+
+test("R1 new collector negotiates with the real base Worker parser", async () => {
+  const { collectSourceInventoryPages } = await import("../../brain.mjs");
+  const handler = await baseInventoryHandler();
+  const db = migratedDb(); await addInventoryFixture(db);
+  const { env } = d1Env(db); const requests = [];
+  const request = (body) => { requests.push(body); return handler(env, post(body, { "X-Admin-Key": env.ADMIN_KEY })); };
+  const control = await collectSourceInventoryPages(request);
+  assert.equal(control.total, 3);
+  requests.length = 0;
+  const actual = await collectSourceInventoryPages(request, { bounded: true });
+  assert.deepEqual(actual.sources, control.sources);
+  assert.deepEqual(requests, [{ mode: "bounded", limit: 5000 }, { limit: 250 }], "unsupported mode decision reached exactly once");
+  db.close();
+});
+
+test("R2 historical receipts are work pages, never a lifetime inventory limit", async () => {
+  const { collectSourceInventoryPages } = await import("../../brain.mjs");
+  const db = migratedDb(); await addInventoryFixture(db);
+  const { env, seen } = d1Env(db); let requests = 0;
+  const request = (body) => { requests++; return call(env, post(body, { "X-Admin-Key": env.ADMIN_KEY })); };
+  const control = await collectSourceInventoryPages(request, { bounded: true });
+  assert.equal(control.sources.find(r => r.name === "alpha").receipt.latest_run.outcome, "completed");
+  db.exec(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<65537)
+    INSERT INTO source_events (source_name,event,at) SELECT 'alpha','schedule','2026-09-01' FROM n;
+    WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<65537)
+    INSERT INTO sync_runs (run_id,source,lane,started_at,finished_at,error)
+      SELECT 'old-'||i,'alpha','manual',i,i,'synthetic failure' FROM n;
+    WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<65537)
+    INSERT INTO custom_api_jobs (job_id,source,fetched_at,status,next_slice,total_slices,job_hash,response_hashes_json,stats_json,created_at,verified_at)
+      SELECT 'job-'||i,'archive','2026-01-01','verified',0,0,printf('%064d',0),'{}','{}','2026-01-01','2026-01-01' FROM n`);
+  requests = 0;
+  const actual = await collectSourceInventoryPages(request, { bounded: true });
+  assert.equal(actual.sources.find(r => r.name === "alpha").receipt.last_successful_run_at,
+    control.sources.find(r => r.name === "alpha").receipt.last_successful_run_at);
+  assert.ok(requests > 1, "historical receipts reached continuation decisions");
+  assert.equal(seen.runs + seen.batches, 0, "paging history is read-only");
+  db.close();
+});
+
+test("R3 bounded mode preserves the schema-44 small inventory compatibility path", async () => {
+  const { collectSourceInventoryPages } = await import("../../brain.mjs");
+  const db = migratedDb("schema44", { throughMigration: 44 }); await addInventoryFixture(db);
+  const { env, seen } = d1Env(db);
+  const request = body => call(env, post(body, { "X-Admin-Key": env.ADMIN_KEY }));
+  const control = await collectSourceInventoryPages(request);
+  assert.equal(control.total, 3);
+  const actual = await collectSourceInventoryPages(request, { bounded: true });
+  assert.deepEqual(actual.sources, control.sources);
+  assert.ok(seen.prepared.some(sql => sql.includes("source_original_retrieval_generation")), "missing-fence decision reached");
+  const freshness = await request({ mode: "freshness" });
+  assert.equal(freshness.status, 200);
+  assert.equal((await freshness.json()).sources.length, 2);
+  db.close();
+});
+
+test("R4 legacy inventory refuses excess work before the per-request D1 quota", async () => {
+  const db = migratedDb(); await addInventoryFixture(db);
+  const { env } = d1Env(db); const prepare = env.DB.prepare;
+  let statements = 0, quotaRefusals = 0;
+  env.DB.prepare = sql => {
+    if (++statements > 1000) { quotaRefusals++; throw new Error("D1 request query quota exceeded"); }
+    return prepare(sql);
+  };
+  const control = await call(env, post({}, { "X-Admin-Key": env.ADMIN_KEY }));
+  assert.equal(control.status, 200);
+  db.exec(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<315001)
+    INSERT INTO documents (doc_uid,source,source_id,title,ingested_at,content_hash,deleted_at)
+      SELECT 'archive:'||i,'archive',CAST(i AS TEXT),'Synthetic',1,'fixture',1 FROM n`);
+  statements = 0;
+  const response = await call(env, post({}, { "X-Admin-Key": env.ADMIN_KEY }));
+  const body = await response.json();
+  assert.equal(response.status, 503);
+  assert.equal(body.code, "source_inventory_upgrade_required");
+  assert.ok(statements > 0 && statements < 100, "legacy work decision reached within one bounded page");
+  assert.equal(quotaRefusals, 0);
+  const { collectSourceInventoryPages } = await import("../../brain.mjs");
+  let requests = 0, peak = 0;
+  const bounded = await collectSourceInventoryPages(async body => {
+    statements = 0; requests++;
+    const response = await call(env, post(body, { "X-Admin-Key": env.ADMIN_KEY }));
+    peak = Math.max(peak, statements);
+    return response;
+  }, { bounded: true });
+  assert.equal(bounded.sources.find(row => row.name === "alpha").storage.physical_documents, 2);
+  assert.equal(requests, 64, "the same large corpus completes over separate bounded requests");
+  assert.ok(peak < 30); assert.equal(quotaRefusals, 0);
+  db.close();
+});
+
+
+test("R1 negotiation never downgrades an auth, outage, snapshot, or generic request failure", async () => {
+  const { collectSourceInventoryPages } = await import("../../brain.mjs");
+  const statuses = [400, 401, 403, 409, 503];
+  for (const status of statuses) {
+    let reached = 0;
+    await assert.rejects(() => collectSourceInventoryPages(async () => {
+      reached++;
+      return Response.json({ error: "unavailable" }, { status });
+    }, { bounded: true }));
+    assert.equal(reached, 1, "failed response reached the downgrade decision without a fallback request");
+  }
+});
+
+test("R1 mixed-version daily run executes eligible work with unknown freshness", async () => {
+  const { readSourceFreshness } = await import("../../brain.mjs");
+  const { runDailyRefresh } = await import("../../operations/daily-refresh-run.mjs");
+  const base = await baseInventoryHandler();
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "daily-inventory-")));
+  const manifest = join(root, "brain.manifest.json");
+  const keyFile = join(root, "admin-key");
+  writeFileSync(manifest, JSON.stringify({ brain: { domain: "brain.invalid" } }));
+  writeFileSync(keyFile, "test-admin-key", { mode: 0o600 });
+  try {
+    const outcomes = [];
+    for (const oldWorker of [false, true]) {
+      const db = migratedDb(); await addInventoryFixture(db);
+      db.exec(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<5001)
+        INSERT INTO source_events (source_name,event,at) SELECT 'alpha','schedule','2026-09-01' FROM n`);
+      const { env } = d1Env(db);
+      let requests = 0, legs = 0, locks = 0;
+      const result = await runDailyRefresh({
+        plan: { ready: true, enabled: true, identity: { id: "fixture" }, max_runtime_minutes: 45,
+          sources: [
+            { key: "alpha", class: "machine-pull", owner: "daily-task", status: "ready", run_key: "drive", source_names: ["alpha"] },
+            { key: "held", class: "machine-pull", owner: "daily-task", status: "skipped", run_key: "held" },
+          ] },
+        acquireLock: () => ({ assertOwned: () => { locks++; return true; }, release: () => {} }),
+        readFreshness: async () => {
+          const inventory = await readSourceFreshness(manifest, {
+            resolveAdminKey: () => readFileSync(keyFile, "utf8"),
+            fetchImpl: async (url, init) => {
+              requests++;
+              return (oldWorker ? base : (env, request) => call(env, request))(env, new Request(url, init));
+            },
+          });
+          return Object.fromEntries(inventory.sources.map(row => [row.name, { last_successful_run_at: row.receipt.last_successful_run_at }]));
+        },
+        runSource: async source => {
+          legs++; assert.equal(source.key, "alpha");
+          db.exec("UPDATE sync_runs SET finished_at=finished_at+60000 WHERE source='alpha'");
+          return { status: "complete" };
+        },
+        writeReceipt: () => {}, now: () => new Date("2026-10-01T00:00:00Z"),
+      });
+      assert.equal(legs, 1); assert.equal(requests, oldWorker ? 2 : 4); assert.ok(locks > 0);
+      const imported = result.sources.find(row => row.source === "alpha");
+      assert.equal(result.sources.find(row => row.source === "held").status, "skipped");
+      assert.equal(imported.freshness_advanced, !oldWorker);
+      if (oldWorker) assert.equal(imported.reason_code, "source_inventory_unavailable");
+      outcomes.push(imported.status);
+      db.close();
+    }
+    assert.deepEqual(outcomes, ["complete", "unavailable"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("R2 receipt pages preserve successful history and retirement while bounding SQL work", async () => {
+  const { collectBoundedInventory } = await import("../../operations/source-inventory-pages.mjs");
+  const db = migratedDb(); await addInventoryFixture(db);
+  db.exec(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<12001)
+    INSERT INTO source_events (source_name,event,at) SELECT 'alpha','schedule','2026-09-01' FROM n;
+    INSERT INTO source_events (source_name,event,at) VALUES ('beta','retired','2026-09-04');
+    WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<12001)
+    INSERT INTO sync_runs (run_id,source,lane,started_at,finished_at,error)
+      SELECT 'recent-failure-'||i,'alpha','manual',2000000000000+i,2000000000000+i,'fixture failure' FROM n`);
+  const { env } = d1Env(db); const prepare = env.DB.prepare;
+  let pages = 0, cpuDecisions = 0, cpuRefusals = 0, queryCount = 0, peakQueries = 0;
+  env.DB.prepare = sql => {
+    peakQueries = Math.max(peakQueries, ++queryCount);
+    if (sql.includes("source_events_rollup AS")) {
+      cpuDecisions++;
+      if (!sql.includes("inventory_event_page AS MATERIALIZED") || !sql.includes("inventory_run_page AS MATERIALIZED")) {
+        cpuRefusals++; throw new Error("D1_ERROR: receipt history exceeded its CPU time limit");
+      }
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(10001, 0, 0, 0, 0);
+      assert.ok(plan.some(row => /SEARCH source_events USING INTEGER PRIMARY KEY/.test(row.detail)));
+      assert.ok(plan.some(row => /SEARCH sync_runs USING INTEGER PRIMARY KEY/.test(row.detail)));
+      assert.ok(plan.some(row => /SEARCH sync_runs USING (?:COVERING )?INDEX idx_sync_runs_source/.test(row.detail)));
+    }
+    return prepare(sql);
+  };
+  const request = body => { pages++; queryCount = 0; return call(env, post(body, { "X-Admin-Key": env.ADMIN_KEY })); };
+  const { sourceInventorySql } = await import("../src/lib/store-d1.js");
+  assert.throws(() => env.DB.prepare(sourceInventorySql({ bounded: true })), /CPU time limit/);
+  assert.equal(cpuRefusals, 1, "the whole-history mutation reached the CPU decision");
+  const first = await (await request({ mode: "freshness" })).json();
+  assert.equal(first.kind, "source_freshness_scan");
+  const result = await collectBoundedInventory(first, request, { now: () => 0 });
+  assert.equal(result.kind, "source_freshness");
+  assert.equal(result.sources.find(row => row.name === "alpha").receipt.latest_run.outcome, "failed");
+  assert.equal(result.sources.find(row => row.name === "alpha").receipt.last_successful_run_at, "2026-09-09T00:01:00.000Z");
+  assert.equal(result.sources.find(row => row.name === "beta").freshness.state, "manual");
+  assert.equal(pages, 3); assert.equal(cpuDecisions, 4); assert.ok(peakQueries < 30);
+  assert.ok(result.sources.every(row => !("storage" in row)));
+  db.close();
+});
+
+
+test("R2 retired source coverage agrees with the complete compatibility reader", async () => {
+  const { sourceInventorySlice } = await import("../src/lib/store-d1.js");
+  const { collectSourceInventoryPages } = await import("../../brain.mjs");
+  const db = migratedDb(); await addInventoryFixture(db);
+  db.exec("INSERT INTO source_events (source_name,event,at) VALUES ('alpha','retired','2026-09-10')");
+  const { env } = d1Env(db); let requests = 0;
+  const result = await collectSourceInventoryPages(body => {
+    requests++; return call(env, post({ ...body, limit: 2 }, { "X-Admin-Key": env.ADMIN_KEY }));
+  }, { bounded: true });
+  const control = await sourceInventorySlice(env, { now: Date.parse(result.as_of) });
+  assert.equal(requests, 3, "retirement merged after all physical pages");
+  assert.equal(result.sources[0].freshness.state, "manual");
+  assert.deepEqual(result.sources, control.rows);
+  db.close();
+});
+
+
+test("R2 event append fences a historical run completion between work pages", async () => {
+  const outcomes = [];
+  for (const mutate of [false, true]) {
+    const db = migratedDb(); await addInventoryFixture(db);
+    const { env, seen } = d1Env(db);
+    const first = await (await call(env, post({ mode: "bounded", limit: 2 }, { "X-Admin-Key": env.ADMIN_KEY }))).json();
+    assert.equal(first.complete, false);
+    if (mutate) db.exec(`UPDATE sync_runs SET finished_at=finished_at+60000 WHERE source='beta';
+      INSERT INTO source_events (source_name,event,at) VALUES ('beta','ingest','2026-09-11')`);
+    const scansBefore = seen.prepared.filter(sql => sql.includes("inventory_document_page AS MATERIALIZED")).length;
+    const response = await call(env, post({ mode: "bounded", limit: 2, cursor: first.cursor }, { "X-Admin-Key": env.ADMIN_KEY }));
+    outcomes.push(response.status);
+    if (mutate) {
+      assert.equal((await response.json()).code, "source_inventory_changed");
+      assert.equal(seen.prepared.filter(sql => sql.includes("inventory_document_page AS MATERIALIZED")).length, scansBefore,
+        "changed high-water mark refused continuation before another document scan");
+    }
+    assert.ok(scansBefore > 0, "both arms reached and accepted their first work page");
+    db.close();
+  }
+  assert.deepEqual(outcomes, [200, 409]);
+});
+
+test("R2 latest-run ordering bounds an equal-start group independently of history age", async () => {
+  const db = migratedDb(); await addInventoryFixture(db);
+  const { env, seen } = d1Env(db);
+  db.exec(`INSERT INTO sync_runs (run_id,source,lane,started_at,finished_at,error)
+    VALUES ('tied-a','alpha','manual',2000000000000,2000000000001,NULL),
+           ('tied-z','alpha','manual',2000000000000,2000000000001,'fixture failure')`);
+  const control = await call(env, post({ mode: "freshness" }, { "X-Admin-Key": env.ADMIN_KEY }));
+  assert.equal(control.status, 200);
+  assert.equal((await control.json()).sources.find(row => row.name === "alpha").receipt.latest_run.outcome, "failed");
+  db.exec(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<5001)
+    INSERT INTO sync_runs (run_id,source,lane,started_at) SELECT 'tie-'||i,'alpha','manual',2000000000000 FROM n`);
+  const refused = await call(env, post({ mode: "freshness" }, { "X-Admin-Key": env.ADMIN_KEY }));
+  assert.equal(refused.status, 503);
+  assert.ok(seen.prepared.filter(sql => sql.includes("LIMIT 5001)) AS candidates")).length >= 3,
+    "control and overflow reached the bounded tied-head query");
+  db.close();
+});
+
+test("R2 forgotten-source history cannot grow the retirement accumulator", async () => {
+  const db = migratedDb(); await addInventoryFixture(db);
+  db.exec("INSERT INTO source_events (source_name,event,at) VALUES ('forgotten','retired','2026-09-10'),('alpha','retired','2026-09-11')");
+  const { env } = d1Env(db);
+  const response = await call(env, post({ mode: "bounded" }, { "X-Admin-Key": env.ADMIN_KEY }));
+  const page = await response.json();
+  assert.equal(response.status, 200);
+  assert.ok(page.retirements.some(entry => entry[0] === "alpha"), "registered retirement decision reached");
+  assert.ok(page.retirements.every(entry => page.sources.some(row => row.registered && row.name === entry[0])),
+    "discarded source history is irrelevant to the current registry");
+  db.close();
+});

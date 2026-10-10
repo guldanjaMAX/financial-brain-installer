@@ -429,21 +429,23 @@ test("retirement queries preserve insertion order without sorting multi-source e
       plan.map((row) => String(row.detail || "")).join("\n"),
     );
 
-    await sourceInventory(fixture.env, { now: NOW });
-    const inventoryRetirementSql = fixture.seen.sql.find((sql) =>
-      /SELECT s\.name AS source_name/.test(sql) && /retired_at/.test(sql));
+    const inventory = await sourceInventory(fixture.env, { now: NOW });
+    assert.equal(inventory.rows.find(row => row.name === "archive-2026").freshness.state, "manual");
+    assert.doesNotMatch(String(inventory.rows.find(row => row.name === "archive-2025").freshness.reason), /retired by the owner/);
+    const inventoryRetirementSql = fixture.seen.sql.find(sql =>
+      /WITH events AS MATERIALIZED/.test(sql) && /retired_at/.test(sql));
     assert.ok(inventoryRetirementSql, "the inventory retirement companion read must run");
-    const inventoryPlan = fixture.rows(`EXPLAIN QUERY PLAN ${inventoryRetirementSql}`);
-    const inventoryEventSteps = inventoryPlan.map((row) => String(row.detail || ""))
-      .filter((detail) => /source_events/.test(detail));
-    assert.ok(inventoryEventSteps.some((detail) =>
-      /SEARCH .* USING INDEX idx_source_events_source/.test(detail)), inventoryEventSteps.join("\n"));
-    assert.equal(inventoryEventSteps.some((detail) => /SCAN .*source_events/.test(detail)), false);
-    assert.equal(
-      inventoryPlan.some((row) => /USE TEMP B-TREE/i.test(String(row.detail || ""))),
-      false,
-      inventoryPlan.map((row) => String(row.detail || "")).join("\n"),
-    );
+    assert.match(inventoryRetirementSql, /WHERE id > \?1 ORDER BY id LIMIT 5000/,
+      "grouping and insertion-order comparison operate only on a bounded event page");
+    const inventoryPlan = fixture.rows(`EXPLAIN QUERY PLAN ${inventoryRetirementSql}`, 0);
+    const inventoryEventSteps = inventoryPlan.map(row => String(row.detail || ""))
+      .filter(detail => /source_events/.test(detail));
+    assert.ok(inventoryEventSteps.some(detail =>
+      /SEARCH source_events USING INTEGER PRIMARY KEY/.test(detail)), inventoryEventSteps.join("\n"));
+    assert.equal(inventoryEventSteps.some(detail => /SCAN .*source_events/.test(detail)), false);
+    // The old whole-history companion needed no grouping. The replacement
+    // groups only the materialized 5,000-event page, never the history table.
+    assert.ok(inventoryPlan.some(row => /MATERIALIZE events/.test(row.detail)));
   } finally {
     fixture.close();
   }
