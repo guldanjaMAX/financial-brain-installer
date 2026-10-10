@@ -2380,6 +2380,104 @@ for (const [platform, path] of [['mac', MAC], ['windows', WINDOWS]]) {
 }
 
 
+function windowsLogCreation(source, kind) {
+  const start = kind === 'directory' ? 'var security = new DirectorySecurity();' : 'var security = new FileSecurity();';
+  const end = kind === 'directory' ? 'Directory.CreateDirectory(current, security);' : 'FileOptions.None, security)) { }';
+  const offset = source.indexOf(start);
+  assert.notEqual(offset, -1, `${kind} security descriptor reached`);
+  const finish = source.indexOf(end, offset);
+  assert.ok(finish > offset, `${kind} creation with the descriptor reached`);
+  return source.slice(offset, finish + end.length);
+}
+
+function assertWindowsLogAccess(source, kind) {
+  const block = windowsLogCreation(source, kind);
+  assert.match(block, /security\.SetOwner\(WindowsIdentity\.GetCurrent\(\)\.User\)/);
+  const inheritance = kind === 'directory'
+    ? String.raw`InheritanceFlags\.ContainerInherit \| InheritanceFlags\.ObjectInherit,\s*PropagationFlags\.None,\s*` : '';
+  assert.match(block, new RegExp(String.raw`security\.AddAccessRule\(new FileSystemAccessRule\(WindowsIdentity\.GetCurrent\(\)\.User,\s*FileSystemRights\.FullControl,\s*${inheritance}AccessControlType\.Allow\)\)`),
+    `${kind} owner needs an explicit grant; setting ownership alone leaves an empty DACL`);
+  assert.match(block, /security\.SetAccessRuleProtection\(true, false\)/);
+}
+
+for (const kind of ['directory', 'file']) {
+  test(`Windows diagnostic ACL grants the owner access before creating a ${kind}`, () => {
+    assertWindowsLogAccess(readFileSync(WINDOWS, 'utf8'), kind);
+  });
+
+  test(`Windows diagnostic ACL ${kind} mutations cannot remove owner access`, (context) => {
+    const source = readFileSync(WINDOWS, 'utf8');
+    assertWindowsLogAccess(source, kind);
+    const block = windowsLogCreation(source, kind);
+    const targets = ['security.SetOwner(WindowsIdentity.GetCurrent().User)',
+      'security.SetAccessRuleProtection(true, false)', 'security.AddAccessRule',
+      'FileSystemRights.FullControl', 'AccessControlType.Allow'];
+    if (kind === 'directory') targets.push('InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit', 'PropagationFlags.None');
+    for (const target of targets) {
+      assert.ok(block.includes(target), 'mutation reaches the actual creation descriptor');
+      const mutant = source.replace(block, block.replace(target, 'MUTATED'));
+      assert.throws(() => assertWindowsLogAccess(mutant, kind), undefined, `${kind}: mutation survived`);
+    }
+    context.diagnostic(`log_acl_static_mutations_killed=${targets.length}`);
+  });
+}
+
+test('Windows diagnostic ACL permits repeated I/O and immediate cleanup while PowerShell is still running',
+  { skip: process.platform !== 'win32', timeout: 300_000 }, (context) => {
+    const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-log-access-')));
+    const home = join(directory, 'home');
+    mkdirSync(join(home, 'temp'), { recursive: true });
+    const wrapper = join(directory, 'probe.ps1');
+    const source = readFileSync(WINDOWS, 'utf8').replaceAll('\r\n', '\n');
+    context.diagnostic(`copied_source_sha256=${createHash('sha256').update(readFileSync(WINDOWS)).digest('hex')}`);
+    writeFileSync(wrapper, `
+      $ErrorActionPreference = 'Stop'
+      ${functionBody(source, 'function Initialize-NpmLogIO', '\n# Windows PowerShell 5.1')}
+      Initialize-NpmLogIO
+      $directory = Join-Path $env:LOCALAPPDATA 'FinancialBrainMachinePrep'
+      $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+      function Assert-OwnerAccess([string]$Path, [bool]$Inherited) {
+        $acl = Get-Acl -LiteralPath $Path
+        # Default file ownership can be the Administrators group on hosted CI;
+        # directories and prep.log explicitly bind their owner even there.
+        if (-not $Inherited -and -not $acl.GetOwner([Security.Principal.SecurityIdentifier]).Equals($user)) { throw 'Owner mismatch' }
+        $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+        if ($rules.Count -ne 1 -or -not $rules[0].IdentityReference.Equals($user) -or
+            $rules[0].AccessControlType -ne 'Allow' -or $rules[0].FileSystemRights -ne 'FullControl' -or
+            $rules[0].IsInherited -ne $Inherited) { throw 'Owner access rule mismatch' }
+      }
+      # WriteNew exercises directory creation independently of prep.log creation.
+      Write-Output 'LOG_DIRECTORY_CREATE_REACHED=1'
+      $first = [MachinePrepLogIO]::WriteNew($directory, 'first-debug')
+      Assert-OwnerAccess $directory $false
+      Assert-OwnerAccess (Join-Path $directory $first) $true
+      Write-Output 'LOG_FILE_CREATE_REACHED=1'
+      [MachinePrepLogIO]::Append($directory, 'first-line;')
+      [MachinePrepLogIO]::Append($directory, 'second-line')
+      Assert-OwnerAccess (Join-Path $directory 'prep.log') $false
+      $second = [MachinePrepLogIO]::WriteNew($directory, 'second-debug')
+      if ($first -eq $second) { throw 'Debug file overwritten' }
+      if ([IO.File]::ReadAllText((Join-Path $directory 'prep.log')) -ne 'first-line;second-line') { throw 'Append failed' }
+      if ([IO.File]::ReadAllText((Join-Path $directory $first)) -ne 'first-debug') { throw 'First debug file changed' }
+      if ([IO.File]::ReadAllText((Join-Path $directory $second)) -ne 'second-debug') { throw 'Second debug file missing' }
+      if ([IO.Directory]::GetFiles($directory).Length -ne 3) { throw 'Unexpected file count' }
+      # No GC, sleep, ACL repair or process exit may be needed to release handles.
+      [IO.Directory]::Move($directory, ($directory + '-moved'))
+      [IO.Directory]::Delete(($directory + '-moved'), $true)
+      Write-Output 'LOG_OWNER_IO_AND_CLEANUP=1'
+    `);
+    try {
+      const result = runWindowsScratch(wrapper, [], home, { timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS });
+      assert.ifError(result.error);
+      assert.equal(result.signal, null, 'PowerShell exited without being killed');
+      assert.equal(result.status, 0, combined(result));
+      assert.match(combined(result), /LOG_DIRECTORY_CREATE_REACHED=1/);
+      assert.match(combined(result), /LOG_FILE_CREATE_REACHED=1/);
+      assert.match(combined(result), /LOG_OWNER_IO_AND_CLEANUP=1/);
+      assert.deepEqual(readdirSync(join(home, 'local')), [], 'cleanup completed inside the running child');
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
 for (const scenario of ['logs-link', 'cache-link', 'leaf-link', 'destination-link', 'destination-existing', 'log-dir-link', 'regular']) {
   test(`Windows npm evidence boundary: ${scenario}`, { skip: process.platform !== 'win32', timeout: 300_000 }, () => {
     const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-win-evidence-')));
@@ -2412,6 +2510,9 @@ for (const scenario of ['logs-link', 'cache-link', 'leaf-link', 'destination-lin
       $dir = ${quote(logDir)}
       $security = [Security.AccessControl.DirectorySecurity]::new()
       $security.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User)
+      $security.SetAccessRuleProtection($true, $false)
+      $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        [Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
       [IO.Directory]::CreateDirectory($dir, $security) | Out-Null
       & ${quote(WINDOWS)} @args
     `);
