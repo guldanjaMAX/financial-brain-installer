@@ -11,8 +11,9 @@ the brain, not for whoever built it: what changed for them, and what to check.
   unavailable reads, unreliable extraction and missing review steps. Tax amounts
   and filing readiness are not checked; verify the selected entity and year
   before reviewing originals. Unsupported polite or compound workflow requests
-  ask for clarification without returning evidence amounts. Quoted workflow
-  titles in document questions remain searchable.
+  ask for clarification without returning evidence amounts, including requests
+  to run quoted commands. Workflow titles and reported instructions in document
+  questions remain searchable.
 
 ## 0.4.11 (2026-10-09)
 
