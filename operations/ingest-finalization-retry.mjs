@@ -12,10 +12,15 @@ const transientResponse = (res, raw) => {
   try { return transientD1Failure(JSON.parse(raw)?.error); } catch { return false; }
 };
 
+// Share this allowance across all batches in one source run. Each batch still
+// gets its first attempt, so a held prefix cannot spend a fresh backoff window
+// per group before new mail gets a turn. Four retries add at most 30s of sleep.
+export const createIngestFinalizationRetryBudget = () => ({ remaining: 4 });
+
 /**
  * Retry only unresolved members, preserving every exact accepted receipt.
  * The caller supplies a single-attempt idempotent POST and its normal receipt
- * validator. One shared budget bounds HTTP, transport and finalization retries.
+ * validator and the run's shared HTTP, transport and finalization retry budget.
  * Exhaustion is a failed receipt, never invented acceptance: the Gmail runner
  * must durably retain the logical identities before advancing its cursor.
  */
@@ -23,6 +28,7 @@ export async function retryIngestFinalization({
   docs, send, validate, assertOwned = () => {},
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   onRetry = () => {},
+  retryBudget = createIngestFinalizationRetryBudget(),
 }) {
   let pending = docs;
   const settled = new Map();
@@ -52,6 +58,8 @@ export async function retryIngestFinalization({
     }
     if (pending.length === 0) break;
     if (attempt < attempts) {
+      if (retryBudget.remaining <= 0) break;
+      retryBudget.remaining--;
       onRetry(attempt, attempts - 1);
       await sleep(2000 * (2 ** (attempt - 1)));
     }
