@@ -4,6 +4,17 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.12 (unreleased)
+
+- If an update loses the reply to its pause request, it now warns that new
+  documents may be blocked. Check `brain health` before retrying.
+- An unconfirmed database change now asks for installer review. It no longer
+  claims the provider is still working when delivery was never proved.
+- Updates save and verify the rollback bookmark on this computer before
+  deployment or migration starts. It survives an interrupted update, including
+  one stopped without an error message. Keep the private
+  `~/.brain/upgrade-bookmarks/` receipts for recovery review.
+
 ## 0.4.11 (2026-10-09)
 
 Candidate only. This version has not been released. The changes below still

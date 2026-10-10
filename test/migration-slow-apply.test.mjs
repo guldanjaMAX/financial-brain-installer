@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -86,7 +86,7 @@ function tableInfo(present = false, type = "TEXT") {
 }
 
 test("cmdMigrate waits for one slow 0044 column and sends its ALTER once", async () => {
-  const sandbox = mkdtempSync(join(tmpdir(), "migration-slow-command-"));
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "migration-slow-command-")));
   try {
     const manifestPath = join(sandbox, "brain.manifest.json");
     writeFileSync(manifestPath, JSON.stringify({
@@ -148,8 +148,8 @@ test("cmdMigrate waits for one slow 0044 column and sends its ALTER once", async
     database.close();
     assert.equal(scriptedPolls.length, 0);
     assert.ok(calls.some((call) => /INSERT INTO schema_migrations/.test(call.sql) && call.params[0] === 44));
-    assert.ok(lines.some((line) => /still applying a large database change/i.test(line)));
-    assert.ok(lines.some((line) => /still applying \(20 ms so far\)/i.test(line)));
+    assert.ok(lines.some((line) => /unconfirmed database change|database change is unconfirmed/i.test(line)));
+    assert.ok(lines.some((line) => /column still absent \(20 ms so far\)/i.test(line)));
     assert.ok(lines.some((line) => /could not check yet; trying again in 10 ms/i.test(line)));
     assert.ok(lines.some((line) => /finished adding chunks\.bound_document_revision_id/i.test(line)));
     assert.doesNotMatch(lines.join("\n"), /VPN|network|timed out/i);
@@ -159,7 +159,7 @@ test("cmdMigrate waits for one slow 0044 column and sends its ALTER once", async
 });
 
 test("every shipped ADD COLUMN recovers when the request times out after commit", async (t) => {
-  const directory = mkdtempSync(join(tmpdir(), "migration-all-intents-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "migration-all-intents-")));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const migrationStatements = readdirSync(MIGRATIONS)
     .filter((name) => /^\d{4}_.+\.sql$/.test(name))
@@ -350,7 +350,7 @@ test("a deadline with no successful wait read reports network uncertainty", asyn
   assert.equal(inspections, 4);
   assert.equal(alters, 1);
   assert.equal(lines.filter((line) => /could not check yet; trying again in 10 ms/i.test(line)).length, 3);
-  assert.equal(lines.filter((line) => /^still applying/i.test(line)).length, 0);
+  assert.equal(lines.filter((line) => /^column still absent/i.test(line)).length, 0);
   const updateError = await capturedUpgradeFailure(error);
   assert.equal(updateError.supportCode, "NETWORK_UNREACHABLE");
   assert.match(updateError.message, /PRAGMA table_info\(chunks\)/);
@@ -384,11 +384,11 @@ test("a slow ADD COLUMN deadline has a stable support code and bounded polls", a
   assert.equal(error?.supportCode, "MIGRATION_STILL_APPLYING");
   assert.equal(error?.cause, firstFailure);
   assert.equal(supportErrorCode(error, { command: "update" }), "MIGRATION_STILL_APPLYING");
-  assert.match(error?.message || "", /still applying a large database change/i);
+  assert.match(error?.message || "", /unconfirmed database change|database change is unconfirmed/i);
   assert.match(error?.message || "", /chunks\.bound_document_revision_id/);
-  assert.match(error?.message || "", /Nothing was lost and nothing needs undoing/);
-  assert.match(error?.message || "", /wait about 10 minutes/i);
-  assert.ok((error?.message || "").includes(renderCliCommands("brain update")));
+  assert.match(error?.message || "", /does not prove whether the change was delivered or is running/);
+  assert.match(error?.message || "", /installer must review/i);
+  assert.match(error?.message || "", /will not resend.*without proof/);
   assert.doesNotMatch(error?.message || "", /timed out|VPN|proxy|connection|network/i);
   assert.equal(polls, 3);
 });
@@ -452,8 +452,8 @@ test("a rerun sends the ALTER once after a successful absent-column pre-check", 
 test("slow migration support guidance matches the bounded retry contract", () => {
   const recovery = supportRecovery("MIGRATION_STILL_APPLYING");
   assert.equal(recovery.retry, "safe_after_step");
-  assert.match(recovery.title, /still applying a database change/i);
-  assert.ok(recovery.next_steps.some((step) => /wait about 10 minutes/i.test(step)));
+  assert.match(recovery.title, /database change is unconfirmed/i);
+  assert.ok(recovery.next_steps.some((step) => /installer.*review.*intent/i.test(step)));
   for (const platform of ["darwin", "win32"]) {
     assert.ok(recovery.next_steps.some((step) => renderCliCommands(step, { platform }).includes(
       renderCliCommands("brain update once more", { platform }),
@@ -607,7 +607,7 @@ test("a normally completed ALTER keeps the existing zero-poll path", async () =>
 });
 
 test("only migration statements receive the longer request timeout", async () => {
-  const sandbox = mkdtempSync(join(tmpdir(), "migration-timeout-option-"));
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "migration-timeout-option-")));
   try {
     const manifestPath = join(sandbox, "brain.manifest.json");
     writeFileSync(manifestPath, JSON.stringify({
@@ -676,7 +676,7 @@ function upgradeManifest() {
 }
 
 async function capturedUpgradeFailure(migrationError, { paused = false, onMigrate = () => {} } = {}) {
-  const sandbox = mkdtempSync(join(tmpdir(), "migration-upgrade-message-"));
+  const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "migration-upgrade-message-")));
   try {
     const manifestPath = join(sandbox, "brain.manifest.json");
     const manifest = upgradeManifest();
@@ -723,7 +723,7 @@ test("update preserves slow-migration wording and typed support code", async () 
   assert.equal(error?.supportCode, "MIGRATION_STILL_APPLYING");
   for (const platform of ["darwin", "win32"]) {
     assert.ok(renderCliCommands(error?.message || "", { platform }).startsWith(
-      renderCliCommands("Cloudflare is still applying a large database change. Your Brain is working normally. Nothing was lost. Wait about 10 minutes, then run brain update once more.", { platform }),
+      renderCliCommands("The database change is unconfirmed. Ask your installer to review the saved migration intent and exact database state before retrying.", { platform }),
     ));
   }
   assert.match(error?.message || "", /For your installer:/);
@@ -749,7 +749,7 @@ test("update says documents remain paused only after the pause was installed", a
   assert.equal(error?.supportCode, "MIGRATION_STILL_APPLYING");
   for (const platform of ["darwin", "win32"]) {
     assert.ok(renderCliCommands(error?.message || "", { platform }).startsWith(
-      renderCliCommands("Cloudflare is still applying a large database change. Your Brain can still answer questions but won't take new documents until the update finishes. Nothing was lost. Wait about 10 minutes, then run brain update once more.", { platform }),
+      renderCliCommands("The database change is unconfirmed. Your Brain may still be paused and unable to take new documents. Ask your installer to review the saved migration intent and exact database state before retrying.", { platform }),
     ));
   }
 });
@@ -820,7 +820,7 @@ for (const slow of [false, true]) {
 for (const version of [49, 50]) {
   for (const ambiguous of [false, true]) {
     test(`cmdMigrate covers migration ${version}, ambiguous=${ambiguous}`, async () => {
-      const sandbox = mkdtempSync(join(tmpdir(), 'migration-latest-'));
+      const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), 'migration-latest-')));
       const database = new DatabaseSync(':memory:');
       const migrations = readdirSync(MIGRATIONS).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
       const applied = [];
@@ -924,7 +924,7 @@ for(const arm of ['verified-restart-control','interrupted-ambiguous-restart']) {
 }
 
 test("durable intent is scoped exactly and survives the before-dispatch interruption window", async (t) => {
-  const directory = mkdtempSync(join(tmpdir(), "migration-intent-scope-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "migration-intent-scope-")));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const scope = { directory, accountId: "fixture-account", databaseId: "fixture-db", migrationChecksum: "checksum-one" };
   const first = createMigrationStatementIntentStore(scope);
@@ -963,7 +963,7 @@ test("durable intent is scoped exactly and survives the before-dispatch interrup
 
 for (const arm of ["healthy", "non-delivery", "outage", "incompatible", "corrupt"]) {
   test(`durable intent recovery ${arm}`, async (t) => {
-    const directory = mkdtempSync(join(tmpdir(), "migration-intent-recovery-"));
+    const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "migration-intent-recovery-")));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
     const scope = { directory, accountId: "fixture-account", databaseId: "fixture-db", migrationChecksum: "checksum" };
     let sends = 0, reads = 0, completions = 0;
@@ -1017,7 +1017,7 @@ for (const arm of ["healthy", "non-delivery", "outage", "incompatible", "corrupt
 }
 
 test("cmdMigrate restart keeps ambiguous 0044 pending until exact schema proof, then completes every later migration", async (t) => {
-  const directory = mkdtempSync(join(tmpdir(), "migration-command-restart-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "migration-command-restart-")));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const database = new DatabaseSync(":memory:");
   t.after(() => database.close());

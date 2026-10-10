@@ -722,6 +722,7 @@ On Windows, use:
 ```
 
 The update verifies the Cloudflare account, requires a D1 restore bookmark,
+saves and verifies a private receipt under `~/.brain/upgrade-bookmarks/`,
 and deploys a temporary paused Worker. Before waiting for older Worker requests
 or applying any migration, one authenticated documents response must bind the
 exact new Worker version,
