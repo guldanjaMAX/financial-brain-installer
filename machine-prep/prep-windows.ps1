@@ -348,9 +348,8 @@ function Test-BrainKit([string]$File) {
 }
 
 function Write-Log([string]$Message) {
-  [IO.Directory]::CreateDirectory($LogDir) | Out-Null
   $stamp = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTimeOffset]::UtcNow, "US Mountain Standard Time").ToString("yyyy-MM-ddTHH:mm:sszzz")
-  [IO.File]::AppendAllText($LogFile, "$stamp $Message`r`n")
+  [MachinePrepLogIO]::Append($LogDir, "$stamp $Message`r`n")
 }
 
 function Add-UserPath([string[]]$Directories) {
@@ -422,18 +421,261 @@ function Wait-RedirectedProcess([Diagnostics.Process]$Process) {
   $stderrTask = $Process.StandardError.ReadToEndAsync()
   $Process.WaitForExit()
   [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdoutTask, $stderrTask))
+  return [pscustomobject]@{ ExitCode = [int]$Process.ExitCode; Output = $stdoutTask.Result; Errors = $stderrTask.Result }
+}
+
+# npm can echo config, argv and authenticated URLs. Keep the same conservative
+# redaction as macOS, including when retaining the full newest debug log.
+function Protect-NpmOutput([string]$Text) {
+  $lines = foreach ($line in ($Text -split "`r?`n")) {
+    $safe = $line -replace '\x1b\[[0-9;]*[A-Za-z]', '' -replace '[\x00-\x1f\x7f]', ''
+    $safe = $safe -replace '//[^/\s]*@', '//[REDACTED]@'
+    $safe = $safe -replace '[?#][^\s"<>]*', '[REDACTED]'
+    if ($safe -match 'auth|token|password|passwd|secret|credential|bearer|api[ _-]?key|npm_[a-z0-9]{16,}|gh[pousr]_[a-z0-9]+|github_pat_|eyj[a-z0-9_-]+\.') { $safe = '[REDACTED]' }
+    $safe
+  }
+  return [string]::Join("`r`n", [string[]]$lines)
+}
+
+# Keep every directory handle open without FILE_SHARE_DELETE until I/O ends.
+# OPEN_REPARSE_POINT checks the object itself, so a junction at any level or a
+# swapped leaf cannot redirect diagnostic reads/writes outside the attempt.
+function Initialize-NpmLogIO {
+  if ('MachinePrepLogIO' -as [type]) { return }
+  Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using Microsoft.Win32.SafeHandles;
+public static class MachinePrepLogIO {
+  [StructLayout(LayoutKind.Sequential)] struct Info {
+    public uint Attributes; public System.Runtime.InteropServices.ComTypes.FILETIME Created, Accessed, Written;
+    public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+  }
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint mode, uint flags, IntPtr template);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file, out Info info);
+  [DllImport("kernel32.dll")] static extern uint GetFileType(SafeFileHandle file);
+  static SafeFileHandle Open(string path, bool directory, bool write) {
+    // OPEN_EXISTING for append preserves bytes; all new leaves use CreateNew.
+    var h = CreateFile(path, directory ? 0x80u : (write ? 0x40000000u : 0x80000000u), directory ? 3u : 1u,
+      IntPtr.Zero, 3u, 0x00200000u | (directory ? 0x02000000u : 0u), IntPtr.Zero);
+    Info i;
+    if (h.IsInvalid || !GetFileInformationByHandle(h, out i) || (i.Attributes & 0x400) != 0 ||
+        ((i.Attributes & 0x10) != 0) != directory || (!directory && (GetFileType(h) != 1 || i.Links != 1))) {
+      h.Dispose(); throw new IOException("Unsafe diagnostic path");
+    }
+    return h;
+  }
+  sealed class Directories : IDisposable {
+    readonly List<SafeFileHandle> held = new List<SafeFileHandle>();
+    public Directories(string path, bool create, bool owner) {
+      try {
+        path = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(path);
+        if (root.Length != 3 || root[1] != ':') throw new IOException("Local log directory required");
+        var current = root;
+        held.Add(Open(current, true, false));
+        foreach (var part in path.Substring(root.Length).Split(new char[] { '\\' }, StringSplitOptions.RemoveEmptyEntries)) {
+          current = Path.Combine(current, part);
+          if (create && !Directory.Exists(current)) {
+            var security = new DirectorySecurity(); security.SetOwner(WindowsIdentity.GetCurrent().User);
+            Directory.CreateDirectory(current, security);
+          }
+          held.Add(Open(current, true, false));
+        }
+        if (owner && !Directory.GetAccessControl(path).GetOwner(typeof(SecurityIdentifier)).Equals(WindowsIdentity.GetCurrent().User))
+          throw new IOException("Log directory owner mismatch");
+      } catch { Dispose(); throw; }
+    }
+    public void Dispose() { for (int n = held.Count - 1; n >= 0; n--) held[n].Dispose(); }
+  }
+  public static string ReadNewest(string attempt) {
+    // The fixed child components establish containment, not a textual prefix.
+    using (var dirs = new Directories(Path.Combine(attempt, "npm-cache", "_logs"), false, false)) {
+      FileStream newest = null; DateTime stamp = DateTime.MinValue;
+      try {
+        foreach (var name in Directory.GetFiles(Path.Combine(attempt, "npm-cache", "_logs"), "*.log")) {
+          FileStream file;
+          try { file = new FileStream(Open(name, false, false), FileAccess.Read); } catch (IOException) { continue; }
+          var time = File.GetLastWriteTimeUtc(name);
+          if (newest == null || time > stamp) { if (newest != null) newest.Dispose(); newest = file; stamp = time; }
+          else file.Dispose();
+        }
+        if (newest == null) return null;
+        using (var reader = new StreamReader(newest)) { return reader.ReadToEnd(); }
+      } finally { if (newest != null) newest.Dispose(); }
+    }
+  }
+  public static string WriteNew(string directory, string text) {
+    using (var dirs = new Directories(directory, true, true)) {
+      var name = "npm-debug-" + Guid.NewGuid().ToString("N") + ".log";
+      using (var file = new FileStream(Path.Combine(directory, name), FileMode.CreateNew, FileAccess.Write, FileShare.None))
+      using (var writer = new StreamWriter(file)) { writer.Write(text); }
+      return name;
+    }
+  }
+  public static void Append(string directory, string text) {
+    using (var dirs = new Directories(directory, true, true)) {
+      var path = Path.Combine(directory, "prep.log");
+      if (!File.Exists(path)) {
+        var security = new FileSecurity(); security.SetOwner(WindowsIdentity.GetCurrent().User);
+        using (var created = new FileStream(path, FileMode.CreateNew, FileSystemRights.Write, FileShare.None, 4096, FileOptions.None, security)) { }
+      }
+      using (var file = new FileStream(Open(path, false, true), FileAccess.Write)) {
+        if (!File.GetAccessControl(path).GetOwner(typeof(SecurityIdentifier)).Equals(WindowsIdentity.GetCurrent().User))
+          throw new IOException("Log file owner mismatch");
+        file.Seek(0, SeekOrigin.End);
+        using (var writer = new StreamWriter(file)) { writer.Write(text); }
+      }
+    }
+  }
+}
+'@
+}
+
+# Windows PowerShell 5.1 lacks ArgumentList. Use CRT argv quoting for a direct
+# executable, including trailing backslashes; no command shell expands % or !.
+function ConvertTo-NativeArgument([string]$Value) {
+  return '"' + [regex]::Replace([regex]::Replace($Value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1') + '"'
+}
+
+function Test-StandardNpmShim([string]$Text) {
+  # Checked against npm 11.8.0 and 11.9.0 bin/npm.cmd. Recognize the whole
+  # standard structure, not a target substring that a forwarding shim can keep.
+  # Blank lines, comments, case and indentation may vary; extra commands cannot.
+  $lines = @($Text -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^(::|REM(?:\s|$))[^&|<>^%!\x00-\x1f]*$' })
+  $patterns = @(
+    '^@?ECHO\s+OFF$'
+    '^SETLOCAL$'
+    '^SET\s+"NODE_EXE=%~dp0\\node\.exe"$'
+    '^IF\s+NOT\s+EXIST\s+"%NODE_EXE%"\s+\($'
+    '^SET\s+"NODE_EXE=node"$'
+    '^\)$'
+    '^SET\s+"NPM_PREFIX_JS=%~dp0\\node_modules\\npm\\bin\\npm-prefix\.js"$'
+    '^SET\s+"NPM_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npm-cli\.js"$'
+    '^FOR\s+/F\s+"delims="\s+%%F\s+IN\s+\(\x27CALL\s+"%NODE_EXE%"\s+"%NPM_PREFIX_JS%"\x27\)\s+DO\s+\($'
+    '^SET\s+"NPM_PREFIX_NPM_CLI_JS=%%F\\node_modules\\npm\\bin\\npm-cli\.js"$'
+    '^\)$'
+    '^IF\s+EXIST\s+"%NPM_PREFIX_NPM_CLI_JS%"\s+\($'
+    '^SET\s+"NPM_CLI_JS=%NPM_PREFIX_NPM_CLI_JS%"$'
+    '^\)$'
+    '^"%NODE_EXE%"\s+"%NPM_CLI_JS%"\s+%\*$'
+  )
+  if ($lines.Count -ne $patterns.Count) { return $false }
+  for ($i = 0; $i -lt $patterns.Count; $i++) {
+    if ($lines[$i] -notmatch $patterns[$i]) { return $false }
+  }
+  return $true
+}
+
+function Resolve-StandardNpmRuntime([string]$Npm) {
+  $directory = Split-Path -Parent $Npm
+  $runtime = [pscustomobject]@{
+    Supported = $false
+    Node = Join-Path $directory 'node.exe'
+    NpmCli = Join-Path $directory 'node_modules\npm\bin\npm-cli.js'
+  }
+  try {
+    if ([IO.Path]::GetFileName($Npm) -ine 'npm.cmd') { return $runtime }
+    foreach ($path in @($Npm, $runtime.Node, $runtime.NpmCli)) {
+      $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+      if ($item -isnot [IO.FileInfo] -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $runtime }
+    }
+    if (-not (Test-StandardNpmShim ([IO.File]::ReadAllText($Npm)))) { return $runtime }
+    $runtime.Supported = $true
+  } catch { return $runtime }
+  return $runtime
+}
+
+function Write-NpmFailure($Result, [Diagnostics.ProcessStartInfo]$Info, [string]$Npm, [string]$Temp, $Runtime) {
+  Initialize-NpmLogIO
+  Write-Log "npm_exit_code=$($Result.ExitCode)"
+  foreach ($stream in @(@{ Name = 'stdout'; Text = $Result.Output }, @{ Name = 'stderr'; Text = $Result.Errors })) {
+    if ($stream.Text) {
+      $lines = ([regex]::Replace($stream.Text, '\r?\n\z', '') -split "`r?`n") | Select-Object -Last 40
+      foreach ($line in $lines) {
+        $safe = Protect-NpmOutput $line
+        [MachinePrepLogIO]::Append($LogDir, "$($stream.Name): $safe`r`n")
+      }
+    }
+  }
+  # Version probes may create their own debug logs. Retain the install's newest
+  # log first, before Install-Brain's finally removes the owned temporary tree.
+  $debug = $null
+  try { $debug = [MachinePrepLogIO]::ReadNewest($Temp) } catch { $debug = $null }
+  if ($null -ne $debug) {
+    $safe = Protect-NpmOutput $debug
+    $name = [MachinePrepLogIO]::WriteNew($LogDir, $safe)
+    Write-Log "npm_debug_log=saved file=$name"
+  } else {
+    Write-Log 'npm_debug_log=unavailable'
+  }
+  Write-Log (Protect-NpmOutput "npm_selected=$Npm")
+  Write-Log (Protect-NpmOutput "npm_candidate_node=$($Runtime.Node)")
+  Write-Log (Protect-NpmOutput "npm_candidate_entry_point=$($Runtime.NpmCli)")
+  $npmCli = if ($Runtime.Supported) { $Runtime.NpmCli } else { 'unavailable' }
+  Write-Log (Protect-NpmOutput "npm_entry_point=$npmCli")
+  # An unsupported shim must not trigger the guessed adjacent npm, even for a
+  # diagnostic version probe. Candidate paths above explain the refusal.
+  if (-not $Runtime.Supported) { return }
+  $installArguments = $Info.Arguments
+  $installExecutable = $Info.FileName
+  try {
+    # Reuse the exact isolated PATH and execute every probe without cmd.
+    $where = Join-Path $env:SystemRoot 'System32\where.exe'
+    foreach ($probe in @(
+      @{ Name = 'npm_path'; File = $where; Arguments = 'npm.cmd' },
+      @{ Name = 'node_path'; File = $where; Arguments = 'node.exe' },
+      @{ Name = 'node_version'; File = $installExecutable; Arguments = '--version' },
+      @{ Name = 'npm_version'; File = $installExecutable; Arguments = ((ConvertTo-NativeArgument $npmCli) + ' --version') }
+    )) {
+      $Info.FileName = $probe.File
+      $Info.Arguments = $probe.Arguments
+      $value = 'unavailable'
+      try {
+        $child = [Diagnostics.Process]::Start($Info)
+        try { $observed = Wait-RedirectedProcess $child } finally { $child.Dispose() }
+        if ($observed.ExitCode -eq 0) { $value = $observed.Output.TrimEnd("`r", "`n") }
+      } catch { $value = 'unavailable' }
+      Write-Log (Protect-NpmOutput "$($probe.Name)=$value")
+    }
+  } finally { $Info.FileName = $installExecutable; $Info.Arguments = $installArguments }
+}
+
+function Show-NpmFailure($Result) {
+  $text = "$($Result.Output)`n$($Result.Errors)"
+  if ($text -match 'unsupported npm layout') {
+    [Console]::Error.WriteLine("Financial Brain setup needs the standard Node.js install (npm next to node.exe). This PC uses a different npm setup. For help, send Financial Brain support this log: $LogFile")
+    return
+  }
+  $reason = 'an unclassified npm error'
+  if ($text -match 'node.*(not recognized|not found|no such file)|cannot find.*node') {
+    $reason = 'npm could not find Node.js'
+  } elseif ($text -match 'ENOTCACHED') {
+    $reason = 'a package was not in the offline cache (ENOTCACHED)'
+  } elseif ($text -match 'EACCES|EPERM|EAI_AGAIN|ENOTFOUND|ECONN|ETIMEDOUT|network|permission') {
+    $reason = 'a network or permission error'
+  }
+  [Console]::Error.WriteLine("Financial Brain CLI install failed: $reason. For help, send Financial Brain support this log: $LogFile")
 }
 
 function Invoke-IsolatedNpm([string]$Npm, [string]$Prefix, [string]$Archive, [string]$Temp) {
   $cmd = Join-Path $env:SystemRoot "System32\cmd.exe"
   $info = [Diagnostics.ProcessStartInfo]::new()
-  $info.FileName = $cmd
+  $runtime = Resolve-StandardNpmRuntime $Npm
+  $node = $runtime.Node
+  $npmCli = $runtime.NpmCli
+  $info.FileName = $node
   $info.UseShellExecute = $false
   $info.CreateNoWindow = $true
   $info.RedirectStandardOutput = $true
   $info.RedirectStandardError = $true
-  $quoted = @($Npm, $Prefix, $Archive) | ForEach-Object { '"' + $_.Replace('"', '""') + '"' }
-  $info.Arguments = "/d /s /c `"`"$($quoted[0])`" install --global --offline --ignore-scripts --no-audit --no-fund --prefix $($quoted[1]) $($quoted[2])`""
+  $info.Arguments = (@($npmCli, 'install', '--global', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', $Prefix, $Archive) |
+    ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' '
   $info.EnvironmentVariables.Clear()
   foreach ($pair in @{
     SystemRoot = $env:SystemRoot; ComSpec = $cmd; USERPROFILE = $PrepHome; HOME = $PrepHome
@@ -443,12 +685,25 @@ function Invoke-IsolatedNpm([string]$Npm, [string]$Prefix, [string]$Archive, [st
   }.GetEnumerator()) { $info.EnvironmentVariables[$pair.Key] = [string]$pair.Value }
   [IO.File]::WriteAllText((Join-Path $Temp "npmrc"), "")
   [Console]::Out.WriteLine("NPM_ENVIRONMENT_ISOLATED=1")
-  $process = [Diagnostics.Process]::Start($info)
+  $process = $null
   try {
-    Wait-RedirectedProcess $process
-    return [int]$process.ExitCode
+    [Console]::Out.WriteLine('NPM_LAYOUT_DECISION_REACHED=1')
+    if (-not $runtime.Supported) {
+      $result = [pscustomobject]@{ ExitCode = 1; Output = ''; Errors = 'unsupported npm layout' }
+    } else {
+      $process = [Diagnostics.Process]::Start($info)
+      $result = Wait-RedirectedProcess $process
+    }
+    if ($result.ExitCode -ne 0) {
+      try { Write-NpmFailure $result $info $Npm $Temp $runtime } catch {
+        # A logging failure must not hide the npm failure or prevent cleanup.
+        [Console]::Error.WriteLine("Machine Prep could not save all npm diagnostics.")
+      }
+      Show-NpmFailure $result
+    }
+    return [int]$result.ExitCode
   } finally {
-    $process.Dispose()
+    if ($process) { $process.Dispose() }
   }
 }
 

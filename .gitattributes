@@ -57,3 +57,6 @@ test/financial-oracle/fixtures/golden-company.json text eol=lf
 test/financial-oracle/fixtures/seed-requests.json text eol=lf
 test/financial-oracle/fixtures/golden-selftest.mjs text eol=lf
 test/fixtures/legacy-local-ingest-run.txt text eol=lf
+
+# The standard npm Windows shim fixture must keep its exact CRLF bytes.
+test/fixtures/machine-prep/*.cmd -text -whitespace
