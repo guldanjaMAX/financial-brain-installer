@@ -66,7 +66,7 @@ for (const branch of ['missing', 'stale', 'failed', 'year', 'entity']) {
     if (!['missing', 'entity'].includes(branch)) await green(f);
     if (branch === 'stale') f.raw("UPDATE fin_entities SET display_label='Changed entity' WHERE entity_slug=?", ENTITY);
     if (branch === 'failed') f.control.failOn = /FROM owner_financial_map_snapshots/;
-    const request = branch === 'year' ? { q: 'Check tax readiness for 2024.' } : {};
+    const request = branch === 'year' ? { year: 2024 } : {};
     const expected = { missing: 'tax_map_missing', stale: 'tax_map_stale', failed: 'tax_map_unavailable', year: 'tax_year_unassigned', entity: 'tax_entity_unassigned' }[branch];
     reset(f);
     const allowed = await ask(f, request);
@@ -105,7 +105,7 @@ for (const branch of ['missing', 'stale', 'failed', 'year', 'entity']) {
 
 test('unmapped year reaches identity assessment and does not read a nearby year', async t => {
   const f = await cfoFixture(t);
-  const result = await ask(f, { q: 'Check tax readiness for 2024.' });
+  const result = await ask(f, { year: 2024 });
   assert.ok(result.body.workflow.stages.includes('identity'));
   assert.ok(codes(result.body).includes('tax_year_unassigned'));
   assert.equal(inventoryReads(f), 0);
@@ -324,7 +324,7 @@ test('same labels never substitute for exact ledger entity identity in the map',
     snapshot.entities.find(entity => entity.ledger_ref === before.selected_entity_ref).disposition = 'excluded';
   });
   await green(f); reset(f);
-  const denied = await ask(f, { entity_slug: 'fixture-other' });
+  const denied = await ask(f, { entity: 'fixture-other' });
   assert.ok(scopeReads(f) > 0);
   assert.ok(denied.body.workflow.stages.includes('identity'));
   assert.ok(codes(denied.body).includes('tax_entity_unassigned'));

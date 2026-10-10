@@ -1,13 +1,18 @@
 # Tax evidence checklist in Ask
 
-Sign in to the owner app, select one owned entity, and ask:
+Sign in to the owner app and open **Ask & Explore**. Select one owned financial
+entity, enter a tax year, and choose **Tax evidence checklist** beside the question
+box. The checklist button is available only in the owner workspace. It requires
+an explicit entity and a four-digit year from 1900 through 2200.
 
-> Check tax readiness for 2025.
+The result is a dated, nonmonetary checklist of stored evidence and missing review
+steps. Tax amounts and filing readiness are not checked. A populated checklist
+is never tax correctness, filing approval, a complete document population, or
+permission for a money answer.
 
-Use the exact year you want to review. The result is a dated, nonmonetary
-checklist of stored evidence and missing review steps. Tax amounts and filing
-readiness are not checked. A populated checklist is never tax correctness,
-filing approval, a complete document population, or permission for a money answer.
+Typing a question, including `Check tax readiness for 2025.`, always uses ordinary
+Ask. Quoting, punctuation, casing, compound instructions and monetary text do not
+select a workflow. The checklist button does not send or rewrite the question draft.
 
 The workflow reads the current Financial Map and the structured Financial
 Picture inventory. It does not search prose to prove absence, extract PDFs,
@@ -26,49 +31,34 @@ missing/stale map notices and entity/year clarification. Lost or unverifiable
 access withholds those private states and diagnostic read counts.
 
 Ask's existing entity scope validation runs first. Missing entity selection or
-an unsupported question asks for clarification. Missing, unreadable and stale
+an invalid structured action asks for clarification. Missing, unreadable and stale
 maps have separate actions. The map reader resolves the exact selected ledger
 entity to its signed map reference inside the captured inventory. Labels and
 Financial Picture references are never used to join map identities. An excluded
 entity or a year outside the active map does not trigger a whole-owner fallback.
 Ambiguous or unconfirmed filing units remain gaps.
 
-The dispatcher recognizes these complete questions, with optional final period
-and case-insensitive command words:
+## Structured action contract
 
-- `Check tax readiness for YYYY.` (1900 through 2200)
-- `Show my weekly cash brief.`
-- `Check books against bank from YYYY-MM-DD to YYYY-MM-DD.`
-- `Check books against bank from YYYY-MM-DD to YYYY-MM-DD for account "opaque reference".`
+Send a JSON POST to `/api/rag/think` with exactly:
 
-Books dates must be real and ordered. Its optional account reference is a JSON
-string, decoded exactly without trimming or case folding, limited to 256
-characters and excluding control characters. Cash and Books currently return
-unavailable placeholders. They cannot fall through to generic retrieval.
-Routing makes one structural decision: an explicit workflow request enters the
-workflow boundary; anything else retains generic Ask unchanged. Detection uses
-an NFKC-normalized, lowercase token view, treating punctuation and quotation
-marks as presentation. The original question and opaque Books account reference
-are never rewritten. Only the complete grammar above can invoke a handler;
-other explicit forms return nonmonetary scoped clarification, with no evidence
-snippets or model call.
+```json
+{ "workflow": "tax_evidence_checklist", "entity": "fixture-entity", "year": 2025 }
+```
 
-A request head consists of a workflow action and noun, optionally preceded by
-polite/modal operators, an explicit year, or execution operators (`run` and
-`execute`). Thus `Please run "Check tax readiness for 2025; review books".` is
-an execution request, including with Unicode quotes or compatibility characters.
-Quoted command arguments belong to that execution head. Separate unquoted
-action clauses also stay inside the workflow boundary, as in `Summarize the
-project notes; check tax readiness for 2025.`
+`entity` is the exact owned ledger identity, and `year` is an integer. A string
+year, unknown workflow, missing fields, extra fields (including `q`, `entity_slug`,
+source filters, confirmations or amounts) are refused. A present `workflow`
+field, even null or malformed, never falls through to generic Ask. The search
+route does not accept workflow actions. Without a `workflow` field the existing
+Ask parser, scope validation, tax-question safeguards and retrieval remain unchanged.
 
-A document or explanation head instead owns its quoted arguments and any data
-introduced by a colon through the end of the request. Neither punctuation inside
-that data nor a coordinated quoted title becomes a new action. For example,
-`What did the CFO mean by this instruction: check tax readiness for 2025?` and
-`Find the note titled "Check tax readiness for 2025; review books".` retain
-document retrieval. Merely mentioning the CFO or a workflow topic does not
-invoke a workflow. Extra source, category, platform, folder and date filters
-are refused for CFO requests.
+The dispatcher also reserves structured `cash_brief` (`entity`) and `books_check`
+(`entity`, `period_start`, `period_end`, optional `account_ref`) actions. They
+currently return unavailable placeholders. Books dates must be canonical real,
+ordered calendar dates. Its optional account reference is an exact opaque string
+of 1 through 256 characters without control characters; no trimming, casing or
+Unicode normalization occurs. No text command invokes these placeholders.
 
 ## What the checklist means
 
@@ -95,7 +85,7 @@ maps do not supply one. The checklist uses the existing 32-family tax catalog:
 all 32 remain not checked, including the 14 implemented families and 18 families
 without implementations. It calls `uncheckedTaxResult`, never the evaluator,
 and creates no T1 transfer. The denominator and prerequisite gaps are visible
-in the ordinary Ask answer, which needs no frontend change.
+in the ordinary Ask answer display.
 
 Opaque inventory references are not original-document citations. This increment
 resolves no original-document links and returns an explicit citation gap with
@@ -123,7 +113,12 @@ shared mutation fence or completeness, and no such claim is made.
 
 ## Extension and verification
 
-`dispatchCfoWorkflow` accepts trusted parsed context and injected handlers.
+`dispatchCfoWorkflow` now accepts `{ action, entityScope, ownerCapability,
+filters, reauthorize }` and injected handlers. `parseCfoQuestion` and the text
+classifier have been removed; `parseCfoAction` validates the closed typed object.
+The trusted capability is still supplied independently of the action body.
+Handler kinds and intent shapes remain `tax_readiness` with `taxYear`, `cash_brief`,
+and `books_check` with `periodStart`, `periodEnd`, `accountRef`.
 Handlers return `{status, answer, gaps, metadata}`; the dispatcher supplies the
 Ask envelope and fixed scope. Later workflows must retain the positive owner
 capability, source authorization and final recheck boundaries and add their own
@@ -133,9 +128,11 @@ through request JSON.
 The dedicated suites exercise actual Worker fetch requests, SQLite-backed
 ledger and map activation, supported credentials and excluded readers, empty
 versus failed inventory, continuation limits, scope mismatch and mid-read
-revocation. A balanced 48-case routing corpus uses stored monetary originals
-to distinguish workflow refusal from real document retrieval; 648 generated
-quote, punctuation and casing variants each exercise execution and reported
-text. Offline lane tests are not release or live acceptance. Full host/CI,
+revocation. Free-text regression cases from prior reviews now all require generic
+Ask and a zero `cfo_workflow` invocation counter. Structured positive and negative
+controls prove the separate workflow boundary. This fixed aggregate timing stage
+is visible only through existing authorized diagnostics; it carries no question,
+entity, year, financial value or raw error. Offline lane tests are not release
+or live acceptance. Full host/CI,
 package/history privacy, independent review and separately authorized desktop,
 mobile and deployed Ask verification remain integration gates.

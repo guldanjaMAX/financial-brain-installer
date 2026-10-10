@@ -15,7 +15,7 @@ export const inventoryReads = f => f.seen.sql.filter(sql => /FROM fin_documents 
 export const mapReads = f => f.seen.sql.filter(sql => /FROM owner_financial_map_snapshots/.test(sql)).length;
 export const scopeReads = f => f.seen.sql.filter(sql => /FROM fin_entities/.test(sql)).length;
 export const ask = (f, body = {}, headers = f.headers) => f.post('/api/rag/think', {
-  q: QUESTION, entity_slug: ENTITY, ...body,
+  workflow: 'tax_evidence_checklist', entity: ENTITY, year: 2025, ...body,
 }, headers).then(async response => ({ status: response.status, body: await response.json() }));
 
 export function seedEvidence(f, { count = 1, year = 2025, readable = 1 } = {}) {
