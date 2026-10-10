@@ -1,16 +1,77 @@
 import { taxReadiness } from './cfo-tax-evidence.js';
 
 const QUESTIONS = 'Select one entity and ask “Check tax readiness for 2025.”, “Show my weekly cash brief.” or “Check books against bank from 2026-09-01 to 2026-09-30.”';
-// Clarify attempted workflow actions, including compound clauses. A role or
-// topic mention in a document question is not a request to run a workflow.
-const CFO_REQUEST = /(?:^|[.!?;,:]\s*|\b(?:and|then)\s+)(?:(?:please|(?:can|could|would)\s+you)\s+)*(?:(?:check|review|run)\s+(?:my\s+)?(?:tax[\s-]+readiness|books)\b|(?:show|run|review|check)\s+(?:my\s+)?(?:weekly[\s-]+cash(?:[\s-]+brief)?|cash[\s-]+brief)\b)/i;
+// Recognition is separate from execution: normalize only this detection view,
+// never the original question or an opaque Books account reference. A request
+// head owns its quoted argument; a document/explanation head owns quoted or
+// colon-introduced data. Punctuation alone cannot promote that data to actions.
+const WORD = /^[\p{L}\p{N}]+$/u;
+const QUOTE = /^[\p{Quotation_Mark}`]$/u;
+const QUOTE_END = new Map([
+  ['“', '”'], ['‘', '’'], ['«', '»'], ['‹', '›'], ['„', '“'], ['‚', '‘'],
+  ['‟', '”'], ['‛', '’'], ['「', '」'], ['『', '』'], ['〝', '〞'], ['⹂', '”'],
+]);
 
-// Quoted commands in a document question are data. Preserve a non-word marker
-// so removing a title cannot join its surrounding words into a new command.
-// Match only paired delimiters; a possessive apostrophe must not hide a later
-// action. Exact supported commands (including opaque account refs) parse first.
-function unquotedClauses(text) {
-  return text.replace(/"(?:\\[\s\S]|[^"\\])*"|“[^”]*”|(?<![\p{L}\p{N}])'(?:\\[\s\S]|[^'\\])*'(?![\p{L}\p{N}])|‘[^’]*’|`[^`]*`/gu, ' \ufffc ');
+function workflowRequestHead(tokens) {
+  const words = tokens.filter(token => WORD.test(token));
+  let i = 0;
+  // These are grammatical request operators, not workflow/topic keywords.
+  // An unknown head (find, explain, what, a negation, etc.) stays generic.
+  while (i < words.length) {
+    if (words[i] === 'please') { i++; continue; }
+    if (['can', 'could', 'would', 'will'].includes(words[i]) && words[i + 1] === 'you') { i += 2; continue; }
+    if (words[i] === 'for' && /^\d{4}$/.test(words[i + 1] ?? '')) { i += 2; continue; }
+    const verb = words[i];
+    const noun = words[i + 1] === 'my' ? i + 2 : i + 1;
+    if (['check', 'review', 'run'].includes(verb)
+      && (words[noun] === 'books' || (words[noun] === 'tax' && words[noun + 1] === 'readiness'))) return true;
+    if (['show', 'run', 'review', 'check'].includes(verb)
+      && ((words[noun] === 'weekly' && words[noun + 1] === 'cash')
+        || (words[noun] === 'cash' && words[noun + 1] === 'brief'))) return true;
+    if (verb === 'run' || verb === 'execute') { i++; continue; }
+    return false;
+  }
+  return false;
+}
+
+function explicitWorkflowRequest(text) {
+  const normalized = text.normalize('NFKC').toLowerCase();
+  const matches = [...normalized.matchAll(/[\p{L}\p{N}]+|[^\s]/gu)];
+  const tokens = matches.map(match => match[0]);
+  // Inspect the head before parsing arguments. Thus both a quoted command and
+  // `please run <quoted command>` remain execution requests, even if compound.
+  if (workflowRequestHead(tokens)) return true;
+  const quotes = [];
+  let start = 0;
+  const clauseRequest = clause => {
+    // After a document request, a coordinated quoted title is another data
+    // argument. A new execution clause must supply its own unquoted head.
+    const head = clause.find(token => WORD.test(token) || QUOTE.test(token));
+    return !QUOTE.test(head ?? '') && workflowRequestHead(clause);
+  };
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    const at = matches[i].index;
+    const apostrophe = /['’]/u.test(token)
+      && /[\p{L}\p{N}]/u.test(normalized[at - 1] ?? '') && /[\p{L}\p{N}]/u.test(normalized[at + 1] ?? '');
+    if (QUOTE.test(token) && !apostrophe && tokens[i - 1] !== '\\') {
+      if (quotes.at(-1) === token) quotes.pop();
+      else quotes.push(QUOTE_END.get(token) ?? token);
+      continue;
+    }
+    if (quotes.length) continue;
+    // An unquoted colon under a non-execution head introduces reported data
+    // through the end of that request, including punctuation in the data.
+    if (token === ':') return false;
+    const boundary = /^[.!?,;。！？，；]$/u.test(token) || token === 'and' || token === 'then';
+    if (!boundary) continue;
+    if (clauseRequest(tokens.slice(start, i))) return true;
+    start = i + 1;
+    // The new clause gets its own head before its colon/quote arguments are
+    // examined. A temporal preface is an operator; a reported title is not.
+    if (clauseRequest(tokens.slice(start))) return true;
+  }
+  return clauseRequest(tokens.slice(start));
 }
 function calendarDate(value) {
   const date = new Date(`${value}T00:00:00Z`);
@@ -35,7 +96,7 @@ export function parseCfoQuestion(question) {
       return { kind: 'books_check', periodStart: match[1], periodEnd: match[2], accountRef };
     }
   }
-  return CFO_REQUEST.test(unquotedClauses(text)) ? { kind: 'clarification' } : null;
+  return explicitWorkflowRequest(text) ? { kind: 'clarification' } : null;
 }
 
 export function cfoEnvelope({ entityScope, asOf, kind, status, answer, gaps = [], metadata = {} }) {

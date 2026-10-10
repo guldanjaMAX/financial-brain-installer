@@ -45,21 +45,30 @@ Books dates must be real and ordered. Its optional account reference is a JSON
 string, decoded exactly without trimming or case folding, limited to 256
 characters and excluding control characters. Cash and Books currently return
 unavailable placeholders. They cannot fall through to generic retrieval.
-Unsupported or compound requests to check tax readiness, review books or show a
-cash brief ask for scoped clarification before retrieving evidence or calling a
-model. This includes polite requests such as “Can you please check tax readiness
-for 2025?”, “Run tax readiness for 2025.”, and actions after a comma, such as
-“For 2025, check tax readiness.” These variants do not expand the supported
-whole-question grammar above, and clarification returns no evidence snippets.
+Routing makes one structural decision: an explicit workflow request enters the
+workflow boundary; anything else retains generic Ask unchanged. Detection uses
+an NFKC-normalized, lowercase token view, treating punctuation and quotation
+marks as presentation. The original question and opaque Books account reference
+are never rewritten. Only the complete grammar above can invoke a handler;
+other explicit forms return nonmonetary scoped clarification, with no evidence
+snippets or model call.
 
-Mentioning the CFO role or one of those topics in a document question does not
-invoke a workflow. Quoted titles and reported commands, including compound
-commands inside straight quotes, curly quotes or backticks, retain normal
-document retrieval. For example, `Find the note titled "Check tax readiness for
-2025; review books".` searches documents. An action outside the quotation still
-requires clarification. Quote handling never rewrites an opaque Books account
-reference in a supported question. Extra
-source, category, platform, folder and date filters are refused for CFO requests.
+A request head consists of a workflow action and noun, optionally preceded by
+polite/modal operators, an explicit year, or execution operators (`run` and
+`execute`). Thus `Please run "Check tax readiness for 2025; review books".` is
+an execution request, including with Unicode quotes or compatibility characters.
+Quoted command arguments belong to that execution head. Separate unquoted
+action clauses also stay inside the workflow boundary, as in `Summarize the
+project notes; check tax readiness for 2025.`
+
+A document or explanation head instead owns its quoted arguments and any data
+introduced by a colon through the end of the request. Neither punctuation inside
+that data nor a coordinated quoted title becomes a new action. For example,
+`What did the CFO mean by this instruction: check tax readiness for 2025?` and
+`Find the note titled "Check tax readiness for 2025; review books".` retain
+document retrieval. Merely mentioning the CFO or a workflow topic does not
+invoke a workflow. Extra source, category, platform, folder and date filters
+are refused for CFO requests.
 
 ## What the checklist means
 
@@ -124,6 +133,9 @@ through request JSON.
 The dedicated suites exercise actual Worker fetch requests, SQLite-backed
 ledger and map activation, supported credentials and excluded readers, empty
 versus failed inventory, continuation limits, scope mismatch and mid-read
-revocation. Offline lane tests are not release or live acceptance. Full host/CI,
+revocation. A balanced 48-case routing corpus uses stored monetary originals
+to distinguish workflow refusal from real document retrieval; 648 generated
+quote, punctuation and casing variants each exercise execution and reported
+text. Offline lane tests are not release or live acceptance. Full host/CI,
 package/history privacy, independent review and separately authorized desktop,
 mobile and deployed Ask verification remain integration gates.
