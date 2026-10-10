@@ -857,3 +857,49 @@ test("storage and cryptographic failures expose only stable codes", async () => 
     db.close();
   }
 });
+
+test('P03 a seeded intent refuses callback origin and path drift, then accepts its exact redirect', async () => {
+  const db = freshDb();
+  const env = { DB: d1(db), QUICKBOOKS_OAUTH_CALLBACK_MODE: 'field-reviewed', QUICKBOOKS_OAUTH_OBSERVABILITY_REVIEWED: '1' };
+  try {
+    const fixture = await startFixture(env, {}, { directNow: START_NOW });
+    assert.equal(fixture.start.response.status, 201);
+    const query = `?state=${fixture.startBody.state}&code=synthetic-code&realmId=${fixture.realmId}`;
+    let reached = 0;
+    for (const redirect of ['https://alias.invalid/api/oauth/quickbooks/callback', 'http://brain.invalid/api/oauth/quickbooks/callback',
+      'https://brain.invalid:444/api/oauth/quickbooks/callback', 'https://brain.invalid/api/oauth/quickbooks/callback/',
+      'https://brain.invalid/api/oauth/quickbooks/Callback', 'https://brain.invalid/api/oauth/quickbooks/%63allback']) {
+      const request = new Request(redirect + query);
+      reached++;
+      await handleQuickBooksOAuthRoute(env, request, new URL(request.url), QUICKBOOKS_OAUTH_PATHS.callback, { now: START_NOW + 1 });
+      assert.equal(db.prepare('SELECT status FROM quickbooks_oauth_intents').get().status, 'pending');
+    }
+    assert.equal(reached, 6);
+    const request = new Request('https://brain.invalid' + QUICKBOOKS_OAUTH_PATHS.callback + query);
+    await handleQuickBooksOAuthRoute(env, request, new URL(request.url), QUICKBOOKS_OAUTH_PATHS.callback, { now: START_NOW + 1 });
+    assert.equal(db.prepare('SELECT status FROM quickbooks_oauth_intents').get().status, 'received');
+  } finally { db.close(); }
+});
+
+test('HTTPS intent start refuses HTTP before persistence and has an exact HTTPS control', async () => {
+  const db = freshDb();
+  const env = { DB: d1(db), QUICKBOOKS_OAUTH_CALLBACK_MODE: 'field-reviewed', QUICKBOOKS_OAUTH_OBSERVABILITY_REVIEWED: '1' };
+  try {
+    const fixture = await startFixture(env, {}, { directNow: START_NOW });
+    assert.equal(fixture.start.response.status, 201);
+    const request = new Request('http://brain.invalid' + QUICKBOOKS_OAUTH_PATHS.start, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fixture.startBody),
+    });
+    const response = await handleQuickBooksOAuthRoute(env, request, new URL(request.url), QUICKBOOKS_OAUTH_PATHS.start, { adminAuthorized: true, now: START_NOW });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, 'quickbooks_oauth_origin_invalid');
+    assert.equal(db.prepare('SELECT count(*) n FROM quickbooks_oauth_intents').get().n, 1);
+  } finally { db.close(); }
+});
+
+test('callback result links back to owner setup without provider query values', async () => {
+  const request = new Request('https://brain.invalid' + QUICKBOOKS_OAUTH_PATHS.result);
+  const response = await handleQuickBooksOAuthRoute({}, request, new URL(request.url), QUICKBOOKS_OAUTH_PATHS.result);
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /href="\/app\/setup\?provider=quickbooks"/);
+});

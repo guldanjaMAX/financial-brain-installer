@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,7 +23,7 @@ const check = (name, value, detail = "") => {
   console.log(`PASS  ${name}`);
 };
 
-const folder = mkdtempSync(join(tmpdir(), "brain-provider-cli-"));
+const folder = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-provider-cli-")));
 // Provider connection takes the same owner lease as a real source run. Keep
 // its private lock tree inside this fixture instead of the developer's home.
 process.env.HOME = folder;
@@ -290,18 +290,19 @@ try {
     corpora: { quickbooks: { enabled: true, environment: "production" } },
   }));
   let productionCredentialOrBrowserCalls = 0;
+  let productionPreflightCalls = 0;
   await assert.rejects(
     cmdConnectProvider("quickbooks", productionManifest, {}, {
       oauth: {
-        providerOAuthConfig: () => ({ provider: "quickbooks", label: "QuickBooks Online" }),
+        providerOAuthConfig: () => { productionPreflightCalls++; return { provider: "quickbooks", label: "QuickBooks Online" }; },
         loadProviderCredentials: () => { productionCredentialOrBrowserCalls++; return null; },
         authorizeProvider: () => { productionCredentialOrBrowserCalls++; },
       },
     }),
-    (error) => error.code === "quickbooks_production_callback_unavailable",
+    (error) => error.code === "quickbooks_owner_app_required",
   );
   check("QuickBooks production refuses before reading credentials or starting OAuth",
-    productionCredentialOrBrowserCalls === 0);
+    productionPreflightCalls === 1 && productionCredentialOrBrowserCalls === 0);
 
   const invalidRedirectManifest = join(folder, "invalid-redirect.manifest.json");
   writeFileSync(invalidRedirectManifest, JSON.stringify({
@@ -374,6 +375,7 @@ try {
   for (const key of ["PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP"]) {
     if (process.env[key] !== undefined) cliEnvironment[key] = process.env[key];
   }
+  cliEnvironment.BRAIN_NO_WRANGLER_LOGIN = "1";
   cliEnvironment.HOME = folder;
   cliEnvironment.USERPROFILE = folder;
   const routedProvider = spawnSync(

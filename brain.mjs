@@ -19123,6 +19123,13 @@ export async function cmdConnect(target, options = {}) {
   const manifestPath = argv[4];
   if (which === "quickbooks-desktop") return cmdConnectQuickBooksDesktop(manifestPath, flags, options.desktopOptions || {});
   if (which === "quickbooks") {
+    if (flags.edition !== undefined && !["online", "desktop"].includes(flags.edition)) die("--edition must be online or desktop");
+    if (flags["owner-app-setup"] !== undefined && flags["owner-app-setup"] !== true) die("--owner-app-setup does not take a value");
+    if (flags["owner-app-setup"] && flags.edition === "desktop") die("owner-app setup is for QuickBooks Online");
+    if (flags.edition === "online" || flags["owner-app-setup"] === true) {
+      return (options.connectOnline || cmdConnectProvider)("quickbooks", manifestPath, flags, options.providerOptions || {});
+    }
+    if (flags.edition === "desktop") return (options.connectDesktop || cmdConnectQuickBooksDesktop)(manifestPath, flags, options.desktopOptions || {});
     const probe = options.probeQuickBooksEdition || (await import("./connectors/quickbooks-edition-probe.mjs")).probeQuickBooksEdition;
     const edition = await probe(options.editionProbeOptions || {});
     if (edition === "windows-desktop") return cmdConnectQuickBooksDesktop(manifestPath, flags, options.desktopOptions || {});
@@ -31057,12 +31064,12 @@ export async function cmdConnectProvider(provider, manifestPath, flags = {}, opt
     throw error;
   }
   if (provider === "quickbooks" && configuration.environment === "production") {
-    const error = new Fatal(
-      "QuickBooks production connection is not available in this release. Intuit production OAuth needs a client-owned HTTPS callback with a single-use local handoff; the loopback callback is sandbox-only. No credential or browser flow was opened.",
-    );
-    error.code = "quickbooks_production_callback_unavailable";
-    throw error;
+    const ownerSetup = options.ownerSetup ?? await import("./operations/quickbooks-owner-setup.mjs");
+    if (flags["owner-app-setup"] !== undefined) return ownerSetup.setupQuickBooksOwnerApp(m, manifestPath, flags, options);
+    if (flags.reconnect !== undefined && flags.reconnect !== true) die("--reconnect does not take a value");
+    return ownerSetup.connectQuickBooksOwnerApp(m, manifestPath, { ...options, freshConsent: flags.reconnect === true });
   }
+  if (provider === "quickbooks" && flags["owner-app-setup"] !== undefined) die("owner-app setup requires the production environment");
   const port = flags.port ? Number(flags.port) : oauth.PROVIDER_DEFAULT_PORT;
   if (!Number.isInteger(port) || port < 1024 || port > 65535) die("--port must be an integer from 1024 through 65535");
   const redirectHost = provider === "quickbooks"
@@ -31168,6 +31175,13 @@ export async function cmdDisconnectProvider(provider, manifestPath, flags = {}, 
   const { m } = loadManifest(manifestPath);
   const configuration = m?.corpora?.[provider] || {};
   const source = assertSourceName(configuration.source || provider);
+  if (provider === "quickbooks" && configuration.environment === "production") {
+    const ownerSetup = options.ownerSetup ?? await import("./operations/quickbooks-owner-setup.mjs");
+    return (options.withSourceIngestLock || withSourceIngestLock)({
+      sourceName: provider, sharedRecord: `provider:${provider}`, ...sourceIngestLockRuntimeOptions(options),
+    }, () => ownerSetup.disconnectQuickBooksOwnerApp(m, manifestPath, flags, options));
+  }
+
   if (!(provider === "quickbooks" && m.operations?.quickbooks_schedule !== undefined)) {
     const scheduler = options.scheduler ?? await import("./operations/provider-scheduler.mjs");
     try {

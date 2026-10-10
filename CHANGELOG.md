@@ -4,6 +4,15 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.12 (unreleased)
+
+- **QuickBooks Online can prepare an owner-controlled private app connection.**
+  The new local adapter stages your app keys separately from a working grant,
+  checks the exact callback and company, and preserves imported records when
+  disconnecting. Guided setup remains held until the signed companion, private
+  browser transfer and production field checks pass. Verify the company,
+  connection, last completed import and next scheduled check separately.
+
 ## 0.4.11 (2026-10-09)
 
 Candidate only. This version has not been released. The changes below still

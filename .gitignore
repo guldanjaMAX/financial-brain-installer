@@ -88,3 +88,6 @@ machine-prep/installers/windows/handoff-windows.url
 /artifact-in/
 /home-dpapi/
 /lane-evidence/
+
+# Local offline QuickBooks owner-app lane evidence and isolated test homes.
+.qbo-owner-build/

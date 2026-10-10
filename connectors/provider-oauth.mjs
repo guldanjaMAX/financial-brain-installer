@@ -33,6 +33,8 @@ import {
   quickBooksCompanyFingerprint,
 } from "./quickbooks-online.mjs";
 
+import { ownerAppError, validateQuickBooksOwnerBinding, sameQuickBooksOwnerBinding } from "./quickbooks-owner-binding.mjs";
+
 const b64url = (bytes) => Buffer.from(bytes).toString("base64url");
 const clean = (value) => String(value ?? "").trim();
 const safeDetail = (value, fallback = "the provider refused the request") => {
@@ -646,13 +648,164 @@ export async function loadQuickBooksCredentials(storage = {}, options = {}) {
   return withQuickBooksCredentialLock(
     "quickbooks",
     storage,
-    () => providerConnectionFromStore(loadProviderCredentialStore(
-      "quickbooks",
-      storage,
-      { allowQuickBooksMigration: true },
-    )),
+    () => {
+      const store = loadProviderCredentialStore("quickbooks", storage, { allowQuickBooksMigration: true });
+      if (options.refuseOwnerApp === true && store.quickbooks_installation) throw ownerAppError("quickbooks_owner_binding_conflict");
+      return providerConnectionFromStore(store);
+    },
     options,
   );
+}
+
+// Owner app staging shares the existing envelope and custody lease with
+// refresh, reconnect and revoke. No second credential locator is introduced.
+function assertOwnerStore(store, binding) {
+  const occupied = store.connection || store.quickbooks_owner_app ||
+    Object.keys(store[QUICKBOOKS_SOURCE_REGISTRY_KEY]?.sources || {}).length;
+  if ((occupied && !store.quickbooks_installation) ||
+      (store.quickbooks_installation && !sameQuickBooksOwnerBinding(store.quickbooks_installation, binding))) {
+    throw ownerAppError("quickbooks_owner_binding_conflict");
+  }
+  if (store.connection && (!store.connection.quickbooks_owner_app ||
+      !sameQuickBooksOwnerBinding(store.connection.quickbooks_owner_app, binding))) {
+    throw ownerAppError("quickbooks_owner_binding_conflict");
+  }
+}
+
+function saveOwnerStore(store, storage, assertOwned) {
+  assertOwned();
+  saveTokens(store, providerCredentialOptions("quickbooks", storage));
+  assertOwned();
+  const readback = loadProviderCredentialStore("quickbooks", storage);
+  if (JSON.stringify(readback) !== JSON.stringify(store)) {
+    throw ownerAppError("quickbooks_owner_store_unverified");
+  }
+  return readback;
+}
+
+export async function stageQuickBooksOwnerApp(value, pair, storage = {}) {
+  const binding = validateQuickBooksOwnerBinding(value);
+  if (!pair || Object.keys(pair).sort().join(",") !== "clientId,clientSecret" ||
+      [pair.clientId, pair.clientSecret].some((v) => typeof v !== "string" || !v || v.length > 4096 || /[\s\x00-\x1f\x7f]/.test(v))) {
+    throw ownerAppError("quickbooks_owner_pair_invalid");
+  }
+  return withQuickBooksCredentialLock("quickbooks", storage, ({ assertOwned }) => {
+    const store = loadProviderCredentialStore("quickbooks", storage, { allowQuickBooksMigration: true });
+    assertOwnerStore(store, binding);
+    saveOwnerStore({ ...store, quickbooks_installation: binding,
+      quickbooks_owner_app: { client_id: pair.clientId, client_secret: pair.clientSecret },
+    }, storage, assertOwned);
+    return { stage: "keys_staged", connected: false, environment: "production" };
+  });
+}
+
+export async function quickBooksOwnerAppStatus(value, storage = {}) {
+  const binding = validateQuickBooksOwnerBinding(value);
+  return withQuickBooksCredentialLock("quickbooks", storage, () => {
+    const store = loadProviderCredentialStore("quickbooks", storage);
+    assertOwnerStore(store, binding);
+    const connection = store.connection;
+    const reconnect = Boolean(connection?.quickbooks_refresh_fence || ["outcome_unknown", "finalization_pending"].includes(store.quickbooks_authorization?.state));
+    return {
+      connected: Boolean(connection && !reconnect),
+      stage: reconnect ? "reconnect" : store.quickbooks_owner_app ? "keys_staged" : connection ? "connected" : "owner_action",
+      environment: "production", import_pending: true,
+    };
+  });
+}
+
+export async function authorizeQuickBooksOwnerApp(value, {
+  storage = {}, receiveAuthorization, fetchImpl = fetch, now = Date.now,
+  assertCredentialOwned = () => {},
+} = {}) {
+  const binding = validateQuickBooksOwnerBinding(value);
+  if (typeof receiveAuthorization !== "function") throw ownerAppError("quickbooks_companion_required");
+  const starting = await withQuickBooksCredentialLock("quickbooks", storage, () => {
+    const store = loadProviderCredentialStore("quickbooks", storage, { allowQuickBooksMigration: true });
+    assertOwnerStore(store, binding);
+    const pair = store.quickbooks_owner_app || store.connection;
+    if (!pair?.client_id || !pair?.client_secret) throw ownerAppError("quickbooks_owner_app_required");
+    return { store, pair };
+  });
+  // The callback phase owns only an ephemeral private key. A process loss must
+  // start a new ceremony, never reconstruct or replay a consumed code.
+  const callback = await receiveAuthorization({ clientId: starting.pair.client_id, binding });
+  if (!callback || quickBooksCompanyFingerprint(callback.realmId) !== binding.company_fingerprint) {
+    throw ownerAppError("quickbooks_company_binding_mismatch");
+  }
+  return withQuickBooksCredentialLock("quickbooks", storage, async ({ assertOwned }) => {
+    assertCredentialOwned();
+    const store = loadProviderCredentialStore("quickbooks", storage, { allowQuickBooksMigration: true });
+    assertOwnerStore(store, binding);
+    if (JSON.stringify(store) !== JSON.stringify(starting.store)) throw ownerAppError("credential_changed_during_authorization");
+    if (typeof callback.authorizationCode !== "string" || !callback.authorizationCode) throw ownerAppError("quickbooks_code_required");
+    const codeFingerprint = createHash("sha256").update(callback.authorizationCode).digest("hex");
+    if (store.quickbooks_authorization?.code_fingerprint === codeFingerprint) throw ownerAppError("quickbooks_exchange_replay");
+    // Durable intent precedes the one-shot exchange. A failed response keeps
+    // the prior grant and staged pair, but never authorizes another exchange
+    // of this callback. A fresh owner ceremony can recover independently.
+    const fenced = { ...store, quickbooks_authorization: { state: "outcome_unknown", code_fingerprint: codeFingerprint } };
+    saveOwnerStore(fenced, storage, assertOwned);
+    let token;
+    try {
+      token = await exchangeProviderAuthorizationCode("quickbooks", {
+        clientId: starting.pair.client_id, clientSecret: starting.pair.client_secret,
+        code: callback.authorizationCode, redirectUri: binding.redirect_uri, fetchImpl, now: now(),
+      });
+    } catch { throw ownerAppError("quickbooks_exchange_outcome_unknown"); }
+    assertCredentialOwned();
+    assertOwned();
+    const candidate = bindQuickBooksConnection({
+      prior: store.connection, source: binding.source, environment: "production",
+      sourceRegistry: store[QUICKBOOKS_SOURCE_REGISTRY_KEY],
+      candidate: { ...token, client_id: starting.pair.client_id, client_secret: starting.pair.client_secret,
+        provider: "quickbooks", schema_version: 1, quickbooks_owner_app: binding,
+        connected_at: new Date(now()).toISOString(), scopes: PROVIDER_OAUTH.quickbooks.scopes,
+        provider_metadata: { ...token.provider_metadata, realm_id: callback.realmId },
+      },
+    });
+    const credentialFingerprint = createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
+    const recovery = callback.finalization;
+    if (recovery && (!/^[A-Za-z0-9_-]{43,128}$/.test(recovery.intent_id) ||
+        !/^[A-Za-z0-9_-]{43,128}$/.test(recovery.claim_secret) ||
+        !/^[a-f0-9]{64}$/.test(recovery.intent_fingerprint))) throw ownerAppError("quickbooks_finalization_unverified");
+    const promoted = { ...fenced, connection: candidate,
+      [QUICKBOOKS_SOURCE_REGISTRY_KEY]: { schema_version: 1, sources: quickBooksBindingSources(candidate) },
+      quickbooks_authorization: { state: recovery ? "finalization_pending" : "saved", code_fingerprint: codeFingerprint,
+        ...(recovery ? { finalization: { intent_id: recovery.intent_id, claim_secret: recovery.claim_secret,
+          intent_fingerprint: recovery.intent_fingerprint, company_fingerprint: binding.company_fingerprint,
+          credential_fingerprint: credentialFingerprint } } : {}),
+      },
+    };
+    delete promoted.quickbooks_owner_app;
+    saveOwnerStore(promoted, storage, assertOwned);
+    return { connected: true, stage: "connected", environment: "production", import_pending: true,
+      company_fingerprint: binding.company_fingerprint,
+      credential_fingerprint: credentialFingerprint,
+    };
+  });
+}
+
+/** Retry only the acknowledgement from protected recovery; never exchange again. */
+export async function finishQuickBooksOwnerAppAuthorization(value, storage, finalize) {
+  const binding = validateQuickBooksOwnerBinding(value);
+  return withQuickBooksCredentialLock("quickbooks", storage, async ({ assertOwned }) => {
+    const store = loadProviderCredentialStore("quickbooks", storage);
+    assertOwnerStore(store, binding);
+    const record = store.quickbooks_authorization;
+    if (record?.state !== "finalization_pending") return null;
+    const { intent_fingerprint: intentFingerprint, ...payload } = record.finalization;
+    if (!store.connection || createHash("sha256").update(JSON.stringify(store.connection)).digest("hex") !== payload.credential_fingerprint) {
+      throw ownerAppError("quickbooks_finalization_unverified");
+    }
+    let final;
+    try { final = await finalize(payload); } catch { throw ownerAppError("quickbooks_finalization_outcome_unknown"); }
+    if (final?.status !== "finalized" || final.intent_fingerprint !== intentFingerprint ||
+        final.company_fingerprint !== binding.company_fingerprint ||
+        final.credential_fingerprint !== payload.credential_fingerprint) throw ownerAppError("quickbooks_finalization_unverified");
+    saveOwnerStore({ ...store, quickbooks_authorization: { state: "saved", code_fingerprint: record.code_fingerprint } }, storage, assertOwned);
+    return { connected: true, stage: "connected", import_pending: true };
+  });
 }
 
 function saveProviderCredentialsUnlocked(provider, connection, options = {}) {
@@ -668,9 +821,14 @@ function saveProviderCredentialsUnlocked(provider, connection, options = {}) {
   const storage = providerCredentialOptions(key, options);
   let payload = { connection: record };
   if (key === "quickbooks") {
-    const existing = loadQuickBooksSourceRegistry(options);
-    const sources = mergeQuickBooksSources(existing.sources, quickBooksBindingSources(record));
+    const store = loadProviderCredentialStore(key, options);
+    if (store.quickbooks_installation && (!record.quickbooks_owner_app ||
+        !sameQuickBooksOwnerBinding(store.quickbooks_installation, record.quickbooks_owner_app))) {
+      throw ownerAppError("quickbooks_owner_binding_conflict");
+    }
+    const sources = mergeQuickBooksSources(store?.[QUICKBOOKS_SOURCE_REGISTRY_KEY]?.sources, quickBooksBindingSources(record));
     payload = {
+      ...store,
       connection: record,
       [QUICKBOOKS_SOURCE_REGISTRY_KEY]: { schema_version: 1, sources },
     };
@@ -715,6 +873,7 @@ function clearProviderCredentialsUnlocked(provider, options = {}) {
       );
     }
     retained = {
+      ...(store.quickbooks_installation ? { quickbooks_installation: store.quickbooks_installation } : {}),
       [QUICKBOOKS_SOURCE_REGISTRY_KEY]: {
         schema_version: 1,
         sources: mergeQuickBooksSources(existing, bound),
@@ -722,7 +881,8 @@ function clearProviderCredentialsUnlocked(provider, options = {}) {
     };
   }
   saveTokens(retained, providerCredentialOptions(key, options));
-  if (loadProviderCredentials(key, options) !== null) {
+  if (loadProviderCredentials(key, options) !== null || (key === "quickbooks" &&
+      JSON.stringify(loadProviderCredentialStore(key, options)) !== JSON.stringify(retained))) {
     throw new Error(`${PROVIDER_OAUTH[key].label} credentials were not removed from the local store`);
   }
   return true;
@@ -762,6 +922,17 @@ async function disconnectProviderUnlocked(provider, {
       ))
     : loadProviderCredentials(config.provider, storage);
   if (!connection) {
+    if (config.provider === "quickbooks") {
+      const store = loadProviderCredentialStore(config.provider, storage);
+      if (store.quickbooks_authorization?.state === "outcome_unknown") {
+        // The provider may have issued tokens whose response was lost. With
+        // no token to revoke, preserve the app pair for owner recovery.
+        throw ownerAppError("quickbooks_revocation_uncertain");
+      }
+      assertOwned?.();
+      clearProviderCredentialsUnlocked(config.provider, storage);
+    }
+
     const result = {
       disconnected: true,
       already_disconnected: true,
@@ -805,6 +976,11 @@ async function disconnectProviderUnlocked(provider, {
       })(),
     });
     assertOwned?.();
+    if (connection.quickbooks_owner_app) {
+      // A lost revoke response must keep all future reads fenced until a
+      // confirmed revoke or a fresh owner ceremony resolves custody.
+      connection = { ...connection, quickbooks_refresh_fence: { state: "reconnect_required" } };
+    }
     connection = saveProviderCredentialsUnlocked(config.provider, connection, storage);
   }
   let remoteRevoked = false;
@@ -1001,6 +1177,10 @@ export function providerCredentialStatus(provider, options = {}) {
       };
     }
     const connection = providerConnectionFromStore(activeStore);
+    if (["outcome_unknown", "finalization_pending"].includes(activeStore.quickbooks_authorization?.state)) {
+      return { connected: false, readable: true, storage: envelope, code: "quickbooks_authorization_unverified",
+        reason: "complete the local owner setup before using this connection" };
+    }
     if (connection?.quickbooks_refresh_fence) {
       return {
         connected: false,
@@ -1743,6 +1923,13 @@ export async function providerAccessToken(provider, {
     }
   }
   return withQuickBooksCredentialLock(config.provider, storage, async ({ assertOwned }) => {
+    if (quickbooks) {
+      const ownerStore = loadProviderCredentialStore(config.provider, storage);
+      if (["outcome_unknown", "finalization_pending"].includes(ownerStore.quickbooks_authorization?.state)) {
+        throw ownerAppError("quickbooks_authorization_unverified");
+      }
+    }
+
     const assertMutationOwned = () => { assertSourceOwned?.(); assertOwned(); };
     assertMutationOwned();
     // Read under the renewal lease: another request may already have renewed
@@ -1956,6 +2143,7 @@ export async function authorizeProvider(provider, {
   }
   const startingQuickBooksConnection = config.provider === "quickbooks"
     ? await loadQuickBooksCredentials(storage, {
+        refuseOwnerApp: true,
         refreshLockWaitMs,
         refreshLockPollMs,
         refreshLockStaleMs,

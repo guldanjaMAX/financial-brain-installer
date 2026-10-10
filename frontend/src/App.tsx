@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { ApiError, OWNER_SIGNED_OUT_EVENT, api, type Me } from "./lib/api";
 import { Gate, type EnrollmentKind } from "./components/Gate";
 import { Ask, ScopedAsk } from "./components/Ask";
+import { QuickBooksSetup } from "./components/QuickBooksSetup";
 import { Settings } from "./components/Settings";
 import { Home } from "./components/Home";
 import { Documents } from "./components/Documents";
@@ -44,8 +45,8 @@ export function enrollmentInviteFromHash(hash: string): EnrollmentInvite | null 
 const root = typeof document === "undefined" ? null : document.getElementById("root");
 const shellOwner = root?.dataset.owner || "";
 
-export type View = "home" | "year" | "financial-map" | "documents" | "ask" | "review" | "access";
-export const OWNER_VIEWS: readonly View[] = ["home", "year", "financial-map", "documents", "ask", "review", "access"];
+export type View = "home" | "year" | "financial-map" | "documents" | "ask" | "review" | "access" | "quickbooks-setup";
+export const OWNER_VIEWS: readonly View[] = ["home", "year", "financial-map", "documents", "ask", "review", "access", "quickbooks-setup"];
 export const GRANT_VIEWS: readonly View[] = ["documents", "ask"];
 const ENTITY_REQUIRED_VIEWS: readonly View[] = ["year", "review"];
 const SCOPE_CHOICE_VIEWS: readonly View[] = ["home", "documents", "ask"];
@@ -85,6 +86,7 @@ export function scopeGateRequiresEntity(scopeGate: ReturnType<typeof ownerViewSc
 
 export function initialOwnerView(): View {
   if (typeof location === "undefined") return "home";
+  if (location.pathname === "/app/setup" && new URLSearchParams(location.search).get("provider") === "quickbooks") return "quickbooks-setup";
   const requested = new URLSearchParams(location.search).get("view") as View | null;
   return requested && OWNER_VIEWS.includes(requested) ? requested : "home";
 }
@@ -222,6 +224,7 @@ export function OwnerWorkspace({ owner, me, view, setView, refresh }: {
           </section>
         ) : (
           <>
+            {view === "quickbooks-setup" && <QuickBooksSetup />}
             {view === "home" && <Home onNavigate={setView} />}
             {view === "year" && <ThisYear />}
             {view === "financial-map" && <FinancialMap />}

@@ -1205,3 +1205,21 @@ remain not observable until a richer read-only snapshot exists.
 | Change scheduling | `operations/drive-scheduler.mjs` and its connector specs (`imessage-scheduler.mjs`, `folder-scheduler.mjs`), launchd tests, freshness expectations, private log and lock behavior |
 | Add an issue category | Support schema, typed classification, privacy tests, error-path test, troubleshooting remedy |
 | Cut a release | Package and lock versions, template version, current-version test, changelog, pack inspection, six CI jobs, release tag |
+
+### Owner-created QuickBooks app boundary (0.4.12 candidate)
+
+Each production app serves its owner's one intended company. App keys, tokens,
+staged replacements and uncertain-exchange fences use the existing local
+provider envelope and lock. The singleton store retains installation and company
+reservations after disconnect and cannot be adopted by another Brain. The
+Worker receives encrypted callback handoffs and safe signed setup receipts;
+it never exchanges codes or stores client secrets. Exact redirect binding is
+append-only migration 0054, and expiring pairing metadata is migration 0055.
+
+The owner page requires an owner principal with `grantId=null`, same-origin
+requests and the companion header. Pairing offers require the local admin
+credential on a separate route. The page does not receive that credential.
+A paired public key authenticates sequential progress for one owner session
+and installation. This is coordination, not money-answer evidence. No new code
+approves a money answer. Native helper signing, installation, portal capture,
+agent-observation exclusion and production field acceptance remain held.

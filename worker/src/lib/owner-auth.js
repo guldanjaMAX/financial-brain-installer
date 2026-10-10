@@ -47,6 +47,8 @@ import {
 } from "./support-access.js";
 import { readUpdateStatus } from "./update-status.js";
 
+import { handleQuickBooksOwnerSetup } from "./quickbooks-owner-setup.js";
+
 const APP_HEADER = "X-Brain-App";
 
 function appRequest(request) {
@@ -372,7 +374,7 @@ export async function handleOwnerAuth(env, request, url, path, options = {}) {
       },
     });
   }
-  if (path === "/app" && request.method === "GET") {
+  if ((path === "/app" || path === "/app/setup") && request.method === "GET") {
     // Absolute URLs: a link scraper resolves og:image against nothing.
     return new Response(appPageHtml(env, url.origin), {
       headers: {
@@ -746,6 +748,10 @@ export async function handleOwnerAuth(env, request, url, path, options = {}) {
       clear_session: true,
       recovery: "Ask the owner to create new document access and send a new enrollment link.",
     }, 403), clearSessionCookie());
+  }
+
+  if (path.startsWith("/api/app/quickbooks/setup/")) {
+    return handleQuickBooksOwnerSetup(env, request, { principal });
   }
 
   // Device management is caller-scoped. A scoped passkey may see, rename, or
