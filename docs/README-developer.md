@@ -2392,3 +2392,36 @@ overwritten, and are never uploaded. Deterministic answer results contain only
 counts, booleans, and typed failure codes, never expected phrases, values,
 answers, citation identities, or source titles. It is intentionally not labeled
 as the v2 run-artifact schema described in `docs/EVALUATION.md`.
+
+### Owner-created QuickBooks app candidate for 0.4.12
+
+The local production adapter lives in `operations/quickbooks-owner-setup.mjs`.
+`--owner-app-setup` explicitly selects Online; `--edition online` skips local
+Desktop detection. Production resolves only the owner-bound protected app
+pair. Sandbox retains injected credentials and the exact localhost callback.
+The manifest's optional `corpora.quickbooks.owner_app` contains installation ID,
+app ID, company fingerprint and exact redirect URI only. It never carries keys.
+
+App staging, exchange fences, promotion and refresh use the existing provider
+store and custody lock. A working grant survives staging and failed exchange.
+A code is exchanged once; an uncertain response requires fresh consent. The
+callback's ephemeral private key remains memory-only. Migration 0054 binds the
+callback's exact origin and path; older pending intents must restart. Migration
+0055 holds expiring owner/companion coordination with public verification keys,
+session hashes and signed safe progress, without provider credentials.
+
+The native host registers a pairing offer through the admin-only
+`/api/oauth/quickbooks/setup/pair`. The owner claims it through the existing
+passkey session and companion header at `/api/app/quickbooks/setup/start`.
+Progress is signed, sequential, origin-bound and session-bound. Canceling setup
+revokes coordination only; it never disconnects a grant. The page never gets an
+admin key. The signed host/extension installer and its observation-isolation
+proof are not supplied by this candidate. Production has no default companion
+and stays refused until that separately reviewed implementation exists.
+
+The owner page distinguishes staged keys, connection, pending import, reconnect
+and uncertain revocation. Native schedule pause/readback and signed progress
+publication are companion integration seams. Run the new Node suites together
+with existing provider OAuth, CLI and QuickBooks callback suites. MAIN must
+build the frontend and run its component/browser suites before packaging.
+See `onboarding/quickbooks-owner-app.md` for owner instructions and field gates.

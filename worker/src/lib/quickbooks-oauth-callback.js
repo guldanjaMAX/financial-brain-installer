@@ -36,7 +36,7 @@ const TENANT_ID = "primary";
 const HASH = /^[0-9a-f]{64}$/;
 const RANDOM_CAPABILITY = /^[A-Za-z0-9_-]{43,128}$/;
 const SOURCE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-const NEUTRAL_CALLBACK_HTML = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>QuickBooks return</title><body><main><p>QuickBooks sent you back. Go back to the Claude Code or Codex window on your computer. It will tell you whether QuickBooks connected. You can close this tab.</p></main></body></html>";
+const NEUTRAL_CALLBACK_HTML = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>QuickBooks return</title><body><main><p>QuickBooks sent you back. Go back to the Claude Code or Codex window on your computer. It will tell you whether QuickBooks connected. You can close this tab.</p><p><a href=\"/app/setup?provider=quickbooks\">Return to QuickBooks setup</a></p></main></body></html>";
 
 class RouteError extends Error {
   constructor(code, status = 400, error = "invalid_request") {
@@ -230,6 +230,9 @@ async function intentByIdentity(env, intentId, claimSecret = null) {
 }
 
 async function startIntent(env, request, now) {
+  const startUrl = new URL(request.url);
+  if (startUrl.protocol !== "https:" || startUrl.port) routeError("quickbooks_oauth_origin_invalid");
+  const redirectUri = `${startUrl.origin}${QUICKBOOKS_OAUTH_PATHS.callback}`;
   const body = await boundedJson(request);
   if (!exactKeys(body, [
     "intent_id", "state", "claim_secret", "source", "environment",
@@ -269,6 +272,7 @@ async function startIntent(env, request, now) {
     client_id_fingerprint: clientIdFingerprint,
     expected_company_fingerprint: expectedCompanyFingerprint,
     recipient_public_jwk: publicJwk,
+    redirect_uri: redirectUri,
   };
   const startFingerprint = await sha256Hex(JSON.stringify(startShape));
 
@@ -302,12 +306,12 @@ async function startIntent(env, request, now) {
       `INSERT INTO quickbooks_oauth_intents
          (tenant_id,intent_hash,state_hash,claim_hash,start_fingerprint,pkce_challenge_hash,
           recipient_public_jwk,source,environment,client_id_fingerprint,
-          expected_company_fingerprint,status,created_at,expires_at)
-       VALUES (?,?,?,?,?,NULL,?,?,?,?,?,'pending',?,?)`,
+          expected_company_fingerprint,status,created_at,expires_at,redirect_uri)
+       VALUES (?,?,?,?,?,NULL,?,?,?,?,?,'pending',?,?,?)`,
     ).bind(
       TENANT_ID, intentHash, stateHash, claimHash, startFingerprint,
       JSON.stringify(publicJwk), source, body.environment, clientIdFingerprint,
-      expectedCompanyFingerprint, createdAt, expiresAt,
+      expectedCompanyFingerprint, createdAt, expiresAt, redirectUri,
     ).run();
   } catch (insertError) {
     // A response-loss retry can race the original start on another isolate.
@@ -361,6 +365,9 @@ async function receiveCallback(env, url, now) {
     "SELECT * FROM quickbooks_oauth_intents WHERE tenant_id = ? AND state_hash = ?",
   ).bind(TENANT_ID, stateHash).first();
   if (!row || row.status !== "pending" || Number(row.expires_at) <= now) return;
+  // Origin aliases and path variants must not consume an otherwise valid
+  // pending intent. Old intents lacking this proof require a fresh ceremony.
+  if (row.redirect_uri !== `${url.origin}${url.pathname}`) return;
 
   const providerErrors = url.searchParams.getAll("error");
   if (providerErrors.length > 0) {

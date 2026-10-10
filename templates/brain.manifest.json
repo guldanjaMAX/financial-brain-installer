@@ -185,8 +185,11 @@
       "_comment": [
         "QuickBooks Online runtime queries are read-only, but Intuit's one",
         "Accounting OAuth scope grants broader read and update permission.",
-        "This release connects sandbox companies only. Register the exact",
-        "http://localhost:47812/ redirect shown by the technician command.",
+        "Sandbox uses the exact http://localhost:47812/ redirect.",
+        "Owner-app production setup is held until the reviewed local companion",
+        "and production field gates pass. Its owner_app metadata contains only",
+        "installation_id, app_id, company_fingerprint and exact redirect_uri.",
+        "Never put a client ID, secret or token in this manifest.",
         "OAuth credentials and the selected company id stay in the local",
         "provider credential store. Disconnect retains imported documents;",
         "removal needs a separately reviewed forget preview."

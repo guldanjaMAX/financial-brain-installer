@@ -12,7 +12,7 @@ export const CONNECTOR_EXPANSION_CATALOG = Object.freeze([
   row({
     id: "quickbooks", label: "QuickBooks Online", build: "sandbox_ready_runner",
     automated_proof: "offline_scripted_provider_io", rehearsal_available: true, installed_connection: true,
-    current_boundary: "Sandbox localhost OAuth, canonical company binding, rotating refresh, paginated read-only accounting snapshots, common receipts, scheduling, retry, and revoke-before-disconnect are wired. Intuit's Accounting consent is broader than runtime use. Production callback and query deletion truth remain unavailable.",
+    current_boundary: "Sandbox localhost OAuth, canonical company binding, rotating refresh, paginated read-only accounting snapshots, common receipts, scheduling, retry, and revoke-before-disconnect are wired. Intuit's Accounting consent is broader than runtime use. Owner-app production adapter and HTTPS handoff have synthetic coverage; signed portal transfer, installation pairing and production field acceptance remain held. Query deletion truth remains unavailable.",
     next_acceptance: "Use an Intuit sandbox company to prove consent, returned company identity, same-company reconnect, wrong-company refusal, refresh rotation, pagination, changed records, outage recovery, disconnect retention, retrieval, and a separate forget preview.",
   }),
   row({

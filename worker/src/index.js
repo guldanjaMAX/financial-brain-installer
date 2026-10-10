@@ -1,3 +1,4 @@
+import { handleQuickBooksOwnerSetup } from "./lib/quickbooks-owner-setup.js";
 import { readIngestRemovalRequest, previewIngestRemovals, applyIngestRemovals } from "./lib/ingest-removal-plan.js";
 import { createQueryTiming, queryTimingResponse, measureQueryStage, startQueryStage } from "./lib/query-timing.js";
 /**
@@ -3051,7 +3052,7 @@ export default {
     // preview image, and the scraper that fetches it holds no credential.
     // It sat behind the key gate at first, so every shared invite would have
     // previewed as a 401 instead of an image.
-    if (path === "/app" || path.startsWith("/auth/") || path.startsWith("/api/app/") ||
+    if (path === "/app" || path === "/app/setup" || path.startsWith("/auth/") || path.startsWith("/api/app/") ||
         path.startsWith("/brand/") || path.startsWith("/app/assets/")) {
       // /auth/* takes unauthenticated writes (WebAuthn challenge rows), so it
       // carries a public policy in the guard's table. The guard is a no-op for
@@ -3073,6 +3074,9 @@ export default {
     // admin key and is rate-limited by the public guard instead. Callback
     // failures redirect away from Intuit's query string; claim failures stay
     // private JSON for the local polling client.
+    if (path === "/api/oauth/quickbooks/setup/pair") {
+      return handleQuickBooksOwnerSetup(env, request, { adminAuthorized: validateAdminKey(request, env) });
+    }
     if (path === QUICKBOOKS_OAUTH_PATH_PREFIX || path.startsWith(`${QUICKBOOKS_OAUTH_PATH_PREFIX}/`)) {
       if (path === QUICKBOOKS_OAUTH_PATHS.callback || path === QUICKBOOKS_OAUTH_PATHS.claim) {
         const guarded = await guardPublicRequest(env, request, url, path);

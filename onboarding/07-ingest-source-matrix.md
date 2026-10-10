@@ -59,7 +59,7 @@ in ADR 003; they are not claimed as current connector behavior.
 | Microsoft 365, Outlook, Calendar, SharePoint, OneDrive | **Built behind a field gate.** OAuth, immutable Outlook mail and event IDs, a rolling 30-day-past and 90-day-future calendar view, independent delta sync, file extraction, tombstones, and scheduling are scripted-provider tested. Existing connections must re-consent once for delegated `Calendars.Read`. No real Entra tenant proof yet |
 | Dropbox | **Built behind a field gate.** OAuth, bounded file extraction, cursor resume, tombstones, baseline reconciliation, and scheduling are scripted-provider tested. No real Dropbox account proof yet |
 | Box | No native connector. Use a reviewed export or a locally synced Box folder through the watched-folder path. That fallback is only as current as the local sync and Brain schedule |
-| QuickBooks Online | **Built behind a field gate.** Sandbox OAuth, company binding, rotating refresh, paginated read-only snapshots, scheduling, and disconnect are wired. No Intuit sandbox company has crossed the full acceptance run yet |
+| QuickBooks Online | **Built behind a field gate.** Sandbox OAuth, company binding, rotating refresh, paginated read-only snapshots, scheduling, and disconnect are wired. The 0.4.12 owner-app candidate adds local staging and HTTPS handoff; signed portal transfer and production field acceptance remain held. No Intuit company has crossed the full acceptance run yet |
 | HubSpot CRM | **Built behind a field gate.** OAuth, contacts, companies, deals, archived records, scheduling, and disconnect are scripted-provider tested. No real portal proof yet |
 | Airtable | Not built |
 
@@ -475,7 +475,10 @@ is visible.
 
 **Built behind a field gate.** Sandbox OAuth, company binding, rotating refresh,
 paginated read-only snapshots, scheduling, and disconnect are wired. No Intuit
-sandbox company has completed the acceptance run.
+sandbox company has completed the acceptance run. The owner-app candidate for
+0.4.12 has local custody, exact HTTPS handoff and owner-only setup coordination.
+Signed portal transfer, helper installation, observation isolation and production
+field acceptance remain held. See `quickbooks-owner-app.md`.
 
 ### HubSpot and other CRMs
 

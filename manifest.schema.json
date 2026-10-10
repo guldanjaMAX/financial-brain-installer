@@ -296,8 +296,20 @@
         },
         "quickbooks": {
           "type": "object",
-          "description": "QuickBooks Online accounting records queried read-only at runtime. Intuit's Accounting OAuth consent can authorize broader read and update access. Sandbox localhost OAuth is available; production stops before credential or browser access until the client-owned HTTPS callback is implemented. OAuth credentials and raw company identity remain in the local provider store. Disconnect retains imported documents, and query snapshots do not prove hard deletion.",
+          "description": "QuickBooks Online accounting records queried read-only at runtime. Intuit's Accounting OAuth consent can authorize broader read and update access. Sandbox localhost OAuth is available. Owner-app production setup requires the reviewed local companion, an exact HTTPS callback, a protected owner-bound app pair and one confirmed company. Portal transfer and production field acceptance remain held. OAuth credentials and raw company identity remain in the local provider store. Disconnect retains imported documents, and query snapshots do not prove hard deletion.",
           "properties": {
+            "owner_app": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Non-secret metadata written after exact owner app and company selection. Never put client keys or tokens here. Absence keeps production refused.",
+              "required": ["installation_id", "app_id", "company_fingerprint", "redirect_uri"],
+              "properties": {
+                "installation_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,128}$" },
+                "app_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
+                "company_fingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                "redirect_uri": { "type": "string", "pattern": "^https://[a-z0-9.-]+/api/oauth/quickbooks/callback$" }
+              }
+            },
             "enabled": {
               "type": "boolean",
               "default": false
