@@ -14,7 +14,10 @@ const selection = () => ({
   google_drive: { state: "held", reason: "safety review pending" },
 });
 
-function harness({ sources = selection(), driveReady = true, corpora = {} } = {}) {
+function harness({ sources = selection(), driveReady = true, corpora = {}, runtime = process } = {}) {
+  // Match the host's path syntax; Linux exercises the Darwin scheduler offline.
+  // A Darwin definition would resolve a Windows Node path as a POSIX relative path.
+  const platform = runtime.platform === "win32" ? "win32" : "darwin";
   const home = realpathSync.native(mkdtempSync(join(tmpdir(), "daily-selection-")));
   const path = join(home, "brain.manifest.json");
   writeFileSync(join(home, ".brain-admin-key"), randomBytes(32).toString("hex"), { mode: 0o600 });
@@ -26,7 +29,7 @@ function harness({ sources = selection(), driveReady = true, corpora = {} } = {}
   };
   const save = () => writeFileSync(path, JSON.stringify(m));
   save();
-  const calls = { plans: [], probes: [], native: [], runs: [], receipts: [], reads: 0, locks: 0 };
+  const calls = { plans: [], probes: [], native: [], runs: [], receipts: [], reads: 0, locks: 0, acls: 0 };
   let state = null;
   const adapter = {
     read() { calls.native.push("read"); return state; },
@@ -42,13 +45,15 @@ function harness({ sources = selection(), driveReady = true, corpora = {} } = {}
     return { connected: key !== "google_drive" || driveReady, reason: "connection unavailable" };
   }]));
   const definitionOptions = {
-    platform: "darwin", home, nodePath: process.execPath,
+    platform, home, nodePath: runtime.execPath,
     brainPath: realpathSync.native(new URL("../brain.mjs", import.meta.url)),
     runnerPath: realpathSync.native(new URL("../operations/daily-refresh-run.mjs", import.meta.url)),
     now: () => new Date(after),
   };
   const options = {
-    home, platform: "darwin", principal: "uid:501", localTimezone: "UTC",
+    home, platform, principal: platform === "win32" ? "sid:S-1-0-0" : "uid:501", localTimezone: "UTC",
+    username: "owner", environment: { SystemRoot: String.raw`C:\Windows` },
+    runAcl: () => { calls.acls++; return { status: 0 }; },
     existingSchedulerOwners: [], lifecycleLockHeld: true,
     planLoad: async (args) => {
       const entries = await planLoad({ ...args, probes });
@@ -73,6 +78,57 @@ function harness({ sources = selection(), driveReady = true, corpora = {} } = {}
   };
   const command = (action, extra = [], overrides = {}) => cmdDaily([action, path, ...extra], { ...options, ...overrides });
   return { path, m, save, calls, options, command, setDriveReady: (value) => { driveReady = value; } };
+}
+
+for (const hostPlatform of ["darwin", "linux", "win32"]) {
+  test(`selection fixture preserves the ${hostPlatform} Node path through registered execution`, async () => {
+    const windows = hostPlatform === "win32";
+    const execPath = windows ? String.raw`C:\Program Files\nodejs\node.exe` : "/fixture/runtime/node";
+    const h = harness({ runtime: { platform: hostPlatform, execPath } });
+    const checked = [];
+    let present = true;
+    Object.assign(h.options.definitionOptions, {
+      brainPath: windows ? String.raw`C:\Fixture\brain.mjs` : "/fixture/runtime/brain.mjs",
+      runnerPath: windows ? String.raw`C:\Fixture\daily-refresh-run.mjs` : "/fixture/runtime/daily-refresh-run.mjs",
+      nodePathExists: (path) => { checked.push(path); return present && path === execPath; },
+      nodeRealpath: (path) => {
+        assert.equal(path, execPath, "Node resolution must preserve the injected host path");
+        return realpathSync.native(process.execPath);
+      },
+    });
+    const installed = await h.command("on");
+    assert.equal(installed.schedule.verified, true);
+    assert.equal(h.calls.plans.length, 1);
+    assert.equal(installed.plan.sources.filter((source) => source.run_key !== null).length, 2);
+    const hash = installed.schedule.definition.definition_hash;
+    const result = await h.command("run", ["--definition-hash", hash]);
+    assert.equal(result.status, "partial");
+    assert.ok(checked.length > 0, "the real registered Node presence guard was reached");
+    assert.ok(checked.every((path) => path === execPath));
+    assert.equal(installed.schedule.definition.platform, windows ? "win32" : "darwin");
+    assert.equal(installed.schedule.definition.identity.principal, windows ? "sid:S-1-0-0" : "uid:501");
+    assert.deepEqual(h.calls.runs, ["gmail", "calendar"]);
+    assert.equal(h.calls.reads, 3);
+    assert.equal(h.calls.acls, windows ? 4 : 0, "Windows journal permissions use the injected ACL runner");
+
+    present = false;
+    const checksBefore = checked.length;
+    await assert.rejects(h.command("run", ["--definition-hash", hash]), { code: "daily_schedule_node_missing" });
+    assert.equal(h.calls.plans.length, 3, "the missing-runtime arm rebuilt the source plan");
+    assert.ok(checked.length > checksBefore, "the missing-runtime arm reached the same presence guard");
+    assert.equal(h.calls.locks, 1, "a missing Node cannot reach a second source-execution lease");
+    assert.deepEqual(h.calls.runs, ["gmail", "calendar"], "the missing-runtime arm added no source calls");
+
+    present = true;
+    h.m.operations.daily_refresh.sources.google_drive.reason = "scope review pending";
+    h.save();
+    const driftChecksBefore = checked.length;
+    await assert.rejects(h.command("run", ["--definition-hash", hash]), /manifest or source plan changed/);
+    assert.equal(h.calls.plans.length, 4, "the drift arm rebuilt the changed source plan");
+    assert.ok(checked.length > driftChecksBefore, "drift reached the registered runtime check");
+    assert.equal(h.calls.locks, 1);
+    assert.deepEqual(h.calls.runs, ["gmail", "calendar"], "drift added no source calls");
+  });
 }
 
 for (const driveReady of [true, false]) {
