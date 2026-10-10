@@ -88,7 +88,7 @@ function sumCounts(target, next) {
 }
 function mergeReceipt(a, b) {
   if (!a || !b) return;
-  for (const field of ["first_stored_ingest_at", "last_stored_ingest_at"]) {
+  for (const field of ["first_stored_ingest_at", "last_stored_ingest_at", "last_successful_run_at"]) {
     const values = [a[field], b[field]].filter(Boolean).sort();
     a[field] = (field.startsWith("first") ? values[0] : values.at(-1)) || null;
   }
@@ -104,10 +104,20 @@ function mergeReceipt(a, b) {
 export function createInventoryAccumulator() {
   const sources = new Map();
   const families = new Map();
+  const retirements = new Map();
   return {
     add(page) {
       if (!Array.isArray(page.sources) || !Array.isArray(page.families) || page.sources.length > 10000 ||
           page.families.length > 5000) throw new Error("invalid inventory page");
+      const retirementPage = page.retirements ?? [];
+      if (!Array.isArray(retirementPage) || retirementPage.length > 5000) throw new Error("invalid retirement page");
+      const registeredNames = new Set(page.sources.filter(row => row?.registered).map(row => row.source_id));
+      for (const entry of retirementPage) {
+        if (!Array.isArray(entry) || entry.length !== 3 || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(entry[0]) ||
+            !registeredNames.has(entry[0]) || !Number.isSafeInteger(entry[1]) || entry[1] < 1 ||
+            !(entry[2] === null || Number.isFinite(Date.parse(entry[2])))) throw new Error("invalid retirement receipt");
+        if (!retirements.has(entry[0]) || retirements.get(entry[0])[1] < entry[1]) retirements.set(entry[0], entry);
+      }
       const pageNames = new Set();
       const pageFamilies = new Map();
       for (const row of page.sources) {
@@ -142,6 +152,11 @@ export function createInventoryAccumulator() {
     },
     finish() {
       return [...sources.values()].sort((a, b) => a.source_id < b.source_id ? -1 : 1).map((row) => {
+        const retiredAt = retirements.get(row.source_id)?.[2];
+        if (row.registered && retiredAt) {
+          row.freshness.state = "manual";
+          row.freshness.reason = `retired by the owner on ${retiredAt.slice(0, 10)}; kept, not refreshed`;
+        }
         const physical = row.storage.physical_documents;
         const logical = families.get(row.source_id).size;
         row.storage.logical_documents = logical;
@@ -163,12 +178,13 @@ export function createInventoryAccumulator() {
         recovery.priority_basis = row.readability.unreadable_documents ? "stored records without nonblank searchable text"
           : recovery.candidate_documents ? "stored OCR or provenance receipts require review" : "no stored recovery condition was found";
         if (row.receipt) row.receipt.logical_matches_reported = row.receipt.reported_logical_documents === logical;
-        // Only these coverage dimensions depend on the accumulated document
-        // count; preserve the original receipt's range/refusal proof verbatim.
+        // Recompute document-count and retirement dimensions after all pages;
+        // preserve the original receipt's range/refusal proof verbatim.
         const nextCoverage = sourceCoverageFromEvidence({ ...row.freshness, kind: row.kind,
           documents: logical }, { latestRun: row.receipt?.latest_run });
         row.freshness.coverage = { ...row.freshness.coverage,
-          starter_context: nextCoverage.starter_context, history: nextCoverage.history };
+          starter_context: nextCoverage.starter_context, history: nextCoverage.history,
+          live_updates: nextCoverage.live_updates, waiting_on_owner_machine: nextCoverage.waiting_on_owner_machine };
         return row;
       });
     },

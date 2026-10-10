@@ -10,8 +10,8 @@ import { jsonResponse, privateNoStore, validateAdminKey } from "./core.js";
 import { backendOf, D1 } from "./store.js";
 import { ownerSessionPrincipal } from "./owner-auth.js";
 import { sourceInventory, sourceRecoveryCandidates } from "./store-d1.js";
-import { sourceInventoryScanPage, sourceFreshnessPage } from "./source-inventory-scan.js";
-import { recoveryPlanSummary } from "./source-inventory-merge.js";
+import { sourceInventoryScanPage, sourceFreshnessPage, missingInventoryFence } from "./source-inventory-scan.js";
+import { recoveryPlanSummary, createInventoryAccumulator } from "./source-inventory-merge.js";
 
 export const SOURCE_INVENTORY_PATH = "/api/admin/brain/sources";
 export const SOURCE_INVENTORY_CONTRACT_VERSION = 3;
@@ -57,15 +57,17 @@ function decodeCursor(value, mode) {
   try { cursor = JSON.parse(decoded); } catch { return undefined; }
   if (!cursor || typeof cursor !== "object" || Array.isArray(cursor)) return undefined;
   const fields = Object.keys(cursor).sort().join(",");
-  if (fields !== (mode === "bounded" ? "after,as_of,mode,page,snapshot,source,v" : "after,as_of,mode,snapshot,source,v")) return undefined;
-  if (mode === "bounded" && (!Number.isSafeInteger(cursor.page) || cursor.page < 1 || cursor.page >= 1000)) return undefined;
+  const workPage = mode === "bounded" || mode === "freshness";
+  if (fields !== (workPage ? "after,as_of,events_after,mode,page,runs_after,snapshot,source,v" : "after,as_of,mode,snapshot,source,v")) return undefined;
+  if (workPage && (![cursor.events_after, cursor.runs_after].every(value => Number.isSafeInteger(value) && value >= 0))) return undefined;
+  if (workPage && (!Number.isSafeInteger(cursor.page) || cursor.page < 1 || cursor.page >= 1000)) return undefined;
   if (cursor.v !== SOURCE_INVENTORY_CONTRACT_VERSION) return undefined;
   if (cursor.mode !== mode) return undefined;
   if (mode === "inventory" &&
       (typeof cursor.after !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(cursor.after))) {
     return undefined;
   }
-  if (["recovery", "bounded"].includes(mode) && (!Number.isSafeInteger(cursor.after) || cursor.after < 1)) return undefined;
+  if ((mode === "recovery" || workPage) && (!Number.isSafeInteger(cursor.after) || cursor.after < (workPage ? 0 : 1))) return undefined;
   if (!(cursor.source === null ||
         (typeof cursor.source === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(cursor.source)))) {
     return undefined;
@@ -114,8 +116,8 @@ async function inventoryBody(request) {
       status: 400,
     };
   }
-  if (mode === "freshness" && (body.cursor !== undefined || body.limit !== undefined)) {
-    return { error: "freshness reads do not accept a cursor or limit", status: 400 };
+  if (mode === "freshness" && body.limit !== undefined) {
+    return { error: "freshness reads do not accept a limit", status: 400 };
   }
   const cursor = decodeCursor(body.cursor, mode);
   if (cursor === undefined) return { error: "cursor is not valid for this inventory", status: 400 };
@@ -239,38 +241,55 @@ export async function handleSourceInventoryApi(env, request) {
   const parsed = await inventoryBody(request);
   if (!parsed.body) return respond({ error: parsed.error }, parsed.status);
 
-  const { limit, cursor, mode, source, sourceGroupCursor } = parsed.body;
+  let { limit, cursor, mode, source, sourceGroupCursor } = parsed.body;
   const asOf = cursor?.as_of || new Date().toISOString();
-  if (mode === "freshness") {
+  if (mode === "bounded" || mode === "freshness") {
     try {
-      const sources = await sourceFreshnessPage(env, { now: Date.parse(asOf) });
-      return respond({ contract_version: 3, kind: "source_freshness", as_of: asOf, sources });
-    } catch {
-      return respond({ error: "source freshness is unavailable", code: "source_inventory_unavailable" }, 503);
-    }
-  }
-  if (mode === "bounded") {
-    try {
-      const inventory = await sourceInventoryScanPage(env, {
-        after: cursor?.after || 0, limit, now: Date.parse(asOf), snapshot: cursor?.snapshot ?? null,
+      const read = mode === "freshness" ? sourceFreshnessPage : sourceInventoryScanPage;
+      const inventory = await read(env, {
+        after: cursor?.after || 0, limit: mode === "freshness" ? 5000 : limit,
+        eventsAfter: cursor?.events_after || 0, runsAfter: cursor?.runs_after || 0,
+        now: Date.parse(asOf), snapshot: cursor?.snapshot ?? null,
       });
       const page = (cursor?.page || 0) + 1;
       if (!inventory.complete && page >= 1000) throw new Error("inventory page limit");
       const { after: _after, through: _through, ...scan } = inventory.scan;
       const nextCursor = inventory.complete ? null : encodeBase64Url(JSON.stringify({
         v: SOURCE_INVENTORY_CONTRACT_VERSION, mode, page, after: inventory.scan.through,
+        events_after: inventory.receiptThrough.events, runs_after: inventory.receiptThrough.runs,
         snapshot: inventory.snapshot, as_of: asOf, source: null,
       }));
-      return respond({ contract_version: 3, kind: "source_inventory_scan",
+      if (mode === "freshness" && page === 1 && inventory.complete) {
+        const accumulator = createInventoryAccumulator();
+        accumulator.add({ sources: inventory.rows, families: inventory.families, retirements: inventory.retirements });
+        return respond({ contract_version: 3, kind: "source_freshness", as_of: asOf,
+          sources: freshnessRows(accumulator.finish()) });
+      }
+      return respond({ contract_version: 3, kind: mode === "freshness" ? "source_freshness_scan" : "source_inventory_scan",
         complete: inventory.complete, truncated: !inventory.complete, cursor: nextCursor,
         as_of: asOf, snapshot: inventory.snapshot, scan: { ...scan, page },
-        sources: inventory.rows, families: inventory.families, limitations: sourceInventoryLimitations(),
+        sources: inventory.rows, families: inventory.families, retirements: inventory.retirements,
+        limitations: sourceInventoryLimitations(),
       });
     } catch (error) {
-      const changed = error?.code === "source_inventory_changed";
-      return respond({ error: changed ? "source inventory changed; restart from the first page"
-        : "bounded source inventory is unavailable", code: changed ? "source_inventory_changed"
-        : "source_inventory_unavailable" }, changed ? 409 : 503);
+      if (missingInventoryFence(error) && !cursor) {
+        // A pre-45 database has no generation to fabricate. Reuse its existing
+        // single-page compatibility guard, then return the complete v3 shape.
+        if (mode === "freshness") {
+          try {
+            const inventory = await sourceInventory(env, { now: Date.parse(asOf) });
+            return respond({ contract_version: 3, kind: "source_freshness", as_of: asOf,
+              sources: freshnessRows(inventory.rows.filter(row => row.registered)) });
+          } catch { return respond({ error: "source freshness is unavailable", code: "source_inventory_unavailable" }, 503); }
+        }
+        mode = "inventory";
+        limit = SOURCE_INVENTORY_MAX_PAGE_SIZE;
+      } else {
+        const changed = error?.code === "source_inventory_changed";
+        return respond({ error: changed ? "source inventory changed; restart from the first page"
+          : "bounded source inventory is unavailable", code: changed ? "source_inventory_changed"
+          : "source_inventory_unavailable" }, changed ? 409 : 503);
+      }
     }
   }
   if (mode === "recovery") {
@@ -353,13 +372,14 @@ export async function handleSourceInventoryApi(env, request) {
   try {
     inventory = await sourceInventory(env, { now: Date.parse(asOf) });
   } catch (error) {
-    const code = error?.code === "source_inventory_too_large"
-      ? "source_inventory_too_large"
-      : "source_inventory_unavailable";
+    const code = ["source_inventory_too_large", "source_inventory_upgrade_required"].includes(error?.code)
+      ? error.code : "source_inventory_unavailable";
     const detail = inventoryFailureDetail(error);
     logInventoryFailure("inventory", detail);
     return respond({
-      error: code === "source_inventory_too_large"
+      error: code === "source_inventory_upgrade_required"
+        ? "source inventory requires a CLI with bounded work-page support; update the local CLI"
+        : code === "source_inventory_too_large"
         ? "source inventory is too large for one safe snapshot"
         : "source inventory is unavailable",
       code,
@@ -424,5 +444,15 @@ export async function handleSourceInventoryApi(env, request) {
     sources,
     recovery_plan_summary: recoverySummary,
     limitations: sourceInventoryLimitations(),
+  });
+}
+
+function freshnessRows(rows) {
+  return rows.map(row => {
+    const { coverage: _coverage, ...freshness } = row.freshness;
+    return { name: row.name, kind: row.kind, freshness, receipt: {
+      last_successful_run_at: row.receipt?.last_successful_run_at ?? null,
+      latest_run: row.receipt?.latest_run ?? null,
+    } };
   });
 }

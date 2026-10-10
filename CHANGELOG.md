@@ -11,6 +11,10 @@ the brain, not for whoever built it: what changed for them, and what to check.
   cannot be verified, eligible imports still run and freshness stays unknown;
   held sources and removal approvals remain protected. Check daily status after
   the next run for a verified success date or an explicit unknown result.
+- Source checks remain available while the local installer and Brain run
+  different versions. Long refresh histories are read in pages. Older clients
+  receive an explicit update request when an inventory needs multiple work
+  pages; daily imports still run if freshness cannot yet be verified.
 
 ## 0.4.11 (2026-10-09)
 
