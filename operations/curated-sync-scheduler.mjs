@@ -4,7 +4,7 @@
  *
  * Launchd receives only file locators and a configuration hash. The wrapper
  * starts a second copy under macOS lockf, strips ambient credentials, and lets
- * the curated operation resolve both admin keys from the target manifests at
+ * the curated operation resolve the configured admin keys from the target manifests at
  * execution time. A success receipt and support event contain aggregates only.
  */
 
@@ -37,6 +37,7 @@ import {
   cronToCalendarIntervals,
   expectedRefreshSecondsForCron,
   renderLaunchAgentPlist,
+  launchctlChildEnvironment,
   rotateDriveSchedulerLogs,
   safeIngestEnvironment,
 } from "./drive-scheduler.mjs";
@@ -72,6 +73,7 @@ const FRESHNESS_KEYS = new Set([
   "target_coverage", "historical_raw_drive",
 ]);
 const TARGET_COVERAGE_KEYS = new Set(["cloudflare", "legacy"]);
+const CLOUDFLARE_COVERAGE_KEYS = new Set(["cloudflare"]);
 const HISTORICAL_RAW_DRIVE_KEYS = new Set([
   "checksum_matches", "presence_unverified", "checksum_mismatches", "deletion_eligible",
 ]);
@@ -99,12 +101,12 @@ function nonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
-function ensurePrivateDirectory(path) {
+function ensurePrivateDirectory(path, preserveMode = false) {
   if (!existsSync(path)) mkdirSync(path, { recursive: true, mode: 0o700 });
   const info = lstatSync(path);
   if (!info.isDirectory() || info.isSymbolicLink()) fail("curated scheduler runtime path is not a private directory");
   assertOwned(info, "curated scheduler runtime directory");
-  chmodSync(path, 0o700);
+  if (!preserveMode) chmodSync(path, 0o700);
 }
 
 function preparePrivateLock(path) {
@@ -225,7 +227,7 @@ export function buildCuratedSchedulerPlan(planPath, options = {}) {
     planDirectory: loaded.planDirectory,
   });
   const targetManifestFingerprints = Object.freeze({
-    legacy: targetContracts.legacy.manifestFingerprint,
+    ...(targetContracts.legacy ? { legacy: targetContracts.legacy.manifestFingerprint } : {}),
     cloudflare: targetContracts.cloudflare.manifestFingerprint,
   });
   const label = `com.brain-installer.${scheduler.slug}.curated-sync`;
@@ -259,6 +261,7 @@ export function buildCuratedSchedulerPlan(planPath, options = {}) {
     label,
     domain: `gui/${uid}`,
     service: `gui/${uid}/${label}`,
+    plistPath: join(home, "Library", "LaunchAgents", `${label}.plist`),
     nodePath,
     schedulerPath,
     intervals,
@@ -286,6 +289,121 @@ export function buildCuratedSchedulerPlan(planPath, options = {}) {
 
 export function renderCuratedLaunchAgentPlist(plan) {
   return renderLaunchAgentPlist(plan);
+}
+
+function launchArguments(output) {
+  const block = String(output ?? "").match(/\barguments\s*=\s*\{\n([\s\S]*?)\n\s*\}/)?.[1];
+  return block?.split("\n").map(line => line.trim()).filter(Boolean) ?? [];
+}
+
+function stageCuratedPlist(path, text) {
+  const temporary = `${path}.tmp-${randomBytes(8).toString("hex")}`;
+  let descriptor;
+  try {
+    descriptor = openSync(temporary, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY |
+      (fsConstants.O_NOFOLLOW || 0), 0o600);
+    writeFileSync(descriptor, text);
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    if (readFileSync(temporary, "utf8") !== text) fail("curated scheduler staged plist readback failed");
+    return {
+      commit() { renameSync(temporary, path); },
+      discard() { if (existsSync(temporary)) unlinkSync(temporary); },
+    };
+  } catch (error) {
+    if (descriptor !== undefined) closeSync(descriptor);
+    if (existsSync(temporary)) unlinkSync(temporary);
+    throw error;
+  }
+}
+
+/** Explicit local replacement. Staging, identity checks and rollback precede success. */
+export function reinstallScheduledCuratedSync(planPath, options = {}) {
+  const plan = buildCuratedSchedulerPlan(planPath, options);
+  const launchctl = options.launchctl ?? (args => spawnSync("/bin/launchctl", args, {
+    encoding: "utf8", env: launchctlChildEnvironment(options.env ?? process.env),
+    timeout: 15_000, shell: false,
+  }));
+  const desired = renderCuratedLaunchAgentPlist(plan);
+  ensurePrivateDirectory(join(plan.home, "Library"), true);
+  ensurePrivateDirectory(dirname(plan.plistPath));
+  let prior = null;
+  if (existsSync(plan.plistPath)) {
+    assertPrivateLockIdentity(lstatSync(plan.plistPath), "curated scheduler plist");
+    prior = readFileSync(plan.plistPath, "utf8");
+    // A matching label alone cannot authorize adopting an unrelated service.
+    // Bind the exact runtime, wrapper and plan, allowing only its previous hash.
+    const argumentsBlock = text => text.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1]
+      ?.replace(/<string>[0-9a-f]{64}<\/string>/g, "<string>HASH</string>");
+    if (argumentsBlock(prior) !== argumentsBlock(desired) ||
+        !prior.includes(`<string>${plan.label}</string>`)) {
+      fail("curated scheduler existing plist does not belong to this plan and runtime");
+    }
+  }
+  const staged = stageCuratedPlist(plan.plistPath, desired);
+  let wasLoaded = false;
+  let replacing = false;
+  const requireSuccess = args => {
+    const result = launchctl(args);
+    if (result?.error || result?.status !== 0) fail("curated scheduler service operation failed");
+    return result;
+  };
+  try {
+    const status = launchctl(["print", plan.service]);
+    if (status?.error || ![0, 113].includes(status?.status)) fail("curated scheduler service inspection failed");
+    wasLoaded = status.status === 0;
+    if (wasLoaded && !prior) fail("curated scheduler cannot adopt a service without its reviewed plist");
+    if (wasLoaded) {
+      const active = launchArguments(status.stdout);
+      if (JSON.stringify(active.slice(0, -1)) !== JSON.stringify(plan.programArguments.slice(0, -1)) ||
+          !/^[0-9a-f]{64}$/.test(active.at(-1) ?? "")) {
+        fail("curated scheduler loaded service does not belong to this plan and runtime");
+      }
+      if (/\bstate\s*=\s*running\b|\bpid\s*=\s*[1-9][0-9]*/.test(status.stdout)) {
+        fail("curated sync is currently running; wait before reinstalling");
+      }
+    }
+    ensurePrivateDirectory(join(plan.home, ".brain"));
+    ensurePrivateDirectory(plan.logsDir);
+    const lock = preparePrivateLock(plan.lockPath);
+    closeSync(lock);
+    (options.rotateLogs ?? rotateDriveSchedulerLogs)(plan, options);
+    if (wasLoaded) requireSuccess(["bootout", plan.service]);
+    replacing = true;
+    staged.commit();
+    if (readFileSync(plan.plistPath, "utf8") !== desired) fail("curated scheduler plist readback failed");
+    // A plan or manifest changed while preparing the service is never adopted.
+    assertExpectedConfiguration(buildCuratedSchedulerPlan(planPath, options), plan.configHash);
+    requireSuccess(["enable", plan.service]);
+    requireSuccess(["bootstrap", plan.domain, plan.plistPath]);
+    const readback = requireSuccess(["print", plan.service]);
+    if (JSON.stringify(launchArguments(readback.stdout)) !== JSON.stringify(plan.programArguments)) {
+      fail("curated scheduler loaded arguments did not read back exactly");
+    }
+    assertExpectedConfiguration(buildCuratedSchedulerPlan(planPath, options), plan.configHash);
+    if (readFileSync(plan.plistPath, "utf8") !== desired) fail("curated scheduler final plist readback failed");
+    return { ...plan, installed: true, loaded: true, replaced: prior !== null };
+  } catch (error) {
+    if (!replacing) throw error;
+    try {
+      const status = launchctl(["print", plan.service]);
+      if (status?.status === 0) requireSuccess(["bootout", plan.service]);
+      else if (status?.error || status?.status !== 113) fail("rollback inspection failed");
+      if (prior === null) unlinkSync(plan.plistPath);
+      else {
+        const rollback = stageCuratedPlist(plan.plistPath, prior);
+        try { rollback.commit(); } finally { rollback.discard(); }
+        if (readFileSync(plan.plistPath, "utf8") !== prior) fail("rollback readback failed");
+      }
+      if (wasLoaded) requireSuccess(["bootstrap", plan.domain, plan.plistPath]);
+    } catch {
+      fail("curated scheduler replacement failed and rollback needs review");
+    }
+    fail("curated scheduler replacement failed; previous service restored");
+  } finally {
+    staged.discard();
+  }
 }
 
 export function safeCuratedSchedulerEnvironment(environment = process.env) {
@@ -476,7 +594,7 @@ function successReceipt(plan, report, now = new Date()) {
     documents: report.count,
     target_coverage: {
       cloudflare: report.targetCoverage.cloudflare_confirmed.total,
-      legacy: report.targetCoverage.legacy_confirmed.total,
+      ...(plan.curatedPlan.legacyTarget ? { legacy: report.targetCoverage.legacy_confirmed.total } : {}),
     },
     historical_raw_drive: {
       checksum_matches: report.rawDriveHistoricalChecksumMatches.total,
@@ -494,7 +612,8 @@ function validateFreshnessReceipt(value, now) {
       !/^[0-9a-f]{64}$/.test(String(value.corpus_fingerprint ?? "")) ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(String(value.completed_at ?? "")) ||
       !Number.isSafeInteger(value.documents) || value.documents < 1 ||
-      !exactObjectKeys(value.target_coverage, TARGET_COVERAGE_KEYS) ||
+      (!exactObjectKeys(value.target_coverage, TARGET_COVERAGE_KEYS) &&
+       !exactObjectKeys(value.target_coverage, CLOUDFLARE_COVERAGE_KEYS)) ||
       !exactObjectKeys(value.historical_raw_drive, HISTORICAL_RAW_DRIVE_KEYS)) {
     return { ok: false, reason: "invalid_shape" };
   }
@@ -509,8 +628,9 @@ function validateFreshnessReceipt(value, now) {
     return { ok: false, reason: "future_timestamp" };
   }
   const coverage = value.target_coverage;
-  if (!nonNegativeInteger(coverage.cloudflare) || !nonNegativeInteger(coverage.legacy) ||
-      coverage.cloudflare !== value.documents || coverage.legacy !== value.documents) {
+  if (!nonNegativeInteger(coverage.cloudflare) || coverage.cloudflare !== value.documents ||
+      (Object.hasOwn(coverage, "legacy") &&
+       (!nonNegativeInteger(coverage.legacy) || coverage.legacy !== value.documents))) {
     return { ok: false, reason: "invalid_coverage" };
   }
   const historical = value.historical_raw_drive;
@@ -532,7 +652,7 @@ function validateFreshnessReceipt(value, now) {
       documents: value.documents,
       target_coverage: Object.freeze({
         cloudflare: coverage.cloudflare,
-        legacy: coverage.legacy,
+        ...(Object.hasOwn(coverage, "legacy") ? { legacy: coverage.legacy } : {}),
       }),
       historical_raw_drive: Object.freeze({
         checksum_matches: historical.checksum_matches,
@@ -544,7 +664,7 @@ function validateFreshnessReceipt(value, now) {
   };
 }
 
-/** Execute inside the already-held lock and advance freshness only on full dual confirmation. */
+/** Execute inside the already-held lock and advance freshness only on confirmation of every configured target. */
 export async function executeScheduledCuratedSync(planPath, options = {}) {
   const plan = buildCuratedSchedulerPlan(planPath, options);
   assertExpectedConfiguration(plan, options.expectedConfigHash);
@@ -629,6 +749,10 @@ function readFreshness(plan, now) {
     }
     const value = checked.value;
     if (value.config_hash === plan.configHash &&
+        !exactObjectKeys(value.target_coverage, plan.curatedPlan.legacyTarget ? TARGET_COVERAGE_KEYS : CLOUDFLARE_COVERAGE_KEYS)) {
+      return { status: "invalid", stale: true, reason: "target_set_mismatch" };
+    }
+    if (value.config_hash === plan.configHash &&
         value.documents !== plan.curatedPlan.expectedDocuments) {
       return { status: "invalid", stale: true, reason: "document_count_mismatch" };
     }
@@ -696,13 +820,13 @@ function printSupportReceipt(eventId) {
 export function parseCuratedSchedulerCliArguments(argv) {
   if (!Array.isArray(argv)) fail("curated scheduler arguments are invalid");
   const [rawCommand, planPath, flag, configHash, ...extra] = argv;
-  if (!new Set(["run", INTERNAL_EXECUTE_COMMAND, "status"]).has(rawCommand) ||
+  if (!new Set(["run", INTERNAL_EXECUTE_COMMAND, "status", "reinstall"]).has(rawCommand) ||
       typeof planPath !== "string" || !planPath || planPath.startsWith("--") ||
       extra.length) {
     fail("curated scheduler arguments are invalid");
   }
   const command = rawCommand === INTERNAL_EXECUTE_COMMAND ? "execute" : rawCommand;
-  if (command === "status") {
+  if (command === "status" || command === "reinstall") {
     if (argv.length !== 2) fail("curated scheduler arguments are invalid");
     return Object.freeze({ command, planPath, expectedConfigHash: undefined });
   }
@@ -729,10 +853,16 @@ async function main(argv = process.argv.slice(2)) {
     parsed = parseCuratedSchedulerCliArguments(argv);
   } catch {
     console.log("usage: node operations/curated-sync-scheduler.mjs status <private-plan>");
+    console.log("       node operations/curated-sync-scheduler.mjs reinstall <private-plan>");
     console.log("       node operations/curated-sync-scheduler.mjs run <private-plan> --config-hash <sha256>");
     return 1;
   }
   const { command, planPath, expectedConfigHash } = parsed;
+  if (command === "reinstall") {
+    reinstallScheduledCuratedSync(planPath);
+    console.log("Curated LaunchAgent reinstalled and verified.");
+    return 0;
+  }
   if (command === "execute") {
     try {
       const result = await executeScheduledCuratedSync(planPath, { expectedConfigHash });
