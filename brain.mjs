@@ -231,7 +231,7 @@ import { renderCliCommands } from "./operations/cli-guidance.mjs";
 import { quotePowerShellArgument, quotePosixArgument } from "./operations/command-display.mjs";
 export { brainCliPrefix, renderCliCommands } from "./operations/cli-guidance.mjs";
 import { readAdminKeyFile, validateAdminKeyValue } from "./operations/admin-key-file.mjs";
-import { retryIngestFinalization } from "./operations/ingest-finalization-retry.mjs";
+import { createIngestFinalizationRetryBudget, retryIngestFinalization } from "./operations/ingest-finalization-retry.mjs";
 import {
   acquireSourceIngestLock,
   canonicalSourceIngestStatePath,
@@ -16242,16 +16242,21 @@ export function describeLoadResult(result) {
       const extra = [];
       const refused = result.docs_refused ?? result.refused ?? 0;
       const excluded = result.docs_excluded ?? result.excluded ?? 0;
+      const heldForRetry = result.held_for_retry ?? 0;
+      // Exit policy and completion are separate: an existing Gmail backlog
+      // returns normally but must not become a successful refresh in load.
+      const incomplete = result.complete === false || heldForRetry > 0 || !!result.failed;
       if (refused) extra.push(`${refused} refused, NOT indexed`);
       if (result.skipped) extra.push(`${result.skipped} skipped`);
+      if (heldForRetry) extra.push(`${heldForRetry} held for retry`);
       return {
         known: true,
         counts,
-        partial: !!(refused || excluded || result.failed),
+        partial: !!(refused || excluded || incomplete),
         refused,
         excluded,
-        refreshSucceeded: !result.failed,
-        outcome: outcomeOf(refused || excluded || result.failed ? "partial" : "completed"),
+        refreshSucceeded: !incomplete,
+        outcome: outcomeOf(refused || excluded || incomplete ? "partial" : "completed"),
         text: `${counts.created} created, ${counts.updated} updated, ${counts.unchanged} unchanged`
           + (extra.length ? `, ${extra.join(", ")}` : ""),
       };
@@ -17335,6 +17340,7 @@ const cmdIngestRemoteRun = async (
   let retryableOcrSkips = 0;
   let gmailDurableRetryFailures = 0;
   let gmailPreviouslyHeldFailures = 0;
+  const finalizationRetryBudget = createIngestFinalizationRetryBudget();
   // Held back until every batch receipt is settled. A failed Gmail part may
   // cross this boundary only after its exact logical retry is durable.
   let pendingCursor = null;
@@ -17384,6 +17390,7 @@ const cmdIngestRemoteRun = async (
       base, adminKey, groups: [group], state, statePath, skips, quiet: true,
       saveState, assertOwned: assertLockOwned,
       retryFinalization: which === "gmail", retrySleep: options.ingestRetrySleep,
+      retryBudget: finalizationRetryBudget,
       onResult: (item, result) => {
         if (paceVectorsPerMinute !== null && ["created", "updated"].includes(result.status)) {
           if (!Number.isSafeInteger(result.chunks) || result.chunks < 0) {
@@ -18999,6 +19006,7 @@ async function sendBatches({
   onAccepted = null, onResult = null, saveState: saveStateOverride = null,
   assertOwned = null,
   retryFinalization = false, retrySleep = undefined,
+  retryBudget = undefined,
 }) {
   // Loaded here rather than closed over: sendBatches is top-level and shared by
   // both ingest paths, so it cannot rely on a caller's destructured import.
@@ -19025,7 +19033,7 @@ async function sendBatches({
       const docs = group.map((g) => g.envelope);
       ({ res, raw } = retryFinalization
         ? await retryIngestFinalization({
-            docs, send: (pending) => request(pending, 1), assertOwned, sleep: retrySleep,
+            docs, send: (pending) => request(pending, 1), assertOwned, sleep: retrySleep, retryBudget,
             validate: (body, pending) => validateBatchReceipt(body, pending.map((envelope) => ({ envelope }))),
             onRetry: (attempt, retries) => info(`Gmail ingest is temporarily unconfirmed. Retrying ${attempt}/${retries}.`),
           })

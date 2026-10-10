@@ -10,7 +10,10 @@ the brain, not for whoever built it: what changed for them, and what to check.
   resets. Messages still failing after bounded retries stay in a private retry
   list while newer mail advances. Each run reports how many are held for retry;
   existing held messages keep the source incomplete without repeating a new
-  failure exit. Check that the held count returns to zero after recovery.
+  failure exit from direct ingestion. Retry delays share one allowance across
+  the run so a backlog cannot add another full wait for every batch. The load
+  report keeps held messages visibly partial. Check that the held count returns
+  to zero after recovery.
 
 ## 0.4.11 (2026-10-09)
 

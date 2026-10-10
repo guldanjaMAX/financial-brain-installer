@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtempSync, realpathSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { cmdIngestRemote, credentialScannerFingerprint } from "../brain.mjs";
+import { cmdIngestRemote, cmdLoad, describeLoadResult, credentialScannerFingerprint } from "../brain.mjs";
 import { gmailPolicyFingerprint } from "../connectors/gmail.mjs";
 import * as ingest from "../ingest/run.mjs";
 import { retryIngestFinalization } from "../operations/ingest-finalization-retry.mjs";
@@ -20,6 +20,7 @@ async function fixture(run, source = "gmail") {
   const manifestPath = join(root, "fixture.manifest.json");
   const statePath = join(root, `.brain-ingest-${source}.json`);
   const manifest = {
+    corpora: { gmail: { enabled: true } },
     client: { slug: "fixture" }, brain: { domain: "fixture.invalid" },
     safety: { credential_scanner: { enabled: true }, ocr: { enabled: false } },
   };
@@ -56,12 +57,12 @@ async function fixture(run, source = "gmail") {
     f.forgotten++;
     throw new Error("unexpected fixture HTTP route");
   };
-  f.once = async (flags = {}) => {
+  f.once = async (flags = {}, loadOptions = null) => {
     logs.length = 0;
     let error = null;
     let result = null;
     try {
-      result = await cmdIngestRemote(manifest, manifestPath, { from: "gmail", source, ...flags }, {
+      const dependencies = {
         withSourceIngestLock: async (_options, task) => task({ assertOwned: () => {
           f.leases++;
           if (f.lostLease) throw Object.assign(new Error("fixture lease lost"), { code: "source_ingest_lock_lost" });
@@ -69,7 +70,7 @@ async function fixture(run, source = "gmail") {
         resolveBaseUrl: async () => "https://fixture.invalid",
         resolveAdminKey: () => key,
         getAccessToken: async () => { throw new Error("provider credential seam must not be used"); },
-        ingestRetrySleep: async (ms) => { f.sleeps.push(ms); f.onSleep?.(); },
+        ingestRetrySleep: async (ms) => { f.sleeps.push(ms); f.onSleep?.(ms); },
         ingestLib: async () => ({ ...ingest, saveState: (path, state) => {
           f.beforeSave?.(state);
           f.saves.push(structuredClone(state));
@@ -95,7 +96,18 @@ async function fixture(run, source = "gmail") {
           f.previews++;
           return { marker: { instance: "fixture", nonce: "fixture", generation: 1, runtime: "fixture" }, targets: [], documents: 0 };
         },
-      });
+      };
+      const ingestRemote = async (m, path, args) => {
+        const value = await cmdIngestRemote(m, path, args, dependencies);
+        f.loadLeg = describeLoadResult(value);
+        return value;
+      };
+      result = loadOptions
+        ? await cmdLoad(manifestPath, {
+            flags, lifecycleLockHeld: true, probes: { gmail: () => ({ connected: true }) },
+            commands: { ingestRemote }, ...loadOptions,
+          })
+        : await cmdIngestRemote(manifest, manifestPath, { from: "gmail", source, ...flags }, dependencies);
     } catch (caught) { error = caught; }
     return { error, result, output: logs.join("\n"), receipt: f.receipts.at(-1), state: f.state() };
   };
@@ -374,3 +386,129 @@ test("a named Gmail source keeps its own retry identities across runs", async ()
   assert.equal(second.error, null);
   assert.equal(second.receipt.status, "error");
 }, "mailbox"));
+
+
+for (const allowPartialRefresh of [false, true]) {
+  test(`held Gmail finalizations stay partial in the real load report (allowPartialRefresh=${allowPartialRefresh})`, async () => fixture(async (f) => {
+    f.setState({ ...f.state(), gmail_retry: { "gmail:stubborn": true } });
+    f.ids = ["clean"];
+    f.respond = (docs) => json({ results: docs.map((doc) => ({ source_id: doc.source_id,
+      status: doc.source_id === "stubborn" ? "failed" : "created", chunks: 1,
+      ...(doc.source_id === "stubborn" ? { error: finalizationError } : {}),
+    })) });
+    const held = await f.once({}, { allowPartialRefresh });
+    assert.equal(f.calls.length, 5, "real load leg reached all finalization attempts");
+    assert.equal(f.previews, 1, "real cleanup decision reached");
+    assert.equal(held.receipt.status, "error");
+    assert.deepEqual(held.state.gmail_retry, { "gmail:stubborn": true });
+    assert.equal(held.state.history_id, "next");
+    assert.equal(f.loadLeg.partial, true, "held source must remain partial");
+    assert.equal(f.loadLeg.outcome.kind, "partial");
+    assert.equal(f.loadLeg.refreshSucceeded, false);
+    assert.match(f.loadLeg.text, /1 held for retry/);
+    assert.match(held.error?.message || "", /1 partial source outcome/);
+    assert.match(held.output.replace(/\x1b\[[0-9;]*m/g, ""), /partly loaded\s+Gmail/);
+
+    f.respond = (docs) => json({ results: docs.map((doc) => ({ source_id: doc.source_id, status: "unchanged" })) });
+    f.calls.length = 0;
+    const recovered = await f.once({}, { allowPartialRefresh });
+    assert.deepEqual(f.calls, [["stubborn", "clean"]], "accepted control reaches the same load leg");
+    assert.equal(recovered.error, null);
+    assert.equal(recovered.result.entries[0].status, "loaded");
+    assert.equal(recovered.result.entries[0].outcome.kind, "completed");
+    assert.equal(recovered.result.entries[0].refreshSucceeded, true);
+    assert.equal(recovered.state.gmail_retry, undefined);
+  }));
+}
+
+test("load classification independently honors explicit incompletion and held identities", () => {
+  for (const result of [{ complete: false }, { held_for_retry: 2 }]) {
+    const described = describeLoadResult({ created: 1, ...result });
+    assert.deepEqual(described.counts, { created: 1, updated: 0, unchanged: 0 });
+    assert.equal(described.partial, true);
+    assert.equal(described.outcome.kind, "partial");
+    assert.equal(described.refreshSucceeded, false);
+  }
+  const accepted = describeLoadResult({ created: 1, complete: true, held_for_retry: 0 });
+  assert.equal(accepted.partial, false);
+  assert.equal(accepted.outcome.kind, "completed");
+  assert.equal(accepted.refreshSucceeded, true);
+});
+
+for (const reset of [false, true]) {
+ test(`a shared run backoff allowance lets fresh mail pass a held prefix on consecutive daily windows (reset=${reset})`, async () => fixture(async (f) => {
+  const heldIds = Array.from({ length: 100 }, (_, index) => `held-${index}`);
+  const retries = Object.fromEntries(heldIds.map((id) => [`gmail:${id}`, true]));
+  f.setState({ ...f.state(), gmail_retry: retries });
+  f.respond = (docs) => json({ results: docs.map((doc) => ({ source_id: doc.source_id,
+    status: heldIds.includes(doc.source_id) ? "failed" : "created", chunks: 1,
+    ...(heldIds.includes(doc.source_id) ? { error: finalizationError } : {}),
+  })) });
+  let elapsed = 0;
+  let deadlines = 0;
+  f.onSleep = (ms) => {
+    elapsed += ms;
+    if (elapsed >= 60_000) { deadlines++; throw new Error("fixture daily deadline"); }
+  };
+  for (let run = 1; run <= 2; run++) {
+    elapsed = 0;
+    f.calls.length = f.sleeps.length = f.reads.length = 0;
+    f.ids = [`fresh-${run}`];
+    f.marker = `window-${run}`;
+    const result = await f.once({ reset });
+    assert.ok(f.calls.length >= 5, "held finalization retry decision reached");
+    assert.deepEqual(f.reads.slice(0, 100), heldIds, "held identities attempted before new history");
+    assert.equal(deadlines, 0, "held retries cannot consume a minute in sleeps");
+    assert.equal(result.error, null, "no new failure exit for the existing held list");
+    assert.deepEqual(f.calls.at(-1), [`fresh-${run}`], "fresh-mail batch reached before deadline");
+    assert.equal(f.calls.length, 7, "three groups share four retries");
+    assert.deepEqual(f.sleeps, [2000, 4000, 8000, 16000]);
+    assert.deepEqual(result.state.gmail_retry, retries, "every held identity remains durable");
+    assert.equal(result.state.history_id, f.marker);
+    assert.equal(result.state.done[`gmail:fresh-${run}`], "revision");
+    assert.equal(result.receipt.status, "error");
+    assert.equal(result.receipt.docs_failed, 100);
+    assert.equal(result.result.complete, false);
+    assert.match(result.output, /100 held for retry/);
+    const heldSave = f.saves.findIndex((state) => Object.keys(state.gmail_retry || {}).length === 100);
+    const cursorSave = f.saves.findIndex((state) => state.history_id === f.marker);
+    assert.ok(heldSave >= 0 && heldSave < cursorSave, "durable coverage precedes cursor advancement");
+  }
+  f.respond = (docs) => json({ results: docs.map((doc) => ({ source_id: doc.source_id, status: "unchanged" })) });
+  f.ids = ["fresh-control"];
+  elapsed = 0;
+  f.calls.length = f.sleeps.length = 0;
+  const accepted = await f.once();
+  assert.equal(f.calls.length, 3, "successful control visits all three groups");
+  assert.deepEqual(f.calls.at(-1), ["fresh-control"]);
+  assert.equal(accepted.error, null);
+  assert.equal(accepted.state.gmail_retry, undefined);
+  assert.equal(accepted.receipt.status, "ready");
+  assert.equal(elapsed, 0);
+}));
+}
+
+
+test("exhausting the shared budget still attempts and durably holds new failures", async () => fixture(async (f) => {
+  const heldIds = Array.from({ length: 50 }, (_, index) => `held-${index}`);
+  f.setState({ ...f.state(), gmail_retry: Object.fromEntries(heldIds.map((id) => [`gmail:${id}`, true])) });
+  f.ids = ["new-failure"];
+  f.respond = () => json({ error: cpuError }, 400);
+  const result = await f.once();
+  assert.equal(f.calls.length, 6, "held group exhausts four retries; new group still reaches HTTP decision");
+  assert.deepEqual(f.calls.at(-1), ["new-failure"]);
+  assert.deepEqual(f.sleeps, [2000, 4000, 8000, 16000]);
+  assert.ok(result.error, "a newly held failure still exits nonzero");
+  assert.equal(Object.keys(result.state.gmail_retry).length, 51);
+  assert.equal(result.state.gmail_retry["gmail:new-failure"], true);
+  assert.equal(result.state.history_id, "next");
+  assert.equal(result.receipt.docs_failed, 51);
+  assert.match(result.output, /51 held for retry; 1 newly held/);
+  f.respond = (docs) => json({ results: docs.map((doc) => ({ source_id: doc.source_id, status: "unchanged" })) });
+  f.calls.length = 0;
+  const recovered = await f.once();
+  assert.equal(f.calls.length, 2, "recovery visits both groups");
+  assert.equal(recovered.error, null);
+  assert.equal(recovered.state.gmail_retry, undefined);
+  assert.equal(recovered.receipt.status, "ready");
+}));
