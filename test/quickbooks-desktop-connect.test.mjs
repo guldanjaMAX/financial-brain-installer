@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, realpathSync, mkdirSync, readFileSync, lstatSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { ingestPlanStore } from './helpers/ingest-plan-store.mjs';
 import { createProductFixture } from '../worker/test/product-contract-fixture.mjs';
 import { connectQuickBooksDesktop, disconnectQuickBooksDesktop, desktopBindingStore, makeDesktopBinding } from '../connectors/quickbooks-desktop-binding.mjs';
@@ -171,15 +172,52 @@ test('binding is owner-only, exactly read back and rejects links without replaci
   const root = join(process.env.HOME, 'binding-tests'); mkdirSync(root, { recursive: true, mode: 0o700 });
   const home = realpathSync.native(mkdtempSync(join(root, 'case-')));
   try {
-    const store = desktopBindingStore({ home, platform: 'darwin' });
+    const aclCalls = [];
+    const store = desktopBindingStore({ home, runAcl: (...args) => { aclCalls.push(args); return spawnSync(...args); } });
     const value = makeDesktopBinding({ accounts: desktopFixture().AccountRet, country: 'US' });
     store.write(value); assert.deepEqual(store.read(), value);
-    const path = join(home, '.brain', 'quickbooks-desktop.json'); assert.equal(lstatSync(path).mode & 0o777, 0o600);
+    const path = join(home, '.brain', 'quickbooks-desktop.json');
+    if (process.platform === 'win32') {
+      assert.equal(aclCalls.length, 4, 'directory, staged file and both exact reads were protected');
+      assert.equal(aclCalls[0][1][0], join(home, '.brain'));
+      assert.ok(aclCalls[1][1][0].endsWith('.tmp'));
+      assert.ok(aclCalls.slice(2).every(([, args]) => args[0] === path));
+    } else {
+      assert.equal(aclCalls.length, 0);
+      assert.equal(lstatSync(path).mode & 0o777, 0o600);
+    }
     assert.equal(readFileSync(path, 'utf8').includes('Checking'), false);
     store.remove(); const target = join(home, 'target'); writeFileSync(target, 'unchanged'); symlinkSync(target, path);
     await assert.rejects(async () => store.write(value), { code: 'QB_BINDING_INVALID' });
     assert.equal(readFileSync(target, 'utf8'), 'unchanged');
   } finally { rmSync(home, { recursive: true }); }
+});
+
+test('Windows binding ACL failures reach protection before replacement and preserve the verified control', () => {
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), 'binding-acl-')));
+  try {
+    let calls = 0, failedStaging = 0, refuse = false;
+    const store = desktopBindingStore({ home, platform: 'win32', username: 'fixture',
+      environment: { SystemRoot: String.raw`C:\Windows` },
+      runAcl(command, args, options) {
+        calls++;
+        assert.equal(command, String.raw`C:\Windows\System32\icacls.exe`);
+        assert.deepEqual(args.slice(1, 3), ['/inheritance:r', '/grant:r']);
+        assert.equal(args[3], args[0].endsWith('.brain') ? 'fixture:(OI)(CI)F' : 'fixture:F');
+        assert.equal(options.shell, false);
+        if (refuse && args[0].endsWith('.tmp')) { failedStaging++; return { status: 1 }; }
+        return { status: 0 };
+      },
+    });
+    const value = makeDesktopBinding({ accounts: desktopFixture().AccountRet, country: 'US' });
+    store.write(value); assert.deepEqual(store.read(), value); assert.equal(calls, 4);
+    const path = join(home, '.brain', 'quickbooks-desktop.json'); const before = readFileSync(path);
+    refuse = true;
+    assert.throws(() => store.write({ ...value, country: 'CA' }), /could not restrict/);
+    assert.equal(calls, 6); assert.equal(failedStaging, 1);
+    assert.deepEqual(readFileSync(path), before);
+    assert.deepEqual(store.read(), value);
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
 test('configuration fingerprint binds Desktop company without changing other provider bytes', () => {

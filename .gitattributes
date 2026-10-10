@@ -50,3 +50,10 @@ onboarding/start-windows-rehearsal.ps1 text eol=lf
 
 # Install-entry fixtures bind whole-document and receipt byte hashes across hosts.
 test/fixtures/install-entry-v3/* text eol=lf
+
+# These immutable test inputs are verified by exact SHA-256. Preserve the
+# reviewed bytes under Git-for-Windows autocrlf without changing their pins.
+test/financial-oracle/fixtures/golden-company.json text eol=lf
+test/financial-oracle/fixtures/seed-requests.json text eol=lf
+test/financial-oracle/fixtures/golden-selftest.mjs text eol=lf
+test/fixtures/legacy-local-ingest-run.txt text eol=lf

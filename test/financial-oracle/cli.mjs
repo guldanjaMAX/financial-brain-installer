@@ -11,6 +11,7 @@ import { planSeed,runSeed,createSandboxApi } from './seeder.mjs';
 import { buildCases,evaluate } from './evaluator.mjs';
 import { loadProviderCredentials,assertQuickBooksSourceBinding } from '../../connectors/provider-oauth.mjs';
 import { readAdminKeyFile } from '../../operations/admin-key-file.mjs';
+import { syncDirectory } from '../../migration/state-file.mjs';
 const check=(ok,code)=>{if(!ok)throw Error(`ORACLE_CLI_${code}`);};
 const fixture=JSON.parse(readFileSync(new URL('./fixtures/golden-company.json',import.meta.url)));
 const templates=JSON.parse(readFileSync(new URL('./fixtures/seed-requests.json',import.meta.url)));
@@ -27,7 +28,7 @@ export function writeReceipt(path,value){
  try{writeFileSync(fd,JSON.stringify(value,null,2)+'\n');fsyncSync(fd);}finally{closeSync(fd);}
  check(hash(readFileSync(path))===hash(JSON.stringify(value,null,2)+'\n'),'READBACK');
 }
-export function privateJournal(path){
+export function privateJournal(path,{platform=process.platform}={}){
  path=privatePath(path);let lock;
  try{lock=openSync(`${path}.lock`,'wx',0o600);}catch{throw Error('ORACLE_CLI_JOURNAL_LOCKED');}
  return {readJournal:async()=>existsSync(path)?readJson(privatePath(path,true)):null,
@@ -35,7 +36,7 @@ export function privateJournal(path){
   if(existsSync(path))privatePath(path,true);
   const temporary=`${path}.${randomBytes(8).toString('hex')}.tmp`;
   writeReceipt(temporary,value);renameSync(temporary,path);
-  const dir=openSync(dirname(path),'r');try{fsyncSync(dir);}finally{closeSync(dir);}
+  syncDirectory(dirname(path),{platform});
   check(JSON.stringify(readJson(privatePath(path,true)))===JSON.stringify(value),'JOURNAL_READBACK');
  },close:()=>{closeSync(lock);unlinkSync(`${path}.lock`);}};
 }

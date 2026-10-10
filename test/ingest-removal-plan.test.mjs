@@ -4,7 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, realpathSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
 import { cmdIngest, driveConnectorConfig, PROVIDER_CONNECTOR_IDS } from "../brain.mjs";
@@ -638,12 +638,12 @@ test("0.4.10 removal markers recover for legacy rows but cannot approve unverifi
   }
   const home = realpathSync.native(mkdtempSync(join(tmpdir(), "removal-support-")));
   try {
-    const result = spawnSync(process.execPath, [new URL("../brain.mjs", import.meta.url).pathname,
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL("../brain.mjs", import.meta.url)),
       "support", "--explain", "SAFETY_REVIEW_REQUIRED"], {
       encoding: "utf8", timeout: 30000,
       env: { HOME: home, USERPROFILE: home, BRAIN_NO_WRANGLER_LOGIN: "1", NO_COLOR: "1" },
     });
-    assert.equal(result.status, 0);
+    assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Ask the technician to review the plan/);
     assert.doesNotMatch(result.stdout, /--apply-removals|--target/);
   } finally { rmSync(home, { recursive: true, force: true }); }

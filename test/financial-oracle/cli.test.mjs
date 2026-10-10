@@ -84,3 +84,32 @@ test('apply reads an explicit synthetic file through the real product credential
  assert.equal(hash(readFileSync(store)),before);assert.equal(fake.calls.filter(c=>c.method==='POST').length,42);
  assert.equal(existsSync(join(dir,'.brain')),false);
 });
+
+// Model the native filesystem refusal on every host; POSIX failures must still
+// stop the writer, and Windows must still flush the file before its readback.
+test('journal preserves file durability when Windows cannot sync a directory', async t => {
+ const fs = (await import('node:fs')).default;
+ const { syncBuiltinESMExports } = await import('node:module');
+ const original = fs.fsyncSync; let files = 0, directories = 0;
+ t.mock.method(fs, 'fsyncSync', fd => {
+  if (fs.fstatSync(fd).isDirectory()) { directories++; throw Object.assign(Error('fixture directory refusal'), { code: 'EPERM' }); }
+  files++; return original(fd);
+ });
+ syncBuiltinESMExports();
+ try {
+  const store = privateJournal(join(area(), 'windows.json'), { platform: 'win32' });
+  try { await store.writeJournal({ durable: true }); assert.deepEqual(await store.readJournal(), { durable: true }); }
+  finally { store.close(); }
+  assert.equal(files, 1); assert.equal(directories, 0);
+  const posix = privateJournal(join(area(), 'posix.json'), { platform: 'linux' });
+  try { await assert.rejects(posix.writeJournal({ durable: true }), { code: 'EPERM' }); }
+  finally { posix.close(); }
+  assert.equal(files, 2); assert.equal(directories, 1, 'POSIX directory decision must propagate errors');
+  t.mock.method(fs, 'fsyncSync', () => { files++; throw Object.assign(Error('fixture file refusal'), { code: 'EIO' }); });
+  syncBuiltinESMExports();
+  const file = join(area(), 'failed.json'); const failed = privateJournal(file, { platform: 'win32' });
+  try { await assert.rejects(failed.writeJournal({ durable: true }), { code: 'EIO' }); }
+  finally { failed.close(); }
+  assert.equal(files, 3); assert.equal(existsSync(file), false, 'no rename before file durability');
+ } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+});

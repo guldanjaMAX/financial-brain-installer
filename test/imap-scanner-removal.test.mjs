@@ -6,7 +6,7 @@
  */
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,7 +45,7 @@ const versionOf = (raw) => `sha256:${createHash("sha256").update(raw).digest("he
 const stateKeyOf = (messageId) => `${SOURCE}:mid:${messageId.toLowerCase()}`;
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 
-async function runCli({ manifestPath, evidencePath, statePath, userRoot, port, run, approval = null, apply = null }) {
+function cliEnvironment({ evidencePath, statePath, userRoot, port, run }) {
   const environment = {};
   for (const name of ["PATH", "Path", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR"]) {
     if (process.env[name] !== undefined) environment[name] = process.env[name];
@@ -53,7 +53,10 @@ async function runCli({ manifestPath, evidencePath, statePath, userRoot, port, r
   Object.assign(environment, {
     NO_COLOR: "1",
     HOME: userRoot,
+    USERPROFILE: userRoot,
     BRAIN_NO_WRANGLER_LOGIN: "1",
+    BRAIN_TEST_USER_ROOT: userRoot,
+    BRAIN_LIFECYCLE_LOCK_ROOT: join(userRoot, "lifecycle-locks"),
     BRAIN_IMAP_CREDENTIAL_STORE: "file",
     BRAIN_IMAP_SCANNER_EVIDENCE_PATH: evidencePath,
     BRAIN_IMAP_SCANNER_USER_ROOT: userRoot,
@@ -61,6 +64,11 @@ async function runCli({ manifestPath, evidencePath, statePath, userRoot, port, r
     BRAIN_IMAP_SCANNER_PORT: String(port),
     BRAIN_IMAP_SCANNER_RUN: String(run),
   });
+  return environment;
+}
+
+async function runCli({ manifestPath, evidencePath, statePath, userRoot, port, run, approval = null, apply = null }) {
+  const environment = cliEnvironment({ evidencePath, statePath, userRoot, port, run });
   const args = ["--import", FIXTURE, CLI, "ingest", manifestPath, "--from", "imap", "--source", SOURCE];
   if (approval) args.push("--approve-removals", approval);
   if (apply) args.push("--apply-removals", apply);
@@ -132,6 +140,27 @@ try {
   // Compare only a boolean so a failed assertion can never print key bytes.
   check("the isolated file credential passes the real reader before IMAP begins",
     resolveAdminKey(manifestPath, { ignoreEnvironment: true }) === adminKey);
+
+  // Exercise the real Windows lock boundary even on POSIX. Only the reviewed
+  // scratch ACL dependency is injected; every other native child still exits
+  // through the fixture's tripwire before any executable can start.
+  const lockModule = new URL("../operations/brain-lifecycle-lock.mjs", import.meta.url).href;
+  const lockProbe = `
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const { acquireBrainLifecycleLock } = await import(${JSON.stringify(lockModule)});
+    const lease = acquireBrainLifecycleLock({ manifestPath: ${JSON.stringify(manifestPath)}, operation: 'ingest' });
+    lease.assertOwned(); lease.release();
+  `;
+  const probeEnv = cliEnvironment({ evidencePath, statePath, userRoot, port: 1, run: 1 });
+  for (const forbidden of [false, true]) {
+    const result = spawnSync(process.execPath, ["--import", FIXTURE, "--input-type=module", "-e",
+      lockProbe + (forbidden ? "(await import('node:child_process')).spawnSync('fixture-forbidden-child', []);" : "")],
+    { env: probeEnv, encoding: "utf8", timeout: 30000 });
+    check("the Windows fixture reaches the bounded lifecycle ACL", /TEST_LIFECYCLE_ACL_REACHED/.test(result.stderr));
+    check(forbidden ? "the native-child tripwire stays active after the ACL control" : "the injected Windows lock acquires and releases without a host process",
+      result.status === (forbidden ? 86 : 0) &&
+      /TEST_SIDE_EFFECT_BLOCKED:host_process/.test(result.stderr) === forbidden);
+  }
   await server.listen();
   writeFileSync(join(credentialRoot, "imap-credentials.json"), JSON.stringify({
     imap: {

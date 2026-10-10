@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import test from "node:test";
 
 import { prepare, walk, splitOversized } from "../ingest/run.mjs";
@@ -1404,10 +1404,11 @@ for (const shape of ["control", "prefix", "part-syntax", "conflicting-binding"])
     ? `${LOCATOR}.other.txt` : other;
   const otherPath = join(install.root,preparedLocator);
   writeFileSync(otherPath,'Independent synthetic document with its own original identity.');
-  const otherFile = walk(install.root).files.find(file=>file.rel===preparedLocator);
+  const otherFile = walk(install.root).files.find(file=>file.rel===relative(install.root, otherPath));
   assert.ok(otherFile,'independent original discovered by real local walker');
   const prepared = await prepare(otherFile,{sourceName:SOURCE});
   assert.ok(prepared.envelope,'real preparation accepted independent original');
+  assert.equal(prepared.envelope.source_id, preparedLocator, 'native walker path becomes the canonical upload identity');
   prepared.envelope.source_id = other;
   assert.equal(prepared.envelope.metadata?.part_of,undefined);
   const { value: seed } = await harness.adminPost('/api/admin/brain/ingest/batch',
@@ -1469,8 +1470,10 @@ test("approved provenance repair removes authenticated obsolete parts of its sea
   attachVectorIndex(fixture);
   const harness = orchestratorHarness(fixture, install);
   await registerSyntheticSource(fixture, harness);
-  const file = walk(install.root).files.find(file => file.rel === LOCATOR);
+  const file = walk(install.root).files.find(file => file.rel === relative(install.root, join(install.root, LOCATOR)));
+  assert.ok(file, 'sealed original discovered by the real local walker');
   const prepared = await prepare(file, { sourceName: SOURCE });
+  assert.equal(prepared.envelope.source_id, LOCATOR);
   const parts = splitOversized(prepared.envelope, Math.ceil(prepared.envelope.content.length / 2));
   assert.equal(parts.length, 2);
   const { value: seeded } = await harness.adminPost("/api/admin/brain/ingest/batch",

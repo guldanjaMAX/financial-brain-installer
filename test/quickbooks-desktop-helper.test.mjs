@@ -24,7 +24,7 @@ test('the unshipped Desktop helper fails closed at the pin boundary', async () =
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, writeFileSync, lstatSync } from 'node:fs';
+import { mkdtempSync, realpathSync, readFileSync, writeFileSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -35,7 +35,7 @@ import { QBD_ENVIRONMENT, QBD_HELPERS, inspectQuickBooksDesktopHelper } from '..
 import { checkQbdContract, checkQbdSource, checkQbdIl } from '../scripts/qbd-helper-il-check.mjs';
 import { fakeQbdFrames } from './fixtures/qbd-fake-helper.mjs';
 
-const directory = mkdtempSync(join(process.env.HOME, 'qbd-test-'));
+const directory = realpathSync.native(mkdtempSync(join(process.env.HOME, 'qbd-test-')));
 const exe = join(directory, 'quickbooks-desktop-helper.exe');
 writeFileSync(exe, 'synthetic inert test artifact');
 const artifact = { path: exe, sha256: createHash('sha256').update(readFileSync(exe)).digest('hex') };
@@ -336,7 +336,10 @@ test('timed session acquisition retains the ticket for cleanup even after its de
 
 test('signing workflow gates source, compiled metadata, stub lifecycle and RFC 3161 before artifact adoption', () => {
   const workflow = readFileSync(new URL('../.github/workflows/quickbooks-desktop-helper-signing.yml', import.meta.url), 'utf8');
-  assert.match(workflow, /^on:\n  workflow_dispatch:$/m);
+  for (const ending of ['\n', '\r\n']) {
+    const text = workflow.replace(/\r\n/g, '\n').replace(/\n/g, ending);
+    assert.match(text, /^on:\r?\n  workflow_dispatch:\r?$/m);
+  }
   assert.match(workflow, /if: github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\)/);
   const actions = [...workflow.matchAll(/uses: ([^\s]+)/g)];
   assert.ok(actions.length >= 5);

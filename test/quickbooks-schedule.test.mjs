@@ -135,7 +135,11 @@ test('Windows definition repeats within the cutoff and uses the exact current-us
       const definition = qb.buildQuickBooksScheduleDefinition(desired, nativeOptions);
       const label = timezone === 'America/Phoenix' ? 'phoenix' : 'new-york';
       const season = date.includes('-01-') ? 'standard' : 'daylight';
-      assert.equal(definition.serialized, readFileSync(new URL(`./fixtures/quickbooks-schedule/${label}-${season}.xml`, import.meta.url), 'utf8'));
+      const expected = readFileSync(new URL(`./fixtures/quickbooks-schedule/${label}-${season}.xml`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+      // XML whitespace uses either checkout newline; every other byte remains exact.
+      for (const ending of ['\n', '\r\n']) {
+        assert.equal(definition.serialized, expected.replace(/\n/g, ending).replace(/\r\n/g, '\n'));
+      }
       const c = definition.native_contract;
       assert.equal(c.repetition_interval, 'PT2H');
       assert.equal(c.repetition_duration, `PT${desired.window.duration_minutes}M`);

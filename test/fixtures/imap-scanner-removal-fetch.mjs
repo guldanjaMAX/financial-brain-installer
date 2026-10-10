@@ -1,4 +1,5 @@
 import { installRemovalPlanAdapter } from "./removal-plan-adapter.mjs";
+import "./support-journal-acl-preload.mjs";
 /**
  * Offline Worker, socket, and state-observation fixture for IMAP scanner
  * migration cleanup. Every mailbox identity and credential-shaped value used

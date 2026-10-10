@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createMcpQueryTiming } from '../components/brain-mcp-timing.mjs';
 import { createQueryTiming } from '../worker/src/lib/query-timing.js';
 
@@ -51,7 +51,8 @@ test('real local MCP carries bounded timing in metadata for authorized diagnosti
   const root = fileURLToPath(new URL('..', import.meta.url));
   const parent = join(root, 'home-query-spans');
   await mkdir(parent, { recursive: true });
-  const scratch = await mkdtemp(join(parent, 'mcp-'));
+  // URL-significant characters exercise --import encoding on every host.
+  const scratch = await realpath(await mkdtemp(join(parent, 'mcp #% -')));
   try {
   const home = join(scratch, 'home');
   await mkdir(home);
@@ -73,9 +74,9 @@ test('real local MCP carries bounded timing in metadata for authorized diagnosti
     };
   `);
   for (const profile of ['owner-assistant', 'librarian']) {
-    const child = spawn(process.execPath, ['--import', preload, join(root, 'components/brain-mcp.mjs')], {
+    const child = spawn(process.execPath, ['--import', pathToFileURL(preload).href, join(root, 'components/brain-mcp.mjs')], {
       cwd: root, env: {
-        PATH: process.env.PATH, HOME: home, TMPDIR: scratch, TZ: 'UTC',
+        PATH: process.env.PATH, HOME: home, USERPROFILE: home, TMPDIR: scratch, TZ: 'UTC',
         BRAIN_NO_WRANGLER_LOGIN: '1', BRAIN_TEST_LAUNCHCTL: launchctl,
         BRAIN_URL: 'https://fixture.invalid', BRAIN_MANIFEST: manifest, BRAIN_AGENT_PROFILE: profile,
       }, stdio: ['pipe', 'pipe', 'pipe'],
@@ -86,7 +87,7 @@ test('real local MCP carries bounded timing in metadata for authorized diagnosti
     child.stdin.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call',
       params: { name: 'brain_think', arguments: { q: 'What threshold was recorded?' } } }) + '\n');
     const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
-    assert.equal(code, 0);
+    assert.equal(code, 0, errors);
     assert.equal(errors, '');
     const reply = JSON.parse(output.trim());
     assert.notEqual(reply.result.isError, true);
