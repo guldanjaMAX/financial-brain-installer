@@ -26,6 +26,9 @@ exact sealed package.
   Windows user needs internet access to the npm registry for that one-time
   install, and Windows Smart App Control may block it. If sign-in still stops,
   `brain support --explain CLOUDFLARE_KEYRING_UNAVAILABLE` explains why.
+- **A connector sign-in code works exactly once.** When the same code was
+  exchanged several times at the same moment, more than one exchange could
+  succeed. Reading and removing the code now happen in one step.
 
 ### Known issues
 

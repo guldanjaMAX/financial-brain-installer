@@ -32,6 +32,12 @@ function connectorDb() {
           // as "denied", so an unmodelled table would refuse the first call.
           if (/INSERT INTO public_request_quotas/.test(sql)) return { request_count: 1 };
           if (/FROM oauth_clients/.test(sql)) return tables.clients.get(bound[0]) || null;
+          if (/DELETE FROM oauth_codes .*RETURNING/s.test(sql)) {
+            // Atomic consume: return the row and remove it in the same step.
+            const row = tables.codes.get(bound[0]) || null;
+            tables.codes.delete(bound[0]);
+            return row;
+          }
           if (/FROM oauth_codes/.test(sql)) return tables.codes.get(bound[0]) || null;
           if (/FROM oauth_tokens/.test(sql)) return tables.tokens.get(bound[0]) || null;
           if (/FROM documents WHERE doc_uid/.test(sql)) return tables.documents.get(bound[0]) || null;

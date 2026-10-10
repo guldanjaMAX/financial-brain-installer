@@ -427,12 +427,13 @@ export async function handleToken(env, request) {
   const codeHash = await sha256Hex(String(params.get("code") || ""));
   let row;
   try {
-    row = await env.DB.prepare(
-      "SELECT client_id, redirect_uri, code_challenge, scope, expires_at, used_at FROM oauth_codes WHERE code_hash = ?",
-    ).bind(codeHash).first();
     // Single use, deleted on sight: a replayed code proves interception and
-    // must not stay replayable while anyone reasons about it.
-    await env.DB.prepare("DELETE FROM oauth_codes WHERE code_hash = ?").bind(codeHash).run();
+    // must not stay replayable while anyone reasons about it. One statement
+    // reads and deletes, so concurrent exchanges of the same code cannot all
+    // see the row before any delete lands; exactly one of them gets it.
+    row = await env.DB.prepare(
+      "DELETE FROM oauth_codes WHERE code_hash = ? RETURNING client_id, redirect_uri, code_challenge, scope, expires_at, used_at",
+    ).bind(codeHash).first();
   } catch (error) {
     guard(error);
   }
