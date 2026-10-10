@@ -67,8 +67,12 @@ function cliEnvironment({ evidencePath, statePath, userRoot, port, run }) {
   return environment;
 }
 
-async function runCli({ manifestPath, evidencePath, statePath, userRoot, port, run, approval = null, apply = null }) {
+async function runCli({ manifestPath, evidencePath, statePath, userRoot, port, run, approval = null, apply = null, platform = process.platform }) {
   const environment = cliEnvironment({ evidencePath, statePath, userRoot, port, run });
+  if (platform === "win32") {
+    environment.BRAIN_IMAP_SCANNER_PLATFORM = "win32";
+    environment.SystemRoot ||= "C:\\Windows";
+  }
   const args = ["--import", FIXTURE, CLI, "ingest", manifestPath, "--from", "imap", "--source", SOURCE];
   if (approval) args.push("--approve-removals", approval);
   if (apply) args.push("--apply-removals", apply);
@@ -79,7 +83,10 @@ async function runCli({ manifestPath, evidencePath, statePath, userRoot, port, r
     child.stderr.on("data", (chunk) => { output += chunk; });
     child.once("error", reject);
     child.once("close", (code, signal) => {
-      if (code === 86) reject(new Error("the IMAP fixture reached a forbidden host process"));
+      if (code === 86) {
+        const diagnostic = output.match(/^TEST_SIDE_EFFECT_BLOCKED:host_process:[A-Za-z.]+:[A-Za-z0-9_.-]{1,80}$/m)?.[0];
+        reject(new Error(`the IMAP fixture reached a forbidden host process${diagnostic ? ` (${diagnostic})` : ""}`));
+      }
       else resolve({ code, signal, output: strip(output) });
     });
   });
@@ -140,6 +147,10 @@ try {
   // Compare only a boolean so a failed assertion can never print key bytes.
   check("the isolated file credential passes the real reader before IMAP begins",
     resolveAdminKey(manifestPath, { ignoreEnvironment: true }) === adminKey);
+  const writeMailboxCredential = (port) => writeFileSync(join(credentialRoot, "imap-credentials.json"), JSON.stringify({
+    imap: { host: "mail.example.invalid", port, username: server.username, password: server.password },
+  }), { mode: 0o600 });
+  writeMailboxCredential(993);
 
   // Exercise the real Windows lock boundary even on POSIX. Only the reviewed
   // scratch ACL dependency is injected; every other native child still exits
@@ -154,22 +165,62 @@ try {
   const probeEnv = cliEnvironment({ evidencePath, statePath, userRoot, port: 1, run: 1 });
   for (const forbidden of [false, true]) {
     const result = spawnSync(process.execPath, ["--import", FIXTURE, "--input-type=module", "-e",
-      lockProbe + (forbidden ? "(await import('node:child_process')).spawnSync('fixture-forbidden-child', []);" : "")],
+      lockProbe + (forbidden ? `
+        (await import('node:child_process')).spawnSync(
+          'C:\\\\synthetic-private-dir\\\\fixture-forbidden-child.exe', ['synthetic-private-argument']);
+      ` : "")],
     { env: probeEnv, encoding: "utf8", timeout: 30000 });
     check("the Windows fixture reaches the bounded lifecycle ACL", /TEST_LIFECYCLE_ACL_REACHED/.test(result.stderr));
     check(forbidden ? "the native-child tripwire stays active after the ACL control" : "the injected Windows lock acquires and releases without a host process",
       result.status === (forbidden ? 86 : 0) &&
       /TEST_SIDE_EFFECT_BLOCKED:host_process/.test(result.stderr) === forbidden);
+    if (forbidden) check("the tripwire reports only the API name and executable basename",
+      result.stderr.trim().split(/\r?\n/).at(-1) ===
+        "TEST_SIDE_EFFECT_BLOCKED:host_process:spawnSync:fixture-forbidden-child.exe" &&
+      !/synthetic-private/.test(result.stderr));
+  }
+  const credentialProbe = `
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const { loadImapCredentials } = await import(${JSON.stringify(new URL("../connectors/imap.mjs", import.meta.url).href)});
+    const record = loadImapCredentials({ sourceName: 'mailbox' });
+    if (record?.host !== 'mail.example.invalid' || record?.port !== 993) process.exit(1);
+    process.stderr.write('TEST_IMAP_CREDENTIAL_READ_COMPLETE\\n');
+  `;
+  const credentialResult = spawnSync(process.execPath,
+    ["--import", FIXTURE, "--input-type=module", "-e", credentialProbe], {
+      env: { ...probeEnv, SystemRoot: probeEnv.SystemRoot || "C:\\Windows" }, encoding: "utf8", timeout: 30000,
+    });
+  check("the Windows IMAP reader reaches its credential decision with zero host-process hits",
+    credentialResult.status === 0 && /TEST_IMAP_CREDENTIAL_READ_COMPLETE/.test(credentialResult.stderr) &&
+      !/TEST_SIDE_EFFECT_BLOCKED/.test(credentialResult.stderr), credentialResult.stderr);
+  check("the Windows fixture exercises real legacy migration, ACL staging, and DPAPI readback",
+    /TEST_IMAP_DPAPI_REACHED:protect/.test(credentialResult.stderr) &&
+      /TEST_IMAP_DPAPI_REACHED:unprotect/.test(credentialResult.stderr) &&
+      /TEST_IMAP_CREDENTIAL_ACL_REACHED/.test(credentialResult.stderr) &&
+      readFileSync(join(credentialRoot, "imap-credentials.json"), "utf8").startsWith("BRAIN-GOOGLE-TOKENS-DPAPI-V1\n"));
+  // Reading the now-migrated fixture must still hit the same refusal for every
+  // child-process API. Shell strings and both path spellings must redact to
+  // one basename, and prototype spawning must not evade the top-level hooks.
+  for (const api of ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork", "ChildProcess.spawn"]) {
+    const executable = api === "exec" || api === "execSync"
+      ? '"C:\\synthetic-private-dir with spaces\\fixture-forbidden-child.exe" synthetic-private-argument'
+      : "/synthetic-private-dir/fixture-forbidden-child.exe";
+    const call = api === "ChildProcess.spawn"
+      ? `new cp.ChildProcess().spawn({ file: ${JSON.stringify(executable)}, args: ['synthetic-private-argument'] })`
+      : `cp[${JSON.stringify(api)}](${JSON.stringify(executable)}, ['synthetic-private-argument'])`;
+    const result = spawnSync(process.execPath, ["--import", FIXTURE, "--input-type=module", "-e",
+      credentialProbe + `const cp = await import('node:child_process'); ${call};`], {
+        env: { ...probeEnv, SystemRoot: probeEnv.SystemRoot || "C:\\Windows" }, encoding: "utf8", timeout: 30000,
+      });
+    const diagnostics = result.stderr.split(/\r?\n/).filter((line) => line.startsWith("TEST_SIDE_EFFECT_BLOCKED:"));
+    check(`${api} stays blocked after the Windows credential control with a sanitized diagnostic`,
+      result.status === 86 && /TEST_IMAP_CREDENTIAL_READ_COMPLETE/.test(result.stderr) &&
+        diagnostics.length === 1 &&
+        diagnostics[0] === `TEST_SIDE_EFFECT_BLOCKED:host_process:${api}:fixture-forbidden-child.exe` &&
+        !/synthetic-private/.test(result.stderr));
   }
   await server.listen();
-  writeFileSync(join(credentialRoot, "imap-credentials.json"), JSON.stringify({
-    imap: {
-      host: "mail.example.invalid",
-      port: server.port,
-      username: server.username,
-      password: server.password,
-    },
-  }), { mode: 0o600 });
+  writeMailboxCredential(server.port);
 
   const scannerV4 = credentialScannerFingerprint(true, 4);
   const scannerV5 = credentialScannerFingerprint(true, 5);
@@ -193,11 +244,21 @@ try {
   }), { mode: 0o600 });
 
   const review = await runCli({
-    manifestPath, evidencePath, statePath, userRoot, port: server.port, run: 1,
+    manifestPath, evidencePath, statePath, userRoot, port: server.port, run: 1, platform: "win32",
   });
   const approval = /--approve-removals ([0-9a-f]{64})/.exec(review.output)?.[1] || null;
   const reviewEvidence = readJson(evidencePath);
   const reviewState = readJson(statePath);
+  check("the Windows CLI reaches a nonempty removal decision with zero host-process hits",
+    review.code !== 0 && reviewState.ingest_removal_plan?.targets.length === 101 &&
+      reviewEvidence.events.some((entry) => entry.run === 1 && entry.kind === "plan_preview") &&
+      /TEST_LIFECYCLE_ACL_REACHED/.test(review.output) &&
+      /TEST_IMAP_DPAPI_REACHED:protect/.test(review.output) &&
+      /TEST_IMAP_CREDENTIAL_ACL_REACHED/.test(review.output) &&
+      !/TEST_SIDE_EFFECT_BLOCKED/.test(review.output));
+  // Subsequent scenarios keep the host platform. Restore the same synthetic
+  // record because a POSIX reader deliberately refuses a Windows envelope.
+  if (process.platform !== "win32") writeMailboxCredential(server.port);
 
   check("scanner v5 rereads the complete IMAP folder instead of starting after its saved UID",
     server.log.some((line) => /SEARCH ALL/.test(line)) &&
