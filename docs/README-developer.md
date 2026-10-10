@@ -718,12 +718,22 @@ message body again when both its D1 family and scanner receipt are proven.
 
 A per-document Worker `failed` result is different from a provider or policy
 gap. Gmail first saves the exact logical message identity in `gmail_retry`, then
-may commit the observed history marker while the source receipt and process
-remain failed. The next incremental pass prepends those identities to the
-history changes, deduplicates them, and removes a retry only after full family
-acceptance or a current typed source decision. The cursor gate requires the
-failed-part count to match the durable retry count, and malformed retry state
-fails closed.
+may commit the observed history marker while the source receipt remains
+incomplete. Temporary finalization failures, including D1 CPU resets reported
+as HTTP 400, have at most five attempts per batch and share four retries
+across the entire source run, adding at most 30 seconds of backoff. After that
+allowance is spent, each later batch still gets its initial attempt; unresolved
+members follow the same durable retry settlement. Successful batch members are
+retained without resending. The retry list contains ids only, and legacy
+revision-valued entries remain readable. A new held failure exits nonzero; subsequent runs
+report `N held for retry` without another failure exit for that same backlog.
+The consolidated load report still marks that source partial, reports its held
+count, and refuses a successful refresh, including when partial refresh is
+otherwise allowed. Other operational and coverage failures still exit nonzero.
+Both incremental passes and full sweeps prepend those identities, deduplicate
+them, and remove a retry only after full family acceptance or a current typed
+source decision. The cursor gate requires the failed-part count to match the
+durably retained failed-part count, and malformed retry state fails closed.
 
 A credential refusal is a measured Gmail policy outcome rather than an
 operational failure. Local scanner refusals and Worker content-scanner

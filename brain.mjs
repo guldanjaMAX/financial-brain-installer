@@ -231,6 +231,7 @@ import { renderCliCommands } from "./operations/cli-guidance.mjs";
 import { quotePowerShellArgument, quotePosixArgument } from "./operations/command-display.mjs";
 export { brainCliPrefix, renderCliCommands } from "./operations/cli-guidance.mjs";
 import { readAdminKeyFile, validateAdminKeyValue } from "./operations/admin-key-file.mjs";
+import { createIngestFinalizationRetryBudget, retryIngestFinalization } from "./operations/ingest-finalization-retry.mjs";
 import {
   acquireSourceIngestLock,
   canonicalSourceIngestStatePath,
@@ -9048,21 +9049,23 @@ export function gmailRetryMessageIds(state, sourceName = "gmail") {
   return Object.entries(retries).map(([key, version]) => {
     const id = key.startsWith(prefix) ? key.slice(prefix.length) : "";
     if (!id || id.length > 256 || /[\s\x00-\x1f\x7f]/.test(id) ||
-        key !== `${sourceName}:${id}` || typeof version !== "string" || !version) {
+        key !== `${sourceName}:${id}` || (version !== true && (typeof version !== "string" || !version))) {
       throw new Error("the saved Gmail retry list is invalid; no history cursor was advanced");
     }
     return id;
   });
 }
 
-function recordGmailRetry(state, plan) {
-  gmailRetryMessageIds(state);
-  state.gmail_retry = { ...(state.gmail_retry || {}), [plan.stateKey]: plan.hash };
+function recordGmailRetry(state, plan, sourceName) {
+  const ids = gmailRetryMessageIds(state, sourceName);
+  // Read the legacy revision-valued map, but write only exact identities.
+  state.gmail_retry = Object.fromEntries(ids.map((id) => [`${sourceName}:${id}`, true]));
+  state.gmail_retry[plan.stateKey] = true;
 }
 
-function clearGmailRetry(state, stateKey) {
+function clearGmailRetry(state, stateKey, sourceName) {
   if (state.gmail_retry === undefined) return;
-  gmailRetryMessageIds(state);
+  gmailRetryMessageIds(state, sourceName);
   delete state.gmail_retry[stateKey];
   if (Object.keys(state.gmail_retry).length === 0) delete state.gmail_retry;
 }
@@ -16239,16 +16242,21 @@ export function describeLoadResult(result) {
       const extra = [];
       const refused = result.docs_refused ?? result.refused ?? 0;
       const excluded = result.docs_excluded ?? result.excluded ?? 0;
+      const heldForRetry = result.held_for_retry ?? 0;
+      // Exit policy and completion are separate: an existing Gmail backlog
+      // returns normally but must not become a successful refresh in load.
+      const incomplete = result.complete === false || heldForRetry > 0 || !!result.failed;
       if (refused) extra.push(`${refused} refused, NOT indexed`);
       if (result.skipped) extra.push(`${result.skipped} skipped`);
+      if (heldForRetry) extra.push(`${heldForRetry} held for retry`);
       return {
         known: true,
         counts,
-        partial: !!(refused || excluded || result.failed),
+        partial: !!(refused || excluded || incomplete),
         refused,
         excluded,
-        refreshSucceeded: !result.failed,
-        outcome: outcomeOf(refused || excluded || result.failed ? "partial" : "completed"),
+        refreshSucceeded: !incomplete,
+        outcome: outcomeOf(refused || excluded || incomplete ? "partial" : "completed"),
         text: `${counts.created} created, ${counts.updated} updated, ${counts.unchanged} unchanged`
           + (extra.length ? `, ${extra.join(", ")}` : ""),
       };
@@ -16861,7 +16869,7 @@ const cmdIngestRemoteRun = async (
   }
 
   const savedState = loadState(statePath);
-  if (which === "gmail") gmailRetryMessageIds(savedState);
+  const gmailRetriesAtStart = new Set(which === "gmail" ? gmailRetryMessageIds(savedState, sourceName) : []);
   // Capture only enough in-memory state to prove the post-failure file kept
   // the prior Gmail cursor. The cursor itself never crosses the process
   // boundary and the final readback reports only counts and a comparison.
@@ -17331,6 +17339,8 @@ const cmdIngestRemoteRun = async (
   let batchNo = 0;
   let retryableOcrSkips = 0;
   let gmailDurableRetryFailures = 0;
+  let gmailPreviouslyHeldFailures = 0;
+  const finalizationRetryBudget = createIngestFinalizationRetryBudget();
   // Held back until every batch receipt is settled. A failed Gmail part may
   // cross this boundary only after its exact logical retry is durable.
   let pendingCursor = null;
@@ -17379,6 +17389,8 @@ const cmdIngestRemoteRun = async (
     const part = await sendPreparedBatches({
       base, adminKey, groups: [group], state, statePath, skips, quiet: true,
       saveState, assertOwned: assertLockOwned,
+      retryFinalization: which === "gmail", retrySleep: options.ingestRetrySleep,
+      retryBudget: finalizationRetryBudget,
       onResult: (item, result) => {
         if (paceVectorsPerMinute !== null && ["created", "updated"].includes(result.status)) {
           if (!Number.isSafeInteger(result.chunks) || result.chunks < 0) {
@@ -17419,7 +17431,7 @@ const cmdIngestRemoteRun = async (
     intentionalRemovalUids.push(...settlement.intentionalRemovalUids);
     for (const plan of outcome.completed) {
       recordAcceptedDocumentState(state, plan);
-      if (which === "gmail") clearGmailRetry(state, plan.stateKey);
+      if (which === "gmail") clearGmailRetry(state, plan.stateKey, sourceName);
       if (scannerPolicyChanged) {
         recordCredentialScannerProgress(state, scannerFingerprint, plan.stateKey, plan.hash);
       }
@@ -17427,12 +17439,19 @@ const cmdIngestRemoteRun = async (
     for (const { plan, statuses } of settlement.incomplete) {
       delete state.done[plan.stateKey];
       state.skipped[plan.stateKey] = `logical document was not indexed because part status was ${statuses.join(", ")}`;
-      const failedParts = statuses.filter((status) => status === "failed").length;
+      // Settlement deduplicates status labels for policy decisions. Cursor
+      // accounting needs the actual part count, including failures in earlier
+      // batches of this same family, or one split message pins the cursor.
+      const failedParts = (rejectedFamilyParts.get(plan.stateKey) || statuses)
+        .filter((status) => status === "failed").length;
       if (which === "gmail" && failedParts > 0) {
-        recordGmailRetry(state, plan);
+        recordGmailRetry(state, plan, sourceName);
         gmailDurableRetryFailures += failedParts;
+        if (gmailRetriesAtStart.has(plan.stateKey.slice(sourceName.length + 1))) {
+          gmailPreviouslyHeldFailures += failedParts;
+        }
       } else if (which === "gmail") {
-        clearGmailRetry(state, plan.stateKey);
+        clearGmailRetry(state, plan.stateKey, sourceName);
       }
     }
     for (const plan of [...outcome.completed, ...outcome.incomplete]) {
@@ -18077,6 +18096,23 @@ const cmdIngestRemoteRun = async (
       ids = gmail.listMessages(getToken, { max: limit, query: gmailFullQuery });
     }
 
+    // A reset, expired history or policy sweep must also service the durable
+    // list, including ids absent from the current query. Those ids have no
+    // query-derived eligibility, so classify them using current metadata.
+    if (authoritativeSnapshot && gmailRetriesAtStart.size > 0) {
+      const listed = ids;
+      policyById = new Map();
+      for (const id of gmailRetriesAtStart) {
+        const policy = await gmail.messagePolicy(getToken, id, { since: gmailSince });
+        policyById.set(id, policy);
+        if (policy.cursor_blocking === true) gmailLabelGaps++;
+      }
+      ids = (async function* () {
+        yield* gmailRetriesAtStart;
+        for await (const id of listed) if (!gmailRetriesAtStart.has(id)) yield id;
+      })();
+    }
+
     // Capture the pre-run inventory before new mail expands it. It is both the
     // authority for scanner migration and the removal-plan denominator. Using
     // a post-ingest count could let a wrong-account sweep dilute removal of the
@@ -18099,6 +18135,7 @@ const cmdIngestRemoteRun = async (
     }
 
     const resumableStoredRevision = (id) => {
+      if (gmailRetriesAtStart.has(id)) return null;
       if (!authoritativeSnapshot || !storedBeforeSweep) return null;
       const key = `${sourceName}:${id}`;
       const version = state.done?.[key];
@@ -18139,7 +18176,7 @@ const cmdIngestRemoteRun = async (
               sourceName,
               // A full-list id matched DEFAULT_QUERY. An incremental id reached
               // this point only after its label/date preflight allowed it.
-              trustedEligible: !incremental || policy?.allowed === true,
+              trustedEligible: (!incremental && !gmailRetriesAtStart.has(id)) || policy?.allowed === true,
             }),
           };
         } catch (preparationError) {
@@ -18187,7 +18224,7 @@ const cmdIngestRemoteRun = async (
           gmailIntentionalUids.push(key);
         }
         if (r.cursor_blocking === true) gmailLabelGaps++;
-        if (r.cursor_blocking !== true) clearGmailRetry(state, key);
+        if (r.cursor_blocking !== true) clearGmailRetry(state, key, sourceName);
         if (scannerPolicyChanged && previouslyAccepted && r.retain_existing === true) {
           scannerProgressCanCommit = false;
         }
@@ -18201,7 +18238,7 @@ const cmdIngestRemoteRun = async (
       // is repaired by re-posting even if its revision and scanner receipt are
       // unchanged locally.
       const storedFamilyConfirmed = storedBeforeSweep == null || storedBeforeSweep.has(key);
-      if (storedFamilyConfirmed &&
+      if (!gmailRetriesAtStart.has(id) && storedFamilyConfirmed &&
           (!scannerPolicyChanged || scannerResumeAccepted) && state.done[key] === r.version) {
         recordAcceptedDocumentState(state, {
           stateKey: key, hash: r.version, skipKeys: [id], legacyPartRoot: id,
@@ -18217,7 +18254,7 @@ const cmdIngestRemoteRun = async (
         state.skipped[key] = refusal.reason;
         localRefused++;
         gmailIntentionalUids.push(key);
-        clearGmailRetry(state, key);
+        clearGmailRetry(state, key, sourceName);
         return { skip };
       }
       const envelopes = splitOversized(envelope);
@@ -18717,7 +18754,7 @@ const cmdIngestRemoteRun = async (
 
   const gmailCredentialRefusalSkips = which === "gmail" ? localRefused + tally.refused : 0;
   const coverageGaps = Math.max(0, skips.length - policySkipped - sourceResolvedSkipped - adjudicatedSkipped -
-    gmailCredentialRefusalSkips) +
+    gmailCredentialRefusalSkips - (which === "gmail" ? gmailDurableRetryFailures : 0)) +
     gmailHistoryMarkerMissing + imapSnapshotGaps;
 
   if (dry) {
@@ -18771,6 +18808,8 @@ const cmdIngestRemoteRun = async (
   // the cursor above.
   const totalRefused = tally.refused + localRefused;
   const gmailRetryBacklog = which === "gmail" ? gmailRetryMessageIds(state, sourceName).length : 0;
+  const gmailNewRetryFailures = which === "gmail"
+    ? gmailRetryMessageIds(state, sourceName).filter((id) => !gmailRetriesAtStart.has(id)).length : 0;
   const driveReviewRequired = which === "drive" &&
     (protectedDriveUids().size > 0 || malformedDriveIdentityCount > 0);
   const hasRemoteGap = sourceReceiptHasRemoteGap({
@@ -18820,6 +18859,7 @@ const cmdIngestRemoteRun = async (
   const summary = `${tally.created} created, ${tally.updated} updated, ${unchanged + tally.unchanged} unchanged`;
   if (tally.failed || retryableOcrSkips || gmailRetryBacklog) info(summary);
   else ok(summary);
+  if (gmailRetryBacklog) info(`${gmailRetryBacklog} held for retry; ${gmailNewRetryFailures} newly held. This ingest remains incomplete.`);
   if (totalRefused) {
     if (which === "gmail") {
       info(`${totalRefused} Gmail message(s) withheld for carrying live credentials by design.`);
@@ -18832,7 +18872,7 @@ const cmdIngestRemoteRun = async (
   info(`progress saved to ${relative(process.cwd(), statePath)}`);
   assertNoIngestFailures({
     ...tally,
-    failed: Math.max(tally.failed, gmailRetryBacklog),
+    failed: tally.failed - gmailPreviouslyHeldFailures,
   });
   if (driveReviewRequired) {
     const count = protectedDriveUids().size + malformedDriveIdentityCount;
@@ -18894,7 +18934,8 @@ const cmdIngestRemoteRun = async (
     warn(message);
   }
   await reportBacklog(manifestPath);
-  if (which === "gmail" && hasRemoteGap) {
+  if (which === "gmail" && (coverageGaps > 0 || gmailLabelGaps ||
+      gmailHistoryMarkerMissing || gmailPendingRemovalGaps || retryableOcrSkips)) {
     die(
       `partial coverage: ${coverageGaps} Gmail message(s) had unresolved coverage gaps.\n` +
         "      Progress was saved. The cursor advances only when every message had trustworthy policy evidence.",
@@ -18909,6 +18950,7 @@ const cmdIngestRemoteRun = async (
     refused: totalRefused,
     scanned,
     skipped: skips.length,
+    ...(which === "gmail" ? { held_for_retry: gmailRetryBacklog, complete: !hasRemoteGap } : {}),
   };
   } catch (error) {
     // The cursor is deliberately outside this path: it is written only after
@@ -18963,6 +19005,8 @@ async function sendBatches({
   base, adminKey, groups, state, statePath, skips, quiet = false,
   onAccepted = null, onResult = null, saveState: saveStateOverride = null,
   assertOwned = null,
+  retryFinalization = false, retrySleep = undefined,
+  retryBudget = undefined,
 }) {
   // Loaded here rather than closed over: sendBatches is top-level and shared by
   // both ingest paths, so it cannot rely on a caller's destructured import.
@@ -18975,16 +19019,25 @@ async function sendBatches({
     let res, raw;
     try {
       assertOwned?.();
-      ({ res, raw } = await requestIngestBatch({
+      const request = async (docs, attempts) => await requestIngestBatch({
         base,
         adminKey,
-        docs: group.map((g) => g.envelope),
+        docs,
+        ...(attempts ? { attempts } : {}),
         assertOwned,
         onRetry: (_error, attempt, attempts) => info(
           `the ingest batch connection was interrupted. Retrying ${attempt}/${attempts - 1}; ` +
             "an accepted copy is safe and will be reported as unchanged."
         ),
-      }));
+      });
+      const docs = group.map((g) => g.envelope);
+      ({ res, raw } = retryFinalization
+        ? await retryIngestFinalization({
+            docs, send: (pending) => request(pending, 1), assertOwned, sleep: retrySleep, retryBudget,
+            validate: (body, pending) => validateBatchReceipt(body, pending.map((envelope) => ({ envelope }))),
+            onRetry: (attempt, retries) => info(`Gmail ingest is temporarily unconfirmed. Retrying ${attempt}/${retries}.`),
+          })
+        : await request(docs));
     } catch (error) {
       saveState(statePath, state);
       die(

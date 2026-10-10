@@ -4,6 +4,17 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.12 (unreleased)
+
+- Gmail retries temporary storage finalization failures, including D1 CPU
+  resets. Messages still failing after bounded retries stay in a private retry
+  list while newer mail advances. Each run reports how many are held for retry;
+  existing held messages keep the source incomplete without repeating a new
+  failure exit from direct ingestion. Retry delays share one allowance across
+  the run so a backlog cannot add another full wait for every batch. The load
+  report keeps held messages visibly partial. Check that the held count returns
+  to zero after recovery.
+
 ## 0.4.11 (2026-10-09)
 
 Candidate only. This version has not been released. The changes below still
