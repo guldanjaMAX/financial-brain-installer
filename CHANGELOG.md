@@ -15,6 +15,10 @@ the brain, not for whoever built it: what changed for them, and what to check.
   different versions. Long refresh histories are read in pages. Older clients
   receive an explicit update request when an inventory needs multiple work
   pages; daily imports still run if freshness cannot yet be verified.
+- **See what blocks tax evidence review.** In Ask, select one entity and ask
+  “Check tax readiness for 2025.” The checklist distinguishes stored evidence,
+  unavailable reads and missing review steps. Tax amounts and filing readiness
+  are not checked; verify the selected entity and year before reviewing originals.
 
 ## 0.4.11 (2026-10-09)
 

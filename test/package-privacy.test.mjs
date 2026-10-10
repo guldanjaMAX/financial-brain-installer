@@ -404,6 +404,7 @@ const expected = [
   "worker/src/lib/financial-answer-plan.js",
   "worker/src/lib/financial-evidence-store.js",
   "docs/FINANCIAL-CONTRACTS.md",
+  "docs/CFO-TAX-EVIDENCE.md",
   "scripts/query-spans-probe.mjs",
   "worker/src/lib/query-timing.js",
   "worker/src/lib/entity-fact-answer.js",
@@ -415,6 +416,8 @@ const expected = [
   "worker/src/lib/tax-check-document.js",
   "worker/src/lib/tax-check-rules.js",
   "worker/src/lib/tax-check.js",
+  "worker/src/lib/cfo-workflow.js",
+  "worker/src/lib/cfo-tax-evidence.js",
   // Local digital tax-PDF field extraction (no network); reviewed 2026-10-08, fixtures invented.
   "ingest/tax-pdf.mjs",
   "components/brain-mcp-timing.mjs",
