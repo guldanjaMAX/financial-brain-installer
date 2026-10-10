@@ -4,6 +4,13 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.12 (unreleased)
+
+- **See what blocks tax evidence review.** In Ask, select one entity and ask
+  “Check tax readiness for 2025.” The checklist distinguishes stored evidence,
+  unavailable reads and missing review steps. Tax amounts and filing readiness
+  are not checked; verify the selected entity and year before reviewing originals.
+
 ## 0.4.11 (2026-10-09)
 
 Candidate only. This version has not been released. The changes below still

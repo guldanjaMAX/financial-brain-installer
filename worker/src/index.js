@@ -133,6 +133,7 @@ import {
   CUSTOM_API_RUN_PATH, customApiOwnerMessage, runCustomApiWorker,
 } from "./lib/custom-api.js";
 import { supplementalRetrievalFilters } from "./lib/retrieval-routing.js";
+import { dispatchCfoWorkflow } from "./lib/cfo-workflow.js";
 import { entityFactAnswer } from "./lib/entity-fact-answer.js";
 
 /* ------------------------------------------------------------ retrieval */
@@ -875,6 +876,7 @@ function financialMapStateFor(env, question, {
 
 async function handleThink(
   env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner", timing = null,
+  cfoCapability = null, cfoReauthorize = async () => false,
 ) {
   const unsupportedAnswer = "The documents do not answer the question.";
   const url = await privateRagParameters(request);
@@ -885,6 +887,11 @@ async function handleThink(
   const scope = await measureQueryStage(timing, "scope", () => applyBusinessScope(env, url));
   if (!scope.ok) return scope.response;
   const entityScope = scope.entityScope;
+  const cfo = await dispatchCfoWorkflow({
+    question: q, entityScope, ownerCapability: cfoCapability,
+    filters: filtersFrom(url), reauthorize: cfoReauthorize,
+  }, { tax: { env } });
+  if (cfo) return jsonResponse(cfo);
   const taxQuestion = measureQueryStage(timing, "premise_temporal", () => taxQuestionScopeAssessment(q));
   if (taxQuestion.applicable && !taxQuestion.resolved) {
     return jsonResponse({
@@ -3307,6 +3314,7 @@ export default {
     const ownerKeyAuthorized = validateAdminKey(request, env);
     const keyAuthorized = readRoute ? validateReadKey(request, env) : ownerKeyAuthorized;
     let authorized = keyAuthorized;
+    let cfoCapability = ownerKeyAuthorized ? "full_admin" : null;
     let readAccess = null;
     let scope = { all: true };
     // validateReadKey intentionally accepts both env-held keys on the fast
@@ -3329,6 +3337,9 @@ export default {
         }, 403));
       }
       if (sessionPrincipal) {
+        if (sessionPrincipal.kind === "owner" && sessionPrincipal.grantId === null) {
+          cfoCapability = "signed_in_owner";
+        }
         if (sessionPrincipal.grantType === "document") {
           authorized = true;
           readAccess = sessionPrincipal;
@@ -3404,7 +3415,13 @@ export default {
         return privateNoStore(await handleUnified(env, request, readAccess, scope, scopePrincipalKind, timing));
       }
       if (path === "/api/rag/think" && request.method === "POST") {
-        return privateNoStore(await handleThink(env, request, readAccess, scope, scopePrincipalKind, timing));
+        return privateNoStore(await handleThink(env, request, readAccess, scope, scopePrincipalKind, timing,
+          cfoCapability, async () => {
+            if (cfoCapability === "full_admin") return validateAdminKey(request, env);
+            if (cfoCapability !== "signed_in_owner") return false;
+            const current = await ownerSessionPrincipal(request, env);
+            return current?.kind === "owner" && current.grantId === null;
+          }));
       }
       if (path === "/api/admin/auth/invite" && request.method === "POST") {
         return handleAdminInvite(env, url);
