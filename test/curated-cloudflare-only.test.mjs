@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as sync from "../operations/curated-dual-sync.mjs";
 import * as scheduler from "../operations/curated-sync-scheduler.mjs";
+import { validateAdminKeyFileDestination } from "../operations/admin-key-file.mjs";
 
 const now = new Date("2026-10-01T12:00:00.000Z");
 function fixture(t, dual = false) {
@@ -105,6 +106,73 @@ test("Cloudflare-only sync confirms writes and emits no legacy aggregates", asyn
   assert.equal(report.ledger.raw_drive_evidence.deletion_eligible, false);
   assert.equal(report.rawDriveHistoricalChecksumMatches.total, 0);
   assert.equal(readFileSync(join(f.root, "coverage.json"), "utf8").includes("legacy"), false);
+});
+
+test("Windows target resolution obtains current-user identity before file validation", async t => {
+  for (const dual of [true, false]) {
+    await t.test(dual ? "dual target" : "Cloudflare only", async t => {
+      const f = fixture(t, dual);
+      const username = "fixture-owner";
+      const expectedRequests = dual ? 10 : 7;
+      const options = { ...f.options, platform: "win32", home: f.common.home };
+      const control = await sync.runCuratedDualSync(f.plan, { ...options, username,
+        userInfo: () => { throw new Error("explicit identity must not need a lookup"); },
+      });
+      assert.equal(control.ok, true);
+      assert.equal(f.calls.length, expectedRequests);
+      const prior = readFileSync(join(f.root, "coverage.json"));
+      f.calls.length = 0;
+      let identities = 0;
+      let validations = 0;
+      const report = await sync.runCuratedDualSync(f.plan, { ...options,
+        userInfo: () => { identities++; return { username }; },
+        validateAdminKeyDestination: (path, supplied) => {
+          validations++;
+          assert.equal(supplied.username, username);
+          return validateAdminKeyFileDestination(path, supplied);
+        },
+      });
+      assert.equal(validations, dual ? 2 : 1, "reached the real Windows destination guard");
+      assert.equal(report.ok, true);
+      assert.equal(identities, dual ? 2 : 1);
+      assert.equal(f.calls.length, expectedRequests);
+      assert.deepEqual(readFileSync(join(f.root, "coverage.json")), prior);
+    });
+  }
+});
+
+test("Windows identity lookup failures refuse before credential reads or requests", async t => {
+  const f = fixture(t);
+  const options = { ...f.options, platform: "win32", home: f.common.home };
+  const control = await sync.runCuratedDualSync(f.plan, { ...options, username: "fixture-owner" });
+  assert.equal(control.ok, true);
+  assert.equal(f.calls.length, 7);
+  f.calls.length = 0;
+  for (const fault of ["missing", "blank", "throw"]) {
+    let identities = 0;
+    let validations = 0;
+    let reads = 0;
+    const report = await sync.runCuratedDualSync(f.plan, { ...options,
+      userInfo: () => {
+        identities++;
+        if (fault === "throw") throw new Error("synthetic identity failure");
+        return fault === "missing" ? {} : { username: " " };
+      },
+      validateAdminKeyDestination: (path, supplied) => {
+        validations++;
+        return validateAdminKeyFileDestination(path, supplied);
+      },
+      readAdminKey: () => { reads++; throw new Error("credential read forbidden"); },
+    });
+    assert.equal(identities, 1, "reached the failing Windows identity lookup");
+    assert.equal(validations, fault === "throw" ? 0 : 1);
+    assert.equal(report.ok, false);
+    assert.equal(report.ledger.documents.length, 3);
+    assert.ok(report.ledger.documents.every(d => d.targets.cloudflare === "credential_unavailable"));
+    assert.equal(report.targetCoverage.cloudflare_confirmed.total, 0);
+    assert.equal(reads, 0);
+    assert.equal(f.calls.length, 0);
+  }
 });
 
 test("partial and malformed targets refuse after a valid nonempty control", async t => {
