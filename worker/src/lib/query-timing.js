@@ -4,7 +4,7 @@ export const QUERY_STAGES = Object.freeze([
   'scope', 'retrieval', 'embedding', 'keyword', 'vector', 'vector_query', 'projection_readiness',
   'authority_lineage', 'answer_llm', 'verifier_llm', 'evidence_gate',
   'premise_temporal', 'coverage', 'gaps', 'rerank', 'financial_map',
-  'legacy_hybrid', 'mcp_wrapping', 'mcp_backend', 'mcp_retry_wait',
+  'cfo_workflow', 'legacy_hybrid', 'mcp_wrapping', 'mcp_backend', 'mcp_retry_wait',
 ]);
 const ROUTES = new Set(['think', 'unified', 'mcp', 'mcp.ask', 'mcp.search', 'mcp.brain_think', 'mcp.brain_search']);
 const PROVIDERS = new Set(['cloudflare-workers-ai', 'anthropic']);
