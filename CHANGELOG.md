@@ -15,6 +15,9 @@ the brain, not for whoever built it: what changed for them, and what to check.
   different versions. Long refresh histories are read in pages. Older clients
   receive an explicit update request when an inventory needs multiple work
   pages; daily imports still run if freshness cannot yet be verified.
+- **Windows Machine Prep logs remain accessible.** Fixed log permissions that
+  could prevent saving failure details or removing the log folder. The owner
+  can read the logs and a later run can append to them.
 - **Windows setup checks the npm layout before installing.** Machine Prep
   now stops with a clear explanation when npm uses a custom launcher instead
   of the standard Node.js installation. Send the displayed log for help.
