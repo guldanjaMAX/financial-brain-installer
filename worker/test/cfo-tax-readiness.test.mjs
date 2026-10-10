@@ -57,6 +57,52 @@ test('map read failure differs from missing map', async t => {
   f.control.failOn = null; await green(f);
 });
 
+for (const branch of ['missing', 'stale', 'failed', 'year', 'entity']) {
+  for (const access of ['revoked', 'unavailable']) test(`R156-02 ${branch} map response withholds private state when owner access is ${access}`, async t => {
+    const f = await cfoFixture(t, {
+      map: branch !== 'missing',
+      changeMap: branch === 'entity' ? snapshot => { snapshot.entities[0].disposition = 'excluded'; } : undefined,
+    });
+    if (!['missing', 'entity'].includes(branch)) await green(f);
+    if (branch === 'stale') f.raw("UPDATE fin_entities SET display_label='Changed entity' WHERE entity_slug=?", ENTITY);
+    if (branch === 'failed') f.control.failOn = /FROM owner_financial_map_snapshots/;
+    const request = branch === 'year' ? { q: 'Check tax readiness for 2024.' } : {};
+    const expected = { missing: 'tax_map_missing', stale: 'tax_map_stale', failed: 'tax_map_unavailable', year: 'tax_year_unassigned', entity: 'tax_entity_unassigned' }[branch];
+    reset(f);
+    const allowed = await ask(f, request);
+    assert.ok(f.seen.sql.some(sql => /FROM owner_financial_map_snapshots/.test(sql)), 'map branch reached in authorized control');
+    assert.ok(codes(allowed.body).includes(expected), 'unchanged owner can receive the specific map action');
+    assert.equal(inventoryReads(f), 0);
+    if (['year', 'entity'].includes(branch)) assert.ok(allowed.body.workflow.stages.includes('identity'));
+
+    reset(f);
+    const batch = f.DB.batch;
+    let changed = false, afterMap = 0;
+    f.DB.batch = async statements => {
+      try { return await batch(statements); }
+      finally {
+        if (!changed && statements.some(stmt => /FROM owner_financial_map_snapshots/.test(stmt.sql))) {
+          changed = true;
+          afterMap = f.seen.sql.length;
+          if (access === 'revoked') f.raw('UPDATE install_state SET session_generation=session_generation+1');
+          else f.control.failOn = /session_generation/;
+        }
+      }
+    };
+    const denied = await ask(f, request);
+    assert.equal(changed, true, 'initial authorized map read completed or failed before access changed');
+    assert.ok(codes(denied.body).includes('cfo_owner_required'), 'final owner check must precede every map-derived response');
+    assert.ok(f.seen.sql.slice(afterMap).some(sql => /session_generation/.test(sql)), 'owner recheck reached after the map read');
+    assert.equal(inventoryReads(f), 0);
+    assert.deepEqual(denied.body.workflow.checklist, []);
+    assert.deepEqual(denied.body.workflow.stages, ['recheck'], 'private map branch must not escape through diagnostics');
+    assert.equal(denied.body.workflow.pages_read, undefined);
+    assert.deepEqual(denied.body.citations, []);
+    assert.deepEqual(codes(denied.body), ['cfo_owner_required']);
+    if (access === 'revoked') assert.equal((await ask(f, request)).status, 401, 'the same session is revoked at the next route entry');
+  });
+}
+
 test('unmapped year reaches identity assessment and does not read a nearby year', async t => {
   const f = await cfoFixture(t);
   const result = await ask(f, { q: 'Check tax readiness for 2024.' });
@@ -91,6 +137,37 @@ test('unreadable originals have a reached distinct state and readable sibling', 
   assert.ok(codes(result.body).includes('tax_tax_returns_unreadable'));
   f.raw('UPDATE fin_documents SET readable=1'); f.raw('UPDATE documents SET text_reliable=1');
   await green(f);
+});
+
+test('R156-03 unreliable native extraction keeps an explicit review gap', async t => {
+  const f = await cfoFixture(t);
+  const { financialPictureInventory } = await import('../src/lib/financial-picture.js');
+  const request = { sections: ['tax_returns'], filters: { entity_slug: ENTITY, tax_year: 2025 } };
+  const original = await financialPictureInventory(f.env, request);
+  assert.equal(original.body.sections.tax_returns.records[0].verification.extraction.text_reliable, true);
+  const allowed = await ask(f);
+  assert.ok(inventoryReads(f) > 0);
+  assert.equal(allowed.body.workflow.checklist.find(item => item.section === 'tax_returns').state, 'present');
+  assert.equal(codes(allowed.body).includes('tax_tax_returns_unreadable'), false);
+
+  f.raw('UPDATE documents SET text_reliable=0');
+  reset(f);
+  const unreliable = await financialPictureInventory(f.env, request);
+  const record = unreliable.body.sections.tax_returns.records[0];
+  assert.equal(record.custody.readable, true, 'custody readability remains the positive control');
+  assert.equal(record.verification.extraction.state, 'native');
+  assert.equal(record.verification.extraction.text_reliable, false);
+  assert.ok(record.verification.blocking_reasons.includes('extraction_text_unreliable'), 'real inventory quality assessment reached');
+  reset(f);
+  const result = await ask(f);
+  assert.ok(inventoryReads(f) > 0, 'route performs its own scoped inventory read');
+  assert.ok(codes(result.body).includes('tax_tax_returns_unreadable'), 'known extraction failure must survive the summary');
+  const row = result.body.workflow.checklist.find(item => item.section === 'tax_returns');
+  assert.equal(row.unreadable_records, 1);
+  assert.equal(row.state, 'unreadable');
+  assert.match(result.body.answer, /unreadable or unverified extraction/);
+  assert.equal(result.body.financial_authority, false);
+  assert.equal(f.calls.model, 0);
 });
 
 test('mixed stored years never widen the requested year', async t => {

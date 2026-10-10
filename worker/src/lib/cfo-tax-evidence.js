@@ -61,6 +61,7 @@ function scopedSection(result, section, filters) {
 
 function summarize(section, records, unavailable, unfinished) {
   const unreadable = records.filter(row => row.custody?.readable === false ||
+    row.verification?.extraction?.text_reliable === false ||
     ['unreadable', 'ocr_partial', 'unavailable'].includes(row.verification?.extraction?.state)).length;
   const inaccessible = records.filter(row => row.custody?.restricted === true ||
     ['can_get_it', 'do_not_have_it'].includes(row.custody?.availability) ||
@@ -73,12 +74,27 @@ function summarize(section, records, unavailable, unfinished) {
     scope: section === 'conflicts' ? 'selected_entity_all_periods' : 'selected_entity_tax_year', real_world_completeness: 'not_proven' };
 }
 
+// Every map/inventory outcome crosses this final owner check, including early
+// gaps and failed reads. Refusal metadata must not reveal which private branch
+// ran or how many pages were read after access was revoked or became unknown.
+export async function taxReadiness(context, dependencies = {}) {
+  const result = await readTaxEvidence(context, dependencies);
+  try {
+    if (await context.reauthorize?.() === true) return result;
+  } catch { /* Unknown current access withholds the same private state. */ }
+  const detail = 'Owner access could not be confirmed at the end of the check. Sign in again before reading this checklist.';
+  const checks = taxChecks();
+  return { status: 'unavailable', answer: `${detail} ${LIMIT_NOTICE}`, gaps: [gap('cfo_owner_required', detail)],
+    metadata: { tax_year: context.intent.taxYear, tax_checks: checks, compared_families: 0,
+      total_families: checks.length, checklist: [], stages: ['recheck'] } };
+}
+
 /** Read-only metadata checklist. At most 14 initial and 14 validation reads.
  * Offset cursors are live views, not snapshot continuation: replay every page
  * and recheck the sealed map and owner before exposing observed presence.
  * Even a stable replay proves neither a shared snapshot nor real-world absence.
  */
-export async function taxReadiness({ intent, entityScope, asOf, reauthorize }, {
+async function readTaxEvidence({ intent, entityScope, asOf }, {
   env, readMap = (options) => readOwnerFinancialMapState(env, options),
   inventory = body => financialPictureInventory(env, body, { capturedAt: asOf }),
 } = {}) {
@@ -150,8 +166,7 @@ export async function taxReadiness({ intent, entityScope, asOf, reauthorize }, {
       if (!same(current, read.value)) return refusal('tax_evidence_changed', 'Evidence or source access changed during the check. Run the checklist again; affected evidence is withheld.');
     }
     if (!same(map, await readMap({ entitySlug: entity }))) return refusal('tax_map_changed', 'Financial Map changed during the check. Review the current map and run the checklist again.');
-    if (!await reauthorize()) return refusal('cfo_owner_required', 'Owner access changed during the check. Sign in again before reading this checklist.');
-  } catch { return refusal('tax_recheck_unavailable', 'Current evidence and owner access could not be rechecked. Retry; observed evidence is withheld.'); }
+  } catch { return refusal('tax_recheck_unavailable', 'Current evidence could not be rechecked. Retry; observed evidence is withheld.'); }
   metadata.checklist = checklist;
   gaps.push(gap('tax_original_citations_unresolved', 'Inventory references are opaque metadata, not original-document links. Open and review the authorized originals separately; no document citation was resolved here.'));
   const allRead = checklist.every(item => item.traversal === 'finished');
