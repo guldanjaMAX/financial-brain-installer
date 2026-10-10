@@ -96,7 +96,14 @@ export function createQuickBooksScheduleAdapter(options = {}) {
   return createNativeDailyRefreshAdapter({ ...options, platform: 'win32', taskSpec: { name: taskName, marker: markerOf, observe } });
 }
 export function buildQuickBooksScheduleDefinition(plan, options = {}) {
-  const { windowlessHost, windowlessVerified, ...definitionOptions } = options;
+  // Read the windowless decision exactly once. Rest destructuring can invoke an
+  // excluded getter a second time on some Node 22 releases.
+  const windowlessHost = options.windowlessHost;
+  const windowlessVerified = options.windowlessVerified;
+  const definitionOptions = {};
+  for (const key of Object.keys(options)) {
+    if (key !== 'windowlessHost' && key !== 'windowlessVerified') definitionOptions[key] = options[key];
+  }
   if (plan.platform !== 'win32') throw failure('QB_SCHEDULE_PLATFORM_INVALID', 'Windows QuickBooks task definitions require Windows.');
   if (!/^sid:S-1-[0-9-]+$/u.test(plan.identity.principal)) throw failure('QB_SCHEDULE_PRINCIPAL_INVALID', 'The current Windows user SID is required.');
   const runner = options.runnerPath || fileURLToPath(import.meta.url);
