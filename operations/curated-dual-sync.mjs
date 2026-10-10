@@ -5,7 +5,7 @@
  * write path while a Cloudflare Brain is proved in parallel. The private plan
  * is an exact inventory, not a folder hint: credentials and network access are
  * unreachable until enumeration matches that inventory and its role counts.
- * Both targets then receive content built once from the same bytes. A failure
+ * Configured targets receive content built once from the same bytes. A failure
  * at either target stays retryable and never suppresses the other target.
  *
  * The coverage ledger deliberately contains only salted logical fingerprints,
@@ -51,6 +51,10 @@ const ROLE_SET = new Set(CURATED_SYNC_ROLES);
 const RECEIPT_ACTIONS = new Set(["created", "updated", "unchanged"]);
 const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown"]);
 const TARGET_NAMES = Object.freeze(["legacy", "cloudflare"]);
+
+function targetNames(plan) {
+  return plan.legacyTarget ? TARGET_NAMES : ["cloudflare"];
+}
 const TARGET_BACKENDS = Object.freeze({
   legacy: "legacy_notes_supabase",
   cloudflare: "cloudflare_d1",
@@ -320,7 +324,10 @@ export function validateCuratedSyncPlan(input) {
     transforms: Object.freeze(transforms),
     excludedDirectories: Object.freeze([...new Set(excluded)]),
     commonMetadata: checkedMetadata(plan.common_metadata, "common_metadata"),
-    legacyTarget: targetPlan(plan.legacy_target, "legacy_target", "legacy"),
+    // Only omission retires the rollback target. Null or a partial declaration
+    // must still fail validation instead of silently disabling a destination.
+    legacyTarget: Object.hasOwn(plan, "legacy_target")
+      ? targetPlan(plan.legacy_target, "legacy_target", "legacy") : null,
     cloudflareTarget: targetPlan(plan.cloudflare_target, "cloudflare_target", "cloudflare"),
     rawDrive,
     scheduler: optionalSchedulerPlan(plan.scheduler),
@@ -764,7 +771,7 @@ function readTargetManifest(target, planDirectory) {
 
 function readCuratedTargetContracts(plan, planDirectory) {
   const targets = {};
-  for (const name of TARGET_NAMES) {
+  for (const name of targetNames(plan)) {
     const target = name === "legacy" ? plan.legacyTarget : plan.cloudflareTarget;
     const descriptor = readTargetManifest(target, planDirectory);
     targets[name] = Object.freeze({
@@ -773,8 +780,8 @@ function readCuratedTargetContracts(plan, planDirectory) {
       backend: target.backend,
     });
   }
-  if (targets.legacy.backend === targets.cloudflare.backend ||
-      targets.legacy.origin === targets.cloudflare.origin) {
+  if (targets.legacy && (targets.legacy.backend === targets.cloudflare.backend ||
+      targets.legacy.origin === targets.cloudflare.origin)) {
     fail("curated sync targets must use distinct backends and origins");
   }
   return Object.freeze(targets);
@@ -787,7 +794,7 @@ export function inspectCuratedTargetContracts(planInput, options = {}) {
     ? planInput
     : validateCuratedSyncPlan(planInput);
   const inspected = readCuratedTargetContracts(plan, planDirectory);
-  return Object.freeze(Object.fromEntries(TARGET_NAMES.map((name) => [name, Object.freeze({
+  return Object.freeze(Object.fromEntries(targetNames(plan).map((name) => [name, Object.freeze({
     name,
     backend: inspected[name].backend,
     baseUrl: inspected[name].baseUrl,
@@ -823,7 +830,7 @@ function validateResolvedTarget(name, target, resolved) {
 async function resolveRequiredTargets(prepared, options, mode, inspectedTargets = null) {
   if (mode === "dry-run") return Object.freeze({});
   const resolver = options.resolveTarget ?? defaultResolveTarget;
-  const names = mode === "sync" ? TARGET_NAMES : ["cloudflare"];
+  const names = mode === "sync" ? targetNames(prepared.plan) : ["cloudflare"];
   const resolved = {};
   const candidates = await Promise.all(names.map(async (name) => {
     const target = name === "legacy" ? prepared.plan.legacyTarget : prepared.plan.cloudflareTarget;
@@ -1022,7 +1029,10 @@ function assertExpectedTargetFingerprints(inspected, expected) {
   if (!expected || typeof expected !== "object" || Array.isArray(expected)) {
     fail("expected target manifest fingerprints are invalid");
   }
-  for (const name of TARGET_NAMES) {
+  if (Object.keys(expected).length !== Object.keys(inspected).length) {
+    fail("a target manifest changed after the curated scheduler was prepared");
+  }
+  for (const name of Object.keys(inspected)) {
     const fingerprint = String(expected[name] ?? "");
     if (!/^[0-9a-f]{64}$/.test(fingerprint) ||
         inspected[name].manifestFingerprint !== fingerprint) {
@@ -1065,7 +1075,7 @@ export function buildCuratedCoverageLedger(prepared, observations = {}) {
       content_sha256: document.contentHash,
       envelope_sha256: document.envelopeHash,
       role: document.role,
-      targets: { cloudflare: cloudflareStatus, legacy: legacyStatus },
+      targets: { cloudflare: cloudflareStatus, ...(prepared.plan.legacyTarget ? { legacy: legacyStatus } : {}) },
       raw_drive: rawDriveStatus,
     };
   });
@@ -1083,7 +1093,7 @@ export function buildCuratedCoverageLedger(prepared, observations = {}) {
     roles: { ...prepared.plan.expectedRoles },
     target_coverage: {
       cloudflare_confirmed: aggregateByRole(prepared, cloudflare, "confirmed"),
-      legacy_confirmed: aggregateByRole(prepared, legacy, "confirmed"),
+      ...(prepared.plan.legacyTarget ? { legacy_confirmed: aggregateByRole(prepared, legacy, "confirmed") } : {}),
     },
     raw_drive_historical_checksum_matches: aggregateByRole(
       prepared,
@@ -1209,15 +1219,16 @@ export function writeCuratedCoverageLedger(path, ledger, options = {}) {
 }
 
 /**
- * Run one of three explicit modes:
+ * Run one of four explicit modes:
+ *   preview: counts compared with the local ledger, no credentials or writes;
  *   dry-run: exact local inventory and hashes only, no credential or network;
  *   audit:   read-only Cloudflare historical-family evidence, no ingest writes;
  *   sync:    independent legacy and Cloudflare writes plus historical evidence.
  */
 export async function runCuratedDualSync(planInput, options = {}) {
   const mode = String(options.mode ?? "");
-  if (!new Set(["dry-run", "audit", "sync"]).has(mode)) {
-    fail("curated sync mode must be dry-run, audit, or sync");
+  if (!new Set(["preview", "dry-run", "audit", "sync"]).has(mode)) {
+    fail("curated sync mode must be preview, dry-run, audit, or sync");
   }
   const prepared = prepareCuratedCorpus(planInput, {
     ...options,
@@ -1228,7 +1239,7 @@ export async function runCuratedDualSync(planInput, options = {}) {
   const protectedPaths = [
     options.planPath,
     ...prepared.documents.map((document) => document.absolutePath),
-    ...TARGET_NAMES.flatMap((name) => {
+    ...targetNames(prepared.plan).flatMap((name) => {
       const target = name === "legacy" ? prepared.plan.legacyTarget : prepared.plan.cloudflareTarget;
       const manifest = resolveFromPlan(prepared.planDirectory, target.manifest);
       return [manifest, join(dirname(manifest), ".brain-admin-key")];
@@ -1245,6 +1256,22 @@ export async function runCuratedDualSync(planInput, options = {}) {
   // still present immediately before any durable credential can be touched.
   assertCuratedEnvelopesCredentialSafe(prepared, options);
   verifyCuratedSourceSnapshot(prepared, options);
+
+  if (mode === "preview") {
+    // These are local envelope differences, not promises about remote state.
+    // Never replace the evidence ledger while merely previewing a change.
+    const prior = existsSync(ledgerPath)
+      ? validateExistingLedger(JSON.parse(readFileSync(ledgerPath, "utf8"))) : null;
+    const byIdentity = new Map((prior?.documents ?? []).map(document => [document.logical_fingerprint, document]));
+    const preview = { documents: prepared.documents.length, roles: { ...prepared.plan.expectedRoles }, adds: 0, updates: 0, unchanged: 0 };
+    for (const document of prepared.documents) {
+      const previous = byIdentity.get(document.logicalFingerprint);
+      if (!previous) preview.adds++;
+      else if (previous.envelope_sha256 === document.envelopeHash) preview.unchanged++;
+      else preview.updates++;
+    }
+    return { ok: true, mode, preview };
+  }
 
   // Production manifests are identity-only inspected before Keychain access.
   // Injected resolvers are validated from their returned backend and origin.
@@ -1271,7 +1298,7 @@ export async function runCuratedDualSync(planInput, options = {}) {
     // must not prevent Cloudflare from converging, and the reverse is equally
     // important while legacy retrieval remains the rollback path.
     [legacyResult, cloudflareResult] = await Promise.all([
-      postOneTargetSafely("legacy", prepared, targetOptions),
+      prepared.plan.legacyTarget ? postOneTargetSafely("legacy", prepared, targetOptions) : legacyResult,
       postOneTargetSafely("cloudflare", prepared, targetOptions),
     ]);
     // D1 exposes exact stored source families, so a POST receipt is not final
@@ -1299,7 +1326,7 @@ export async function runCuratedDualSync(planInput, options = {}) {
   const allConfirmed = (statuses) => [...statuses.values()].every((value) => value === "confirmed");
   const auditComplete = !prepared.plan.rawDrive || live.ok || mode === "dry-run";
   const ok = mode === "sync"
-    ? allConfirmed(legacyResult.statuses) && allConfirmed(cloudflareResult.statuses) && auditComplete
+    ? (!prepared.plan.legacyTarget || allConfirmed(legacyResult.statuses)) && allConfirmed(cloudflareResult.statuses) && auditComplete
     : auditComplete;
   return {
     ok,
@@ -1312,7 +1339,7 @@ export async function runCuratedDualSync(planInput, options = {}) {
     rawDriveHistoricalChecksumMismatches: ledger.raw_drive_historical_checksum_mismatches,
     targetCoverage: ledger.target_coverage,
     actions: {
-      legacy: legacyResult.actions,
+      ...(prepared.plan.legacyTarget ? { legacy: legacyResult.actions } : {}),
       cloudflare: cloudflareResult.actions,
     },
     ledger,
@@ -1322,6 +1349,7 @@ export async function runCuratedDualSync(planInput, options = {}) {
 function usage() {
   return [
     "Usage:",
+    "  node operations/curated-dual-sync.mjs --plan <private-plan.json> --preview",
     "  node operations/curated-dual-sync.mjs --plan <private-plan.json> --dry-run",
     "  node operations/curated-dual-sync.mjs --plan <private-plan.json> --audit",
     "  node operations/curated-dual-sync.mjs --plan <private-plan.json> --sync",
@@ -1337,7 +1365,7 @@ function cliArguments(argv) {
     const arg = argv[index];
     if (arg === "--plan" && index + 1 < argv.length) {
       planPath = argv[++index];
-    } else if (["--dry-run", "--audit", "--sync"].includes(arg)) {
+    } else if (["--preview", "--dry-run", "--audit", "--sync"].includes(arg)) {
       if (mode) fail("choose exactly one curated sync mode");
       mode = arg.slice(2);
     } else if (arg === "--help" || arg === "-h") {
@@ -1364,6 +1392,10 @@ async function main(argv = process.argv.slice(2)) {
       planDirectory,
       planPath: resolve(args.planPath),
     });
+    if (args.mode === "preview") {
+      console.log(JSON.stringify(report.preview));
+      return 0;
+    }
     console.log(
       `curated ${report.mode}: ${report.count} documents; ` +
       `${report.roles.authoritative} authoritative, ${report.roles.superseded} superseded, ` +

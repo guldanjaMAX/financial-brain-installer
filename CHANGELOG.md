@@ -45,6 +45,7 @@ the brain, not for whoever built it: what changed for them, and what to check.
   npm install now names the reason category and the log to send for help.
   Redacted output and the newest npm debug log survive cleanup. If setup stops,
   check the displayed log path before asking support for help.
+- Curated collections can sync to Cloudflare alone after retiring a legacy target; preview the local counts, reinstall the daily schedule, and check freshness after the next successful run.
 
 ## 0.4.11 (2026-10-09)
 
