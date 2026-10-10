@@ -482,7 +482,13 @@ public static class MachinePrepLogIO {
         foreach (var part in path.Substring(root.Length).Split(new char[] { '\\' }, StringSplitOptions.RemoveEmptyEntries)) {
           current = Path.Combine(current, part);
           if (create && !Directory.Exists(current)) {
+            // SetOwner alone leaves an empty DACL: even this user cannot open
+            // or delete the result. Grant access before creation, including
+            // inheritance for debug files, without importing broader grants.
             var security = new DirectorySecurity(); security.SetOwner(WindowsIdentity.GetCurrent().User);
+            security.SetAccessRuleProtection(true, false);
+            security.AddAccessRule(new FileSystemAccessRule(WindowsIdentity.GetCurrent().User, FileSystemRights.FullControl,
+              InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
             Directory.CreateDirectory(current, security);
           }
           held.Add(Open(current, true, false));
@@ -522,7 +528,10 @@ public static class MachinePrepLogIO {
     using (var dirs = new Directories(directory, true, true)) {
       var path = Path.Combine(directory, "prep.log");
       if (!File.Exists(path)) {
+        // Ownership is not permission to reopen the file after CreateNew.
         var security = new FileSecurity(); security.SetOwner(WindowsIdentity.GetCurrent().User);
+        security.SetAccessRuleProtection(true, false);
+        security.AddAccessRule(new FileSystemAccessRule(WindowsIdentity.GetCurrent().User, FileSystemRights.FullControl, AccessControlType.Allow));
         using (var created = new FileStream(path, FileMode.CreateNew, FileSystemRights.Write, FileShare.None, 4096, FileOptions.None, security)) { }
       }
       using (var file = new FileStream(Open(path, false, true), FileAccess.Write)) {
