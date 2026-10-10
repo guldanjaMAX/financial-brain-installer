@@ -56,7 +56,9 @@ if [ "$prep_status" -ne 0 ]; then
   emit_status 'INSTALLER_PROGRESS=2/4 Prep needs attention; setup was not opened'
   emit_status 'SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed'
   say ''
-  say 'Financial Brain setup has not started yet: follow the steps above, then open Run Financial Brain Machine Prep again.'
+  say 'Financial Brain setup has not started yet. For help, send Financial Brain support the log shown below.'
+  say "Support log: $LOG_FILE"
+  if [ -f "$LOG_DIR/prep.log" ]; then say "Npm diagnostics: $LOG_DIR/prep.log"; fi
   exit "$prep_status"
 fi
 
