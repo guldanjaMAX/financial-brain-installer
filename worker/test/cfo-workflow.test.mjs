@@ -143,7 +143,7 @@ test('R5 typed workflow wording stays on generic Ask', async t => {
   assert.equal(result.body.workflow, undefined, 'free text must never choose a workflow');
   assert.equal(inventoryReads(f), 0);
   assert.ok(result.body.timing.stages.premise_temporal.calls > 0, 'normal Ask decision reached');
-  assert.equal(result.body.timing.stages.cfo_workflow.calls, 0);
+  assert.equal(Object.hasOwn(result.body.timing.stages, 'cfo_workflow'), false, 'unused optional span is absent');
 });
 
 // All previous execution and reported-command examples are now ordinary Ask.
@@ -226,7 +226,7 @@ test('R5 every previous free-text form follows generic Ask with zero workflow ca
     assert.equal(result.status, 200);
     assert.ok(scopeReads(f) > 0);
     assert.equal(result.body.workflow, undefined);
-    assert.equal(result.body.timing.stages.cfo_workflow.calls, 0);
+    assert.equal(Object.hasOwn(result.body.timing.stages, 'cfo_workflow'), false, 'unused optional span is absent');
     assert.equal(inventoryReads(f), 0);
     assert.ok(result.body.timing.stages.premise_temporal.calls > 0);
     genericDecisions++;
@@ -267,6 +267,10 @@ test('structured placeholders cannot fall through to generic models', async t =>
 
 test('R5 malformed actions and forged trusted fields refuse with a reached decision', async t => {
   const f = await cfoFixture(t);
+  // Random diagnostic IDs can coincidentally contain the rejected input marker.
+  // Keep unique request IDs deterministic without excluding diagnostics from the check.
+  let requestIds = 0;
+  t.mock.method(globalThis.crypto, 'randomUUID', () => `00000000-0000-4000-8000-${String(++requestIds).padStart(12, '0')}`);
   const invalid = [
     { year: undefined }, { year: '2025' }, { year: null }, { year: true }, { year: 2025.5 }, { year: 1899 }, { year: 2201 },
     { entity: undefined }, { entity: null }, { entity: ['fixture-entity'] }, { entity: '' },

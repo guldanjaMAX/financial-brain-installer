@@ -6,6 +6,9 @@ export const QUERY_STAGES = Object.freeze([
   'premise_temporal', 'coverage', 'gaps', 'rerank', 'financial_map',
   'cfo_workflow', 'legacy_hybrid', 'mcp_wrapping', 'mcp_backend', 'mcp_retry_wait',
 ]);
+// Version-1 consumers also read older Workers. Additive spans are optional on
+// the wire and omitted when unused; the original stages remain required.
+const OPTIONAL_QUERY_STAGES = new Set(['cfo_workflow']);
 const ROUTES = new Set(['think', 'unified', 'mcp', 'mcp.ask', 'mcp.search', 'mcp.brain_think', 'mcp.brain_search']);
 const PROVIDERS = new Set(['cloudflare-workers-ai', 'anthropic']);
 // Unknown configured model strings cannot become an exfiltration channel. Add
@@ -99,7 +102,9 @@ export function createQueryTiming({ route, now = () => performance.now() } = {})
         outcome: outcome === 'ok' ? observedOutcome : ['refused', 'error'].includes(outcome) ? outcome : 'error',
         total_ms: rounded(total), covered_ms: rounded(covered),
         overlap_ms: rounded(stageTotal - covered), unattributed_ms: rounded(total - covered),
-        stages: Object.fromEntries(Object.entries(stages).map(([key, value]) => [key, {
+        stages: Object.fromEntries(Object.entries(stages)
+          .filter(([key, value]) => !OPTIONAL_QUERY_STAGES.has(key) || value.calls > 0)
+          .map(([key, value]) => [key, {
           calls: value.calls, errors: value.errors, ms: rounded(value.ms),
         }])),
         models: [...models.values()].map(value => ({ ...value, ms: rounded(value.ms) })),
@@ -159,6 +164,7 @@ export function projectQueryTiming(value) {
   if (!fields.every(key => duration(value[key]))) return null;
   const stages = {};
   for (const key of QUERY_STAGES) {
+    if (OPTIONAL_QUERY_STAGES.has(key) && !Object.hasOwn(value.stages ?? {}, key)) continue;
     const stage = value.stages?.[key];
     if (!stage || !duration(stage.ms) || !count(stage.calls) || !count(stage.errors) || stage.errors > stage.calls) return null;
     stages[key] = { calls: stage.calls, errors: stage.errors, ms: stage.ms };
