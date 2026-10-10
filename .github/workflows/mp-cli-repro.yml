@@ -1,0 +1,73 @@
+name: mp-cli-repro
+on:
+  push:
+    branches: [ci/mp-cli-repro]
+permissions:
+  contents: read
+jobs:
+  repro:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install Node 24.18.0 into Program Files
+        shell: powershell
+        run: |
+          $msi = Join-Path $env:RUNNER_TEMP "node.msi"
+          Invoke-WebRequest -UseBasicParsing "https://nodejs.org/dist/v24.18.0/node-v24.18.0-x64.msi" -OutFile $msi
+          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait
+          & "$env:ProgramFiles\nodejs\node.exe" -v
+          & "$env:ProgramFiles\nodejs\npm.cmd" -v
+      - name: Same npm step inside the Machine Prep child environment
+        shell: powershell
+        run: |
+          $child = @'
+          $ErrorActionPreference = "Continue"
+          "PATHEXT=" + $env:PATHEXT
+          "PATH=" + $env:PATH
+          "npm candidates (Get-Command -All, Application):"
+          Get-Command npm -All -CommandType Application | ForEach-Object { "  " + $_.Source }
+          $npm = @(Get-Command npm -All -CommandType Application | ForEach-Object Source)[0]
+          "chosen npm: $npm"
+          $t = Join-Path ([IO.Path]::GetTempPath()) ("financial-brain-installer-" + [guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $t | Out-Null
+          $kit = Join-Path $t "brain-installer-0.4.10.tgz"
+          $c = [Net.Http.HttpClient]::new()
+          $bytes = $c.GetByteArrayAsync("https://financialbrain.ai/kit/brain-installer-0.4.10-55824b383909c57b.tgz").GetAwaiter().GetResult()
+          [IO.File]::WriteAllBytes($kit, $bytes)
+          "kit sha256: " + (Get-FileHash $kit -Algorithm SHA256).Hash.ToLower()
+          $stage = Join-Path $env:LOCALAPPDATA ("FinancialBrain.stage." + [guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          [IO.File]::WriteAllText((Join-Path $t "npmrc"), "")
+          $cmd = Join-Path $env:SystemRoot "System32\cmd.exe"
+          $psi = [Diagnostics.ProcessStartInfo]::new()
+          $psi.FileName = $cmd; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+          $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+          $q = @($npm, $stage, $kit) | ForEach-Object { '"' + $_.Replace('"', '""') + '"' }
+          $psi.Arguments = "/d /s /c `"`"$($q[0])`" install --global --offline --ignore-scripts --no-audit --no-fund --prefix $($q[1]) $($q[2])`""
+          $psi.EnvironmentVariables.Clear()
+          foreach ($pair in @{ SystemRoot = $env:SystemRoot; ComSpec = $cmd; USERPROFILE = $env:USERPROFILE; HOME = $env:USERPROFILE; TEMP = $t; TMP = $t; PATH = ((Split-Path -Parent $npm) + ";" + (Join-Path $env:SystemRoot "System32")); BRAIN_NO_WRANGLER_LOGIN = "1"; npm_config_userconfig = (Join-Path $t "npmrc"); npm_config_cache = (Join-Path $t "npm-cache"); npm_config_update_notifier = "false" }.GetEnumerator()) { $psi.EnvironmentVariables[$pair.Key] = [string]$pair.Value }
+          "arguments: " + $psi.Arguments
+          $p = [Diagnostics.Process]::Start($psi)
+          $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync(); $p.WaitForExit()
+          "npm exit=" + $p.ExitCode
+          "--- stdout"; $o.Result
+          "--- stderr"; $e.Result
+          "--- npm debug log tail"
+          Get-ChildItem (Join-Path $t "npm-cache\_logs") -Filter *.log -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1 | Get-Content -Tail 60
+          '@
+          $script = Join-Path $env:RUNNER_TEMP "child.ps1"
+          Set-Content -Path $script -Value $child -Encoding UTF8
+          $ps = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+          $info = [Diagnostics.ProcessStartInfo]::new()
+          $info.FileName = $ps; $info.UseShellExecute = $false; $info.CreateNoWindow = $true
+          $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+          $info.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$script`""
+          $allowed = @((Join-Path $env:SystemRoot "System32"), (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0"), (Join-Path $env:USERPROFILE ".local\bin"), (Join-Path $env:LOCALAPPDATA "FinancialBrainTools\npm"), (Join-Path $env:LOCALAPPDATA "Programs\Git\cmd"), (Join-Path $env:ProgramFiles "nodejs"), (Join-Path $env:ProgramFiles "Git\cmd"))
+          $info.EnvironmentVariables.Clear()
+          foreach ($pair in @{ SystemRoot = $env:SystemRoot; USERPROFILE = $env:USERPROFILE; HOME = $env:USERPROFILE; LOCALAPPDATA = $env:LOCALAPPDATA; APPDATA = $env:APPDATA; TEMP = $env:TEMP; TMP = $env:TMP; PATH = ($allowed -join ";"); PATHEXT = ".COM;.EXE;.BAT;.CMD"; BRAIN_NO_WRANGLER_LOGIN = "1" }.GetEnumerator()) { if ($null -ne $pair.Value) { $info.EnvironmentVariables[$pair.Key] = [string]$pair.Value } }
+          $proc = [Diagnostics.Process]::Start($info)
+          $so = $proc.StandardOutput.ReadToEndAsync(); $se = $proc.StandardError.ReadToEndAsync(); $proc.WaitForExit()
+          "child exit=" + $proc.ExitCode
+          $so.Result
+          "--- child stderr"; $se.Result
