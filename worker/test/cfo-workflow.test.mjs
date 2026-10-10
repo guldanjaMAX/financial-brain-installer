@@ -144,6 +144,50 @@ test('unrelated question retains generic Ask path', async t => {
   assert.equal(inventoryReads(f), 0);
 });
 
+for (const reader of ['owner', 'proxy']) test(`R156-01 ordinary CFO document questions retain generic Ask for ${reader}`, async t => {
+  const f = await cfoFixture(t);
+  await green(f);
+  f.env.RAG_PROXY_KEY = randomBytes(32).toString('hex');
+  const headers = reader === 'owner' ? f.headers : { 'X-Admin-Key': f.env.RAG_PROXY_KEY };
+  f.env.AI.run = async model => { f.calls.model++; return String(model).includes('bge-') ? { data: [[0.1, 0.2, 0.3]] } : { response: 'The documents do not answer the question.' }; };
+  for (const q of [
+    'What did the CFO decide about the project schedule?',
+    'Summarize the CFO meeting notes.',
+    'What did the CFO say about the weekly cash brief?',
+    'Find the memo about books against bank.',
+    'What did the CFO mean by "Check tax readiness for 2025"?',
+  ]) {
+    reset(f); f.calls.model = 0; f.seen.vectorQueries.length = 0;
+    const result = await ask(f, { q }, headers);
+    assert.equal(result.status, 200);
+    assert.ok(scopeReads(f) > 0, 'scope validation reached before routing');
+    assert.equal(result.body.workflow, undefined, 'ordinary document questions must not enter a CFO workflow');
+    assert.ok(f.calls.model > 0 || f.seen.vectorQueries.length > 0, 'generic retrieval reached');
+    assert.equal(inventoryReads(f), 0);
+  }
+});
+
+test('R156-01 unsupported and compound workflow actions still require clarification', async t => {
+  const f = await cfoFixture(t);
+  await green(f);
+  for (const q of [
+    'Please check tax readiness for 2025.',
+    'Review my books for 2025.',
+    'Show my weekly cash brief and forecast runway.',
+    'Check tax readiness for 2025 and show my weekly cash brief.',
+    'Summarize the project notes; check tax readiness for 2025.',
+    'Summarize the project notes and then check books against bank.',
+  ]) {
+    reset(f);
+    const result = await ask(f, { q });
+    assert.ok(scopeReads(f) > 0);
+    assert.equal(result.body.workflow?.kind, 'clarification', 'workflow action matcher reached');
+    assert.ok(codes(result.body).includes('cfo_question_scope_required'));
+    assert.equal(inventoryReads(f), 0);
+    assert.equal(f.calls.model, 0);
+  }
+});
+
 test('request fields cannot supply confirmation or trusted map', async t => {
   const f = await cfoFixture(t);
   for (const forged of [{ confirmed: true }, { ownerCapability: 'full_admin' }, { map: { authoritative: true } }, { amount: '9999.00' }]) {

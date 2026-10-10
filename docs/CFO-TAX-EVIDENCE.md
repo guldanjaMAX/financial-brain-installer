@@ -21,7 +21,9 @@ workflow. The Worker passes an explicit internal capability after authentication
 Proxy keys, capability grants (including unrestricted grants), document grants,
 and remote MCP's default owner label do not confer this capability. Request
 fields cannot supply a map, confirmation, capability, or amount. Current owner
-access is checked again before the checklist is returned.
+access is checked again before any map or inventory result is returned, including
+missing/stale map notices and entity/year clarification. Lost or unverifiable
+access withholds those private states and diagnostic read counts.
 
 Ask's existing entity scope validation runs first. Missing entity selection or
 an unsupported question asks for clarification. Missing, unreadable and stale
@@ -43,8 +45,10 @@ Books dates must be real and ordered. Its optional account reference is a JSON
 string, decoded exactly without trimming or case folding, limited to 256
 characters and excluding control characters. Cash and Books currently return
 unavailable placeholders. They cannot fall through to generic retrieval.
-Unsupported or compound questions containing these CFO intents ask for scoped
-clarification. Unrelated questions retain their existing Ask behavior. Extra
+Unsupported or compound requests to check tax readiness, review books or show a
+cash brief ask for scoped clarification. Mentioning the CFO role or one of those
+topics in a document question does not invoke a workflow. For example, asking
+what the CFO decided about a project keeps the existing Ask behavior. Extra
 source, category, platform, folder and date filters are refused for CFO requests.
 
 ## What the checklist means
@@ -59,7 +63,9 @@ the selected entity; filter echoes are verified before using inventory pages.
 
 Each section distinguishes present metadata, unreadable originals, unavailable
 reads or access, and measured empty stored scope. A failed read has no zero
-count. A measured empty section does not prove that an original or tax item is
+count. An explicit unreliable-extraction flag also triggers the originals-review
+gap, even when custody says the original is readable and extraction is native.
+A measured empty section does not prove that an original or tax item is
 absent. Payroll, rejected/unextracted documents, freshness, form classification,
 K-1 role, filing jurisdiction, official form mapping and authenticated field
 review remain explicit limitations with next steps. Inventory metadata is not
