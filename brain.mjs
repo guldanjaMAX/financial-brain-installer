@@ -52,6 +52,7 @@ import {
   canonicalGoogleProviderReason,
   GMAIL_FAILURE_OPERATION_CLASSES,
   normalizeSourceFailureEvidence,
+  providerNoChangeCheckAt,
   SOURCE_FAILURE_EVIDENCE_VERSION,
 } from "./worker/src/lib/source-receipt.js";
 import { PLAID_PROFILE, manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
@@ -10331,10 +10332,22 @@ export async function cmdSources(manifestPath, options = {}) {
       const kindWidth = Math.max(4, ...inventory.sources.map((row) => row.kind.length));
       console.log(`\n  ${"name".padEnd(nameWidth)}  ${"kind".padEnd(kindWidth)}  ${"zone".padEnd(12)}  ${"physical".padStart(9)}  ${"readable".padStart(10)}  freshness`);
       for (const row of inventory.sources) {
+        const noChangeAt = providerNoChangeCheckAt(row.kind, row.receipt?.latest_run);
+        const checkAge = noChangeAt ? Date.parse(inventory.as_of) - Date.parse(noChangeAt) : NaN;
+        const checkLabel = checkAge >= 0 && checkAge <= 24 * 60 * 60 * 1000 ? "checked (no changes)" : null;
         console.log(
           `  ${row.name.padEnd(nameWidth)}  ${row.kind.padEnd(kindWidth)}  ${String(row.zone || "unassigned").padEnd(12)}  ` +
-            `${num(row.storage.physical_documents).padStart(9)}  ${num(row.storage.readable_documents).padStart(10)}  ${row.freshness.state}`,
+            `${num(row.storage.physical_documents).padStart(9)}  ${num(row.storage.readable_documents).padStart(10)}  ${row.receipt?.zoom?.state || checkLabel || row.freshness.state}`,
         );
+        if (noChangeAt) {
+          console.log(`    checked ${row.receipt.last_check_at}; no changes; last ingest ${row.receipt.last_ingest_receipt_at || "never"}`);
+        }
+        if (row.receipt?.zoom) {
+          const zoom = row.receipt.zoom;
+          const pending = zoom.deliveries.pending + zoom.deliveries.processing + zoom.deliveries.retryable;
+          console.log(`    Zoom ${zoom.state}; last check ${zoom.last_check_at || "never"}; ` +
+            `${pending} pending, ${zoom.deliveries.refused} refused, ${zoom.deliveries.unavailable} unavailable; history unproven`);
+        }
       }
       const failures = inventory.sources.filter((row) => row.last_failure !== null);
       if (failures.length) {
@@ -26531,14 +26544,21 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       ["broken", "review"].includes(row?.freshness?.state) ? row.freshness.state
         : row?.freshness?.state && receiptTimestamps[index] ? row.freshness.state : "unknown");
     const latestRuns = receiptRows.map((row) => row?.receipt?.latest_run);
-    const outcomes = latestRuns.map((run) => run?.outcome || "missing_history");
-    const lastRunOutcome = ["failed", "refused", "empty", "missing_history", "in_progress", "partial", "completed"]
+    const checkTimestamps = receiptRows.map(row => providerNoChangeCheckAt(row?.kind, row?.receipt?.latest_run));
+    const outcomes = latestRuns.map((run, index) => checkTimestamps[index] ? "no_change" : run?.outcome || "missing_history");
+    const lastRunOutcome = ["failed", "refused", "empty", "missing_history", "in_progress", "partial", "no_change", "completed"]
       .find((outcome) => outcomes.includes(outcome)) || "missing_history";
+    const asOf = Date.parse(inventory?.as_of || "");
+    const checked = checkTimestamps.every(at => at && Number.isFinite(asOf) &&
+      Date.parse(at) <= asOf && asOf - Date.parse(at) <= 24 * 60 * 60 * 1000);
+    const zoom = receiptRows.length === 1 ? receiptRows[0]?.receipt?.zoom : null;
     const measuredCount = (field) => latestRuns.every((run) => Number.isSafeInteger(run?.[field]))
       ? latestRuns.reduce((sum, run) => sum + run[field], 0) : null;
     const currentState = source.class === "connect-required" ? "skipped"
       : source.class === "snapshot" ? "snapshot"
       : source.class === "disabled" ? "skipped"
+        : zoom ? zoom.state
+        : checked ? "checked"
         : states.includes("broken") ? "broken"
           : states.includes("review") || ["refused", "empty"].includes(lastRunOutcome) ? "review"
           : states.includes("unknown") ? "unknown"
@@ -26565,6 +26585,8 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       docs_refused: measuredCount("docs_refused"),
       docs_failed: measuredCount("docs_failed"),
       last_successful_run_at: newest,
+      last_check_at: zoom?.last_check_at || receiptRows.map(row => row?.receipt?.last_check_at).filter(Boolean).sort().at(-1) || null,
+      ...(zoom ? { zoom } : {}),
       next_run: nextRun,
       owner: effectiveOwner,
       reason: source.reason,
@@ -26575,6 +26597,8 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
 function renderDailyFreshnessRows(rows, log = console.log) {
   for (const row of rows) {
     log(`${row.source} | ${row.current_state} | ${row.last_successful_run_at || "never"} | ${row.next_run} | ${row.owner}` +
+      (row.last_run_outcome === "no_change" ? ` | checked ${row.last_check_at}; no changes` : "") +
+      (row.zoom ? ` | Zoom ${row.zoom.state}; last check ${row.zoom.last_check_at || "never"}; history unproven` : "") +
       (["partial", "refused", "empty"].includes(row.last_run_outcome)
         ? ` | ${row.last_run_outcome}; ${row.docs_refused ?? "unknown"} refused` : "") +
       (row.current_state === "skipped" && row.reason === "not connected on this machine" ? ` | ${row.reason}` : ""));

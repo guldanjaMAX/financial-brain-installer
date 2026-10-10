@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dailyRefreshIdentity, dailyRefreshPrincipal } from "./daily-refresh-plan.mjs";
 import { observeDailyRun } from "./daily-refresh-observation.mjs";
 import { acquireBrainLifecycleLock } from "./brain-lifecycle-lock.mjs";
+import { providerNoChangeCheckAt } from "../worker/src/lib/source-receipt.js";
 import {
   buildDailyRefreshDefinition,
   readDailyRefreshUpdateTransaction,
@@ -161,20 +162,47 @@ export async function runDailyRefresh({
         const after = afterValues.at(-1) || null;
         const before = beforeValues.at(-1) || null;
         const latestRuns = Object.keys(afterBySource).map((name) => afterInventory?.[name]?.latest_run);
+        const checkedAt = timestamp(now);
+        const selectedEntries = Array.isArray(runResult?.entries) ? runResult.entries.filter(entry =>
+          entry.key === source.run_key || entry.manifestKey === source.key) : null;
+        // cmdLoad reports unselected manifest entries as skipped. Only the
+        // selected leg's outcome can establish that this invocation ran.
+        const selectedRan = selectedEntries ? selectedEntries.length === 1 &&
+          ["loaded", "partial"].includes(selectedEntries[0].status) : !runResult?.skipped;
+        const executionComplete = (runResult?.status === undefined || ["complete", "partial"].includes(runResult.status)) && selectedRan &&
+          !runResult?.failed && !runResult?.unavailable;
+        const noChangeBySource = Object.keys(afterBySource).map((name) => {
+          const row = afterInventory?.[name];
+          const check = providerNoChangeCheckAt(row?.kind, row?.latest_run);
+          const prior = validTimestamp(baseline?.[name]?.latest_run?.finished_at) || beforeBySource[name];
+          // A stale/replayed receipt, a future clock, or a borrowed ingest date
+          // cannot certify this invocation. Every leg needs its own new proof.
+          return executionComplete && (runResult?.loaded > 0 || runResult?.status === "complete") &&
+            check !== null && Date.parse(row.latest_run.started_at) >= Date.parse(sourceStartedAt) &&
+            Date.parse(check) <= Date.parse(checkedAt) && (!prior || Date.parse(check) > Date.parse(prior)) &&
+            beforeBySource[name] === afterBySource[name];
+        });
         const docsRefused = latestRuns.every((run) => Number.isSafeInteger(run?.docs_refused))
           ? latestRuns.reduce((sum, run) => sum + run.docs_refused, 0) : null;
         const failedRun = latestRuns.some((run) => ["failed", "refused"].includes(run?.outcome) || run?.docs_failed > 0);
         // Reject measured zero work even when an older server advanced its date.
-        const unverifiedRun = latestRuns.some((run) => run?.outcome === "empty" ||
+        const unverifiedBySource = latestRuns.map((run) => run?.outcome === "empty" ||
           ((run?.metrics_version === 1 || (Number.isSafeInteger(run?.docs_refused) &&
             Number.isSafeInteger(run?.docs_failed))) &&
             ![run?.docs_added, run?.docs_updated, run?.docs_unchanged]
               .some((count) => Number.isSafeInteger(count) && count > 0)));
-        const freshnessAdvanced = freshness.advanced && !failedRun && !unverifiedRun;
+        const unverifiedRun = unverifiedBySource.some(Boolean);
+        const freshnessAdvanced = executionComplete && freshness.advanced && !failedRun && !unverifiedRun;
+        const checkVerified = executionComplete && !failedRun && latestRuns.every((_run, index) => {
+          if (noChangeBySource[index]) return true;
+          const name = Object.keys(afterBySource)[index];
+          return compareFreshness({ [name]: beforeBySource[name] }, { [name]: afterBySource[name] }).advanced &&
+            !unverifiedBySource[index];
+        });
         const docsExcluded = Number.isSafeInteger(runResult?.excluded) ? runResult.excluded : null;
-        if (freshnessAdvanced && (latestRuns.some((run) => run?.outcome === "partial") ||
+        if (checkVerified && (latestRuns.some((run) => run?.outcome === "partial") ||
             runResult?.partial > 0 || docsExcluded > 0)) outcome = "partial";
-        if (!freshnessAdvanced && runResult?.status !== "skipped") {
+        if (!checkVerified) {
           outcome = "failed";
           reason = unverifiedRun ? "the latest source receipt verified no accepted or unchanged documents"
             : failedRun ? "the latest source receipt reports a failed or refused run"
@@ -193,6 +221,12 @@ export async function runDailyRefresh({
           last_successful_run_at_before: before,
           last_successful_run_at_after: after,
           freshness_advanced: freshnessAdvanced,
+          check_verified: checkVerified,
+          no_change: checkVerified && noChangeBySource.every(Boolean),
+          last_check_at_before: Object.keys(beforeBySource).map(name => baseline?.[name]?.last_check_at || beforeBySource[name])
+            .filter(Boolean).sort().at(-1) || null,
+          last_check_at_after: checkVerified ? Object.keys(afterBySource).map((name, index) =>
+            noChangeBySource[index] ? afterInventory[name].latest_run.finished_at : afterBySource[name]).sort().at(-1) : null,
           docs_refused: docsRefused,
           docs_excluded: docsExcluded,
           missing_freshness_sources: freshness.missing,
@@ -222,7 +256,7 @@ export async function runDailyRefresh({
       schema_version: 1,
       kind: "daily_refresh",
       identity: plan.identity.id,
-      status: sourceResults.some((entry) => !["complete", "partial"].includes(entry.status)) ? "failed"
+      status: sourceResults.length === 0 || sourceResults.some((entry) => !["complete", "partial"].includes(entry.status)) ? "failed"
         : sourceResults.some((entry) => entry.status === "partial") ? "partial" : "complete",
       started_at: startedAt,
       completed_at: timestamp(now),
@@ -238,6 +272,8 @@ export async function runDailyRefresh({
 
 function freshnessMap(inventory) {
   return Object.fromEntries((inventory?.sources || []).map((row) => [row.name, {
+    kind: row.kind,
+    last_check_at: row?.receipt?.last_check_at || null,
     last_successful_run_at: row?.receipt?.last_successful_run_at || null,
     state: row?.freshness?.state || null,
     latest_run: row?.receipt?.latest_run || null,
@@ -355,6 +391,7 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
       log(`daily refresh ${result.status}: ${result.sources.length} source(s) attempted`);
       for (const source of result.sources) {
         log(`${source.source} | ${source.status} | ${source.last_successful_run_at_after || "never"}` +
+          (source.no_change ? ` | checked ${source.last_check_at_after}; no changes` : "") +
           (source.status === "partial" ? ` | ${source.docs_refused ?? "unknown"} refused` : "") +
           (source.docs_excluded > 0 ? ` | ${source.docs_excluded} excluded by rule` : ""));
       }

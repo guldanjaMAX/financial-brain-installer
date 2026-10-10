@@ -49,8 +49,9 @@ import {
   PUBLIC_INSTALL_SMOKE_TITLE,
   publicInstallSmokeContentHash,
 } from "./install-smoke.js";
-import { parseStoredSourceFailureEvidence, sourceReceiptOwnerMessage } from "./source-receipt.js";
+import { parseStoredSourceFailureEvidence, providerNoChangeCheckAt, sourceReceiptOwnerMessage } from "./source-receipt.js";
 import { sourceCoverageFromEvidence } from "./source-coverage.js";
+import { zoomSourceStatus } from "./zoom-deliveries.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { probeStalledVectorFence } from "./vector-fence-probe.js";
 import { publicOwnerNoteProvenance } from "./owner-note-contract.js";
@@ -4740,6 +4741,8 @@ export async function sourceInventory(env, {
   // referencing tables that do not exist yet.
   const result = await readWithCustomApiVisibility(env, readInventory, { probe: false });
   const rawRows = Array.isArray(result?.results) ? result.results : [];
+  const zoomStatus = rawRows.some(row => row.name === "zoom" && row.kind === "zoom" && Number(row.registered) === 1)
+    ? await zoomSourceStatus(env, { now }) : null;
   // Keep the v3 inventory statement byte-for-byte stable. Retirement is a
   // small indexed companion read, like the other post-inventory operational
   // lookups below, and does not widen the published row contract.
@@ -5028,6 +5031,8 @@ export async function sourceInventory(env, {
             last_stored_ingest_at: inventoryTimestamp(row.last_stored_ingest_at),
             last_ingest_receipt_at: inventoryTimestamp(row.last_ingest_at),
             last_successful_run_at: inventoryTimestamp(row.last_successful_run_at),
+            last_check_at: providerNoChangeCheckAt(kind, latestRun) || inventoryTimestamp(row.last_successful_run_at),
+            ...(sourceId === "zoom" && kind === "zoom" && zoomStatus ? { zoom: zoomStatus } : {}),
             complete_history_through: inventoryTimestamp(row.last_complete_sweep_at),
             reported_logical_documents: inventoryCount(row.reported_logical_documents),
             logical_matches_reported: inventoryCount(row.reported_logical_documents) === logicalDocuments,
