@@ -88,7 +88,8 @@ function sumCounts(target, next) {
 }
 function mergeReceipt(a, b) {
   if (!a || !b) return;
-  for (const field of ["first_stored_ingest_at", "last_stored_ingest_at", "last_successful_run_at"]) {
+  // A successful ingest may lie beyond page one; its check proof must follow it.
+  for (const field of ["first_stored_ingest_at", "last_stored_ingest_at", "last_successful_run_at", "last_check_at"]) {
     const values = [a[field], b[field]].filter(Boolean).sort();
     a[field] = (field.startsWith("first") ? values[0] : values.at(-1)) || null;
   }
