@@ -537,6 +537,7 @@ const expected = [
   "operations/daily-refresh-observation.mjs",
   // Content-free durable dispatch intent is required by the migration runner.
   "operations/migration-statement-intent.mjs",
+  "operations/upgrade-bookmark.mjs",
   "operations/daily-refresh-plan.mjs",
   "operations/daily-refresh-run.mjs",
   "operations/daily-refresh-scheduler.mjs",

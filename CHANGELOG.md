@@ -15,6 +15,22 @@ the brain, not for whoever built it: what changed for them, and what to check.
   different versions. Long refresh histories are read in pages. Older clients
   receive an explicit update request when an inventory needs multiple work
   pages; daily imports still run if freshness cannot yet be verified.
+- If an update loses the reply to its pause request, it now warns that new
+  documents may be blocked. Check `brain health` before retrying.
+- An unconfirmed database change now asks for installer review. It no longer
+  claims the provider is still working when delivery was never proved.
+- Updates save and verify the rollback bookmark on this computer before
+  deployment or migration starts. It survives an interrupted update, including
+  one stopped without an error message. Keep the private
+  `~/.brain/upgrade-bookmarks/` receipts for recovery review. A different
+  capitalization of the same home folder is accepted. On Windows, receipt
+  access is restricted to your account and verified before the update continues,
+  including when your home folder name contains non-English characters or the
+  update runs from an administrator session. Slow Windows permission checks
+  have up to two minutes each; a timeout stops the update with an explanation
+  before deployment or migration. On Mac,
+  inherited access is removed from receipts and unsafe folder permissions stop
+  the update before deployment.
 
 ## 0.4.11 (2026-10-09)
 

@@ -15,6 +15,7 @@
  * Worker upload and the provider-side bootstrap are stand-ins, and each of
  * those mutates the same simulated Worker the router reads from.
  */
+import { createUpgradeBookmarkWriter } from "./fixtures/upgrade-bookmark-writer.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -214,7 +215,9 @@ function installation({ manifestVersion = PRODUCT_VERSION } = {}) {
     live.vectors = chunks;
     return { epoch: 1, total: chunks, confirmed: chunks, remaining: 0, rounds: 1, complete: true, vector_ready: true };
   };
+  const bookmarkWriter = createUpgradeBookmarkWriter();
   const upgradeOptions = {
+    saveUpgradeBookmark: bookmarkWriter.saveUpgradeBookmark,
     resolveAccount: async () => ({ id: ACCOUNT_ID, name: "Harbor Fixture" }),
     d1Query,
     cf,
@@ -244,6 +247,7 @@ function installation({ manifestVersion = PRODUCT_VERSION } = {}) {
   };
   return {
     sandbox, manifestPath, db, live, events, reads, failures, restore, http, d1Query, cf, cmdDeploy, cmdHealth,
+    bookmarkWriter,
     upgradeOptions,
     manifestVersion: () => JSON.parse(readFileSync(manifestPath, "utf8")).brain.version,
     close() {
@@ -329,6 +333,7 @@ test("rollback then update: the paused same-version Worker resumes and the updat
     brain.events.length = 0;
     const run = await update(brain);
     assert.equal(run.error, null, run.error?.message);
+    brain.bookmarkWriter.assertCalled();
     // Both backlog gates read the real receipt of the paused Worker once each.
     assert.equal(brain.reads.backlog, 2);
     assert.deepEqual(upgradeStages(brain), ["deploy:paused-for-upgrade", "migrate", "bootstrap", "deploy:active"]);

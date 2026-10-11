@@ -1,3 +1,4 @@
+import { createUpgradeBookmarkWriter } from "./fixtures/upgrade-bookmark-writer.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -792,6 +793,7 @@ test("force with pending work proceeds after one risk warning", async () => {
 test("work enqueued after the initial gate refuses at the immediate pre-pause gate", async () => {
   await withFixture(async ({ manifestPath, original }) => {
     const events = [];
+    const bookmarkWriter = createUpgradeBookmarkWriter();
     let error = null;
     try {
       await cmdUpdate(manifestPath, {
@@ -807,6 +809,7 @@ test("work enqueued after the initial gate refuses at the immediate pre-pause ga
         },
         cmdVerify: async () => events.push("verification"),
         upgradeOptions: {
+          saveUpgradeBookmark: bookmarkWriter.saveUpgradeBookmark,
           resolveAccount: async () => ({ id: "1".repeat(32) }),
           d1Query: async (_account, _database, sql) => {
             if (/sqlite_master/iu.test(sql)) return { results: [{ name: "install_state" }] };
@@ -844,6 +847,7 @@ test("work enqueued after the initial gate refuses at the immediate pre-pause ga
     } catch (caught) {
       error = caught;
     }
+    bookmarkWriter.assertCalled();
 
     assert.ok(error, "the second queue decision must refuse");
     assert.equal(error.message, renderCliCommands(
@@ -867,6 +871,7 @@ test("work enqueued after the initial gate refuses at the immediate pre-pause ga
 test("a supervised-recovery queue refusal escapes update without a bookmark, rerun advice, or history row", async () => {
   await withFixture(async ({ manifestPath, original }) => {
     const events = [];
+    const bookmarkWriter = createUpgradeBookmarkWriter();
     let historyWrites = 0;
     let error = null;
     const expected = renderCliCommands(
@@ -889,6 +894,7 @@ test("a supervised-recovery queue refusal escapes update without a bookmark, rer
         withCloudflareControl: async (action) => action(),
         cmdVerify: async () => events.push("verification"),
         upgradeOptions: {
+          saveUpgradeBookmark: bookmarkWriter.saveUpgradeBookmark,
           resolveAccount: async () => ({ id: "1".repeat(32) }),
           d1Query: async (_account, _database, sql) => {
             if (/sqlite_master/iu.test(sql)) return { results: [{ name: "install_state" }] };
@@ -927,6 +933,7 @@ test("a supervised-recovery queue refusal escapes update without a bookmark, rer
     } catch (caught) {
       error = caught;
     }
+    bookmarkWriter.assertCalled();
 
     assert.equal(error?.message, expected, "the complete owner-facing refusal must escape unchanged");
     assert.doesNotMatch(error?.message || "", /run brain update again|D1 recovery bookmark/u);
@@ -1331,6 +1338,7 @@ function prePauseRefusal(message) {
 // production reader and one scripted aggregate response.
 async function prePauseGate(manifestPath, inventory) {
   const events = [];
+  const bookmarkWriter = createUpgradeBookmarkWriter();
   const { log, options } = scriptedReader(manifestPath, [
     { status: 200, body: JSON.stringify(inventory) },
   ]);
@@ -1343,6 +1351,7 @@ async function prePauseGate(manifestPath, inventory) {
       withCloudflareControl: async (action) => action(),
       cmdVerify: async () => {},
       upgradeOptions: {
+        saveUpgradeBookmark: bookmarkWriter.saveUpgradeBookmark,
         resolveAccount: async () => ({ id: "1".repeat(32) }),
         d1Query: async (_account, _database, sql) => {
           if (/sqlite_master/iu.test(sql)) return { results: [{ name: "install_state" }] };
@@ -1369,6 +1378,7 @@ async function prePauseGate(manifestPath, inventory) {
   } catch (caught) {
     error = caught;
   }
+  bookmarkWriter.assertCalled();
   return { error, events, log };
 }
 
@@ -1585,6 +1595,7 @@ async function throughBothGates(manifestPath, {
   health,
 } = {}) {
   const events = [];
+  const bookmarkWriter = createUpgradeBookmarkWriter();
   const cfPaths = [];
   const urls = [];
   const initial = scriptedReader(manifestPath, [{ status: 200, body: JSON.stringify(first) }], { health });
@@ -1614,6 +1625,7 @@ async function throughBothGates(manifestPath, {
       withCloudflareControl: async (action) => action(),
       cmdVerify: async () => events.push("verification"),
       upgradeOptions: {
+        saveUpgradeBookmark: bookmarkWriter.saveUpgradeBookmark,
         resolveAccount: async () => ({ id: "1".repeat(32) }),
         d1Query: async (_account, _database, sql) => {
           if (/sqlite_master/iu.test(sql)) return { results: [{ name: "install_state" }] };
@@ -1632,6 +1644,7 @@ async function throughBothGates(manifestPath, {
         readUpdateBacklog,
         updateBacklogOptions: prePause.options,
         cmdDeploy: async () => {
+          bookmarkWriter.assertCalled();
           events.push("paused deployment");
           throw new Error("fixture stop after the paused deployment started");
         },
