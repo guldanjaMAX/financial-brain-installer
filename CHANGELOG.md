@@ -6,11 +6,19 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.12 (unreleased)
 
+- Ask can list largest expenses and recent deposits, total spending or income
+  by merchant or category, and detect weekly or monthly recurring charges.
+  Matched transfers between your own accounts are excluded from income and
+  spending; unmatched candidates stay counted and are labeled for review.
+  Check the cited rows, account coverage, Unsorted amounts and unconfirmed
+  bank categories. Recurring charges are detected patterns, not confirmed
+  subscriptions; their monthly total is an estimate.
+
 - Ask can read account balances, exact deposit matches, and money in and out
   directly from the bank ledger, with masked accounts, dates and row citations.
   Live-feed rows take precedence over matching manual-account rows within the
-  live coverage window. Totals include transfers between your accounts. Check
-  the stated period, balance date and feed coverage; questions the ledger cannot
+  live coverage window. Check the stated period, balance date and feed
+  coverage; questions the ledger cannot
   answer show a gap before falling back to documents.
 - Ask refuses money claims when citations have unreliable or out-of-period
   dates, only agent or unknown-lineage support, or mismatched figures, months

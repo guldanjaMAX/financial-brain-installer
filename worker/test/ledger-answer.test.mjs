@@ -81,7 +81,7 @@ test("Think totals exclude the manual twin inside live coverage", async (t) => {
   assert.equal(body.ledger?.accounts.length, 1);
   assert.equal(body.ledger.accounts[0].credits_minor, 12001);
   assert.equal(body.ledger.accounts[0].debits_minor, 2300);
-  assert.match(body.answer, /include transfers/);
+  assert.match(body.answer, /excludes 0 matched transfers between your accounts/);
   assert.ok(f.seen.sql.some(sql => /fin_transactions/.test(sql)), "transaction decision was reached");
   assert.equal(f.sqlite.prepare("SELECT total_changes() AS n").get().n, before);
 });
@@ -130,7 +130,7 @@ test("all period shapes use an injected UTC calendar and covered zero periods st
       assert.equal(body.gaps[0].accounts[0].covered_to, "2026-10-11");
     } else {
       assert.equal(body.ledger.accounts[0].credits_minor, credits);
-      assert.equal(body.ledger.includes_own_transfers, true);
+      assert.equal(body.ledger.includes_own_transfers, false);
     }
   }
   f.raw("UPDATE fin_account_coverage SET covered_from='2026-01-01' WHERE account_slug='manual-account'");
@@ -342,7 +342,7 @@ test("a concurrent coverage change cannot mix old twin precedence with new rows"
   let changed = 0;
   const prepare = f.env.DB.prepare;
   f.env.DB.prepare = sql => {
-    if (/FROM json_each\(\?1\) m JOIN fin_transactions/.test(sql) && !changed++) {
+    if (/FROM json_each\(\?1\) m CROSS JOIN fin_transactions/.test(sql) && !changed++) {
       f.raw("UPDATE fin_account_coverage SET covered_from='2026-09-16' WHERE account_slug='live-account'");
     }
     return prepare(sql);

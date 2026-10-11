@@ -2008,7 +2008,42 @@ date. Relative periods use the UTC calendar because the Worker has no owner
 timezone at this boundary. Reads are bounded to 200 source accounts and 5,000
 matching transaction rows; exceeding either bound falls back with a visible
 gap. Complete coverage is required for totals and negative deposit results.
-Transfer pairing, category totals and account-data repairs are separate work.
+`node --test worker/test/ledger-phase2.test.mjs` extends that same path with
+largest N expenses/deposits (1 through 100), recent deposits, merchant/category
+spend or income, recurring charges, and own-account transfers. Named months
+and Q1 through Q4 may omit the year, meaning the current UTC year. Merchant
+matches use contiguous NFKC-normalized, case-insensitive tokens in description
+or payee. Category totals separate confirmed and proposed categories; proposed
+ones say "bank's category (unconfirmed)". Unsorted is always a separate line.
+
+Transfer matching reads six extra days on either side of the answer window
+and can inspect other owned accounts when the question selects one account.
+The extra margin tests the counterpart's competing candidates too; the actual
+matching tolerance remains three days.
+Only readable, covered rows from unambiguous confirmed owned accounts can
+pair. Both legs need a TRANSFER_IN/TRANSFER_OUT category or TRANSFER TO/FROM
+description, equal cents, opposite directions and different effective accounts.
+A leg must have exactly one possible counterpart within three days, mutually;
+ambiguous candidates remain unmatched and counted. Pairs are cited, never
+stored, and excluded from phase-one totals as well as phase-two income/spend.
+Transfer totals count each pair once by its outgoing posting date. A receipt
+inside the period can therefore be excluded from income even when its outgoing
+leg belongs to the preceding period. The 5,000-row cap includes the padding and
+other owned accounts, and refuses a partial answer. Separate indexed date-range
+and undated arms preserve the existing refusal for rows with unknown dates.
+SQL stops at 5,001 matching rows; sorting happens only after proving the bound,
+so an oversized covered range does not need a full sort before refusing.
+
+Recurring detection defaults to the last 120 UTC days and uses the normalized
+payee, or description if payee is absent. At least three charges must have all
+intervals in 6 through 8 days (weekly) or 25 through 35 days (monthly); every
+amount must be within exactly 10% of the upper median observed cent amount.
+The last charge must be no more than 8 or 35 days before the period ends.
+Transfer candidates are excluded from recurrence detection. All occurrences
+are cited. Weekly amounts convert to estimated monthly cents using 52/12 and
+round half up per merchant. These are detected patterns, not confirmed active
+subscriptions. Account-data repairs and live owner verification remain field
+work.
 
 ### Local owner-onboarding rehearsal
 
