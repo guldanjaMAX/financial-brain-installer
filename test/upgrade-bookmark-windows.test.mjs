@@ -4,13 +4,18 @@ import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import test from "node:test";
-import { saveUpgradeBookmark, secureWindowsUpgradeBookmarkPath } from "../operations/upgrade-bookmark.mjs";
+import { saveUpgradeBookmark, secureWindowsUpgradeBookmarkPath, WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS } from "../operations/upgrade-bookmark.mjs";
 import { windowsFileChildEnvironment } from "../operations/current-user-file.mjs";
 
 // Native tests touch only synthetic receipt paths. They never invoke a
 // credential helper, account endpoint, scheduler, or the installer CLI.
-function acl(path, broaden = false, administratorOwner = false) {
-  const env = windowsFileChildEnvironment();
+const NATIVE_ACL_TIMEOUT_MS = WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS + 30_000;
+// The elevated-owner case deliberately performs multiple independent native
+// observations as well as product calls. Its outer limit must cover all of them.
+const NATIVE_TEST_TIMEOUT_MS = 20 * NATIVE_ACL_TIMEOUT_MS;
+
+function acl(path, broaden = false, administratorOwner = false, { run = spawnSync, environment = process.env } = {}) {
+  const env = windowsFileChildEnvironment(environment);
   const script = `
     $ErrorActionPreference = 'Stop'
     try {
@@ -47,10 +52,10 @@ function acl(path, broaden = false, administratorOwner = false) {
       [Console]::Out.Write((@{ broad = $broad; protected = $acl.AreAccessRulesProtected; owner = ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -eq $sid.Value); rules = $rules.Count } | ConvertTo-Json -Compress))
     } catch { exit 1 }
   `;
-  const result = spawnSync(win32.join(env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+  const result = run(win32.join(env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
       input: JSON.stringify({ path, broaden, administratorOwner }), encoding: "utf8", env, shell: false,
-      timeout: 15_000, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+      timeout: NATIVE_ACL_TIMEOUT_MS, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     });
   assert.equal(result.status, 0, "native fixture ACL operation completed");
   return JSON.parse(result.stdout);
@@ -63,7 +68,26 @@ const record = {
 const now = () => new Date("2026-10-10T12:00:00.000Z");
 const privateAcl = { broad: 0, protected: true, owner: true, rules: 1 };
 
+for (const startupMs of [0, 25_000, 90_000]) {
+  test(`CI Windows fixture latency: ${startupMs}ms startup can reach the native ACL assertions`, () => {
+    let calls = 0;
+    const run = (_command, _args, options) => {
+      calls++;
+      assert.ok(Number.isSafeInteger(options.timeout) && options.timeout > 0);
+      return startupMs >= options.timeout
+        ? { status: null, error: Object.assign(new Error("fixture timeout"), { code: "ETIMEDOUT" }) }
+        : { status: 0, stdout: JSON.stringify(privateAcl) };
+    };
+    let result;
+    try {
+      result = acl("C:\\fixture\\receipt.json", false, false, { run, environment: { SystemRoot: "C:\\Windows" } });
+    } finally { assert.equal(calls, 1, "native fixture timeout decision was reached"); }
+    assert.deepEqual(result, privateAcl);
+  });
+}
+
 test("CI native Windows: elevated group owner becomes the individual owner before receipt bytes", {
+  timeout: NATIVE_TEST_TIMEOUT_MS,
   skip: process.platform !== "win32" ? "requires native Windows DACLs" : false,
 }, (t) => {
   const root = fs.realpathSync.native(fs.mkdtempSync(join(tmpdir(), "receipt-admin-owner-")));
@@ -107,6 +131,7 @@ test("CI native Windows: elevated group owner becomes the individual owner befor
 
 for (const inheritedBroadAccess of [true, false]) {
   test(`R152-02 native Windows: ${inheritedBroadAccess ? "broad inherited" : "private"} ACL control`, {
+    timeout: NATIVE_TEST_TIMEOUT_MS,
     skip: process.platform !== "win32" ? "requires native Windows DACLs" : false,
   }, (t) => {
     const root = fs.realpathSync.native(fs.mkdtempSync(join(tmpdir(), "receipt-acl-")));
@@ -144,6 +169,7 @@ for (const inheritedBroadAccess of [true, false]) {
 
 for (const folder of ["ascii-profile", "caf\u00e9-\u4e2d-\ud83d\udcc1"]) {
   test(`R152-03 native Windows: OEM 437 stdin with ${folder === "ascii-profile" ? "ASCII" : "Unicode"} path`, {
+    timeout: NATIVE_TEST_TIMEOUT_MS,
     skip: process.platform !== "win32" ? "requires native Windows PowerShell" : false,
   }, (t) => {
     const root = fs.realpathSync.native(fs.mkdtempSync(join(tmpdir(), "receipt-codepage-")));

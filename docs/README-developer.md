@@ -240,8 +240,13 @@ grants, and reads the owner SID and exact grants back before writing receipt
 contents. An elevated token may replace the default Administrators group owner
 with its individual user SID during protection. Other starting owners are
 refused; verification always requires the individual owner and its sole grant.
-It verifies the ACLs again at readback. Missing PowerShell, denied ACL
-changes or unverified ACLs stop the update before deployment. Paths cross the
+It verifies the ACLs again at readback. Each of the four native ACL calls has a
+120-second bound, including PowerShell startup (eight minutes maximum in total).
+A timeout reports the Windows permission-check failure explicitly and stops
+before deployment or migration. The separate protection and readback calls keep
+both paths private before writing and verify both again after content readback.
+Missing PowerShell, denied ACL changes or unverified ACLs also stop the update
+before deployment. Paths cross the
 PowerShell stdin boundary as ASCII-escaped JSON so non-ASCII profile names
 survive the console input code page. Windows flushes
 the file; native power-loss durability remains a field gate.

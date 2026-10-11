@@ -183,6 +183,80 @@ test("R152-02: Windows native ACL boundary requires proof and uses an allowliste
   assert.equal(calls, 2, "both denied and verified ACL boundaries ran");
 });
 
+for (const startupMs of [0, 25_000, 90_000]) {
+  test(`CI Windows latency: ${startupMs}ms PowerShell startup completes every receipt gate`, async (t) => {
+    const f = fixture(t);
+    const gates = [];
+    let writes = 0;
+    const result = await runFaultUpgrade(f, { bookmarkOptions: {
+      platform: "win32",
+      io: { ...fs, writeFileSync(...args) { writes++; return fs.writeFileSync(...args); } },
+      windowsAcl(path, options) {
+        secureWindowsUpgradeBookmarkPath(path, { ...options, environment: { SystemRoot: "C:\\Windows" },
+          run(_command, _args, settings) {
+            const request = JSON.parse(settings.input);
+            gates.push(`${request.verifyOnly ? "verify" : "protect"}:${request.directory ? "directory" : "file"}`);
+            assert.ok(Number.isSafeInteger(settings.timeout) && settings.timeout > 0 && settings.timeout <= 120_000,
+              "each native call retains a finite bound");
+            // Model the CI child boundary without a wall-clock sleep. spawnSync
+            // returns null status plus ETIMEDOUT when startup exceeds its bound.
+            return startupMs >= settings.timeout
+              ? { status: null, signal: "SIGTERM", error: Object.assign(new Error("fixture timeout"), { code: "ETIMEDOUT" }) }
+              : { status: 0, stdout: Buffer.from("private"), stderr: Buffer.alloc(0) };
+          },
+        });
+      },
+    } });
+    assert.ok(gates.length > 0, "the native timeout decision was reached");
+    assert.equal(result.error, null);
+    assert.deepEqual(gates, ["protect:directory", "protect:file", "verify:file", "verify:directory"]);
+    assert.equal(writes, 1);
+    assert.ok(result.events.includes("health:active"));
+    assert.equal(result.history.at(-1).status, "verified");
+  });
+}
+
+for (const gate of ["protect:directory", "protect:file", "verify:file", "verify:directory"]) {
+  for (const throws of [false, true]) {
+    test(`CI Windows timeout: ${gate} ${throws ? "thrown" : "returned"} timeout stops with a clear refusal`, async (t) => {
+      const f = fixture(t);
+      let reached = 0, writes = 0;
+      const output = Buffer.from("fixture output must stay private");
+      const diagnostic = Buffer.from("fixture diagnostic must stay private");
+      const result = await runFaultUpgrade(f, { bookmarkOptions: {
+        platform: "win32",
+        io: { ...fs, writeFileSync(...args) { writes++; return fs.writeFileSync(...args); } },
+        windowsAcl(path, options) {
+          secureWindowsUpgradeBookmarkPath(path, { ...options, environment: { SystemRoot: "C:\\Windows" },
+            run(_command, _args, settings) {
+              const request = JSON.parse(settings.input);
+              if (`${request.verifyOnly ? "verify" : "protect"}:${request.directory ? "directory" : "file"}` !== gate) {
+                return { status: 0, stdout: Buffer.from("private"), stderr: Buffer.alloc(0) };
+              }
+              reached++;
+              const error = Object.assign(new Error("fixture private child error"), { code: "ETIMEDOUT" });
+              if (throws) throw error;
+              return { status: null, signal: "SIGTERM", error, stdout: output, stderr: diagnostic };
+            },
+          });
+        },
+      } });
+      assert.equal(reached, 1, "timeout was injected at the named native decision");
+      assert.equal(writes, gate.startsWith("protect:") ? 0 : 1);
+      assert.deepEqual(result.events, ["bookmark:captured"]);
+      assert.equal(result.history.length, 0);
+      assert.match(result.error?.message || "", /Windows.*permission check timed out after 120 seconds/);
+      assert.match(result.error.message, /No deployment or migration was started/);
+      assert.doesNotMatch(result.error.message, /fixture|SIGTERM|ETIMEDOUT/);
+      if (!throws) {
+        assert.ok(output.every((byte) => byte === 0), "stdout wiped after timeout");
+        assert.ok(diagnostic.every((byte) => byte === 0), "stderr wiped after timeout");
+      }
+      assert.equal((await runFaultUpgrade(f)).error, null, "verified receipt remains a green control");
+    });
+  }
+}
+
 test("CI Windows: an elevated creator can privatize an Administrators-owned receipt", async (t) => {
   for (const groupOwned of [false, true]) {
     const f = fixture(t);

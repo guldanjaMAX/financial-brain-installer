@@ -32,7 +32,7 @@
 
 import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { saveUpgradeBookmark } from "./operations/upgrade-bookmark.mjs";
+import { saveUpgradeBookmark, WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS } from "./operations/upgrade-bookmark.mjs";
 import { basename, delimiter, isAbsolute, join, dirname, relative, resolve, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
@@ -6802,7 +6802,10 @@ export async function cmdUpgrade(manifestPath, options = {}) {
       }, options.bookmarkOptions);
       assertStageFiles("D1 bookmark persistence");
       ok("D1 restore bookmark saved and verified in this computer's private upgrade-bookmarks folder");
-    } catch {
+    } catch (error) {
+      if (error?.code === "UPGRADE_BOOKMARK_ACL_TIMEOUT") {
+        die(`update stopped because its D1 restore bookmark could not be saved and verified on this computer: the Windows permission check timed out after ${WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS / 1000} seconds. No deployment or migration was started. Ask the installer to review this computer's PowerShell startup before retrying.`);
+      }
       die("update stopped because its D1 restore bookmark could not be saved and verified on this computer. No deployment or migration was started.");
     }
     const logRun = async (status, detail, { required = false } = {}) => {

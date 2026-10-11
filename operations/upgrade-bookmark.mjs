@@ -5,6 +5,10 @@ import { homedir } from "node:os";
 import { dirname, join, resolve, win32 } from "node:path";
 import { windowsFileChildEnvironment } from "./current-user-file.mjs";
 
+// Windows PowerShell startup alone takes 15-25 seconds on some owner PCs and
+// CI runners. Keep a finite bound with room for startup and ACL readback.
+export const WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS = 120_000;
+
 // Modes passed to Node do not establish a Windows DACL. Replace inherited and
 // explicit grants on our own receipt paths, then independently read the DACL.
 // Paths travel on stdin, never inside executable PowerShell source.
@@ -66,12 +70,17 @@ export function secureWindowsUpgradeBookmarkPath(path, {
         // page, including surrogate pairs in non-BMP profile names.
         input: JSON.stringify({ path, directory, verifyOnly }).replace(/[\u007f-\uffff]/g,
           (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`), encoding: null, env,
-        shell: false, stdio: ["pipe", "pipe", "pipe"], timeout: 15_000, windowsHide: true,
+        shell: false, stdio: ["pipe", "pipe", "pipe"], timeout: WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS, windowsHide: true,
       });
+    if (result?.error) throw result.error;
     if (result?.status !== 0 || result.error || result.signal || String(result.stdout) !== "private") {
       throw new Error("unverified ACL");
     }
-  } catch {
+  } catch (error) {
+    if (error?.code === "ETIMEDOUT") {
+      throw Object.assign(new Error(`recovery receipt Windows permission check timed out after ${WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS / 1000} seconds`),
+        { code: "UPGRADE_BOOKMARK_ACL_TIMEOUT" });
+    }
     throw new Error("recovery receipt Windows ACL could not be protected and verified");
   } finally {
     if (Buffer.isBuffer(result?.stdout)) result.stdout.fill(0);
