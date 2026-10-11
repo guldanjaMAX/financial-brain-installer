@@ -433,7 +433,7 @@
   },
   "operations": {
     "daily_refresh": {
-      "_comment": "One owned per-Brain, per-user daily task is derived from every configured source. Omit enabled for the conditional default: it turns on only after at least one connected machine-pull source exists. Worker cron, push, resident capture, snapshots, disabled sources, and existing faster schedulers are reported without duplication. The timezone defaults to client.timezone and must match this computer.",
+      "_comment": "One owned per-Brain, per-user daily task is derived from every configured source. Omit enabled for the conditional default: it turns on only after at least one connected machine-pull source exists. Worker cron, push, resident capture, snapshots, disabled sources, and existing faster schedulers are reported without duplication. Optional sources maps exact corpora keys to {state: selected} or {state: held, reason: safety review pending}; when present, every enabled daily-owned machine-pull source needs a decision. Holds leave corpora enabled and visible. Review daily status, then daily on to reconcile any change. Omit sources to keep automatic all-source planning. The timezone defaults to client.timezone and must match this computer.",
       "cron": "0 9 * * *",
       "max_runtime_minutes": 45
     },

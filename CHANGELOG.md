@@ -63,6 +63,12 @@ the brain, not for whoever built it: what changed for them, and what to check.
   before deployment or migration. On Mac,
   inherited access is removed from receipts and unsafe folder permissions stop
   the update before deployment.
+- **Daily imports can keep a source visibly on hold.** A reviewed manifest
+  selection lets approved sources run while another enabled source awaits
+  safety review. Daily status and run receipts show the held source and its
+  reason without claiming fresh data. Review the selection with `brain daily
+  status`, then reconcile it with `brain daily on`; changes require a new
+  verified schedule.
 
 ## 0.4.11 (2026-10-09)
 
