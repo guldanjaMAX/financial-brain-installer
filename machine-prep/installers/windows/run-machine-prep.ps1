@@ -148,7 +148,10 @@ if ($prepResult.ExitCode -eq 0) {
   Write-SafeLog "INSTALLER_PROGRESS=2/4 Prep needs attention; setup was not opened"
   Write-SafeLog "SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed"
   Write-OwnerLine ""
-  Write-OwnerLine "Financial Brain setup has not started yet: follow the steps above, then open Run Financial Brain Machine Prep again from the Start menu."
+  Write-OwnerLine "Financial Brain setup has not started yet. For help, send Financial Brain support the log shown below."
+  Write-OwnerLine "Support log: $LogFile"
+  $prepLog = Join-Path $LogDir "prep.log"
+  if (Test-Path -LiteralPath $prepLog -PathType Leaf) { Write-OwnerLine "Npm diagnostics: $prepLog" }
   if ($env:MACHINE_PREP_INSTALLER_TEST_MODE -eq "1") { Write-Output "TEST_SETUP_ATTEMPTS=0" }
   Wait-OwnerBeforeClose
   exit $prepResult.ExitCode

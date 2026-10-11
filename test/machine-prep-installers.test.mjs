@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -1916,7 +1917,7 @@ test("installer security contracts detect one mutation per reviewed boundary", (
   }
 });
 
-function runMacWrapper({ prepExit, openExit, handoffExit, prepBody = "", handoffBody = "" }) {
+function runMacWrapper({ prepExit, openExit, handoffExit, prepBody = "", handoffBody = "", script = join(MAC_INSTALLER, "run-machine-prep-mac.sh") }) {
   const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-wrapper-test-")));
   const counter = join(directory, "counter.log");
   const helper = (name, exitCode, body = "") => {
@@ -1925,7 +1926,7 @@ function runMacWrapper({ prepExit, openExit, handoffExit, prepBody = "", handoff
     chmodSync(path, 0o755);
     return path;
   };
-  const result = spawnSync("bash", [join(MAC_INSTALLER, "run-machine-prep-mac.sh")], {
+  const result = spawnSync("bash", [script], {
     cwd: ROOT,
     env: {
       PATH: "/usr/bin:/bin",
@@ -1942,15 +1943,93 @@ function runMacWrapper({ prepExit, openExit, handoffExit, prepBody = "", handoff
   const calls = existsSync(counter) ? readFileSync(counter, "utf8").trim().split("\n").filter(Boolean) : [];
   const logFile = join(directory, "log", "installer.log");
   const log = existsSync(logFile) ? readFileSync(logFile, "utf8") : null;
+  const prepLogFile = join(directory, "log", "prep.log");
+  const prepLogExists = existsSync(prepLogFile);
   rmSync(directory, { recursive: true, force: true });
-  return { ...result, calls, log };
+  return { ...result, calls, log, logFile, prepLogFile, prepLogExists };
 }
+
+function assertLauncherFailureLog(failed) {
+  assert.deepEqual(failed.calls, ["prep"], "prep decision was reached and setup stayed closed");
+  assert.equal(failed.status, 1);
+  assert.match(failed.log, /PREP_EXIT_CODE=1/);
+  assert.doesNotMatch(failed.stdout, /follow the steps above|open Run Financial Brain Machine Prep again/);
+  assert.match(failed.stdout, /Support log: .*installer\.log/);
+}
+
+test("launcher failure without owner steps points to an existing support log", bashBehaviorOptions(), () => {
+  const failed = runMacWrapper({ prepExit: 1, openExit: 0, handoffExit: 0 });
+  assertLauncherFailureLog(failed);
+  const control = runMacWrapper({ prepExit: 0, openExit: 0, handoffExit: 0 });
+  assert.equal(control.status, 0);
+  assert.deepEqual(control.calls, ["prep", "open", "handoff"]);
+});
+
+test("launcher also names the npm evidence when prep.log exists", bashBehaviorOptions(), () => {
+  const result = runMacWrapper({ prepExit: 1, openExit: 0, handoffExit: 0,
+    prepBody: 'printf "synthetic npm failure\\n" > "$HOME/log/prep.log"' });
+  assertLauncherFailureLog(result);
+  assert.equal(result.prepLogExists, true, "the failing child wrote its diagnostics");
+  assert.ok(result.stdout.includes(`Npm diagnostics: ${result.prepLogFile}`));
+});
+
+test("launcher failure message and log path mutations are detected on both platforms", bashBehaviorOptions(), (context) => {
+  const source = read("machine-prep/installers/macos/run-machine-prep-mac.sh");
+  context.diagnostic(`copied_source_sha256=${createHash("sha256").update(source).digest("hex")}`);
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, ".machine-prep-message-mutants-")));
+  try {
+    const control = runMacWrapper({ prepExit: 1, openExit: 0, handoffExit: 0 });
+    assertLauncherFailureLog(control);
+    for (const [from, to] of [
+      ['Financial Brain setup has not started yet. For help, send Financial Brain support the log shown below.', 'Financial Brain setup has not started yet: follow the steps above.'],
+      ['say "Support log: $LOG_FILE"', 'say "Support log unavailable"'],
+    ]) {
+      assert.ok(source.includes(from), 'Mac message mutation decision reached');
+      const script = join(directory, "wrapper.sh");
+      writeFileSync(script, source.replace(from, to));
+      const result = runMacWrapper({ prepExit: 1, openExit: 0, handoffExit: 0, script });
+      assert.deepEqual(result.calls, ["prep"]);
+      assert.throws(() => assertLauncherFailureLog(result));
+    }
+    for (const [from, to] of [
+      ['if [ -f "$LOG_DIR/prep.log" ]; then', 'if false; then'],
+      ['say "Npm diagnostics: $LOG_DIR/prep.log"', 'say "Npm diagnostics unavailable"'],
+    ]) {
+      assert.ok(source.includes(from), 'Mac prep log message decision reached');
+      const script = join(directory, "wrapper.sh");
+      writeFileSync(script, source.replace(from, to));
+      const result = runMacWrapper({ prepExit: 1, openExit: 0, handoffExit: 0, script,
+        prepBody: 'printf "synthetic npm failure\\n" > "$HOME/log/prep.log"' });
+      assert.equal(result.prepLogExists, true);
+      assert.deepEqual(result.calls, ["prep"]);
+      assert.throws(() => assert.ok(result.stdout.includes(`Npm diagnostics: ${result.prepLogFile}`)));
+    }
+    const windows = read("machine-prep/installers/windows/run-machine-prep.ps1");
+    const contract = (text) => {
+      assert.doesNotMatch(text, /follow the steps above/);
+      assert.match(text, /Write-OwnerLine "Support log: \$LogFile"/);
+      assert.match(text, /For help, send Financial Brain support the log shown below/);
+      assert.match(text, /if \(Test-Path -LiteralPath \$prepLog -PathType Leaf\) \{ Write-OwnerLine "Npm diagnostics: \$prepLog" \}/);
+    };
+    contract(windows);
+    for (const [from, to] of [
+      ['For help, send Financial Brain support the log shown below', 'follow the steps above'],
+      ['Write-OwnerLine "Support log: $LogFile"', 'Write-OwnerLine "Support log unavailable"'],
+      ['Test-Path -LiteralPath $prepLog -PathType Leaf', '$false'],
+      ['Write-OwnerLine "Npm diagnostics: $prepLog"', 'Write-OwnerLine "Npm diagnostics unavailable"'],
+    ]) {
+      assert.ok(windows.includes(from), 'Windows message mutation decision reached');
+      assert.throws(() => contract(windows.replace(from, to)));
+    }
+    context.diagnostic('launcher_message_mutations_killed=8 (4 executed, 4 static Windows)');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
 
 // What the owner reads in the launcher window. Status markers live only in
 // installer.log; these lines never enter it.
 const MAC_SCREEN = {
   start: "Financial Brain Machine Prep: checking this Mac for the tools setup needs.",
-  failed: "Financial Brain setup has not started yet: follow the steps above, then open Run Financial Brain Machine Prep again.",
+  failed: "Financial Brain setup has not started yet. For help, send Financial Brain support the log shown below.",
   ready: "This Mac is ready. Opening Financial Brain setup in a new Terminal window.",
   windowFailed: "The Financial Brain setup window did not open. Ask Financial Brain support for help.",
   handoff: "Opening Claude to guide your next steps.",
@@ -1991,7 +2070,7 @@ test("Mac launcher shows only plain lines on screen and keeps every status marke
     prepBody: "printf 'Machine Prep for macOS\\nMODE real\\nPREREQUISITE_DECISION_REACHED=1\\nCodex CLI (optional): not found. Setup can continue without it.\\n'\nprintf 'Financial Brain setup cannot start yet. Nothing was downloaded or installed.\\n- Node.js: not found.\\n' >&2",
   });
   assert.equal(prepFailure.status, 2, prepFailure.stderr);
-  assert.equal(prepFailure.stdout, lines(MAC_SCREEN.start, "Codex CLI (optional): not found. Setup can continue without it.", "", MAC_SCREEN.failed));
+  assert.equal(prepFailure.stdout, lines(MAC_SCREEN.start, "Codex CLI (optional): not found. Setup can continue without it.", "", MAC_SCREEN.failed, `Support log: ${prepFailure.logFile}`));
   assert.equal(prepFailure.stderr, lines("Financial Brain setup cannot start yet. Nothing was downloaded or installed.", "- Node.js: not found."));
   assert.equal(prepFailure.log, lines(...MAC_FAILURE_MARKERS));
 
@@ -2072,11 +2151,15 @@ test("Windows launcher mirrors the Mac screen: markers only in installer.log, pr
   const macLines = [...mac.matchAll(/^\s*say '([^']*)'/gm)].map((match) => match[1]);
   const windowsLines = [...wrapper.matchAll(/^\s*Write-OwnerLine "([^"]*)"/gm)].map((match) => match[1]);
   assert.deepEqual(macLines, [MAC_SCREEN.start, "", MAC_SCREEN.failed, MAC_SCREEN.ready, MAC_SCREEN.windowFailed, MAC_SCREEN.handoff, MAC_SCREEN.handoffFailed, MAC_SCREEN.done]);
-  assert.deepEqual([...windowsLines].sort(), [...macLines.map(toWindowsScreen), "This PC needs Windows 10 or newer. Nothing was downloaded or installed."].sort());
+  assert.deepEqual([...windowsLines].sort(), [...macLines.map(toWindowsScreen), "Support log: $LogFile", "This PC needs Windows 10 or newer. Nothing was downloaded or installed."].sort());
+  assert.match(mac, /say "Support log: \$LOG_FILE"/);
   assert.match(wrapper, new RegExp([
     'Write-SafeLog "SETUP_LAUNCH_DECISION_REACHED=1 skipped=prep_failed"',
     'Write-OwnerLine ""',
     `Write-OwnerLine "${escape(WINDOWS_SCREEN.failed)}"`,
+    'Write-OwnerLine "Support log: \\$LogFile"',
+    '\\$prepLog = Join-Path \\$LogDir "prep\\.log"',
+    'if \\(Test-Path -LiteralPath \\$prepLog -PathType Leaf\\) \\{ Write-OwnerLine "Npm diagnostics: \\$prepLog" \\}',
     "Wait-OwnerBeforeClose",
     "exit \\$prepResult\\.ExitCode",
   ].join("\\s*(?:if [^\\n]*\\n\\s*)?")));
