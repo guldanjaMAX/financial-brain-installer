@@ -19,6 +19,7 @@
  * difference is one in-flight vector_outbox row: if the probe result were
  * ignored, both would wait the same amount of time.
  */
+import { createUpgradeBookmarkWriter } from "./fixtures/upgrade-bookmark-writer.mjs";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -186,7 +187,9 @@ async function runUpdate({
     return { results: [], success: true, meta: { changes: Number(result.changes || 0) } };
   };
 
+  const bookmarkWriter = createUpgradeBookmarkWriter();
   const options = {
+    saveUpgradeBookmark: bookmarkWriter.saveUpgradeBookmark,
     resolveAccount: async () => ({ id: ACCOUNT_ID, name: "Riverbend Studio" }),
     d1Query,
     cf: async (path) => {
@@ -242,6 +245,7 @@ async function runUpdate({
   console.log = () => {};
   try {
     await cmdUpgrade(manifestPath, options);
+    bookmarkWriter.assertCalled();
   } catch (thrown) {
     error = thrown;
   } finally {

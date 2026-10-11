@@ -77,6 +77,7 @@ import {
   technicianSkillPaths,
 } from "../operations/claude-skill.mjs";
 import { createProductFixture } from "../worker/test/product-contract-fixture.mjs";
+import { createUpgradeBookmarkWriter } from "./fixtures/upgrade-bookmark-writer.mjs";
 
 // Every fixture below that says "the running package version" means exactly
 // that, so it is read from package.json rather than hardcoded. A literal here
@@ -98,11 +99,13 @@ const expectedBrainCliPrefix = process.platform === "win32"
   ? `& ${powershellLiteral(process.execPath)} ${powershellLiteral(fileURLToPath(new URL("../brain.mjs", import.meta.url)))}`
   : "brain";
 
-// Production waits the full cutover grace. Unit tests inject a zero-time
-// waiter while still asserting the exact duration requested by cmdUpgrade.
+// Native receipt protection and the full cutover grace have dedicated tests.
+// Simulated upgrades must not pay for PowerShell startup on Windows runners.
+const bookmarkWriter = createUpgradeBookmarkWriter();
 const cmdUpgrade = (manifestPath, options = {}) => cmdUpgradeWithRealQuiescence(
   manifestPath,
   {
+    saveUpgradeBookmark: bookmarkWriter.saveUpgradeBookmark,
     waitForVectorDrainQuiescence: async () => {},
     cmdBootstrap: async () => bootstrapCompletion(),
     cmdDrain: async () => {},
@@ -1352,6 +1355,7 @@ const drainResponse = (body, status) => new Response(JSON.stringify(body), {
         return commitManifestVersion(path, version);
       },
     });
+    check("the healthy upgrade reaches the injected receipt writer exactly once", bookmarkWriter.receipts.length === 1);
     check(
       "upgrade proves active propagation before secret reconciliation and vector convergence",
       events.join(",") === "state,bookmark,deploy-paused,health-paused,quiescence,migrate,bootstrap,deploy-active,health-active-cutover,reconcile,drain,health-active-final,test,version,readback,manifest,log",
@@ -1686,11 +1690,12 @@ const drainResponse = (body, status) => new Response(JSON.stringify(body), {
   };
 
   const prePauseFailure = await runFailure("paused-deploy");
-  check("a failure before paused deployment succeeds does not claim refused recovery commands",
+  check("an unacknowledged pause upload warns of an uncertain pause and requires health verification",
     prePauseFailure.events.join(",") === "deploy-paused" &&
-      !/CANNOT ACCEPT DOCUMENTS/i.test(prePauseFailure.error?.message || "") &&
-      !/reindex and drain are\s+refused|remain unavailable/i.test(prePauseFailure.error?.message || "") &&
-      /does not claim that reindex or drain are blocked/i.test(prePauseFailure.error?.message || ""),
+      /MAY NOT ACCEPT DOCUMENTS/i.test(prePauseFailure.error?.message || "") &&
+      /may be paused/i.test(prePauseFailure.error?.message || "") &&
+      !/working normally/i.test(prePauseFailure.error?.message || "") &&
+      /health verifies active mode/i.test(prePauseFailure.error?.message || ""),
     prePauseFailure.error?.message);
 
   for (const failureStage of pausedAggregateFailures.keys()) {

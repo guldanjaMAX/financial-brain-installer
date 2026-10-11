@@ -650,9 +650,12 @@ fail  upgrade failed: <reason>
 
 **Why:** anything can fail mid-update. What matters is what the system did about it. A snapshot was taken **before** anything was touched, the failure was recorded, and **the recorded version was not advanced**, so your install correctly still reports the version it is actually running rather than the one it tried to become.
 
-If the issue code is `MIGRATION_STILL_APPLYING`, an uncertain database change
-may still be finishing. Wait about 10 minutes, then run `brain update` once
-more. ADD COLUMN statements use a five-minute first request window followed by
+If the issue code is `MIGRATION_STILL_APPLYING`, the database change is
+unconfirmed. An absent column proves neither delivery nor ongoing work: the
+process may have stopped after saving intent but before sending the change.
+Ask the installer to review the saved migration intent and exact column
+definition before retrying. Do not remove intent or resend an ALTER without
+proof of non-delivery. ADD COLUMN statements use a five-minute first request window followed by
 column checks every 30 seconds for up to 15 minutes. The runner verifies the
 column's type, nullability, default, and declared CHECK constraint before
 continuing; it never blindly resends an ambiguous ALTER.

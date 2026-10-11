@@ -1,3 +1,4 @@
+import { createUpgradeBookmarkWriter } from "./fixtures/upgrade-bookmark-writer.mjs";
 import assert from "node:assert/strict";
 import { createHash as boundaryHash } from "node:crypto";
 import { createWindowsUpdateBridgeGuard as boundaryGuard } from "../operations/windows-update-bridge.mjs";
@@ -95,7 +96,9 @@ function productionHarness(manifestPath, {
       state = { exists: true, owned: true, enabled: true, definition };
     },
   };
+  const bookmarkWriter = createUpgradeBookmarkWriter();
   const upgradeOptions = {
+    saveUpgradeBookmark: bookmarkWriter.saveUpgradeBookmark,
     resolveAccount: async () => ({ id: "1".repeat(32) }),
     d1Query: async (_account, _database, sql, params = []) => {
       if (sql === "ALTER TABLE fixture_records ADD COLUMN migrated INTEGER") {
@@ -176,6 +179,7 @@ function productionHarness(manifestPath, {
   };
   return {
     adapter,
+    bookmarkWriter,
     events,
     finish,
     machineLockRoot,
@@ -306,6 +310,7 @@ test("production update proves active propagation before convergence and schedul
   await withFixture(async ({ manifestPath }) => {
     const harness = productionHarness(manifestPath);
     await cmdUpdate(manifestPath, harness.options);
+    harness.bookmarkWriter.assertCalled();
     const index = (event) => harness.events.indexOf(event);
     assert.ok(index("schedule:false") < index("deploy:paused"), "native pause precedes the deployment stages");
     assert.ok(index("deploy:active") < index("health:active-cutover"));

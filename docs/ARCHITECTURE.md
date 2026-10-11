@@ -136,8 +136,9 @@ briefly during propagation.
 Provisioning adopts only resources whose identity and stored install state prove
 they belong to this client. Migrations are checksum-protected, append-only, and
 restart-safe after every independently committed statement. A D1 upgrade
-captures a required bookmark, deploys and verifies the paused compatibility
-Worker, accepts one exact authenticated aggregate as the pre-migration gate,
+captures a required bookmark, saves and exactly reads back an owner-only local
+receipt under `~/.brain/upgrade-bookmarks/`, then deploys and verifies the paused
+compatibility Worker, accepts one exact authenticated aggregate as the pre-migration gate,
 waits the same old-invocation window, migrates, deploys active mode,
 reconciles allowed provider secrets, waits for the new version, and records
 success. Schema 13 changes that ordering only for an existing legacy
