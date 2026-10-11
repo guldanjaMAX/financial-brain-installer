@@ -712,11 +712,19 @@ and provider receipts instead of resetting completed pages.
 
 Think first offers unrestricted owner money questions to a read-only ledger
 path. `ledger-question.js` recognizes current balances, exact-cent deposits and
-account inflow/outflow periods; `ledger-answer.js` formats the stored amounts
-without an answer model. `ledger-reader.js` groups manual/live twins by exact
+account inflow/outflow periods, largest expenses/deposits, merchant/category
+totals, recent deposits, recurring charges and own-account transfers;
+`ledger-answer.js` formats the stored amounts without an answer model.
+`ledger-reader.js` groups manual/live twins by exact
 entity, numeric mask and account kind, excludes manual transactions inside
 the live coverage window, and retains the supplying account on each row. This
-does not rewrite account coverage or stored transactions. Ambiguous groups,
+does not rewrite account coverage or stored transactions. `ledger-analysis.js`
+computes mutually unique transfer pairs using equal cents, opposite directions,
+two owned accounts, transfer hints on both legs and a three-day date tolerance.
+All income/spend totals exclude matched legs. Unmatched hints remain counted
+and visible. Recurrence uses at least three charges, bounded weekly/monthly
+intervals and integer amount tolerance; results are explicitly detected rather
+than confirmed. Category proposals and Unsorted remain visible. Ambiguous groups,
 incomplete coverage and unreadable rows cannot establish a total or absence.
 Ledger citations expose masked accounts, amounts, dates and feed sync time.
 The boundary follows the financial-map owner guard: exact-document access,

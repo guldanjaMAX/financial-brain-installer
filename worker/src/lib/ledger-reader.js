@@ -101,19 +101,28 @@ export async function readEffectiveTransactions(env, accounts, { from, to, amoun
     exclude_to: member.feed_mode === "manual" && account.live && validWindow(account.live) ? account.live.covered_to : null,
     last_synced_at: member.feed_mode === "live" ? member.last_synced_at : null,
   })));
-  const result = await snapshotRows(env, accounts, `SELECT t.id,t.account_slug AS source_account_slug,
+  const select = `SELECT t.id,t.account_slug AS source_account_slug,
       json_extract(m.value,'$.effective') AS effective_account_slug,
       json_extract(m.value,'$.last_synced_at') AS last_synced_at,
-      t.posted_on,t.amount_minor,t.direction,t.currency,t.description,t.payee,t.basis_state
-    FROM json_each(?1) m JOIN fin_transactions t ON t.account_slug=json_extract(m.value,'$.slug')
+      t.posted_on,t.amount_minor,t.direction,t.currency,t.description,t.payee,t.category,t.category_basis_state,t.basis_state
+    FROM json_each(?1) m CROSS JOIN fin_transactions t INDEXED BY idx_fin_transactions_account ON t.account_slug=json_extract(m.value,'$.slug')
     WHERE t.tenant_id=?2 AND t.superseded_by_id IS NULL AND t.removed_at IS NULL AND t.pending=0
-      AND (t.posted_on BETWEEN ?3 AND ?4 OR t.posted_on IS NULL)
       AND (json_extract(m.value,'$.exclude_from') IS NULL OR t.posted_on IS NULL OR
         NOT (t.posted_on BETWEEN json_extract(m.value,'$.exclude_from') AND json_extract(m.value,'$.exclude_to')))
       AND (?5 IS NULL OR (t.amount_minor = ?5 AND t.direction='inflow') OR t.basis_state<>'confirmed' OR t.posted_on IS NULL)
-    ORDER BY t.posted_on,t.id LIMIT ?6`, [JSON.stringify(mapping), tenantId, from, to, amountMinor, MAX_ROWS + 1], { tenantId, mask, accountKind });
+    `;
+  // Separate the undated refusal arm so both arms use the account/date index.
+  // CROSS JOIN fixes the small mapping as the outer loop; SQLite otherwise
+  // chooses a tenant-wide scan for json_each despite the account/date index.
+  const result = await snapshotRows(env, accounts, `SELECT * FROM (
+    ${select} AND t.posted_on BETWEEN ?3 AND ?4
+    UNION ALL ${select} AND t.posted_on IS NULL
+    ) LIMIT ?6`,
+  [JSON.stringify(mapping), tenantId, from, to, amountMinor, MAX_ROWS + 1], { tenantId, mask, accountKind });
   if (result.length > MAX_ROWS) throw new Error("ledger row limit");
-  return result;
+  // Sorting in SQL before LIMIT scans the entire covered range. Sort only
+  // after the bound is proven, so a large ledger stops at the overflow row.
+  return result.sort((a, b) => String(a.posted_on || "").localeCompare(String(b.posted_on || "")) || a.id - b.id);
 }
 
 export async function readEffectiveBalances(env, accounts, {
