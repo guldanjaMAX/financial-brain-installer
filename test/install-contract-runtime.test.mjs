@@ -784,7 +784,8 @@ test("the public install caller prints a sanitized diagnosis after preserving th
     ], {
       cwd: dirname(caller),
       encoding: "utf8",
-      timeout: 30_000,
+      // Windows PowerShell and unzip starts are slow on shared runners.
+      timeout: 120_000,
       maxBuffer: 5_000_000,
       shell: false,
       env: {
