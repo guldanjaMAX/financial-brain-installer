@@ -1,3 +1,4 @@
+import { createUpgradeBookmarkWriter } from "./fixtures/upgrade-bookmark-writer.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -212,8 +213,10 @@ async function runUpdate({ baseCount, vectors = 5 }) {
     { waitUntil() {}, passThroughOnException() {} },
   );
   const backlogReads = [];
+  const bookmarkWriter = createUpgradeBookmarkWriter();
   try {
     await cmdUpgrade(manifestPath, {
+      saveUpgradeBookmark: bookmarkWriter.saveUpgradeBookmark,
       // The pre-pause queue gate reads the real Worker's authenticated
       // documents aggregate through the same router as health.
       updateBacklogOptions: {
@@ -271,6 +274,7 @@ async function runUpdate({ baseCount, vectors = 5 }) {
       cmdDrain: async () => { events.push("drain"); },
       cmdTest: async () => { events.push("acceptance"); },
     });
+    bookmarkWriter.assertCalled();
     return { ...brain, sandbox, manifestPath, events, waits, backlogReads, migrationsApplied, bootstrapResult, error: null };
   } catch (error) {
     return { ...brain, sandbox, manifestPath, events, waits, backlogReads, migrationsApplied, bootstrapResult, error };

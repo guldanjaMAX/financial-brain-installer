@@ -20,6 +20,7 @@
  * at the head schema. Only the HTTP transport, the Cloudflare control plane,
  * the Worker upload and the provider-side bootstrap are stand-ins.
  */
+import { createUpgradeBookmarkWriter } from "./fixtures/upgrade-bookmark-writer.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs, {
@@ -287,7 +288,9 @@ function installation(installed, { activeFolder = false } = {}) {
       live.vectors = chunks;
       return { epoch: 1, total: chunks, confirmed: chunks, remaining: 0, rounds: 1, complete: true, vector_ready: true };
     };
+    const bookmarkWriter = createUpgradeBookmarkWriter();
     const upgradeOptions = {
+      saveUpgradeBookmark: bookmarkWriter.saveUpgradeBookmark,
       resolveAccount: async () => ({ id: ACCOUNT_ID, name: "Harbor Fixture" }),
       d1Query,
       cf,
@@ -315,7 +318,7 @@ function installation(installed, { activeFolder = false } = {}) {
         sleep: async () => { throw new Error("a readable receipt must not be retried"); },
       },
     };
-    return { release, cmdDeploy, cmdHealth, upgradeOptions };
+    return { release, cmdDeploy, cmdHealth, upgradeOptions, bookmarkWriter };
   }
 
   return {
@@ -362,7 +365,7 @@ async function update(brain, release, { force = false, duringAcceptance = null }
       },
     }
     : kit.upgradeOptions;
-  return quietly(() => release.cli.cmdUpdate(brain.manifestPath, {
+  const run = await quietly(() => release.cli.cmdUpdate(brain.manifestPath, {
     discoverInstalledManifest: () => ({ path: brain.manifestPath, source: "remembered" }),
     readUpdateBacklog: release.cli.readUpdateBacklog,
     updateBacklogOptions: upgradeOptions.updateBacklogOptions,
@@ -375,6 +378,8 @@ async function update(brain, release, { force = false, duringAcceptance = null }
     writeClaudeWorkspaceGuideAfterUpdate: null,
     claudeSkillOptions: { home: brain.sandbox },
   }));
+  if (!run.error) kit.bookmarkWriter.assertCalled();
+  return run;
 }
 
 async function rollback(brain, release) {
