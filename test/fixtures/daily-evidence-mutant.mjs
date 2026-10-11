@@ -3,6 +3,7 @@ import { registerHooks, syncBuiltinESMExports } from "node:module";
 import fs from "node:fs";
 
 const mutations = {
+  receipt_check_merge: ["source-inventory-merge.js", ', "last_check_at"]', ']'],
   inventory_fixture_key: ["daily-evidence.test.mjs", 'SESSION_SIGNING_KEY: randomBytes(32).toString("hex"), ', ''],
   unknown_check: ["daily-refresh-run.mjs", 'const checkVerified = !freshnessUnknown && ', 'const checkVerified = '],
   paged_provider_retry: ["store-d1.js", 'includeProviderCheck = false;', 'throw error;'],
