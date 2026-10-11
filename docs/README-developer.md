@@ -1511,25 +1511,34 @@ configured handover; it does not claim that Outlook has already imported.
 No new prompt, storage migration, alias rewrite, or per-message matching is
 introduced. This remains scripted-provider proof pending the tenant field gate.
 
-### Legacy curated collections during migration
+### Curated collections during and after migration
 
 `operations/curated-dual-sync.mjs` is the internal rollback-compatible path for
-a small Markdown collection that already has a live legacy ingest target. It is
-not part of a fresh install. A private mode-0600 sidecar plan names the exact
+a small Markdown collection with an optional legacy ingest target. It is
+not part of a fresh install. Omit `legacy_target` entirely after retiring that
+service; a null or partial target remains an error. Cloudflare is always required. A private mode-0600 sidecar plan names the exact
 expected files, their authoritative, superseded or plain role, their existing
-legacy identities, both target manifests, each target's fixed backend contract,
+legacy identities, the configured target manifests, each target's fixed backend contract,
 the private coverage-ledger destination, and an optional unattended scheduler
 slug, cron, and timezone. The plan and ledger are ignored by Git and never
-belong in the package. `legacy_target.backend` must be
+belong in the package. When present, `legacy_target.backend` must be
 `legacy_notes_supabase`; `cloudflare_target.backend` must be `cloudflare_d1`.
 
-The operation has three explicit modes. `--dry-run` reads no credential and
+The operation has four explicit modes. `--preview` prints only JSON counts:
+`documents`, `roles`, `adds`, `updates`, `unchanged`, and `removed`. It reads no credentials,
+contacts no service, and leaves the coverage ledger unchanged. Counts compare
+local envelope hashes against the existing ledger, not remote records. With no
+ledger, every document is an add; an older ledger without envelope hashes treats
+existing identities as updates. A previous dry-run or failed sync can have
+written that ledger, so these counts do not prove target coverage.
+`--dry-run` reads no credential and
 makes no request. `--audit` reads the Cloudflare Drive-family inventory but
 writes no document. `--sync` builds every transformed envelope once and sends
-the same title, content and metadata independently to the existing endpoint and
+the same title, content and metadata independently to any configured legacy endpoint and
 to the Cloudflare identity `curated:brain:<legacy source type>:<legacy source
-id>`. The legacy write stays in place until retrieval evaluation approves a
-cutover.
+id>`. The legacy write stays in place while its target is declared. Cloudflare-only
+receipts and coverage contain only the Cloudflare target; historical raw Drive
+evidence keeps the same meaning and never permits deletion.
 
 Enumeration is the first gate. A missing root, an unreadable directory, zero
 Markdown files, a count change, an unexpected file, a missing planned file or a
@@ -1551,7 +1560,16 @@ authenticated fetch uses manual redirect handling. A redirect is a target
 failure, never an invitation to forward a key. Cloudflare POST receipts must
 echo the exact deterministic document identity, then the operation reads the
 curated source-family inventory back from the same origin and confirms every
-identity. The legacy endpoint has no equivalent exact identity readback, so its
+identity. Each confirmed Cloudflare write also requires authenticated
+`POST /api/admin/brain/curated-verify` readback. That read-only, full-admin route
+compares the current D1 content marker, title and normalized metadata with the
+submitted envelope, then binds its reply to the envelope hash. It uses a primary
+D1 session when sessions are available. Missing routes, mismatched revisions,
+redirects and unavailable verification fail closed; an older Worker must be
+updated through the separately approved upgrade workflow before this runtime
+can report a successful sync. This proof is current durable storage at readback,
+not semantic-index completion or a promise against later external writes.
+The legacy endpoint has no equivalent exact identity readback, so its
 bounded document receipt remains the strongest available proof. After a valid
 preflight, failure of one target cannot suppress the other. The command exits
 unsuccessfully unless every target receipt is complete, so rerunning is the
@@ -1563,7 +1581,15 @@ bounded target receipt states and aggregate raw Drive history findings. The
 corpus fingerprint includes the envelope hash, so a title-only or metadata-only
 change cannot hide behind unchanged content. The ledger contains no filenames,
 paths, source IDs, URLs, document content or credentials. Before replacement,
-an existing ledger must parse as a supported schema. The ledger path must not
+an existing ledger must parse as a supported schema. Preview compares identities
+in both directions. A nonzero `removed` count means a prior identity is absent
+from the local inventory and may still be searchable remotely. Sync, audit and
+dry-run refuse before credentials, target writes or ledger writes, preserving the previous ledger
+until separate reviewed reconciliation. No document is deleted automatically;
+do not remove the ledger to bypass this refusal. All ledger-writing modes share
+a local lease over the canonical ledger path, including direct and scheduled
+runs. A busy lease refuses a second writer; authenticated revision readback
+remains necessary for other machines or producers. The ledger path must not
 alias the plan, a corpus source, either target manifest, an adjacent admin-key
 sidecar, or the raw Drive state file, including through a real-path or hard-link
 collision.
@@ -1589,7 +1615,7 @@ stops the run before either target is contacted.
 
 `operations/curated-sync-scheduler.mjs` supplies the unattended execution rails
 for a reviewed plan. Its LaunchAgent definition contains only the plan locator
-and a configuration hash. That hash binds the normalized plan plus both complete
+and a configuration hash. That hash binds the normalized plan plus the configured
 target-manifest fingerprints, including domains and Keychain locators; changing
 any of them stops before Keychain access until the service is reviewed and
 reinstalled. The public `run` command requires that exact 64-character hash and
@@ -1601,7 +1627,7 @@ Before Keychain or network access, the child proves fd 3 is the same stable lock
 inode, its parent is the native `lockf`, and an independent descriptor observes
 active contention. Merely opening the lock or copying the hash cannot bypass
 that gate. A complete
-dual-target confirmation atomically advances an owner-only aggregate freshness
+confirmation of every configured target atomically advances an owner-only aggregate freshness
 receipt. A normal child
 failure records one bounded local support-journal event and returns a dedicated
 handled exit code; every other nonzero result is parent-owned, so a missing
@@ -1614,12 +1640,35 @@ errors, or credentials. Freshness rejects malformed aggregates and timestamps
 more than five minutes ahead of the local clock, and any configuration change is
 always stale.
 
-The scheduler wrapper and plist renderer do not silently install or replace a
-LaunchAgent. Production rollout still requires independent review, one
-supervised successful sync, a staged rollback-safe service replacement, and a
-fresh status read. The existing medical job must remain untouched until those
-checks pass; copying the Drive job's plist or command would use the wrong lock
-identity and could report false freshness.
+The scheduler wrapper and plist renderer do not silently replace a LaunchAgent.
+After reviewing the plan change, use these explicit local commands from the
+reviewed checkout, substituting the actual private plan path:
+
+```bash
+node operations/curated-dual-sync.mjs --plan "$CURATED_PLAN" --preview
+node operations/curated-sync-scheduler.mjs reinstall "$CURATED_PLAN"
+node operations/curated-sync-scheduler.mjs status "$CURATED_PLAN"
+```
+
+For a legacy retirement, preserve a private backup, remove only the complete
+`legacy_target` property, and retain Cloudflare, document identities, role counts,
+raw Drive settings and scheduler settings. Keep the plan owner-only. Dropping a
+target changes the configuration hash, so the old job continues refusing before
+credentials until reinstallation. Reinstall stages the plist, refuses an active
+or unrelated job, verifies the saved bytes and loaded arguments, and restores
+the prior plist/service if replacement fails. Recovery starts before unload so
+an ambiguous timeout cannot silently leave the prior service absent. Restoration
+requires loaded-argument readback; unprovable recovery reports that rollback
+needs review. CLI failures print bounded messages without raw filesystem or
+process errors. It reads no admin credential
+itself, but bootstrap uses `RunAtLoad`, so the new job may immediately read its
+configured credentials and sync. A changed runtime/plan locator is deliberately
+refused when replacing an existing service; review that migration separately.
+
+Production rollout still requires independent review, the full host gate, and
+an owner-approved service replacement. Inspect status after a completed run;
+old freshness remains stale until every remaining target is confirmed. These
+local fixture tests do not prove a live service or production retrieval.
 
 ---
 
