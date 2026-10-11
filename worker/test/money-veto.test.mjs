@@ -56,11 +56,43 @@ test("money: a dated primary record passes unchanged", async (t) => {
   assert.equal(body.evidence_gate.complete, true);
 });
 
+for (const kind of ["gmail", "imessage", "upload", "calendar", "gdrive"]) {
+  test(`money: dated unknown-lineage ${kind} supports its cited figure`, async (t) => {
+    const body = await run(t, { lineage: null, kind });
+    assert.equal(body.results[0].lineage.status, "unknown", "stored legacy lineage remains unknown");
+    assert.equal(body.results[0].lineage.kind, "unclassified");
+    assert.equal(body.answer, ANSWER);
+    assert.equal(body.evidence_gate.supported, true);
+    assert.equal(body.evidence_gate.complete, true);
+    assert.equal(body.citations[0].lineage.status, "unknown", "acceptance grants no corroboration credit");
+  });
+}
+
+for (const [label, mutation, reason] of [
+  ["unreliable date", { reliable: false }, /reliable date/i],
+  ["outside window", { date: "2026-07-01" }, /window/i],
+  ["agent-derived email", { lineage: "agent_derived" }, /primary|agent/i],
+  ["agent instruction file", { title: "AGENTS.md" }, /primary|agent/i],
+  ["AI brief", { title: "AI financial brief" }, /primary|agent/i],
+  ["assistant notes", { title: "Assistant notes" }, /primary|agent/i],
+  ["wrong figure", { answer: ANSWER.replace("120.00", "121.00") }, /span/i],
+  ["absence claim", { answer: "Nothing is due [1].", content: "Nothing is due for card ending 4242." }, /ledger|whole window/i],
+]) {
+  test(`money: legacy support still refuses ${label}`, async (t) => {
+    const body = await run(t, { lineage: null, kind: "gmail", ...mutation });
+    assert.equal(body.results[0].lineage.status, "unknown", "the legacy evidence was actually retrieved");
+    assert.equal(body.answer, null);
+    assert.equal(body.evidence_gate.supported, false);
+    assert.equal(body.evidence_gate.complete, false);
+    assert.match(body.evidence_gate.reason, reason);
+    assert.ok(body.gaps.length, "retrieval gaps survive the veto");
+  });
+}
+
 for (const [label, mutation, reason] of [
   ["unreliable date", { reliable: false }, /reliable date/i],
   ["before the window", { date: "2026-07-01" }, /window/i],
   ["agent lineage", { lineage: "agent_derived" }, /primary|agent|lineage/i],
-  ["unknown lineage", { lineage: null, kind: "upload" }, /primary|agent|lineage/i],
   ["agent filename", { title: "SKILL.md" }, /primary|agent|lineage/i],
   ["AI brief", { title: "AI financial brief" }, /primary|agent|lineage/i],
   ["wrong figure", { answer: ANSWER.replace("120.00", "121.00") }, /span/i],
@@ -126,7 +158,7 @@ test("agent filename and AI brief are one-way lineage and authority demotions", 
   const base = { source_kind: "bank", source: "records", ref_key: "one", title: "Bank statement", text: CONTENT };
   assert.equal(evidenceLineageFor(base).lineage.kind, "source_record");
   assert.equal(tierOf(base).tier, "T1");
-  for (const title of ["SKILL.md", "folder/SKILL.md", "AGENTS.md", "AI financial brief", "Agent-written financial summary"]) {
+  for (const title of ["SKILL.md", "folder/SKILL.md", "AGENTS.md", "AI financial brief", "Agent-written financial summary", "Assistant notes", "Assistant-written financial summary"]) {
     const row = { ...base, title };
     assert.equal(evidenceLineageFor(row).lineage.kind, "agent_derived", title);
     assert.equal(tierOf(row).tier, "T4", title);

@@ -26,7 +26,7 @@ const MAX_ROOT_ID_CHARS = 512;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const AGENT_MARKER = /^Evidence-Lineage:[ \t]*agent-derived[ \t]*$/im;
 const AGENT_FILE = /(?:^|[/\\])(?:SKILL|AGENTS|CLAUDE)\.md$/i;
-const AGENT_BRIEF = /\b(?:ai|agent)[ -](?:(?:written|generated)[ -])?(?:\w+[ -]){0,3}(?:brief|summary|report|notes?)\b|\b(?:generated|written) by (?:an? )?(?:ai|agent)\b/i;
+const AGENT_BRIEF = /\b(?:ai|agent|assistant)[ -](?:(?:written|generated)[ -])?(?:\w+[ -]){0,3}(?:brief|summary|report|notes?)\b|\b(?:generated|written) by (?:an? )?(?:ai|agent|assistant)\b/i;
 
 /** Names and explicit authorship can only demote, never promote provenance. */
 export function isAgentDerivedArtifact(row = {}) {

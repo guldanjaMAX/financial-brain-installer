@@ -103,8 +103,10 @@ function eventDates(span, kind) {
 }
 
 function primary(doc) {
-  return doc.lineage?.status === "known" &&
-    ["source_record", "derived_record"].includes(doc.lineage?.kind) &&
+  // Missing derivation metadata does not make an older primary record an
+  // agent restatement. It may support its own dated span, without earning
+  // independent-corroboration credit. Explicit agent demotions still win.
+  return doc.lineage?.kind !== "agent_derived" &&
     doc.authority?.tier !== "T4" && doc.authority?.eligible !== false &&
     !isAgentDerivedArtifact(doc);
 }
@@ -145,7 +147,7 @@ export function applyMoneyVeto({ question, answer, evidenceGate, docs = [], now 
     if (!cited.length) return veto("A money claim has no exact cited span.");
     if (cited.some((doc) => reliableDocumentTime(doc) === null)) return veto("A supporting money citation has no reliable date.");
     const records = cited.filter(primary);
-    if (!records.length) return veto("Money claims need recorded primary support; agent-derived, T4 or unknown-lineage material is insufficient.");
+    if (!records.length) return veto("Money claims need eligible non-agent support; agent-derived or T4 material alone is insufficient.");
     const kind = eventKind(question);
     const supporting = records.filter(doc => inSpan(claim, question, kind ? { ...doc, ts: "" } : doc));
     if (!supporting.length) return veto("A money figure, month list or account identifier does not match the exact cited span.");
