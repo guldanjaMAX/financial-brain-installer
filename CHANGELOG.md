@@ -6,6 +6,12 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.12 (unreleased)
 
+- Ask can read account balances, exact deposit matches, and money in and out
+  directly from the bank ledger, with masked accounts, dates and row citations.
+  Live-feed rows take precedence over matching manual-account rows within the
+  live coverage window. Totals include transfers between your accounts. Check
+  the stated period, balance date and feed coverage; questions the ledger cannot
+  answer show a gap before falling back to documents.
 - Source inventory checks large libraries in bounded pages and shows progress.
   Daily imports read run receipts independently of document counts. If freshness
   cannot be verified, eligible imports still run and freshness stays unknown;

@@ -13,6 +13,8 @@ export const RUNNER_TEST_COMMAND = "node test/test-chain-runner.test.mjs";
 // weaken the projection itself.
 export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   RUNNER_TEST_COMMAND,
+  "node --test worker/test/ledger-answer.test.mjs",
+  "node --test test/ledger-mcp.test.mjs",
   "node --test test/gmail-finalization.test.mjs",
   "node --test test/gmail-finalization-mutations.test.mjs",
   "node --test test/curated-cloudflare-only.test.mjs",
@@ -521,6 +523,8 @@ export const TEST_COMMANDS = Object.freeze([
   "node worker/test/spend-cap.test.mjs",
   "node --no-warnings --test worker/test/ocr-reply-shape.test.mjs",
   "node --no-warnings worker/test/fin-d1.test.mjs",
+  "node --test worker/test/ledger-answer.test.mjs",
+  "node --test test/ledger-mcp.test.mjs",
   "node --no-warnings worker/test/fin-routes.test.mjs",
   "node --no-warnings worker/test/financial-picture.test.mjs",
   "node --no-warnings test/financial-picture-cli.test.mjs",

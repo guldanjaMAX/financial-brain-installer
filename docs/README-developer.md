@@ -1999,6 +1999,17 @@ provider-scale proof.
 
 ## Tests
 
+`node --test worker/test/ledger-answer.test.mjs` exercises the read-only money
+answer path through the Worker and real SQLite migrations, including twin
+precedence, exact cents, coverage boundaries, scope refusals and SQL mutations.
+Phase one supports USD balances, deposits within seven days of a supplied date
+(otherwise the last 30 days), named months, last month, last N days and year to
+date. Relative periods use the UTC calendar because the Worker has no owner
+timezone at this boundary. Reads are bounded to 200 source accounts and 5,000
+matching transaction rows; exceeding either bound falls back with a visible
+gap. Complete coverage is required for totals and negative deposit results.
+Transfer pairing, category totals and account-data repairs are separate work.
+
 ### Local owner-onboarding rehearsal
 
 `npm run rehearse:onboarding` builds the current React owner workspace without

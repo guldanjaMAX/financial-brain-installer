@@ -710,6 +710,21 @@ and provider receipts instead of resetting completed pages.
 
 ## Retrieval and answer flow
 
+Think first offers unrestricted owner money questions to a read-only ledger
+path. `ledger-question.js` recognizes current balances, exact-cent deposits and
+account inflow/outflow periods; `ledger-answer.js` formats the stored amounts
+without an answer model. `ledger-reader.js` groups manual/live twins by exact
+entity, numeric mask and account kind, excludes manual transactions inside
+the live coverage window, and retains the supplying account on each row. This
+does not rewrite account coverage or stored transactions. Ambiguous groups,
+incomplete coverage and unreadable rows cannot establish a total or absence.
+Ledger citations expose masked accounts, amounts, dates and feed sync time.
+The boundary follows the financial-map owner guard: exact-document access,
+non-owner principals, narrowed grants and request filters fall back without a
+ledger read. Remote MCP Ask currently enters with unrestricted owner scope.
+Unsupported money questions receive a leading ledger gap; document-age gaps
+explicitly describe retrieved documents rather than the bank feed.
+
 For a query, the Worker builds two independent candidate sets: semantic matches
 from Vectorize and keyword matches from D1 FTS5. Metadata filters are applied as
 early as the backend supports. Reciprocal rank fusion combines the rankings.

@@ -934,6 +934,9 @@ const expected = [
   // inference, mutation, or instance defaults.
   "worker/src/lib/financial-picture.js",
   "worker/src/lib/fin-d1.js",
+  "worker/src/lib/ledger-question.js",
+  "worker/src/lib/ledger-reader.js",
+  "worker/src/lib/ledger-answer.js",
   "worker/src/lib/fin-import.js",
   "worker/src/lib/fin-upload.js",
   "worker/src/lib/grants.js",
