@@ -550,11 +550,16 @@ test("daily CLI records a planner authorization failure before source execution"
   assert.equal(planned, 1);
   const identity = dailyRefreshIdentity(manifest, options.principal);
   assert.equal(readDailyObservation(identity, { home }).record?.result, "failed");
+  let reads = 0;
+  let runs = 0;
   await runDailyRefreshCli(manifestPath, { ...options,
-    buildPlan: async () => ({ ...plan, identity, sources: [], manifest_path: manifestPath }),
+    buildPlan: async () => ({ ...plan, identity, manifest_path: manifestPath }),
     acquireLock: () => ({ assertOwned() {}, release() {} }),
-    readUpdateTransaction: () => null, readFreshness: async () => ({}), runSource: async () => {}, writeReceipt: () => {},
+    readUpdateTransaction: () => null,
+    readFreshness: async () => ({ drive: { last_successful_run_at: ++reads === 1 ? "2026-10-08T12:00:00.000Z" : "2026-10-10T12:00:00.000Z" } }),
+    runSource: async () => { runs++; }, writeReceipt: () => {},
   });
+  assert.equal(runs, 1, "the green journal control executes verified work");
   assert.equal(readDailyObservation(identity, { home }).record.result, "complete");
 });
 
@@ -790,6 +795,59 @@ for (const status of ["complete", "partial", "failed"]) {
     if (status !== "failed") assert.equal(observed.record.error, null);
     else assert.equal(observed.record.error, "One or more daily sources failed or did not prove freshness.");
   });
+}
+
+for (const evidence of ["changed", "quiet"]) {
+  for (const outage of ["none", "before", "after", "both"]) {
+    test(`inventory evidence ${evidence} with ${outage} outage never certifies unknown freshness`, async () => {
+      const before = "2026-10-01T00:00:00.000Z";
+      const now = "2026-10-02T00:00:00.000Z";
+      const calls = [];
+      const receipts = [];
+      let reads = 0;
+      const result = await runDailyRefresh({
+        plan,
+        acquireLock: () => ({ assertOwned() {}, release: () => calls.push("release") }),
+        runSource: async source => { calls.push(source.key); return { status: "complete" }; },
+        readFreshness: async () => {
+          reads++;
+          if (outage === "both" || (outage === "before" && reads === 1) || (outage === "after" && reads === 2)) {
+            throw new Error("synthetic inventory outage");
+          }
+          return { drive: {
+            kind: "drive",
+            last_successful_run_at: evidence === "quiet" ? null : reads === 1 ? before : now,
+            latest_run: reads === 1 ? null : {
+              outcome: evidence === "quiet" ? "empty" : "success", walk_complete: true, metrics_version: 1,
+              started_at: now, finished_at: now, files_seen: evidence === "quiet" ? 0 : 1,
+              docs_added: evidence === "quiet" ? 0 : 1, docs_updated: 0, docs_unchanged: 0,
+              docs_refused: 0, docs_failed: 0,
+            },
+          } };
+        },
+        writeReceipt: receipt => receipts.push(receipt),
+        now: () => new Date(now),
+      });
+      assert.equal(reads, 2, "both inventory decisions were reached");
+      assert.deepEqual(calls, ["drive", "release"], "the approved source ran within its lock");
+      assert.equal(result.sources.length, 1, "the real execution produced a source receipt");
+      const source = result.sources[0];
+      assert.equal(receipts[0], source, "the source evidence reached the durable receipt writer");
+      const known = outage === "none";
+      assert.equal(source.check_verified, known, "unknown freshness cannot certify a provider check");
+      assert.equal(source.no_change, known && evidence === "quiet", "unknown freshness cannot certify no change");
+      assert.equal(source.freshness_advanced, known && evidence === "changed");
+      assert.equal(source.last_check_at_after, known ? now : null);
+      if (known) {
+        assert.equal(result.status, "complete", "known evidence remains a green control");
+        assert.equal(source.freshness_state, undefined);
+      } else {
+        assert.equal(source.freshness_state, "unknown");
+        assert.equal(source.reason_code, "source_inventory_unavailable");
+        assert.notEqual(result.status, "complete");
+      }
+    });
+  }
 }
 
 test("inventory outages run eligible legs, retain holds and never claim fresh", async () => {

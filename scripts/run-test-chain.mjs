@@ -16,6 +16,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/gmail-finalization.test.mjs",
   "node --test test/gmail-finalization-mutations.test.mjs",
   "node --test test/curated-cloudflare-only.test.mjs",
+  "node --test test/daily-evidence.test.mjs",
   "node --test test/query-mcp-timing.test.mjs",
   "node --test test/query-spans-probe.test.mjs",
   "node --test worker/test/query-timing.test.mjs",
@@ -248,6 +249,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --no-warnings test/windows-dpapi-signing-workflow.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
+  "node --test test/daily-evidence.test.mjs",
   "node --test test/query-mcp-timing.test.mjs",
   "node --test test/query-spans-probe.test.mjs",
   "node --test worker/test/query-timing.test.mjs",
