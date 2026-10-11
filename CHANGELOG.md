@@ -26,6 +26,12 @@ the brain, not for whoever built it: what changed for them, and what to check.
   obligations, and unknown accounts or missing coverage dates cannot certify
   a complete financial picture. Verify the account mapping and review Unsorted
   after the next import.
+- Ask recognizes explicit document update dates, reduces backup copies in search
+  results, and tries conservative spelling and topic alternatives. Dated primary
+  status records can answer with an explicit observation date and age. Lists
+  keep items whose own citations support them, with gaps for unsupported items.
+  Check the record spelling, as-of date, and any conflicting evidence. Existing
+  file dates can be repaired by previewed, non-deleting operator maintenance.
 
 - Source inventory checks large libraries in bounded pages and shows progress.
   Daily imports read run receipts independently of document counts. If freshness

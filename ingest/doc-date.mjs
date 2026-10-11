@@ -1,3 +1,5 @@
+import { contentFreshness } from '../worker/src/lib/content-freshness.js';
+
 /**
  * The date a document is FROM, which is not the date its file was touched.
  *
@@ -112,6 +114,9 @@ export function documentDate({ filename = "", relPath = "", contentHead = "" } =
   }
 
   const fromName = parseDateFrom(filename);
+  const fresh = contentFreshness({ title: filename, content: contentHead,
+    date: fromName?.value, dateSource: fromName ? "filename" : null });
+  if (fresh) return fresh;
   if (fromName) return { value: fromName.value, source: "filename", reliable: fromName.reliable, note: fromName.note };
 
   // Directories like "2024/Q1" or "Statements 2023-11" carry real intent.

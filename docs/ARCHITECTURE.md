@@ -725,6 +725,38 @@ ledger read. Remote MCP Ask currently enters with unrestricted owner scope.
 Unsupported money questions receive a leading ledger gap; document-age gaps
 explicitly describe retrieved documents rather than the bank feed.
 
+Explicit `Last updated`, `Updated`, and `As of` ISO-date lines, plus title
+`(started YYYY-MM-DD)` and `(updated YYYY-MM-DD)` annotations, establish content
+freshness for file records. The newer explicit content or filename date wins;
+provider event clocks are preserved. `refreshContentDates` in
+`worker/src/lib/content-freshness-maintenance.js` is an internal, injected-D1
+maintenance function for existing records. It previews by default, pages at
+most ten documents, refuses partial reads over 500 chunks, checks the observed
+revision in one atomic batch, and verifies document/chunk dates plus outbox
+entries before advancing its cursor. It deletes no records and performs no
+provider calls. A caller resumes with the returned cursor; a blocked receipt
+requires review. This is not an automatic migration or a new CLI command.
+
+File-title families collapse before the result limit within source, entity,
+client and folder boundaries. The newest canonical file wins; backup-only
+families move below canonical results. Explicit history queries retain versions.
+Domain synonyms add a separate keyword lane alongside the unchanged original
+query. Capitalized name misses can try a unique edit-distance-one spelling from
+a bounded page of 500 authorized metadata records plus retrieval candidates.
+Title, client, sender and attendee fields provide candidates. Exact token search
+runs first where the original keyword pool was nonempty. Ambiguous variants
+are not selected. This is a bounded rescue, not a complete identity directory;
+older metadata outside the page may be missed. Matched spellings travel only in
+private results/citations and the answer, never service logs.
+
+Ordinary current-state claims from reliably read primary or owner-confirmed
+records may be qualified with their exact observation date and age. The verifier
+receives the retrieved context for a separate newer-conflict check. Relationship,
+financial and operative-value gates remain in force. Synthesis verifies each
+item using its own citations and exact supporting spans, drops unsupported
+items, and preserves missing-coverage disclosures. Financial vetoes still run
+on the returned answer.
+
 For a query, the Worker builds two independent candidate sets: semantic matches
 from Vectorize and keyword matches from D1 FTS5. Metadata filters are applied as
 early as the backend supports. Reciprocal rank fusion combines the rankings.
