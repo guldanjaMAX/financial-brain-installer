@@ -2363,16 +2363,17 @@ async function handleSourceReceipt(env, request) {
     statements.push(env.DB.prepare(
       `INSERT INTO sync_runs
          (run_id,source,lane,started_at,finished_at,walk_complete,files_seen,
-          docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
+          docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,provider_check_complete,
           proposed_deletes,delete_action,refusal_reason,
           confirmed_from,confirmed_through,target_from,target_through,error,failure_evidence)
-       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?23,?14,?15,?16,?17,?18,?19,?20,?21,?22)
        ON CONFLICT(run_id) DO UPDATE SET
          source=excluded.source, lane=excluded.lane, finished_at=excluded.finished_at,
          walk_complete=excluded.walk_complete, files_seen=excluded.files_seen,
          docs_added=excluded.docs_added, docs_updated=excluded.docs_updated,
          docs_unchanged=excluded.docs_unchanged, docs_refused=excluded.docs_refused,
          docs_failed=excluded.docs_failed, metrics_version=excluded.metrics_version,
+         provider_check_complete=excluded.provider_check_complete,
          proposed_deletes=excluded.proposed_deletes, delete_action=excluded.delete_action,
          refusal_reason=excluded.refusal_reason,
          confirmed_from=excluded.confirmed_from, confirmed_through=excluded.confirmed_through,
@@ -2391,6 +2392,7 @@ async function handleSourceReceipt(env, request) {
       targetRange.from, targetRange.through,
       errorReason,
       failureEvidence ? JSON.stringify(failureEvidence) : null,
+      status === "ready" && kind === "calendar" && walkComplete && body?.provider_check_complete === true ? 1 : 0,
     ));
   }
   statements.push(env.DB.prepare(
