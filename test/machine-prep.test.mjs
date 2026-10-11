@@ -137,6 +137,7 @@ function runWindowsScratch(script, args, home, { extraEnv = {}, ...options } = {
       ...extraEnv,
     },
     encoding: "utf8",
+    timeout: WINDOWS_POWERSHELL_PROCESS_TIMEOUT_MS,
     ...options,
   });
 }
@@ -1954,11 +1955,32 @@ test('Windows direct npm argv contract kills shell and unquoted argument mutatio
   context.diagnostic(`npm_quoting_static_mutations_killed=${mutations.length}`);
 });
 
+function legacyWindowsNpmCommand(npm, prefix, archive) {
+  // The field defect put an extra pair around an already quoted npm path.
+  // A valid cmd wrapper may succeed with spaces or metacharacters; it is not
+  // a reproduction of that defect. Preserve all the isolated install flags.
+  return `/d /s /c """${npm}"" install --global --offline --ignore-scripts --no-audit --no-fund --prefix "${prefix}" "${archive}""`;
+}
+
+test('Windows legacy quoting probe reproduces the actual extra pair and complete install argv', (context) => {
+  const command = legacyWindowsNpmCommand('C:\\node js\\npm.cmd', 'C:\\stage dir\\', 'C:\\kit dir\\kit.tgz');
+  const assertReproduction = value => assert.equal(value,
+    String.raw`/d /s /c """C:\node js\npm.cmd"" install --global --offline --ignore-scripts --no-audit --no-fund --prefix "C:\stage dir\" "C:\kit dir\kit.tgz""`);
+  assertReproduction(command);
+  for (const fragment of ['"""', 'npm.cmd""', '--offline']) {
+    assert.ok(command.includes(fragment), 'legacy mutation reaches its target');
+    assert.throws(() => assertReproduction(command.replace(fragment, 'MUTATED')));
+  }
+  context.diagnostic('legacy_quoting_probe_mutations_killed=3');
+});
+
 for (const label of ['node js', 'literal-%USERNAME%-%SystemRoot%', 'amp&caret^(paren)!', 'non-ascii-\u00e9']) {
   test(`Windows direct npm preserves argv: ${label}`, { skip: process.platform !== 'win32', timeout: 300_000 }, (context) => {
     const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-npm-quoting-')));
     const home = join(directory, 'home'); const temp = join(home, 'temp');
-    const bin = join(directory, label); const npm = join(bin, 'npm.cmd');
+    // The historical defect requires a space; every arm retains that trigger
+    // as well as its distinct character case.
+    const bin = join(directory, 'node js', label); const npm = join(bin, 'npm.cmd');
     const prefix = join(directory, label, 'prefix') + '\\';
     const archive = join(directory, label, 'kit.tgz');
     mkdirSync(temp, { recursive: true });
@@ -1968,6 +1990,8 @@ for (const label of ['node js', 'literal-%USERNAME%-%SystemRoot%', 'amp&caret^(p
     try {
       const run = (script) => runWindowsScratch(script, ['--test-isolated-npm', npm, prefix, archive, temp], home);
       const control = run(WINDOWS);
+      assert.ifError(control.error);
+      assert.equal(control.signal, null);
       assert.equal(control.status, 0, combined(control));
       assert.match(combined(control), /REDIRECTED_PROCESS_DECISION_REACHED=1 exit=0/);
       assert.deepEqual(JSON.parse(readFileSync(join(temp, 'argv.json'), 'utf8')), ['install', '--global', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', prefix, archive]);
@@ -1976,10 +2000,16 @@ for (const label of ['node js', 'literal-%USERNAME%-%SystemRoot%', 'amp&caret^(p
       // Restore the previous shell construction, retaining its real decision path.
       const old = source.replace('$info.FileName = $node', '$info.FileName = $cmd')
         .replace(NATIVE_NPM_ARGUMENTS + "\n    ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' '",
-          '$info.Arguments = "/d /s /c `"`"' + npm + '`" install --prefix `"' + prefix + '`" `"' + archive + '`"`""');
+          // Keep paths in PowerShell variables so its legacy script encoding
+          // cannot corrupt non-ASCII fixture paths and cause a false refusal.
+          "$info.Arguments = '" + legacyWindowsNpmCommand('{0}', '{1}', '{2}') + "' -f $Npm, $Prefix, $Archive");
       assert.notEqual(old, source); writeFileSync(mutant, old);
       const broken = run(mutant);
+      assert.ifError(broken.error);
+      assert.equal(broken.signal, null, 'a timeout cannot kill the quoting mutant');
       assert.match(combined(broken), /NPM_ENVIRONMENT_ISOLATED=1/);
+      assert.match(combined(broken), /NPM_LAYOUT_DECISION_REACHED=1/);
+      assert.match(combined(broken), /REDIRECTED_PROCESS_DECISION_REACHED=1 exit=[1-9][0-9]*/);
       assert.notEqual(broken.status, 0);
       assert.equal(existsSync(join(temp, 'argv.json')), false);
       if (label.startsWith('literal-')) {
@@ -1992,11 +2022,15 @@ for (const label of ['node js', 'literal-%USERNAME%-%SystemRoot%', 'amp&caret^(p
         const plainShim = join(temp, 'control.cmd'); cpSync(shellShim, plainShim);
         writeFileSync(mutant, shellSource.replace(nativeTemplate, shellTemplate(plainShim)));
         const shellControl = run(mutant);
+        assert.ifError(shellControl.error);
+        assert.equal(shellControl.signal, null);
         assert.equal(shellControl.status, 0, combined(shellControl));
         assert.equal(readFileSync(join(temp, 'shell-reached.txt'), 'utf8').trim(), 'reached');
         rmSync(join(temp, 'shell-reached.txt'));
         writeFileSync(mutant, shellSource.replace(nativeTemplate, shellTemplate(shellShim)));
         const expanded = run(mutant);
+        assert.ifError(expanded.error);
+        assert.equal(expanded.signal, null);
         assert.notEqual(expanded.status, 0);
         assert.match(combined(expanded), /REDIRECTED_PROCESS_DECISION_REACHED=1/);
         assert.equal(existsSync(join(temp, 'shell-reached.txt')), false);
@@ -2422,6 +2456,29 @@ for (const kind of ['directory', 'file']) {
   });
 }
 
+function assertWindowsLogCleanup(local) {
+  // PowerShell may create LOCALAPPDATA/Microsoft during startup. Only the
+  // directories created/renamed by the production I/O probe belong to it.
+  const remaining = readdirSync(local).filter(name => /^FinancialBrainMachinePrep(?:-|$)/i.test(name));
+  assert.deepEqual(remaining, [], 'cleanup completed inside the running child');
+}
+
+test('Windows log cleanup probe permits a host cache but rejects either remaining log directory', (context) => {
+  const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-cleanup-probe-')));
+  try {
+    assertWindowsLogCleanup(directory);
+    mkdirSync(join(directory, 'Microsoft'));
+    assertWindowsLogCleanup(directory);
+    for (const name of ['FinancialBrainMachinePrep', 'FinancialBrainMachinePrep-moved']) {
+      mkdirSync(join(directory, name));
+      assert.throws(() => assertWindowsLogCleanup(directory), undefined, 'remaining owned directory must fail');
+      rmSync(join(directory, name), { recursive: true });
+    }
+    assertWindowsLogCleanup(directory);
+    context.diagnostic('log_cleanup_probe_mutations_killed=2');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('Windows diagnostic ACL permits repeated I/O and immediate cleanup while PowerShell is still running',
   { skip: process.platform !== 'win32', timeout: 300_000 }, (context) => {
     const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-log-access-')));
@@ -2474,7 +2531,64 @@ test('Windows diagnostic ACL permits repeated I/O and immediate cleanup while Po
       assert.match(combined(result), /LOG_DIRECTORY_CREATE_REACHED=1/);
       assert.match(combined(result), /LOG_FILE_CREATE_REACHED=1/);
       assert.match(combined(result), /LOG_OWNER_IO_AND_CLEANUP=1/);
-      assert.deepEqual(readdirSync(join(home, 'local')), [], 'cleanup completed inside the running child');
+      assertWindowsLogCleanup(join(home, 'local'));
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
+function windowsEvidenceWrapper(logDir, script) {
+  const quote = value => "'" + value.replaceAll("'", "''") + "'";
+  // Hosted Windows CI can be elevated. Bind the synthetic log directory to
+  // its current user, matching the ordinary per-user installer.
+  return `
+      $ErrorActionPreference = 'Stop'
+      $dir = ${quote(logDir)}
+      $security = [Security.AccessControl.DirectorySecurity]::new()
+      $security.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User)
+      $security.SetAccessRuleProtection($true, $false)
+      $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        [Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+      [IO.Directory]::CreateDirectory($dir, $security) | Out-Null
+      & ${quote(script)} @args
+      exit $LASTEXITCODE
+    `;
+}
+
+test('Windows evidence wrapper probe propagates the child exit code immediately', (context) => {
+  const wrapper = windowsEvidenceWrapper('C:\\fixture\\logs', 'C:\\fixture\\prep.ps1');
+  const assertPropagation = value => assert.match(value, /& 'C:\\fixture\\prep\.ps1' @args\s+exit \$LASTEXITCODE\s*$/);
+  assertPropagation(wrapper);
+  for (const replacement of ['', 'exit 0']) {
+    assert.throws(() => assertPropagation(wrapper.replace('exit $LASTEXITCODE', replacement)));
+  }
+  context.diagnostic('evidence_wrapper_static_mutations_killed=2');
+});
+
+test('Windows evidence wrapper preserves child failure and success with a lost-exit mutation',
+  { skip: process.platform !== 'win32', timeout: 420_000 }, (context) => {
+    const directory = realpathSync.native(mkdtempSync(join(ROOT, '.machine-prep-wrapper-exit-')));
+    const home = join(directory, 'home');
+    mkdirSync(join(home, 'temp'), { recursive: true });
+    const child = join(directory, 'child.ps1');
+    const wrapper = join(directory, 'wrapper.ps1');
+    writeFileSync(child, "Write-Output ('CHILD_EXIT_DECISION_REACHED=' + $args[0])\nexit ([int]$args[0])\n");
+    const source = windowsEvidenceWrapper(join(home, 'local', 'FinancialBrainMachinePrep'), child);
+    writeFileSync(wrapper, source);
+    const assertExit = (result, code) => {
+      assert.ifError(result.error);
+      assert.equal(result.signal, null);
+      assert.match(combined(result), new RegExp(`CHILD_EXIT_DECISION_REACHED=${code}`));
+      assert.equal(result.status, code, combined(result));
+    };
+    try {
+      for (const code of [0, 1]) assertExit(runWindowsScratch(wrapper, [String(code)], home), code);
+      writeFileSync(wrapper, source.replace('exit $LASTEXITCODE', ''));
+      const broken = runWindowsScratch(wrapper, ['1'], home);
+      assert.ifError(broken.error);
+      assert.equal(broken.signal, null);
+      assert.match(combined(broken), /CHILD_EXIT_DECISION_REACHED=1/);
+      assert.equal(broken.status, 0, 'the old wrapper hides a completed child failure');
+      assert.throws(() => assertExit(broken, 1));
+      context.diagnostic('evidence_wrapper_runtime_mutations_killed=1');
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 
@@ -2503,22 +2617,13 @@ for (const scenario of ['logs-link', 'cache-link', 'leaf-link', 'destination-lin
       if (scenario === 'log-dir-link') { rmSync(logDir, { recursive: true }); symlinkSync(foreign, logDir, 'junction'); }
     `, 'cache');
     const wrapper = join(directory, 'probe.ps1');
-    const quote = value => "'" + value.replaceAll("'", "''") + "'";
-    // Hosted Windows CI can be elevated. Make the synthetic log directory owned
-    // by its current user explicitly, matching the ordinary per-user installer.
-    writeFileSync(wrapper, `
-      $dir = ${quote(logDir)}
-      $security = [Security.AccessControl.DirectorySecurity]::new()
-      $security.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User)
-      $security.SetAccessRuleProtection($true, $false)
-      $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-        [Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-      [IO.Directory]::CreateDirectory($dir, $security) | Out-Null
-      & ${quote(WINDOWS)} @args
-    `);
+    writeFileSync(wrapper, windowsEvidenceWrapper(logDir, WINDOWS));
     try {
       const result = runWindowsScratch(wrapper, ['--test-isolated-npm', npm, join(directory, 'prefix'), join(directory, 'kit.tgz'), temp], home);
-      assert.notEqual(result.status, 0, combined(result));
+      assert.ifError(result.error);
+      assert.equal(result.signal, null, 'evidence checks require a normally exited child');
+      assert.equal(result.status, 1, combined(result));
+      assert.match(combined(result), /NPM_LAYOUT_DECISION_REACHED=1/);
       assert.match(combined(result), /REDIRECTED_PROCESS_DECISION_REACHED=1 exit=1/);
       assert.equal(readFileSync(join(home, 'npm-calls.txt'), 'utf8').trim(), 'install');
       assert.equal(readFileSync(join(foreign, 'foreign.log'), 'utf8'), 'foreign-preservation-marker\n');
