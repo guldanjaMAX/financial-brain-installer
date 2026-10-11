@@ -30,6 +30,7 @@ import { handleCuratedVerify } from "./lib/curated-verify.js";
 import { WORKER_VERSION } from "./lib/version.js";
 import { jsonResponse, privateNoStore, validateAdminKey, validateReadKey, callLLM } from "./lib/core.js";
 import { resolvePrincipal, principalMay, scopeIsUnrestricted } from "./lib/grants.js";
+import { withLedgerAnswer } from "./lib/ledger-answer.js";
 import { handleBankFeed, bankFeedEnabled } from "./lib/bank-feed.js";
 import { handlePlaidWebhook, runPlaidMaintenance } from "./lib/plaid-bank-feed.js";
 import { runSimpleFinMaintenance } from "./lib/simplefin-bank-feed.js";
@@ -886,7 +887,6 @@ async function handleThink(
   env, request, access = null, grantScope = { all: true }, scopePrincipalKind = "owner", timing = null,
   cfoCapability = null, cfoReauthorize = async () => false,
 ) {
-  const unsupportedAnswer = "The documents do not answer the question.";
   const url = await privateRagParameters(request, { allowWorkflow: true });
   if (!url) return jsonResponse({ error: "Expected a JSON request body" }, 400);
   if (url.parameter_error) return jsonResponse(url.parameter_error, 400);
@@ -903,6 +903,13 @@ async function handleThink(
     return jsonResponse(cfo);
   }
   const taxQuestion = measureQueryStage(timing, "premise_temporal", () => taxQuestionScopeAssessment(q));
+  return withLedgerAnswer({ env, question: q, access, grantScope, scopePrincipalKind,
+    filters: filtersFrom(url), entityScope, ledgerEligible: !taxQuestion.applicable }, (ledgerGap) => handleDocumentThink(
+    env, url, q, entityScope, access, grantScope, scopePrincipalKind, timing, ledgerGap, taxQuestion));
+}
+
+async function handleDocumentThink(env, url, q, entityScope, access, grantScope, scopePrincipalKind, timing, ledgerGap, taxQuestion) {
+  const unsupportedAnswer = "The documents do not answer the question.";
   if (taxQuestion.applicable && !taxQuestion.resolved) {
     return jsonResponse({
       mode: "think",
@@ -1019,6 +1026,12 @@ async function handleThink(
   }
 
   const gaps = measureQueryStage(timing, "gaps", () => computeGaps(results));
+  if (ledgerGap) {
+    for (const gap of gaps) if (gap.type === "stale") {
+      gap.detail = gap.detail.replace("Newest source", "Newest retrieved document") + " This does not measure bank-feed freshness.";
+    }
+    gaps.unshift(ledgerGap);
+  }
 
   // Coverage staleness goes in FRONT of the content gaps, because it qualifies
   // all of them. "The newest thing I found is 40 days old" reads very

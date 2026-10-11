@@ -350,6 +350,7 @@ test("the final owner account assignment immediately resumes the staged Plaid im
     await completePlaidLink(fixture.env, {
       sessionRef: link.session_ref,
       publicToken: "public-sandbox-once",
+      institutionLabel: "Fixture Bank",
       fetchImpl,
       now: stamp,
     });
@@ -395,6 +396,10 @@ test("the final owner account assignment immediately resumes the staged Plaid im
     assert.equal(fixture.first(
       "SELECT entity_slug FROM fin_accounts WHERE external_ref='account-1'",
     ).entity_slug, "fixture-company");
+    assert.equal(fixture.first("SELECT institution FROM fin_accounts WHERE external_ref='account-1'").institution, "Fixture Bank");
+    fixture.raw("UPDATE bank_feed_items SET institution_label='Updated Fixture Bank'");
+    await syncPlaidItem(fixture.env, "item-sandbox-1", { fetchImpl, now: "2026-08-31T13:00:00.000Z" });
+    assert.equal(fixture.first("SELECT institution FROM fin_accounts WHERE external_ref='account-1'").institution, "Updated Fixture Bank");
   } finally {
     fixture.close();
   }

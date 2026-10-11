@@ -972,10 +972,12 @@ function promotionStatements(env, {
     ).bind(tenantId, windowRef, itemRef, tenantId, windowRef),
     env.DB.prepare(
       `INSERT INTO fin_accounts
-         (tenant_id,account_slug,entity_slug,label,account_kind,balance_role,mask,currency,
+         (tenant_id,account_slug,entity_slug,label,institution,account_kind,balance_role,mask,currency,
           feed_mode,external_ref,provenance,source_feed,basis_state,recorded_at,
           source_iso_currency_code,source_unofficial_currency_code)
-       SELECT s.tenant_id,s.account_slug,a.entity_slug,s.name,s.account_kind,s.balance_role,s.mask,s.currency,
+       SELECT s.tenant_id,s.account_slug,a.entity_slug,s.name,
+              (SELECT i.institution_label FROM bank_feed_items i WHERE i.tenant_id=s.tenant_id AND i.item_ref=a.item_ref),
+              s.account_kind,s.balance_role,s.mask,s.currency,
               'live',s.provider_account_id,'feed',?,'confirmed',?,s.iso_currency_code,s.unofficial_currency_code
          FROM plaid_sync_stage_accounts s
          JOIN plaid_account_entity_assignments a
@@ -985,7 +987,7 @@ function promotionStatements(env, {
           AND e.superseded_by_id IS NULL AND e.status='active' AND e.relationship='owned'
         WHERE s.tenant_id=? AND s.window_ref=?
        ON CONFLICT(tenant_id,account_slug) WHERE superseded_by_id IS NULL DO UPDATE SET
-         entity_slug=excluded.entity_slug,label=excluded.label,
+         entity_slug=excluded.entity_slug,label=excluded.label,institution=excluded.institution,
          account_kind=excluded.account_kind,balance_role=excluded.balance_role,
          mask=excluded.mask,currency=excluded.currency,feed_mode='live',external_ref=excluded.external_ref,
          source_iso_currency_code=excluded.source_iso_currency_code,

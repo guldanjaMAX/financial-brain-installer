@@ -516,6 +516,7 @@ async function runTool(name, args = {}, queryTiming = null) {
           : undefined,
         gaps: d.gaps ?? [],
         citations: d.citations ?? [],
+        ledger: d.ledger ?? undefined,
         // Trust metadata rides beside the answer. The worker computes a
         // deterministic confidence rubric with a plain-words basis list, and
         // the evidence gate records WHY an answer was refused or cut short.
@@ -580,6 +581,11 @@ async function runTool(name, args = {}, queryTiming = null) {
         out.gaps = out.gaps.filter((gap) => gap?.type !== "no_results");
         out.note = (d.notice || coverageIncompleteNotice(coverageUnavailable)) +
           " Relay the source coverage gaps and describe the result as provisional.";
+      } else if (d.answer && d.evidence_gate?.supported === true && d.evidence_gate?.complete === true &&
+        ["balance", "payment", "totals"].includes(d.ledger?.kind)) {
+        // A covered zero or a bounded deposit miss has no matching row to cite.
+        // That is a ledger answer, not an empty document search.
+        out.note = "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds.";
       } else if (!out.citations.length && !out.results?.length) {
         out.note =
           "The brain has nothing on this. Report that as the finding, in those terms. Do not substitute inference.";
