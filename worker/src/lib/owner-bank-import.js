@@ -11,7 +11,7 @@
 
 import { readBankExport } from "./bank-export.js";
 import { jsonResponse, privateNoStore } from "./core.js";
-import { prepareBankExportImport, DEFAULT_TENANT } from "./fin-import.js";
+import { prepareBankExportImport, bankExportIdentityNeedsReview, DEFAULT_TENANT } from "./fin-import.js";
 import { ledgerInstalled } from "./fin-d1.js";
 import { validateBankEnvelope } from "./fin-upload.js";
 import { ownerActivityStatement } from "./owner-activity.js";
@@ -491,6 +491,13 @@ async function commit(env, body, options) {
   }
 
   const at = currentIso(options.now);
+  try {
+    if (await bankExportIdentityNeedsReview(env, prepared.envelope)) {
+      return conflict("bank_export_identity_review_required");
+    }
+  } catch {
+    return unavailable("owner_bank_import_unavailable");
+  }
   const plan = prepareBankExportImport(prepared.envelope, {
     tenantId: DEFAULT_TENANT,
     entitySlug: prepared.entitySlug,

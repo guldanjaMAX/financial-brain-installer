@@ -2108,6 +2108,48 @@ absent during setup. `brain secrets` preserves all allowed bank names, requires
 the wrapping-key name for an enabled feed, and does not manufacture any bank
 secret.
 
+Bank-export identities in 0.4.12 use the mapped account, posting date, normalized
+amount and direction, normalized description, and an ordinal among identical
+lines. Row numbers remain citation locators. CSV imports must use the same
+explicit account mapping across exports. Without provider transaction IDs,
+two separate exports each containing one indistinguishable same-day charge
+cannot prove whether there were one or two charges; review the original bank
+record when a day is split across exports.
+
+Existing row-based export IDs require reviewed maintenance before another
+ID-less export for that account can land. The injected-D1 function
+`rekeyBankExportTransactions` in `worker/src/lib/fin-ledger-maintenance.js`
+defaults to a read-only preview with `tenantId` and `accountSlug`. It returns
+`candidate_count`, `review_row_ids`, and `plan_hash`. Only an owner-reviewed
+call with `dryRun: false`, `confirm: true`, and that exact `expectedPlanHash`
+may apply the re-key. It checks the snapshot and reads back all target IDs
+inside one D1 batch. A replay is a no-op. No migration or trigger runs it.
+The function is a maintenance seam for an authorized operator, not a new CLI
+command or public route. Its private receipt must not be placed in public logs.
+
+The preview refuses more than 2,000 current ID-less export rows per account,
+including tombstones. Withdrawn or unreadable identities, linked exceptions or
+claims, reconciled accounts, closed periods, mixed currencies, new-format collisions, and
+identical lines attributed to different documents remain intact and block the
+account for separate owner review. No rows are deleted or tombstoned by this
+function. Resolve ambiguous duplicates only through a separately approved
+maintenance plan, then preview the re-key again. Other accounts remain usable.
+
+New and refreshed feed rows carry proposed category state. Unsorted includes
+proposed categories as spending needing review, preserving the existing single
+review surface. Historical rows are not automatically changed.
+`previewFeedCategoryBackfill(env, { tenantId })` returns only the active legacy
+feed-category count and `mutation_count: 0`; any backfill needs a separate
+owner-approved action. Confirmed categories are excluded from that count.
+
+Plaid loan and credit account types already map to liabilities. Promotion now
+creates or refreshes loan and line-of-credit obligations from observed balances
+without inferring payment terms or personal guarantees. Owner-maintained linked
+obligations are preserved. A reviewed account move transfers its feed-derived
+obligation in the same transaction. An account needs a dated coverage start before its
+coverage can be complete. Unknown feed accounts prevent the obligation exposure
+from claiming all obligations, even when the snapshot requests no accounts.
+
 SimpleFIN uses the same independent bank-feed wrapping key but no Plaid client
 ID, Plaid secret, manifest endpoint, or browser SDK. `brain connect bank` may
 create a missing wrapping key and open the owner page. The one-time Setup Token

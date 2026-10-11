@@ -108,8 +108,34 @@ export function normaliseOrigin(origin = {}) {
  */
 export function transactionUid(accountKey, txn, ordinal) {
   if (txn.externalId) return `${accountKey}:id:${txn.externalId}`.slice(0, 190);
-  const shape = [txn.postedOn || "undated", txn.rawAmountMinor ?? "unread", txn.description || "", txn.locator || ""].join("|");
-  return `${accountKey}:line:${fnv(shape)}:${ordinal}`;
+  return `${accountKey}:line-v2:${fnv(transactionShape(txn))}:${ordinal}`;
+}
+
+/** Identity and ordinal grouping must use exactly the same normalization. */
+export function transactionShape(txn) {
+  return JSON.stringify([
+    txn.postedOn || null,
+    txn.amountMinor ?? null,
+    txn.direction || null,
+    String(txn.description || "").normalize("NFC").trim().replace(/\s+/gu, " ").toLowerCase(),
+  ]);
+}
+
+// Legacy IDs used the CSV row number. Until their guarded re-key is reviewed,
+// letting a v2 ID land beside them would silently double an overlapping export.
+export const LEGACY_EXPORT_IDENTITY_WHERE = `provenance='extracted' AND external_id IS NULL
+  AND superseded_by_id IS NULL
+  AND substr(txn_uid,1,length(account_slug)+6)=account_slug || ':line:'`;
+
+export async function bankExportIdentityNeedsReview(env, envelope, tenantId = DEFAULT_TENANT) {
+  for (const account of envelope.accounts) {
+    if (!account.transactions.some(txn => !txn.externalId)) continue;
+    const row = await env.DB.prepare(`SELECT id FROM fin_transactions
+      WHERE tenant_id=? AND account_slug=? AND ${LEGACY_EXPORT_IDENTITY_WHERE} LIMIT 1`)
+      .bind(tenantId, account.accountKey).first();
+    if (row) return true;
+  }
+  return false;
 }
 
 /** Identity for a statement period read out of one specific document. */
@@ -190,6 +216,17 @@ export function prepareBankExportImport(envelope, {
   };
   const transactionUids = [];
 
+  if (source.provenance === "extracted") {
+    for (const account of envelope.accounts) {
+      if (!account.transactions.some(txn => !txn.externalId)) continue;
+      statements.push([
+        `SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fin_transactions
+          WHERE tenant_id=? AND account_slug=? AND ${LEGACY_EXPORT_IDENTITY_WHERE})
+          THEN 1 ELSE json_extract('bank export identity review required','$') END AS identity_guard`,
+        [tenantId, account.accountKey],
+      ]);
+    }
+  }
   statements.push(entityStatement(tenantId, entitySlug, entityLabel, source, stamp));
 
   for (const account of envelope.accounts) {
@@ -220,7 +257,7 @@ export function prepareBankExportImport(envelope, {
       ? statementUid(accountKey, account, source)
       : null;
     for (const txn of account.transactions) {
-      const shapeKey = [txn.postedOn, txn.rawAmountMinor, txn.description, txn.externalId].join("|");
+      const shapeKey = txn.externalId ? `id:${txn.externalId}` : transactionShape(txn);
       const ordinal = (seen.get(shapeKey) || 0);
       seen.set(shapeKey, ordinal + 1);
       const uid = transactionUid(accountKey, txn, ordinal);
@@ -245,6 +282,11 @@ export function prepareBankExportImport(envelope, {
 export async function importBankExport(env, envelope, options = {}) {
   const plan = prepareBankExportImport(envelope, options);
   if (!plan.receipt.imported) return plan.receipt;
+  if (options.origin?.provenance !== "feed" &&
+      await bankExportIdentityNeedsReview(env, envelope, options.tenantId)) {
+    return { imported: false, refused: true, code: "bank_export_identity_review_required",
+      reason: "Existing bank-export rows need a reviewed identity re-key before another export can be imported." };
+  }
   await runAll(env, plan.statements);
   return plan.receipt;
 }
@@ -416,8 +458,9 @@ function transactionRow(tenantId, accountKey, uid, txn, statementRef, source, en
     `INSERT INTO fin_transactions
        (tenant_id, txn_uid, account_slug, posted_on, amount_minor, direction, raw_amount_minor,
         raw_sign_convention, currency, description, payee, pending, statement_uid, external_id,
-        provenance, source_doc_uid, source_locator, source_feed, basis_state, unparsed_reason, recorded_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        provenance, source_doc_uid, source_locator, source_feed, basis_state, unparsed_reason, recorded_at,
+        category_basis_state)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT (tenant_id, txn_uid) WHERE superseded_by_id IS NULL DO UPDATE SET
        posted_on = excluded.posted_on,
        amount_minor = excluded.amount_minor,
@@ -430,6 +473,9 @@ function transactionRow(tenantId, accountKey, uid, txn, statementRef, source, en
        statement_uid = COALESCE(excluded.statement_uid, fin_transactions.statement_uid),
        basis_state = excluded.basis_state,
        unparsed_reason = excluded.unparsed_reason,
+       category_basis_state = CASE WHEN excluded.provenance='feed' THEN 'proposed'
+         ELSE fin_transactions.category_basis_state END,
+       source_doc_uid = excluded.source_doc_uid,
        source_locator = excluded.source_locator,
        recorded_at = excluded.recorded_at`,
     [
@@ -450,6 +496,7 @@ function transactionRow(tenantId, accountKey, uid, txn, statementRef, source, en
       unread ? "unparsed" : "confirmed",
       unread ? txn.unparsedReason : null,
       stamp,
+      source.provenance === "feed" ? "proposed" : null,
     ],
   ];
 }

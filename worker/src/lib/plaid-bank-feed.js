@@ -1024,17 +1024,54 @@ function promotionStatements(env, {
        WHERE fin_balance_snapshots.source_feed=excluded.source_feed
          AND excluded.recorded_at>=fin_balance_snapshots.recorded_at`,
     ).bind(tenantId, sourceFeed, windowRef, JSON.stringify(accountMappings)),
+    // A loan balance is an obligation even when the provider supplies no
+    // transactions. Do not infer terms or guarantee findings from that balance,
+    // and do not create a second debt beside an owner-maintained linked row.
+    env.DB.prepare(
+      `INSERT INTO fin_obligations
+         (tenant_id,obligation_uid,entity_slug,kind,label,account_slug,balance_minor,
+          balance_as_of,currency,provenance,source_locator,source_feed,basis_state,recorded_at)
+       SELECT f.tenant_id,'plaid-obligation:'||f.account_slug,f.entity_slug,f.account_kind,
+              f.label,f.account_slug,json_extract(m.value,'$.currentMinor'),
+              substr(json_extract(m.value,'$.observedAt'),1,10),f.currency,'feed',
+              'plaid/balance/'||?3||'/'||s.provider_account_id||COALESCE(json_extract(m.value,'$.locatorQualifier'),''),
+              ?2,'confirmed',json_extract(m.value,'$.observedAt')
+         FROM json_each(?4) m
+         JOIN plaid_sync_stage_accounts s ON s.tenant_id=?1 AND s.window_ref=?3
+          AND s.provider_account_id=json_extract(m.value,'$.providerAccountId')
+          AND s.account_slug=json_extract(m.value,'$.accountSlug')
+         JOIN fin_accounts f ON f.tenant_id=s.tenant_id AND f.account_slug=s.account_slug
+          AND f.superseded_by_id IS NULL AND f.source_feed=?2
+        WHERE f.account_kind IN ('loan','line_of_credit') AND NOT EXISTS (
+          SELECT 1 FROM fin_obligations o WHERE o.tenant_id=f.tenant_id
+            AND o.account_slug=f.account_slug AND o.superseded_by_id IS NULL
+            AND o.obligation_uid<>'plaid-obligation:'||f.account_slug)
+       ON CONFLICT(tenant_id,obligation_uid) WHERE superseded_by_id IS NULL DO UPDATE SET
+         entity_slug=excluded.entity_slug,kind=excluded.kind,label=excluded.label,
+         balance_minor=excluded.balance_minor,balance_as_of=excluded.balance_as_of,
+         currency=excluded.currency,source_locator=excluded.source_locator,recorded_at=excluded.recorded_at
+       WHERE fin_obligations.provenance='feed' AND fin_obligations.source_feed=excluded.source_feed
+         AND fin_obligations.account_slug=excluded.account_slug
+         AND excluded.recorded_at>=fin_obligations.recorded_at`,
+    ).bind(tenantId, sourceFeed, windowRef, JSON.stringify(accountMappings)),
     env.DB.prepare(
       `INSERT INTO fin_account_coverage
          (tenant_id,account_slug,coverage_status,covered_from,covered_to,basis_note,
           computed_at,provenance,source_feed,basis_state,recorded_at)
        SELECT s.tenant_id,s.account_slug,
-              CASE WHEN ? AND NOT (${pendingStage}) THEN 'complete'
+              CASE WHEN ? AND NOT (${pendingStage}) AND COALESCE(MIN(t.posted_on),(
+                     SELECT c.covered_from FROM fin_account_coverage c
+                      WHERE c.tenant_id=s.tenant_id AND c.account_slug=s.account_slug
+                        AND c.source_feed=? AND c.superseded_by_id IS NULL)) IS NOT NULL THEN 'complete'
                    WHEN COUNT(t.provider_transaction_id)>0 THEN 'partial' ELSE 'missing' END,
               MIN(t.posted_on),
               CASE WHEN ? THEN substr(?,1,10) ELSE MAX(t.posted_on) END,
               CASE WHEN ${pendingStage} THEN 'Saved activity is available. Checking for newer bank activity.'
-                   WHEN ? THEN 'Plaid completed the requested history window.'
+                   WHEN ? AND COALESCE(MIN(t.posted_on),(
+                     SELECT c.covered_from FROM fin_account_coverage c
+                      WHERE c.tenant_id=s.tenant_id AND c.account_slug=s.account_slug
+                        AND c.source_feed=? AND c.superseded_by_id IS NULL)) IS NOT NULL
+                     THEN 'Plaid completed the requested history window.'
                    WHEN COUNT(t.provider_transaction_id)>0 THEN 'Plaid history is still arriving.'
                    ELSE 'No dated transaction coverage has promoted yet.' END,
               ?,'feed',?,'confirmed',?
@@ -1062,9 +1099,11 @@ function promotionStatements(env, {
          basis_state='confirmed',recorded_at=excluded.recorded_at`,
     ).bind(
       historicalComplete ? 1 : 0,
+      sourceFeed,
       historicalComplete ? 1 : 0,
       observedAt,
       historicalComplete ? 1 : 0,
+      sourceFeed,
       stamp,
       sourceFeed,
       stamp,
@@ -1075,14 +1114,14 @@ function promotionStatements(env, {
     env.DB.prepare(
       `INSERT INTO fin_transactions
          (tenant_id,txn_uid,account_slug,posted_on,amount_minor,direction,raw_amount_minor,
-          raw_sign_convention,currency,description,payee,category,pending,external_id,
+          raw_sign_convention,currency,description,payee,category,category_basis_state,pending,external_id,
           provenance,source_locator,source_feed,basis_state,recorded_at,pending_transaction_id,
           source_iso_currency_code,source_unofficial_currency_code,source_amount_decimal,
           source_provider,source_window_ref,source_page_index)
        SELECT tenant_id,'plaid:'||provider_transaction_id,account_slug,posted_on,amount_minor,direction,
               CASE WHEN direction='inflow' THEN -amount_minor ELSE amount_minor END,
               'feed_positive_amount_is_outflow',iso_currency_code,
-              description,merchant_name,COALESCE(category_detailed,category_primary),COALESCE(pending,0),
+              description,merchant_name,COALESCE(category_detailed,category_primary),'proposed',COALESCE(pending,0),
               provider_transaction_id,'feed',
               'plaid/transactions/'||provider_transaction_id||CASE
                 WHEN json_extract(provenance_json,'$.amount_minor_rounded')=1 THEN '${MINOR_ROUNDED_QUALIFIER}' ELSE '' END,?,
@@ -1094,6 +1133,7 @@ function promotionStatements(env, {
          account_slug=excluded.account_slug,posted_on=excluded.posted_on,amount_minor=excluded.amount_minor,
          direction=excluded.direction,raw_amount_minor=excluded.raw_amount_minor,currency=excluded.currency,
          description=excluded.description,payee=excluded.payee,pending=excluded.pending,
+         category=excluded.category,category_basis_state='proposed',
          pending_transaction_id=excluded.pending_transaction_id,source_locator=excluded.source_locator,
          source_iso_currency_code=excluded.source_iso_currency_code,
          source_unofficial_currency_code=excluded.source_unofficial_currency_code,

@@ -1154,9 +1154,13 @@ function assertRecord(section, value, path) {
       ], `${path}.coverage`);
       assertEnum(value.coverage.status, new Set([
         "complete", "partial", "gapped", "indirect", "none", "unknown",
+        "missing", "not_applicable", "closed",
       ]), `${path}.coverage.status`);
       assertDateOrNull(value.coverage.covered_from, `${path}.coverage.covered_from`);
       assertDateOrNull(value.coverage.covered_to, `${path}.coverage.covered_to`);
+      if (value.coverage.status === "complete" && value.coverage.covered_from === null) {
+        fail(`${path}.coverage.covered_from`, "complete coverage requires a start date");
+      }
       assertEnum(value.coverage.covered_via_account_reference_state, ACCOUNT_REFERENCE_STATES, `${path}.coverage.covered_via_account_reference_state`);
       assertStoredTimestampOrNull(value.coverage.computed_at, `${path}.coverage.computed_at`);
       assertReference(value.coverage.covered_via_account_ref, `${path}.coverage.covered_via_account_ref`);
