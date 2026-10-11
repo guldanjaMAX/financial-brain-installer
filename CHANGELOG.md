@@ -15,6 +15,12 @@ the brain, not for whoever built it: what changed for them, and what to check.
   different versions. Long refresh histories are read in pages. Older clients
   receive an explicit update request when an inventory needs multiple work
   pages; daily imports still run if freshness cannot yet be verified.
+- **Daily imports can keep a source visibly on hold.** A reviewed manifest
+  selection lets approved sources run while another enabled source awaits
+  safety review. Daily status and run receipts show the held source and its
+  reason without claiming fresh data. Review the selection with `brain daily
+  status`, then reconcile it with `brain daily on`; changes require a new
+  verified schedule.
 
 ## 0.4.11 (2026-10-09)
 
