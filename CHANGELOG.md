@@ -15,14 +15,6 @@ the brain, not for whoever built it: what changed for them, and what to check.
   different versions. Long refresh histories are read in pages. Older clients
   receive an explicit update request when an inventory needs multiple work
   pages; daily imports still run if freshness cannot yet be verified.
-- **See what blocks tax evidence review.** In Ask, select one entity and ask
-  “Check tax readiness for 2025.” The checklist distinguishes stored evidence,
-  unavailable reads, unreliable extraction and missing review steps. Tax amounts
-  and filing readiness are not checked; verify the selected entity and year
-  before reviewing originals. Unsupported polite or compound workflow requests
-  ask for clarification without returning evidence amounts, including requests
-  to run quoted commands. Workflow titles and reported instructions in document
-  questions remain searchable.
 - **See what blocks tax evidence review.** In Ask, select one entity, enter a
   tax year, and choose **Tax evidence checklist**. The checklist distinguishes
   stored evidence, unavailable reads, unreliable extraction and missing review
