@@ -1432,6 +1432,47 @@ test("R1 mixed-version daily run executes eligible work with unknown freshness",
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+for (const throughMigration of [53, 54]) {
+  test(`paged inventory retains all cursor binds through schema ${throughMigration} provider-check compatibility`, async t => {
+    const { sourceInventorySlice } = await import("../src/lib/store-d1.js");
+    const db = migratedDb("paged-proof", { throughMigration });
+    t.after(() => db.close());
+    const before = Date.parse("2026-10-01T00:00:00.000Z");
+    const now = Date.parse("2026-10-02T00:00:00.000Z");
+    db.exec(`INSERT INTO sources (name,kind,status,created_at) VALUES ('calendar','calendar','ready','2026-01-01');
+      INSERT INTO documents (doc_uid,source,source_id,title,ingested_at,content_hash)
+        VALUES ('calendar:first','calendar','first','Synthetic first',1,'first'),
+               ('calendar:second','calendar','second','Synthetic second',2,'second');
+      INSERT INTO source_events (source_name,event,at) VALUES
+        ('calendar','retired','2026-10-01'),('calendar','unretired','2026-10-02')`);
+    const insert = db.prepare(`INSERT INTO sync_runs
+      (run_id,source,lane,started_at,finished_at,walk_complete,metrics_version,files_seen,
+       docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed)
+      VALUES (?,'calendar','manual',?,?,1,1,?,?,0,0,0,0)`);
+    insert.run("prior", before, before, 1, 1);
+    insert.run("quiet", now, now, 0, 0);
+    if (throughMigration === 54) db.exec("UPDATE sync_runs SET provider_check_complete=1 WHERE run_id='quiet'");
+    const { env, seen } = d1Env(db);
+    const result = await sourceInventorySlice(env, {
+      now, maxRows: 10, documentPage: { after: 1, limit: 1 }, receiptPage: { events: 1, runs: 1 },
+    });
+    assert.equal(result.rows.length, 1, "a registered source reached the bounded inventory reader");
+    const row = result.rows[0];
+    assert.equal(row.storage.physical_documents, 1, "the nonzero document cursor and limit were retained");
+    assert.equal(row.receipt.last_successful_run_at, null, "the prior success lies before the run-page cursor");
+    assert.equal(row.receipt.latest_run.outcome, "empty");
+    assert.equal(row.receipt.latest_run.provider_check_complete, throughMigration === 54);
+    assert.equal(row.receipt.last_check_at, throughMigration === 54 ? new Date(now).toISOString() : null);
+    assert.deepEqual(result.retirements, [["calendar", 2, null]], "the paged unretirement decision remains intact");
+    const attempts = seen.prepared.filter(sql => sql.includes("source_events_rollup AS"));
+    assert.equal(attempts.length, throughMigration === 53 ? 2 : 1, "only the missing column triggers one retry");
+    assert.ok(attempts.every(sql => sql.includes("inventory_event_page AS MATERIALIZED") &&
+      sql.includes("inventory_run_page AS MATERIALIZED")), "every attempt retains bounded receipt pages");
+    assert.equal(attempts.some(sql => sql.includes("0 AS provider_check_complete")), throughMigration === 53);
+    assert.equal(seen.runs + seen.batches, 0, "the reached inventory path remains read-only");
+  });
+}
+
 test("R2 receipt pages preserve successful history and retirement while bounding SQL work", async () => {
   const { collectBoundedInventory } = await import("../../operations/source-inventory-pages.mjs");
   const db = migratedDb(); await addInventoryFixture(db);
