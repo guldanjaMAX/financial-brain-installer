@@ -355,10 +355,123 @@ verify_brain_kit() {
   verify_checksum --verify-checksum "$file" "$BRAIN_KIT_SHA256"
 }
 
+# Traverse through directory descriptors and open leaves without following links.
+# A pathname check followed by shell redirection is not enough: either parent
+# can be replaced between the check and the read/write. Perl is supplied by macOS.
+safe_npm_io() {
+  /usr/bin/env -i /usr/bin/perl -e '
+    use strict; use warnings;
+    use Fcntl qw(:DEFAULT :mode O_NOFOLLOW O_DIRECTORY);
+    use File::Temp qw(tempfile);
+    my ($mode, $path, $identity) = @ARGV;
+    sub enter_dir {
+      my ($name, $create) = @_;
+      mkdir($name, 0700) if $create && !lstat($name);
+      sysopen(my $dir, $name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or die "unsafe directory\n";
+      chdir($dir) or die "directory unavailable\n";
+      return $dir;
+    }
+    die "absolute path required\n" unless $path =~ m{^/};
+    my $dir = enter_dir("/", 0);
+    for my $part (split m{/}, $path) {
+      next if $part eq "";
+      die "unsafe component\n" if $part eq "." || $part eq "..";
+      $dir = enter_dir($part, $mode ne "newest");
+    }
+    my @root = stat($dir);
+    die "directory owner mismatch\n" unless $root[4] == $<;
+    if ($mode eq "newest") {
+      die "attempt changed\n" unless "$root[0]:$root[1]" eq $identity;
+      $dir = enter_dir("npm-cache", 0);
+      $dir = enter_dir("_logs", 0);
+      opendir(my $entries, ".") or die "logs unavailable\n";
+      my ($newest, $mtime);
+      for my $name (sort readdir($entries)) {
+        next unless $name =~ /\.log\z/;
+        sysopen(my $file, $name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW) or next;
+        my @s = stat($file);
+        next unless S_ISREG($s[2]) && $s[3] == 1 && $s[4] == $<;
+        if (!defined($mtime) || $s[9] > $mtime) { $newest = $file; $mtime = $s[9]; }
+      }
+      die "no regular debug log\n" unless $newest;
+      while (read($newest, my $buffer, 65536)) { print $buffer or die "read failed\n"; }
+    } else {
+      my ($out, $name);
+      if ($mode eq "unique") {
+        # File::Temp uses O_CREAT|O_EXCL and mode 0600. Never reuse a log name.
+        ($out, $name) = tempfile("npm-debug-XXXXXXXX", SUFFIX => ".log", DIR => ".", UNLINK => 0);
+      } elsif ($mode eq "append") {
+        sysopen($out, "prep.log", O_WRONLY | O_APPEND | O_CREAT | O_NONBLOCK | O_NOFOLLOW, 0600) or die "unsafe prep log\n";
+        my @s = stat($out);
+        die "unsafe prep log\n" unless S_ISREG($s[2]) && $s[3] == 1 && $s[4] == $<;
+        chmod(0600, $out) or die "log permissions failed\n";
+      } else { die "invalid mode\n"; }
+      while (read(STDIN, my $buffer, 65536)) { print $out $buffer or die "write failed\n"; }
+      close($out) or die "close failed\n";
+      if ($mode eq "unique") { $name =~ s{^\./}{}; print "$name\n"; }
+    }
+  ' "$@"
+}
+
 log_event() {
-  /bin/mkdir -p "$LOG_DIR"
-  /usr/bin/printf '%s %s\n' "$(TZ=America/Phoenix /bin/date '+%Y-%m-%dT%H:%M:%S%z')" "$1" >> "$LOG_FILE"
-  /bin/chmod 600 "$LOG_FILE"
+  /usr/bin/printf '%s %s\n' "$(TZ=America/Phoenix /bin/date '+%Y-%m-%dT%H:%M:%S%z')" "$1" | safe_npm_io append "$LOG_DIR"
+}
+
+# npm can echo config, argv and authenticated URLs. Redact before persistent
+# writes, including the retained debug log; never relay raw npm output.
+redact_npm_output() {
+  /usr/bin/awk '
+    {
+      line = $0
+      gsub(/\033\[[0-9;]*[[:alpha:]]/, "", line)
+      gsub(/[[:cntrl:]]/, "", line)
+      gsub(/\/\/[^\/[:space:]]*@/, "//[REDACTED]@", line)
+      gsub(/[?#][^[:space:]"<>]*/, "[REDACTED]", line)
+      if (tolower(line) ~ /auth|token|password|passwd|secret|credential|bearer|api[ _-]?key|npm_[a-z0-9]{16,}|gh[pousr]_[a-z0-9]+|github_pat_|eyj[a-z0-9_-]+\./) line = "[REDACTED]"
+      print line
+    }'
+}
+
+run_isolated_npm() {
+  /usr/bin/env -i HOME="$PREP_HOME" PATH="$npm_bin_dir:/usr/bin:/bin" BRAIN_NO_WRANGLER_LOGIN=1 \
+    npm_config_userconfig="$temp/npmrc" npm_config_cache="$temp/npm-cache" npm_config_update_notifier=false \
+    "$@"
+}
+
+record_npm_failure() (
+  # A diagnostics failure must not change the install result or prevent cleanup.
+  set -o pipefail
+  umask 077
+  log_event "npm_exit_code=$npm_exit" || exit 1
+  for stream in stdout stderr; do
+    /usr/bin/tail -n 40 "$temp/npm-$stream" | redact_npm_output | /usr/bin/sed "s/^/$stream: /" | safe_npm_io append "$LOG_DIR" || exit 1
+  done
+  # Select before version probes, which can themselves create npm debug logs.
+  if debug=$(safe_npm_io newest "$temp" "$temp_identity" 2>/dev/null | redact_npm_output); then
+    debug_file=$(printf '%s\n' "$debug" | safe_npm_io unique "$LOG_DIR") || exit 1
+    log_event "npm_debug_log=saved file=$debug_file" || exit 1
+  else
+    log_event 'npm_debug_log=unavailable' || exit 1
+  fi
+  printf 'npm_selected=%s\n' "$npm_path" | redact_npm_output | safe_npm_io append "$LOG_DIR" || exit 1
+  run_isolated_npm /bin/sh -c '
+    printf "npm_path="; command -v npm || printf "unavailable\n"
+    printf "node_path="; command -v node || printf "unavailable\n"
+    printf "node_version="; node --version || printf "unavailable\n"
+    printf "npm_version="; "$1" --version || printf "unavailable\n"
+  ' diagnostics "$npm_path" 2>&1 | redact_npm_output | safe_npm_io append "$LOG_DIR"
+)
+
+show_npm_failure() {
+  reason='an unclassified npm error'
+  if /usr/bin/grep -Eiq "node.*(not recognized|not found|no such file)|cannot find.*node" "$temp/npm-stdout" "$temp/npm-stderr"; then
+    reason='npm could not find Node.js'
+  elif /usr/bin/grep -Eiq 'ENOTCACHED' "$temp/npm-stdout" "$temp/npm-stderr"; then
+    reason='a package was not in the offline cache (ENOTCACHED)'
+  elif /usr/bin/grep -Eiq 'EACCES|EPERM|EAI_AGAIN|ENOTFOUND|ECONN|ETIMEDOUT|network|permission' "$temp/npm-stdout" "$temp/npm-stderr"; then
+    reason='a network or permission error'
+  fi
+  printf 'Financial Brain CLI install failed: %s. For help, send Financial Brain support this log: %s\n' "$reason" "$LOG_FILE" >&2
 }
 
 ensure_path() {
@@ -380,6 +493,9 @@ install_brain() {
   npm_path="${MACHINE_PREP_TEST_NPM_PATH:-$(tool_paths npm | /usr/bin/head -n 1)}"
   [ -n "$npm_path" ] || { printf 'npm is unavailable\n' >&2; return 1; }
   temp=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/financial-brain-installer.XXXXXX") || return 1
+  # Canonicalize the system temp alias before npm can change its cache tree.
+  temp=$(cd "$temp" && /bin/pwd -P) || return 1
+  temp_identity=$(/usr/bin/stat -f '%d:%i' "$temp") || return 1
   stage=""
   lock=""
   prefix_published=0
@@ -466,9 +582,14 @@ install_brain() {
   printf 'INSTALL_STARTED=1 kit_version=%s\n' "$BRAIN_VERSION"
   printf 'NPM_ENVIRONMENT_ISOLATED=1\n'
   npm_bin_dir=$(/usr/bin/dirname "$npm_path")
-  /usr/bin/env -i HOME="$PREP_HOME" PATH="$npm_bin_dir:/usr/bin:/bin" BRAIN_NO_WRANGLER_LOGIN=1 \
-    npm_config_userconfig="$temp/npmrc" npm_config_cache="$temp/npm-cache" npm_config_update_notifier=false \
-    "$npm_path" install --global --offline --ignore-scripts --no-audit --no-fund --prefix "$stage" "$archive" || return 1
+  npm_exit=0
+  run_isolated_npm "$npm_path" install --global --offline --ignore-scripts --no-audit --no-fund --prefix "$stage" "$archive" \
+    > "$temp/npm-stdout" 2> "$temp/npm-stderr" || npm_exit=$?
+  if [ "$npm_exit" -ne 0 ]; then
+    if ! record_npm_failure; then printf 'Machine Prep could not save all npm diagnostics.\n' >&2; fi
+    show_npm_failure
+    return 1
+  fi
   package_json="$stage/lib/node_modules/brain-installer/package.json"
   installed_brain="$stage/bin/brain"
   expected_brain_link="../lib/node_modules/brain-installer/brain.mjs"

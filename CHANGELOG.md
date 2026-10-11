@@ -4,6 +4,25 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.12 (unreleased)
+
+- **Windows Machine Prep logs remain accessible.** Fixed log permissions that
+  could prevent saving failure details or removing the log folder. The owner
+  can read the logs and a later run can append to them.
+- **Windows setup checks the npm layout before installing.** Machine Prep
+  now stops with a clear explanation when npm uses a custom launcher instead
+  of the standard Node.js installation. Send the displayed log for help.
+- **Machine Prep keeps failure logs safely.** Debug logs stay within the install
+  attempt and are saved as new files without overwriting an existing file.
+  Windows setup also handles folders with literal percent signs in their names.
+- **Windows setup handles Node.js in Program Files.** Fixed a quoting error
+  that prevented Financial Brain from installing when the Node.js path had
+  spaces. The standard Windows Node.js installation now works with Machine Prep.
+- **Machine Prep explains failed CLI installs.** On Windows and Mac, a failed
+  npm install now names the reason category and the log to send for help.
+  Redacted output and the newest npm debug log survive cleanup. If setup stops,
+  check the displayed log path before asking support for help.
+
 ## 0.4.11 (2026-10-09)
 
 Candidate only. This version has not been released. The changes below still
