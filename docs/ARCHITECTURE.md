@@ -768,6 +768,23 @@ plain-language lineage status, never the underlying root ids. Agent memory write
 are always stamped `agent_derived` in both metadata and native text so export and
 reingest cannot turn an agent's restatement into a new primary source.
 
+Money answers add a deterministic veto after ordinary verification and partial
+rendering. It can remove approval but never grant it. Money claims require
+reliable citation dates, recorded non-agent support and matching figures,
+months and account identifiers in the exact cited excerpt. Agent instruction
+files and explicitly AI-written briefs are one-way demotions to agent-derived
+T4, even if another metadata field claims primary provenance. Unknown-lineage
+or T4 material cannot be the sole support for money. Document excerpts never
+establish whole-window absence or statement completeness; that requires a
+separate deterministic ledger contract. Explicitly unconfirmed money answers
+remain partial, and all computed retrieval gaps survive a veto.
+
+Verification recognizes last/past N days, weeks or months, next N days,
+year-to-date, so-far month/year, this quarter and numbered calendar quarters.
+These are UTC calendar-day bounds, including the rolling boundary days with an
+exclusive upper bound. Month shifts clamp at month-end. They constrain the
+money verifier, not retrieval filters or the existing present-status ranking.
+
 `/api/rag/unified` returns ranked evidence. It has no universal relevance floor,
 so a result list by itself is not proof that the corpus answers the question.
 `/api/rag/think` is the owner-facing answer path: it generates an answer from

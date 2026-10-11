@@ -845,6 +845,7 @@ const expected = [
   // Pure observed-money and label boundaries. No I/O, owner data or secrets.
   "worker/src/lib/quickbooks-label.js",
   "worker/src/lib/quickbooks-money.js",
+  "worker/src/lib/money-veto.js",
   "worker/src/lib/quickbooks-open-items.js",
   "worker/src/lib/quickbooks-oauth-callback.js",
   "worker/src/lib/reliability-alerts.js",

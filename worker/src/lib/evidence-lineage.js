@@ -25,6 +25,15 @@ const MAX_ROOT_IDS = 16;
 const MAX_ROOT_ID_CHARS = 512;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const AGENT_MARKER = /^Evidence-Lineage:[ \t]*agent-derived[ \t]*$/im;
+const AGENT_FILE = /(?:^|[/\\])(?:SKILL|AGENTS|CLAUDE)\.md$/i;
+const AGENT_BRIEF = /\b(?:ai|agent)[ -](?:(?:written|generated)[ -])?(?:\w+[ -]){0,3}(?:brief|summary|report|notes?)\b|\b(?:generated|written) by (?:an? )?(?:ai|agent)\b/i;
+
+/** Names and explicit authorship can only demote, never promote provenance. */
+export function isAgentDerivedArtifact(row = {}) {
+  return [row.title, row.ref_key, row.ref, row.uri].some((value) =>
+    AGENT_FILE.test(String(value || "")) || AGENT_BRIEF.test(String(value || ""))) ||
+    AGENT_BRIEF.test(String(row.authority_document_head ?? row._authority_document_head ?? row.text ?? row.snippet ?? "").slice(0, 500));
+}
 const AGENT_WRITERS = new Set(["agent", "connector"]);
 const DIRECT_CONNECTOR_KINDS = new Set([
   "bank", "bank-feed", "billing_system", "plaid", "qbo", "quickbooks",
@@ -120,7 +129,7 @@ function result(kind, roots, reason) {
 
 /**
  * Assess lineage from durable metadata and provenance that the product itself
- * controls. Titles and filenames are intentionally absent from this decision.
+ * controls. Titles and filenames can only demote explicit agent artifacts.
  */
 export function evidenceLineageFor(row = {}, { trustedSourceRecord = false } = {}) {
   const metadata = jsonObject(row.authority_meta ?? row._authority_meta) || {};
@@ -141,7 +150,7 @@ export function evidenceLineageFor(row = {}, { trustedSourceRecord = false } = {
   // A product-authored marker is a one-way demotion. A copied agent note may
   // lose its JSON metadata during export and reingest, but this header remains
   // in its native text and prevents it from becoming primary by its new name.
-  if (agentMarked) {
+  if (agentMarked || isAgentDerivedArtifact(row)) {
     const roots = contract?.kind === "agent_derived" ? contractRoots : [];
     return result(
       "agent_derived",
