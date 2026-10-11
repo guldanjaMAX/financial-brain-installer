@@ -6,6 +6,11 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.12 (unreleased)
 
+- Money answers can use dated primary emails, messages and documents whose
+  lineage was never recorded. Agent-written material alone remains insufficient,
+  including assistant notes. Check the cited figure and date; missing lineage
+  still cannot establish independent confirmation.
+
 - Money answers keep distinct banks separate, refuse uncertain overlapping
   coverage, preserve reviewed categories, and count owner-linked loans once.
   Equivalent decimal and month formats now match; account masks stay literal,
@@ -30,7 +35,7 @@ the brain, not for whoever built it: what changed for them, and what to check.
   coverage; questions the ledger cannot
   answer show a gap before falling back to documents.
 - Ask refuses money claims when citations have unreliable or out-of-period
-  dates, only agent or unknown-lineage support, or mismatched figures, months
+  dates, only agent-written notes or recollections, or mismatched figures, months
   or accounts. Document excerpts cannot prove that charges are absent or all
   statements are present. Unconfirmed money answers stay partial. Check the
   cited records and requested period before relying on an answer.

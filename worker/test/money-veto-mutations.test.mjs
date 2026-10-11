@@ -32,6 +32,14 @@ for (const [guard, from, to, mutate] of [
   }],
   ["period membership", "if (cited.some(doc => reliableDocumentTime(doc) < window.start", "if (false && cited.some(doc => reliableDocumentTime(doc) < window.start", (value) => { value.docs[0].ts = "2026-07-01"; }],
   ["lineage and T4", "cited.filter(primary)", "cited", (value) => { value.docs[0].lineage.kind = "agent_derived"; }],
+  ["T4 with unknown lineage", "cited.filter(primary)", "cited", (value) => {
+    value.docs[0].lineage = { status: "unknown", kind: "unclassified" };
+    value.docs[0].authority.tier = "T4";
+  }],
+  ["ineligible unknown lineage", "cited.filter(primary)", "cited", (value) => {
+    value.docs[0].lineage = { status: "unknown", kind: "unclassified" };
+    value.docs[0].authority.eligible = false;
+  }],
   ["absence", "if (ABSENCE.test(claim) ||", "if (false && ABSENCE.test(claim) ||", (value) => {
     value.question = "Any duplicate charges?"; value.answer = "There are no duplicate charges [1].";
     value.docs[0].snippet = "There are no duplicate charges.";
@@ -72,7 +80,7 @@ test("source mutation is killed: agent artifact demotion", async () => {
   assert.equal(evidenceLineageFor(row).lineage.kind, "source_record");
   const mutant = await mutatedModule(new URL("../src/lib/evidence-lineage.js", import.meta.url),
     "if (agentMarked || isAgentDerivedArtifact(row))", "if (agentMarked)");
-  for (const title of ["SKILL.md", "AI financial brief"]) {
+  for (const title of ["SKILL.md", "AI financial brief", "Assistant notes"]) {
     assert.equal(evidenceLineageFor({ ...row, title }).lineage.kind, "agent_derived");
     assert.equal(mutant.evidenceLineageFor({ ...row, title }).lineage.kind, "source_record");
   }

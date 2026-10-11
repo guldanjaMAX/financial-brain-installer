@@ -810,12 +810,14 @@ reingest cannot turn an agent's restatement into a new primary source.
 
 Money answers add a deterministic veto after ordinary verification and partial
 rendering. It can remove approval but never grant it. Money claims require
-reliable citation dates, recorded non-agent support and matching figures,
+reliable citation dates, eligible non-agent support and matching figures,
 months and account identifiers in the exact cited excerpt. Agent instruction
-files and explicitly AI-written briefs are one-way demotions to agent-derived
-T4, even if another metadata field claims primary provenance. Unknown-lineage
-or T4 material cannot be the sole support for money. Document excerpts never
-establish whole-window absence or statement completeness; that requires a
+files, explicitly AI-written briefs and assistant notes are one-way demotions
+to agent-derived T4, even if another metadata field claims primary provenance.
+Unknown lineage alone does not disqualify a dated primary record from supporting
+its own cited span; it still earns no independent-corroboration credit.
+Agent-derived or T4 material cannot be the sole support for money. Document
+excerpts never establish whole-window absence or statement completeness; that requires a
 separate deterministic ledger contract. Explicitly unconfirmed money answers
 remain partial, and all computed retrieval gaps survive a veto.
 
