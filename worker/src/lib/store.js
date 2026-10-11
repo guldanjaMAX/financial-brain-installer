@@ -1,3 +1,4 @@
+import { withContentFreshness } from './content-freshness.js';
 import { measureQueryStage } from "./query-timing.js";
 /**
  * store — one retrieval interface, two backends.
@@ -167,12 +168,13 @@ async function sha256Hex(s) {
 async function prepareD1Envelope(env, submittedEnvelope, {
   sourceOriginalSigningKey = () => loadSourceOriginalSigningKey(env),
 } = {}) {
-  const envelope = normalizeIngestEnvelopeProvenance(submittedEnvelope);
+  let envelope = normalizeIngestEnvelopeProvenance(submittedEnvelope);
   // HTTP routes validate earlier for a useful 400 response, but storage is the
   // last common mutation boundary for direct first-party callers too. Never
   // let an internal path persist a malformed provenance claim by accident.
   const validationError = ingestEnvelopeValidationError(envelope);
   if (validationError) throw new TypeError(validationError);
+  envelope = withContentFreshness(envelope);
   const { source_type, source_id, content, title } = envelope;
   const docUid = `${source_type}:${source_id}`;
   const md = envelope.metadata || {};
@@ -807,6 +809,7 @@ const d1Backend = {
           // row. It is additive public metadata, kept beside date and text
           // provenance so a citation never presents a tier without its reason.
           authority: x.authority || null,
+          ...(x.query_variant ? { query_variant: x.query_variant } : {}),
           // Closed, server-verified origin for conversational owner notes. No
           // arbitrary document metadata crosses this public boundary.
           ...(x.write_provenance ? { write_provenance: x.write_provenance } : {}),
@@ -839,6 +842,7 @@ const d1Backend = {
     // That keeps this internal optimization from becoming a way to pair one
     // document's hash or prior row with another document's content.
     const input = prepared?.envelope === envelope ? prepared : await prepareD1Envelope(env, envelope);
+    envelope = input.envelope;
     const {
       source_type, source_id, content, title, docUid, md,
       hasEntity, hasClient, hasCategory, hasTopFolder, hasPlatform,

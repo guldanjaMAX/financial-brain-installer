@@ -1882,7 +1882,7 @@ export async function prepare(file, { sourceName, ocr = null }) {
   const note = got.note || null;
 
   // NOT the file mtime. See ingest/doc-date.mjs for why that is refused outright.
-  const dd = documentDate({ filename: file.name, relPath: dirname(file.rel), contentHead: got.text.slice(0, 1200) });
+  const dd = documentDate({ filename: file.name, relPath: dirname(file.rel), contentHead: got.text });
   let originalByteReceipt = null;
   let originalBindingUnavailableReason = null;
   try {

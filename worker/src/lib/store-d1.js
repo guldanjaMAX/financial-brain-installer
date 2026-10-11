@@ -1,3 +1,4 @@
+import { collapseTitleFamilies, domainExpansion, queryNames, containsName, metadataNameVariant } from './retrieval-expansion.js';
 import { measureQueryStage, startQueryStage } from "./query-timing.js";
 /**
  * store-d1 — retrieval over Cloudflare alone: D1 for text and keywords,
@@ -681,6 +682,51 @@ export async function searchKeyword(env, query, { limit, filters = {}, access = 
   return results || [];
 }
 
+// Metadata candidates are bounded and carry the same source, zone, exact-document,
+// visibility and supersession restrictions as keyword reads. No global names
+// directory or log of private spellings is created.
+async function nameVariantMetadata(env, { filters, access, scope }) {
+  const f = filterSql(filters, "d", 1);
+  const sc = scopeSql(scope, "d", f.nextParam);
+  const a = documentAccessSql(access, "d", "d", sc.nextParam);
+  const run = (memoryClause) => readWithCustomApiVisibility(env, (withCurrentPointer) =>
+    env.DB.prepare(`/* name-variant-metadata */
+      SELECT d.doc_uid, d.source_id, d.source, d.title, d.client, d.meta AS authority_meta
+        FROM documents d WHERE d.deleted_at IS NULL
+        ${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}
+        ORDER BY d.rowid DESC LIMIT 500`)
+      .bind(...f.params, ...sc.params, ...a.params).all());
+  try { return (await run(currentMemorySql("d"))).results || []; }
+  catch (error) {
+    if (!await legacySchemaMayReadWithoutMemorySupersessions(env, error)) throw error;
+    return (await run("")).results || [];
+  }
+}
+
+async function hydrateNameMetadata(env, candidates, options) {
+  const ids = [...new Set(candidates.map(row => row.doc_uid).filter(Boolean))].slice(0, 10);
+  if (!ids.length) return [];
+  const f = filterSql(options.filters, "d", ids.length + 1);
+  const sc = scopeSql(options.scope, "d", f.nextParam);
+  const a = documentAccessSql(options.access, "c", "d", sc.nextParam);
+  const run = memoryClause => readWithCustomApiVisibility(env, withCurrentPointer => env.DB.prepare(`
+    /* name-variant-hydration */
+    SELECT c.chunk_uid,c.doc_uid,c.text,d.source,COALESCE(src.kind,'unregistered') AS source_kind,
+      d.source_id,d.title,d.client,d.entity_slug,d.category,d.top_folder,d.platform,
+      d.document_date,d.date_source,d.date_reliable,d.text_source,d.text_reliable,
+      d.meta AS authority_meta,c.text AS authority_document_head,d.content_hash
+    FROM chunks c JOIN documents d ON d.doc_uid=c.doc_uid
+      LEFT JOIN sources src ON src.name=d.source
+    WHERE c.chunk_ix=0 AND d.doc_uid IN (${ids.map((_, i) => `?${i + 1}`).join(',')})
+      AND d.deleted_at IS NULL ${f.clause}${sc.clause}${a.clause}${customApiVisibilitySql("d", withCurrentPointer)}${memoryClause}`)
+    .bind(...ids,...f.params,...sc.params,...a.params).all());
+  try { return (await run(currentMemorySql("d"))).results || []; }
+  catch (error) {
+    if (!await legacySchemaMayReadWithoutMemorySupersessions(env, error)) throw error;
+    return (await run("")).results || [];
+  }
+}
+
 /**
  * Find document rows that cannot participate in chunk search at all.
  *
@@ -894,10 +940,62 @@ export async function search(env, {
   ]
     .find((error) => memorySupersessionIntegrityFailure(error));
   if (integrityFailure) throw integrityFailure;
+  const expansionRows = [];
+  let expansionFailed = false;
+  const extraKeyword = async (text, depth = pool) => {
+    const attempt = await settleModality(measureQueryStage(timing, "keyword", () =>
+      searchKeyword(env, text, { limit: depth, filters, access, scope })));
+    if (memorySupersessionIntegrityFailure(attempt.error)) throw attempt.error;
+    if (attempt.error) expansionFailed = true;
+    return attempt.results;
+  };
+  const synonyms = domainExpansion(query);
+  if (!keywordAttempt.error && synonyms.length) {
+    expansionRows.push(...await extraKeyword(synonyms.join(' ')));
+  }
+  let metadata = null;
+  for (const name of keywordAttempt.error ? [] : queryNames(query)) {
+    if ([...keywordAttempt.results, ...vectorAttempt.results].some(row => containsName(row, name))) continue;
+    // A bag-of-words miss does not prove the name is absent. Try the exact
+    // token separately before considering a spelling change.
+    const exact = keywordAttempt.results.length ? await extraKeyword(name) : [];
+    if (exact.some(row => containsName(row, name))) { expansionRows.push(...exact); continue; }
+    if (expansionFailed) continue;
+    if (metadata === null) {
+      try { metadata = await nameVariantMetadata(env, { filters, access, scope }); }
+      catch (error) {
+        if (memorySupersessionIntegrityFailure(error)) throw error;
+        expansionFailed = true; metadata = [];
+      }
+    }
+    const exactMetadata = metadata.filter(row => containsName(row, name));
+    if (exactMetadata.length) {
+      try { expansionRows.push(...await hydrateNameMetadata(env, exactMetadata, { filters, access, scope })); }
+      catch (error) {
+        if (memorySupersessionIntegrityFailure(error)) throw error;
+        expansionFailed = true;
+      }
+      continue;
+    }
+    const variant = metadataNameVariant(name, [...metadata, ...keywordAttempt.results, ...vectorAttempt.results]);
+    if (!variant) continue;
+    const matched = await extraKeyword(variant.matched);
+    try {
+      const hydrated = await hydrateNameMetadata(env,
+        metadata.filter(row => containsName(row, variant.matched)), { filters, access, scope });
+      matched.push(...hydrated);
+    } catch (error) {
+      if (memorySupersessionIntegrityFailure(error)) throw error;
+      expansionFailed = true;
+    }
+    expansionRows.push(...matched.filter(row => containsName(row, variant.matched))
+      .map(row => ({ ...row, query_variant: variant })));
+  }
   const finishAuthority = startQueryStage(timing, "authority_lineage");
   const kw = keywordAttempt.results.map(assessStoredProvenance);
+  const expanded = expansionRows.map(assessStoredProvenance);
   const vec = vectorAttempt.results.map(assessStoredProvenance);
-  const keywordFailed = keywordAttempt.attempted && Boolean(keywordAttempt.error);
+  const keywordFailed = (keywordAttempt.attempted && Boolean(keywordAttempt.error)) || expansionFailed;
   const vectorFailed = vectorAttempt.attempted && Boolean(vectorAttempt.error);
 
   // Empty is a valid result from either modality. A zero-row success must never
@@ -957,7 +1055,7 @@ export async function search(env, {
   const baseDocumentKeys = new Set(
     [...kwDocuments, ...vecDocuments].map(retrievalDocumentKey),
   );
-  const hintedKeywordDocuments = hintAttempts.map((attempt) =>
+  const hintedKeywordDocuments = [{ keyword: { results: expanded } }, ...hintAttempts].map((attempt) =>
     collapseRankedDocuments(attempt.keyword.results.map(assessStoredProvenance))
       .filter((row) => !baseDocumentKeys.has(retrievalDocumentKey(row)))
   );
@@ -1083,6 +1181,10 @@ export async function search(env, {
       : row;
   });
 
+  const variantByDocument = new Map(expanded.filter(row => row.query_variant).map(row => [retrievalDocumentKey(row), row.query_variant]));
+  fused = fused.map(row => variantByDocument.has(retrievalDocumentKey(row))
+    ? { ...row, query_variant: variantByDocument.get(retrievalDocumentKey(row)) } : row);
+  fused = collapseTitleFamilies(fused, query);
   const documents = [];
   for (const row of fused) {
     // content_hash is an internal dedupe key, not part of the authenticated
