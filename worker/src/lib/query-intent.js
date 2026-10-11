@@ -41,6 +41,50 @@ const ISO_DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
 const RFC3339_INSTANT =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/;
 
+/** UTC day bounds for verification, never hidden retrieval filters. The owner
+ * timezone is unavailable here. Include each boundary day in a rolling window
+ * and use an exclusive upper bound so dated records have unambiguous membership.
+ * Calendar months clamp to their last day instead of Date's rollover behavior.
+ */
+export function queryTimeWindow(query, { now = Date.now() } = {}) {
+  if (!Number.isFinite(now)) return null;
+  const date = new Date(now);
+  if (!Number.isFinite(date.getTime())) return null;
+  const text = String(query || "");
+  const year = date.getUTCFullYear(), month = date.getUTCMonth(), day = date.getUTCDate();
+  const today = Date.UTC(year, month, day), dayMs = 86400000;
+  const window = (start, end) => Number.isFinite(start) && Number.isFinite(end) && start < end
+    ? { start, end } : null;
+  const rolling = /\b(last|past|next)\s+([1-9]\d*)\s+(days?|weeks?|months?)\b/i.exec(text);
+  if (rolling) {
+    const [, direction, countText, unit] = rolling;
+    const count = Number(countText);
+    if (!Number.isSafeInteger(count) || count > 36600) return null;
+    if (direction.toLowerCase() === "next") {
+      return /^day/i.test(unit) ? window(today, today + (count + 1) * dayMs) : null;
+    }
+    if (/^month/i.test(unit)) {
+      const first = new Date(Date.UTC(year, month - count, 1));
+      const lastDay = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0)).getUTCDate();
+      return window(Date.UTC(first.getUTCFullYear(), first.getUTCMonth(), Math.min(day, lastDay)), today + dayMs);
+    }
+    return window(today - count * (/^week/i.test(unit) ? 7 : 1) * dayMs, today + dayMs);
+  }
+  if (/\b(?:so far\s+this year|year[ -]to[ -]date)\b/i.test(text)) return window(Date.UTC(year, 0, 1), today + dayMs);
+  if (/\bso far\s+this month\b/i.test(text)) return window(Date.UTC(year, month, 1), today + dayMs);
+  if (/\bthis quarter\b/i.test(text)) {
+    const quarter = Math.floor(month / 3) * 3;
+    return window(Date.UTC(year, quarter, 1), Date.UTC(year, quarter + 3, 1));
+  }
+  const quarter = /\bq([1-4])\s+((?:19|20)\d{2})\b/i.exec(text);
+  if (quarter) return window(Date.UTC(Number(quarter[2]), (Number(quarter[1]) - 1) * 3, 1), Date.UTC(Number(quarter[2]), Number(quarter[1]) * 3, 1));
+  // An invalid quarter must not fall through to the broader year interpretation.
+  if (/\bq\d\b/i.test(text)) return null;
+  const years = [...text.matchAll(/\b(?:19|20)\d{2}\b/g)];
+  if (years.length === 1) return window(Date.UTC(Number(years[0][0]), 0, 1), Date.UTC(Number(years[0][0]) + 1, 0, 1));
+  return null;
+}
+
 const validCalendarDay = (year, month, day) => {
   const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
   const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];

@@ -741,6 +741,7 @@ const call = (env, path) => {
   const current = {
     ...ROW,
     chunk_uid: "taylor-current#0", doc_uid: "taylor-current", source_id: "taylor-current", source: "message",
+    source_kind: "email", authority_meta: JSON.stringify({ evidence_lineage: { version: 1, kind: "source_record" } }),
     title: "Taylor conversation", text: "Taylor confirmed the engagement remains active. The August invoice payment failed for insufficient funds.",
     document_date: Date.parse("2026-08-19T00:00:00Z"), date_reliable: 1, date_source: "fixture:message_timestamp",
   };
@@ -1672,7 +1673,9 @@ const zeroChunkExpectedReturn = {
 
 /* ---- every material part must be answered or explicitly called unknown ---- */
 {
-  const { env } = mkEnv([ROW], {
+  // Money controls now carry the actual cited figure and direct provenance.
+  // An approving verifier alone cannot certify invented fixture amounts.
+  const { env } = mkEnv([{ ...ROW, source_kind: "bank", text: "The amount was $5,000." }], {
     vectorIds: [],
     extra: {
       AI: {
@@ -1723,7 +1726,7 @@ const zeroChunkExpectedReturn = {
   const split = await (await call(answerEnv([newsletter, ownerOnly]), "/api/rag/think?q=What+valuation+was+on+the+Series+A+term+sheet%3F")).json();
   check("owner identity and the high-risk fact cannot come from different documents", isUnavailableRefusal(split), JSON.stringify(split));
 
-  const owned = { ...newsletter, chunk_uid: "owned-term-sheet#0", doc_uid: "owned-term-sheet", source_id: "owned-term-sheet", title: "Morgan's Series A Term Sheet", text: "Morgan's Series A term sheet states a $150M valuation." };
+  const owned = { ...newsletter, source_kind: "bank", chunk_uid: "owned-term-sheet#0", doc_uid: "owned-term-sheet", source_id: "owned-term-sheet", title: "Morgan's Series A Term Sheet", text: "Morgan's Series A term sheet states a $150M valuation." };
   const linked = await (await call(answerEnv(owned), "/api/rag/think?q=What+valuation+was+on+the+Series+A+term+sheet%3F")).json();
   check("an explicitly owner-linked term sheet can still answer", linked.answer === "The Series A valuation was $150M [1]." && linked.evidence_gate?.supported === true, JSON.stringify(linked));
 }
@@ -5460,11 +5463,11 @@ async function postConfirmedSourceForget(env, source = "meeting") {
 {
   const ledger = (id, title, text) => ({
     ...ROW, chunk_uid: `${id}#0`, doc_uid: id, source_id: id, uri: `drive://${id}`,
-    source: "drive", client: null, title, text,
+    source: "drive", source_kind: "bank", client: null, title, text,
   });
   const rows = [
-    ledger("ledger-a", "Example Holdings LLC March income ledger", "March income: $1,234.73 total deposits."),
-    ledger("ledger-b", "Example Holdings LLC March expense ledger", "March expenses: rent $5,678.47. Loan balance $1.2 million."),
+    ledger("ledger-a", "Example Holdings LLC March income ledger", "March income: $1,234.73 total deposits. Separate whole-dollar record: $1,234. US total $5M; profit $9M. Invoice.pdf."),
+    ledger("ledger-b", "Example Holdings LLC March expense ledger", "March expenses: rent $5,678.47. Separate whole-dollar rent record: $5,678. Loan balance $1.2 million. Profit $9M."),
   ];
   const partialThink = async (draft) => {
     const { env } = mkEnv(rows, { extra: { AI: { run: async (model, input) => model.includes("bge-")
@@ -5595,9 +5598,9 @@ async function postConfirmedSourceForget(env, source = "meeting") {
 {
   const row = {
     ...ROW, chunk_uid: "subscription-a#0", doc_uid: "subscription-a", source_id: "subscription-a",
-    uri: "drive://subscription-a", source: "drive", client: null, document_date: 1780000000000, date_reliable: 1,
+    uri: "drive://subscription-a", source: "drive", source_kind: "bank", client: null, document_date: 1780000000000, date_reliable: 1,
     title: "Example Holdings LLC storage subscription",
-    text: "The Example Holdings LLC storage subscription is active at $1,234.73 per month.",
+    text: "The Example Holdings LLC storage subscription is active at $1,234.73 per month. Separate whole-dollar plan: active at $1,234 per month.",
   };
   const currentThink = async (draft) => {
     const { env } = mkEnv([row], { extra: { AI: { run: async (model, input) => model.includes("bge-")

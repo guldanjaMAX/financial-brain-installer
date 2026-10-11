@@ -69,6 +69,7 @@ import {
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
 import { answerSentences } from "./lib/answer-sentences.js";
 import { quickBooksMoneyPolicy } from "./lib/quickbooks-money.js";
+import { applyMoneyVeto } from "./lib/money-veto.js";
 import { quickBooksBalanceAnswer, quickBooksBalanceRequest } from "./lib/quickbooks-balance.js";
 import { quickBooksOpenItemsAnswer } from "./lib/quickbooks-open-items.js";
 import {
@@ -409,7 +410,7 @@ async function unifiedRetrieve(env, url, {
 // defeats the `$` end-anchor, which was the actual bug that let CLAUDE.md hold
 // the number one slot in the original.
 const SCAFFOLDING_RE =
-  /(^|\/)(CLAUDE|AGENTS|README|CHANGELOG|CONTRIBUTING)\.md$|(^|\/)(package(-lock)?|tsconfig|composer)\.json$|\.(log|lock)$/i;
+  /(^|\/)(CLAUDE|AGENTS|SKILL|README|CHANGELOG|CONTRIBUTING)\.md$|(^|\/)(package(-lock)?|tsconfig|composer)\.json$|\.(log|lock)$/i;
 
 export function demoteScaffolding(results) {
   if (!Array.isArray(results) || results.length < 2) return results;
@@ -1536,6 +1537,11 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       }
     }
   }
+
+  // Run on the final prose, including partial-answer formatting. This can only
+  // demote the existing verdict; retrieved documents never certify an absence.
+  ({ answer, evidenceGate } = applyMoneyVeto({ question: q, answer, evidenceGate, docs: approvedDocs }));
+  if (answer === null) approvedDocs = [];
 
   // Computed coverage warnings describe retrieval, not account facts. Append
   // them only after the exact claims pass the shared gates, and keep `gaps` in
