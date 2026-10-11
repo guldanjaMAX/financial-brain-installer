@@ -774,6 +774,7 @@ const expected = [
   "migrations/d1/0051_simplefin_window_revisions.sql",
   "migrations/d1/0052_ingest_removal_generation.sql",
   "migrations/d1/0053_financial_evidence.sql",
+  "migrations/d1/0054_daily_evidence.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values

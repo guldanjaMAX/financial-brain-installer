@@ -15,6 +15,16 @@ the brain, not for whoever built it: what changed for them, and what to check.
   different versions. Long refresh histories are read in pages. Older clients
   receive an explicit update request when an inventory needs multiple work
   pages; daily imports still run if freshness cannot yet be verified.
+- **Daily evidence stays honest after errors.** Calendar quiet checks require
+  a validated provider completion token, and later source failures stay visible.
+  Zoom status shows delivery totals without interrupting transcript delivery.
+  After updating, verify quiet checks and any pending debt.
+
+- **Quiet daily checks have their own evidence.** A completed provider check
+  with no changes can finish successfully without changing the last ingest
+  date. Daily status shows when it checked. Zoom source status also shows
+  reconciliation checks and pending or refused deliveries. Verify those
+  checks separately from ingest dates; complete Zoom history remains unproven.
 
 ## 0.4.11 (2026-10-09)
 

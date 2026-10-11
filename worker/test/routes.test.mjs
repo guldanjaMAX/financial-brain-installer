@@ -1970,7 +1970,7 @@ const zeroChunkExpectedReturn = {
   }), env, {});
   const body = await response.json();
   const runBind = seen.binds.find((values) =>
-    values[0] === "run_gmail_failure_evidence" && values.length === 22);
+    values[0] === "run_gmail_failure_evidence" && values.length === 23);
   let stored = null;
   try { stored = JSON.parse(runBind?.[21] || "null"); } catch { /* assertion below owns failure */ }
   check("a Gmail error stores only server-reconstructed closed failure evidence",
@@ -2023,7 +2023,7 @@ const zeroChunkExpectedReturn = {
       }),
     }), env, {});
     if (response.status !== 400 || seen.sql.length !== 0 ||
-        seen.binds.some((values) => values[0] === runId && values.length === 22)) {
+        seen.binds.some((values) => values[0] === runId && values.length === 23)) {
       failures.push({ description, status: response.status, binds: seen.binds });
     }
   }
@@ -2042,7 +2042,7 @@ const zeroChunkExpectedReturn = {
       lane: "sweep", complete_sweep: true, walk_complete: false, error: "walk aborted",
     }),
   }), env, {});
-  const runBind = seen.binds.find((values) => values[0] === "run_failed_sweep" && values.length === 22);
+  const runBind = seen.binds.find((values) => values[0] === "run_failed_sweep" && values.length === 23);
   check("an error receipt cannot turn complete_sweep into walk_complete",
     response.status === 200 && runBind?.[5] === 0 && runBind?.[12] === 0, JSON.stringify(runBind));
 }
@@ -2062,7 +2062,7 @@ const zeroChunkExpectedReturn = {
   const sourceBind = seen.binds.find((values) =>
     values[0] === "calendar-inconsistent" && values.length === 7);
   const runBind = seen.binds.find((values) =>
-    values[0] === "run_inconsistent_sweep" && values.length === 22);
+    values[0] === "run_inconsistent_sweep" && values.length === 23);
   check("complete_sweep is fail-closed when the same ready receipt did not complete its walk",
     response.status === 200 && sourceBind?.[4] === 0 && runBind?.[5] === 0 && runBind?.[12] === 0,
     JSON.stringify({ sourceBind, runBind }));
@@ -2083,7 +2083,7 @@ const zeroChunkExpectedReturn = {
   const sourceBind = seen.binds.find((values) =>
     values[0] === "measured-calendar" && values.length === 5);
   const runBind = seen.binds.find((values) =>
-    values[0] === "run_measured_sweep" && values.length === 22);
+    values[0] === "run_measured_sweep" && values.length === 23);
   check("measured document failures prevent an otherwise complete receipt from advancing history",
     response.status === 200 && sourceBind?.[4] === "INGEST_FAILED" &&
       runBind?.[11] === 1 && runBind?.[12] === 1 && runBind?.[20] === "INGEST_FAILED" &&
@@ -2102,7 +2102,7 @@ const zeroChunkExpectedReturn = {
   const refusedSourceBind = seen.binds.find((values) =>
     values[0] === "refused-calendar" && values.length === 7);
   const refusedRunBind = seen.binds.find((values) =>
-    values[0] === "run_refused_sweep" && values.length === 22);
+    values[0] === "run_refused_sweep" && values.length === 23);
   check("measured document refusals prevent an otherwise complete receipt from advancing history",
     refused.status === 200 && refusedSourceBind?.[4] === 0 &&
       refusedRunBind?.[10] === 1 && refusedRunBind?.[11] === 0 && refusedRunBind?.[12] === 1,
@@ -2121,7 +2121,7 @@ const zeroChunkExpectedReturn = {
   const adjudicatedSourceBind = seen.binds.find((values) =>
     values[0] === "adjudicated-drive" && values.length === 7);
   const adjudicatedRunBind = seen.binds.find((values) =>
-    values[0] === "run_adjudicated_sweep" && values.length === 22);
+    values[0] === "run_adjudicated_sweep" && values.length === 23);
   check("measured policy and adjudicated skips do not block a zero-refusal completed walk",
     adjudicated.status === 200 && adjudicatedSourceBind?.[4] === 1 &&
       adjudicatedRunBind?.[5] === 1 && adjudicatedRunBind?.[10] === 0 &&
@@ -2160,7 +2160,7 @@ const zeroChunkExpectedReturn = {
     }),
   }), env, {});
   const sourceBind = seen.binds.find((values) => values[0] === "imessage" && values.length === 7);
-  const runBind = seen.binds.find((values) => values[0] === "run_imessage_sweep" && values.length === 22);
+  const runBind = seen.binds.find((values) => values[0] === "run_imessage_sweep" && values.length === 23);
   check("an unbounded iMessage walk advances durable history proof for the imessage source",
     response.status === 200 && sourceBind?.[4] === 1 &&
       runBind?.[5] === 1 && runBind?.[10] === 0 && runBind?.[11] === 0 && runBind?.[12] === 1,
@@ -2197,7 +2197,7 @@ const zeroChunkExpectedReturn = {
     }),
   }), env, {});
   const runBind = seen.binds.find((values) =>
-    values[0] === "run_range_contract" && values.length === 22);
+    values[0] === "run_range_contract" && values.length === 23);
   check("receipt ranges normalize an exact calendar date and preserve a canonical UTC timestamp",
     response.status === 200 &&
       runBind?.[16] === "2026-03-04T00:00:00.000Z" &&
@@ -2229,7 +2229,7 @@ const zeroChunkExpectedReturn = {
         run_id: runId, confirmed_range: confirmedRange,
       }),
     }), env, {});
-    if (response.status !== 400 || seen.binds.some((values) => values[0] === runId && values.length === 22)) {
+    if (response.status !== 400 || seen.binds.some((values) => values[0] === runId && values.length === 23)) {
       failures.push({ description, status: response.status, binds: seen.binds });
     }
   }

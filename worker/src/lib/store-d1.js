@@ -49,8 +49,9 @@ import {
   PUBLIC_INSTALL_SMOKE_TITLE,
   publicInstallSmokeContentHash,
 } from "./install-smoke.js";
-import { parseStoredSourceFailureEvidence, sourceReceiptOwnerMessage } from "./source-receipt.js";
+import { parseStoredSourceFailureEvidence, providerNoChangeCheckAt, sourceReceiptOwnerMessage } from "./source-receipt.js";
 import { sourceCoverageFromEvidence } from "./source-coverage.js";
+import { zoomSourceStatus } from "./zoom-deliveries.js";
 import { scopeIsUnrestricted } from "./grants.js";
 import { probeStalledVectorFence } from "./vector-fence-probe.js";
 import { publicOwnerNoteProvenance } from "./owner-note-contract.js";
@@ -4542,6 +4543,7 @@ export const inventoryLatestRunsSql = `WITH heads AS MATERIALIZED (
 // synthetic corpus and diff its rows with the 0.4.8 SQL it replaced.
 export const sourceInventorySql = ({
   includeFailureEvidence = true,
+  includeProviderCheck = true,
   includeCurrentCustomApi = true,
   bounded = false,
   pagedReceipts = false,
@@ -4626,7 +4628,8 @@ export const sourceInventorySql = ({
            docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
            confirmed_from,confirmed_through,target_from,target_through,proposed_deletes,
            delete_action,refusal_reason,error,
-           ${includeFailureEvidence ? "failure_evidence" : "NULL AS failure_evidence"}
+           ${includeFailureEvidence ? "failure_evidence" : "NULL AS failure_evidence"},
+           ${includeProviderCheck ? "provider_check_complete" : "0 AS provider_check_complete"}
       FROM (
         SELECT sr.*,
                ROW_NUMBER() OVER (
@@ -4686,6 +4689,7 @@ export const sourceInventorySql = ({
          r.started_at AS run_started_at,
          r.finished_at AS run_finished_at,
          r.walk_complete AS run_walk_complete,
+         r.provider_check_complete AS run_provider_check_complete,
          r.files_seen AS run_files_seen,
          r.docs_added AS run_docs_added,
          r.docs_updated AS run_docs_updated,
@@ -4799,20 +4803,22 @@ export async function sourceInventorySlice(env, {
   const binds = [maxRows + 1, documentPage.after, documentPage.limit,
     ...(receiptPage ? [receiptPage.events, receiptPage.runs] : [])];
   const readInventory = async (includeCurrentCustomApi) => {
-    try {
-      return await env.DB.prepare(sourceInventorySql({ includeCurrentCustomApi, bounded: true, pagedReceipts: !!receiptPage }))
-        .bind(...binds).all();
-    } catch (error) {
-      if (!missingFailureEvidenceColumn(error)) throw error;
-      // Schema 39 remains readable while migration 0040 is pending. Missing
-      // failure evidence is unknown; every older receipt and coverage field
-      // keeps its exact meaning, and malformed/non-schema errors never retry.
-      return env.DB.prepare(sourceInventorySql({
-        includeFailureEvidence: false,
-        includeCurrentCustomApi,
-        bounded: true,
-        pagedReceipts: !!receiptPage,
-      })).bind(...binds).all();
+    let includeFailureEvidence = true;
+    let includeProviderCheck = true;
+    for (;;) {
+      try {
+        return await env.DB.prepare(sourceInventorySql({
+          includeCurrentCustomApi, includeFailureEvidence, includeProviderCheck,
+          bounded: true, pagedReceipts: !!receiptPage,
+        })).bind(...binds).all();
+      } catch (error) {
+        // Older schemas remain readable, but cannot certify a new Calendar
+        // check. Only exact missing-column failures enter a bounded retry.
+        if (includeFailureEvidence && missingFailureEvidenceColumn(error)) includeFailureEvidence = false;
+        else if (includeProviderCheck && /no such column:\s*(?:\w+\.)?provider_check_complete\b/i.test(String(error?.message))) {
+          includeProviderCheck = false;
+        } else throw error;
+      }
     }
   };
   // Custom-source version tables arrive after the v3 inventory contract. An
@@ -4820,6 +4826,8 @@ export async function sourceInventorySlice(env, {
   // referencing tables that do not exist yet.
   const result = await readWithCustomApiVisibility(env, readInventory, { probe: false });
   const rawRows = Array.isArray(result?.results) ? result.results : [];
+  const zoomStatus = rawRows.some(row => row.name === "zoom" && row.kind === "zoom" && Number(row.registered) === 1)
+    ? await zoomSourceStatus(env, { now }) : null;
   // Retirement is an append-only event decision by id, not event timestamp.
   // Page that history too, and apply its final decision only after collection.
   const retirementSql = receiptPage
@@ -4898,6 +4906,7 @@ export async function sourceInventorySlice(env, {
           started_at: inventoryTimestamp(row.run_started_at),
           finished_at: inventoryTimestamp(row.run_finished_at),
           walk_complete: row.run_walk_complete === 1 || row.run_walk_complete === true,
+          provider_check_complete: row.run_provider_check_complete === 1 || row.run_provider_check_complete === true,
           files_seen: inventoryCount(row.run_files_seen),
           docs_added: inventoryCount(row.run_docs_added),
           docs_updated: inventoryCount(row.run_docs_updated),
@@ -5111,6 +5120,8 @@ export async function sourceInventorySlice(env, {
             last_stored_ingest_at: inventoryTimestamp(row.last_stored_ingest_at),
             last_ingest_receipt_at: inventoryTimestamp(row.last_ingest_at),
             last_successful_run_at: inventoryTimestamp(row.last_successful_run_at),
+            last_check_at: providerNoChangeCheckAt(kind, latestRun) || inventoryTimestamp(row.last_successful_run_at),
+            ...(sourceId === "zoom" && kind === "zoom" && zoomStatus ? { zoom: zoomStatus } : {}),
             complete_history_through: inventoryTimestamp(row.last_complete_sweep_at),
             reported_logical_documents: inventoryCount(row.reported_logical_documents),
             logical_matches_reported: inventoryCount(row.reported_logical_documents) === logicalDocuments,
