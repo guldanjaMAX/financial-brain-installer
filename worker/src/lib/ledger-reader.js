@@ -15,7 +15,7 @@ async function rows(env, sql, binds) {
 
 // No labels, external references or credential columns are selected. The source
 // account slug remains internal row provenance, never the public account label.
-const ACCOUNTS_SQL = `SELECT a.account_slug,a.entity_slug,a.mask,a.account_kind,
+const ACCOUNTS_SQL = `SELECT a.account_slug,a.entity_slug,a.mask,a.account_kind,a.institution,
       a.currency,a.feed_mode,a.balance_role,a.basis_state,c.coverage_status,c.covered_from,c.covered_to,
       c.basis_state AS coverage_basis,i.last_synced_at
     FROM fin_accounts a
@@ -34,9 +34,14 @@ export async function readEffectiveAccounts(env, { tenantId = env.BANK_FEED_TENA
 function groupAccounts(accounts) {
   if (accounts.length > MAX_ACCOUNTS) throw new Error("ledger account limit");
   const groups = new Map();
+  const institution = a => String(a.institution || "").normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+  const identity = a => JSON.stringify([a.entity_slug, a.mask, a.account_kind]);
+  // A mask collision with a missing institution cannot authorize precedence.
+  const uncertain = new Set(accounts.filter(a => /^\d{1,4}$/.test(a.mask || "") && !institution(a))
+    .filter(a => accounts.some(b => b !== a && identity(b) === identity(a))).map(identity));
   for (const account of accounts) {
     const key = /^\d{1,4}$/.test(account.mask || "")
-      ? JSON.stringify([account.entity_slug, account.mask, account.account_kind])
+      ? JSON.stringify([account.entity_slug, account.mask, account.account_kind, institution(account)])
       : JSON.stringify([account.account_slug]);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(account);
@@ -45,7 +50,7 @@ function groupAccounts(accounts) {
     const live = members.filter(a => a.feed_mode === "live");
     const manual = members.filter(a => a.feed_mode === "manual");
     const primary = live[0] || members[0];
-    const ambiguous = members.length > 1 && !(members.length === 2 && live.length === 1 && manual.length === 1 &&
+    const ambiguous = uncertain.has(identity(primary)) || members.length > 1 && !(members.length === 2 && live.length === 1 && manual.length === 1 &&
       members.every(a => a.currency === primary.currency && a.balance_role === primary.balance_role));
     return { ...primary, members, live: live[0] || null, ambiguous };
   });
@@ -65,7 +70,12 @@ async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, account
   return facts.results;
 }
 
+const unknownTwinCoverage = account => account.members.length > 1 && account.live &&
+  (!validWindow(account.live) || account.live.coverage_status !== "complete" || account.live.coverage_basis !== "confirmed");
+
 export function effectivePeriodCovered(account, from, to) {
+  // Admission and row precedence must refuse the same unbounded live overlap.
+  if (unknownTwinCoverage(account)) return false;
   // A complete manual statement cannot fill a hole inside a partial live
   // window: those manual rows are excluded there by the same precedence rule.
   const intervals = [];
@@ -95,8 +105,13 @@ export function effectivePeriodCovered(account, from, to) {
 
 export async function readEffectiveTransactions(env, accounts, { from, to, amountMinor = null,
   tenantId = env.BANK_FEED_TENANT || DEFAULT_TENANT, mask = null, accountKind = null } = {}) {
+  if (accounts.some(unknownTwinCoverage)) throw new Error("ledger twin coverage unknown");
   const mapping = accounts.flatMap(account => account.members.map(member => ({
     slug: member.account_slug, effective: account.account_slug,
+    // A twin's live rows are authoritative only inside its proven interval;
+    // the complete manual source supplies the outside interval alone.
+    include_from: member.feed_mode === "live" && account.members.length > 1 ? member.covered_from : null,
+    include_to: member.feed_mode === "live" && account.members.length > 1 ? member.covered_to : null,
     exclude_from: member.feed_mode === "manual" && account.live && validWindow(account.live) ? account.live.covered_from : null,
     exclude_to: member.feed_mode === "manual" && account.live && validWindow(account.live) ? account.live.covered_to : null,
     last_synced_at: member.feed_mode === "live" ? member.last_synced_at : null,
@@ -109,6 +124,8 @@ export async function readEffectiveTransactions(env, accounts, { from, to, amoun
     WHERE t.tenant_id=?2 AND t.superseded_by_id IS NULL AND t.removed_at IS NULL AND t.pending=0
       AND (json_extract(m.value,'$.exclude_from') IS NULL OR t.posted_on IS NULL OR
         NOT (t.posted_on BETWEEN json_extract(m.value,'$.exclude_from') AND json_extract(m.value,'$.exclude_to')))
+      AND (json_extract(m.value,'$.include_from') IS NULL OR t.posted_on IS NULL OR
+        t.posted_on BETWEEN json_extract(m.value,'$.include_from') AND json_extract(m.value,'$.include_to'))
       AND (?5 IS NULL OR (t.amount_minor = ?5 AND t.direction='inflow') OR t.basis_state<>'confirmed' OR t.posted_on IS NULL)
     `;
   // Separate the undated refusal arm so both arms use the account/date index.

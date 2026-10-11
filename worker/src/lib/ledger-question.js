@@ -87,7 +87,7 @@ function phaseTwoQuestion(q, intent, today) {
 
 export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
   const q = String(question || "").toLowerCase().replace(/[’]/g, "'").replace(/\bwhat's\b/g, "what is");
-  const broad = /\b(?:money|cash|balance|balances|bank|deposits?|expenses?|recurring (?:charges|subscriptions)|payment|paid|spend|spent|spending|income|revenue|credits?|debits?|transactions?|transfers?|checking|savings|loan|debt|tax|payroll|invoice|receivable|payable|came in|went out)\b|\$\s*\d/.test(q);
+  const broad = /\b(?:money|cash|bank|deposits?|expenses?|recurring (?:charges|subscriptions)|payment|paid|spend|spent|spending|income|revenue|credits?|debits?|transactions?|transfers?|checking|savings|loan|debt|tax|payroll|invoice|receivable|payable|came in|went out)\b|\$\s*\d/.test(q) || /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/.test(q);
   const base = { broad, kind: null };
   if (!broad) return base;
   const today = ledgerDay(now);

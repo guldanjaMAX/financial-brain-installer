@@ -790,6 +790,14 @@ export async function ledgerObligations(
             payment_cadence, rate_bp, currency, start_on, end_on, renews_on,
             personal_guarantee, personal_guarantee_state,
             personal_guarantee_source_doc_uid, personal_guarantee_locator,
+            CASE WHEN provenance='feed' AND account_slug IS NOT NULL AND EXISTS (
+              SELECT 1 FROM fin_obligations owner
+              WHERE owner.tenant_id=fin_obligations.tenant_id
+                AND owner.account_slug=fin_obligations.account_slug
+                AND owner.entity_slug=fin_obligations.entity_slug
+                AND owner.provenance='owner_stated' AND owner.basis_state='confirmed'
+                AND owner.superseded_by_id IS NULL
+            ) THEN 1 ELSE 0 END AS shadowed_by_owner,
             ${PROVENANCE_COLUMNS}
        FROM fin_obligations
       WHERE ${where} AND ${LIVE}
@@ -799,6 +807,7 @@ export async function ledgerObligations(
   );
   const obligations = results.map((row) => ({
     obligation_uid: row.obligation_uid,
+    shadowed_by_owner: Number(row.shadowed_by_owner) === 1,
     entity_slug: row.entity_slug,
     kind: row.kind,
     counterparty: row.counterparty || null,
@@ -821,7 +830,10 @@ export async function ledgerObligations(
     ...provenanceOf(row),
   }));
 
-  const withBalance = obligations.filter((o) => o.balance_minor !== null);
+  // Preserve both records and owner terms, but count the authoritative linked
+  // obligation once regardless of which representation arrived first.
+  const effective = obligations.filter(o => !o.shadowed_by_owner);
+  const withBalance = effective.filter((o) => o.balance_minor !== null);
   const currencies = new Set(withBalance.map((o) => o.currency));
   // This read is independent of the snapshot's requested sections and limits.
   // An unknown feed account may hide a debt even when the register is empty.
@@ -845,12 +857,12 @@ export async function ledgerObligations(
         : null,
       currency: currencies.size === 1 && withBalance.length ? [...currencies][0] : null,
       obligations_with_balance: withBalance.length,
-      obligations_total: obligations.length,
-      guaranteed: obligations.filter((o) => o.personal_guarantee).length,
-      guarantee_none_found: obligations.filter((o) => o.personal_guarantee_state === "none_found").length,
+      obligations_total: effective.length,
+      guaranteed: effective.filter((o) => o.personal_guarantee).length,
+      guarantee_none_found: effective.filter((o) => o.personal_guarantee_state === "none_found").length,
       // The honest headline number on this summary. Not zero: unexamined.
-      guarantee_not_examined: obligations.filter((o) => o.personal_guarantee_state === "not_examined").length,
-      guarantee_unreadable: obligations.filter((o) => o.personal_guarantee_state === "unreadable").length,
+      guarantee_not_examined: effective.filter((o) => o.personal_guarantee_state === "not_examined").length,
+      guarantee_unreadable: effective.filter((o) => o.personal_guarantee_state === "unreadable").length,
     },
   };
 }

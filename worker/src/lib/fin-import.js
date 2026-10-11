@@ -285,7 +285,7 @@ export async function importBankExport(env, envelope, options = {}) {
   if (options.origin?.provenance !== "feed" &&
       await bankExportIdentityNeedsReview(env, envelope, options.tenantId)) {
     return { imported: false, refused: true, code: "bank_export_identity_review_required",
-      reason: "Existing bank-export rows need a reviewed identity re-key before another export can be imported." };
+      reason: "Existing bank-export rows need identity recovery. Run brain ledger rekey <manifest> --account <account> --preview, then review each page before --apply --approve <hash>. Imports remain blocked until recovery completes." };
   }
   await runAll(env, plan.statements);
   return plan.receipt;
@@ -473,7 +473,8 @@ function transactionRow(tenantId, accountKey, uid, txn, statementRef, source, en
        statement_uid = COALESCE(excluded.statement_uid, fin_transactions.statement_uid),
        basis_state = excluded.basis_state,
        unparsed_reason = excluded.unparsed_reason,
-       category_basis_state = CASE WHEN excluded.provenance='feed' THEN 'proposed'
+       category_basis_state = CASE WHEN fin_transactions.category_basis_state='confirmed' THEN 'confirmed'
+         WHEN excluded.provenance='feed' THEN 'proposed'
          ELSE fin_transactions.category_basis_state END,
        source_doc_uid = excluded.source_doc_uid,
        source_locator = excluded.source_locator,

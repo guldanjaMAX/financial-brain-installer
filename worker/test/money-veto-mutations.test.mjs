@@ -30,13 +30,13 @@ for (const [guard, from, to, mutate] of [
   ["date reliability", "if (cited.some((doc) => reliableDocumentTime(doc) === null))", "if (false)", (value) => {
     value.question = "What was charged?"; value.docs[0].date_reliable = false;
   }],
-  ["period membership", "if (window && cited.some", "if (false && window && cited.some", (value) => { value.docs[0].ts = "2026-07-01"; }],
+  ["period membership", "if (cited.some(doc => reliableDocumentTime(doc) < window.start", "if (false && cited.some(doc => reliableDocumentTime(doc) < window.start", (value) => { value.docs[0].ts = "2026-07-01"; }],
   ["lineage and T4", "cited.filter(primary)", "cited", (value) => { value.docs[0].lineage.kind = "agent_derived"; }],
   ["absence", "if (ABSENCE.test(claim) ||", "if (false && ABSENCE.test(claim) ||", (value) => {
     value.question = "Any duplicate charges?"; value.answer = "There are no duplicate charges [1].";
     value.docs[0].snippet = "There are no duplicate charges.";
   }],
-  ["span binding", "if (!records.some((doc) => inSpan(claim, question, doc)))", "if (false)", (value) => { value.answer = value.answer.replace("120.00", "121.00"); }],
+  ["span binding", "if (!supporting.length)", "if (false)", (value) => { value.answer = value.answer.replace("120.00", "121.00"); }],
   ["currency binding", "currencyInSpan(claim, span)", "true", (value) => { value.answer = value.answer.replace("USD", "CAD"); }],
   ["month binding", "months.every((month) => spanMonths.has(month))", "true", (value) => { value.answer = "Card ending 4242 statement months: January, April [1]."; }],
   ["question account binding", "ids.every((id) => tokens.has(id))", "true", (value) => { value.question = "What did card ending 4343 charge?"; }],

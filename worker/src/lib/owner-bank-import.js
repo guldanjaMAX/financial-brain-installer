@@ -382,6 +382,9 @@ async function preview(env, body, options) {
   if (scope.entity.status !== "active") return conflict("bank_import_entity_inactive");
   try {
     if (!(await importStorageReady(env))) return unavailable("owner_bank_import_unavailable");
+    if (await bankExportIdentityNeedsReview(env, prepared.envelope)) {
+      return conflict("bank_export_identity_review_required");
+    }
     if (await accountScopeConflict(env, prepared.entitySlug, prepared.envelope)) {
       return conflict("bank_account_entity_conflict");
     }

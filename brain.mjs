@@ -503,7 +503,7 @@ export function supportSourceForCommand(command = "") {
   if (command === "ocr-preflight" || command === "provenance-assess" ||
       command === "ingest-file-preview") return "local";
   if (command === "update-preview" || command === "ingest-file-apply") return "brain-data-plane";
-  if (["financial-picture", "machine-continuity"].includes(command)) return "brain-data-plane";
+  if (["financial-picture", "machine-continuity", "ledger"].includes(command)) return "brain-data-plane";
   if (command === "ingest") {
     const index = process.argv.indexOf("--from");
     const remote = index >= 0 ? process.argv[index + 1] : null;
@@ -32317,6 +32317,15 @@ export async function cmdCustomApi(manifestPath, flags = parseFlags(process.argv
   return receipt;
 }
 
+export async function cmdLedger(argv, options = {}) {
+  const { parseLedgerRekeyArgs, runLedgerRekey } = await import("./operations/ledger-rekey.mjs");
+  const args = parseLedgerRekeyArgs(argv);
+  const { m } = (options.loadManifest ?? loadManifest)(args.manifestPath);
+  return runLedgerRekey(args, { manifest: m,
+    credential: () => (options.resolveAdminKey ?? resolveAdminKey)(args.manifestPath),
+    fetchImpl: options.fetchImpl ?? fetch, write: options.write ?? console.log });
+}
+
 const commands = {
   init: cmdInit,
   setup: cmdSetupInteractive,
@@ -32342,6 +32351,7 @@ const commands = {
     boundaryCommand: cliBoundaryCommand,
   }),
   import: cmdImport,
+  ledger: () => cmdLedger(process.argv.slice(3)),
   "custom-api": cmdCustomApi,
   load: cmdLoad,
   connect: cmdConnect,
@@ -32396,6 +32406,7 @@ const versionRequested = VERSION_ARGUMENTS.has(cmd);
 // Keep this one set beside the actual dispatcher wrapper so tests exercise the
 // same decision the installed CLI uses.
 const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
+  "ledger",
   "quickbooks-desktop-data",
   "sources",
   "financial-picture",
@@ -32472,6 +32483,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain setup      [manifest] --cloudflare-token  recovery-only hidden API-token entry
     brain setup      [manifest] --no-connect  same, without touching THIS computer's AI tool config
     brain ask        <manifest>            ask a private question in this terminal
+    brain ledger rekey <manifest> --account <account> --preview
+                                           review identity recovery; apply with --apply --approve <hash>
     brain financial-picture <manifest>     read-only exact financial evidence inventory;
                                            --json for Optimize, exact entity/year/period filters,
                                            and optional prior as-of provenance baseline

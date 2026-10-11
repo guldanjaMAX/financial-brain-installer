@@ -1133,7 +1133,10 @@ function promotionStatements(env, {
          account_slug=excluded.account_slug,posted_on=excluded.posted_on,amount_minor=excluded.amount_minor,
          direction=excluded.direction,raw_amount_minor=excluded.raw_amount_minor,currency=excluded.currency,
          description=excluded.description,payee=excluded.payee,pending=excluded.pending,
-         category=excluded.category,category_basis_state='proposed',
+         category=CASE WHEN fin_transactions.category_basis_state='confirmed'
+           THEN fin_transactions.category ELSE excluded.category END,
+         category_basis_state=CASE WHEN fin_transactions.category_basis_state='confirmed'
+           THEN 'confirmed' ELSE 'proposed' END,
          pending_transaction_id=excluded.pending_transaction_id,source_locator=excluded.source_locator,
          source_iso_currency_code=excluded.source_iso_currency_code,
          source_unofficial_currency_code=excluded.source_unofficial_currency_code,
