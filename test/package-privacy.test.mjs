@@ -667,6 +667,7 @@ const expected = [
   // validates HTTPS before resolving the protected credential, refuses
   // redirects, and sends only bounded exact filters to the Brain data plane.
   "operations/financial-picture.mjs",
+  "operations/ledger-rekey.mjs",
   "operations/cloudflare-token-store.mjs",
   // Generic brain check modules. Reviewed 2026-09-05: categories and fixtures
   // are synthetic, with no client identity or credential material.

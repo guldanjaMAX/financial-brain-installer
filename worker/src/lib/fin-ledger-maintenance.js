@@ -16,9 +16,15 @@ const SNAPSHOT_SQL = `SELECT json_group_array(json_object(
     OR EXISTS (SELECT 1 FROM fin_period_closes p JOIN fin_accounts a
       ON a.tenant_id=p.tenant_id AND a.entity_slug=p.entity_slug AND a.superseded_by_id IS NULL
       WHERE a.tenant_id=t.tenant_id AND a.account_slug=t.account_slug)))
-  FROM (SELECT * FROM fin_transactions WHERE tenant_id=? AND account_slug=?
-    AND provenance='extracted' AND external_id IS NULL
-    AND superseded_by_id IS NULL ORDER BY id LIMIT ${MAX_ROWS + 1}) t`;
+  FROM (SELECT current.* FROM fin_transactions current WHERE tenant_id=?1 AND account_slug=?2
+    AND provenance='extracted' AND external_id IS NULL AND superseded_by_id IS NULL
+    AND EXISTS (SELECT 1 FROM fin_transactions legacy
+      WHERE legacy.tenant_id=current.tenant_id AND legacy.account_slug=current.account_slug
+        AND legacy.posted_on IS current.posted_on AND legacy.amount_minor IS current.amount_minor
+        AND legacy.direction IS current.direction AND legacy.provenance='extracted'
+        AND legacy.external_id IS NULL AND legacy.superseded_by_id IS NULL
+        AND substr(legacy.txn_uid,1,length(legacy.account_slug)+6)=legacy.account_slug||':line:')
+    ORDER BY posted_on,amount_minor,direction,id LIMIT ${MAX_ROWS + 1}) t`;
 
 async function digest(text) {
   return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))))
@@ -37,8 +43,8 @@ const asTransaction = row => ({ postedOn: row.posted_on, amountMinor: row.amount
  *
  * Multiple source documents may mean overlapping exports or distinct identical
  * charges. Retained rows cannot prove which. Report those row IDs for a separate
- * owner decision; never delete, tombstone or silently merge them here. Keeping
- * the entire account blocked also makes the successful re-key one atomic step.
+ * owner decision; never delete, tombstone or silently merge them here. The import gate
+ * stays closed until the last legacy identity has been recovered.
  */
 export async function rekeyBankExportTransactions(env, {
   tenantId = "primary", accountSlug, dryRun = true, confirm = false, expectedPlanHash = null,
@@ -46,8 +52,14 @@ export async function rekeyBankExportTransactions(env, {
   scope(tenantId, accountSlug);
   const result = await env.DB.prepare(`SELECT (${SNAPSHOT_SQL}) AS snapshot`).bind(tenantId, accountSlug).first();
   if (typeof result?.snapshot !== "string") throw new Error("maintenance inventory unavailable");
-  const rows = JSON.parse(result.snapshot);
-  if (rows.length > MAX_ROWS) throw new Error("maintenance account exceeds the reviewed row limit");
+  const inventory = JSON.parse(result.snapshot);
+  const bucket = row => JSON.stringify([row.posted_on, row.amount_minor, row.direction]);
+  // Keep complete identity buckets together. No ordinal or cross-document
+  // collision may be decided from only one side of a page boundary.
+  const hasMore = inventory.length > MAX_ROWS;
+  const boundary = hasMore ? bucket(inventory.at(-1)) : null;
+  const rows = hasMore ? inventory.filter(row => bucket(row) !== boundary) : inventory;
+  if (!rows.length && hasMore) throw new Error("An identity group exceeds 2000 rows. Keep imports blocked and request a separately reviewed identity plan; no rows changed.");
   const legacy = rows.filter(row => row.txn_uid.startsWith(`${accountSlug}:line:`));
   const groups = new Map();
   for (const row of rows) {
@@ -83,6 +95,7 @@ export async function rekeyBankExportTransactions(env, {
   }
   const planHash = await digest(JSON.stringify(["bank-export-rekey-v2", tenantId, accountSlug, result.snapshot]));
   const receipt = { dry_run: dryRun, candidate_count: legacy.length, mutation_count: 0,
+    has_more: hasMore, complete: !hasMore && legacy.length === 0,
     blocked: review.size > 0, review_row_ids: [...review].sort((a, b) => a - b), plan_hash: planHash };
   if (dryRun) return receipt;
   if (confirm !== true || typeof expectedPlanHash !== "string") throw new Error("exact owner approval is required");
@@ -108,8 +121,13 @@ export async function rekeyBankExportTransactions(env, {
       THEN 1 ELSE json_extract('bank export maintenance readback failed','$') END AS verified`)
       .bind(tenantId, accountSlug, JSON.stringify(rekeys)),
   ];
-  await env.DB.batch(statements);
-  return { ...receipt, mutation_count: rekeys.length };
+  statements.push(env.DB.prepare(`SELECT EXISTS (SELECT 1 FROM fin_transactions
+    WHERE tenant_id=? AND account_slug=? AND ${LEGACY_EXPORT_IDENTITY_WHERE}) AS remaining`)
+    .bind(tenantId, accountSlug));
+  const committed = await env.DB.batch(statements);
+  const remaining = committed.at(-1)?.results?.[0]?.remaining;
+  if (remaining !== 0 && remaining !== 1) throw new Error("maintenance completion readback unavailable");
+  return { ...receipt, mutation_count: rekeys.length, complete: remaining === 0, has_more: remaining === 1 };
 }
 
 /** Counts only. A separate owner-approved action must authorize any backfill. */

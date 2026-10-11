@@ -6,6 +6,15 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.12 (unreleased)
 
+- Money answers keep distinct banks separate, refuse uncertain overlapping
+  coverage, preserve reviewed categories, and count owner-linked loans once.
+  Equivalent decimal and month formats now match; account masks stay literal,
+  and payment windows use the cited payment or due date. Older export identities
+  are flagged at preview with `brain ledger rekey <manifest> --account <account>
+  --preview` recovery guidance. Review and approve each recovery page, then
+  retry the import only after completion. Check the account, period, category
+  and loan terms before relying on totals.
+
 - Ask can list largest expenses and recent deposits, total spending or income
   by merchant or category, and detect weekly or monthly recurring charges.
   Matched transfers between your own accounts are excluded from income and

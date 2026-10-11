@@ -2151,28 +2151,33 @@ two separate exports each containing one indistinguishable same-day charge
 cannot prove whether there were one or two charges; review the original bank
 record when a day is split across exports.
 
-Existing row-based export IDs require reviewed maintenance before another
-ID-less export for that account can land. The injected-D1 function
-`rekeyBankExportTransactions` in `worker/src/lib/fin-ledger-maintenance.js`
-defaults to a read-only preview with `tenantId` and `accountSlug`. It returns
-`candidate_count`, `review_row_ids`, and `plan_hash`. Only an owner-reviewed
-call with `dryRun: false`, `confirm: true`, and that exact `expectedPlanHash`
-may apply the re-key. It checks the snapshot and reads back all target IDs
-inside one D1 batch. A replay is a no-op. No migration or trigger runs it.
-The function is a maintenance seam for an authorized operator, not a new CLI
-command or public route. Its private receipt must not be placed in public logs.
+Existing row-based export IDs block another ID-less export at preview as well
+as import. Use `brain ledger rekey <manifest> --account <account> --preview`.
+Review the returned candidate count, row IDs needing review and plan hash, then
+run `brain ledger rekey <manifest> --account <account> --apply --approve <hash>`.
+This uses the saved Brain address and durable admin credential through the
+existing authenticated `/api/admin/fin/import-bank-export` route. It never
+opens a Cloudflare login. Its private receipt must not enter public logs.
 
-The preview refuses more than 2,000 current ID-less export rows per account,
-including tombstones. Withdrawn or unreadable identities, linked exceptions or
-claims, reconciled accounts, closed periods, mixed currencies, new-format collisions, and
-identical lines attributed to different documents remain intact and block the
-account for separate owner review. No rows are deleted or tombstoned by this
-function. Resolve ambiguous duplicates only through a separately approved
-maintenance plan, then preview the re-key again. Other accounts remain usable.
+Each page considers at most 2,000 rows plus an overflow sentinel. Equal posting
+date, amount and direction buckets stay together so normalized descriptions,
+ordinals and cross-document ambiguity are checked as a whole. Preview and
+apply repeat until `complete: true`; each new page requires fresh approval.
+The duplicate-prevention gate stays closed while any legacy row remains.
+Every page checks its snapshot and reads back changed IDs inside one D1 batch.
+A stale approval refuses; a fully completed replay is a no-op. No migration or
+scheduled task performs this maintenance.
 
-New and refreshed feed rows carry proposed category state. Unsorted includes
-proposed categories as spending needing review, preserving the existing single
-review surface. Historical rows are not automatically changed.
+A single identity bucket exceeding 2,000 rows still requires a separate reviewed
+plan. Withdrawn or unreadable identities, linked exceptions or claims,
+reconciled accounts, closed periods, mixed currencies, new-format collisions,
+and identical lines attributed to different documents remain intact and block
+that page for owner review. No rows are deleted or tombstoned. Other accounts
+remain usable.
+
+New feed categories are proposed and remain in Unsorted until reviewed.
+Provider refreshes preserve owner-confirmed categories and their review state.
+Historical rows are not automatically changed.
 `previewFeedCategoryBackfill(env, { tenantId })` returns only the active legacy
 feed-category count and `mutation_count: 0`; any backfill needs a separate
 owner-approved action. Confirmed categories are excluded from that count.

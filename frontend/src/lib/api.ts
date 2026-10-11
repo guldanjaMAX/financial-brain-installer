@@ -53,6 +53,7 @@ const OWNER_ACTION_CODE_MESSAGES: Readonly<Record<string, string>> = Object.free
   unsafe_upload_archive: "This archive did not pass the Brain's file-safety checks. Nothing was added. Choose the original supported files or ask your installer for help.",
   unreadable_upload: "The Brain could not read this file. Nothing was added. Choose a supported readable copy and try again.",
   bank_export_unreadable: "The Brain could not read this bank export. Nothing was imported. Download a fresh supported export and try again.",
+  bank_export_identity_review_required: "Older bank-export rows need identity recovery before another import. Ask your installer to run brain ledger rekey <manifest> --account <account> --preview. Review each page, then use --apply --approve <hash>. Retry the import only after recovery is complete.",
   bank_export_refused: "This bank export did not match the reviewed import format. Nothing was imported. Review the export type and column choices before trying again.",
 });
 

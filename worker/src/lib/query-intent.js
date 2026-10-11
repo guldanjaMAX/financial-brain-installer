@@ -50,7 +50,12 @@ export function queryTimeWindow(query, { now = Date.now() } = {}) {
   if (!Number.isFinite(now)) return null;
   const date = new Date(now);
   if (!Number.isFinite(date.getTime())) return null;
-  const text = String(query || "");
+  // Strip scalar/identifier positions before looking for temporal expressions.
+  const text = String(query || "")
+    .replace(/\b(?:card|account|invoice|order|reference)\s*(?:(?:number|ending(?: in)?|ends in|no\.)\s*|#\s*)?[\w*-]*\d[\w*-]*/gi, " ")
+    .replace(/(?:[xX•*]+)\s*\d+\b/g, " ")
+    .replace(/(?:[$€£¥]\s*|\b(?:USD|EUR|GBP|CAD|AUD|JPY)\s+)[-+−]?[\d,]+(?:\.\d+)?/gi, " ")
+    .replace(/\b\d[\d,]*(?:\.\d+)?\s*(?:dollars?|euros?|pounds?|cents?|items?|rows?|transactions?|payments?|charges?|%)/gi, " ");
   const year = date.getUTCFullYear(), month = date.getUTCMonth(), day = date.getUTCDate();
   const today = Date.UTC(year, month, day), dayMs = 86400000;
   const window = (start, end) => Number.isFinite(start) && Number.isFinite(end) && start < end
@@ -80,7 +85,12 @@ export function queryTimeWindow(query, { now = Date.now() } = {}) {
   if (quarter) return window(Date.UTC(Number(quarter[2]), (Number(quarter[1]) - 1) * 3, 1), Date.UTC(Number(quarter[2]), Number(quarter[1]) * 3, 1));
   // An invalid quarter must not fall through to the broader year interpretation.
   if (/\bq\d\b/i.test(text)) return null;
-  const years = [...text.matchAll(/\b(?:19|20)\d{2}\b/g)];
+  const years = [...text.matchAll(/(?<![\d.,])\b(?:19|20)\d{2}\b(?![\d,]|\.\d)/g)].filter(match => {
+    const before = text.slice(0, match.index), after = text.slice(match.index + 4);
+    return /\b(?:in|during|for|year|from|since|through|until|before|after|of)\s*$|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+\d{1,2},?)?\s*$/i.test(before) ||
+      /^-\d{2}-\d{2}\b/.test(after) || /^\s*(?:(?:tax|financial|calendar|fiscal)\s+year|statements?|records?)\b/i.test(after) ||
+      !before.trim() && !after.trim();
+  });
   if (years.length === 1) return window(Date.UTC(Number(years[0][0]), 0, 1), Date.UTC(Number(years[0][0]) + 1, 0, 1));
   return null;
 }

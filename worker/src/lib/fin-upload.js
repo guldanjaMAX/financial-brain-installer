@@ -39,6 +39,7 @@
 
 import { jsonResponse } from "./core.js";
 import { importBankExport, balanceRoleFor, DEFAULT_TENANT } from "./fin-import.js";
+import { rekeyBankExportTransactions } from "./fin-ledger-maintenance.js";
 import { ledgerInstalled } from "./fin-d1.js";
 
 /** Operator-only. Mounted behind the admin-key gate in `index.js`. */
@@ -225,6 +226,25 @@ export async function handleBankExportImport(env, request) {
     body = await request.json();
   } catch {
     return jsonResponse({ imported: false, refused: true, reason: "the import body was not readable JSON" }, 400);
+  }
+
+  // Reuse the import route's exact admin-key and upgrade-pause boundaries.
+  if (body?.action === "rekey") {
+    if (!SLUG.test(body.account_slug || "") || typeof body.dry_run !== "boolean" ||
+        (!body.dry_run && !/^[a-f0-9]{64}$/.test(body.approve || ""))) {
+      return jsonResponse({ reason: "Preview the account, then apply with its exact approval hash." }, 400);
+    }
+    try {
+      return jsonResponse(await rekeyBankExportTransactions(env, {
+        tenantId: DEFAULT_TENANT, accountSlug: body.account_slug, dryRun: body.dry_run,
+        confirm: !body.dry_run, expectedPlanHash: body.approve,
+      }));
+    } catch (error) {
+      const known = ["maintenance approval is stale; preview again", "ambiguous export identities require separate owner review",
+        "An identity group exceeds 2000 rows. Keep imports blocked and request a separately reviewed identity plan; no rows changed."];
+      return jsonResponse({ code: "bank_export_identity_review_required",
+        reason: known.includes(error.message) ? error.message : "Identity recovery could not be verified. Preview again before applying." }, 409);
+    }
   }
 
   if (body?.entity_slug === undefined || body?.entity_slug === null || body.entity_slug === "") {

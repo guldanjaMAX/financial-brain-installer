@@ -36,8 +36,8 @@ async function fixtureFor(t) {
     ["live-account", "live", "2026-09-01", "2026-10-11"],
   ]) {
     fixture.raw(`INSERT INTO fin_accounts
-      (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,source_feed,basis_state,recorded_at)
-      VALUES (?,'owner-company','checking','asset','4321',?,'feed','bank-feed:fixture-feed','confirmed',?)`, slug, mode, stamp);
+      (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,source_feed,basis_state,recorded_at,institution)
+      VALUES (?,'owner-company','checking','asset','4321',?,'feed','bank-feed:fixture-feed','confirmed',?,'Fixture Bank')`, slug, mode, stamp);
     fixture.raw(`INSERT INTO fin_account_coverage
       (account_slug,coverage_status,covered_from,covered_to,computed_at,provenance,basis_state,recorded_at)
       VALUES (?,'complete',?,?,?,'owner_stated','confirmed',?)`, slug, start, end, stamp, stamp);
