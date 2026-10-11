@@ -567,6 +567,14 @@ reviewed owner-present flow and may be absent during setup. `brain secrets`
 preserves the bank allowlist, requires only the wrapping-key name for an enabled
 feed, and never manufactures a bank value.
 
+Windows code signing has its own identity and stores no secret. The sign job
+in `.github/workflows/windows-daemon-signing.yml` runs in the
+`artifact-signing` environment and signs in through GitHub OIDC as one Entra
+app registration. Its federated credential trusts only that environment, and
+its only role is Artifact Signing Certificate Profile Signer on the publisher's
+signing account. It grants no Cloudflare, corpus, subscription, or Brain
+access. Do not replace it with a client secret or reuse it for anything else.
+
 ## Issue-note collection and regression tracking
 
 Recognized command failures already create immutable, sanitized local issue
