@@ -192,7 +192,8 @@ workspace, install, browser, support, and skill effects remain zero. These local
 rules and fixture tests are not package, CI, field, or live-Brain proof.
 
 The supported beginner update is `brain update [manifest]`. It verifies the
-account, requires a pre-change D1 bookmark, deploys and verifies a paused
+account, requires a pre-change D1 bookmark, saves and exactly reads back a
+private local receipt, then deploys and verifies a paused
 compatibility Worker, then requires one authenticated documents response to
 bind the exact new version, `paused-for-upgrade`, D1, equal vector totals, an
 empty queue, and query readiness. A responded mismatch is not retried: update
@@ -212,6 +213,43 @@ The older `brain upgrade` command uses the same engine and cannot
 bypass those gates. Neither path restores D1 automatically because that would
 discard writes made after the bookmark. Direct `brain migrate` refuses a live
 D1 install when the pending writer-protocol migrations require this cutover.
+
+Pre-change bookmarks are retained per attempt under `~/.brain/upgrade-bookmarks/`,
+including for legacy databases without `upgrade_runs`. Each receipt binds the
+exact account, database, original manifest hash, versions and capture time.
+File bytes and, on POSIX, the directory entry are flushed before readback and
+before deployment or migration. A persistence failure stops the update. An
+interrupted process cannot erase the receipt, and a retry never overwrites an
+earlier restore point. These are private recovery records, never package inputs.
+If an abrupt stop left no D1 history row, the installer can inspect the matching
+local receipt for the bookmark; `doctor --rollback` still reads D1 history and
+does not automatically select a local receipt. Restore requires separate review.
+Directory components must be real directories, and native path spelling is
+accepted only when the canonical path identifies the same directory. POSIX
+ancestors must be owned by the current user or root and refuse other writers
+except root-owned sticky temporary directories. The receipt directory and file
+must be private to the current user. On macOS, ancestor ACLs must grant no
+write, delete or permission-changing rights; unknown grants are refused. Ordinary
+read/traverse grants and deny entries on ancestors remain unchanged. The owned
+receipt directory and empty file have their ACLs removed and read back before
+identifying bytes are written, then checked again after content readback.
+Missing native tools, denied changes and ambiguous ACL listings stop the update.
+Windows creates protected DACLs on the
+receipt directory and new empty file, removes other inherited and explicit
+grants, and reads the owner SID and exact grants back before writing receipt
+contents. An elevated token may replace the default Administrators group owner
+with its individual user SID during protection. Other starting owners are
+refused; verification always requires the individual owner and its sole grant.
+It verifies the ACLs again at readback. Each of the four native ACL calls has a
+120-second bound, including PowerShell startup (eight minutes maximum in total).
+A timeout reports the Windows permission-check failure explicitly and stops
+before deployment or migration. The separate protection and readback calls keep
+both paths private before writing and verify both again after content readback.
+Missing PowerShell, denied ACL changes or unverified ACLs also stop the update
+before deployment. Paths cross the
+PowerShell stdin boundary as ASCII-escaped JSON so non-ASCII profile names
+survive the console input code page. Windows flushes
+the file; native power-loss durability remains a field gate.
 
 The accelerated bootstrap keeps two separate time boundaries. Its six-hour
 wall-clock deadline remains a hard stop. Its fifteen-minute no-movement budget

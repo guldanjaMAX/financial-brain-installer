@@ -1686,11 +1686,12 @@ const drainResponse = (body, status) => new Response(JSON.stringify(body), {
   };
 
   const prePauseFailure = await runFailure("paused-deploy");
-  check("a failure before paused deployment succeeds does not claim refused recovery commands",
+  check("an unacknowledged pause upload warns of an uncertain pause and requires health verification",
     prePauseFailure.events.join(",") === "deploy-paused" &&
-      !/CANNOT ACCEPT DOCUMENTS/i.test(prePauseFailure.error?.message || "") &&
-      !/reindex and drain are\s+refused|remain unavailable/i.test(prePauseFailure.error?.message || "") &&
-      /does not claim that reindex or drain are blocked/i.test(prePauseFailure.error?.message || ""),
+      /MAY NOT ACCEPT DOCUMENTS/i.test(prePauseFailure.error?.message || "") &&
+      /may be paused/i.test(prePauseFailure.error?.message || "") &&
+      !/working normally/i.test(prePauseFailure.error?.message || "") &&
+      /health verifies active mode/i.test(prePauseFailure.error?.message || ""),
     prePauseFailure.error?.message);
 
   for (const failureStage of pausedAggregateFailures.keys()) {

@@ -32,6 +32,7 @@
 
 import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdtempSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync, appendFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { saveUpgradeBookmark, WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS } from "./operations/upgrade-bookmark.mjs";
 import { basename, delimiter, isAbsolute, join, dirname, relative, resolve, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
@@ -4899,9 +4900,10 @@ function migrationCheckUnreachableError(message, { cause, descriptor }) {
 }
 
 function slowAddedColumnDeadlineMessage(descriptor) {
-  return `Cloudflare is still applying a large database change (${descriptor.table}.${descriptor.column}). ` +
-    "Nothing was lost and nothing needs undoing. Wait about 10 minutes, then " +
-    renderCliCommands("run brain update again. It checks the column first and continues.");
+  return `The database change is unconfirmed (${descriptor.table}.${descriptor.column}). ` +
+    "The column is still absent; this does not prove whether the change was delivered or is running. " +
+    "The installer must review the saved migration intent and exact column definition before deciding how to recover. " +
+    "The update will not resend this change without proof that it was never delivered.";
 }
 
 function unreachableAddedColumnDeadlineMessage(descriptor, deadline) {
@@ -4957,8 +4959,8 @@ export async function runRestartSafeMigrationStatements(
   const waitForColumnInventory = async (descriptor, firstFailure, { returnWhenAbsent }) => {
     const startedAt = now();
     log(
-      `Cloudflare is still applying a large database change (adding ${descriptor.table}.${descriptor.column}). ` +
-      `On a large Brain this can take several minutes. Checking every ${migrationDuration(interval)} ` +
+      `Checking an unconfirmed database change (adding ${descriptor.table}.${descriptor.column}). ` +
+      `Its delivery and completion are not yet proved. Checking every ${migrationDuration(interval)} ` +
       `for up to ${migrationDuration(deadline)}.`,
     );
     let pollIterations = 0;
@@ -5001,10 +5003,11 @@ export async function runRestartSafeMigrationStatements(
         log(`Cloudflare answered the column check for ${descriptor.table}.${descriptor.column}; continuing.`);
         return "absent";
       }
-      log(`still applying (${migrationDuration(now() - startedAt)} so far)`);
+      log(`column still absent (${migrationDuration(now() - startedAt)} so far)`);
     }
-    // Only a successful inventory read supports saying the service is still
-    // applying the change. An entire wait made of failed reads is an outage.
+    // An absent column proves neither dispatch nor provider progress: the
+    // process may have died between durable intent and dispatch. All failed
+    // reads instead mean we could not even observe the column inventory.
     if (inventoryReadSucceeded) {
       throw migrationStillApplyingError(slowAddedColumnDeadlineMessage(descriptor), {
         cause: firstFailure,
@@ -6791,6 +6794,20 @@ export async function cmdUpgrade(manifestPath, options = {}) {
     }
 
     const startedAt = new Date().toISOString();
+    try {
+      saveUpgradeBookmark({
+        account_id: accountId, database_id: dbId, bookmark,
+        from_version: fromVersion, to_version: toVersion,
+        manifest_sha256: createHash("sha256").update(originalPin.raw).digest("hex"),
+      }, options.bookmarkOptions);
+      assertStageFiles("D1 bookmark persistence");
+      ok("D1 restore bookmark saved and verified in this computer's private upgrade-bookmarks folder");
+    } catch (error) {
+      if (error?.code === "UPGRADE_BOOKMARK_ACL_TIMEOUT") {
+        die(`update stopped because its D1 restore bookmark could not be saved and verified on this computer: the Windows permission check timed out after ${WINDOWS_UPGRADE_BOOKMARK_ACL_TIMEOUT_MS / 1000} seconds. No deployment or migration was started. Ask the installer to review this computer's PowerShell startup before retrying.`);
+      }
+      die("update stopped because its D1 restore bookmark could not be saved and verified on this computer. No deployment or migration was started.");
+    }
     const logRun = async (status, detail, { required = false } = {}) => {
       try {
         await queryDatabase(
@@ -6809,11 +6826,13 @@ export async function cmdUpgrade(manifestPath, options = {}) {
 
     info(`Updating your Brain from ${fromVersion} to ${toVersion}. For part of this your Brain won't accept new documents; asking questions keeps working. Keep this window open.`);
     let stage = "migration";
-    // True from verified paused deployment until active mode is itself verified.
+    // True from pause dispatch until active mode is itself verified. A lost
+    // reply cannot prove the pause was not deployed.
     // Uploading the active Worker is not enough: during propagation the paused
     // generation can still answer. If the run dies in that window the install
     // may stay paused, which is correct but must be explicit to the operator.
     let corpusPauseMayStillBeServing = false;
+    let pauseUploadAcknowledged = false;
     const runStage = async (name, action) => {
       stage = name;
       const context = await assertStageContext(name);
@@ -6876,12 +6895,13 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           // Persist intent before handing control to deploy: a thrown upload
           // can already have changed the Worker, even before any migration.
           options.beforeRemoteMutation?.();
+          corpusPauseMayStillBeServing = true;
           return deploy(executionPin.target, {
             persistDomain: false,
             pauseVectorDrainForUpgrade: true,
           });
         });
-        corpusPauseMayStillBeServing = true;
+        pauseUploadAcknowledged = true;
         await runStage("paused vector-drain health verification", () =>
           verifyHealth(executionPin.target, {
             expectVersion: toVersion,
@@ -7041,10 +7061,12 @@ export async function cmdUpgrade(manifestPath, options = {}) {
       );
       const ownerRecovery = slowMigration
         ? corpusPauseMayStillBeServing
-          ? "Cloudflare is still applying a large database change. Your Brain can still answer questions but won't take new documents until the update finishes. Nothing was lost. Wait about 10 minutes, then run brain update once more."
-          : "Cloudflare is still applying a large database change. Your Brain is working normally. Nothing was lost. Wait about 10 minutes, then run brain update once more."
+          ? "The database change is unconfirmed. Your Brain may still be paused and unable to take new documents. Ask your installer to review the saved migration intent and exact database state before retrying."
+          : "The database change is unconfirmed. Ask your installer to review the saved migration intent and exact database state before retrying."
         : corpusPauseMayStillBeServing
-          ? "The update stopped partway. Your Brain can still answer questions but won't take new documents until the update finishes. Nothing was lost. Run brain update once more."
+          ? pauseUploadAcknowledged
+            ? "The update stopped partway. Your Brain can still answer questions but won't take new documents until the update finishes. Nothing was lost. Run brain update once more."
+            : "The pause upload did not return a confirmed result. Your Brain may be paused and unable to take new documents. Run brain health to check its state before retrying the update."
           : "The update stopped before its last check. Your Brain is working normally and nothing was lost. Run brain update once more; it picks up where it stopped.";
       const failureMessage =
         `${ownerRecovery}\n` +
@@ -7057,9 +7079,16 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           `      D1 recovery bookmark: ${bookmark}\n` +
           "      Do not restore it as the first response. A D1 restore discards newer writes.\n" +
           projectionRecovery +
-          "      Safe default: fix the reported issue and run brain update again." +
+          (slowMigration
+            ? "      Ask your installer to review the saved intent before retrying; do not remove it to force a resend."
+            : "      Safe default: fix the reported issue and run brain update again.") +
           (corpusPauseMayStillBeServing
-            ? "\n\n" +
+            ? !pauseUploadAcknowledged
+              ? "\n\n      THIS BRAIN MAY NOT ACCEPT DOCUMENTS RIGHT NOW.\n" +
+                "      The pause request may have taken effect even though its reply was lost.\n" +
+                "      Do not assume imports, reindex or drain are available until brain health verifies active mode.\n" +
+                "      Do not clear VECTOR_DRAIN_MODE by hand."
+              : "\n\n" +
               "      THIS BRAIN CANNOT ACCEPT DOCUMENTS RIGHT NOW.\n" +
               "      The update paused its corpus writes before changing the schema and did not\n" +
               "      reach the step that resumes them. Ingest, forget and reindex return 503 until\n" +
