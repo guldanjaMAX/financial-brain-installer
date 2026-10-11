@@ -76,7 +76,11 @@ async function scratchRelease(version) {
   scratchReleases.push(directory);
   for (const entry of readdirSync(ROOT)) {
     if (EXCLUDED_FROM_RELEASE_COPY.has(entry)) continue;
-    cpSync(join(ROOT, entry), join(directory, entry), { recursive: true });
+    const sourcePath = join(ROOT, entry);
+    // An isolated TMPDIR may live inside the checkout. Its container is test
+    // output, and copying it would recursively copy this release into itself.
+    if (directory === sourcePath || directory.startsWith(`${sourcePath}${sep}`)) continue;
+    cpSync(sourcePath, join(directory, entry), { recursive: true });
   }
   symlinkSync(join(ROOT, "node_modules"), join(directory, "node_modules"), "dir");
   const packagePath = join(directory, "package.json");

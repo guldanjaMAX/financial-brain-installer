@@ -17,6 +17,16 @@ the brain, not for whoever built it: what changed for them, and what to check.
   or accounts. Document excerpts cannot prove that charges are absent or all
   statements are present. Unconfirmed money answers stay partial. Check the
   cited records and requested period before relying on an answer.
+- **Bank exports keep matching charges when rows move.** Overlapping exports
+  for the same mapped account no longer duplicate charges just because row
+  numbers or description spacing change. Identical charges keep separate
+  ordinals. Older export rows require a reviewed identity re-key before another
+  import; ambiguous matches stay intact for owner review. Feed categories are
+  proposed and remain in Unsorted until reviewed. Plaid loans appear as
+  obligations, and unknown accounts or missing coverage dates cannot certify
+  a complete financial picture. Verify the account mapping and review Unsorted
+  after the next import.
+
 - Source inventory checks large libraries in bounded pages and shows progress.
   Daily imports read run receipts independently of document counts. If freshness
   cannot be verified, eligible imports still run and freshness stays unknown;

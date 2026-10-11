@@ -349,7 +349,7 @@ async function snapshot(env, install, body, entitySlug) {
   if (out.obligation_exposure) {
     out.obligation_exposure = {
       ...out.obligation_exposure,
-      covers_all_obligations: !truncated.obligations,
+      covers_all_obligations: out.obligation_exposure.covers_all_obligations === true && !truncated.obligations,
     };
   }
 

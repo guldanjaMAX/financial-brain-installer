@@ -2792,7 +2792,7 @@ async function accountRecord(row, references) {
     opened_on: row.opened_on || null,
     closed_on: row.closed_on || null,
     coverage: row.coverage_status ? {
-      status: row.coverage_status,
+      status: row.coverage_status === "complete" && !row.period_start ? "missing" : row.coverage_status,
       covered_from: row.period_start || null,
       covered_to: row.period_end || null,
       covered_via_account_ref: row.covered_via_account_slug

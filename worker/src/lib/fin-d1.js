@@ -226,11 +226,13 @@ export async function ledgerAccounts(env, { tenantId = DEFAULT_TENANT, entitySlu
       status: row.status,
       opened_on: row.opened_on || null,
       closed_on: row.closed_on || null,
-      coverage_status: row.coverage_status || null,
+      coverage_status: row.coverage_status === "complete" && !row.covered_from
+        ? "missing" : row.coverage_status || null,
       covered_from: row.covered_from || null,
       covered_to: row.covered_to || null,
       covered_via_account_slug: row.covered_via_account_slug || null,
-      coverage_note: row.basis_note || null,
+      coverage_note: row.coverage_status === "complete" && !row.covered_from
+        ? "No dated transaction coverage has been established." : row.basis_note || null,
       coverage_computed_at: row.computed_at || null,
       ...provenanceOf(row),
     })),
@@ -583,7 +585,7 @@ async function confirmedBalanceFor(env, tenantId, accountSlug) {
 /**
  * Spending nobody has sorted yet.
  *
- * `category IS NULL` is the state, and the total deliberately excludes three
+ * Missing or proposed categories need owner review. The total excludes three
  * classes that would each inflate it in a different direction: pending lines
  * (which are later withdrawn and re-reported), tombstoned lines, and lines the
  * extractor could not read. The unreadable ones are COUNTED and returned, so the
@@ -595,7 +597,7 @@ export async function ledgerUnsortedSpending(
   { tenantId = DEFAULT_TENANT, accountSlug = null, entitySlug = null, from = null, to = null } = {},
 ) {
   const binds = [tenantId];
-  let where = "tenant_id = ? AND category IS NULL AND removed_at IS NULL AND pending = 0";
+  let where = "tenant_id = ? AND (category IS NULL OR category_basis_state = 'proposed') AND removed_at IS NULL AND pending = 0";
   if (accountSlug) {
     where += " AND account_slug = ?";
     binds.push(accountSlug);
@@ -821,10 +823,21 @@ export async function ledgerObligations(
 
   const withBalance = obligations.filter((o) => o.balance_minor !== null);
   const currencies = new Set(withBalance.map((o) => o.currency));
+  // This read is independent of the snapshot's requested sections and limits.
+  // An unknown feed account may hide a debt even when the register is empty.
+  const classification = await safeAll(env,
+    `SELECT COUNT(*) AS unclassified FROM fin_accounts
+      WHERE tenant_id=? AND ${LIVE} AND (provenance='feed' OR feed_mode='live')
+        AND (account_kind IS NULL OR account_kind='' OR account_kind='other')
+        ${entitySlug ? "AND entity_slug=?" : ""}`,
+    entitySlug ? [tenantId, entitySlug] : [tenantId]);
   return {
-    unavailable,
+    unavailable: unavailable || classification.unavailable,
     obligations,
     exposure: {
+      covers_all_obligations: !unavailable && !classification.unavailable &&
+        classification.results.length === 1 && Number(classification.results[0].unclassified) === 0 &&
+        obligations.length < boundedLimit(limit),
       // Same refusal as the cash figure: a total across units that are not the
       // same unit is not a total.
       balance_minor: currencies.size === 1 && withBalance.length

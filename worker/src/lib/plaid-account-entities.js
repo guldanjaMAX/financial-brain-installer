@@ -275,7 +275,8 @@ export async function plaidOwnerAccountStatus(env, { now = null } = {}) {
     const historyPartial = row.history_state !== "complete" || row.provider_history_state !== "HISTORICAL_UPDATE_COMPLETE";
     const coverageState = !assigned
       ? "assignment_required"
-      : row.coverage_status || (historyPartial ? "pending" : "missing");
+      : row.coverage_status === "complete" && !row.covered_from
+        ? "missing" : row.coverage_status || (historyPartial ? "pending" : "missing");
     return {
       account_ref: row.account_ref,
       masked_identifier: maskedIdentifier(row.account_label, row.account_mask),
@@ -302,7 +303,8 @@ export async function plaidOwnerAccountStatus(env, { now = null } = {}) {
         state: coverageState,
         covered_from: row.covered_from || null,
         covered_to: row.covered_to || null,
-        note: row.basis_note || null,
+        note: row.coverage_status === "complete" && !row.covered_from
+          ? "No dated transaction coverage has been established." : row.basis_note || null,
         computed_at: row.computed_at || null,
       },
       // Balance fields rounded from a finer provider decimal, so they are not
@@ -456,8 +458,8 @@ async function plaidAccountReassignmentReview(env, {
  * Preview or apply one owner-reviewed historical Plaid account move.
  *
  * Transactions and balance snapshots inherit scope through fin_accounts, so
- * the move changes exactly the assignment authority and its one live ledger
- * account. Closed periods and reconciliations deliberately stop the move
+ * the move changes the assignment authority, its live ledger account, and its
+ * feed-derived obligation. Closed periods and reconciliations stop the move
  * rather than silently reclassifying already-reviewed financial evidence.
  */
 export async function reassignPlaidAccountEntity(env, body, { now = null } = {}) {
@@ -573,6 +575,12 @@ export async function reassignPlaidAccountEntity(env, body, { now = null } = {})
         WHERE tenant_id=? AND account_slug=? AND entity_slug=?
           AND external_ref=? AND source_feed=('bank-feed:'||?) AND superseded_by_id IS NULL`,
     ).bind(toEntitySlug, stamp, tenantId, reviewed.account_slug, fromEntitySlug, reviewed.provider_account_id, reviewed.item_ref),
+    env.DB.prepare(
+      `UPDATE fin_obligations SET entity_slug=?1
+        WHERE tenant_id=?2 AND account_slug=?3 AND entity_slug=?4
+          AND obligation_uid='plaid-obligation:'||?3 AND provenance='feed'
+          AND source_feed=('bank-feed:'||?5) AND superseded_by_id IS NULL`,
+    ).bind(toEntitySlug, tenantId, reviewed.account_slug, fromEntitySlug, reviewed.item_ref),
     env.DB.prepare(
       `INSERT INTO plaid_reconciliation
          (tenant_id,item_ref,reason,state,due_at,attempts,updated_at)

@@ -1739,7 +1739,8 @@ test("reviewed Plaid reassignment refreshes the committed move once and permits 
     const originalDb = fixture.env.DB;
     fixture.env.DB = { ...originalDb, async batch(statements) {
       batches += 1;
-      assert.equal(statements.length, 8, "the apply decision reaches one closed D1 batch");
+      assert.equal(statements.length, 9, "the apply decision includes the feed obligation in one closed D1 batch");
+      assert.equal(statements.filter(statement => /UPDATE fin_obligations/.test(statement.sql)).length, 1);
       return originalDb.batch(statements);
     } };
     const background = [];
