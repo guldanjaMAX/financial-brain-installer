@@ -20,9 +20,11 @@ const workflowFiles = readdirSync(workflowsDir)
   .filter((name) => /\.ya?ml$/.test(name))
   .map((name) => [name, readText(join(workflowsDir, name))]);
 
-// Branch and pull-request CI remains independent. Tags have one route, through
-// release.yml, so two racing CI runs cannot disagree about which one released.
-assert.match(ci, /^  push:\n    branches:\n      - "\*\*"$/m);
+// A pull request is tested once, by its pull_request run; branch pushes run
+// only on main. Tags have one route, through release.yml, so two racing CI runs
+// cannot disagree about which one released: ci.yml must never list push tags.
+assert.match(ci, /^  push:\n    branches:\n      - main$/m);
+assert.doesNotMatch(ci.split(/^  pull_request:$/m)[0], /^    tags:/m);
 assert.match(ci, /^  pull_request:$/m);
 assert.match(ci, /^  workflow_dispatch:$/m);
 assert.match(ci, /^  workflow_call:\n    outputs:/m);

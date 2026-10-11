@@ -11,15 +11,15 @@
 name: ci
 
 on:
-  # Branch pushes keep their existing CI coverage. Version tags enter through
-  # release.yml, which calls this same workflow and waits for every job before
-  # it is allowed to create a draft release.
+  # A pull request is tested once, by its pull_request run. Testing every
+  # branch push as well ran the whole matrix twice per change and doubled the
+  # wait for the few concurrent macOS runners. Pushes to main still run, so
+  # main and the release paths keep their own evidence. Version tags enter
+  # through release.yml, which calls this same workflow and waits for every job
+  # before it is allowed to create a draft release.
   push:
     branches:
-      - "**"
-      # This orphan branch has a separate Windows-only, CI-only rehearsal. It
-      # must not allocate the paid private macOS runners in this release matrix.
-      - "!codex/windows-rehearsal-plaid-20260906"
+      - main
   pull_request:
   workflow_dispatch:
   workflow_call:
