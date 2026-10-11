@@ -1,3 +1,4 @@
+import { createUpgradeBookmarkWriter } from "./fixtures/upgrade-bookmark-writer.mjs";
 import assert from "node:assert/strict";
 import {
   mkdirSync,
@@ -384,6 +385,7 @@ test("deploy performs no secret call when the bank feed is disabled", async () =
 });
 
 test("brain update reaches the real deploy and creates the wrapping key before verification", async () => {
+  const bookmarkWriter = createUpgradeBookmarkWriter();
   const harness = cloudflareHarness();
   const path = writeManifest("update-absent.json", manifest());
   let d1Version = null;
@@ -396,6 +398,7 @@ test("brain update reaches the real deploy and creates the wrapping key before v
     withCloudflareControl: async (action) => action(),
     cmdVerify: async () => {},
     cmdUpgrade: (upgradePath) => cmdUpgrade(upgradePath, {
+      saveUpgradeBookmark: bookmarkWriter.saveUpgradeBookmark,
       resolveAccount: async () => ({ id: "fixture-account" }),
       d1Query: async (_account, _database, sql) => {
         if (/sqlite_master/i.test(sql)) return { results: [] };
@@ -439,6 +442,7 @@ test("brain update reaches the real deploy and creates the wrapping key before v
   }));
 
   assert.equal(upgradeDeployments, 2, "the D1 update must reach paused and active deployment stages");
+  bookmarkWriter.assertCalled();
   assert.equal(harness.workerUploads, 2, "both stages must use the real deploy function");
   assert.equal(harness.secretLists, 3, "the second deploy must observe the first deploy's verified key");
   assert.equal(harness.secretPuts, 1);
