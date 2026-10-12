@@ -749,8 +749,13 @@ and visible. Recurrence uses at least three charges, bounded weekly/monthly
 intervals and integer amount tolerance; results are explicitly detected rather
 than confirmed. Category proposals and Unsorted remain visible. Ambiguous groups,
 incomplete coverage and unreadable rows cannot establish a total or absence.
-Named payment arrivals can match whole counterparty words in the payee or
-memo, with or without an exact amount. Only posted inflows match. Without a
+Named payment arrivals match whole counterparty words. For an amountless
+arrival, an explicit payee supplies the sender evidence; a memo supplies it
+only when no payee is recorded. Generic-only sender clauses cannot identify
+an amountless payment, in named, `from` or `via` forms. Exact-amount questions
+retain their amount-plus-text match. Budget, approval and planning qualifiers
+stay with documents instead of becoming merchant filters. Only posted inflows
+match. Without a
 supplied period, a named payment without an amount searches 60 days; exact
 amounts retain the 30-day default. Recent deposits use 14 days, and largest
 expenses without a count list ten. The current named month ends today; period

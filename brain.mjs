@@ -26767,9 +26767,12 @@ function renderDailyFreshnessRows(rows, log = console.log) {
 }
 
 // Daily plan keys name the manifest corpus; the Worker registers source kinds.
-// Only Google Drive differs today ("google_drive" in the plan, "drive" in D1),
-// and sending the plan key made `brain daily on` fail for every Drive owner.
-const DAILY_PLAN_KEY_WORKER_KIND = Object.freeze({ google_drive: "drive" });
+// These aliases must agree with ingestion, including Desktop when no separate
+// scheduler owns it. The daily registry test checks every eligible source
+// against the Worker's actual allowlist and registration handler.
+const DAILY_PLAN_KEY_WORKER_KIND = Object.freeze({
+  google_drive: "drive", local_folder: "upload", quickbooks_desktop: "quickbooks",
+});
 
 async function syncDailySourceExpectations(m, manifestPath, plan, expectedRefreshSeconds, options = {}) {
   if (options.syncSourceExpectations === false) return [];

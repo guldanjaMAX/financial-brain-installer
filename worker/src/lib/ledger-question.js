@@ -3,6 +3,13 @@
 const MONTHS = "january february march april may june july august september october november december".split(" ");
 const MONTH = `(${MONTHS.join("|")})`;
 const DAY_MS = 86400000;
+const GENERIC_SENDERS = new Set("bank payment payments deposit transfer money the my our a an account company client customer someone them".split(" "));
+const ledgerWords = text => text.match(/[\p{L}\p{N}]+/gu) || [];
+function specificSender(text) {
+  const words = ledgerWords(text);
+  return text.length <= 80 && words.length <= 6 && words.some(word => /\p{L}/u.test(word) && !GENERIC_SENDERS.has(word)) &&
+    !/\b(?:second|first|third|next|last|another|other|loan|car|tax)\b/.test(text);
+}
 export const ledgerDay = (value) => new Date(value).toISOString().slice(0, 10);
 export const shiftLedgerDay = (day, delta) => ledgerDay(Date.parse(`${day}T00:00:00Z`) + delta * DAY_MS);
 
@@ -98,7 +105,9 @@ function phaseTwoQuestion(q, intent, today) {
   const nounSpend = residual.match(/^(?:show(?: me)?|what (?:was|is)) (?:my )?(.+?) spend(?:ing)?$/);
   if (nounSpend) {
     const name = nounSpend[1];
-    if (/\b(?:my|our|the|income|versus|vs|business|entity|money|cash|accounts?|largest|biggest|top|total|net)\b/.test(name)) return null;
+    if (name.length > 80 || ledgerWords(name).length > 6 || !/\p{L}/u.test(name) ||
+        !/^[\p{L}\p{N}\s&/.'-]+$/u.test(name) ||
+        /\b(?:my|our|the|income|versus|vs|business|entity|money|cash|accounts?|largest|biggest|top|total|net|how|what|much|very)\b/.test(name)) return null;
     residual = `show spending ${/^(?:software|saas|software\/saas)$/.test(name) ? "on" : "at"} ${name}`;
   }
   const spending = residual.match(/^(?:how much did (?:i|we) spend|(?:show(?: me)? |what is (?:my |the )?)spend(?:ing)?)(?: (at|on|by) (.+))$/);
@@ -131,7 +140,7 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
   const punctuationOnly = text => !text.replace(/[?'.,:]/g, "").trim();
   if (kinds.length > 1) return intent;
   // These qualifiers require a different source or a richer financial model.
-  if (/\b(?:quickbooks|qbo|tax|profit|net income|excluding|exclude|without|except|forecast|projected|average|median|smallest|interest)\b/.test(q)) return intent;
+  if (/\b(?:quickbooks|qbo|tax|profit|net income|excluding|exclude|without|except|budgeted|budget|approved|planned|projected|expected|estimated|forecast|target|allowed|average|median|smallest|interest)\b/.test(q)) return intent;
   const phaseTwo = phaseTwoQuestion(q, intent, today);
   if (phaseTwo) return phaseTwo;
   if (/\b(?:balance|balances)\b/.test(q)) {
@@ -163,13 +172,19 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     if (dates.length && /\b(?:before|after|between)\b/.test(rest)) return intent;
     if (!dates.length && !period.from && /\b(?:on|between|before|after|yesterday|tomorrow|last|this)\b/.test(rest)) return intent;
     const arrival = "arrive|arrived|receive|received|come|came|land|landed|hit|reach|reached|clear|cleared|post|posted";
-    const partyMatch = rest.match(new RegExp(`\\bfrom\\s+(.+?)(?=\\s+(?:on|into|to|in|for|via|${arrival})\\b|[?,]|$)`));
-    const viaMatch = rest.match(/\bvia\s+([\p{L}\p{N}]+)\b/u);
-    const namedPayment = rest.match(/^(?:did|has|have)\s+(?:the\s+)?([\p{L}\p{N}]+(?:\s+[\p{L}\p{N}]+){0,3})\s+payment\b/u);
-    // Generic/ordinal adjectives are not a counterparty. In particular,
-    // "the second payment" needs context that this deterministic route lacks.
-    const named = namedPayment && !/\b(?:a|my|our|the|second|first|third|next|last|another|other|bank|loan|car|tax)\b/.test(namedPayment[1]) ? namedPayment[1] : "";
-    const counterparty = [named, viaMatch?.[1], partyMatch?.[1]].filter(Boolean).join(" ");
+    const senderClause = preposition => rest.match(new RegExp(`\\b${preposition}\\s+(.+?)(?=\\s+(?:on|into|to|in|for|from|via|${arrival})\\b|[?,]|$)`));
+    const partyMatch = senderClause("from"), viaMatch = senderClause("via");
+    const namedPayment = rest.match(/^(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?([\p{L}\p{N}]+(?:\s+[\p{L}\p{N}]+){0,3})\s+payment\b/u);
+    // Apply one specificity rule to every sender form. Generic-only clauses
+    // cannot identify an amountless payment; keep all words in specific names
+    // so rejecting generic narration never widens a query to every deposit.
+    const named = namedPayment && !/^(?:the|my|our|a|an)$/.test(namedPayment[1]) ? namedPayment[1] : "";
+    const parties = [named, viaMatch?.[1], partyMatch?.[1]].filter(Boolean);
+    // An amount does not establish which ordinal payment was meant, and a
+    // generic adjective must not become sender evidence by being consumed.
+    if (named && !specificSender(named)) return intent;
+    if (amountMinor === null && (!parties.length || parties.some(party => !specificSender(party)))) return intent;
+    const counterparty = parties.join(" ");
     if (partyMatch) rest = rest.replace(partyMatch[0], "");
     if (viaMatch) rest = rest.replace(viaMatch[0], "");
     if (named) rest = rest.replace(namedPayment[0], "payment");
