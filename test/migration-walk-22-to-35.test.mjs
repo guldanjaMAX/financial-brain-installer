@@ -1,8 +1,8 @@
-// The migration walk an installed brain has to survive: schema 22 -> 54.
+// The migration walk an installed brain has to survive: schema 22 -> 55.
 //
 // Every release published through v0.3.6 ships exactly 22 migrations, so both
 // production-shaped v0.2.0 and v0.2.3 -> v0.3.5 fixtures are at schema 22
-// with a POPULATED database. Migrations 0023..0054 have
+// with a POPULATED database. Migrations 0023..0055 have
 // never been applied to a real client brain, and test/migrations.test.mjs only
 // parses the SQL text; nothing here or anywhere else applies them to rows that
 // already exist.
@@ -53,9 +53,10 @@ const SHIPPED_MIGRATIONS_DIGEST = "cd9010998d14097137500dabb8516f1d8901ae5c1d82d
 function shippedMigrationFiles(repoRoot, migrationsDir) {
   const fromTag = (() => {
     try {
-      const listing = execFileSync("git", ["ls-tree", "-r", "--name-only", "refs/tags/v0.2.0", "migrations/d1/"],
+      const listing = execFileSync("git", ["cat-file", "-p", "refs/tags/v0.2.0:migrations/d1"],
         { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
-        .trim().split("\n").filter(Boolean).sort();
+        .trim().split("\n").map(line => /^\d+ blob [a-f0-9]+\t(.+\.sql)$/.exec(line)?.[1])
+        .filter(Boolean).map(name => `migrations/d1/${name}`).sort();
       if (!listing.length) return null;
       return listing.map((path) => ({ path, sql: execFileSync("git", ["show", `refs/tags/v0.2.0:${path}`],
         { cwd: repoRoot, encoding: "utf8", maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }) }));
@@ -271,7 +272,7 @@ const snapshot = (db) => ({
 console.log("\n--- baseline: a shipped v0.2.0 brain builds and is at schema 22 ---");
 const db = await buildShippedBrain();
 check("v0.2.0 ships exactly 22 migrations", SHIPPED.length === 22, `got ${SHIPPED.length}`);
-check("today's tree has 0023..0054 pending", PENDING.length === 32 && PENDING.at(-1).version === 54,
+check("today's tree has 0023..0055 pending", PENDING.length === 33 && PENDING.at(-1).version === 55,
   `${PENDING.length} pending, last ${PENDING.at(-1)?.version}`);
 check("baseline schema_migrations is contiguous 1..22",
   db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().every((r, i) => r.version === i + 1));
@@ -281,7 +282,7 @@ check("baseline FTS index actually holds every chunk (MATCH, not COUNT(*))",
   before.ftsIndexed === before.chunks && before.chunks > 0, `${before.ftsIndexed} indexed vs ${before.chunks} chunks`);
 check("baseline FTS passes FTS5's own integrity-check", ftsIntegrityOk(db));
 
-console.log("\n--- the walk: apply 0023..0054 to that populated brain ---");
+console.log("\n--- the walk: apply 0023..0055 to that populated brain ---");
 const applied = [];
 const errors = [];
 for (const migration of PENDING) {
@@ -439,7 +440,7 @@ if (errors.length === 0) {
   // silently reduced to a no-op fails here rather than passing unnoticed. This
   // is what makes 0023/0024/0025/0027/0030/0031/0032 load-bearing: they add
   // nothing to pre-existing rows, so nothing else in this file would notice.
-  console.log("\n--- every final declared object of 0023..0054 exists after the walk ---");
+  console.log("\n--- every final declared object of 0023..0055 exists after the walk ---");
   const objectsPresent = new Set(
     db.prepare("SELECT name FROM sqlite_master WHERE name IS NOT NULL").all().map((r) => r.name));
   const finalDeclaredObjects = new Set();
@@ -517,12 +518,12 @@ if (errors.length === 0) {
          schema_version = excluded.schema_version,
          gate_version = excluded.gate_version,
          source_original_retrieval_generation = excluded.source_original_retrieval_generation`
-    ).run("fixture-brain", "0.4.0", 54, 0, "2025-02-01T12:00:00.000Z", "stable");
+    ).run("fixture-brain", "0.4.0", 55, 0, "2025-02-01T12:00:00.000Z", "stable");
     return null;
   }, "threw");
   check("cmdMigrate's install_state upsert runs against the upgraded schema", upsertError === null, String(upsertError));
   const state = probe(() => db.prepare("SELECT * FROM install_state WHERE id=1").get(), {});
-  check("migrate records schema_version 54", state?.schema_version === 54, JSON.stringify(state?.schema_version));
+  check("migrate records schema_version 55", state?.schema_version === 55, JSON.stringify(state?.schema_version));
   check("migrate does NOT advance product_version (only a verified upgrade does)",
     state?.product_version === "0.2.0", JSON.stringify(state?.product_version));
   check("migrate does NOT clobber an in-progress vector projection bootstrap",
@@ -531,8 +532,8 @@ if (errors.length === 0) {
 
   console.log("\n--- schema_migrations after the walk ---");
   const versions = db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((r) => r.version);
-  check("schema_migrations is contiguous 1..54 after the upgrade",
-    versions.length === 54 && versions.every((v, i) => v === i + 1), JSON.stringify(versions));
+  check("schema_migrations is contiguous 1..55 after the upgrade",
+    versions.length === 55 && versions.every((v, i) => v === i + 1), JSON.stringify(versions));
 }
 
 /* --------------------------------------- restart resume, per the runner's own promise */
@@ -634,7 +635,7 @@ console.log("\n--- 0033's DROP/CREATE window: the hazard the writer barrier exis
 console.log("\n--- restart safety: killed and resumed at EVERY statement boundary ---");
 // D1's REST endpoint commits each statement on its own and schema_migrations is
 // written only after the last one, so a process killed mid-file re-runs the
-// WHOLE file on the next `brain migrate`. Every statement in 0023..0054 must
+// WHOLE file on the next `brain migrate`. Every statement in 0023..0055 must
 // therefore be idempotent against its own partial application - at every
 // possible kill point, not just a convenient one.
 for (const target of PENDING) {

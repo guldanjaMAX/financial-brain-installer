@@ -6,6 +6,22 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.12 (unreleased)
 
+- Money answers keep coincident transfers in income and spend unless a leg
+  names the other owned account. Merchant totals use the explicit payee when
+  present; descriptions only supply a missing payee. Check the cited accounts
+  and payees when reviewing possible transfers.
+
+- Matching bank names and last-four digits now ask for your account-link
+  confirmation before applying live-feed precedence. Preview with
+  `brain ledger link-accounts <manifest> --manual <account> --live <account>
+  --preview`, then approve the exact plan with `--apply --approve <hash>` only
+  for two records of the same account. Add `--unlink --preview` to review
+  removing a link. Accounts, transactions and approval history are retained.
+
+- Explicit AI, agent or assistant authorship makes a memo, recap, analysis or
+  other generated document insufficient as sole money evidence. Dated primary
+  email and messages remain eligible, including emails discussing AI tools.
+
 - Money answers can use dated primary emails, messages and documents whose
   lineage was never recorded. Agent-written material alone remains insufficient,
   including assistant notes. Check the cited figure and date; missing lineage
@@ -30,7 +46,7 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 - Ask can read account balances, exact deposit matches, and money in and out
   directly from the bank ledger, with masked accounts, dates and row citations.
-  Live-feed rows take precedence over matching manual-account rows within the
+  Live-feed rows take precedence over owner-linked manual-account rows within the
   live coverage window. Check the stated period, balance date and feed
   coverage; questions the ledger cannot
   answer show a gap before falling back to documents.

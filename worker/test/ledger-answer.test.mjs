@@ -7,6 +7,8 @@ import { classifyLedgerQuestion } from "../src/lib/ledger-question.js";
 import { withLedgerAnswer } from "../src/lib/ledger-answer.js";
 import { readEffectiveAccounts, readEffectiveTransactions } from "../src/lib/ledger-reader.js";
 
+import { linkAccounts } from "./fixtures/money-fix/fixture.mjs";
+
 const NOW = "2026-10-11T12:00:00.000Z";
 const stamp = "2026-10-11T10:00:00.000Z";
 test.before(() => mock.method(Date, "now", () => Date.parse(NOW)));
@@ -56,6 +58,7 @@ async function fixtureFor(t) {
   fixture.ask = (q, extra = {}, headers = { "X-Admin-Key": fixture.env.ADMIN_KEY }) =>
     fixture.post("/api/rag/think", { q, ...extra }, headers);
   fixture.add = add;
+  await linkAccounts(fixture);
   return fixture;
 }
 
@@ -167,7 +170,7 @@ test("ambiguous and missing accounts, missing balances, unreadable and partial c
   f.raw("UPDATE fin_transactions SET basis_state='unparsed',unparsed_reason='fixture',amount_minor=NULL,direction=NULL WHERE txn_uid='live-deposit'");
   assert.equal((await direct(f, "How much money came in September 2026?")).gaps[0].reason, "unreadable_transactions");
   f.raw("UPDATE fin_accounts SET feed_mode='live' WHERE account_slug='manual-account'");
-  assert.equal((await direct(f, "What is my balance?")).gaps[0].reason, "ambiguous_account");
+  assert.equal((await direct(f, "What is my balance?")).gaps[0].reason, "ledger_account_link_required");
   f.raw("UPDATE fin_accounts SET superseded_by_id=999");
   assert.equal((await direct(f, "What is my balance?")).gaps[0].reason, "no_accounts");
   assert.ok(f.seen.sql.some(sql => /fin_balance_snapshots/.test(sql)));
@@ -292,7 +295,7 @@ test("all twin members must be confirmed and the configured tenant must be used"
   const f = await fixtureFor(t);
   assert.equal((await direct(f, "What is my balance?")).ledger.kind, "balance");
   f.raw("UPDATE fin_accounts SET basis_state='proposed' WHERE account_slug='manual-account'");
-  assert.equal((await direct(f, "How much money came in August 2026?")).gaps[0].reason, "ambiguous_account");
+  assert.equal((await direct(f, "How much money came in August 2026?")).gaps[0].reason, "ledger_account_link_required");
   f.env.BANK_FEED_TENANT = "second-owner";
   assert.equal((await direct(f, "What is my balance?")).gaps[0].reason, "no_accounts");
 });
@@ -306,6 +309,7 @@ test("latest snapshot wins across twins, and different kinds and entities do not
   assert.equal(body.ledger.accounts.length, 1);
   assert.equal(body.ledger.accounts[0].current_minor, 65432);
   assert.equal(body.citations[0].supplied_by, "manual");
+  await linkAccounts(f, "manual-account", "live-account", true);
   f.raw("UPDATE fin_accounts SET account_kind='savings' WHERE account_slug='manual-account'");
   assert.equal((await readEffectiveAccounts(f.env)).length, 2);
   assert.equal((await direct(f, "What is my balance for account 4321?")).gaps[0].reason, "ambiguous_account");
@@ -355,7 +359,9 @@ test("a concurrent coverage change cannot mix old twin precedence with new rows"
 
 test("short numeric masks use the same exact twin rule and malformed coverage cannot certify a period", async (t) => {
   const f = await fixtureFor(t);
+  await linkAccounts(f, "manual-account", "live-account", true);
   f.raw("UPDATE fin_accounts SET mask='321'");
+  await linkAccounts(f);
   assert.equal((await readEffectiveAccounts(f.env)).length, 1);
   assert.equal((await direct(f, "How much money came in September 2026 for account 321?")).ledger.accounts[0].credits_minor, 12001);
   assert.equal((await direct(f, "How much money came in August 2026?")).ledger.accounts[0].credits_minor, 1100);

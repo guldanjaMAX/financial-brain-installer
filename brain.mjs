@@ -32318,10 +32318,11 @@ export async function cmdCustomApi(manifestPath, flags = parseFlags(process.argv
 }
 
 export async function cmdLedger(argv, options = {}) {
-  const { parseLedgerRekeyArgs, runLedgerRekey } = await import("./operations/ledger-rekey.mjs");
-  const args = parseLedgerRekeyArgs(argv);
+  const { parseLedgerRekeyArgs, runLedgerRekey, parseLedgerLinkArgs, runLedgerLink } = await import("./operations/ledger-rekey.mjs");
+  const linking = argv[0] === 'link-accounts';
+  const args = (linking ? parseLedgerLinkArgs : parseLedgerRekeyArgs)(argv);
   const { m } = (options.loadManifest ?? loadManifest)(args.manifestPath);
-  return runLedgerRekey(args, { manifest: m,
+  return (linking ? runLedgerLink : runLedgerRekey)(args, { manifest: m,
     credential: () => (options.resolveAdminKey ?? resolveAdminKey)(args.manifestPath),
     fetchImpl: options.fetchImpl ?? fetch, write: options.write ?? console.log });
 }
@@ -32484,6 +32485,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain setup      [manifest] --no-connect  same, without touching THIS computer's AI tool config
     brain ask        <manifest>            ask a private question in this terminal
     brain ledger rekey <manifest> --account <account> --preview
+    brain ledger link-accounts <manifest> --manual <account> --live <account> --preview
+    brain ledger link-accounts <manifest> --manual <account> --live <account> --unlink --preview
                                            review identity recovery; apply with --apply --approve <hash>
     brain financial-picture <manifest>     read-only exact financial evidence inventory;
                                            --json for Optimize, exact entity/year/period filters,

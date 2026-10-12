@@ -1,6 +1,6 @@
 import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture, account, transaction, NOW } from './fixtures/money-fix/fixture.mjs';
+import { fixture, account, transaction, NOW, linkAccounts } from './fixtures/money-fix/fixture.mjs';
 import { withLedgerAnswer } from '../src/lib/ledger-answer.js';
 import { applyMoneyVeto } from '../src/lib/money-veto.js';
 import { queryTimeWindow } from '../src/lib/query-intent.js';
@@ -105,6 +105,7 @@ test('F03 separate institutions with the same mask retain both accounts', async 
 test('F04 unknown live coverage cannot turn twin rows into a complete double total', async t => {
   const f = fixture(); t.after(f.close);
   account(f, { slug: 'manual-account', mode: 'manual' }); account(f);
+  await linkAccounts(f);
   transaction(f, { uid: 'manual-credit', slug: 'manual-account' }); transaction(f);
   assert.equal(cents(await ask(f, totalQuestion)), 123450);
   f.raw("UPDATE fin_account_coverage SET coverage_status='missing',covered_from=NULL,covered_to=NULL WHERE account_slug='live-account'");
@@ -353,16 +354,18 @@ for (const scalar of ['card ending 2025', 'account ending 2025', 'x2025', '•20
   });
 }
 
-test('F03 missing institution refuses; normalized institution proves a twin', async t => {
+test('F03 normalized institution remains a candidate until approved; changed identity refuses', async t => {
   const f = fixture(); t.after(f.close);
   account(f, { slug: 'manual-account', mode: 'manual', institution: ' BANK   ONE ' }); account(f);
+  assert.equal((await ask(f, totalQuestion)).gaps[0].reason, 'ledger_account_link_required');
+  await linkAccounts(f);
   transaction(f, { uid: 'manual-credit', slug: 'manual-account' }); transaction(f);
   assert.equal(cents(await ask(f, totalQuestion)), 123450);
   f.raw("UPDATE fin_accounts SET institution=NULL WHERE account_slug='manual-account'");
   const before = f.seen.length;
   const result = await ask(f, totalQuestion);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('FROM fin_accounts')));
-  assert.equal(result.gaps[0].reason, 'ambiguous_account');
+  assert.equal(result.gaps[0].reason, 'ledger_account_link_required');
   assert.equal(result.ledger, undefined);
 });
 
@@ -452,6 +455,7 @@ test('F06 a document date cannot supply a different claimed due date', () => {
 test('F04 retained live dates do not certify missing coverage or duplicate manual rows outside it', async t => {
   const f = fixture(); t.after(f.close);
   account(f, { slug: 'manual-account', mode: 'manual' }); account(f);
+  await linkAccounts(f);
   transaction(f, { uid: 'manual-credit', slug: 'manual-account' }); transaction(f);
   assert.equal(cents(await ask(f, totalQuestion)), 123450);
   f.raw("UPDATE fin_account_coverage SET covered_from='2026-10-01',coverage_status='missing' WHERE account_slug='live-account'");

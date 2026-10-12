@@ -40,6 +40,7 @@
 import { jsonResponse } from "./core.js";
 import { importBankExport, balanceRoleFor, DEFAULT_TENANT } from "./fin-import.js";
 import { rekeyBankExportTransactions } from "./fin-ledger-maintenance.js";
+import { maintainAccountLink } from "./fin-account-links.js";
 import { ledgerInstalled } from "./fin-d1.js";
 
 /** Operator-only. Mounted behind the admin-key gate in `index.js`. */
@@ -229,6 +230,22 @@ export async function handleBankExportImport(env, request) {
   }
 
   // Reuse the import route's exact admin-key and upgrade-pause boundaries.
+  if (body?.action === 'link-accounts') {
+    if (!SLUG.test(body.manual_account_slug || '') || !SLUG.test(body.live_account_slug || '') ||
+        typeof body.dry_run !== 'boolean' || typeof body.unlink !== 'boolean' ||
+        (!body.dry_run && !/^[a-f0-9]{64}$/.test(body.approve || ''))) {
+      return jsonResponse({ reason: 'Preview both accounts, then apply with the exact approval hash.' }, 400);
+    }
+    try {
+      return jsonResponse(await maintainAccountLink(env, { manualSlug: body.manual_account_slug,
+        liveSlug: body.live_account_slug, dryRun: body.dry_run, unlink: body.unlink, approve: body.approve }));
+    } catch (error) {
+      const known = ['Account link approval is stale; preview again.',
+        'Account link is blocked. Review ownership and any existing link; unlink an outdated approval first.'];
+      return jsonResponse({ code: 'ledger_account_link_required', reason: known.includes(error.message)
+        ? error.message : 'Account link could not be verified. Preview again before applying.' }, 409);
+    }
+  }
   if (body?.action === "rekey") {
     if (!SLUG.test(body.account_slug || "") || typeof body.dry_run !== "boolean" ||
         (!body.dry_run && !/^[a-f0-9]{64}$/.test(body.approve || ""))) {
