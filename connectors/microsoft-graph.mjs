@@ -80,31 +80,40 @@ async function deltaCollection({ provider = "microsoft", initialUrl, accessToken
   return { items, deletions, changes, deltaLink };
 }
 
-async function pagedGraphValues(url, auth) {
+async function pagedGraphValues(url, auth, shape = null) {
   const values = [];
   const guard = createPaginationGuard("microsoft");
   let next = url;
   while (next) {
     guard.visit(next);
     const { data } = await providerJson("microsoft", next, auth);
-    values.push(...(data.value || []));
+    if (shape && !Array.isArray(data?.value)) shape.malformed = true;
+    values.push(...(data?.value || []));
     next = data["@odata.nextLink"] || null;
   }
   return values;
 }
 
+// Discovery that returns 200 without a drive identity or a value array skipped
+// an enabled file workload. Report it so the run cannot certify a quiet check.
 async function configuredDriveIds({ driveIds, siteIds, includePersonalDrive, accessToken, fetchImpl }) {
   const ids = new Set((driveIds || []).map(String).filter(Boolean));
   const auth = { accessToken, fetchImpl };
+  const shape = { malformed: false };
+  const validId = (value) => typeof value === "string" && value.length > 0;
   if (includePersonalDrive) {
     const { data } = await providerJson("microsoft", `${GRAPH}/me/drive?$select=id`, auth);
-    if (data?.id) ids.add(String(data.id));
+    if (validId(data?.id)) ids.add(data.id);
+    else shape.malformed = true;
   }
   for (const siteId of siteIds || []) {
-    const drives = await pagedGraphValues(`${GRAPH}/sites/${encodeURIComponent(siteId)}/drives?$select=id`, auth);
-    for (const drive of drives) if (drive?.id) ids.add(String(drive.id));
+    const drives = await pagedGraphValues(`${GRAPH}/sites/${encodeURIComponent(siteId)}/drives?$select=id`, auth, shape);
+    for (const drive of drives) {
+      if (validId(drive?.id)) ids.add(drive.id);
+      else shape.malformed = true;
+    }
   }
-  return [...ids].sort();
+  return { ids: [...ids].sort(), discoveryComplete: !shape.malformed };
 }
 
 function mailContent(message, folderId) {
@@ -505,9 +514,13 @@ export async function syncMicrosoftGraph({
     proposed.mail[folderId] = page.deltaLink;
   }
 
-  const selectedDriveIds = await configuredDriveIds({
+  const { ids: selectedDriveIds, discoveryComplete } = await configuredDriveIds({
     driveIds, siteIds, includePersonalDrive, accessToken, fetchImpl,
   });
+  if (!discoveryComplete) {
+    providerCheckComplete = false;
+    warnings.push("Microsoft drive discovery returned an unexpected response, so some configured files were not checked this run.");
+  }
   for (const [priorDriveId, priorCursor] of Object.entries(prior?.drives || {})) {
     if (selectedDriveIds.includes(priorDriveId)) continue;
     authoritativeSnapshot = false;
