@@ -12,6 +12,14 @@ const accountCoverage = accounts => accounts.map(a => ({
 }));
 
 function gapFor(reason, accounts = [], intent = {}) {
+  if (reason === 'ledger_account_link_required') {
+    const pair = accounts.find(a => a.linkRequired)?.linkRequired;
+    const describe = (a, role) => `${role}: ${String(a?.institution || 'institution unavailable').replace(/[\r\n]/g, ' ').slice(0, 100)}, ${masked(a || {})}, ${a?.account_kind || 'kind unavailable'}`;
+    const slug = a => /^[a-z0-9][a-z0-9_-]{0,63}$/.test(a?.account_slug || '') ? a.account_slug : '<account>';
+    return { type: 'ledger_not_consulted', reason, code: reason,
+      ...(intent.from ? { from: intent.from, to: intent.to } : {}),
+      detail: `Confirm whether these records describe the same account: ${describe(pair?.manual, 'manual import')}; ${describe(pair?.live, 'live feed')}. No money was removed. Preview with brain ledger link-accounts <manifest> --manual ${slug(pair?.manual)} --live ${slug(pair?.live)} --preview. Approve only if they are the same account; use --apply --approve <hash>. An outdated link can be reviewed with --unlink --preview.` };
+  }
   const coverage = accountCoverage(accounts);
   const detail = coverage.length ? coverage.map(a =>
     `${a.account_mask ? `****${a.account_mask}` : "mask unavailable"}: covered through ${a.covered_to || "unknown"}, feed last synced ${a.last_synced_at || "unknown"}`
@@ -82,7 +90,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   }
   const eligible = allRows.filter(row => readableRow(row) && usableAccount(bySlug.get(row.effective_account_slug)) &&
     effectivePeriodCovered(bySlug.get(row.effective_account_slug), row.posted_on, row.posted_on));
-  const pairing = pairOwnTransfers(eligible);
+  const pairing = pairOwnTransfers(eligible, bySlug);
   const pairs = pairing.pairs.filter(pair => [pair.out, pair.in].some(row => selected.has(row.effective_account_slug) && inWindow(row)));
   const unmatched = pairing.unmatched.filter(row => selected.has(row.effective_account_slug) && inWindow(row));
   const activity = excludeMatchedTransfers(rows, pairing.matched);
@@ -186,7 +194,7 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
       accounts = inventory;
       if (intent.mask) accounts = accounts.filter(a => a.mask === intent.mask);
       if (intent.accountKind) accounts = accounts.filter(a => a.account_kind === intent.accountKind);
-      let reason = !accounts.length ? "no_accounts" : accounts.some(a => a.ambiguous || a.members.some(m => m.basis_state !== "confirmed")) ||
+      let reason = !accounts.length ? "no_accounts" : accounts.some(a => a.linkRequired) ? 'ledger_account_link_required' : accounts.some(a => a.ambiguous || a.members.some(m => m.basis_state !== "confirmed")) ||
         (intent.mask && accounts.length !== 1) ? "ambiguous_account" :
         accounts.some(a => a.currency !== "USD") ? "unsupported_currency" : !intent.kind ? "unsupported_question" : null;
       if (!reason) {
@@ -198,6 +206,11 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
         { headers: { "Content-Type": "application/json" } });
       }
       gap = gapFor(reason, accounts, intent);
+      // Documents cannot resolve a disputed ledger identity or authorize a
+      // financial total that this deterministic account decision refused.
+      if (reason === 'ledger_account_link_required') return new Response(JSON.stringify({ mode: 'think',
+        code: reason, answer: null, citations: [], results: [], gaps: [gap],
+        evidence_gate: { supported: false, complete: false, reason } }), { headers: { 'Content-Type': 'application/json' } });
     } catch {
       gap = gapFor("ledger_unavailable", accounts, intent);
     }

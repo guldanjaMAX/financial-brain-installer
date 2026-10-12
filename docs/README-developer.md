@@ -2012,8 +2012,8 @@ gap. Complete coverage is required for totals and negative deposit results.
 largest N expenses/deposits (1 through 100), recent deposits, merchant/category
 spend or income, recurring charges, and own-account transfers. Named months
 and Q1 through Q4 may omit the year, meaning the current UTC year. Merchant
-matches use contiguous NFKC-normalized, case-insensitive tokens in description
-or payee. Category totals separate confirmed and proposed categories; proposed
+matches use the exact NFKC-normalized, case-insensitive payee when present.
+Only rows without a payee use contiguous description tokens as a fallback. Category totals separate confirmed and proposed categories; proposed
 ones say "bank's category (unconfirmed)". Unsorted is always a separate line.
 
 Transfer matching reads six extra days on either side of the answer window
@@ -2021,8 +2021,10 @@ and can inspect other owned accounts when the question selects one account.
 The extra margin tests the counterpart's competing candidates too; the actual
 matching tolerance remains three days.
 Only readable, covered rows from unambiguous confirmed owned accounts can
-pair. Both legs need a TRANSFER_IN/TRANSFER_OUT category or TRANSFER TO/FROM
-description, equal cents, opposite directions and different effective accounts.
+pair. Equal cents, opposite directions, different effective accounts and nearby
+dates only identify candidates. Exclusion also requires one leg to name the other
+owned account by its unique mask or stored label. A provider's proposed transfer
+category or generic transfer wording cannot remove money.
 A leg must have exactly one possible counterpart within three days, mutually;
 ambiguous candidates remain unmatched and counted. Pairs are cited, never
 stored, and excluded from phase-one totals as well as phase-two income/spend.
@@ -2142,6 +2144,20 @@ Provider credentials remain owned by the reviewed owner-present flow and may be
 absent during setup. `brain secrets` preserves all allowed bank names, requires
 the wrapping-key name for an enabled feed, and does not manufacture any bank
 secret.
+
+Manual/live precedence requires an owner-approved account link. Matching
+institution, entity, mask and kind identify candidates only; a missing institution
+also remains ambiguous. Review with
+`brain ledger link-accounts <manifest> --manual <account> --live <account> --preview`,
+then use `--apply --approve <hash>` for the reviewed pair. To remove precedence,
+add `--unlink --preview` and approve that separate plan. Migration 0055 retains
+link and unlink history without triggers; it changes no account or money rows.
+The existing authenticated import admin route binds the plan to both current
+account identities and active links, checks that snapshot in the write batch,
+and reads back the desired state before claiming success. Exact receipt replays
+are idempotent; old approvals cannot undo a later unlink/relink. Changed account
+identities invalidate the saved approval. Unknown live coverage still refuses
+and never admits both sources as a complete answer.
 
 Bank-export identities in 0.4.12 use the mapped account, posting date, normalized
 amount and direction, normalized description, and an ordinal among identical

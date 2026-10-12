@@ -6,6 +6,8 @@ import { createProductFixture, seedOwnedEntity } from "./product-contract-fixtur
 import { withLedgerAnswer } from "../src/lib/ledger-answer.js";
 import { classifyLedgerQuestion } from "../src/lib/ledger-question.js";
 
+import { linkAccounts } from "./fixtures/money-fix/fixture.mjs";
+
 const NOW = "2026-10-11T12:00:00Z";
 const stamp = "2026-10-11T10:00:00Z";
 test.before(() => mock.method(Date, "now", () => Date.parse(NOW)));
@@ -48,8 +50,8 @@ for (const [question, kind, seed] of [
     for (const [i, day] of ["2026-08-10", "2026-09-10", "2026-10-10"].entries()) f.add(`monthly-${i}`, day, 12001);
   }],
   ["How much did I transfer between my own accounts last month?", "transfers", f => {
-    f.add("sent", "2026-09-15", 12001, "outflow", "TRANSFER TO savings");
-    f.add("received", "2026-09-18", 12001, "inflow", "TRANSFER FROM checking", null, null, "account-b");
+    f.add("sent", "2026-09-15", 12001, "outflow", "TRANSFER TO account 2222");
+    f.add("received", "2026-09-18", 12001, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
   }],
 ]) {
   test(`${kind}: found, bounded absence and out of coverage through SQLite`, async t => {
@@ -80,6 +82,7 @@ for (const [question, kind, seed] of [
 test("largest and deposits retain cents, order, citations, posted filters and twin dedup", async t => {
   const f = await fixture(t);
   f.account("manual-a", "1111", "checking", "manual");
+  await linkAccounts(f, "manual-a", "account-a");
   f.add("small", "2026-09-15", 900);
   f.add("large", "2026-09-16", 10001);
   f.add("twin", "2026-09-16", 10001, "outflow", "Fixture merchant", null, null, "manual-a");
@@ -118,12 +121,12 @@ test("merchant tokens are contiguous and category proposals and Unsorted stay ex
 
 test("transfers exclude each matched leg once; near misses stay counted and labeled", async t => {
   const f = await fixture(t);
-  f.add("out", "2026-09-15", 10001, "outflow", "TRANSFER TO savings");
+  f.add("out", "2026-09-15", 10001, "outflow", "TRANSFER TO account 2222");
   f.add("in", "2026-09-18", 10001, "inflow", "Fixture bank", "TRANSFER_IN_ACCOUNT_TRANSFER", "proposed", "account-b");
-  f.add("amount-out", "2026-09-20", 20001, "outflow", "TRANSFER TO savings");
-  f.add("amount-in", "2026-09-20", 20002, "inflow", "TRANSFER FROM checking", null, null, "account-b");
-  f.add("date-out", "2026-09-01", 30001, "outflow", "TRANSFER TO savings");
-  f.add("date-in", "2026-09-05", 30001, "inflow", "TRANSFER FROM checking", null, null, "account-b");
+  f.add("amount-out", "2026-09-20", 20001, "outflow", "TRANSFER TO account 2222");
+  f.add("amount-in", "2026-09-20", 20002, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
+  f.add("date-out", "2026-09-01", 30001, "outflow", "TRANSFER TO account 2222");
+  f.add("date-in", "2026-09-05", 30001, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
   f.add("expense", "2026-09-16", 77);
   const changes = f.sqlite.prepare("SELECT total_changes() n").get().n;
   const totals = await f.ask("How much money came in and went out in September 2026?");
@@ -142,14 +145,14 @@ test("transfers exclude each matched leg once; near misses stay counted and labe
 
 test("three-account ambiguity never consumes a leg twice; unique second pair works", async t => {
   const f = await fixture(t); f.account("account-c", "3333", "savings");
-  f.add("out", "2026-09-15", 10001, "outflow", "TRANSFER TO savings");
-  for (const account of ["account-b", "account-c"]) f.add(account, "2026-09-16", 10001, "inflow", "TRANSFER FROM checking", null, null, account);
+  f.add("out", "2026-09-15", 10001, "outflow", "TRANSFER TO account 2222");
+  for (const account of ["account-b", "account-c"]) f.add(account, "2026-09-16", 10001, "inflow", "TRANSFER FROM account 1111", null, null, account);
   const ambiguous = await f.ask("How much did I transfer between my own accounts last month?");
   assert.equal(ambiguous.ledger.found, false);
   assert.equal(ambiguous.ledger.unmatched_transfers.length, 3);
   assert.ok(transactionReads(f) > 0);
   f.raw("UPDATE fin_transactions SET amount_minor=7001 WHERE txn_uid='account-c'");
-  f.add("second-out", "2026-09-15", 7001, "outflow", "TRANSFER TO savings", null, null, "account-b");
+  f.add("second-out", "2026-09-15", 7001, "outflow", "TRANSFER TO account 3333", null, null, "account-b");
   const unique = await f.ask("How much did I transfer between my own accounts last month?");
   assert.equal(unique.ledger.transfers.length, 2);
   assert.equal(unique.ledger.total_minor, 17002);
@@ -187,8 +190,8 @@ test("phase-two grammar rejects unknown qualifiers, and dates use UTC", () => {
 
 test("selected account still pairs with owned counterparts across month boundaries", async t => {
   const f = await fixture(t);
-  f.add("boundary-out", "2026-09-30", 5555, "outflow", "TRANSFER TO savings");
-  f.add("boundary-in", "2026-10-02", 5555, "inflow", "TRANSFER FROM checking", null, null, "account-b");
+  f.add("boundary-out", "2026-09-30", 5555, "outflow", "TRANSFER TO account 2222");
+  f.add("boundary-in", "2026-10-02", 5555, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
   const out = await f.ask("How much money went out in September 2026 for account 1111?");
   assert.equal(out.ledger.accounts.length, 1);
   assert.equal(out.ledger.accounts[0].debits_minor, 0);
@@ -249,8 +252,8 @@ async () => new Response(JSON.stringify({ answer: null, gaps: [] }))).then(r => 
 
 test("mutation control kills transfer exclusion through the real SQLite answer path", async t => {
   const f = await fixture(t);
-  f.add("out", "2026-09-15", 10001, "outflow", "TRANSFER TO savings");
-  f.add("in", "2026-09-18", 10001, "inflow", "TRANSFER FROM checking", null, null, "account-b");
+  f.add("out", "2026-09-15", 10001, "outflow", "TRANSFER TO account 2222");
+  f.add("in", "2026-09-18", 10001, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
   f.add("expense", "2026-09-16", 77);
   const question = "How much money came in and went out in September 2026?";
   const control = await f.ask(question);
@@ -336,12 +339,12 @@ test("recurrence rejects two charges and stale runs; exact cadence edges have co
 
 test("transfer uniqueness inspects competitors beyond a window-edge counterpart", async t => {
   const f = await fixture(t); f.account("account-c", "3333", "savings");
-  f.add("out", "2026-09-01", 12345, "outflow", "TRANSFER TO savings");
-  f.add("in", "2026-08-29", 12345, "inflow", "TRANSFER FROM checking", null, null, "account-b");
+  f.add("out", "2026-09-01", 12345, "outflow", "TRANSFER TO account 2222");
+  f.add("in", "2026-08-29", 12345, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
   const control = await f.ask("How much money went out in September 2026 for account 1111?");
   assert.equal(control.ledger.accounts[0].debits_minor, 0);
   assert.equal(control.ledger.matched_transfer_count, 1);
-  f.add("competitor", "2026-08-26", 12345, "outflow", "TRANSFER TO savings", null, null, "account-c");
+  f.add("competitor", "2026-08-26", 12345, "outflow", "TRANSFER TO account 2222", null, null, "account-c");
   const before = transactionReads(f);
   const ambiguous = await f.ask("How much money went out in September 2026 for account 1111?");
   assert.ok(transactionReads(f) > before);

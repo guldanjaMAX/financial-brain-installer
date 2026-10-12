@@ -26,13 +26,16 @@ const MAX_ROOT_ID_CHARS = 512;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const AGENT_MARKER = /^Evidence-Lineage:[ \t]*agent-derived[ \t]*$/im;
 const AGENT_FILE = /(?:^|[/\\])(?:SKILL|AGENTS|CLAUDE)\.md$/i;
-const AGENT_BRIEF = /\b(?:ai|agent|assistant)[ -](?:(?:written|generated)[ -])?(?:\w+[ -]){0,3}(?:brief|summary|report|notes?)\b|\b(?:generated|written) by (?:an? )?(?:ai|agent|assistant)\b/i;
+const AGENT_BRIEF = /\b(?:ai|agent|assistant)[ -](?:(?:written|generated)[ -])?(?:\w+[ -]){0,3}(?:brief|summary|report|notes?)\b/i;
+// Explicit authorship is independent of the artifact noun. Mere discussion of
+// AI (for example, an invoice for AI tools) does not assert AI authorship.
+const AGENT_AUTHORSHIP = /\b(?:ai|claude|chatgpt|gpt(?:-\d[\w.-]*)?|agent|assistant)[\s-]+(?:generated|written|drafted|prepared)\b|\b(?:generated|written|drafted|prepared)\s+by\s+(?:an?\s+)?(?:ai|claude|chatgpt|gpt(?:-\d[\w.-]*)?|assistant|agent)\b/i;
 
 /** Names and explicit authorship can only demote, never promote provenance. */
 export function isAgentDerivedArtifact(row = {}) {
   return [row.title, row.ref_key, row.ref, row.uri].some((value) =>
-    AGENT_FILE.test(String(value || "")) || AGENT_BRIEF.test(String(value || ""))) ||
-    AGENT_BRIEF.test(String(row.authority_document_head ?? row._authority_document_head ?? row.text ?? row.snippet ?? "").slice(0, 500));
+    AGENT_FILE.test(String(value || "")) || AGENT_BRIEF.test(String(value || "")) || AGENT_AUTHORSHIP.test(String(value || ""))) ||
+    [AGENT_BRIEF, AGENT_AUTHORSHIP].some(pattern => pattern.test(String(row.authority_document_head ?? row._authority_document_head ?? row.text ?? row.snippet ?? "").slice(0, 500)));
 }
 const AGENT_WRITERS = new Set(["agent", "connector"]);
 const DIRECT_CONNECTOR_KINDS = new Set([

@@ -715,12 +715,21 @@ path. `ledger-question.js` recognizes current balances, exact-cent deposits and
 account inflow/outflow periods, largest expenses/deposits, merchant/category
 totals, recent deposits, recurring charges and own-account transfers;
 `ledger-answer.js` formats the stored amounts without an answer model.
-`ledger-reader.js` groups manual/live twins by exact
-entity, numeric mask and account kind, excludes manual transactions inside
-the live coverage window, and retains the supplying account on each row. This
+`ledger-reader.js` groups manual/live twins only after an explicit owner-approved
+link. Matching institution, entity, mask and account kind identify candidates,
+not proof. Unlinked collisions refuse with one bounded gap and the exact
+`brain ledger link-accounts` preview command. Migration 0055 stores approval
+history without triggers. The authenticated import admin route previews, hashes,
+atomically guards and verifies link/unlink actions. Saved account identities
+must still match at read time; changed identities require new review.
+Linked manual transactions are excluded inside the complete live coverage
+window, retaining the supplying account on every row. This
 does not rewrite account coverage or stored transactions. `ledger-analysis.js`
 computes mutually unique transfer pairs using equal cents, opposite directions,
-two owned accounts, transfer hints on both legs and a three-day date tolerance.
+two owned accounts and a three-day date tolerance. Exclusion additionally
+requires one leg to name the other owned account by its unique literal mask
+or stored label. Proposed categories and transfer words alone cannot remove
+money. No provider transfer-link or owner-pair field currently exists.
 All income/spend totals exclude matched legs. Unmatched hints remain counted
 and visible. Recurrence uses at least three charges, bounded weekly/monthly
 intervals and integer amount tolerance; results are explicitly detected rather
@@ -812,7 +821,8 @@ Money answers add a deterministic veto after ordinary verification and partial
 rendering. It can remove approval but never grant it. Money claims require
 reliable citation dates, eligible non-agent support and matching figures,
 months and account identifiers in the exact cited excerpt. Agent instruction
-files, explicitly AI-written briefs and assistant notes are one-way demotions
+files, explicit AI/agent/assistant authorship of any artifact, and assistant
+notes are one-way demotions
 to agent-derived T4, even if another metadata field claims primary provenance.
 Unknown lineage alone does not disqualify a dated primary record from supporting
 its own cited span; it still earns no independent-corroboration credit.

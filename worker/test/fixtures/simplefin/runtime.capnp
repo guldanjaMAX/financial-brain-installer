@@ -19,6 +19,7 @@ const config :Workerd.Config = (services = [
     (name = "worker/src/lib/documents-summary.js", esModule = embed "../../../src/lib/documents-summary.js"),
     (name = "worker/src/lib/evidence-authority.js", esModule = embed "../../../src/lib/evidence-authority.js"),
     (name = "worker/src/lib/evidence-lineage.js", esModule = embed "../../../src/lib/evidence-lineage.js"),
+    (name = "worker/src/lib/fin-account-links.js", esModule = embed "../../../src/lib/fin-account-links.js"),
     (name = "worker/src/lib/fin-d1.js", esModule = embed "../../../src/lib/fin-d1.js"),
     (name = "worker/src/lib/fin-import.js", esModule = embed "../../../src/lib/fin-import.js"),
     (name = "worker/src/lib/grants.js", esModule = embed "../../../src/lib/grants.js"),

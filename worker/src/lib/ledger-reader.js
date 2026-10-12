@@ -1,5 +1,6 @@
 import { DEFAULT_TENANT } from "./fin-d1.js";
 import { ledgerDay, shiftLedgerDay } from "./ledger-question.js";
+import { accountLinkIdentity } from "./fin-account-links.js";
 
 const MAX_ACCOUNTS = 200;
 const MAX_ROWS = 5000;
@@ -13,17 +14,20 @@ async function rows(env, sql, binds) {
   return result.results;
 }
 
-// No labels, external references or credential columns are selected. The source
-// account slug remains internal row provenance, never the public account label.
-const ACCOUNTS_SQL = `SELECT a.account_slug,a.entity_slug,a.mask,a.account_kind,a.institution,
+// Labels identify transfer counterparts; provider references only validate the
+// owner's saved link. Neither reference nor credential is exposed in citations.
+const ACCOUNTS_SQL = `SELECT a.id,a.account_slug,a.entity_slug,a.mask,a.account_kind,a.institution,a.label,a.external_ref,a.source_feed,
       a.currency,a.feed_mode,a.balance_role,a.basis_state,c.coverage_status,c.covered_from,c.covered_to,
-      c.basis_state AS coverage_basis,i.last_synced_at
+      c.basis_state AS coverage_basis,i.last_synced_at,
+      l.manual_account_slug AS link_manual,l.live_account_slug AS link_live,l.identity_json AS link_identity
     FROM fin_accounts a
     JOIN fin_entities e ON e.tenant_id=a.tenant_id AND e.entity_slug=a.entity_slug
       AND e.superseded_by_id IS NULL AND e.relationship='owned' AND e.basis_state='confirmed'
     LEFT JOIN fin_account_coverage c ON c.tenant_id=a.tenant_id AND c.account_slug=a.account_slug
       AND c.superseded_by_id IS NULL
     LEFT JOIN bank_feed_items i ON i.tenant_id=a.tenant_id AND a.source_feed=('bank-feed:'||i.item_ref)
+    LEFT JOIN fin_account_links l ON l.tenant_id=a.tenant_id AND l.unlinked_at IS NULL
+      AND (l.manual_account_slug=a.account_slug OR l.live_account_slug=a.account_slug)
     WHERE a.tenant_id=? AND a.superseded_by_id IS NULL
     ORDER BY a.entity_slug,a.account_slug LIMIT ?`;
 
@@ -36,13 +40,32 @@ function groupAccounts(accounts) {
   const groups = new Map();
   const institution = a => String(a.institution || "").normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
   const identity = a => JSON.stringify([a.entity_slug, a.mask, a.account_kind]);
-  // A mask collision with a missing institution cannot authorize precedence.
-  const uncertain = new Set(accounts.filter(a => /^\d{1,4}$/.test(a.mask || "") && !institution(a))
-    .filter(a => accounts.some(b => b !== a && identity(b) === identity(a))).map(identity));
+  const bySlug = new Map(accounts.map(a => [a.account_slug, a]));
+  const approved = new Map(), unresolved = new Map();
+  for (const a of accounts) {
+    if (!a.link_manual) continue;
+    const manual = bySlug.get(a.link_manual), live = bySlug.get(a.link_live);
+    if (manual && live && manual.feed_mode === 'manual' && live.feed_mode === 'live' &&
+        manual.basis_state === 'confirmed' && live.basis_state === 'confirmed' &&
+        a.link_identity === JSON.stringify([accountLinkIdentity(manual), accountLinkIdentity(live)])) {
+      approved.set(manual.account_slug, live.account_slug);
+    } else unresolved.set(a.account_slug, { manual: manual || { account_slug: a.link_manual }, live: live || { account_slug: a.link_live } });
+  }
+  // Coincident institution/entity/mask/kind are candidates, never authority.
+  // Missing institution is also uncertain. Only an approved pair may suppress
+  // overlapping rows, even when external references happen to look alike.
+  for (const manual of accounts.filter(a => a.feed_mode === 'manual')) {
+    for (const live of accounts.filter(a => a.feed_mode === 'live')) {
+      if (approved.get(manual.account_slug) === live.account_slug) continue;
+      if (/^\d{1,4}$/.test(manual.mask || '') && identity(manual) === identity(live) &&
+          (!institution(manual) || !institution(live) || institution(manual) === institution(live))) {
+        const candidate = { manual, live };
+        unresolved.set(manual.account_slug, candidate); unresolved.set(live.account_slug, candidate);
+      }
+    }
+  }
   for (const account of accounts) {
-    const key = /^\d{1,4}$/.test(account.mask || "")
-      ? JSON.stringify([account.entity_slug, account.mask, account.account_kind, institution(account)])
-      : JSON.stringify([account.account_slug]);
+    const key = approved.get(account.account_slug) || account.account_slug;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(account);
   }
@@ -50,9 +73,10 @@ function groupAccounts(accounts) {
     const live = members.filter(a => a.feed_mode === "live");
     const manual = members.filter(a => a.feed_mode === "manual");
     const primary = live[0] || members[0];
-    const ambiguous = uncertain.has(identity(primary)) || members.length > 1 && !(members.length === 2 && live.length === 1 && manual.length === 1 &&
+    const linkRequired = members.map(a => unresolved.get(a.account_slug)).find(Boolean);
+    const ambiguous = Boolean(linkRequired) || members.length > 1 && !(members.length === 2 && live.length === 1 && manual.length === 1 &&
       members.every(a => a.currency === primary.currency && a.balance_role === primary.balance_role));
-    return { ...primary, members, live: live[0] || null, ambiguous };
+    return { ...primary, members, live: live[0] || null, ambiguous, linkRequired };
   });
 }
 

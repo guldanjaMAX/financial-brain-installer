@@ -618,6 +618,8 @@ export const RECOVERY_DURABLE_TABLES = Object.freeze([
   "financial_findings",
   "financial_run_events",
   "financial_snapshot_heads",
+  // Schema 55: owner account-link approvals and unlink history are durable.
+  "fin_account_links",
 ]);
 
 /**
@@ -894,6 +896,7 @@ const SCHEMA_52_TABLES = Object.freeze(["ingest_removal_generation"]);
 const SCHEMA_53_TABLES = Object.freeze([
   "financial_snapshots", "financial_findings", "financial_run_events", "financial_snapshot_heads",
 ]);
+const SCHEMA_55_TABLES = Object.freeze(["fin_account_links"]);
 
 const AGGREGATE_FIELDS = Object.freeze([
   ...RECOVERY_DURABLE_TABLES
@@ -918,7 +921,7 @@ const AGGREGATE_FIELDS = Object.freeze([
      ...SCHEMA_42_TABLES, ...SCHEMA_43_TABLES, ...SCHEMA_44_TABLES,
      ...SCHEMA_45_TABLES, ...SCHEMA_47_TABLES, ...SCHEMA_48_TABLES,
      ...SCHEMA_49_TABLES, ...SCHEMA_50_TABLES, ...SCHEMA_52_TABLES,
-     ...SCHEMA_53_TABLES].includes(table)
+     ...SCHEMA_53_TABLES, ...SCHEMA_55_TABLES].includes(table)
       ? "SELECT 0"
       : `SELECT COUNT(*) FROM ${quoteIdentifier(table)}`,
   ]),
@@ -4433,7 +4436,8 @@ function expectedRecoveryTables(migrations) {
     (latest >= 49 || !SCHEMA_49_TABLES.includes(table)) &&
     (latest >= 50 || !SCHEMA_50_TABLES.includes(table)) &&
     (latest >= 52 || !SCHEMA_52_TABLES.includes(table)) &&
-    (latest >= 53 || !SCHEMA_53_TABLES.includes(table)));
+    (latest >= 53 || !SCHEMA_53_TABLES.includes(table)) &&
+    (latest >= 55 || !SCHEMA_55_TABLES.includes(table)));
 }
 
 // The v0.4.8 disposal proof is a frozen campaign contract. Later product

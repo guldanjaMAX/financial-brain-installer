@@ -1,7 +1,15 @@
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync, readdirSync } from 'node:fs';
+import { maintainAccountLink } from '../../../src/lib/fin-account-links.js';
 
 export const NOW = '2026-10-11T12:00:00.000Z';
+
+// Twin fixtures carry the same explicit approval required of owner accounts.
+export async function linkAccounts(f, manualSlug = 'manual-account', liveSlug = 'live-account', unlink = false) {
+  const args = { manualSlug, liveSlug, unlink, now: NOW };
+  const plan = await maintainAccountLink(f.env, args);
+  return maintainAccountLink(f.env, { ...args, dryRun: false, approve: plan.plan_hash });
+}
 
 export function fixture() {
   const sqlite = new DatabaseSync(':memory:');

@@ -3,7 +3,11 @@
 export const normalizeLedgerText = value => (String(value || "").normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).join(" ");
 export const merchantFor = row => normalizeLedgerText(row.payee || row.description);
 const containsTokens = (haystack, needle) => Boolean(needle) && ` ${haystack} `.includes(` ${needle} `);
-export const matchesMerchant = (row, query) => [row.description, row.payee].some(text => containsTokens(normalizeLedgerText(text), normalizeLedgerText(query)));
+// An explicit payee controls attribution. A memo about another merchant cannot
+// turn a payment to this payee into that merchant's income or spend.
+export const matchesMerchant = (row, query) => row.payee
+  ? normalizeLedgerText(row.payee) === normalizeLedgerText(query)
+  : containsTokens(normalizeLedgerText(row.description), normalizeLedgerText(query));
 export function categoryFor(row) {
   const category = normalizeLedgerText(row.category);
   return !category || !row.category_basis_state || ["unsorted", "uncategorized", "uncategorised", "unknown"].includes(category) ? null : category;
@@ -28,8 +32,21 @@ export function isTransferCandidate(row) {
   return /^TRANSFER_(?:IN|OUT)(?:_|$)/i.test(row.category || "") ||
     /\btransfer (?:to|from)\b/.test(normalizeLedgerText(row.description));
 }
-export function pairOwnTransfers(rows) {
-  const candidates = rows.filter(row => row.amount_minor > 0 && isTransferCandidate(row));
+function namesOwnedAccount(row, account, accounts) {
+  const text = `${row.description || ""} ${row.payee || ""}`;
+  return (account?.members || []).some(member => {
+    const label = normalizeLedgerText(member.label);
+    if (label && containsTokens(normalizeLedgerText(text), label) &&
+        [...accounts.values()].filter(a => a.members.some(m => normalizeLedgerText(m.label) === label)).length === 1) return true;
+    if (!/^\d{1,4}$/.test(member.mask || "")) return false;
+    if ([...accounts.values()].filter(a => a.members.some(m => m.mask === member.mask)).length !== 1) return false;
+    // A bare amount or year is not an account reference. Require a mask marker
+    // or account/destination wording, with literal digit boundaries.
+    return new RegExp(`(?:\\b(?:account|acct|card|checking|savings|ending|to|from)\\s+(?:ending\\s+)?|(?:^|[^\\p{L}\\p{N}])[x*•]+)${member.mask}(?![\\p{L}\\p{N}])`, "u").test(text.toLowerCase());
+  });
+}
+export function pairOwnTransfers(rows, accounts = new Map()) {
+  const candidates = rows.filter(row => row.amount_minor > 0);
   const buckets = new Map();
   const bucketKey = (row, direction, day) => JSON.stringify([row.currency, row.amount_minor, direction, day]);
   for (const row of candidates) {
@@ -59,9 +76,14 @@ export function pairOwnTransfers(rows) {
     // A deterministic tie-break would invent an ownership match in the
     // three-account case. Require mutual uniqueness, even for equal dates.
     if (!incoming || peers.get(incoming.id)?.id !== out.id) continue;
+    // Date/amount/direction and provider category only locate candidates.
+    // Exclusion requires a leg explicitly naming the other owned account.
+    // There is no provider transfer-link or owner-pair field in this schema.
+    if (!namesOwnedAccount(out, accounts.get(incoming.effective_account_slug), accounts) &&
+        !namesOwnedAccount(incoming, accounts.get(out.effective_account_slug), accounts)) continue;
     pairs.push({ out, in: incoming }); matched.add(out.id); matched.add(incoming.id);
   }
-  return { pairs, matched, unmatched: candidates.filter(row => !matched.has(row.id)) };
+  return { pairs, matched, unmatched: candidates.filter(row => isTransferCandidate(row) && !matched.has(row.id)) };
 }
 export const excludeMatchedTransfers = (rows, matched) => rows.filter(row => !matched.has(row.id));
 
