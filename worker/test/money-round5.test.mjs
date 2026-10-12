@@ -313,3 +313,24 @@ test('S01: "made by <AI>" discloses document authorship unless a payment was the
     assert.equal(b.evidence_gate.supported, true, content);
   }
 });
+
+test('T01: a document about payments made by AI is a disclosure; only a payment as the subject is exempt', async t => {
+  for (const input of [
+    { content: 'This summary of payments was made by ChatGPT. Card ending 4242 charged USD 120.00.' },
+    { title: 'This report about transfers was made by AI' },
+    { content: 'This purchase order was made by Copilot. Card ending 4242 charged USD 120.00.' },
+    { content: 'This record of transactions was made by ChatGPT. Card ending 4242 charged USD 120.00.' },
+    { content: 'The payment was made by Jane. This memo was made by ChatGPT. Card ending 4242 charged USD 120.00.' },
+  ]) {
+    const b = await documentAnswer(t, input);
+    assert.equal(b.results[0].lineage.kind, 'agent_derived', JSON.stringify(input));
+    assert.equal(b.answer, null); assert.equal(b.evidence_gate.supported, false);
+  }
+  for (const content of [
+    'The payment was made by AI. Card ending 4242 charged USD 120.00.',
+    'Card ending 4242 charged USD 120.00. Your refund was made by an agent at the branch.',
+  ]) {
+    const b = await documentAnswer(t, { content });
+    assert.equal(b.evidence_gate.supported, true, content);
+  }
+});

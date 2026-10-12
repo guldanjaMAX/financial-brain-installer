@@ -6,6 +6,13 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.12 (unreleased)
 
+- A record that says in its title or opening lines that an AI made it ("made
+  with ChatGPT", "AI-generated", "written by Claude") cannot be the only
+  support for a money answer. Known limit: the Brain recognizes these
+  explicit notes, not AI-written text that says nothing about how it was
+  made, and a person whose first name is an AI product name may have their
+  email treated as AI-written. When unsure, the Brain refuses rather than
+  guesses.
 - Human bank agents and accounts-payable assistants no longer make a dated
   record look AI-authored. Explicit AI disclosures still cannot be the sole
   support for a money answer. Multiple matching account records keep every

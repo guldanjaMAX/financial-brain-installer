@@ -39,8 +39,12 @@ const AGENT_AUTHORSHIP = new RegExp(String.raw`\b${AUTHOR_VERB}\s+(?:by|with|usi
 const AGENT_TITLE = new RegExp(String.raw`\b${AI_TERM}[\s-]+(?:summary|notes?|draft|memo)\b`, 'i');
 
 const MADE_BY_AI = new RegExp(String.raw`\bmade\s+by\s+${AI_TERM}`, 'i');
-const PAYMENT_MADE_BY = /\b(?:payments?|charges?|transfers?|deposits?|withdrawals?|purchases?|transactions?|refunds?|orders?)\s+(?:was|were|is|are|(?:has|have|had)\s+been)\s+made\s+by\b/gi;
-const madeByAi = (text) => MADE_BY_AI.test(text.replace(PAYMENT_MADE_BY, ' '));
+// Exempt only a sentence whose subject IS a payment ("The payment was made by
+// AI."), counting a stored "[Title]" header or line break as a sentence start.
+// "This summary of payments was made by ChatGPT" names a document, so it
+// stays a disclosure; ambiguous wording demotes, which only ever refuses.
+const PAYMENT_MADE_BY = /(^|[.!?\]:\n]\s*)(?:(?:the|a|this|that|your|our|my|his|her|their)\s+)?(?:payments?|charges?|transfers?|deposits?|withdrawals?|refunds?)\s+(?:was|were|is|are|(?:has|have|had)\s+been)\s+made\s+by\b/gi;
+const madeByAi = (text) => MADE_BY_AI.test(text.replace(PAYMENT_MADE_BY, '$1 '));
 const authored = (text) => AGENT_AUTHORSHIP.test(text) || madeByAi(text);
 
 /** Names and explicit authorship can only demote, never promote provenance. */
