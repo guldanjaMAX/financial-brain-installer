@@ -107,7 +107,10 @@ function phaseTwoQuestion(q, intent, today) {
     const name = nounSpend[1];
     if (name.length > 80 || ledgerWords(name).length > 6 || !/\p{L}/u.test(name) ||
         !/^[\p{L}\p{N}\s&/.'-]+$/u.test(name) ||
-        /\b(?:my|our|the|income|versus|vs|business|entity|money|cash|accounts?|largest|biggest|top|total|net|how|what|much|very)\b/.test(name)) return null;
+        /\b(?:my|our|the|income|versus|vs|business|entity|money|cash|accounts?|largest|biggest|top|total|net|how|what|much|very)\b/.test(name) ||
+        // A lone past-participle ("authorized", "allocated") qualifies spending;
+        // it is not a merchant. Those questions stay with documents.
+        (ledgerWords(name).length === 1 && /ed$/.test(name))) return null;
     residual = `show spending ${/^(?:software|saas|software\/saas)$/.test(name) ? "on" : "at"} ${name}`;
   }
   const spending = residual.match(/^(?:how much did (?:i|we) spend|(?:show(?: me)? |what is (?:my |the )?)spend(?:ing)?)(?: (at|on|by) (.+))$/);
@@ -140,7 +143,7 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
   const punctuationOnly = text => !text.replace(/[?'.,:]/g, "").trim();
   if (kinds.length > 1) return intent;
   // These qualifiers require a different source or a richer financial model.
-  if (/\b(?:quickbooks|qbo|tax|profit|net income|excluding|exclude|without|except|budgeted|budget|approved|planned|projected|expected|estimated|forecast|target|allowed|average|median|smallest|interest)\b/.test(q)) return intent;
+  if (/\b(?:quickbooks|qbo|tax|profit|net income|excluding|exclude|without|except|budgeted|budget|approved|authori[sz]ed|allocated|proposed|committed|permitted|planned|projected|expected|estimated|forecast|target|allowed|average|median|smallest|interest)\b/.test(q)) return intent;
   const phaseTwo = phaseTwoQuestion(q, intent, today);
   if (phaseTwo) return phaseTwo;
   if (/\b(?:balance|balances)\b/.test(q)) {

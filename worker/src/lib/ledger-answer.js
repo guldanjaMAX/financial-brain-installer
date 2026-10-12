@@ -82,9 +82,14 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       if (row.direction !== "inflow" || (intent.amountMinor !== null && row.amount_minor !== intent.amountMinor)) return false;
       // An amountless arrival depends on sender attribution. A memo mention
       // cannot override an explicit payee, just as for merchant totals.
-      const sender = intent.amountMinor === null ? row.payee || row.description || ""
-        : `${row.description || ""} ${row.payee || ""}`;
-      const words = new Set(sender.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
+      if (intent.amountMinor === null) {
+        if (row.payee) {
+          const words = new Set(String(row.payee).toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
+          return intent.counterpartyWords.every(word => words.has(word));
+        }
+        return descriptionNamesSender(row.description, intent.counterpartyWords);
+      }
+      const words = new Set(`${row.description || ""} ${row.payee || ""}`.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
       return intent.counterpartyWords.every(word => words.has(word));
     });
     const citations = matched.map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
@@ -206,6 +211,17 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
 
 // The only integration point wraps the existing document path. Non-money
 // responses return untouched, including their exact serialized bytes.
+
+// Without a payee, a description proves the sender only when the requested
+// words open the description or follow its "from"/"by" clause. "Transfer from
+// A for B invoice" names A as the sender, never B. Anything else refuses.
+function descriptionNamesSender(description, wanted) {
+  const tokens = String(description || "").toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+  const startsWith = (at) => wanted.every((word, i) => tokens[at + i] === word);
+  const clause = tokens.findIndex(token => token === "from" || token === "by");
+  return clause === -1 ? startsWith(0) : startsWith(clause + 1);
+}
+
 export async function withLedgerAnswer({ env, question, access, grantScope, scopePrincipalKind,
   filters = {}, entityScope, ledgerEligible = true, now = Date.now() }, next) {
   const intent = classifyLedgerQuestion(question, { now });
