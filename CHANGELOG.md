@@ -10,6 +10,11 @@ the brain, not for whoever built it: what changed for them, and what to check.
   Microsoft finishes checking for changes and saves its place for the next check.
   Check that daily status says checked with no changes; the last import date
   stays unchanged. Interrupted checks and errors still need attention.
+- Your installer can now repair dates on stored documents one reviewed page at
+  a time with `brain content refresh-dates <manifest> --preview`. The preview
+  shows counts and an approval hash. Apply requires that hash, stops for large
+  documents or a full indexing queue, and safely acknowledges a repeated request.
+  Wait for indexing to finish, then check dates in representative search results.
 
 - A record that says in its title or opening lines that an AI made it ("made
   with ChatGPT", "AI-generated", "written by Claude") cannot be the only

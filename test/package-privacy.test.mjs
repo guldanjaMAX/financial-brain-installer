@@ -668,6 +668,7 @@ const expected = [
   // redirects, and sends only bounded exact filters to the Brain data plane.
   "operations/financial-picture.mjs",
   "operations/ledger-rekey.mjs",
+  "operations/content-refresh-dates.mjs",
   "operations/cloudflare-token-store.mjs",
   // Generic brain check modules. Reviewed 2026-09-05: categories and fixtures
   // are synthetic, with no client identity or credential material.
@@ -782,6 +783,7 @@ const expected = [
   "migrations/d1/0053_financial_evidence.sql",
   "migrations/d1/0054_daily_evidence.sql",
   "migrations/d1/0055_fin_account_links.sql",
+  "migrations/d1/0056_content_date_refresh_receipts.sql",
   "operations/bank-access-wrapping-key.mjs",
   // Generic owner-present bank secret custody. Reviewed 2026-09-17: takes only
   // injected list, write, and hidden-prompt callbacks; refuses ambient values

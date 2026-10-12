@@ -708,6 +708,15 @@ in-flight window, and confirms the exact generation of every vector before
 advancing the verified receipt. Re-running either path resumes its D1 cursor
 and provider receipts instead of resetting completed pages.
 
+Content-date maintenance is an explicit admin-only, approved page operation.
+Schema 0056 stores count-only apply receipts atomically with document dates,
+chunk dates and vector outbox upserts. Read-only previews and in-transaction
+writes check schema 0052's corpus generation and nonce. One blocked document or
+queue-budget failure aborts the entire page. Exact receipt replay performs no
+mutation and reports historical completion only. The recovery table inventory
+includes these receipts, but exports omit them so a restored database cannot
+reuse an old local approval.
+
 ## Retrieval and answer flow
 
 Think first offers unrestricted owner money questions to a read-only ledger

@@ -24,13 +24,13 @@ test('ingest and existing-document repair preserve rows and queue exact date pro
     assert.equal(preview.planned, 1, 'preview reached a non-empty repair plan');
     assert.equal(preview.updated, 0);
     assert.equal(f.first('SELECT date_source FROM documents').date_source, 'filename');
-    const changed = await refreshContentDates(f.env, { dryRun: false, now: NOW });
+    const changed = await refreshContentDates(f.env, { dryRun: false, approve: preview.plan_hash, now: NOW });
     assert.equal(changed.updated, 1);
     assert.equal(changed.complete, true);
     assert.deepEqual(f.rows('SELECT chunk_uid,text FROM chunks ORDER BY chunk_uid'), before);
     assert.ok(f.first("SELECT COUNT(*) AS n FROM vector_outbox WHERE op='upsert'").n > 0);
     assert.equal(f.first('SELECT document_date FROM chunks').document_date, Date.parse('2026-09-21'));
-    assert.equal((await refreshContentDates(f.env, { dryRun: false, now: NOW })).updated, 0);
+    assert.equal((await refreshContentDates(f.env, { dryRun: false, approve: preview.plan_hash, now: NOW })).updated, 0);
   } finally { f.sqlite.close(); }
 });
 
@@ -40,6 +40,8 @@ test('maintenance detects revision races and truncated documents without advanci
     await storeFor(f.env).ingest(f.env, { source_type: 'files', source_id: 'race', title: 'State.md',
       content: 'Updated 2026-09-21\nThe setting is enabled.', text_source: 'native', text_reliable: true, metadata: {} });
     f.raw("UPDATE documents SET document_date=NULL,date_source='none',date_reliable=0 WHERE doc_uid='files:race'");
+    const plan = await refreshContentDates(f.env, { now: NOW });
+    assert.equal(plan.planned, 1);
     let batches = 0;
     const batch = f.env.DB.batch;
     f.env.DB.batch = async statements => {
@@ -47,23 +49,21 @@ test('maintenance detects revision races and truncated documents without advanci
       f.raw("UPDATE documents SET content_hash='synthetic-new-revision' WHERE doc_uid='files:race'");
       return batch(statements);
     };
-    const result = await refreshContentDates(f.env, { dryRun: false, now: NOW });
+    await assert.rejects(refreshContentDates(f.env, { dryRun: false, approve: plan.plan_hash, now: NOW }), /stale/);
     assert.equal(batches, 1, 'mutation reached the write decision');
-    assert.equal(result.planned, 1);
-    assert.equal(result.updated, 0);
-    assert.equal(result.cursor, 0);
-    assert.equal(result.blocked, 'revision_or_readback_changed');
     assert.equal(f.first('SELECT document_date FROM documents').document_date, null);
     f.env.DB.batch = batch;
-    const good = await refreshContentDates(f.env, { dryRun: false, now: NOW });
+    const stable = await refreshContentDates(f.env, { now: NOW });
+    const good = await refreshContentDates(f.env, { dryRun: false, approve: stable.plan_hash, now: NOW });
     assert.equal(good.updated, 1, 'control repairs the same row when revision is stable');
     f.raw("UPDATE documents SET document_date=NULL,date_source='none',date_reliable=0 WHERE doc_uid='files:race'");
     for (let i = 1; i <= 500; i++) {
       f.raw('INSERT INTO chunks(chunk_uid,doc_uid,chunk_ix,text,source) VALUES (?,?,?,?,?)',
         `files:race#${i}`, 'files:race', i, 'Additional section.', 'files');
     }
-    const bounded = await refreshContentDates(f.env, { dryRun: false, now: NOW });
-    assert.equal(bounded.blocked, 'document_chunk_budget');
+    const bounded = await refreshContentDates(f.env, { now: NOW });
+    assert.equal(bounded.blocked_documents, 1);
+    await assert.rejects(refreshContentDates(f.env, { dryRun: false, approve: bounded.plan_hash, now: NOW }), /500 chunks/);
     assert.equal(bounded.cursor, 0);
     assert.equal(bounded.updated, 0);
     assert.ok(f.seen.sql.some(sql => /ORDER BY chunk_ix LIMIT 501/.test(sql)));

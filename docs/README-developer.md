@@ -2162,6 +2162,28 @@ are idempotent; old approvals cannot undo a later unlink/relink. Changed account
 identities invalidate the saved approval. Unknown live coverage still refuses
 and never admits both sources as a complete answer.
 
+Content-date repair uses `brain content refresh-dates <manifest> --preview
+[--limit N] [--cursor C]`, then `brain content refresh-dates <manifest> --apply
+--approve <hash> [--cursor C] [--queue-budget N]`. Use the same input cursor
+when applying; the hash identifies the reviewed limit, so apply needs no limit.
+Preview is read-only and reports only document/change/chunk/block counts, vector
+queue depth, a page hash and the next cursor. The default page has ten eligible
+documents (limit 1–10). A document over 500 chunks blocks the entire page without
+advancing its cursor; request separate installer review instead of skipping it.
+Apply checks both the existing and resulting queue against `--queue-budget`
+(default 500, range 0–10000), inside the same D1 transaction as the repair.
+Prefer waiting for indexing or a smaller page over raising that budget. Apply
+requires schema 56, which records count-only receipts with each repaired page.
+Retry a lost response with the identical hash and input cursor; replay returns
+zero additional mutations, even after the queue drains. This acknowledges the
+historical page, not its current state after later ingestion. Preview each next
+cursor until `complete: true`; completion covers this walk's eligible rows, not
+semantic indexing readiness. Never reuse a preview after a corpus change.
+The authenticated route is `POST /api/admin/brain/content/refresh-dates`; it
+requires the D1 document store, honors the upgrade pause, and never deletes
+content or calls a vector provider.
+Restored databases require new previews; repair receipts are not exported.
+
 Bank-export identities in 0.4.12 use the mapped account, posting date, normalized
 amount and direction, normalized description, and an ordinal among identical
 lines. Row numbers remain citation locators. CSV imports must use the same

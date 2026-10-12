@@ -49,6 +49,7 @@ import {
 } from "./lib/quickbooks-oauth-callback.js";
 import { cleanupPublicAuthState, guardPublicRequest } from "./lib/public-request-guard.js";
 import { handleBankExportImport, BANK_IMPORT_PATH } from "./lib/fin-upload.js";
+import { handleContentRefreshDates, CONTENT_REFRESH_PATH } from "./lib/content-freshness-maintenance.js";
 import { handleFinApi, FIN_PATH_PREFIX } from "./lib/fin-api.js";
 import {
   handleOwnerActions, OWNER_PATH_PREFIX, validateOwnedEntityScope,
@@ -3039,6 +3040,7 @@ const PAUSED_CORPUS_MUTATION_PATHS = new Set([
   // flight, and financial rows written against a half-migrated schema are the
   // last thing anyone wants to unpick. It refuses with the same 503.
   BANK_IMPORT_PATH,
+  CONTENT_REFRESH_PATH,
 ]);
 
 function upgradePauseHolds(env) {
@@ -3532,6 +3534,9 @@ export default {
       // feed's owner pages: this one writes figures on the owner's behalf from
       // a file they handed over, so it is the operator's action and the admin
       // key is the right authority for it.
+      if (path === CONTENT_REFRESH_PATH) {
+        return await handleContentRefreshDates(env, request);
+      }
       if (path === BANK_IMPORT_PATH) {
         return await handleBankExportImport(env, request);
       }

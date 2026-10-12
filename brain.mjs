@@ -503,7 +503,7 @@ export function supportSourceForCommand(command = "") {
   if (command === "ocr-preflight" || command === "provenance-assess" ||
       command === "ingest-file-preview") return "local";
   if (command === "update-preview" || command === "ingest-file-apply") return "brain-data-plane";
-  if (["financial-picture", "machine-continuity", "ledger"].includes(command)) return "brain-data-plane";
+  if (["financial-picture", "machine-continuity", "ledger", "content"].includes(command)) return "brain-data-plane";
   if (command === "ingest") {
     const index = process.argv.indexOf("--from");
     const remote = index >= 0 ? process.argv[index + 1] : null;
@@ -32317,6 +32317,15 @@ export async function cmdCustomApi(manifestPath, flags = parseFlags(process.argv
   return receipt;
 }
 
+export async function cmdContent(argv, options = {}) {
+  const { parseContentRefreshDatesArgs, runContentRefreshDates } = await import("./operations/content-refresh-dates.mjs");
+  const args = parseContentRefreshDatesArgs(argv);
+  const { m } = (options.loadManifest ?? loadManifest)(args.manifestPath);
+  return runContentRefreshDates(args, { manifest: m,
+    credential: () => (options.resolveAdminKey ?? resolveAdminKey)(args.manifestPath),
+    fetchImpl: options.fetchImpl ?? fetch, write: options.write ?? console.log });
+}
+
 export async function cmdLedger(argv, options = {}) {
   const { parseLedgerRekeyArgs, runLedgerRekey, parseLedgerLinkArgs, runLedgerLink } = await import("./operations/ledger-rekey.mjs");
   const linking = argv[0] === 'link-accounts';
@@ -32353,6 +32362,7 @@ const commands = {
   }),
   import: cmdImport,
   ledger: () => cmdLedger(process.argv.slice(3)),
+  content: () => cmdContent(process.argv.slice(3)),
   "custom-api": cmdCustomApi,
   load: cmdLoad,
   connect: cmdConnect,
@@ -32407,6 +32417,7 @@ const versionRequested = VERSION_ARGUMENTS.has(cmd);
 // Keep this one set beside the actual dispatcher wrapper so tests exercise the
 // same decision the installed CLI uses.
 const WRANGLER_SESSION_EXEMPT_COMMANDS = new Set([
+  "content",
   "ledger",
   "quickbooks-desktop-data",
   "sources",
@@ -32484,6 +32495,8 @@ if (IS_MAIN && (!cmd || helpRequested || !commands[cmd])) {
     brain setup      [manifest] --cloudflare-token  recovery-only hidden API-token entry
     brain setup      [manifest] --no-connect  same, without touching THIS computer's AI tool config
     brain ask        <manifest>            ask a private question in this terminal
+    brain content refresh-dates <manifest> --preview [--limit N] [--cursor C]
+    brain content refresh-dates <manifest> --apply --approve <hash> [--cursor C] [--queue-budget N]
     brain ledger rekey <manifest> --account <account> --preview
     brain ledger link-accounts <manifest> --manual <account> --live <account> --preview
     brain ledger link-accounts <manifest> --manual <account> --live <account> --unlink --preview

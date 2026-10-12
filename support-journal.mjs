@@ -46,6 +46,7 @@ export const SUPPORT_COMMANDS = Object.freeze([
   "assistant-repair",
   "auth",
   "connect",
+  "content",
   "diagnose",
   "deploy",
   "disconnect",
