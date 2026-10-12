@@ -139,3 +139,27 @@ for (const qualifier of ['first', 'second', 'third', 'another', 'bank']) test(`n
   assert.deepEqual(body, { route: 'documents', gaps: [] });
   assert.equal(f.documentCalls, documents + 1, 'ambiguous sender reached document routing');
 });
+
+test('closure: a lone past-participle qualifier such as "authorized" stays a document question', async t => {
+  const f = ledgerFixture(t);
+  assert.equal((await f.ask('Show my software spending this month.')).ledger?.kind, 'category');
+  for (const question of ['What is my authorized spending this month?', 'What is my allocated spending this month?']) {
+    const documents = f.documentCalls;
+    const body = await f.ask(question);
+    assert.deepEqual(body, { route: 'documents', gaps: [] }, question);
+    assert.equal(f.documentCalls, documents + 1, question);
+  }
+});
+
+test('closure: without a payee, only the description sender clause can name the payer', async t => {
+  const f = ledgerFixture(t);
+  f.add('unrelated', 'Transfer from Unrelated Payer for Fixture Payer invoice', null);
+  f.add('opening', 'Fixture Sender ACH deposit', null);
+  assert.equal((await f.ask('Did the Unrelated Payer payment arrive?')).ledger?.found, true);
+  assert.equal((await f.ask('Did the Fixture Sender payment arrive?')).ledger?.found, true);
+  const start = f.calls.length;
+  const body = await f.ask('Did the Fixture Payer payment arrive?');
+  assert.ok(f.calls.slice(start).some(sql => /JOIN fin_transactions/.test(sql)), 'sender match decision reached');
+  assert.notEqual(body.ledger?.found, true, 'an invoice-party mention cannot confirm arrival from that party');
+  assert.equal(body.citations?.length || 0, 0);
+});
