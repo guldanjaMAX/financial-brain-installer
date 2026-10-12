@@ -1543,3 +1543,37 @@ test("daily on preserves verified installation when the freshness inventory is u
   assert.equal(result.sources[0].current_state, "unknown");
   assert.ok(adapter.calls.some(([name]) => name === "install"), "the native install decision point was reached");
 });
+
+test("daily on registers Drive freshness under the Worker's drive kind, not the plan key", async () => {
+  const directory = makeTempDirectory(join(tmpdir(), "daily-drive-kind-"));
+  const manifestPath = join(directory, "brain.manifest.json");
+  writeFileSync(manifestPath, `${JSON.stringify({
+    client: { slug: "fixture", timezone: "America/Phoenix" },
+    infrastructure: { cloudflare: { account_id: "fixture-account", d1_database_id: "fixture-database" } },
+    corpora: { google_drive: { enabled: true }, gmail: { enabled: true } },
+    operations: { daily_refresh: { enabled: true, timezone: "America/Phoenix" } },
+  }, null, 2)}\n`);
+  const posted = [];
+  const sources = [
+    { key: "google_drive", run_key: "google_drive", class: "machine-pull", owner: "daily-task", status: "ready", source_names: ["drive"] },
+    { key: "gmail", run_key: "gmail", class: "machine-pull", owner: "daily-task", status: "ready", source_names: ["gmail"] },
+  ];
+  await cmdScheduleAllConfigured(manifestPath, "install", {
+    platform: "win32",
+    planDailyRefresh: async () => ({ ...basePlan, enabled: true, timezone_matches_machine: true, unsupported_sources: 0, sources }),
+    schedulerAdapter: memoryAdapter(),
+    schedulerOptions: WINDOWS_DEFINITION_OPTIONS,
+    resolveAdminKey: () => "fixture-admin-key-value-not-a-secret",
+    resolveBaseUrl: async () => "https://brain.invalid",
+    postSourceExpectation: async (_base, _key, body) => { posted.push(body); },
+    readSourceInventory: async () => ({ sources: [] }),
+    withBrainLifecycleLock: async (_options, task) => task(),
+    log: () => {},
+  });
+  rmSync(directory, { recursive: true, force: true });
+  assert.deepEqual(posted.map(({ source, kind }) => ({ source, kind })),
+    [{ source: "drive", kind: "drive" }, { source: "gmail", kind: "gmail" }]);
+  const workerKinds = new Set(["drive", "gmail", "imap", "calendar", "imessage", "whatsapp", "zoom", "quickbooks",
+    "slack", "notion", "microsoft", "dropbox", "hubspot", "plaid", "iphone-backup", "upload", "custom_api"]);
+  assert.ok(posted.every(({ kind }) => workerKinds.has(kind)), "every posted kind is one the Worker accepts");
+});

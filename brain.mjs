@@ -26766,6 +26766,11 @@ function renderDailyFreshnessRows(rows, log = console.log) {
   }
 }
 
+// Daily plan keys name the manifest corpus; the Worker registers source kinds.
+// Only Google Drive differs today ("google_drive" in the plan, "drive" in D1),
+// and sending the plan key made `brain daily on` fail for every Drive owner.
+const DAILY_PLAN_KEY_WORKER_KIND = Object.freeze({ google_drive: "drive" });
+
 async function syncDailySourceExpectations(m, manifestPath, plan, expectedRefreshSeconds, options = {}) {
   if (options.syncSourceExpectations === false) return [];
   const sources = [...new Set(plan.sources
@@ -26781,7 +26786,10 @@ async function syncDailySourceExpectations(m, manifestPath, plan, expectedRefres
   for (const source of sources) {
     await post(base, key, {
       source,
-      kind: plan.sources.find((entry) => (entry.source_names || []).includes(source))?.key || source,
+      kind: (() => {
+        const key = plan.sources.find((entry) => (entry.source_names || []).includes(source))?.key || source;
+        return DAILY_PLAN_KEY_WORKER_KIND[key] ?? key;
+      })(),
       expected_refresh_seconds: expectedRefreshSeconds,
     });
   }
