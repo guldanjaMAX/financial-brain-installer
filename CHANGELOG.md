@@ -4,7 +4,11 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
-## 0.4.13 (unreleased)
+## 0.4.13 (2026-10-12)
+
+Candidate only. This version has not been released. The changes below still
+need the full host gate, CI and separately reviewed field acceptance for the
+exact sealed package.
 
 - More everyday bank questions now reach the ledger, including money that came
   into an account, largest expenses, recent deposits, and named payment arrivals.
@@ -14,6 +18,28 @@ the brain, not for whoever built it: what changed for them, and what to check.
   transactions. Older empty accounts can use that dated provider receipt only
   with confirmed zero balances and no saved activity; missing proof still
   produces a coverage gap.
+
+- Enabling daily refresh with Google Drive no longer fails when registering
+  the source for freshness checks. Check that daily status lists the approved
+  Drive source; a registered source still needs a successful check or import
+  before its freshness is proven.
+
+### Known issues
+
+- Removal of rows the Worker cannot verify still needs the technician.
+- Money answers still require review of cited accounts, dates and coverage.
+  Explicit AI disclosures are recognized; undisclosed generated text is not.
+  Missing lineage cannot prove independent confirmation.
+
+### This release does NOT cover
+
+- **UPDATE-012:** Windows x64 is the only supported Windows runtime in this
+  release. Windows ARM64 ships unproven.
+- **UPDATE-044:** Bank breadth ships unproven. Bank invitations stay closed.
+- QuickBooks Desktop money answers and owner readiness still need field
+  acceptance. The tax evidence checklist does not verify tax amounts or filing
+  readiness. Financial contracts, the test-only oracle, books-match and
+  tax-check remain internal libraries. SimpleFIN proof remains held.
 
 ## 0.4.12 (2026-10-11)
 
