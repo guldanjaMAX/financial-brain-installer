@@ -719,7 +719,8 @@ totals, recent deposits, recurring charges and own-account transfers;
 link. Matching institution, entity, mask and account kind identify candidates,
 not proof. For supported ledger questions, unlinked collisions whose selected
 accounts and coverage overlap the requested window refuse with one bounded gap and the exact
-`brain ledger link-accounts` preview command. Migration 0055 stores approval
+`brain ledger link-accounts` preview command. Every unresolved pair is retained
+for the window decision; the gap displays one relevant pair. Migration 0055 stores approval
 history without triggers. The authenticated import admin route previews, hashes,
 atomically guards and verifies link/unlink actions. Saved account identities
 must still match at read time; changed identities require new review.
@@ -827,9 +828,11 @@ Money answers add a deterministic veto after ordinary verification and partial
 rendering. It can remove approval but never grant it. Money claims require
 reliable citation dates, eligible non-agent support and matching figures,
 months and account identifiers in the exact cited excerpt. Agent instruction
-files, explicit AI/agent/assistant authorship of any artifact, and assistant
-notes are one-way demotions
+files and explicit AI authorship of any artifact are one-way demotions
 to agent-derived T4, even if another metadata field claims primary provenance.
+Generic agent or assistant roles require an AI qualifier, such as AI assistant,
+AI agent, virtual assistant or chatbot. Named AI products remain authorship
+terms. Payment actions described as "made by" do not establish authorship.
 Unknown lineage alone does not disqualify a dated primary record from supporting
 its own cited span; it still earns no independent-corroboration credit.
 Agent-derived or T4 material cannot be the sole support for money. Document

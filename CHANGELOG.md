@@ -6,6 +6,12 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.12 (unreleased)
 
+- Human bank agents and accounts-payable assistants no longer make a dated
+  record look AI-authored. Explicit AI disclosures still cannot be the sole
+  support for a money answer. Multiple matching account records keep every
+  unresolved pair under review; adding old records cannot hide a collision in
+  the period you asked about.
+
 - Transfers between your accounts are flagged, not removed. Income, spending,
   largest expenses and category totals include possible moves, with cited
   accounts, dates and reasons plus a separate figure labelled "if these are
@@ -22,7 +28,7 @@ the brain, not for whoever built it: what changed for them, and what to check.
   for two records of the same account. Add `--unlink --preview` to review
   removing a link. Accounts, transactions and approval history are retained.
 
-- Explicit AI, agent or assistant authorship makes a memo, recap, analysis or
+- Explicit AI authorship makes a memo, recap, analysis or
   other generated document insufficient as sole money evidence, including
   disclosures such as "generated with ChatGPT" or "created using Claude".
   Dated primary
@@ -30,7 +36,7 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 - Money answers can use dated primary emails, messages and documents whose
   lineage was never recorded. Agent-written material alone remains insufficient,
-  including assistant notes. Check the cited figure and date; missing lineage
+  including AI assistant notes. Check the cited figure and date; missing lineage
   still cannot establish independent confirmation.
 
 - Money answers keep distinct banks separate, refuse uncertain overlapping

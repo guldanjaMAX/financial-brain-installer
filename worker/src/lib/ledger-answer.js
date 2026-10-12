@@ -1,6 +1,6 @@
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
-import { accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
+import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
 import { categoryFor, detectRecurring, matchesCategory, matchesMerchant, merchantFor, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
 
 const masked = account => /^\d{1,4}$/.test(account.mask || "") ? `account ****${account.mask}` : "account (mask unavailable)";
@@ -13,7 +13,8 @@ const accountCoverage = accounts => accounts.map(a => ({
 
 function gapFor(reason, accounts = [], intent = {}) {
   if (reason === 'ledger_account_link_required') {
-    const pair = accounts.find(a => a.linkRequired)?.linkRequired;
+    // Display one relevant pair; the admission decision checks every edge.
+    const pair = accounts.flatMap(a => accountLinkPairsInWindow(a, intent))[0];
     const describe = (a, role) => `${role}: ${String(a?.institution || 'institution unavailable').replace(/[\r\n]/g, ' ').slice(0, 100)}, ${masked(a || {})}, ${a?.account_kind || 'kind unavailable'}`;
     const slug = a => /^[a-z0-9][a-z0-9_-]{0,63}$/.test(a?.account_slug || '') ? a.account_slug : '<account>';
     return { type: 'ledger_not_consulted', reason, code: reason,

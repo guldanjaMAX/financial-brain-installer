@@ -74,7 +74,7 @@ for (const [label, mutation, reason] of [
   ["agent-derived email", { lineage: "agent_derived" }, /primary|agent/i],
   ["agent instruction file", { title: "AGENTS.md" }, /primary|agent/i],
   ["AI brief", { title: "AI financial brief" }, /primary|agent/i],
-  ["assistant notes", { title: "Assistant notes" }, /primary|agent/i],
+  ["AI assistant notes", { title: "AI assistant notes" }, /primary|agent/i],
   ["wrong figure", { answer: ANSWER.replace("120.00", "121.00") }, /span/i],
   ["absence claim", { answer: "Nothing is due [1].", content: "Nothing is due for card ending 4242." }, /ledger|whole window/i],
 ]) {
@@ -158,7 +158,7 @@ test("agent filename and AI brief are one-way lineage and authority demotions", 
   const base = { source_kind: "bank", source: "records", ref_key: "one", title: "Bank statement", text: CONTENT };
   assert.equal(evidenceLineageFor(base).lineage.kind, "source_record");
   assert.equal(tierOf(base).tier, "T1");
-  for (const title of ["SKILL.md", "folder/SKILL.md", "AGENTS.md", "AI financial brief", "Agent-written financial summary", "Assistant notes", "Assistant-written financial summary"]) {
+  for (const title of ["SKILL.md", "folder/SKILL.md", "AGENTS.md", "AI financial brief", "AI agent-written financial summary", "AI assistant notes", "AI assistant-written financial summary"]) {
     const row = { ...base, title };
     assert.equal(evidenceLineageFor(row).lineage.kind, "agent_derived", title);
     assert.equal(tierOf(row).tier, "T4", title);
