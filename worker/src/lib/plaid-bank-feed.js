@@ -896,6 +896,17 @@ function promotionStatements(env, {
     `COALESCE((SELECT r.reason FROM plaid_reconciliation r WHERE r.tenant_id=${tenant} AND r.item_ref=${item}), '')<>'sync_fetch'`;
   const pendingItem = pendingFor("?1", "?2");
   const pendingStage = pendingFor("s.tenant_id", "(SELECT w.item_ref FROM plaid_sync_windows w WHERE w.tenant_id=s.tenant_id AND w.window_ref=s.window_ref)");
+  // The request receipt, not the first transaction, bounds an empty history.
+  // queued_at is no earlier than Link's request, so this inclusive start is
+  // conservative. Missing/invalid receipts never manufacture coverage.
+  const requestedStart = `(SELECT date(substr(b.queued_at,1,10),printf('-%d days',b.requested_days-1))
+    FROM bank_feed_backfill b WHERE b.tenant_id=s.tenant_id
+      AND b.item_ref=(SELECT w.item_ref FROM plaid_sync_windows w
+        WHERE w.tenant_id=s.tenant_id AND w.window_ref=s.window_ref)
+      AND b.requested_days BETWEEN 1 AND 730 AND b.unread_lines=0
+      AND date(substr(b.queued_at,1,10),'+0 days')=substr(b.queued_at,1,10)
+      AND b.queued_at<=(SELECT w.started_at FROM plaid_sync_windows w
+        WHERE w.tenant_id=s.tenant_id AND w.window_ref=s.window_ref))`;
   return [
     // Old Workers persisted lossy slugs in ready/staging payloads. Re-resolve
     // from exact Item/account authority before use, without moving ledger rows.
@@ -1062,15 +1073,17 @@ function promotionStatements(env, {
               CASE WHEN ? AND NOT (${pendingStage}) AND COALESCE(MIN(t.posted_on),(
                      SELECT c.covered_from FROM fin_account_coverage c
                       WHERE c.tenant_id=s.tenant_id AND c.account_slug=s.account_slug
-                        AND c.source_feed=? AND c.superseded_by_id IS NULL)) IS NOT NULL THEN 'complete'
+                        AND c.source_feed=? AND c.superseded_by_id IS NULL),${requestedStart}) IS NOT NULL THEN 'complete'
                    WHEN COUNT(t.provider_transaction_id)>0 THEN 'partial' ELSE 'missing' END,
-              MIN(t.posted_on),
+              CASE WHEN ? AND NOT (${pendingStage}) AND ${requestedStart} IS NOT NULL
+                   THEN MIN(COALESCE(MIN(t.posted_on),${requestedStart}),${requestedStart})
+                   ELSE MIN(t.posted_on) END,
               CASE WHEN ? THEN substr(?,1,10) ELSE MAX(t.posted_on) END,
               CASE WHEN ${pendingStage} THEN 'Saved activity is available. Checking for newer bank activity.'
                    WHEN ? AND COALESCE(MIN(t.posted_on),(
                      SELECT c.covered_from FROM fin_account_coverage c
                       WHERE c.tenant_id=s.tenant_id AND c.account_slug=s.account_slug
-                        AND c.source_feed=? AND c.superseded_by_id IS NULL)) IS NOT NULL
+                        AND c.source_feed=? AND c.superseded_by_id IS NULL),${requestedStart}) IS NOT NULL
                      THEN 'Plaid completed the requested history window.'
                    WHEN COUNT(t.provider_transaction_id)>0 THEN 'Plaid history is still arriving.'
                    ELSE 'No dated transaction coverage has promoted yet.' END,
@@ -1100,6 +1113,7 @@ function promotionStatements(env, {
     ).bind(
       historicalComplete ? 1 : 0,
       sourceFeed,
+      historicalComplete ? 1 : 0,
       historicalComplete ? 1 : 0,
       observedAt,
       historicalComplete ? 1 : 0,

@@ -2324,3 +2324,52 @@ test("two banks and four accounts promote only after owner routing and retain se
       [["multi-bank-alpha", null], ["multi-bank-beta", null], ["multi-bank-alpha", "multi-bank-alpha-cursor-0"]]);
   } finally { globalThis.fetch = previousFetch; fixture.close(); }
 });
+
+
+test("completed empty provider history records its requested start and remains bounded on replay", async () => {
+  const { fixture, state, run, assignAll } = await containmentFixture(["empty-coverage"], { added: [] });
+  try {
+    await run(); await assignAll(); assertReadyPromotion(await run());
+    // A resumed promotion is pending until a fresh fetch proves no newer work.
+    state.page = { ...state.page, next_cursor: "empty-coverage-fresh" };
+    assert.equal((await run()).ok, true);
+    const proof = fixture.first("SELECT requested_days,queued_at,state,provider_history_state FROM bank_feed_backfill");
+    assert.equal(proof.state, "complete");
+    assert.equal(proof.provider_history_state, "HISTORICAL_UPDATE_COMPLETE");
+    assert.equal(fixture.first("SELECT COUNT(*) n FROM fin_transactions").n, 0);
+    const start = new Date(Date.parse(proof.queued_at) - (proof.requested_days - 1) * 86400000).toISOString().slice(0, 10);
+    const coverage = fixture.first("SELECT coverage_status,covered_from,covered_to FROM fin_account_coverage");
+    assert.deepEqual({ ...coverage }, { coverage_status: "complete", covered_from: start, covered_to: "2026-08-30" });
+    state.now = "2026-09-01T12:00:00.000Z";
+    state.page = { ...state.page, next_cursor: "empty-coverage-later" };
+    const later = await run();
+    assert.equal(later.ok, true, String(later.code));
+    assert.equal(fixture.first("SELECT covered_from FROM fin_account_coverage").covered_from, start);
+  } finally { fixture.close(); }
+});
+
+
+for (const arm of ["partial-provider", "missing-request"]) test(`empty history does not infer coverage: ${arm}`, async () => {
+  const { fixture, state, run, assignAll } = await containmentFixture(["empty-refusal"], { added: [] });
+  try {
+    await run(); await assignAll(); assertReadyPromotion(await run());
+    state.page = { ...state.page, next_cursor: "empty-control" };
+    assert.equal((await run()).ok, true);
+    assert.equal(fixture.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete", "green provider completion control");
+    fixture.raw("DELETE FROM fin_account_coverage");
+    if (arm === "missing-request") fixture.raw("DELETE FROM bank_feed_backfill");
+    else {
+      fixture.raw("UPDATE bank_feed_backfill SET state='running',provider_history_state='INITIAL_UPDATE_COMPLETE'");
+      state.page.transactions_update_status = "INITIAL_UPDATE_COMPLETE";
+    }
+    state.page.next_cursor = "empty-refusal";
+    const before = state.fetchPaths.length;
+    const receipt = await run();
+    assert.equal(receipt.ok, arm === "missing-request");
+    assert.equal(receipt.status, arm === "missing-request" ? "complete" : "partial");
+    assert.equal(receipt.promoted, true);
+    assert.ok(state.fetchPaths.slice(before).includes("/transactions/sync"), "provider decision reached");
+    const row = fixture.first("SELECT coverage_status,covered_from FROM fin_account_coverage");
+    assert.equal(row.coverage_status, "missing"); assert.equal(row.covered_from, null);
+  } finally { fixture.close(); }
+});

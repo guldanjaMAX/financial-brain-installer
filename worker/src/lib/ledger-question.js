@@ -21,11 +21,15 @@ function amountInCents(text) {
   return Number.isSafeInteger(cents) ? cents : null;
 }
 
-// Remove exactly one period before interpreting the remaining intent. A second
-// period or unsupported qualifier stays in the residual and cannot widen scope.
-function phaseTwoQuestion(q, intent, today) {
-  const periods = [...q.matchAll(new RegExp(`\\b(?:${MONTHS.join("|")})(?:\\s+\\d{4})?\\b|\\bq[1-4](?:\\s+\\d{4})?\\b|\\blast\\s+\\d+\\s+days\\b|\\blast month\\b|\\bso far this year\\b`, "g"))];
-  if (periods.length > 1) return null;
+// Exactly one supported period is removed. Unconsumed qualifiers still have
+// to match a bounded intent grammar, so a second scope cannot become a total.
+function questionPeriod(q, today) {
+  const pattern = new RegExp(`\\b(?:${MONTHS.join("|")})(?:\\s+\\d{4})?\\b|\\bq[1-4](?:\\s+\\d{4})?\\b|\\blast\\s+\\d+\\s+days\\b|\\b(?:last|this) month\\b|\\bso far this year\\b|\\b\\d{4} so far\\b|\\brecent\\b`, "g");
+  const matches = [...q.matchAll(pattern)];
+  // "Recent deposits in September" has one explicit period; recent is a
+  // listing modifier there. It supplies the 14-day default only on its own.
+  const periods = matches.some(m => m[0] !== "recent") ? matches.filter(m => m[0] !== "recent") : matches;
+  if (periods.length > 1) return { invalid: true };
   let from, to, residual = q.trim().replace(/[?!.]+$/, "").trim();
   if (periods.length) {
     const period = periods[0][0], parts = period.split(/\s+/);
@@ -33,50 +37,76 @@ function phaseTwoQuestion(q, intent, today) {
     if (MONTHS.includes(parts[0])) {
       const month = MONTHS.indexOf(parts[0]);
       from = ledgerDay(Date.UTC(year, month, 1)); to = ledgerDay(Date.UTC(year, month + 1, 0));
+      // A question in the current named month asks about posted activity so
+      // far. State the bounded end; future months remain outside coverage.
+      if (from.slice(0, 7) === today.slice(0, 7)) to = today;
     } else if (/^q[1-4]$/.test(parts[0])) {
       const month = (Number(parts[0][1]) - 1) * 3;
       from = ledgerDay(Date.UTC(year, month, 1)); to = ledgerDay(Date.UTC(year, month + 3, 0));
-    } else if (period === "last month") {
+    } else if (["last month", "this month"].includes(period)) {
       const date = new Date(`${today}T00:00:00Z`);
-      from = ledgerDay(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - 1, 1));
-      to = ledgerDay(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 0));
-    } else if (period === "so far this year") {
-      from = `${today.slice(0, 4)}-01-01`; to = today;
+      const month = date.getUTCMonth() - (period === "last month" ? 1 : 0);
+      from = ledgerDay(Date.UTC(date.getUTCFullYear(), month, 1));
+      to = period === "this month" ? today : ledgerDay(Date.UTC(date.getUTCFullYear(), month + 1, 0));
+    } else if (period === "so far this year" || /^\d{4} so far$/.test(period)) {
+      const selectedYear = period === "so far this year" ? today.slice(0, 4) : parts[0];
+      if (selectedYear !== today.slice(0, 4)) return { invalid: true };
+      from = `${selectedYear}-01-01`; to = today;
+    } else if (period === "recent") {
+      from = shiftLedgerDay(today, -13); to = today;
     } else if (Number(parts[1]) >= 1 && Number(parts[1]) <= 3660) {
       from = shiftLedgerDay(today, 1 - Number(parts[1])); to = today;
     }
-    if (!from || !to) return null;
-    residual = residual.replace(new RegExp(`(?:\\b(?:in|during|for|over)\\s+(?:the\\s+)?)?${periods[0][0]}\\b`), "").trim();
+    if (!from || !to) return { invalid: true };
+    residual = residual.replace(new RegExp(`(?:\\b(?:in|during|for|over)\\s+(?:the\\s+)?)?${period}\\b`), "").trim();
   }
-  const selected = residual.match(/\s+(?:in|for)\s+(?:(?:my|the)\s+)?(?:(checking|savings|card|loan|investment|retirement|escrow)\s+)?account\s+(?:ending(?:\s+in)?\s+)?(\d{1,4})$/);
-  if (selected) residual = residual.slice(0, selected.index);
-  residual = residual.replace(/\s+/g, " ").trim();
-  // Merchant/category words such as "card" are not account selectors. Only
-  // an explicit account clause may narrow a phase-two answer's account set.
+  return { from, to, residual, period: periods[0]?.[0] };
+}
+
+function phaseTwoQuestion(q, intent, today) {
+  const period = questionPeriod(q, today);
+  if (period.invalid) return null;
+  let { from, to, residual } = period;
+  // Account clauses are explicit and literal. A named bank or entity cannot
+  // be consumed as filler, nor can a merchant named "card" select card accounts.
+  const selected = residual.match(/\b(?:in|for|of|into)\s+(?:(?:my|the)\s+)?(?:(checking|savings|card|loan|investment|retirement|escrow)\s+)?account\s+(?:ending(?:\s+in)?\s+)?(\d{1,4})\b/);
+  if (selected) residual = residual.replace(selected[0], "");
+  residual = residual.replace(/,/g, "").replace(/\s+/g, " ").trim();
   const result = { ...intent, mask: selected?.[2] || null, accountKind: selected?.[1] || null, from, to };
   const numberWords = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
-  const largest = residual.match(/^(?:(?:what (?:were|are)|show(?: me)?|list) )?(?:my |the )?(\d+|one|two|three|four|five|six|seven|eight|nine|ten) largest (expenses|charges|deposits)$/);
+  const count = "(\\d+|one|two|three|four|five|six|seven|eight|nine|ten)";
+  const largest = residual.match(new RegExp(`^(?:(?:what (?:were|are)|show(?: me)?|list) )?(?:my |the )?(?:${count} (?:largest|biggest)|(?:largest|biggest|top)(?: ${count})?) (expenses|charges|deposits)$`));
   if (largest && from) {
-    const limit = numberWords[largest[1]] || Number(largest[1]);
-    return limit >= 1 && limit <= 100 ? { ...result, kind: "largest", limit, direction: largest[2] === "deposits" ? "inflow" : "outflow" } : null;
+    const requested = largest[1] || largest[2];
+    const limit = requested ? numberWords[requested] || Number(requested) : 10;
+    return limit >= 1 && limit <= 100 ? { ...result, kind: "largest", limit, direction: largest[3] === "deposits" ? "inflow" : "outflow" } : null;
   }
-  if (from && /^(?:what deposits came in|(?:show(?: me)?|list) (?:my |the )?(?:recent )?deposits)$/.test(residual)) {
+  if (from && /^(?:(?:what|which) deposits came in|(?:what (?:were|are)|show(?: me)?|list) (?:my |the )?(?:recent )?deposits)$/.test(residual)) {
     return { ...result, kind: "deposits", direction: "inflow" };
   }
-  if (from && /^(?:how much did (?:i|we) transfer between (?:my|our) (?:own )?accounts|(?:show(?: me)?|list) (?:my |our )?(?:own[- ]account )?transfers)$/.test(residual)) {
+  if (from && /^(?:how much did (?:i|we) transfer between (?:my|our) (?:own )?accounts|(?:show(?: me)?|list) (?:my |our )?(?:own[- ]account )?transfers(?: between (?:my|our) (?:own )?accounts)?)$/.test(residual)) {
     return { ...result, kind: "transfers" };
   }
-  if (/^(?:what recurring (?:subscriptions|charges) am i paying for,?(?: and how much per month)?|(?:show(?: me)?|list) (?:my )?recurring (?:subscriptions|charges))$/.test(residual)) {
+  if (/^(?:what recurring (?:subscriptions|charges) am i paying for(?: and how much per month)?|(?:show(?: me)?|list|what are) (?:my )?(?:recurring (?:subscriptions|charges)|subscriptions)(?: and (?:the|their) monthly total)?)$/.test(residual)) {
     return { ...result, kind: "recurring", from: from || shiftLedgerDay(today, -119), to: to || today, direction: "outflow" };
   }
-  const spending = residual.match(/^(?:how much did (?:i|we) spend|(?:show(?: me)?|what is (?:my |the )?)spend(?:ing)?)(?: (at|on|by) (.+))$/);
-  const income = residual.match(/^(?:how much income(?: came)?|how much did (?:i|we) receive|(?:show(?: me)?|what is (?:my |the )?)income) (from|by|in category) (.+)$/);
+  if (from && /^(?:(?:what (?:was|is)|show(?: me)?) (?:my )?spending (?:by category|top categories)|what (?:were|are) my top spending categories)$/.test(residual)) {
+    return { ...result, kind: "category", direction: "outflow", match: null, ranked: /\btop\b/.test(residual) };
+  }
+  // Short noun-first requests retain the same merchant/category attribution as
+  // the existing "spend at/on" forms. Only software/SaaS is a category alias.
+  const nounSpend = residual.match(/^(?:show(?: me)?|what (?:was|is)) (?:my )?(.+?) spend(?:ing)?$/);
+  if (nounSpend) {
+    const name = nounSpend[1];
+    if (/\b(?:my|our|the|income|versus|vs|business|entity|money|cash|accounts?|largest|biggest|top|total|net)\b/.test(name)) return null;
+    residual = `show spending ${/^(?:software|saas|software\/saas)$/.test(name) ? "on" : "at"} ${name}`;
+  }
+  const spending = residual.match(/^(?:how much did (?:i|we) spend|(?:show(?: me)? |what is (?:my |the )?)spend(?:ing)?)(?: (at|on|by) (.+))$/);
+  const income = residual.match(/^(?:how much income(?: came)?|how much did (?:i|we) receive|(?:show(?: me)? |what is (?:my |the )?)income) (from|by|in category) (.+)$/);
   const filter = spending || income;
   if (filter && from) {
     const direction = spending ? "outflow" : "inflow";
     const mode = filter[1], value = filter[2].trim();
-    // Only these grammar positions admit an arbitrary merchant/category. Do
-    // not swallow another scope, date or exclusion as part of its name.
     if (/\b(?:in|during|for|over|between|before|after|account|accounts|entity|and|or|last|month|year|q[1-4])\b/.test(value)) return null;
     if (mode === "by") return ["merchant", "category"].includes(value) ? { ...result, kind: value, direction, match: null } : null;
     if (!/[\p{L}\p{N}]/u.test(value)) return null;
@@ -87,7 +117,7 @@ function phaseTwoQuestion(q, intent, today) {
 
 export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
   const q = String(question || "").toLowerCase().replace(/[’]/g, "'").replace(/\bwhat's\b/g, "what is");
-  const broad = /\b(?:money|cash|bank|deposits?|expenses?|recurring (?:charges|subscriptions)|payment|paid|spend|spent|spending|income|revenue|credits?|debits?|transactions?|transfers?|checking|savings|loan|debt|tax|payroll|invoice|receivable|payable|came in|went out)\b|\$\s*\d/.test(q) || /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/.test(q);
+  const broad = /\b(?:money|cash|bank|deposits?|expenses?|charges?|subscriptions|recurring (?:charges|subscriptions)|payment|paid|spend|spent|spending|income|revenue|credits?|debits?|transactions?|transfers?|checking|savings|loan|debt|tax|payroll|invoice|receivable|payable|came in|went out)\b|\$\s*\d/.test(q) || /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/.test(q);
   const base = { broad, kind: null };
   if (!broad) return base;
   const today = ledgerDay(now);
@@ -109,9 +139,9 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     const residual = withoutMasks(q).replace(/\b(?:what|is|are|my|our|the|current|latest|bank|account|accounts|balance|balances|checking|savings|card|loan|investment|retirement|escrow|per|each|show|me|please|today|now|ending|in|mask|for|all)\b/g, "");
     return punctuationOnly(residual) ? { ...intent, kind: "balance" } : intent;
   }
-  if (/\b(?:payment|deposit|paid)\b/.test(q) && /\b(?:arrive|arrived|received|receive|come|came|land|landed|hit)\b/.test(q)) {
+  if (/\b(?:payment|deposit|paid)\b/.test(q) && /\b(?:arrive|arrived|received|receive|come|came|land|landed|hit|reach|reached|clear|cleared|post|posted)\b/.test(q)) {
     const amountMinor = amountInCents(q);
-    if (amountMinor === null) return intent;
+    if (amountMinor === null && /\$|\busd\b|\bdollars?\b/.test(q)) return intent;
     const dates = [];
     let rest = withoutMasks(q);
     const date = (match, day) => { dates.push(day); rest = rest.replace(match[0], ""); };
@@ -124,45 +154,40 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     }
     for (const m of q.matchAll(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g)) date(m, calendarDay(m[3], m[1], m[2]));
     if (dates.some(d => !d) || new Set(dates).size > 1) return intent;
-    // An explicit but unsupported date must never silently become the last 30 days.
-    if (!dates.length && /\b(?:on|between|before|after|yesterday|tomorrow|last|this)\b/.test(q)) return intent;
-    const partyMatch = q.match(/\bfrom\s+(.+?)(?=\s+(?:on|into|to|in|for|arrive|arrived|come|came|land|landed|hit)\b|[?]|$)/);
-    const counterparty = partyMatch?.[1] || "";
+    const period = dates.length ? { residual: rest } : questionPeriod(rest, today);
+    if (period.invalid) return intent;
+    // A bare month still cannot date an exact payment. Keep the original
+    // ambiguity control; an explicit year or relative bounded window is needed.
+    if (period.period && MONTHS.includes(period.period)) return intent;
+    rest = period.residual;
+    if (dates.length && /\b(?:before|after|between)\b/.test(rest)) return intent;
+    if (!dates.length && !period.from && /\b(?:on|between|before|after|yesterday|tomorrow|last|this)\b/.test(rest)) return intent;
+    const arrival = "arrive|arrived|receive|received|come|came|land|landed|hit|reach|reached|clear|cleared|post|posted";
+    const partyMatch = rest.match(new RegExp(`\\bfrom\\s+(.+?)(?=\\s+(?:on|into|to|in|for|via|${arrival})\\b|[?,]|$)`));
+    const viaMatch = rest.match(/\bvia\s+([\p{L}\p{N}]+)\b/u);
+    const namedPayment = rest.match(/^(?:did|has|have)\s+(?:the\s+)?([\p{L}\p{N}]+(?:\s+[\p{L}\p{N}]+){0,3})\s+payment\b/u);
+    // Generic/ordinal adjectives are not a counterparty. In particular,
+    // "the second payment" needs context that this deterministic route lacks.
+    const named = namedPayment && !/\b(?:a|my|our|the|second|first|third|next|last|another|other|bank|loan|car|tax)\b/.test(namedPayment[1]) ? namedPayment[1] : "";
+    const counterparty = [named, viaMatch?.[1], partyMatch?.[1]].filter(Boolean).join(" ");
     if (partyMatch) rest = rest.replace(partyMatch[0], "");
+    if (viaMatch) rest = rest.replace(viaMatch[0], "");
+    if (named) rest = rest.replace(namedPayment[0], "payment");
     rest = rest.replace(/(?:\$|\busd\s+)\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s+dollars?\b/g, "")
-      .replace(/\b(?:did|has|have|was|is|the|a|my|our|payment|deposit|of|paid|arrive|arrived|received|receive|come|came|land|landed|hit|yet|on|in|into|to|account|checking|savings|ending|mask|please)\b/g, "");
+      .replace(/,?\s+and when\b/g, "")
+      .replace(new RegExp(`\\b(?:did|has|have|was|is|the|a|my|our|payment|deposit|of|paid|${arrival}|yet|on|in|into|to|account|bank|checking|savings|ending|mask|please)\\b`, "g"), "");
     if (!punctuationOnly(rest)) return intent;
     const counterpartyWords = counterparty.match(/[\p{L}\p{N}]+/gu) || [];
+    if (amountMinor === null && !counterpartyWords.length) return intent;
     return { ...intent, kind: "payment", amountMinor, counterpartyWords,
-      from: dates.length ? shiftLedgerDay(dates[0], -7) : shiftLedgerDay(today, -29),
-      to: dates.length ? shiftLedgerDay(dates[0], 7) : today };
+      from: dates.length ? shiftLedgerDay(dates[0], -7) : period.from || shiftLedgerDay(today, amountMinor === null ? -59 : -29),
+      to: dates.length ? shiftLedgerDay(dates[0], 7) : period.to || today };
   }
-  if (/\b(?:money|cash|came in|went out|income|spend|spent|spending|credits?|debits?|inflow|outflow)\b/.test(q)) {
-    let from, to;
-    const namedMatches = [...q.matchAll(new RegExp(`\\b${MONTH}\\s+(\\d{4})\\b`, "g"))];
-    const named = namedMatches[0];
-    const days = q.match(/\blast\s+(\d+)\s+days\b/);
-    const lastMonth = q.match(/\blast month\b/);
-    const year = q.match(/\bso far this year\b/);
-    if (namedMatches.length + Number(Boolean(days)) + Number(Boolean(lastMonth)) + Number(Boolean(year)) !== 1) return intent;
-    if (named) {
-      from = calendarDay(named[2], MONTHS.indexOf(named[1]) + 1, 1);
-      to = ledgerDay(Date.UTC(Number(named[2]), MONTHS.indexOf(named[1]) + 1, 0));
-    } else if (lastMonth) {
-      const date = new Date(`${today}T00:00:00Z`);
-      from = ledgerDay(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - 1, 1));
-      to = ledgerDay(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 0));
-    } else if (days && Number(days[1]) >= 1 && Number(days[1]) <= 3660) {
-      from = shiftLedgerDay(today, 1 - Number(days[1])); to = today;
-    } else if (year) {
-      from = `${today.slice(0, 4)}-01-01`; to = today;
-    }
-    // Anything not consumed by the bounded grammar above must not become
-    // a whole-account total just because it contains money words.
-    const residual = withoutMasks(q).replace((named || days || lastMonth || year)[0], "")
-      .replace(/\b(?:how|much|money|cash|came|come|in|and|or|went|go|out|income|spend|spent|spending|credits?|debits?|inflow|outflow|did|i|we|what|was|were|is|are|the|total|totals|my|our|account|accounts|bank|checking|savings|card|loan|investment|retirement|escrow|by|per|each|all|during|for|over|show|me|please)\b/g, "");
-    if (!punctuationOnly(residual)) return intent;
-    if (from && to) return { ...intent, kind: "totals", from, to };
+  if (/\b(?:money|cash|came in|went out|income|spend|spent|spending|expenses?|credits?|debits?|inflow|outflow)\b/.test(q)) {
+    const { from, to, residual: rest, invalid } = questionPeriod(withoutMasks(q), today);
+    if (invalid || !from || !to) return intent;
+    const residual = rest.replace(/\b(?:how|much|money|cash|came|come|in|into|of|and|or|went|go|out|income|spend|spent|spending|expenses?|credits?|debits?|inflow|outflow|did|i|we|what|was|were|is|are|the|total|totals|my|our|account|accounts|bank|checking|savings|card|loan|investment|retirement|escrow|by|per|each|all|during|for|over|show|me|please)\b/g, "");
+    if (punctuationOnly(residual)) return { ...intent, kind: "totals", from, to };
   }
   return intent;
 }

@@ -79,6 +79,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   const bySlug = new Map(inventory.map(a => [a.account_slug, a]));
   if (intent.kind === "payment") {
     const matched = rows.filter(row => {
+      if (row.direction !== "inflow" || (intent.amountMinor !== null && row.amount_minor !== intent.amountMinor)) return false;
       const words = new Set(`${row.description || ""} ${row.payee || ""}`.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
       return intent.counterpartyWords.every(word => words.has(word));
     });
@@ -156,13 +157,15 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       if (!groups.has(key)) groups.set(key, { label, state, rows: [] });
       groups.get(key).rows.push(row);
     }
-    ledger.groups = [...groups.values()].map(g => ({ [intent.kind]: safeDescription(g.label),
+    const orderedGroups = [...groups.values()];
+    if (intent.ranked) orderedGroups.sort((a, b) => sumMinor(b.rows) - sumMinor(a.rows) || a.label.localeCompare(b.label));
+    ledger.groups = orderedGroups.map(g => ({ [intent.kind]: safeDescription(g.label),
       category_basis_state: g.state, total_minor: sumMinor(g.rows), citations: g.rows.map(row => cite(row).n),
       possible_transfer_citations: g.rows.filter(row => pairing.candidateRows.has(row.id)).map(row => cite(row).n),
       if_own_transfers_total_minor: sumMinor(withoutCandidates(g.rows)) }));
     answer = `Total ${intent.direction === "inflow" ? "income" : "spend"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.total_minor)}.`;
     if (!matched.length) answer += " No matching transactions found.";
-    for (const g of groups.values()) answer += `\n${safeDescription(g.label)}${g.state === "proposed" ? " (bank's category (unconfirmed))" : ""}: ${money(sumMinor(g.rows))} ${refs(g.rows)}${g.rows.some(row => pairing.candidateRows.has(row.id)) ? " (includes possible moves between your own accounts)" : ""}.`;
+    for (const g of orderedGroups) answer += `\n${safeDescription(g.label)}${g.state === "proposed" ? " (bank's category (unconfirmed))" : ""}: ${money(sumMinor(g.rows))} ${refs(g.rows)}${g.rows.some(row => pairing.candidateRows.has(row.id)) ? " (includes possible moves between your own accounts)" : ""}.`;
     answer += `\nUnsorted: ${money(ledger.unsorted_minor)}${intent.kind === "category" && intent.match && !matched.some(row => !categoryFor(row)) ? " (separate from the requested category)" : ""} ${refs(unsorted)}.`;
   } else if (intent.kind === "transfers") {
     // A candidate amount is counted once by outgoing date. Neither leg is

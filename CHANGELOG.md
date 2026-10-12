@@ -4,6 +4,17 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.13 (unreleased)
+
+- More everyday bank questions now reach the ledger, including money that came
+  into an account, largest expenses, recent deposits, and named payment arrivals.
+  Named payments without an amount search the last 60 days; recent deposits use
+  the last 14 days. Check the cited dates, amounts, and account masks. Completed
+  bank history now records its requested start even when it contains no
+  transactions. Older empty accounts can use that dated provider receipt only
+  with confirmed zero balances and no saved activity; missing proof still
+  produces a coverage gap.
+
 ## 0.4.12 (2026-10-11)
 
 Candidate only. This version has not been released. The changes below still
