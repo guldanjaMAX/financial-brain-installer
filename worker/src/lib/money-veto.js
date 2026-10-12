@@ -111,11 +111,16 @@ function primary(doc) {
     !isAgentDerivedArtifact(doc);
 }
 
+// Shared only to keep other refuse-only guards outside the money contract.
+export function isMoneyAnswer(question, answer) {
+  return MONEY_TOPIC.test(`${question || ""} ${answer || ""}`) || CURRENCY.test(answer || "") ||
+    /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/i.test(`${question || ""} ${answer || ""}`);
+}
+
 export function applyMoneyVeto({ question, answer, evidenceGate, docs = [], now = Date.now() } = {}) {
   const unchanged = { answer, evidenceGate };
   if (!answer || evidenceGate?.supported !== true) return unchanged;
-  if (!MONEY_TOPIC.test(`${question || ""} ${answer}`) && !CURRENCY.test(answer) &&
-      !/\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/i.test(`${question || ""} ${answer}`)) return unchanged;
+  if (!isMoneyAnswer(question, answer)) return unchanged;
   const veto = (reason) => ({ answer: null, evidenceGate: {
     ...evidenceGate, supported: false, complete: false, evidence: [], reason,
   } });

@@ -812,6 +812,20 @@ item using its own citations and exact supporting spans, drops unsupported
 items, and preserves missing-coverage disclosures. Financial vetoes still run
 on the returned answer.
 
+After final prose rendering, `temporal-guard.js` can veto an approved
+non-money answer but cannot approve one or substitute a fact. Future-event
+dates are checked against today's day in `BRAIN_TIMEZONE`, passed from the
+manifest's `client.timezone`. Missing or invalid zones produce an explicit gap.
+Authorized retrieved candidates, including uncited ones, can disqualify a
+later event for the same named subject. Calendar start instants retain their
+offsets for same-day ordering; mail sent dates never stand in for appointment
+dates. Yearless dates require a unique cited occurrence, and recurrence wording
+alone does not establish one. A newer reliable record about the same status
+item can disqualify older support even when the model reports no conflict.
+Refusals retain retrieval gaps and candidates but clear approved citations.
+This is bounded evidence checking, not a calendar expansion or complete corpus
+search. The existing evidence and dated-status gates still run first.
+
 For a query, the Worker builds two independent candidate sets: semantic matches
 from Vectorize and keyword matches from D1 FTS5. Metadata filters are applied as
 early as the backend supports. Reciprocal rank fusion combines the rankings.
@@ -825,8 +839,8 @@ then fused with the ordinary whole-corpus lanes. It is not a hard source filter:
 cross-source evidence remains eligible, and a document already present in an
 ordinary lane receives no duplicate hint vote. Generic decision questions get
 no guessed source. Relative date phrases are not converted into hidden date
-filters because the Worker does not currently carry the owner's timezone at
-this boundary.
+filters. The owner's timezone is used only by the final temporal veto, not to
+narrow the evidence available to retrieval.
 
 Retrieval first collapses multiple chunks from one document. It also collapses
 same-source, same-date documents with the same canonical content hash before the
