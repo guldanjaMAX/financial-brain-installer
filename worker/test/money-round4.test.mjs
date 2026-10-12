@@ -237,9 +237,9 @@ test('N01 same-cent outside-payee collision is retained and has no own-account c
 });
 
 test('N02 explicit disclosure grammar covers verbs, prepositions, AI terms and title nouns', () => {
-  const verbs = ['generated', 'created', 'written', 'drafted', 'prepared', 'produced', 'composed', 'summarised', 'summarized', 'made'];
+  const verbs = ['generated', 'created', 'written', 'drafted', 'prepared', 'produced', 'composed', 'summarised', 'summarized'];
   const prepositions = ['by', 'with', 'using', 'via', 'through', 'in', 'from'];
-  const terms = ['AI', 'A.I.', 'ChatGPT', 'GPT', 'GPT-4', 'OpenAI', 'Claude', 'Anthropic', 'Gemini', 'Copilot', 'Grok', 'Perplexity', 'LLM', 'Codex', 'an assistant', 'an AI assistant', 'an agent', 'an AI agent'];
+  const terms = ['AI', 'A.I.', 'ChatGPT', 'GPT', 'GPT-4', 'OpenAI', 'Claude', 'Anthropic', 'Gemini', 'Copilot', 'Grok', 'Perplexity', 'LLM', 'Codex', 'a virtual assistant', 'an AI assistant', 'a chatbot', 'an AI agent'];
   for (const verb of verbs) for (const prep of prepositions) for (const term of terms) {
     const text = `${verb} ${prep} ${term}: financial record`;
     assert.equal(isAgentDerivedArtifact({ title: text }), true, text);
@@ -248,11 +248,13 @@ test('N02 explicit disclosure grammar covers verbs, prepositions, AI terms and t
   for (const term of terms) for (const noun of ['summary', 'notes', 'draft', 'memo']) {
     assert.equal(isAgentDerivedArtifact({ title: `${term} ${noun}` }), true, `${term} ${noun}`);
   }
-  for (const title of ['AI-generated memo', 'AI-written statement', 'AI-drafted report', 'assistant-written memo']) {
+  for (const title of ['AI-generated memo', 'AI-written statement', 'AI-drafted report', 'AI assistant-written memo']) {
     assert.equal(evidenceLineageFor({ title, authority_meta: { evidence_lineage: { version: 1, kind: 'source_record' } } }).lineage.kind, 'agent_derived');
   }
   for (const text of ['Our AI tools invoice is $120.', 'We use ChatGPT for drafts, invoice attached.',
-    'Generated with artificial flowers.', 'Created using cardboard.']) {
+    'Generated with artificial flowers.', 'Created using cardboard.',
+    'The payment was made by AI.', 'The payment was made by an agent.',
+    'The invoice was created by an assistant.', 'I created an invoice using ChatGPT\'s template.']) {
     assert.equal(isAgentDerivedArtifact({ title: 'Human email', text }), false, text);
   }
   assert.equal(isAgentDerivedArtifact({ text: ' '.repeat(500) + 'Generated with ChatGPT' }), false, 'disclosure scan is bounded');
@@ -264,7 +266,7 @@ test('N02 common disclosures are vetoed through real ingestion and Think with or
     { content: 'Generated with ChatGPT. Card ending 4242 charged USD 120.00.' },
     { title: 'Created using Claude' },
     { content: 'Drafted by an AI assistant. Card ending 4242 charged USD 120.00.' },
-    { title: 'Made via A.I.' }, { title: 'Codex memo' },
+    { title: 'Produced via A.I.' }, { title: 'Codex memo' },
   ]) {
     const b = await documentAnswer(t, input);
     assert.equal(b.answer, null); assert.equal(b.evidence_gate.supported, false);

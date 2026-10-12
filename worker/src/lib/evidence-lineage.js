@@ -26,11 +26,13 @@ const MAX_ROOT_ID_CHARS = 512;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const AGENT_MARKER = /^Evidence-Lineage:[ \t]*agent-derived[ \t]*$/im;
 const AGENT_FILE = /(?:^|[/\\])(?:SKILL|AGENTS|CLAUDE)\.md$/i;
-const AGENT_BRIEF = /\b(?:ai|agent|assistant)[ -](?:(?:written|generated)[ -])?(?:\w+[ -]){0,3}(?:brief|summary|report|notes?)\b/i;
 // Detect common explicit disclosures, not undisclosed AI text. Authorship is
 // independent of the artifact noun; discussion of AI tools is not authorship.
-const AI_TERM = String.raw`(?:an?\s+)?(?:a\.?i\.?(?:\s+(?:assistant|agent))?|chatgpt|gpt(?:-\d[\w.-]*)?|openai|claude|anthropic|gemini|copilot|grok|perplexity|llm|codex|assistant|agent)(?!\w)`;
-const AUTHOR_VERB = '(?:generated|created|written|drafted|prepared|produced|composed|summari[sz]ed|made)';
+// Human agents and assistants are roles, not AI disclosures. "Made" commonly
+// describes a payment action and cannot establish document authorship either.
+const AI_TERM = String.raw`(?:an?\s+)?(?:a\.?i\.?(?:\s+(?:assistant|agent))?|chatgpt|gpt(?:-\d[\w.-]*)?|openai|claude|anthropic|gemini|copilot|grok|perplexity|llm|codex|virtual\s+assistant|chatbot)(?!\w)`;
+const AUTHOR_VERB = '(?:generated|created|written|drafted|prepared|produced|composed|summari[sz]ed)';
+const AGENT_BRIEF = new RegExp(String.raw`\b${AI_TERM}[ -](?:(?:written|generated)[ -])?(?:\w+[ -]){0,3}(?:brief|summary|report|notes?)\b`, 'i');
 const AGENT_AUTHORSHIP = new RegExp(String.raw`\b${AUTHOR_VERB}\s+(?:by|with|using|via|through|in|from)\s+${AI_TERM}|\b${AI_TERM}[\s-]+${AUTHOR_VERB}\b`, 'i');
 const AGENT_TITLE = new RegExp(String.raw`\b${AI_TERM}[\s-]+(?:summary|notes?|draft|memo)\b`, 'i');
 

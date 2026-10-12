@@ -80,7 +80,7 @@ test("source mutation is killed: agent artifact demotion", async () => {
   assert.equal(evidenceLineageFor(row).lineage.kind, "source_record");
   const mutant = await mutatedModule(new URL("../src/lib/evidence-lineage.js", import.meta.url),
     "if (agentMarked || isAgentDerivedArtifact(row))", "if (agentMarked)");
-  for (const title of ["SKILL.md", "AI financial brief", "Assistant notes"]) {
+  for (const title of ["SKILL.md", "AI financial brief", "AI assistant notes"]) {
     assert.equal(evidenceLineageFor({ ...row, title }).lineage.kind, "agent_derived");
     assert.equal(mutant.evidenceLineageFor({ ...row, title }).lineage.kind, "source_record");
   }

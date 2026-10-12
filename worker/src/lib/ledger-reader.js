@@ -42,6 +42,16 @@ function groupAccounts(accounts) {
   const identity = a => JSON.stringify([a.entity_slug, a.mask, a.account_kind]);
   const bySlug = new Map(accounts.map(a => [a.account_slug, a]));
   const approved = new Map(), unresolved = new Map();
+  const pairKey = pair => JSON.stringify([pair.manual.account_slug, pair.live.account_slug]);
+  const addUnresolved = pair => {
+    // One account can collide with several records. Retain every edge until
+    // the question's window is checked; a later historical pair cannot erase
+    // an overlapping pair. The inventory limit bounds this candidate graph.
+    for (const member of [pair.manual, pair.live]) {
+      if (!unresolved.has(member.account_slug)) unresolved.set(member.account_slug, new Map());
+      unresolved.get(member.account_slug).set(pairKey(pair), pair);
+    }
+  };
   for (const a of accounts) {
     if (!a.link_manual) continue;
     const manual = bySlug.get(a.link_manual), live = bySlug.get(a.link_live);
@@ -49,7 +59,7 @@ function groupAccounts(accounts) {
         manual.basis_state === 'confirmed' && live.basis_state === 'confirmed' &&
         a.link_identity === JSON.stringify([accountLinkIdentity(manual), accountLinkIdentity(live)])) {
       approved.set(manual.account_slug, live.account_slug);
-    } else unresolved.set(a.account_slug, { manual: manual || { account_slug: a.link_manual }, live: live || { account_slug: a.link_live } });
+    } else addUnresolved({ manual: manual || { account_slug: a.link_manual }, live: live || { account_slug: a.link_live } });
   }
   // Coincident institution/entity/mask/kind are candidates, never authority.
   // Missing institution is also uncertain. Only an approved pair may suppress
@@ -59,8 +69,7 @@ function groupAccounts(accounts) {
       if (approved.get(manual.account_slug) === live.account_slug) continue;
       if (/^\d{1,4}$/.test(manual.mask || '') && identity(manual) === identity(live) &&
           (!institution(manual) || !institution(live) || institution(manual) === institution(live))) {
-        const candidate = { manual, live };
-        unresolved.set(manual.account_slug, candidate); unresolved.set(live.account_slug, candidate);
+        addUnresolved({ manual, live });
       }
     }
   }
@@ -73,7 +82,8 @@ function groupAccounts(accounts) {
     const live = members.filter(a => a.feed_mode === "live");
     const manual = members.filter(a => a.feed_mode === "manual");
     const primary = live[0] || members[0];
-    const linkRequired = members.map(a => unresolved.get(a.account_slug)).find(Boolean);
+    const links = new Map(members.flatMap(a => [...(unresolved.get(a.account_slug) || [])]));
+    const linkRequired = links.size ? [...links.values()] : null;
     const ambiguous = members.length > 1 && !(members.length === 2 && live.length === 1 && manual.length === 1 &&
       members.every(a => a.currency === primary.currency && a.balance_role === primary.balance_role));
     return { ...primary, members, live: live[0] || null, ambiguous, linkRequired };
@@ -81,15 +91,20 @@ function groupAccounts(accounts) {
 }
 
 export function accountLinkRequiredInWindow(account, intent) {
-  if (!account.linkRequired || !intent.kind) return false;
-  if (!intent.from || !intent.to) return true;
-  // A known non-overlapping interval proves this collision is irrelevant.
-  // Missing coverage cannot prove that, so it keeps the identity gate closed.
-  const members = [account.linkRequired.manual, account.linkRequired.live];
-  const known = members.filter(a => a && validWindow(a));
-  const start = [intent.from, ...known.map(a => a.covered_from)].sort().at(-1);
-  const end = [intent.to, ...known.map(a => a.covered_to)].sort()[0];
-  return start <= end;
+  return accountLinkPairsInWindow(account, intent).length > 0;
+}
+
+export function accountLinkPairsInWindow(account, intent) {
+  if (!intent.kind) return [];
+  return (account.linkRequired || []).filter(pair => {
+    if (!intent.from || !intent.to) return true;
+    // A known non-overlapping interval proves this collision is irrelevant.
+    // Missing coverage cannot prove that, so it keeps the identity gate closed.
+    const known = [pair.manual, pair.live].filter(a => a && validWindow(a));
+    const start = [intent.from, ...known.map(a => a.covered_from)].sort().at(-1);
+    const end = [intent.to, ...known.map(a => a.covered_to)].sort()[0];
+    return start <= end;
+  });
 }
 
 async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, accountKind }) {
