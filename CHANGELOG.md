@@ -6,14 +6,18 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.14 (unreleased)
 
-- Questions about next appointments now flag past dates and an earlier upcoming
-  event found for the same subject. Current-status answers flag newer records
-  that may supersede older support, including stopped or discontinued items.
+- Questions about next appointments now flag past dates, elapsed start times
+  today and an earlier upcoming event found for the same subject. Procedural
+  next steps do not require an event date. All-day events remain today through
+  the owner's day. Current-status answers distinguish the specific stopped
+  item from its purpose and recognize a cited, later restart of that same item.
   Check the cited dates and the timezone in your manifest; missing or invalid
   timezone settings leave an explicit gap instead of guessing today's date.
 - Document money answers recognize equivalent amount shorthand, dollar formats,
-  monthly rates, month ranges and account masks. An explicit claim date in the
-  cited sentence can support an otherwise undated citation. The money check
+  rate units, month ranges and whole account masks. Annual and monthly rates
+  cannot substitute for each other. Month coverage stays with its account,
+  and an explicit date can support only the same claim in its sentence or
+  clause, including when citation metadata has no reliable date. The money check
   still only refuses or qualifies model answers; it cannot approve one. Check
   the cited amount, currency, sign, months, account and date. Response gaps now
   identify the money rule that refused or qualified an answer without copying
