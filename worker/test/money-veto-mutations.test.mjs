@@ -102,7 +102,7 @@ test("money guard never promotes upstream verdicts or changes non-money output",
 for (const [label, from, to, answer, snippet] of [
   ["expanded range interior", "months.push(MONTH_ORDER[i]);", "", "Statement months: Jul–Sep [1].", "Statement months: July, September"],
   ["monthly rate binding", "candidate.rate === fact.rate", "true", "$5,000 per month charged [1].", "$5k per year charged"],
-  ["fallback date locality", ".filter(snippet => inSpan(claim, question, { ...doc, snippet, ts: \"\" }))\n    .flatMap(snippet => [...snippet.matchAll", ".filter(() => true)\n    .flatMap(snippet => [...snippet.matchAll", "Card ending 4242 charged USD 120.00 [1].", "Card ending 4242 charged USD 120.00. An appointment was on 2026-10-10."],
+  ["fallback date locality", ".filter(snippet => claimSpan(claim, question, { ...doc, snippet, ts: \"\" }))\n    .flatMap(snippet => [...snippet.matchAll", ".filter(() => true)\n    .flatMap(snippet => [...snippet.matchAll", "Card ending 4242 charged USD 120.00 [1].", "Card ending 4242 charged USD 120.00. An appointment was on 2026-10-10."],
 ]) {
   test(`calibration mutation killed: ${label}`, async () => {
     const control = input();

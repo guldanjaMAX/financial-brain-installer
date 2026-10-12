@@ -59,7 +59,9 @@ function simpleWords(text) {
   }
   return words.length ? text : String(total * scale);
 }
-const MASK = /(?<![\p{L}\p{N}*])(?:x|•|\*{4})(\d{4})(?![\p{L}\p{N}])/giu;
+// Single marker and four-character display masks are recognized as whole
+// groups. A suffix inside a longer or mixed mask is not an account identity.
+const MASK = /(?<![\p{L}\p{N}*•])(?:x|•{4}|•|\*{4})(\d{4})(?![\p{L}\p{N}*•])/giu;
 const normalizedFacts = text => canonical(text)
   .replace(WORD_FIGURES, simpleWords)
   .replace(MASK, "$1")
@@ -68,6 +70,9 @@ function accountIds(text) {
   return [
     ...[...normalizedFacts(text).matchAll(ACCOUNT_IDS)].map(match => canonical(match[1] || match[2])),
     ...[...String(text || "").matchAll(MASK)].map(match => match[1]),
+    // Keep unsupported mask groups opaque on both sides of the decision;
+    // otherwise an invalid mask in the claim can degrade to bare digits.
+    ...matches(normalizedFacts(text), /(?<![\p{L}\p{N}*•])[x*•]+\d+(?![\p{L}\p{N}*•])/giu),
     ...[...String(text || "").matchAll(/\b(?:ending(?: in)?|ends in)\s+(\d{4})(?![\p{L}\p{N}])/giu)].map(match => match[1]),
   ];
 }
@@ -87,21 +92,34 @@ function monthsIn(text) {
 }
 const currencyCode = currency => ({ "$": "usd", dollars: "usd", dollar: "usd", "€": "eur", euro: "eur", euros: "eur", "£": "gbp", pound: "gbp", pounds: "gbp", "¥": "jpy", cent: "cent", cents: "cent" }[canonical(currency)] || canonical(currency));
 const CURRENCY_TOKEN = `(?:[$€£¥]|\\b(?:USD|EUR|GBP|CAD|AUD|JPY|dollars?|euros?|pounds?|cents?)\\b)`;
-const RATE = /^(?:\s*(?:\/\s*|per\s+|a\s+)(month|mo|year|yr|week|day|hour)\b|\s+(monthly|annually|yearly|weekly|daily|hourly)\b)/i;
-const rateUnit = value => ({ mo: "month", monthly: "month", yr: "year", annually: "year", yearly: "year", weekly: "week", daily: "day", hourly: "hour" }[value] || value);
+const RATE_WORD = "(?:monthly|annual(?:ly)?|yearly|weekly|daily|hourly|quarterly|biweekly|bimonthly|semiannual(?:ly)?|biennial(?:ly)?)";
+const RATE = new RegExp(`^(?:\\s*(?:/\\s*|per\\s+|(?:a|an|each|every)\\s+)(months?|mo|years?|yr|annum|weeks?|days?|hours?|quarters?)\\b|\\s+(${RATE_WORD})\\b)`, "i");
+const RATE_HINT = new RegExp(`\\b${RATE_WORD}\\b|\\b(?:per|every|each|a|an)\\s+(?:[a-z0-9-]+\\s+){0,2}(?:months?|mo|years?|yr|weeks?|days?|hours?|quarters?|fortnights?|annum)\\b|\\b(?:every|each)\\s*$`, "i");
+const rateUnit = value => ({ mo: "month", months: "month", monthly: "month", yr: "year", years: "year", annum: "year", annual: "year", annually: "year", yearly: "year", weeks: "week", weekly: "week", days: "day", daily: "day", hours: "hour", hourly: "hour", quarters: "quarter", quarterly: "quarter" }[value] || value);
 function amountFacts(text) {
   const normalized = normalizedFacts(text);
-  return [...normalized.matchAll(NUMBERS)].map(match => {
-    const before = normalized.slice(0, match.index);
-    const after = normalized.slice(match.index + match[0].length);
+  const amounts = [...normalized.matchAll(NUMBERS)];
+  return amounts.map((match, index) => {
+    // Keep rate hints beside their own amount. A date or account number
+    // cannot inherit a later amount's unit merely by sharing the sentence.
+    const previous = amounts[index - 1];
+    const before = normalized.slice(previous ? previous.index + previous[0].length : 0, match.index);
+    const after = normalized.slice(match.index + match[0].length, amounts[index + 1]?.index);
     const prefix = new RegExp(`(${CURRENCY_TOKEN}(?:\\s*${CURRENCY_TOKEN})*)\\s*$`, "i").exec(before);
     const suffix = new RegExp(`^\\s*(${CURRENCY_TOKEN}(?:\\s*${CURRENCY_TOKEN})*)`, "i").exec(after);
     const codes = [...new Set(matches(`${prefix?.[1] || ""} ${suffix?.[1] || ""}`, CURRENCIES).map(currencyCode))];
     const rate = RATE.exec(suffix ? after.slice(suffix[0].length) : after);
-    const leadingRate = /\b(monthly|annually|yearly|weekly|daily|hourly)\s+(?:(?:charge|cost|rate|fee|payment|income|salary)\s+)?(?:(?:of|is)\s+)?$/.exec(prefix ? before.slice(0, prefix.index) : before);
+    const leadingRate = new RegExp(`\\b(${RATE_WORD})\\s+(?:[a-z-]+\\s+){0,6}$`).exec(prefix ? before.slice(0, prefix.index) : before);
+    const trailingUnit = rateUnit(rate?.[1] || rate?.[2] || "");
+    const leadingUnit = rateUnit(leadingRate?.[1] || "");
+    // Explicit but unparsed rate prose must not degrade to a unitless amount.
+    // Ambiguous compound intervals stay on the refusing side of this veto.
+    const unparsedRate = !leadingUnit && RATE_HINT.test(before.split(/[;.!?]|\band\b/).at(-1)) ||
+      !trailingUnit && RATE_HINT.test(after.split(/[;.!?]|\band\b/)[0]);
     return { value: decimal(match[0]), currency: codes[0] || null,
       conflictingCurrency: codes.length > 1,
-      rate: rateUnit(rate?.[1] || rate?.[2] || leadingRate?.[1] || "") };
+      conflictingRate: unparsedRate || !!(trailingUnit && leadingUnit && trailingUnit !== leadingUnit),
+      rate: trailingUnit || leadingUnit };
   });
 }
 const currencyInSpan = (claim, span) => {
@@ -110,8 +128,8 @@ const currencyInSpan = (claim, span) => {
   // A bare shorthand can support a dollar rendering only when this entire
   // span has no explicit currency. Explicit currencies stay bound to amounts.
   return matches(claim, CURRENCIES).map(currencyCode).every(currency => currencies.has(currency) || (currency === "usd" && !currencies.size)) &&
-    amountFacts(claim).filter(fact => fact.currency || fact.rate).every(fact => !fact.conflictingCurrency && money.some(candidate =>
-      !candidate.conflictingCurrency && candidate.value === fact.value && (!fact.rate || candidate.rate === fact.rate) &&
+    amountFacts(claim).filter(fact => fact.currency || fact.rate || fact.conflictingRate).every(fact => !fact.conflictingCurrency && !fact.conflictingRate && money.some(candidate =>
+      !candidate.conflictingCurrency && !candidate.conflictingRate && candidate.value === fact.value && candidate.rate === fact.rate &&
       (!fact.currency || candidate.currency === fact.currency || (fact.currency === "usd" && !candidate.currency && !currencies.size))));
 };
 
@@ -120,6 +138,12 @@ function moneySentences(text) {
   // only paired quoted labels; neither output nor the global splitter changes.
   const protectedText = text.replace(/["“][^"”\n]+["”]/g, (label) => label.replaceAll(".", "\0"));
   return answerSentences(protectedText).map((sentence) => sentence.replaceAll("\0", "."));
+}
+
+// Split independent financial assertions, retaining comma-separated month
+// lists. Conjunctions cannot lend a predicate, account or date across claims.
+function moneyClauses(text) {
+  return moneySentences(text).flatMap(sentence => sentence.split(/;|\b(?:but|however|while|whereas|then)\b|\band\b|,\s*(?=(?:card|account|charged?|refunded?|paid|payment|invoice|fee)\b)/i));
 }
 
 function quotedValues(text) {
@@ -154,6 +178,15 @@ function inSpan(sentence, question, doc, checkMonths = true) {
     quotedValues(claim).every((quote) => span.includes(quote));
 }
 
+function boundMonths(doc, claim, question) {
+  const ids = accountIds(`${question}\n${claim}`);
+  const labels = quotedValues(`${question}\n${claim}`);
+  return moneyClauses(exactExcerpt(doc)).filter(span => {
+    const present = new Set(accountIds(span));
+    return ids.every(id => present.has(id)) && labels.every(label => canonical(span).includes(label));
+  }).flatMap(monthsIn);
+}
+
 function eventKind(question) {
   if (/\bdue\b/i.test(question)) return "due";
   if (/\b(?:posted|posting)\b/i.test(question)) return "posted";
@@ -173,14 +206,27 @@ function eventDates(span, kind) {
   const pattern = new RegExp(`\\b${label}\\s*(?:(?:on|by|is|:|of)\\s*)?(${EXPLICIT_DATE})\\b`, "gi");
   return [...span.matchAll(pattern)].map(match => parseSpanDate(match[1])).filter(value => value !== null);
 }
+const CLAIM_GLUE = new Set("a an the and or of on in at for by to from with as is was were are be been has have had it this that card account ending ends number no date dated recorded statement says owner your my our".split(" "));
+function claimTerms(text) {
+  return (normalizedFacts(withoutCitations(text)).replace(new RegExp(EXPLICIT_DATE, "gi"), " ")
+    .replace(CURRENCIES, " ").replace(NUMBERS, " ").match(/[\p{L}][\p{L}-]*/gu) || [])
+    .filter(term => !CLAIM_GLUE.has(term));
+}
+function claimSpan(claim, question, doc) {
+  if (!inSpan(claim, question, doc)) return false;
+  // Scalars alone cannot bind an undated charge to a dated refund or a second
+  // charge. Retain the predicate and item words as well as amount/account.
+  const terms = claimTerms(claim), present = new Set(claimTerms(doc.snippet));
+  return terms.length > 0 && terms.every(term => present.has(term));
+}
 function claimTime(doc, claim, question) {
   const stored = reliableDocumentTime(doc);
   if (stored !== null) return stored;
   // Do not promote metadata, use a title/header date, or borrow a date from a
   // neighboring sentence. A fallback needs one unambiguous, valid claim day.
   const body = exactExcerpt(doc);
-  const dates = moneySentences(body).flatMap(sentence => sentence.split(";"))
-    .filter(snippet => inSpan(claim, question, { ...doc, snippet, ts: "" }))
+  const dates = moneyClauses(body)
+    .filter(snippet => claimSpan(claim, question, { ...doc, snippet, ts: "" }))
     .flatMap(snippet => [...snippet.matchAll(new RegExp(`\\b(${EXPLICIT_DATE})\\b`, "gi"))].map(match => parseSpanDate(match[1])));
   const unique = [...new Set(dates)];
   return unique.length === 1 && unique[0] !== null ? unique[0] : null;
@@ -242,14 +288,14 @@ export function applyMoneyVeto({ question, answer, evidenceGate, docs = [], now 
     if (!records.length) return veto("ineligible_support", "Money claims need eligible non-agent support; agent-derived or T4 material alone is insufficient.");
     const kind = eventKind(question);
     const supporting = records.filter(doc => inSpan(claim, question, kind ? { ...doc, ts: "" } : doc, false));
-    const spanMonths = new Set(supporting.flatMap(doc => monthsIn(exactExcerpt(doc))));
+    const spanMonths = new Set(supporting.flatMap(doc => boundMonths(doc, claim, question)));
     if (!supporting.length || !monthsIn(claim).every(month => spanMonths.has(month))) return veto("span_mismatch", "A money figure, month list or account identifier does not match the exact cited span.");
     if (window) {
       if (kind) {
         // Bind dates to the same supported claim, not an unrelated line in the
         // invoice, and never substitute the document's creation date.
-        const dates = supporting.flatMap(doc => moneySentences(String(doc.snippet || ""))
-          .filter(snippet => inSpan(claim, question, { ...doc, snippet, ts: "" }))
+        const dates = supporting.flatMap(doc => moneyClauses(exactExcerpt(doc))
+          .filter(snippet => claimSpan(claim, question, { ...doc, snippet, ts: "" }))
           .flatMap(snippet => eventDates(snippet, kind)));
         const unique = [...new Set(dates)];
         if (unique.length !== 1) { incomplete = true; claimDateUnknown = true; }
