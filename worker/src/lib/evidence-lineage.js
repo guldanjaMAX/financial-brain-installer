@@ -29,20 +29,25 @@ const AGENT_FILE = /(?:^|[/\\])(?:SKILL|AGENTS|CLAUDE)\.md$/i;
 // Detect common explicit disclosures, not undisclosed AI text. Authorship is
 // independent of the artifact noun; discussion of AI tools is not authorship.
 // Human agents, assistants and virtual assistants are roles, not AI
-// disclosures, so they count only with an explicit AI qualifier. "Made by"
-// usually describes a payment action ("payment made by AI"), so "made" counts
-// only as "made with/using/via/through/in <AI>" or the compound "AI-made".
+// disclosures, so they count only with an explicit AI qualifier. "Made" is a
+// disclosure as "made with/using/via/through/in <AI>", the compound "AI-made",
+// or "made by <AI>" unless a payment, charge or transfer was the thing made.
 const AI_TERM = String.raw`(?:an?\s+)?(?:a\.?i\.?(?:\s+(?:assistant|agent))?|chatgpt|gpt(?:-\d[\w.-]*)?|openai|claude|anthropic|gemini|copilot|grok|perplexity|llm|codex|chatbot)(?!\w)`;
 const AUTHOR_VERB = '(?:generated|created|written|drafted|prepared|produced|composed|summari[sz]ed)';
 const AGENT_BRIEF = new RegExp(String.raw`\b${AI_TERM}[ -](?:(?:written|generated)[ -])?(?:\w+[ -]){0,3}(?:brief|summary|report|notes?)\b`, 'i');
 const AGENT_AUTHORSHIP = new RegExp(String.raw`\b${AUTHOR_VERB}\s+(?:by|with|using|via|through|in|from)\s+${AI_TERM}|\b${AI_TERM}[\s-]+${AUTHOR_VERB}\b|\bmade\s+(?:with|using|via|through|in)\s+${AI_TERM}|\b${AI_TERM}-made\b`, 'i');
 const AGENT_TITLE = new RegExp(String.raw`\b${AI_TERM}[\s-]+(?:summary|notes?|draft|memo)\b`, 'i');
 
+const MADE_BY_AI = new RegExp(String.raw`\bmade\s+by\s+${AI_TERM}`, 'i');
+const PAYMENT_MADE_BY = /\b(?:payments?|charges?|transfers?|deposits?|withdrawals?|purchases?|transactions?|refunds?|orders?)\s+(?:was|were|is|are|(?:has|have|had)\s+been)\s+made\s+by\b/gi;
+const madeByAi = (text) => MADE_BY_AI.test(text.replace(PAYMENT_MADE_BY, ' '));
+const authored = (text) => AGENT_AUTHORSHIP.test(text) || madeByAi(text);
+
 /** Names and explicit authorship can only demote, never promote provenance. */
 export function isAgentDerivedArtifact(row = {}) {
   return AGENT_TITLE.test(String(row.title || '')) || [row.title, row.ref_key, row.ref, row.uri].some((value) =>
-    AGENT_FILE.test(String(value || "")) || AGENT_BRIEF.test(String(value || "")) || AGENT_AUTHORSHIP.test(String(value || ""))) ||
-    [AGENT_BRIEF, AGENT_AUTHORSHIP].some(pattern => pattern.test(String(row.authority_document_head ?? row._authority_document_head ?? row.text ?? row.snippet ?? "").slice(0, 500)));
+    AGENT_FILE.test(String(value || "")) || AGENT_BRIEF.test(String(value || "")) || authored(String(value || ""))) ||
+    ((head) => AGENT_BRIEF.test(head) || authored(head))(String(row.authority_document_head ?? row._authority_document_head ?? row.text ?? row.snippet ?? "").slice(0, 500));
 }
 const AGENT_WRITERS = new Set(["agent", "connector"]);
 const DIRECT_CONNECTOR_KINDS = new Set([

@@ -293,3 +293,23 @@ test('Q02: explicit "made with" AI disclosures still demote, a human payment mad
   const human = await documentAnswer(t, { content: 'The payment was made by an agent at the bank branch. Card ending 4242 charged USD 120.00.' });
   assert.equal(human.evidence_gate.supported, true);
 });
+
+test('S01: "made by <AI>" discloses document authorship unless a payment was the thing made', async t => {
+  for (const input of [
+    { content: 'This invoice was made by ChatGPT. Card ending 4242 charged USD 120.00.' },
+    { title: 'Report made by ChatGPT' },
+    { content: 'This invoice was made by AI. Card ending 4242 charged USD 120.00.' },
+    { title: 'Invoice made by Copilot' },
+  ]) {
+    const b = await documentAnswer(t, input);
+    assert.equal(b.results[0].lineage.kind, 'agent_derived', JSON.stringify(input));
+    assert.equal(b.answer, null); assert.equal(b.evidence_gate.supported, false);
+  }
+  for (const content of [
+    'The payment was made by AI. Card ending 4242 charged USD 120.00.',
+    'The transfer was made by an agent at the bank branch. Card ending 4242 charged USD 120.00.',
+  ]) {
+    const b = await documentAnswer(t, { content });
+    assert.equal(b.evidence_gate.supported, true, content);
+  }
+});
