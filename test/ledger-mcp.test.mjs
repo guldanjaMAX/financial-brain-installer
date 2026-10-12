@@ -15,11 +15,13 @@ test("local MCP preserves a bounded ledger absence without declaring the brain e
   mkdirSync(home);
   const manifest = join(root, "brain.manifest.json");
   writeFileSync(manifest, JSON.stringify({ operations: { admin_key_secret: null } }));
-  writeAdminKeyFile(join(root, ".brain-admin-key"), randomBytes(24).toString("hex"), {
-    environment: { HOME: home },
-    // Windows binds the key file to the current account by name.
-    ...(process.platform === "win32" ? { username: process.env.USERNAME || process.env.USER } : {}),
-  });
+  // Windows protects the key with DPAPI through the system PowerShell, which
+  // needs the real system environment and account name, as in the MCP search
+  // contract test.
+  writeAdminKeyFile(join(root, ".brain-admin-key"), randomBytes(24).toString("hex"),
+    process.platform === "win32"
+      ? { environment: process.env, username: process.env.USERNAME || process.env.USER }
+      : { environment: { HOME: home } });
   const launchctl = join(root, "launchctl-fixture");
   writeFileSync(launchctl, "#!/bin/sh\nexit 99\n", { mode: 0o700 });
   const answer = "No matching deposit in account ****4321 between 2026-09-08 and 2026-09-22; the bank feed covers through 2026-10-11.";
