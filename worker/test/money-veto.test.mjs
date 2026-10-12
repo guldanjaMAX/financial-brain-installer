@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { createProductFixture } from "./product-contract-fixture.mjs";
 import { demoteScaffolding } from "../src/index.js";
 import { evidenceLineageFor } from "../src/lib/evidence-lineage.js";
+import { applyMoneyVeto } from "../src/lib/money-veto.js";
 import { tierOf } from "../src/lib/evidence-authority.js";
 
 const NOW = Date.parse("2026-10-11T12:00:00Z");
@@ -12,7 +13,7 @@ const ANSWER = "Card ending 4242 charged USD 120.00 [1].";
 async function run(t, {
   question = "What did card ending 4242 charge in the last 60 days?",
   answer = ANSWER, content = CONTENT, date = "2026-10-10", reliable = true,
-  title = "Card statement", lineage = "source_record", kind = "bank", verdict = {},
+  title = "Card statement", lineage = "source_record", kind = "bank", verdict = {}, expectedVerifiers = 1,
 } = {}) {
   t.mock.method(Date, "now", () => NOW);
   let drafts = 0, verifiers = 0, network = 0;
@@ -42,7 +43,7 @@ async function run(t, {
     const body = await result.json();
     assert.ok(body.results.length, "real retrieval reached stored evidence");
     assert.equal(drafts, 1, "real draft path was reached");
-    assert.equal(verifiers, 1, "injected approving verifier was reached");
+    assert.equal(verifiers, expectedVerifiers, "the expected verifier decision path was reached");
     assert.equal(body.evidence_gate.error, undefined, "a thrown verifier is not a veto");
     assert.equal(network, 0);
     return body;
@@ -69,7 +70,7 @@ for (const kind of ["gmail", "imessage", "upload", "calendar", "gdrive"]) {
 }
 
 for (const [label, mutation, reason] of [
-  ["unreliable date", { reliable: false }, /reliable date/i],
+  ["unreliable date without a claim date", { reliable: false, content: CONTENT.replace(" on 2026-10-10", "") }, /reliable date/i],
   ["outside window", { date: "2026-07-01" }, /window/i],
   ["agent-derived email", { lineage: "agent_derived" }, /primary|agent/i],
   ["agent instruction file", { title: "AGENTS.md" }, /primary|agent/i],
@@ -90,7 +91,7 @@ for (const [label, mutation, reason] of [
 }
 
 for (const [label, mutation, reason] of [
-  ["unreliable date", { reliable: false }, /reliable date/i],
+  ["unreliable date without a claim date", { reliable: false, content: CONTENT.replace(" on 2026-10-10", "") }, /reliable date/i],
   ["before the window", { date: "2026-07-01" }, /window/i],
   ["agent lineage", { lineage: "agent_derived" }, /primary|agent|lineage/i],
   ["agent filename", { title: "SKILL.md" }, /primary|agent|lineage/i],
@@ -166,4 +167,181 @@ test("agent filename and AI brief are one-way lineage and authority demotions", 
   const skill = { title: "folder/SKILL.md" };
   assert.deepEqual(demoteScaffolding([skill, base]), [base, skill]);
   assert.deepEqual(demoteScaffolding([base, { title: "record.txt" }]), [base, { title: "record.txt" }]);
+});
+
+// Calibration uses only invented document prose and the real Think fixture above.
+const equivalences = [
+  ["savings ratio", "$0 of $80,000 saved", "0 / 80k saved"],
+  ["uppercase thousands", "$80,000 saved", "$80K saved"],
+  ["fractional millions", "USD 1,200,000 saved", "$1.2m saved"],
+  ["uppercase millions", "$1,200,000 saved", "1.2M USD saved"],
+  ["suffix currency", "$4,997 charged", "4997.00 USD charged"],
+  ["reverse currency", "4997.00 USD charged", "$4,997 charged"],
+  ["simple words", "$80,000 saved", "eighty thousand dollars saved"],
+  ["reverse words", "eighty thousand dollars saved", "$80,000 saved"],
+  ["negative suffix", "-$80,000 charged", "-80k USD charged"],
+  ["monthly words", "$5,000/month charged", "5k a month charged"],
+  ["monthly slash", "$5,000 per month charged", "USD 5k/mo charged"],
+  ["monthly suffix", "$5,000 monthly charged", "5000.00 USD per month charged"],
+  ["monthly prefix", "$5,000/month charged", "monthly charge of USD 5k"],
+  ["month range", "Statement months: Jul–Sep", "Statement months: July, August, September"],
+  ["month through", "Statement months: July through September", "Statement months: July, August, September"],
+  ["quarter", "Statement months: Q3", "Statement months: July, August, September"],
+  ["reverse quarter", "Statement months: July, August, September", "Statement months: Q3"],
+  ...["x1234", "•1234", "****1234"].map(mask => ["account " + mask,
+    "Card ending 1234 charged $80", `Card ${mask} charged USD 80.00`]),
+];
+for (const [label, claim, span] of equivalences) {
+  test(`calibration Think control: ${label}`, async t => {
+    const answer = `${claim} [1].`;
+    const body = await run(t, { question: "What does the money record say?", answer, content: span });
+    assert.equal(body.answer, answer, body.evidence_gate.reason);
+    assert.equal(body.evidence_gate.supported, true);
+    assert.equal(body.gaps.some(gap => gap.type === "money_veto"), false);
+  });
+}
+
+for (const [label, claim, span] of [
+  ["magnitude", "$80 charged", "80k charged"],
+  ["currency", "$80,000 charged", "80k CAD charged"],
+  ["currency pair", "CAD 80,000 charged", "USD 80k charged; CAD 90k charged"],
+  ["sign", "-$80,000 charged", "80k USD charged"],
+  ["suffix sign", "$80,000 charged", "-80k USD charged"],
+  ["month outside", "Statement months: Jul–Oct", "Statement months: July, August, September"],
+  ["range hole", "Statement months: Jul–Sep", "Statement months: July, September"],
+  ["quarter hole", "Statement months: Q3", "Statement months: July, September"],
+  ["different mask", "Card ending 1234 charged $80", "Card x5678 charged USD 80"],
+  ["long identifier", "Card ending 1234 charged $80", "Card 991234 charged USD 80"],
+  ["rate unit", "$5,000/month charged", "$5k per year charged"],
+  ["rate different amount", "$5,000/month charged", "$5k charged; $7k a month charged"],
+]) {
+  test(`calibration Think refusal: ${label}`, async t => {
+    const body = await run(t, { question: "What does the money record say?", answer: `${claim} [1].`, content: span });
+    assert.equal(body.answer, null);
+    assert.equal(body.evidence_gate.supported, false);
+    const diagnostic = body.gaps.filter(gap => gap.type === "money_veto");
+    assert.deepEqual(diagnostic, [{ type: "money_veto", rule: "span_mismatch", count: 1,
+      detail: "The money evidence check refused a claim." }]);
+  });
+}
+
+for (const dateText of ["2026-10-10", "October 10, 2026"]) {
+  test(`calibration Think explicit span date: ${dateText}`, async t => {
+    const body = await run(t, { reliable: false, content: `Card ending 4242 charged USD 120.00 on ${dateText}.` });
+    assert.equal(body.answer, ANSWER, body.evidence_gate.reason);
+    assert.equal(body.citations[0].date_reliable, false, "metadata is not promoted by a claim-specific date");
+  });
+}
+for (const [label, content, rule] of [
+  ["undated", "Card ending 4242 charged USD 120.00.", "unreliable_date"],
+  ["unrelated date", "Card ending 4242 charged USD 120.00. An appointment was on 2026-10-10.", "unreliable_date"],
+  ["invalid day", "Card ending 4242 charged USD 120.00 on 2026-02-30.", "unreliable_date"],
+  ["ambiguous dates", "Card ending 4242 charged USD 120.00 on 2026-10-09 or 2026-10-10.", "unreliable_date"],
+  ["old claim", "Card ending 4242 charged USD 120.00 on 2026-01-10.", "citation_outside_window"],
+]) {
+  test(`calibration Think date refusal: ${label}`, async t => {
+    const body = await run(t, { reliable: false, content });
+    assert.equal(body.answer, null);
+    assert.equal(body.gaps.find(gap => gap.type === "money_veto")?.rule, rule);
+  });
+}
+
+test("calibration model refusal has no veto diagnostic", async t => {
+  const body = await run(t, { verdict: { supported: false, complete: false } });
+  assert.equal(body.answer, null);
+  assert.equal(body.gaps.some(gap => gap.type === "money_veto"), false);
+});
+
+function calibrationInput(answer, spans) {
+  return { now: NOW, question: "What does the money record say?", answer,
+    evidenceGate: { supported: true, complete: true, evidence: spans.map((_, i) => i + 1) },
+    docs: spans.map((snippet, i) => ({ n: i + 1, snippet, ts: "2026-10-10", date_reliable: true })) };
+}
+test("calibration months can use multiple exact cited spans without filling a hole", () => {
+  const input = calibrationInput("Statement months: Jul–Sep [1][2][3].", ["July", "August", "September"]);
+  assert.equal(applyMoneyVeto(input).answer, input.answer);
+  input.docs[1].snippet = "October";
+  assert.equal(input.docs.length, 3, "all cited records reach the month decision");
+  assert.equal(applyMoneyVeto(input).answer, null);
+});
+test("calibration cannot assemble an amount from separate cited records", () => {
+  const input = calibrationInput("Card ending 1234 charged $80,000 [1][2].", ["Card x1234 charged $80k", "Other card charged $90k"]);
+  assert.equal(applyMoneyVeto(input).answer, input.answer);
+  input.docs[0].snippet = "Card x1234 charged $70k";
+  input.docs[1].snippet = "Other card charged $80k";
+  assert.equal(input.docs.length, 2);
+  assert.equal(applyMoneyVeto(input).answer, null);
+});
+
+for (const [label, claim, span, supported] of [
+  ["numeric scale words", "$1,200,000 saved [1].", "USD 1.2 million saved", true],
+  ["scale without coefficient", "$0 saved [1].", "thousand dollars saved", false],
+  ["same quoted label", 'Account "One" charged $80 [1].', 'Account "One" charged $80', true],
+  ["different quoted label", 'Account "One" charged $80 [1].', 'Account "1" charged $80', false],
+  ["header cannot fill month hole", "Statement months: Jul–Sep [1].", "[August] Statement months: July, September", false],
+]) {
+  test(`calibration exact binding: ${label}`, () => {
+    const control = calibrationInput("Statement months: Jul–Sep [1].", ["July, August, September"]);
+    assert.equal(applyMoneyVeto(control).answer, control.answer);
+    const input = calibrationInput(claim, [span]);
+    assert.equal(input.evidenceGate.supported, true);
+    assert.equal(input.docs.length, 1);
+    const result = applyMoneyVeto(input);
+    assert.equal(result.answer, supported ? input.answer : null);
+  });
+}
+
+for (const [label, claim, span, supported] of [
+  ["reverse numeric scale", "USD 1.2 million saved [1].", "$1,200,000 saved", true],
+  ["qualified dollar symbol", "$80 charged [1].", "CAD $80 charged", false],
+  ["dollar cents", "$80 charged [1].", "80 cents charged", false],
+  ["exact large decimal", "USD 9007199254740993 charged [1].", "$9007199254740.993k charged", true],
+  ["large decimal neighbor", "USD 9007199254740992 charged [1].", "$9007199254740.993k charged", false],
+  ["masked question control", "Card ending 1234 charged USD 80 [1].", "Card x1234 charged $80", true],
+]) {
+  test(`calibration scalar boundary: ${label}`, () => {
+    const control = calibrationInput("$80 charged [1].", ["USD 80 charged"]);
+    assert.equal(applyMoneyVeto(control).answer, control.answer);
+    const input = calibrationInput(claim, [span]);
+    assert.equal(input.docs[0].n, input.evidenceGate.evidence[0]);
+    assert.equal(applyMoneyVeto(input).answer, supported ? claim : null);
+  });
+}
+
+for (const [label, claim, span, supported] of [
+  ["suffix currency monthly", "$5,000/month charged [1].", "5000.00 USD monthly charged", true],
+  ["bare quarter control", "Q3 [1].", "July, August, September", true],
+  ["bare quarter hole", "Q3 [1].", "July, September", false],
+  ["bare mask control", "x1234 [1].", "Card ending 1234", true],
+  ["bare mask mismatch", "x1234 [1].", "Card ending 5678", false],
+]) {
+  test(`calibration compact answer: ${label}`, async t => {
+    const body = await run(t, { question: "What does the money record say?", answer: claim, content: span });
+    assert.equal(body.answer, supported ? claim : null);
+  });
+}
+
+test("calibration answer-model refusal remains distinguishable from a money veto", async t => {
+  const body = await run(t, { answer: "The documents do not answer the question.", expectedVerifiers: 0 });
+  assert.equal(body.evidence_gate.supported, false);
+  assert.equal(body.evidence_gate.reason, "answer model found no direct support");
+  assert.equal(body.gaps.some(gap => gap.type === "money_veto"), false);
+});
+
+test("calibration qualification reports only a fixed rule and count", async t => {
+  const body = await run(t, { answer: `${ANSWER} Payment status is unconfirmed.` });
+  assert.equal(body.evidence_gate.supported, true);
+  assert.equal(body.evidence_gate.complete, false);
+  assert.deepEqual(body.gaps.filter(gap => gap.type === "money_veto"), [{ type: "money_veto",
+    rule: "incomplete_claim", count: 1, detail: "The money evidence check qualified an incomplete answer." }]);
+});
+
+test("calibration an amount cannot stand in for an account identifier", () => {
+  for (const claim of ["Card ending 1234 charged $1,234 [1].", "x1234 [1]."]) {
+    const input = calibrationInput(claim, ["Card x1234 charged USD 1234"]);
+    assert.equal(applyMoneyVeto(input).answer, claim);
+    input.docs[0].snippet = "Card x5678 charged USD 1234";
+    assert.equal(input.docs[0].n, input.evidenceGate.evidence[0]);
+    assert.equal(applyMoneyVeto(input).answer, null);
+  }
 });
