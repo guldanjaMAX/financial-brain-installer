@@ -749,6 +749,23 @@ and visible. Recurrence uses at least three charges, bounded weekly/monthly
 intervals and integer amount tolerance; results are explicitly detected rather
 than confirmed. Category proposals and Unsorted remain visible. Ambiguous groups,
 incomplete coverage and unreadable rows cannot establish a total or absence.
+Named payment arrivals can match whole counterparty words in the payee or
+memo, with or without an exact amount. Only posted inflows match. Without a
+supplied period, a named payment without an amount searches 60 days; exact
+amounts retain the 30-day default. Recent deposits use 14 days, and largest
+expenses without a count list ten. The current named month ends today; period
+responses retain their actual UTC window. Unrecognized bank names, entities and
+unsupported analysis still use documents rather than widening account scope.
+
+Plaid historical promotion derives an empty window's start from its saved
+requested days and queue date, never from absent transactions. A legacy
+complete feed with no start may use that same completed provider receipt only
+when it has no active stored transactions at all, at least one confirmed zero
+balance, no nonzero or unknown balance observations, and no staged refresh.
+The coverage source, provider history completion, finished date and last sync
+must agree. This conservative read-only exception cannot suppress a twin or
+extend a request beyond the proven provider interval. Transaction snapshots
+recheck that evidence beside the rows, so a concurrent change refuses.
 Ledger citations expose masked accounts, amounts, dates and feed sync time.
 The boundary follows the financial-map owner guard: exact-document access,
 non-owner principals, narrowed grants and request filters fall back without a

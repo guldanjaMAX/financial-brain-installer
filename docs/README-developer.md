@@ -2015,6 +2015,13 @@ and Q1 through Q4 may omit the year, meaning the current UTC year. Merchant
 matches use the exact NFKC-normalized, case-insensitive payee when present.
 Only rows without a payee use contiguous description tokens as a fallback. Category totals separate confirmed and proposed categories; proposed
 ones say "bank's category (unconfirmed)". Unsorted is always a separate line.
+`node --test worker/test/ledger-phrasing.test.mjs` covers natural bank question
+forms, named payments without amounts (60-day default), recent deposits
+(14-day default), largest expenses without a count (ten), and current named
+months through today. It exercises the real Think route with two approved
+twin pairs and an empty provider account, including missing-proof refusals.
+Named banks, entity-specific analysis, ordinal payments, average spend,
+anomalies and runway remain unsupported by this deterministic grammar.
 
 Transfer matching reads six extra days on either side of the answer window
 and can inspect other owned accounts when the question selects one account.
@@ -2228,7 +2235,10 @@ creates or refreshes loan and line-of-credit obligations from observed balances
 without inferring payment terms or personal guarantees. Owner-maintained linked
 obligations are preserved. A reviewed account move transfers its feed-derived
 obligation in the same transaction. An account needs a dated coverage start before its
-coverage can be complete. Unknown feed accounts prevent the obligation exposure
+coverage can be complete. Completed Plaid history can use the saved requested
+window start even with no transactions. Legacy complete rows with a null start
+remain unusable unless a matching completed provider receipt and entirely
+empty activity with confirmed zero balances prove the bounded interval. Unknown feed accounts prevent the obligation exposure
 from claiming all obligations, even when the snapshot requests no accounts.
 
 SimpleFIN uses the same independent bank-feed wrapping key but no Plaid client

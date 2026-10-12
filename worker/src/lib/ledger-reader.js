@@ -19,6 +19,22 @@ async function rows(env, sql, binds) {
 const ACCOUNTS_SQL = `SELECT a.id,a.account_slug,a.entity_slug,a.mask,a.account_kind,a.institution,a.label,a.external_ref,a.source_feed,
       a.currency,a.feed_mode,a.balance_role,a.basis_state,c.coverage_status,c.covered_from,c.covered_to,
       c.basis_state AS coverage_basis,i.last_synced_at,
+      CASE WHEN a.feed_mode='live' AND c.coverage_status='complete' AND c.covered_from IS NULL
+        AND c.basis_state='confirmed' AND c.provenance='feed' AND c.source_feed=a.source_feed
+        AND i.status='connected' AND i.removed_at IS NULL
+        AND b.state='complete' AND b.provider_history_state='HISTORICAL_UPDATE_COMPLETE'
+        AND b.unread_lines=0 AND b.requested_days BETWEEN 1 AND 730
+        AND b.queued_at<=b.finished_at AND b.finished_at=i.last_synced_at
+        AND substr(b.finished_at,1,10)=c.covered_to
+        AND date(substr(b.queued_at,1,10),'+0 days')=substr(b.queued_at,1,10)
+        AND NOT EXISTS (SELECT 1 FROM plaid_sync_windows w WHERE w.tenant_id=a.tenant_id AND w.item_ref=i.item_ref)
+        AND NOT EXISTS (SELECT 1 FROM fin_transactions t WHERE t.tenant_id=a.tenant_id
+          AND t.account_slug=a.account_slug AND t.superseded_by_id IS NULL AND t.removed_at IS NULL)
+        AND EXISTS (SELECT 1 FROM fin_balance_snapshots z WHERE z.tenant_id=a.tenant_id AND z.account_slug=a.account_slug)
+        AND NOT EXISTS (SELECT 1 FROM fin_balance_snapshots z WHERE z.tenant_id=a.tenant_id AND z.account_slug=a.account_slug
+          AND (z.current_minor IS NULL OR z.current_minor<>0 OR COALESCE(z.available_minor,0)<>0
+            OR z.basis_state<>'confirmed' OR z.currency<>'USD'))
+        THEN date(substr(b.queued_at,1,10),printf('-%d days',b.requested_days-1)) END AS empty_provider_from,
       l.manual_account_slug AS link_manual,l.live_account_slug AS link_live,l.identity_json AS link_identity
     FROM fin_accounts a
     JOIN fin_entities e ON e.tenant_id=a.tenant_id AND e.entity_slug=a.entity_slug
@@ -26,6 +42,7 @@ const ACCOUNTS_SQL = `SELECT a.id,a.account_slug,a.entity_slug,a.mask,a.account_
     LEFT JOIN fin_account_coverage c ON c.tenant_id=a.tenant_id AND c.account_slug=a.account_slug
       AND c.superseded_by_id IS NULL
     LEFT JOIN bank_feed_items i ON i.tenant_id=a.tenant_id AND a.source_feed=('bank-feed:'||i.item_ref)
+    LEFT JOIN bank_feed_backfill b ON b.tenant_id=i.tenant_id AND b.item_ref=i.item_ref
     LEFT JOIN fin_account_links l ON l.tenant_id=a.tenant_id AND l.unlinked_at IS NULL
       AND (l.manual_account_slug=a.account_slug OR l.live_account_slug=a.account_slug)
     WHERE a.tenant_id=? AND a.superseded_by_id IS NULL
@@ -125,6 +142,14 @@ const unknownTwinCoverage = account => account.members.length > 1 && account.liv
   (!validWindow(account.live) || account.live.coverage_status !== "complete" || account.live.coverage_basis !== "confirmed");
 
 export function effectivePeriodCovered(account, from, to) {
+  // Legacy empty feeds may lack a start even after historical promotion.
+  // This deliberately requires zero activity for the entire stored history,
+  // a confirmed zero balance and the matching completed provider receipt.
+  // Emptiness alone is never coverage, and an unknown twin is never suppressed.
+  if (account.members.length === 1 && account.empty_provider_from &&
+      validWindow({ covered_from: account.empty_provider_from, covered_to: account.covered_to })) {
+    return account.empty_provider_from <= from && account.covered_to >= to;
+  }
   // Admission and row precedence must refuse the same unbounded live overlap.
   if (unknownTwinCoverage(account)) return false;
   // A complete manual statement cannot fill a hole inside a partial live

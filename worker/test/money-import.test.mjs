@@ -368,20 +368,34 @@ test("M5: a reviewed loan-account move transfers its feed obligation in the same
   } finally { f.close(); }
 });
 
-test("M5: provider history complete with no dated transactions never certifies account coverage", async () => {
+test("M5: empty completed history needs a dated provider request to certify coverage", async () => {
   const { f, state, run } = await feedFixture();
   try {
     await run();
     const empty = f.first("SELECT * FROM fin_account_coverage");
     assert.ok(empty, "the promotion coverage decision was reached");
-    assert.equal(empty.covered_from, null);
-    assert.notEqual(empty.coverage_status, "complete");
+    assert.equal(empty.covered_from, "2024-10-08");
+    assert.equal(empty.coverage_status, "complete");
+    assert.equal(f.first("SELECT COUNT(*) n FROM fin_transactions").n, 0);
+    assert.equal(f.first("SELECT state FROM bank_feed_backfill").state, "complete");
     state.page = { ...state.page, added: [transaction()] };
     await run();
     assert.equal(f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete");
     state.page = { ...state.page, added: [] };
     await run();
     assert.equal(f.first("SELECT coverage_status FROM fin_account_coverage").coverage_status, "complete", "a quiet refresh keeps proven dated coverage");
+    // Intentional contract change: empty history is covered by the completed
+    // requested window, not by a transaction date. Preserve the old refusal
+    // when the dated provider request is unavailable.
+    f.raw("DELETE FROM fin_account_coverage");
+    f.raw("DELETE FROM bank_feed_backfill");
+    const before = state.calls.length;
+    await run();
+    assert.ok(state.calls.slice(before).includes("/transactions/sync"), "missing-proof decision reached");
+    const unproven = f.first("SELECT * FROM fin_account_coverage");
+    assert.ok(unproven);
+    assert.equal(unproven.covered_from, null);
+    assert.notEqual(unproven.coverage_status, "complete");
   } finally { f.close(); }
 });
 
