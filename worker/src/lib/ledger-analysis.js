@@ -32,18 +32,31 @@ export function isTransferCandidate(row) {
   return /^TRANSFER_(?:IN|OUT)(?:_|$)/i.test(row.category || "") ||
     /\btransfer (?:to|from)\b/.test(normalizeLedgerText(row.description));
 }
+function conflictsWithAccountKind(row, account) {
+  const text = `${row.description || ""} ${row.payee || ""}`;
+  for (const member of account?.members || []) {
+    // A card reference cannot identify an owned checking account that happens
+    // to have the same mask. Even advisory candidates must honor this conflict.
+    if (/^\d{1,4}$/.test(member.mask || '')) {
+      const kinds = [...text.toLowerCase().matchAll(new RegExp(`\\b(card|checking|savings|loan|investment|retirement|escrow)(?:\\s+account)?\\s+(?:ending(?:\\s+in)?\\s+)?[x*•]*${member.mask}(?![\\p{L}\\p{N}])`, 'gu'))];
+      if (kinds.some(match => match[1] !== member.account_kind)) return true;
+    }
+  }
+  return false;
+}
 function namesOwnedAccount(row, account, accounts) {
   const text = `${row.description || ""} ${row.payee || ""}`;
-  return (account?.members || []).some(member => {
+  for (const member of account?.members || []) {
     const label = normalizeLedgerText(member.label);
     if (label && containsTokens(normalizeLedgerText(text), label) &&
-        [...accounts.values()].filter(a => a.members.some(m => normalizeLedgerText(m.label) === label)).length === 1) return true;
-    if (!/^\d{1,4}$/.test(member.mask || "")) return false;
-    if ([...accounts.values()].filter(a => a.members.some(m => m.mask === member.mask)).length !== 1) return false;
+        [...accounts.values()].filter(a => a.members.some(m => normalizeLedgerText(m.label) === label)).length === 1) return 'one leg names the other account label';
+    if (!/^\d{1,4}$/.test(member.mask || "")) continue;
+    if ([...accounts.values()].filter(a => a.members.some(m => m.mask === member.mask)).length !== 1) continue;
     // A bare amount or year is not an account reference. Require a mask marker
     // or account/destination wording, with literal digit boundaries.
-    return new RegExp(`(?:\\b(?:account|acct|card|checking|savings|ending|to|from)\\s+(?:ending\\s+)?|(?:^|[^\\p{L}\\p{N}])[x*•]+)${member.mask}(?![\\p{L}\\p{N}])`, "u").test(text.toLowerCase());
-  });
+    if (new RegExp(`(?:\\b(?:account|acct|card|checking|savings|ending|to|from)\\s+(?:ending\\s+)?|(?:^|[^\\p{L}\\p{N}])[x*•]+)${member.mask}(?![\\p{L}\\p{N}])`, "u").test(text.toLowerCase())) return 'one leg names the other account mask';
+  }
+  return null;
 }
 export function pairOwnTransfers(rows, accounts = new Map()) {
   const candidates = rows.filter(row => row.amount_minor > 0);
@@ -70,27 +83,31 @@ export function pairOwnTransfers(rows, accounts = new Map()) {
     }
     if (count === 1) peers.set(row.id, peer);
   }
-  const pairs = [], matched = new Set();
+  const pairs = [], candidateRows = new Set();
   for (const out of candidates.filter(row => row.direction === "outflow")) {
     const incoming = peers.get(out.id);
     // A deterministic tie-break would invent an ownership match in the
     // three-account case. Require mutual uniqueness, even for equal dates.
     if (!incoming || peers.get(incoming.id)?.id !== out.id) continue;
-    // Date/amount/direction and provider category only locate candidates.
-    // Exclusion requires a leg explicitly naming the other owned account.
-    // There is no provider transfer-link or owner-pair field in this schema.
-    if (!namesOwnedAccount(out, accounts.get(incoming.effective_account_slug), accounts) &&
-        !namesOwnedAccount(incoming, accounts.get(out.effective_account_slug), accounts)) continue;
-    pairs.push({ out, in: incoming }); matched.add(out.id); matched.add(incoming.id);
+    const outAccount = accounts.get(out.effective_account_slug), inAccount = accounts.get(incoming.effective_account_slug);
+    if (conflictsWithAccountKind(out, inAccount) || conflictsWithAccountKind(incoming, outAccount)) continue;
+    const outsidePayee = (row, other) => normalizeLedgerText(row.payee) &&
+      !namesOwnedAccount({ payee: row.payee }, other, accounts);
+    if (outsidePayee(out, inAccount) && outsidePayee(incoming, outAccount)) continue;
+    const reason = namesOwnedAccount(out, inAccount, accounts) || namesOwnedAccount(incoming, outAccount, accounts);
+    if (!reason) continue;
+    // This schema stores no provider transfer linkage or owner-confirmed pair.
+    // Text, amounts and dates can label candidates but NEVER authorize removal.
+    pairs.push({ out, in: incoming, reason: `equal amounts, opposite directions, dates within three days; ${reason}` });
+    candidateRows.add(out.id); candidateRows.add(incoming.id);
   }
-  return { pairs, matched, unmatched: candidates.filter(row => isTransferCandidate(row) && !matched.has(row.id)) };
+  return { pairs, candidateRows, unmatched: candidates.filter(row => isTransferCandidate(row) && !candidateRows.has(row.id)) };
 }
-export const excludeMatchedTransfers = (rows, matched) => rows.filter(row => !matched.has(row.id));
 
 export function detectRecurring(rows, to) {
   const groups = new Map();
   for (const row of rows) {
-    if (row.direction !== "outflow" || row.amount_minor <= 0 || isTransferCandidate(row)) continue;
+    if (row.direction !== "outflow" || row.amount_minor <= 0) continue;
     const merchant = merchantFor(row);
     if (!merchant) continue;
     if (!groups.has(merchant)) groups.set(merchant, []);

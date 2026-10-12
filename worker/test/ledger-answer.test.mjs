@@ -84,7 +84,7 @@ test("Think totals exclude the manual twin inside live coverage", async (t) => {
   assert.equal(body.ledger?.accounts.length, 1);
   assert.equal(body.ledger.accounts[0].credits_minor, 12001);
   assert.equal(body.ledger.accounts[0].debits_minor, 2300);
-  assert.match(body.answer, /excludes 0 matched transfers between your accounts/);
+  assert.match(body.answer, /no rows were removed as transfers/);
   assert.ok(f.seen.sql.some(sql => /fin_transactions/.test(sql)), "transaction decision was reached");
   assert.equal(f.sqlite.prepare("SELECT total_changes() AS n").get().n, before);
 });
@@ -133,7 +133,7 @@ test("all period shapes use an injected UTC calendar and covered zero periods st
       assert.equal(body.gaps[0].accounts[0].covered_to, "2026-10-11");
     } else {
       assert.equal(body.ledger.accounts[0].credits_minor, credits);
-      assert.equal(body.ledger.includes_own_transfers, false);
+      assert.equal(body.ledger.includes_own_transfers, true);
     }
   }
   f.raw("UPDATE fin_account_coverage SET covered_from='2026-01-01' WHERE account_slug='manual-account'");
@@ -216,7 +216,8 @@ test("ordinary non-money Think response is byte-identical with and without a pop
 
 test("money fallback gap leads even when documents carry an old reliable date", async (t) => {
   const f = await fixtureFor(t);
-  const q = "money expenses";
+  const q = "How much money came in September 2026?";
+  f.raw("UPDATE fin_transactions SET basis_state='proposed' WHERE txn_uid='live-deposit'");
   f.raw(`INSERT INTO documents (doc_uid,source,source_id,title,ingested_at,content_hash,meta,document_date,date_source,date_reliable)
     VALUES ('fixture:money','upload','money','Money expenses',?,'fixture','{}',?,'content',1)`, Date.parse("2026-01-01T00:00:00Z"), Date.parse("2026-01-01T00:00:00Z"));
   f.raw(`INSERT INTO chunks (chunk_uid,doc_uid,chunk_ix,text,source,title,document_date)
@@ -295,7 +296,7 @@ test("all twin members must be confirmed and the configured tenant must be used"
   const f = await fixtureFor(t);
   assert.equal((await direct(f, "What is my balance?")).ledger.kind, "balance");
   f.raw("UPDATE fin_accounts SET basis_state='proposed' WHERE account_slug='manual-account'");
-  assert.equal((await direct(f, "How much money came in August 2026?")).gaps[0].reason, "ledger_account_link_required");
+  assert.equal((await direct(f, "How much money came in September 2026?")).gaps[0].reason, "ledger_account_link_required");
   f.env.BANK_FEED_TENANT = "second-owner";
   assert.equal((await direct(f, "What is my balance?")).gaps[0].reason, "no_accounts");
 });

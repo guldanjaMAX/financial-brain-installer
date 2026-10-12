@@ -1,7 +1,7 @@
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
-import { effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
-import { categoryFor, detectRecurring, excludeMatchedTransfers, matchesCategory, matchesMerchant, merchantFor, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
+import { accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
+import { categoryFor, detectRecurring, matchesCategory, matchesMerchant, merchantFor, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
 
 const masked = account => /^\d{1,4}$/.test(account.mask || "") ? `account ****${account.mask}` : "account (mask unavailable)";
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
@@ -51,7 +51,7 @@ function citation(row, account, index, balance = false) {
 const readableRow = row => row.basis_state === "confirmed" && /^\d{4}-\d{2}-\d{2}$/.test(row.posted_on || "") &&
   Number.isFinite(Date.parse(row.posted_on)) && ledgerDay(row.posted_on) === row.posted_on &&
   Number.isSafeInteger(row.amount_minor) && row.amount_minor >= 0 && row.currency === "USD" && ["inflow", "outflow"].includes(row.direction);
-const usableAccount = a => !a.ambiguous && a.currency === "USD" && a.members.every(m => m.basis_state === "confirmed");
+const usableAccount = a => !a.ambiguous && !a.linkRequired && a.currency === "USD" && a.members.every(m => m.basis_state === "confirmed");
 
 async function ledgerAnswer(env, intent, accounts, inventory) {
   if (intent.kind === "balance") {
@@ -93,7 +93,10 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   const pairing = pairOwnTransfers(eligible, bySlug);
   const pairs = pairing.pairs.filter(pair => [pair.out, pair.in].some(row => selected.has(row.effective_account_slug) && inWindow(row)));
   const unmatched = pairing.unmatched.filter(row => selected.has(row.effective_account_slug) && inWindow(row));
-  const activity = excludeMatchedTransfers(rows, pairing.matched);
+  // No transfer-link authority exists in this schema. All primary figures and
+  // lists retain candidates; only the explicitly conditional figure omits them.
+  const activity = rows;
+  const withoutCandidates = list => list.filter(row => !pairing.candidateRows.has(row.id));
   const citations = [], references = new Map();
   const cite = row => {
     if (!references.has(row.id)) {
@@ -103,11 +106,19 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     return references.get(row.id);
   };
   const refs = list => list.map(row => `[${cite(row).n}]`).join(" ");
-  const publicRow = row => ({ ...cite(row), description: safeDescription(row.description || row.payee || "Transaction") });
-  const rowLine = row => `${money(row.amount_minor)} on ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description || row.payee || "Transaction")} ${refs([row])}`;
+  const candidateMark = row => pairing.candidateRows.has(row.id) ? " (possible move between your own accounts, included)" : "";
+  const publicRow = row => ({ ...cite(row), description: safeDescription(row.description || row.payee || "Transaction"), possible_own_transfer: pairing.candidateRows.has(row.id) });
+  const rowLine = row => `${money(row.amount_minor)} on ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description || row.payee || "Transaction")}${candidateMark(row)} ${refs([row])}`;
   const bounded = `Accounts: ${accounts.map(masked).join(", ")}; ${intent.from} through ${intent.to}; ${accounts.map(a => `${masked(a)}: covered through ${a.covered_to || "unknown"}`).join("; ")}.`;
   const ledger = { kind: intent.kind, from: intent.from, to: intent.to, accounts: accountCoverage(accounts),
-    includes_own_transfers: false, matched_transfer_count: pairs.length };
+    includes_own_transfers: true, matched_transfer_count: 0, candidate_transfer_count: pairs.length };
+  const conditionalAccounts = accounts.map(account => {
+    const ownRows = withoutCandidates(rows.filter(row => row.effective_account_slug === account.account_slug));
+    return { account_mask: account.mask, credits_minor: sumMinor(ownRows.filter(r => r.direction === "inflow")),
+      debits_minor: sumMinor(ownRows.filter(r => r.direction === "outflow")), transaction_count: ownRows.length };
+  });
+  ledger.if_own_transfers = { accounts: conditionalAccounts };
+  let conditionalDetail = conditionalAccounts.map((a, i) => `${masked(accounts[i])}: credits ${money(a.credits_minor)}; debits ${money(a.debits_minor)}`).join("; ");
   let answer;
   if (intent.kind === "totals") {
     ledger.accounts = accounts.map(account => {
@@ -124,12 +135,17 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       (intent.kind === "largest" ? b.amount_minor - a.amount_minor : b.posted_on.localeCompare(a.posted_on)) || a.id - b.id);
     const listed = intent.limit ? found.slice(0, intent.limit) : found;
     ledger.found = listed.length > 0; ledger.rows = listed.map(publicRow);
+    ledger.if_own_transfers.total_minor = sumMinor(withoutCandidates(listed));
+    conditionalDetail = `total of the listed ${intent.direction === "inflow" ? "deposits" : "expenses"}: ${money(ledger.if_own_transfers.total_minor)}`;
     answer = listed.length ? listed.map(rowLine).join("\n") : `No ${intent.direction === "inflow" ? "deposits" : "expenses"} found.`;
   } else if (["merchant", "category"].includes(intent.kind)) {
     const directionRows = activity.filter(row => row.direction === intent.direction);
     const matched = intent.match ? directionRows.filter(row => (intent.kind === "merchant" ? matchesMerchant : matchesCategory)(row, intent.match)) : directionRows;
     const unsorted = (intent.kind === "category" ? directionRows : matched).filter(row => !categoryFor(row));
     ledger.total_minor = sumMinor(matched); ledger.unsorted_minor = sumMinor(unsorted); ledger.found = matched.length > 0;
+    ledger.if_own_transfers.total_minor = sumMinor(withoutCandidates(matched));
+    ledger.if_own_transfers.unsorted_minor = sumMinor(withoutCandidates(unsorted));
+    conditionalDetail = `total ${intent.direction === "inflow" ? "income" : "spend"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.if_own_transfers.total_minor)}; Unsorted: ${money(ledger.if_own_transfers.unsorted_minor)}`;
     const groups = new Map();
     for (const row of matched) {
       const label = intent.kind === "category" ? categoryFor(row) : merchantFor(row) || "unknown merchant";
@@ -140,33 +156,42 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       groups.get(key).rows.push(row);
     }
     ledger.groups = [...groups.values()].map(g => ({ [intent.kind]: safeDescription(g.label),
-      category_basis_state: g.state, total_minor: sumMinor(g.rows), citations: g.rows.map(row => cite(row).n) }));
+      category_basis_state: g.state, total_minor: sumMinor(g.rows), citations: g.rows.map(row => cite(row).n),
+      possible_transfer_citations: g.rows.filter(row => pairing.candidateRows.has(row.id)).map(row => cite(row).n),
+      if_own_transfers_total_minor: sumMinor(withoutCandidates(g.rows)) }));
     answer = `Total ${intent.direction === "inflow" ? "income" : "spend"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.total_minor)}.`;
     if (!matched.length) answer += " No matching transactions found.";
-    for (const g of groups.values()) answer += `\n${safeDescription(g.label)}${g.state === "proposed" ? " (bank's category (unconfirmed))" : ""}: ${money(sumMinor(g.rows))} ${refs(g.rows)}.`;
+    for (const g of groups.values()) answer += `\n${safeDescription(g.label)}${g.state === "proposed" ? " (bank's category (unconfirmed))" : ""}: ${money(sumMinor(g.rows))} ${refs(g.rows)}${g.rows.some(row => pairing.candidateRows.has(row.id)) ? " (includes possible moves between your own accounts)" : ""}.`;
     answer += `\nUnsorted: ${money(ledger.unsorted_minor)}${intent.kind === "category" && intent.match && !matched.some(row => !categoryFor(row)) ? " (separate from the requested category)" : ""} ${refs(unsorted)}.`;
   } else if (intent.kind === "transfers") {
-    // A transfer total is counted once by the outgoing posting date. A credit
-    // crossing the window edge is still excluded from that window's income.
+    // A candidate amount is counted once by outgoing date. Neither leg is
+    // removed from income/spend, including across the answer window boundary.
     const outgoing = pairs.filter(pair => inWindow(pair.out));
     ledger.total_minor = sumMinor(outgoing, pair => pair.out.amount_minor);
     ledger.found = outgoing.length > 0;
-    answer = outgoing.length ? `Matched transfers: ${money(ledger.total_minor)}, counted once by outgoing posting date.` : "No matched transfers found by outgoing posting date.";
+    answer = outgoing.length ? `Possible moves between your own accounts: ${money(ledger.total_minor)}, counted once by outgoing posting date; not confirmed.` : "No possible moves between your own accounts found by outgoing posting date.";
   } else if (intent.kind === "recurring") {
     const recurring = detectRecurring(activity, intent.to);
     ledger.recurring = recurring.map(g => ({ merchant: safeDescription(g.merchant), cadence: g.cadence,
       typical_minor: g.typical_minor, monthly_minor: g.monthly_minor, last_charge: g.last_charge,
       last_amount_minor: g.rows.at(-1).amount_minor, occurrence_count: g.rows.length, detected: true,
-      citations: g.rows.map(row => cite(row).n) }));
+      citations: g.rows.map(row => cite(row).n), possible_transfer_citations: g.rows.filter(row => pairing.candidateRows.has(row.id)).map(row => cite(row).n) }));
     ledger.monthly_total_minor = sumMinor(recurring, g => g.monthly_minor); ledger.found = recurring.length > 0;
+    ledger.if_own_transfers.monthly_total_minor = sumMinor(detectRecurring(withoutCandidates(activity), intent.to), g => g.monthly_minor);
+    conditionalDetail = `estimated monthly total: ${money(ledger.if_own_transfers.monthly_total_minor)}`;
     answer = "Recurring charges detected, not confirmed. " + (recurring.length ? recurring.map(g =>
       `${safeDescription(g.merchant)}: ${g.cadence}, typical ${money(g.typical_minor)}; last charge ${money(g.rows.at(-1).amount_minor)} on ${g.last_charge} ${refs(g.rows)}.`).join("\n") : "No recurring charges detected.");
     answer += `\nEstimated monthly total: ${money(ledger.monthly_total_minor)} (weekly amounts use 52/12, rounded to cents per merchant).`;
   } else throw new Error("unsupported ledger intent");
-  ledger.transfers = pairs.map(pair => ({ amount_minor: pair.out.amount_minor, outgoing: publicRow(pair.out), incoming: publicRow(pair.in) }));
+  ledger.transfers = pairs.map(pair => ({ candidate: true, excluded_from_totals: false, reason: pair.reason,
+    amount_minor: pair.out.amount_minor, outgoing: publicRow(pair.out), incoming: publicRow(pair.in) }));
   ledger.unmatched_transfers = unmatched.map(publicRow);
-  answer += `\n${bounded}\nThis answer excludes ${pairs.length} matched transfers between your accounts from income and spend.`;
-  for (const pair of pairs) answer += `\nMatched transfer: ${rowLine(pair.out)}; received ${rowLine(pair.in)}.`;
+  answer += `\n${bounded}\nPossible transfers are included in income and spend; no rows were removed as transfers.`;
+  if (pairs.length) {
+    answer += "\nPossible moves between your own accounts:";
+    for (const pair of pairs) answer += `\n${rowLine(pair.out)}; received ${rowLine(pair.in)}. Why: ${pair.reason}.`;
+    answer += `\nIf these are transfers between your own accounts, with those candidates excluded: ${conditionalDetail}.`;
+  }
   for (const row of unmatched) answer += `\nPossible transfer, unmatched (retained in income/spend totals): ${rowLine(row)}.`;
   return { answer, citations, ledger };
 }
@@ -176,7 +201,9 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
 export async function withLedgerAnswer({ env, question, access, grantScope, scopePrincipalKind,
   filters = {}, entityScope, ledgerEligible = true, now = Date.now() }, next) {
   const intent = classifyLedgerQuestion(question, { now });
-  if (!intent.broad) return next(null);
+  // An unsupported question needs ordinary document retrieval. Inventory
+  // coincidences cannot add a bank gap or interrupt that unrelated path.
+  if (!intent.broad || !intent.kind) return next(null);
   let accounts = [], gap;
   // Same whole-owner boundary as financialMapStateFor. The remote MCP ask
   // handler explicitly supplies owner + unrestricted scope today; grants and
@@ -194,7 +221,8 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
       accounts = inventory;
       if (intent.mask) accounts = accounts.filter(a => a.mask === intent.mask);
       if (intent.accountKind) accounts = accounts.filter(a => a.account_kind === intent.accountKind);
-      let reason = !accounts.length ? "no_accounts" : accounts.some(a => a.linkRequired) ? 'ledger_account_link_required' : accounts.some(a => a.ambiguous || a.members.some(m => m.basis_state !== "confirmed")) ||
+      const disputed = accounts.filter(a => accountLinkRequiredInWindow(a, intent));
+      let reason = !accounts.length ? "no_accounts" : disputed.length ? 'ledger_account_link_required' : accounts.some(a => a.ambiguous || a.members.some(m => m.basis_state !== "confirmed")) ||
         (intent.mask && accounts.length !== 1) ? "ambiguous_account" :
         accounts.some(a => a.currency !== "USD") ? "unsupported_currency" : !intent.kind ? "unsupported_question" : null;
       if (!reason) {
@@ -205,7 +233,7 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
           evidence_gate: { supported: true, complete: true, reason: "read from covered ledger rows" } }),
         { headers: { "Content-Type": "application/json" } });
       }
-      gap = gapFor(reason, accounts, intent);
+      gap = gapFor(reason, reason === 'ledger_account_link_required' ? disputed : accounts, intent);
       // Documents cannot resolve a disputed ledger identity or authorize a
       // financial total that this deterministic account decision refused.
       if (reason === 'ledger_account_link_required') return new Response(JSON.stringify({ mode: 'think',

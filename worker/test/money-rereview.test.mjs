@@ -35,13 +35,13 @@ test('R01: equal external transfers must retain the real expense and income', as
   add(f, { uid: 'customer-payment', slug: 'second-account', amount: 50001, direction: 'inflow', description: 'Transfer from outside customer invoice', payee: 'Outside Customer', category: 'TRANSFER_IN_ACCOUNT_TRANSFER', categoryState: 'proposed' });
   const control = await ask(f, totalQuestion);
   assert.equal(total(control, 'debits_minor'), 50000); assert.equal(total(control, 'credits_minor'), 50001);
-  assert.equal(control.ledger.matched_transfer_count, 0);
+  assert.equal(control.ledger.candidate_transfer_count, 0);
   f.raw("UPDATE fin_transactions SET amount_minor=50000 WHERE txn_uid='customer-payment'");
   const reads = f.seen.length;
   const body = await ask(f, totalQuestion);
   assert.ok(f.seen.slice(reads).some(sql => sql.includes('JOIN fin_transactions')));
   assert.equal(body.evidence_gate.complete, true);
-  t.diagnostic(JSON.stringify({ matched: body.ledger.matched_transfer_count, expense: total(body, 'debits_minor'), income: total(body, 'credits_minor') }));
+  t.diagnostic(JSON.stringify({ matched: body.ledger.candidate_transfer_count, expense: total(body, 'debits_minor'), income: total(body, 'credits_minor') }));
   assert.equal(total(body, 'debits_minor'), 50000, 'external supplier payment is an expense');
   assert.equal(total(body, 'credits_minor'), 50000, 'external customer receipt is income');
 });
@@ -139,13 +139,13 @@ for (const noun of ['memo', 'summary', 'report', 'recap', 'analysis', 'brief']) 
   });
 }
 
-test('R01 positive own-mask proof excludes genuine legs from totals and phase-two lists', async t => {
+test('R01 own-mask candidate keeps genuine legs in totals and phase-two lists', async t => {
   const f = fixture(); t.after(f.close); account(f); account(f, { slug: 'second-account', mask: '8765' });
   add(f, { uid: 'out', amount: 50000, direction: 'outflow', description: 'Transfer to account 8765' });
   add(f, { uid: 'in', slug: 'second-account', amount: 50000, direction: 'inflow', description: 'Bank credit' });
   const control = await ask(f, totalQuestion);
-  assert.equal(control.ledger.matched_transfer_count, 1);
-  assert.equal(total(control, 'credits_minor'), 0); assert.equal(total(control, 'debits_minor'), 0);
+  assert.equal(control.ledger.candidate_transfer_count, 1);
+  assert.equal(total(control, 'credits_minor'), 50000); assert.equal(total(control, 'debits_minor'), 50000);
   for (const [question, field] of [
     ['What were my 3 largest expenses in September 2026?', 'rows'],
     ['How much did I spend by category in September 2026?', 'total_minor'],
@@ -153,21 +153,23 @@ test('R01 positive own-mask proof excludes genuine legs from totals and phase-tw
   ]) {
     f.raw("UPDATE fin_transactions SET description='Transfer to account 8765',payee='Outside Supplier' WHERE txn_uid='out'");
     const linked = await ask(f, question);
-    assert.equal(field === 'rows' ? linked.ledger.rows.length : linked.ledger[field], 0);
+    assert.equal(field === 'rows' ? linked.ledger.rows[0].amount_minor : linked.ledger[field], 50000);
+    assert.equal(linked.ledger.if_own_transfers.total_minor, 0);
+    assert.equal(linked.ledger.candidate_transfer_count, 1);
     f.raw("UPDATE fin_transactions SET description='Transfer to outside supplier' WHERE txn_uid='out'");
     const reads = f.seen.length;
     const unproven = await ask(f, question);
     assert.ok(f.seen.slice(reads).some(sql => sql.includes('JOIN fin_transactions')));
-    assert.equal(unproven.ledger.matched_transfer_count, 0);
+    assert.equal(unproven.ledger.candidate_transfer_count, 0);
     assert.equal(field === 'rows' ? unproven.ledger.rows[0].amount_minor : unproven.ledger[field], 50000);
   }
   for (const description of ['Transfer to account 87650', 'Transfer to supplier for $8765', 'Transfer to outside supplier in 8765', 'Transfer to tax8765 service']) {
     f.raw('UPDATE fin_transactions SET description=? WHERE txn_uid=\'out\'', description);
-    assert.equal((await ask(f, totalQuestion)).ledger.matched_transfer_count, 0, description);
+    assert.equal((await ask(f, totalQuestion)).ledger.candidate_transfer_count, 0, description);
   }
   f.raw("UPDATE fin_accounts SET label='Reserve fund' WHERE account_slug='second-account'");
   f.raw("UPDATE fin_transactions SET description='Move funds to Reserve fund' WHERE txn_uid='out'");
-  assert.equal((await ask(f, totalQuestion)).ledger.matched_transfer_count, 1);
+  assert.equal((await ask(f, totalQuestion)).ledger.candidate_transfer_count, 1);
 });
 
 test('R02 description fallback only when an explicit payee is absent', async t => {
@@ -186,12 +188,12 @@ test('R01 a mask shared by two owned accounts cannot identify the counterparty',
   account(f, { slug: 'second-account', mask: '8765', institution: 'Bank Two' });
   add(f, { uid: 'out', amount: 50000, direction: 'outflow', description: 'Transfer to account 8765' });
   add(f, { uid: 'in', slug: 'second-account', amount: 50000, direction: 'inflow', description: 'Bank credit' });
-  assert.equal((await ask(f, totalQuestion)).ledger.matched_transfer_count, 1);
+  assert.equal((await ask(f, totalQuestion)).ledger.candidate_transfer_count, 1);
   f.raw("UPDATE fin_accounts SET mask='4321' WHERE account_slug='second-account'");
   f.raw("UPDATE fin_transactions SET description='Transfer to account 4321' WHERE txn_uid='out'");
   const before = f.seen.length, result = await ask(f, totalQuestion);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('JOIN fin_transactions')));
-  assert.equal(result.ledger.matched_transfer_count, 0);
+  assert.equal(result.ledger.candidate_transfer_count, 0);
   assert.equal(total(result, 'debits_minor'), 50000); assert.equal(total(result, 'credits_minor'), 50000);
 });
 

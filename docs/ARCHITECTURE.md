@@ -717,7 +717,8 @@ totals, recent deposits, recurring charges and own-account transfers;
 `ledger-answer.js` formats the stored amounts without an answer model.
 `ledger-reader.js` groups manual/live twins only after an explicit owner-approved
 link. Matching institution, entity, mask and account kind identify candidates,
-not proof. Unlinked collisions refuse with one bounded gap and the exact
+not proof. For supported ledger questions, unlinked collisions whose selected
+accounts and coverage overlap the requested window refuse with one bounded gap and the exact
 `brain ledger link-accounts` preview command. Migration 0055 stores approval
 history without triggers. The authenticated import admin route previews, hashes,
 atomically guards and verifies link/unlink actions. Saved account identities
@@ -726,11 +727,14 @@ Linked manual transactions are excluded inside the complete live coverage
 window, retaining the supplying account on every row. This
 does not rewrite account coverage or stored transactions. `ledger-analysis.js`
 computes mutually unique transfer pairs using equal cents, opposite directions,
-two owned accounts and a three-day date tolerance. Exclusion additionally
-requires one leg to name the other owned account by its unique literal mask
-or stored label. Proposed categories and transfer words alone cannot remove
-money. No provider transfer-link or owner-pair field currently exists.
-All income/spend totals exclude matched legs. Unmatched hints remain counted
+two owned accounts and a three-day date tolerance. One leg must name the other
+owned account by its unique literal mask or stored label to label a pair as a
+candidate. Conflicting account kinds or explicit outside payees on both legs
+rule out the candidate. No provider transfer-link or owner-pair field currently
+exists, so no transaction is removed as a transfer. Primary totals, lists and
+breakdowns retain candidate legs; a separately labelled conditional figure
+shows the result if these are transfers between the owner's accounts. Candidates
+include both accounts, amounts, dates and reasons. Unmatched hints remain counted
 and visible. Recurrence uses at least three charges, bounded weekly/monthly
 intervals and integer amount tolerance; results are explicitly detected rather
 than confirmed. Category proposals and Unsorted remain visible. Ambiguous groups,
@@ -739,8 +743,10 @@ Ledger citations expose masked accounts, amounts, dates and feed sync time.
 The boundary follows the financial-map owner guard: exact-document access,
 non-owner principals, narrowed grants and request filters fall back without a
 ledger read. Remote MCP Ask currently enters with unrestricted owner scope.
-Unsupported money questions receive a leading ledger gap; document-age gaps
-explicitly describe retrieved documents rather than the bank feed.
+Unsupported money and non-ledger questions bypass ledger reads and preserve the
+ordinary document response unchanged. Supported ledger questions outside known
+collision coverage can fall back with ordinary coverage guidance. Document-age
+gaps explicitly describe retrieved documents rather than the bank feed.
 
 Explicit `Last updated`, `Updated`, and `As of` ISO-date lines, plus title
 `(started YYYY-MM-DD)` and `(updated YYYY-MM-DD)` annotations, establish content

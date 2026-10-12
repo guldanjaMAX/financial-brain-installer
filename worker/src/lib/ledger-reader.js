@@ -74,10 +74,22 @@ function groupAccounts(accounts) {
     const manual = members.filter(a => a.feed_mode === "manual");
     const primary = live[0] || members[0];
     const linkRequired = members.map(a => unresolved.get(a.account_slug)).find(Boolean);
-    const ambiguous = Boolean(linkRequired) || members.length > 1 && !(members.length === 2 && live.length === 1 && manual.length === 1 &&
+    const ambiguous = members.length > 1 && !(members.length === 2 && live.length === 1 && manual.length === 1 &&
       members.every(a => a.currency === primary.currency && a.balance_role === primary.balance_role));
     return { ...primary, members, live: live[0] || null, ambiguous, linkRequired };
   });
+}
+
+export function accountLinkRequiredInWindow(account, intent) {
+  if (!account.linkRequired || !intent.kind) return false;
+  if (!intent.from || !intent.to) return true;
+  // A known non-overlapping interval proves this collision is irrelevant.
+  // Missing coverage cannot prove that, so it keeps the identity gate closed.
+  const members = [account.linkRequired.manual, account.linkRequired.live];
+  const known = members.filter(a => a && validWindow(a));
+  const start = [intent.from, ...known.map(a => a.covered_from)].sort().at(-1);
+  const end = [intent.to, ...known.map(a => a.covered_to)].sort()[0];
+  return start <= end;
 }
 
 async function snapshotRows(env, accounts, sql, binds, { tenantId, mask, accountKind }) {

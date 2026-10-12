@@ -6,20 +6,26 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.12 (unreleased)
 
-- Money answers keep coincident transfers in income and spend unless a leg
-  names the other owned account. Merchant totals use the explicit payee when
-  present; descriptions only supply a missing payee. Check the cited accounts
-  and payees when reviewing possible transfers.
+- Transfers between your accounts are flagged, not removed. Income, spending,
+  largest expenses and category totals include possible moves, with cited
+  accounts, dates and reasons plus a separate figure labelled "if these are
+  transfers between your own accounts". Check each candidate before treating
+  it as a transfer. Merchant totals use the explicit payee when present;
+  descriptions only supply a missing payee.
 
-- Matching bank names and last-four digits now ask for your account-link
-  confirmation before applying live-feed precedence. Preview with
+- Matching bank names and last-four digits ask for your account-link
+  confirmation only when the ledger question's accounts and period touch that
+  collision. Unrelated document questions keep their ordinary retrieval path.
+  Confirm the link before applying live-feed precedence. Preview with
   `brain ledger link-accounts <manifest> --manual <account> --live <account>
   --preview`, then approve the exact plan with `--apply --approve <hash>` only
   for two records of the same account. Add `--unlink --preview` to review
   removing a link. Accounts, transactions and approval history are retained.
 
 - Explicit AI, agent or assistant authorship makes a memo, recap, analysis or
-  other generated document insufficient as sole money evidence. Dated primary
+  other generated document insufficient as sole money evidence, including
+  disclosures such as "generated with ChatGPT" or "created using Claude".
+  Dated primary
   email and messages remain eligible, including emails discussing AI tools.
 
 - Money answers can use dated primary emails, messages and documents whose
@@ -38,8 +44,8 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 - Ask can list largest expenses and recent deposits, total spending or income
   by merchant or category, and detect weekly or monthly recurring charges.
-  Matched transfers between your own accounts are excluded from income and
-  spending; unmatched candidates stay counted and are labeled for review.
+  Possible transfers between your own accounts stay in income and spending
+  and are labeled for review.
   Check the cited rows, account coverage, Unsorted amounts and unconfirmed
   bank categories. Recurring charges are detected patterns, not confirmed
   subscriptions; their monthly total is an estimate.

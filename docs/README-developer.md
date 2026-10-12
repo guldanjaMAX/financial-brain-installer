@@ -2022,15 +2022,18 @@ The extra margin tests the counterpart's competing candidates too; the actual
 matching tolerance remains three days.
 Only readable, covered rows from unambiguous confirmed owned accounts can
 pair. Equal cents, opposite directions, different effective accounts and nearby
-dates only identify candidates. Exclusion also requires one leg to name the other
-owned account by its unique mask or stored label. A provider's proposed transfer
-category or generic transfer wording cannot remove money.
+dates only identify candidates. One leg must name the other owned account by
+its unique mask or stored label; conflicting account kinds and explicit outside
+payees on both legs rule out the candidate. No provider transfer linkage or
+owner-confirmed transaction pairing exists in this schema. Nothing is removed
+as a transfer from phase-one totals or phase-two lists and breakdowns.
 A leg must have exactly one possible counterpart within three days, mutually;
 ambiguous candidates remain unmatched and counted. Pairs are cited, never
-stored, and excluded from phase-one totals as well as phase-two income/spend.
-Transfer totals count each pair once by its outgoing posting date. A receipt
-inside the period can therefore be excluded from income even when its outgoing
-leg belongs to the preceding period. The 5,000-row cap includes the padding and
+stored, with amount, dates, both accounts and reasons. A separate figure shows
+what the answer would be if these are transfers between the owner's accounts.
+Possible-transfer totals count each candidate once by its outgoing posting date.
+A receipt inside the period remains in income when its outgoing leg belongs to
+the preceding period. The 5,000-row cap includes the padding and
 other owned accounts, and refuses a partial answer. Separate indexed date-range
 and undated arms preserve the existing refusal for rows with unknown dates.
 SQL stops at 5,001 matching rows; sorting happens only after proving the bound,

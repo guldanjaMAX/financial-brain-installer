@@ -119,7 +119,7 @@ test("merchant tokens are contiguous and category proposals and Unsorted stay ex
   assert.equal(breakdown.ledger.groups.filter(g => g.category === "software").length, 2);
 });
 
-test("transfers exclude each matched leg once; near misses stay counted and labeled", async t => {
+test("transfer candidates keep every leg counted; conditional figures and near misses stay explicit", async t => {
   const f = await fixture(t);
   f.add("out", "2026-09-15", 10001, "outflow", "TRANSFER TO account 2222");
   f.add("in", "2026-09-18", 10001, "inflow", "Fixture bank", "TRANSFER_IN_ACCOUNT_TRANSFER", "proposed", "account-b");
@@ -130,12 +130,14 @@ test("transfers exclude each matched leg once; near misses stay counted and labe
   f.add("expense", "2026-09-16", 77);
   const changes = f.sqlite.prepare("SELECT total_changes() n").get().n;
   const totals = await f.ask("How much money came in and went out in September 2026?");
-  assert.equal(sumAccounts(totals, "debits_minor"), 50079);
-  assert.equal(sumAccounts(totals, "credits_minor"), 50003);
-  assert.equal(totals.ledger.matched_transfer_count, 1);
+  assert.equal(sumAccounts(totals, "debits_minor"), 60080);
+  assert.equal(sumAccounts(totals, "credits_minor"), 60004);
+  assert.equal(totals.ledger.candidate_transfer_count, 1);
   assert.equal(totals.ledger.unmatched_transfers.length, 4);
-  assert.equal(totals.ledger.includes_own_transfers, false);
-  assert.match(totals.answer, /excludes 1 matched transfers between your accounts/);
+  assert.equal(totals.ledger.includes_own_transfers, true);
+  assert.match(totals.answer, /If these are transfers between your own accounts/);
+  assert.equal(totals.ledger.if_own_transfers.accounts.reduce((n, a) => n + a.debits_minor, 0), 50079);
+  assert.equal(totals.ledger.if_own_transfers.accounts.reduce((n, a) => n + a.credits_minor, 0), 50003);
   assert.match(totals.answer, /possible transfer, unmatched/i);
   const transfer = await f.ask("How much did I transfer between my own accounts last month?");
   assert.equal(transfer.ledger.total_minor, 10001);
@@ -194,14 +196,14 @@ test("selected account still pairs with owned counterparts across month boundari
   f.add("boundary-in", "2026-10-02", 5555, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
   const out = await f.ask("How much money went out in September 2026 for account 1111?");
   assert.equal(out.ledger.accounts.length, 1);
-  assert.equal(out.ledger.accounts[0].debits_minor, 0);
-  assert.equal(out.ledger.matched_transfer_count, 1);
+  assert.equal(out.ledger.accounts[0].debits_minor, 5555);
+  assert.equal(out.ledger.candidate_transfer_count, 1);
   const income = await f.ask("How much income by category in October 2026?", { now: "2026-11-01T00:00:00Z" });
   assert.equal(income.gaps[0]?.reason, "period_outside_coverage");
   f.raw("UPDATE fin_account_coverage SET covered_to='2026-10-31'");
   const inResult = await f.ask("How much income by category in October 2026?");
-  assert.equal(inResult.ledger.total_minor, 0);
-  assert.equal(inResult.ledger.matched_transfer_count, 1);
+  assert.equal(inResult.ledger.total_minor, 5555);
+  assert.equal(inResult.ledger.candidate_transfer_count, 1);
 });
 
 test("SQL date arms use an account date range index and the row cap fails visibly", async t => {
@@ -235,36 +237,37 @@ test("ordinary recurring meetings keep the identical non-money response", async 
   assert.equal((await f.ask("How much did I spend by category in September 2026?")).ledger.total_minor, 101);
 });
 
-async function mutantAnswer(from, to) {
+async function mutantAnswer(from, to, target = "analysis") {
   const analysisUrl = new URL("../src/lib/ledger-analysis.js", import.meta.url);
-  const analysis = readFileSync(analysisUrl, "utf8");
+  const targetUrl = target === "analysis" ? analysisUrl : new URL("../src/lib/ledger-answer.js", import.meta.url);
+  const analysis = readFileSync(targetUrl, "utf8");
   assert.equal(analysis.split(from).length - 1, 1, "exactly one mutation site");
   const altered = analysis.replace(from, to);
   const analysisModule = `data:text/javascript;base64,${Buffer.from(altered).toString("base64")}`;
   const answerUrl = new URL("../src/lib/ledger-answer.js", import.meta.url);
-  const answer = readFileSync(answerUrl, "utf8").replace(/from "(\.\/.+?)"/g, (_, path) =>
-    `from ${JSON.stringify(path === "./ledger-analysis.js" ? analysisModule : new URL(path, answerUrl).href)}`);
+  const answer = (target === "analysis" ? readFileSync(answerUrl, "utf8") : altered).replace(/from "(\.\/.+?)"/g, (_, path) =>
+    `from ${JSON.stringify(target === "analysis" && path === "./ledger-analysis.js" ? analysisModule : new URL(path, answerUrl).href)}`);
   return (await import(`data:text/javascript;base64,${Buffer.from(answer).toString("base64")}`)).withLedgerAnswer;
 }
 const askMutant = (f, question, answer) => answer({ env: f.env, question, now: NOW,
   grantScope: { all: true }, scopePrincipalKind: "owner" },
 async () => new Response(JSON.stringify({ answer: null, gaps: [] }))).then(r => r.json());
 
-test("mutation control kills transfer exclusion through the real SQLite answer path", async t => {
+test("mutation control catches automatic transfer removal through the real SQLite answer path", async t => {
   const f = await fixture(t);
   f.add("out", "2026-09-15", 10001, "outflow", "TRANSFER TO account 2222");
   f.add("in", "2026-09-18", 10001, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
   f.add("expense", "2026-09-16", 77);
   const question = "How much money came in and went out in September 2026?";
   const control = await f.ask(question);
-  assert.equal(control.ledger.matched_transfer_count, 1);
-  assert.equal(sumAccounts(control, "debits_minor"), 77);
-  const mutant = await mutantAnswer("rows.filter(row => !matched.has(row.id));", "rows.filter(row => true);");
+  assert.equal(control.ledger.candidate_transfer_count, 1);
+  assert.equal(sumAccounts(control, "debits_minor"), 10078);
+  const mutant = await mutantAnswer("const activity = rows;", "const activity = rows.filter(row => !pairing.candidateRows.has(row.id));", "answer");
   const before = transactionReads(f);
   const changed = await askMutant(f, question, mutant);
   assert.ok(transactionReads(f) > before, "mutant reached SQL and pairing");
-  assert.equal(changed.ledger.matched_transfer_count, 1);
-  assert.equal(sumAccounts(changed, "debits_minor"), 10078);
+  assert.equal(changed.ledger.candidate_transfer_count, 1);
+  assert.equal(sumAccounts(changed, "debits_minor"), 77);
   assert.notEqual(sumAccounts(changed, "debits_minor"), sumAccounts(control, "debits_minor"));
 });
 
@@ -342,14 +345,14 @@ test("transfer uniqueness inspects competitors beyond a window-edge counterpart"
   f.add("out", "2026-09-01", 12345, "outflow", "TRANSFER TO account 2222");
   f.add("in", "2026-08-29", 12345, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
   const control = await f.ask("How much money went out in September 2026 for account 1111?");
-  assert.equal(control.ledger.accounts[0].debits_minor, 0);
-  assert.equal(control.ledger.matched_transfer_count, 1);
+  assert.equal(control.ledger.accounts[0].debits_minor, 12345);
+  assert.equal(control.ledger.candidate_transfer_count, 1);
   f.add("competitor", "2026-08-26", 12345, "outflow", "TRANSFER TO account 2222", null, null, "account-c");
   const before = transactionReads(f);
   const ambiguous = await f.ask("How much money went out in September 2026 for account 1111?");
   assert.ok(transactionReads(f) > before);
   assert.equal(ambiguous.ledger.accounts[0].debits_minor, 12345);
-  assert.equal(ambiguous.ledger.matched_transfer_count, 0);
+  assert.equal(ambiguous.ledger.candidate_transfer_count, 0);
   assert.equal(ambiguous.ledger.unmatched_transfers.length, 1);
 });
 
