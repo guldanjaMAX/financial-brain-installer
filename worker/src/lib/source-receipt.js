@@ -42,11 +42,14 @@ export const DEFAULT_SOURCE_RECEIPT_ISSUE_CODE = "INGEST_FAILED";
 export function providerNoChangeCheckAt(kind, run) {
   // Restrict this to connector receipts whose terminal walk flag proves provider
   // enumeration. Re-reading an empty export folder cannot prove upstream work.
-  if (!["drive", "gmail", "imap", "calendar"].includes(kind)) return null;
+  if (!["drive", "gmail", "imap", "calendar", "microsoft"].includes(kind)) return null;
   if (run?.outcome !== "empty" || run.walk_complete !== true || run.metrics_version !== 1) return null;
   // Older Calendar walks could terminate without a valid nextSyncToken.
   // Only the dedicated, persisted boundary proof certifies a quiet check.
   if (kind === "calendar" && run.provider_check_complete !== true) return null;
+  // Microsoft shares one receipt across mail, calendar and files. Every delta
+  // walk must finish cleanly and its resulting cursor must be saved first.
+  if (kind === "microsoft" && run.provider_check_complete !== true) return null;
   if (!["files_seen", "docs_added", "docs_updated", "docs_unchanged", "docs_refused", "docs_failed"]
     .every(field => run[field] === 0)) return null;
   const started = typeof run.started_at === "string" ? Date.parse(run.started_at) : NaN;

@@ -2489,7 +2489,7 @@ async function handleSourceReceipt(env, request) {
       targetRange.from, targetRange.through,
       errorReason,
       failureEvidence ? JSON.stringify(failureEvidence) : null,
-      status === "ready" && kind === "calendar" && walkComplete && body?.provider_check_complete === true ? 1 : 0,
+      status === "ready" && ["calendar", "microsoft"].includes(kind) && walkComplete && body?.provider_check_complete === true ? 1 : 0,
     ));
   }
   statements.push(env.DB.prepare(

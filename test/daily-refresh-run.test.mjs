@@ -917,3 +917,43 @@ test("an explicit loader refusal cannot borrow an advancing freshness receipt", 
   }
   assert.deepEqual(outcomes, [["complete", true], ["failed", false]]);
 });
+
+for (const kind of ["microsoft", "gmail", "calendar"]) {
+  test(`quiet ${kind} daily refresh requires a current completed provider check`, async () => {
+    const before = "2026-10-08T12:00:00.000Z";
+    const now = "2026-10-10T12:00:00.000Z";
+    const quiet = { outcome: "empty", walk_complete: true, provider_check_complete: true, metrics_version: 1,
+      started_at: now, finished_at: now, files_seen: 0, docs_added: 0, docs_updated: 0,
+      docs_unchanged: 0, docs_refused: 0, docs_failed: 0 };
+    const arms = [
+      ["complete", quiet, before, "complete"],
+      ["incomplete", { ...quiet, walk_complete: false }, before, "failed"],
+      ["error", { ...quiet, docs_failed: 1 }, before, "failed"],
+      ["stale", { ...quiet, started_at: before, finished_at: before }, before, "failed"],
+      ["replay", quiet, now, "failed"],
+      ["future", { ...quiet, finished_at: "2026-10-11T12:00:00.000Z" }, before, "failed"],
+      ["missing boundary", { ...quiet, provider_check_complete: false }, before, kind === "gmail" ? "complete" : "failed"],
+    ];
+    for (const [arm, latestRun, prior, expected] of arms) {
+      let runs = 0;
+      let reads = 0;
+      const receipts = [];
+      const result = await runDailyRefresh({
+        plan: { ...plan, sources: [{ key: "mailbox", source_names: ["mailbox"], run_key: kind,
+          class: "machine-pull", owner: "daily-task", status: "ready" }] },
+        acquireLock: () => ({ assertOwned() {}, release() {} }),
+        runSource: async () => { runs++; return { status: "complete" }; },
+        readFreshness: async () => ({ mailbox: { kind, last_successful_run_at: before,
+          latest_run: ++reads === 1 ? { finished_at: prior } : latestRun } }),
+        writeReceipt: receipt => receipts.push(receipt), now: () => new Date(now),
+      });
+      assert.equal(runs, 1, `${arm}: selected source reached`);
+      assert.equal(reads, 2, `${arm}: both evidence decisions reached`);
+      assert.equal(receipts.length, 2, `${arm}: source and daily receipts written`);
+      assert.equal(result.status, expected, arm);
+      assert.equal(result.sources[0].check_verified, expected === "complete", arm);
+      assert.equal(result.sources[0].no_change, expected === "complete", arm);
+      assert.equal(result.sources[0].freshness_advanced, false, arm);
+    }
+  });
+}

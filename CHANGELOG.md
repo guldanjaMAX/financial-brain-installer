@@ -6,6 +6,11 @@ the brain, not for whoever built it: what changed for them, and what to check.
 
 ## 0.4.12 (unreleased)
 
+- A quiet Outlook mail or calendar day now shows a successful daily check when
+  Microsoft finishes checking for changes and saves its place for the next check.
+  Check that daily status says checked with no changes; the last import date
+  stays unchanged. Interrupted checks and errors still need attention.
+
 - A record that says in its title or opening lines that an AI made it ("made
   with ChatGPT", "AI-generated", "written by Claude") cannot be the only
   support for a money answer. Known limit: the Brain recognizes these
