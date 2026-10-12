@@ -155,7 +155,7 @@ test('P01 human role titles stay primary; explicitly AI-qualified roles still de
     assert.equal(b.evidence_gate.supported, true);
     assert.equal(b.results[0].lineage.status, 'unknown');
   }
-  for (const title of ['AI assistant notes', 'AI agent summary', 'Virtual assistant memo', 'Chatbot draft']) {
+  for (const title of ['AI assistant notes', 'AI agent summary', 'ChatGPT memo', 'Chatbot draft']) {
     const b = await documentAnswer(t, { title });
     assert.equal(b.results[0].lineage.kind, 'agent_derived', title);
     assert.equal(b.answer, null); assert.equal(b.evidence_gate.supported, false);
@@ -265,4 +265,31 @@ test('P02 real Think route: historical collisions cannot bypass the unresolved l
   t.diagnostic(JSON.stringify({ answer: b.answer, supported: b.evidence_gate.supported, gap: b.gaps[0]?.reason, drafts, verifiers }));
   assert.equal(b.code, 'ledger_account_link_required');
   assert.equal(b.answer, null);
+});
+
+test('Q01: a human virtual assistant is a role, not an AI authorship disclosure', async t => {
+  for (const content of [
+    'The invoice was prepared by a virtual assistant, a human contractor working remotely. Card ending 4242 charged USD 120.00.',
+    'The invoice was drafted by a virtual assistant who is a human member of the team. Card ending 4242 charged USD 120.00.',
+  ]) {
+    const b = await documentAnswer(t, { content });
+    assert.equal(b.results[0].lineage.status, 'unknown', content);
+    assert.equal(b.evidence_gate.supported, true, content);
+  }
+  const b = await documentAnswer(t, { title: 'Virtual assistant memo' });
+  assert.equal(b.evidence_gate.supported, true);
+});
+
+test('Q02: explicit "made with" AI disclosures still demote, a human payment made by an agent does not', async t => {
+  for (const input of [
+    { content: 'This report was made with ChatGPT. Card ending 4242 charged USD 120.00.' },
+    { title: 'Report made with ChatGPT' },
+    { title: 'AI-made invoice' },
+  ]) {
+    const b = await documentAnswer(t, input);
+    assert.equal(b.results[0].lineage.kind, 'agent_derived', JSON.stringify(input));
+    assert.equal(b.answer, null); assert.equal(b.evidence_gate.supported, false);
+  }
+  const human = await documentAnswer(t, { content: 'The payment was made by an agent at the bank branch. Card ending 4242 charged USD 120.00.' });
+  assert.equal(human.evidence_gate.supported, true);
 });
