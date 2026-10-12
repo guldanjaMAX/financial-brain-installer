@@ -40,6 +40,12 @@ function ownerSafeMessage(value: unknown, fallback = OWNER_SAFE_REQUEST_FAILURE)
 }
 
 const OWNER_ACTION_CODE_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+  content_dates_d1_required: "Content-date repair requires the D1 document store. Ask your installer to review storage before continuing.",
+  content_dates_approval_required: "Ask your installer to preview content-date repair and review its counts before approving that page.",
+  content_dates_stale: "The records changed since this page was reviewed. Ask your installer to preview the same page again before applying.",
+  content_dates_blocked: "A document in this page has over 500 chunks. Ask your installer to review it before continuing. No page changes were made.",
+  content_dates_queue_budget: "Search indexing needs time to catch up, or this page is too large for the queue budget. Wait, then ask your installer to preview a smaller page if needed.",
+  content_dates_unavailable: "Content-date repair could not be verified. Ask your installer to check the database upgrade, then preview again.",
   idempotency_conflict: "This save was already used for a different choice. Nothing changed. Refresh this page, review the current information, and try again.",
   request_id_conflict: "This save was already used for a different choice. Nothing changed. Refresh this page, review the current information, and try again.",
   entity_parent_cycle: "That ownership choice would create a loop. Nothing changed. Review which financial entity owns which, then choose again.",
@@ -112,6 +118,12 @@ export function requestId(prefix = "owner"): string {
 
 export function ownerError(error: unknown): { status: number | null; message: string } {
   if (error instanceof ApiError) {
+    // Repair refusals also use 400 and 503; keep their owner guidance on those
+    // paths instead of falling back to a generic question-answer failure.
+    if (typeof error.body.code === "string" && error.body.code.startsWith("content_dates_") &&
+        Object.hasOwn(OWNER_ACTION_CODE_MESSAGES, error.body.code)) {
+      return { status: error.status, message: ownerActionMessage(error.body, OWNER_SAFE_REQUEST_FAILURE) };
+    }
     if (error.status === 409) return {
       status: 409,
       message: ownerActionMessage(

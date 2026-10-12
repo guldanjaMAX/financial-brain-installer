@@ -202,7 +202,7 @@ try {
   const manifest = join(directory, "brain.manifest.json");
   writeFileSync(manifest, "{}\n", { mode: 0o600 });
   const env = Object.fromEntries(["PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"].filter((key) => process.env[key]).map((key) => [key, process.env[key]]));
-  Object.assign(env, { HOME: fixtureRoot, USERPROFILE: fixtureRoot, NO_COLOR: "1" });
+  Object.assign(env, { HOME: fixtureRoot, USERPROFILE: fixtureRoot, NO_COLOR: "1", BRAIN_NO_WRANGLER_LOGIN: "1" });
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("../brain.mjs", import.meta.url)), "eval", manifest, "--init"], { cwd: fixtureRoot, env, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   // The child runs in the canonical fixture root, so its copyable command
@@ -575,7 +575,7 @@ try {
   // way test/eval-init-privacy.test.mjs already passes its isolation hook.
   const preloadSpecifier = pathToFileURL(preload).href;
   const env = Object.fromEntries(["PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"].filter((key) => process.env[key]).map((key) => [key, process.env[key]]));
-  Object.assign(env, { HOME: supportRoot, USERPROFILE: supportRoot, NO_COLOR: "1" });
+  Object.assign(env, { HOME: supportRoot, USERPROFILE: supportRoot, NO_COLOR: "1", BRAIN_NO_WRANGLER_LOGIN: "1" });
   const run = spawnSync(
     process.execPath,
     ["--import", preloadSpecifier, fileURLToPath(new URL("brain.mjs", productRoot)), "support"],

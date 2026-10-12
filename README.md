@@ -921,6 +921,14 @@ do not speed up provider processing.
 
 ## Check changing facts and access zones
 
+For older stored document dates, an installer can preview a bounded repair with
+`brain content refresh-dates <manifest> --preview`. Review the counts and approve
+only that page with `--apply --approve <hash>`, keeping the same input cursor.
+Repeat previews using the returned next cursor until complete. The repair stops
+for oversized documents or an indexing queue above its budget. Wait for indexing
+to finish, then check dates in representative results. See the content-date
+repair procedure in [the developer runbook](docs/README-developer.md).
+
 ```bash
 brain check ./brain.manifest.json
 ```
