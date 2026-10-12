@@ -19,10 +19,15 @@ exact sealed package.
   with confirmed zero balances and no saved activity; missing proof still
   produces a coverage gap.
 
-- Enabling daily refresh with Google Drive no longer fails when registering
-  the source for freshness checks. Check that daily status lists the approved
-  Drive source; a registered source still needs a successful check or import
-  before its freshness is proven.
+- Budget, approval and planning questions stay with document evidence instead
+  of becoming merchant totals. An amountless payment question needs a specific
+  sender; generic words such as "the bank" cannot confirm a deposit. Check the
+  cited payee: a memo mentioning another payer cannot override it.
+
+- Enabling daily refresh with Google Drive, watched folders or QuickBooks
+  Desktop no longer fails when registering the source for freshness checks.
+  Check that daily status lists each approved source; a registered source
+  still needs a successful check or import before its freshness is proven.
 
 ### Known issues
 

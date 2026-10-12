@@ -135,7 +135,9 @@ for (const reverse of [false, true]) test(`Think exact cents and empty-account c
   assert.equal(amount.ledger?.found, true); assert.deepEqual(amount.citations.map(c => c.amount_minor), [250000]);
   const named = await f.ask("Did the Paywire payment hit my bank account?");
   assert.equal(named.ledger?.found, true);
-  assert.deepEqual(named.citations.map(c => [c.posted_on, c.amount_minor, c.account_mask]), [["2026-10-05", 250000, "8862"], ["2026-10-08", 1234, "4417"]]);
+  // The first deposit names a different explicit payee. Its memo mention
+  // cannot supply the sender evidence for an amountless arrival (R02/F3).
+  assert.deepEqual(named.citations.map(c => [c.posted_on, c.amount_minor, c.account_mask]), [["2026-10-08", 1234, "4417"]]);
   assert.ok(f.seen.sql.some(sql => /JOIN fin_transactions/.test(sql)));
   assert.equal(modelCalls, 0);
 });

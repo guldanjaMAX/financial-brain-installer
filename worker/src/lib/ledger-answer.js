@@ -80,7 +80,11 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   if (intent.kind === "payment") {
     const matched = rows.filter(row => {
       if (row.direction !== "inflow" || (intent.amountMinor !== null && row.amount_minor !== intent.amountMinor)) return false;
-      const words = new Set(`${row.description || ""} ${row.payee || ""}`.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
+      // An amountless arrival depends on sender attribution. A memo mention
+      // cannot override an explicit payee, just as for merchant totals.
+      const sender = intent.amountMinor === null ? row.payee || row.description || ""
+        : `${row.description || ""} ${row.payee || ""}`;
+      const words = new Set(sender.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
       return intent.counterpartyWords.every(word => words.has(word));
     });
     const citations = matched.map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
