@@ -11,6 +11,13 @@ the brain, not for whoever built it: what changed for them, and what to check.
   that may supersede older support, including stopped or discontinued items.
   Check the cited dates and the timezone in your manifest; missing or invalid
   timezone settings leave an explicit gap instead of guessing today's date.
+- Document money answers recognize equivalent amount shorthand, dollar formats,
+  monthly rates, month ranges and account masks. An explicit claim date in the
+  cited sentence can support an otherwise undated citation. The money check
+  still only refuses or qualifies model answers; it cannot approve one. Check
+  the cited amount, currency, sign, months, account and date. Response gaps now
+  identify the money rule that refused or qualified an answer without copying
+  document content.
 
 ## 0.4.13 (2026-10-12)
 

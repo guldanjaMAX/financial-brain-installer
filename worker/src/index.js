@@ -1595,7 +1595,9 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
 
   // Run on the final prose, including partial-answer formatting. This can only
   // demote the existing verdict; retrieved documents never certify an absence.
-  ({ answer, evidenceGate } = applyMoneyVeto({ question: q, answer, evidenceGate, docs: approvedDocs }));
+  const moneyVeto = applyMoneyVeto({ question: q, answer, evidenceGate, docs: approvedDocs });
+  ({ answer, evidenceGate } = moneyVeto);
+  if (moneyVeto.gap) gaps.push(moneyVeto.gap);
   const temporal = applyTemporalVeto({ question: q, answer, evidenceGate, docs: approvedDocs,
     // The model sees shortened excerpts. A contradiction already retrieved
     // outside those excerpts must still be able to veto the final draft.

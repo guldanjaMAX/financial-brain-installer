@@ -27,10 +27,10 @@ async function mutatedModule(url, from, to) {
 }
 
 for (const [guard, from, to, mutate] of [
-  ["date reliability", "if (cited.some((doc) => reliableDocumentTime(doc) === null))", "if (false)", (value) => {
+  ["date reliability", "if (cited.some((doc) => times.get(doc) === null))", "if (false)", (value) => {
     value.question = "What was charged?"; value.docs[0].date_reliable = false;
   }],
-  ["period membership", "if (cited.some(doc => reliableDocumentTime(doc) < window.start", "if (false && cited.some(doc => reliableDocumentTime(doc) < window.start", (value) => { value.docs[0].ts = "2026-07-01"; }],
+  ["period membership", "if (cited.some(doc => times.get(doc) < window.start", "if (false && cited.some(doc => times.get(doc) < window.start", (value) => { value.docs[0].ts = "2026-07-01"; }],
   ["lineage and T4", "cited.filter(primary)", "cited", (value) => { value.docs[0].lineage.kind = "agent_derived"; }],
   ["T4 with unknown lineage", "cited.filter(primary)", "cited", (value) => {
     value.docs[0].lineage = { status: "unknown", kind: "unclassified" };
@@ -44,9 +44,9 @@ for (const [guard, from, to, mutate] of [
     value.question = "Any duplicate charges?"; value.answer = "There are no duplicate charges [1].";
     value.docs[0].snippet = "There are no duplicate charges.";
   }],
-  ["span binding", "if (!supporting.length)", "if (false)", (value) => { value.answer = value.answer.replace("120.00", "121.00"); }],
+  ["span binding", "if (!supporting.length || !monthsIn(claim).every(month => spanMonths.has(month)))", "if (false)", (value) => { value.answer = value.answer.replace("120.00", "121.00"); }],
   ["currency binding", "currencyInSpan(claim, span)", "true", (value) => { value.answer = value.answer.replace("USD", "CAD"); }],
-  ["month binding", "months.every((month) => spanMonths.has(month))", "true", (value) => { value.answer = "Card ending 4242 statement months: January, April [1]."; }],
+  ["month binding", "monthsIn(claim).every(month => spanMonths.has(month))", "true", (value) => { value.answer = "Card ending 4242 statement months: January, April [1]."; }],
   ["question account binding", "ids.every((id) => tokens.has(id))", "true", (value) => { value.question = "What did card ending 4343 charge?"; }],
   ["quoted account binding", "quotedValues(claim).every((quote) => span.includes(quote))", "true", (value) => { value.answer = 'Account "Reserve" charged USD 120.00 [1].'; }],
 ]) {
@@ -97,3 +97,24 @@ test("money guard never promotes upstream verdicts or changes non-money output",
   value.docs[0].date_reliable = false;
   assert.equal(JSON.stringify(applyMoneyVeto(value)), JSON.stringify({ answer: value.answer, evidenceGate: value.evidenceGate }));
 });
+
+// These mutations exercise the widened equivalences through the same veto.
+for (const [label, from, to, answer, snippet] of [
+  ["expanded range interior", "months.push(MONTH_ORDER[i]);", "", "Statement months: Jul–Sep [1].", "Statement months: July, September"],
+  ["monthly rate binding", "candidate.rate === fact.rate", "true", "$5,000 per month charged [1].", "$5k per year charged"],
+  ["fallback date locality", ".filter(snippet => inSpan(claim, question, { ...doc, snippet, ts: \"\" }))\n    .flatMap(snippet => [...snippet.matchAll", ".filter(() => true)\n    .flatMap(snippet => [...snippet.matchAll", "Card ending 4242 charged USD 120.00 [1].", "Card ending 4242 charged USD 120.00. An appointment was on 2026-10-10."],
+]) {
+  test(`calibration mutation killed: ${label}`, async () => {
+    const control = input();
+    assert.equal(applyMoneyVeto(control).answer, control.answer);
+    const value = input();
+    value.question = "What does the money record say?";
+    value.answer = answer; value.docs[0].snippet = snippet;
+    if (label === "fallback date locality") value.docs[0].date_reliable = false;
+    assert.equal(value.evidenceGate.supported, true);
+    assert.equal(value.docs[0].n, value.evidenceGate.evidence[0]);
+    assert.equal(applyMoneyVeto(value).answer, null);
+    const mutant = await mutatedModule(moduleURL, from, to);
+    assert.equal(mutant.applyMoneyVeto(value).answer, value.answer);
+  });
+}
