@@ -73,6 +73,7 @@ import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js"
 import { answerSentences } from "./lib/answer-sentences.js";
 import { quickBooksMoneyPolicy } from "./lib/quickbooks-money.js";
 import { applyMoneyVeto } from "./lib/money-veto.js";
+import { applyTemporalVeto } from "./lib/temporal-guard.js";
 import { quickBooksBalanceAnswer, quickBooksBalanceRequest } from "./lib/quickbooks-balance.js";
 import { quickBooksOpenItemsAnswer } from "./lib/quickbooks-open-items.js";
 import {
@@ -1595,6 +1596,13 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   // Run on the final prose, including partial-answer formatting. This can only
   // demote the existing verdict; retrieved documents never certify an absence.
   ({ answer, evidenceGate } = applyMoneyVeto({ question: q, answer, evidenceGate, docs: approvedDocs }));
+  const temporal = applyTemporalVeto({ question: q, answer, evidenceGate, docs: approvedDocs,
+    // The model sees shortened excerpts. A contradiction already retrieved
+    // outside those excerpts must still be able to veto the final draft.
+    candidates: results.map((result, index) => ({ ...citationCandidateForResult(result, index),
+      snippet: result.snippet || "" })), timeZone: env.BRAIN_TIMEZONE, owner });
+  ({ answer, evidenceGate } = temporal);
+  if (temporal.gap) gaps.unshift(temporal.gap);
   if (answer === null) approvedDocs = [];
 
   // Computed coverage warnings describe retrieval, not account facts. Append

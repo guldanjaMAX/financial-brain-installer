@@ -35,7 +35,8 @@
           "format": "email"
         },
         "timezone": {
-          "type": "string"
+          "type": "string",
+          "description": "IANA owner timezone. Used by local schedules and the Worker's upcoming-event date checks. Missing or invalid values leave a temporal evidence gap."
         }
       }
     },

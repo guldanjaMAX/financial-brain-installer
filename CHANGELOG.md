@@ -4,6 +4,14 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.14 (unreleased)
+
+- Questions about next appointments now flag past dates and an earlier upcoming
+  event found for the same subject. Current-status answers flag newer records
+  that may supersede older support, including stopped or discontinued items.
+  Check the cited dates and the timezone in your manifest; missing or invalid
+  timezone settings leave an explicit gap instead of guessing today's date.
+
 ## 0.4.13 (2026-10-12)
 
 Candidate only. This version has not been released. The changes below still

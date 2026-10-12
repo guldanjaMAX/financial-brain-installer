@@ -2951,6 +2951,9 @@ export function workerBindings(m, cfg, options = {}) {
         : []),
       { type: "plain_text", name: "BRAIN_NAME", text: m.client?.slug || "brain" },
       { type: "plain_text", name: "BRAIN_OWNER", text: m.client?.display_name || "the owner" },
+      ...(typeof m.client?.timezone === "string" && m.client.timezone
+        ? [{ type: "plain_text", name: "BRAIN_TIMEZONE", text: m.client.timezone }]
+        : []),
       { type: "plain_text", name: "BRAIN_VERSION", text: PRODUCT_VERSION },
       ...(customApiBinding ? [customApiBinding] : []),
       ...(options.pauseVectorDrainForUpgrade === true

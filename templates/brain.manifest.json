@@ -8,7 +8,9 @@
     "",
     "It lives in the CLIENT's repo, in the CLIENT's account. We keep a copy only",
     "while engaged, and it contains no secrets: every credential is a reference",
-    "to a secret store, never a value."
+    "to a secret store, never a value.",
+    "client.timezone also defines today for upcoming-event answer checks.",
+    "Use an IANA timezone; a missing or invalid zone leaves an evidence gap."
   ],
   "manifest_version": 1,
   "client": {

@@ -1966,8 +1966,12 @@ messages add a supplemental metadata-prefiltered keyword and vector lane. The
 lane rescues matching `category` or `platform` records from beyond the ordinary
 candidate cutoff without restricting the base search or double-boosting records
 already present there. Generic decision wording gets no source hint. Natural
-language date windows remain explicit request filters until retrieval has a
-reviewed owner-timezone input.
+language date windows remain explicit request filters. The final temporal
+veto uses `client.timezone`, deployed as `BRAIN_TIMEZONE`, to check upcoming
+dates against the owner's today without narrowing retrieval. Missing or invalid
+zones leave an explicit gap. The veto also checks earlier retrieved events for
+the same subject and newer status evidence, including stopped items. Money
+and deterministic ledger answers retain their existing contracts.
 
 A completed hybrid search distinguishes a bounded projection catch-up from a
 failed search. The catch-up classification requires an exact pending count below
