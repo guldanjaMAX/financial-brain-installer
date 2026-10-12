@@ -40,7 +40,7 @@ const mutations = {
     END;`],
   zoom_unknown_counts: ["zoom-deliveries.js", ': !countsAvailable ? "unknown"', ''],
   zoom_uninitialized_counts: ["zoom-deliveries.js", 'Number.isSafeInteger(item.count) && item.count >= 0', 'true'],
-  provider_kind: ["source-receipt.js", 'if (!["drive", "gmail", "imap", "calendar"].includes(kind)) return null;', ""],
+  provider_kind: ["source-receipt.js", 'if (!["drive", "gmail", "imap", "calendar", "microsoft"].includes(kind)) return null;', ""],
   provider_terminal: ["source-receipt.js", 'if (run?.outcome !== "empty" || run.walk_complete !== true || run.metrics_version !== 1) return null;', ""],
   provider_counts: ["source-receipt.js", '.every(field => run[field] === 0)', '.every(() => true)'],
   provider_times: ["source-receipt.js", 'if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) return null;', 'if (!Number.isFinite(started) || !Number.isFinite(finished)) return null;'],

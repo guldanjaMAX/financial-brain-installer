@@ -5,13 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { buildConfiguredDailyPlan, cmdIngestCalendar, cmdLoad, cmdSources, dailyFreshnessRows, splitStatements } from "../brain.mjs";
+import { buildConfiguredDailyPlan, cmdIngestCalendar, cmdIngestProvider, cmdLoad, cmdSources, dailyFreshnessRows, splitStatements } from "../brain.mjs";
 import { runDailyRefresh, runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
 import worker from "../worker/src/index.js";
 import { sourceInventory } from "../worker/src/lib/store-d1.js";
 import { runZoomDeliveryMaintenance } from "../worker/src/lib/zoom.js";
 import { persistZoomDelivery, claimZoomDeliveries, finishZoomDelivery } from "../worker/src/lib/zoom-deliveries.js";
 import { providerNoChangeCheckAt } from "../worker/src/lib/source-receipt.js";
+
+import { syncMicrosoftGraph } from "../connectors/microsoft-graph.mjs";
 
 const BEFORE = "2026-10-08T12:00:00.000Z";
 const NOW = "2026-10-10T12:00:00.000Z";
@@ -680,4 +682,140 @@ test("Zoom failure, lease, debt and invalid time states never borrow a quiet che
   assert.equal((await read()).last_check_at, null);
   f.db.exec("DELETE FROM zoom_reconciliation");
   assert.equal((await read()).state, "unknown");
+});
+
+async function microsoftDailyCase(t, { workload = "mail", pages = null, saveFailure = false } = {}) {
+  const f = fixture(t);
+  const source = "mailbox";
+  const statePath = join(f.root, "provider-state.json");
+  let saves = 0;
+  let syncError = null;
+  const terminalReceipts = [];
+  const m = { brain: { domain: "brain.example.invalid" }, corpora: { microsoft: {
+    enabled: true, source, mail_folder_ids: workload === "calendar" ? [] : ["inbox"], include_personal_drive: false,
+  } } };
+  const manifestPath = join(f.root, "brain.manifest.json");
+  writeFileSync(manifestPath, JSON.stringify(m));
+  await f.postReceipt({ source, kind: "microsoft", status: "ready", run_id: "prior", lane: "manual",
+    started_at: BEFORE, completed_at: BEFORE, walk_complete: true, files_seen: 1,
+    docs_added: 1, docs_updated: 0, docs_unchanged: 0, docs_refused: 0, docs_failed: 0 });
+  const providerPages = pages || Array.from({ length: workload === "both" ? 2 : 1 }, (_, i) => ({
+    value: [], "@odata.deltaLink": `https://graph.microsoft.com/v1.0/fixture-delta-${i}`,
+  }));
+  t.mock.method(console, "log", () => {});
+  t.mock.method(console, "warn", () => {});
+  const result = await runDailyRefresh({
+    plan: { ready: true, enabled: true, manifest_path: manifestPath, identity: { id: "fixture" },
+      sources: [{ key: "microsoft", source_names: [source], run_key: "microsoft",
+        class: "machine-pull", owner: "daily-task", status: "ready" }] },
+    acquireLock: () => ({ assertOwned() {}, release() {} }), now: () => new Date(NOW), home: f.root,
+    readFreshness: async () => {
+      const inventory = await sourceInventory(f.env, { now: Date.parse(NOW) });
+      return Object.fromEntries(inventory.rows.map(row => [row.name, { kind: row.kind, ...row.receipt }]));
+    },
+    runSource: async () => {
+      f.seen.runs++;
+      await cmdIngestProvider(m, manifestPath, { from: "microsoft" }, {
+        withSourceIngestLock: async (_options, run) => run({ assertOwned() {} }),
+        resolveBaseUrl: async () => ORIGIN, resolveAdminKey: () => readFileSync(f.keyPath, "utf8"),
+        oauth: {
+          providerAccessToken: async () => ({ accessToken: "synthetic-provider-proof" }),
+          loadProviderSyncState: () => ({}),
+          saveProviderSyncState: (_provider, _source, state) => {
+            saves++;
+            if (saveFailure) throw new Error("synthetic cursor save failure");
+            writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 });
+          },
+        },
+        sync: async options => {
+          try { return await syncMicrosoftGraph({ ...options, includeCalendar: workload !== "mail" }); }
+          catch (error) { syncError = error.code; throw error; }
+        },
+        fetchImpl: async () => {
+          f.seen.provider++;
+          assert.ok(providerPages.length > 0, "the real delta walk cannot silently repeat a page");
+          const { status = 200, ...body } = providerPages.shift();
+          return Response.json(body, { status });
+        },
+        listStoredSourceFamilies: async () => new Set(),
+        requestIngestBatch: async () => assert.fail("a quiet walk has no documents to send"),
+        postSourceReceipt: async (_base, _key, row) => {
+          if (row.status !== "indexing") {
+            terminalReceipts.push(row);
+            if (row.provider_check_complete) {
+              assert.ok(saves > 0, "boundary proof is published only after cursor persistence");
+              assert.ok(readFileSync(statePath, "utf8").length > 0);
+            }
+          }
+          return f.postReceipt(row);
+        },
+      });
+      return { status: "complete" };
+    },
+  });
+  return { ...f, result, saves, syncError, terminalReceipts,
+    inventory: await sourceInventory(f.env, { now: Date.parse(NOW) }) };
+}
+
+for (const workload of ["mail", "calendar", "both"]) {
+  test(`quiet Microsoft ${workload} reaches delta persistence and durable daily evidence`, async t => {
+    const f = await microsoftDailyCase(t, { workload });
+    assert.equal(f.seen.provider, workload === "both" ? 2 : 1);
+    assert.equal(f.seen.runs, 1);
+    assert.equal(f.seen.receipts, 3);
+    assert.equal(f.saves, 1);
+    assert.equal(f.result.status, "complete");
+    assert.equal(f.result.sources[0].check_verified, true);
+    assert.equal(f.result.sources[0].no_change, true);
+    assert.equal(f.result.sources[0].freshness_advanced, false);
+    const receipt = f.inventory.rows[0].receipt;
+    assert.equal(receipt.latest_run.metrics_version, 1);
+    assert.equal(receipt.latest_run.walk_complete, true);
+    assert.equal(receipt.latest_run.provider_check_complete, true);
+    assert.equal(receipt.last_check_at, NOW);
+    assert.equal(receipt.last_ingest_receipt_at, BEFORE);
+    assert.equal(receipt.complete_history_through, null);
+    const [status] = dailyFreshnessRows({ sources: [{ key: "microsoft", source_names: ["mailbox"] }] },
+      { sources: f.inventory.rows, as_of: NOW });
+    assert.equal(status.current_state, "checked");
+  });
+}
+
+for (const [name, options, code] of [
+  ["incomplete walk", { pages: [{ value: [] }] }, "missing_delta_link"],
+  ["expired cursor", { pages: [{ status: 410 }] }, "cursor_expired"],
+  ["provider error", { pages: [{ status: 403 }] }, null],
+  ["cursor persistence failure", { saveFailure: true }, null],
+]) {
+  test(`Microsoft daily ${name} stays failed through durable receipt readback`, async t => {
+    const f = await microsoftDailyCase(t, options);
+    assert.equal(f.seen.provider, 1);
+    assert.equal(f.seen.runs, 1);
+    assert.equal(f.seen.receipts, 3);
+    if (code) assert.equal(f.syncError, code);
+    assert.equal(f.result.status, "failed");
+    assert.notEqual(f.result.sources[0].check_verified, true);
+    assert.notEqual(f.terminalReceipts.at(-1).provider_check_complete, true);
+    assert.equal(f.inventory.rows[0].receipt.latest_run.provider_check_complete, false);
+    assert.equal(f.inventory.rows[0].receipt.last_check_at, BEFORE);
+  });
+}
+
+test("Microsoft boundary proof persists only on a ready completed receipt", async t => {
+  const f = fixture(t);
+  const arms = [
+    ["ready", true, true, true],
+    ["error", true, true, false],
+    ["ready", false, true, false],
+    ["ready", true, false, false],
+  ];
+  for (const [index, [status, walk, proof, expected]] of arms.entries()) {
+    await f.postReceipt({ source: "mailbox", kind: "microsoft", run_id: `run-${index}`, status,
+      started_at: NOW, completed_at: NOW, walk_complete: walk, provider_check_complete: proof,
+      files_seen: 0, docs_added: 0, docs_updated: 0, docs_unchanged: 0, docs_refused: 0, docs_failed: 0 });
+    const row = f.db.prepare("SELECT provider_check_complete FROM sync_runs WHERE run_id=?").get(`run-${index}`);
+    assert.ok(row, "each arm reached durable receipt persistence");
+    assert.equal(row.provider_check_complete, Number(expected));
+  }
+  assert.equal(f.seen.receipts, arms.length);
 });

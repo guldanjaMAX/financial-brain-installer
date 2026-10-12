@@ -48,7 +48,19 @@ async function deltaCollection({ provider = "microsoft", initialUrl, accessToken
     } catch (error) {
       throw cursorExpired(error);
     }
-    for (const item of data.value || []) {
+    // A cursor from an earlier page or a malformed empty response is not a
+    // terminal provider check. Require one well-formed continuation or delta
+    // boundary on each page before any cursor can be proposed for persistence.
+    const next = data?.["@odata.nextLink"];
+    const delta = data?.["@odata.deltaLink"];
+    if (!Array.isArray(data?.value) ||
+        [next, delta].some(link => link !== undefined && (typeof link !== "string" || !link.trim())) ||
+        (next !== undefined && delta !== undefined)) {
+      throw new ProviderSyncError(provider, "Graph returned an invalid delta page", {
+        kind: "retryable", code: "invalid_delta_page",
+      });
+    }
+    for (const item of data.value) {
       if (item?.["@removed"] || item?.deleted) {
         deletions.push(item);
         changes.push({ kind: "delete", item });
@@ -57,8 +69,8 @@ async function deltaCollection({ provider = "microsoft", initialUrl, accessToken
         changes.push({ kind: "upsert", item });
       }
     }
-    deltaLink = data["@odata.deltaLink"] || deltaLink;
-    url = data["@odata.nextLink"] || null;
+    deltaLink = delta || null;
+    url = next || null;
   }
   if (!deltaLink) {
     throw new ProviderSyncError(provider, "Graph did not return a terminal delta cursor", {
@@ -307,6 +319,7 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
     return url.toString();
   };
   let page;
+  let cursorRecovered = false;
   try {
     page = await deltaCollection({
       initialUrl: baseline ? initialUrl() : prior.delta_link,
@@ -317,6 +330,7 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
   } catch (error) {
     if (!(!baseline && error instanceof ProviderSyncError && error.code === "cursor_expired")) throw error;
     baseline = true;
+    cursorRecovered = true;
     page = await deltaCollection({
       initialUrl: initialUrl(), accessToken, fetchImpl,
       headers: { Prefer: CALENDAR_PREFER },
@@ -393,6 +407,7 @@ async function syncOutlookCalendar({ accessToken, fetchImpl, cursor, now }) {
     deletions: [...deletions.values()],
     eventIds: [...inventory].sort(),
     deltaLink: page.deltaLink,
+    provider_check_complete: !cursorRecovered,
     baseline,
     window,
     warnings,
@@ -428,11 +443,13 @@ export async function syncMicrosoftGraph({
   // A bounded mail walk cannot authorize absence-based deletion of an older
   // stored family, including after a reset or a configuration fingerprint change.
   let authoritativeSnapshot = mailStart === null;
+  let providerCheckComplete = true;
 
   if (includeCalendar) {
     const calendar = await syncOutlookCalendar({
       accessToken, fetchImpl, cursor: prior.calendar, now,
     });
+    providerCheckComplete = calendar.provider_check_complete;
     documents.push(...calendar.documents);
     deletions.push(...calendar.deletions);
     warnings.push(...calendar.warnings);
@@ -550,6 +567,9 @@ export async function syncMicrosoftGraph({
     deletionAuthority: "authoritative",
     complete: warnings.length === 0,
   }, cursorSafe, {
+    // A recovered 410 may save its new baseline, but the failed window is not
+    // evidence of a quiet check. The runner also requires durable cursor save.
+    provider_check_complete: cursorSafe && providerCheckComplete && warnings.length === 0,
     ...(mailTransition ? { mail_transition: mailTransition } : {}),
     authoritative_snapshot: authoritativeSnapshot,
     snapshot_source_ids: snapshotSourceIds,

@@ -388,6 +388,9 @@ export async function runProviderConnector({
       docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
       docs_refused: tally.refused, docs_failed: tally.failed,
       walk_complete: sourceWalkComplete,
+      // Publish boundary proof only after the selected cursor has been saved.
+      // Error receipts and partial/withheld walks never inherit this claim.
+      provider_check_complete: normalized.provider_check_complete === true && sourceWalkComplete && cursorAdvanced,
       complete_sweep: sourceWalkComplete && sourceComplete && normalized.authoritative_snapshot === true,
       outcome_kind: normalized.outcome.kind,
       deletion_authority: normalized.deletion_authority,
