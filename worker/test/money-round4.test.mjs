@@ -239,7 +239,7 @@ test('N01 same-cent outside-payee collision is retained and has no own-account c
 test('N02 explicit disclosure grammar covers verbs, prepositions, AI terms and title nouns', () => {
   const verbs = ['generated', 'created', 'written', 'drafted', 'prepared', 'produced', 'composed', 'summarised', 'summarized'];
   const prepositions = ['by', 'with', 'using', 'via', 'through', 'in', 'from'];
-  const terms = ['AI', 'A.I.', 'ChatGPT', 'GPT', 'GPT-4', 'OpenAI', 'Claude', 'Anthropic', 'Gemini', 'Copilot', 'Grok', 'Perplexity', 'LLM', 'Codex', 'a virtual assistant', 'an AI assistant', 'a chatbot', 'an AI agent'];
+  const terms = ['AI', 'A.I.', 'ChatGPT', 'GPT', 'GPT-4', 'OpenAI', 'Claude', 'Anthropic', 'Gemini', 'Copilot', 'Grok', 'Perplexity', 'LLM', 'Codex', 'an AI assistant', 'a chatbot', 'an AI agent'];
   for (const verb of verbs) for (const prep of prepositions) for (const term of terms) {
     const text = `${verb} ${prep} ${term}: financial record`;
     assert.equal(isAgentDerivedArtifact({ title: text }), true, text);
@@ -254,7 +254,7 @@ test('N02 explicit disclosure grammar covers verbs, prepositions, AI terms and t
   for (const text of ['Our AI tools invoice is $120.', 'We use ChatGPT for drafts, invoice attached.',
     'Generated with artificial flowers.', 'Created using cardboard.',
     'The payment was made by AI.', 'The payment was made by an agent.',
-    'The invoice was created by an assistant.', 'I created an invoice using ChatGPT\'s template.']) {
+    'The invoice was created by an assistant.', 'Prepared by a virtual assistant on our team.', 'I created an invoice using ChatGPT\'s template.']) {
     assert.equal(isAgentDerivedArtifact({ title: 'Human email', text }), false, text);
   }
   assert.equal(isAgentDerivedArtifact({ text: ' '.repeat(500) + 'Generated with ChatGPT' }), false, 'disclosure scan is bounded');

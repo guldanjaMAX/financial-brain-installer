@@ -28,12 +28,14 @@ const AGENT_MARKER = /^Evidence-Lineage:[ \t]*agent-derived[ \t]*$/im;
 const AGENT_FILE = /(?:^|[/\\])(?:SKILL|AGENTS|CLAUDE)\.md$/i;
 // Detect common explicit disclosures, not undisclosed AI text. Authorship is
 // independent of the artifact noun; discussion of AI tools is not authorship.
-// Human agents and assistants are roles, not AI disclosures. "Made" commonly
-// describes a payment action and cannot establish document authorship either.
-const AI_TERM = String.raw`(?:an?\s+)?(?:a\.?i\.?(?:\s+(?:assistant|agent))?|chatgpt|gpt(?:-\d[\w.-]*)?|openai|claude|anthropic|gemini|copilot|grok|perplexity|llm|codex|virtual\s+assistant|chatbot)(?!\w)`;
+// Human agents, assistants and virtual assistants are roles, not AI
+// disclosures, so they count only with an explicit AI qualifier. "Made by"
+// usually describes a payment action ("payment made by AI"), so "made" counts
+// only as "made with/using/via/through/in <AI>" or the compound "AI-made".
+const AI_TERM = String.raw`(?:an?\s+)?(?:a\.?i\.?(?:\s+(?:assistant|agent))?|chatgpt|gpt(?:-\d[\w.-]*)?|openai|claude|anthropic|gemini|copilot|grok|perplexity|llm|codex|chatbot)(?!\w)`;
 const AUTHOR_VERB = '(?:generated|created|written|drafted|prepared|produced|composed|summari[sz]ed)';
 const AGENT_BRIEF = new RegExp(String.raw`\b${AI_TERM}[ -](?:(?:written|generated)[ -])?(?:\w+[ -]){0,3}(?:brief|summary|report|notes?)\b`, 'i');
-const AGENT_AUTHORSHIP = new RegExp(String.raw`\b${AUTHOR_VERB}\s+(?:by|with|using|via|through|in|from)\s+${AI_TERM}|\b${AI_TERM}[\s-]+${AUTHOR_VERB}\b`, 'i');
+const AGENT_AUTHORSHIP = new RegExp(String.raw`\b${AUTHOR_VERB}\s+(?:by|with|using|via|through|in|from)\s+${AI_TERM}|\b${AI_TERM}[\s-]+${AUTHOR_VERB}\b|\bmade\s+(?:with|using|via|through|in)\s+${AI_TERM}|\b${AI_TERM}-made\b`, 'i');
 const AGENT_TITLE = new RegExp(String.raw`\b${AI_TERM}[\s-]+(?:summary|notes?|draft|memo)\b`, 'i');
 
 /** Names and explicit authorship can only demote, never promote provenance. */
