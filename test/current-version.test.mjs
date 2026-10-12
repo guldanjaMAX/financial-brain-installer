@@ -88,7 +88,7 @@ const followingChangelogControl = [
 ].join("\n");
 
 assert.match(version, /^\d+\.\d+\.\d+$/, "package version must be a stable semantic version");
-assert.equal(version, "0.4.12", "the integrated candidate must use its own release identity");
+assert.equal(version, "0.4.13", "the integrated candidate must use its own release identity");
 assert.equal(packageLock.version, version, "package-lock top-level version drifted");
 assert.equal(packageLock.packages?.[""]?.version, version, "package-lock root package version drifted");
 assert.equal(manifestTemplate.brain?.version, version, "manifest template version drifted");
@@ -103,7 +103,7 @@ assert.equal(LOCKED_WRANGLER_LOCK_ROOT_VERSION, version,
 // matches the package, so it is pinned here with everything else.
 const workerVersion = read("worker/src/lib/version.js").match(/WORKER_VERSION = "([^"]+)"/)?.[1];
 assert.equal(workerVersion, version, "worker source version drifted from the package");
-assert.match(changelog, new RegExp(`^## ${escapedVersion} \\(2026-10-11\\)$`, "m"),
+assert.match(changelog, new RegExp(`^## ${escapedVersion} \\(2026-10-12\\)$`, "m"),
   "changelog has no dated current-version heading");
 assert.match(currentEvidencePlan, new RegExp(`^# v${escapedVersion} candidate release evidence plan$`, "m"),
   "current candidate has no version-matched evidence plan");
@@ -292,7 +292,7 @@ async function whatsnewStatusOutput(readStatus, options = {}) {
 const currentNotesOnly = await whatsnewStatusOutput(async () => ({
   status: "up_to_date", latest_version: version,
 }), { full: true });
-assert.match(currentNotesOnly, new RegExp(`## ${escapedVersion} \\(2026-10-11\\)`, "u"));
+assert.match(currentNotesOnly, new RegExp(`## ${escapedVersion} \\(2026-10-12\\)`, "u"));
 assert.doesNotMatch(currentNotesOnly, /## 0\.4\.9/u,
   "whatsnew must not repeat the already delivered 0.4.9 notes in the current entry");
 assert.doesNotMatch(currentNotesOnly, /## 0\.4\.6/u,
