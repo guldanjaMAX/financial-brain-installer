@@ -271,14 +271,14 @@ export async function* listFiles(getAccessToken, { pageSize = 1000, query, maxPa
 
 const driveQueryValue = (value) => String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 
-export function normalizeRootFolderIds(values) {
+export function normalizeRootFolderIds(values, { includeMyDriveRootFiles = false } = {}) {
   if (!Array.isArray(values)) {
-    throw new DriveError("corpora.google_drive.root_folder_ids must be a non-empty array", 0, "rootPolicyMissing");
+    throw new DriveError("corpora.google_drive.root_folder_ids must be an array", 0, "rootPolicyMissing");
   }
   const roots = [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))].sort();
-  if (!roots.length) {
+  if (!roots.length && includeMyDriveRootFiles !== true) {
     throw new DriveError(
-      "Google Drive is disabled until corpora.google_drive.root_folder_ids names at least one reviewed folder",
+      "Google Drive requires corpora.google_drive.root_folder_ids to name a reviewed folder or include_my_drive_root_files: true",
       0,
       "rootPolicyMissing",
     );
@@ -294,7 +294,8 @@ export async function getFileMetadata(getAccessToken, fileId, opts = {}) {
 }
 
 /**
- * Traverse only direct children of reviewed roots, including Shared Drives.
+ * Traverse reviewed roots recursively, including Shared Drives. The optional
+ * My Drive root scope admits only direct files, never its child folders.
  *
  * A shortcut is returned as the shortcut object but never followed. Following
  * it would let a shortcut placed inside an approved folder silently authorize
@@ -303,18 +304,21 @@ export async function getFileMetadata(getAccessToken, fileId, opts = {}) {
  */
 export async function* listRootedFiles(getAccessToken, {
   rootFolderIds,
+  includeMyDriveRootFiles = false,
   pageSize = 1000,
   maxFiles = 250_000,
   maxFolders = 100_000,
   maxPages = 100_000,
   opts = {},
 } = {}) {
-  const roots = normalizeRootFolderIds(rootFolderIds);
+  const roots = normalizeRootFolderIds(rootFolderIds, { includeMyDriveRootFiles });
   const found = new Map();
   let pages = 0;
   let folders = 0;
 
-  for (const rootId of roots) {
+  const scopes = roots.map((rootId) => ({ rootId, shallow: false }));
+  if (includeMyDriveRootFiles === true) scopes.push({ rootId: "root", shallow: true });
+  for (const { rootId, shallow } of scopes) {
     let root;
     try {
       root = await getFileMetadata(getAccessToken, rootId, opts);
@@ -329,7 +333,7 @@ export async function* listRootedFiles(getAccessToken, {
       }
       throw error;
     }
-    if (root?.trashed === true || root?.mimeType !== FOLDER_MIME) {
+    if (!root?.id || root?.trashed === true || root?.mimeType !== FOLDER_MIME) {
       throw new DriveError(
         `reviewed Drive root ${rootId} is not an active folder; existing indexed content was preserved`,
         0,
@@ -352,7 +356,10 @@ export async function* listRootedFiles(getAccessToken, {
       const priorRoot = found.get(folderId);
       found.set(folderId, {
         ...(priorRoot || folder),
-        scope_root_ids: [...new Set([...(priorRoot?.scope_root_ids || []), rootId])].sort(),
+        scope_root_ids: [...new Set([...(priorRoot?.scope_root_ids || []), ...(shallow ? [] : [rootId])])].sort(),
+        // Keep the canonical root id for absence checks without introducing
+        // a "My Drive" path segment or authorizing its child folders.
+        ...(shallow ? { scope_my_drive_root: true } : {}),
       });
 
       let pageToken;
@@ -378,7 +385,7 @@ export async function* listRootedFiles(getAccessToken, {
             supportsAllDrives: true,
             includeItemsFromAllDrives: true,
             corpora: "allDrives",
-            q: `'${driveQueryValue(folderId)}' in parents and trashed = false`,
+            q: `'${driveQueryValue(shallow ? "root" : folderId)}' in parents and trashed = false`,
             orderBy: "name",
           },
           ...opts,
@@ -392,16 +399,17 @@ export async function* listRootedFiles(getAccessToken, {
         }
         for (const file of page.files || []) {
           if (!file?.id || file.trashed === true) continue;
+          if (shallow && file.mimeType === FOLDER_MIME) continue;
           const id = String(file.id);
           const prior = found.get(id);
           found.set(id, {
             ...(prior || file),
-            scope_root_ids: [...new Set([...(prior?.scope_root_ids || []), rootId])].sort(),
+            scope_root_ids: [...new Set([...(prior?.scope_root_ids || []), ...(shallow ? [] : [rootId])])].sort(),
           });
           if (found.size > maxFiles) {
             throw new DriveError(`root-scoped Drive walk exceeded ${maxFiles} files`, 0, "fileLimit");
           }
-          if (file.mimeType === FOLDER_MIME) queue.push(file);
+          if (!shallow && file.mimeType === FOLDER_MIME) queue.push(file);
         }
         pageToken = page.nextPageToken || null;
       } while (pageToken);
@@ -421,6 +429,7 @@ export async function* listRootedFiles(getAccessToken, {
  */
 export async function* listRootedFilesPreview(getAccessToken, {
   rootFolderIds,
+  includeMyDriveRootFiles = false,
   limit = 25,
   pageSize = 100,
   maxFolders = 10_000,
@@ -430,9 +439,11 @@ export async function* listRootedFilesPreview(getAccessToken, {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
     throw new DriveError("the assistant Drive preview limit must be between 1 and 100", 0, "previewLimit");
   }
-  const roots = normalizeRootFolderIds(rootFolderIds);
+  const roots = normalizeRootFolderIds(rootFolderIds, { includeMyDriveRootFiles });
   const validatedRoots = [];
-  for (const rootId of roots) {
+  const scopes = roots.map((rootId) => ({ rootId, shallow: false }));
+  if (includeMyDriveRootFiles === true) scopes.push({ rootId: "root", shallow: true });
+  for (const { rootId, shallow } of scopes) {
     let root;
     try { root = await getFileMetadata(getAccessToken, rootId, opts); }
     catch (error) {
@@ -441,10 +452,11 @@ export async function* listRootedFilesPreview(getAccessToken, {
       }
       throw error;
     }
-    if (root?.trashed === true || root?.mimeType !== FOLDER_MIME) {
+    if (!root?.id || root?.trashed === true || root?.mimeType !== FOLDER_MIME) {
       throw new DriveError("a reviewed Drive root is not an active folder", 0, "rootUnavailable");
     }
-    validatedRoots.push({ ...root, scope_root_ids: [rootId] });
+    validatedRoots.push({ ...root, scope_root_ids: shallow ? [] : [rootId],
+      ...(shallow ? { scope_my_drive_root: true } : {}) });
   }
 
   const queue = [...validatedRoots];
@@ -453,6 +465,9 @@ export async function* listRootedFilesPreview(getAccessToken, {
   let pages = 0;
   let folders = 0;
   let count = 0;
+  // If My Drive itself is also an explicit recursive root, visit it once with
+  // that stronger scope, while preserving its root-level path convention.
+  const myDriveRootId = validatedRoots.find((root) => root.scope_my_drive_root)?.id;
   while (queue.length && count < limit) {
     const folder = queue.shift();
     const folderId = String(folder?.id || "");
@@ -465,7 +480,7 @@ export async function* listRootedFilesPreview(getAccessToken, {
     if (!emitted.has(folderId)) {
       emitted.add(folderId);
       count++;
-      yield folder;
+      yield folderId === myDriveRootId ? { ...folder, scope_my_drive_root: true } : folder;
       if (count >= limit) return;
     }
 
@@ -488,7 +503,7 @@ export async function* listRootedFilesPreview(getAccessToken, {
           supportsAllDrives: true,
           includeItemsFromAllDrives: true,
           corpora: "allDrives",
-          q: `'${driveQueryValue(folderId)}' in parents and trashed = false`,
+          q: `'${driveQueryValue(folder.scope_my_drive_root ? "root" : folderId)}' in parents and trashed = false`,
           orderBy: "name",
         },
         ...opts,
@@ -498,6 +513,7 @@ export async function* listRootedFilesPreview(getAccessToken, {
       }
       for (const file of page.files || []) {
         if (!file?.id || file.trashed === true) continue;
+        if (folder.scope_my_drive_root && file.mimeType === FOLDER_MIME) continue;
         const id = String(file.id);
         if (emitted.has(id)) continue;
         const scoped = { ...file, scope_root_ids: [...(folder.scope_root_ids || [])] };
@@ -515,6 +531,7 @@ export async function* listRootedFilesPreview(getAccessToken, {
 export function driveAssistantPreviewSummary({
   limit,
   configuredRootCount,
+  includeMyDriveRootFiles = false,
   scanned,
   wouldSend,
   unchanged,
@@ -528,7 +545,7 @@ export function driveAssistantPreviewSummary({
   };
   const previewLimit = count(limit, "limit");
   const rootCount = count(configuredRootCount, "root");
-  if (previewLimit < 1 || previewLimit > 100 || rootCount < 1) {
+  if (previewLimit < 1 || previewLimit > 100 || (rootCount < 1 && includeMyDriveRootFiles !== true)) {
     throw new DriveError("the bounded Drive preview receipt has an invalid scope", 0, "invalidPreviewReceipt");
   }
   return Object.freeze({
@@ -539,6 +556,7 @@ export function driveAssistantPreviewSummary({
     scope_complete: false,
     preview_limit: previewLimit,
     configured_root_count: rootCount,
+    ...(includeMyDriveRootFiles === true ? { include_my_drive_root_files: true } : {}),
     counts: Object.freeze({
       scanned: count(scanned, "scanned"),
       would_send: count(wouldSend, "would-send"),
@@ -733,7 +751,7 @@ export function updateFolderIndex(files, prior = {}) {
     if (file?.mimeType !== FOLDER_MIME || !file.id) continue;
     if (file.trashed) delete out[file.id];
     else out[file.id] = {
-      name: String(file.name || "").trim(),
+      name: file.scope_my_drive_root === true ? "" : String(file.name || "").trim(),
       parents: Array.isArray(file.parents) ? file.parents.filter(Boolean).map(String) : [],
     };
   }

@@ -96,6 +96,7 @@
     "google_drive": {
       "enabled": false,
       "root_folder_ids": [],
+      "include_my_drive_root_files": false,
       "exclude_paths": [],
       "exclude_name_parts": [],
       "exclude_file_ids": [],

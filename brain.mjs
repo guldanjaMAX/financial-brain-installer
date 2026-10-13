@@ -8546,7 +8546,11 @@ export function driveExclusionIdsOf(raw) {
  */
 export function driveConnectorConfig(m, manifestPath, read = (path) => readFileSync(path, "utf-8")) {
   const declared = m?.corpora?.google_drive || {};
-  // Drive must be told what it may read. Without roots the walk enumerates
+  if (declared.include_my_drive_root_files !== undefined && typeof declared.include_my_drive_root_files !== "boolean") {
+    throw new Error("corpora.google_drive.include_my_drive_root_files must be a boolean");
+  }
+  const includeMyDriveRootFiles = declared.include_my_drive_root_files === true;
+  // Drive must be told what it may read. Without a bounded scope the walk enumerates
   // every file the token can see INCLUDING SHARED DRIVES, which on a real
   // install was 468,697 files against a My Drive of about 43,000: roughly 70%
   // of it images, video and web assets that can never be indexed. Google
@@ -8554,14 +8558,14 @@ export function driveConnectorConfig(m, manifestPath, read = (path) => readFileS
   // and the source stalls permanently, re-walking from the start every night.
   // Exclusions cannot fix it, because they filter AFTER enumeration.
   if (!Array.isArray(declared.root_folder_ids)) {
-    throw new Error("corpora.google_drive.root_folder_ids must be a non-empty array before Drive can run");
+    throw new Error("corpora.google_drive.root_folder_ids must be an array before Drive can run");
   }
   const rootFolderIds = [...new Set(
     declared.root_folder_ids.map((value) => String(value || "").trim()).filter(Boolean)
   )].sort();
-  if (!rootFolderIds.length) {
+  if (!rootFolderIds.length && !includeMyDriveRootFiles) {
     throw new Error(
-      "Google Drive is disabled until corpora.google_drive.root_folder_ids names at least one reviewed folder"
+      "Google Drive requires corpora.google_drive.root_folder_ids to name a reviewed folder or include_my_drive_root_files: true"
     );
   }
   let fileIds = driveExclusionIdsOf(declared.exclude_file_ids || []);
@@ -8577,6 +8581,7 @@ export function driveConnectorConfig(m, manifestPath, read = (path) => readFileS
   }
   return {
     rootFolderIds,
+    includeMyDriveRootFiles,
     excludeFileIds: fileIds,
     excludePaths: Array.isArray(declared.exclude_paths) ? declared.exclude_paths.map(String) : [],
     excludeNameParts: Array.isArray(declared.exclude_name_parts) ? declared.exclude_name_parts.map(String) : [],
@@ -8656,6 +8661,9 @@ export function drivePolicyFingerprint(
   for (const key of ["rootFolderIds", "excludeFileIds", "excludePaths", "excludeNameParts", "privatePrefixes"]) {
     normalized[key] = [...new Set((config[key] || []).map((value) => String(value)))].sort();
   }
+  // Preserve existing fingerprints when omitted or false. Either direction of
+  // an explicit opt-in change forces a sweep, including unchanged loose files.
+  if (config.includeMyDriveRootFiles === true) normalized.includeMyDriveRootFiles = true;
   normalized.credentialScanner = credentialScannerFingerprint(scannerEnabled);
   normalized.extractorPolicyVersion = Number(extractorPolicyVersion);
   // Turning OCR on changes what Drive is ALLOWED TO READ, so it belongs in the
@@ -17664,10 +17672,11 @@ const cmdIngestRemoteRun = async (
       }
     }
     if (!incremental) {
-      if (!assistantJson) info(`full walk of ${sourcePolicy.rootFolderIds.length} reviewed Drive root folder(s)`);
+      if (!assistantJson) info(`full walk of ${sourcePolicy.rootFolderIds.length} reviewed Drive root folder(s)${sourcePolicy.includeMyDriveRootFiles ? " plus direct My Drive files" : ""}`);
       const listing = assistantJson ? drive.listRootedFilesPreview : drive.listRootedFiles;
       for await (const f of listing(getToken, {
         rootFolderIds: sourcePolicy.rootFolderIds,
+        includeMyDriveRootFiles: sourcePolicy.includeMyDriveRootFiles,
         ...(assistantJson ? { limit } : {}),
       })) {
         files.push(f);
@@ -18111,6 +18120,7 @@ const cmdIngestRemoteRun = async (
       const receipt = drive.driveAssistantPreviewSummary({
         limit,
         configuredRootCount: sourcePolicy.rootFolderIds.length,
+        includeMyDriveRootFiles: sourcePolicy.includeMyDriveRootFiles,
         scanned,
         wouldSend: prepared,
         unchanged,

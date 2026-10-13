@@ -538,6 +538,17 @@ or widen a repair into whole-source removal.
 
 ### Connector status
 
+Drive's scope combines recursive `root_folder_ids` with optional
+`include_my_drive_root_files` (default false). The latter enumerates only direct
+My Drive files and never expands its child folders. Both paths use the same
+exclusion and extraction pipeline. A root-only selection may have an empty
+root list. The canonical My Drive root is retained as a nameless folder-index
+entry so loose files keep null folder metadata and remain in scope during
+absence classification. Unselected child folders never enter that index.
+Changing the option changes the policy fingerprint and forces a full sweep.
+The existing removal-plan builder receives only the classified candidates;
+null `top_folder` alone is never proof of membership or permission to remove.
+
 | Source | Current path |
 |---|---|
 | Local folders, including an Obsidian vault | Built through `--path`; Obsidian is file ingest, not a separate connector |

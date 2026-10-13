@@ -681,6 +681,48 @@ file-id, path-prefix and filename-part exclusions before downloading content.
 An excluded document already present in the brain enters the separate removal
 review. Gmail has no folder path and does not use these rules.
 
+Drive recursively walks only `corpora.google_drive.root_folder_ids`. In 0.4.14,
+`include_my_drive_root_files: true` adds a separate, nonrecursive listing of
+files directly in the owner's My Drive root. This uses `'root' in parents and
+trashed = false`, including pagination, with the same type, size, private-prefix
+and exclusion checks before reading content. Child folders do not enter scope
+through this option. Folder trees still require a listed root; listing My Drive
+itself as a root still authorizes its full recursive tree.
+
+For example, merge this selection into the manifest and replace the synthetic
+folder ID with the exact reviewed ID:
+
+```json
+{
+  "corpora": {
+    "google_drive": {
+      "enabled": true,
+      "root_folder_ids": ["reviewed-folder-id"],
+      "include_my_drive_root_files": true,
+      "exclude_paths": ["Reviewed Root/Design", "omit.txt"]
+    }
+  }
+}
+```
+
+Use `root_folder_ids: []` with the flag on to select only loose My Drive files.
+The flag defaults to false and must be a JSON boolean. Changing it forces a full
+comparison even if the files have not changed. Root-level envelopes keep
+`folder: null` and `top_folder: null`. The complete listing retains the canonical
+My Drive root ID for absence checks without including any unselected folders.
+Turning the flag off makes those files removal candidates unless an explicit
+recursive root still covers them. Ordinary ingest only prepares that removal
+plan; the existing exact apply approval remains required.
+
+`exclude_paths` matches the beginning of the resolved path, case-insensitively
+and on slash segment boundaries. For a root displayed as `Reviewed Root`, use
+`Reviewed Root/Design` to exclude its `Design` folder and every file below it.
+`Design` alone does not match that nested path, and `Reviewed Root/Design Notes`
+remains included. Use the complete resolved path when overlapping roots add an
+ancestor. For a loose My Drive file, use its filename, such as `omit.txt`.
+These exclusions prevent content downloads; they do not prune folder metadata
+enumeration. `exclude_name_parts` matches filenames, not ancestor folder names.
+
 Flags: `--dry-run`, `--source <name>`, `--limit <n>`, `--reset`, Drive-only
 `--dry-run --json` for a bounded aggregate assistant preview, and the
 separate `--apply-removals <fingerprint>` command. Keep the additional
