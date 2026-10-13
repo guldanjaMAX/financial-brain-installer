@@ -20,6 +20,44 @@ const eligible = doc => doc.text_source === 'native' && doc.text_reliable === tr
   doc.authority?.eligible !== false && doc.authority?.tier !== 'T4' && doc.lineage?.kind !== 'agent_derived';
 const negativeRecord = /\b(?:cancelled|canceled|unpaid|did not pay|not paid|terminated)\b/i;
 
+function contradictsPaymentPremise(question, quote) {
+  const query = normalized(question);
+  const assertion = normalized(quote).replace(/\.$/, '');
+  const anchors = queryEntityAnchors(question).map(normalized);
+  const boundSubject = subject => anchors.includes(subject) &&
+    !/\b(?:no|not|never|none|neither|nobody|nothing|any|all|every|if|unless|and|or)\b/.test(subject);
+  // A leading "No" asserts more than the quotation. Recognize only explicit
+  // positive premises and one direct negative assertion, never a subject in
+  // one clause plus an unpaid word in another. Unparsed/multiple assertions
+  // or question polarity stay unqualified rather than having "No" removed.
+  const next = /^when is (?:my |the )?next subscription payment for (.+)\?$/.exec(query);
+  if (next && boundSubject(next[1])) {
+    return ['is', 'was', 'remains'].some(verb =>
+      ['cancelled', 'canceled', 'terminated'].some(status =>
+        assertion === `${next[1]} subscription ${verb} ${status}`));
+  }
+  const premise = /^(.+?) paid(.*), right\?$/.exec(query) ||
+    /^did (.+?) pay(.*)\?$/.exec(query) || /^has (.+?) paid(.*)\?$/.exec(query);
+  if (!premise || !boundSubject(premise[1])) return false;
+  const [, subject, payment] = premise;
+  // Keep the requested payment literal on both sides. This grammar does not
+  // infer an invoice, reconcile amounts, or lend another account/month/date
+  // to the negation. Other descriptions require the model to abstain or quote
+  // history without asserting a negative answer to an ambiguous premise.
+  const amount = '(?:[$€£¥]\\s*|(?:usd|eur|gbp|cad|aud|jpy)\\s+)\\d+(?:,\\d{3})*(?:\\.\\d+)?';
+  const month = '(?:january|february|march|april|may|june|july|august|september|october|november|december)';
+  const object = `(?: (?:invoice [\\p{L}\\p{N}][\\p{L}\\p{N}-]*|${amount}))?`;
+  const period = `(?: for ${month})?`;
+  const account = '(?: on (?:card|account) ending [\\p{L}\\p{N}-]+)?';
+  const date = '(?: on \\d{4}-\\d{2}-\\d{2})?';
+  if (!new RegExp(`^${object}${period}${account}${date}$`, 'u').test(payment)) return false;
+  if (assertion === `${subject} did not pay${payment}` ||
+      assertion === `${subject} has not paid${payment}`) return true;
+  const invoice = payment || ' invoice';
+  return /^ invoice(?: [\p{L}\p{N}-]+)?$/u.test(invoice) &&
+    ['is', 'was', 'remains'].some(verb => assertion === `${subject}${invoice} ${verb} unpaid`);
+}
+
 export function moneyDraftRepair({ question, answer, docs = [] }) {
   if (!answer || !isMoneyAnswer(question, answer)) return '';
   // This requests a new model draft only. The final draft still passes through
@@ -52,8 +90,7 @@ export function moneyRecordQualification({ question, answer, docs = [], now = Da
   const labels = [...String(question).matchAll(/"([^"\n]+)"/g)].map(m => m[1]);
   const body = ` ${normalized(quote).replace(/[^\p{L}\p{N}]+/gu, ' ')} `;
   if (![...anchors, ...labels].every(anchor => body.includes(` ${normalized(anchor).replace(/[^\p{L}\p{N}]+/gu, ' ')} `))) return unchanged;
-  if (answer.startsWith('No,') && (!negativeRecord.test(quote) ||
-      /\b(?:not|never)\s+(?:cancelled|canceled|unpaid|terminated)\b/i.test(quote))) return unchanged;
+  if (answer.startsWith('No,') && !contradictsPaymentPremise(question, quote)) return unchanged;
   const start = doc.snippet.indexOf(quote);
   return { answer, evidence: [doc.n], spans: [{ n: doc.n, start, end: start + quote.length }] };
 }
