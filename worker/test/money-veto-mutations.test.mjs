@@ -18,7 +18,8 @@ function input() {
 }
 
 async function mutatedModule(url, from, to) {
-  const source = readFileSync(url, "utf8");
+  // A Windows checkout may carry CRLF line endings; mutation targets use LF.
+  const source = readFileSync(url, "utf8").replace(/\r\n/g, "\n");
   assert.equal(source.split(from).length - 1, 1, "mutation reaches exactly one real guard");
   const changed = source.replace(from, to).replace(/from "(\.\.?\/[^"\n]+)"/g,
     (_, path) => `from ${JSON.stringify(new URL(path, url).href)}`);
