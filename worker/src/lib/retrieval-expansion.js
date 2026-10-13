@@ -43,6 +43,9 @@ export function collapseTitleFamilies(rows, query) {
 }
 
 const DOMAINS = [
+  // Candidate recall only. Existing scoped SQL and the money verifier still
+  // decide whether a sales record answers this exact revenue question.
+  { pattern: /\brevenue breakdown\b/i, terms: ['sales', 'gross', 'turnover'] },
   { pattern: /\bbloodwork\b/i, terms: ['labs', 'lab results', 'blood test', 'panel'] },
   { pattern: /\bp\s*&\s*l\b/i, terms: ['profit and loss', 'revenue', 'income', 'expenses'] },
   { pattern: /\bsales opportunities\b/i, terms: ['prospects', 'pipeline', 'proposal', 'install', 'deal'] },
