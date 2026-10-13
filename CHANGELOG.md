@@ -4,7 +4,11 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
-## 0.4.15 (unreleased)
+## 0.4.15 (2026-10-13)
+
+Candidate only. This version has not been released. The changes below still
+need the full host gate, CI and separately reviewed field acceptance for the
+exact sealed package.
 
 - **Updates work on macOS 27 when daily imports are on.** macOS 27 reports a
   paused background job as "disabled" instead of "true". The update read that
@@ -12,6 +16,23 @@ the brain, not for whoever built it: what changed for them, and what to check.
   for recovery. Daily refresh now reads both forms, so the update can pause,
   update and restore daily imports; re-running `brain update` completes the
   held recovery.
+
+### Known issues
+
+- Removal of rows the Worker cannot verify still needs the technician.
+- Money answers still require review of cited accounts, dates and coverage.
+  Explicit AI disclosures are recognized; undisclosed generated text is not.
+  Missing lineage cannot prove independent confirmation.
+
+### This release does NOT cover
+
+- **UPDATE-012:** Windows x64 is the only supported Windows runtime in this
+  release. Windows ARM64 ships unproven.
+- **UPDATE-044:** Bank breadth ships unproven. Bank invitations stay closed.
+- QuickBooks Desktop money answers and owner readiness still need field
+  acceptance. The tax evidence checklist does not verify tax amounts or filing
+  readiness. Financial contracts, the test-only oracle, books-match and
+  tax-check remain internal libraries. SimpleFIN proof remains held.
 
 ## 0.4.14 (2026-10-12)
 
