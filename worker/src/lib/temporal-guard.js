@@ -8,7 +8,7 @@ import { isMoneyAnswer } from "./money-veto.js";
 
 const FUTURE = /\b(?:next|upcoming|coming up)\b|\bwhen (?:do|will) (?:i|we) see\b|\bwhen is (?:my|our|the)\b[^?\n]*\b(?:appointment|meeting|call|visit|session|event)\b/i;
 const EVENT_NOUN = /\b(?:appointments?|visits?|meetings?|calls?|sessions?|flights?|trips?|deadlines?|due dates?|events?)\b/i;
-const PROCEDURAL = /\bnext\s+(?:steps?|actions?|phases?|stages?|moves?)\b|\bwhat(?:['’]s| is)\s+next\b(?!\s+(?:appointment|visit|meeting|call|session|flight|trip|deadline|event)\b)/i;
+const PROCEDURAL_STEP = /\bnext\s+(?:steps?|actions?|phases?|stages?|moves?)\b/gi;
 const HISTORICAL_SEQUENCE = /\b(?:what|when|which)\s+(?:was|were|did)\b|\b(?:back then|at that time)\b/i;
 const EVENT = /\b(?:appointments?|meetings?|calls?|visits?|sessions?|flights?|trips?|deadlines?|events?|see|seeing|scheduled|when|starts?)\b/i;
 const HISTORICAL = /\b(?:last (?:recorded|appointment|meeting|visit)|previous|past|has passed|had passed|historical|was on|took place|started|began|since)\b/i;
@@ -116,12 +116,23 @@ const upcoming = (event, { today, timeZone, now }) => event.instant !== null ? e
 const clauses = text => sentences(text).flatMap(sentence => sentence.split(/;|\bbut\b|\bhowever\b|\band\s+(?=(?:(?:owner|you|they|she|he)\s+)?(?:stopped|discontinued|ended|no longer|restarted|resumed|(?:is )?back on)\b)/i));
 // Purpose and symptom words cannot identify the item a status verb describes.
 // Keep this local to the veto rather than changing retrieval tokenization.
-const itemWords = text => words(String(text).split(/\b(?:for|because|to (?:help|treat)|due to)\b/i)[0])
+const itemWords = text => words(String(text).replace(/\b(?:for|because|to (?:help|treat)|due to)\b[^,;]*/gi, phrase => {
+  // A fronted purpose can contain the main clause when punctuation is absent.
+  // Keep that clause from its explicit actor/status predicate, not its purpose.
+  const main = /\b(?:[a-z][a-z0-9-]*\s+(?:(?:is|are|was|were|has|have|had|been)\s+)*)?(?:stopped|discontinued|ended|no longer|ceased|terminated|restarted|resumed|back on)\b/i.exec(phrase);
+  return main ? phrase.slice(main.index) : "";
+}))
   .filter(word => !["sleep", "anxiety", "blood", "pressure", "medication", "medicine"].includes(word));
 const stoppedSubject = (text, subject) => clauses(text).some(clause => itemWords(clause).includes(subject) &&
   STOPPED.test(clause) && !/\b(?:not|never)\s+(?:stopped|discontinued|ended|terminated)\b/i.test(clause));
-const restartedSubject = (text, subject) => clauses(text).some(clause => itemWords(clause).includes(subject) &&
-  RESTARTED.test(clause) && !/\b(?:not|never)\b/i.test(clause) && !STOPPED.test(clause));
+const restartedSubject = (text, subject) => {
+  // A dated record of a plan is not a dated occurrence. Quoted, conditional
+  // or prospective language cannot clear a stop, even with a permissive model.
+  if (/["“”]|(?:^|\s)['‘].*['’]/.test(text) || /\b(?:will|would|could|should|may|might|can|if|unless|when|once|until|next|tomorrow|soon|later|plan\w*|intend\w*|expect\w*|hope\w*|hypothetical|example)\b/i.test(text)) return false;
+  return clauses(text).some(clause => itemWords(clause).includes(subject) &&
+    RESTARTED.test(clause) && /\b(?:restarted|resumed|(?:is|are|am) back on)\b/i.test(clause) &&
+    !/\b(?:not|never|\w+n['’]t)\b/i.test(clause) && !STOPPED.test(clause));
+};
 
 function entityAnchors(question, sentence, cited, owner) {
   const ownerWords = new Set(tokens(owner));
@@ -150,9 +161,13 @@ export function applyTemporalVeto({ question, answer, evidenceGate, docs = [], c
   const unchanged = { answer, evidenceGate };
   if (!answer || evidenceGate?.supported !== true || isMoneyAnswer(question, answer)) return unchanged;
   const when = /\bwhen (?:do|does|will|is|are|can|should)\b/i.test(question || "");
-  const future = !PROCEDURAL.test(question || "") && !HISTORICAL_SEQUENCE.test(question || "") &&
-    (EVENT_NOUN.test(question || "") && (FUTURE.test(question || "") || when) ||
-      when && (FUTURE.test(question || "") || /\bsee\b/i.test(question || "")));
+  // Remove only procedural next-step phrases. A second event request, a
+  // possessive week modifier or "who do I see next" retains event intent.
+  const eventQuestion = String(question || "").replace(PROCEDURAL_STEP, "");
+  const future = !HISTORICAL_SEQUENCE.test(question || "") &&
+    (EVENT_NOUN.test(eventQuestion) && (FUTURE.test(eventQuestion) || when) ||
+      /\bsee(?:ing)?\b/i.test(eventQuestion) && (FUTURE.test(eventQuestion) || when) ||
+      when && FUTURE.test(eventQuestion));
   // Keep ranking and specialized money/status behavior unchanged. Normalize
   // this additional phrase only inside this veto, retaining historical bounds.
   const current = hasExplicitCurrentIntent(String(question || "").replace(/\bthese days\b/gi, "right now"));

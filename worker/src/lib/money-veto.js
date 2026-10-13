@@ -109,7 +109,13 @@ function amountFacts(text) {
     const suffix = new RegExp(`^\\s*(${CURRENCY_TOKEN}(?:\\s*${CURRENCY_TOKEN})*)`, "i").exec(after);
     const codes = [...new Set(matches(`${prefix?.[1] || ""} ${suffix?.[1] || ""}`, CURRENCIES).map(currencyCode))];
     const rate = RATE.exec(suffix ? after.slice(suffix[0].length) : after);
-    const leadingRate = new RegExp(`\\b(${RATE_WORD})\\s+(?:[a-z-]+\\s+){0,6}$`).exec(prefix ? before.slice(0, prefix.index) : before);
+    const ratePrefix = prefix ? before.slice(0, prefix.index) : before;
+    // Rate words cannot be swallowed as filler. A plan's annual label may
+    // precede a monthly fee, but two competing fee units remain ambiguous.
+    const leadingRate = new RegExp(`\\b(${RATE_WORD})\\s+(?:(?!${RATE_WORD}\\b)[a-z-]+\\s+){0,6}$`).exec(ratePrefix);
+    const earlierRates = leadingRate ? ratePrefix.slice(0, leadingRate.index) : "";
+    const planLabel = new RegExp(`^\\s*${RATE_WORD}\\s+plan\\s+with\\s+$`).test(earlierRates);
+    const competingLeadingRate = RATE_HINT.test(earlierRates) && !planLabel;
     const trailingUnit = rateUnit(rate?.[1] || rate?.[2] || "");
     const leadingUnit = rateUnit(leadingRate?.[1] || "");
     // Explicit but unparsed rate prose must not degrade to a unitless amount.
@@ -118,7 +124,7 @@ function amountFacts(text) {
       !trailingUnit && RATE_HINT.test(after.split(/[;.!?]|\band\b/)[0]);
     return { value: decimal(match[0]), currency: codes[0] || null,
       conflictingCurrency: codes.length > 1,
-      conflictingRate: unparsedRate || !!(trailingUnit && leadingUnit && trailingUnit !== leadingUnit),
+      conflictingRate: unparsedRate || competingLeadingRate || !!(trailingUnit && leadingUnit && trailingUnit !== leadingUnit),
       rate: trailingUnit || leadingUnit };
   });
 }
@@ -143,7 +149,18 @@ function moneySentences(text) {
 // Split independent financial assertions, retaining comma-separated month
 // lists. Conjunctions cannot lend a predicate, account or date across claims.
 function moneyClauses(text) {
-  return moneySentences(text).flatMap(sentence => sentence.split(/;|\b(?:but|however|while|whereas|then)\b|\band\b|,\s*(?=(?:card|account|charged?|refunded?|paid|payment|invoice|fee)\b)/i));
+  return moneySentences(text).flatMap(sentence => {
+    // Retain "and" only inside a pure month-list tail. A month followed by
+    // another account, predicate or qualifier must still start a new clause.
+    const monthTail = new RegExp(`^\\s*${MONTHS.source}(?:\\s*,?\\s*(?:and\\s+)?${MONTHS.source})*\\s*[.!?]?\\s*$`, "i");
+    const parts = sentence.split(/;|\b(?:but|however|while|whereas|then)\b|,\s*(?=(?:card|account|charged?|refunded?|paid|payment|invoice|fee)\b)/i);
+    return parts.flatMap(part => part.split(/\band\b/i).reduce((clauses, piece) => {
+      const previous = clauses.at(-1);
+      if (previous && new RegExp(`${MONTHS.source}\\s*,?\\s*$`, "i").test(previous) && monthTail.test(piece)) clauses[clauses.length - 1] += ` and ${piece}`;
+      else clauses.push(piece);
+      return clauses;
+    }, []));
+  });
 }
 
 function quotedValues(text) {
@@ -152,7 +169,7 @@ function quotedValues(text) {
 
 const exactExcerpt = doc => String(doc.snippet || "").replace(/^\[[^\]\r\n]*\]\s*/, "");
 
-function inSpan(sentence, question, doc, checkMonths = true) {
+function inSpan(sentence, question, doc, checkMonths = true, eventDateRequired = false) {
   // Only the exact excerpt supplied to the model is evidence. Titles, other
   // chunks and uncited records cannot lend a figure or an account identifier.
   const span = canonical(exactExcerpt(doc));
@@ -160,8 +177,16 @@ function inSpan(sentence, question, doc, checkMonths = true) {
   // A citation's reliable day is displayed beside the excerpt. An as-of date
   // can use that day, but a statement year or account number is still a scalar
   // that must occur in the body, never just the title or date metadata.
-  const days = claim.match(/\b\d{4}-\d{2}-\d{2}\b/g) || [];
-  if (days.some((day) => !span.includes(day) && !String(doc.ts || "").startsWith(day))) return false;
+  const days = [...claim.matchAll(/\b\d{4}-\d{2}-\d{2}\b/g)];
+  if (days.some(match => {
+    const day = match[0];
+    // A leading explicit as-of date describes the record, even when the
+    // question asks about payment. It cannot lend its day to a payment,
+    // posting or due-date assertion elsewhere in the same sentence.
+    const observation = /^(?:No,\s*)?As of\s+$/i.test(claim.slice(0, match.index).trimStart()) &&
+      reliableDocumentTime(doc) !== null;
+    return !span.includes(day) && !((!eventDateRequired || observation) && String(doc.ts || "").startsWith(day));
+  })) return false;
   const figures = figuresIn(claim.replace(/\b\d{4}-\d{2}-\d{2}\b/g, ""));
   const spanFigures = new Set(figuresIn(span));
   const months = monthsIn(claim);
@@ -190,7 +215,7 @@ function boundMonths(doc, claim, question) {
 function eventKind(question) {
   if (/\bdue\b/i.test(question)) return "due";
   if (/\b(?:posted|posting)\b/i.test(question)) return "posted";
-  if (/\b(?:paid|payment|payments|received|arrived)\b/i.test(question)) return "paid";
+  if (/\b(?:pay|paid|payment|payments|received|arrived)\b/i.test(question)) return "paid";
   return null;
 }
 
@@ -287,7 +312,7 @@ export function applyMoneyVeto({ question, answer, evidenceGate, docs = [], now 
     const records = cited.filter(primary);
     if (!records.length) return veto("ineligible_support", "Money claims need eligible non-agent support; agent-derived or T4 material alone is insufficient.");
     const kind = eventKind(question);
-    const supporting = records.filter(doc => inSpan(claim, question, kind ? { ...doc, ts: "" } : doc, false));
+    const supporting = records.filter(doc => inSpan(claim, question, doc, false, Boolean(kind)));
     const spanMonths = new Set(supporting.flatMap(doc => boundMonths(doc, claim, question)));
     if (!supporting.length || !monthsIn(claim).every(month => spanMonths.has(month))) return veto("span_mismatch", "A money figure, month list or account identifier does not match the exact cited span.");
     if (window) {

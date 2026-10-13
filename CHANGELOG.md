@@ -10,6 +10,8 @@ Candidate only. This version has not been released. The changes below still
 need the full host gate, CI and separately reviewed field acceptance for the
 exact sealed package.
 
+- Ask answers more money questions from your records, quoting the exact figure
+  and date; it still refuses when the records do not say.
 - Questions about next appointments now flag past dates, elapsed start times
   today and an earlier upcoming event found for the same subject. Procedural
   next steps do not require an event date. All-day events remain today through

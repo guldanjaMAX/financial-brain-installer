@@ -72,7 +72,8 @@ import {
 import { computeAnswerConfidence, refusalConfidence } from "./lib/confidence.js";
 import { answerSentences } from "./lib/answer-sentences.js";
 import { quickBooksMoneyPolicy } from "./lib/quickbooks-money.js";
-import { applyMoneyVeto } from "./lib/money-veto.js";
+import { applyMoneyVeto, isMoneyAnswer } from "./lib/money-veto.js";
+import { MONEY_RECALL_INSTRUCTION, moneyDraftRepair, moneyRecordQualification, applyMoneyRecallVeto } from "./lib/money-recall.js";
 import { applyTemporalVeto } from "./lib/temporal-guard.js";
 import { quickBooksBalanceAnswer, quickBooksBalanceRequest } from "./lib/quickbooks-balance.js";
 import { quickBooksOpenItemsAnswer } from "./lib/quickbooks-open-items.js";
@@ -1197,6 +1198,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
     "16. A QuickBooks balance snapshot observes the displayed balance at its exact as-of date, even if the transaction or provider last-change date is older. State that as-of date with each account balance and cite that account's own record. For a negative Credit Card balance, say the owner owes the positive amount; retain the minus sign if also quoting the provider balance. Individual retrieved records do not establish a complete list or company-wide total.",
     synthesisIntent(q) ? SYNTHESIS_INSTRUCTION : "",
     datedInstruction,
+    isMoneyAnswer(q, "") ? MONEY_RECALL_INSTRUCTION : "",
     docs.some(doc => doc.query_variant) ? "A spelling variant rescued some candidates. Use and cite the record's spelling. A similar spelling alone does not establish identity; verify the surrounding subject and context." : "",
     env.BRAIN_STYLE_RULE || "",
   ]
@@ -1241,15 +1243,27 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
   try {
     let repairInstruction = "";
     for (let attempt = 0; !observedAnswer && !factAnswer && attempt < 2; attempt++) {
-      const data = await callLLM(env, {
-        model: env.ANSWER_MODEL || "claude-sonnet-4-5",
-        max_tokens: 1000,
-        system,
-        label: attempt === 0 ? "rag-think" : "rag-think-repair",
-        timing, timingStage: "answer_llm",
-        timeoutMs: 45_000,
-        messages: [{ role: "user", content: attempt === 0 ? userMsg : `${userMsg}\n\nREGENERATION REQUIREMENTS:\n${repairInstruction}` }],
-      });
+      let data;
+      try {
+        data = await callLLM(env, {
+          model: env.ANSWER_MODEL || "claude-sonnet-4-5",
+          max_tokens: 1000,
+          system,
+          label: attempt === 0 ? "rag-think" : "rag-think-repair",
+          timing, timingStage: "answer_llm",
+          timeoutMs: 45_000,
+          messages: [{ role: "user", content: attempt === 0 ? userMsg : `${userMsg}\n\nREGENERATION REQUIREMENTS:\n${repairInstruction}` }],
+        });
+      } catch (error) {
+        // This is the pinned local adapter's empty-completion error, not an
+        // arbitrary provider outage. One retry still needs full verification.
+        if (attempt === 0 && isMoneyAnswer(q, "") && !moneyPolicy &&
+            error?.message === "Workers AI: Workers AI returned no answer text") {
+          repairInstruction = `${MONEY_RECALL_INSTRUCTION}\nThe first completion was empty. Answer only from the supplied evidence, or state that it does not support an answer.`;
+          continue;
+        }
+        throw error;
+      }
       answer = (data?.content?.[0]?.text || "").trim() || null;
       model = data?.model || null;
       if (!answer) approvedDocs = [];
@@ -1266,6 +1280,10 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
       if (attempt === 0 && answer && modelRefusedAnswer(answer) && (synthesisIntent(q) || datedInstruction) && !moneyPolicy) {
         repairInstruction = [synthesisIntent(q) ? SYNTHESIS_INSTRUCTION : "", datedInstruction].filter(Boolean).join("\n");
         continue;
+      }
+      if (attempt === 0 && !moneyPolicy) {
+        const moneyRepair = moneyDraftRepair({ question: q, answer, docs });
+        if (moneyRepair) { repairInstruction = moneyRepair; continue; }
       }
       if (attempt !== 0 || !answer || modelRefusedAnswer(answer)) break;
       const citedNumbers = new Set([...answer.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1])));
@@ -1302,7 +1320,10 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
         answer = synthesis.answer || answer;
         if (!synthesis.answer) evidenceGate = synthesis.verdict;
       }
-      datedStatus = qualifyDatedStatus({ question: q, answer, docs });
+      // Money history is qualified only by the model's exact dated quotation.
+      // Unlike ordinary dated-status formatting, no money prose is rewritten.
+      const moneyHistory = moneyRecordQualification({ question: q, answer, docs });
+      datedStatus = moneyHistory.evidence.length ? moneyHistory : qualifyDatedStatus({ question: q, answer, docs });
       answer = datedStatus.answer;
     } catch (error) {
       answer = null; approvedDocs = []; answerError = answerGenerationError(error, { verification: true });
@@ -1384,6 +1405,7 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
             complete: verdict?.complete === true || String(verdict?.complete).toLowerCase() === "true",
             evidence: [...allowed],
             reason: String(verdict?.reason || "").slice(0, 240) || undefined,
+            ...(datedStatus.spans?.length ? { quoted_spans: datedStatus.spans } : {}),
             ...(!verdict && raw ? { invalid_response: raw.replace(/\s+/g, " ").slice(0, 240) } : {}),
           };
           if (evidenceGate.supported && evidenceGate.complete && allowed.size !== citedDocs.length) {
@@ -1595,6 +1617,10 @@ async function handleDocumentThink(env, url, q, entityScope, access, grantScope,
 
   // Run on the final prose, including partial-answer formatting. This can only
   // demote the existing verdict; retrieved documents never certify an absence.
+  const moneyRecall = applyMoneyRecallVeto({ question: q, answer, evidenceGate, docs: approvedDocs,
+    candidates: results.map(citationCandidateForResult), owner, filters: filtersFrom(url) });
+  ({ answer, evidenceGate } = moneyRecall);
+  if (moneyRecall.gap) gaps.push(moneyRecall.gap);
   const moneyVeto = applyMoneyVeto({ question: q, answer, evidenceGate, docs: approvedDocs });
   ({ answer, evidenceGate } = moneyVeto);
   if (moneyVeto.gap) gaps.push(moneyVeto.gap);
