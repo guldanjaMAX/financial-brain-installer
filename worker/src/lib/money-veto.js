@@ -6,12 +6,26 @@
  */
 import { answerSentences } from "./answer-sentences.js";
 import { isAgentDerivedArtifact } from "./evidence-lineage.js";
-import { parseCanonicalEvidenceDate, queryEntityAnchors, queryTimeWindow, reliableDocumentTime } from "./query-intent.js";
+import { parseCanonicalEvidenceDate, queryTimeWindow, reliableDocumentTime } from "./query-intent.js";
 
-const MONEY_TOPIC = /\b(?:money|financial|bank|cards?|accounts?|statements?|charges?|charged|payments?|paid|unpaid|invoices?|bills?|owe[ds]?|due|refunds?|debits?|credits?|transactions?|spend|spent|expenses?|income|revenue|fees?|costs?|prices?|tax|salary|wages?|receipts?)\b/i;
+const MONEY_TOPIC = /\b(?:money|financial|bank|cards?|accounts?|statements?|charges?|charged|payments?|pay(?:s|ing)?|paid|unpaid|invoices?|bills?|owe[ds]?|owing|due|outstanding|settled|refund(?:s|ed|ing)?|bounc(?:e[ds]?|ing)|return(?:s|ed|ing)?|wir(?:e[ds]?|ing)|debits?|credits?|transactions?|spend|spent|expenses?|income|revenue|fees?|costs?|prices?|tax|salary|wages?|receipts?)\b/i;
 const CURRENCY = /[$€£¥]|\b(?:USD|EUR|GBP|CAD|AUD|JPY|dollars?|euros?|pounds?|cents?)\b/i;
 const UNCONFIRMED = /\b(?:documents?|sources?|evidence|records?)\s+(?:do(?:es)? not|don['’]t|doesn['’]t|cannot|can['’]t)\s+(?:confirm|establish|cover|show|provide|answer|verify|prove)\b|\b(?:cannot|can['’]t|could not|unable to)\s+(?:be\s+)?(?:confirm|verify|establish|determine)\b|\b(?:not (?:confirmed|covered|established|verified|known)|unconfirmed|unknown|insufficient evidence)\b/i;
-const ABSENCE = /\b(?:no|without|zero)\s+(?:(?:duplicate|unusual|missing|outstanding|unpaid|overdue|further|other|additional|remaining)\s+)*(?:charges?|payments?|balances?|bills?|invoices?|statements?|transactions?|debts?|amounts?|fees?|duplicates?)\b|\b(?:nothing|none)\s+(?:(?:is|was|are|were|remains?|else)\s+)*(?:due|owed|outstanding|missing|unpaid|overdue)\b|\b(?:all|every)\s+(?:[\w-]+\s+){0,4}(?:statements?|payments?|bills?|invoices?)\s+(?:(?:are|is|were|was|have been|has been)\s+)?(?:present|available|received|paid|complete|accounted for)\b|\b(?:complete (?:set|list)|no (?:duplicates?|anomalies)|paid (?:everything|in full))\b/i;
+const ABSENCE = /\b(?:no|without|zero)\s+(?:(?:duplicate|unusual|missing|outstanding|unpaid|overdue|further|other|additional|remaining)\s+)*(?:charges?|payments?|balances?|bills?|invoices?|statements?|transactions?|debts?|amounts?|fees?|duplicates?)\b|\b(?:nothing|none)\s+(?:(?:is|was|are|were|remains?|else)\s+)*(?:due|owed|outstanding|missing|unpaid|overdue)\b|\b(?:all|every)\s+(?:[\w-]+\s+){0,4}(?:statements?|payments?|bills?|invoices?)\s+(?:(?:are|is|were|was|have been|has been)\s+)?(?:present|available|received|paid|complete|accounted for)\b|\b(?:complete (?:set|list)|no (?:duplicates?|anomalies)|paid (?:everything|in full))\b|\b(?:nothing|none|nope|not any|settled)\b|\bpaid\s+all\s+(?:invoices?|bills?|payments?)\b|\b(?:not|never)\s+owe\s+anything\b/i;
+// A limit sentence may bypass claim checks only when, apart from its hedge,
+// it asserts nothing: no citation, figure, contrast, extra clause, payment,
+// debt, refund or absence wording. Arbitrary prose after an uncertainty word
+// can still assert an amount, absence or payment, so it is checked.
+const LIMIT_ASSERTION = /\b(?:owe[ds]?|owing|nothing|none|paid|pays?|paying|refund\w*|unpaid|outstanding|settled|bounc\w*|wired|charged|no\s+(?:\w+\s+)?(?:balances?|payments?|invoices?|charges?|bills?|debts?|amounts?))\b/i;
+function isLimitOnly(sentence) {
+  if (/\[\d+\]/.test(sentence)) return false;
+  const text = withoutCitations(sentence).trim();
+  if (CURRENCY.test(text) || matches(text, NUMBERS).length) return false;
+  if (/\b(?:but|however|yet|though|although|except|whereas|while)\b/i.test(text)) return false;
+  const template = /^Not covered by the documents: [^:;]+\.$/i.test(text);
+  if (!template && /[:;]/.test(text)) return false;
+  return !LIMIT_ASSERTION.test(text.replace(UNCONFIRMED, " "));
+}
 const MONTHS = /\b(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\b/gi;
 const NUMBERS = /(?<![\p{L}\p{N}])[-+−]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:\s?(?:million|billion|thousand)|[kmb]|%)?(?![\p{L}\p{N}])/giu;
 const CURRENCIES = /[$€£¥]|\b(?:USD|EUR|GBP|CAD|AUD|JPY|dollars?|euros?|pounds?|cents?)\b/gi;
@@ -205,19 +219,12 @@ function inSpan(sentence, question, doc, checkMonths = true, eventDateRequired =
 
 function boundMonths(doc, claim, question) {
   const ids = accountIds(`${question}\n${claim}`);
-  // The exact dated excerpt is source prose, not an account/entity label that
-  // must fit inside each clause. Recognize it locally by equality and citation,
-  // never by caller-supplied offsets or a quotation substring. Question labels,
-  // subject anchors and account IDs still bind each supporting month clause.
-  const quote = /^(?:As|No, as) of \d{4}-\d{2}-\d{2}, the record states "([^"\n]+)" \[(\d+)\]\.$/.exec(claim);
-  const wholeExcerpt = quote && quote[1] === exactExcerpt(doc) && Number(quote[2]) === doc.n;
-  const labels = [...quotedValues(question), ...(wholeExcerpt ? [] : quotedValues(claim))];
-  const anchors = wholeExcerpt ? queryEntityAnchors(question).map(canonical) : [];
+  // An exact displayed quotation may be a cut window of a larger record.
+  // Keep its labels bound to each month clause, even at a cost to recall.
+  const labels = quotedValues(`${question}\n${claim}`);
   return moneyClauses(exactExcerpt(doc)).filter(span => {
     const present = new Set(accountIds(span));
-    const words = ` ${canonical(span).replace(/[^\p{L}\p{N}]+/gu, ' ')} `;
-    return ids.every(id => present.has(id)) && labels.every(label => canonical(span).includes(label)) &&
-      anchors.every(anchor => words.includes(` ${anchor.replace(/[^\p{L}\p{N}]+/gu, ' ')} `));
+    return ids.every(id => present.has(id)) && labels.every(label => canonical(span).includes(label));
   }).flatMap(monthsIn);
 }
 
@@ -278,7 +285,7 @@ function primary(doc) {
 // Shared only to keep other refuse-only guards outside the money contract.
 export function isMoneyAnswer(question, answer) {
   return MONEY_TOPIC.test(`${question || ""} ${answer || ""}`) || CURRENCY.test(answer || "") ||
-    /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/i.test(`${question || ""} ${answer || ""}`);
+    /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding|no|without|zero)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/i.test(`${question || ""} ${answer || ""}`);
 }
 
 export function applyMoneyVeto({ question, answer, evidenceGate, docs = [], now = Date.now() } = {}) {
@@ -295,19 +302,12 @@ export function applyMoneyVeto({ question, answer, evidenceGate, docs = [], now 
   let incomplete = false, claimDateUnknown = false;
   for (const sentence of moneySentences(answer)) {
     if (SCOPE_NOTICE.test(sentence)) continue;
-    // An explicit limit is a partial answer, never a positive absence claim.
-    // Keep any factual prefix in a mixed sentence subject to the same checks.
+    // A hedge makes an answer incomplete, but cannot discard any part of a
+    // mixed sentence. Check all figures and absence claims on either side.
     const uncertainty = sentence.search(UNCONFIRMED);
     if (uncertainty >= 0) incomplete = true;
-    const contrast = uncertainty >= 0 ? /[,;]\s*(?:but|however|yet)\b/i.exec(sentence.slice(uncertainty)) : null;
-    const prefix = uncertainty >= 0 ? sentence.slice(0, uncertainty) : sentence;
-    // "Payment status is unconfirmed" carries no affirmative financial fact.
-    // Preserve it as a limit without asking it to cite an invented status.
-    if (uncertainty >= 0 && !contrast && !CURRENCY.test(prefix) &&
-        !matches(withoutCitations(prefix), NUMBERS).length) continue;
-    const claim = uncertainty >= 0
-      ? prefix + (contrast ? sentence.slice(uncertainty + contrast.index + contrast[0].length) : "")
-      : sentence;
+    if (uncertainty >= 0 && isLimitOnly(sentence)) continue;
+    const claim = sentence;
     if (!claim.trim() || !/[\p{L}\p{N}]/u.test(claim)) continue;
     if (ABSENCE.test(claim) || (COVERAGE_QUESTION.test(question) && /^(?:yes|no|none)\b/i.test(claim))) return veto("document_coverage", "Only a ledger can establish absence or completeness over the whole window; document excerpts cannot.");
     const hasFacts = CURRENCY.test(claim) || MONEY_TOPIC.test(claim) ||
