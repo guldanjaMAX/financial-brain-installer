@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createProductFixture } from './product-contract-fixture.mjs';
 import { applyMoneyRecallVeto, moneyRecordQualification } from '../src/lib/money-recall.js';
-import { applyMoneyVeto } from '../src/lib/money-veto.js';
+import { applyMoneyVeto, isMoneyAnswer } from '../src/lib/money-veto.js';
 import { applyTemporalVeto } from '../src/lib/temporal-guard.js';
 
 const NOW = Date.parse('2026-10-12T12:00:00Z');
@@ -13,7 +13,7 @@ const quoted = (text, n = 1, day = '2026-10-10', no = false) =>
   `${no ? 'No, as' : 'As'} of ${day}, the record states "${text}" [${n}]. Current status is unknown.`;
 
 async function run(t, { q = question, records = [record(charge)], draft = `${charge} [1].`,
-  repaired = draft, verdict, empty = false, searchFails = false, verifierFails = false, allowMissing = false } = {}) {
+  repaired = draft, verdict, empty = false, searchFails = false, verifierFails = false, allowMissing = false, ftsFails = false } = {}) {
   t.mock.method(Date, 'now', () => NOW);
   let drafts = 0, verifiers = 0, network = 0, searches = 0;
   const prompts = [];
@@ -66,7 +66,7 @@ async function run(t, { q = question, records = [record(charge)], draft = `${cha
       if (searchFails) throw new Error('synthetic vector search unavailable');
       return { matches: empty ? [] : fixture.rows('SELECT chunk_uid AS id FROM chunks') };
     };
-    if (searchFails) fixture.control.failOn = /FROM chunks_fts/;
+    if (searchFails || ftsFails) fixture.control.failOn = /FROM chunks_fts/;
     const response = await fixture.post('/api/rag/think', { q }, { 'X-Admin-Key': fixture.env.ADMIN_KEY });
     assert.equal(response.status, 200);
     const body = await response.json();
@@ -78,7 +78,8 @@ async function run(t, { q = question, records = [record(charge)], draft = `${cha
       assert.ok(drafts > 0, 'the real model draft decision was reached');
     }
     assert.equal(network, 0, 'no external fetch was attempted');
-    return { body, drafts, verifiers, prompts, render, keywordQueries };
+    const chunks = fixture.rows('SELECT text FROM chunks').map(row => row.text);
+    return { body, drafts, verifiers, prompts, render, keywordQueries, chunks };
   } finally { fixture.close(); }
 }
 const accepted = (r, text) => {
@@ -144,11 +145,13 @@ test('B control: conflict review cannot be omitted', async t => {
   refused(r, /conflict check unavailable/);
 });
 
-test('C: a cancelled-payment premise is repaired to a scoped cited negative fact', async t => {
+// Leading-negative qualification is disabled for 0.4.14. It returns in a
+// later release with stricter binding; keep same-payer probes as refusals.
+test('C: a cancelled-payment premise repair still refuses a leading negative', async t => {
   const answer = quoted(oldStatus, 1, '2026-10-10', true);
   const r = await run(t, { q: 'When is my next subscription payment for Payer North?',
     records: [record(oldStatus)], draft: 'No payment is due [1].', repaired: answer });
-  accepted(r, answer); assert.equal(r.drafts, 2);
+  refused(r); assert.equal(r.drafts, 2);
 });
 
 test('C control: an unchanged whole-window absence still refuses', async t => {
@@ -247,12 +250,12 @@ test('D: bounded lexical expansion surfaces a sales record for a revenue-breakdo
 });
 
 
-test('C: an unpaid-invoice premise is repaired to the cited invoice status', async t => {
+test('C: an unpaid-invoice premise repair still refuses a leading negative', async t => {
   const content = 'Payer North invoice remains unpaid.';
   const answer = quoted(content, 1, '2026-10-10', true);
   const r = await run(t, { q: 'Payer North paid, right?', records: [record(content)],
     draft: 'No payment received [1].', repaired: answer });
-  accepted(r, answer); assert.equal(r.drafts, 2);
+  refused(r); assert.equal(r.drafts, 2);
 });
 
 test('quote offsets bind the exact model-visible excerpt after its storage header', async t => {
@@ -305,12 +308,12 @@ const paymentQuestion = 'Payer North paid, right?';
 const unpaid = 'Payer North invoice remains unpaid.';
 const paid = 'Payer North paid USD 120.00.';
 for (const repair of [false, true]) {
-  test(`B01 control: same-payer unpaid quotation survives ${repair ? 'repair' : 'ordinary generation'}`, async t => {
+  test(`B01 control: same-payer negative quotation refuses ${repair ? 'repair' : 'ordinary generation'}`, async t => {
     const answer = quoted(unpaid, 1, '2026-10-10', true);
     const r = await run(t, { q: paymentQuestion, records: [record(unpaid)],
       draft: repair ? 'No payment was received [1].' : answer, repaired: answer });
     assert.equal(r.drafts, repair ? 2 : 1);
-    accepted(r, answer);
+    refused(r);
   });
 
   test(`B01: wrong-payer unpaid quotation refuses after ${repair ? 'repair' : 'ordinary generation'}`, async t => {
@@ -336,7 +339,7 @@ for (const [label, content] of [
   ['two-sentence month excerpt', `${charge} The invoice is provisional.`],
   ['single-sentence month control', charge],
   ['two-sentence control without month', `${charge.replace(' for October', '')} The invoice is provisional.`],
-]) test(`B02: ${label} survives qualified recall after repair`, async t => {
+]) test(`B02: ${label} reaches month binding after repair`, async t => {
   const answer = quoted(content);
   const r = await run(t, { records: [record(content)], draft: '', repaired: answer });
   assert.equal(r.drafts, 2);
@@ -347,7 +350,10 @@ for (const [label, content] of [
   const snippet = r.body.results[span.n - 1].snippet.replace(/\s+/g, ' ').slice(0, 900);
   assert.ok(span.start >= 0);
   assert.equal(snippet.slice(span.start, span.end), content);
-  accepted(r, answer);
+  // Refuse multi-sentence month excerpts even when they are exact quotes:
+  // equality to a displayed cut window does not prove intact source binding.
+  if (label === 'two-sentence month excerpt') refused(r, /span/);
+  else accepted(r, answer);
 });
 
 const recallInput = content => ({ question, answer: quoted(content), now: NOW, timeZone: 'UTC',
@@ -355,7 +361,7 @@ const recallInput = content => ({ question, answer: quoted(content), now: NOW, t
     text_source: 'native', text_reliable: true }],
   evidenceGate: { supported: true, complete: true, evidence: [1] } });
 
-test('B02 localized: whole-excerpt qualification retains months through the final veto', () => {
+test('B02 localized: whole-excerpt qualification cannot bypass month binding', () => {
   const control = recallInput(charge);
   assert.equal(applyMoneyVeto(control).evidenceGate.supported, true);
   const content = `${charge} The invoice is provisional.`;
@@ -364,7 +370,8 @@ test('B02 localized: whole-excerpt qualification retains months through the fina
   assert.deepEqual(recognized.evidence, [1], 'entire exact quote recognition reached');
   assert.equal(input.docs[0].snippet.slice(recognized.spans[0].start, recognized.spans[0].end), content);
   assert.equal(applyMoneyRecallVeto(input).evidenceGate.supported, true);
-  assert.equal(applyMoneyVeto(input).evidenceGate.supported, true);
+  assert.equal(applyMoneyVeto(input).evidenceGate.supported, false);
+  assert.equal(applyMoneyVeto(input).gap.rule, 'span_mismatch');
 });
 
 for (const content of [charge, `${charge} The invoice is provisional.`]) test('B01/B02 invariants: guards preserve rejected verdicts and never mutate input', () => {
@@ -372,8 +379,9 @@ for (const content of [charge, `${charge} The invoice is provisional.`]) test('B
     const control = recallInput(content);
     assert.ok(moneyRecordQualification(control).evidence.length, 'matching qualification decision reached');
     const approved = guard(control);
-    assert.equal(approved.evidenceGate.supported, true);
-    assert.equal(approved.answer, control.answer);
+    const monthRefused = guard === applyMoneyVeto && content !== charge;
+    assert.equal(approved.evidenceGate.supported, !monthRefused);
+    assert.equal(approved.answer, monthRefused ? null : control.answer);
     const input = { ...control,
       evidenceGate: { supported: false, complete: false, evidence: [], reason: 'fixture rejection' } };
     const saved = structuredClone(input);
@@ -420,17 +428,19 @@ for (const [q, content] of [
   ['Did Payer North pay for October?', 'Payer North did not pay for October.'],
   ['Did Payer North pay on card ending 4242?', 'Payer North did not pay on card ending 4242.'],
   ['Did Payer North pay on 2026-10-09?', 'Payer North did not pay on 2026-10-09.'],
-]) test('B01 payment control: explicitly requested payment has its own direct negation', async t => {
+]) test('B01 payment control: even an exact same-payment leading negative refuses', async t => {
   const answer = quoted(content, 1, '2026-10-10', true);
   const r = await run(t, { q, records: [record(content)], draft: answer });
-  accepted(r, answer);
+  refused(r);
 });
 
 test('B02 boundary: an excerpt cannot supply another account or payer month', () => {
   const content = `${charge} The invoice is provisional.`;
   const control = recallInput(content);
   assert.deepEqual(moneyRecordQualification(control).evidence, [1]);
-  assert.equal(applyMoneyVeto(control).answer, control.answer);
+  assert.equal(applyMoneyVeto(control).gap.rule, 'span_mismatch');
+  const intact = recallInput(charge);
+  assert.equal(applyMoneyVeto(intact).answer, intact.answer);
   for (const [q, text] of [
     ['Which months for card ending 4242?',
       'Card ending 4242 statement months: October. Card ending 4343 statement months: September.'],
@@ -462,10 +472,14 @@ test('B02 boundary: omitted source text and forged quotation offsets still refus
 });
 
 test('B02 boundary: exact account labels cannot lose punctuation in a whole quotation', () => {
-  const input = { ...recallInput('Account `Reserve-one` statement months: October. The invoice is provisional.'),
+  const content = 'Account `Reserve-one` statement months: October.';
+  const input = { ...recallInput(content),
     question: 'Which months for account `Reserve-one`?' };
   assert.deepEqual(moneyRecordQualification(input).evidence, [1]);
   assert.equal(applyMoneyVeto(input).answer, input.answer);
+  const multiple = { ...recallInput(`${content} The invoice is provisional.`), question: input.question };
+  assert.deepEqual(moneyRecordQualification(multiple).evidence, [1]);
+  assert.equal(applyMoneyVeto(multiple).gap.rule, 'span_mismatch');
   const probe = { ...input, question: 'Which months for account `Reserve one`?' };
   assert.equal(probe.evidenceGate.supported, true, 'exact quoted excerpt reaches the final veto');
   assert.equal(applyMoneyVeto(probe).gap.rule, 'span_mismatch');
@@ -483,3 +497,213 @@ for (const content of [unpaid, `${charge} The invoice is provisional.`]) {
     refused(r, /fixture rejection/);
   });
 }
+
+// FIX-0414-R4: port the confirmed polarity, payer-binding and cut-window
+// probes through real retrieval and verification. All records are synthetic.
+const wired = 'Payer North wired 276.40 on 2026-10-09. Payer South did not pay.';
+for (const q of ['Did Payer North pay?', 'Has Payer North paid?']) {
+  test(`R4 topic: wrong-payer negative refuses for ${q}`, async t => {
+    const r = await run(t, { q, records: [record(wired)], draft: quoted(wired, 1, '2026-10-10', true) });
+    assert.equal(r.drafts, 1);
+    refused(r);
+  });
+  test(`R4 topic control: positive dated quotation survives for ${q}`, async t => {
+    const r = await run(t, { q, records: [record(wired)], draft: quoted(wired) });
+    accepted(r, quoted(wired));
+  });
+}
+for (const currency of ['', 'USD ']) {
+  for (const wrong of [false, true]) test(`R4 bare pay: ${currency ? 'currency source' : 'bare source'}, ${wrong ? 'wrong' : 'correct'} figure`, async t => {
+    const content = `Payer North wired ${currency}276.40 on 2026-10-09.`;
+    const answer = `Payer North wired ${wrong ? '267.40' : '276.40'} on 2026-10-09 [1].`;
+    const r = await run(t, { q: 'How much did Payer North pay?', records: [record(content)], draft: answer });
+    assert.equal(r.drafts, 1);
+    if (wrong) refused(r, /span/);
+    else accepted(r, answer);
+  });
+}
+for (const verb of ['pay', 'pays', 'paying', 'refund', 'refunded', 'bounced', 'returned',
+  'wired', 'charged', 'owed', 'owes', 'outstanding', 'scheduled to pay', 'no balance']) {
+  test(`R4 topic vocabulary: ${verb} reaches the money guard`, () => {
+    const input = { ...recallInput('Reference 120.'), question: `What ${verb}?`, answer: 'Reference 121 [1].' };
+    // The real guard receives an affirmative verdict and an actual cited span.
+    assert.equal(input.evidenceGate.supported, true);
+    assert.deepEqual(input.evidenceGate.evidence, [input.docs[0].n]);
+    assert.equal(isMoneyAnswer(input.question, input.answer), true);
+    const result = applyMoneyVeto(input);
+    assert.equal(result.gap?.rule, 'span_mismatch');
+    assert.equal(result.evidenceGate.supported, false);
+    const control = { ...input, answer: 'Reference 120 [1].' };
+    assert.equal(applyMoneyVeto(control).answer, control.answer);
+    assert.equal(applyMoneyVeto(control).evidenceGate.supported, true);
+  });
+}
+
+const openInvoice = 'Payer North invoice A-12 for USD 276.40 remains unpaid.';
+const openQuestion = 'Has Payer North paid invoice A-12?';
+const marchCharge = 'Payer North charged USD 276.40 for March on card ending 7853.';
+for (const [label, q, content, bad, good] of [
+  ['unknown but absence', openQuestion, openInvoice,
+    'Current status is unknown but nothing is owed by Payer North [1].',
+    'Current status is unknown but Payer North invoice A-12 for USD 276.40 remains unpaid [1].'],
+  ['unconfirmed colon absence', openQuestion, openInvoice,
+    'Unconfirmed beyond this record: nothing is owed by Payer North [1].',
+    'Unconfirmed beyond this record: Payer North invoice A-12 for USD 276.40 remains unpaid [1].'],
+  ['not confirmed semicolon absence', openQuestion, openInvoice,
+    'Not confirmed elsewhere; Payer North has no unpaid invoices [1].',
+    'Not confirmed elsewhere; Payer North invoice A-12 for USD 276.40 remains unpaid [1].'],
+  ['refund without comma', question, marchCharge,
+    'The documents do not confirm a refund but Payer North was refunded USD 267.40 [1].',
+    'The documents do not confirm a refund but Payer North charged USD 276.40 for March on card ending 7853 [1].'],
+  ['refund with comma', question, marchCharge,
+    'The documents do not confirm a refund, but Payer North was refunded USD 267.40 [1].',
+    'Status unknown: Payer North charged USD 276.40 for March on card ending 7853 [1].'],
+  ['refund month and mask', question, marchCharge,
+    'Status unknown: Payer North was refunded USD 267.40 for April on card ending 9999 [1].',
+    'Status unknown: Payer North charged USD 276.40 for March on card ending 7853 [1].'],
+]) {
+  test(`R4 hedge: ${label} refuses`, async t => {
+    refused(await run(t, { q, records: [record(content)], draft: bad }));
+  });
+  test(`R4 hedge control: ${label} retains the exact figure`, async t => {
+    const r = await run(t, { q, records: [record(content)], draft: good });
+    accepted(r, good);
+    assert.equal(r.body.evidence_gate.complete, false);
+  });
+}
+for (const first of ['', 'No payments are outstanding [1].']) {
+  test(`R4 hedge ${first ? 'repair' : 'retry'} refuses a later absence assertion`, async t => {
+    const r = await run(t, { q: openQuestion, records: [record(openInvoice)], draft: first,
+      repaired: 'Current status is unknown but nothing is owed by Payer North [1].' });
+    assert.equal(r.drafts, 2);
+    refused(r);
+  });
+  test(`R4 hedge ${first ? 'repair' : 'retry'} control retains positive dated history`, async t => {
+    const answer = quoted(openInvoice);
+    const r = await run(t, { q: openQuestion, records: [record(openInvoice)], draft: first, repaired: answer });
+    assert.equal(r.drafts, 2);
+    accepted(r, answer);
+  });
+}
+for (const answer of [
+  'Payer North owes nothing [1].', 'Nothing [1].', 'Nothing is owed by Payer North [1].',
+  'Payer North has no balance [1].', 'Payer North paid in full [1].', 'Payer North is settled [1].',
+  'Nope [1].', 'Not any [1].', 'Payer North has paid all invoices [1].',
+  'Payer North does not owe anything [1].',
+]) test(`R4 absence: ${answer} reaches coverage refusal`, async t => {
+  const r = await run(t, { q: 'Are any Payer North invoices unpaid?', records: [record(openInvoice)], draft: answer });
+  refused(r, /ledger|whole window/);
+});
+test('R4 absence control: cited unpaid balance remains supported', async t => {
+  const answer = `${openInvoice} [1].`;
+  accepted(await run(t, { q: openQuestion, records: [record(openInvoice)], draft: answer }), answer);
+});
+
+for (const [label, q, content] of [
+  ['pronoun', 'She paid, right?', 'She did not pay.'],
+  ['possessive pronoun', 'When is my next subscription payment for her?', 'Her subscription is cancelled.'],
+  ['role noun', 'Tenant paid, right?', 'Tenant invoice remains unpaid.'],
+  ['existential', 'Someone paid, right?', 'Someone did not pay.'],
+  ['partial quantifier', 'Some paid, right?', 'Some did not pay.'],
+  ['number word', 'Two paid, right?', 'Two did not pay.'],
+  ['plural quantifier', 'Several paid, right?', 'Several did not pay.'],
+  ['invoice footnote', 'Did Payer North pay invoice 171?', 'Payer North did not pay invoice 17¹.'],
+  ['amount footnote', 'Did Payer North pay USD 1202?', 'Payer North did not pay USD 120².'],
+  ['same invoice control', 'Did Payer North pay invoice 171?', 'Payer North did not pay invoice 171.'],
+  ['different invoice control', 'Did Payer North pay invoice 171?', 'Payer North did not pay invoice 17.'],
+  ['different amount control', 'Did Payer North pay USD 1202?', 'Payer North did not pay USD 120.'],
+  ['negative quantifier control', 'Nobody paid, right?', 'Nobody did not pay.'],
+]) {
+  for (const repair of [false, true]) test(`R4 leading negative: ${label}, ${repair ? 'repair' : 'ordinary'}`, async t => {
+    const answer = quoted(content, 1, '2026-10-10', true);
+    const r = await run(t, { q, records: [record(content)],
+      draft: repair ? 'No payment was received [1].' : answer, repaired: answer });
+    assert.equal(r.drafts, repair ? 2 : 1);
+    refused(r);
+  });
+}
+for (const subject of ['Payer North', 'Someone', 'Some', 'Two', 'Several']) {
+  test(`R4 leading-negative control: positive quotation for ${subject} keeps offsets`, async t => {
+    const content = `${subject} did not pay.`;
+    const answer = quoted(content);
+    const r = await run(t, { q: `${subject} paid, right?`, records: [record(content)], draft: answer });
+    accepted(r, answer);
+    const span = r.body.evidence_gate.quoted_spans[0];
+    const snippet = r.body.results[span.n - 1].snippet.replace(/\s+/g, ' ').slice(0, 900);
+    assert.equal(snippet.slice(span.start, span.end), content);
+  });
+}
+
+const visibleExcerpt = prompt => (/\n\[1\] \([^\n]*\n([^\n]*)/.exec(prompt)?.[1] ?? '').replace(/^\[[^\]\r\n]*\]\s*/, '');
+const draftVisible = ({ prompt }) => {
+  const text = visibleExcerpt(prompt);
+  assert.ok(text, 'the model received a nonempty numbered excerpt');
+  return quoted(text);
+};
+const windowQuestion = 'What did Payer North charge for April?';
+const neutralTail = ' The issuer keeps one receipt per line of the shared ledger. Each receipt for Payer North carries its own reference code. Receipts are kept on file for seven years under the issuer retention rules. Reference codes for Payer North are printed on every receipt.';
+function windowed(prefix) {
+  const lead = ' Payer North charged USD 50.00 on the shared card as one business expense with receipt reference ';
+  const mid = `${lead}${'Q'.repeat(200 - lead.length - ' for '.length)} for April.`;
+  assert.equal(mid.indexOf('April'), 200);
+  return `${prefix}${mid}${neutralTail}`;
+}
+for (const [label, prefix, dropped] of [
+  ['payer correction', 'Shared ledger for Payer North. This line was keyed under the wrong payer; the real payer is Payer South. As keyed:', /real payer is Payer South/],
+  ['negation', 'Shared ledger for Payer North. Struck by the issuer as a false entry that never posted:', /false entry that never posted/],
+]) test(`R4 cut window: ${label} dropped before the April claim refuses`, async t => {
+  const r = await run(t, { q: windowQuestion, records: [record(windowed(prefix))], draft: draftVisible });
+  assert.equal(r.chunks.length, 1);
+  assert.match(r.chunks[0], dropped, 'the stored record contains the qualifier');
+  const seen = visibleExcerpt(r.prompts[0].prompt);
+  assert.ok(seen.startsWith('…Payer North charged USD 50.00'));
+  assert.doesNotMatch(seen, dropped, 'actual retrieval cut the qualifier');
+  assert.ok(r.body.evidence_gate.quoted_spans.length, 'exact displayed quote recognition was reached');
+  assert.equal(r.drafts, 1);
+  refused(r, /span/);
+});
+test('R4 cut-window control: intact single-sentence April quotation survives', async t => {
+  const content = 'Payer North charged USD 50.00 for April.';
+  const r = await run(t, { q: windowQuestion, records: [record(content)], draft: draftVisible });
+  assert.equal(visibleExcerpt(r.prompts[0].prompt), content);
+  accepted(r, quoted(content));
+});
+test('R4 cut-window safe over-refusal: an unqualified multi-sentence window also refuses', async t => {
+  const prefix = 'Shared ledger for Payer North, issuer copy. The issuer posted the following line exactly as entered:';
+  const r = await run(t, { q: windowQuestion, records: [record(windowed(prefix))], draft: draftVisible });
+  assert.ok(visibleExcerpt(r.prompts[0].prompt).startsWith('…Payer North charged USD 50.00'));
+  refused(r, /span/);
+});
+const storageHeader = '[Payment record 0] ';
+test('R4 cut window: the 400-character tail inside a figure refuses', async t => {
+  const lead = 'Shared ledger for Payer North, issuer copy. Payer North charged USD 276.40 on the shared card for April.';
+  const before = ' Payer North also listed a card fee of USD ';
+  const gap = 400 - storageHeader.length - lead.length - before.length - '276'.length;
+  const filler = ` Ledger reference ${'Q'.repeat(gap - ' Ledger reference '.length)}`;
+  const content = `${lead}${filler}${before}276.40 on the shared card ledger.${neutralTail}${neutralTail}`;
+  assert.equal(`${storageHeader}${content}`.indexOf('276.40 on the shared card ledger') + 3, 400);
+  const r = await run(t, { q: windowQuestion, records: [record(content)], draft: draftVisible });
+  assert.ok(r.chunks[0].includes('card fee of USD 276.40 on the shared card ledger.'));
+  assert.match(visibleExcerpt(r.prompts[0].prompt), /card fee of USD 27…$/);
+  refused(r, /span/);
+});
+test('R4 citation cut: 900 characters inside a figure refuses during keyword outage', async t => {
+  const line = 'Payer North charged USD 12.00 for March. ';
+  const keep = 'Payer North charged USD 27';
+  let content = '';
+  while (storageHeader.length + content.length + line.length + keep.length <= 900) content += line;
+  const gap = 900 - storageHeader.length - content.length - keep.length;
+  content += `Ref ${'Q'.repeat(gap - 'Ref  '.length)} Payer North charged USD 276.40 for March.`;
+  assert.equal(`${storageHeader}${content}`.slice(0, 900).slice(-keep.length), keep);
+  const r = await run(t, { q: 'What did Payer North charge for March?', records: [record(content)], draft: draftVisible, ftsFails: true });
+  assert.ok(r.chunks[0].includes('USD 276.40 for March.'));
+  assert.ok(visibleExcerpt(r.prompts[0].prompt).endsWith(keep));
+  assert.equal(r.drafts, 1);
+  refused(r, /span/);
+});
+test('R4 citation-cut control: intact single-sentence quote survives keyword outage', async t => {
+  const content = 'Payer North charged USD 276.40 for March.';
+  const r = await run(t, { q: 'What did Payer North charge for March?', records: [record(content)], draft: draftVisible, ftsFails: true });
+  assert.equal(visibleExcerpt(r.prompts[0].prompt), content);
+  accepted(r, quoted(content));
+});
