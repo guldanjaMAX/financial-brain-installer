@@ -88,7 +88,7 @@ const followingChangelogControl = [
 ].join("\n");
 
 assert.match(version, /^\d+\.\d+\.\d+$/, "package version must be a stable semantic version");
-assert.equal(version, "0.4.13", "the integrated candidate must use its own release identity");
+assert.equal(version, "0.4.14", "the integrated candidate must use its own release identity");
 assert.equal(packageLock.version, version, "package-lock top-level version drifted");
 assert.equal(packageLock.packages?.[""]?.version, version, "package-lock root package version drifted");
 assert.equal(manifestTemplate.brain?.version, version, "manifest template version drifted");
