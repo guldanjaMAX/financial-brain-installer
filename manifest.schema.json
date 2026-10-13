@@ -162,11 +162,19 @@
                 "required": [
                   "root_folder_ids"
                 ],
-                "properties": {
-                  "root_folder_ids": {
-                    "minItems": 1
+                "anyOf": [
+                  {
+                    "properties": {
+                      "root_folder_ids": { "minItems": 1 }
+                    }
+                  },
+                  {
+                    "required": ["include_my_drive_root_files"],
+                    "properties": {
+                      "include_my_drive_root_files": { "const": true }
+                    }
                   }
-                }
+                ]
               }
             }
           ],
@@ -177,15 +185,21 @@
             },
             "root_folder_ids": {
               "type": "array",
-              "description": "Exact reviewed folder ids that bound Drive ingestion. Only these folders and their descendants are traversed; shortcuts are not followed outside them.",
+              "description": "Exact reviewed folder ids that authorize recursive Drive ingestion. When enabled, may be empty only when include_my_drive_root_files is true. Shortcuts are never followed.",
               "items": {
                 "type": "string",
                 "minLength": 1
               },
               "uniqueItems": true
             },
+            "include_my_drive_root_files": {
+              "type": "boolean",
+              "default": false,
+              "description": "Also include files directly in the owner's My Drive root, with the same exclusions and content limits. Child folders are not traversed by this option; recursive traversal is authorized only by root_folder_ids."
+            },
             "exclude_paths": {
               "type": "array",
+              "description": "Case-insensitive prefixes of resolved paths, matched at slash segment boundaries, including the reviewed root folder name. Example: Reviewed Root/Design excludes that folder and descendants, but not Reviewed Root/Design Notes. For a loose My Drive file use its filename. These rules prevent content reads, not folder metadata traversal.",
               "items": {
                 "type": "string",
                 "minLength": 1

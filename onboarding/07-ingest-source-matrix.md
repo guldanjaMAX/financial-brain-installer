@@ -71,6 +71,16 @@ in ADR 003; they are not claimed as current connector behavior.
 
 Connected with **read-only** access. It can look at documents. It cannot change, move, or delete anything, and that is enforced by the permission itself rather than by good behavior.
 
+**Which folders:** `corpora.google_drive.root_folder_ids` selects folder trees.
+In 0.4.14, `include_my_drive_root_files: true` also selects files sitting directly
+in My Drive without walking its folders. Use an empty root list to select only
+those loose files. Existing exclusions and content limits still apply. To
+exclude `Design` inside a root named `Reviewed Root`, use
+`exclude_paths: ["Reviewed Root/Design"]`. This excludes its contents, but keeps
+the sibling `Reviewed Root/Design Notes`. Loose-file path exclusions use the
+filename. Review a preview after changing scope; removal from the index still
+requires the separate exact approval.
+
 **What it reads:**
 
 | Type | How |

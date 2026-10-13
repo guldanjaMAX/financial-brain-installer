@@ -12,6 +12,12 @@ exact sealed package.
 
 - Ask answers more money questions from your records, quoting the exact figure
   and date; it still refuses when the records do not say.
+- Google Drive can include files sitting directly in My Drive without walking
+  its folders. Set `corpora.google_drive.include_my_drive_root_files` to `true`;
+  folder trees still come from `root_folder_ids`. The usual exclusions and
+  content limits apply. Check your preview after changing this option. Turning
+  it off puts previously indexed loose files outside the selected scope unless
+  My Drive itself is a listed recursive root; removal still needs exact approval.
 - Questions about next appointments now flag past dates, elapsed start times
   today and an earlier upcoming event found for the same subject. Procedural
   next steps do not require an event date. All-day events remain today through
