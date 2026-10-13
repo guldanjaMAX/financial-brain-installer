@@ -964,7 +964,9 @@ function macAdapter({ home, uid, spawn }) {
     }
     const disabledState = launchctl(["print-disabled", `gui/${uid}`]);
     if (disabledState?.status !== 0) throw new Error("the macOS daily refresh disabled state could not be inspected");
-    const disabled = new RegExp(`"?com\\.financialbrain\\.daily\\.${identity.id}"?\\s*=>\\s*true`, "u").test(String(disabledState.stdout || ""));
+    // macOS through 26 prints "=> true" for a disabled service; macOS 27
+    // prints "=> disabled" (and "=> enabled" for an enabled one).
+    const disabled = new RegExp(`"?com\\.financialbrain\\.daily\\.${identity.id}"?\\s*=>\\s*(?:true|disabled)\\b`, "u").test(String(disabledState.stdout || ""));
     const definition = definitionFromNative(identity, serialized, "darwin");
     return {
       exists: true,

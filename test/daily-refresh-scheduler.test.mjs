@@ -900,6 +900,43 @@ test("macOS pause persists disabled state across a simulated new login", () => {
   assert.equal(afterLogin.read(basePlan.identity).enabled, true, "verified restore is the green control");
 });
 
+test("macOS 27 disabled wording pauses and restores daily refresh", () => {
+  const home = mkdtempSync(join(tmpdir(), "daily-native-mac27-"));
+  const definition = buildDailyRefreshDefinition(basePlan, {
+    platform: "darwin", nodePath: "/runtime/node", brainPath: "/runtime/brain.mjs",
+    runnerPath: "/runtime/operations/daily-refresh-run.mjs",
+  });
+  const plist = join(home, "Library", "LaunchAgents", `com.financialbrain.daily.${basePlan.identity.id}.plist`);
+  mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
+  writeFileSync(plist, definition.serialized);
+  let loaded = true;
+  let disabled = false;
+  const spawn = (_command, args) => {
+    if (args[0] === "print") return { status: loaded ? 0 : 113, stderr: loaded ? "" : "Could not find service" };
+    if (args[0] === "print-disabled") {
+      // Exact macOS 27 shape: tab-indented, other services listed, words instead of booleans.
+      return { status: 0, stdout: [
+        "disabled services = {",
+        "\t\t\"com.example.other\" => disabled",
+        `\t\t\"com.financialbrain.daily.${basePlan.identity.id}\" => ${disabled ? "disabled" : "enabled"}`,
+        "\t}",
+      ].join("\n") };
+    }
+    if (args[0] === "bootout") loaded = false;
+    if (args[0] === "disable") disabled = true;
+    if (args[0] === "enable") disabled = false;
+    if (args[0] === "bootstrap") loaded = true;
+    return { status: 0 };
+  };
+  const adapter = createNativeDailyRefreshAdapter({ platform: "darwin", home, uid: 501, spawn });
+  assert.equal(adapter.read(basePlan.identity).enabled, true, "an explicit enabled entry reads as enabled");
+  const snapshot = pauseDailyRefreshSchedule(basePlan, { platform: "darwin", home, uid: 501, spawn, adapter });
+  assert.equal(snapshot.enabled, true);
+  assert.equal(adapter.read(basePlan.identity).enabled, false, "a disabled entry reads as paused");
+  adapter.setEnabled(basePlan.identity, true);
+  assert.equal(adapter.read(basePlan.identity).enabled, true, "restore is the green control");
+});
+
 test("update recovery state is durable, private, and readable after restart", () => {
   const home = mkdtempSync(join(tmpdir(), "daily-update-transaction-"));
   const otherHome = join(home, "other-home");
