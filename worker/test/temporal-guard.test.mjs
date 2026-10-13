@@ -277,7 +277,8 @@ test("temporal: another stopped item in the answer cannot hide an obsolete item"
 });
 
 async function mutate(url, from, to) {
-  const source = readFileSync(url, "utf8");
+  // A Windows checkout may carry CRLF line endings; mutation targets use LF.
+  const source = readFileSync(url, "utf8").replace(/\r\n/g, "\n");
   assert.equal(source.split(from).length - 1, 1, "mutation reaches exactly one product decision");
   const changed = source.replace(from, to).replace(/from (["'])(\.\.?\/[^"'\n]+)\1/g,
     (_, quote, path) => `from ${JSON.stringify(new URL(path, url).href)}`);
