@@ -6,7 +6,7 @@
  */
 import { answerSentences } from "./answer-sentences.js";
 import { isAgentDerivedArtifact } from "./evidence-lineage.js";
-import { parseCanonicalEvidenceDate, queryTimeWindow, reliableDocumentTime } from "./query-intent.js";
+import { parseCanonicalEvidenceDate, queryEntityAnchors, queryTimeWindow, reliableDocumentTime } from "./query-intent.js";
 
 const MONEY_TOPIC = /\b(?:money|financial|bank|cards?|accounts?|statements?|charges?|charged|payments?|paid|unpaid|invoices?|bills?|owe[ds]?|due|refunds?|debits?|credits?|transactions?|spend|spent|expenses?|income|revenue|fees?|costs?|prices?|tax|salary|wages?|receipts?)\b/i;
 const CURRENCY = /[$€£¥]|\b(?:USD|EUR|GBP|CAD|AUD|JPY|dollars?|euros?|pounds?|cents?)\b/i;
@@ -205,10 +205,19 @@ function inSpan(sentence, question, doc, checkMonths = true, eventDateRequired =
 
 function boundMonths(doc, claim, question) {
   const ids = accountIds(`${question}\n${claim}`);
-  const labels = quotedValues(`${question}\n${claim}`);
+  // The exact dated excerpt is source prose, not an account/entity label that
+  // must fit inside each clause. Recognize it locally by equality and citation,
+  // never by caller-supplied offsets or a quotation substring. Question labels,
+  // subject anchors and account IDs still bind each supporting month clause.
+  const quote = /^(?:As|No, as) of \d{4}-\d{2}-\d{2}, the record states "([^"\n]+)" \[(\d+)\]\.$/.exec(claim);
+  const wholeExcerpt = quote && quote[1] === exactExcerpt(doc) && Number(quote[2]) === doc.n;
+  const labels = [...quotedValues(question), ...(wholeExcerpt ? [] : quotedValues(claim))];
+  const anchors = wholeExcerpt ? queryEntityAnchors(question).map(canonical) : [];
   return moneyClauses(exactExcerpt(doc)).filter(span => {
     const present = new Set(accountIds(span));
-    return ids.every(id => present.has(id)) && labels.every(label => canonical(span).includes(label));
+    const words = ` ${canonical(span).replace(/[^\p{L}\p{N}]+/gu, ' ')} `;
+    return ids.every(id => present.has(id)) && labels.every(label => canonical(span).includes(label)) &&
+      anchors.every(anchor => words.includes(` ${anchor.replace(/[^\p{L}\p{N}]+/gu, ' ')} `));
   }).flatMap(monthsIn);
 }
 
