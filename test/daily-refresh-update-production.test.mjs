@@ -1332,7 +1332,7 @@ for (const recovery of ["restore", "retire"]) {
 for (const recovery of ["restore", "retire"]) for (const transport of ["text", "console"]) {
   test(`FIX-2 bridge reads saved v1 receipts and captures only v2 (${recovery}, ${transport})`, () => {
     for (const changed of [false, true]) {
-      const native = bridgeNativeHarness({ tasks: [{}], explicitEnabled: true });
+      const native = bridgeNativeHarness({ tasks: [{ extraSettings: transport === "console" ? "<Label>é</Label>" : "" }], explicitEnabled: true });
       let originalPipe;
       if (transport === "console") {
         const spawn = native.options.spawn;
@@ -1389,3 +1389,46 @@ test("FIX-2 bridge omitted default does not admit malformed enabled fields", () 
     assert.equal(native.mutations().length, 0);
   }
 });
+
+
+for (const recovery of ["restore", "retire"]) for (const timing of ["during-com", "before-mutation"]) {
+  test(`FIX-3 v1 bridge ${recovery} binds ${timing} to the same observation`, () => {
+    for (const changed of [false, true]) {
+      const native = bridgeNativeHarness({ tasks: [{ extraSettings: "<Label>é</Label>" }], explicitEnabled: true });
+      const baseSpawn = native.options.spawn;
+      let racing = false; let decisionReads = 0; let injected = false;
+      const mutate = () => {
+        injected = true;
+        if (changed) native.rows.get(BRIDGE_NAME).extraSettings += "<Hidden>true</Hidden><Priority>4</Priority>";
+      };
+      native.options.spawn = (command, args, child) => {
+        if (command.endsWith("powershell.exe")) {
+          native.calls.push({ command, args });
+          if (racing && timing === "during-com" && !injected) mutate();
+          const result = baseSpawn(String.raw`C:\Windows\System32\schtasks.exe`, ["/Query", "/TN", BRIDGE_NAME, "/XML"], child);
+          return { status: 0, stdout: Buffer.from(`\ufeff${result.stdout}`, "utf16le") };
+        }
+        if (racing && args.includes("/XML") && ++decisionReads === 3 && timing === "before-mutation") mutate();
+        const result = baseSpawn(command, args, child);
+        return args.includes("/XML") && result.status === 0 ? { ...result, stdout: Buffer.from(result.stdout, "latin1") } : result;
+      };
+      const guard = boundaryGuard(native.options);
+      const inventory = guard.inventory();
+      const receipts = guard.capture(inventory);
+      const entry = inventory.entries[0];
+      const fields = ["bridge-definition-v1", receipts[0].binding_hash, BRIDGE_NAME, BRIDGE_SID, entry.legacy_definition];
+      receipts[0].definition_hash = `sha256:${boundaryHash("sha256").update(fields.map(value => `${Buffer.byteLength(value, "utf8")}:${value},`).join(""), "utf8").digest("hex")}`;
+      guard.pause(receipts, () => {});
+      assert.equal(receipts[0].state, "paused");
+      const before = native.mutations().length;
+      racing = true;
+      const resume = () => guard[recovery](receipts, () => {});
+      if (changed) assert.throws(resume, /Task Scheduler/);
+      else resume();
+      assert.equal(injected, true, "both arms reached the edit injection point");
+      assert.equal(native.mutations().length - before, changed ? 0 : 1);
+      if (changed) assert.equal(native.rows.get(BRIDGE_NAME).enabled, false, "edited task remains paused and present");
+      else assert.equal(receipts[0].state, recovery === "restore" ? "restored" : "retired");
+    }
+  });
+}

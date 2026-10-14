@@ -2,10 +2,11 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { win32 } from "node:path";
 import { parseWindowsTaskInventory } from "./daily-refresh-scheduler.mjs";
 
-import { decodeWindowsTaskXml } from "./windows-task-contract.mjs";
+import { decodeWindowsTaskXml, withWindowsTaskMutationLock } from "./windows-task-contract.mjs";
 
 const BRIDGE_NAME = /^\\Financial Brain\\daily-refresh-[0-9a-f]{16}$/u;
 const SID = /^S-1-\d+(?:-\d+)+$/u;
@@ -117,7 +118,7 @@ function observe(taskName, serialized) {
   };
 }
 
-export function createNativeWindowsBridgeAdapter({ spawn = spawnSync, environment = process.env } = {}) {
+export function createNativeWindowsBridgeAdapter({ spawn = spawnSync, environment = process.env, home = homedir() } = {}) {
   const systemRoot = environment.SystemRoot || environment.SYSTEMROOT || environment.WINDIR;
   if (!win32.isAbsolute(String(systemRoot || ""))) throw repair();
   const env = { SystemRoot: systemRoot, ...(environment.WINDIR ? { WINDIR: environment.WINDIR } : {}) };
@@ -145,7 +146,15 @@ export function createNativeWindowsBridgeAdapter({ spawn = spawnSync, environmen
       throw repair();
     }
     try {
-      const entry = observe(name, decodeWindowsTaskXml(result.stdout, { spawn, systemRoot, environment: env, taskName: name }));
+      let usedUnicode = false;
+      const unicodeSpawn = (...args) => { usedUnicode = true; return spawn(...args); };
+      const entry = observe(name, decodeWindowsTaskXml(result.stdout, { spawn: unicodeSpawn, systemRoot, environment: env, taskName: name }));
+      // A legacy receipt hashes console bytes. Bracket the separate COM read
+      // so its action/principal cannot borrow authorization from an older task.
+      if (usedUnicode) {
+        const after = tasks(["/Query", "/TN", name, "/XML"]);
+        if (after?.status !== 0 || !Buffer.isBuffer(after.stdout) || !result.stdout.equals(after.stdout)) throw repair();
+      }
       // The Unicode export may format XML differently from the original
       // console pipe. Keep the old byte decoder ONLY for comparing saved v1
       // hashes, never for principal/action decisions or replaying a definition.
@@ -157,6 +166,16 @@ export function createNativeWindowsBridgeAdapter({ spawn = spawnSync, environmen
       return entry;
     } catch { throw repair(); }
   };
+  const mutate = (name, expected, args) => withWindowsTaskMutationLock(home,
+    { id: `bridge-${digest(name)}` }, () => {
+      if (!expected) throw repair();
+      const current = read(name);
+      if (!current || ["task_name", "principal", "enabled", "definition", "legacy_definition", "action"]
+        .some(key => current[key] !== expected[key])) throw repair();
+      // Task Scheduler has no atomic compare-and-change/delete. This fresh
+      // comparison runs under our lock immediately before the native action.
+      if (tasks(args)?.status !== 0) throw repair();
+    });
   return {
     currentSid,
     inventory() {
@@ -174,11 +193,11 @@ export function createNativeWindowsBridgeAdapter({ spawn = spawnSync, environmen
       return { entries, ignored };
     },
     read,
-    setEnabled(name, enabled) {
-      if (tasks(["/Change", "/TN", name, enabled ? "/ENABLE" : "/DISABLE"])?.status !== 0) throw repair();
+    setEnabled(name, enabled, { expected } = {}) {
+      return mutate(name, expected, ["/Change", "/TN", name, enabled ? "/ENABLE" : "/DISABLE"]);
     },
-    remove(name) {
-      if (tasks(["/Delete", "/F", "/TN", name])?.status !== 0) throw repair();
+    remove(name, { expected } = {}) {
+      return mutate(name, expected, ["/Delete", "/F", "/TN", name]);
     },
   };
 }
@@ -276,8 +295,8 @@ export function createWindowsUpdateBridgeGuard(options = {}) {
         if (current.enabled) {
           entry.state = "disabling";
           persist(); // Write intent before even an ambiguously successful native call.
-          checked(entry);
-          adapter.setEnabled(entry.task_name, false);
+          const expected = checked(entry);
+          adapter.setEnabled(entry.task_name, false, { expected });
         }
         if (checked(entry).enabled !== false) throw repair();
         entry.state = "paused";
@@ -289,7 +308,8 @@ export function createWindowsUpdateBridgeGuard(options = {}) {
       for (const entry of receipts) {
         if (!entry.prior_enabled || !["disabling", "paused"].includes(entry.state)) continue;
         try {
-          if (checked(entry).enabled === false) adapter.setEnabled(entry.task_name, true);
+          const expected = checked(entry);
+          if (expected.enabled === false) adapter.setEnabled(entry.task_name, true, { expected });
           if (checked(entry).enabled !== true) throw repair();
           entry.state = "restored";
           persist();
@@ -305,8 +325,9 @@ export function createWindowsUpdateBridgeGuard(options = {}) {
           if (current.enabled !== false) throw repair();
           entry.state = "retiring";
           persist();
-          if (checked(entry).enabled !== false) throw repair();
-          adapter.remove(entry.task_name);
+          const expected = checked(entry);
+          if (expected.enabled !== false) throw repair();
+          adapter.remove(entry.task_name, { expected });
           if (checked(entry, { absent: true }) !== null) throw repair();
         }
         entry.state = "retired";

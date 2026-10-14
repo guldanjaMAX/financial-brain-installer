@@ -1309,13 +1309,17 @@ descriptors are refused because the product writes none. A paused task must
 still match its saved execution projection before restore can enable it,
 including the final comparison under the native mutation lock.
 
-Task XML with a Unicode byte-order mark is decoded strictly. An 8-bit schtasks
-pipe is ambiguous even when it contains only ASCII (unrepresentable characters
-can become question marks). The adapter obtains that exact registered task's
-Unicode XML through the local Task Scheduler COM API and a bounded, profile-free
-PowerShell process writing UTF-16 bytes directly. The child receives only the
-system-root environment. A failed Unicode read refuses inspection and rollback
-rather than replaying corrupted paths.
+Task XML with a Unicode byte-order mark is decoded strictly. ASCII-only
+schtasks XML uses the direct read path. Ambiguous non-ASCII 8-bit output uses
+a bounded local PowerShell COM export; restricted PowerShell reports a specific
+refusal and never verifies the task. Question-mark substitutions in an expected
+Unicode execution path fail the execution comparison. Re-registration normalizes the XML
+to exactly one UTF-16 BOM. Windows mutation locks publish process ownership
+atomically and recover a proven dead owner after interruption; live or unknown
+owners remain a refusal. Rollback compares its captured replacement readback
+before restoring or removing a task. Legacy bridge recovery brackets the COM
+export with matching console reads and compares again under the mutation lock
+immediately before acting.
 
 The definition contains paths, hashes, cadence, and the manifest locator, but
 no key or provider credential. Its Node action prefers a stable launcher on

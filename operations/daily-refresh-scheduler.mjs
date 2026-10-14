@@ -12,7 +12,7 @@ import {
   writeBrainRecoveryFence,
 } from "./brain-lifecycle-lock.mjs";
 
-import { observedWindowsContract, decodeWindowsTaskXml, windowsTaskDescription } from "./windows-task-contract.mjs";
+import { observedWindowsContract, decodeWindowsTaskXml, windowsTaskDescription, withWindowsTaskMutationLock } from "./windows-task-contract.mjs";
 export { observedWindowsContract } from "./windows-task-contract.mjs";
 
 const OWNER_MARKER = "financial-brain-daily-refresh-v1";
@@ -498,7 +498,12 @@ export function restoreDailyRefreshSchedule(snapshot, options = {}) {
   // A multi-task registration can deliberately replace this task before a
   // later step fails. Rollback may use that caller's verified replacement as
   // its comparison target, never a newly observed foreign edit.
-  if (state?.exists) requireWindowsRestoreDefinition(state, options.expectedReplacement?.definition || snapshot.definition);
+  if (state?.exists) {
+    requireWindowsRestoreDefinition(state, options.expectedReplacement?.definition || snapshot.definition);
+    if (snapshot.definition?.platform === "win32" && options.expectedReplacement && !sameObservedState(state, options.expectedReplacement)) {
+      throw concurrentScheduleEdit("the daily replacement changed before restore; nothing was enabled or replaced");
+    }
+  }
   if (!state?.exists || state.definition?.definition_hash !== snapshot.definition?.definition_hash ||
       (snapshot.definition?.platform === "win32" && !sameNativeDefinition(state.definition, snapshot.definition))) {
     adapter.install(snapshot.definition, { replaceOwned: state?.exists === true, expected: state });
@@ -520,6 +525,9 @@ export function removeDailyRefreshSchedule(plan, options = {}) {
   const state = adapter.read(plan.identity);
   requireOwned(state);
   if (!state?.exists) return Object.freeze({ removed: false, verified: true });
+  if (state.definition?.platform === "win32" && options.expectedReplacement && !sameObservedState(state, options.expectedReplacement)) {
+    throw concurrentScheduleEdit("the daily definition changed before rollback removal; nothing was removed");
+  }
   adapter.remove(plan.identity, { expected: state });
   if (adapter.read(plan.identity)?.exists) throw new Error("daily refresh removal exact readback failed");
   return Object.freeze({ removed: true, verified: true });
@@ -1130,7 +1138,10 @@ function windowsAdapter({ home, spawn, environment, taskSpec = null }) {
     let serialized;
     try {
       serialized = decodeWindowsTaskXml(result.stdout, { spawn, systemRoot, environment: childEnvironment, taskName: taskName(identity) });
-    } catch { throw new DailyRefreshInspectionError("the Windows daily refresh task XML could not be decoded losslessly"); }
+    } catch (cause) {
+      throw new DailyRefreshInspectionError(cause?.code === "WINDOWS_TASK_POWERSHELL_RESTRICTED"
+        ? cause.message : "the Windows daily refresh task XML could not be decoded losslessly");
+    }
     const definition = taskSpec?.observe ? taskSpec.observe(identity, serialized)
       : definitionFromNative(identity, serialized, "win32", { resolveUserId });
     const marker = taskSpec?.marker ? taskSpec.marker(serialized) : markerOf(windowsTaskDescription(serialized), true);
@@ -1161,12 +1172,12 @@ function windowsAdapter({ home, spawn, environment, taskSpec = null }) {
       } catch { return { known: false }; }
     },
     install(definition, { replaceOwned = false, expected = null } = {}) {
-      return withScheduleMutationLock(home, definition.identity, () => {
+      return withWindowsTaskMutationLock(home, definition.identity, () => {
         const directory = join(resolve(home), ".brain", "schedules");
         mkdirSync(directory, { recursive: true, mode: 0o700 });
         const path = join(directory, `daily-${definition.identity.id}-${process.pid}.xml`);
         try {
-          writeFileSync(path, `\ufeff${definition.serialized}`, { encoding: "utf16le", mode: 0o600, flag: "wx" });
+          writeFileSync(path, `\ufeff${definition.serialized.replace(/^\ufeff+/u, "")}`, { encoding: "utf16le", mode: 0o600, flag: "wx" });
           const current = read(definition.identity);
           if (!sameObservedState(current, expected)) throw concurrentScheduleEdit("the daily definition changed before installation; nothing was replaced");
           if (current?.exists) {
@@ -1189,7 +1200,7 @@ function windowsAdapter({ home, spawn, environment, taskSpec = null }) {
       });
     },
     setEnabled(identity, enabled, { expected } = {}) {
-      return withScheduleMutationLock(home, identity, () => {
+      return withWindowsTaskMutationLock(home, identity, () => {
         const current = read(identity);
         requireOwned(current);
         if (expected !== undefined && !sameObservedState(current, expected)) {
@@ -1208,7 +1219,7 @@ function windowsAdapter({ home, spawn, environment, taskSpec = null }) {
       });
     },
     remove(identity, { expected = null } = {}) {
-      return withScheduleMutationLock(home, identity, () => {
+      return withWindowsTaskMutationLock(home, identity, () => {
         const current = read(identity);
         requireOwned(current);
         if (!sameObservedState(current, expected)) throw new Error("the daily definition changed before removal; nothing was removed");
