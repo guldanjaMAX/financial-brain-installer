@@ -11,6 +11,7 @@ import {
   createNativeDailyRefreshAdapter,
   parseWindowsTaskInventory,
   removeDailyRefreshSchedule,
+  restoreDailyRefreshSchedule,
   statusDailyRefreshSchedule,
 } from "../operations/daily-refresh-scheduler.mjs";
 
@@ -120,6 +121,12 @@ test("real Windows registers, verifies and removes the product daily XML without
     assert.equal(status.enabled, false, "the probe cannot execute");
     assert.equal(status.verified, true, "real schtasks /Query /XML passes the production projection");
     assert.equal(status.definition_matches_plan, true);
+    // Replay the exact OS export, including a COM-produced BOM when the pipe
+    // cannot represent this accented synthetic path. Keep the task disabled.
+    const snapshot = { identity, exists: true, enabled: false, definition: status.state.definition };
+    assert.equal(removeDailyRefreshSchedule(plan, { platform: "win32", home, adapter }).removed, true);
+    assert.equal(restoreDailyRefreshSchedule(snapshot, { platform: "win32", home, adapter }).verified, true);
+    assert.equal(adapter.read(identity).enabled, false, "readback replay stays disabled");
     assert.equal(removeDailyRefreshSchedule(plan, { platform: "win32", home, adapter }).removed, true);
     assert.equal(Boolean(adapter.read(identity)?.exists), false, "the real adapter proved deletion");
   } finally {

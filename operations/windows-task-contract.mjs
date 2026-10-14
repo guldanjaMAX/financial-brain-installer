@@ -1,5 +1,7 @@
 /** Semantic Task Scheduler readback. No DTDs, loose descendant lookups or XML execution. */
-import { win32 } from "node:path";
+import { join, resolve, win32 } from "node:path";
+import { randomBytes } from "node:crypto";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 
 const NS = "http://schemas.microsoft.com/windows/2004/02/mit/task";
 const SID = /^S-1-\d+(?:-\d+)+$/u;
@@ -17,24 +19,27 @@ export function decodeWindowsTaskXml(value, { spawn, systemRoot, environment, ta
   const encoding = utf16Encoding(value);
   if (encoding) {
     new TextDecoder(encoding, { fatal: true }).decode(value);
-    // Keep the BOM for byte-bound legacy bridge receipts.
+    // Preserve receipt serialization; registration normalizes its own BOM.
     return (encoding === "utf-16be" ? Buffer.from(value).swap16() : value).toString("utf16le");
   }
   if (value.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]))) {
     new TextDecoder("utf-8", { fatal: true }).decode(value);
     return value.toString("utf8");
   }
-  // schtasks may pipe OEM/ANSI bytes, including valid-looking UTF-8 sequences
-  // or ASCII '?' substitutions. Even an ASCII pipe is not losslessness proof.
+  // ASCII bytes are code-page invariant. A lossy '?' path still cannot match
+  // the expected execution projection; do not require PowerShell for ASCII.
+  if (value.every(byte => byte < 0x80)) return value.toString("ascii");
+  // Non-ASCII OEM/ANSI bytes can also look like valid UTF-8. Never guess.
   // Read the same registered task's Unicode XML directly through Task Scheduler
   // COM instead of corrupting paths or replaying lossy XML during rollback.
   if (typeof spawn !== "function" || !win32.isAbsolute(String(systemRoot || "")) ||
       typeof taskName !== "string" || !taskName.startsWith("\\") || /[\0\r\n]/u.test(taskName)) return invalid();
   const locator = Buffer.from(taskName, "utf16le").toString("base64");
-  const script = `$ErrorActionPreference='Stop'; try { $p=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${locator}')); $s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $x=$s.GetFolder('\\').GetTask($p).Xml; $b=[Text.Encoding]::Unicode.GetPreamble()+[Text.Encoding]::Unicode.GetBytes($x); $o=[Console]::OpenStandardOutput(); $o.Write($b,0,$b.Length); $o.Flush() } catch { exit 1 }`;
+  const script = `$ErrorActionPreference='Stop'; if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { exit 73 }; try { $p=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${locator}')); $s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $x=$s.GetFolder('\\').GetTask($p).Xml; $b=[Text.Encoding]::Unicode.GetPreamble()+[Text.Encoding]::Unicode.GetBytes($x); $o=[Console]::OpenStandardOutput(); $o.Write($b,0,$b.Length); $o.Flush() } catch { exit 1 }`;
   const result = spawn(win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
-    { encoding: null, windowsHide: true, env: environment, timeout: 15000, maxBuffer: 1048576 });
+    { encoding: null, windowsHide: true, env: environment, timeout: 15000, killSignal: "SIGKILL", maxBuffer: 1048576 });
+  if (result?.status === 73) throw Object.assign(new Error("PowerShell is restricted on this PC, so daily refresh can't verify its task here"), { code: "WINDOWS_TASK_POWERSHELL_RESTRICTED" });
   if (result?.status !== 0 || !Buffer.isBuffer(result.stdout) || !utf16Encoding(result.stdout)) return invalid();
   return decodeWindowsTaskXml(result.stdout);
 }
@@ -214,5 +219,64 @@ export function observedWindowsContract(serialized, { repetition = false, resolv
     // Execution drift must not masquerade as a disabled task during update
     // pause. Read this independent state even when another field is invalid.
     return { valid: false, contract: { task_enabled: taskEnabled(serialized) }, description: windowsTaskDescription(serialized) };
+  }
+}
+
+
+/** Windows-only lock: publish owner metadata atomically, recover only a proven dead owner. */
+export function withWindowsTaskMutationLock(home, identity, task) {
+  if (!/^[a-z0-9-]{1,100}$/u.test(identity?.id || "")) throw new Error("invalid Windows task lock identity");
+  const root = join(resolve(home), ".brain", "schedule-mutations");
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  chmodSync(root, 0o700);
+  const path = join(root, `${identity.id}.lock`);
+  const token = randomBytes(16).toString("hex");
+  const owner = `owner-${process.pid}-${token}.json`;
+  const pending = join(root, `.${identity.id}-${token}.pending`);
+  const busy = () => new Error("this owned daily schedule is already being changed; no concurrent mutation was attempted");
+  // A nonempty directory is the atomic acquisition unit. Killing a process
+  // between mkdir and writing its owner can no longer publish an orphan lock.
+  mkdirSync(pending, { mode: 0o700 });
+  try {
+    writeFileSync(join(pending, owner), JSON.stringify({ pid: process.pid, token, started_at: new Date().toISOString() }), { mode: 0o600, flag: "wx" });
+    try {
+      const state = lstatSync(path);
+      if (!state.isDirectory() || state.isSymbolicLink()) throw busy();
+      const entries = readdirSync(path);
+      // Old empty locks and malformed ownership are not evidence of a dead process.
+      if (entries.length !== 1 || !/^owner-[1-9][0-9]*-[a-f0-9]{32}\.json$/u.test(entries[0])) throw busy();
+      const previousPath = join(path, entries[0]);
+      const previousState = lstatSync(previousPath);
+      if (!previousState.isFile() || previousState.isSymbolicLink() || previousState.nlink !== 1) throw busy();
+      const previous = JSON.parse(readFileSync(previousPath, "utf8"));
+      if (!Number.isSafeInteger(previous.pid) || previous.pid <= 0 ||
+          entries[0] !== `owner-${previous.pid}-${previous.token}.json` || !Number.isFinite(Date.parse(previous.started_at))) throw busy();
+      let dead = false;
+      try { process.kill(previous.pid, 0); } catch (error) { dead = error?.code === "ESRCH"; }
+      if (!dead) throw busy();
+      // Unlink only that owner's unpredictable filename. Competing reclaimers
+      // cannot delete a successor's nonempty directory or its owner record.
+      try { unlinkSync(previousPath); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+      try { rmdirSync(path); } catch (error) { if (error?.code !== "ENOENT") throw busy(); }
+    } catch (error) { if (error?.code !== "ENOENT") throw error; }
+    try { renameSync(pending, path); } catch { throw busy(); }
+  } finally {
+    try { unlinkSync(join(pending, owner)); } catch {}
+    try { rmdirSync(pending); } catch {}
+  }
+  const release = () => {
+    try { unlinkSync(join(path, owner)); } catch {}
+    try { rmdirSync(path); } catch {}
+  };
+  const signals = [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]
+    .filter(([signal]) => process.listenerCount(signal) === 0)
+    .map(([signal, code]) => [signal, () => { release(); process.exit(code); }]);
+  process.once("exit", release);
+  for (const [signal, handler] of signals) process.once(signal, handler);
+  try { return task(); }
+  finally {
+    process.removeListener("exit", release);
+    for (const [signal, handler] of signals) process.removeListener(signal, handler);
+    release();
   }
 }

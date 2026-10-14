@@ -26899,9 +26899,9 @@ export async function cmdScheduleAllConfigured(manifestPath, action, options = {
             exists: true,
             enabled: priorStatus.enabled === true,
             definition: priorStatus.state.definition,
-          }, schedulerOptions);
+          }, { ...schedulerOptions, expectedReplacement: schedule?.readback });
         } else {
-          removeDailyRefreshSchedule(plan, schedulerOptions);
+          removeDailyRefreshSchedule(plan, { ...schedulerOptions, expectedReplacement: schedule?.readback });
         }
       } catch (rollbackError) {
         schedulerRollbackError = rollbackError;

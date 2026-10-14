@@ -3,6 +3,9 @@ import { mkdtempSync, realpathSync, readFileSync, writeFileSync, rmSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { cmdDaily } from "../brain.mjs";
+import { reregisterAfterManifestChange } from "../operations/quickbooks-schedule.mjs";
+import { randomBytes } from "node:crypto";
 import {
   buildDailyRefreshDefinition, createNativeDailyRefreshAdapter, installDailyRefreshSchedule,
   statusDailyRefreshSchedule, removeDailyRefreshSchedule, pauseDailyRefreshSchedule, restoreDailyRefreshSchedule,
@@ -46,11 +49,12 @@ function windowsReadback(definition, user = SID) {
 </Task>`;
 }
 
-function harness(t, { initial = null, transform = windowsReadback, changingMetadata = false, beforeQuery = value => value, pipeEncoding = null, unicodeReadFailure = false } = {}) {
+function harness(t, { initial = null, transform = windowsReadback, changingMetadata = false, beforeQuery = value => value, pipeEncoding = null, unicodeReadFailure = false, unicodeStatus = null, strictRegistration = false } = {}) {
   const home = realpathSync.native(mkdtempSync(join(tmpdir(), "daily-readback-")));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   let native = initial;
   const calls = [];
+  const registrations = [];
   const adapter = createNativeDailyRefreshAdapter({ platform: "win32", home,
     environment: { SystemRoot: String.raw`C:\Windows` },
     spawn: (command, args, child) => {
@@ -61,6 +65,10 @@ function harness(t, { initial = null, transform = windowsReadback, changingMetad
         const script = Buffer.from(args.at(-1), "base64").toString("utf16le");
         assert.ok(script.includes("Schedule.Service") && script.includes("OpenStandardOutput"), "read requests native Unicode XML");
         assert.ok(script.includes("GetTask") && script.includes("FromBase64String"), "task locator is passed as data");
+        assert.ok(script.indexOf("LanguageMode") < script.indexOf("New-Object"), "policy check precedes restricted operations");
+        assert.match(script, /LanguageMode -ne 'FullLanguage'\) \{ exit 73 \}/u);
+        assert.equal(child.timeout, 15000, "Unicode export is bounded");
+        if (unicodeStatus !== null) return { status: unicodeStatus };
         if (unicodeReadFailure) return { status: 5 };
         return { status: 0, stdout: Buffer.from(`\ufeff${native.replace(/^\ufeff/u, "")}`, "utf16le") };
       }
@@ -77,7 +85,10 @@ function harness(t, { initial = null, transform = windowsReadback, changingMetad
       if (args[0] === "/Query") return native === null ? { status: 1 } : { status: 0, stdout: changingMetadata
         ? native.replace("<Version>1.0</Version>", `<Version>${calls.length}</Version>`) : native };
       if (args[0] === "/Create") {
-        const serialized = readFileSync(args[args.indexOf("/XML") + 1], "utf16le").replace(/^\ufeff/u, "");
+        const bytes = readFileSync(args[args.indexOf("/XML") + 1]);
+        registrations.push(bytes);
+        const serialized = bytes.toString("utf16le").replace(/^\ufeff/u, "");
+        if (strictRegistration && !serialized.startsWith("<?xml")) return { status: 1 };
         native = transform({ ...buildDailyRefreshDefinition(plan, options), serialized });
       } else if (args[0] === "/Delete") native = null;
       else if (args[0] === "/Change") native = native.replace(/<Settings>([\s\S]*?)<\/Settings>/u,
@@ -90,7 +101,7 @@ function harness(t, { initial = null, transform = windowsReadback, changingMetad
       return { status: 0, stdout: "" };
     },
   });
-  return { home, adapter, calls, get native() { return native; }, set native(value) { native = value; } };
+  return { home, adapter, calls, registrations, get native() { return native; }, set native(value) { native = value; } };
 }
 
 for (const user of [SID, "FIXTURE\\owner"]) {
@@ -216,6 +227,7 @@ for (const encoding of ["utf8", "utf16le", "utf16be"]) {
     const h = harness(t, { initial: bytes });
     assert.equal(statusDailyRefreshSchedule(plan, { ...options, adapter: h.adapter }).verified, true);
     assert.ok(h.calls.some(args => args.includes("/XML")), "byte readback reached native inspection");
+    assert.equal(h.calls.filter(args => args.includes("-EncodedCommand")).length, 0, "Unicode BOMs need no COM export");
   });
 }
 
@@ -377,7 +389,7 @@ test("FIX-2 restore refuses paused command edits before any enable or replacemen
   }
 });
 
-for (const pipeEncoding of ["latin1", "oem", "utf8", "ascii-lossy"]) {
+for (const pipeEncoding of ["latin1", "oem", "utf8"]) {
 test(`FIX-2 ${pipeEncoding} XML preserves accented paths through verification and rollback`, t => {
   const unicodeOptions = { ...options, nodePath: String.raw`C:\Profiles\ownér\node.exe` };
   const definition = buildDailyRefreshDefinition(plan, unicodeOptions);
@@ -450,5 +462,147 @@ test("FIX-2 lossless export failure refuses install before any native mutation",
     else assert.equal(install().verified, true, "readable Unicode export control");
     assert.ok(h.calls.some(args => args.includes("-EncodedCommand")), "lossless export was attempted");
     assert.equal(h.calls.filter(args => ["/Create", "/Change", "/Delete"].includes(args[0])).length, 0);
+  }
+});
+
+
+for (const action of ["rollback", "restore"]) test(`FIX-3 COM ${action} registers exactly one BOM`, t => {
+  const unicodeOptions = { ...options, nodePath: String.raw`C:\Profiles\ownér\node.exe` };
+  const definition = buildDailyRefreshDefinition(plan, unicodeOptions);
+  let creates = 0;
+  const h = harness(t, { initial: fieldReadback(definition), pipeEncoding: "latin1", strictRegistration: true,
+    transform: value => {
+      const xml = fieldReadback(value);
+      return action === "rollback" && ++creates === 1 ? xml.replace("<WakeToRun>true", "<WakeToRun>false") : xml;
+    } });
+  assert.equal(statusDailyRefreshSchedule(plan, { ...unicodeOptions, adapter: h.adapter }).verified, true, "green read control");
+  if (action === "rollback") {
+    assert.throws(() => installDailyRefreshSchedule({ ...plan, source_plan_hash: "sha256:new" }, { ...unicodeOptions, adapter: h.adapter }), error => {
+      assert.match(error.message, /exact readback/);
+      assert.doesNotMatch(error.message, /rollback also failed/);
+      return true;
+    });
+  } else {
+    const snapshot = pauseDailyRefreshSchedule(plan, { ...unicodeOptions, adapter: h.adapter });
+    h.native = null;
+    assert.equal(restoreDailyRefreshSchedule(snapshot, { ...unicodeOptions, adapter: h.adapter }).verified, true);
+  }
+  assert.ok(h.calls.some(args => args.includes("-EncodedCommand")), "COM read was reached");
+  assert.equal(h.registrations.length, action === "rollback" ? 2 : 1, "re-registration was reached");
+  for (const bytes of h.registrations) assert.equal(bytes.subarray(0, 4).toString("hex"), "fffe3c00");
+  assert.equal(statusDailyRefreshSchedule(plan, { ...unicodeOptions, adapter: h.adapter }).verified, true);
+});
+
+test("FIX-3 restricted PowerShell has specific refusal and never verifies", t => {
+  const unicodeOptions = { ...options, nodePath: String.raw`C:\Profiles\ownér\node.exe` };
+  for (const restricted of [false, true]) {
+    const h = harness(t, { initial: fieldReadback(buildDailyRefreshDefinition(plan, unicodeOptions)), pipeEncoding: "latin1", unicodeStatus: restricted ? 73 : null });
+    const inspect = () => statusDailyRefreshSchedule(plan, { ...unicodeOptions, adapter: h.adapter });
+    if (restricted) assert.throws(inspect, error => {
+      assert.equal(error.code, "DAILY_REFRESH_INSPECTION_UNKNOWN");
+      assert.equal(error.message, "PowerShell is restricted on this PC, so daily refresh can't verify its task here");
+      return true;
+    });
+    else assert.equal(inspect().verified, true);
+    assert.equal(h.calls.filter(args => args.includes("-EncodedCommand")).length, 1);
+    assert.equal(h.calls.filter(args => ["/Create", "/Change", "/Delete"].includes(args[0])).length, 0);
+  }
+});
+
+test("FIX-3 ASCII XML inspection spawns only schtasks; ambiguous bytes use COM", t => {
+  for (const unicode of [false, true]) {
+    const definitionOptions = unicode ? { ...options, nodePath: String.raw`C:\Profiles\ownér\node.exe` } : options;
+    const h = harness(t, { initial: fieldReadback(buildDailyRefreshDefinition(plan, definitionOptions)), pipeEncoding: "latin1" });
+    assert.equal(h.adapter.read(plan.identity).definition.native_contract_valid, true);
+    assert.equal(h.calls.filter(args => args.includes("/XML")).length, 1);
+    assert.equal(h.calls.filter(args => args.includes("-EncodedCommand")).length, unicode ? 1 : 0);
+    assert.equal(h.calls.length, unicode ? 2 : 1, "all child spawns counted");
+  }
+});
+
+for (const prior of [false, true]) for (const edit of [false, true]) {
+  test(`FIX-3 daily on expectation failure rolls back its captured replacement (${prior}, ${edit})`, async t => {
+    const h = harness(t, { transform: fieldReadback });
+    const path = join(h.home, "brain.manifest.json");
+    const fixture = { brain: { domain: "brain.example.invalid" }, corpora: { google_drive: { enabled: true } },
+      operations: { daily_refresh: { enabled: false, timezone: "UTC" } } };
+    writeFileSync(path, JSON.stringify(fixture));
+    writeFileSync(join(h.home, ".brain-admin-key"), randomBytes(32).toString("hex"), { mode: 0o600 });
+    const activePlan = { ...plan, manifest_path: path, timezone_matches_machine: true, unsupported_sources: 0 };
+    const old = buildDailyRefreshDefinition({ ...activePlan, source_plan_hash: "sha256:old" }, options);
+    h.native = prior ? fieldReadback(old) : null;
+    let expectations = 0;
+    await assert.rejects(() => cmdDaily(["on", path], {
+      platform: "win32", home: h.home, lifecycleLockHeld: true, quiet: true,
+      planDailyRefresh: async () => activePlan, schedulerAdapter: h.adapter, schedulerOptions: options,
+      resolveAdminKey: () => readFileSync(join(h.home, ".brain-admin-key"), "utf8"),
+      resolveBaseUrl: async () => "https://brain.example.invalid",
+      postSourceExpectation: async () => { expectations++; if (edit) h.native = h.native.replace(String.raw`C:\Runtime\node.exe`, String.raw`C:\Foreign\node.exe`); throw new Error("synthetic expectation failure"); },
+      readSourceInventory: async () => ({ sources: [] }),
+    }), error => {
+      assert.match(error.message, /synthetic expectation failure/);
+      if (edit) assert.match(error.message, /could not be restored/);
+      else assert.doesNotMatch(error.message, /could not be restored|outside edit/);
+      return true;
+    });
+    assert.equal(expectations, 1, "mid-install failure happened after native install and readback");
+    assert.equal(h.registrations.length, prior && !edit ? 2 : 1);
+    assert.equal(h.calls.filter(args => args[0] === "/Delete").length, !prior && !edit ? 1 : 0);
+    if (edit) assert.ok(h.native.includes(String.raw`C:\Foreign\node.exe`));
+    else if (prior) assert.equal(h.adapter.read(plan.identity).definition.definition_hash, old.definition_hash);
+    else assert.equal(h.native, null);
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).operations.daily_refresh.enabled, false);
+  });
+}
+
+
+test("FIX-3 lossy ASCII paths cannot verify a different Unicode action", t => {
+  const unicodeOptions = { ...options, nodePath: String.raw`C:\Profiles\ownér\node.exe` };
+  for (const lossy of [false, true]) {
+    const h = harness(t, { initial: fieldReadback(buildDailyRefreshDefinition(plan, unicodeOptions)),
+      pipeEncoding: lossy ? "ascii-lossy" : "latin1" });
+    assert.equal(statusDailyRefreshSchedule(plan, { ...unicodeOptions, adapter: h.adapter }).verified, !lossy);
+    assert.equal(h.calls.filter(args => args.includes("/XML")).length, 1, "both arms reached the projection");
+    assert.equal(h.calls.filter(args => args.includes("-EncodedCommand")).length, lossy ? 0 : 1);
+    assert.equal(h.calls.filter(args => ["/Create", "/Change", "/Delete"].includes(args[0])).length, 0);
+  }
+});
+
+
+test("FIX-3 QuickBooks recovery preserves the prior daily task when daily on itself fails", async t => {
+  for (const fail of [false, true]) {
+    const h = harness(t, { transform: fieldReadback, strictRegistration: true, pipeEncoding: "latin1" });
+    const path = join(h.home, "brain.manifest.json");
+    writeFileSync(path, JSON.stringify({ client: { slug: "fixture", timezone: "UTC" },
+      brain: { domain: "brain.example.invalid" }, corpora: { google_drive: { enabled: true }, quickbooks: { enabled: true } },
+      operations: { daily_refresh: { enabled: true, timezone: "UTC" }, quickbooks_schedule: { enabled: true } } }));
+    const keyFile = join(h.home, ".brain-admin-key");
+    writeFileSync(keyFile, randomBytes(32).toString("hex"), { mode: 0o600 });
+    const activePlan = { ...plan, manifest_path: path, timezone_matches_machine: true, unsupported_sources: 0 };
+    const prior = buildDailyRefreshDefinition({ ...activePlan, source_plan_hash: "sha256:prior" }, options);
+    h.native = fieldReadback(prior);
+    let posted = 0; let registered = 0;
+    const run = () => reregisterAfterManifestChange(path, {
+      platform: "win32", home: h.home, principal: `sid:${SID}`, localTimezone: "UTC",
+      now: new Date("2026-10-14T09:00:00Z"), lifecycleLockHeld: true,
+      cli: { buildConfiguredDailyPlan: async () => activePlan, cmdDaily },
+      planDailyRefresh: async () => activePlan, schedulerAdapter: h.adapter, schedulerOptions: options,
+      resolveAdminKey: () => readFileSync(keyFile, "utf8"), resolveBaseUrl: async () => "https://brain.example.invalid",
+      postSourceExpectation: async () => { posted++; if (fail) throw new Error("synthetic expectation failure"); },
+      readSourceInventory: async () => ({ sources: [] }),
+      quickBooksStatus: () => ({ installed: false }),
+      quickBooksRegister: () => { registered++; return { installed: true, verified: true }; },
+      syncExpectations: async () => {},
+    });
+    if (fail) await assert.rejects(run, error => {
+      assert.equal(error.code, "SCHEDULE_INSTALL_FAILED");
+      assert.equal(error.rollback_verified, true);
+      return true;
+    });
+    else assert.equal((await run()).verified, true);
+    assert.equal(posted, 1, "failure is after the real daily command registered its replacement");
+    assert.equal(registered, fail ? 0 : 1);
+    assert.equal(h.registrations.length, fail ? 2 : 1);
+    if (fail) assert.equal(h.adapter.read(plan.identity).definition.definition_hash, prior.definition_hash);
   }
 });
