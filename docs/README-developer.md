@@ -1315,9 +1315,11 @@ status, runner authorization and removal use this same projection. A task left
 unverified by an older parser is replaced and verified with `brain daily on`.
 Windows authorization version 2 makes this a one-time reconciliation; subsequent
 calls verify the matching definition in place. macOS authorization is unchanged.
-The real Windows CI probe registers an isolated disabled task, verifies its
-native XML and removes it without executing its action. Registration security
-descriptors are refused because the product writes none. A paused task must
+The real Windows CI probe registers isolated disabled tasks with ASCII and
+accented paths, verifies their native XML and removes them without executing
+their actions. Decode or verification failures print bounded byte facts and
+the actual decoder branch, without task fields or native error text.
+Registration security descriptors are refused because the product writes none. A paused task must
 still match its saved execution projection before restore can enable it,
 including the final comparison under the native mutation lock.
 

@@ -573,9 +573,10 @@ export function createNativeDailyRefreshAdapter({
   spawn = spawnSync,
   environment = process.env,
   taskSpec = null,
+  onTaskXmlDecode,
 } = {}) {
   if (platform === "darwin") return macAdapter({ home, uid, spawn });
-  if (platform === "win32") return windowsAdapter({ home, spawn, environment, taskSpec });
+  if (platform === "win32") return windowsAdapter({ home, spawn, environment, taskSpec, onTaskXmlDecode });
   throw new Error(`daily refresh scheduling is not supported on ${platform}`);
 }
 
@@ -1087,7 +1088,7 @@ export function parseWindowsTaskInventory(output) {
   return Object.freeze(names);
 }
 
-function windowsAdapter({ home, spawn, environment, taskSpec = null }) {
+function windowsAdapter({ home, spawn, environment, taskSpec = null, onTaskXmlDecode }) {
   const taskName = taskSpec?.name || ((identity) => `\\Financial Brain\\Daily ${identity.id}`);
   const systemRoot = environment.SystemRoot || environment.SYSTEMROOT || environment.WINDIR;
   // Unit tests on another host inject the process runner. A real Windows process
@@ -1137,7 +1138,9 @@ function windowsAdapter({ home, spawn, environment, taskSpec = null }) {
     }
     let serialized;
     try {
-      serialized = decodeWindowsTaskXml(result.stdout, { spawn, systemRoot, environment: childEnvironment, taskName: taskName(identity) });
+      serialized = decodeWindowsTaskXml(result.stdout, {
+        spawn, systemRoot, environment: childEnvironment, taskName: taskName(identity), onDecode: onTaskXmlDecode,
+      });
     } catch (cause) {
       throw new DailyRefreshInspectionError(cause?.code === "WINDOWS_TASK_POWERSHELL_RESTRICTED"
         ? cause.message : "the Windows daily refresh task XML could not be decoded losslessly");

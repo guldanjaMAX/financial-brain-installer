@@ -49,13 +49,13 @@ function windowsReadback(definition, user = SID) {
 </Task>`;
 }
 
-function harness(t, { initial = null, transform = windowsReadback, changingMetadata = false, beforeQuery = value => value, pipeEncoding = null, unicodeReadFailure = false, unicodeStatus = null, strictRegistration = false } = {}) {
+function harness(t, { initial = null, transform = windowsReadback, changingMetadata = false, beforeQuery = value => value, pipeEncoding = null, unicodeReadFailure = false, unicodeStatus = null, strictRegistration = false, onTaskXmlDecode } = {}) {
   const home = realpathSync.native(mkdtempSync(join(tmpdir(), "daily-readback-")));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   let native = initial;
   const calls = [];
   const registrations = [];
-  const adapter = createNativeDailyRefreshAdapter({ platform: "win32", home,
+  const adapter = createNativeDailyRefreshAdapter({ platform: "win32", home, onTaskXmlDecode,
     environment: { SystemRoot: String.raw`C:\Windows` },
     spawn: (command, args, child) => {
       calls.push(args);
@@ -126,6 +126,135 @@ test("normalized install, pause, restore and off use the same projection despite
   assert.equal(removeDailyRefreshSchedule(plan, { ...options, adapter: h.adapter }).verified, true);
   assert.equal(h.native, null);
   assert.equal(h.calls.filter(args => args[0] === "/Delete").length, 1);
+});
+
+// Model the field transport independently of the declaration. schtasks can
+// emit 8-bit ASCII with doubled CR and still declare UTF-16 in the XML.
+for (const ending of ["\n", "\r\n", "\r\r\n"]) {
+  for (const encoding of ["ascii", "utf8-bom", "utf16le", "utf16le-bom", "utf16be", "utf16be-bom"]) {
+    test(`FIX-4 direct ${encoding} pipe verifies with ${JSON.stringify(ending)} line endings`, t => {
+      const text = fieldReadback(buildDailyRefreshDefinition(plan, options)).replace(/^\ufeff/u, "")
+        .replace(/\r?\n/gu, ending) + ending;
+      assert.match(text, /^<\?xml version="1.0" encoding="UTF-16"\?>/u);
+      assert.ok([...text].every(character => character.charCodeAt(0) < 128));
+      const marked = encoding.endsWith("-bom") ? `\ufeff${text}` : text;
+      const bytes = Buffer.from(marked, encoding.startsWith("utf16") ? "utf16le" : "utf8");
+      if (encoding.startsWith("utf16be")) bytes.swap16();
+      const facts = [];
+      const h = harness(t, { initial: bytes, onTaskXmlDecode: fact => facts.push(fact) });
+      const status = statusDailyRefreshSchedule(plan, { ...options, adapter: { read: h.adapter.read } });
+      assert.equal(status.verified, true);
+      assert.equal(status.state.definition.serialized, marked, "BOM and line endings are preserved without normalization");
+      assert.equal(h.calls.filter(args => args.includes("/XML")).length, 1, "actual native decoder was reached");
+      assert.equal(h.calls.length, 1, "ASCII and marked Unicode need no COM or other child");
+      assert.equal(facts.length, 1);
+      assert.equal(facts[0].branch, encoding.startsWith("utf16") ? encoding.startsWith("utf16be") ? "utf-16be" : "utf-16le"
+        : encoding === "utf8-bom" ? "utf-8-bom" : "ascii");
+      assert.equal(facts[0].byte_length, bytes.length);
+      assert.equal(facts[0].nul_count, [...bytes].filter(byte => byte === 0).length);
+      assert.equal(facts[0].cr_count, (text.match(/\r/gu) || []).length);
+      assert.equal(facts[0].crlf_count, (text.match(/\r\n/gu) || []).length);
+      assert.equal(facts[0].crcrlf_count, (text.match(/\r\r\n/gu) || []).length);
+      assert.equal(facts[0].declared_encoding, "UTF-16");
+    });
+  }
+}
+
+test("FIX-4 invalid terminal NUL and truncated Unicode refuse after the same good readback control", t => {
+  const text = fieldReadback(buildDailyRefreshDefinition(plan, options)).replace(/^\ufeff/u, "");
+  for (const bytes of [Buffer.from(`${text}\0`, "ascii"), Buffer.from(`\ufeff${text}\0`, "utf16le"),
+    Buffer.concat([Buffer.from(`\ufeff${text}`, "utf16le"), Buffer.from([0x0a])])]) {
+    const h = harness(t, { initial: Buffer.from(text, "ascii") });
+    assert.equal(statusDailyRefreshSchedule(plan, { ...options, adapter: { read: h.adapter.read } }).verified, true);
+    h.native = bytes;
+    const reads = h.calls.length;
+    let verified = false;
+    try { verified = h.adapter.read(plan.identity).definition.native_contract_valid; }
+    catch (error) { assert.equal(error.code, "DAILY_REFRESH_INSPECTION_UNKNOWN"); }
+    assert.equal(verified, false);
+    assert.equal(h.calls.length, reads + 1, "malformed bytes reached the decoder and projection without fallback");
+    assert.equal(h.calls.filter(args => ["/Create", "/Change", "/Delete"].includes(args[0])).length, 0);
+  }
+});
+
+test("FIX-4 decode and verification failures expose only byte facts from the branch actually reached", t => {
+  const text = fieldReadback(buildDailyRefreshDefinition(plan, options)).replace(/^\ufeff/u, "")
+    .replace(/\r?\n/gu, "\r\r\n");
+  const facts = [];
+  const bytes = Buffer.from(text, "ascii");
+  const h = harness(t, { initial: bytes, onTaskXmlDecode: fact => facts.push(fact) });
+  assert.equal(statusDailyRefreshSchedule(plan, { ...options, adapter: { read: h.adapter.read } }).verified, true);
+  assert.equal(h.calls.length, 1, "the real adapter's decoder ran");
+  assert.equal(facts.length, 1, "the native probe can observe the successful decoder branch before verification");
+  assert.deepEqual(facts[0], {
+    branch: "ascii", byte_length: bytes.length, first_16_hex: bytes.subarray(0, 16).toString("hex"), bom: null,
+    nul_count: 0, cr_count: (text.match(/\r/gu) || []).length,
+    crlf_count: (text.match(/\r\n/gu) || []).length, crcrlf_count: (text.match(/\r\r\n/gu) || []).length,
+    declared_encoding: "UTF-16",
+  });
+  h.native = Buffer.from(text.replace("T09:00:00", "T10:00:00"), "ascii");
+  assert.equal(statusDailyRefreshSchedule(plan, { ...options, adapter: { read: h.adapter.read } }).verified, false);
+  assert.equal(facts.length, 2, "verification failures retain the read that led to the failed comparison");
+  h.native = Buffer.concat([Buffer.from(`\ufeff${text}`, "utf16le"), Buffer.from([0x0a])]);
+  assert.throws(() => h.adapter.read(plan.identity), /decoded losslessly/u);
+  assert.equal(facts.length, 3, "strict decoding reports facts before throwing");
+  assert.equal(facts[2].branch, "utf-16le");
+  assert.equal(facts[2].bom, "utf-16le");
+  assert.equal(facts[2].declared_encoding, "UTF-16");
+  for (const fact of facts) {
+    const safe = JSON.stringify(fact);
+    for (const content of [SID, plan.identity.id, "RegistrationInfo", "Runtime", "Arguments", "Description"])
+      assert.equal(safe.includes(content), false, "facts contain no task content");
+  }
+});
+
+test("FIX-4 ambiguous 8-bit diagnostics distinguish COM refusal from its lossless Unicode control", t => {
+  const unicodeOptions = { ...options, nodePath: String.raw`C:\Profiles\ownér\node.exe` };
+  for (const denied of [false, true]) {
+    const facts = [];
+    const h = harness(t, { initial: fieldReadback(buildDailyRefreshDefinition(plan, unicodeOptions)),
+      pipeEncoding: "latin1", unicodeReadFailure: denied, onTaskXmlDecode: fact => facts.push(fact) });
+    const inspect = () => statusDailyRefreshSchedule(plan, { ...unicodeOptions, adapter: { read: h.adapter.read } });
+    if (denied) assert.throws(inspect, /decoded losslessly/u);
+    else assert.equal(inspect().verified, true);
+    assert.equal(h.calls.filter(args => args.includes("/XML")).length, 1);
+    assert.equal(h.calls.filter(args => args.includes("-EncodedCommand")).length, 1, "both arms reach the COM decision");
+    assert.deepEqual(facts.map(fact => fact.branch), denied ? ["com"] : ["com", "utf-16le"]);
+    assert.equal(facts[0].bom, null);
+    assert.equal(facts[0].declared_encoding, "UTF-16");
+    if (!denied) {
+      assert.equal(facts[1].bom, "utf-16le");
+      assert.ok(facts[1].nul_count > 0);
+    }
+    assert.equal(JSON.stringify(facts).includes("ownér"), false);
+    assert.equal(h.calls.filter(args => ["/Create", "/Change", "/Delete"].includes(args[0])).length, 0);
+  }
+});
+
+test("FIX-4 malformed COM output reports its byte shape and cannot become a verified task", () => {
+  const unicodeOptions = { ...options, nodePath: String.raw`C:\Profiles\ownér\node.exe` };
+  const text = fieldReadback(buildDailyRefreshDefinition(plan, unicodeOptions));
+  for (const malformed of [false, true]) {
+    const facts = [];
+    let queries = 0; let exports = 0;
+    const adapter = createNativeDailyRefreshAdapter({ platform: "win32", home: "fixture-home",
+      environment: { SystemRoot: String.raw`C:\Windows` }, onTaskXmlDecode: fact => facts.push(fact),
+      spawn(_command, args) {
+        if (args.includes("-EncodedCommand")) {
+          exports++;
+          return { status: 0, stdout: Buffer.from(malformed ? text : `\ufeff${text}`, malformed ? "latin1" : "utf16le") };
+        }
+        assert.ok(args.includes("/XML")); queries++;
+        return { status: 0, stdout: Buffer.from(text, "latin1") };
+      } });
+    const inspect = () => statusDailyRefreshSchedule(plan, { ...unicodeOptions, adapter: { read: adapter.read } });
+    if (malformed) assert.throws(inspect, /decoded losslessly/u);
+    else assert.equal(inspect().verified, true);
+    assert.equal(queries, 1);
+    assert.equal(exports, 1, "both arms reached the COM output decision");
+    assert.deepEqual(facts.map(fact => fact.branch), ["com", malformed ? "com-output-refused" : "utf-16le"]);
+    assert.equal(facts[1].declared_encoding, "UTF-16");
+  }
 });
 
 test("daily on recovers an owned failed-version task and reconciles the current definition", t => {
