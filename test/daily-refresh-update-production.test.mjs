@@ -531,7 +531,7 @@ const BRIDGE_NAME = boundaryBridgeName("brain.example.invalid", "S-1-5-21-100-20
 const BRIDGE_SID = "S-1-5-21-100-200-300-1001";
 const BRIDGE_TIME = "2026-10-07T15:00:00.000Z";
 
-function bridgeNativeHarness({ manifestPath = "C:\\Fixture\\brain.manifest.json", tasks = [], failDisable = false, ignoreDisable = false, onDisable = () => {}, onDelete = () => {}, failRestore = false, failDelete = false } = {}) {
+function bridgeNativeHarness({ manifestPath = "C:\\Fixture\\brain.manifest.json", tasks = [], failDisable = false, ignoreDisable = false, onDisable = () => {}, onDelete = () => {}, failRestore = false, failDelete = false, fieldShape = false, explicitEnabled = false } = {}) {
   const calls = [];
   const rows = new Map(tasks.map((entry) => [entry.name || BRIDGE_NAME, {
     sid: BRIDGE_SID, enabled: true, action: `brain load '${manifestPath.replaceAll("'", "''")}' --only google_drive`, ...entry,
@@ -557,8 +557,15 @@ function bridgeNativeHarness({ manifestPath = "C:\\Fixture\\brain.manifest.json"
       const name = args[args.indexOf("/TN") + 1];
       const row = rows.get(name);
       if (args[0] === "/Query") {
-        return row ? { status: 0, stdout: `<Task><Principals><Principal id="Owner"><UserId>${row.sid}</UserId></Principal></Principals><Settings><Enabled>${row.enabled}</Enabled></Settings><Actions><Exec><Command>powershell.exe</Command><Arguments>-EncodedCommand ${Buffer.from(row.action, "utf16le").toString("base64")}</Arguments></Exec></Actions></Task>` }
-          : { status: 1, stdout: "" };
+        if (!row) return { status: 1, stdout: "" };
+        let xml = `<Task><Principals><Principal id="Owner"><UserId>${row.sid}</UserId></Principal></Principals><Settings>${!row.enabled || explicitEnabled ? `<Enabled>${row.enabled}</Enabled>` : ""}${row.extraSettings || ""}</Settings><Actions><Exec><Command>powershell.exe</Command><Arguments>-EncodedCommand ${Buffer.from(row.action, "utf16le").toString("base64")}</Arguments></Exec></Actions></Task>`;
+        if (fieldShape) {
+          xml = xml.replace("<Task>", `<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><URI>${name}</URI></RegistrationInfo>`)
+            .replace("<Settings>", "<Settings><StartWhenAvailable>true</StartWhenAvailable>")
+            .replaceAll("><", ">\r\n  <");
+          return { status: 0, stdout: Buffer.from(`\ufeff<?xml version="1.0" encoding="UTF-16"?>\r\n${xml}`, "utf16le") };
+        }
+        return { status: 0, stdout: xml };
       }
       assert.ok(row, "mutation addresses an inventoried task");
       if (args[0] === "/Change") {
@@ -1289,6 +1296,96 @@ test("unrecognized bridge refusal explains the exact task and recovery", () => {
       return true;
     });
     assert.ok(native.calls.some(({ args }) => args.includes("/XML")), "refusal reached real native adapter observation");
+    assert.equal(native.mutations().length, 0);
+  }
+});
+
+
+for (const recovery of ["restore", "retire"]) {
+  test(`FIX-2 bridge omitted Enabled survives field-shaped ${recovery} and refuses edits`, () => {
+    for (const changed of [false, true]) {
+      const native = bridgeNativeHarness({ tasks: [{}], fieldShape: true });
+      const first = boundaryGuard(native.options);
+      const inventory = first.inventory();
+      assert.equal(inventory.entries.length, 1, "inventory found the bound enabled task");
+      assert.equal(inventory.entries[0].enabled, true);
+      const receipts = first.capture(inventory);
+      first.pause(receipts, () => {});
+      assert.equal(receipts[0].state, "paused");
+      assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+      assert.equal(native.mutations().length, 1, "pause reached disable and readback");
+      if (changed) native.rows.get(BRIDGE_NAME).extraSettings = "<Priority>4</Priority>";
+      const before = native.calls.length;
+      const resumed = boundaryGuard(native.options);
+      const recover = () => resumed[recovery](JSON.parse(JSON.stringify(receipts)), () => {});
+      if (changed) assert.throws(recover, /Task Scheduler/);
+      else recover();
+      assert.ok(native.calls.slice(before).some(({ args }) => args.includes("/XML")), "recovery checked the saved definition");
+      assert.equal(native.mutations().length, changed ? 1 : 2, "foreign edit causes zero recovery mutations");
+      if (changed) assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+      else assert.equal(native.rows.has(BRIDGE_NAME), recovery === "restore");
+    }
+  });
+}
+
+
+for (const recovery of ["restore", "retire"]) for (const transport of ["text", "console"]) {
+  test(`FIX-2 bridge reads saved v1 receipts and captures only v2 (${recovery}, ${transport})`, () => {
+    for (const changed of [false, true]) {
+      const native = bridgeNativeHarness({ tasks: [{}], explicitEnabled: true });
+      let originalPipe;
+      if (transport === "console") {
+        const spawn = native.options.spawn;
+        native.options.spawn = (command, args, child) => {
+          if (command.endsWith("powershell.exe")) {
+            native.calls.push({ command, args });
+            const raw = spawn(String.raw`C:\Windows\System32\schtasks.exe`, ["/Query", "/TN", BRIDGE_NAME, "/XML"], child);
+            return { status: 0, stdout: Buffer.from(`\ufeff${raw.stdout.replaceAll("><", ">\r\n  <")}`, "utf16le") };
+          }
+          const result = spawn(command, args, child);
+          if (args.includes("/XML")) {
+            originalPipe ??= result.stdout;
+            return { ...result, stdout: Buffer.from(result.stdout, "utf8") };
+          }
+          return result;
+        };
+      }
+      const guard = boundaryGuard(native.options);
+      const inventory = guard.inventory();
+      const receipts = guard.capture(inventory);
+      const digest = (...fields) => `sha256:${boundaryHash("sha256").update(fields.map(value => `${Buffer.byteLength(value, "utf8")}:${value},`).join(""), "utf8").digest("hex")}`;
+      const entry = inventory.entries[0];
+      if (transport === "console") {
+        assert.equal(entry.legacy_definition, originalPipe.replace(/<Enabled>(true|false)<\/Enabled>/u, "<Enabled/>"), "v1 retains the exact old console serialization despite the Unicode export");
+        assert.ok(native.calls.some(({ args }) => args.includes("-EncodedCommand")), "console path reached Unicode export");
+      }
+      assert.equal(receipts[0].definition_hash, digest("bridge-definition-v2", receipts[0].binding_hash, BRIDGE_NAME, BRIDGE_SID, entry.definition));
+      receipts[0].definition_hash = digest("bridge-definition-v1", receipts[0].binding_hash, BRIDGE_NAME, BRIDGE_SID, entry.legacy_definition);
+      guard.pause(receipts, () => {});
+      assert.equal(receipts[0].state, "paused", "v1 receipt authorizes the exact original pause");
+      if (changed) native.rows.get(BRIDGE_NAME).extraSettings = "<Priority>4</Priority>";
+      const before = native.calls.length;
+      const resumed = boundaryGuard(native.options);
+      const resume = () => {
+        const hydrated = resumed.capture(resumed.inventory(), JSON.parse(JSON.stringify(receipts)));
+        resumed[recovery](hydrated, () => {});
+      };
+      if (changed) assert.throws(resume, /Task Scheduler/);
+      else resume();
+      assert.ok(native.calls.slice(before).some(({ args }) => args.includes("/XML")), "saved v1 proof was compared to native XML");
+      assert.equal(native.mutations().length, changed ? 1 : 2);
+      if (changed) assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
+    }
+  });
+}
+
+test("FIX-2 bridge omitted default does not admit malformed enabled fields", () => {
+  for (const extraSettings of ["", "<Enabled/>", "<Enabled>maybe</Enabled>", "<Enabled>true</Enabled><Enabled>false</Enabled>"]) {
+    const native = bridgeNativeHarness({ tasks: [{ extraSettings }] });
+    const guard = boundaryGuard(native.options);
+    if (extraSettings) assert.throws(() => guard.inventory(), /Task Scheduler/);
+    else assert.equal(guard.inventory().entries[0].enabled, true, "omitted enabled control");
+    assert.ok(native.calls.some(({ args }) => args.includes("/XML")), "enabled-state validation reached XML readback");
     assert.equal(native.mutations().length, 0);
   }
 });

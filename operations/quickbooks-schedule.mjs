@@ -325,6 +325,7 @@ export async function reregisterAfterManifestChange(manifestPath, options = {}) 
   const willSchedule = plan.enabled && plan.sources.length > 0;
   if (willSchedule) owners.push(...QUICKBOOKS_KEYS);
   let dailyAttempted = false; let quickBooksAttempted = false;
+  let dailyReplacement;
   try {
     dailyAttempted = true;
     // The lifecycle lease keeps the temporarily rebound daily runner from
@@ -332,6 +333,7 @@ export async function reregisterAfterManifestChange(manifestPath, options = {}) 
     const daily = await cli.cmdDaily(['on', manifestPath], { ...options, flags: {}, quiet: true,
       lifecycleLockHeld: true, existingSchedulerOwners: owners, allowQuickBooksOnly: true });
     if (!daily?.schedule?.installed || !daily.schedule.enabled || !daily.schedule.verified) throw new Error('Daily readback failed');
+    dailyReplacement = daily.schedule.readback;
     quickBooksAttempted = true;
     const quickbooks = willSchedule ? operations.register() : operations.remove();
     if (willSchedule && (quickbooks?.installed !== true || quickbooks?.verified !== true)) throw new Error('QuickBooks readback failed');
@@ -344,7 +346,8 @@ export async function reregisterAfterManifestChange(manifestPath, options = {}) 
       try {
         if (options.restoreDaily) options.restoreDaily(beforeDaily);
         else if (beforeDaily.installed) restoreDailyRefreshSchedule({ identity: beforePlan.identity, exists: true,
-          enabled: beforeDaily.enabled === true, definition: beforeDaily.state.definition }, dailyOptions);
+          enabled: beforeDaily.enabled === true, definition: beforeDaily.state.definition },
+        { ...dailyOptions, expectedReplacement: dailyReplacement });
         else removeDailyRefreshSchedule(beforePlan, dailyOptions);
         const current = readManifest(manifestPath, options);
         if (JSON.stringify(current.operations?.daily_refresh) !== JSON.stringify(m.operations?.daily_refresh)) {

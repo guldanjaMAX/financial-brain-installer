@@ -489,12 +489,24 @@ export function restoreDailyRefreshSchedule(snapshot, options = {}) {
   if (!snapshot?.exists) return Object.freeze({ restored: false, verified: true });
   const state = adapter.read(snapshot.identity);
   requireOwned(state);
-  if (!state?.exists || state.definition?.definition_hash !== snapshot.definition?.definition_hash) {
+  const requireWindowsRestoreDefinition = (current, definition = snapshot.definition) => {
+    if (snapshot.definition?.platform !== "win32") return;
+    if (!verifiedState(current, definition, { enabled: current?.enabled === true })) {
+      throw concurrentScheduleEdit("the daily definition changed before restore; nothing was enabled or replaced");
+    }
+  };
+  // A multi-task registration can deliberately replace this task before a
+  // later step fails. Rollback may use that caller's verified replacement as
+  // its comparison target, never a newly observed foreign edit.
+  if (state?.exists) requireWindowsRestoreDefinition(state, options.expectedReplacement?.definition || snapshot.definition);
+  if (!state?.exists || state.definition?.definition_hash !== snapshot.definition?.definition_hash ||
+      (snapshot.definition?.platform === "win32" && !sameNativeDefinition(state.definition, snapshot.definition))) {
     adapter.install(snapshot.definition, { replaceOwned: state?.exists === true, expected: state });
   }
   const current = adapter.read(snapshot.identity);
+  requireWindowsRestoreDefinition(current);
   if (current?.enabled !== (snapshot.enabled === true)) {
-    adapter.setEnabled(snapshot.identity, snapshot.enabled === true);
+    adapter.setEnabled(snapshot.identity, snapshot.enabled === true, { expected: current });
   }
   const readback = adapter.read(snapshot.identity);
   if (!verifiedState(readback, snapshot.definition, { enabled: snapshot.enabled === true })) {
@@ -1103,8 +1115,7 @@ function windowsAdapter({ home, spawn, environment, taskSpec = null }) {
       currentUser = match ? { name: match[1].replaceAll('""', '"'), sid: match[2] } : null;
     }
     if (!currentUser) return user;
-    const aliases = [currentUser.name, currentUser.name.split("\\").at(-1)];
-    return aliases.some(alias => alias.toLowerCase() === user.toLowerCase()) ? currentUser.sid : user;
+    return currentUser.name.includes("\\") && currentUser.name.toLowerCase() === user.toLowerCase() ? currentUser.sid : user;
   };
   const read = (identity) => {
     const result = run(["/Query", "/TN", taskName(identity), "/XML"]);
@@ -1116,7 +1127,10 @@ function windowsAdapter({ home, spawn, environment, taskSpec = null }) {
       }
       throw new DailyRefreshInspectionError();
     }
-    const serialized = decodeWindowsTaskXml(result.stdout);
+    let serialized;
+    try {
+      serialized = decodeWindowsTaskXml(result.stdout, { spawn, systemRoot, environment: childEnvironment, taskName: taskName(identity) });
+    } catch { throw new DailyRefreshInspectionError("the Windows daily refresh task XML could not be decoded losslessly"); }
     const definition = taskSpec?.observe ? taskSpec.observe(identity, serialized)
       : definitionFromNative(identity, serialized, "win32", { resolveUserId });
     const marker = taskSpec?.marker ? taskSpec.marker(serialized) : markerOf(windowsTaskDescription(serialized), true);
@@ -1174,10 +1188,13 @@ function windowsAdapter({ home, spawn, environment, taskSpec = null }) {
         }
       });
     },
-    setEnabled(identity, enabled) {
+    setEnabled(identity, enabled, { expected } = {}) {
       return withScheduleMutationLock(home, identity, () => {
         const current = read(identity);
         requireOwned(current);
+        if (expected !== undefined && !sameObservedState(current, expected)) {
+          throw concurrentScheduleEdit("the daily definition changed before restore; nothing was enabled");
+        }
         requireUnchangedMutationRead(
           read,
           identity,

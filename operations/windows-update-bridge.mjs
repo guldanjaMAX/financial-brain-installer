@@ -82,7 +82,13 @@ function observe(taskName, serialized) {
   const principal = singleTag(principals, "Principal");
   const user = singleTag(principal, "UserId");
   const settings = singleTag(serialized, "Settings");
-  const enabled = singleTag(settings, "Enabled");
+  // Missing is the schema default, but malformed and duplicate values must
+  // never be mistaken for that omission.
+  const enabledCount = settings === null ? 0 : [...settings.matchAll(/<Enabled[\s/>]/gu)].length;
+  const enabledText = enabledCount === 1 ? singleTag(settings, "Enabled") : null;
+  const enabled = settings === null || enabledCount > 1 ? null
+    : enabledCount === 0 ? true
+      : ["true", "false"].includes(enabledText) ? enabledText === "true" : null;
   if (!user) throw repair();
   const actions = singleTag(serialized, "Actions") || "";
   let action = null;
@@ -97,14 +103,14 @@ function observe(taskName, serialized) {
   }
   // Exclude only Settings/Enabled. Trigger enablement and every other byte
   // remain part of the recovery fingerprint, including across process restart.
-  const immutable = settings === null ? serialized
-    : serialized.replace(/<Settings(?:\s[^>]*)?>[\s\S]*?<\/Settings>/u,
-      (section) => section.replace(/<Enabled>(true|false)<\/Enabled>/u, "<Enabled/>"));
+  const strip = (transform) => settings === null ? serialized
+    : serialized.replace(/<Settings(?:\s[^>]*)?>[\s\S]*?<\/Settings>/u, transform);
   return {
     task_name: taskName,
     principal: user,
-    enabled: ["true", "false"].includes(enabled) ? enabled === "true" : null,
-    definition: immutable,
+    enabled,
+    definition: strip(section => section.replace(/\s*<Enabled>(?:true|false)<\/Enabled>/u, "")),
+    legacy_definition: strip(section => section.replace(/<Enabled>(true|false)<\/Enabled>/u, "<Enabled/>")),
     action,
     action_mentions_brain: /\bbrain\b/iu.test(action || ""),
     action_mentions_load: /\bload\b/iu.test(action || ""),
@@ -138,7 +144,18 @@ export function createNativeWindowsBridgeAdapter({ spawn = spawnSync, environmen
       if (!names().includes(name)) return null;
       throw repair();
     }
-    return observe(name, decodeWindowsTaskXml(result.stdout));
+    try {
+      const entry = observe(name, decodeWindowsTaskXml(result.stdout, { spawn, systemRoot, environment: env, taskName: name }));
+      // The Unicode export may format XML differently from the original
+      // console pipe. Keep the old byte decoder ONLY for comparing saved v1
+      // hashes, never for principal/action decisions or replaying a definition.
+      if (Buffer.isBuffer(result.stdout) && !result.stdout.includes(0) &&
+          !(result.stdout[0] === 0xff && result.stdout[1] === 0xfe) &&
+          !(result.stdout[0] === 0xfe && result.stdout[1] === 0xff)) {
+        entry.legacy_definition = observe(name, result.stdout.toString("utf8")).legacy_definition;
+      }
+      return entry;
+    } catch { throw repair(); }
   };
   return {
     currentSid,
@@ -181,7 +198,7 @@ export function createWindowsUpdateBridgeGuard(options = {}) {
   const target = () => binding(options.domain, options.manifestPath, adapter.currentSid());
   const fingerprint = (entry, bound) => {
     if (typeof entry.definition !== "string" || !entry.definition) throw repair();
-    return `sha256:${digest("bridge-definition-v1", bound.hash, entry.task_name, entry.principal, entry.definition)}`;
+    return `sha256:${digest("bridge-definition-v2", bound.hash, entry.task_name, entry.principal, entry.definition)}`;
   };
   const checked = (entry, { absent = false } = {}) => {
     validateReceipt(entry);
@@ -190,7 +207,12 @@ export function createWindowsUpdateBridgeGuard(options = {}) {
     const current = adapter.read(entry.task_name);
     if (!current && absent) return null;
     if (!current || current.principal !== entry.principal || typeof current.enabled !== "boolean" ||
-        !actionBinds(current, options.manifestPath) || fingerprint(current, bound) !== entry.definition_hash) throw repair();
+        !actionBinds(current, options.manifestPath)) throw repair();
+    // Old receipts remain exact-byte bound to their v1 placeholder. Never
+    // upgrade their authorization from a freshly observed replacement task.
+    const legacyHash = typeof current.legacy_definition === "string"
+      ? `sha256:${digest("bridge-definition-v1", bound.hash, current.task_name, current.principal, current.legacy_definition)}` : null;
+    if (fingerprint(current, bound) !== entry.definition_hash && legacyHash !== entry.definition_hash) throw repair();
     return current;
   };
   return {
