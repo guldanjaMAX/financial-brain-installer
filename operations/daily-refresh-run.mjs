@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dailyRefreshIdentity, dailyRefreshPrincipal } from "./daily-refresh-plan.mjs";
 import { observeDailyRun } from "./daily-refresh-observation.mjs";
 import { acquireBrainLifecycleLock } from "./brain-lifecycle-lock.mjs";
-import { providerNoChangeCheckAt } from "../worker/src/lib/source-receipt.js";
+import { providerNoChangeCheckAt, providerWithheldCheckAt } from "../worker/src/lib/source-receipt.js";
 import {
   buildDailyRefreshDefinition,
   readDailyRefreshUpdateTransaction,
@@ -207,22 +207,30 @@ export async function runDailyRefresh({
             Date.parse(check) <= Date.parse(checkedAt) && (!prior || Date.parse(check) > Date.parse(prior)) &&
             beforeBySource[name] === afterBySource[name];
         });
+        const withheldBySource = Object.keys(afterBySource).map((name) => {
+          const row = afterInventory?.[name];
+          const check = providerWithheldCheckAt(row?.kind, row?.latest_run);
+          const prior = validTimestamp(baseline?.[name]?.last_check_at) || beforeBySource[name];
+          return check && Date.parse(row.latest_run.started_at) >= Date.parse(sourceStartedAt) &&
+            Date.parse(check) <= Date.parse(checkedAt) && (!prior || Date.parse(check) > Date.parse(prior)) ? check : null;
+        });
+        const docsWithheld = latestRuns.reduce((sum, run) => sum + (run?.docs_withheld || 0), 0);
         const docsRefused = latestRuns.every((run) => Number.isSafeInteger(run?.docs_refused))
           ? latestRuns.reduce((sum, run) => sum + run.docs_refused, 0) : null;
         const failedRun = latestRuns.some((run) => ["failed", "refused"].includes(run?.outcome) || run?.docs_failed > 0);
         // Reject measured zero work even when an older server advanced its date.
-        const unverifiedBySource = latestRuns.map((run) => run?.outcome === "empty" ||
+        const unverifiedBySource = latestRuns.map((run, index) => !withheldBySource[index] && (run?.outcome === "empty" ||
           ((run?.metrics_version === 1 || (Number.isSafeInteger(run?.docs_refused) &&
             Number.isSafeInteger(run?.docs_failed))) &&
             ![run?.docs_added, run?.docs_updated, run?.docs_unchanged]
-              .some((count) => Number.isSafeInteger(count) && count > 0)));
+              .some((count) => Number.isSafeInteger(count) && count > 0))));
         const loaderRefused = ["failed", "refused"].includes(runResult?.status);
         const unverifiedRun = unverifiedBySource.some(Boolean);
         const freshnessAdvanced = !freshnessUnknown && !loaderRefused && executionComplete && freshness.advanced && !failedRun && !unverifiedRun;
         // Either missing observation leaves this invocation's evidence unknown,
         // even if the other read contains a completed provider check.
         const checkVerified = !freshnessUnknown && executionComplete && !failedRun && latestRuns.every((_run, index) => {
-          if (noChangeBySource[index]) return true;
+          if (noChangeBySource[index] || withheldBySource[index]) return true;
           const name = Object.keys(afterBySource)[index];
           return compareFreshness({ [name]: beforeBySource[name] }, { [name]: afterBySource[name] }).advanced &&
             !unverifiedBySource[index];
@@ -268,8 +276,9 @@ export async function runDailyRefresh({
           last_check_at_before: Object.keys(beforeBySource).map(name => baseline?.[name]?.last_check_at || beforeBySource[name])
             .filter(Boolean).sort().at(-1) || null,
           last_check_at_after: checkVerified ? Object.keys(afterBySource).map((name, index) =>
-            noChangeBySource[index] ? afterInventory[name].latest_run.finished_at : afterBySource[name]).sort().at(-1) : null,
+            noChangeBySource[index] ? afterInventory[name].latest_run.finished_at : withheldBySource[index] || afterBySource[name]).sort().at(-1) : null,
           docs_refused: docsRefused,
+          docs_withheld: docsWithheld,
           docs_excluded: docsExcluded,
           missing_freshness_sources: freshness.missing,
           unadvanced_freshness_sources: freshness.notAdvanced,
@@ -436,7 +445,8 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
       for (const source of result.sources) {
         log(`${source.source} | ${source.status} | ${source.last_successful_run_at_after || "never"}` +
           (source.no_change ? ` | checked ${source.last_check_at_after}; no changes` : "") +
-          (source.status === "partial" ? ` | ${source.docs_refused ?? "unknown"} refused` : "") +
+          (source.docs_withheld > 0 ? ` | ${source.docs_withheld} item(s) withheld by design`
+            : source.status === "partial" ? ` | ${source.docs_refused ?? "unknown"} refused` : "") +
           (source.status === "held" ? ` | ${source.reason}` : "") +
           (source.docs_excluded > 0 ? ` | ${source.docs_excluded} excluded by rule` : ""));
       }

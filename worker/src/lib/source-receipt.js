@@ -58,6 +58,41 @@ export function providerNoChangeCheckAt(kind, run) {
   return new Date(finished).toISOString();
 }
 
+// Reuse the existing durable refusal_reason column with a versioned, closed
+// aggregate. It carries no document identities or arbitrary provider strings.
+const PROVIDER_WITHHELD_PREFIX = "provider_withheld_v1:";
+const PROVIDER_KINDS = new Set(["microsoft", "slack", "notion", "dropbox", "hubspot", "quickbooks"]);
+
+export function providerWithheldReason(count) {
+  if (!Number.isSafeInteger(count) || count <= 0) return null;
+  return `${PROVIDER_WITHHELD_PREFIX}${JSON.stringify({ credential_detected: count })}`;
+}
+
+export function parseProviderWithheldReason(value, kind, refused) {
+  if (!PROVIDER_KINDS.has(kind) || typeof value !== "string" || !value.startsWith(PROVIDER_WITHHELD_PREFIX)) return null;
+  try {
+    const reasons = JSON.parse(value.slice(PROVIDER_WITHHELD_PREFIX.length));
+    const count = reasons?.credential_detected;
+    if (providerWithheldReason(count) !== value || !Number.isSafeInteger(refused) || count > refused) return null;
+    return { count, reasons: { credential_detected: count } };
+  } catch { return null; }
+}
+
+/** A completed check with policy omissions proves freshness, never full history. */
+export function providerWithheldCheckAt(kind, run) {
+  if (!PROVIDER_KINDS.has(kind) || run?.outcome !== "partial" || run.walk_complete !== true ||
+      run.provider_check_complete !== true || run.metrics_version !== 1 || run.docs_failed !== 0 ||
+      !Number.isSafeInteger(run.docs_withheld) || run.docs_withheld <= 0 || run.docs_withheld !== run.docs_refused ||
+      run.withheld_reasons?.credential_detected !== run.docs_withheld ||
+      Object.keys(run.withheld_reasons).length !== 1 || run.error) return null;
+  if (!["files_seen", "docs_added", "docs_updated", "docs_unchanged"]
+      .every(field => Number.isSafeInteger(run[field]) && run[field] >= 0) || run.files_seen <= 0) return null;
+  const started = typeof run.started_at === "string" ? Date.parse(run.started_at) : NaN;
+  const finished = typeof run.finished_at === "string" ? Date.parse(run.finished_at) : NaN;
+  return Number.isFinite(started) && Number.isFinite(finished) && finished >= started
+    ? new Date(finished).toISOString() : null;
+}
+
 export const SOURCE_FAILURE_EVIDENCE_VERSION = 1;
 export const GMAIL_FAILURE_OPERATION_CLASSES = Object.freeze([
   "gmail_profile_read",

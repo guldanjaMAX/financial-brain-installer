@@ -54,6 +54,7 @@ import {
   GMAIL_FAILURE_OPERATION_CLASSES,
   normalizeSourceFailureEvidence,
   providerNoChangeCheckAt,
+  providerWithheldCheckAt,
   SOURCE_FAILURE_EVIDENCE_VERSION,
 } from "./worker/src/lib/source-receipt.js";
 import { PLAID_PROFILE, manifestBankFeedProvider } from "./worker/src/lib/bank-feed-profiles.js";
@@ -10450,15 +10451,23 @@ export async function cmdSources(manifestPath, options = {}) {
       console.log(`\n  ${"name".padEnd(nameWidth)}  ${"kind".padEnd(kindWidth)}  ${"zone".padEnd(12)}  ${"physical".padStart(9)}  ${"readable".padStart(10)}  freshness`);
       for (const row of inventory.sources) {
         const noChangeAt = providerNoChangeCheckAt(row.kind, row.receipt?.latest_run);
-        const checkAge = noChangeAt ? Date.parse(inventory.as_of) - Date.parse(noChangeAt) : NaN;
+        const withheldAt = providerWithheldCheckAt(row.kind, row.receipt?.latest_run);
+        const checkedAt = noChangeAt || withheldAt;
+        const checkAge = checkedAt ? Date.parse(inventory.as_of) - Date.parse(checkedAt) : NaN;
         const sourceFailed = row.receipt?.status === "error" || row.freshness.state === "broken";
-        const checkLabel = checkAge >= 0 && checkAge <= 24 * 60 * 60 * 1000 ? "checked (no changes)" : null;
+        const checkLabel = checkAge >= 0 && checkAge <= 24 * 60 * 60 * 1000
+          ? (withheldAt ? "checked (withheld by design)" : "checked (no changes)") : null;
         console.log(
           `  ${row.name.padEnd(nameWidth)}  ${row.kind.padEnd(kindWidth)}  ${String(row.zone || "unassigned").padEnd(12)}  ` +
             `${num(row.storage.physical_documents).padStart(9)}  ${num(row.storage.readable_documents).padStart(10)}  ${sourceFailed ? "broken" : row.receipt?.zoom?.state || checkLabel || row.freshness.state}`,
         );
         if (noChangeAt) {
           console.log(`    checked ${row.receipt.last_check_at}; no changes; last ingest ${row.receipt.last_ingest_receipt_at || "never"}`);
+        }
+        if (row.receipt?.latest_run?.docs_withheld > 0) {
+          console.log(`    ${row.receipt.latest_run.docs_withheld} item(s) withheld by design; history remains incomplete`);
+        } else if (row.receipt?.last_withheld) {
+          console.log(`    last withholding: ${row.receipt.last_withheld.count} item(s) withheld by design on ${row.receipt.last_withheld.at}`);
         }
         if (row.receipt?.zoom) {
           const zoom = row.receipt.zoom;
@@ -16320,6 +16329,18 @@ export function describeLoadResult(result) {
         text: wouldSendKnown
           ? `${Number(result.would_send)} document(s) WOULD be sent, ${result.unchanged ?? 0} unchanged`
           : "would be read, but this source does not report a count in advance (unknown, not zero)",
+      };
+    }
+    if (result.tally && Number.isSafeInteger(result.tally.withheld)) {
+      const tally = result.tally;
+      const counts = { created: tally.created, updated: tally.updated, unchanged: tally.unchanged };
+      const partial = tally.withheld > 0 || declaredOutcome?.kind !== "completed";
+      return {
+        known: true, counts, partial, refused: tally.refused,
+        refreshSucceeded: result.refresh_succeeded === true,
+        outcome: outcomeOf(partial ? "partial" : "completed"),
+        text: `${counts.created} created, ${counts.updated} updated, ${counts.unchanged} unchanged` +
+          (tally.withheld ? `; ${tally.withheld} item(s) withheld by design` : ""),
       };
     }
     // calendar: { result, sent, removed }
@@ -26716,8 +26737,10 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       ["broken", "review"].includes(row?.freshness?.state) ? row.freshness.state
         : row?.freshness?.state && receiptTimestamps[index] ? row.freshness.state : "unknown");
     const latestRuns = receiptRows.map((row) => row?.receipt?.latest_run);
-    const checkTimestamps = receiptRows.map(row => providerNoChangeCheckAt(row?.kind, row?.receipt?.latest_run));
-    const outcomes = latestRuns.map((run, index) => checkTimestamps[index] ? "no_change" : run?.outcome || "missing_history");
+    const noChangeTimestamps = receiptRows.map(row => providerNoChangeCheckAt(row?.kind, row?.receipt?.latest_run));
+    const checkTimestamps = receiptRows.map((row, index) => noChangeTimestamps[index] ||
+      providerWithheldCheckAt(row?.kind, row?.receipt?.latest_run));
+    const outcomes = latestRuns.map((run, index) => noChangeTimestamps[index] ? "no_change" : run?.outcome || "missing_history");
     const lastRunOutcome = ["failed", "refused", "empty", "missing_history", "in_progress", "partial", "no_change", "completed"]
       .find((outcome) => outcomes.includes(outcome)) || "missing_history";
     const asOf = Date.parse(inventory?.as_of || "");
@@ -26756,6 +26779,9 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       current_state: currentState,
       last_run_outcome: lastRunOutcome,
       docs_refused: measuredCount("docs_refused"),
+      docs_withheld: measuredCount("docs_withheld"),
+      last_withheld_count: receiptRows.reduce((sum, row) => sum + (row?.receipt?.last_withheld?.count || 0), 0),
+      last_withheld_at: receiptRows.map(row => row?.receipt?.last_withheld?.at).filter(Boolean).sort().at(-1) || null,
       docs_failed: measuredCount("docs_failed"),
       last_successful_run_at: newest,
       last_check_at: zoom?.last_check_at || receiptRows.map(row => row?.receipt?.last_check_at).filter(Boolean).sort().at(-1) || null,
@@ -26775,7 +26801,9 @@ function renderDailyFreshnessRows(rows, log = console.log) {
     log(`${row.source} | ${row.current_state} | ${row.last_successful_run_at || "never"} | ${row.next_run} | ${row.owner}` +
       (row.last_run_outcome === "no_change" ? ` | checked ${row.last_check_at}; no changes` : "") +
       (row.zoom ? ` | Zoom ${row.zoom.state}; last check ${row.zoom.last_check_at || "never"}; history unproven` : "") +
-      (["partial", "refused", "empty"].includes(row.last_run_outcome)
+      (row.docs_withheld > 0 ? ` | ${row.docs_withheld} item(s) withheld by design`
+        : row.last_withheld_count > 0 ? ` | last withholding: ${row.last_withheld_count} item(s) on ${row.last_withheld_at}` : "") +
+      (!row.docs_withheld && ["partial", "refused", "empty"].includes(row.last_run_outcome)
         ? ` | ${row.last_run_outcome}; ${row.docs_refused ?? "unknown"} refused` : "") +
       (row.current_state === "held" || (row.current_state === "skipped" && row.reason === "not connected on this machine")
         ? ` | ${row.reason}` : ""));

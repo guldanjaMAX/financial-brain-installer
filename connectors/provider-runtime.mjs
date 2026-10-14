@@ -10,8 +10,9 @@
 import { createHash, randomBytes } from "node:crypto";
 import { batches, splitOversized } from "../ingest/envelope-batching.mjs";
 import { ingestionOutcome } from "../ingest/outcome.mjs";
-import { sourceReceiptIssueCode } from "../worker/src/lib/source-receipt.js";
+import { providerWithheldReason, sourceReceiptIssueCode } from "../worker/src/lib/source-receipt.js";
 import { restampFirstPartySourceProvenance } from "../worker/src/lib/provenance-receipt.js";
+import { credentialRefusalReason } from "../worker/src/lib/secret-scan.js";
 
 const SAFE_SOURCE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const RESULT_STATUSES = new Set(["created", "updated", "unchanged", "refused", "failed"]);
@@ -126,7 +127,7 @@ export async function deliverProviderDocuments(documents, {
 } = {}) {
   if (typeof sendBatch !== "function") throw new TypeError("provider delivery needs sendBatch");
   const expanded = documents.flatMap((document) => splitOversized(document));
-  const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0, sent: expanded.length };
+  const tally = { created: 0, updated: 0, unchanged: 0, refused: 0, failed: 0, withheld: 0, refusal_reasons: {}, sent: expanded.length };
   for (const group of batches(expanded.map((envelope) => ({ envelope })))) {
     assertOwned?.();
     const sent = await sendBatch({ base, adminKey, docs: group.map((item) => item.envelope) });
@@ -138,6 +139,13 @@ export async function deliverProviderDocuments(documents, {
     }
     for (const item of validateResults(body, group.map((entry) => entry.envelope))) {
       tally[item.status]++;
+      if (item.status === "refused") {
+        const reason = credentialRefusalReason(item.labels);
+        if (reason) {
+          tally.withheld++;
+          tally.refusal_reasons[reason] = (tally.refusal_reasons[reason] || 0) + 1;
+        }
+      }
     }
   }
   return tally;
@@ -175,7 +183,8 @@ function resultDetail(result, tally, removal, cursorAdvanced) {
   return [
     prefix,
     `${tally.created} created`, `${tally.updated} updated`, `${tally.unchanged} unchanged`,
-    `${tally.refused} refused`, `${tally.failed} failed`, `${removal.applied} removed`,
+    `${tally.withheld} item(s) withheld by design`, `${tally.refused - tally.withheld} unresolved refusals`,
+    `${tally.failed} failed`, `${removal.applied} removed`,
     `${removal.pending} removal pending`, cursorAdvanced ? "cursor advanced" : "cursor withheld",
   ].join("; ").slice(0, 500);
 }
@@ -316,13 +325,14 @@ export async function runProviderConnector({
       files_seen: normalized.documents.length + normalized.deletions.length,
       docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
       docs_refused: tally.refused, docs_failed: tally.failed,
+      refusal_reason: providerWithheldReason(tally.withheld),
       walk_complete: normalized.walk_complete === true ||
         (normalized.walk_complete === undefined && normalized.outcome.kind === "completed"),
       complete_sweep: false, outcome_kind: normalized.outcome.kind,
       deletion_authority: normalized.deletion_authority,
     };
     assertOwned?.();
-    if (tally.failed || tally.refused) {
+    if (tally.failed || tally.refused !== tally.withheld) {
       throw new ProviderDeliveryError("Provider document delivery is incomplete; the cursor was kept.", {
         code: "provider_delivery_incomplete", tally,
       });
@@ -346,15 +356,18 @@ export async function runProviderConnector({
     // All nonempty removals leave through the separate exact-plan command.
     const removal = { applied: 0, pending: 0 };
     const deletionReadbackVerified = normalized.deletions.length === 0;
-    const deliveryComplete = tally.failed === 0 && tally.refused === 0;
+    const deliveryComplete = tally.failed === 0 && tally.refused === tally.withheld;
     const sourceComplete = normalized.outcome.kind === "completed";
     const sourceWalkComplete = normalized.walk_complete === true ||
       (normalized.walk_complete === undefined && sourceComplete);
     // The common runner, not an individual adapter, owns cursor and health
     // truth. An inconsistent adapter must not turn an explicit partial result
     // into a skipped provider window or a healthy source receipt.
-    const cursorAdvanced = deliveryComplete && sourceComplete &&
+    const cursorAdvanced = deliveryComplete && sourceComplete && sourceWalkComplete &&
       normalized.cursor_can_advance && normalized.proposed_cursor !== null;
+    const providerCheckComplete = sourceWalkComplete && cursorAdvanced &&
+      (normalized.provider_check_complete === true ||
+        (tally.withheld > 0 && normalized.provider_check_complete !== false));
     const completedAt = now().toISOString();
     if (cursorAdvanced) {
       assertOwned?.();
@@ -371,6 +384,7 @@ export async function runProviderConnector({
       docs_updated: tally.updated,
       docs_unchanged: tally.unchanged,
       docs_refused: tally.refused,
+      refusal_reason: providerWithheldReason(tally.withheld),
       docs_failed: tally.failed,
       walk_complete: sourceWalkComplete,
       complete_sweep: false,
@@ -387,11 +401,12 @@ export async function runProviderConnector({
       files_seen: normalized.documents.length + normalized.deletions.length,
       docs_added: tally.created, docs_updated: tally.updated, docs_unchanged: tally.unchanged,
       docs_refused: tally.refused, docs_failed: tally.failed,
+      refusal_reason: providerWithheldReason(tally.withheld),
       walk_complete: sourceWalkComplete,
       // Publish boundary proof only after the selected cursor has been saved.
-      // Error receipts and partial/withheld walks never inherit this claim.
-      provider_check_complete: normalized.provider_check_complete === true && sourceWalkComplete && cursorAdvanced,
-      complete_sweep: sourceWalkComplete && sourceComplete && normalized.authoritative_snapshot === true,
+      // Incomplete walks and an explicit adapter refusal of proof stay unverified.
+      provider_check_complete: providerCheckComplete,
+      complete_sweep: tally.refused === 0 && sourceWalkComplete && sourceComplete && normalized.authoritative_snapshot === true,
       outcome_kind: normalized.outcome.kind,
       deletion_authority: normalized.deletion_authority,
       ...(sourceWalkComplete ? { detail } : { issue_code: "INGEST_FAILED" }),
@@ -399,6 +414,13 @@ export async function runProviderConnector({
     assertOwned?.();
     return {
       ...normalized,
+      // A finished provider walk may have incomplete indexed coverage. Keep
+      // that partial outcome separate from successful operational refresh.
+      outcome: tally.withheld > 0 && sourceComplete
+        ? ingestionOutcome("partial", { reason: `${tally.withheld} item(s) withheld by design` })
+        : normalized.outcome,
+      refresh_succeeded: deliveryComplete && sourceComplete && sourceWalkComplete && cursorAdvanced &&
+        (tally.withheld === 0 || providerCheckComplete),
       tally,
       removed: removal.applied,
       removal_pending: removal.pending,
