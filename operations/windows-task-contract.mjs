@@ -1,15 +1,42 @@
 /** Semantic Task Scheduler readback. No DTDs, loose descendant lookups or XML execution. */
+import { win32 } from "node:path";
+
 const NS = "http://schemas.microsoft.com/windows/2004/02/mit/task";
 const SID = /^S-1-\d+(?:-\d+)+$/u;
 const invalid = () => { throw new Error("invalid task XML contract"); };
 
-/** schtasks XML pipes may carry UTF-16 bytes despite the console code page. */
-export function decodeWindowsTaskXml(value) {
+function utf16Encoding(value) {
+  if ((value[0] === 0xff && value[1] === 0xfe) || (value[0] === 0x3c && value[1] === 0)) return "utf-16le";
+  if ((value[0] === 0xfe && value[1] === 0xff) || (value[0] === 0 && value[1] === 0x3c)) return "utf-16be";
+  return null;
+}
+
+/** Never guess a console code page from the XML declaration (often UTF-16). */
+export function decodeWindowsTaskXml(value, { spawn, systemRoot, environment, taskName } = {}) {
   if (!Buffer.isBuffer(value)) return String(value || "");
-  if (value[0] === 0xff && value[1] === 0xfe) return value.toString("utf16le");
-  if (value[0] === 0xfe && value[1] === 0xff) return Buffer.from(value).swap16().toString("utf16le");
-  if (value[0] === 0x3c && value[1] === 0) return value.toString("utf16le");
-  return value.toString("utf8");
+  const encoding = utf16Encoding(value);
+  if (encoding) {
+    new TextDecoder(encoding, { fatal: true }).decode(value);
+    // Keep the BOM for byte-bound legacy bridge receipts.
+    return (encoding === "utf-16be" ? Buffer.from(value).swap16() : value).toString("utf16le");
+  }
+  if (value.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]))) {
+    new TextDecoder("utf-8", { fatal: true }).decode(value);
+    return value.toString("utf8");
+  }
+  // schtasks may pipe OEM/ANSI bytes, including valid-looking UTF-8 sequences
+  // or ASCII '?' substitutions. Even an ASCII pipe is not losslessness proof.
+  // Read the same registered task's Unicode XML directly through Task Scheduler
+  // COM instead of corrupting paths or replaying lossy XML during rollback.
+  if (typeof spawn !== "function" || !win32.isAbsolute(String(systemRoot || "")) ||
+      typeof taskName !== "string" || !taskName.startsWith("\\") || /[\0\r\n]/u.test(taskName)) return invalid();
+  const locator = Buffer.from(taskName, "utf16le").toString("base64");
+  const script = `$ErrorActionPreference='Stop'; try { $p=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${locator}')); $s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $x=$s.GetFolder('\\').GetTask($p).Xml; $b=[Text.Encoding]::Unicode.GetPreamble()+[Text.Encoding]::Unicode.GetBytes($x); $o=[Console]::OpenStandardOutput(); $o.Write($b,0,$b.Length); $o.Flush() } catch { exit 1 }`;
+  const result = spawn(win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+    { encoding: null, windowsHide: true, env: environment, timeout: 15000, maxBuffer: 1048576 });
+  if (result?.status !== 0 || !Buffer.isBuffer(result.stdout) || !utf16Encoding(result.stdout)) return invalid();
+  return decodeWindowsTaskXml(result.stdout);
 }
 
 function decode(value) {
@@ -126,7 +153,7 @@ export function observedWindowsContract(serialized, { repetition = false, resolv
     const root = parse(serialized);
     const task = children(root, ["RegistrationInfo", "Triggers", "Principals", "Settings", "Actions"], ["Triggers", "Principals", "Settings", "Actions"]);
     const registration = task.RegistrationInfo && children(task.RegistrationInfo,
-      ["Description", "URI", "Date", "Author", "Version", "Source", "Documentation", "SecurityDescriptor"]);
+      ["Description", "URI", "Date", "Author", "Version", "Source", "Documentation"]);
     // Metadata never authorizes execution. A marker is accepted only from the
     // single Description, not a comment, action argument, or extra sibling.
     const description = registration ? leaf(registration.Description) : null;
@@ -136,7 +163,9 @@ export function observedWindowsContract(serialized, { repetition = false, resolv
     const triggers = children(task.Triggers, ["CalendarTrigger"], ["CalendarTrigger"]);
     const calendar = children(triggers.CalendarTrigger, ["StartBoundary", "Enabled", "ScheduleByDay", ...(repetition ? ["Repetition"] : [])], ["StartBoundary", "ScheduleByDay", ...(repetition ? ["Repetition"] : [])]);
     const day = children(calendar.ScheduleByDay, ["DaysInterval"], ["DaysInterval"]);
-    const boundary = leaf(calendar.StartBoundary)?.match(/^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.0+)?$/u);
+    // The product renders a local wall time without an offset. Preserve its
+    // full date; only zero fractional seconds are an equivalent spelling.
+    const boundary = leaf(calendar.StartBoundary)?.match(/^(\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d)(?:\.0+)?$/u);
     if (!boundary) return invalid();
     const principals = children(task.Principals, ["Principal"], ["Principal"]);
     const principal = children(principals.Principal, ["UserId", "LogonType", "RunLevel", "ProcessTokenSidType"], ["LogonType"]);
@@ -162,7 +191,7 @@ export function observedWindowsContract(serialized, { repetition = false, resolv
     const idle = settings.IdleSettings ? children(settings.IdleSettings, ["Duration", "WaitTimeout", "StopOnIdleEnd", "RestartOnIdle"]) : {};
     const contract = {
       command: leaf(exec.Command), arguments: leaf(exec.Arguments),
-      start_boundary: `2000-01-01T${boundary[1]}:${boundary[2]}:${boundary[3]}`,
+      start_boundary: boundary[1],
       trigger_enabled: bool(calendar.Enabled, true), days_interval: integer(day.DaysInterval),
       user_id: resolvedUser, logon_type: leaf(principal.LogonType), run_level: leaf(principal.RunLevel, "LeastPrivilege"),
       start_when_available: bool(settings.StartWhenAvailable, false),

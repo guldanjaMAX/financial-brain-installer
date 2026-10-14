@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = mkdtempSync(join(tmpdir(), "brain-cli-success-exit-"));
+const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-cli-success-exit-")));
 const fixture = fileURLToPath(new URL("./fixtures/cli-success-exit-child.mjs", import.meta.url));
 const ptyFixture = fileURLToPath(new URL("./fixtures/cli-success-exit-pty.py", import.meta.url));
 
@@ -35,6 +35,7 @@ function runArm(mode, extraEnv = {}) {
         HOME: home,
         PATH: [dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter),
         BRAIN_NO_WRANGLER_LOGIN: "1",
+        BRAIN_LIFECYCLE_LOCK_ROOT: join(root, `locks-${mode}`),
         BRAIN_TEST_LAUNCHCTL: join(root, "launchctl-unavailable"),
         BRAIN_ADMIN_KEY_FILE: join(home, ".brain-admin-key"),
         CLI_EXIT_PTY_SECONDS: String(ARM_BUDGET_SECONDS),

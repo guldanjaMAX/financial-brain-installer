@@ -1295,15 +1295,27 @@ absence.
 
 Windows readback compares the execution contract after Task Scheduler normalizes
 its XML. Element order, registration metadata, schema defaults, encoding and
-current-user name/SID aliases do not create drift. The action and exact
-arguments, daily clock and interval, enablement, principal, logon and privilege
+qualified current-user name/SID aliases do not create drift. Bare account names
+do not prove the current SID. The action and exact arguments, full daily start
+boundary and interval, enablement, principal, logon and privilege
 level, runtime limit and execution policies still have to match. Install,
 status, runner authorization and removal use this same projection. A task left
 unverified by an older parser is replaced and verified with `brain daily on`.
 Windows authorization version 2 makes this a one-time reconciliation; subsequent
 calls verify the matching definition in place. macOS authorization is unchanged.
 The real Windows CI probe registers an isolated disabled task, verifies its
-native XML and removes it without executing its action.
+native XML and removes it without executing its action. Registration security
+descriptors are refused because the product writes none. A paused task must
+still match its saved execution projection before restore can enable it,
+including the final comparison under the native mutation lock.
+
+Task XML with a Unicode byte-order mark is decoded strictly. An 8-bit schtasks
+pipe is ambiguous even when it contains only ASCII (unrepresentable characters
+can become question marks). The adapter obtains that exact registered task's
+Unicode XML through the local Task Scheduler COM API and a bounded, profile-free
+PowerShell process writing UTF-16 bytes directly. The child receives only the
+system-root environment. A failed Unicode read refuses inspection and rollback
+rather than replaying corrupted paths.
 
 The definition contains paths, hashes, cadence, and the manifest locator, but
 no key or provider credential. Its Node action prefers a stable launcher on
@@ -1400,7 +1412,11 @@ Before native disable, the update journal records task name, principal, prior
 enabled state, time, action-recognition booleans, a binding fingerprint and an
 immutable definition fingerprint. The fingerprints bind domain, exact manifest
 path, exact task name and SID; the definition excludes only Settings/Enabled,
-retaining trigger enablement and every other definition byte. Raw definitions
+retaining trigger enablement and every other definition byte. The v2 fingerprint
+removes Settings/Enabled and its leading whitespace, so the omitted true default
+and the explicit false form remain stable across pause and restore. Capture
+writes v2; recovery also accepts the exact old v1 placeholder fingerprint for
+already saved receipts. Raw definitions
 and decoded actions are never persisted. Recovery validates the saved fingerprints
 against every native read, including after restart and before enable or delete.
 A missing legacy fingerprint or any mismatch refuses mutation rather than

@@ -97,7 +97,7 @@ test("real Windows registers, verifies and removes the product daily XML without
   assert.equal(current.status, 0, "current-user SID lookup succeeded");
   const sid = String(current.stdout).trim().match(/^"(?:[^"]|"")*","(S-1-\d+(?:-\d+)+)"$/u)?.[1];
   assert.ok(sid, "a current-user SID was observed");
-  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "daily-registration-probe-")));
+  const home = realpathSync.native(mkdtempSync(join(tmpdir(), "daily-registration-probe-ownér-")));
   const identity = { id: `v1-${randomBytes(16).toString("hex")}`, principal: `sid:${sid}` };
   const name = `\\Financial Brain Probe\\${identity.id}`;
   const plan = { identity, manifest_path: join(home, "synthetic.manifest.json"), manifest_path_hash: "sha256:path",
@@ -106,8 +106,8 @@ test("real Windows registers, verifies and removes the product daily XML without
   const adapter = createNativeDailyRefreshAdapter({ platform: "win32", home, environment, taskSpec: { name: () => name } });
   const definition = buildDailyRefreshDefinition(plan, { platform: "win32", home });
   // Never execute even if this probe happens at the daily clock slot. Register
-  // disabled, with a future boundary as a second guard; do not issue /Run.
-  const serialized = definition.serialized.replace("2000-01-01T", "2099-01-01T")
+  // disabled; the full product StartBoundary must verify unchanged. Do not issue /Run.
+  const serialized = definition.serialized
     .replace(/<Settings>([\s\S]*?)<\/Settings>/u, (_all, settings) =>
       `<Settings>${settings.replace("<Enabled>true</Enabled>", "<Enabled>false</Enabled>")}</Settings>`);
   let attempted = false;

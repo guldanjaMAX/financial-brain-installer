@@ -46,7 +46,7 @@ function windowsReadback(definition, user = SID) {
 </Task>`;
 }
 
-function harness(t, { initial = null, transform = windowsReadback, changingMetadata = false, beforeQuery = value => value } = {}) {
+function harness(t, { initial = null, transform = windowsReadback, changingMetadata = false, beforeQuery = value => value, pipeEncoding = null, unicodeReadFailure = false } = {}) {
   const home = realpathSync.native(mkdtempSync(join(tmpdir(), "daily-readback-")));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   let native = initial;
@@ -56,9 +56,24 @@ function harness(t, { initial = null, transform = windowsReadback, changingMetad
     spawn: (command, args, child) => {
       calls.push(args);
       assert.deepEqual(child.env, { SystemRoot: String.raw`C:\Windows` });
+      if (command.endsWith("powershell.exe")) {
+        assert.ok(args.includes("-EncodedCommand"), "lossless read uses a literal encoded program");
+        const script = Buffer.from(args.at(-1), "base64").toString("utf16le");
+        assert.ok(script.includes("Schedule.Service") && script.includes("OpenStandardOutput"), "read requests native Unicode XML");
+        assert.ok(script.includes("GetTask") && script.includes("FromBase64String"), "task locator is passed as data");
+        if (unicodeReadFailure) return { status: 5 };
+        return { status: 0, stdout: Buffer.from(`\ufeff${native.replace(/^\ufeff/u, "")}`, "utf16le") };
+      }
       if (command.endsWith("whoami.exe")) return { status: 0, stdout: `"fixture\\owner","${SID}"\r\n` };
       if (args.includes("/FO")) return { status: 0, stdout: '"\\Other\\Control","N/A","Ready"\r\n' };
       if (args[0] === "/Query") native = beforeQuery(native);
+      if (args[0] === "/Query" && pipeEncoding && native !== null) {
+        const xml = native.replace(/^\ufeff/u, "");
+        const text = pipeEncoding === "ascii-lossy" ? xml.replaceAll("é", "?") : xml;
+        const bytes = Buffer.from(text, pipeEncoding === "utf8" ? "utf8" : "latin1");
+        if (pipeEncoding === "oem") for (let i = 0; i < bytes.length; i++) if (bytes[i] === 0xe9) bytes[i] = 0x82;
+        return { status: 0, stdout: bytes };
+      }
       if (args[0] === "/Query") return native === null ? { status: 1 } : { status: 0, stdout: changingMetadata
         ? native.replace("<Version>1.0</Version>", `<Version>${calls.length}</Version>`) : native };
       if (args[0] === "/Create") {
@@ -78,7 +93,7 @@ function harness(t, { initial = null, transform = windowsReadback, changingMetad
   return { home, adapter, calls, get native() { return native; }, set native(value) { native = value; } };
 }
 
-for (const user of [SID, "FIXTURE\\owner", "owner"]) {
+for (const user of [SID, "FIXTURE\\owner"]) {
   test(`Windows query normalization verifies the same owner (${user === SID ? "SID" : user.includes("\\") ? "qualified" : "short"})`, t => {
     const definition = buildDailyRefreshDefinition(plan, options);
     const h = harness(t, { initial: windowsReadback(definition, user) });
@@ -164,7 +179,7 @@ test("required fields and extra execution remain refused with unchanged ownershi
 });
 
 test("the scheduled runner accepts normalized readback and refuses drift before any source write", async t => {
-  for (const readback of [windowsReadback, fieldReadback]) for (const changed of [false, "clock", "disabled"]) {
+  for (const readback of [windowsReadback, fieldReadback]) for (const changed of [false, "clock", "date", "disabled"]) {
     const h = harness(t);
     const path = join(h.home, "brain.manifest.json");
     writeFileSync(path, JSON.stringify({ brain: { domain: "fixture.invalid" } }));
@@ -172,6 +187,7 @@ test("the scheduled runner accepts normalized readback and refuses drift before 
     const definition = buildDailyRefreshDefinition(activePlan, options);
     h.native = readback(definition);
     if (changed === "clock") h.native = h.native.replace("T09:00:00", "T10:00:00");
+    if (changed === "date") h.native = h.native.replace("2000-01-01T", "2099-01-01T");
     if (changed === "disabled") h.native = h.native.replace(/<Settings>([\s\S]*?)<\/Settings>/u,
       (_all, settings) => `<Settings><Enabled>false</Enabled>${settings.replace(/<Enabled>.*?<\/Enabled>/u, "")}</Settings>`);
     let writes = 0;
@@ -298,5 +314,141 @@ test("install refuses a marked semantic edit at the mutation boundary without ro
     assert.equal(h.calls.filter(args => args[0] === "/Create").length, changed ? 0 : 1,
       "a concurrent semantic edit must not be overwritten by either install or rollback");
     if (changed) assert.ok(h.native.includes("C:\\Foreign\\node.exe"));
+  }
+});
+
+
+// WIN-DAILY-FIX-2 regressions run through the native adapter, not a parallel parser.
+test("FIX-2 full start boundary is verified and daily on repairs a future date", t => {
+  const definition = buildDailyRefreshDefinition(plan, options);
+  const h = harness(t, { initial: fieldReadback(definition), transform: fieldReadback });
+  for (const boundary of ["2000-01-01T09:00:00", "2000-01-01T09:00:00.000"]) {
+    h.native = fieldReadback(definition).replace("2000-01-01T09:00:00", boundary);
+    assert.equal(statusDailyRefreshSchedule(plan, { ...options, adapter: h.adapter }).verified, true, "equivalent precision control");
+  }
+  h.native = fieldReadback(definition).replace("2000-01-01T", "2099-01-01T");
+  assert.equal(statusDailyRefreshSchedule(plan, { ...options, adapter: h.adapter }).verified, false);
+  assert.ok(h.calls.filter(args => args.includes("/XML")).length >= 3, "boundary comparison was reached");
+  const repaired = installDailyRefreshSchedule(plan, { ...options, adapter: h.adapter });
+  assert.equal(repaired.changed, true);
+  assert.equal(repaired.verified, true);
+  assert.equal(h.calls.filter(args => args[0] === "/Create").length, 1);
+});
+
+test("FIX-2 task security descriptors are refused even with an intact marker", t => {
+  const definition = buildDailyRefreshDefinition(plan, options);
+  const h = harness(t, { initial: fieldReadback(definition) });
+  assert.equal(statusDailyRefreshSchedule(plan, { ...options, adapter: h.adapter }).verified, true, "default ACL control");
+  for (const descriptor of ["<SecurityDescriptor>D:(A;;FA;;;WD)</SecurityDescriptor>", "<SecurityDescriptor/>"]) {
+    h.native = fieldReadback(definition).replace("</RegistrationInfo>", `${descriptor}</RegistrationInfo>`);
+    const before = h.calls.length;
+    assert.equal(statusDailyRefreshSchedule(plan, { ...options, adapter: h.adapter }).verified, false);
+    assert.ok(h.calls.length > before, "ACL decision reached the native read");
+    assert.equal(h.calls.filter(args => ["/Create", "/Change", "/Delete"].includes(args[0])).length, 0);
+  }
+});
+
+test("FIX-2 isolated account names cannot inherit a qualified account SID", t => {
+  const definition = buildDailyRefreshDefinition(plan, options);
+  const h = harness(t, { initial: windowsReadback(definition, "FIXTURE\\owner") });
+  assert.equal(statusDailyRefreshSchedule(plan, { ...options, adapter: h.adapter }).verified, true, "qualified current-user control");
+  for (const user of ["owner", "OTHER\\owner"]) {
+    h.native = windowsReadback(definition, user);
+    const before = h.calls.length;
+    assert.equal(statusDailyRefreshSchedule(plan, { ...options, adapter: h.adapter }).verified, false);
+    assert.ok(h.calls.length > before, "principal decision reached native inspection");
+  }
+  assert.equal(h.calls.filter(args => ["/Create", "/Change", "/Delete"].includes(args[0])).length, 0);
+});
+
+test("FIX-2 restore refuses paused command edits before any enable or replacement", t => {
+  for (const changed of [false, true]) {
+    const h = harness(t, { initial: fieldReadback(buildDailyRefreshDefinition(plan, options)) });
+    const snapshot = pauseDailyRefreshSchedule(plan, { ...options, adapter: h.adapter });
+    assert.equal(h.adapter.read(plan.identity).enabled, false, "pause decision reached native disable");
+    if (changed) h.native = h.native.replace("C:\\Runtime\\node.exe", "C:\\Foreign\\node.exe");
+    const before = h.calls.length;
+    const restore = () => restoreDailyRefreshSchedule(snapshot, { ...options, adapter: h.adapter });
+    if (changed) assert.throws(restore, /restore|changed/);
+    else assert.equal(restore().verified, true, "unchanged restore control");
+    assert.ok(h.calls.length > before, "restore reached native projection");
+    assert.equal(h.calls.slice(before).filter(args => ["/Create", "/Change", "/Delete"].includes(args[0])).length, changed ? 0 : 1);
+    assert.equal(h.adapter.read(plan.identity).enabled, !changed);
+  }
+});
+
+for (const pipeEncoding of ["latin1", "oem", "utf8", "ascii-lossy"]) {
+test(`FIX-2 ${pipeEncoding} XML preserves accented paths through verification and rollback`, t => {
+  const unicodeOptions = { ...options, nodePath: String.raw`C:\Profiles\ownér\node.exe` };
+  const definition = buildDailyRefreshDefinition(plan, unicodeOptions);
+  let creates = 0;
+  const h = harness(t, { initial: fieldReadback(definition), pipeEncoding, transform: value => {
+    const result = fieldReadback(value);
+    return ++creates === 1 ? result.replace("<WakeToRun>true", "<WakeToRun>false") : result;
+  } });
+  assert.equal(statusDailyRefreshSchedule(plan, { ...unicodeOptions, adapter: h.adapter }).verified, true);
+  assert.ok(h.calls.some(args => args.includes("-EncodedCommand")), "ambiguous bytes reached lossless native export");
+  assert.throws(() => installDailyRefreshSchedule({ ...plan, source_plan_hash: "sha256:new" }, { ...unicodeOptions, adapter: h.adapter }), error => {
+    assert.match(error.message, /exact readback/);
+    assert.doesNotMatch(error.message, /rollback also failed/);
+    return true;
+  });
+  assert.equal(creates, 2, "replacement and rollback both reached registration");
+  assert.ok(h.native.includes("ownér"));
+  assert.ok(!h.native.includes("\ufffd"));
+  assert.equal(statusDailyRefreshSchedule(plan, { ...unicodeOptions, adapter: h.adapter }).verified, true);
+});
+}
+
+
+test("FIX-2 restore rejects an edit that arrives inside the enable mutation lock", t => {
+  for (const changed of [false, true]) {
+    let restoring = false;
+    let reads = 0;
+    const h = harness(t, { initial: fieldReadback(buildDailyRefreshDefinition(plan, options)), beforeQuery: value => {
+      if (restoring && ++reads === 3 && changed) return value.replace("C:\\Runtime\\node.exe", "C:\\Foreign\\node.exe");
+      return value;
+    } });
+    const snapshot = pauseDailyRefreshSchedule(plan, { ...options, adapter: h.adapter });
+    restoring = true;
+    const before = h.calls.length;
+    const restore = () => restoreDailyRefreshSchedule(snapshot, { ...options, adapter: h.adapter });
+    if (changed) assert.throws(restore, /changed before restore/);
+    else assert.equal(restore().verified, true);
+    assert.ok(reads >= 3, "both arms reached the locked read immediately before enabling");
+    assert.equal(h.calls.slice(before).filter(args => args[0] === "/Change").length, changed ? 0 : 1);
+    assert.equal(h.adapter.read(plan.identity).enabled, !changed);
+  }
+});
+
+
+test("FIX-2 intentional replacement rollback requires its saved verified readback", t => {
+  for (const changed of [false, true]) {
+    const oldDefinition = buildDailyRefreshDefinition(plan, options);
+    const h = harness(t, { initial: fieldReadback(oldDefinition), transform: fieldReadback });
+    const snapshot = { identity: plan.identity, exists: true, enabled: true, definition: h.adapter.read(plan.identity).definition };
+    const replacement = installDailyRefreshSchedule({ ...plan, source_plan_hash: "sha256:replacement" }, { ...options, adapter: h.adapter });
+    assert.equal(replacement.verified, true, "intentional replacement reached exact readback");
+    if (changed) h.native = h.native.replace("C:\\Runtime\\node.exe", "C:\\Foreign\\node.exe");
+    const before = h.calls.length;
+    const restore = () => restoreDailyRefreshSchedule(snapshot, { ...options, adapter: h.adapter, expectedReplacement: replacement.readback });
+    if (changed) assert.throws(restore, /changed before restore/);
+    else assert.equal(restore().verified, true);
+    assert.ok(h.calls.length > before, "rollback compared the saved replacement with current XML");
+    assert.equal(h.calls.slice(before).filter(args => ["/Create", "/Change", "/Delete"].includes(args[0])).length, changed ? 0 : 1);
+    if (!changed) assert.equal(statusDailyRefreshSchedule(plan, { ...options, adapter: h.adapter }).verified, true);
+  }
+});
+
+
+test("FIX-2 lossless export failure refuses install before any native mutation", t => {
+  const unicodeOptions = { ...options, nodePath: String.raw`C:\Profiles\ownér\node.exe` };
+  for (const denied of [false, true]) {
+    const h = harness(t, { initial: fieldReadback(buildDailyRefreshDefinition(plan, unicodeOptions)), pipeEncoding: "latin1", unicodeReadFailure: denied });
+    const install = () => installDailyRefreshSchedule(plan, { ...unicodeOptions, adapter: h.adapter });
+    if (denied) assert.throws(install, /decoded losslessly/);
+    else assert.equal(install().verified, true, "readable Unicode export control");
+    assert.ok(h.calls.some(args => args.includes("-EncodedCommand")), "lossless export was attempted");
+    assert.equal(h.calls.filter(args => ["/Create", "/Change", "/Delete"].includes(args[0])).length, 0);
   }
 });
