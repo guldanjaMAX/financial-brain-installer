@@ -380,7 +380,7 @@ async function executeDailyRefreshCli(path, m, options, observationStarted) {
         ...definitionOptions,
         ...(options.schedulerAdapter ? { adapter: options.schedulerAdapter } : {}),
       });
-      if (!schedule?.installed || schedule.state?.definition?.definition_hash !== expectedDefinitionHash) {
+      if (!schedule?.installed || schedule.enabled === false || schedule.state?.definition?.definition_hash !== expectedDefinitionHash) {
         throw new Error("the manifest or source plan changed after daily refresh registration; run brain daily on <manifest> to reconcile it");
       }
       if (schedule.registered_node_usable === false) {

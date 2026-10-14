@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -31,7 +32,7 @@ import {
   parseLocalAssistantRepairScopes,
 } from "../operations/local-assistant-repair.mjs";
 
-const sandbox = mkdtempSync(join(tmpdir(), "brain-assistant-repair-"));
+const sandbox = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-assistant-repair-")));
 const manifestPath = join(sandbox, "brain.manifest.json");
 const manifest = {
   client: { slug: "fixture-brain", display_name: "Fixture Owner" },
@@ -139,16 +140,41 @@ try {
   );
   for (const item of inspectTechnicianSkillEverywhere(skillOptions)) assert.equal(item.status, "missing");
 
+  const jsonPreview = await captured(() => cmdAssistantRepair(manifestPath, {
+    flags: { only: "technician-skill", json: true }, skillOptions,
+  }));
+  const approvedJson = JSON.parse(jsonPreview.output);
+  assert.equal(approvedJson.plan_id, firstPreview.value.plan_id, "JSON and human previews authorize the same exact write set");
+  assert.ok(approvedJson.write_set.length > 0, "JSON apply has real destinations to repair");
+  await assert.rejects(cmdAssistantRepair(manifestPath, {
+    flags: { only: "technician-skill", json: true, apply: true, approve: "0".repeat(64) }, skillOptions,
+  }), /missing, stale, or different/i, "JSON preserves exact approval refusal");
+
   const appliedSkill = await captured(() => cmdAssistantRepair(manifestPath, {
     flags: {
       only: "technician-skill",
       apply: true,
-      approve: firstPreview.value.plan_id,
+      approve: approvedJson.plan_id,
     },
     skillOptions,
   }));
   assert.equal(appliedSkill.value.results[0].status, "repaired");
   assert.match(appliedSkill.output, /No Brain records, sources, providers, access, zones, passkeys, devices, cloud resources, or CLI executable changed/);
+  const jsonSkillHome = join(sandbox, "json-skill-home");
+  mkdirSync(jsonSkillHome, { mode: 0o700 });
+  const jsonSkillOptions = { home: jsonSkillHome };
+  const jsonOnlyPreview = await captured(() => cmdAssistantRepair(manifestPath, {
+    flags: { only: "technician-skill", json: true }, skillOptions: jsonSkillOptions,
+  }));
+  const jsonPlan = JSON.parse(jsonOnlyPreview.output);
+  assert.ok(jsonPlan.write_set.length > 0);
+  const jsonApplied = await captured(() => cmdAssistantRepair(manifestPath, {
+    flags: { only: "technician-skill", json: true, apply: true, approve: jsonPlan.plan_id }, skillOptions: jsonSkillOptions,
+  }));
+  const jsonReceipt = JSON.parse(jsonApplied.output);
+  assert.equal(jsonReceipt.plan_id, jsonPlan.plan_id);
+  assert.equal(jsonReceipt.results[0].changed, true, "JSON apply reached the exact write transaction");
+  for (const item of inspectTechnicianSkillEverywhere(jsonSkillOptions)) assert.equal(item.status, "current");
   for (const item of inspectTechnicianSkillEverywhere(skillOptions)) assert.equal(item.status, "current");
   assert.deepEqual(readFileSync(manifestPath), manifestBefore, "the local repair never changes the manifest");
 

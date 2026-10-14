@@ -5,10 +5,23 @@ import { realpathSync } from "node:fs";
 import { win32 } from "node:path";
 import { parseWindowsTaskInventory } from "./daily-refresh-scheduler.mjs";
 
+import { decodeWindowsTaskXml } from "./windows-task-contract.mjs";
+
 const BRIDGE_NAME = /^\\Financial Brain\\daily-refresh-[0-9a-f]{16}$/u;
 const SID = /^S-1-\d+(?:-\d+)+$/u;
 const HASH = /^sha256:[a-f0-9]{64}$/u;
-const repair = () => new Error("Check the old daily task in Task Scheduler, then retry the update.");
+export class WindowsDailyTaskRepairRequired extends Error {
+  constructor(taskName = null, { unrecognized = false } = {}) {
+    const exactTask = BRIDGE_NAME.test(taskName || "") ? `Task Scheduler task "${taskName}"` : "The old daily task in Task Scheduler";
+    super(unrecognized
+      ? `${exactTask} binds this Brain but was not created by the installer. ` +
+        "Back up its XML in Task Scheduler, remove only this task, then rerun the update. Nothing was changed."
+      : `Check ${exactTask}, then retry the update.`);
+    this.name = "WindowsDailyTaskRepairRequired";
+    this.supportCode = "SAFETY_REVIEW_REQUIRED";
+  }
+}
+const repair = (taskName, options) => new WindowsDailyTaskRepairRequired(taskName, options);
 const decodeXml = (value) => value.replaceAll("&quot;", '"').replaceAll("&apos;", "'")
   .replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
 function singleTag(text, name) {
@@ -103,7 +116,7 @@ export function createNativeWindowsBridgeAdapter({ spawn = spawnSync, environmen
   if (!win32.isAbsolute(String(systemRoot || ""))) throw repair();
   const env = { SystemRoot: systemRoot, ...(environment.WINDIR ? { WINDIR: environment.WINDIR } : {}) };
   const run = (exe, args) => {
-    try { return spawn(win32.join(systemRoot, "System32", exe), args, { encoding: "utf8", windowsHide: true, env }); }
+    try { return spawn(win32.join(systemRoot, "System32", exe), args, { encoding: args.includes("/XML") ? null : "utf8", windowsHide: true, env }); }
     catch { throw repair(); }
   };
   const tasks = (args) => run("schtasks.exe", args);
@@ -125,7 +138,7 @@ export function createNativeWindowsBridgeAdapter({ spawn = spawnSync, environmen
       if (!names().includes(name)) return null;
       throw repair();
     }
-    return observe(name, String(result.stdout || ""));
+    return observe(name, decodeWindowsTaskXml(result.stdout));
   };
   return {
     currentSid,
@@ -192,7 +205,7 @@ export function createWindowsUpdateBridgeGuard(options = {}) {
           // Even a differently named task cannot be silently ignored if its
           // literal action points at this manifest or Brain.
           if (actionBinds(entry, options.manifestPath) ||
-              entry.action?.includes(options.manifestPath) || entry.action?.includes(options.domain)) throw repair();
+              entry.action?.includes(options.manifestPath) || entry.action?.includes(options.domain)) throw repair(entry.task_name, { unrecognized: true });
           ignored += 1;
           continue;
         }
@@ -211,7 +224,7 @@ export function createWindowsUpdateBridgeGuard(options = {}) {
         if (saved) {
           if (saved.principal !== entry.principal || saved.state === "retired") throw repair();
         } else {
-          if (!actionBinds(entry, options.manifestPath)) throw repair();
+          if (!actionBinds(entry, options.manifestPath)) throw repair(entry.task_name, { unrecognized: true });
           const bound = target();
           if (entry.task_name !== bound.name || entry.principal !== adapter.currentSid()) throw repair();
           receipts.push({ task_name: entry.task_name, principal: entry.principal,

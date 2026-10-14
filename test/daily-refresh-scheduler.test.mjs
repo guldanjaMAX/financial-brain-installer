@@ -1445,11 +1445,13 @@ test("daily status renders the observed run fields through the public command", 
   assert.ok(adapter.calls.length > 0);
 });
 
-test("daily execution hashes retain the pre-observability contract", () => {
+test("macOS retains its execution hash and Windows versions semantic readback authorization", () => {
   const mac = buildDailyRefreshDefinition(basePlan, DARWIN_DEFINITION_OPTIONS);
   const windows = buildDailyRefreshDefinition(basePlan, WINDOWS_DEFINITION_OPTIONS);
   assert.equal(mac.definition_hash, "sha256:fa20159bef67f028755af04241d7603c4949f1add0fec8792e908fcb7835387c");
-  assert.equal(windows.definition_hash, "sha256:7c56a91ee26964d1946a1ea03d00d9240820c7281454c9596a82aa1529998527");
+  assert.equal(mac.contract_version, 1);
+  assert.equal(windows.contract_version, 2, "daily on must replace the failed version-1 Windows authorization once");
+  assert.equal(windows.definition_hash, "sha256:88bbdf9b7f0a48f350c031d86d8d0d9c879de6a2960b4a1ba1aa19a207a018a6");
   assert.ok(mac.log_path.endsWith("daily.log"));
   assert.ok(windows.log_path.endsWith("daily.log"));
 });
