@@ -12,6 +12,9 @@ import {
   writeBrainRecoveryFence,
 } from "./brain-lifecycle-lock.mjs";
 
+import { observedWindowsContract, decodeWindowsTaskXml, windowsTaskDescription } from "./windows-task-contract.mjs";
+export { observedWindowsContract } from "./windows-task-contract.mjs";
+
 const OWNER_MARKER = "financial-brain-daily-refresh-v1";
 
 export class DailyRefreshInspectionError extends Error {
@@ -182,7 +185,9 @@ export function buildDailyRefreshDefinition(plan, options = {}) {
   const brainPath = executablePath(options.brainPath || urlPath(options.brainUrl || new URL("../brain.mjs", import.meta.url)));
   const runnerPath = executablePath(options.runnerPath || urlPath(options.runnerUrl || new URL("./daily-refresh-run.mjs", import.meta.url)));
   const payload = {
-    contract_version: 1,
+    // Version the Windows authorization so daily on replaces an old failed
+    // registration once. The owner marker and task identity still prove custody.
+    contract_version: platform === "win32" ? 2 : 1,
     owner_marker: OWNER_MARKER,
     identity: plan.identity,
     name,
@@ -241,10 +246,11 @@ export function buildDailyRefreshDefinition(plan, options = {}) {
   // Task Scheduler persists Enabled inside the task XML. Pausing is allowed to
   // change that one field, so it is verified separately from the immutable
   // executable, trigger, principal, and safety contract.
-  const nativeDefinitionHash = hash(JSON.stringify(immutableNativeContract(platform, nativeContract)));
   const serialized = platform === "darwin"
     ? `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${xml(name)}</string>\n<key>ProgramArguments</key><array><string>${xml(nodePath)}</string>${args.map((arg) => `<string>${xml(arg)}</string>`).join("")}</array>\n<key>StartCalendarInterval</key><dict><key>Hour</key><integer>${clock.hour}</integer><key>Minute</key><integer>${clock.minute}</integer></dict>\n<key>RunAtLoad</key><true/>\n<key>ProcessType</key><string>Background</string>\n<!-- ${marker} -->\n</dict></plist>\n`
     : `<?xml version="1.0" encoding="UTF-16"?>\n<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>${xml(marker)}</Description></RegistrationInfo><Triggers><CalendarTrigger><StartBoundary>2000-01-01T${clock.hhmm}</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers><Principals><Principal id="Owner">${windowsSid ? `<UserId>${xml(windowsSid)}</UserId>` : ""}<LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><IdleSettings><StopOnIdleEnd>true</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>true</WakeToRun><ExecutionTimeLimit>PT${plan.max_runtime_minutes}M</ExecutionTimeLimit><Priority>7</Priority></Settings><Actions Context="Owner"><Exec><Command>${xml(nodePath)}</Command><Arguments>${xml(args.map((arg) => `"${arg}"`).join(" "))}</Arguments></Exec></Actions></Task>\n`;
+  const projectedContract = platform === "win32" ? observedWindowsContract(serialized).contract : nativeContract;
+  const nativeDefinitionHash = hash(JSON.stringify(immutableNativeContract(platform, projectedContract)));
   return Object.freeze({
     ...payload,
     // The resolved binary is diagnostic evidence only. The stable launcher is
@@ -252,7 +258,7 @@ export function buildDailyRefreshDefinition(plan, options = {}) {
     node_realpath: nodeRealpath,
     log_path: dailyLogPaths(plan.identity, options).log_path,
     definition_hash: definitionHash,
-    native_contract: Object.freeze(nativeContract),
+    native_contract: Object.freeze(projectedContract),
     native_definition_hash: nativeDefinitionHash,
     serialized,
     receipt: Object.freeze({
@@ -298,10 +304,21 @@ function registeredNodeDetails(definition, platform, options = {}) {
 
 function verifiedState(state, definition, { enabled = true } = {}) {
   return Boolean(state?.exists && state.owned === true && state.enabled === enabled &&
+    state.definition?.native_contract_valid !== false && definition.native_contract_valid !== false &&
     (!enabled || state.loaded !== false) &&
     state.loaded_definition_matches !== false &&
     state.definition?.definition_hash === definition.definition_hash &&
     state.definition?.native_definition_hash === definition.native_definition_hash);
+}
+
+function sameNativeDefinition(left, right) {
+  // Windows rewrites metadata and element order after registration. Compare the
+  // same semantic projection as install/status; invalid parses stay byte-bound.
+  if (left?.platform === "win32" && right?.platform === "win32" &&
+      left.native_definition_hash && right.native_definition_hash) {
+    return left.native_definition_hash === right.native_definition_hash;
+  }
+  return left?.serialized === right?.serialized;
 }
 
 function sameObservedState(left, right) {
@@ -309,7 +326,7 @@ function sameObservedState(left, right) {
   return left.owned === right.owned && left.enabled === right.enabled &&
     left.definition?.definition_hash === right.definition?.definition_hash &&
     left.definition?.native_definition_hash === right.definition?.native_definition_hash &&
-    left.definition?.serialized === right.definition?.serialized &&
+    sameNativeDefinition(left.definition, right.definition) &&
     left.loaded_definition_matches === right.loaded_definition_matches;
 }
 
@@ -318,7 +335,11 @@ function sameObservedDefinition(left, right) {
   return left.owned === right.owned &&
     left.definition?.definition_hash === right.definition?.definition_hash &&
     left.definition?.native_definition_hash === right.definition?.native_definition_hash &&
-    left.definition?.serialized === right.definition?.serialized;
+    sameNativeDefinition(left.definition, right.definition);
+}
+
+function concurrentScheduleEdit(message) {
+  return Object.assign(new Error(message), { code: "DAILY_REFRESH_CONCURRENT_EDIT" });
 }
 
 function requireUnchangedMutationRead(read, identity, expected, message, { definitionOnly = false } = {}) {
@@ -327,7 +348,7 @@ function requireUnchangedMutationRead(read, identity, expected, message, { defin
   const matches = definitionOnly
     ? sameObservedDefinition(observed, expected)
     : sameObservedState(observed, expected);
-  if (!matches) throw new Error(message);
+  if (!matches) throw concurrentScheduleEdit(message);
   return observed;
 }
 
@@ -361,6 +382,9 @@ export function reconcileDailyRefreshSchedule(plan, options = {}) {
     }
     return Object.freeze({ installed: true, enabled: desiredEnabled, verified: true, definition, readback, changed: true });
   } catch (error) {
+    // A refused compare-before-write is not our partial install. Rollback must
+    // not overwrite the concurrent edit that caused this refusal.
+    if (error?.code === "DAILY_REFRESH_CONCURRENT_EDIT") throw error;
     try {
       const partial = adapter.read(plan.identity);
       requireOwned(partial);
@@ -372,7 +396,7 @@ export function reconcileDailyRefreshSchedule(plan, options = {}) {
           throw new Error("the prior definition did not read back exactly");
         }
       } else if (partial?.exists) {
-        adapter.remove(plan.identity);
+        adapter.remove(plan.identity, { expected: partial });
         if (adapter.read(plan.identity)?.exists) throw new Error("the partial definition still exists");
       }
     } catch (rollbackError) {
@@ -535,8 +559,10 @@ export function createNativeDailyRefreshAdapter({
   throw new Error(`daily refresh scheduling is not supported on ${platform}`);
 }
 
-function markerOf(serialized) {
-  const match = String(serialized || "").match(/financial-brain-daily-refresh-v1:(v1-[a-f0-9]+):(sha256:[a-f0-9]{64})/u);
+function markerOf(serialized, exact = false) {
+  const text = String(serialized || "");
+  const match = text.match(/financial-brain-daily-refresh-v1:(v1-[a-f0-9]+):(sha256:[a-f0-9]{64})/u);
+  if (exact && match?.[0] !== text) return null;
   return match ? { identity: match[1], definition_hash: match[2] } : null;
 }
 
@@ -767,107 +793,8 @@ function decodeXml(value) {
   return String(value || "").replaceAll("&quot;", '"').replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&amp;", "&");
 }
 
-function tag(serialized, name) {
-  const match = String(serialized).match(new RegExp(`<${name}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${name}>`, "iu"));
-  return match ? decodeXml(match[1].trim()) : null;
-}
-
-function boolTag(serialized, name) {
-  const value = tag(serialized, name);
-  return value === null ? null : value.toLowerCase() === "true";
-}
-
-function tagCount(serialized, name) {
-  return [...String(serialized || "").matchAll(new RegExp(`<${name}(?:\\s[^>]*)?>`, "giu"))].length;
-}
-
-function exactlyOne(serialized, names) {
-  return names.every((name) => tagCount(serialized, name) === 1);
-}
-
-function directChildNames(serialized) {
-  const names = [];
-  let depth = 0;
-  for (const match of String(serialized || "").matchAll(/<\/?([A-Za-z][A-Za-z0-9:_-]*)(?:\s[^>]*)?\s*\/?>/gu)) {
-    const token = match[0];
-    if (token.startsWith("</")) {
-      depth -= 1;
-    } else {
-      if (depth === 0) names.push(match[1]);
-      if (!token.endsWith("/>") ) depth += 1;
-    }
-  }
-  return names;
-}
-
 function sameNames(actual, expected) {
   return actual.length === expected.length && actual.every((name, index) => name === expected[index]);
-}
-
-export function observedWindowsContract(serialized, { repetition = false } = {}) {
-  const text = String(serialized || "");
-  const actions = text.match(/<Actions(?:\s[^>]*)?>([\s\S]*?)<\/Actions>/iu)?.[1] || "";
-  const triggers = text.match(/<Triggers(?:\s[^>]*)?>([\s\S]*?)<\/Triggers>/iu)?.[1] || "";
-  const principals = text.match(/<Principals(?:\s[^>]*)?>([\s\S]*?)<\/Principals>/iu)?.[1] || "";
-  const exec = actions.match(/<Exec(?:\s[^>]*)?>([\s\S]*?)<\/Exec>/iu)?.[1] || "";
-  const calendar = triggers.match(/<CalendarTrigger(?:\s[^>]*)?>([\s\S]*?)<\/CalendarTrigger>/iu)?.[1] || "";
-  const scheduleByDay = calendar.match(/<ScheduleByDay(?:\s[^>]*)?>([\s\S]*?)<\/ScheduleByDay>/iu)?.[1] || "";
-  const principal = principals.match(/<Principal(?:\s[^>]*)?>([\s\S]*?)<\/Principal>/iu)?.[1] || "";
-  const settings = text.match(/<Settings(?:\s[^>]*)?>([\s\S]*?)<\/Settings>/iu)?.[1] || "";
-  const idleSettings = settings.match(/<IdleSettings(?:\s[^>]*)?>([\s\S]*?)<\/IdleSettings>/iu)?.[1] || "";
-  const principalNames = directChildNames(principal);
-  const expectedPrincipalNames = tag(principal, "UserId") === null
-    ? ["LogonType", "RunLevel"]
-    : ["UserId", "LogonType", "RunLevel"];
-  const valid = exactlyOne(text, [
-    "Actions", "Exec", "Command", "Arguments", "Triggers", "CalendarTrigger", "StartBoundary",
-    "ScheduleByDay", "DaysInterval", "Principals", "Principal", "LogonType", "RunLevel", "Settings",
-    "StartWhenAvailable", "MultipleInstancesPolicy", "ExecutionTimeLimit",
-  ]) && tagCount(text, "Enabled") === 2 &&
-    sameNames(directChildNames(actions), ["Exec"]) &&
-    sameNames(directChildNames(exec), ["Command", "Arguments"]) &&
-    sameNames(directChildNames(triggers), ["CalendarTrigger"]) &&
-    sameNames(directChildNames(calendar), repetition
-      ? ["Repetition", "StartBoundary", "Enabled", "ScheduleByDay"]
-      : ["StartBoundary", "Enabled", "ScheduleByDay"]) &&
-    (!repetition || (exactlyOne(calendar, ["Repetition", "Interval", "Duration", "StopAtDurationEnd"]) &&
-      sameNames(directChildNames(tag(calendar, "Repetition")), ["Interval", "Duration", "StopAtDurationEnd"]))) &&
-    sameNames(directChildNames(scheduleByDay), ["DaysInterval"]) &&
-    sameNames(directChildNames(principals), ["Principal"]) &&
-    sameNames(principalNames, expectedPrincipalNames) &&
-    sameNames(directChildNames(settings), [
-      "MultipleInstancesPolicy", "DisallowStartIfOnBatteries", "StopIfGoingOnBatteries",
-      "AllowHardTerminate", "StartWhenAvailable", "RunOnlyIfNetworkAvailable", "IdleSettings",
-      "AllowStartOnDemand", "Enabled", "Hidden", "RunOnlyIfIdle", "WakeToRun", "ExecutionTimeLimit", "Priority",
-    ]) && sameNames(directChildNames(idleSettings), ["StopOnIdleEnd", "RestartOnIdle"]);
-  const contract = {
-    command: tag(serialized, "Command"),
-    arguments: tag(serialized, "Arguments"),
-    start_boundary: tag(serialized, "StartBoundary"),
-    trigger_enabled: boolTag(serialized, "Enabled"),
-    days_interval: Number(tag(serialized, "DaysInterval")),
-    user_id: tag(serialized, "UserId"),
-    logon_type: tag(serialized, "LogonType"),
-    run_level: tag(serialized, "RunLevel"),
-    start_when_available: boolTag(serialized, "StartWhenAvailable"),
-    multiple_instances_policy: tag(serialized, "MultipleInstancesPolicy"),
-    execution_time_limit: tag(serialized, "ExecutionTimeLimit"),
-    task_enabled: boolTag(settings, "Enabled"),
-    disallow_start_on_batteries: boolTag(settings, "DisallowStartIfOnBatteries"),
-    stop_on_batteries: boolTag(settings, "StopIfGoingOnBatteries"),
-    allow_hard_terminate: boolTag(settings, "AllowHardTerminate"),
-    run_only_if_network_available: boolTag(settings, "RunOnlyIfNetworkAvailable"),
-    stop_on_idle_end: boolTag(idleSettings, "StopOnIdleEnd"),
-    restart_on_idle: boolTag(idleSettings, "RestartOnIdle"),
-    allow_start_on_demand: boolTag(settings, "AllowStartOnDemand"),
-    hidden: boolTag(settings, "Hidden"),
-    run_only_if_idle: boolTag(settings, "RunOnlyIfIdle"),
-    wake_to_run: boolTag(settings, "WakeToRun"),
-    priority: Number(tag(settings, "Priority")),
-    ...(repetition ? { repetition_interval: tag(calendar, "Interval"), repetition_duration: tag(calendar, "Duration"),
-      stop_at_duration_end: boolTag(calendar, "StopAtDurationEnd") } : {}),
-  };
-  return { valid, contract };
 }
 
 function observedMacContract(serialized) {
@@ -894,12 +821,13 @@ function observedMacContract(serialized) {
   return { valid, contract };
 }
 
-function definitionFromNative(identity, serialized, platform) {
-  const marker = markerOf(serialized);
+function definitionFromNative(identity, serialized, platform, options = {}) {
   const observed = platform === "win32"
-    ? observedWindowsContract(serialized)
+    ? observedWindowsContract(serialized, options)
     : observedMacContract(serialized);
+  const marker = markerOf(platform === "win32" ? observed.description : serialized, platform === "win32");
   return {
+    platform,
     identity,
     definition_hash: marker?.definition_hash || null,
     native_contract: observed.contract,
@@ -997,7 +925,7 @@ function macAdapter({ home, uid, spawn }) {
         try {
           writeFileSync(staged, definition.serialized, { mode: 0o600, flag: "wx" });
           const current = read(definition.identity);
-          if (!sameObservedState(current, expected)) throw new Error("the daily definition changed before installation; nothing was replaced");
+          if (!sameObservedState(current, expected)) throw concurrentScheduleEdit("the daily definition changed before installation; nothing was replaced");
           if (current?.exists) {
             requireOwned(current);
             if (!replaceOwned) throw new Error("the owned daily definition appeared during installation; nothing was replaced");
@@ -1157,13 +1085,26 @@ function windowsAdapter({ home, spawn, environment, taskSpec = null }) {
   const run = (args) => {
     try {
       return spawn(command, args, {
-        encoding: "utf8",
+        encoding: args.includes("/XML") ? null : "utf8",
         windowsHide: true,
         env: childEnvironment,
       });
     } catch (cause) {
       return { status: null, error: cause };
     }
+  };
+  let currentUser;
+  const resolveUserId = (user) => {
+    if (currentUser === undefined) {
+      const result = spawn(win32Path.join(systemRoot || "", "System32", "whoami.exe"),
+        ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true, env: childEnvironment });
+      const match = result?.status === 0 && String(result.stdout || "").trim()
+        .match(/^"((?:[^"]|"")*)","(S-1-\d+(?:-\d+)+)"$/u);
+      currentUser = match ? { name: match[1].replaceAll('""', '"'), sid: match[2] } : null;
+    }
+    if (!currentUser) return user;
+    const aliases = [currentUser.name, currentUser.name.split("\\").at(-1)];
+    return aliases.some(alias => alias.toLowerCase() === user.toLowerCase()) ? currentUser.sid : user;
   };
   const read = (identity) => {
     const result = run(["/Query", "/TN", taskName(identity), "/XML"]);
@@ -1175,14 +1116,18 @@ function windowsAdapter({ home, spawn, environment, taskSpec = null }) {
       }
       throw new DailyRefreshInspectionError();
     }
-    const serialized = String(result.stdout || "");
-    const marker = taskSpec ? taskSpec.marker(serialized) : markerOf(serialized);
-    const disabled = /<Enabled>\s*false\s*<\/Enabled>/iu.test(serialized);
+    const serialized = decodeWindowsTaskXml(result.stdout);
+    const definition = taskSpec?.observe ? taskSpec.observe(identity, serialized)
+      : definitionFromNative(identity, serialized, "win32", { resolveUserId });
+    const marker = taskSpec?.marker ? taskSpec.marker(serialized) : markerOf(windowsTaskDescription(serialized), true);
+    if (marker?.identity === identity.id && typeof definition.native_contract?.task_enabled !== "boolean") {
+      throw new DailyRefreshInspectionError("the Windows daily refresh task enabled state could not be inspected");
+    }
     return {
       exists: true,
       owned: marker?.identity === identity.id,
-      enabled: !disabled,
-      definition: taskSpec ? taskSpec.observe(identity, serialized) : definitionFromNative(identity, serialized, "win32"),
+      enabled: definition.native_contract?.task_enabled === true,
+      definition,
     };
   };
   return {
@@ -1209,7 +1154,7 @@ function windowsAdapter({ home, spawn, environment, taskSpec = null }) {
         try {
           writeFileSync(path, `\ufeff${definition.serialized}`, { encoding: "utf16le", mode: 0o600, flag: "wx" });
           const current = read(definition.identity);
-          if (!sameObservedState(current, expected)) throw new Error("the daily definition changed before installation; nothing was replaced");
+          if (!sameObservedState(current, expected)) throw concurrentScheduleEdit("the daily definition changed before installation; nothing was replaced");
           if (current?.exists) {
             requireOwned(current);
             if (!replaceOwned) throw new Error("the owned daily definition appeared during installation; nothing was replaced");

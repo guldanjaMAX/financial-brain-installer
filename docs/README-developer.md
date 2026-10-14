@@ -1293,6 +1293,18 @@ Node upgrade cannot strand an owned task. A definition without that identity
 remains foreign and read-only. Native inspection errors are not reported as
 absence.
 
+Windows readback compares the execution contract after Task Scheduler normalizes
+its XML. Element order, registration metadata, schema defaults, encoding and
+current-user name/SID aliases do not create drift. The action and exact
+arguments, daily clock and interval, enablement, principal, logon and privilege
+level, runtime limit and execution policies still have to match. Install,
+status, runner authorization and removal use this same projection. A task left
+unverified by an older parser is replaced and verified with `brain daily on`.
+Windows authorization version 2 makes this a one-time reconciliation; subsequent
+calls verify the matching definition in place. macOS authorization is unchanged.
+The real Windows CI probe registers an isolated disabled task, verifies its
+native XML and removes it without executing its action.
+
 The definition contains paths, hashes, cadence, and the manifest locator, but
 no key or provider credential. Its Node action prefers a stable launcher on
 `PATH` only after its resolved target is proved to be a regular file executable
@@ -2689,7 +2701,8 @@ Without `--apply` it only inspects safe local files, starts the packaged MCP
 runtime for an offline initialize and exact tool-list exchange, and prints a
 SHA-256 plan ID bound to the manifest and current destination bytes. Apply also
 requires `--approve <plan-id>`, recomputes the plan, and stops before writes if
-anything drifted. The MCP reconciler receives exactly one selected target at a
+anything drifted. JSON preview includes that same `plan_id`; `--apply --json`
+returns a JSON receipt containing the approved ID and verified scope results. The MCP reconciler receives exactly one selected target at a
 time, refuses custom and disabled entries, uses a credential-scrubbed child
 environment, and restores a safe prior locator or absence when exact readback
 fails. The skill scope treats its Claude and Codex copies as one transaction

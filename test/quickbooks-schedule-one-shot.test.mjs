@@ -33,10 +33,13 @@ async function dailyDefinition(m) {
   }, options);
 }
 
-test("the no-QuickBooks daily definition retains the golden captured at the pinned commit", async () => {
+test("the no-QuickBooks daily definition pins Windows authorization version 2", async () => {
   const definition = await dailyDefinition(fixture);
-  assert.equal(definition.definition_hash, "sha256:49eba2ee9abe5ac491226d1fdfd274f7cc8c67356fb6eed52a1da6174abf86ba");
-  assert.equal(definition.native_definition_hash, "sha256:a8b37b65878f83b57edfa1ea8893e2a1055e82c664c5c3a358761704bdd93b0e");
+  // Windows authorization changed intentionally so failed version-1 installs
+  // are replaced once; keep exact hashes for the new daily-only contract.
+  assert.equal(definition.contract_version, 2);
+  assert.equal(definition.definition_hash, "sha256:262451cfc70bbfcd73a5cb0f6c406938fdd63acf9cfd386b39092b5b949dbc15");
+  assert.equal(definition.native_definition_hash, "sha256:76a977c3ae491a084865f23a9f3b4924d66d79b843d545f0b8f1de16e18aba82");
 });
 
 test("one-shot task carries a bounded visible interactive invocation", () => {

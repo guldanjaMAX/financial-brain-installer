@@ -940,7 +940,8 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
 {
   const fs = await import("node:fs/promises");
   const src = await fs.readFile(new URL("../brain.mjs", import.meta.url), "utf-8");
-  const i = src.indexOf("const reviewRequired = e instanceof DriveRemovalReviewRequired;");
+  const i = src.indexOf("const reviewRequired = e instanceof DriveRemovalReviewRequired || e instanceof WindowsDailyTaskRepairRequired;");
+  check("both deliberate review types reach the anticipated failure renderer", i >= 0);
   const block = src.slice(i, i + 1_100);
   check("a Fatal prints on stdout, so PowerShell does not dress it up as a crash",
     /if \(e instanceof Fatal \|\| reviewRequired\)/.test(block) &&

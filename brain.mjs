@@ -76,7 +76,7 @@ import { BANK_ACCESS_WRAPPING_KEY_SECRET } from "./operations/bank-access-wrappi
 import { withBrainLifecycleLock, withBrainLifecycleLockWait } from "./operations/brain-lifecycle-lock.mjs";
 import { renderDailyObservation } from "./operations/daily-refresh-observation.mjs";
 import { createMigrationStatementIntentStore } from "./operations/migration-statement-intent.mjs";
-import { createWindowsUpdateBridgeGuard } from "./operations/windows-update-bridge.mjs";
+import { createWindowsUpdateBridgeGuard, WindowsDailyTaskRepairRequired } from "./operations/windows-update-bridge.mjs";
 import { planDailyRefresh } from "./operations/daily-refresh-plan.mjs";
 import {
   clearDailyRefreshUpdateTransaction,
@@ -8278,7 +8278,6 @@ export async function cmdAssistantRepair(manifestPath, options = {}) {
     }
     return plan;
   }
-  if (flags.json) die("--json is a read-only preview option and cannot be combined with --apply");
   if (typeof flags.approve !== "string" || flags.approve !== plan.plan_id) {
     die(
       "the local repair plan is missing, stale, or different from the approved preview. Nothing changed.\n" +
@@ -8393,14 +8392,18 @@ export async function cmdAssistantRepair(manifestPath, options = {}) {
     );
   }
 
-  ok("the approved local assistant repair finished and every changed item passed exact readback");
-  say("      No Brain records, sources, providers, access, zones, passkeys, devices, cloud resources, or CLI executable changed.");
-  return Object.freeze({
+  const receipt = Object.freeze({
     operation: "local-assistant-repair",
     plan_id: plan.plan_id,
     results: Object.freeze(results.map((result) => Object.freeze(result))),
     boundaries: plan.boundaries,
   });
+  if (flags.json) console.log(JSON.stringify(receipt, null, 2));
+  else {
+    ok("the approved local assistant repair finished and every changed item passed exact readback");
+    say("      No Brain records, sources, providers, access, zones, passkeys, devices, cloud resources, or CLI executable changed.");
+  }
+  return receipt;
 }
 
 async function cmdAssistantRepairInteractive(manifestPath) {
@@ -32763,7 +32766,7 @@ if (IS_MAIN) {
     // token, a free-tier account, a typo'd source name. A Drive removal review
     // is an intentional safety stop with the same no-crash treatment and a
     // clearer label. Anything else is a bug, and crash() says so.
-    const reviewRequired = e instanceof DriveRemovalReviewRequired;
+    const reviewRequired = e instanceof DriveRemovalReviewRequired || e instanceof WindowsDailyTaskRepairRequired;
     if (e instanceof Fatal || reviewRequired) {
       if (e instanceof JsonFatal) {
         console.log(e.message);

@@ -544,6 +544,7 @@ const expected = [
   "operations/daily-refresh-plan.mjs",
   "operations/daily-refresh-run.mjs",
   "operations/daily-refresh-scheduler.mjs",
+  "operations/windows-task-contract.mjs",
   "operations/windows-update-bridge.mjs",
   "operations/feed-folders.mjs",
   "operations/wrangler-oauth.mjs",

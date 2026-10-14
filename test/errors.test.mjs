@@ -126,6 +126,20 @@ function cli(args, env = {}, options = {}) {
     /^loc_[0-9a-f]{24}$/.test(events[0]?.fingerprint || "") && !r.journal.includes(rawSentinel), r.journal);
 }
 
+/* ---- an unrecognized Windows task is an intentional safety refusal ---- */
+{
+  const r = cli(["whatsnew"], {}, { imports: [new URL("./fixtures/windows-daily-refusal.mjs", import.meta.url).href] });
+  check("the bridge refusal reaches the public CLI with its exact task name and remedy",
+    r.code === 1 && r.stdout.includes("\\Financial Brain\\daily-refresh-0123456789abcdef") &&
+      /not created by the installer/i.test(r.stdout) && /back up.*XML.*remove only this task.*rerun the update/is.test(r.stdout), r.out);
+  check("a deliberate bridge refusal is not rendered as an unexpected installer bug",
+    !/unexpected error|bug in the installer/i.test(r.out) && /review required/.test(r.stdout), r.out);
+  const events = journalEvents(r.journal);
+  check("the bridge refusal records existing content-free safety classification",
+    events.length === 1 && events[0]?.error_code === "SAFETY_REVIEW_REQUIRED" &&
+      !r.journal.includes("daily-refresh-0123456789abcdef"), r.journal);
+}
+
 /* ---- Cloudflare 9109 explains token dates and names the local source ---- */
 {
   const r = cli(["whatsnew"], {

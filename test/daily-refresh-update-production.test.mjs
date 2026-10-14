@@ -1272,3 +1272,23 @@ test("Windows non-outbox compatibility path records intent before invoking migra
     assert.equal(bridgeTransaction(harness, manifestPath).bridge_snapshots[0].state, "paused");
   });
 });
+
+// An opaque task under the expected bridge name binds this Brain, but has no
+// installer ownership proof. Refusal must name the exact task and safe remedy.
+test("unrecognized bridge refusal explains the exact task and recovery", () => {
+  for (const recognized of [true, false]) {
+    const native = bridgeNativeHarness({ tasks: [{ ...(recognized ? {} : { action: "Write-Output 'brain.example.invalid'" }) }] });
+    const guard = boundaryGuard(native.options);
+    if (recognized) assert.equal(guard.capture(guard.inventory()).length, 1, "recognized green control reaches capture");
+    else assert.throws(() => guard.capture(guard.inventory()), error => {
+      assert.equal(error.name, "WindowsDailyTaskRepairRequired");
+      assert.ok(error.message.includes(BRIDGE_NAME));
+      assert.match(error.message, /not created by the installer/i);
+      assert.match(error.message, /back up.*XML.*remove only this task.*rerun the update/is);
+      assert.doesNotMatch(error.message, /unexpected error|bug in the installer/i);
+      return true;
+    });
+    assert.ok(native.calls.some(({ args }) => args.includes("/XML")), "refusal reached real native adapter observation");
+    assert.equal(native.mutations().length, 0);
+  }
+});
