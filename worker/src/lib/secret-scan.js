@@ -326,6 +326,14 @@ const GENERIC = [
 
 const ALL_RULES = [...PROVIDER, ...STRUCTURAL, ...GENERIC];
 
+/** Only the scanner's complete, known label set can authorize a content refusal. */
+export function credentialRefusalReason(labels) {
+  if (!Array.isArray(labels) || !labels.length ||
+      !labels.every(label => typeof label === "string" && ALL_RULES.some(rule => rule.label === label)) ||
+      !labels.some(label => ALL_RULES.some(rule => rule.label === label && rule.severity === CONFIRMED))) return null;
+  return "credential_detected";
+}
+
 /* ------------------------------------------------------------ allowlist */
 
 const HEX32 = /^[0-9a-f]{32}$/i;

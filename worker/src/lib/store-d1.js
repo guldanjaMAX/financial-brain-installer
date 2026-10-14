@@ -50,7 +50,7 @@ import {
   PUBLIC_INSTALL_SMOKE_TITLE,
   publicInstallSmokeContentHash,
 } from "./install-smoke.js";
-import { parseStoredSourceFailureEvidence, providerNoChangeCheckAt, sourceReceiptOwnerMessage } from "./source-receipt.js";
+import { parseProviderWithheldReason, parseStoredSourceFailureEvidence, providerNoChangeCheckAt, providerWithheldCheckAt, sourceReceiptOwnerMessage } from "./source-receipt.js";
 import { sourceCoverageFromEvidence } from "./source-coverage.js";
 import { zoomSourceStatus } from "./zoom-deliveries.js";
 import { scopeIsUnrestricted } from "./grants.js";
@@ -4725,6 +4725,14 @@ export const sourceInventorySql = ({
       FROM ${pagedReceipts ? "inventory_run_page" : "sync_runs"}
      GROUP BY source
   ),
+  latest_withholding AS (
+    SELECT source,finished_at,docs_refused,refusal_reason FROM (
+      SELECT source,finished_at,docs_refused,refusal_reason,
+             ROW_NUMBER() OVER (PARTITION BY source ORDER BY started_at DESC,run_id DESC) AS source_rank
+        FROM ${pagedReceipts ? "inventory_run_page" : "sync_runs"}
+       WHERE finished_at IS NOT NULL AND refusal_reason GLOB 'provider_withheld_v1:*'
+    ) WHERE source_rank=1
+  ),
   latest_runs AS (
     SELECT source,lane,started_at,finished_at,walk_complete,files_seen,
            docs_added,docs_updated,docs_unchanged,docs_refused,docs_failed,metrics_version,
@@ -4806,6 +4814,10 @@ export const sourceInventorySql = ({
          r.proposed_deletes AS run_proposed_deletes,
          r.delete_action AS run_delete_action,
          r.failure_evidence AS run_failure_evidence,
+         r.refusal_reason AS run_refusal_reason,
+         w.finished_at AS withheld_at,
+         w.docs_refused AS withheld_refused,
+         w.refusal_reason AS withheld_reason,
          CASE
            WHEN r.source IS NULL THEN NULL
            WHEN r.finished_at IS NULL THEN 'in_progress'
@@ -4828,6 +4840,7 @@ export const sourceInventorySql = ({
     LEFT JOIN source_events_rollup e ON e.source=n.name
     LEFT JOIN run_rollup rr ON rr.source=n.name
     LEFT JOIN latest_runs r ON r.source=n.name
+    LEFT JOIN latest_withholding w ON w.source=n.name
    ORDER BY n.name ASC
    LIMIT ?1`;
 
@@ -5026,6 +5039,22 @@ export async function sourceInventorySlice(env, {
             : null,
           outcome: row.run_outcome || null,
         };
+    const lastWithheld = parseProviderWithheldReason(row.withheld_reason, row.kind, row.withheld_refused);
+    const withheld = parseProviderWithheldReason(row.run_refusal_reason, row.kind, latestRun?.docs_refused);
+    if (latestRun && withheld) {
+      latestRun.docs_withheld = withheld.count;
+      latestRun.withheld_reasons = withheld.reasons;
+      if (row.status === "ready" && !row.run_had_error && latestRun.docs_failed === 0 &&
+          latestRun.walk_complete && latestRun.provider_check_complete && withheld.count === latestRun.docs_refused) {
+        latestRun.outcome = "partial";
+      }
+    }
+    const withheldCheckAt = providerWithheldCheckAt(row.kind, latestRun);
+    if (registered && !retirement.retired && row.status === "ready" && withheldCheckAt) {
+      const age = now - Date.parse(withheldCheckAt);
+      state = age >= 0 && age <= (expectedSeconds || 86400) * 1000 * 1.5 ? "ok" : "stale";
+      reason = `${withheld.count} item(s) withheld by design`;
+    }
     const lastFailure = latestRun?.outcome === "failed"
       ? parseStoredSourceFailureEvidence(row.run_failure_evidence, {
           status: "error",
@@ -5222,12 +5251,15 @@ export async function sourceInventorySlice(env, {
             last_stored_ingest_at: inventoryTimestamp(row.last_stored_ingest_at),
             last_ingest_receipt_at: inventoryTimestamp(row.last_ingest_at),
             last_successful_run_at: inventoryTimestamp(row.last_successful_run_at),
-            last_check_at: providerNoChangeCheckAt(kind, latestRun) || inventoryTimestamp(row.last_successful_run_at),
+            last_check_at: providerNoChangeCheckAt(kind, latestRun) || withheldCheckAt || inventoryTimestamp(row.last_successful_run_at),
             ...(sourceId === "zoom" && kind === "zoom" && zoomStatus ? { zoom: zoomStatus } : {}),
             complete_history_through: inventoryTimestamp(row.last_complete_sweep_at),
             reported_logical_documents: inventoryCount(row.reported_logical_documents),
             logical_matches_reported: inventoryCount(row.reported_logical_documents) === logicalDocuments,
             latest_run: latestRun,
+            ...(lastWithheld ? { last_withheld: {
+              at: inventoryTimestamp(row.withheld_at), count: lastWithheld.count, reasons: lastWithheld.reasons,
+            } } : {}),
           }
         : null,
       last_failure: lastFailure,

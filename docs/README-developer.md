@@ -822,7 +822,19 @@ refusals are removed from Gmail's skip-derived coverage gap and do not set
 `withheld_for_secrets` to its detail, and leaves `complete_sweep` false. A
 failed part, retry backlog, retryable extraction skip, missing history marker,
 label gap, or other non-policy skip still produces `INGEST_FAILED`. Drive,
-IMAP, and all other source receipts keep their existing refusal behavior.
+IMAP, and other source receipts keep their existing refusal behavior except
+for the shared provider runner. Microsoft, Slack, Notion, Dropbox, HubSpot and
+QuickBooks advance a completed provider window when its only refusals carry a
+complete, recognized credential-scanner label set. The run remains partial for
+coverage and prints the withheld count. Unknown or missing refusal labels,
+custody restrictions, failed documents and transport errors still keep the
+cursor and fail. Receipt storage retains a versioned count and reason aggregate
+without document identities; sources and daily status show the withheld count.
+After a quiet run they retain the dated count from the most recent run with
+withholding, explicitly labeled as historical rather than a cumulative total.
+Daily can verify this completed check without inventing accepted documents or
+complete history. A delta provider resumes after the saved cursor; a snapshot
+provider may re-read the same withheld content but does not fail on it.
 
 `corpora.gmail.since` optionally declares an inclusive `YYYY-MM-DD` corpus
 floor. Full sweeps append Gmail's `after:YYYY/MM/DD` search term. Incremental

@@ -417,7 +417,20 @@ run fail when they are its only non-accepted outcome. The ready receipt records
 the count in its detail and keeps `complete_sweep` false, because the Worker
 does not credit a complete history sweep with refused documents. Failed parts,
 durable retry backlog, missing history or label proof, and other non-policy
-skips remain receipt gaps. Other connectors retain refusal-as-gap behavior.
+skips remain receipt gaps.
+The shared provider runner (Microsoft, Slack, Notion, Dropbox, HubSpot and
+QuickBooks) also treats a complete set of known credential-scanner labels as a
+permanent refusal for that content. Its exact batch acknowledgement remains
+mandatory. Unknown labels, custody refusals, missing identities, failed members
+and transport errors keep the cursor. A completed walk containing only accepted
+or credential-withheld items can save its cursor and close ready with a partial
+coverage outcome. The versioned `provider_withheld_v1:` aggregate in the existing
+`sync_runs.refusal_reason` column records only the `credential_detected` reason
+and count. Source inventory projects that validated aggregate as `docs_withheld`
+and `withheld_reasons`, and retains the most recent withholding aggregate as
+`last_withheld` across bounded receipt pages; daily verification requires the completed walk and saved
+provider boundary. A withheld-only check advances no accepted-document timestamp
+or complete-history claim. Other connectors retain their refusal behavior.
 
 Mutating local-folder, Drive, Gmail, and Calendar runs share one cross-platform
 owner lease keyed to the canonical adjacent source-state path. The lease is

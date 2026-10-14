@@ -88,6 +88,10 @@ function sumCounts(target, next) {
 }
 function mergeReceipt(a, b) {
   if (!a || !b) return;
+  // Withholding evidence can also arrive on a later bounded receipt page.
+  if (b.last_withheld && (!a.last_withheld || b.last_withheld.at > a.last_withheld.at)) {
+    a.last_withheld = structuredClone(b.last_withheld);
+  }
   // A successful ingest may lie beyond page one; its check proof must follow it.
   for (const field of ["first_stored_ingest_at", "last_stored_ingest_at", "last_successful_run_at", "last_check_at"]) {
     const values = [a[field], b[field]].filter(Boolean).sort();

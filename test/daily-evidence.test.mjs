@@ -5,13 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { buildConfiguredDailyPlan, cmdIngestCalendar, cmdIngestProvider, cmdLoad, cmdSources, dailyFreshnessRows, splitStatements } from "../brain.mjs";
+import { buildConfiguredDailyPlan, cmdIngestCalendar, cmdIngestProvider, cmdLoad, cmdSources, cmdDaily, dailyFreshnessRows, splitStatements } from "../brain.mjs";
 import { runDailyRefresh, runDailyRefreshCli } from "../operations/daily-refresh-run.mjs";
 import worker from "../worker/src/index.js";
 import { sourceInventory } from "../worker/src/lib/store-d1.js";
 import { runZoomDeliveryMaintenance } from "../worker/src/lib/zoom.js";
 import { persistZoomDelivery, claimZoomDeliveries, finishZoomDelivery } from "../worker/src/lib/zoom-deliveries.js";
-import { providerNoChangeCheckAt } from "../worker/src/lib/source-receipt.js";
+import { providerNoChangeCheckAt, providerWithheldCheckAt, providerWithheldReason } from "../worker/src/lib/source-receipt.js";
 
 import { syncMicrosoftGraph } from "../connectors/microsoft-graph.mjs";
 
@@ -819,3 +819,149 @@ test("Microsoft boundary proof persists only on a ready completed receipt", asyn
   }
   assert.equal(f.seen.receipts, arms.length);
 });
+
+test("permanent provider refusals remain visible through Worker receipts, sources, load and daily verification", async t => {
+  const f = fixture(t);
+  const m = { client: { slug: "owner", timezone: "UTC" }, brain: { domain: "brain.example.invalid" },
+    corpora: { microsoft: { enabled: true, source: "mailbox", mail_folder_ids: ["inbox"], include_personal_drive: false },
+      upload: { enabled: false } } };
+  const manifestPath = join(f.root, "brain.manifest.json");
+  writeFileSync(manifestPath, JSON.stringify(m));
+  let saved = null;
+  let sends = 0;
+  let scannerRefusals = 0;
+  const logs = [];
+  t.mock.method(console, "log", line => logs.push(String(line)));
+  t.mock.method(console, "warn", line => logs.push(String(line)));
+  const commands = { ingestProvider: (manifest, path, flags) => cmdIngestProvider(manifest, path, flags, {
+    withSourceIngestLock: async (_options, run) => run({ assertOwned() {} }),
+    resolveBaseUrl: async () => ORIGIN, resolveAdminKey: () => readFileSync(f.keyPath, "utf8"),
+    oauth: { providerAccessToken: async () => ({}), loadProviderSyncState: () => saved || {},
+      saveProviderSyncState: (_provider, _source, state) => { saved = state; } },
+    sync: async () => ({ documents: [{ source_type: "microsoft", source_id: "fixture_item",
+      title: "Synthetic private title", content: "-----BEGIN PRIVATE KEY-----", metadata: {}, uri: null }],
+      deletions: [], outcome: { kind: "completed" }, walk_complete: true, provider_check_complete: true,
+      cursor_can_advance: true, proposed_cursor: { page: "next" }, warnings: [] }),
+    requestIngestBatch: async ({ docs }) => {
+      sends++;
+      const response = await f.call(new Request(`${ORIGIN}/api/admin/brain/ingest/batch`, { method: "POST",
+        headers: { "Content-Type": "application/json", "X-Admin-Key": readFileSync(f.keyPath, "utf8") },
+        body: JSON.stringify({ docs }) }));
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.results[0].status, "refused", "the real Worker scanner decision was reached");
+      assert.deepEqual(body.results[0].labels, ["private_key_header"]);
+      scannerRefusals++;
+      return body;
+    },
+    listStoredSourceFamilies: async () => new Set(),
+    postSourceReceipt: async (_base, _key, row) => f.postReceipt(row),
+  }) };
+  const result = await runDailyRefresh({
+    plan: { ready: true, enabled: true, manifest_path: manifestPath, identity: { id: "fixture" },
+      sources: [{ key: "microsoft", source_names: ["mailbox"], run_key: "microsoft",
+        class: "machine-pull", owner: "daily-task", status: "ready" }] },
+    acquireLock: () => ({ assertOwned() {}, release() {} }), now: () => new Date(NOW), home: f.root,
+    readFreshness: async () => Object.fromEntries((await sourceInventory(f.env, { now: Date.parse(NOW) })).rows
+      .map(row => [row.name, { kind: row.kind, ...row.receipt }])),
+    runSource: async () => cmdLoad(manifestPath, { only: "microsoft", allowPartialRefresh: true,
+      commands, probes: { microsoft: async () => ({ connected: true }) }, log: line => logs.push(String(line)) }),
+  });
+  assert.equal(sends, 1, "the daily run reached real provider delivery");
+  assert.equal(scannerRefusals, 1, "the actual scanner refusal was acknowledged");
+  assert.equal(saved?.cursor.page, "next");
+  assert.equal(result.status, "partial");
+  assert.equal(result.sources[0].check_verified, true);
+  assert.equal(result.sources[0].no_change, false);
+  assert.equal(result.sources[0].docs_withheld, 1);
+  const inventory = await cmdSources(manifestPath, { resolveAdminKey: () => readFileSync(f.keyPath, "utf8"),
+    fetchImpl: (_url, init) => f.call(new Request(`${ORIGIN}/api/admin/brain/sources`, init)) });
+  const receipt = inventory.sources[0].receipt;
+  assert.equal(receipt.status, "ready");
+  assert.equal(receipt.latest_run.outcome, "partial");
+  assert.equal(receipt.latest_run.docs_refused, 1);
+  assert.equal(receipt.latest_run.docs_withheld, 1);
+  assert.deepEqual(receipt.latest_run.withheld_reasons, { credential_detected: 1 });
+  assert.equal(receipt.last_successful_run_at, null, "withheld work is not an accepted document");
+  assert.equal(receipt.complete_history_through, null, "withheld content never proves complete history");
+  assert.equal(receipt.last_check_at, NOW);
+  const [status] = dailyFreshnessRows({ sources: [{ key: "microsoft", source_names: ["mailbox"] }] }, inventory);
+  assert.equal(status.current_state, "checked");
+  assert.equal(status.docs_withheld, 1);
+  const readDailyStatus = async inventoryValue => {
+    for (const platform of ["darwin", "win32"]) {
+      let scheduleReads = 0;
+      const lines = [];
+      const result = await cmdDaily(["status", manifestPath], {
+        platform, schedulerOptions: { platform, home: f.root },
+        schedulerAdapter: { read: () => { scheduleReads++; return { exists: false }; } },
+        planDailyRefresh: async () => ({ enabled: true, identity: { id: "v1-fixture" }, cron: "0 8 * * *", timezone: "UTC",
+          sources: [{ key: "microsoft", source_names: ["mailbox"], class: "machine-pull", owner: "daily-task", status: "ready" }] }),
+        readSourceInventory: async () => inventoryValue, log: line => lines.push(line),
+      });
+      assert.equal(scheduleReads, 1, "status uses the injected native scheduler");
+      assert.equal(result.sources.length, 1);
+      assert.match(lines.join("\n"), /1 item\(s\)/);
+      if (result.sources[0].docs_withheld) assert.match(lines.join("\n"), /withheld by design/);
+      else assert.match(lines.join("\n"), /last withholding/);
+    }
+  };
+  await readDailyStatus(inventory);
+  assert.match(logs.join("\n"), /1 item\(s\) withheld by design/);
+  assert.doesNotMatch(logs.join("\n"), /Synthetic private|BEGIN PRIVATE KEY|fixture_item/);
+  // A quiet next delta must not erase the previous measured withholding count.
+  const later = "2026-10-11T12:00:00.000Z";
+  await f.postReceipt({ source: "mailbox", kind: "microsoft", status: "ready", run_id: "later",
+    started_at: later, completed_at: later, walk_complete: true, provider_check_complete: true,
+    files_seen: 0, docs_added: 0, docs_updated: 0, docs_unchanged: 0, docs_refused: 0, docs_failed: 0 });
+  const after = await sourceInventory(f.env, { now: Date.parse(later) });
+  assert.equal(after.rows[0].receipt.latest_run.outcome, "empty");
+  assert.deepEqual(after.rows[0].receipt.last_withheld, {
+    at: NOW, count: 1, reasons: { credential_detected: 1 },
+  });
+  const [afterStatus] = dailyFreshnessRows({ sources: [{ key: "microsoft", source_names: ["mailbox"] }] },
+    { ...after, sources: after.rows });
+  assert.equal(afterStatus.last_withheld_count, 1);
+  await readDailyStatus({ ...after, sources: after.rows });
+  const insert = f.db.prepare("INSERT INTO sync_runs (run_id,source,lane,started_at,finished_at) VALUES (?,'mailbox','manual',?,?)");
+  for (let index = 0; index < 5000; index++) insert.run(`filler_${index}`, Date.parse(BEFORE), Date.parse(BEFORE));
+  const newest = "2026-10-12T12:00:00.000Z";
+  await f.postReceipt({ source: "mailbox", kind: "microsoft", status: "ready", run_id: "newest",
+    started_at: newest, completed_at: newest, walk_complete: true, provider_check_complete: true,
+    files_seen: 2, docs_added: 0, docs_updated: 0, docs_unchanged: 0, docs_refused: 2, docs_failed: 0,
+    refusal_reason: providerWithheldReason(2) });
+  const paged = await cmdSources(manifestPath, { json: true, silent: true,
+    resolveAdminKey: () => readFileSync(f.keyPath, "utf8"),
+    fetchImpl: (_url, init) => f.call(new Request(`${ORIGIN}/api/admin/brain/sources`, init)) });
+  assert.ok(f.db.prepare("SELECT count(*) AS n FROM sync_runs").get().n > 5000, "a second receipt page was required");
+  assert.deepEqual(paged.sources[0].receipt.last_withheld, {
+    at: newest, count: 2, reasons: { credential_detected: 2 },
+  }, "bounded receipt-page merging retains the newest withholding aggregate");
+});
+
+for (const kind of ["microsoft", "slack", "notion", "dropbox", "hubspot", "quickbooks"]) {
+  test(`${kind} stores only closed withholding evidence and rejects unproven checks`, async t => {
+    const f = fixture(t);
+    const base = { source: "fixture", kind, status: "ready", run_id: "fixture",
+      started_at: NOW, completed_at: NOW, walk_complete: true, provider_check_complete: true,
+      files_seen: 1, docs_added: 0, docs_updated: 0, docs_unchanged: 0, docs_refused: 1, docs_failed: 0,
+      refusal_reason: providerWithheldReason(1) };
+    await f.postReceipt(base);
+    const read = async () => (await sourceInventory(f.env, { now: Date.parse(NOW) })).rows[0];
+    assert.equal(providerWithheldCheckAt(kind, (await read()).receipt.latest_run), NOW, "positive control reaches real storage");
+    for (const mutation of [
+      { refusal_reason: 'provider_withheld_v1:{"future_policy":1}' },
+      { refusal_reason: 'provider_withheld_v1:{"credential_detected":1,"content":"synthetic"}' },
+      { refusal_reason: providerWithheldReason(2) },
+      { docs_refused: 2 }, { docs_failed: 1 }, { status: "error" },
+      { walk_complete: false }, { provider_check_complete: false }, { files_seen: 0 },
+    ]) {
+      const before = f.seen.receipts;
+      await f.postReceipt({ ...base, ...mutation });
+      assert.equal(f.seen.receipts, before + 1, "every negative case reached the receipt decision");
+      const row = await read();
+      assert.equal(providerWithheldCheckAt(kind, row.receipt.latest_run), null);
+      assert.notEqual(row.receipt.last_check_at, NOW);
+    }
+  });
+}

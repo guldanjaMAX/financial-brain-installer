@@ -113,7 +113,7 @@ import {
 } from "./lib/oauth.js";
 import { handleMcp } from "./lib/mcp-endpoint.js";
 import {
-  isSourceKindConflict, normalizeSourceFailureEvidence, normalizeSourceReceiptIssueCode,
+  isSourceKindConflict, normalizeSourceFailureEvidence, normalizeSourceReceiptIssueCode, parseProviderWithheldReason,
   resolveSourceKind, sourceReceiptOwnerMessage,
 } from "./lib/source-receipt.js";
 import {
@@ -2466,6 +2466,10 @@ async function handleSourceReceipt(env, request) {
   const refusalReason = failureEvidence
     ? null
     : body?.refusal_reason ? String(body.refusal_reason).slice(0, 500) : null;
+  const withheld = parseProviderWithheldReason(refusalReason, kind, body?.docs_refused);
+  const withheldCheck = status === "ready" && walkComplete && body?.provider_check_complete === true &&
+    metricsVersion === 1 && body.docs_failed === 0 && withheld?.count === body.docs_refused && withheld?.count > 0 &&
+    receiptCount(body.files_seen) > 0;
   const statements = [];
 
   if (status === "ready") {
@@ -2478,7 +2482,7 @@ async function handleSourceReceipt(env, request) {
          last_complete_sweep_at=CASE WHEN ?5 = 1 THEN excluded.last_ingest_at ELSE sources.last_complete_sweep_at END
        WHERE sources.kind=excluded.kind`
     ).bind(source, kind, completedAt, documents, completeSweep ? 1 : 0,
-      verifiedWork ? 1 : 0, verifiedWork ? null : "NO_VERIFIED_WORK"));
+      verifiedWork ? 1 : 0, verifiedWork || withheldCheck ? null : "NO_VERIFIED_WORK"));
   } else {
     // A failed attempt does not become the last successful ingest. Advancing
     // last_ingest_at here would make a broken daily sync look current for the
@@ -2526,7 +2530,7 @@ async function handleSourceReceipt(env, request) {
       targetRange.from, targetRange.through,
       errorReason,
       failureEvidence ? JSON.stringify(failureEvidence) : null,
-      status === "ready" && ["calendar", "microsoft"].includes(kind) && walkComplete && body?.provider_check_complete === true ? 1 : 0,
+      status === "ready" && (["calendar", "microsoft"].includes(kind) || withheldCheck) && walkComplete && body?.provider_check_complete === true ? 1 : 0,
     ));
   }
   statements.push(env.DB.prepare(
