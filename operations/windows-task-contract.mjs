@@ -13,22 +13,57 @@ function utf16Encoding(value) {
   return null;
 }
 
+// Opt-in probe evidence contains no task fields or native errors. Inspect only
+// the declaration for encoding; it never selects the actual decoder branch.
+function reportDecodeBytes(value, branch, onDecode) {
+  if (typeof onDecode !== "function") return;
+  const bom = value.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])) ? "utf-8"
+    : value[0] === 0xff && value[1] === 0xfe ? "utf-16le"
+    : value[0] === 0xfe && value[1] === 0xff ? "utf-16be" : null;
+  const encoding = utf16Encoding(value);
+  const count = sequence => {
+    let total = 0;
+    for (let offset = 0; (offset = value.indexOf(sequence, offset)) !== -1; offset += sequence.length) total++;
+    return total;
+  };
+  const wire = text => {
+    const bytes = Buffer.from(text, encoding ? "utf16le" : "ascii");
+    return encoding === "utf-16be" ? bytes.swap16() : bytes;
+  };
+  // Bound declaration inspection and tolerate a partial final code unit here
+  // only. The decoder below still rejects truncated or malformed Unicode.
+  const prefix = value.subarray(0, Math.min(value.length, 1024));
+  const units = prefix.subarray(0, prefix.length - prefix.length % 2);
+  const text = encoding ? (encoding === "utf-16be" ? Buffer.from(units).swap16() : units).toString("utf16le")
+    : prefix.toString("latin1").replace(/^\xef\xbb\xbf/u, "");
+  const declaration = text.replace(/^\ufeff/u, "").match(/^<\?xml\s[^\r\n]*?\?>/u)?.[0];
+  const declared = declaration?.match(/\bencoding\s*=\s*(["'])([A-Za-z][A-Za-z0-9._-]{0,39})\1/u)?.[2] || null;
+  onDecode(Object.freeze({
+    branch, byte_length: value.length, first_16_hex: value.subarray(0, 16).toString("hex"), bom,
+    nul_count: count(Buffer.from([0])), cr_count: count(wire("\r")), crlf_count: count(wire("\r\n")),
+    crcrlf_count: count(wire("\r\r\n")), declared_encoding: declared,
+  }));
+}
+
 /** Never guess a console code page from the XML declaration (often UTF-16). */
-export function decodeWindowsTaskXml(value, { spawn, systemRoot, environment, taskName } = {}) {
+export function decodeWindowsTaskXml(value, { spawn, systemRoot, environment, taskName, onDecode } = {}) {
   if (!Buffer.isBuffer(value)) return String(value || "");
   const encoding = utf16Encoding(value);
+  const utf8Bom = value.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]));
+  const ascii = !encoding && !utf8Bom && value.every(byte => byte < 0x80);
+  reportDecodeBytes(value, encoding || (utf8Bom ? "utf-8-bom" : ascii ? "ascii" : "com"), onDecode);
   if (encoding) {
     new TextDecoder(encoding, { fatal: true }).decode(value);
     // Preserve receipt serialization; registration normalizes its own BOM.
     return (encoding === "utf-16be" ? Buffer.from(value).swap16() : value).toString("utf16le");
   }
-  if (value.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]))) {
+  if (utf8Bom) {
     new TextDecoder("utf-8", { fatal: true }).decode(value);
     return value.toString("utf8");
   }
   // ASCII bytes are code-page invariant. A lossy '?' path still cannot match
   // the expected execution projection; do not require PowerShell for ASCII.
-  if (value.every(byte => byte < 0x80)) return value.toString("ascii");
+  if (ascii) return value.toString("ascii");
   // Non-ASCII OEM/ANSI bytes can also look like valid UTF-8. Never guess.
   // Read the same registered task's Unicode XML directly through Task Scheduler
   // COM instead of corrupting paths or replaying lossy XML during rollback.
@@ -40,8 +75,11 @@ export function decodeWindowsTaskXml(value, { spawn, systemRoot, environment, ta
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
     { encoding: null, windowsHide: true, env: environment, timeout: 15000, killSignal: "SIGKILL", maxBuffer: 1048576 });
   if (result?.status === 73) throw Object.assign(new Error("PowerShell is restricted on this PC, so daily refresh can't verify its task here"), { code: "WINDOWS_TASK_POWERSHELL_RESTRICTED" });
-  if (result?.status !== 0 || !Buffer.isBuffer(result.stdout) || !utf16Encoding(result.stdout)) return invalid();
-  return decodeWindowsTaskXml(result.stdout);
+  if (result?.status !== 0 || !Buffer.isBuffer(result.stdout) || !utf16Encoding(result.stdout)) {
+    if (Buffer.isBuffer(result?.stdout)) reportDecodeBytes(result.stdout, "com-output-refused", onDecode);
+    return invalid();
+  }
+  return decodeWindowsTaskXml(result.stdout, { onDecode });
 }
 
 function decode(value) {
