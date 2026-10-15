@@ -894,6 +894,8 @@ test("permanent provider refusals remain visible through Worker receipts, source
       const lines = [];
       const result = await cmdDaily(["status", manifestPath], {
         platform, schedulerOptions: { platform, home: f.root },
+        // The simulated platform must not reach host-only LaunchAgent probes on a Linux or Windows runner.
+        existingSchedulerOwners: [],
         schedulerAdapter: { read: () => { scheduleReads++; return { exists: false }; } },
         planDailyRefresh: async () => ({ enabled: true, identity: { id: "v1-fixture" }, cron: "0 8 * * *", timezone: "UTC",
           sources: [{ key: "microsoft", source_names: ["mailbox"], class: "machine-pull", owner: "daily-task", status: "ready" }] }),

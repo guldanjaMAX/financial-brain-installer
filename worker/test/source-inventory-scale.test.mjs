@@ -924,8 +924,31 @@ test("source statements preserve shipped rows except the specified refresh outco
     // must read false (or null when no run exists), while every pre-existing
     // field and its order stay exact.
     assert.ok(corrected.some(row => row.run_lane === null), "the comparison reaches a source with no run");
+    // 0.4.16 adds provider withholding evidence after the failure evidence: the
+    // latest run's raw refusal reason, and the latest provider_withheld_v1 run.
+    // Historical fixture runs carry no provider_withheld_v1 reason, so the
+    // withholding join reads null; the raw reason is present exactly when the
+    // frozen statement reported the run as refused.
+    const afterByName = new Map(after.map(row => [row.name, row]));
+    for (const row of corrected) {
+      const now = afterByName.get(row.name);
+      assert.ok(now, `source ${row.name} disappeared`);
+      assert.equal(now.withheld_at, null);
+      assert.equal(now.withheld_refused, null);
+      assert.equal(now.withheld_reason, null);
+      if (row.run_lane !== null) {
+        assert.equal(now.run_refusal_reason !== null, Number(row.run_was_refused) === 1,
+          `raw refusal reason must match the refused flag for ${row.name}`);
+      } else assert.equal(now.run_refusal_reason, null);
+    }
+    assert.ok(corrected.some(row => Number(row.run_was_refused) === 1), "the comparison reaches a refused run");
+    const withholdingColumns = row => [
+      ["run_refusal_reason", afterByName.get(row.name).run_refusal_reason],
+      ["withheld_at", null], ["withheld_refused", null], ["withheld_reason", null],
+    ];
     const expected = corrected.map(row => Object.fromEntries(Object.entries(row).flatMap(entry =>
-      entry[0] === "run_walk_complete" ? [entry, ["run_provider_check_complete", row.run_lane === null ? null : 0]] : [entry])));
+      entry[0] === "run_walk_complete" ? [entry, ["run_provider_check_complete", row.run_lane === null ? null : 0]]
+        : entry[0] === "run_failure_evidence" ? [entry, ...withholdingColumns(row)] : [entry])));
     assert.equal(
       JSON.stringify(after), JSON.stringify(expected),
       `inventory rows changed beyond the specified refresh corrections (failure evidence ${includeFailureEvidence})`,
