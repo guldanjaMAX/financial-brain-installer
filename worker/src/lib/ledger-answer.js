@@ -53,8 +53,50 @@ const readableRow = row => row.basis_state === "confirmed" && /^\d{4}-\d{2}-\d{2
   Number.isFinite(Date.parse(row.posted_on)) && ledgerDay(row.posted_on) === row.posted_on &&
   Number.isSafeInteger(row.amount_minor) && row.amount_minor >= 0 && row.currency === "USD" && ["inflow", "outflow"].includes(row.direction);
 const usableAccount = a => !a.ambiguous && !a.linkRequired && a.currency === "USD" && a.members.every(m => m.basis_state === "confirmed");
+const moveKind = kind => ["checking", "savings", "card"].includes(kind);
+const withdrawalKind = kind => ["investment", "retirement"].includes(kind);
+
+function leadExclusions(rows, pairs, selected, bySlug, intent) {
+  const excluded = new Set(), ownPairs = [], withdrawals = new Map(), keptPairs = new Map();
+  const inAnswer = new Set(rows.map(row => row.id));
+  const kind = row => bySlug.get(row.effective_account_slug).account_kind;
+  const omit = row => { if (inAnswer.has(row.id)) excluded.add(row.id); };
+  // A category code is evidence; description words and institution names are
+  // never withdrawal evidence. Proposed feed categories count by this rule.
+  if (intent.withdrawals !== "include") for (const row of rows) {
+    if (row.direction === "inflow" && moveKind(kind(row)) &&
+        /^TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS$/i.test(row.category || "") &&
+        ["proposed", "confirmed"].includes(row.category_basis_state)) {
+      omit(row); withdrawals.set(row.id, row);
+    }
+  }
+  for (const pair of pairs) {
+    const outKind = kind(pair.out), inKind = kind(pair.in);
+    const bothInScope = selected.has(pair.out.effective_account_slug) && selected.has(pair.in.effective_account_slug);
+    if (moveKind(outKind) && moveKind(inKind)) {
+      if (intent.ownTransfers !== "include" && (bothInScope || intent.ownTransfers === "exclude")) {
+        omit(pair.out); omit(pair.in); ownPairs.push(pair);
+      } else if (!bothInScope && intent.ownTransfers !== "include") {
+        keptPairs.set(pair, "other account is outside this question, kept in money in and money out");
+      }
+    } else if (withdrawalKind(outKind) && moveKind(inKind) && selected.has(pair.in.effective_account_slug)) {
+      if (intent.withdrawals !== "include") {
+        omit(pair.out); omit(pair.in); withdrawals.set(pair.in.id, pair.in);
+      }
+    } else {
+      keptPairs.set(pair, moveKind(outKind) && ["loan", "line_of_credit"].includes(inKind)
+        ? "loan payment, kept in money out" : moveKind(outKind) && withdrawalKind(inKind)
+          ? "sent to a retirement or investment account, kept in money out"
+          : "account kind does not qualify for this exclusion, kept in the figures");
+    }
+  }
+  return { excluded, keptPairs, summary: { own_transfer_pairs: ownPairs.length,
+    own_transfer_minor: sumMinor(ownPairs, pair => pair.out.amount_minor),
+    withdrawal_count: withdrawals.size, withdrawal_minor: sumMinor([...withdrawals.values()]) } };
+}
 
 async function ledgerAnswer(env, intent, accounts, inventory) {
+  if (intent.measure && !accounts.some(a => moveKind(a.account_kind))) return { reason: "unsupported_question" };
   if (intent.kind === "balance") {
     const balances = await readEffectiveBalances(env, accounts, intent);
     if (balances.length !== accounts.length || balances.some(b => b.basis_state !== "confirmed" ||
@@ -104,8 +146,11 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   const pairing = pairOwnTransfers(eligible, bySlug);
   const pairs = pairing.pairs.filter(pair => [pair.out, pair.in].some(row => selected.has(row.effective_account_slug) && inWindow(row)));
   const unmatched = pairing.unmatched.filter(row => selected.has(row.effective_account_slug) && inWindow(row));
-  // No transfer-link authority exists in this schema. All primary figures and
-  // lists retain candidates; only the explicitly conditional figure omits them.
+  // Pairs never change stored rows or existing gross keys. Qualifying pairs
+  // leave the lead figures; the unchanged gross figures are always printed.
+  const { excluded: leadExcluded, keptPairs, summary } = leadExclusions(rows, intent.kind === "transfers" ? [] : pairs, selected, bySlug,
+    intent.kind === "transfers" ? { withdrawals: "include" } : intent);
+  const withoutLead = list => list.filter(row => !leadExcluded.has(row.id));
   const activity = rows;
   const withoutCandidates = list => list.filter(row => !pairing.candidateRows.has(row.id));
   const citations = [], references = new Map();
@@ -122,7 +167,8 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   const rowLine = row => `${money(row.amount_minor)} on ${row.posted_on} in ${masked(bySlug.get(row.effective_account_slug))}: ${safeDescription(row.description || row.payee || "Transaction")}${candidateMark(row)} ${refs([row])}`;
   const bounded = `Accounts: ${accounts.map(masked).join(", ")}; ${intent.from} through ${intent.to}; ${accounts.map(a => `${masked(a)}: covered through ${a.covered_to || "unknown"}`).join("; ")}.`;
   const ledger = { kind: intent.kind, from: intent.from, to: intent.to, accounts: accountCoverage(accounts),
-    includes_own_transfers: true, matched_transfer_count: 0, candidate_transfer_count: pairs.length };
+    includes_own_transfers: true, matched_transfer_count: 0, candidate_transfer_count: pairs.length,
+    lead: leadExcluded.size ? "default_exclusions" : "gross", default_exclusions: summary, flip: [] };
   const conditionalAccounts = accounts.map(account => {
     const ownRows = withoutCandidates(rows.filter(row => row.effective_account_slug === account.account_slug));
     return { account_mask: account.mask, credits_minor: sumMinor(ownRows.filter(r => r.direction === "inflow")),
@@ -130,7 +176,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   });
   ledger.if_own_transfers = { accounts: conditionalAccounts };
   let conditionalDetail = conditionalAccounts.map((a, i) => `${masked(accounts[i])}: credits ${money(a.credits_minor)}; debits ${money(a.debits_minor)}`).join("; ");
-  let answer;
+  let answer, leadDetail;
   if (intent.kind === "totals") {
     ledger.accounts = accounts.map(account => {
       const ownRows = activity.filter(row => row.effective_account_slug === account.account_slug);
@@ -141,6 +187,20 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       const ownRows = activity.filter(row => row.effective_account_slug === accounts[i].account_slug);
       return `${masked(accounts[i])}, ${intent.from} through ${intent.to}: credits ${money(total.credits_minor)}; debits ${money(total.debits_minor)} ${refs(ownRows) || "(no posted income or expenses in the covered period)"}.`;
     }).join("\n");
+    ledger.lead_accounts = accounts.map(account => {
+      const ownRows = withoutLead(rows.filter(row => row.effective_account_slug === account.account_slug));
+      return { account_mask: account.mask, credits_minor: sumMinor(ownRows.filter(r => r.direction === "inflow")),
+        debits_minor: sumMinor(ownRows.filter(r => r.direction === "outflow")), transaction_count: ownRows.length };
+    });
+    leadDetail = ledger.lead_accounts.map((total, i) => `${masked(accounts[i])}, ${intent.from} through ${intent.to}: money in ${money(total.credits_minor)}; money out ${money(total.debits_minor)}.`).join("\n");
+    if (intent.measure) {
+      ledger.measure = intent.measure;
+      ledger.net_minor = sumMinor(ledger.lead_accounts.filter((_, i) => moveKind(accounts[i].account_kind)), a => a.credits_minor - a.debits_minor);
+      ledger.net_label = "cash in minus cash out, not accounting profit";
+      leadDetail = `Cash in minus cash out, not accounting profit: ${money(ledger.net_minor)}.\n${leadDetail}`;
+      for (const account of accounts.filter(a => !moveKind(a.account_kind)))
+        leadDetail += `\n${masked(account)}: ${account.account_kind} account, left out of cash in minus cash out; only checking, savings and card accounts contribute.`;
+    }
   } else if (["largest", "deposits"].includes(intent.kind)) {
     const found = activity.filter(row => row.direction === intent.direction).sort((a, b) =>
       (intent.kind === "largest" ? b.amount_minor - a.amount_minor : b.posted_on.localeCompare(a.posted_on)) || a.id - b.id);
@@ -154,6 +214,8 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     const matched = intent.match ? directionRows.filter(row => (intent.kind === "merchant" ? matchesMerchant : matchesCategory)(row, intent.match)) : directionRows;
     const unsorted = (intent.kind === "category" ? directionRows : matched).filter(row => !categoryFor(row));
     ledger.total_minor = sumMinor(matched); ledger.unsorted_minor = sumMinor(unsorted); ledger.found = matched.length > 0;
+    ledger.lead_total_minor = sumMinor(withoutLead(matched));
+    leadDetail = `Total money ${intent.direction === "inflow" ? "in" : "out"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.lead_total_minor)}; Unsorted: ${money(sumMinor(withoutLead(unsorted)))}.`;
     ledger.if_own_transfers.total_minor = sumMinor(withoutCandidates(matched));
     ledger.if_own_transfers.unsorted_minor = sumMinor(withoutCandidates(unsorted));
     conditionalDetail = `total ${intent.direction === "inflow" ? "income" : "spend"}${intent.match ? ` for ${safeDescription(intent.match)}` : ` by ${intent.kind}`}: ${money(ledger.if_own_transfers.total_minor)}; Unsorted: ${money(ledger.if_own_transfers.unsorted_minor)}`;
@@ -177,8 +239,8 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     for (const g of orderedGroups) answer += `\n${safeDescription(g.label)}${g.state === "proposed" ? " (bank's category (unconfirmed))" : ""}: ${money(sumMinor(g.rows))} ${refs(g.rows)}${g.rows.some(row => pairing.candidateRows.has(row.id)) ? " (includes possible moves between your own accounts)" : ""}.`;
     answer += `\nUnsorted: ${money(ledger.unsorted_minor)}${intent.kind === "category" && intent.match && !matched.some(row => !categoryFor(row)) ? " (separate from the requested category)" : ""} ${refs(unsorted)}.`;
   } else if (intent.kind === "transfers") {
-    // A candidate amount is counted once by outgoing date. Neither leg is
-    // removed from income/spend, including across the answer window boundary.
+    // This diagnostic view keeps its gross, outgoing-date contract. Other
+    // answer kinds apply lead exclusions to each leg inside their own window.
     const outgoing = pairs.filter(pair => inWindow(pair.out));
     ledger.total_minor = sumMinor(outgoing, pair => pair.out.amount_minor);
     ledger.found = outgoing.length > 0;
@@ -190,6 +252,8 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       last_amount_minor: g.rows.at(-1).amount_minor, occurrence_count: g.rows.length, detected: true,
       citations: g.rows.map(row => cite(row).n), possible_transfer_citations: g.rows.filter(row => pairing.candidateRows.has(row.id)).map(row => cite(row).n) }));
     ledger.monthly_total_minor = sumMinor(recurring, g => g.monthly_minor); ledger.found = recurring.length > 0;
+    ledger.lead_monthly_total_minor = sumMinor(detectRecurring(withoutLead(activity), intent.to), g => g.monthly_minor);
+    leadDetail = `Estimated monthly money out: ${money(ledger.lead_monthly_total_minor)} (detected, not confirmed).`;
     ledger.if_own_transfers.monthly_total_minor = sumMinor(detectRecurring(withoutCandidates(activity), intent.to), g => g.monthly_minor);
     conditionalDetail = `estimated monthly total: ${money(ledger.if_own_transfers.monthly_total_minor)}`;
     answer = "Recurring charges detected, not confirmed. " + (recurring.length ? recurring.map(g =>
@@ -197,13 +261,37 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     answer += `\nEstimated monthly total: ${money(ledger.monthly_total_minor)} (weekly amounts use 52/12, rounded to cents per merchant).`;
   } else throw new Error("unsupported ledger intent");
   ledger.transfers = pairs.map(pair => ({ candidate: true, excluded_from_totals: false, reason: pair.reason,
-    amount_minor: pair.out.amount_minor, outgoing: publicRow(pair.out), incoming: publicRow(pair.in) }));
+    amount_minor: pair.out.amount_minor, outgoing: publicRow(pair.out), incoming: publicRow(pair.in),
+    excluded_from_lead: [pair.out, pair.in].some(row => leadExcluded.has(row.id)), kept_reason: keptPairs.get(pair) || null }));
   ledger.unmatched_transfers = unmatched.map(publicRow);
-  answer += `\n${bounded}\nPossible transfers are included in income and spend; no rows were removed as transfers.`;
-  if (pairs.length) {
-    answer += "\nPossible moves between your own accounts:";
-    for (const pair of pairs) answer += `\n${rowLine(pair.out)}; received ${rowLine(pair.in)}. Why: ${pair.reason}.`;
-    answer += `\nIf these are transfers between your own accounts, with those candidates excluded: ${conditionalDetail}.`;
+  const restored = intent.ownTransfers === "include" && intent.withdrawals === "include";
+  if (intent.measure || (!restored && (leadExcluded.size || keptPairs.size))) {
+    const notes = [];
+    if (summary.own_transfer_pairs) { notes.push(`${money(summary.own_transfer_minor)} between your own connected accounts left out of the first figures; say "including transfers" to count those moves`); ledger.flip.push("including transfers"); }
+    if (summary.withdrawal_count) { notes.push(`${money(summary.withdrawal_minor)} in retirement or investment withdrawals left out of the first figures; say "including withdrawals" to count them`); ledger.flip.push("including withdrawals"); }
+    if ([...keptPairs.values()].some(reason => reason.startsWith("other account"))) {
+      notes.push('moves with an account outside this question are kept; say "excluding transfers" to leave them out'); ledger.flip.push("excluding transfers");
+    }
+    if (!notes.length) notes.push(keptPairs.size ? "paired activity stays where listed below" : "only checking, savings and card accounts contribute to cash in minus cash out");
+    // List views deliberately retain every row. The gross block also retains
+    // its exact wording and citation order for clients that parse those lines.
+    answer = `${leadDetail || answer}\nNote: ${notes.join("; ")}.\nWith everything counted:\n${answer}\n${bounded}`;
+    const omittedPairs = pairs.filter(pair => [pair.out, pair.in].some(row => leadExcluded.has(row.id)));
+    if (omittedPairs.length) {
+      answer += "\nMoves between your own connected accounts, left out of the first figures:";
+      const leadRowLine = row => rowLine(row).replace(candidateMark(row), leadExcluded.has(row.id)
+        ? " (left out of the first figures)" : " (outside this answer's accounts or period)");
+      for (const pair of omittedPairs) answer += `\n${leadRowLine(pair.out)}; received ${leadRowLine(pair.in)}. Why: ${pair.reason}.`;
+    }
+    if (keptPairs.size) answer += "\nKept pairs:";
+    for (const [pair, reason] of keptPairs) answer += `\n${rowLine(pair.out)}; received ${rowLine(pair.in)}. ${reason}.`;
+  } else {
+    answer += `\n${bounded}\nPossible transfers are included in income and spend; no rows were removed as transfers.`;
+    if (pairs.length) {
+      answer += "\nPossible moves between your own accounts:";
+      for (const pair of pairs) answer += `\n${rowLine(pair.out)}; received ${rowLine(pair.in)}. Why: ${pair.reason}.`;
+      answer += `\nIf these are transfers between your own accounts, with those candidates excluded: ${conditionalDetail}.`;
+    }
   }
   for (const row of unmatched) answer += `\nPossible transfer, unmatched (retained in income/spend totals): ${rowLine(row)}.`;
   return { answer, citations, ledger };

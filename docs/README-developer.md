@@ -2123,18 +2123,51 @@ Only readable, covered rows from unambiguous confirmed owned accounts can
 pair. Equal cents, opposite directions, different effective accounts and nearby
 dates only identify candidates. One leg must name the other owned account by
 its unique mask or stored label; conflicting account kinds and explicit outside
-payees on both legs rule out the candidate. No provider transfer linkage or
-owner-confirmed transaction pairing exists in this schema. Nothing is removed
-as a transfer from phase-one totals or phase-two lists and breakdowns.
-A leg must have exactly one possible counterpart within three days, mutually;
-ambiguous candidates remain unmatched and counted. Pairs are cited, never
-stored, with amount, dates, both accounts and reasons. A separate figure shows
-what the answer would be if these are transfers between the owner's accounts.
-Possible-transfer totals count each candidate once by its outgoing posting date.
-A receipt inside the period remains in income when its outgoing leg belongs to
-the preceding period. The 5,000-row cap includes the padding and
-other owned accounts, and refuses a partial answer. Separate indexed date-range
-and undated arms preserve the existing refusal for rows with unknown dates.
+payees on both legs rule out the candidate. A leg must have exactly one possible
+counterpart within three days, mutually. Ambiguous candidates and unmatched
+hints remain counted and visible. Pairing never changes stored rows.
+
+Money answers lead with moves between connected checking, savings and card
+accounts left out when both accounts are in the question's scope. Each leg
+changes only its own answer period, even across a month boundary. A note offers
+"including transfers" to restore them. When the other account is outside the
+question, the payment stays and the note offers "excluding transfers". Loan and
+line-of-credit payments, contributions to investment or retirement accounts,
+and pairs involving other account kinds stay, with a reason. These flags never
+remove a loan payment or contribution.
+
+An inflow into checking, savings or card is a withdrawal only when its category
+is `TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS` (case-insensitive, proposed or
+confirmed), or a paired outgoing leg is in an investment or retirement account.
+Withdrawals leave the lead income figure; the paired outgoing leg also leaves
+the lead when in scope. Description words alone never exclude a row. The note
+offers "including withdrawals". Lead lines say "money in" and "money out";
+the unchanged gross sentences, including "credits" and "debits", follow under
+"With everything counted:". This avoids a second subtraction by clients that
+read gross lines. Lists retain their original rows. Existing JSON keys remain
+gross, including `accounts`, `total_minor`, `includes_own_transfers` and
+`excluded_from_totals`; `if_own_transfers` keeps its conditional meaning.
+Additive `lead`, `default_exclusions`, `lead_accounts`, `lead_total_minor`,
+`lead_monthly_total_minor`, `flip` and per-pair `excluded_from_lead`/`kept_reason`
+explain the presentation. Answers with no exclusions or kept pairs retain their
+exact text. The transfers view stays unchanged and counts each pair once by
+outgoing posting date. The 5,000-row cap includes padding and other owned
+accounts and refuses a partial answer. Separate indexed date-range and undated
+arms preserve the refusal for rows with unknown dates.
+
+Bounded "What was my profit in September 2026?", "What is my net income last
+month?", "What was our cash flow in Q3?" and "How much profit did I make so far
+this year?" forms use `kind: totals`. Optional account clauses retain their
+literal scope. The first line is "Cash in minus cash out, not accounting
+profit", computed only over in-scope checking, savings and card lead figures;
+other account kinds get a reason for staying outside that net. `measure`,
+`net_minor` and `net_label` describe it. Without a move-kind account the answer
+falls through as `unsupported_question`. Exactly one supported period is
+required. Tax, projected, average, gross or business profit and other unconsumed
+qualifiers remain unsupported. Transfer and withdrawal clauses apply only to
+totals, largest, deposits, merchant, category and recurring questions. Repeated
+or contradictory clauses, other exclusions and flags on balance, payment or
+transfers questions refuse. Document-path money refusals remain unchanged.
 SQL stops at 5,001 matching rows; sorting happens only after proving the bound,
 so an oversized covered range does not need a full sort before refusing.
 

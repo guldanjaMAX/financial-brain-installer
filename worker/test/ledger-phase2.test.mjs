@@ -119,7 +119,7 @@ test("merchant tokens are contiguous and category proposals and Unsorted stay ex
   assert.equal(breakdown.ledger.groups.filter(g => g.category === "software").length, 2);
 });
 
-test("transfer candidates keep every leg counted; conditional figures and near misses stay explicit", async t => {
+test("transfer candidates leave the lead; gross figures and near misses stay explicit", async t => {
   const f = await fixture(t);
   f.add("out", "2026-09-15", 10001, "outflow", "TRANSFER TO account 2222");
   f.add("in", "2026-09-18", 10001, "inflow", "Fixture bank", "TRANSFER_IN_ACCOUNT_TRANSFER", "proposed", "account-b");
@@ -135,7 +135,9 @@ test("transfer candidates keep every leg counted; conditional figures and near m
   assert.equal(totals.ledger.candidate_transfer_count, 1);
   assert.equal(totals.ledger.unmatched_transfers.length, 4);
   assert.equal(totals.ledger.includes_own_transfers, true);
-  assert.match(totals.answer, /If these are transfers between your own accounts/);
+  assert.match(totals.answer, /Moves between your own connected accounts, left out of the first figures/);
+  assert.match(totals.answer, /With everything counted:[\s\S]*credits \$0\.00; debits \$600\.80/);
+  assert.match(totals.answer, /credits \$600\.04; debits \$0\.00/);
   assert.equal(totals.ledger.if_own_transfers.accounts.reduce((n, a) => n + a.debits_minor, 0), 50079);
   assert.equal(totals.ledger.if_own_transfers.accounts.reduce((n, a) => n + a.credits_minor, 0), 50003);
   assert.match(totals.answer, /possible transfer, unmatched/i);
