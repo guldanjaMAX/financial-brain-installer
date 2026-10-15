@@ -73,7 +73,7 @@ export function decodeWindowsTaskXml(value, { spawn, systemRoot, environment, ta
   const script = `$ErrorActionPreference='Stop'; if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { exit 73 }; try { $p=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${locator}')); $s=New-Object -ComObject 'Schedule.Service'; $s.Connect(); $x=$s.GetFolder('\\').GetTask($p).Xml; $b=[Text.Encoding]::Unicode.GetPreamble()+[Text.Encoding]::Unicode.GetBytes($x); $o=[Console]::OpenStandardOutput(); $o.Write($b,0,$b.Length); $o.Flush() } catch { exit 1 }`;
   const result = spawn(win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
-    { encoding: null, windowsHide: true, env: environment, timeout: 15000, killSignal: "SIGKILL", maxBuffer: 1048576 });
+    { encoding: null, windowsHide: true, env: environment, timeout: 60000, killSignal: "SIGKILL", maxBuffer: 1048576 });
   if (result?.status === 73) throw Object.assign(new Error("PowerShell is restricted on this PC, so daily refresh can't verify its task here"), { code: "WINDOWS_TASK_POWERSHELL_RESTRICTED" });
   if (result?.status !== 0 || !Buffer.isBuffer(result.stdout) || !utf16Encoding(result.stdout)) {
     if (Buffer.isBuffer(result?.stdout)) reportDecodeBytes(result.stdout, "com-output-refused", onDecode);

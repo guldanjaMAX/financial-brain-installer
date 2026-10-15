@@ -67,7 +67,7 @@ function harness(t, { initial = null, transform = windowsReadback, changingMetad
         assert.ok(script.includes("GetTask") && script.includes("FromBase64String"), "task locator is passed as data");
         assert.ok(script.indexOf("LanguageMode") < script.indexOf("New-Object"), "policy check precedes restricted operations");
         assert.match(script, /LanguageMode -ne 'FullLanguage'\) \{ exit 73 \}/u);
-        assert.equal(child.timeout, 15000, "Unicode export is bounded");
+        assert.equal(child.timeout, 60000, "Unicode export is bounded");
         if (unicodeStatus !== null) return { status: unicodeStatus };
         if (unicodeReadFailure) return { status: 5 };
         return { status: 0, stdout: Buffer.from(`\ufeff${native.replace(/^\ufeff/u, "")}`, "utf16le") };
