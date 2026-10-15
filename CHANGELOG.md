@@ -4,6 +4,40 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.16 (2026-10-15)
+
+Candidate only. This version has not been released. The changes below still
+need the full host gate, CI and separately reviewed field acceptance for the
+exact sealed package.
+
+- **Windows daily imports now install, verify, run and remove correctly.**
+  The Brain recognizes the scheduled task Windows saves, including when an
+  existing task is replaced. Check that daily imports show as verified, run
+  at the expected time and can be removed when you turn them off.
+- **An email or file that looks like it contains a password or key no longer
+  stops the whole Outlook import every day.** It is set aside and counted,
+  and everything else loads. Other provider imports use the same handling.
+  Check the set-aside count in your source and daily status: the run remains
+  partial because those items were not loaded. Other refusals, failed items,
+  connection failures and pending removal review still stop progress.
+
+### Known issues
+
+- Removal of rows the Worker cannot verify still needs the technician.
+- Money answers still require review of cited accounts, dates and coverage.
+  Explicit AI disclosures are recognized; undisclosed generated text is not.
+  Missing lineage cannot prove independent confirmation.
+
+### This release does NOT cover
+
+- **UPDATE-012:** Windows x64 is the only supported Windows runtime in this
+  release. Windows ARM64 ships unproven.
+- **UPDATE-044:** Bank breadth ships unproven. Bank invitations stay closed.
+- QuickBooks Desktop money answers and owner readiness still need field
+  acceptance. The tax evidence checklist does not verify tax amounts or filing
+  readiness. Financial contracts, the test-only oracle, books-match and
+  tax-check remain internal libraries. SimpleFIN proof remains held.
+
 ## 0.4.15 (2026-10-13)
 
 Candidate only. This version has not been released. The changes below still
