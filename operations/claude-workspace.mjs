@@ -1,15 +1,13 @@
 /**
- * Create the small, instance-local Claude Code guide beside a Brain manifest.
+ * Create installer-managed assistant guides beside a Brain manifest.
  *
- * This file contains locators and safety rules only. It never contains a
- * Cloudflare token, Brain admin key, provider credential, or copied user data.
- * An unrelated CLAUDE.md is preserved rather than merged or overwritten.
+ * Guides contain locators, answer rules and owner-approved account labels,
+ * never credentials. Unrelated files and damaged account sections are preserved.
  */
 
 import {
   chmodSync,
   closeSync,
-  existsSync,
   fsyncSync,
   lstatSync,
   openSync,
@@ -18,28 +16,33 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { dirname, join, resolve, win32, posix } from "node:path";
 import { CLOUDFLARE_OAUTH_WRANGLER_PACKAGE } from "./cloudflare-oauth-session.mjs";
 
 export const CLAUDE_WORKSPACE_MARKER = "<!-- financial-brain-installer:claude-workspace:v1 -->";
 
-function safeLocator(value, label) {
-  const text = resolve(String(value || ""));
+function safeLocator(value, label, platformName = process.platform) {
+  const raw = String(value || "");
+  const paths = platformName === "win32" && /^(?:[a-z]:[/\\]|[/\\]{2})/i.test(raw) ? win32 : { resolve };
+  const text = paths.resolve(raw);
   if (!text || /[\u0000-\u001f\u007f`]/.test(text)) {
     throw new Error(`${label} is not safe to place in the Claude workspace guide`);
   }
   return text;
 }
 
-export function renderClaudeWorkspaceGuide(manifestPath, {
-  brainCliPath = process.argv[1],
-  nodePath = null,
-} = {}) {
-  const manifest = safeLocator(manifestPath, "manifest path");
-  const brainScript = safeLocator(brainCliPath, "Brain CLI path");
+function guideLocators(manifestPath, { brainCliPath = process.argv[1], nodePath = null, platformName = process.platform } = {}) {
+  const manifest = safeLocator(manifestPath, "manifest path", platformName);
+  const brainScript = safeLocator(brainCliPath, "Brain CLI path", platformName);
   const brain = nodePath
-    ? `${JSON.stringify(safeLocator(nodePath, "Node path"))} ${JSON.stringify(brainScript)}`
+    ? `${JSON.stringify(safeLocator(nodePath, "Node path", platformName))} ${JSON.stringify(brainScript)}`
     : JSON.stringify(brainScript);
+  return { manifest, brain };
+}
+
+export function renderClaudeWorkspaceGuide(manifestPath, options = {}) {
+  const { manifest, brain } = guideLocators(manifestPath, options);
   return `${CLAUDE_WORKSPACE_MARKER}
 # Financial Brain owner workspace
 
@@ -102,41 +105,174 @@ the owner has approved. Credentials stay in provider pages or hidden prompts rat
 `;
 }
 
-export function writeClaudeWorkspaceGuide(manifestPath, options = {}) {
-  const target = join(dirname(resolve(manifestPath)), "CLAUDE.md");
-  // An update may refresh the guide setup previously created, but it must not
-  // create a new workspace file just because the Brain software changed. A
-  // missing guide remains an owner choice; setup is the path that creates one.
-  if (options.existingOnly === true && !existsSync(target)) {
-    return { path: target, changed: false, status: "skipped_missing" };
-  }
-  const content = renderClaudeWorkspaceGuide(manifestPath, options);
-  if (existsSync(target)) {
-    const stat = lstatSync(target);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
-      return { path: target, changed: false, status: "preserved_unsafe_existing_file" };
-    }
-    const existing = readFileSync(target, "utf8");
-    if (!existing.startsWith(CLAUDE_WORKSPACE_MARKER)) {
-      return { path: target, changed: false, status: "preserved_unrelated_existing_file" };
-    }
-    if (existing === content) return { path: target, changed: false, status: "verified" };
-  }
+export const OWNER_RULES_BEGIN = '<!-- BEGIN Financial Brain answer rules (written by Financial Brain setup and update; running either again replaces this section and keeps your "My accounts" lines) -->';
+export const OWNER_RULES_END = "<!-- END Financial Brain answer rules -->";
+export const CODEX_WORKSPACE_MARKER = "<!-- financial-brain-installer:codex-workspace:v1 -->";
+const KIT_BEGIN = '<!-- BEGIN Financial Brain money-question rules (added by the Financial Brain morning kit; running the kit again replaces this section and keeps your "My accounts" lines) -->';
+const KIT_END = "<!-- END Financial Brain money-question rules -->";
+const ACCOUNT_PLACEHOLDER = "- ****NNNN = (business | personal), (checking | savings | card | loan | investment), (owner's name for it)";
+const ACCOUNT_LINE = /^- \*\*\*\*[0-9]{4} = /;
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+const withoutCR = (line) => line.replace(/\r$/, "");
 
-  const temporary = `${target}.${process.pid}.tmp`;
+function markerIndices(lines, marker) {
+  return lines.flatMap((line, index) => withoutCR(line) === marker ? [index] : []);
+}
+
+export function renderOwnerRulesSection({ platformName = process.platform, assistant = "claude", accountLines = [] } = {}) {
+  const contract = readFileSync(new URL("../templates/owner-contract/answer-contract-v1.md", import.meta.url), "utf8");
+  const money = readFileSync(platformName === "win32"
+    ? new URL("../templates/owner-contract/money-rules-v2-windows.md", import.meta.url)
+    : new URL("../templates/owner-contract/money-rules-v2.md", import.meta.url), "utf8");
+  const lines = money.split("\n");
+  const begins = markerIndices(lines, KIT_BEGIN);
+  const ends = markerIndices(lines, KIT_END);
+  if (begins.length !== 1 || ends.length !== 1 || begins[0] >= ends[0]) {
+    throw new Error("the packaged money rules have invalid section markers");
+  }
+  const inner = lines.slice(begins[0] + 1, ends[0]);
+  if (markerIndices(inner, ACCOUNT_PLACEHOLDER).length !== 1) {
+    throw new Error("the packaged money rules must have one account placeholder");
+  }
+  if (!Array.isArray(accountLines) || accountLines.some((line) => typeof line !== "string" || !ACCOUNT_LINE.test(line) || CONTROL.test(line))) {
+    throw new Error("account lines are not safe to preserve in the answer rules");
+  }
+  let content = inner.join("\n") + "\n";
+  if (assistant === "codex") {
+    if (content.split("in this CLAUDE.md").length !== 2) {
+      throw new Error("the packaged money rules must have one assistant file reference");
+    }
+    content = content.replace("in this CLAUDE.md", "in this AGENTS.md");
+  }
+  if (accountLines.length) content = content.split("\n").map((line) => withoutCR(line) === ACCOUNT_PLACEHOLDER ? accountLines.join("\n") : line).join("\n");
+  return `${OWNER_RULES_BEGIN}\n${contract}\n${content}${OWNER_RULES_END}\n`;
+}
+
+/** Refuse ambiguous sections before rendering so no owner account note is lost. */
+export function mergeOwnerRules(existingText, render) {
+  const rawLines = existingText.split("\n");
+  const begins = markerIndices(rawLines, OWNER_RULES_BEGIN);
+  const ends = markerIndices(rawLines, OWNER_RULES_END);
+  const lines = rawLines.map(withoutCR);
+  const damaged = () => ({ status: "damaged", content: existingText });
+  if (!begins.length && !ends.length) {
+    const prefix = lines.join("\n");
+    return { status: "merged", content: `${prefix}${prefix.endsWith("\n") ? "" : "\n"}\n${render({ accountLines: [] })}` };
+  }
+  if (begins.length !== 1 || ends.length !== 1 || begins[0] >= ends[0]) return damaged();
+  const accountLines = [];
+  let inAccounts = false;
+  for (const line of lines.slice(begins[0] + 1, ends[0])) {
+    if (line.startsWith("## ")) inAccounts = /^## My accounts(?:$|[ (])/.test(line);
+    else if (inAccounts && line.trim() && line !== ACCOUNT_PLACEHOLDER && !ACCOUNT_LINE.test(line)) return damaged();
+    if (ACCOUNT_LINE.test(line)) {
+      if (CONTROL.test(line)) return damaged();
+      accountLines.push(line);
+    }
+  }
+  const prefix = lines.slice(0, begins[0]);
+  const content = (prefix.length ? prefix.join("\n") + "\n" : "") +
+    render({ accountLines }) + lines.slice(ends[0] + 1).join("\n");
+  return { status: "merged", content };
+}
+
+function renderCodexWorkspaceGuide(manifestPath, options) {
+  const { manifest, brain } = guideLocators(manifestPath, options);
+  return `${CODEX_WORKSPACE_MARKER}
+# Financial Brain owner workspace (Codex)
+
+This folder belongs to the Brain owner. Keep Codex's normal approval prompts on.
+
+- Brain CLI invocation: \`${brain}\`
+- Manifest: \`${manifest}\`
+- Guided install and connector skill: \`$financial-brain-technician\`
+- credentials stay in provider pages or hidden prompts
+`;
+}
+
+function writeWorkspaceGuide(manifestPath, options, assistant) {
+  const target = join(dirname(resolve(manifestPath)), assistant === "codex" ? "AGENTS.md" : "CLAUDE.md");
+  const result = (status, changed = false) => ({ path: target, workspace: dirname(target), status, changed });
+  let stat;
+  try { stat = lstatSync(target); } catch (error) { if (error.code !== "ENOENT") throw error; }
+  // lstat also sees dangling links. Neither setup nor update may replace one.
+  if (stat && (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1)) return result("preserved_unsafe_existing_file");
+  // Update refreshes only a file that setup already created.
+  if (!stat && options.existingOnly === true) return result("skipped_missing");
+  const marker = assistant === "codex" ? CODEX_WORKSPACE_MARKER : CLAUDE_WORKSPACE_MARKER;
+  const existing = stat ? readFileSync(target, "utf8") : "";
+  if (stat && !existing.startsWith(marker)) return result("preserved_unrelated_existing_file");
+  const merged = mergeOwnerRules(existing, ({ accountLines }) => renderOwnerRulesSection({ ...options, assistant, accountLines }));
+  if (merged.status === "damaged") return result("preserved_damaged_section");
+  const guide = assistant === "codex" ? renderCodexWorkspaceGuide(manifestPath, options) : renderClaudeWorkspaceGuide(manifestPath, options);
+  // The whole preamble is managed. Preserve the merged section and its suffix.
+  const sectionStart = merged.content.split("\n").findIndex((line) => line === OWNER_RULES_BEGIN);
+  const content = `${guide}\n${merged.content.split("\n").slice(sectionStart).join("\n")}`;
+  if (assistant === "codex" ? Buffer.byteLength(content) > 32_768 : content.length >= 40_000) {
+    throw new Error("the owner workspace guide exceeds its assistant's document limit");
+  }
+  if (existing === content) return result("verified");
+  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
   let fd = null;
+  let created = false;
   try {
     fd = openSync(temporary, "wx", 0o600);
+    created = true;
     writeFileSync(fd, content, "utf8");
     fsyncSync(fd);
     closeSync(fd);
     fd = null;
     renameSync(temporary, target);
     chmodSync(target, 0o600);
-  } catch (error) {
-    if (fd !== null) closeSync(fd);
-    try { unlinkSync(temporary); } catch { /* no temporary file to remove */ }
-    throw error;
+    if (readFileSync(target, "utf8") !== content) throw new Error("the owner workspace guide failed exact readback");
+  } finally {
+    try {
+      if (fd !== null) closeSync(fd);
+    } finally {
+      // A failed close must not strand the temporary file. An exclusive-open
+      // failure, however, never gives us ownership of an existing temp path.
+      if (created) {
+        try { unlinkSync(temporary); } catch (error) { if (error.code !== "ENOENT") throw error; }
+      }
+    }
   }
-  return { path: target, changed: true, status: "written" };
+  return result("written", true);
+}
+
+export function writeClaudeWorkspaceGuide(manifestPath, options = {}) {
+  return writeWorkspaceGuide(manifestPath, options, "claude");
+}
+
+export function writeCodexWorkspaceGuide(manifestPath, options = {}) {
+  return writeWorkspaceGuide(manifestPath, options, "codex");
+}
+
+export function classifySessionFolder(folder, { home, platform = process.platform, brainFolder } = {}) {
+  const normalize = (value) => {
+    const path = posix.normalize(String(value || "").replace(/\\/g, "/"));
+    const normalized = path.replace(/\/$/, "");
+    return platform === "darwin" || platform === "win32" ? normalized.toLowerCase() : normalized;
+  };
+  const current = normalize(folder), ownerHome = normalize(home), brain = normalize(brainFolder);
+  const inside = (path, root) => path === root || path.startsWith(`${root}/`);
+  if (brainFolder && inside(current, brain)) return null;
+  if (home && current === ownerHome) return null;
+  // Mirror the credential-folder and feed-folder guards without importing
+  // their lifecycle code. Cloud risk takes precedence over Desktop/Downloads.
+  const synced = [/OneDrive/i, /Dropbox/i, /Google ?Drive/i, /CloudStorage/i, /Mobile Documents/i, /[/]Box(?:[/]|$)/i];
+  const darwinRoots = [
+    "/library/mobile documents", "/library/cloudstorage",
+    "/library/application support/clouddocs", "/library/fileprovider",
+    "/library/containers/com.apple.clouddocs",
+  ];
+  if (synced.some((pattern) => pattern.test(current)) ||
+      (platform === "darwin" && (darwinRoots.some((root) => current.includes(`${root}/`) || current.endsWith(root)) || /\/icloud drive(?:\/|$)/.test(current))) ||
+      (platform === "win32" && inside(current, ownerHome) && /\/(?:onedrive[^/]*|icloud ?drive|cloudstorage)(?:\/|$)/i.test(current))) {
+    return { kind: "synced" };
+  }
+  for (const kind of ["desktop", "downloads"]) {
+    const label = kind[0].toUpperCase() + kind.slice(1);
+    if (home && inside(current, normalize(`${home}/${label}`))) return { kind };
+  }
+  return null;
 }

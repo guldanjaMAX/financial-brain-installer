@@ -259,7 +259,7 @@ import {
   prepareFeedAddition,
   uploadFolderEntriesOf,
 } from "./operations/feed-folders.mjs";
-import { writeClaudeWorkspaceGuide } from "./operations/claude-workspace.mjs";
+import { writeClaudeWorkspaceGuide, writeCodexWorkspaceGuide, classifySessionFolder } from "./operations/claude-workspace.mjs";
 import {
   captureTechnicianSkillRepairSnapshot,
   inspectTechnicianSkillEverywhere,
@@ -22006,9 +22006,13 @@ export async function cmdSetup(manifestPath, options = {}) {
       const guide = writeGuide(target, {
         brainCliPath: options.brainCliPath || fileURLToPath(import.meta.url),
         nodePath: options.nodePath || process.execPath,
+        platformName: options.platformName ?? options.platform ?? process.platform,
       });
       if (guide.status === "written" || guide.status === "verified") {
         ok(`Claude Code owner workspace ready at ${guide.path}`);
+        info(`For Brain conversations, open Claude Code in this folder: ${displayPath(guide.workspace || dirname(guide.path))}`);
+      } else if (guide.status === "preserved_damaged_section") {
+        warn(damagedOwnerRulesWarning(guide.path));
       } else {
         warn(`preserved the existing CLAUDE.md at ${guide.path}; add the Financial Brain safety guide manually`);
       }
@@ -22019,6 +22023,30 @@ export async function cmdSetup(manifestPath, options = {}) {
           "No existing CLAUDE.md was replaced. Fix the manifest folder and rerun setup."
       );
     }
+  }
+  if (wired.includes("Codex")) {
+    try {
+      const writeGuide = options.writeCodexWorkspaceGuide ?? writeCodexWorkspaceGuide;
+      const guide = writeGuide(target, {
+        brainCliPath: options.brainCliPath || fileURLToPath(import.meta.url),
+        nodePath: options.nodePath || process.execPath,
+        platformName: options.platformName ?? options.platform ?? process.platform,
+      });
+      if (guide.status === "written" || guide.status === "verified") {
+        ok(`Codex owner workspace ready at ${guide.path}`);
+        info(`For Brain conversations, open Codex in this folder: ${displayPath(guide.workspace || dirname(guide.path))}`);
+      } else if (guide.status === "preserved_damaged_section") {
+        warn(damagedOwnerRulesWarning(guide.path));
+      } else {
+        warn(`preserved the existing AGENTS.md at ${guide.path}; add the Financial Brain safety guide manually`);
+      }
+    } catch {
+      warn("The Brain is connected to Codex, but its AGENTS.md owner workspace guide could not be written safely. Review the manifest folder and rerun setup.");
+    }
+  }
+  if (wired.includes("Claude Code") || wired.includes("Codex")) {
+    const label = ownerSessionFolderLabel(target, options);
+    if (label) warn(`This conversation is running in ${label}, which can be tidied away or synced. Next time, open Claude Code (or Codex) in your Financial Brain folder: ${displayPath(dirname(resolve(target)))}.`);
   }
 
   /* --- 6. the first thing worth looking at --- */
@@ -28971,9 +28999,27 @@ export async function refreshOwnerAssistantConnectionsAfterUpdate(
   };
 }
 
-/** Refresh a marker-owned CLAUDE.md, but never create or claim one on update. */
-export function refreshClaudeWorkspaceGuideAfterUpdate(manifestPath, options = {}) {
-  const writeGuide = options.writeClaudeWorkspaceGuide ?? writeClaudeWorkspaceGuide;
+function damagedOwnerRulesWarning(path) {
+  return `The answer rules in ${displayPath(path)} are damaged; nothing was changed. ` +
+    'Copy your "My accounts" lines aside, delete the section from its BEGIN line to its END line, then rerun setup to restore it.';
+}
+
+function ownerSessionFolderLabel(manifestPath, options) {
+  const risk = classifySessionFolder(options.sessionFolder ?? process.cwd(), {
+    home: options.home ?? options.installedManifestOptions?.home ?? homedir(),
+    platform: options.platformName ?? options.platform ?? process.platform,
+    brainFolder: dirname(resolve(manifestPath)),
+  });
+  return risk ? { desktop: "your Desktop folder", downloads: "your Downloads folder", synced: "a folder that syncs to the cloud" }[risk.kind] : null;
+}
+
+/** Refresh a marker-owned guide, but never create or claim one on update. */
+function refreshWorkspaceGuideAfterUpdate(manifestPath, options, assistant) {
+  const codex = assistant === "codex";
+  const filename = codex ? "AGENTS.md" : "CLAUDE.md";
+  const writeGuide = codex
+    ? (options.writeCodexWorkspaceGuide ?? writeCodexWorkspaceGuide)
+    : (options.writeClaudeWorkspaceGuide ?? writeClaudeWorkspaceGuide);
   const reportOk = options.reportOk ?? ok;
   const reportInfo = options.reportInfo ?? info;
   const reportWarning = options.reportWarning ?? warn;
@@ -28982,13 +29028,14 @@ export function refreshClaudeWorkspaceGuideAfterUpdate(manifestPath, options = {
     result = writeGuide(manifestPath, {
       brainCliPath: options.brainCliPath || fileURLToPath(import.meta.url),
       nodePath: options.nodePath || process.execPath,
+      platformName: options.platformName ?? options.platform ?? process.platform,
       existingOnly: true,
     });
   } catch {
     safelyReportUpdateResult(
       reportWarning,
-      "The Brain software update is verified, but its existing managed CLAUDE.md could not be refreshed safely. " +
-        "No unrelated CLAUDE.md was replaced. The Brain and AI connection do not need to be updated again.",
+      `The Brain software update is verified, but its existing managed ${filename} could not be refreshed safely. ` +
+        `No unrelated ${filename} was replaced. The Brain and AI connection do not need to be updated again.`,
     );
     return { status: "warning" };
   }
@@ -28996,16 +29043,26 @@ export function refreshClaudeWorkspaceGuideAfterUpdate(manifestPath, options = {
   if (result?.status === "written") {
     safelyReportUpdateResult(
       reportOk,
-      "existing Financial Brain CLAUDE.md refreshed with the Owner assistant write and approval guidance",
+      `existing Financial Brain ${filename} refreshed with the answer rules in ${displayPath(result.workspace || dirname(resolve(manifestPath)))}; open ${codex ? "Codex" : "Claude Code"} in that folder for Brain conversations`,
     );
+  } else if (result?.status === "preserved_damaged_section") {
+    safelyReportUpdateResult(reportWarning, damagedOwnerRulesWarning(result.path || join(dirname(resolve(manifestPath)), filename)));
   } else if (result?.status === "preserved_unrelated_existing_file" ||
       result?.status === "preserved_unsafe_existing_file") {
     safelyReportUpdateResult(
       reportInfo,
-      "The existing CLAUDE.md is not a safely managed Financial Brain guide, so update left it unchanged.",
+      `The existing ${filename} is not a safely managed Financial Brain guide, so update left it unchanged.`,
     );
   }
   return result;
+}
+
+export function refreshClaudeWorkspaceGuideAfterUpdate(manifestPath, options = {}) {
+  return refreshWorkspaceGuideAfterUpdate(manifestPath, options, "claude");
+}
+
+export function refreshCodexWorkspaceGuideAfterUpdate(manifestPath, options = {}) {
+  return refreshWorkspaceGuideAfterUpdate(manifestPath, options, "codex");
 }
 
 function updateSkillAgentLabel(root) {
@@ -30254,6 +30311,9 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   const updateWorkspaceGuide = Object.hasOwn(options, "writeClaudeWorkspaceGuideAfterUpdate")
     ? options.writeClaudeWorkspaceGuideAfterUpdate
     : (IS_MAIN ? writeClaudeWorkspaceGuide : null);
+  const updateCodexWorkspaceGuide = Object.hasOwn(options, "writeCodexWorkspaceGuideAfterUpdate")
+    ? options.writeCodexWorkspaceGuideAfterUpdate
+    : (IS_MAIN ? writeCodexWorkspaceGuide : null);
   const resolveUpdateAgentBaseUrl = options.resolveUpdateAgentBaseUrl ?? resolveBaseUrl;
   let updatedManifest = null;
   let updatedBaseUrl = null;
@@ -30639,12 +30699,28 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       writeClaudeWorkspaceGuide: updateWorkspaceGuide,
       brainCliPath: options.brainCliPath,
       nodePath: options.nodePath,
+      platformName: options.platformName ?? options.platform,
       reportOk: options.reportWorkspaceGuideRefreshOk,
       reportInfo: options.reportWorkspaceGuideRefreshInfo,
       reportWarning: options.reportWorkspaceGuideRefreshWarning,
     });
     if (workspaceGuideResult?.status === "warning") {
       updateAttention.push("Review the CLAUDE.md warning above; the Brain update itself is complete.");
+    }
+  }
+
+  if (updateCodexWorkspaceGuide && ownerAgentRefreshResult?.wired?.includes("Codex")) {
+    const workspaceGuideResult = refreshCodexWorkspaceGuideAfterUpdate(pin.target, {
+      writeCodexWorkspaceGuide: updateCodexWorkspaceGuide,
+      brainCliPath: options.brainCliPath,
+      nodePath: options.nodePath,
+      platformName: options.platformName ?? options.platform,
+      reportOk: options.reportWorkspaceGuideRefreshOk,
+      reportInfo: options.reportWorkspaceGuideRefreshInfo,
+      reportWarning: options.reportWorkspaceGuideRefreshWarning,
+    });
+    if (workspaceGuideResult?.status === "warning") {
+      updateAttention.push("Review the AGENTS.md warning above; the Brain update itself is complete.");
     }
   }
 
@@ -30666,6 +30742,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     updateAttention.push("Use https://financialbrain.ai/update/agent.md for this session; do not rerun brain update.");
   }
   const attention = [...new Set(updateAttention)];
+  const sessionFolderLabel = ownerSessionFolderLabel(pin.target, options);
   const closing = [
     `Done. Your Brain is now on version ${PRODUCT_VERSION} and passed its checks.`,
     ...(mailTransition ? [microsoftMailTransitionSummary(mailTransition)] : []),
@@ -30676,6 +30753,9 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.",
     "In Claude Code type /exit, then claude --continue.",
     "Then ask: check my Brain.",
+    ...(sessionFolderLabel ? [
+      `Next time, open Claude Code (or Codex) in your Financial Brain folder, ${displayPath(dirname(pin.target))}. This conversation runs in ${sessionFolderLabel}, which can be tidied away or synced.`,
+    ] : []),
   ].join("\n");
   safelyReportUpdateResult(options.reportUpdateFinish ?? console.log, closing);
   return upgradeResult;

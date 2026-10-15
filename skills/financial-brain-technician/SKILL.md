@@ -856,6 +856,25 @@ must stop before resource creation.
    token. The owner still performs sign-in, 2FA, billing acceptance, and final
    consent in the browser.
 
+## Answer from the Brain
+
+Every answer that uses the Brain follows the answer rules the installer keeps
+between the "BEGIN Financial Brain answer rules" and "END Financial Brain
+answer rules" markers in the CLAUDE.md (Claude Code) or AGENTS.md (Codex)
+beside the Brain manifest, normally in `~/Financial Brain`. If that section is
+not already in this conversation, read it before the first money question. In
+short: answer first; then `Confidence: N%` with a one-line reason; one asterisk
+line per assumption with its evidence and the words that flip it; "as of
+<record date>" on every status; one brain_search sorted newest for the subject
+before any status, latest, or absence claim; "not found in this search" plus
+the next place you would check, never "nothing recorded"; money questions go
+to brain_think in the money rules' template wording. Add account names under
+"My accounts" only after the owner approves the exact lines.
+
+Brain conversations belong in the Financial Brain folder: open Claude Code (or
+Codex) there. If this conversation runs in Desktop, Downloads, or a synced
+folder, say so once and suggest that folder for next time.
+
 ## Credential boundary
 
 - Normal fresh Cloudflare setup uses the owner's official browser sign-in and
