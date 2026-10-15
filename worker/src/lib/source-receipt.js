@@ -38,19 +38,24 @@ export const SOURCE_RECEIPT_ISSUE_CODES = Object.freeze([
 const ISSUE_CODES = new Set(SOURCE_RECEIPT_ISSUE_CODES);
 export const DEFAULT_SOURCE_RECEIPT_ISSUE_CODE = "INGEST_FAILED";
 
-/** A completed empty provider walk is a check, never an ingest or history proof. */
+/** A completed quiet walk is a check, never accepted work or history proof. */
 export function providerNoChangeCheckAt(kind, run) {
   // Restrict this to connector receipts whose terminal walk flag proves provider
   // enumeration. Re-reading an empty export folder cannot prove upstream work.
-  if (!["drive", "gmail", "imap", "calendar", "microsoft"].includes(kind)) return null;
+  if (!["drive", "gmail", "imap", "calendar", "microsoft", "imessage", "whatsapp"].includes(kind)) return null;
   if (run?.outcome !== "empty" || run.walk_complete !== true || run.metrics_version !== 1) return null;
+  if ((run.status !== undefined && run.status !== "ready") || run.error || run.refusal_reason) return null;
   // Older Calendar walks could terminate without a valid nextSyncToken.
   // Only the dedicated, persisted boundary proof certifies a quiet check.
   if (kind === "calendar" && run.provider_check_complete !== true) return null;
   // Microsoft shares one receipt across mail, calendar and files. Every delta
   // walk must finish cleanly and its resulting cursor must be saved first.
   if (kind === "microsoft" && run.provider_check_complete !== true) return null;
-  if (!["files_seen", "docs_added", "docs_updated", "docs_unchanged", "docs_refused", "docs_failed"]
+  // Local walks can read rows held in an open conversation without delivering
+  // a document. Their saved watermark still proves they reached the current end.
+  if (!Number.isSafeInteger(run.files_seen) || run.files_seen < 0) return null;
+  if (!["imessage", "whatsapp"].includes(kind) && run.files_seen !== 0) return null;
+  if (!["docs_added", "docs_updated", "docs_unchanged", "docs_refused", "docs_failed"]
     .every(field => run[field] === 0)) return null;
   const started = typeof run.started_at === "string" ? Date.parse(run.started_at) : NaN;
   const finished = typeof run.finished_at === "string" ? Date.parse(run.finished_at) : NaN;

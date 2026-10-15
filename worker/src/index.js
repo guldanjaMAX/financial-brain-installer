@@ -114,7 +114,7 @@ import {
 import { handleMcp } from "./lib/mcp-endpoint.js";
 import {
   isSourceKindConflict, normalizeSourceFailureEvidence, normalizeSourceReceiptIssueCode, parseProviderWithheldReason,
-  resolveSourceKind, sourceReceiptOwnerMessage,
+  resolveSourceKind, sourceReceiptOwnerMessage, providerNoChangeCheckAt,
 } from "./lib/source-receipt.js";
 import {
   beginOwnerNoteWrite, completeOwnerNoteWrite, failOwnerNoteWrite, OwnerNoteLifecycleError,
@@ -2337,8 +2337,8 @@ async function handleSourceReceipt(env, request) {
   // Both fields opt the receipt into the versioned, measured outcome shape.
   // Missing counters remain unknown rather than defaulting to a clean zero.
   const metricsVersion = Object.hasOwn(body, "docs_refused") && Object.hasOwn(body, "docs_failed") ? 1 : 0;
-  // A completed empty walk is evidence of an attempt, not verified freshness.
-  // Keep the zero counters and prior success; do not invent an imported item.
+  // Accepted work and a certified quiet check are separate evidence. Keep
+  // zero counters and prior accepted-work success; never invent an item.
   const verifiedWork = metricsVersion !== 1 || ["docs_added", "docs_updated", "docs_unchanged"]
     .some((field) => receiptCount(body?.[field]) > 0);
   // A producer's ready label cannot hide measured transient failures. Keep
@@ -2470,6 +2470,15 @@ async function handleSourceReceipt(env, request) {
   const withheldCheck = status === "ready" && walkComplete && body?.provider_check_complete === true &&
     metricsVersion === 1 && body.docs_failed === 0 && withheld?.count === body.docs_refused && withheld?.count > 0 &&
     receiptCount(body.files_seen) > 0;
+  const quietCheck = providerNoChangeCheckAt(kind, {
+    status, outcome: "empty", metrics_version: metricsVersion,
+    walk_complete: walkComplete, provider_check_complete: body?.provider_check_complete === true,
+    files_seen: receiptCount(body?.files_seen), docs_added: receiptCount(body?.docs_added),
+    docs_updated: receiptCount(body?.docs_updated), docs_unchanged: receiptCount(body?.docs_unchanged),
+    docs_refused: receiptCount(body?.docs_refused), docs_failed: receiptCount(body?.docs_failed),
+    error: errorReason, refusal_reason: refusalReason,
+    started_at: new Date(startedMs).toISOString(), finished_at: completedAt,
+  });
   const statements = [];
 
   if (status === "ready") {
@@ -2482,7 +2491,7 @@ async function handleSourceReceipt(env, request) {
          last_complete_sweep_at=CASE WHEN ?5 = 1 THEN excluded.last_ingest_at ELSE sources.last_complete_sweep_at END
        WHERE sources.kind=excluded.kind`
     ).bind(source, kind, completedAt, documents, completeSweep ? 1 : 0,
-      verifiedWork ? 1 : 0, verifiedWork || withheldCheck ? null : "NO_VERIFIED_WORK"));
+      verifiedWork || quietCheck ? 1 : 0, verifiedWork || quietCheck || withheldCheck ? null : "NO_VERIFIED_WORK"));
   } else {
     // A failed attempt does not become the last successful ingest. Advancing
     // last_ingest_at here would make a broken daily sync look current for the

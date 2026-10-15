@@ -7,6 +7,8 @@
  * making already stored documents look absent.
  */
 
+import { providerNoChangeCheckAt } from "./source-receipt.js";
+
 export const STARTER_CONTEXT_STATES = Object.freeze(["preparing", "ready", "degraded"]);
 export const LIVE_UPDATE_STATES = Object.freeze(["catching_up", "current", "stale", "unavailable"]);
 export const HISTORY_STATES = Object.freeze([
@@ -50,8 +52,9 @@ function liveState(source) {
   return "unavailable";
 }
 
-function latestRunNeedsAttention(latestRun) {
+function latestRunNeedsAttention(latestRun, kind) {
   if (!latestRun) return false;
+  if (providerNoChangeCheckAt(kind, latestRun)) return false;
   const outcome = String(latestRun.outcome || "").toLowerCase();
   if (["failed", "refused", "empty", "partial"].includes(outcome)) return true;
   if (latestRun.error || latestRun.refusal_reason) return true;
@@ -68,7 +71,7 @@ function historyState(source, latestRun) {
       (latestRun && latestRun.finished_at === null)) return "running";
   // The prior complete-through timestamp remains useful evidence, but a newer
   // incomplete run must not borrow it to look complete today.
-  if (latestRunNeedsAttention(latestRun)) return "needs_attention";
+  if (latestRunNeedsAttention(latestRun, source.kind)) return "needs_attention";
   if (source.last_complete_sweep_at) return "complete";
   if (["broken", "review"].includes(source.state)) return "needs_attention";
   if ((finiteCount(source.documents) || 0) === 0) return "not_started";

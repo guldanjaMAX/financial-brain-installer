@@ -160,7 +160,8 @@ test("Calendar quiet incremental completion has its own durable proof without fu
   assert.equal(f.result.status, "complete");
   assert.equal(f.inventory.rows[0].receipt.latest_run.provider_check_complete, true);
   assert.equal(f.inventory.rows[0].receipt.complete_history_through, null);
-  assert.equal(f.inventory.rows[0].receipt.last_ingest_receipt_at, BEFORE);
+  assert.equal(f.inventory.rows[0].receipt.last_ingest_receipt_at, NOW, "a certified check advances source freshness");
+  assert.equal(f.inventory.rows[0].receipt.last_successful_run_at, BEFORE, "quiet checks preserve accepted-work history");
 });
 
 test("Calendar legacy walk completion cannot stand in for terminal provider proof", async t => {
@@ -480,7 +481,8 @@ test("daily quiet control reaches Calendar enumeration, Worker receipt and CLI i
   assert.equal(receipt.freshness_advanced, false);
   assert.equal(receipt.last_successful_run_at_after, BEFORE);
   assert.equal(f.inventory.rows[0].receipt.last_check_at, NOW);
-  assert.equal(f.inventory.rows[0].receipt.last_ingest_receipt_at, BEFORE);
+  assert.equal(f.inventory.rows[0].receipt.last_ingest_receipt_at, NOW, "a certified check advances source freshness");
+  assert.equal(f.inventory.rows[0].receipt.last_successful_run_at, BEFORE, "quiet checks preserve accepted-work history");
   assert.equal(f.inventory.rows[0].receipt.complete_history_through, null);
   const [status] = dailyFreshnessRows({ sources: [{ key: "calendar" }] }, { sources: f.inventory.rows, as_of: NOW });
   assert.equal(status.current_state, "checked");
@@ -773,7 +775,8 @@ for (const workload of ["mail", "calendar", "both"]) {
     assert.equal(receipt.latest_run.walk_complete, true);
     assert.equal(receipt.latest_run.provider_check_complete, true);
     assert.equal(receipt.last_check_at, NOW);
-    assert.equal(receipt.last_ingest_receipt_at, BEFORE);
+    assert.equal(receipt.last_ingest_receipt_at, NOW, "a certified check advances source freshness");
+    assert.equal(receipt.last_successful_run_at, BEFORE, "quiet checks preserve accepted-work history");
     assert.equal(receipt.complete_history_through, null);
     const [status] = dailyFreshnessRows({ sources: [{ key: "microsoft", source_names: ["mailbox"] }] },
       { sources: f.inventory.rows, as_of: NOW });

@@ -160,7 +160,7 @@ export function createInventoryAccumulator() {
         const retiredAt = retirements.get(row.source_id)?.[2];
         if (row.registered && retiredAt) {
           row.freshness.state = "manual";
-          row.freshness.reason = `retired by the owner on ${retiredAt.slice(0, 10)}; kept, not refreshed`;
+          row.freshness.reason = `historical: kept and searchable, not refreshed (retired by the owner on ${retiredAt.slice(0, 10)})`;
         }
         const physical = row.storage.physical_documents;
         const logical = families.get(row.source_id).size;
