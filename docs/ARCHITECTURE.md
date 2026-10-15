@@ -765,13 +765,34 @@ two owned accounts and a three-day date tolerance. One leg must name the other
 owned account by its unique literal mask or stored label to label a pair as a
 candidate. Conflicting account kinds or explicit outside payees on both legs
 rule out the candidate. No provider transfer-link or owner-pair field currently
-exists, so no transaction is removed as a transfer. Primary totals, lists and
-breakdowns retain candidate legs; a separately labelled conditional figure
-shows the result if these are transfers between the owner's accounts. Candidates
-include both accounts, amounts, dates and reasons. Unmatched hints remain counted
-and visible. Recurrence uses at least three charges, bounded weekly/monthly
-intervals and integer amount tolerance; results are explicitly detected rather
-than confirmed. Category proposals and Unsorted remain visible. Ambiguous groups,
+exists. Pairing never changes stored rows. Money answers leave qualifying own
+moves out of the lead figures when both accounts are connected checking,
+savings or card accounts in scope; each leg affects only its own period. The
+note offers "including transfers". A counterpart outside the question stays
+counted unless "excluding transfers" is requested. Loan and line-of-credit
+payments, contributions to investment or retirement accounts, and other
+account kinds stay with an explicit reason. Withdrawal inflows into move-kind
+accounts are excluded only by the exact case-insensitive category
+`TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS` (proposed or confirmed) or a pair
+from an investment or retirement account. A paired outgoing leg also leaves
+the lead when in scope. Description words never authorize withdrawal exclusion;
+"including withdrawals" restores it. The unchanged gross sentences always
+remain visible. Lead lines use "money in"/"money out" so clients parsing gross
+"credits"/"debits" cannot subtract twice. Existing JSON keys remain gross or,
+for `if_own_transfers`, conditional; additive lead and exclusion fields explain
+the presentation. Lists retain all rows and the transfers view keeps its
+outgoing-date semantics. Unmatched hints remain counted and visible.
+Bounded profit, net income and cash flow forms route to `kind: totals`, with
+`measure`, `net_minor` and the label "cash in minus cash out, not accounting
+profit". The net sums only in-scope checking, savings and card lead figures;
+other account kinds are listed with a reason and no eligible account means
+`unsupported_question`. One supported period and fully consumed grammar are
+required. The two flip clause families are bounded and reject duplicates,
+contradictions and other qualifiers. They apply to totals, largest, deposits,
+merchant, category and recurring, never balances, payments or the transfers
+view. The document path retains its existing money refusal rules.
+Recurrence uses at least three charges, bounded weekly/monthly intervals and
+integer amount tolerance; results are explicitly detected rather than confirmed. Category proposals and Unsorted remain visible. Ambiguous groups,
 incomplete coverage and unreadable rows cannot establish a total or absence.
 Named payment arrivals match whole counterparty words. For an amountless
 arrival, an explicit payee supplies the sender evidence; a memo supplies it

@@ -1,0 +1,3596 @@
+{
+  "own": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $283.27 [1] [2] [3] [4].\naccount ****2222, 2026-09-01 through 2026-09-30: credits $236.17; debits $0.00 [5].\nAccounts: account ****1111, account ****2222; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$236.17 on 2026-09-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [4]; received $236.17 on 2026-09-16 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [5]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10; account ****2222: credits $0.00; debits $0.00.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 28327,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "2222",
+            "credits_minor": 23617,
+            "debits_minor": 0,
+            "transaction_count": 1
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $236.17 on 2026-09-15",
+              "account_mask": "1111",
+              "posted_on": "2026-09-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $236.17 on 2026-09-16",
+              "account_mask": "2222",
+              "posted_on": "2026-09-16",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-16",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "How much money came in and went out in October 2026?": {
+      "answer": "account ****1111, 2026-10-01 through 2026-10-11: credits $0.00; debits $0.00 (no posted income or expenses in the covered period).\naccount ****2222, 2026-10-01 through 2026-10-11: credits $0.00; debits $0.00 (no posted income or expenses in the covered period).\nAccounts: account ****1111, account ****2222; 2026-10-01 through 2026-10-11; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-10-01",
+        "to": "2026-10-11",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 0,
+            "debits_minor": 0,
+            "transaction_count": 0
+          },
+          {
+            "account_mask": "2222",
+            "credits_minor": 0,
+            "debits_minor": 0,
+            "transaction_count": 0
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    },
+    "How much money came in and went out of my checking account in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $283.27 [1] [2] [3] [4].\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$236.17 on 2026-09-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [4]; received $236.17 on 2026-09-16 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [5]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 28327,
+            "transaction_count": 4
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $236.17 on 2026-09-15",
+              "account_mask": "1111",
+              "posted_on": "2026-09-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $236.17 on 2026-09-16",
+              "account_mask": "2222",
+              "posted_on": "2026-09-16",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-16",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "What is my current balance?": {
+      "answer": "account ****1111: $837.19 as of 2026-10-11 [1].\naccount ****2222: $837.19 as of 2026-10-11 [2].",
+      "ledger": {
+        "kind": "balance",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "current_minor": 83719,
+            "as_of": "2026-10-11"
+          },
+          {
+            "account_mask": "2222",
+            "current_minor": 83719,
+            "as_of": "2026-10-11"
+          }
+        ]
+      }
+    },
+    "Did the payment of $731.29 arrive on 2026-09-03?": {
+      "answer": "Found a deposit of $731.29 posted 2026-09-03 in account ****1111: Fixture client deposit [1].",
+      "ledger": {
+        "kind": "payment",
+        "found": true,
+        "from": "2026-08-27",
+        "to": "2026-09-10",
+        "amount_minor": 73129,
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          },
+          {
+            "account_mask": "2222",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ]
+      }
+    },
+    "What were my ten largest expenses in September 2026?": {
+      "answer": "$236.17 on 2026-09-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [1]\n$28.07 on 2026-09-05 in account ****1111: Fixture Store [2]\n$19.03 on 2026-09-07 in account ****1111: Fixture Supplies [3]\nAccounts: account ****1111, account ****2222; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$236.17 on 2026-09-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [1]; received $236.17 on 2026-09-16 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [4]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: total of the listed expenses: $47.10.",
+      "ledger": {
+        "kind": "largest",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          },
+          {
+            "account_mask": "2222",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ],
+          "total_minor": 4710
+        },
+        "found": true,
+        "rows": [
+          {
+            "n": 1,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:4",
+            "title": "account ****1111: $236.17 on 2026-09-15",
+            "account_mask": "1111",
+            "posted_on": "2026-09-15",
+            "amount_minor": 23617,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-15",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "TRANSFER TO account 2222",
+            "possible_own_transfer": true
+          },
+          {
+            "n": 2,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:2",
+            "title": "account ****1111: $28.07 on 2026-09-05",
+            "account_mask": "1111",
+            "posted_on": "2026-09-05",
+            "amount_minor": 2807,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-05",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "Fixture Store",
+            "possible_own_transfer": false
+          },
+          {
+            "n": 3,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:3",
+            "title": "account ****1111: $19.03 on 2026-09-07",
+            "account_mask": "1111",
+            "posted_on": "2026-09-07",
+            "amount_minor": 1903,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-07",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "Fixture Supplies",
+            "possible_own_transfer": false
+          }
+        ],
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 1,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $236.17 on 2026-09-15",
+              "account_mask": "1111",
+              "posted_on": "2026-09-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $236.17 on 2026-09-16",
+              "account_mask": "2222",
+              "posted_on": "2026-09-16",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-16",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "What were my deposits in September 2026?": {
+      "answer": "$236.17 on 2026-09-16 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [1]\n$731.29 on 2026-09-03 in account ****1111: Fixture client deposit [2]\nAccounts: account ****1111, account ****2222; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$236.17 on 2026-09-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [3]; received $236.17 on 2026-09-16 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [1]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: total of the listed deposits: $731.29.",
+      "ledger": {
+        "kind": "deposits",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          },
+          {
+            "account_mask": "2222",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ],
+          "total_minor": 73129
+        },
+        "found": true,
+        "rows": [
+          {
+            "n": 1,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:5",
+            "title": "account ****2222: $236.17 on 2026-09-16",
+            "account_mask": "2222",
+            "posted_on": "2026-09-16",
+            "amount_minor": 23617,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-16",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "TRANSFER FROM account 1111",
+            "possible_own_transfer": true
+          },
+          {
+            "n": 2,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:1",
+            "title": "account ****1111: $731.29 on 2026-09-03",
+            "account_mask": "1111",
+            "posted_on": "2026-09-03",
+            "amount_minor": 73129,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-03",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "Fixture client deposit",
+            "possible_own_transfer": false
+          }
+        ],
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 3,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $236.17 on 2026-09-15",
+              "account_mask": "1111",
+              "posted_on": "2026-09-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 1,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $236.17 on 2026-09-16",
+              "account_mask": "2222",
+              "posted_on": "2026-09-16",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-16",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "How much did I spend by merchant in September 2026?": {
+      "answer": "Total spend by merchant: $283.27.\nfixture store: $28.07 [1].\nfixture supplies: $19.03 [2].\ntransfer to account 2222: $236.17 [3] (includes possible moves between your own accounts).\nUnsorted: $19.03 [2].\nAccounts: account ****1111, account ****2222; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$236.17 on 2026-09-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [3]; received $236.17 on 2026-09-16 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [4]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: total spend by merchant: $47.10; Unsorted: $19.03.",
+      "ledger": {
+        "kind": "merchant",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          },
+          {
+            "account_mask": "2222",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ],
+          "total_minor": 4710,
+          "unsorted_minor": 1903
+        },
+        "total_minor": 28327,
+        "unsorted_minor": 1903,
+        "found": true,
+        "groups": [
+          {
+            "merchant": "fixture store",
+            "category_basis_state": null,
+            "total_minor": 2807,
+            "citations": [
+              1
+            ],
+            "possible_transfer_citations": [],
+            "if_own_transfers_total_minor": 2807
+          },
+          {
+            "merchant": "fixture supplies",
+            "category_basis_state": null,
+            "total_minor": 1903,
+            "citations": [
+              2
+            ],
+            "possible_transfer_citations": [],
+            "if_own_transfers_total_minor": 1903
+          },
+          {
+            "merchant": "transfer to account 2222",
+            "category_basis_state": null,
+            "total_minor": 23617,
+            "citations": [
+              3
+            ],
+            "possible_transfer_citations": [
+              3
+            ],
+            "if_own_transfers_total_minor": 0
+          }
+        ],
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 3,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $236.17 on 2026-09-15",
+              "account_mask": "1111",
+              "posted_on": "2026-09-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $236.17 on 2026-09-16",
+              "account_mask": "2222",
+              "posted_on": "2026-09-16",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-16",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "How much did I spend by category in September 2026?": {
+      "answer": "Total spend by category: $283.27.\nsoftware: $28.07 [1].\ntransfer out account transfer (bank's category (unconfirmed)): $236.17 [2] (includes possible moves between your own accounts).\nUnsorted: $19.03 [3].\nAccounts: account ****1111, account ****2222; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$236.17 on 2026-09-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [2]; received $236.17 on 2026-09-16 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [4]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: total spend by category: $47.10; Unsorted: $19.03.",
+      "ledger": {
+        "kind": "category",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          },
+          {
+            "account_mask": "2222",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ],
+          "total_minor": 4710,
+          "unsorted_minor": 1903
+        },
+        "total_minor": 28327,
+        "unsorted_minor": 1903,
+        "found": true,
+        "groups": [
+          {
+            "category": "software",
+            "category_basis_state": "confirmed",
+            "total_minor": 2807,
+            "citations": [
+              1
+            ],
+            "possible_transfer_citations": [],
+            "if_own_transfers_total_minor": 2807
+          },
+          {
+            "category": "transfer out account transfer",
+            "category_basis_state": "proposed",
+            "total_minor": 23617,
+            "citations": [
+              2
+            ],
+            "possible_transfer_citations": [
+              2
+            ],
+            "if_own_transfers_total_minor": 0
+          }
+        ],
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 2,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $236.17 on 2026-09-15",
+              "account_mask": "1111",
+              "posted_on": "2026-09-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $236.17 on 2026-09-16",
+              "account_mask": "2222",
+              "posted_on": "2026-09-16",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-16",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "Show my recurring charges in September 2026?": {
+      "answer": "Recurring charges detected, not confirmed. No recurring charges detected.\nEstimated monthly total: $0.00 (weekly amounts use 52/12, rounded to cents per merchant).\nAccounts: account ****1111, account ****2222; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$236.17 on 2026-09-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [1]; received $236.17 on 2026-09-16 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [2]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: estimated monthly total: $0.00.",
+      "ledger": {
+        "kind": "recurring",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          },
+          {
+            "account_mask": "2222",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ],
+          "monthly_total_minor": 0
+        },
+        "recurring": [],
+        "monthly_total_minor": 0,
+        "found": false,
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 1,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $236.17 on 2026-09-15",
+              "account_mask": "1111",
+              "posted_on": "2026-09-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 2,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $236.17 on 2026-09-16",
+              "account_mask": "2222",
+              "posted_on": "2026-09-16",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-16",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "How much did I transfer between my own accounts in September 2026?": {
+      "answer": "Possible moves between your own accounts: $236.17, counted once by outgoing posting date; not confirmed.\nAccounts: account ****1111, account ****2222; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$236.17 on 2026-09-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [1]; received $236.17 on 2026-09-16 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [2]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10; account ****2222: credits $0.00; debits $0.00.",
+      "ledger": {
+        "kind": "transfers",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          },
+          {
+            "account_mask": "2222",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "total_minor": 23617,
+        "found": true,
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 1,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $236.17 on 2026-09-15",
+              "account_mask": "1111",
+              "posted_on": "2026-09-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 2,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $236.17 on 2026-09-16",
+              "account_mask": "2222",
+              "posted_on": "2026-09-16",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-16",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "How much income came from Fixture brokerage in September 2026?": {
+      "answer": "Total income for fixture brokerage: $0.00. No matching transactions found.\nUnsorted: $0.00 .\nAccounts: account ****1111, account ****2222; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$236.17 on 2026-09-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [1]; received $236.17 on 2026-09-16 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [2]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: total income for fixture brokerage: $0.00; Unsorted: $0.00.",
+      "ledger": {
+        "kind": "merchant",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          },
+          {
+            "account_mask": "2222",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ],
+          "total_minor": 0,
+          "unsorted_minor": 0
+        },
+        "total_minor": 0,
+        "unsorted_minor": 0,
+        "found": false,
+        "groups": [],
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 1,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $236.17 on 2026-09-15",
+              "account_mask": "1111",
+              "posted_on": "2026-09-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 2,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $236.17 on 2026-09-16",
+              "account_mask": "2222",
+              "posted_on": "2026-09-16",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-16",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "What was my profit in September 2026?": {
+      "answer": null
+    },
+    "What is my net income last month?": {
+      "answer": null
+    },
+    "What was our cash flow in Q3?": {
+      "answer": null
+    },
+    "How much profit did I make so far this year?": {
+      "answer": null
+    },
+    "What was my profit in September 2026 for account ending 1111?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026 excluding transfers?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026, including transfers?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026 including withdrawals?": {
+      "answer": null
+    },
+    "How much did I spend at Fixture Store in September 2026 excluding transfers?": {
+      "answer": null
+    },
+    "What was my profit before tax in September 2026?": {
+      "answer": null
+    },
+    "What was my projected profit in September 2026?": {
+      "answer": null
+    },
+    "What was my average cash flow in Q3?": {
+      "answer": null
+    },
+    "What was my net income in 2025?": {
+      "answer": null
+    },
+    "What was my profit in September and October 2026?": {
+      "answer": null
+    },
+    "What was my gross profit in September 2026?": {
+      "answer": null
+    },
+    "What was my business profit in September 2026?": {
+      "answer": null
+    },
+    "What is my QuickBooks profit for September 2026?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026 excluding refunds?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026 excluding transfers and refunds?": {
+      "answer": null
+    },
+    "What is my balance excluding transfers?": {
+      "answer": null
+    },
+    "Did the payment of $120.01 arrive on 2026-09-15 excluding transfers?": {
+      "answer": null
+    },
+    "How much did I spend on software/SaaS in Q3 excluding refunds?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026 including transfers excluding transfers?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026 excluding transfers without transfers?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026 including withdrawals including retirement withdrawals?": {
+      "answer": null
+    },
+    "How much did I transfer between my own accounts in September 2026 excluding transfers?": {
+      "answer": null
+    },
+    "Did the payment of $731.29 arrive on 2026-09-03 including withdrawals?": {
+      "answer": null
+    },
+    "What was my profit?": {
+      "answer": null
+    },
+    "What was my net income in September 2026 after fees?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026 including transfers?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026 without my own transfers between my own accounts?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026 not counting our transfers?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026 including investment withdrawals?": {
+      "answer": null
+    }
+  },
+  "plain": {
+    "What is my current balance?": {
+      "answer": "account ****1111: $837.19 as of 2026-10-11 [1].",
+      "ledger": {
+        "kind": "balance",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "current_minor": 83719,
+            "as_of": "2026-10-11"
+          }
+        ]
+      }
+    },
+    "Did the payment of $731.29 arrive on 2026-09-03?": {
+      "answer": "Found a deposit of $731.29 posted 2026-09-03 in account ****1111: Fixture client deposit [1].",
+      "ledger": {
+        "kind": "payment",
+        "found": true,
+        "from": "2026-08-27",
+        "to": "2026-09-10",
+        "amount_minor": 73129,
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ]
+      }
+    },
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $74.23 [1] [2] [3] [4].\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 7423,
+            "transaction_count": 4
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 7423,
+              "transaction_count": 4
+            }
+          ]
+        },
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    },
+    "What were my ten largest expenses in September 2026?": {
+      "answer": "$28.07 on 2026-09-05 in account ****1111: Fixture Store [1]\n$27.13 on 2026-09-15 in account ****1111: Fixture subscription [2]\n$19.03 on 2026-09-07 in account ****1111: Fixture Supplies [3]\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "largest",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 7423,
+              "transaction_count": 4
+            }
+          ],
+          "total_minor": 7423
+        },
+        "found": true,
+        "rows": [
+          {
+            "n": 1,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:2",
+            "title": "account ****1111: $28.07 on 2026-09-05",
+            "account_mask": "1111",
+            "posted_on": "2026-09-05",
+            "amount_minor": 2807,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-05",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "Fixture Store",
+            "possible_own_transfer": false
+          },
+          {
+            "n": 2,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:6",
+            "title": "account ****1111: $27.13 on 2026-09-15",
+            "account_mask": "1111",
+            "posted_on": "2026-09-15",
+            "amount_minor": 2713,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-15",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "Fixture subscription",
+            "possible_own_transfer": false
+          },
+          {
+            "n": 3,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:3",
+            "title": "account ****1111: $19.03 on 2026-09-07",
+            "account_mask": "1111",
+            "posted_on": "2026-09-07",
+            "amount_minor": 1903,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-07",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "Fixture Supplies",
+            "possible_own_transfer": false
+          }
+        ],
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    },
+    "What were my deposits in September 2026?": {
+      "answer": "$731.29 on 2026-09-03 in account ****1111: Fixture client deposit [1]\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "deposits",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 7423,
+              "transaction_count": 4
+            }
+          ],
+          "total_minor": 73129
+        },
+        "found": true,
+        "rows": [
+          {
+            "n": 1,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:1",
+            "title": "account ****1111: $731.29 on 2026-09-03",
+            "account_mask": "1111",
+            "posted_on": "2026-09-03",
+            "amount_minor": 73129,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-03",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "Fixture client deposit",
+            "possible_own_transfer": false
+          }
+        ],
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    },
+    "How much did I spend by merchant in September 2026?": {
+      "answer": "Total spend by merchant: $74.23.\nfixture store: $28.07 [1].\nfixture supplies: $19.03 [2].\nfixture subscription: $27.13 [3].\nUnsorted: $19.03 [2].\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "merchant",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 7423,
+              "transaction_count": 4
+            }
+          ],
+          "total_minor": 7423,
+          "unsorted_minor": 1903
+        },
+        "total_minor": 7423,
+        "unsorted_minor": 1903,
+        "found": true,
+        "groups": [
+          {
+            "merchant": "fixture store",
+            "category_basis_state": null,
+            "total_minor": 2807,
+            "citations": [
+              1
+            ],
+            "possible_transfer_citations": [],
+            "if_own_transfers_total_minor": 2807
+          },
+          {
+            "merchant": "fixture supplies",
+            "category_basis_state": null,
+            "total_minor": 1903,
+            "citations": [
+              2
+            ],
+            "possible_transfer_citations": [],
+            "if_own_transfers_total_minor": 1903
+          },
+          {
+            "merchant": "fixture subscription",
+            "category_basis_state": null,
+            "total_minor": 2713,
+            "citations": [
+              3
+            ],
+            "possible_transfer_citations": [],
+            "if_own_transfers_total_minor": 2713
+          }
+        ],
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    },
+    "How much did I spend by category in September 2026?": {
+      "answer": "Total spend by category: $74.23.\nsoftware: $55.20 [1] [2].\nUnsorted: $19.03 [3].\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "category",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 7423,
+              "transaction_count": 4
+            }
+          ],
+          "total_minor": 7423,
+          "unsorted_minor": 1903
+        },
+        "total_minor": 7423,
+        "unsorted_minor": 1903,
+        "found": true,
+        "groups": [
+          {
+            "category": "software",
+            "category_basis_state": "confirmed",
+            "total_minor": 5520,
+            "citations": [
+              1,
+              2
+            ],
+            "possible_transfer_citations": [],
+            "if_own_transfers_total_minor": 5520
+          }
+        ],
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    },
+    "Show my recurring charges in September 2026?": {
+      "answer": "Recurring charges detected, not confirmed. No recurring charges detected.\nEstimated monthly total: $0.00 (weekly amounts use 52/12, rounded to cents per merchant).\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "recurring",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 7423,
+              "transaction_count": 4
+            }
+          ],
+          "monthly_total_minor": 0
+        },
+        "recurring": [],
+        "monthly_total_minor": 0,
+        "found": false,
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    },
+    "How much did I transfer between my own accounts in September 2026?": {
+      "answer": "No possible moves between your own accounts found by outgoing posting date.\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "transfers",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 7423,
+              "transaction_count": 4
+            }
+          ]
+        },
+        "total_minor": 0,
+        "found": false,
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "unrelated": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $283.27 [1] [2] [3] [4].\naccount ****2222, 2026-09-01 through 2026-09-30: credits $236.17; debits $0.00 [5].\nAccounts: account ****1111, account ****2222; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 28327,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "2222",
+            "credits_minor": 23617,
+            "debits_minor": 0,
+            "transaction_count": 1
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 28327,
+              "transaction_count": 4
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 23617,
+              "debits_minor": 0,
+              "transaction_count": 1
+            }
+          ]
+        },
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "related": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $283.27 [1] [2] [3] [4].\naccount ****2222, 2026-09-01 through 2026-09-30: credits $236.17; debits $0.00 [5].\nAccounts: account ****1111, account ****2222; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$236.17 on 2026-09-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [4]; received $236.17 on 2026-09-17 in account ****2222: Fixture outside customer (possible move between your own accounts, included) [5]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10; account ****2222: credits $0.00; debits $0.00.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 28327,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "2222",
+            "credits_minor": 23617,
+            "debits_minor": 0,
+            "transaction_count": 1
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $236.17 on 2026-09-15",
+              "account_mask": "1111",
+              "posted_on": "2026-09-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $236.17 on 2026-09-17",
+              "account_mask": "2222",
+              "posted_on": "2026-09-17",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-17",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "Fixture outside customer",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "boundary": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $323.63 [1] [2] [3] [4].\naccount ****2222, 2026-09-01 through 2026-09-30: credits $0.00; debits $0.00 (no posted income or expenses in the covered period).\nAccounts: account ****1111, account ****2222; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$276.53 on 2026-09-30 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [4]; received $276.53 on 2026-10-02 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [5]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10; account ****2222: credits $0.00; debits $0.00.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 32363,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "2222",
+            "credits_minor": 0,
+            "debits_minor": 0,
+            "transaction_count": 0
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 27653,
+            "outgoing": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $276.53 on 2026-09-30",
+              "account_mask": "1111",
+              "posted_on": "2026-09-30",
+              "amount_minor": 27653,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-30",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $276.53 on 2026-10-02",
+              "account_mask": "2222",
+              "posted_on": "2026-10-02",
+              "amount_minor": 27653,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-10-02",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "How much money came in and went out in October 2026?": {
+      "answer": "account ****1111, 2026-10-01 through 2026-10-11: credits $0.00; debits $0.00 (no posted income or expenses in the covered period).\naccount ****2222, 2026-10-01 through 2026-10-11: credits $276.53; debits $0.00 [1].\nAccounts: account ****1111, account ****2222; 2026-10-01 through 2026-10-11; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$276.53 on 2026-09-30 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [2]; received $276.53 on 2026-10-02 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [1]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $0.00; debits $0.00; account ****2222: credits $0.00; debits $0.00.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-10-01",
+        "to": "2026-10-11",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 0,
+            "debits_minor": 0,
+            "transaction_count": 0
+          },
+          {
+            "account_mask": "2222",
+            "credits_minor": 27653,
+            "debits_minor": 0,
+            "transaction_count": 1
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 27653,
+            "outgoing": {
+              "n": 2,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $276.53 on 2026-09-30",
+              "account_mask": "1111",
+              "posted_on": "2026-09-30",
+              "amount_minor": 27653,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-30",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 1,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $276.53 on 2026-10-02",
+              "account_mask": "2222",
+              "posted_on": "2026-10-02",
+              "amount_minor": 27653,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-10-02",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "boundary-far": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $323.63 [1] [2] [3] [4].\naccount ****2222, 2026-09-01 through 2026-09-30: credits $0.00; debits $0.00 (no posted income or expenses in the covered period).\nAccounts: account ****1111, account ****2222; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible transfer, unmatched (retained in income/spend totals): $276.53 on 2026-09-30 in account ****1111: TRANSFER TO account 2222 [4].",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 32363,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "2222",
+            "credits_minor": 0,
+            "debits_minor": 0,
+            "transaction_count": 0
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 32363,
+              "transaction_count": 4
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [],
+        "unmatched_transfers": [
+          {
+            "n": 4,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:4",
+            "title": "account ****1111: $276.53 on 2026-09-30",
+            "account_mask": "1111",
+            "posted_on": "2026-09-30",
+            "amount_minor": 27653,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-30",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "TRANSFER TO account 2222",
+            "possible_own_transfer": false
+          }
+        ]
+      }
+    }
+  },
+  "boundary-uncovered": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $323.63 [1] [2] [3] [4].\naccount ****2222, 2026-09-01 through 2026-09-30: credits $0.00; debits $0.00 (no posted income or expenses in the covered period).\nAccounts: account ****1111, account ****2222; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-09-30.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible transfer, unmatched (retained in income/spend totals): $276.53 on 2026-09-30 in account ****1111: TRANSFER TO account 2222 [4].",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 32363,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "2222",
+            "credits_minor": 0,
+            "debits_minor": 0,
+            "transaction_count": 0
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 32363,
+              "transaction_count": 4
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [],
+        "unmatched_transfers": [
+          {
+            "n": 4,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:4",
+            "title": "account ****1111: $276.53 on 2026-09-30",
+            "account_mask": "1111",
+            "posted_on": "2026-09-30",
+            "amount_minor": 27653,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-30",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "TRANSFER TO account 2222",
+            "possible_own_transfer": false
+          }
+        ]
+      }
+    }
+  },
+  "card": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $201.49 [1] [2] [3] [4].\naccount ****3333, 2026-09-01 through 2026-09-30: credits $154.39; debits $93.41 [5] [6].\nAccounts: account ****1111, account ****3333; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****3333: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$154.39 on 2026-09-19 in account ****1111: PAYMENT TO CARD ENDING 3333 (possible move between your own accounts, included) [4]; received $154.39 on 2026-09-20 in account ****3333: PAYMENT THANK YOU (possible move between your own accounts, included) [6]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10; account ****3333: credits $0.00; debits $93.41.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 20149,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "3333",
+            "credits_minor": 15439,
+            "debits_minor": 9341,
+            "transaction_count": 2
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "3333",
+              "credits_minor": 0,
+              "debits_minor": 9341,
+              "transaction_count": 1
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 15439,
+            "outgoing": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $154.39 on 2026-09-19",
+              "account_mask": "1111",
+              "posted_on": "2026-09-19",
+              "amount_minor": 15439,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-19",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "PAYMENT TO CARD ENDING 3333",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 6,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****3333: $154.39 on 2026-09-20",
+              "account_mask": "3333",
+              "posted_on": "2026-09-20",
+              "amount_minor": 15439,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-20",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "PAYMENT THANK YOU",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "How much money came in and went out of my checking account in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $201.49 [1] [2] [3] [4].\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$154.39 on 2026-09-19 in account ****1111: PAYMENT TO CARD ENDING 3333 (possible move between your own accounts, included) [4]; received $154.39 on 2026-09-20 in account ****3333: PAYMENT THANK YOU (possible move between your own accounts, included) [5]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 20149,
+            "transaction_count": 4
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 15439,
+            "outgoing": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $154.39 on 2026-09-19",
+              "account_mask": "1111",
+              "posted_on": "2026-09-19",
+              "amount_minor": 15439,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-19",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "PAYMENT TO CARD ENDING 3333",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****3333: $154.39 on 2026-09-20",
+              "account_mask": "3333",
+              "posted_on": "2026-09-20",
+              "amount_minor": 15439,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-20",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "PAYMENT THANK YOU",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "How much money came in and went out of my checking account in September 2026 excluding transfers?": {
+      "answer": null
+    }
+  },
+  "card-unconnected": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $201.49 [1] [2] [3] [4].\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 20149,
+            "transaction_count": 4
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 20149,
+              "transaction_count": 4
+            }
+          ]
+        },
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "loan": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $229.73 [1] [2] [3] [4].\naccount ****4444, 2026-09-01 through 2026-09-30: credits $182.63; debits $0.00 [5].\nAccounts: account ****1111, account ****4444; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****4444: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$182.63 on 2026-09-23 in account ****1111: TRANSFER TO account 4444 (possible move between your own accounts, included) [4]; received $182.63 on 2026-09-23 in account ****4444: TRANSFER FROM account 1111 (possible move between your own accounts, included) [5]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10; account ****4444: credits $0.00; debits $0.00.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 22973,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "4444",
+            "credits_minor": 18263,
+            "debits_minor": 0,
+            "transaction_count": 1
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "4444",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 18263,
+            "outgoing": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $182.63 on 2026-09-23",
+              "account_mask": "1111",
+              "posted_on": "2026-09-23",
+              "amount_minor": 18263,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-23",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 4444",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****4444: $182.63 on 2026-09-23",
+              "account_mask": "4444",
+              "posted_on": "2026-09-23",
+              "amount_minor": 18263,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-23",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "How much money came in and went out in September 2026 excluding transfers?": {
+      "answer": null
+    }
+  },
+  "loan-as-savings": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $229.73 [1] [2] [3] [4].\naccount ****4444, 2026-09-01 through 2026-09-30: credits $182.63; debits $0.00 [5].\nAccounts: account ****1111, account ****4444; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****4444: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$182.63 on 2026-09-23 in account ****1111: TRANSFER TO account 4444 (possible move between your own accounts, included) [4]; received $182.63 on 2026-09-23 in account ****4444: TRANSFER FROM account 1111 (possible move between your own accounts, included) [5]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10; account ****4444: credits $0.00; debits $0.00.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 22973,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "4444",
+            "credits_minor": 18263,
+            "debits_minor": 0,
+            "transaction_count": 1
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "4444",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 18263,
+            "outgoing": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $182.63 on 2026-09-23",
+              "account_mask": "1111",
+              "posted_on": "2026-09-23",
+              "amount_minor": 18263,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-23",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 4444",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****4444: $182.63 on 2026-09-23",
+              "account_mask": "4444",
+              "posted_on": "2026-09-23",
+              "amount_minor": 18263,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-23",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "credit-line": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $229.73 [1] [2] [3] [4].\naccount ****4444, 2026-09-01 through 2026-09-30: credits $182.63; debits $0.00 [5].\nAccounts: account ****1111, account ****4444; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****4444: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$182.63 on 2026-09-23 in account ****1111: TRANSFER TO account 4444 (possible move between your own accounts, included) [4]; received $182.63 on 2026-09-23 in account ****4444: TRANSFER FROM account 1111 (possible move between your own accounts, included) [5]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10; account ****4444: credits $0.00; debits $0.00.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 22973,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "4444",
+            "credits_minor": 18263,
+            "debits_minor": 0,
+            "transaction_count": 1
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "4444",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 18263,
+            "outgoing": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $182.63 on 2026-09-23",
+              "account_mask": "1111",
+              "posted_on": "2026-09-23",
+              "amount_minor": 18263,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-23",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 4444",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****4444: $182.63 on 2026-09-23",
+              "account_mask": "4444",
+              "posted_on": "2026-09-23",
+              "amount_minor": 18263,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-23",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "kept-other": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $229.73 [1] [2] [3] [4].\naccount ****4444, 2026-09-01 through 2026-09-30: credits $182.63; debits $0.00 [5].\nAccounts: account ****1111, account ****4444; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****4444: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$182.63 on 2026-09-23 in account ****1111: TRANSFER TO account 4444 (possible move between your own accounts, included) [4]; received $182.63 on 2026-09-23 in account ****4444: TRANSFER FROM account 1111 (possible move between your own accounts, included) [5]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10; account ****4444: credits $0.00; debits $0.00.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 22973,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "4444",
+            "credits_minor": 18263,
+            "debits_minor": 0,
+            "transaction_count": 1
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "4444",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 18263,
+            "outgoing": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $182.63 on 2026-09-23",
+              "account_mask": "1111",
+              "posted_on": "2026-09-23",
+              "amount_minor": 18263,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-23",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 4444",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****4444: $182.63 on 2026-09-23",
+              "account_mask": "4444",
+              "posted_on": "2026-09-23",
+              "amount_minor": 18263,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-23",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "category-withdrawal": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $1,145.12; debits $47.10 [1] [2] [3] [4].\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible transfer, unmatched (retained in income/spend totals): $413.83 on 2026-09-18 in account ****1111: Fixture brokerage [4].",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 114512,
+            "debits_minor": 4710,
+            "transaction_count": 4
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 114512,
+              "debits_minor": 4710,
+              "transaction_count": 4
+            }
+          ]
+        },
+        "transfers": [],
+        "unmatched_transfers": [
+          {
+            "n": 4,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:4",
+            "title": "account ****1111: $413.83 on 2026-09-18",
+            "account_mask": "1111",
+            "posted_on": "2026-09-18",
+            "amount_minor": 41383,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-18",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "Fixture brokerage",
+            "possible_own_transfer": false
+          }
+        ]
+      }
+    },
+    "How much income came from Fixture brokerage in September 2026?": {
+      "answer": "Total income for fixture brokerage: $413.83.\nfixture brokerage: $413.83 [1].\nUnsorted: $0.00 .\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible transfer, unmatched (retained in income/spend totals): $413.83 on 2026-09-18 in account ****1111: Fixture brokerage [1].",
+      "ledger": {
+        "kind": "merchant",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 114512,
+              "debits_minor": 4710,
+              "transaction_count": 4
+            }
+          ],
+          "total_minor": 41383,
+          "unsorted_minor": 0
+        },
+        "total_minor": 41383,
+        "unsorted_minor": 0,
+        "found": true,
+        "groups": [
+          {
+            "merchant": "fixture brokerage",
+            "category_basis_state": null,
+            "total_minor": 41383,
+            "citations": [
+              1
+            ],
+            "possible_transfer_citations": [],
+            "if_own_transfers_total_minor": 41383
+          }
+        ],
+        "transfers": [],
+        "unmatched_transfers": [
+          {
+            "n": 1,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:4",
+            "title": "account ****1111: $413.83 on 2026-09-18",
+            "account_mask": "1111",
+            "posted_on": "2026-09-18",
+            "amount_minor": 41383,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-18",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "Fixture brokerage",
+            "possible_own_transfer": false
+          }
+        ]
+      }
+    },
+    "How much money came in and went out in September 2026 including withdrawals?": {
+      "answer": null
+    }
+  },
+  "confirmed-withdrawal": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $1,145.12; debits $47.10 [1] [2] [3] [4].\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible transfer, unmatched (retained in income/spend totals): $413.83 on 2026-09-18 in account ****1111: Fixture brokerage [4].",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 114512,
+            "debits_minor": 4710,
+            "transaction_count": 4
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 114512,
+              "debits_minor": 4710,
+              "transaction_count": 4
+            }
+          ]
+        },
+        "transfers": [],
+        "unmatched_transfers": [
+          {
+            "n": 4,
+            "source": "ledger",
+            "source_kind": "ledger",
+            "ref": "ledger:transaction:4",
+            "title": "account ****1111: $413.83 on 2026-09-18",
+            "account_mask": "1111",
+            "posted_on": "2026-09-18",
+            "amount_minor": 41383,
+            "currency": "USD",
+            "last_synced_at": null,
+            "supplied_by": "live",
+            "ts": "2026-09-18",
+            "date_reliable": true,
+            "text_source": "native",
+            "text_reliable": true,
+            "description": "Fixture brokerage",
+            "possible_own_transfer": false
+          }
+        ]
+      }
+    }
+  },
+  "dividend": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $1,145.12; debits $47.10 [1] [2] [3] [4].\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 114512,
+            "debits_minor": 4710,
+            "transaction_count": 4
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 114512,
+              "debits_minor": 4710,
+              "transaction_count": 4
+            }
+          ]
+        },
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "description-ira": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $1,145.12; debits $47.10 [1] [2] [3] [4].\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 114512,
+            "debits_minor": 4710,
+            "transaction_count": 4
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 114512,
+              "debits_minor": 4710,
+              "transaction_count": 4
+            }
+          ]
+        },
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "description-401k": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $1,145.12; debits $47.10 [1] [2] [3] [4].\nAccounts: account ****1111; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 114512,
+            "debits_minor": 4710,
+            "transaction_count": 4
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 114512,
+              "debits_minor": 4710,
+              "transaction_count": 4
+            }
+          ]
+        },
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "investment": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $1,057.70; debits $47.10 [1] [2] [3] [4].\naccount ****5555, 2026-09-01 through 2026-09-30: credits $0.00; debits $326.41 [5].\nAccounts: account ****1111, account ****5555; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****5555: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$326.41 on 2026-09-26 in account ****5555: TRANSFER TO account 1111 (possible move between your own accounts, included) [5]; received $326.41 on 2026-09-27 in account ****1111: TRANSFER FROM account 5555 (possible move between your own accounts, included) [4]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10; account ****5555: credits $0.00; debits $0.00.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 105770,
+            "debits_minor": 4710,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "5555",
+            "credits_minor": 0,
+            "debits_minor": 32641,
+            "transaction_count": 1
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "5555",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 32641,
+            "outgoing": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****5555: $326.41 on 2026-09-26",
+              "account_mask": "5555",
+              "posted_on": "2026-09-26",
+              "amount_minor": 32641,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-26",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 1111",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****1111: $326.41 on 2026-09-27",
+              "account_mask": "1111",
+              "posted_on": "2026-09-27",
+              "amount_minor": 32641,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-27",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 5555",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "retirement": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $1,057.70; debits $47.10 [1] [2] [3] [4].\naccount ****5555, 2026-09-01 through 2026-09-30: credits $0.00; debits $326.41 [5].\nAccounts: account ****1111, account ****5555; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****5555: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$326.41 on 2026-09-26 in account ****5555: TRANSFER TO account 1111 (possible move between your own accounts, included) [5]; received $326.41 on 2026-09-27 in account ****1111: TRANSFER FROM account 5555 (possible move between your own accounts, included) [4]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10; account ****5555: credits $0.00; debits $0.00.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 105770,
+            "debits_minor": 4710,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "5555",
+            "credits_minor": 0,
+            "debits_minor": 32641,
+            "transaction_count": 1
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "5555",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 32641,
+            "outgoing": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****5555: $326.41 on 2026-09-26",
+              "account_mask": "5555",
+              "posted_on": "2026-09-26",
+              "amount_minor": 32641,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-26",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 1111",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****1111: $326.41 on 2026-09-27",
+              "account_mask": "1111",
+              "posted_on": "2026-09-27",
+              "amount_minor": 32641,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-27",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 5555",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "contribution": {
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $731.29; debits $373.51 [1] [2] [3] [4].\naccount ****5555, 2026-09-01 through 2026-09-30: credits $326.41; debits $0.00 [5].\nAccounts: account ****1111, account ****5555; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****5555: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$326.41 on 2026-09-26 in account ****1111: TRANSFER TO account 5555 (possible move between your own accounts, included) [4]; received $326.41 on 2026-09-27 in account ****5555: TRANSFER FROM account 1111 (possible move between your own accounts, included) [5]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10; account ****5555: credits $0.00; debits $0.00.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 73129,
+            "debits_minor": 37351,
+            "transaction_count": 4
+          },
+          {
+            "account_mask": "5555",
+            "credits_minor": 32641,
+            "debits_minor": 0,
+            "transaction_count": 1
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 1,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "5555",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 32641,
+            "outgoing": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $326.41 on 2026-09-26",
+              "account_mask": "1111",
+              "posted_on": "2026-09-26",
+              "amount_minor": 32641,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-26",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 5555",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****5555: $326.41 on 2026-09-27",
+              "account_mask": "5555",
+              "posted_on": "2026-09-27",
+              "amount_minor": 32641,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-27",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "How much money came in and went out in September 2026 excluding transfers?": {
+      "answer": null
+    }
+  },
+  "combined": {
+    "What was my profit in September 2026?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****1111, 2026-09-01 through 2026-09-30: credits $1,057.70; debits $620.29 [1] [2] [3] [4] [5] [6] [7].\naccount ****2222, 2026-09-01 through 2026-09-30: credits $236.17; debits $0.00 [8].\naccount ****3333, 2026-09-01 through 2026-09-30: credits $154.39; debits $93.41 [9] [10].\naccount ****4444, 2026-09-01 through 2026-09-30: credits $182.63; debits $0.00 [11].\naccount ****5555, 2026-09-01 through 2026-09-30: credits $0.00; debits $326.41 [12].\nAccounts: account ****1111, account ****2222, account ****3333, account ****4444, account ****5555; 2026-09-01 through 2026-09-30; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11; account ****3333: covered through 2026-10-11; account ****4444: covered through 2026-10-11; account ****5555: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$236.17 on 2026-09-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [4]; received $236.17 on 2026-09-16 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [8]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\n$154.39 on 2026-09-19 in account ****1111: PAYMENT TO CARD ENDING 3333 (possible move between your own accounts, included) [5]; received $154.39 on 2026-09-20 in account ****3333: PAYMENT THANK YOU (possible move between your own accounts, included) [10]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\n$182.63 on 2026-09-23 in account ****1111: TRANSFER TO account 4444 (possible move between your own accounts, included) [6]; received $182.63 on 2026-09-23 in account ****4444: TRANSFER FROM account 1111 (possible move between your own accounts, included) [11]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\n$326.41 on 2026-09-26 in account ****5555: TRANSFER TO account 1111 (possible move between your own accounts, included) [12]; received $326.41 on 2026-09-27 in account ****1111: TRANSFER FROM account 5555 (possible move between your own accounts, included) [7]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: account ****1111: credits $731.29; debits $47.10; account ****2222: credits $0.00; debits $0.00; account ****3333: credits $0.00; debits $93.41; account ****4444: credits $0.00; debits $0.00; account ****5555: credits $0.00; debits $0.00.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "credits_minor": 105770,
+            "debits_minor": 62029,
+            "transaction_count": 7
+          },
+          {
+            "account_mask": "2222",
+            "credits_minor": 23617,
+            "debits_minor": 0,
+            "transaction_count": 1
+          },
+          {
+            "account_mask": "3333",
+            "credits_minor": 15439,
+            "debits_minor": 9341,
+            "transaction_count": 2
+          },
+          {
+            "account_mask": "4444",
+            "credits_minor": 18263,
+            "debits_minor": 0,
+            "transaction_count": 1
+          },
+          {
+            "account_mask": "5555",
+            "credits_minor": 0,
+            "debits_minor": 32641,
+            "transaction_count": 1
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 4,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 4710,
+              "transaction_count": 3
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            },
+            {
+              "account_mask": "3333",
+              "credits_minor": 0,
+              "debits_minor": 9341,
+              "transaction_count": 1
+            },
+            {
+              "account_mask": "4444",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            },
+            {
+              "account_mask": "5555",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ]
+        },
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $236.17 on 2026-09-15",
+              "account_mask": "1111",
+              "posted_on": "2026-09-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 8,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $236.17 on 2026-09-16",
+              "account_mask": "2222",
+              "posted_on": "2026-09-16",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-16",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          },
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 15439,
+            "outgoing": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:6",
+              "title": "account ****1111: $154.39 on 2026-09-19",
+              "account_mask": "1111",
+              "posted_on": "2026-09-19",
+              "amount_minor": 15439,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-19",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "PAYMENT TO CARD ENDING 3333",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 10,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:7",
+              "title": "account ****3333: $154.39 on 2026-09-20",
+              "account_mask": "3333",
+              "posted_on": "2026-09-20",
+              "amount_minor": 15439,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-20",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "PAYMENT THANK YOU",
+              "possible_own_transfer": true
+            }
+          },
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 18263,
+            "outgoing": {
+              "n": 6,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:9",
+              "title": "account ****1111: $182.63 on 2026-09-23",
+              "account_mask": "1111",
+              "posted_on": "2026-09-23",
+              "amount_minor": 18263,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-23",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 4444",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 11,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:10",
+              "title": "account ****4444: $182.63 on 2026-09-23",
+              "account_mask": "4444",
+              "posted_on": "2026-09-23",
+              "amount_minor": 18263,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-23",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          },
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 32641,
+            "outgoing": {
+              "n": 12,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:11",
+              "title": "account ****5555: $326.41 on 2026-09-26",
+              "account_mask": "5555",
+              "posted_on": "2026-09-26",
+              "amount_minor": 32641,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-26",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 1111",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 7,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:12",
+              "title": "account ****1111: $326.41 on 2026-09-27",
+              "account_mask": "1111",
+              "posted_on": "2026-09-27",
+              "amount_minor": 32641,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-27",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 5555",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    },
+    "How much money came in and went out in September 2026 including transfers including withdrawals?": {
+      "answer": null
+    }
+  },
+  "no-move-kind": {
+    "What was my profit in September 2026?": {
+      "answer": null
+    },
+    "How much money came in and went out in September 2026?": {
+      "answer": "account ****4444, 2026-09-01 through 2026-09-30: credits $182.63; debits $0.00 [1].\nAccounts: account ****4444; 2026-09-01 through 2026-09-30; account ****4444: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.",
+      "ledger": {
+        "kind": "totals",
+        "from": "2026-09-01",
+        "to": "2026-09-30",
+        "accounts": [
+          {
+            "account_mask": "4444",
+            "credits_minor": 18263,
+            "debits_minor": 0,
+            "transaction_count": 1
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 0,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "4444",
+              "credits_minor": 18263,
+              "debits_minor": 0,
+              "transaction_count": 1
+            }
+          ]
+        },
+        "transfers": [],
+        "unmatched_transfers": []
+      }
+    }
+  },
+  "recurring-pairs": {
+    "Show my recurring charges?": {
+      "answer": "Recurring charges detected, not confirmed. fixture subscription: monthly, typical $27.13; last charge $27.13 on 2026-09-15 [1] [2] [3].\ntransfer to account 2222: monthly, typical $236.17; last charge $236.17 on 2026-09-15 [4] [5] [6].\nEstimated monthly total: $263.30 (weekly amounts use 52/12, rounded to cents per merchant).\nAccounts: account ****1111, account ****2222; 2026-06-14 through 2026-10-11; account ****1111: covered through 2026-10-11; account ****2222: covered through 2026-10-11.\nPossible transfers are included in income and spend; no rows were removed as transfers.\nPossible moves between your own accounts:\n$236.17 on 2026-07-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [4]; received $236.17 on 2026-07-15 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [7]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\n$236.17 on 2026-08-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [5]; received $236.17 on 2026-08-15 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [8]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\n$236.17 on 2026-09-15 in account ****1111: TRANSFER TO account 2222 (possible move between your own accounts, included) [6]; received $236.17 on 2026-09-16 in account ****2222: TRANSFER FROM account 1111 (possible move between your own accounts, included) [9]. Why: equal amounts, opposite directions, dates within three days; one leg names the other account mask.\nIf these are transfers between your own accounts, with those candidates excluded: estimated monthly total: $27.13.",
+      "ledger": {
+        "kind": "recurring",
+        "from": "2026-06-14",
+        "to": "2026-10-11",
+        "accounts": [
+          {
+            "account_mask": "1111",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          },
+          {
+            "account_mask": "2222",
+            "covered_to": "2026-10-11",
+            "last_synced_at": null
+          }
+        ],
+        "includes_own_transfers": true,
+        "matched_transfer_count": 0,
+        "candidate_transfer_count": 3,
+        "if_own_transfers": {
+          "accounts": [
+            {
+              "account_mask": "1111",
+              "credits_minor": 73129,
+              "debits_minor": 12849,
+              "transaction_count": 6
+            },
+            {
+              "account_mask": "2222",
+              "credits_minor": 0,
+              "debits_minor": 0,
+              "transaction_count": 0
+            }
+          ],
+          "monthly_total_minor": 2713
+        },
+        "recurring": [
+          {
+            "merchant": "fixture subscription",
+            "cadence": "monthly",
+            "typical_minor": 2713,
+            "monthly_minor": 2713,
+            "last_charge": "2026-09-15",
+            "last_amount_minor": 2713,
+            "occurrence_count": 3,
+            "detected": true,
+            "citations": [
+              1,
+              2,
+              3
+            ],
+            "possible_transfer_citations": []
+          },
+          {
+            "merchant": "transfer to account 2222",
+            "cadence": "monthly",
+            "typical_minor": 23617,
+            "monthly_minor": 23617,
+            "last_charge": "2026-09-15",
+            "last_amount_minor": 23617,
+            "occurrence_count": 3,
+            "detected": true,
+            "citations": [
+              4,
+              5,
+              6
+            ],
+            "possible_transfer_citations": [
+              4,
+              5,
+              6
+            ]
+          }
+        ],
+        "monthly_total_minor": 26330,
+        "found": true,
+        "transfers": [
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 4,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:9",
+              "title": "account ****1111: $236.17 on 2026-07-15",
+              "account_mask": "1111",
+              "posted_on": "2026-07-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-07-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 7,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:10",
+              "title": "account ****2222: $236.17 on 2026-07-15",
+              "account_mask": "2222",
+              "posted_on": "2026-07-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-07-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          },
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 5,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:11",
+              "title": "account ****1111: $236.17 on 2026-08-15",
+              "account_mask": "1111",
+              "posted_on": "2026-08-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-08-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 8,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:12",
+              "title": "account ****2222: $236.17 on 2026-08-15",
+              "account_mask": "2222",
+              "posted_on": "2026-08-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-08-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          },
+          {
+            "candidate": true,
+            "excluded_from_totals": false,
+            "reason": "equal amounts, opposite directions, dates within three days; one leg names the other account mask",
+            "amount_minor": 23617,
+            "outgoing": {
+              "n": 6,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:4",
+              "title": "account ****1111: $236.17 on 2026-09-15",
+              "account_mask": "1111",
+              "posted_on": "2026-09-15",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-15",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER TO account 2222",
+              "possible_own_transfer": true
+            },
+            "incoming": {
+              "n": 9,
+              "source": "ledger",
+              "source_kind": "ledger",
+              "ref": "ledger:transaction:5",
+              "title": "account ****2222: $236.17 on 2026-09-16",
+              "account_mask": "2222",
+              "posted_on": "2026-09-16",
+              "amount_minor": 23617,
+              "currency": "USD",
+              "last_synced_at": null,
+              "supplied_by": "live",
+              "ts": "2026-09-16",
+              "date_reliable": true,
+              "text_source": "native",
+              "text_reliable": true,
+              "description": "TRANSFER FROM account 1111",
+              "possible_own_transfer": true
+            }
+          }
+        ],
+        "unmatched_transfers": []
+      }
+    }
+  }
+}

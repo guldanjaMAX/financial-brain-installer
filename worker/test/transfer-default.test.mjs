@@ -1,0 +1,297 @@
+import test, { mock } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fixture, NOW, Q, accepted, refused, flipQuestion } from "./fixtures/transfer-default/fixture.mjs";
+import { classifyLedgerQuestion } from "../src/lib/ledger-question.js";
+
+const head = JSON.parse(readFileSync(new URL("./fixtures/transfer-default/head-baseline.json", import.meta.url), "utf8"));
+test.before(() => {
+  mock.method(Date, "now", () => Date.parse(NOW));
+  mock.method(globalThis, "fetch", async () => { throw new Error("network forbidden"); });
+});
+test.after(() => mock.restoreAll());
+const newKeys = new Set(["lead", "default_exclusions", "lead_accounts", "lead_total_minor", "lead_monthly_total_minor", "flip", "measure", "net_minor", "net_label", "excluded_from_lead", "kept_reason"]);
+function oldKeys(value) {
+  if (Array.isArray(value)) return value.map(oldKeys);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([key]) => !newKeys.has(key)).map(([key, item]) => [key, oldKeys(item)]));
+  return value;
+}
+function unchanged(body, scenario, question) {
+  const golden = head[scenario][question];
+  assert.ok(golden, "question captured before product changes");
+  assert.equal(body.answer, golden.answer, "answer text is byte-identical to HEAD");
+  assert.deepEqual(oldKeys(body.ledger), golden.ledger, "existing JSON keys retain their values");
+}
+async function ask(f, question = Q.totals, kind = "totals", pairCount = 1) {
+  const before = f.seen.sql.length;
+  const body = await f.ask(question);
+  assert.equal(body.ledger?.kind, kind);
+  assert.ok(f.seen.sql.slice(before).some(sql => /JOIN fin_transactions/.test(sql)), "transaction decision reached");
+  assert.equal(body.ledger.transfers?.length ?? 0, pairCount, "pair decision reached");
+  return body;
+}
+const account = (body, mask, lead = true) => (lead ? body.ledger.lead_accounts : body.ledger.accounts).find(a => a.account_mask === mask);
+const fmt = cents => `$${(cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+function blocks(body, scenario, question) {
+  const marker = "\nWith everything counted:\n";
+  assert.ok(body.answer.includes(marker));
+  const [first, rest] = body.answer.split(marker);
+  assert.doesNotMatch(first, /\b(?:credits|debits)\b/);
+  const lines = first.split("\n"), note = lines.at(-1);
+  assert.match(note, /^Note: /);
+  assert.equal(lines.filter(line => line.startsWith("Note: ")).length, 1);
+  const gross = head[scenario][question].answer.split("\nAccounts:")[0];
+  assert.ok(rest.startsWith(gross + "\nAccounts:"), "gross sentences and citations are unchanged");
+  assert.doesNotMatch(body.answer, /no rows were removed as transfers|If these are transfers between your own accounts/);
+  return { lead: lines.slice(0, -1).join("\n"), note };
+}
+const offered = body => [...body.answer.matchAll(/say "([a-z ]+)"/g)].map(m => m[1]);
+
+// Byte controls are separate tests so the failing-first run proves them green.
+for (const kind of ["balance", "payment", "totals", "largest", "deposits", "merchant", "category", "recurring", "transfers"]) {
+  test(`HEAD control: no exclusions, ${kind}`, async t => {
+    const f = await fixture(t, "plain");
+    const before = f.seen.sql.length, body = await f.ask(Q[kind]);
+    assert.equal(body.ledger?.kind, kind);
+    assert.ok(f.seen.sql.slice(before).some(sql => kind === "balance" ? /fin_balance_snapshots/.test(sql) : /JOIN fin_transactions/.test(sql)));
+    assert.equal(body.ledger.transfers?.length ?? 0, 0);
+    unchanged(body, "plain", Q[kind]);
+  });
+}
+for (const scenario of ["unrelated", "card-unconnected", "dividend", "description-ira", "description-401k", "boundary-far", "boundary-uncovered"]) {
+  test(`HEAD control: ${scenario}`, async t => {
+    const f = await fixture(t, scenario);
+    unchanged(await ask(f, Q.totals, "totals", 0), scenario, Q.totals);
+  });
+}
+test("HEAD control: transfers view keeps both candidate legs and text", async t => {
+  const f = await fixture(t);
+  unchanged(await ask(f, Q.transfers, "transfers"), "own", Q.transfers);
+});
+
+test("a: own move leads with conditional cents, one note, then exact gross", async t => {
+  const f = await fixture(t), body = await ask(f);
+  const { lead, note } = blocks(body, "own", Q.totals);
+  assert.equal(lead, "account ****1111, 2026-09-01 through 2026-09-30: money in $731.29; money out $47.10.\naccount ****2222, 2026-09-01 through 2026-09-30: money in $0.00; money out $0.00.");
+  assert.equal(note.split("$236.17").length - 1, 1);
+  assert.match(note, /between your own connected accounts/);
+  assert.match(note, /say "including transfers"/);
+  assert.deepEqual(body.ledger.default_exclusions, { own_transfer_pairs: 1, own_transfer_minor: 23617, withdrawal_count: 0, withdrawal_minor: 0 });
+  assert.equal(body.ledger.lead, "default_exclusions");
+  assert.deepEqual(body.ledger.lead_accounts, head.own[Q.totals].ledger.if_own_transfers.accounts);
+  assert.deepEqual(oldKeys(body.ledger), head.own[Q.totals].ledger);
+  assert.equal(body.ledger.transfers[0].excluded_from_lead, true);
+  assert.equal(body.ledger.transfers[0].excluded_from_totals, false);
+  assert.deepEqual(body.ledger.flip, ["including transfers"]);
+  f.raw("UPDATE fin_accounts SET feed_mode='manual'");
+  const imported = await ask(f);
+  assert.deepEqual(imported.ledger.lead_accounts, body.ledger.lead_accounts);
+  assert.doesNotMatch(body.answer.split("Moves between your own connected accounts, left out of the first figures:")[1], /, included/);
+});
+
+test("b: offered flip phrases round-trip through the classifier", async t => {
+  for (const [scenario, question, expected] of [["own", Q.totals, "gross"], ["category-withdrawal", Q.totals, "gross"], ["card", Q.checking, "default_exclusions"]]) {
+    const f = await fixture(t, scenario), first = await ask(f, question, "totals", scenario === "category-withdrawal" ? 0 : 1);
+    const phrases = offered(first);
+    assert.equal(phrases.length, 1);
+    const flipped = await ask(f, flipQuestion(question, phrases[0]), "totals", scenario === "category-withdrawal" ? 0 : 1);
+    assert.equal(flipped.ledger.lead, expected);
+    if (expected === "gross") {
+      assert.equal(flipped.answer, head[scenario][question].answer);
+      assert.deepEqual(oldKeys(flipped.ledger), head[scenario][question].ledger);
+    } else assert.equal(account(flipped, "1111").debits_minor, 4710);
+  }
+});
+
+test("c: equal unrelated amounts stay, one description change enables the pair", async t => {
+  const f = await fixture(t, "unrelated");
+  unchanged(await ask(f, Q.totals, "totals", 0), "unrelated", Q.totals);
+  f.raw("UPDATE fin_transactions SET description='TRANSFER TO account 2222' WHERE txn_uid='same-out'");
+  const control = await ask(f);
+  assert.equal(control.ledger.transfers[0].excluded_from_lead, true);
+  assert.equal(account(control, "1111").debits_minor, 4710);
+});
+
+for (const [question, mask, credit, debit] of [[Q.totals, "1111", 73129, 4710], [Q.october, "2222", 0, 0]]) {
+  test(`d: only the in-period leg changes the lead for ${mask}`, async t => {
+    const f = await fixture(t, "boundary"), body = await ask(f, question);
+    assert.equal(body.ledger.transfers[0].excluded_from_lead, true);
+    assert.deepEqual([account(body, mask).credits_minor, account(body, mask).debits_minor], [credit, debit]);
+    assert.equal(account(body, mask, false)[mask === "1111" ? "debits_minor" : "credits_minor"], mask === "1111" ? 32363 : 27653);
+    assert.equal(body.ledger.to, mask === "1111" ? "2026-09-30" : "2026-10-11");
+    assert.equal(body.ledger.lead_accounts.reduce((n, a) => n + a.transaction_count, 0), mask === "1111" ? 3 : 0);
+  });
+}
+for (const [scenario, sql] of [
+  ["boundary-far", "UPDATE fin_transactions SET posted_on='2026-10-02' WHERE txn_uid='boundary-in'"],
+  ["boundary-uncovered", "UPDATE fin_account_coverage SET covered_to='2026-10-11' WHERE account_slug='account-b'"],
+]) test(`d: ${scenario} stays until one evidence variable changes`, async t => {
+  const f = await fixture(t, scenario);
+  unchanged(await ask(f, Q.totals, "totals", 0), scenario, Q.totals);
+  f.raw(sql);
+  const control = await ask(f);
+  assert.equal(account(control, "1111").debits_minor, 4710);
+  assert.equal(control.ledger.transfers[0].excluded_from_lead, true);
+});
+
+test("e: card purchases count, scoped repayment stays until explicitly excluded", async t => {
+  const f = await fixture(t, "card"), all = await ask(f);
+  assert.equal(account(all, "1111").debits_minor, 4710);
+  assert.deepEqual([account(all, "3333").credits_minor, account(all, "3333").debits_minor], [0, 9341]);
+  const selected = await ask(f, Q.checking);
+  assert.equal(account(selected, "1111").debits_minor, 20149);
+  assert.equal(selected.ledger.transfers[0].excluded_from_lead, false);
+  assert.match(selected.answer, /outside this question/);
+  const phrases = offered(selected);
+  assert.equal(phrases.length, 1);
+  const flipped = await ask(f, flipQuestion(Q.checking, phrases[0]));
+  assert.equal(account(flipped, "1111").debits_minor, 4710);
+  assert.equal(flipped.ledger.transfers[0].excluded_from_lead, true);
+});
+
+test("e: unconnected card stays, connecting its one counterpart enables exclusion", async t => {
+  const f = await fixture(t, "card-unconnected");
+  unchanged(await ask(f, Q.totals, "totals", 0), "card-unconnected", Q.totals);
+  // One evidence change: supply the previously absent connected counterpart.
+  f.account("account-c", "9999", "card");
+  f.add("card-in", "2026-09-20", 15439, "inflow", "PAYMENT THANK YOU", null, null, "account-c");
+  const control = await ask(f);
+  assert.equal(account(control, "1111").debits_minor, 4710);
+});
+
+for (const [scenario, reason] of [["loan", "loan payment, kept in money out"], ["credit-line", "loan payment, kept in money out"], ["kept-other", "account kind"]]) {
+  test(`f: ${scenario} remains counted; changing only kind permits exclusion`, async t => {
+    const f = await fixture(t, scenario), kept = await ask(f);
+    assert.equal(kept.ledger.transfers[0].excluded_from_lead, false);
+    assert.match(kept.ledger.transfers[0].kept_reason, new RegExp(reason));
+    assert.equal(account(kept, "1111").debits_minor, 22973);
+    f.raw("UPDATE fin_accounts SET account_kind='savings' WHERE account_slug='account-d'");
+    const control = await ask(f);
+    assert.equal(control.ledger.transfers[0].excluded_from_lead, true);
+    assert.equal(account(control, "1111").debits_minor, 4710);
+  });
+}
+
+test("g: proposed and confirmed category withdrawals leave income with a flip note", async t => {
+  for (const scenario of ["category-withdrawal", "confirmed-withdrawal"]) {
+    const f = await fixture(t, scenario), body = await ask(f, Q.totals, "totals", 0);
+    assert.equal(account(body, "1111").credits_minor, 73129);
+    assert.equal(account(body, "1111", false).credits_minor, 114512);
+    assert.deepEqual(body.ledger.default_exclusions, { own_transfer_pairs: 0, own_transfer_minor: 0, withdrawal_count: 1, withdrawal_minor: 41383 });
+    assert.match(blocks(body, scenario, Q.totals).note, /say "including withdrawals"/);
+  }
+  const f = await fixture(t, "category-withdrawal"), income = await ask(f, Q.income, "merchant", 0);
+  assert.equal(income.ledger.lead_total_minor, 0);
+  assert.equal(income.ledger.total_minor, 41383);
+  assert.match(blocks(income, "category-withdrawal", Q.income).lead, /money in.*\$0\.00/i);
+});
+for (const kind of ["investment", "retirement"]) test(`g: paired ${kind} withdrawal omits both legs`, async t => {
+  const f = await fixture(t, kind), body = await ask(f);
+  assert.equal(account(body, "1111").credits_minor, 73129);
+  assert.equal(account(body, "5555").debits_minor, 0);
+  assert.equal(body.ledger.default_exclusions.withdrawal_minor, 32641);
+  assert.equal(body.ledger.default_exclusions.withdrawal_count, 1);
+  assert.equal(body.ledger.transfers[0].excluded_from_lead, true);
+});
+for (const scenario of ["dividend", "description-ira", "description-401k"]) test(`g: ${scenario} is not withdrawal evidence; category alone changes decision`, async t => {
+  const f = await fixture(t, scenario), kept = await ask(f, Q.totals, "totals", 0);
+  unchanged(kept, scenario, Q.totals);
+  f.raw("UPDATE fin_transactions SET category='TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS',category_basis_state='proposed' WHERE txn_uid='income'");
+  const control = await ask(f, Q.totals, "totals", 0);
+  assert.equal(account(control, "1111").credits_minor, 73129);
+});
+
+test("g: contribution stays; changing only source kind makes an own move", async t => {
+  const f = await fixture(t, "contribution"), body = await ask(f);
+  assert.equal(account(body, "1111").debits_minor, 37351);
+  assert.equal(body.ledger.transfers[0].excluded_from_lead, false);
+  assert.match(body.answer, /sent to a retirement or investment account, kept in money out/);
+  f.raw("UPDATE fin_accounts SET account_kind='savings' WHERE account_slug='account-e'");
+  const control = await ask(f);
+  assert.equal(account(control, "1111").debits_minor, 4710);
+});
+
+test("flags never remove a loan or contribution pair", async t => {
+  for (const scenario of ["loan", "contribution"]) {
+    const f = await fixture(t, scenario), unflagged = await ask(f);
+    const flagged = await ask(f, flipQuestion(Q.totals, "excluding transfers"));
+    assert.equal(flagged.ledger.transfers[0].excluded_from_lead, false);
+    assert.deepEqual(flagged.ledger.lead_accounts, unflagged.ledger.lead_accounts);
+    f.raw(`UPDATE fin_accounts SET account_kind='savings' WHERE account_slug=?`, scenario === "loan" ? "account-d" : "account-e");
+    const control = await ask(f, flipQuestion(Q.totals, "excluding transfers"));
+    assert.equal(control.ledger.transfers[0].excluded_from_lead, true);
+  }
+});
+
+for (const [question, kind, measure, from, to, mask, ownTransfers, withdrawals] of accepted) {
+  test(`h: accepted grammar: ${question}`, () => {
+    const intent = classifyLedgerQuestion(question, { now: NOW });
+    assert.deepEqual([intent.kind, intent.measure, intent.from, intent.to, intent.mask, intent.accountKind, intent.ownTransfers, intent.withdrawals],
+      [kind, measure, from, to, mask, null, ownTransfers, withdrawals]);
+  });
+}
+for (const question of refused) test(`h: refusal with accepted control: ${question}`, () => {
+  assert.equal(classifyLedgerQuestion(Q.profit, { now: NOW }).kind, "totals", "accepted measure control reaches grammar");
+  const intent = classifyLedgerQuestion(question, { now: NOW });
+  assert.equal(intent.broad, true);
+  assert.equal(intent.kind, null);
+});
+
+test("h: combined profit sums only move kinds and uses real Think without a model", async t => {
+  const f = await fixture(t, "combined"), body = await ask(f, Q.profit, "totals", 4);
+  const omitted = new Set(["move-out", "move-in", "card-out", "card-in", "withdraw-out", "withdraw-in"]);
+  const expected = f.rows("SELECT t.*,a.account_kind FROM fin_transactions t JOIN fin_accounts a USING(account_slug)")
+    .filter(r => ["checking", "savings", "card"].includes(r.account_kind) && !omitted.has(r.txn_uid))
+    .reduce((n, r) => n + (r.direction === "inflow" ? r.amount_minor : -r.amount_minor), 0);
+  assert.equal(body.ledger.measure, "profit");
+  assert.equal(body.ledger.net_minor, expected);
+  assert.equal(body.ledger.net_label, "cash in minus cash out, not accounting profit");
+  assert.ok(body.answer.startsWith(`Cash in minus cash out, not accounting profit: ${fmt(expected)}`));
+  assert.match(body.answer, /account \*\*\*\*4444.*loan.*left out of cash in minus cash out/);
+  assert.match(body.answer, /loan payment, kept in money out/);
+  const routeBefore = f.seen.sql.length, routed = await f.ask(Q.profit, true);
+  assert.equal(routed.ledger.kind, "totals");
+  assert.ok(f.seen.sql.slice(routeBefore).some(sql => /JOIN fin_transactions/.test(sql)));
+  assert.equal(routed.ledger.net_minor, expected);
+  assert.equal(f.modelCalls, 0);
+  const gross = await ask(f, flipQuestion(Q.totals, "including transfers including withdrawals"), "totals", 4);
+  assert.equal(gross.answer, head.combined[Q.totals].answer);
+  assert.deepEqual(oldKeys(gross.ledger), head.combined[Q.totals].ledger);
+});
+
+test("h: a measure without a move-kind account falls through, kind change enables it", async t => {
+  const f = await fixture(t, "no-move-kind"), gross = await ask(f, Q.totals, "totals", 0);
+  assert.equal(gross.ledger.accounts[0].credits_minor, 18263);
+  const before = f.seen.sql.length, refusedBody = await f.ask(Q.profit);
+  assert.equal(classifyLedgerQuestion(Q.profit, { now: NOW }).kind, "totals");
+  assert.equal(refusedBody.gaps[0]?.reason, "unsupported_question");
+  assert.ok(f.seen.sql.slice(before).some(sql => /FROM fin_accounts/.test(sql)), "scope decision reached");
+  assert.equal(refusedBody.ledger, undefined);
+  f.raw("UPDATE fin_accounts SET account_kind='checking' WHERE account_slug='account-d'");
+  const control = await ask(f, Q.profit, "totals", 0);
+  assert.equal(control.ledger.net_minor, 18263);
+});
+
+for (const kind of ["merchant", "category", "recurring", "largest", "deposits"]) test(`i: ${kind} leads, notes and preserves the gross view`, async t => {
+  const f = await fixture(t), body = await ask(f, Q[kind], kind);
+  const { lead, note } = blocks(body, "own", Q[kind]);
+  assert.match(note, /say "including transfers"/);
+  assert.deepEqual(oldKeys(body.ledger), head.own[Q[kind]].ledger);
+  if (["merchant", "category"].includes(kind)) {
+    assert.equal(body.ledger.lead_total_minor, 4710);
+    assert.match(lead, /\$47\.10/);
+  } else if (kind === "recurring") assert.equal(body.ledger.lead_monthly_total_minor, 0);
+  else assert.equal(lead, head.own[Q[kind]].answer.split("\nAccounts:")[0]);
+  const phrases = offered(body);
+  assert.equal(phrases.length, 1);
+  const flipped = await ask(f, flipQuestion(Q[kind], phrases[0]), kind);
+  assert.equal(flipped.answer, head.own[Q[kind]].answer);
+  assert.deepEqual(oldKeys(flipped.ledger), head.own[Q[kind]].ledger);
+});
+
+test("i: recurrence recomputes after removing a paired cadence", async t => {
+  const f = await fixture(t, "recurring-pairs"), body = await ask(f, "Show my recurring charges?", "recurring", 3);
+  assert.equal(body.ledger.monthly_total_minor, 26330);
+  assert.equal(body.ledger.lead_monthly_total_minor, 2713);
+  assert.equal(body.ledger.if_own_transfers.monthly_total_minor, 2713);
+});

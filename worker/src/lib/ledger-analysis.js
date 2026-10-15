@@ -96,8 +96,8 @@ export function pairOwnTransfers(rows, accounts = new Map()) {
     if (outsidePayee(out, inAccount) && outsidePayee(incoming, outAccount)) continue;
     const reason = namesOwnedAccount(out, inAccount, accounts) || namesOwnedAccount(incoming, outAccount, accounts);
     if (!reason) continue;
-    // This schema stores no provider transfer linkage or owner-confirmed pair.
-    // Text, amounts and dates can label candidates but NEVER authorize removal.
+    // Pairs never change stored rows. The answer may leave qualifying pairs
+    // out of its lead figures, but always prints the unchanged gross figures.
     pairs.push({ out, in: incoming, reason: `equal amounts, opposite directions, dates within three days; ${reason}` });
     candidateRows.add(out.id); candidateRows.add(incoming.id);
   }

@@ -176,7 +176,7 @@ test('N02: Generated with ChatGPT in the body is explicit generated authorship',
 });
 
 
-test('N01 genuine own-account pair is retained, marked and given a conditional figure in every view', async t => {
+test('N01 genuine own-account pair leaves the lead and remains in every gross view', async t => {
   const f = pairFixture(t);
   const original = f.rows('SELECT * FROM fin_transactions');
   const before = f.seen.length, body = await ask(f);
@@ -190,8 +190,10 @@ test('N01 genuine own-account pair is retained, marked and given a conditional f
   assert.equal(pair.outgoing.account_mask, '4321'); assert.equal(pair.incoming.account_mask, '8765');
   assert.equal(pair.outgoing.posted_on, '2026-09-15'); assert.equal(pair.incoming.posted_on, '2026-09-15');
   assert.match(pair.reason, /equal amounts.*opposite directions.*three days.*mask/);
-  assert.match(body.answer, /Possible moves between your own accounts/);
-  assert.match(body.answer, /If these are transfers between your own accounts.*credits \$0\.00; debits \$0\.00/);
+  assert.match(body.answer, /Moves between your own connected accounts, left out of the first figures/);
+  assert.match(body.answer, /^account .*money in \$0\.00; money out \$0\.00/);
+  assert.match(body.answer, /With everything counted:[\s\S]*credits \$0\.00; debits \$500\.00/);
+  assert.match(body.answer, /credits \$500\.00; debits \$0\.00/);
   assert.deepEqual(body.ledger.if_own_transfers.accounts.map(a => [a.credits_minor, a.debits_minor]), [[0, 0], [0, 0]]);
   f.raw("UPDATE fin_transactions SET category='SOFTWARE',category_basis_state='confirmed',payee='Cloud Tools' WHERE txn_uid='out'");
   for (const q of ['What were my 3 largest expenses in September 2026?',
@@ -311,7 +313,7 @@ test('N03 unsupported and non-ledger questions preserve exact response identity,
 });
 
 
-test('N01 recurring candidate legs remain counted even with a proposed transfer category', async t => {
+test('N01 recurring candidate legs leave the lead and remain in gross with a proposed transfer category', async t => {
   const f = fixture(); t.after(f.close); account(f); account(f, { slug: 'second-account', mask: '8765' });
   f.raw("UPDATE fin_account_coverage SET covered_from='2026-07-01'");
   for (const [i, day] of ['2026-07-15', '2026-08-15', '2026-09-15'].entries()) {
@@ -327,5 +329,6 @@ test('N01 recurring candidate legs remain counted even with a proposed transfer 
   assert.equal(b.ledger.candidate_transfer_count, 3); assert.equal(b.ledger.recurring.length, 1);
   assert.equal(b.ledger.recurring[0].possible_transfer_citations.length, 3);
   assert.equal(b.ledger.monthly_total_minor, 1000); assert.equal(b.ledger.if_own_transfers.monthly_total_minor, 0);
-  assert.match(b.answer, /If these are transfers between your own accounts.*estimated monthly total: \$0\.00/);
+  assert.match(b.answer, /^Estimated monthly money out: \$0\.00/);
+  assert.match(b.answer, /With everything counted:[\s\S]*Estimated monthly total: \$10\.00/);
 });
