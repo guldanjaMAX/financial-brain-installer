@@ -957,3 +957,40 @@ for (const kind of ["microsoft", "gmail", "calendar"]) {
     }
   });
 }
+
+
+test("iMessage quiet check proves this daily invocation without advancing accepted work", async () => {
+  const { dailyFreshnessRows } = await import("../brain.mjs");
+  const prior = "2026-07-06T08:00:00.000Z";
+  const finished = "2026-07-07T08:01:00.000Z";
+  const latest = { outcome: "empty", metrics_version: 1, walk_complete: true,
+    started_at: "2026-07-07T08:00:00.000Z", finished_at: finished,
+    files_seen: 4, docs_added: 0, docs_updated: 0, docs_unchanged: 0, docs_refused: 0, docs_failed: 0 };
+  let reads = 0, runs = 0, ticks = 0;
+  const receipts = [];
+  const chatPlan = { ...plan, sources: [{ ...plan.sources[0], key: "sample-chat", run_key: "imessage" }] };
+  const result = await runDailyRefresh({
+    plan: chatPlan, acquireLock: () => ({ assertOwned() {}, release() {} }),
+    runSource: async () => { runs++; return { status: "complete" }; },
+    readFreshness: async () => ({ "sample-chat": { kind: "imessage", last_successful_run_at: prior,
+      latest_run: ++reads === 1 ? { ...latest, started_at: prior, finished_at: prior } : latest } }),
+    writeReceipt: receipt => receipts.push(receipt),
+    now: () => new Date(Date.parse(latest.started_at) - 60000 + ticks++ * 60000),
+  });
+  assert.equal(runs, 1);
+  assert.equal(reads, 2);
+  assert.equal(receipts.length, 2, "execution and both durable observations reached the decision");
+  assert.equal(result.status, "complete");
+  assert.equal(result.sources[0].check_verified, true);
+  assert.equal(result.sources[0].no_change, true);
+  assert.equal(result.sources[0].freshness_advanced, false);
+  assert.equal(result.sources[0].last_successful_run_at_after, prior);
+  assert.equal(result.sources[0].last_check_at_after, finished);
+  const rows = dailyFreshnessRows(chatPlan, { as_of: "2026-07-07T08:20:00.000Z", sources: [{
+    name: "sample-chat", kind: "imessage", freshness: { state: "ok" },
+    receipt: { status: "ready", last_successful_run_at: prior, last_check_at: finished, latest_run: latest },
+  }] });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].last_run_outcome, "no_change");
+  assert.equal(rows[0].current_state, "checked");
+});

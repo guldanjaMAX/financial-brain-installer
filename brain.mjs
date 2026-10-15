@@ -9576,10 +9576,8 @@ export function documentCountOf(row) {
 /**
  * Print how CURRENT each source is, as distinct from how big it is.
  *
- * Deliberately says "manual" rather than "stale" for a source we cannot refresh
- * on our own, like a folder on the client's laptop. Calling that stale would be
- * blaming them for a limit of the architecture, and a warning that fires every
- * day for something nobody can fix is how clients learn to ignore warnings.
+ * Unscheduled folders describe when they change; retired sources describe
+ * their retained history. Neither has an ongoing refresh obligation.
  */
 async function reportFreshness(m, acct, manifestPath) {
   const base = await resolveBaseUrl(m, acct);
@@ -9595,11 +9593,11 @@ async function reportFreshness(m, acct, manifestPath) {
     ok: () => c.green("current"),
     stale: (s) => c.red(`STALE, ${s.days_since_ingest}d since last read`),
     broken: (s) => c.red(`BROKEN: ${s.reason || "the last sync failed"}`),
-    review: (s) => c.yellow(`REVIEW REQUIRED: ${s.reason || "the latest update paused for review"}`),
+    review: (s) => c.yellow(`REVIEW REQUIRED: ${s.reason || "the latest refresh did not confirm any records"}`),
     indexing: (s) => c.yellow(`indexing, ${s.hours_indexing ?? 0}h elapsed`),
     never_synced: () => c.red("never synced"),
     unscheduled: () => c.yellow("no refresh scheduled"),
-    manual: (s) => c.dim(`manual, ${s.days_since_ingest ?? "?"}d since last load`),
+    manual: (s) => c.dim(s.reason || "updated when you add a file; last load date unavailable"),
   };
   console.log(`\n  ${c.bold("freshness")}`);
   for (const s of sources) {
@@ -9622,8 +9620,7 @@ async function reportFreshness(m, acct, manifestPath) {
   }
   if (manual.length) {
     info(
-      `${manual.length} source(s) are loaded by hand from a machine we cannot reach,` + "\n" +
-        "        so they are never reported as stale. Re-run `brain ingest` to refresh one."
+      `${manual.length} source(s) keep their stored records without a refresh schedule.`
     );
   }
 }
@@ -10454,15 +10451,17 @@ export async function cmdSources(manifestPath, options = {}) {
         const withheldAt = providerWithheldCheckAt(row.kind, row.receipt?.latest_run);
         const checkedAt = noChangeAt || withheldAt;
         const checkAge = checkedAt ? Date.parse(inventory.as_of) - Date.parse(checkedAt) : NaN;
-        const sourceFailed = row.receipt?.status === "error" || row.freshness.state === "broken";
-        const checkLabel = checkAge >= 0 && checkAge <= 24 * 60 * 60 * 1000
+        const sourceFailed = row.freshness.state !== "manual" &&
+          (row.receipt?.status === "error" || row.freshness.state === "broken");
+        const checkWindow = (row.freshness.expected_refresh_seconds || 86400) * 1000 * 1.5;
+        const checkLabel = checkAge >= 0 && checkAge <= checkWindow
           ? (withheldAt ? "checked (withheld by design)" : "checked (no changes)") : null;
         console.log(
           `  ${row.name.padEnd(nameWidth)}  ${row.kind.padEnd(kindWidth)}  ${String(row.zone || "unassigned").padEnd(12)}  ` +
-            `${num(row.storage.physical_documents).padStart(9)}  ${num(row.storage.readable_documents).padStart(10)}  ${sourceFailed ? "broken" : row.receipt?.zoom?.state || checkLabel || row.freshness.state}`,
+            `${num(row.storage.physical_documents).padStart(9)}  ${num(row.storage.readable_documents).padStart(10)}  ${sourceFailed ? "broken" : row.receipt?.zoom?.state || checkLabel || (row.freshness.state === "manual" ? row.freshness.reason || "updated when you add a file" : row.freshness.state)}`,
         );
         if (noChangeAt) {
-          console.log(`    checked ${row.receipt.last_check_at}; no changes; last ingest ${row.receipt.last_ingest_receipt_at || "never"}`);
+          console.log(`    checked ${row.receipt.last_check_at}; no changes; last ingest ${row.receipt.last_successful_run_at || "never"}`);
         }
         if (row.receipt?.latest_run?.docs_withheld > 0) {
           console.log(`    ${row.receipt.latest_run.docs_withheld} item(s) withheld by design; history remains incomplete`);
@@ -26777,7 +26776,11 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
     const zoom = receiptRows.length === 1 ? receiptRows[0]?.receipt?.zoom : null;
     const measuredCount = (field) => latestRuns.every((run) => Number.isSafeInteger(run?.[field]))
       ? latestRuns.reduce((sum, run) => sum + run[field], 0) : null;
-    const currentState = source.class === "held" ? "held"
+    const folderReason = receiptRows.length > 0 && receiptRows.every(row =>
+      row?.kind === "upload" && row?.freshness?.state === "manual" && row?.freshness?.reason)
+      ? receiptRows.map(row => row.freshness.reason).join("; ") : null;
+    const currentState = folderReason?.startsWith("historical:") ? "manual"
+      : source.class === "held" ? "held"
       : source.class === "connect-required" ? "skipped"
       : source.class === "snapshot" ? "snapshot"
       : source.class === "disabled" ? "skipped"
@@ -26814,11 +26817,11 @@ export function dailyFreshnessRows(plan, inventory, schedule = null) {
       last_successful_run_at: newest,
       last_check_at: zoom?.last_check_at || receiptRows.map(row => row?.receipt?.last_check_at).filter(Boolean).sort().at(-1) || null,
       ...(zoom ? { zoom } : {}),
-      next_run: nextRun,
+      next_run: folderReason || nextRun,
       owner: effectiveOwner,
       reason: inventory?.freshness_unavailable
         ? "source freshness is unknown because the source inventory could not be read"
-        : source.reason,
+        : folderReason || source.reason,
       ...(source.selection === undefined ? {} : { selection: source.selection, hold_reason: source.hold_reason }),
     });
   });
