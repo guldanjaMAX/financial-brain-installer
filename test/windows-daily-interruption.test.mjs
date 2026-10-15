@@ -22,7 +22,7 @@ function adapter(home, result) {
       spawn: (command, args, child) => {
         if (command.endsWith("powershell.exe")) {
           exports++;
-          assert.equal(child.timeout, 15000);
+          assert.equal(child.timeout, 60000);
           assert.equal(child.killSignal, "SIGKILL");
           if (typeof result === "function") return result();
           return result || { status: 0, stdout: Buffer.from(`\ufeff${definition.serialized}`, "utf16le") };
