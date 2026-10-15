@@ -720,8 +720,8 @@ test("the remote MCP renders the guidance above the refusal and leaves the incom
   assert.match(rendered, /possible_mention/);
   assert.ok(rendered.includes(ENTITY_LABEL) && rendered.includes(ACCOUNT_LABEL));
   assert.ok(
-    rendered.indexOf("financial map isn't set up") < rendered.indexOf("The documents do not answer"),
-    "the guidance goes above the refusal, and the refusal still stands",
+    rendered.indexOf("financial map isn't set up") < rendered.indexOf("I didn't find a matching record in this search. Which account, document, or date would narrow it?"),
+    "the guidance goes above the search-scoped refusal",
   );
 
   // THE INCOMPLETE-SEARCH PATH. The worst error this product can make is a

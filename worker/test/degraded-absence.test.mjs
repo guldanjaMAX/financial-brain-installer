@@ -808,15 +808,19 @@ const EMPTY_DEGRADED_THINK = {
     ],
   );
   const thought = JSON.parse(lines.find((l) => l.id === 2).result.content[0].text);
-  check("REGRESSION GUARD at the MCP: a healthy empty answer still says nothing is recorded",
-    /The brain has nothing on this\./.test(thought.note) &&
+  check("REGRESSION GUARD at the MCP: a healthy empty answer scopes its finding to this search",
+    thought.note === 'No match in this search. Say "I didn\'t find a matching record in this search", name what you searched, and name the next search you would run (another source, a wider date window, sort "newest", or a distinctive name or number). Do not turn one search into a claim that no such record exists. Do not substitute inference.' &&
       thought.gaps.some((g) => g.type === "no_results"), JSON.stringify(thought));
+  check("REGRESSION GUARD at the MCP: healthy empty think makes no global absence claim",
+    !assertsAbsence(proseOf(thought)), proseOf(thought));
   check("REGRESSION GUARD at the MCP: no degraded or status is invented",
     thought.degraded === undefined && thought.search_status === undefined, JSON.stringify(thought));
 
   const searched = JSON.parse(lines.find((l) => l.id === 3).result.content[0].text);
   check("REGRESSION GUARD at the MCP: healthy brain_search keeps its honest note",
-    /nothing recorded on this/.test(searched.note), String(searched.note));
+    searched.note === 'No hits in this search. This is not proof that no such record exists. Say "I didn\'t find a matching record in this search" and name the next search you would run.', String(searched.note));
+  check("REGRESSION GUARD at the MCP: healthy empty search makes no global absence claim",
+    !assertsAbsence(proseOf(searched)), proseOf(searched));
 }
 
 /* ---- the /app page renders the notice, not the refusal ---- */
