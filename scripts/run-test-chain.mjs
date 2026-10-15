@@ -279,6 +279,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   "node --test test/machine-prep.test.mjs",
   "node --test test/machine-prep-installers.test.mjs",
   "node --no-warnings test/windows-dpapi-signing-workflow.test.mjs",
+  "node --test test/owner-contract-workspace.test.mjs",
 ]);
 export const TEST_COMMANDS = Object.freeze([
   "node --test test/daily-evidence.test.mjs",
@@ -422,6 +423,7 @@ export const TEST_COMMANDS = Object.freeze([
   "node test/wrangler-legacy-keyring-opt-out.test.mjs",
   "node test/cloudflare-token-prompt.test.mjs",
   "node test/technician-setup.test.mjs",
+  "node --test test/owner-contract-workspace.test.mjs",
   "node test/onboarding-sandbox.test.mjs",
   "node --test test/windows-onboarding-kit.test.mjs",
   "node test/cloudflare-token-store.test.mjs",
