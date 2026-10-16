@@ -87,7 +87,10 @@ export function phraseFor(phase: BrainPhase, s: SystemStatus | null): string {
       return "Your brain has not read anything yet. Once records are loaded, it can begin answering from them.";
     case "coverage_unknown":
       if (s?.unavailable?.includes("diagnose")) {
-        return "Your brain is still loading. Its status check will finish once loading settles. You can already ask questions.";
+        return "Your brain has records, but its status check is incomplete. " +
+          (s.vectors?.ready === true && !s.unavailable?.includes("vectors")
+            ? "Meaning search was measured as ready, so you can ask questions. " : "") +
+          "Treat missing results as unproven. Try the status check again; if it remains unavailable, ask your installer to check it.";
       }
       return "Your brain has records, but source or meaning-search coverage could not be checked. Treat missing results as unproven until that status is available.";
     case "preparing":

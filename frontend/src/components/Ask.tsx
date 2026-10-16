@@ -121,7 +121,7 @@ export function EvidenceGateReason({ answer }: { answer: Answer }) {
 /** How sure the brain is, and why. The basis is shown rather than summarised:
  *  a bare percentage is a number to argue with, a percentage with its reasons
  *  is something a person can actually judge. */
-function Trust({ answer }: { answer: Answer }) {
+export function Trust({ answer }: { answer: Answer }) {
   const c = answer.confidence;
   // A search that never completed has no rubric to report. Rendering a
   // percentage here would put a number on an absence nobody measured.
@@ -133,18 +133,18 @@ function Trust({ answer }: { answer: Answer }) {
     );
   }
   if (!c) return null;
-  const refused = /^The documents do not answer/i.test(answer.answer || "");
+  const refused = !answer.answer || /^The documents do not answer/i.test(answer.answer);
   const tone = c.percent >= 80 ? "text-emerald-700 bg-emerald-50"
     : c.percent >= 55 ? "text-amber-700 bg-amber-50"
       : "text-red-700 bg-red-50";
   return (
     <div className="mt-5 pt-4 border-t border-line">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <span className={`text-[13px] font-semibold px-2 py-0.5 rounded-md ${tone}`}>
           {c.percent}% {c.band}
         </span>
         <span className="text-[13px] text-ink-soft">
-          {refused ? "confidence nothing is recorded" : "confidence"}
+          {refused ? "confidence in this search result" : "confidence"}
         </span>
       </div>
       <ul className="mt-2 space-y-1">

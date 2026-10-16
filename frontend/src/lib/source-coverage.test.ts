@@ -166,3 +166,29 @@ describe("source coverage presentation", () => {
     expect(derivePhase({ ...base, sources: [present, missing] })).toBe("coverage_unknown");
   });
 });
+
+
+describe("confirmed coverage bounds", () => {
+  it("keeps both ends of a January receipt in facts and caveat", () => {
+    const bounded = coverage({ confirmed_range: {
+      from: "2027-01-01T00:00:00.000Z", through: "2027-01-31T23:59:59.000Z",
+    } });
+    for (const text of [coverageFacts(bounded)[0], coverageCaveat("Email", bounded)]) {
+      expect(text).toContain("Jan 1, 2027");
+      expect(text).toContain("Jan 31, 2027");
+      expect(text).not.toMatch(/onward|older material may still be loading/i);
+    }
+    expect(coverageCaveat("Email", bounded)).toMatch(/outside.*range.*unproven/i);
+  });
+  it("keeps each unknown bound explicitly unknown", () => {
+    for (const range of [
+      { from: "2027-01-01T00:00:00.000Z", through: null },
+      { from: null, through: "2027-01-31T23:59:59.000Z" },
+    ]) {
+      const partial = coverage({ confirmed_range: range });
+      expect(coverageFacts(partial)[0]).toMatch(/unconfirmed/i);
+      expect(coverageCaveat("Email", partial)).toMatch(/unconfirmed/i);
+      expect(coverageCaveat("Email", partial)).not.toMatch(/onward|since|still be loading/);
+    }
+  });
+});
