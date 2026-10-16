@@ -735,3 +735,38 @@ test("FIX-3 QuickBooks recovery preserves the prior daily task when daily on its
     if (fail) assert.equal(h.adapter.read(plan.identity).definition.definition_hash, prior.definition_hash);
   }
 });
+
+for (const operation of ["/Query", "/Create", "/Change", "/Delete"]) {
+  for (const timeout of [false, true]) test(`S2 bounded native scheduler ${operation}: timeout=${timeout}`, t => {
+    const home = realpathSync.native(mkdtempSync(join(tmpdir(), "bounded-scheduler-")));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const definition = buildDailyRefreshDefinition(plan, options);
+    const calls = [];
+    const adapter = createNativeDailyRefreshAdapter({ platform: "win32", home,
+      environment: { SystemRoot: String.raw`C:\Windows` },
+      spawn: (_command, args, child) => {
+        calls.push({ operation: args[0], timeout: child.timeout });
+        if (args[0] === operation && timeout) return { status: null, error: Object.assign(new Error("fixture deadline"), { code: "ETIMEDOUT" }), signal: "SIGTERM" };
+        if (args.includes("/FO")) return { status: 0, stdout: "" };
+        if (args[0] === "/Query") return { status: 0, stdout: definition.serialized };
+        return { status: 0, stdout: "" };
+      },
+    });
+    let error;
+    try {
+      if (operation === "/Query") adapter.read(plan.identity);
+      else {
+        const observed = adapter.read(plan.identity);
+        if (operation === "/Create") adapter.install(definition, { replaceOwned: true, expected: observed });
+        if (operation === "/Change") adapter.setEnabled(plan.identity, false, { expected: observed });
+        if (operation === "/Delete") adapter.remove(plan.identity, { expected: observed });
+      }
+    } catch (caught) { error = caught; }
+    assert.ok(calls.some(call => call.operation === operation), "native decision reached");
+    if (timeout) assert.ok(calls.every(call => Number.isInteger(call.timeout) && call.timeout > 0 && call.timeout <= 60_000), "all subprocess calls have a finite deadline");
+    if (timeout) {
+      assert.ok(error, "timeout is unknown, never proven absence or success");
+      assert.match(error.message, /unknown|timed out|could not be inspected|recovery/i);
+    } else assert.equal(error, undefined);
+  });
+}

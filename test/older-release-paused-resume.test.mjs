@@ -381,6 +381,18 @@ async function update(brain, release, { force = false, duringAcceptance = null }
     reconcileExistingOwnerAgents: null,
     writeClaudeWorkspaceGuideAfterUpdate: null,
     claudeSkillOptions: { home: brain.sandbox },
+    // This remote-version fixture owns no daily schedule. Keep all native
+    // inspection inside its synthetic home, including legacy source probes.
+    dailyRefreshOptions: {
+      platform: "darwin", home: brain.sandbox, uid: 501, localTimezone: "UTC",
+      existingSchedulerOwners: [], planLoad: async () => [],
+      schedulerAdapter: { read: () => null },
+      schedulerOptions: { home: brain.sandbox },
+      legacySchedulerOptions: { home: brain.sandbox, uid: 501, launchctl: args => {
+        assert.equal(args[0], "print", "this fixture must not mutate a native scheduler");
+        return { status: 113, stdout: "", stderr: "fixture not loaded" };
+      } },
+    },
   }));
   if (!run.error) kit.bookmarkWriter.assertCalled();
   return run;
@@ -665,15 +677,15 @@ test("the documented 0.4.8 active folder updates, retires, and refuses both lega
   }
 });
 
-// Each release's CLI renders its own guidance: on Windows a command names the
-// node executable and that release's brain.mjs, so the expectation must go
-// through the renderer of the release that actually ran.
-const PAUSED_QUEUED_MESSAGE = (release, pending, consequence) => release.cli.renderCliCommands(
-  `This Brain is still paused for an update that has not finished, and it has ${pending} queued search ` +
-    "update(s). A paused Brain does not process its queue, so waiting will not clear it, and this update will " +
-    `not continue over queued work. ${consequence} Do not run \`brain drain\` or clear VECTOR_DRAIN_MODE by hand. ` +
-    "Run `brain health` and keep its output for support.",
-);
+function assertUnverifiedPausedQueue(brain, run, release) {
+  assert.match(run.error?.message || "", /the paused queue cannot be completed from this unverified projection state/u);
+  assert.doesNotMatch(run.error.message, /Nothing was lost|working normally|few minutes/u);
+  assert.equal(brain.reads.backlog, 2, "both real backlog gates were reached");
+  assert.deepEqual(brain.events.filter(event => /^deploy:|^bootstrap$|^migrate$/u.test(event)), [`deploy:${release.version}:paused-for-upgrade`]);
+  assert.equal(brain.db.prepare("SELECT count(*) AS n FROM vector_outbox").get().n, 3, "unverified accepted work remains intact");
+  assert.equal(brain.live.release, release);
+  assert.equal(brain.live.mode, "paused-for-upgrade");
+}
 
 for (const [older, newer] of [[CHECKED_OUT, NEXT], [PREVIOUS, CHECKED_OUT]]) {
   const pair = `Worker ${older.version} paused, manifest ${older.version}, CLI ${newer.version}`;
@@ -739,25 +751,17 @@ for (const [older, newer] of [[CHECKED_OUT, NEXT], [PREVIOUS, CHECKED_OUT]]) {
     }
   });
 
-  test(`${pair}: 3 queued updates refuse truthfully at both gates`, async () => {
+  test(`${pair}: a queue without bootstrap-v2 proof retains its paused recovery checkpoint`, async () => {
     const brain = await pausedByOlderRollback(older);
     try {
       queueVectorWork(brain.db, 3);
       const run = await update(brain, newer);
-      assert.equal(run.error?.message, PAUSED_QUEUED_MESSAGE(newer, 3, "Nothing was changed."));
-      assert.doesNotMatch(run.error?.message || "", /not an earlier update|install that release|few minutes/u);
-      assert.equal(brain.reads.backlog, 1);
-      assert.deepEqual(brain.events, []);
+      assertUnverifiedPausedQueue(brain, run, newer);
 
       brain.reads.backlog = 0;
+      brain.events.length = 0;
       const forced = await update(brain, newer, { force: true });
-      assert.ok(String(forced.error?.message || "").includes(
-        PAUSED_QUEUED_MESSAGE(newer, 3, "The paused deployment was not started."),
-      ), forced.error?.message);
-      assert.equal(brain.reads.backlog, 2);
-      assert.equal(brain.events.some((event) => event.startsWith("deploy:")), false);
-      assert.equal(brain.live.release, older);
-      assert.equal(brain.live.mode, "paused-for-upgrade");
+      assertUnverifiedPausedQueue(brain, forced, newer);
       assert.equal(brain.manifestVersion(), older.version);
     } finally {
       brain.close();
@@ -885,31 +889,37 @@ for (const [recorded, older] of [[CHECKED_OUT, PREVIOUS], [NEXT, CHECKED_OUT]]) 
       try {
         queueVectorWork(brain.db, 3);
         const run = await update(brain, recorded);
-        // An active stale Worker drains its own queue; a paused one never does.
-        assert.equal(run.error?.message, mode === "active"
-          ? ACTIVE_QUEUED_MESSAGE(recorded, 3)
-          : PAUSED_QUEUED_MESSAGE(recorded, 3, "Nothing was changed."));
+        if (mode === "active") {
+          assert.equal(run.error?.message, ACTIVE_QUEUED_MESSAGE(recorded, 3));
+          assert.equal(brain.reads.backlog, 1);
+          assert.deepEqual(brain.events, []);
+        } else {
+          assertUnverifiedPausedQueue(brain, run, recorded);
+        }
         assert.doesNotMatch(run.error?.message || "", /not an earlier update|install that release|few minutes/u);
-        assert.equal(brain.reads.backlog, 1);
-        assert.deepEqual(brain.events, []);
 
         brain.reads.backlog = 0;
+        brain.events.length = 0;
         const forced = await update(brain, recorded, { force: true });
-        assert.ok(forced.error, "queued work must still refuse at the pre-pause gate");
+        assert.ok(forced.error, "queued work requires either active drain or a verified paused completion protocol");
         assert.doesNotMatch(String(forced.error?.message || ""), /not an earlier update|install that release/u);
         assert.equal(brain.reads.backlog, 2);
+        if (mode === "paused-for-upgrade") assertUnverifiedPausedQueue(brain, forced, recorded);
 
+        brain.reads.backlog = 0;
+        brain.events.length = 0;
         const repaired = await doctorRepair(brain, recorded);
         if (mode === "paused-for-upgrade") {
-          assert.ok(String(repaired.error?.message || "").includes(
-            PAUSED_QUEUED_MESSAGE(recorded, 3, "The paused deployment was not started."),
-          ), repaired.error?.message);
+          assert.match(repaired.error?.message || "", /the paused queue cannot be completed from this unverified projection state/u);
+          assert.equal(brain.reads.backlog, 1, "doctor reached the real pre-pause gate");
+          assert.deepEqual(brain.events.filter(event => /^deploy:|^bootstrap$|^migrate$/u.test(event)), [`deploy:${recorded.version}:paused-for-upgrade`]);
+          assert.equal(brain.live.release, recorded);
         } else {
           assert.deepEqual(repaired.result, { paused: false });
+          assert.equal(brain.events.some(event => event.startsWith("deploy:")), false);
+          assert.equal(brain.live.release, older);
         }
-
-        assert.equal(brain.events.some((event) => event.startsWith("deploy:")), false);
-        assert.equal(brain.live.release, older);
+        assert.equal(brain.db.prepare("SELECT count(*) AS n FROM vector_outbox").get().n, 3);
         assert.equal(brain.live.mode, mode);
         assert.equal(brain.manifestVersion(), recorded.version);
       } finally {

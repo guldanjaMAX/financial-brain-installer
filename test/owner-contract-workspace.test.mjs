@@ -27,9 +27,9 @@ const ACCOUNTS = ["- ****0001 = business checking", "- ****0002 = personal card"
 const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)";
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
-  "answer-contract-v1.md": "09f579cfd5a6fbbbb87af184779126c4c0381ac7351b145adc91c14de625dcba",
-  "money-rules-v3.md": "1a60d1be9e24c07a0fc14efaca4496fdff469fe76609e7593d71c5d090a3f58b",
-  "money-rules-v3-windows.md": "04c9995a4787828e304671b386055404fabc00e745f09396807786ff04213cd4",
+  "answer-contract-v1.md": "32f9b8e6c23347651b3246fa42d2f93aef9d4f291651e5b5b8425d84f46f39cf",
+  "money-rules-v3.md": "0f2172275905d0e000acb4d46ae71dcf5623c9c097f59935806772bc52edba2c",
+  "money-rules-v3-windows.md": "b82c90ae31e96ebaaeb2b98ccab6766c1f9c060bbdc9ebd9c510768f2c758056",
 };
 const options = { brainCliPath: resolve("/fixture/brain.mjs"), nodePath: process.execPath };
 const count = (text, part) => text.split(part).length - 1;
@@ -249,7 +249,7 @@ test("g: session folder classifier uses cloud precedence, platform case and path
   for (const folder of [brainFolder, `${brainFolder}/sub`, `${home}/work`, home, `${home}/Desktop-other`]) {
     assert.deepEqual(workspace.classifySessionFolder(folder, { home, platform: "darwin", brainFolder }), folder.startsWith(brainFolder) ? null : { kind: "outside" });
   }
-  assert.equal(workspace.classifySessionFolder(`${home}/Desktop/Brain/sub`, { home, platform: "darwin", brainFolder: `${home}/Desktop/Brain` }), null);
+  assert.deepEqual(workspace.classifySessionFolder(`${home}/Desktop/Brain/sub`, { home, platform: "darwin", brainFolder: `${home}/Desktop/Brain` }), { kind: "desktop" });
   assert.deepEqual(workspace.classifySessionFolder(`${home}/desktop/x`, { home, platform: "linux", brainFolder }), { kind: "outside" });
   const windows = { home: "C:\\Users\\o", platform: "win32", brainFolder: "C:\\Users\\o\\Financial Brain" };
   for (const [folder, kind] of [["OneDrive\\Desktop", "synced"], ["OneDrive - Business\\x", "synced"], ["Downloads", "downloads"]]) {
@@ -637,7 +637,7 @@ test("m6/m11 workspace fallback uses the exact installed invocation and manifest
   workspace.writeClaudeWorkspaceGuide(manifest, options);
   const text = readFileSync(join(folder, "CLAUDE.md"), "utf8");
   const fallback = text.split("## If brain_think gives no answer")[1].split("## Hard rules")[0];
-  assert.ok(fallback.includes(`${renderCopyableCommand(options.nodePath, [options.brainCliPath])} ask ${quotePosixArgument(manifest)}`));
+  assert.ok(fallback.includes(renderCopyableCommand(options.nodePath, [options.brainCliPath, "ask", manifest])));
   assert.doesNotMatch(fallback, /ls -d|sort -V|\$HOME/);
 });
 
@@ -1329,10 +1329,93 @@ test("R5 PowerShell locators use literal arguments for the runtime, script and m
   const manifest = "C:\\Users\\owner\\Reserve $fund's ; $(fixture)\\brain.manifest.json";
   const brainCliPath = "C:\\Brain $fund's ; $(fixture)\\entry.mjs", nodePath = "C:\\Runtime $fund's ; $(fixture)\\node.exe";
   const guide = workspace.renderClaudeWorkspaceGuide(manifest, { platformName: "win32", brainCliPath, nodePath });
-  const expected = `${renderCopyableCommand(nodePath, [brainCliPath], { platformName: "win32" })} ask ${quotePowerShellArgument(manifest)}`;
+  const expected = renderCopyableCommand(nodePath, [brainCliPath, "ask", manifest], { platformName: "win32" });
   assert.ok(guide.includes(expected), "actual guide renders the full installed invocation");
   assert.ok(expected.startsWith("& '"));
   assert.ok(expected.includes("fund''s"));
   const control = workspace.renderClaudeWorkspaceGuide("C:\\Brain\\brain.manifest.json", { platformName: "win32", brainCliPath: "C:\\Brain\\entry.mjs" });
   assert.ok(control.includes("& 'C:\\Brain\\entry.mjs'"));
+});
+
+for (const storage of ["Downloads", "Library/CloudStorage", "Desktop"]) {
+  test(`S2 folder risk survives manifest containment: ${storage}`, () => {
+    const home = "/fixture/owner", folder = `${home}/${storage}/Financial Brain`;
+    const outside = workspace.classifySessionFolder(folder, { home, platform: "darwin", brainFolder: `${home}/other` });
+    assert.ok(outside && outside.kind !== "outside", "risk classifier decision is reached");
+    assert.deepEqual(workspace.classifySessionFolder(folder, { home, platform: "darwin", brainFolder: folder }), outside);
+    assert.equal(workspace.classifySessionFolder(`${home}/Financial Brain`, { home, platform: "darwin", brainFolder: `${home}/Financial Brain` }), null);
+  });
+}
+
+test("S2 owner confidence preserves returned score, independent families and authority", () => {
+  const text = workspace.renderOwnerRulesSection();
+  assert.ok(text.includes("Confidence: N%"), "the actual answer contract was rendered");
+  assert.doesNotMatch(text, /start at 100%/);
+  assert.match(text, /returned confidence/i);
+  assert.match(text, /independent evidence famil/i);
+  assert.match(text, /authority/i);
+  assert.match(text, /owner confirms/);
+});
+
+for (const platformName of ["darwin", "win32"]) test(`S2 money selectors and measure honesty: ${platformName}`, () => {
+  const text = workspace.renderOwnerRulesSection({ platformName });
+  assert.match(text, /A kind-filter miss alone cannot establish that an account is disconnected/);
+  assert.match(text, /ambiguous or redacted/i);
+  assert.match(text, /never.*(?:zero|0)/i);
+  assert.match(text, /combined.*card.*cash.*surplus/i);
+  assert.match(text, /do not call.*cash flow/i);
+  assert.doesNotMatch(text, /start at 100%/i);
+});
+
+for (const platformName of ["darwin", "win32"]) test(`S2 every installed command uses shell-aware argv: ${platformName}`, t => {
+  const { root } = fixture(t);
+  const folder = join(root, "owner's $reserve ; café"); mkdirSync(folder);
+  const recorder = join(folder, "argument-recorder");
+  writeFileSync(recorder, '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o700 });
+  const manifest = platformName === "win32" ? String.raw`C:\Users\ownér\Financial Brain\owner's $reserve ;\brain.manifest.json` : join(folder, "brain.manifest.json");
+  const brainCliPath = platformName === "win32" ? String.raw`C:\Program Files\ownér's $tool;\brain.cmd` : recorder;
+  const guide = workspace.renderClaudeWorkspaceGuide(manifest, { brainCliPath, platformName });
+  const inventory = guide.split("## Installed commands\n")[1].split("For both first-source commands")[0];
+  const lines = inventory.split("\n").filter(line => /^- (Readiness|Source status|Watched folder off|Ask privately|Held update diagnostic|Exact first-source)/.test(line));
+  assert.equal(lines.length, 7, "every installed command decision is represented");
+  for (const line of lines) {
+    const command = line.match(/`([^`]+)`/)[1];
+    if (platformName === "win32") {
+      assert.ok(command.startsWith(`& ${quotePowerShellArgument(brainCliPath)} `));
+      assert.ok(command.includes(quotePowerShellArgument(manifest)));
+      assert.doesNotMatch(command, /&&/);
+    } else {
+      // Replace only documented placeholders with harmless literal arguments.
+      const runnable = command.replaceAll(/<[^>]+>/g, "fixture-value");
+      const child = spawnSync("/bin/sh", ["-c", runnable], { encoding: "utf8", env: shellEnv(root) });
+      assert.equal(child.status, 0);
+      const argv = child.stdout.trimEnd().split("\n");
+      assert.ok(["doctor", "sources", "folder", "ask", "update", "ingest-file"].includes(argv[0]));
+      assert.equal(argv[1], manifest);
+    }
+  }
+});
+
+test("S2 two fresh copies remain one evidence family and owner confirmation stays explicit", async () => {
+  const { independentEvidenceSummary } = await import("../worker/src/lib/evidence-lineage.js");
+  const { computeAnswerConfidence } = await import("../worker/src/lib/confidence.js");
+  const docs = [1, 2].map(n => ({ n, ts: "2031-02-18T09:00:00.000Z", date_reliable: true, text_reliable: true,
+    lineage: { status: "known", family_tokens: ["fixture-family"] } }));
+  assert.equal(independentEvidenceSummary(docs).groups, 1);
+  const score = computeAnswerConfidence({ approvedDocs: docs });
+  assert.equal(score.percent, 75);
+  assert.ok(score.basis.includes("independent corroboration is not established"));
+  const text = workspace.renderOwnerRulesSection();
+  assert.match(text, /two fresh copies from one family remain one family/);
+  assert.match(text, /With a yes, add one line per mask/);
+  assert.match(text, /Without a yes, use the answer for this session only/);
+});
+
+test("S2 update warns when the Brain folder itself is temporary storage", async t => {
+  const result = await update(t, { folder: "Downloads" });
+  assert.ok(result.finish.length === 1, "verified update reached its owner guidance");
+  assert.match(result.finish[0], /Brain folder itself.*Downloads/i);
+  assert.match(result.finish[0], /private.*local folder/i);
+  assert.match(result.finish[0], /approval/i);
+  assert.ok(existsSync(join(result.root, "brain.manifest.json")), "no automatic move or removal");
 });
