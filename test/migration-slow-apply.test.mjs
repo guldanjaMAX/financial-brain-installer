@@ -782,12 +782,12 @@ test("update installer detail keeps the first slow-migration failure without net
   assert.doesNotMatch(installer, /VPN|proxy|check the connection/i);
 });
 
-test("ordinary update migration failures keep their existing rendering", async () => {
+test("ordinary update migration failures retain the exact unverified completion state", async () => {
   const error = await capturedUpgradeFailure(new Error("ordinary migration failure"));
   assert.equal(error?.supportCode, undefined);
   for (const platform of ["darwin", "win32"]) {
     assert.ok(renderCliCommands(error?.message || "", { platform }).startsWith(
-      renderCliCommands("The update stopped before its last check. Your Brain is working normally and nothing was lost. Run brain update once more; it picks up where it stopped.", { platform }),
+      renderCliCommands("The update is incomplete. Final active-state and acceptance checks were not verified. Retrieval and daily imports are not confirmed healthy. Keep the recovery bookmark and run brain update once more.", { platform }),
     ));
   }
   assert.match(error?.message || "", /update stopped during migration: ordinary migration failure/);

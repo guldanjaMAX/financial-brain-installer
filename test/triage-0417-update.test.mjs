@@ -69,7 +69,7 @@ import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { cmdAsk } from "../brain.mjs";
 import { refusalConfidence } from "../worker/src/lib/confidence.js";
-for (const arm of ["candidates", "no-candidates", "incomplete", "answer"]) {
+for (const arm of ["candidates", "no-candidates", "missing-results", "incomplete", "answer"]) {
   test(`S2 CLI refusal scope: ${arm}`, async t => {
     const home = realpathSync.native(mkdtempSync(join(tmpdir(), "scope-answer-")));
     t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -82,6 +82,7 @@ for (const arm of ["candidates", "no-candidates", "incomplete", "answer"]) {
       results: candidates, evidence_gate: { supported: arm === "answer", reason: "Fixture evidence limit" },
       confidence: refusalConfidence({ resultCount: candidates.length }),
       ...(arm === "incomplete" ? { status: "search_unavailable", degraded: "fts" } : {}) };
+    if (arm === "missing-results") delete body.results;
     const printed = [], oldLog = console.log;
     let requests = 0;
     console.log = (...parts) => printed.push(parts.join(" "));
@@ -100,8 +101,17 @@ for (const arm of ["candidates", "no-candidates", "incomplete", "answer"]) {
       assert.doesNotMatch(text, /Confidence[^\n]*%/i);
     } else if (arm === "candidates") {
       assert.match(text, /checked 2 nearest candidates/);
+      assert.match(text, /I found 2 records in this search, but none supported an answer/);
+      assert.match(text, /Confidence in this search result:/);
       assert.match(text, /Fixture evidence limit/);
-    } else if (arm === "no-candidates") assert.match(text, /no candidates/);
+    } else if (arm === "no-candidates") {
+      assert.match(text, /no candidates/);
+      assert.match(text, /I didn't find a matching record in this search/);
+      assert.match(text, /Confidence in this search result:/);
+    } else if (arm === "missing-results") {
+      assert.match(text, /The records checked did not support an answer to this question/);
+      assert.doesNotMatch(text, /I didn't find a matching record|I found 0/);
+    }
     else assert.match(text, /fixture supports this answer/);
   });
 }

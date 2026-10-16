@@ -899,11 +899,11 @@ const EMPTY_DEGRADED_THINK = {
     answer: null, citations: [], results: [],
     confidence: { percent: 80, band: "high", basis: ["retrieval found no candidates at all"] },
   };
-  check("REGRESSION GUARD at /app: a healthy empty result still shows the refusal",
-    render.answerText(healthyEmpty) === "The documents do not answer the question.",
+  check("REGRESSION GUARD at /app: a healthy empty result keeps its search scope",
+    render.answerText(healthyEmpty) === "I didn't find a matching record in this search.",
     render.answerText(healthyEmpty));
-  check("REGRESSION GUARD at /app: and still labels its confidence as absence confidence",
-    /^Confidence nothing is recorded: 80%/.test(render.confidenceText(healthyEmpty)),
+  check("REGRESSION GUARD at /app: labels its confidence in this search result",
+    /^Confidence in this search result: 80%/.test(render.confidenceText(healthyEmpty)),
     render.confidenceText(healthyEmpty));
 
   const answered = {

@@ -196,9 +196,16 @@ account, requires a pre-change D1 bookmark, saves and exactly reads back a
 private local receipt, then deploys and verifies a paused
 compatibility Worker, then requires one authenticated documents response to
 bind the exact new version, `paused-for-upgrade`, D1, equal vector totals, an
-empty queue, and query readiness. A responded mismatch is not retried: update
-stops before the old-invocation wait and every migration, with the Worker still
-paused. Only that exact aggregate permits the declared 20-minute
+empty queue, and query readiness. If accepted work arrives during the pause
+upload, this exact authenticated boundary can finish it through the existing
+leased bootstrap-v2 protocol before refreshing readiness. This checkpoint is
+bounded to 15 minutes and 256 rounds, requires a readable schema-13-or-newer
+pending/verified projection, and refuses legacy protocol or rebuild state.
+A modern already-paused queue may enter account and manifest custody checks
+on retry; an active queue still refuses before upload. No readiness gate is
+removed, no queue is discarded, and no pause is cleared to make progress.
+A responded readiness mismatch still stops before the old-invocation wait and
+every migration, with the Worker still paused. Only that exact aggregate permits the declared 20-minute
 old-invocation window and migration. While the write barrier remains active,
 schema 13 rebuilds a legacy projection through durable 1,000-row batches with a
 bounded number of disjoint
@@ -218,8 +225,15 @@ Pre-change bookmarks are retained per attempt under `~/.brain/upgrade-bookmarks/
 including for legacy databases without `upgrade_runs`. Each receipt binds the
 exact account, database, original manifest hash, versions and capture time.
 File bytes and, on POSIX, the directory entry are flushed before readback and
-before deployment or migration. A persistence failure stops the update. An
-interrupted process cannot erase the receipt, and a retry never overwrites an
+before deployment or migration. A persistence failure stops the update. Every proven pre-dispatch failure
+restores the old verified local schedules; a possibly dispatched request keeps
+its recovery fence. Daily restoration or source-expectation failure returns an
+incomplete, non-success update with its local recovery receipt location. Native
+scheduler inspection must be readable before remote dispatch. Windows task and
+bridge subprocesses have finite deadlines; timeout means unknown outcome.
+A required Worker cron is read back after writing, and adding it preserves all
+observed unrelated crons. Native scheduled execution remains a separate receipt.
+An interrupted process cannot erase the receipt, and a retry never overwrites an
 earlier restore point. These are private recovery records, never package inputs.
 If an abrupt stop left no D1 history row, the installer can inspect the matching
 local receipt for the bookmark; `doctor --rollback` still reads D1 history and
@@ -2091,6 +2105,15 @@ provider-scale proof.
 
 ## Tests
 
+The focused `test/update-preview.test.mjs` uses a synthetic archive and exact
+generated executable shim to verify runtime identity without installing a
+package. The separate MAIN-only host check is
+`node --test test/host/update-preview-install.mjs`. It retains the real clean
+prefix pack/install assertions and must run in an installation-authorized host
+gate, with scratch HOME/cache and the reviewed npm CLI locator in `npm_execpath`.
+It is deliberately outside the offline focused chain. A passing synthetic
+archive check is not evidence that npm materialized the expected installed shim.
+
 `node test/owner-contract-workspace.test.mjs` exercises setup and update guide
 refreshes. Existing guide files and any sibling used to authorize creation must
 belong to the current POSIX uid. On Windows, Node does not expose the owner's
@@ -2144,7 +2167,13 @@ largest N expenses/deposits (1 through 100), recent deposits, merchant/category
 spend or income, recurring charges, and own-account transfers. Named months
 and Q1 through Q4 may omit the year, meaning the current UTC year. Merchant
 matches use the exact NFKC-normalized, case-insensitive payee when present.
-Only rows without a payee use contiguous description tokens as a fallback. Category totals separate confirmed and proposed categories; proposed
+Only outflows without a payee use contiguous description tokens as a fallback.
+Inflows require an explicit payee or a directional/opening sender phrase, never
+an invoice subject. Both amount-qualified and amountless payment checks use
+that attribution. Payer clauses are removed before account-kind selection.
+Merchant labels preserve literal `and` and `&`. Redacted, shortened or unknown
+labels refuse; an unmatched conjunction substitution refuses as ambiguous.
+Quote the original by-merchant line rather than substituting or guessing. Category totals separate confirmed and proposed categories; proposed
 ones say "bank's category (unconfirmed)". Unsorted is always a separate line.
 `node --test worker/test/ledger-phrasing.test.mjs` covers natural bank question
 forms, named payments without amounts (60-day default), recent deposits
@@ -2204,13 +2233,15 @@ accounts and refuses a partial answer. Separate indexed date-range and undated
 arms preserve the refusal for rows with unknown dates.
 
 Bounded "What was my profit in September 2026?", "What is my net income last
-month?", "What was our cash flow in Q3?" and "How much profit did I make so far
+month?" and "How much profit did I make so far
 this year?" forms use `kind: totals`. Optional account clauses retain their
-literal scope. The first line is "Cash in minus cash out, not accounting
-profit", computed only over in-scope checking, savings and card lead figures;
+literal scope. The first line is "Money in minus money out, not accounting
+profit or cash flow", computed only over in-scope checking, savings and card lead figures;
 other account kinds get a reason for staying outside that net. `measure`,
 `net_minor` and `net_label` describe it. Without a move-kind account the answer
-falls through as `unsupported_question`. Exactly one supported period is
+falls through as `unsupported_question`. Cash-flow requests explicitly return
+`cash_flow_unsupported`, no figure and no model fallback. Unpaid card purchases
+are not cash movements. Exactly one supported period is
 required. Tax, projected, average, gross or business profit and other unconsumed
 qualifiers remain unsupported. Transfer and withdrawal clauses apply only to
 totals, largest, deposits, merchant, category and recurring questions. Repeated
@@ -2371,6 +2402,21 @@ explicit account mapping across exports. Without provider transaction IDs,
 two separate exports each containing one indistinguishable same-day charge
 cannot prove whether there were one or two charges; review the original bank
 record when a day is split across exports.
+
+A later partial import that changes coverage bounds downgrades a complete
+interval to partial while retaining every transaction. A contained import keeps
+its independent coverage basis. Legacy complete intervals carrying the old
+partial-export note are unproven until independently reviewed; merely linking
+accounts or importing another file does not recertify them.
+
+OFX/provider IDs and CSV content ordinals cannot prove cross-format identity.
+Overlapping formats refuse at owner preview and commit and at operator import;
+SQL repeats the guard at the write boundary. Same-format replay remains
+idempotent and repeated purchases within one file retain their multiplicity.
+Existing same-day mixed-identity amount/direction candidates refuse a total and
+retain all source provenance. Keep the original exports, compare bank event
+references and statement evidence, and request a separately reviewed approval
+for any reconciliation. Identity rekey is not a cross-format duplicate repair.
 
 Existing row-based export IDs block another ID-less export at preview as well
 as import. Use `brain ledger rekey <manifest> --account <account> --preview`.

@@ -138,7 +138,12 @@ they belong to this client. Migrations are checksum-protected, append-only, and
 restart-safe after every independently committed statement. A D1 upgrade
 captures a required bookmark, saves and exactly reads back an owner-only local
 receipt under `~/.brain/upgrade-bookmarks/`, then deploys and verifies the paused
-compatibility Worker, accepts one exact authenticated aggregate as the pre-migration gate,
+compatibility Worker. Accepted pause-window queue work may complete through the
+existing leased bootstrap-v2 protocol at that authenticated boundary, with a
+15-minute/256-round bound and a fresh exact readiness proof. A modern paused
+retry enters custody checks before this completion; active queued work still
+refuses. Legacy, unreadable, or rebuild projection state cannot use the narrow
+completion path. The update accepts one exact authenticated aggregate as the pre-migration gate,
 waits the same old-invocation window, migrates, deploys active mode,
 reconciles allowed provider secrets, waits for the new version, and records
 success. Schema 13 changes that ordering only for an existing legacy
@@ -621,7 +626,11 @@ The per-user transaction retains daily and legacy scheduler snapshots. A
 content-free fence keyed by canonical Brain identity is stored beside the
 machine-wide lifecycle boundary, so every local user and manifest alias fails
 closed while recovery is unresolved. Writers inspect that fence after taking
-the lease. An interrupted update leaves the receipt, fence, and disabled state
+the lease. Dispatch tracking restores verified prior schedules after every proven
+pre-mutation failure. Possible dispatch retains the fence across retries. A
+failed daily restore or required acceptance check is an incomplete update and
+cannot print ordinary completion or claim normal operation from the pause flag.
+Native task timeout is an unknown outcome, never proof of absence. An interrupted update leaves the receipt, fence, and disabled state
 in place; a retry uses the saved definition as its authorization even after a
 manifest fingerprint change, and clears the fence only after current health
 proof and exact reconciliation.
@@ -805,9 +814,10 @@ completed-month next step, while withholding candidate records and citations.
 The transfers view
 keeps its outgoing-date semantics. Unmatched hints remain visible; a category-
 backed withdrawal explicitly says it was left out of the lead and kept in gross.
-Bounded profit, net income and cash flow forms route to `kind: totals`, with
-`measure`, `net_minor` and the label "cash in minus cash out, not accounting
-profit". The net sums only in-scope checking, savings and card lead figures;
+Bounded profit and net income forms route to `kind: totals`, with
+`measure`, `net_minor` and the label "money in minus money out, not accounting
+profit or cash flow". Cash-flow requests return `cash_flow_unsupported` with no
+figure or model fallback: unpaid card charges do not measure cash movements. The net sums only in-scope checking, savings and card lead figures;
 other account kinds are listed with a reason and no eligible account means
 `unsupported_question`. One supported period and fully consumed grammar are
 required. The three flip clause families are bounded and reject duplicates,
@@ -817,11 +827,13 @@ view. The document path retains its existing money refusal rules.
 Recurrence uses at least three charges, bounded weekly/monthly intervals and
 integer amount tolerance; results are explicitly detected rather than confirmed. Category proposals and Unsorted remain visible. Ambiguous groups,
 incomplete coverage and unreadable rows cannot establish a total or absence.
-Named payment arrivals match whole counterparty words. For an amountless
-arrival, an explicit payee supplies the sender evidence; a memo supplies it
-only when no payee is recorded. Generic-only sender clauses cannot identify
+Named payment arrivals match whole counterparty words. An explicit payee
+supplies sender evidence; otherwise a directional sender or opening sender
+phrase is required. An amount narrows that same attribution rule and cannot
+promote an invoice subject to payer. Merchant income uses the same sender
+extraction; unresolved attribution remains unknown. Generic-only sender clauses cannot identify
 an amountless payment, in named, `from` or `via` forms. Exact-amount questions
-retain their amount-plus-text match. Budget, approval and planning qualifiers
+retain their exact-cent constraint on the attributed sender. Budget, approval and planning qualifiers
 stay with documents instead of becoming merchant filters. Only posted inflows
 match. Without a
 supplied period, a named payment without an amount searches 60 days; exact
@@ -829,6 +841,20 @@ amounts retain the 30-day default. Recent deposits use 14 days, and largest
 expenses without a count list ten. The current named month ends today; period
 responses retain their actual UTC window. Unrecognized bank names, entities and
 unsupported analysis still use documents rather than widening account scope.
+
+Merchant selectors preserve literal `and` and `&` as different labels. Redacted,
+shortened or unknown labels refuse; an unmatched conjunction substitution
+returns `merchant_selector_ambiguous`. Quote the original list line instead of
+guessing hidden text or reporting zero.
+
+Partial imports cannot enlarge a certified complete interval. They retain all
+transactions but downgrade an expanded window to partial. Legacy complete rows
+with the old partial-export basis note return `coverage_review_required` until
+independent review re-establishes coverage. Cross-format imports refuse
+overlapping provider-ID and ID-less windows before writing, and SQL guards
+repeat the decision inside transaction writes. Existing mixed-identity same-day
+amount/direction candidates return `bank_export_overlap_review_required`; no
+automatic merge, deletion or recertification occurs.
 
 Plaid historical promotion derives an empty window's start from its saved
 requested days and queue date, never from absent transactions. A legacy

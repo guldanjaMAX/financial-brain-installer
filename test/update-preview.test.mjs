@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { gzipSync } from "node:zlib";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -697,93 +698,56 @@ test("mocked Windows generated shim contract refuses drift, omission, links, and
   });
 });
 
-test("real clean-prefix POSIX npm install preserves the archive-derived runtime identity", {
+// The actual npm pack/install acceptance lives in test/host/update-preview-install.mjs.
+// This offline arm traverses archive parsing and runtime verification with the
+// same generated-shim boundary, without requiring npm or installing a package.
+test("synthetic archive-derived runtime identity excludes the exact POSIX generated shim", {
   skip: process.platform === "win32",
-}, (t) => {
-  const temporary = realpathSync(mkdtempSync(join(realpathSync(tmpdir()),
-    "brain-real-install-parity-")));
-  const packDirectory = join(temporary, "pack");
-  const installPrefix = join(temporary, "prefix");
-  const cacheDirectory = join(temporary, "npm-cache");
-  mkdirSync(packDirectory, { recursive: true });
-  mkdirSync(installPrefix, { recursive: true });
-  mkdirSync(cacheDirectory, { recursive: true });
-  const npmConfig = join(temporary, "empty.npmrc");
-  writeFileSync(npmConfig, "");
-  t.after(() => rmSync(temporary, { recursive: true, force: true }));
-
-  const npmCli = realpathSync(join(dirname(process.execPath), "npm"));
-  const npmEnvironment = {
-    ...process.env,
-    npm_config_audit: "false",
-    npm_config_cache: cacheDirectory,
-    npm_config_fund: "false",
-    npm_config_ignore_scripts: "true",
-    npm_config_offline: "true",
-    npm_config_userconfig: npmConfig,
-  };
-  const packed = spawnSync(process.execPath, [
-    npmCli,
-    "pack",
-    "--json",
-    "--ignore-scripts",
-    "--offline",
-    "--pack-destination",
-    packDirectory,
-    ROOT,
-  ], {
-    cwd: temporary,
-    encoding: "utf8",
-    env: npmEnvironment,
-    maxBuffer: 8 * 1024 * 1024,
-    timeout: 30_000,
-  });
-  assert.equal(packed.status, 0, packed.stderr || packed.stdout);
-  const metadata = JSON.parse(packed.stdout);
-  assert.equal(metadata.length, 1);
-  assert.match(metadata[0].filename, /^brain-installer-[0-9A-Za-z.-]+\.tgz$/u);
-  const archivePath = join(packDirectory, metadata[0].filename);
-
-  const installed = spawnSync(process.execPath, [
-    npmCli,
-    "install",
-    "--prefix",
-    installPrefix,
-    "--ignore-scripts",
-    "--omit=dev",
-    "--offline",
-    "--no-audit",
-    "--no-fund",
-    "--package-lock=false",
-    archivePath,
-  ], {
-    cwd: temporary,
-    encoding: "utf8",
-    env: npmEnvironment,
-    maxBuffer: 8 * 1024 * 1024,
-    timeout: 30_000,
-  });
-  assert.equal(installed.status, 0, installed.stderr || installed.stdout);
-
-  const archive = readFileSync(archivePath);
+}, t => {
+  const fixture = bundledBinFixture(t, "posix");
+  if (!fixture) return;
+  const parts = [];
+  for (const path of fixture.allowlist) {
+    const content = readFileSync(join(fixture.root, path));
+    const header = Buffer.alloc(512);
+    assert.ok(Buffer.byteLength(`package/${path}`) < 100);
+    header.write(`package/${path}`, 0, 100, "utf8");
+    for (const [offset, width, value] of [[100, 8, 0o644], [108, 8, 0], [116, 8, 0], [124, 12, content.length], [136, 12, 0]]) {
+      header.write(value.toString(8).padStart(width - 1, "0"), offset, width - 1, "ascii");
+    }
+    header.fill(0x20, 148, 156);
+    header[156] = 0x30;
+    header.write("ustar\0" + "00", 257, 8, "ascii");
+    const checksum = header.reduce((sum, byte) => sum + byte, 0);
+    header.write(checksum.toString(8).padStart(6, "0"), 148, 6, "ascii");
+    header[154] = 0;
+    header[155] = 0x20;
+    const padded = Buffer.alloc(Math.ceil(content.length / 512) * 512);
+    content.copy(padded);
+    parts.push(header, padded);
+  }
+  const archive = gzipSync(Buffer.concat([...parts, Buffer.alloc(1024)]));
   const inspected = inspectNpmArchiveBytes(archive);
-  const digestRows = inspected.rows.map(({ path, bytes, sha256 }) =>
-    ({ path, bytes, sha256 }));
-  const expectedRuntimeSha256 = deriveUpdateRuntimePayloadSha256(digestRows);
-  const root = join(installPrefix, "node_modules", "brain-installer");
-  assert.equal(lstatSync(join(root, "node_modules", ".bin", "xlsx")).isSymbolicLink(), true,
-    "npm must have materialized the bundled dependency executable shim being tested");
+  assert.deepEqual(inspected.rows.map(row => row.path).sort(), [...fixture.allowlist].sort(),
+    "the real archive parser must read every synthetic payload file");
+  const expectedRuntimeSha256 = deriveUpdateRuntimePayloadSha256(inspected.rows.map(({ path, bytes, sha256 }) =>
+    ({ path, bytes, sha256 })));
+  assert.equal(lstatSync(join(fixture.binDirectory, "tool")).isSymbolicLink(), true);
   const proof = verifyUpdateRuntimePayload({
-    root,
+    root: fixture.root,
     allowlist: inspected.rows.map(({ path }) => path),
     expectedRuntimeSha256,
     platform: "posix",
   });
   assert.equal(proof.runtime_payload_sha256, expectedRuntimeSha256);
   assert.equal(proof.file_count, inspected.rows.length);
-  assert.equal(proof.total_bytes,
-    inspected.rows.reduce((sum, row) => sum + row.bytes, 0));
-  assert.doesNotMatch(JSON.stringify(proof), /\.bin|xlsx|brain-real-install-parity/u);
+  assert.equal(proof.total_bytes, inspected.rows.reduce((sum, row) => sum + row.bytes, 0));
+  assert.equal(proof.verified_passes, 2);
+  assert.doesNotMatch(JSON.stringify(proof), /\.bin|@scope|tool\.mjs|runtime-fixture/u);
+  writeFileSync(join(fixture.root, "node_modules/@scope/tool/bin/tool.mjs"), "changed payload");
+  assert.throws(() => verifyUpdateRuntimePayload({
+    root: fixture.root, allowlist: fixture.allowlist, expectedRuntimeSha256, platform: "posix",
+  }), expectCode("UPDATE_PREVIEW_RUNTIME_PAYLOAD_MISMATCH"));
 });
 
 test("runtime platform selector is closed", (t) => {

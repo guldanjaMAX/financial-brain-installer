@@ -48,6 +48,20 @@ test('runtime receipt', t => {
   t.diagnostic(`Runtime ${process.version}; offline; fixed clock ${at(NOW)}`);
 });
 
+test('remote initialization and tool inventory retain supported measures and refuse cash flow', async () => {
+  const initialized = await rpc('initialize', {});
+  const inventory = await rpc('tools/list', {});
+  const ask = inventory.tools.find(tool => tool.name === 'ask');
+  assert.ok(ask && initialized.serverInfo, 'both metadata decision points returned');
+  for (const text of [initialized.instructions, ask.description]) {
+    assert.match(text, /profit, net income/);
+    assert.match(text, /Cash flow is unsupported/);
+    assert.match(text, /cash_flow_unsupported/);
+    assert.match(text, /no figure/);
+    assert.doesNotMatch(text, /profit, net income, cash flow/);
+  }
+});
+
 test('T01 control: healthy refusal retains candidates in remote text', async () => {
   let calls = 0;
   const reply = await call('ask', { question: 'What does the statement establish?' }, { think: async () => {

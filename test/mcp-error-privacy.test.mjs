@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,7 +17,7 @@ const keyFixtureOptions = home => process.platform === "win32"
 
 // Run the shipped entrypoint and credential-file reader, with transport replaced
 // before import. The canary is a synthetic body, never an argument or credential.
-function runFixture(t, fixture, { name = "brain_think", args = { q: "Synthetic record" } } = {}) {
+function runFixture(t, fixture, { name = "brain_think", args = { q: "Synthetic record" }, method = "tools/call" } = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "mcp-error-privacy-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home-fixture");
@@ -47,17 +47,33 @@ globalThis.fetch = async (url, init) => {
     if (process.env[name]) environment[name] = process.env[name];
   const run = spawnSync(process.execPath, ["--import", loader, MCP], {
     env: environment, encoding: "utf8", timeout: 15000,
-    input: JSON.stringify({ id: 11, jsonrpc: "2.0", method: "tools/call", params: { name, arguments: args } }) + "\n",
+    input: JSON.stringify({ id: 11, jsonrpc: "2.0", method, params: { name, arguments: args } }) + "\n",
   });
   assert.equal(run.status, 0, "the real MCP process completed");
   const replies = run.stdout.trim().split("\n").map(JSON.parse);
   assert.equal(replies.length, 1);
   assert.equal(replies[0].id, 11, "the RPC reply sink was reached");
-  const calls = readFileSync(join(root, "calls.txt"), "utf8").trim().split("\n");
-  assert.ok(calls.length >= 1, "the real authenticated transport reached the injected response");
+  if (method === "tools/call") {
+    const calls = readFileSync(join(root, "calls.txt"), "utf8").trim().split("\n");
+    assert.ok(calls.length >= 1, "the real authenticated transport reached the injected response");
+  } else assert.equal(existsSync(join(root, "calls.txt")), false, "metadata requires no transport");
   assert.doesNotMatch(run.stdout + run.stderr, /Synthetic private title|count=731|incidental private marker/);
   return replies[0].result;
 }
+
+test("stdio initialization and tool inventory describe the cash-flow refusal honestly", t => {
+  const initialized = runFixture(t, {}, { method: "initialize" });
+  const inventory = runFixture(t, {}, { method: "tools/list" });
+  const think = inventory.tools.find(tool => tool.name === "brain_think");
+  assert.ok(think && initialized.serverInfo, "both metadata decisions were reached");
+  for (const text of [initialized.instructions, think.description]) {
+    assert.match(text, /profit, net income/);
+    assert.match(text, /Cash flow is unsupported/);
+    assert.match(text, /cash_flow_unsupported/);
+    assert.match(text, /no figure/);
+    assert.doesNotMatch(text, /profit, net income, cash flow/);
+  }
+});
 
 for (const status of [400, 401, 403, 429, 503]) {
   test(`stdio HTTP ${status} retains status without relaying a private body`, t => {

@@ -346,6 +346,7 @@ import {
 } from "./operations/technician-setup.mjs";
 import { fetchBrainWithAdminKey, guardBrainAdminFetch, secureBrainRequestUrl } from "./components/brain-http.mjs";
 import { confidenceLine } from "./worker/src/lib/confidence.js";
+import { answerText as renderAnswerText } from "./worker/src/lib/answer-render.js";
 import {
   absenceUnproven, COVERAGE_INCOMPLETE, coverageIncompleteNotice,
   unavailableNotice,
@@ -4393,21 +4394,12 @@ export async function cmdAsk(manifestPath, options = {}) {
         : provisional
           ? coverageIncompleteNotice(false)
           : unavailableNotice(body.degraded))
-    : typeof body.answer === "string" && body.answer.trim()
-      ? body.answer.trim()
-      : "The documents do not answer the question.";
+    : renderAnswerText({ ...body, answer: typeof body.answer === "string" ? body.answer.trim() : null });
   console.log(`\n${answer}\n`);
-  // Trust metadata is a separate line by design: the answer string is a
-  // verbatim contract (the refusal scorer reads every clause of it), so the
-  // rubric score rides beside it rather than inside it. There is no rubric for
-  // an unavailable search: "how sure are we that nothing is recorded" has no
-  // answer when nothing was read.
-  // A refusal scores the support for this answer, never corpus-wide absence.
-  // Preserve the returned basis (including candidate count) without asking an
-  // older shared renderer to turn a refusal into a nothing-recorded claim.
-  const confidence = cannotSupportAbsence ? null : confidenceLine(body.confidence);
-  const refused = body.evidence_gate?.supported === false || /^The documents do not answer/i.test(answer);
-  const trust = refused && confidence ? confidence.replace(/^Confidence:/, "Confidence in this refusal:") : confidence;
+  // The response keeps the scorer's canonical answer; presentation scopes a
+  // refusal to this search. An incomplete search has no refusal percentage.
+  const refused = body.evidence_gate?.supported === false || typeof body.answer !== "string" || !body.answer.trim() || /^The documents do not answer/i.test(body.answer.trim());
+  const trust = cannotSupportAbsence ? null : confidenceLine(body.confidence, { refused });
   if (trust) console.log(`  ${c.dim(trust)}\n`);
   // Say WHY when the answer was refused or cut short. The gate already
   // records it; hiding it left the owner with one sentence that meant five
@@ -4415,7 +4407,7 @@ export async function cmdAsk(manifestPath, options = {}) {
   const gate = body.evidence_gate && typeof body.evidence_gate === "object" ? body.evidence_gate : null;
   const gateReason = gate && typeof gate.reason === "string" ? gate.reason.replace(/\s+/g, " ").trim().slice(0, 240) : "";
   if (gateReason && (gate.supported === false || gate.partial === true ||
-      provisional || /^The documents do not answer/i.test(answer))) {
+      provisional || refused)) {
     console.log(`  ${c.dim(gate.partial === true ? "Not covered" : "Why")}: ${gateReason}\n`);
   }
   if (body.answer_error) warn(`answer generation reported: ${String(body.answer_error).slice(0, 160)}`);

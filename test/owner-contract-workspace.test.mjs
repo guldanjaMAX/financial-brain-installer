@@ -28,8 +28,8 @@ const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
   "answer-contract-v1.md": "32f9b8e6c23347651b3246fa42d2f93aef9d4f291651e5b5b8425d84f46f39cf",
-  "money-rules-v3.md": "0f2172275905d0e000acb4d46ae71dcf5623c9c097f59935806772bc52edba2c",
-  "money-rules-v3-windows.md": "b82c90ae31e96ebaaeb2b98ccab6766c1f9c060bbdc9ebd9c510768f2c758056",
+  "money-rules-v3.md": "25d23c9214c74a05acdbdf6d44f35b62468a647a43d91f854d80d1ed3717824a",
+  "money-rules-v3-windows.md": "32d72c590be98bf8a00ac48085d6bdb6610b3567f042d63f3b40255799317394",
 };
 const options = { brainCliPath: resolve("/fixture/brain.mjs"), nodePath: process.execPath };
 const count = (text, part) => text.split(part).length - 1;
@@ -676,7 +676,14 @@ test("v3 menu expansions all reach the ledger parser", () => {
       }
     }
   }
-  assert.equal(checked, 64, "both complete menu expansions were checked");
+  // Cash flow is a bounded refusal, so it is no longer advertised as a
+  // supported menu measure. Profit and net income remain parser controls.
+  assert.equal(checked, 62, "both complete supported menu expansions were checked");
+  for (const measure of ["profit", "net income"]) {
+    assert.equal(classifyLedgerQuestion(`What was my ${measure} in September 2026?`, {
+      now: "2026-10-11T12:00:00Z",
+    }).kind, "totals");
+  }
 });
 
 test("Codex update requires a safe marker-owned sibling and current wiring proof", t => {
