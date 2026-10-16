@@ -767,14 +767,19 @@ candidate. Conflicting account kinds or explicit outside payees on both legs
 rule out the candidate. No provider transfer-link or owner-pair field currently
 exists. Pairing never changes stored rows. Money answers leave qualifying own
 moves out of the lead figures when both accounts are connected checking,
-savings or card accounts in scope; each leg affects only its own period. The
+savings or card accounts in scope and reciprocal directed references resolve
+uniquely to the owned counterparties. Customer, refund, income or outside-payee
+conflicts on either leg keep the pair counted. A connected card payment supports
+an exact directed outgoing reference plus an unconflicted "PAYMENT THANK YOU"
+acknowledgement. Each leg affects only its own period. The
 note offers "including transfers". A counterpart outside the question stays
 counted unless "excluding transfers" is requested. Loan and line-of-credit
 payments, contributions to investment or retirement accounts, and other
 account kinds stay with an explicit reason. Withdrawal inflows into move-kind
 accounts are excluded only by the exact case-insensitive category
 `TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS` (proposed or confirmed) or a pair
-from an investment or retirement account. A paired outgoing leg also leaves
+from an investment or retirement account that passes those same directed
+counterparty and conflict checks. A paired outgoing leg also leaves
 the lead when in scope. Description words never authorize withdrawal exclusion;
 "including withdrawals" restores it. A qualifying loan or line-of-credit advance
 into a selected checking, savings or card account also leaves both in-scope

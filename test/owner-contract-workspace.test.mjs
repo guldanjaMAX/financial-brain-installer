@@ -4,6 +4,10 @@ import {
   existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
   readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createProductFixture, seedOwnedEntity } from "../worker/test/product-contract-fixture.mjs";
+import { withLedgerAnswer } from "../worker/src/lib/ledger-answer.js";
+import { renderCopyableCommand, quotePosixArgument, quotePowerShellArgument } from "../operations/command-display.mjs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, win32 } from "node:path";
 import { test, mock } from "node:test";
@@ -24,8 +28,8 @@ const ACCOUNT_HEADING = "## My accounts (fill in once, after the owner confirms)
 const SAVE_HEADING = "## Financial Brain: at the end of a working session";
 const hashes = {
   "answer-contract-v1.md": "09f579cfd5a6fbbbb87af184779126c4c0381ac7351b145adc91c14de625dcba",
-  "money-rules-v3.md": "2e3d803ca7bd9648683732bd30cd83d41d2b587320282b616b4d9f9931347995",
-  "money-rules-v3-windows.md": "24a95478214c67e8afb4af974e8d7c481f36dae5f1f1478b5721327950e6acb3",
+  "money-rules-v3.md": "1a60d1be9e24c07a0fc14efaca4496fdff469fe76609e7593d71c5d090a3f58b",
+  "money-rules-v3-windows.md": "04c9995a4787828e304671b386055404fabc00e745f09396807786ff04213cd4",
 };
 const options = { brainCliPath: resolve("/fixture/brain.mjs"), nodePath: process.execPath };
 const count = (text, part) => text.split(part).length - 1;
@@ -60,8 +64,8 @@ function interposeGuideInstall(target, { before = () => {}, after = () => {} }) 
     return result;
   };
   for (const method of ["linkSync", "copyFileSync"]) fs[method] = (source, destination, ...args) => {
-    const installing = destination === target && (basename(source) === "ready" || basename(source).includes(".financial-brain-pending-"));
-    if (installing) before();
+    const installing = !claimed && destination === target && (basename(source) === "ready" || basename(source).includes(".financial-brain-pending-"));
+    if (installing) { claimed = true; before(); }
     const result = original[method](source, destination, ...args);
     if (installing) after();
     return result;
@@ -334,19 +338,23 @@ test("setup warns without failing for a damaged guide and every preserved or fai
   assert.equal(count(good.output, "Codex owner workspace ready"), 1);
 });
 
-async function update(t, { wired = ["Codex"], risky = false, createGuide = false } = {}) {
+async function update(t, { wired = ["Codex"], risky = false, createGuide = false, folder = "Financial Brain", platform = "darwin" } = {}) {
   const { root } = fixture(t);
-  const brainFolder = join(root, "Financial Brain");
+  const brainFolder = join(root, folder);
   mkdirSync(brainFolder);
   const manifest = join(brainFolder, "brain.manifest.json");
   const events = [], finish = [], messages = [], writes = [];
+  const keyFile = join(root, "fixture-admin-key");
+  writeFileSync(keyFile, ["synthetic", "fixture", "only"].join("-"), { mode: 0o600 });
   writeFileSync(manifest, JSON.stringify({
+    credentials: { admin_key: { backend: "file", path: keyFile } },
     client: { slug: "fixture" }, brain: { version: "0.4.7", domain: "brain.example.invalid" },
     infrastructure: { cloudflare: { account_id: "a".repeat(32), auth_profile: `financial-brain-${"b".repeat(24)}`, storage: "d1", d1_database_id: "11111111-2222-4333-8444-555555555555" } },
   }));
   if (createGuide) for (const [agent, file, marker] of writers.filter(([agent]) => createGuide !== "claude" || agent === "claude")) writeFileSync(join(brainFolder, file), `${marker}\n# Earlier guide\n`);
   const result = await cli.cmdUpdate(manifest, {
-    lifecycleLockHeld: true, home: root, platform: "darwin",
+    lifecycleLockHeld: true, home: root, platform,
+    dailyRefreshOptions: { platform: "linux", schedulerOptions: { home: root, launchctl: () => { throw new Error("unexpected scheduler"); } } },
     sessionFolder: join(root, risky ? "Desktop" : "work"),
     installedManifestOptions: { home: root, stateDirectory: join(root, "installed-state") },
     discoverInstalledManifest: () => ({ path: manifest, source: "explicit" }),
@@ -385,7 +393,7 @@ test("f/g: update refresh is gated on assistant proof, skips missing AGENTS, and
     "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.\n" +
     "In Claude Code type /exit, then claude --continue.\nThen ask: check my Brain.";
   const outsideClosing = (folder) => unchangedClosing.replace("In Claude Code type /exit, then claude --continue.",
-    `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: cd ${JSON.stringify(folder)} && claude. For Codex, open that same folder. The answer rules load there.`);
+    `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: cd ${quotePosixArgument(folder)} && claude. For Codex, open that same folder. The answer rules load there.`);
   assert.deepEqual(missing.finish, [outsideClosing(missing.root)]);
   assert.deepEqual(control.finish, [outsideClosing(control.root) + `\nNext time, open Claude Code (or Codex) in your Financial Brain folder, ${cli.displayPathForTesting(control.root, process.cwd())}. This conversation runs in your Desktop folder, which can be tidied away or synced.`]);
   const unverified = await update(t, { wired: [], createGuide: true });
@@ -441,16 +449,23 @@ test("atomic writer retains staging after write, fsync and rename failures with 
     const { root, manifest } = fixture(t);
     const target = join(root, filename);
     let reached = 0;
-    const replacement = mock.method(fs, method, () => { reached++; throw new Error("synthetic atomic failure"); });
+    const original = fs[method];
+    const replacement = mock.method(fs, method, (...args) => {
+      if (!reached) { reached++; throw new Error("synthetic atomic failure"); }
+      return original(...args);
+    });
+    let blocked;
     syncBuiltinESMExports();
     try {
-      assert.throws(() => write(manifest, options), /synthetic atomic failure/);
+      blocked = write(manifest, options);
+      assert.equal(blocked.status, "not_written");
       assert.equal(reached, 1, "the injected atomic failure point was reached");
       assert.equal(existsSync(target), false);
       assert.equal(readdirSync(root).filter((name) => name.endsWith(".tmp")).length, 0);
     } finally { replacement.mock.restore(); syncBuiltinESMExports(); }
-    assert.equal(write(manifest, options).status, "not_written", "retained lock requires explicit recovery");
-    assert.ok(readdirSync(`${target}.lock`).some(name => name.includes(".financial-brain-pending-")));
+    assert.equal(existsSync(`${target}.lock`), false, "pre-publication I/O failure releases its lock");
+    assert.ok(existsSync(blocked.pendingPath), "failed preparation is retained by name");
+    assert.equal(write(manifest, options).status, "written", "retry succeeds after the fault is removed");
     const control = fixture(t);
     assert.equal(write(control.manifest, options).status, "written");
     assertPrivateClean(control.root, join(control.root, filename));
@@ -462,7 +477,7 @@ test("Windows absolute locators retain their native spelling in the shared invoc
   const brainCliPath = "C:\\Program Files\\Brain\\brain.mjs";
   const nodePath = "C:\\Program Files\\Node\\node.exe";
   const guide = workspace.renderClaudeWorkspaceGuide(manifest, { platformName: "win32", brainCliPath, nodePath });
-  assert.ok(guide.includes(`${JSON.stringify(nodePath)} ${JSON.stringify(brainCliPath)}`));
+  assert.ok(guide.includes(renderCopyableCommand(nodePath, [brainCliPath], { platformName: "win32" })));
   assert.ok(guide.includes(manifest));
   assert.throws(() => workspace.renderClaudeWorkspaceGuide(manifest, { brainCliPath: "/fixture/unsafe\npath" }));
 });
@@ -470,7 +485,7 @@ test("Windows absolute locators retain their native spelling in the shared invoc
 test("atomic writer retains the pending file when closing it fails", (t) => {
   const { root, manifest } = fixture(t);
   const originalClose = fs.closeSync;
-  let closes = 0;
+  let closes = 0, blocked;
   const replacement = mock.method(fs, "closeSync", (fd) => {
     closes++;
     originalClose(fd);
@@ -478,12 +493,14 @@ test("atomic writer retains the pending file when closing it fails", (t) => {
   });
   syncBuiltinESMExports();
   try {
-    assert.throws(() => workspace.writeClaudeWorkspaceGuide(manifest, options));
+    blocked = workspace.writeClaudeWorkspaceGuide(manifest, options);
+    assert.equal(blocked.status, "not_written");
     assert.ok(closes > 0, "the temporary-file close decision was reached");
     assert.equal(readdirSync(root).filter((name) => name.endsWith(".tmp")).length, 0);
   } finally { replacement.mock.restore(); syncBuiltinESMExports(); }
-  assert.equal(workspace.writeClaudeWorkspaceGuide(manifest, options).status, "not_written");
-  assert.ok(readdirSync(join(root, "CLAUDE.md.lock")).some(name => name.includes(".financial-brain-pending-")));
+  assert.equal(existsSync(join(root, "CLAUDE.md.lock")), false);
+  assert.ok(existsSync(blocked.pendingPath));
+  assert.equal(workspace.writeClaudeWorkspaceGuide(manifest, options).status, "written");
   const control = fixture(t);
   assert.equal(workspace.writeClaudeWorkspaceGuide(control.manifest, options).status, "written");
   assertPrivateClean(control.root, join(control.root, "CLAUDE.md"));
@@ -573,6 +590,8 @@ for (const [assistant, filename, marker, write] of writers) test(`R7 short masks
 });
 
 test("R2/R5 installed money rules use the Brain lead and preserve the parser menu", () => {
+  const resolving = name => template(name).split("## Resolving account nicknames\n")[1].split("## Profit, net income, cash flow")[0];
+  assert.equal(resolving("money-rules-v3.md"), resolving("money-rules-v3-windows.md"), "shared account guidance is byte-aligned");
   for (const platformName of ["darwin", "win32"]) {
     const rules = workspace.renderOwnerRulesSection({ platformName });
     assert.match(rules, /Financial Brain 0\.4\.17/);
@@ -618,7 +637,7 @@ test("m6/m11 workspace fallback uses the exact installed invocation and manifest
   workspace.writeClaudeWorkspaceGuide(manifest, options);
   const text = readFileSync(join(folder, "CLAUDE.md"), "utf8");
   const fallback = text.split("## If brain_think gives no answer")[1].split("## Hard rules")[0];
-  assert.ok(fallback.includes(`${JSON.stringify(options.nodePath)} ${JSON.stringify(options.brainCliPath)} ask ${JSON.stringify(manifest)}`));
+  assert.ok(fallback.includes(`${renderCopyableCommand(options.nodePath, [options.brainCliPath])} ask ${quotePosixArgument(manifest)}`));
   assert.doesNotMatch(fallback, /ls -d|sort -V|\$HOME/);
 });
 
@@ -1189,4 +1208,131 @@ test("R4 blocked refresh reports the pending file by name", () => {
     writeCodexWorkspaceGuide: () => ({ status: "written" }), reportOk: () => successes++,
   });
   assert.equal(successes, 1, "uncontested refresh still reports success");
+});
+
+for (const [assistant, filename, marker, write] of writers) for (const fault of [false, true]) test(`R5 replacement write failure preserves active guide: ${assistant} ${fault}`, t => {
+  const { root, manifest } = fixture(t), target = join(root, filename);
+  const before = `${marker}\n${workspace.renderOwnerRulesSection({ assistant, accountLines: ACCOUNTS })}`;
+  writeFileSync(target, before);
+  const original = fs.writeFileSync; let writes = 0, reached = 0;
+  fs.writeFileSync = (file, ...args) => {
+    if (typeof file === "number" && ++writes === 2) {
+      reached++;
+      if (fault) throw Object.assign(new Error("synthetic write failure"), { code: "ENOSPC" });
+    }
+    return original(file, ...args);
+  };
+  syncBuiltinESMExports();
+  const warnings = [], successes = [];
+  let result;
+  try { result = (assistant === "codex" ? cli.refreshCodexWorkspaceGuideAfterUpdate : cli.refreshClaudeWorkspaceGuideAfterUpdate)(manifest, {
+    ...options, verifiedCodexWiring: true, reportWarning: text => warnings.push(text), reportOk: text => successes.push(text),
+  }); } finally { fs.writeFileSync = original; syncBuiltinESMExports(); }
+  assert.equal(reached, 1, "real replacement content write reached after initial staging");
+  if (fault) {
+    assert.equal(readFileSync(target, "utf8"), before, "the previous active guide remains byte-identical and readable");
+    assert.equal(existsSync(`${target}.lock`), false, "ordinary I/O failure releases the refresh lock");
+    assert.equal(result.status, "not_written");
+    assert.equal(successes.length, 0);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /not written/i);
+    assert.ok(result.pendingPath || result.recoveryPath);
+    const recovery = result.pendingPath || result.recoveryPath;
+    assert.ok(existsSync(recovery));
+    assert.ok(warnings[0].includes(cli.displayPathForTesting(recovery, process.cwd())));
+    assert.equal(write(manifest, options).status, "written", "retry can refresh after the fault is removed");
+  } else {
+    assert.equal(result.status, "written");
+    assert.equal(successes.length, 1);
+    assert.equal(warnings.length, 0);
+    for (const line of ACCOUNTS) assert.ok(readFileSync(target, "utf8").includes(line));
+    assert.equal(write(manifest, options).status, "verified");
+  }
+});
+
+const shellEnv = root => ({ HOME: root, PATH: "/usr/bin:/bin", BRAIN_NO_WRANGLER_LOGIN: "1", BRAIN_R5_ARGV_PROBE: "1" });
+for (const suffix of ["ordinary space", "$UNSET_FIXTURE", "$(printf SUBSTITUTED)", "owner's ; folder"]) for (const location of ["manifest", "executable", "runtime"]) {
+  test(`R5 literal fallback: ${location} ${suffix}`, { skip: process.platform === "win32" }, t => {
+    const { root } = fixture(t), folder = join(root, suffix); mkdirSync(folder);
+    const manifest = join(location === "manifest" ? folder : root, "brain.manifest.json");
+    const recorder = join(location !== "manifest" ? folder : root, "argument-recorder");
+    writeFileSync(recorder, '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o700 });
+    const opts = { brainCliPath: location === "runtime" ? join(root, "entry.mjs") : recorder, nodePath: location === "runtime" ? recorder : null, platformName: "darwin" };
+    const result = workspace.writeCodexWorkspaceGuide(manifest, opts);
+    assert.equal(result.status, "written");
+    const command = readFileSync(result.path, "utf8").match(/## If brain_think gives no answer\n[^\n]+\n`([^`]+)`/)[1];
+    const child = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", env: shellEnv(root) });
+    assert.equal(child.status, 0, "emitted invocation reaches the argument recorder");
+    const argv = child.stdout.trimEnd().split("\n");
+    assert.equal(argv[location === "runtime" ? 1 : 0], "ask", "command decision point reached");
+    assert.equal(argv.at(-1), manifest, "manifest is literal");
+    if (location === "runtime") assert.equal(argv[0], opts.brainCliPath, "script is literal");
+  });
+}
+
+test("R5 backtick locators are refused before a guide is written", t => {
+  const { root, manifest } = fixture(t);
+  for (const opts of [{ brainCliPath: join(root, "`printf substituted`") }, { nodePath: join(root, "`printf substituted`") }]) {
+    assert.throws(() => workspace.writeCodexWorkspaceGuide(manifest, { ...options, ...opts }), /not safe/);
+    assert.equal(existsSync(join(root, "AGENTS.md")), false);
+  }
+  assert.throws(() => workspace.writeCodexWorkspaceGuide(join(root, "`printf substituted`"), options), /not safe/);
+  assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "written");
+});
+
+for (const platform of ["darwin", "win32"]) test(`R5 literal restart and supported shell: ${platform}`, async t => {
+  const result = await update(t, { platform, folder: "Reserve $fund owner's ; folder" });
+  assert.equal(result.finish.length, 1, "verified update emits restart guidance");
+  const command = result.finish[0].match(/run: (.+)\. For Codex/)[1];
+  assert.ok(command.includes("claude"));
+  if (platform === "win32") {
+    assert.doesNotMatch(command, /&&|\|\|/);
+    assert.ok(command.includes(quotePowerShellArgument(result.root)));
+    assert.match(command, /Set-Location -LiteralPath .* -ErrorAction Stop/);
+  } else {
+    const cd = command.replace(/ && claude$/, "");
+    const child = spawnSync("/bin/sh", ["-c", `${cd} && pwd`], { encoding: "utf8", env: shellEnv(result.root) });
+    assert.equal(child.status, 0);
+    assert.equal(child.stdout.trim(), result.root);
+  }
+  const control = await update(t, { platform });
+  assert.ok(control.finish[0].includes("claude"));
+});
+
+test("R5 unknown kind remains a connected account in both owner templates", async t => {
+  const f = await createProductFixture(); t.after(() => f.close());
+  seedOwnedEntity(f, "owner", "Fixture owner");
+  f.raw("INSERT INTO fin_accounts (account_slug,entity_slug,account_kind,balance_role,mask,feed_mode,provenance,basis_state,recorded_at) VALUES ('one','owner','other','asset','6842','live','owner_stated','confirmed','2028-04-15')");
+  f.raw("INSERT INTO fin_balance_snapshots (account_slug,as_of_date,current_minor,provenance,basis_state,recorded_at) VALUES ('one','2028-04-14',48231,'owner_stated','confirmed','2028-04-15')");
+  async function ask(question) {
+    const before = f.seen.sql.length;
+    const response = await withLedgerAnswer({ env: f.env, question, now: "2028-04-15T12:00:00Z", grantScope: { all: true }, scopePrincipalKind: "owner" }, async () => Response.json({ answer: null, gaps: [] }));
+    assert.ok(f.seen.sql.length > before, "account selection reaches SQL");
+    return response.json();
+  }
+  assert.equal((await ask("What are my account balances?")).ledger.accounts[0].current_minor, 48231);
+  assert.equal((await ask("What are my card account balances?")).gaps[0].reason, "no_accounts");
+  f.raw("UPDATE fin_accounts SET account_kind='card', balance_role='liability'");
+  assert.equal((await ask("What are my card account balances?")).ledger.accounts[0].current_minor, 48231, "classified card control");
+  const resolving = name => template(name).split("## Resolving account nicknames\n")[1].split("## Profit, net income, cash flow")[0];
+  assert.equal(resolving("money-rules-v3.md"), resolving("money-rules-v3-windows.md"), "shared account guidance is byte-aligned");
+  for (const platformName of ["darwin", "win32"]) {
+    const rules = workspace.renderOwnerRulesSection({ platformName });
+    assert.match(rules, /kind not reported/);
+    assert.doesNotMatch(rules, /means no account of that kind is connected|That account is not connected to your Brain/);
+    assert.match(rules, /may be connected under another type/);
+    assert.match(rules, /My accounts or this conversation/);
+  }
+});
+
+test("R5 PowerShell locators use literal arguments for the runtime, script and manifest", () => {
+  const manifest = "C:\\Users\\owner\\Reserve $fund's ; $(fixture)\\brain.manifest.json";
+  const brainCliPath = "C:\\Brain $fund's ; $(fixture)\\entry.mjs", nodePath = "C:\\Runtime $fund's ; $(fixture)\\node.exe";
+  const guide = workspace.renderClaudeWorkspaceGuide(manifest, { platformName: "win32", brainCliPath, nodePath });
+  const expected = `${renderCopyableCommand(nodePath, [brainCliPath], { platformName: "win32" })} ask ${quotePowerShellArgument(manifest)}`;
+  assert.ok(guide.includes(expected), "actual guide renders the full installed invocation");
+  assert.ok(expected.startsWith("& '"));
+  assert.ok(expected.includes("fund''s"));
+  const control = workspace.renderClaudeWorkspaceGuide("C:\\Brain\\brain.manifest.json", { platformName: "win32", brainCliPath: "C:\\Brain\\entry.mjs" });
+  assert.ok(control.includes("& 'C:\\Brain\\entry.mjs'"));
 });

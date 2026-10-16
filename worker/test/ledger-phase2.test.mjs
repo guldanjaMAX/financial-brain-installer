@@ -119,7 +119,7 @@ test("merchant tokens are contiguous and category proposals and Unsorted stay ex
   assert.equal(breakdown.ledger.groups.filter(g => g.category === "software").length, 2);
 });
 
-test("transfer candidates leave the lead; gross figures and near misses stay explicit", async t => {
+test("directed transfers leave the lead; advisory pairs and near misses stay explicit", async t => {
   const f = await fixture(t);
   f.add("out", "2026-09-15", 10001, "outflow", "TRANSFER TO account 2222");
   f.add("in", "2026-09-18", 10001, "inflow", "Fixture bank", "TRANSFER_IN_ACCOUNT_TRANSFER", "proposed", "account-b");
@@ -128,6 +128,10 @@ test("transfer candidates leave the lead; gross figures and near misses stay exp
   f.add("date-out", "2026-09-01", 30001, "outflow", "TRANSFER TO account 2222");
   f.add("date-in", "2026-09-05", 30001, "inflow", "TRANSFER FROM account 1111", null, null, "account-b");
   f.add("expense", "2026-09-16", 77);
+  const advisory = await f.ask("How much money came in and went out in September 2026?");
+  assert.equal(advisory.ledger.candidate_transfer_count, 1, "advisory pair reaches the lead decision");
+  assert.equal(advisory.ledger.default_exclusions.own_transfer_minor, 0, "one direction and a generic category do not prove the counterparty");
+  f.raw("UPDATE fin_transactions SET description='TRANSFER FROM account 1111' WHERE txn_uid='in'");
   const changes = f.sqlite.prepare("SELECT total_changes() n").get().n;
   const totals = await f.ask("How much money came in and went out in September 2026?");
   assert.equal(sumAccounts(totals, "debits_minor"), 60080);

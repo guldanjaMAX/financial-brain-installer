@@ -1,7 +1,7 @@
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
-import { categoryFor, detectRecurring, isLoanAdvance, matchesCategory, matchesMerchant, merchantFor, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
+import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, merchantFor, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
 
 const masked = account => /^\d{1,4}$/.test(account.mask || "") ? `account ****${account.mask}` : "account (mask unavailable)";
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
@@ -74,6 +74,10 @@ function leadExclusions(rows, pairs, selected, bySlug, intent) {
     if (![pair.out, pair.in].some(row => inAnswer.has(row.id))) continue;
     const outKind = kind(pair.out), inKind = kind(pair.in);
     const bothInScope = selected.has(pair.out.effective_account_slug) && selected.has(pair.in.effective_account_slug);
+    if ((moveKind(outKind) || withdrawalKind(outKind)) && moveKind(inKind) && !isDirectedOwnedTransfer(pair, bySlug)) {
+      keptPairs.set(pair, "counterparty evidence is insufficient or conflicting, kept in the figures");
+      continue;
+    }
     if (moveKind(outKind) && moveKind(inKind)) {
       if (intent.ownTransfers !== "include" && (bothInScope || intent.ownTransfers === "exclude")) {
         omit(pair.out); omit(pair.in); ownPairs.push(pair);

@@ -29015,7 +29015,7 @@ export async function refreshOwnerAssistantConnectionsAfterUpdate(
 }
 
 function workspaceGuideNotWrittenWarning(filename, result) {
-  return `The ${filename} guide was not written because its folder or file changed, or another refresh holds its lock. ` +
+  return `The ${filename} guide was not written because a local write failed, its folder or file changed, or another refresh holds its lock. ` +
     (result.pendingPath ? `The staged guide is retained at ${displayPath(result.pendingPath)}. ` : "") +
     (result.recoveryPath ? `The earlier file is retained for recovery at ${displayPath(result.recoveryPath)}. ` : "") +
     "Review the local guide before retrying its refresh.";
@@ -30779,7 +30779,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     ] : []),
     "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.",
     sessionFolderLabel
-      ? `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: cd ${JSON.stringify(dirname(pin.target))} && claude. For Codex, open that same folder. The answer rules load there.`
+      ? `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: ${(options.platformName ?? options.platform ?? process.platform) === "win32" ? `Set-Location -LiteralPath ${quotePowerShellArgument(dirname(pin.target))} -ErrorAction Stop; claude` : `cd ${quotePosixArgument(dirname(pin.target))} && claude`}. For Codex, open that same folder. The answer rules load there.`
       : "In Claude Code type /exit, then claude --continue.",
     "Then ask: check my Brain.",
     ...(sessionFolderLabel && sessionFolderLabel !== "another folder" ? [

@@ -28,7 +28,7 @@ const MCP = fileURLToPath(new URL("../components/brain-mcp.mjs", import.meta.url
 const ABSENCE = 'No match in this search. Say "I didn\'t find a matching record in this search", name what you searched, and name the next search you would run (another source, a wider date window, sort "newest", or a distinctive name or number). Do not turn one search into a claim that no such record exists. Do not substitute inference.';
 const NO_HITS = 'No hits in this search. This is not proof that no such record exists. Say "I didn\'t find a matching record in this search" and name the next search you would run.';
 const SCOPED_GAP = "No match in this search. This is not proof that no such record exists.";
-const REFUSAL = "I didn't find a matching record in this search. Next, search the subject in another source or a wider date window.";
+const REFUSAL = "I didn't find a matching record in this search. Next, search with alternate subject terms or a distinctive name or number. Remote search is relevance-ranked and cannot filter or sort by date.";
 const PRESERVE = "Preserve the ledger answer's exact amounts, account masks, dates, and coverage bounds.";
 const LATEST = 'Before any status, "latest", or absence claim, run one brain_search for the subject with sort "newest", read newest_record, and say "as of <record date>" for the record you relied on.';
 const MONEY = "For a money question the bank ledger answers (a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, cash flow, withdrawals, loan proceeds), use brain_think: it reads the ledger directly. Keep its exact amounts, account masks, dates and coverage bounds.";
@@ -575,12 +575,12 @@ await test("remote descriptions and initialize route money and newest-record rea
   assert.match(search, /^Default tool for questions about the owner's records\./);
   assert.match(search, /newest_record/);
   assert.match(search, /among the results this search returned/);
-  assert.match(search, /recent date window/);
-  assert.match(search, /Before any status, "latest", or absence claim, fetch the newest matching record and rely on it or say why not\./);
+  assert.match(search, /does not support date bounds or sorting/);
+  assert.match(search, /Before any status, "latest", or absence claim, fetch the newest matching record returned here and state its date and these search limits\./);
   assert.ok(search.endsWith("Relay any provisional coverage note and do not turn an incomplete empty result into a corpus-wide absence claim."));
   const { instructions } = await rpc("initialize");
   assert.match(instructions, /ask is for money and short lookups/);
-  assert.match(instructions, /search, newest first, comes before any status or absence claim/);
+  assert.match(instructions, /relevance-ranked search and reading the returned records come before any status or absence claim/);
   assert.match(instructions, /a search with no match is not proof that no record exists/i);
   assert.equal(backendCalls, 0, "metadata never reads records");
 });
@@ -619,4 +619,23 @@ for (const status of ["coverage_incomplete", "search_unavailable"]) for (const t
   assert.doesNotMatch(out, /Fixture reliable|Candidate citation|Sources:|I found 1 record/);
   const control = await remoteCall({ ...payload, status: undefined, notice: undefined, results: [], citations: [] }, "ask");
   assert.ok(control.includes(detail));
+});
+
+await test("R5 remote search guidance matches its query-only schema", async () => {
+  const url = new URL("https://fixture.invalid/mcp"), calls = [];
+  const rpc = async (method, params = {}) => (await (await handleMcp({}, new Request(url, { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }), url, {
+    search: async body => { calls.push(body); return { results: body.q === "current status" ? [reliable] : [reliable, unreliable] }; },
+  })).json()).result;
+  const spec = (await rpc("tools/list")).tools.find(tool => tool.name === "search");
+  assert.deepEqual(Object.keys(spec.inputSchema.properties), ["query"]);
+  const plain = await rpc("tools/call", { name: "search", arguments: { query: "status" } });
+  const narrowed = await rpc("tools/call", { name: "search", arguments: { query: "current status" } });
+  assert.deepEqual(calls, [{ q: "status", limit: 10 }, { q: "current status", limit: 10 }]);
+  assert.equal(JSON.parse(plain.content[0].text).results.length, 2);
+  assert.equal(JSON.parse(narrowed.content[0].text).results.length, 1, "changed-query control changes retrieval");
+  assert.doesNotMatch(spec.description, /re-search the subject with a recent date window/);
+  assert.match(spec.description, /does not support date bounds or sorting/);
+  const { instructions } = await rpc("initialize");
+  assert.doesNotMatch(instructions, /search, newest first/);
+  assert.match(instructions, /relevance-ranked/);
 });

@@ -2108,16 +2108,20 @@ identities. An exclusive adjacent `.lock` directory serializes guide refreshes.
 A complete staged guide has a distinctive `AGENTS.md.financial-brain-pending-<id>`
 (or `CLAUDE.md` equivalent) name inside that directory. An existing guide is moved
 to `previous` and checked against its inspected inode, ownership, metadata and
-exact bytes. The destination is claimed with exclusive creation, then written
-through that descriptor and checked against its own inode and exact content.
-There is a brief missing-path interval and the new file can be observed before
-its write completes. A competing guide is never renamed over or unlinked.
-Any identity/content failure returns `not_written` without cleanup or restoration:
-the staged guide remains at `pendingPath`, any displaced original at
-`recoveryPath`, and a lock still present blocks retries, including verification.
-Review all retained files before explicit local recovery. A refusal after moving
-the original can leave the destination absent or partially written; it does not
-promise automatic restoration. Setup/update warnings name the retained paths.
+exact bytes. Both content writes and flushes finish before moving the original.
+An exclusive hard link publishes the complete replacement inode without replacing
+an editor's competing destination. After exact readback, only the private
+installation link is removed; the separate pending copy stays available.
+A preparation I/O failure keeps the active guide readable, returns `not_written`
+with its recovery locations, and releases the lock by retaining the whole attempt
+in a uniquely named directory. A later refresh can retry.
+There is still a brief missing-path interval during publication. Any identity or
+content failure returns `not_written` without cleanup or restoration: the staged
+guide remains at `pendingPath`, any displaced original at `recoveryPath`, and a
+lock still present blocks retries, including verification. Publication failures
+or concurrent edits after moving the original require explicit local recovery;
+setup/update warnings name the retained paths. No competing guide is unlinked
+or overwritten. Review all retained files before explicit local recovery.
 On an uncontested write the whole lock directory is moved to a unique
 `<guide>.financial-brain-retained-<id>` directory. Both staging and the original
 inode stay there, including after success, so an editor with an open original
@@ -2163,7 +2167,11 @@ counterpart within three days, mutually. Ambiguous candidates and unmatched
 hints remain counted and visible. Pairing never changes stored rows.
 
 Money answers lead with moves between connected checking, savings and card
-accounts left out when both accounts are in the question's scope. Each leg
+accounts left out when both accounts are in the question's scope and the pair
+has reciprocal directed references resolving to unique owned counterparties.
+Customer, refund, income and external-payee conflicts on either leg keep the
+amounts counted. A connected card payment may use an exact directed outgoing
+reference and the card's unconflicted "PAYMENT THANK YOU" acknowledgement. Each leg
 changes only its own answer period, even across a month boundary. A note offers
 "including transfers" to restore them. When the other account is outside the
 question, the payment stays and the note offers "excluding transfers". Loan and
@@ -2173,7 +2181,8 @@ remove a loan payment or contribution.
 
 An inflow into checking, savings or card is a withdrawal only when its category
 is `TRANSFER_IN_INVESTMENT_AND_RETIREMENT_FUNDS` (case-insensitive, proposed or
-confirmed), or a paired outgoing leg is in an investment or retirement account.
+confirmed), or a paired outgoing leg is in an investment or retirement account
+and the pair passes the same directed-counterparty and conflict checks.
 Withdrawals leave the lead income figure; the paired outgoing leg also leaves
 the lead when in scope. Description words alone never exclude a row. The note
 offers "including withdrawals". A qualifying loan or line-of-credit advance into

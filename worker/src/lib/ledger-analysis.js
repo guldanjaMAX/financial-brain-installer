@@ -64,42 +64,49 @@ function resolvesExactAccount(locator, other, accounts) {
   const candidates = [...accounts.values()].filter(account => (account.members || []).some(member =>
     (normalizeLedgerText(member.label) && text === normalizeLedgerText(member.label)) ||
     (/^\d{1,4}$/.test(member.mask || "") &&
-      new RegExp(`^(?:(?:account|acct|card|checking|savings|loan|line of credit) )?(?:ending (?:in )?)?${member.mask}$`).test(text))));
+      new RegExp(`^(?:(?:account|acct|card|checking|savings|loan|line of credit|investment|retirement) )?(?:ending (?:in )?)?${member.mask}$`).test(text))));
   return candidates.length === 1 && candidates[0] === other;
 }
 
-// An advisory match can be a customer receipt or refund mentioning an owned
-// loan. Removing income needs reciprocal, directed account evidence and no
-// conflicting attribution on either leg. Uncertain pairs stay in the lead.
-export function isLoanAdvance(pair, accounts) {
+// Advisory equal-amount matches are not enough to remove money. Both legs
+// must identify the unique owned counterparty without outside attribution.
+export function isDirectedOwnedTransfer(pair, accounts, { loanAdvance = false } = {}) {
   const outAccount = accounts.get(pair.out.effective_account_slug);
   const inAccount = accounts.get(pair.in.effective_account_slug);
   if (!outAccount || !inAccount || outAccount === inAccount ||
-      !["loan", "line_of_credit"].includes(outAccount.account_kind) ||
-      !["checking", "savings", "card"].includes(inAccount.account_kind) ||
       pair.out.direction !== "outflow" || pair.in.direction !== "inflow" ||
       pair.out.amount_minor <= 0 || pair.out.amount_minor !== pair.in.amount_minor ||
       pair.out.currency !== pair.in.currency) return false;
-  const directed = (row, other, direction) => {
+  const unconflicted = (row, other) => {
     const text = normalizeLedgerText(`${row.description || ""} ${row.payee || ""} ${row.category || ""}`);
-    if (/\b(?:customer|client|invoice|refund|refunded|reversal|reversed|reimbursement|chargeback)\b/.test(text) ||
-        /\b(?:income|revenue|sale|sales)\b/.test(text)) return false;
-    const payee = normalizeLedgerText(row.payee);
-    if (payee) {
-      // An external payee can mention an account too. Only an exact unique
-      // owner label or bare account locator resolves that conflicting evidence.
-      if (!resolvesExactAccount(row.payee, other, accounts)) return false;
-    }
-    if (conflictsWithAccountKind(row, other)) return false;
-    // Direction licenses a bare mask, but only the immediate, complete locator
-    // identifies its counterparty. Only the listed transfer channels may prefix
-    // that verb; arbitrary leading text cannot be treated as a channel. An
-    // outside sender followed by an owned mask, multiple alternatives, or
-    // unparsed memo text cannot establish an advance.
-    const clause = normalizeLedgerText(row.description).match(new RegExp(`^(?:(?:(?:online|automatic|mobile|internet) )?transfer|(?:loan |credit )?(?:advance|disbursement|proceeds)) ${direction} (.+)$`));
+    if (/\b(?:customer|client|invoice|refund|refunded|reversal|reversed|reimbursement|chargeback|income|revenue|sale|sales)\b/.test(text)) return false;
+    if (normalizeLedgerText(row.payee) && !resolvesExactAccount(row.payee, other, accounts)) return false;
+    return !conflictsWithAccountKind(row, other);
+  };
+  if (!unconflicted(pair.out, inAccount) || !unconflicted(pair.in, outAccount)) return false;
+  const directed = (row, other, direction) => {
+    // Only the complete immediate locator identifies the counterparty. A memo
+    // mentioning an account, multiple alternatives or an unknown prefix cannot.
+    const verb = loanAdvance
+      ? "(?:(?:(?:online|automatic|mobile|internet) )?transfer|(?:loan |credit )?(?:advance|disbursement|proceeds))"
+      : "(?:(?:(?:online|automatic|mobile|internet) )?transfer|payment)";
+    const clause = normalizeLedgerText(row.description).match(new RegExp(`^${verb} ${direction} (.+)$`));
     return Boolean(clause && resolvesExactAccount(clause[1], other, accounts));
   };
-  return directed(pair.out, inAccount, "to") && directed(pair.in, outAccount, "from");
+  if (!directed(pair.out, inAccount, "to")) return false;
+  if (directed(pair.in, outAccount, "from")) return true;
+  // A connected card's acknowledgement is a supported payment control. It
+  // still needs the uniquely directed outgoing leg and no conflicting payee.
+  return !loanAdvance && inAccount.account_kind === "card" &&
+    ["checking", "savings"].includes(outAccount.account_kind) &&
+    /^payment to /.test(normalizeLedgerText(pair.out.description)) &&
+    normalizeLedgerText(pair.in.description) === "payment thank you";
+}
+
+export function isLoanAdvance(pair, accounts) {
+  return ["loan", "line_of_credit"].includes(accounts.get(pair.out.effective_account_slug)?.account_kind) &&
+    ["checking", "savings", "card"].includes(accounts.get(pair.in.effective_account_slug)?.account_kind) &&
+    isDirectedOwnedTransfer(pair, accounts, { loanAdvance: true });
 }
 export function pairOwnTransfers(rows, accounts = new Map()) {
   const candidates = rows.filter(row => row.amount_minor > 0);

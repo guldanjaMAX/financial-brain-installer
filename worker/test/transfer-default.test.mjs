@@ -103,10 +103,13 @@ test("b: offered flip phrases round-trip through the classifier", async t => {
   }
 });
 
-test("c: equal unrelated amounts stay, one description change enables the pair", async t => {
+test("c: one description enables an advisory pair, reciprocal evidence enables exclusion", async t => {
   const f = await fixture(t, "unrelated");
   unchanged(await ask(f, Q.totals, "totals", 0), "unrelated", Q.totals);
   f.raw("UPDATE fin_transactions SET description='TRANSFER TO account 2222' WHERE txn_uid='same-out'");
+  const advisory = await ask(f);
+  assert.equal(advisory.ledger.transfers[0].excluded_from_lead, false, "outside customer remains counted");
+  f.raw("UPDATE fin_transactions SET description='TRANSFER FROM account 1111' WHERE txn_uid='same-in'");
   const control = await ask(f);
   assert.equal(control.ledger.transfers[0].excluded_from_lead, true);
   assert.equal(account(control, "1111").debits_minor, 4710);
@@ -541,3 +544,49 @@ for (const prefix of ["", "ONLINE ", "AUTOMATIC ", "MOBILE ", "INTERNET "]) {
     });
   }
 }
+
+// R5: advisory equal-amount pairs do not license lead exclusions.
+for (const kind of ["savings", "investment", "retirement"]) for (const arm of ["customer", "refund", "outside-out", "ambiguous", "undirected"]) {
+  test(`R5 cash and withdrawal evidence: ${kind} ${arm}`, async t => {
+    const f = await fixture(t, "plain");
+    f.account("other", "7351", kind);
+    f.add("pair-out", "2026-09-20", 62000, "outflow", arm === "customer" ? "Asset adjustment for account 1111" : "TRANSFER TO account 1111", null, null, "other");
+    f.add("pair-in", "2026-09-20", 62000, "inflow", arm === "customer" ? "Customer receipt" : arm === "refund" ? "TRANSFER FROM account 7351 REFUND" : arm === "undirected" ? "Adjustment mentioning account 7351" : "TRANSFER FROM account 7351");
+    if (arm === "customer") f.raw("UPDATE fin_transactions SET payee='Outside buyer' WHERE txn_uid='pair-in'");
+    if (arm === "outside-out") f.raw("UPDATE fin_transactions SET payee='Outside seller' WHERE txn_uid='pair-out'");
+    if (arm === "ambiguous") f.account("duplicate", "7351", "savings");
+    const flip = kind === "savings" ? "including transfers" : "including withdrawals";
+    for (const question of [Q.profit, Q.profit.replace("profit", "net income"), Q.profit.replace("profit", "cash flow"), Q.deposits]) {
+      const queryKind = question === Q.deposits ? "deposits" : "totals";
+      const body = await ask(f, question, queryKind);
+      const gross = await ask(f, flipQuestion(question, flip), queryKind);
+      assert.equal(body.ledger.candidate_transfer_count, 1, "advisory pair reaches exclusion decision");
+      assert.equal(body.ledger.default_exclusions.own_transfer_minor, 0);
+      assert.equal(body.ledger.default_exclusions.withdrawal_minor, 0);
+      assert.match(body.ledger.transfers[0].kept_reason, /counterparty evidence/);
+      if (queryKind === "deposits") {
+        assert.ok(body.ledger.lead_rows.some(row => row.account_mask === "1111" && row.amount_minor === 62000), "the receipt remains in the displayed deposits");
+        assert.deepEqual(body.ledger.lead_rows, gross.ledger.lead_rows);
+      }
+      else {
+        assert.equal(body.ledger.net_minor, gross.ledger.net_minor);
+        assert.equal(account(body, "1111").credits_minor, account(gross, "1111").credits_minor);
+      }
+      assert.equal(f.modelCalls, 0);
+    }
+    f.raw("UPDATE fin_accounts SET mask='9142' WHERE account_slug='duplicate'");
+    f.raw("UPDATE fin_transactions SET payee=NULL, description='TRANSFER TO account 1111' WHERE txn_uid='pair-out'");
+    f.raw("UPDATE fin_transactions SET payee=NULL, description='TRANSFER FROM account 7351' WHERE txn_uid='pair-in'");
+    const control = await ask(f, Q.profit);
+    assert.equal(control.ledger.default_exclusions[kind === "savings" ? "own_transfer_minor" : "withdrawal_minor"], 62000, "genuine directed transfer control excludes the same amount");
+  });
+}
+
+for (const scenario of ["own", "card", "investment", "retirement", "category-withdrawal"]) test(`R5 genuine exclusion control: ${scenario}`, async t => {
+  const f = await fixture(t, scenario), body = await ask(f, Q.profit, "totals", scenario === "category-withdrawal" ? 0 : 1);
+  const type = ["own", "card"].includes(scenario) ? "own_transfer_minor" : "withdrawal_minor";
+  assert.ok(body.ledger.default_exclusions[type] > 0);
+  const gross = await f.ask(flipQuestion(Q.profit, type === "own_transfer_minor" ? "including transfers" : "including withdrawals"));
+  assert.equal(gross.ledger.default_exclusions[type], 0);
+  assert.equal(f.modelCalls, 0);
+});

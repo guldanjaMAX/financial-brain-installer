@@ -178,6 +178,10 @@ test('N02: Generated with ChatGPT in the body is explicit generated authorship',
 
 test('N01 genuine own-account pair leaves the lead and remains in every gross view', async t => {
   const f = pairFixture(t);
+  const advisory = await ask(f);
+  assert.equal(advisory.ledger.candidate_transfer_count, 1, 'advisory pair reaches exclusion decision');
+  assert.equal(advisory.ledger.default_exclusions.own_transfer_minor, 0);
+  f.raw("UPDATE fin_transactions SET description='Transfer from account 4321' WHERE txn_uid='in'");
   const original = f.rows('SELECT * FROM fin_transactions');
   const before = f.seen.length, body = await ask(f);
   assert.ok(f.seen.slice(before).some(sql => sql.includes('JOIN fin_transactions')));

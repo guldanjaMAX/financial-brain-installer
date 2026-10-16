@@ -1,3 +1,4 @@
+import { renderCopyableCommand } from "../operations/command-display.mjs";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -395,7 +396,7 @@ test("setup can create an owner-only Claude workspace guide with locators but no
   const content = readFileSync(first.path, "utf8");
   assert.equal(first.status, "written");
   assert.ok(content.startsWith(CLAUDE_WORKSPACE_MARKER));
-  assert.ok(content.includes(`${JSON.stringify(safeNodePath)} ${JSON.stringify(safeBrainPath)}`));
+  assert.ok(content.includes(renderCopyableCommand(safeNodePath, [safeBrainPath])));
   assert.match(content, /claude --add-dir <approved-folder>/);
   assert.match(content, /folder .* off.*keeps every document and removes nothing/is);
   assert.match(content, /Never run .*ingest --path.*folder this Brain retired/is);
