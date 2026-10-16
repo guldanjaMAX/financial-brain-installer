@@ -123,8 +123,17 @@ export function createNativeWindowsBridgeAdapter({ spawn = spawnSync, environmen
   if (!win32.isAbsolute(String(systemRoot || ""))) throw repair();
   const env = { SystemRoot: systemRoot, ...(environment.WINDIR ? { WINDIR: environment.WINDIR } : {}) };
   const run = (exe, args) => {
-    try { return spawn(win32.join(systemRoot, "System32", exe), args, { encoding: args.includes("/XML") ? null : "utf8", windowsHide: true, env }); }
-    catch { throw repair(); }
+    let result;
+    try { result = spawn(win32.join(systemRoot, "System32", exe), args, {
+      encoding: args.includes("/XML") ? null : "utf8", windowsHide: true, env,
+      timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
+    }); } catch { throw repair(); }
+    if (!result || result.error || result.signal || result.status === null) {
+      const error = repair();
+      error.message = "The Windows bridge operation timed out or was interrupted; its outcome is unknown. Keep the recovery receipt and inspect the task before retrying.";
+      throw error;
+    }
+    return result;
   };
   const tasks = (args) => run("schtasks.exe", args);
   const names = () => {

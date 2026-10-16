@@ -10,6 +10,7 @@ import { renderCliCommands } from "../operations/cli-guidance.mjs";
 import { cmdDrain, cmdHealth, cmdRollback, cmdUpdate } from "../brain.mjs";
 import {
   buildDailyRefreshDefinition,
+  dailyRefreshUpdateTransactionPath,
   readDailyRefreshUpdateTransaction,
 } from "../operations/daily-refresh-scheduler.mjs";
 
@@ -296,7 +297,7 @@ function useRealPropagationDecisions(harness, { exhaustDrain = false } = {}) {
 }
 
 async function withFixture(run) {
-  const directory = mkdtempSync(join(tmpdir(), "daily-production-update-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "daily-production-update-")));
   const manifestPath = join(directory, "brain.manifest.json");
   writeFileSync(manifestPath, `${JSON.stringify(manifestFixture(), null, 2)}\n`);
   try {
@@ -486,14 +487,16 @@ test("real health and drain propagation retries restore only after bounded succe
   });
 });
 
-test("production native restore failure completes with visible daily attention and remains recoverable", async () => {
+test("production native restore failure rejects with visible daily recovery and remains recoverable", async () => {
   await withFixture(async ({ manifestPath }) => {
     const harness = productionHarness(manifestPath, { failRestore: true });
-    await cmdUpdate(manifestPath, harness.options);
+    await assert.rejects(cmdUpdate(manifestPath, harness.options), error => {
+      assert.match(error.message, /daily imports remain paused or unverified/i);
+      assert.match(error.message, /Daily recovery receipt:/);
+      return true;
+    });
     assert.equal(harness.state().enabled, false);
-    assert.equal(harness.finish.length, 1, "the verified Brain update reaches the attention footer");
-    assert.match(harness.finish[0], /Daily imports.*need attention/i);
-    assert.match(harness.finish[0], /remain paused|could not be verified/i);
+    assert.equal(harness.finish.length, 0, "incomplete update cannot print a success footer");
     assert.ok(harness.events.includes("schedule:true"), "the native restore decision was reached");
     assert.ok(readDailyRefreshUpdateTransaction(harness.plan.identity, {
       home: dirname(manifestPath), manifestPath, machineLockRoot: harness.machineLockRoot,
@@ -503,7 +506,7 @@ test("production native restore failure completes with visible daily attention a
   });
 });
 
-test("unavailable native schedule inspection does not abort a verified Brain update", async () => {
+test("unavailable native schedule inspection refuses before any remote update", async () => {
   await withFixture(async ({ manifestPath }) => {
     const harness = productionHarness(manifestPath);
     let inspectionCalls = 0;
@@ -513,16 +516,12 @@ test("unavailable native schedule inspection does not abort a verified Brain upd
       error.code = "DAILY_REFRESH_INSPECTION_UNKNOWN";
       throw error;
     };
-
-    await cmdUpdate(manifestPath, harness.options);
-    assert.equal(JSON.parse(readFileSync(manifestPath, "utf8")).brain.version, PRODUCT_VERSION,
-      "the real update path reached its committed version decision");
-    assert.equal(inspectionCalls, 1, "the attention arm reached native schedule inspection exactly once");
-    assert.ok(harness.events.includes("deploy:paused"), "the update crossed its first deployment decision");
-    assert.equal(harness.events.includes("schedule:false"), false,
-      "an unknown native schedule was neither assumed present nor mutated");
-    assert.equal(harness.finish.length, 1);
-    assert.match(harness.finish[0], /Daily imports.*need attention/i);
+    await assert.rejects(cmdUpdate(manifestPath, harness.options), /Daily imports could not be inspected/);
+    assert.equal(JSON.parse(readFileSync(manifestPath, "utf8")).brain.version, "0.4.7");
+    assert.equal(inspectionCalls, 1, "the unknown-state arm reached native inspection");
+    assert.equal(harness.events.includes("deploy:paused"), false);
+    assert.equal(harness.events.includes("schedule:false"), false, "unknown native state was never mutated");
+    assert.equal(harness.finish.length, 0);
   });
 });
 
@@ -787,10 +786,10 @@ test("Windows deletion failure keeps bridge disabled and recovers on the next ve
   await withFixture(async ({ manifestPath }) => {
     const harness = productionHarness(manifestPath);
     const native = attachBridge(harness, manifestPath, { tasks: [{}], failDelete: true });
-    await cmdUpdate(manifestPath, harness.options);
+    await assert.rejects(cmdUpdate(manifestPath, harness.options), /daily.*recovery|recovery.*daily/i);
     assert.ok(native.calls.some(({ args }) => args[0] === "/Delete"), "retirement decision reached native mutation");
     assert.equal(native.rows.get(BRIDGE_NAME).enabled, false);
-    assert.match(harness.finish[0], /Daily imports need attention/);
+    assert.equal(harness.finish.length, 0);
     const healthy = attachBridge(harness, manifestPath, { tasks: [{ enabled: false }] });
     await cmdUpdate(manifestPath, harness.options);
     assert.equal(healthy.rows.size, 0, "retry retires only the recorded bridge");
@@ -828,11 +827,11 @@ test("Windows bridge replacement after update is never deleted or re-enabled", a
         native.rows.get(BRIDGE_NAME).action = "replacement fixture action";
       }
     };
-    await cmdUpdate(manifestPath, harness.options);
+    await assert.rejects(cmdUpdate(manifestPath, harness.options), /daily.*recovery|recovery.*daily/i);
     assert.equal(replacements, 1, "the replacement reached the retirement boundary");
     assert.equal(native.rows.get(BRIDGE_NAME).action, "replacement fixture action");
     assert.deepEqual(native.mutations().map(({ args }) => args.at(-1)), ["/DISABLE"]);
-    assert.match(harness.finish[0], /Daily imports need attention/);
+    assert.equal(harness.finish.length, 0);
   });
 });
 
@@ -1432,3 +1431,243 @@ for (const recovery of ["restore", "retire"]) for (const timing of ["during-com"
     }
   });
 }
+
+for (const fault of ["preflight", "bookmark-capture", "bookmark-save", "dispatch"]) {
+  test(`S2 pre-mutation schedule restoration: ${fault}`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const h = productionHarness(manifestPath);
+      let preflight = 0, capture = 0, persist = 0, dispatch = 0;
+      const query = h.options.upgradeOptions.d1Query;
+      h.options.upgradeOptions.d1Query = async (...args) => {
+        if (args[2].includes("SELECT * FROM install_state")) {
+          preflight++;
+          if (fault === "preflight") throw new Error("fixture preflight failure");
+        }
+        return query(...args);
+      };
+      h.options.upgradeOptions.cf = async () => {
+        capture++;
+        if (fault === "bookmark-capture") throw new Error("fixture bookmark failure");
+        return { bookmark: "fixture-bookmark" };
+      };
+      h.options.upgradeOptions.saveUpgradeBookmark = () => {
+        persist++;
+        if (fault === "bookmark-save") throw new Error("fixture persistence failure");
+      };
+      h.options.upgradeOptions.cmdDeploy = async () => {
+        dispatch++;
+        throw new Error("fixture lost dispatch reply");
+      };
+      await assert.rejects(cmdUpdate(manifestPath, h.options));
+      assert.equal(preflight, 1, "the real install preflight was reached");
+      assert.ok(h.events.includes("schedule:false"), "native pause was reached");
+      assert.equal(capture, fault === "preflight" ? 0 : 1);
+      assert.equal(persist, ["preflight", "bookmark-capture"].includes(fault) ? 0 : 1);
+      assert.equal(dispatch, fault === "dispatch" ? 1 : 0);
+      assert.equal(h.state().enabled, fault !== "dispatch", "only proven non-dispatch permits restoration");
+      assert.equal(h.finish.length, 0);
+      const transaction = readDailyRefreshUpdateTransaction(h.plan.identity, {
+        home: dirname(manifestPath), manifestPath, machineLockRoot: h.machineLockRoot,
+      });
+      if (fault === "dispatch") assert.equal(transaction.remote_mutation_may_have_started, true);
+      else assert.equal(transaction, null, "exact prior schedule readback clears the fence");
+    });
+  });
+}
+
+test("S2 daily restore failure is incomplete and preserves a recovery location", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const h = productionHarness(manifestPath, { failRestore: true });
+    let failure;
+    try { await cmdUpdate(manifestPath, h.options); } catch (error) { failure = error; }
+    assert.ok(h.events.includes("acceptance"));
+    assert.ok(h.events.includes("schedule:true"), "restore decision was reached after acceptance");
+    assert.equal(h.state().enabled, false);
+    const transaction = readDailyRefreshUpdateTransaction(h.plan.identity, {
+      home: dirname(manifestPath), manifestPath, machineLockRoot: h.machineLockRoot,
+    });
+    assert.equal(transaction.phase, "recovery_required");
+    assert.ok(failure, "incomplete local restoration must reject");
+    assert.match(failure.message, /daily.*recovery|recovery.*daily/i);
+    assert.equal(h.finish.length, 0, "no ordinary Done footer");
+  });
+});
+
+test("S2 failed mandatory acceptance cannot claim normal operation or no loss", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const h = productionHarness(manifestPath);
+    let acceptance = 0;
+    h.options.upgradeOptions.cmdTest = async () => { acceptance++; throw new Error("fixture acceptance failure"); };
+    let failure;
+    try { await cmdUpdate(manifestPath, h.options); } catch (error) { failure = error; }
+    assert.equal(acceptance, 1);
+    assert.ok(h.events.includes("health:active-final"));
+    assert.ok(h.events.includes("deploy:active"));
+    assert.equal(h.state().enabled, false);
+    assert.match(failure.message, /full acceptance test/);
+    assert.ok(failure.message.includes(`Daily recovery receipt: ${dailyRefreshUpdateTransactionPath(h.plan.identity, { home: dirname(manifestPath) })}`));
+    assert.ok(failure.message.includes("D1 recovery receipt: fixture-verified-bookmark-receipt"));
+    assert.doesNotMatch(failure.message, /working normally|nothing was lost/i);
+    assert.equal(h.finish.length, 0);
+  });
+});
+
+for (const arm of ["empty", "after-empty-read", "during-upload", "already-paused", "interrupted", "stale-projection", "unreadable-state"]) {
+  test(`S2 bounded paused queue completion: ${arm}`, async () => {
+    await withFixture(async ({ manifestPath }) => {
+      const h = productionHarness(manifestPath);
+      let queued = arm === "already-paused" ? 1 : 0;
+      let paused = arm === "already-paused", bootstrap = 0, reads = 0, preparations = 0, interrupted = false;
+      let version = "0.4.7";
+      const events = [];
+      h.options.readUpdateBacklog = async () => ({ pending: queued, ...(paused ? { paused_for_upgrade: true } : {}) });
+      h.options.upgradeOptions.readUpdateBacklog = async () => {
+        reads++;
+        const receipt = { pending: queued, ...(paused ? { paused_for_upgrade: true } : {}) };
+        if (arm === "after-empty-read") queued = 1;
+        return receipt;
+      };
+      h.options.upgradeOptions.d1Query = async (_account, _db, sql, params) => {
+        if (sql.includes("sqlite_master")) return { results: [{ name: "install_state" }] };
+        if (sql.includes("SELECT * FROM install_state")) return { results: [{ product_version: version, schema_version: 54, client_slug: "fixture" }] };
+        if (sql.includes("vector_projection_status AS status")) {
+          preparations++;
+          if (arm === "unreadable-state") return { results: [] };
+          return { results: [{ status: arm === "stale-projection" ? "bootstrap_required" : queued ? "pending" : "verified", has_outbox: queued ? 1 : 0,
+            schema_version: 54, protocol: "bootstrap-v2" }] };
+        }
+        if (sql.includes("vector_drain_lease_owner")) return { results: [{ owner: null, expires_at: null, in_flight: 0 }] };
+        if (sql.includes("expected_vectors")) return { results: [{ expected_vectors: 1 }] };
+        if (sql.includes("UPDATE install_state SET last_upgraded_at")) version = params[1];
+        if (sql === "SELECT product_version FROM install_state WHERE id = 1") return { results: [{ product_version: version }] };
+        return { results: [] };
+      };
+      h.options.upgradeOptions.cmdDeploy = async (_path, opts) => {
+        paused = opts.pauseVectorDrainForUpgrade;
+        events.push(paused ? "pause-upload" : "active-upload");
+        if (paused && ["during-upload", "interrupted", "stale-projection", "unreadable-state"].includes(arm)) queued = 1;
+      };
+      h.options.upgradeOptions.cmdHealth = async (_path, opts) => {
+        events.push(`health:${opts.expectDrainMode}`);
+        if (opts.prepareProjectionReadiness) await opts.prepareProjectionReadiness();
+        if (opts.requireProjectionReady && queued) throw new Error("fixture queued projection");
+      };
+      h.options.upgradeOptions.cmdBootstrap = async (_path, opts) => {
+        bootstrap++;
+        if (queued > 0) {
+          assert.equal(opts.maxDurationMs, 15 * 60_000);
+          assert.equal(opts.maxRounds, 256);
+          await opts.beforeRequest();
+          await opts.afterRequest();
+          if (arm === "interrupted" && !interrupted) {
+            interrupted = true;
+            throw new Error("fixture completion interrupted");
+          }
+        }
+        assert.equal(paused, true, "completion never forces unpause");
+        events.push(`bootstrap:${queued}`);
+        queued = 0;
+        return { epoch: 1, total: 1, confirmed: 1, remaining: 0, rounds: 1, complete: true, vector_ready: true };
+      };
+      let failure;
+      try { await cmdUpdate(manifestPath, h.options); } catch (error) { failure = error; }
+      if (arm === "interrupted") {
+        assert.ok(failure);
+        assert.equal(queued, 1);
+        assert.equal(paused, true);
+        assert.equal(h.state().enabled, false);
+        assert.equal(readDailyRefreshUpdateTransaction(h.plan.identity, {
+          home: dirname(manifestPath), manifestPath, machineLockRoot: h.machineLockRoot,
+        }).remote_mutation_may_have_started, true);
+        failure = undefined;
+        try { await cmdUpdate(manifestPath, h.options); } catch (error) { failure = error; }
+      }
+      if (["stale-projection", "unreadable-state"].includes(arm)) {
+        assert.ok(preparations > 0, "state refusal decision was reached");
+        assert.ok(failure);
+        assert.equal(queued, 1, "refusal retains all accepted work");
+        assert.equal(bootstrap, 0);
+        assert.equal(events.includes("active-upload"), false);
+      } else {
+        assert.equal(failure, undefined, "an accepted pause-window queue has a supported completion path");
+        assert.equal(reads, arm === "interrupted" ? 2 : 1);
+        assert.ok(preparations > 0);
+        assert.ok(bootstrap >= 1);
+        if (arm !== "empty") assert.ok(events.includes("bootstrap:1"), "completion reached the nonempty queue");
+        assert.equal(queued, 0);
+        assert.equal(paused, false);
+        assert.equal(h.state().enabled, true);
+        assert.equal(h.finish.length, 1);
+      }
+    });
+  });
+}
+
+for (const operation of ["whoami", "/Query", "/Change", "/Delete"]) {
+  for (const timeout of [false, true]) test(`S2 bounded bridge ${operation}: timeout=${timeout}`, async () => {
+    await withFixture(async ({ directory, manifestPath }) => {
+      const { createNativeWindowsBridgeAdapter } = await import("../operations/windows-update-bridge.mjs");
+      const h = bridgeNativeHarness({ manifestPath, tasks: [{}] });
+      const calls = [];
+      const spawn = h.options.spawn;
+      const adapter = createNativeWindowsBridgeAdapter({ ...h.options, home: directory,
+        spawn: (command, args, child) => {
+          const op = command.endsWith("whoami.exe") ? "whoami" : args[0];
+          calls.push({ operation: op, timeout: child.timeout });
+          if (op === operation && timeout) return { status: null, error: Object.assign(new Error("fixture deadline"), { code: "ETIMEDOUT" }), signal: "SIGTERM" };
+          return spawn(command, args, child);
+        },
+      });
+      let failure;
+      try {
+        if (operation === "whoami") adapter.currentSid();
+        else {
+          const observed = adapter.read(BRIDGE_NAME);
+          if (operation === "/Change") adapter.setEnabled(BRIDGE_NAME, false, { expected: observed });
+          if (operation === "/Delete") adapter.remove(BRIDGE_NAME, { expected: observed });
+        }
+      } catch (error) { failure = error; }
+      assert.ok(calls.some(call => call.operation === operation));
+      if (timeout) assert.ok(calls.every(call => Number.isInteger(call.timeout) && call.timeout > 0 && call.timeout <= 60_000));
+      if (timeout) assert.ok(failure, "timeout retains recovery, never absent or successful");
+      else assert.equal(failure, undefined);
+    });
+  });
+}
+
+test("S2 unknown scheduler inspection stops before remote dispatch", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const h = productionHarness(manifestPath);
+    let reads = 0;
+    h.adapter.read = () => { reads++; throw Object.assign(new Error("fixture scheduler timeout"), { code: "DAILY_REFRESH_INSPECTION_UNKNOWN" }); };
+    let failure;
+    try { await cmdUpdate(manifestPath, h.options); } catch (error) { failure = error; }
+    assert.equal(reads, 1);
+    assert.ok(h.events.includes("verification"));
+    assert.ok(failure);
+    assert.equal(h.events.includes("deploy:paused"), false);
+    assert.equal(h.state().enabled, true);
+    assert.equal(h.finish.length, 0);
+  });
+});
+
+test("S2 active local ingest owns the update boundary until it releases custody", async () => {
+  await withFixture(async ({ manifestPath }) => {
+    const { acquireBrainLifecycleLock } = await import("../operations/brain-lifecycle-lock.mjs");
+    const h = productionHarness(manifestPath);
+    const lock = acquireBrainLifecycleLock({ manifestPath, operation: "ingest", platform: "win32", machineLockRoot: h.machineLockRoot });
+    h.options.lifecycleLockWaitMs = 0;
+    try {
+      await assert.rejects(cmdUpdate(manifestPath, h.options), error => {
+        assert.equal(error.code, "brain_lifecycle_busy", "the real lifecycle custody decision was reached");
+        return true;
+      });
+      assert.equal(h.events.length, 0);
+      assert.equal(h.state().enabled, true);
+    } finally { lock.release(); }
+    await cmdUpdate(manifestPath, h.options);
+    assert.ok(h.events.includes("deploy:paused"));
+    assert.ok(h.events.includes("acceptance"));
+    assert.equal(h.state().enabled, true);
+  });
+});

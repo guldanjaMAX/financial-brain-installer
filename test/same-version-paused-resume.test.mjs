@@ -304,12 +304,6 @@ function projectionStatus(brain) {
   return brain.db.prepare("SELECT vector_projection_status AS status FROM install_state WHERE id = 1").get().status;
 }
 
-const PAUSED_QUEUED_MESSAGE = (pending, consequence) => renderCliCommands(
-  `This Brain is still paused for an update that has not finished, and it has ${pending} queued search ` +
-    "update(s). A paused Brain does not process its queue, so waiting will not clear it, and this update will " +
-    `not continue over queued work. ${consequence} Do not run \`brain drain\` or clear VECTOR_DRAIN_MODE by hand. ` +
-    "Run `brain health` and keep its output for support.",
-);
 
 function upgradeStages(brain) {
   return brain.events.filter((event) => /^deploy:|^bootstrap$|^migrate$/u.test(event));
@@ -366,8 +360,12 @@ test("rollback with a corpus: both backlog gates resume, then the pre-migration 
     const run = await update(brain);
     assert.equal(brain.reads.backlog, 2);
     assert.doesNotMatch(run.error?.message || "", /not an earlier update|install that release/u);
-    assert.match(run.error?.message || "",
-      /^The update stopped partway\. Your Brain can still answer questions but won't take new documents until the update finishes\. Nothing was lost\. Run brain update once more\.\nIf it stops again at the same step, run brain support --preview and send us that note\.\n\nFor your installer:\n\s+update stopped during paused vector-drain health verification: Vectorize has accepted work that is not query-visible yet while this Brain is paused for an update\./u);
+    assert.ok(String(run.error?.message || "").startsWith(renderCliCommands(
+      "The update stopped partway with a confirmed pause upload. Document writes may still be paused; retrieval and acceptance have not been fully verified. Keep the recovery bookmark and run brain update once more.\n" +
+      "If it stops again at the same step, run brain support --preview and send us that note.\n\nFor your installer:\n" +
+      "      update stopped during paused vector-drain health verification: Vectorize has accepted work that is not query-visible yet while this Brain is paused for an update.",
+    )));
+    assert.doesNotMatch(run.error.message, /Nothing was lost|working normally/u);
     assert.deepEqual(upgradeStages(brain), ["deploy:paused-for-upgrade"]);
     assert.equal(brain.live.mode, "paused-for-upgrade");
     assert.equal(brain.manifestVersion(), PRODUCT_VERSION);
@@ -454,19 +452,21 @@ test("doctor --repair --yes resumes a Brain rollback left paused on this version
   }
 });
 
-test("a paused same-version Worker with 3 queued updates refuses truthfully at both gates", async () => {
+test("a paused same-version queue without bootstrap-v2 proof reaches custody and retains every row", async () => {
   const brain = installation();
   try {
     brain.live.mode = "paused-for-upgrade";
     queueVectorWork(brain.db, 3);
     const run = await update(brain);
-    assert.equal(run.error?.message, PAUSED_QUEUED_MESSAGE(3, "Nothing was changed."));
+    assert.match(run.error?.message || "", /the paused queue cannot be completed from this unverified projection state/u);
     assert.doesNotMatch(run.error?.message || "", /not an earlier update|install that release|few minutes/u);
-    // The decision point was reached: one real receipt was read and classified.
-    assert.equal(brain.reads.backlog, 1);
-    assert.deepEqual(brain.events, []);
+    // Both real receipts and the paused upload precede the protocol refusal.
+    assert.equal(brain.reads.backlog, 2);
+    assert.deepEqual(upgradeStages(brain), ["deploy:paused-for-upgrade"]);
+    assert.equal(brain.db.prepare("SELECT count(*) AS n FROM vector_outbox").get().n, 3);
 
     brain.reads.backlog = 0;
+    brain.events.length = 0;
     const forced = await quietly(() => cmdUpdate(brain.manifestPath, {
       discoverInstalledManifest: () => ({ path: brain.manifestPath, source: "remembered" }),
       readUpdateBacklog,
@@ -479,11 +479,11 @@ test("a paused same-version Worker with 3 queued updates refuses truthfully at b
       reconcileExistingOwnerAgents: null,
       writeClaudeWorkspaceGuideAfterUpdate: null,
     }));
-    assert.ok(String(forced.error?.message || "").includes(
-      PAUSED_QUEUED_MESSAGE(3, "The paused deployment was not started."),
-    ), forced.error?.message);
+    assert.match(forced.error?.message || "", /the paused queue cannot be completed from this unverified projection state/u);
     assert.equal(brain.reads.backlog, 2);
-    assert.equal(brain.events.some((event) => event.startsWith("deploy:")), false);
+    assert.deepEqual(upgradeStages(brain), ["deploy:paused-for-upgrade"]);
+    assert.equal(brain.db.prepare("SELECT count(*) AS n FROM vector_outbox").get().n, 3);
+    assert.equal(brain.live.mode, "paused-for-upgrade");
     assert.equal(brain.manifestVersion(), PRODUCT_VERSION);
   } finally {
     brain.close();

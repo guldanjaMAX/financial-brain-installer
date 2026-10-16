@@ -88,6 +88,7 @@ import {
   reconcileDailyRefreshSchedule,
   removeDailyRefreshSchedule,
   restoreDailyRefreshSchedule,
+  dailyRefreshUpdateTransactionPath,
   statusDailyRefreshSchedule,
 } from "./operations/daily-refresh-scheduler.mjs";
 import {
@@ -3158,23 +3159,32 @@ async function cmdDeployWithPrompts(manifestPath, options = {}) {
     // redeploy, one added by hand after a failure) is success, not a reason to
     // issue a PUT that can fail. This call was unconditional and died on a real
     // install where the cron had been added in the dashboard minutes earlier.
-    let existing = null;
-    try {
-      const current = await cf(`/accounts/${acct.id}/workers/scripts/${scriptName}/schedules`);
-      const crons = (current?.schedules || current || []).map((row) => String(row?.cron || ""));
-      if (crons.includes(schedule)) existing = schedule;
-    } catch {
-      existing = null; // unreadable is not "absent"; fall through to the PUT
+    const schedulePath = `/accounts/${acct.id}/workers/scripts/${scriptName}/schedules`;
+    const readSchedules = async () => {
+      const current = await cf(schedulePath);
+      const rows = Array.isArray(current) ? current : current?.schedules;
+      if (!Array.isArray(rows) || rows.some(row => !row || typeof row.cron !== "string" || !row.cron.trim())) {
+        throw new Error("the Worker schedule inventory is missing or unreadable");
+      }
+      return rows.map(row => row.cron);
+    };
+    let crons;
+    try { crons = await readSchedules(); } catch {
+      die("The Worker was uploaded, but its schedule inventory could not be verified. No schedules were replaced. Retry this same command after schedule access is available.");
     }
+    const existing = crons.includes(schedule);
     if (existing) {
       ok(`vector drain already scheduled (${schedule})`);
     } else {
       try {
-        await cf(`/accounts/${acct.id}/workers/scripts/${scriptName}/schedules`, {
-          method: "PUT",
-          body: [{ cron: schedule }],
-        });
-        ok(`vector drain scheduled (${schedule})`);
+        // The API replaces the entire collection. Retain every observed cron.
+        const desired = [...new Set([...crons, schedule])];
+        await cf(schedulePath, { method: "PUT", body: desired.map(cron => ({ cron })) });
+        const observed = await readSchedules();
+        if (!desired.every(cron => observed.includes(cron))) {
+          throw new Error("the required schedules did not read back after the write");
+        }
+        ok(`vector drain scheduled (${schedule}); schedule presence read back`);
       } catch (e) {
         const message = String(e.message || e);
         // The free plan allows everything up to this exact call. A client who
@@ -4392,9 +4402,12 @@ export async function cmdAsk(manifestPath, options = {}) {
   // rubric score rides beside it rather than inside it. There is no rubric for
   // an unavailable search: "how sure are we that nothing is recorded" has no
   // answer when nothing was read.
-  const trust = cannotSupportAbsence ? null : confidenceLine(body.confidence, {
-    refused: /^The documents do not answer/i.test(answer),
-  });
+  // A refusal scores the support for this answer, never corpus-wide absence.
+  // Preserve the returned basis (including candidate count) without asking an
+  // older shared renderer to turn a refusal into a nothing-recorded claim.
+  const confidence = cannotSupportAbsence ? null : confidenceLine(body.confidence);
+  const refused = body.evidence_gate?.supported === false || /^The documents do not answer/i.test(answer);
+  const trust = refused && confidence ? confidence.replace(/^Confidence:/, "Confidence in this refusal:") : confidence;
   if (trust) console.log(`  ${c.dim(trust)}\n`);
   // Say WHY when the answer was refused or cut short. The gate already
   // records it; hiding it left the owner with one sentence that meant five
@@ -6801,8 +6814,9 @@ export async function cmdUpgrade(manifestPath, options = {}) {
     }
 
     const startedAt = new Date().toISOString();
+    let bookmarkReceiptPath = null;
     try {
-      persistBookmark({
+      bookmarkReceiptPath = persistBookmark({
         account_id: accountId, database_id: dbId, bookmark,
         from_version: fromVersion, to_version: toVersion,
         manifest_sha256: createHash("sha256").update(originalPin.raw).digest("hex"),
@@ -6840,6 +6854,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
     // may stay paused, which is correct but must be explicit to the operator.
     let corpusPauseMayStillBeServing = false;
     let pauseUploadAcknowledged = false;
+    let activeWriterModeVerified = false;
     const runStage = async (name, action) => {
       stage = name;
       const context = await assertStageContext(name);
@@ -6888,7 +6903,8 @@ export async function cmdUpgrade(manifestPath, options = {}) {
             } catch (error) {
               dieWithSupportCode(updateBacklogUnreadableMessage(error, "pre-pause"), "UPDATE_BRAIN_BUSY");
             }
-            if (updateBacklogHasQueuedWork(immediateBacklog)) {
+            if (updateBacklogHasQueuedWork(immediateBacklog) &&
+                !(pausedQueueCanEnterCustodyChecks(immediateBacklog) && Number(before?.schema_version) >= 13)) {
               const refusal = new UpdateBacklogQueuedRefusal(
                 updateBacklogQueuedMessage(immediateBacklog, "pre-pause", options.initialUpdateBacklog ?? null),
               );
@@ -6916,11 +6932,38 @@ export async function cmdUpgrade(manifestPath, options = {}) {
             reachOnly: true,
             requireProjectionReady: true,
             prepareProjectionReadiness: Number(before?.schema_version || 0) >= 13
-              ? () => rebasePausedVerifiedProjection({
-                  accountId,
-                  databaseId: dbId,
-                  queryDatabase,
-                })
+              ? async () => {
+                  const context = { accountId, databaseId: dbId, queryDatabase };
+                  const cut = await rebasePausedVerifiedProjection(context);
+                  if (cut.reason !== "vector_work_queued") return cut;
+                  // The authenticated health boundary has already proved this
+                  // exact paused generation and backend. Only the existing v2
+                  // lease/receipt protocol may finish accepted pause-window
+                  // work here. Never enter the legacy row-supersession branch
+                  // or reinterpret a restore/rebuild state as an ordinary queue.
+                  const state = await queryDatabase(accountId, dbId,
+                    `SELECT vector_projection_status AS status, schema_version,
+                            vector_projection_bootstrap_protocol AS protocol
+                       FROM install_state WHERE id = 1`);
+                  const row = state?.results?.[0];
+                  if (state?.results?.length !== 1 || !Number.isSafeInteger(Number(row?.schema_version)) ||
+                      Number(row.schema_version) < 13 || row.protocol !== "bootstrap-v2" ||
+                      !["pending", "verified"].includes(row.status)) {
+                    throw new Error("the paused queue cannot be completed from this unverified projection state; keep its recovery checkpoint");
+                  }
+                  const completion = await bootstrapProjection(executionPin.target, {
+                    maxDurationMs: 15 * 60_000,
+                    maxRounds: 256,
+                    beforeRequest: () => assertStageFiles("paused queue completion request"),
+                    afterRequest: () => assertStageFiles("paused queue completion receipt"),
+                  });
+                  validateAcceleratedBootstrapCompletion(completion);
+                  const closed = await rebasePausedVerifiedProjection(context);
+                  if (closed.rebased !== true) {
+                    throw new Error("the paused queue changed during completion; keep the checkpoint and retry update");
+                  }
+                  return closed;
+                }
               : null,
           }));
         // A brain on the lease schema can be asked whether its writers are
@@ -6987,6 +7030,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
             reachOnly: true,
           }));
         corpusPauseMayStillBeServing = false;
+        activeWriterModeVerified = true;
       } else {
         await runStage("migration", () => {
           options.beforeRemoteMutation?.();
@@ -7072,9 +7116,11 @@ export async function cmdUpgrade(manifestPath, options = {}) {
           : "The database change is unconfirmed. Ask your installer to review the saved migration intent and exact database state before retrying."
         : corpusPauseMayStillBeServing
           ? pauseUploadAcknowledged
-            ? "The update stopped partway. Your Brain can still answer questions but won't take new documents until the update finishes. Nothing was lost. Run brain update once more."
+            ? "The update stopped partway with a confirmed pause upload. Document writes may still be paused; retrieval and acceptance have not been fully verified. Keep the recovery bookmark and run brain update once more."
             : "The pause upload did not return a confirmed result. Your Brain may be paused and unable to take new documents. Run brain health to check its state before retrying the update."
-          : "The update stopped before its last check. Your Brain is working normally and nothing was lost. Run brain update once more; it picks up where it stopped.";
+          : activeWriterModeVerified
+            ? "The update is incomplete. Active writer mode was verified, but all required checks did not finish. Retrieval and daily imports are not confirmed healthy. Keep the recovery bookmark and run brain update once more."
+            : "The update is incomplete. Final active-state and acceptance checks were not verified. Retrieval and daily imports are not confirmed healthy. Keep the recovery bookmark and run brain update once more.";
       const failureMessage =
         `${ownerRecovery}\n` +
           "If it stops again at the same step, run brain support --preview and send us that note.\n\n" +
@@ -7084,6 +7130,7 @@ export async function cmdUpgrade(manifestPath, options = {}) {
             ? `      ${error.migrationFirstReply}\n`
             : "") +
           `      D1 recovery bookmark: ${bookmark}\n` +
+          (typeof bookmarkReceiptPath === "string" ? `      D1 recovery receipt: ${bookmarkReceiptPath}\n` : "") +
           "      Do not restore it as the first response. A D1 restore discards newer writes.\n" +
           projectionRecovery +
           (slowMigration
@@ -22053,7 +22100,9 @@ export async function cmdSetup(manifestPath, options = {}) {
   }
   if (wired.includes("Claude Code") || wired.includes("Codex")) {
     const label = ownerSessionFolderLabel(target, options);
-    if (label) {
+    const brainFolderWarning = ownerBrainFolderWarning(target, options);
+    if (brainFolderWarning) warn(brainFolderWarning);
+    else if (label) {
       const nudge = `Open Claude Code (or Codex) in your Financial Brain folder: ${displayPath(dirname(resolve(target)))}. The answer rules load there.`;
       if (label === "another folder") info(nudge);
       else warn(`This conversation is running in ${label}, which can be tidied away or synced. ${nudge}`);
@@ -24825,6 +24874,11 @@ export async function readUpdateBacklog(manifestPath, options = {}) {
 /** A capped receipt is a lower bound, so it is never shown as an exact count. */
 function updateBacklogPendingLabel(backlog) {
   return backlog?.pending_is_capped === true ? "over 10,000" : String(backlog?.pending);
+}
+
+function pausedQueueCanEnterCustodyChecks(backlog) {
+  return backlog?.paused_for_upgrade === true && !backlog.legacy_worker_version &&
+    !backlog.drain_mode_unknown && !backlog.projection_recovery;
 }
 
 function updateBacklogHasQueuedWork(backlog) {
@@ -29026,6 +29080,19 @@ function damagedOwnerRulesWarning(path) {
     'Copy your "My accounts" lines aside, delete the section from its BEGIN line to its END line, then rerun setup to restore it.';
 }
 
+function ownerBrainFolderWarning(manifestPath, options) {
+  const folder = dirname(resolve(manifestPath));
+  const risk = classifySessionFolder(folder, {
+    home: options.home ?? options.installedManifestOptions?.home ?? homedir(),
+    platform: options.platformName ?? options.platform ?? process.platform,
+    brainFolder: folder,
+  });
+  if (!risk || risk.kind === "outside") return null;
+  const label = { desktop: "Desktop", downloads: "Downloads", synced: "cloud-synced storage" }[risk.kind];
+  return `The Brain folder itself is in ${label}. Its private account annotations can be tidied away or synced. ` +
+    "With the owner's approval, plan a move to a private local folder, preserve the manifest and owner notes, then repair and verify the saved manifest and assistant connections before using that folder. No files were moved or removed.";
+}
+
 function ownerSessionFolderLabel(manifestPath, options) {
   const risk = classifySessionFolder(options.sessionFolder ?? process.cwd(), {
     home: options.home ?? options.installedManifestOptions?.home ?? homedir(),
@@ -30297,7 +30364,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       }
     }
   }
-  if (updateBacklogHasQueuedWork(backlog)) {
+  if (updateBacklogHasQueuedWork(backlog) && !pausedQueueCanEnterCustodyChecks(backlog)) {
     if (!forceQueuedUpdate) {
       dieWithSupportCode(updateBacklogQueuedMessage(backlog, "initial"), updateBacklogQueuedSupportCode(backlog));
     }
@@ -30361,6 +30428,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
     let dailyTransactionOptions = null;
     let dailyTransactionActive = false;
     let resumingDailyRecovery = false;
+    let remoteMutationMayHaveStarted = false;
     let existingDailyTransaction = null;
     let dailyAuthorizedDefinition = null;
     let dailyReconciliation = { daily_definition: "pending", source_expectations: "pending" };
@@ -30413,14 +30481,9 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         if (bridgeInventory?.entries.length) {
           throw new Error("Check the daily tasks in Task Scheduler, then retry the update.");
         }
-        // A verified data-plane update does not need to reinterpret an unknown
-        // native task as absent. Leave it untouched and make the missing local
-        // proof visible; ownership collisions remain hard refusals.
-        warn("Daily imports need attention. Their Windows task could not be inspected, so it was not changed during this update.");
-        updateAttention.push(
-          "Daily imports need attention: their Windows task could not be inspected or verified. Run brain daily on <manifest> after Task Scheduler is available.",
-        );
-        dailyPlan = null;
+        // Unknown native state cannot prove either an absent task or a safe
+        // pause. Stop before remote dispatch and preserve the existing task.
+        throw new Error("Daily imports could not be inspected. Their state is unknown; the update did not start. Inspect Task Scheduler and retry the update.", { cause: error });
       }
       if (dailyStatus) {
       manageDailyDefinition = Object.hasOwn(beforeUpdateManifest?.operations || {}, "daily_refresh") ||
@@ -30430,6 +30493,8 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         throw new Error("this Brain has an update recovery fence, but this user has no verified schedule snapshot; imports remain paused");
       }
       resumingDailyRecovery = Boolean(existingDailyTransaction);
+      remoteMutationMayHaveStarted = existingDailyTransaction !== null &&
+        existingDailyTransaction.remote_mutation_may_have_started !== false;
       if (bridgeGuard) bridgeSnapshots = bridgeGuard.capture(bridgeInventory, existingDailyTransaction?.bridge_snapshots);
       dailySnapshot = existingDailyTransaction?.snapshot || (dailyStatus.installed
         ? Object.freeze({
@@ -30508,9 +30573,17 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
           ...(backlog ? { initialUpdateBacklog: backlog } : {}),
           beforeRemoteMutation: () => {
             if (dailyTransactionActive) persistDailyTransaction("paused", true);
+            remoteMutationMayHaveStarted = true;
           },
         },
       );
+      // A returned upgrade has crossed the mutation boundary even when an
+      // injected adapter omitted its dispatch callback. Final-state failure
+      // must never be reclassified as a pre-mutation refusal.
+      if (!remoteMutationMayHaveStarted) {
+        if (dailyTransactionActive) persistDailyTransaction("paused", true);
+        remoteMutationMayHaveStarted = true;
+      }
       if (manageAnyLocalSchedule) {
         const finalState = typeof options.dailyRefreshOptions?.verifyFinalUpdateState === "function"
           ? await options.dailyRefreshOptions.verifyFinalUpdateState(upgradeResult)
@@ -30524,20 +30597,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
         }
       }
     } catch (error) {
-      // These refusal codes are emitted before the writer pause or deployment
-      // mutation. Their old, exactly read schedule is therefore safe to put
-      // back. Any ambiguous or paused failure deliberately leaves it off.
-      if (!resumingDailyRecovery && (dailySnapshot || legacySnapshots.some((entry) => entry.snapshot?.exists)) &&
-          ["UPDATE_BRAIN_BUSY", "UPDATE_WAITING_FOR_INDEXING"].includes(error?.supportCode)) {
-        restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
-        if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
-        if (dailyTransactionActive && !bridgeSnapshots.length) {
-          clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
-          dailyTransactionActive = false;
-        }
-      } else if (dailyTransactionActive) {
-        persistDailyTransaction("recovery_required");
-      }
+      if (dailyTransactionActive) persistDailyTransaction("recovery_required");
       throw error;
     }
     if (dailyPlan) {
@@ -30627,16 +30687,43 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
               { cause: error },
             );
           }
-          warn("Daily imports need attention. The Brain update passed, but unattended imports remain paused or could not be verified.");
-          updateAttention.push(
-            "Daily imports need attention: they remain paused or could not be verified. Run brain update <manifest> again to complete verified recovery.",
-          );
+          die("The Brain's remote update passed its checks, but this update is incomplete: daily imports remain paused or unverified.\n" +
+            `Daily recovery receipt: ${dailyRefreshUpdateTransactionPath(dailyPlan.identity, dailyTransactionOptions)}\n` +
+            "Keep that receipt and the recovery fence. Run brain update <manifest> again to complete verified daily recovery.");
         } else {
           throw error;
         }
       }
     }
     } catch (error) {
+      // Covers every failure after a captured local snapshot, including pause,
+      // bookmark capture and persistence. Dispatch evidence is monotonic across
+      // retries; an old ambiguous attempt cannot borrow this attempt's refusal.
+      let provenPreMutation = !remoteMutationMayHaveStarted;
+      if (dailyTransactionActive) {
+        try {
+          provenPreMutation = provenPreMutation && readDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions)
+            ?.remote_mutation_may_have_started === false;
+        } catch { provenPreMutation = false; }
+      }
+      if (provenPreMutation && (dailySnapshot || legacySnapshots.some(entry => entry.snapshot?.exists))) {
+        try {
+          restoreExistingOwnedSchedulers(pin.target, legacySnapshots, options.dailyRefreshOptions || {});
+          if (dailySnapshot) restoreDailyRefreshSchedule(dailySnapshot, dailySchedulerOptions);
+          if (dailyTransactionActive && !bridgeSnapshots.length) {
+            clearDailyRefreshUpdateTransaction(dailyPlan.identity, dailyTransactionOptions);
+            dailyTransactionActive = false;
+          }
+        } catch (restoreError) {
+          if (dailyTransactionActive) persistDailyTransaction("recovery_required");
+          throw new Error(`${error.message} The prior daily schedule could not be restored exactly; keep its recovery receipt. ${restoreError.message}`, { cause: error });
+        }
+      } else if (dailyTransactionActive) {
+        persistDailyTransaction("recovery_required");
+      }
+      if (dailyTransactionActive && !String(error.message).includes("Daily recovery receipt:")) {
+        error.message += `\nDaily recovery receipt: ${dailyRefreshUpdateTransactionPath(dailyPlan.identity, dailyTransactionOptions)}`;
+      }
       if (bridgeGuard && bridgeSnapshots.length) {
         // Re-read the durable transaction, including on a fresh retry. A
         // current preflight refusal cannot undo an earlier ambiguous dispatch.
@@ -30770,6 +30857,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
   }
   const attention = [...new Set(updateAttention)];
   const sessionFolderLabel = ownerSessionFolderLabel(pin.target, options);
+  const brainFolderWarning = ownerBrainFolderWarning(pin.target, options);
   const closing = [
     `Done. Your Brain is now on version ${PRODUCT_VERSION} and passed its checks.`,
     ...(mailTransition ? [microsoftMailTransitionSummary(mailTransition)] : []),
@@ -30782,7 +30870,7 @@ async function cmdUpdateWithPrompts(manifestPath, options = {}) {
       ? `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: ${(options.platformName ?? options.platform ?? process.platform) === "win32" ? `Set-Location -LiteralPath ${quotePowerShellArgument(dirname(pin.target))} -ErrorAction Stop; claude` : `cd ${quotePosixArgument(dirname(pin.target))} && claude`}. For Codex, open that same folder. The answer rules load there.`
       : "In Claude Code type /exit, then claude --continue.",
     "Then ask: check my Brain.",
-    ...(sessionFolderLabel && sessionFolderLabel !== "another folder" ? [
+    ...(brainFolderWarning ? [brainFolderWarning] : sessionFolderLabel && sessionFolderLabel !== "another folder" ? [
       `Next time, open Claude Code (or Codex) in your Financial Brain folder, ${displayPath(dirname(pin.target))}. This conversation runs in ${sessionFolderLabel}, which can be tidied away or synced.`,
     ] : []),
   ].join("\n");
