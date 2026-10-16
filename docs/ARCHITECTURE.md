@@ -780,7 +780,10 @@ the lead when in scope. Description words never authorize withdrawal exclusion;
 into a selected checking, savings or card account also leaves both in-scope
 legs out of the lead. This requires reciprocal directed references to the owned
 accounts, equal amounts and no customer, refund, income or external-payee
-conflict on either leg. Advisory or ambiguous loan pairs stay counted;
+conflict on either leg. The immediate directed locator must resolve exactly to
+one owned account. Reciprocal bare masks are supported; an outside sender with
+a later account mention, multiple candidates, or unparsed trailing memo text
+does not establish an advance. Advisory or ambiguous loan pairs stay counted;
 "including loan proceeds" restores proven advances. The unchanged gross sentences always
 remain visible. Lead lines use "money in"/"money out" so clients parsing gross
 "credits"/"debits" cannot subtract twice. Existing JSON keys remain gross or,

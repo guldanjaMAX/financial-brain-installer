@@ -5,7 +5,7 @@ import {
   readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, win32 } from "node:path";
+import { basename, dirname, join, resolve, win32 } from "node:path";
 import { test, mock } from "node:test";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -817,4 +817,229 @@ test("F4 native attribute probe uses stdin, an allowlisted environment and exact
   }
   assert.equal(calls, 6);
   assert.equal(workspace.windowsWorkspaceAttributesSafe(paths, { environment: {}, run: () => { throw new Error("must not run"); } }), false);
+});
+
+for (const fence of ["```", "~~~~"]) for (const closed of [true, false]) {
+  test(`R3 review fenced session heading (${fence}, closed=${closed})`, t => {
+    const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
+    const notes = [ACCOUNTS[0], `${fence}text`, SAVE_HEADING, "Reserve account is earmarked for a future repair.", ...(closed ? [fence] : [])];
+    const before = `${CODEX}\n${BEGIN}\n${ACCOUNT_HEADING}\n${notes.join("\n")}\n${SAVE_HEADING}\nManaged session prose.\n${END}\n`;
+    writeFileSync(target, before);
+    assert.equal(count(before, SAVE_HEADING), 2, "both potential section boundaries reach the parser");
+    const result = workspace.writeCodexWorkspaceGuide(manifest, options);
+    if (!closed) {
+      assert.equal(result.status, "preserved_damaged_section");
+      assert.equal(readFileSync(target, "utf8"), before);
+    } else {
+      assert.equal(result.status, "written");
+      const once = readFileSync(target, "utf8");
+      assert.ok(once.includes(notes.join("\n")), "every fenced owner byte remains data");
+      assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "verified");
+      assert.equal(readFileSync(target, "utf8"), once);
+    }
+    writeFileSync(target, `${CODEX}\n${BEGIN}\n${ACCOUNT_HEADING}\n${ACCOUNTS[0]}\n${SAVE_HEADING}\n${END}\n`);
+    assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "written", "unambiguous control refreshes");
+  });
+}
+
+for (const arm of ["late-create", "replace", "edit", "foreign", "parent"]) test(`R3 review workspace race: ${arm}`, t => {
+  const { root } = fixture(t), safe = join(root, "safe"), other = join(root, "other"), alias = join(root, "alias");
+  mkdirSync(safe); mkdirSync(other);
+  // The directory-swap arm also works on hosts without symlink privileges.
+  const target = join(safe, "AGENTS.md"), manifest = join(safe, "brain.manifest.json");
+  const before = `${CODEX}\n# Older managed guide\n`;
+  const unrelated = "# Owner project instructions\nCreated by another local writer.\n";
+  writeFileSync(join(safe, "CLAUDE.md"), `${workspace.CLAUDE_WORKSPACE_MARKER}\n`);
+  if (arm !== "late-create") writeFileSync(target, before);
+  writeFileSync(join(other, "AGENTS.md"), unrelated);
+  const originalOpen = fs.openSync, originalStat = fs.lstatSync;
+  let decisions = 0, foreignReads = 0;
+  fs.openSync = (path, flags, ...rest) => {
+    if (!decisions && String(path).endsWith(".tmp") && flags === "wx") {
+      decisions++;
+      if (arm === "late-create") writeFileSync(target, unrelated, { flag: "wx" });
+      if (arm === "replace") { fs.renameSync(target, join(safe, "previous")); writeFileSync(target, unrelated); }
+      if (arm === "edit") writeFileSync(target, unrelated);
+      if (arm === "parent") { fs.renameSync(safe, alias); fs.renameSync(other, safe); }
+    }
+    return originalOpen(path, flags, ...rest);
+  };
+  fs.lstatSync = (path, ...rest) => {
+    const stat = originalStat(path, ...rest);
+    if (arm === "foreign" && decisions && String(path) === target) { foreignReads++; stat.uid = (process.getuid?.() ?? 0) + 1; }
+    return stat;
+  };
+  syncBuiltinESMExports();
+  let result;
+  try { result = workspace.writeCodexWorkspaceGuide(manifest, { ...options, existingOnly: true, verifiedCodexWiring: true }); }
+  finally { fs.openSync = originalOpen; fs.lstatSync = originalStat; syncBuiltinESMExports(); }
+  assert.equal(decisions, 1, "interposition reached staging after target inspection");
+  assert.notEqual(result.status, "written");
+  assert.equal(result.changed, false);
+  assert.equal(readFileSync(target, "utf8"), arm === "foreign" ? before : unrelated);
+  if (arm === "foreign") assert.ok(foreignReads > 0, "ownership is rechecked before commit");
+  if (arm === "parent") assert.equal(readFileSync(join(alias, "AGENTS.md"), "utf8"), before);
+  const control = join(root, "control"); mkdirSync(control);
+  writeFileSync(join(control, "AGENTS.md"), before);
+  assert.equal(workspace.writeCodexWorkspaceGuide(join(control, "brain.manifest.json"), options).status, "written");
+});
+
+test("R3 review symlink parent redirection after inspection preserves both guides", { skip: process.platform === "win32" }, t => {
+  const { root } = fixture(t), safe = join(root, "safe"), other = join(root, "other"), alias = join(root, "alias");
+  mkdirSync(safe); mkdirSync(other); symlinkSync(safe, alias);
+  const before = `${CODEX}\n# Older guide\n`, unrelated = "# Unrelated project instructions\nPreserve this guide.\n";
+  writeFileSync(join(safe, "AGENTS.md"), before); writeFileSync(join(other, "AGENTS.md"), unrelated);
+  const original = fs.openSync; let decisions = 0;
+  fs.openSync = (path, flags, ...rest) => {
+    if (!decisions && String(path).endsWith(".tmp") && flags === "wx") {
+      decisions++; fs.unlinkSync(alias); symlinkSync(other, alias);
+    }
+    return original(path, flags, ...rest);
+  };
+  syncBuiltinESMExports();
+  let result;
+  try { result = workspace.writeCodexWorkspaceGuide(join(alias, "brain.manifest.json"), options); }
+  finally { fs.openSync = original; syncBuiltinESMExports(); }
+  assert.equal(decisions, 1, "redirect occurs after original target inspection");
+  assert.notEqual(result.status, "written");
+  assert.equal(result.changed, false);
+  assert.equal(readFileSync(join(other, "AGENTS.md"), "utf8"), unrelated);
+  assert.equal(readFileSync(join(safe, "AGENTS.md"), "utf8"), before);
+  assert.equal(workspace.writeCodexWorkspaceGuide(join(safe, "brain.manifest.json"), options).status, "written");
+});
+
+for (const present of [false, true]) test(`R3 review final install cannot clobber a late target (present=${present})`, t => {
+  const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
+  const before = `${CODEX}\n# Earlier guide\n`, unrelated = "# Concurrent owner guide\nKeep these bytes.\n";
+  if (present) writeFileSync(target, before);
+  const originals = { renameSync: fs.renameSync, linkSync: fs.linkSync }; let decisions = 0;
+  for (const method of Object.keys(originals)) fs[method] = (source, destination, ...rest) => {
+    if (destination === target) {
+      decisions++;
+      writeFileSync(target, unrelated);
+    }
+    return originals[method](source, destination, ...rest);
+  };
+  syncBuiltinESMExports();
+  let result;
+  try { result = workspace.writeCodexWorkspaceGuide(manifest, options); }
+  finally { Object.assign(fs, originals); syncBuiltinESMExports(); }
+  assert.ok(decisions > 0, "race occurs inside the final filesystem operation, after its last check");
+  assert.equal(result.status, "not_written");
+  assert.equal(result.changed, false);
+  assert.equal(readFileSync(target, "utf8"), unrelated);
+  if (present) {
+    assert.ok(result.recoveryPath, "displaced original remains recoverable when restoration cannot claim its name");
+    assert.equal(readFileSync(result.recoveryPath, "utf8"), before);
+  }
+  const control = join(root, "control"); mkdirSync(control);
+  assert.equal(workspace.writeCodexWorkspaceGuide(join(control, "brain.manifest.json"), options).status, "written");
+});
+
+test("R3 review a competing refresh is serialized without overwriting either writer", t => {
+  const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
+  writeFileSync(target, `${CODEX}\n# Earlier guide\n`);
+  const original = fs.openSync; let competing, decisions = 0;
+  fs.openSync = (path, flags, ...rest) => {
+    if (!decisions && String(path).endsWith(".tmp") && flags === "wx") {
+      decisions++;
+      competing = workspace.writeCodexWorkspaceGuide(manifest, options);
+    }
+    return original(path, flags, ...rest);
+  };
+  syncBuiltinESMExports();
+  let result;
+  try { result = workspace.writeCodexWorkspaceGuide(manifest, options); }
+  finally { fs.openSync = original; syncBuiltinESMExports(); }
+  assert.equal(decisions, 1);
+  assert.equal(competing.status, "not_written");
+  assert.equal(competing.changed, false);
+  assert.equal(result.status, "written");
+  assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "verified");
+});
+
+test("R3 review update reports a blocked commit and its retained recovery copy", () => {
+  const warnings = [], successes = [];
+  let decisions = 0;
+  const manifest = resolve("/fixture/brain.manifest.json"), recoveryPath = resolve("/fixture/AGENTS.md.lock/previous");
+  const blocked = cli.refreshCodexWorkspaceGuideAfterUpdate(manifest, {
+    writeCodexWorkspaceGuide: () => { decisions++; return { status: "not_written", changed: false, recoveryPath }; },
+    reportWarning: text => warnings.push(text), reportOk: text => successes.push(text),
+  });
+  assert.equal(decisions, 1);
+  assert.equal(blocked.status, "not_written");
+  assert.equal(successes.length, 0);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /not written/i);
+  assert.ok(warnings[0].includes(recoveryPath));
+  cli.refreshCodexWorkspaceGuideAfterUpdate(manifest, {
+    writeCodexWorkspaceGuide: () => ({ status: "written" }), reportOk: text => successes.push(text),
+  });
+  assert.equal(successes.length, 1, "successful refresh still reports success");
+});
+
+for (const point of ["move", "install"]) test(`R3 review existing-file change at ${point} preserves the changed bytes`, t => {
+  const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
+  const changed = `${CODEX}\n# Concurrent owner edit\n`;
+  writeFileSync(target, `${CODEX}\n# Earlier guide\n`);
+  const method = point === "move" ? "renameSync" : "linkSync", original = fs[method];
+  let decisions = 0;
+  fs[method] = (source, destination, ...rest) => {
+    if ((point === "move" && source === target) || (point === "install" && destination === target && basename(source) === "ready")) {
+      decisions++;
+      if (point === "move") { fs.unlinkSync(target); writeFileSync(target, changed); }
+      else writeFileSync(join(dirname(source), "previous"), changed);
+    }
+    return original(source, destination, ...rest);
+  };
+  syncBuiltinESMExports();
+  let result;
+  try { result = workspace.writeCodexWorkspaceGuide(manifest, options); }
+  finally { fs[method] = original; syncBuiltinESMExports(); }
+  assert.equal(decisions, 1, "the existing-file race reaches the actual commit syscall");
+  assert.equal(result.status, "not_written");
+  assert.equal(readFileSync(target, "utf8"), changed);
+  assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "written", "unchanged retry succeeds");
+});
+
+test("R3 review edited installed inode is preserved along with the earlier guide", t => {
+  const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
+  const before = `${CODEX}\n# Earlier guide\n`, changed = "# Concurrent edit of installed guide\n";
+  writeFileSync(target, before);
+  const original = fs.linkSync; let decisions = 0;
+  fs.linkSync = (source, destination, ...rest) => {
+    const result = original(source, destination, ...rest);
+    if (destination === target && basename(source) === "ready") { decisions++; writeFileSync(target, changed); }
+    return result;
+  };
+  syncBuiltinESMExports();
+  let result;
+  try { result = workspace.writeCodexWorkspaceGuide(manifest, options); }
+  finally { fs.linkSync = original; syncBuiltinESMExports(); }
+  assert.equal(decisions, 1);
+  assert.equal(result.status, "not_written");
+  assert.equal(readFileSync(target, "utf8"), changed);
+  assert.ok(result.recoveryPath);
+  assert.equal(readFileSync(result.recoveryPath, "utf8"), before);
+  const control = join(root, "control"); mkdirSync(control);
+  writeFileSync(join(control, "AGENTS.md"), before);
+  assert.equal(workspace.writeCodexWorkspaceGuide(join(control, "brain.manifest.json"), options).status, "written");
+});
+
+for (const [assistant, filename, , writer] of writers) test(`R3 review setup reports a blocked ${assistant} write`, async t => {
+  let decisions = 0, recoveryPath;
+  const option = assistant === "codex" ? "writeCodexWorkspaceGuide" : "writeClaudeWorkspaceGuide";
+  const wired = [assistant === "codex" ? "Codex" : "Claude Code"];
+  const blocked = await setup(t, wired, { [option]: manifest => {
+    decisions++;
+    const target = join(dirname(manifest), filename);
+    recoveryPath = `${target}.lock/previous`;
+    return { status: "not_written", path: target, recoveryPath };
+  } });
+  assert.equal(decisions, 1);
+  assert.match(blocked.output, /not written/i);
+  assert.ok(blocked.output.includes(cli.displayPathForTesting(recoveryPath, process.cwd())));
+  assert.doesNotMatch(blocked.output, /owner workspace ready/);
+  const control = await setup(t, wired, { [option]: writer });
+  assert.match(control.output, /owner workspace ready/);
 });

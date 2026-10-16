@@ -22016,6 +22016,8 @@ export async function cmdSetup(manifestPath, options = {}) {
         info(`For Brain conversations, open Claude Code in this folder: ${displayPath(guide.workspace || dirname(guide.path))}`);
       } else if (guide.status === "preserved_damaged_section") {
         warn(damagedOwnerRulesWarning(guide.path));
+      } else if (guide.status === "not_written") {
+        warn(workspaceGuideNotWrittenWarning("CLAUDE.md", guide));
       } else {
         warn(`preserved the existing CLAUDE.md at ${guide.path}; add the Financial Brain safety guide manually`);
       }
@@ -22040,6 +22042,8 @@ export async function cmdSetup(manifestPath, options = {}) {
         info(`For Brain conversations, open Codex in this folder: ${displayPath(guide.workspace || dirname(guide.path))}`);
       } else if (guide.status === "preserved_damaged_section") {
         warn(damagedOwnerRulesWarning(guide.path));
+      } else if (guide.status === "not_written") {
+        warn(workspaceGuideNotWrittenWarning("AGENTS.md", guide));
       } else {
         warn(`preserved the existing AGENTS.md at ${guide.path}; add the Financial Brain safety guide manually`);
       }
@@ -29010,6 +29014,12 @@ export async function refreshOwnerAssistantConnectionsAfterUpdate(
   };
 }
 
+function workspaceGuideNotWrittenWarning(filename, result) {
+  return `The ${filename} guide was not written because its folder or file changed, or another refresh holds its lock. ` +
+    (result.recoveryPath ? `The earlier file is retained for recovery at ${displayPath(result.recoveryPath)}. ` : "") +
+    "Review the local guide before retrying its refresh.";
+}
+
 function damagedOwnerRulesWarning(path) {
   return `The answer rules in ${displayPath(path)} are damaged; nothing was changed. ` +
     'Copy your "My accounts" lines aside, delete the section from its BEGIN line to its END line, then rerun setup to restore it.';
@@ -29059,6 +29069,9 @@ function refreshWorkspaceGuideAfterUpdate(manifestPath, options, assistant) {
     );
   } else if (result?.status === "preserved_damaged_section") {
     safelyReportUpdateResult(reportWarning, damagedOwnerRulesWarning(result.path || join(dirname(resolve(manifestPath)), filename)));
+  } else if (result?.status === "not_written") {
+    safelyReportUpdateResult(reportWarning,
+      `${workspaceGuideNotWrittenWarning(filename, result)} The Brain software update remains verified.`);
   } else if (result?.status === "preserved_unrelated_existing_file" ||
       result?.status === "preserved_unsafe_existing_file") {
     safelyReportUpdateResult(

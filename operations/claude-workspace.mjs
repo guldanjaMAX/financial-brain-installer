@@ -6,21 +6,24 @@
  */
 
 import {
-  chmodSync,
   closeSync,
+  fstatSync,
   fsyncSync,
+  linkSync,
   lstatSync,
+  mkdirSync,
   openSync,
   readFileSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
-import { dirname, join, resolve, win32, posix } from "node:path";
+import { basename, dirname, join, resolve, win32, posix } from "node:path";
 import { CLOUDFLARE_OAUTH_WRANGLER_PACKAGE } from "./cloudflare-oauth-session.mjs";
 import { windowsFileChildEnvironment } from "./current-user-file.mjs";
 
@@ -183,9 +186,16 @@ export function mergeOwnerRules(existingText, render) {
   if (begins.length !== 1 || ends.length !== 1 || begins[0] >= ends[0]) return damaged();
   const accountLines = [];
   let inAccounts = false;
+  let legacyFence = null;
   const inner = lines.slice(begins[0] + 1, ends[0]);
   for (let i = 0; i < inner.length; i++) {
     const line = inner[i];
+    if (inAccounts && legacyFence) {
+      if (CONTROL.test(line)) return damaged();
+      accountLines.push(line);
+      if (new RegExp(`^ {0,3}${legacyFence[0]}{${legacyFence.length},} *$`).test(line)) legacyFence = null;
+      continue;
+    }
     if (inAccounts && line === ACCOUNT_DATA_LABEL) {
       const opening = inner[++i]?.match(/^(`{3,})text$/);
       if (!opening) return damaged();
@@ -197,6 +207,15 @@ export function mergeOwnerRules(existingText, render) {
       i = close;
       continue;
     }
+    if (inAccounts) {
+      const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      if (fence) {
+        if (CONTROL.test(line) || (fence[1][0] === "`" && fence[2].includes("`"))) return damaged();
+        legacyFence = fence[1];
+        accountLines.push(line);
+        continue;
+      }
+    }
     // An unexpected heading in a legacy account section is ambiguous: retain
     // the whole file for review instead of silently dropping the owner's text.
     if (inAccounts && line.startsWith("## ") && line !== SESSION_HEADING) return damaged();
@@ -206,6 +225,7 @@ export function mergeOwnerRules(existingText, render) {
       accountLines.push(line);
     }
   }
+  if (legacyFence) return damaged();
   const prefix = lines.slice(0, begins[0]);
   const content = (prefix.length ? prefix.join("\n") + "\n" : "") +
     render({ accountLines }) + lines.slice(ends[0] + 1).join("\n");
@@ -285,9 +305,124 @@ export function workspaceFileOwnedByUser(path, stat, {
   } catch { return false; }
 }
 
+const sameIdentity = (a, b) => a.dev === b.dev && a.ino === b.ino;
+function inspectWorkspaceParent(target) {
+  const named = dirname(target), physical = realpathSync.native(named);
+  return { named, physical, alias: lstatSync(named), stat: lstatSync(physical) };
+}
+function workspaceParentUnchanged(parent) {
+  try {
+    return realpathSync.native(parent.named) === parent.physical &&
+      sameIdentity(lstatSync(parent.named), parent.alias) &&
+      sameIdentity(lstatSync(parent.physical), parent.stat);
+  } catch { return false; }
+}
+function unchangedWorkspaceFile(path, snapshot, text, ownership) {
+  try {
+    const now = lstatSync(path);
+    return now.isFile() && !now.isSymbolicLink() && now.nlink === 1 &&
+      sameIdentity(now, snapshot) && now.uid === snapshot.uid && now.gid === snapshot.gid &&
+      now.mode === snapshot.mode && now.size === snapshot.size && now.mtimeMs === snapshot.mtimeMs &&
+      workspaceFileOwnedByUser(path, now, ownership) && readFileSync(path, "utf8") === text;
+  } catch { return false; }
+}
+
+function commitWorkspaceGuide(target, parent, snapshot, existing, content, ownership) {
+  const notWritten = recoveryPath => ({ status: "not_written", changed: false, ...(recoveryPath ? { recoveryPath } : {}) });
+  if (!workspaceParentUnchanged(parent)) return notWritten();
+  const physicalTarget = join(parent.physical, basename(target));
+  const lock = `${physicalTarget}.lock`;
+  let lockStat;
+  try { mkdirSync(lock, { mode: 0o700 }); lockStat = lstatSync(lock); }
+  catch (error) { if (error.code === "EEXIST") return notWritten(); throw error; }
+  const physicalLocked = () => {
+    try { return sameIdentity(lstatSync(parent.physical), parent.stat) && sameIdentity(lstatSync(lock), lockStat); }
+    catch { return false; }
+  };
+  const locked = () => workspaceParentUnchanged(parent) && physicalLocked();
+  const temporary = join(lock, `${randomUUID()}.tmp`), ready = join(lock, "ready"), previous = join(lock, "previous");
+  let fd = null, temporaryStat = null, readyStat = null, moved = false, keepPrevious = false;
+  const unlinkOwned = (path, stat) => {
+    try { if (stat && sameIdentity(lstatSync(path), stat)) unlinkSync(path); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+  };
+  const restore = () => {
+    if (!moved) return true;
+    // Never restore over a competing file. Keep the displaced bytes and lock
+    // for explicit recovery if their original name has been claimed meanwhile.
+    if (!physicalLocked()) { keepPrevious = true; return false; }
+    try { linkSync(previous, physicalTarget); unlinkSync(previous); moved = false; return true; }
+    catch (error) {
+      keepPrevious = true;
+      if (!["EEXIST", "ENOENT"].includes(error.code)) throw error;
+      return false;
+    }
+  };
+  try {
+    if (!locked() || (snapshot && !unchangedWorkspaceFile(target, snapshot, existing, ownership))) return notWritten();
+    fd = openSync(temporary, "wx", 0o600);
+    temporaryStat = fstatSync(fd);
+    if (!locked()) return notWritten();
+    writeFileSync(fd, content, "utf8");
+    fsyncSync(fd);
+    const closed = fd; fd = null; closeSync(closed);
+    if (!locked()) return notWritten();
+    // Complete staging inside our exclusive directory. Installation below is
+    // always a no-clobber link, never a rename over the destination pathname.
+    renameSync(temporary, ready);
+    readyStat = temporaryStat;
+    if (!locked()) return notWritten();
+    if (snapshot) {
+      if (!unchangedWorkspaceFile(target, snapshot, existing, ownership)) return notWritten();
+      renameSync(physicalTarget, previous);
+      moved = true;
+      // A writer can replace the target inside rename itself. Inspect what was
+      // actually moved before installing anything; preserve it on refusal.
+      if (!locked() || !unchangedWorkspaceFile(previous, snapshot, existing, ownership)) {
+        restore(); return notWritten(keepPrevious ? previous : undefined);
+      }
+    }
+    if (!locked()) { restore(); return notWritten(keepPrevious ? previous : undefined); }
+    try { linkSync(ready, physicalTarget); }
+    catch (error) {
+      restore();
+      if (error.code === "EEXIST") return notWritten(keepPrevious ? previous : undefined);
+      throw error;
+    }
+    if (!locked() || !sameIdentity(lstatSync(physicalTarget), readyStat) || readFileSync(physicalTarget, "utf8") !== content ||
+        (moved && !unchangedWorkspaceFile(previous, snapshot, existing, ownership))) {
+      // Roll back only our installed inode. A competing destination is never
+      // overwritten, and a changed original is restored with its latest bytes.
+      if (physicalLocked() && sameIdentity(lstatSync(physicalTarget), readyStat) && readFileSync(physicalTarget, "utf8") === content) {
+        unlinkOwned(physicalTarget, readyStat);
+      }
+      restore();
+      return notWritten(keepPrevious ? previous : undefined);
+    }
+    if (moved) { unlinkSync(previous); moved = false; }
+    return { status: "written", changed: true };
+  } catch (error) {
+    if (moved && !keepPrevious) restore();
+    if (!locked()) return notWritten(keepPrevious ? previous : undefined);
+    throw error;
+  } finally {
+    try { if (fd !== null) closeSync(fd); }
+    finally {
+      // Cleanup is identity-bound too. A redirected parent must not cause us
+      // to unlink another writer's staging files or lock.
+      if (physicalLocked()) {
+        unlinkOwned(temporary, temporaryStat);
+        unlinkOwned(ready, readyStat);
+        if (!keepPrevious) rmdirSync(lock);
+      }
+    }
+  }
+}
+
 function writeWorkspaceGuide(manifestPath, options, assistant) {
   const target = join(dirname(resolve(manifestPath)), assistant === "codex" ? "AGENTS.md" : "CLAUDE.md");
   const result = (status, changed = false) => ({ path: target, workspace: dirname(target), status, changed });
+  const parent = inspectWorkspaceParent(target);
   let stat;
   try { stat = lstatSync(target); } catch (error) { if (error.code !== "ENOENT") throw error; }
   // lstat also sees dangling links. Neither setup nor update may replace one.
@@ -330,32 +465,9 @@ function writeWorkspaceGuide(manifestPath, options, assistant) {
   if (assistant === "codex" ? Buffer.byteLength(content) > 32_768 : content.length >= 40_000) {
     throw new Error("the owner workspace guide exceeds its assistant's document limit");
   }
-  if (existing === content) return result("verified");
-  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  let fd = null;
-  let created = false;
-  try {
-    fd = openSync(temporary, "wx", 0o600);
-    created = true;
-    writeFileSync(fd, content, "utf8");
-    fsyncSync(fd);
-    closeSync(fd);
-    fd = null;
-    renameSync(temporary, target);
-    chmodSync(target, 0o600);
-    if (readFileSync(target, "utf8") !== content) throw new Error("the owner workspace guide failed exact readback");
-  } finally {
-    try {
-      if (fd !== null) closeSync(fd);
-    } finally {
-      // A failed close must not strand the temporary file. An exclusive-open
-      // failure, however, never gives us ownership of an existing temp path.
-      if (created) {
-        try { unlinkSync(temporary); } catch (error) { if (error.code !== "ENOENT") throw error; }
-      }
-    }
-  }
-  return result("written", true);
+  if (existing === content) return result(workspaceParentUnchanged(parent) &&
+    unchangedWorkspaceFile(target, stat, existing, options.ownership) ? "verified" : "not_written");
+  return { ...result("not_written"), ...commitWorkspaceGuide(target, parent, stat, existing, content, options.ownership) };
 }
 
 export function writeClaudeWorkspaceGuide(manifestPath, options = {}) {

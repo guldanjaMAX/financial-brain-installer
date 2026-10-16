@@ -59,6 +59,15 @@ function namesOwnedAccount(row, account, accounts) {
   return null;
 }
 
+function resolvesExactAccount(locator, other, accounts) {
+  const text = normalizeLedgerText(locator);
+  const candidates = [...accounts.values()].filter(account => (account.members || []).some(member =>
+    (normalizeLedgerText(member.label) && text === normalizeLedgerText(member.label)) ||
+    (/^\d{1,4}$/.test(member.mask || "") &&
+      new RegExp(`^(?:(?:account|acct|card|checking|savings|loan|line of credit) )?(?:ending (?:in )?)?${member.mask}$`).test(text))));
+  return candidates.length === 1 && candidates[0] === other;
+}
+
 // An advisory match can be a customer receipt or refund mentioning an owned
 // loan. Removing income needs reciprocal, directed account evidence and no
 // conflicting attribution on either leg. Uncertain pairs stay in the lead.
@@ -79,17 +88,14 @@ export function isLoanAdvance(pair, accounts) {
     if (payee) {
       // An external payee can mention an account too. Only an exact unique
       // owner label or bare account locator resolves that conflicting evidence.
-      const exactAccount = (other.members || []).some(member =>
-        (normalizeLedgerText(member.label) && payee === normalizeLedgerText(member.label)) ||
-        (/^\d{1,4}$/.test(member.mask || "") &&
-          new RegExp(`^(?:(?:account|acct|card|checking|savings|loan|line of credit) )?(?:ending (?:in )?)?${member.mask}$`).test(payee)));
-      if (!exactAccount || !namesOwnedAccount({ payee: row.payee }, other, accounts)) return false;
+      if (!resolvesExactAccount(row.payee, other, accounts)) return false;
     }
     if (conflictsWithAccountKind(row, other)) return false;
-    // Read the directional clause, not an unrelated account mention elsewhere
-    // in the memo. Both legs must identify the opposite owned account.
-    const clause = String(row.description || "").match(new RegExp(`\\b(?:transfer|(?:loan |credit )?(?:advance|disbursement|proceeds))\\s+${direction}\\s+(.+)$`, "i"));
-    return Boolean(clause && namesOwnedAccount({ description: clause[1] }, other, accounts));
+    // Direction licenses a bare mask, but only the immediate, complete locator
+    // identifies its counterparty. An outside sender followed by an owned mask,
+    // multiple alternatives, or unparsed memo text cannot establish an advance.
+    const clause = normalizeLedgerText(row.description).match(new RegExp(`^(?:transfer|(?:loan |credit )?(?:advance|disbursement|proceeds)) ${direction} (.+)$`));
+    return Boolean(clause && resolvesExactAccount(clause[1], other, accounts));
   };
   return directed(pair.out, inAccount, "to") && directed(pair.in, outAccount, "from");
 }

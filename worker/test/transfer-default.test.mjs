@@ -436,3 +436,59 @@ test("F1 exact owned-account payees retain the genuine advance control", async t
   const control = await ask(f, flipQuestion(Q.profit, "including loan proceeds"));
   assert.equal(control.ledger.net_minor, baseline.ledger.net_minor + 41000);
 });
+
+// Third-review probes ported through the real SQLite reader and renderer.
+for (const kind of ["loan", "line_of_credit"]) for (const measure of ["profit", "net income", "cash flow"]) {
+  test(`R3 review bare reciprocal masks: ${kind}, ${measure}`, async t => {
+    const f = await fixture(t, "plain");
+    const question = Q.profit.replace("profit", measure);
+    const baseline = await ask(f, question, "totals", 0);
+    f.account("debt", "6193", kind);
+    f.add("advance-out", "2026-09-20", 51000, "outflow", "TRANSFER TO 1111", null, null, "debt");
+    f.add("advance-in", "2026-09-20", 51000, "inflow", "TRANSFER FROM 6193");
+    const included = await ask(f, flipQuestion(question, "including loan proceeds"));
+    assert.equal(included.ledger.net_minor, baseline.ledger.net_minor + 51000);
+    const body = await ask(f, question);
+    assert.equal(body.ledger.net_minor, baseline.ledger.net_minor);
+    assert.equal(body.ledger.default_exclusions.loan_proceeds_minor, 51000);
+    assert.match(body.answer, /Note:.*\$510\.00.*loan/);
+    f.raw("UPDATE fin_transactions SET description=replace(description,'TO 1111','TO account 1111') WHERE txn_uid='advance-out'");
+    f.raw("UPDATE fin_transactions SET description=replace(description,'FROM 6193','FROM account 6193') WHERE txn_uid='advance-in'");
+    assert.equal((await ask(f, question)).ledger.net_minor, baseline.ledger.net_minor);
+  });
+}
+
+for (const description of [
+  "TRANSFER FROM Outside payer for consultation on account 6193",
+  "TRANSFER FROM Outside payer; memo account 6193",
+  "TRANSFER FROM account 6193 or account 1111",
+]) test(`R3 review immediate sender: ${description}`, async t => {
+  const f = await fixture(t, "plain"), baseline = await ask(f, Q.profit, "totals", 0);
+  f.account("debt", "6193", "loan");
+  f.add("advance-out", "2026-09-20", 51000, "outflow", "TRANSFER TO account 1111", null, null, "debt");
+  f.add("advance-in", "2026-09-20", 51000, "inflow", description);
+  for (const measure of ["profit", "net income", "cash flow"]) {
+    const question = Q.profit.replace("profit", measure);
+    const body = await ask(f, question);
+    assert.equal(body.ledger.net_minor, baseline.ledger.net_minor + 51000);
+    assert.equal(body.ledger.default_exclusions.loan_proceeds_minor, 0);
+    assert.equal((await ask(f, flipQuestion(question, "including loan proceeds"))).ledger.net_minor, body.ledger.net_minor);
+  }
+  f.raw("UPDATE fin_transactions SET description='TRANSFER FROM account 6193' WHERE txn_uid='advance-in'");
+  assert.equal((await ask(f, Q.profit)).ledger.default_exclusions.loan_proceeds_minor, 51000, "genuine sender control");
+});
+
+for (const arm of ["duplicate-mask", "outside-destination", "kind-conflict"]) test(`R3 review locator conflict stays counted: ${arm}`, async t => {
+  const f = await fixture(t, "plain"), baseline = await ask(f, Q.profit, "totals", 0);
+  f.account("debt", "6193", "loan");
+  f.add("advance-out", "2026-09-20", 51000, "outflow", arm === "outside-destination" ? "TRANSFER TO Outside payee for account 1111" : "TRANSFER TO 1111", null, null, "debt");
+  f.add("advance-in", "2026-09-20", 51000, "inflow", arm === "kind-conflict" ? "TRANSFER FROM checking 6193" : "TRANSFER FROM 6193");
+  if (arm === "duplicate-mask") f.account("other", "6193", "savings");
+  const body = await ask(f, Q.profit, "totals", arm === "kind-conflict" ? 0 : 1);
+  assert.equal(body.ledger.net_minor, baseline.ledger.net_minor + 51000);
+  assert.equal(body.ledger.default_exclusions.loan_proceeds_minor, 0);
+  f.raw("UPDATE fin_accounts SET mask='9142' WHERE account_slug='other'");
+  f.raw("UPDATE fin_transactions SET description='TRANSFER TO 1111' WHERE txn_uid='advance-out'");
+  f.raw("UPDATE fin_transactions SET description='TRANSFER FROM 6193' WHERE txn_uid='advance-in'");
+  assert.equal((await ask(f, Q.profit)).ledger.default_exclusions.loan_proceeds_minor, 51000);
+});

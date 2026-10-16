@@ -2100,6 +2100,19 @@ The native attribute probe is read-only and fails closed if it is unavailable. N
 ownership is not established by this check. Owner account annotations are
 preserved in a labelled data fence; ambiguous legacy headings block the refresh
 without deleting owner text. Reruns must preserve the same bytes.
+Legacy backtick and tilde fences are data when finding the session boundary;
+an unclosed fence blocks refresh with the whole original file preserved.
+Writes bind both the named and canonical parent to their inspected device/inode
+identities. An exclusive adjacent `.lock` directory serializes guide refreshes.
+The completed staged file is installed with a no-clobber hard link. An existing
+guide is moved into the lock directory and checked against its inspected inode,
+ownership, metadata and exact bytes before installation. This leaves a brief
+missing-path interval during refresh; it never renames over a competing guide.
+Changed parents or files return `not_written`. If a competing guide prevents
+restoring the earlier file, its bytes remain at the returned `recoveryPath` and
+the lock remains for explicit local recovery. An interrupted refresh can likewise
+leave a lock and staging or recovery files; never automatically clear that lock.
+Native Windows filesystem behavior remains a separate host/CI gate.
 
 `node --test worker/test/ledger-answer.test.mjs` exercises the read-only money
 answer path through the Worker and real SQLite migrations, including twin
