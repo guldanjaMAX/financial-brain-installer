@@ -11,7 +11,7 @@
 
 import { readBankExport } from "./bank-export.js";
 import { jsonResponse, privateNoStore } from "./core.js";
-import { prepareBankExportImport, bankExportIdentityNeedsReview, DEFAULT_TENANT } from "./fin-import.js";
+import { prepareBankExportImport, bankExportIdentityNeedsReview, bankExportOverlapNeedsReview, BANK_EXPORT_OVERLAP_REVIEW_REASON, DEFAULT_TENANT } from "./fin-import.js";
 import { ledgerInstalled } from "./fin-d1.js";
 import { validateBankEnvelope } from "./fin-upload.js";
 import { ownerActivityStatement } from "./owner-activity.js";
@@ -385,6 +385,9 @@ async function preview(env, body, options) {
     if (await bankExportIdentityNeedsReview(env, prepared.envelope)) {
       return conflict("bank_export_identity_review_required");
     }
+    if (await bankExportOverlapNeedsReview(env, prepared.envelope)) {
+      return respond({ error: "conflict", code: "bank_export_overlap_review_required", reason: BANK_EXPORT_OVERLAP_REVIEW_REASON }, 409);
+    }
     if (await accountScopeConflict(env, prepared.entitySlug, prepared.envelope)) {
       return conflict("bank_account_entity_conflict");
     }
@@ -497,6 +500,9 @@ async function commit(env, body, options) {
   try {
     if (await bankExportIdentityNeedsReview(env, prepared.envelope)) {
       return conflict("bank_export_identity_review_required");
+    }
+    if (await bankExportOverlapNeedsReview(env, prepared.envelope)) {
+      return respond({ error: "conflict", code: "bank_export_overlap_review_required", reason: BANK_EXPORT_OVERLAP_REVIEW_REASON }, 409);
     }
   } catch {
     return unavailable("owner_bank_import_unavailable");

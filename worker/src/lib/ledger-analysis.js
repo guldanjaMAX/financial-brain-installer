@@ -1,13 +1,34 @@
 // All analysis is ephemeral over the deduplicated, bounded reader snapshot.
 // Neither a transfer hint nor a detected cadence changes stored owner truth.
 export const normalizeLedgerText = value => (String(value || "").normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).join(" ");
-export const merchantFor = row => normalizeLedgerText(row.payee || row.description);
+// Keep literal conjunctions distinct: "A & B", "A and B" and "A B" are
+// different selectors. A displayed label must use the same normalization.
+export const normalizeMerchantText = value => (String(value || "").normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+|&/gu) || []).join(" ");
+export function senderFor(row) {
+  if (row.payee) return normalizeMerchantText(row.payee);
+  const text = normalizeMerchantText(row.description);
+  const directed = text.match(/\b(?:from|by) (.+)/);
+  // A subject after "for" is never the sender, even without an explicit
+  // payee. Preserve the opening-sender form used by plain bank descriptions.
+  return (directed ? directed[1] : text).split(/\b(?:for|invoice|memo|reference|ref)\b/)[0].trim()
+    .replace(/\s+(?:deposit|payment|receipt|payroll|settlement)$/, "");
+}
+export const merchantFor = row => row.direction === "inflow" ? senderFor(row) : normalizeMerchantText(row.payee || row.description);
 const containsTokens = (haystack, needle) => Boolean(needle) && ` ${haystack} `.includes(` ${needle} `);
 // An explicit payee controls attribution. A memo about another merchant cannot
 // turn a payment to this payee into that merchant's income or spend.
-export const matchesMerchant = (row, query) => row.payee
-  ? normalizeLedgerText(row.payee) === normalizeLedgerText(query)
-  : containsTokens(normalizeLedgerText(row.description), normalizeLedgerText(query));
+export const matchesMerchant = (row, query) => row.payee || row.direction === "inflow"
+  ? merchantFor(row) === normalizeMerchantText(query)
+  : containsTokens(normalizeMerchantText(row.description), normalizeMerchantText(query));
+export function matchesSender(row, wanted) {
+  if (!wanted.length) return true;
+  const sender = normalizeLedgerText(senderFor(row));
+  if (row.payee) {
+    const words = new Set(sender.split(" "));
+    return wanted.every(word => words.has(word));
+  }
+  return sender === wanted.join(" ") || sender.startsWith(`${wanted.join(" ")} `);
+}
 export function categoryFor(row) {
   const category = normalizeLedgerText(row.category);
   return !category || !row.category_basis_state || ["unsorted", "uncategorized", "uncategorised", "unknown"].includes(category) ? null : category;

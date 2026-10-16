@@ -1,7 +1,7 @@
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
-import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, merchantFor, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
+import { categoryFor, detectRecurring, isDirectedOwnedTransfer, isLoanAdvance, matchesCategory, matchesMerchant, matchesSender, merchantFor, normalizeMerchantText, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
 
 const masked = account => /^\d{1,4}$/.test(account.mask || "") ? `account ****${account.mask}` : "account (mask unavailable)";
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
@@ -12,6 +12,15 @@ const accountCoverage = accounts => accounts.map(a => ({
 }));
 
 function gapFor(reason, accounts = [], intent = {}) {
+  const review = {
+    cash_flow_unsupported: "Cash flow is not supported. Posted card purchases can be unpaid, and combining card charges with checking and savings activity is not a cash-flow measure. Ask for money in and money out, or the bounded profit/net income surplus; neither is accounting profit or cash flow.",
+    merchant_selector_unsupported: "This printed merchant label is redacted, shortened or unknown and cannot identify an exact merchant safely. Quote the original by-merchant list line with its period and account scope; do not turn this refusal into zero or guess the hidden text.",
+    merchant_selector_ambiguous: "This merchant spelling differs from a stored label only by and or &. Use the exact printed label, including its literal conjunction, or quote the by-merchant list line. Do not substitute and for & or combine different merchants.",
+    coverage_review_required: "A previous partial import may have widened a complete coverage interval across unobserved days. Transactions are retained, but this interval is unproven until its coverage is independently reviewed and re-established. No total or zero is certified.",
+    bank_export_overlap_review_required: "Overlapping bank exports use different transaction identities. Existing rows and provenance are retained. Review the original exports and statements to determine whether these are duplicate records or separate purchases before a separately approved reconciliation. No total or zero is certified, and no rows were merged or deleted.",
+  };
+  if (review[reason]) return { type: "ledger_not_consulted", reason, code: reason,
+    ...(intent.from ? { from: intent.from, to: intent.to } : {}), detail: review[reason] };
   if (reason === 'ledger_account_link_required') {
     // Display one relevant pair; the admission decision checks every edge.
     const pair = accounts.flatMap(a => accountLinkPairsInWindow(a, intent))[0];
@@ -106,6 +115,7 @@ function leadExclusions(rows, pairs, selected, bySlug, intent) {
 }
 
 async function ledgerAnswer(env, intent, accounts, inventory) {
+  if (intent.measure === "cash_flow") return { reason: "cash_flow_unsupported" };
   if (intent.measure && !accounts.some(a => moveKind(a.account_kind))) return { reason: "unsupported_question" };
   if (intent.kind === "balance") {
     const balances = await readEffectiveBalances(env, accounts, intent);
@@ -115,7 +125,11 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     return { answer: balances.map((row, i) => `${masked(accounts.find(a => a.account_slug === row.effective_account_slug))}: ${money(row.current_minor)} as of ${row.as_of_date} [${i + 1}].`).join("\n"),
       citations, ledger: { kind: "balance", accounts: citations.map(c => ({ account_mask: c.account_mask, current_minor: c.amount_minor, as_of: c.posted_on })) } };
   }
+  if (accounts.some(a => a.members.some(m => m.coverage_review_required))) return { reason: "coverage_review_required" };
   if (accounts.some(a => !effectivePeriodCovered(a, intent.from, intent.to))) return { reason: "period_outside_coverage" };
+  if (intent.kind === "merchant" && intent.match && (/\[redacted\]/i.test(intent.match) ||
+      normalizeMerchantText(intent.match) === "unknown merchant" || intent.match.length >= 240))
+    return { reason: "merchant_selector_unsupported" };
   // Pairing needs the other owned account even when the answer selects one
   // mask/kind. Six padding days prove mutual uniqueness: a counterpart within
   // three days may itself have a competing leg another three days away. Only
@@ -127,22 +141,15 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   const inWindow = row => row.posted_on >= intent.from && row.posted_on <= intent.to;
   const selected = new Set(accounts.map(a => a.account_slug));
   const rows = allRows.filter(row => selected.has(row.effective_account_slug) && (!row.posted_on || inWindow(row)));
+  if (rows.some(row => row.export_overlap_review)) return { reason: "bank_export_overlap_review_required" };
   if (rows.some(row => !readableRow(row))) return { reason: "unreadable_transactions" };
   const bySlug = new Map(inventory.map(a => [a.account_slug, a]));
   if (intent.kind === "payment") {
     const matched = rows.filter(row => {
       if (row.direction !== "inflow" || (intent.amountMinor !== null && row.amount_minor !== intent.amountMinor)) return false;
-      // An amountless arrival depends on sender attribution. A memo mention
-      // cannot override an explicit payee, just as for merchant totals.
-      if (intent.amountMinor === null) {
-        if (row.payee) {
-          const words = new Set(String(row.payee).toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
-          return intent.counterpartyWords.every(word => words.has(word));
-        }
-        return descriptionNamesSender(row.description, intent.counterpartyWords);
-      }
-      const words = new Set(`${row.description || ""} ${row.payee || ""}`.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
-      return intent.counterpartyWords.every(word => words.has(word));
+      // An amount narrows an attributed receipt; it cannot promote a memo
+      // subject to sender or override a different explicit payee.
+      return matchesSender(row, intent.counterpartyWords);
     });
     const citations = matched.map((row, i) => citation(row, bySlug.get(row.effective_account_slug), i));
     const answer = matched.length
@@ -150,6 +157,13 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
       : `No matching deposit in ${accounts.map(masked).join(", ")} between ${intent.from} and ${intent.to}; the bank feed covers through ${accounts.map(a => `${masked(a)}: ${a.live?.covered_to || "unknown (manual records only)"}`).join("; ")}.`;
     return { answer, citations, ledger: { kind: "payment", found: matched.length > 0,
       from: intent.from, to: intent.to, amount_minor: intent.amountMinor, accounts: accountCoverage(accounts) } };
+  }
+  if (intent.kind === "merchant" && intent.match) {
+    const wanted = normalizeMerchantText(intent.match);
+    const directionRows = rows.filter(row => row.direction === intent.direction);
+    const conjunction = text => text.replace(/\b(and)\b|&/g, "and");
+    if (!directionRows.some(row => matchesMerchant(row, intent.match)) && directionRows.some(row =>
+      conjunction(merchantFor(row)) === conjunction(wanted))) return { reason: "merchant_selector_ambiguous" };
   }
   const eligible = allRows.filter(row => readableRow(row) && usableAccount(bySlug.get(row.effective_account_slug)) &&
     effectivePeriodCovered(bySlug.get(row.effective_account_slug), row.posted_on, row.posted_on));
@@ -216,10 +230,10 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     if (intent.measure) {
       ledger.measure = intent.measure;
       ledger.net_minor = sumMinor(ledger.lead_accounts.filter((_, i) => moveKind(accounts[i].account_kind)), a => a.credits_minor - a.debits_minor);
-      ledger.net_label = "cash in minus cash out, not accounting profit";
-      leadDetail = `Cash in minus cash out, not accounting profit: ${money(ledger.net_minor)}.\n${leadDetail}`;
+      ledger.net_label = "money in minus money out, not accounting profit or cash flow";
+      leadDetail = `Money in minus money out, not accounting profit or cash flow: ${money(ledger.net_minor)}.\n${leadDetail}`;
       for (const account of accounts.filter(a => !moveKind(a.account_kind)))
-        leadDetail += `\n${masked(account)}: ${account.account_kind} account, left out of cash in minus cash out; only checking, savings and card accounts contribute.`;
+        leadDetail += `\n${masked(account)}: ${account.account_kind} account, left out of money in minus money out; only checking, savings and card accounts contribute.`;
     }
   } else if (["largest", "deposits"].includes(intent.kind)) {
     const found = activity.filter(row => row.direction === intent.direction).sort((a, b) =>
@@ -306,7 +320,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     if (!unchangedLimitedList && [...keptPairs.values()].some(reason => reason.startsWith("other account"))) {
       notes.push('moves with an account outside this question are kept; say "excluding transfers" to leave them out'); ledger.flip.push("excluding transfers");
     }
-    if (!notes.length) notes.push(keptPairs.size ? "paired activity stays where listed below" : "only checking, savings and card accounts contribute to cash in minus cash out");
+    if (!notes.length) notes.push(keptPairs.size ? "paired activity stays where listed below" : "only checking, savings and card accounts contribute to money in minus money out");
     // Gross sentences retain their wording and citation order for existing clients.
     answer = `${leadDetail || answer}\nNote: ${notes.join("; ")}.\nWith everything counted:\n${answer}\n${bounded}`;
     const omittedPairs = pairs.filter(pair => [pair.out, pair.in].some(row => noteExcluded.has(row.id)));
@@ -335,16 +349,6 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
 
 // The only integration point wraps the existing document path. Non-money
 // responses return untouched, including their exact serialized bytes.
-
-// Without a payee, a description proves the sender only when the requested
-// words open the description or follow its "from"/"by" clause. "Transfer from
-// A for B invoice" names A as the sender, never B. Anything else refuses.
-function descriptionNamesSender(description, wanted) {
-  const tokens = String(description || "").toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
-  const startsWith = (at) => wanted.every((word, i) => tokens[at + i] === word);
-  const clause = tokens.findIndex(token => token === "from" || token === "by");
-  return clause === -1 ? startsWith(0) : startsWith(clause + 1);
-}
 
 export async function withLedgerAnswer({ env, question, access, grantScope, scopePrincipalKind,
   filters = {}, entityScope, ledgerEligible = true, now = Date.now() }, next) {
@@ -384,7 +388,8 @@ export async function withLedgerAnswer({ env, question, access, grantScope, scop
       gap = gapFor(reason, reason === 'ledger_account_link_required' ? disputed : accounts, intent);
       // Documents cannot resolve a disputed ledger identity or authorize a
       // financial total that this deterministic account decision refused.
-      if (reason === 'ledger_account_link_required') return new Response(JSON.stringify({ mode: 'think',
+      if (['ledger_account_link_required', 'cash_flow_unsupported', 'merchant_selector_unsupported',
+        'merchant_selector_ambiguous', 'coverage_review_required', 'bank_export_overlap_review_required'].includes(reason)) return new Response(JSON.stringify({ mode: 'think',
         code: reason, answer: null, citations: [], results: [], gaps: [gap],
         evidence_gate: { supported: false, complete: false, reason } }), { headers: { 'Content-Type': 'application/json' } });
     } catch {

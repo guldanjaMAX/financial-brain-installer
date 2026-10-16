@@ -220,7 +220,7 @@ test('populated schema 48 survives the candidate migration and approved money ma
       'two identical charges retain their multiplicity across identity repair');
   });
   const monthQuestion = 'How much money came in and went out in September 2026 for account 4321?';
-  await t.test('unlinked twins refuse, then exact CLI approval permits single-count precedence', async () => {
+  await t.test('unlinked twins and legacy coverage refuse until link approval and independent coverage review', async () => {
     const before = snapshot(f), start = f.seen.length;
     const refusal = await ask(monthQuestion);
     assert.equal(refusal.code, 'ledger_account_link_required'); assert.equal(refusal.answer, null);
@@ -236,6 +236,18 @@ test('populated schema 48 survives the candidate migration and approved money ma
     assert.equal(done.complete, true); assert.equal(done.mutation_count, 1);
     assert.equal(f.rows('SELECT * FROM fin_account_links').length, 1);
     assert.equal(snapshot(f), before); assert.equal(totals(f), money);
+    // The old complete flag retained a partial-export basis note. Link approval
+    // establishes identity, not observed days, and must not repair that claim.
+    const coverageStart = f.seen.length;
+    const coverageRefusal = await ask(monthQuestion);
+    assert.equal(coverageRefusal.gaps[0].reason, 'coverage_review_required');
+    assert.equal(coverageRefusal.ledger, undefined);
+    assert.ok(f.seen.slice(coverageStart).some(sql => sql.includes('FROM fin_accounts')));
+    assert.equal(snapshot(f), before);
+    assert.equal(f.rows("SELECT COUNT(*) n FROM fin_account_coverage WHERE coverage_status='complete'")[0].n, 3);
+    // Synthetic reviewed source evidence, not a migration or automatic repair.
+    f.raw("UPDATE fin_account_coverage SET basis_note='Independently reviewed complete source interval' WHERE coverage_status='complete'");
+    assert.equal(totals(f), money);
     const control = await ask(monthQuestion);
     assert.equal(control.ledger.accounts.length, 1);
     assert.equal(control.ledger.accounts[0].credits_minor, 12001);
