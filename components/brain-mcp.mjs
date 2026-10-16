@@ -36,6 +36,7 @@ import { readAdminKeyFromKeychain } from "../operations/admin-key-persistence.mj
 // Tool failures reach the owner inside their AI tool, not a terminal, and the
 // runtime's remedies name real commands. Rendering here covers every tool.
 import { renderCliCommands } from "../operations/cli-guidance.mjs";
+import { safeAnswerErrorText } from "../worker/src/lib/answer-render.js";
 import {
   createBrainCredentialResolver,
   fetchWithBrainCredential,
@@ -128,6 +129,29 @@ const CREDENTIALS = createBrainCredentialResolver({
 /* http                                                                */
 /* ------------------------------------------------------------------ */
 
+// Only errors constructed at this boundary may carry text into an assistant
+// reply. Redaction of a known token cannot make an arbitrary upstream body safe.
+class McpToolError extends Error {
+  constructor(code, message) {
+    super(`${message} (Support code: ${code})`);
+  }
+}
+
+const REVIEWED_CREDENTIAL_ERRORS = new Set([
+  "the durable brain credential could not be read and verified. Run `brain secrets <manifest>` and restart the AI tool if this continues.",
+  "no brain credential resolved. Reconnect this brain with `brain mcp-config <manifest>`.",
+]);
+
+function safeMcpError(error) {
+  if (error instanceof McpToolError) return error.message;
+  // Exact reviewed sentences from the credential resolver, never substrings or
+  // properties supplied by an HTTP error. Keep their supported recovery path.
+  if (REVIEWED_CREDENTIAL_ERRORS.has(error?.message)) {
+    return `${error.message} (Support code: MCP_CREDENTIAL_UNAVAILABLE)`;
+  }
+  return "The Brain tool could not complete this request. Try the read again; for a write, check its receipt before retrying. If this continues, contact your installer. (Support code: MCP_TOOL_FAILED)";
+}
+
 async function call(path, { method = "GET", body } = {}, queryTiming = null) {
   if (queryTiming) return queryTiming.backend(() => call(path, { method, body }));
   const ctl = new AbortController();
@@ -142,20 +166,32 @@ async function call(path, { method = "GET", body } = {}, queryTiming = null) {
       body: body ? JSON.stringify(body) : undefined,
       signal: ctl.signal,
     }, CREDENTIALS);
-    const text = CREDENTIALS.redact(await res.text());
     if (!res.ok) {
-      const hint = text.includes("1010")
-        ? " (a bot-protection rule rejected the request; the User-Agent header is the usual cause)"
-        : res.status === 401 || res.status === 403
-          ? " (the credential was rejected; check it has not expired or been rotated)"
-          : "";
-      throw new Error(`${method} ${path} -> HTTP ${res.status}${hint}: ${text.slice(0, 300)}`);
+      // Do not read or classify arbitrary body text. HTTP status supplies the
+      // category; abandoning the body also avoids retaining private payloads.
+      try { await res.body?.cancel(); } catch { /* status is still available */ }
+      const status = Number.isInteger(res.status) && res.status >= 100 && res.status <= 599
+        ? `HTTP ${res.status}. ` : "";
+      if (res.status === 401 || res.status === 403) {
+        throw new McpToolError("MCP_ACCESS_REJECTED", `${status}The Brain rejected this connection's access. Ask your installer to verify its access and reconnect it.`);
+      }
+      if (res.status === 429) {
+        throw new McpToolError("MCP_RATE_LIMITED", `${status}The Brain request limit was reached. Try again after the limit resets.`);
+      }
+      throw new McpToolError("MCP_HTTP_ERROR", `${status}The Brain could not complete this request. Try the read again; for a write, check its receipt before retrying.`);
     }
+    const text = CREDENTIALS.redact(await res.text());
     try {
       return JSON.parse(text);
     } catch {
-      throw new Error(`${path} returned non-JSON: ${text.slice(0, 200)}`);
+      throw new McpToolError("MCP_INVALID_RESPONSE", "The Brain returned an unreadable response. Ask your installer to check the connection.");
     }
+  } catch (error) {
+    if (error instanceof McpToolError || REVIEWED_CREDENTIAL_ERRORS.has(error?.message)) throw error;
+    if (ctl.signal.aborted) {
+      throw new McpToolError("MCP_TIMEOUT", "The Brain request timed out. Try the read again; for a write, check its receipt before retrying.");
+    }
+    throw new McpToolError("MCP_CONNECTION_UNAVAILABLE", "The Brain connection could not be completed. Check the connection; for a write, check its receipt before retrying.");
   } finally {
     clearTimeout(timer);
   }
@@ -505,13 +541,13 @@ async function searchWorker(args, queryTiming = null) {
 
 async function runTool(name, args = {}, queryTiming = null) {
   if (name === "brain_remember" && !profileHas(PROFILE, "curated:write")) {
-    throw new Error("the active agent profile cannot write; reconnect as owner-assistant or structured-contributor");
+    throw new McpToolError("MCP_PROFILE_REFUSED", "the active agent profile cannot write; reconnect as owner-assistant or structured-contributor");
   }
   if (name === "brain_health" && !profileHas(PROFILE, "diagnostics:read")) {
-    throw new Error("the active agent profile cannot read whole-brain diagnostics");
+    throw new McpToolError("MCP_PROFILE_REFUSED", "the active agent profile cannot read whole-brain diagnostics");
   }
   if (name === "brain_financial_map" && !profileHas(PROFILE, "diagnostics:read")) {
-    throw new Error("the active agent profile cannot read or preview the owner financial map");
+    throw new McpToolError("MCP_PROFILE_REFUSED", "the active agent profile cannot read or preview the owner financial map");
   }
   switch (name) {
     case "brain_think": {
@@ -532,7 +568,8 @@ async function runTool(name, args = {}, queryTiming = null) {
       const refused = typeof d.answer === "string" && /^The documents do not answer/i.test(d.answer);
       const out = {
         answer: d.answer ?? null,
-        answer_error: d.answer_error ?? undefined,
+        answer_error: d.answer_error ? safeAnswerErrorText(d.answer_error) : undefined,
+        answer_error_code: d.answer_error ? "MCP_ANSWER_ERROR" : undefined,
         degraded,
         degraded_reason: degradedReason,
         search_status: cannotSupportAbsence
@@ -769,7 +806,7 @@ case "brain_remember": {
             records: confirmed,
             failed_record: record.index + 1,
             source_id: L.source_id,
-            note: `The Brain did not return a receipt for record ${record.index + 1}. Stop here. Earlier records listed above are confirmed; this record may or may not have reached storage. An exact retry is idempotent. ${String(error?.message || error).slice(0, 180)}`,
+            note: `The Brain did not return a receipt for record ${record.index + 1}. Stop here. Earlier records listed above are confirmed; this record may or may not have reached storage. An exact retry is idempotent. ${renderCliCommands(safeMcpError(error))}`,
           };
         }
         const receipt = validateRememberReceipt(res, envelope);
@@ -828,7 +865,7 @@ case "brain_remember": {
       return await call("/api/admin/brain/documents");
     case "brain_financial_map": {
       if (!args || typeof args !== "object" || Array.isArray(args)) {
-        throw new Error("brain_financial_map requires one object");
+        throw new McpToolError("MCP_INVALID_ARGUMENTS", "brain_financial_map requires one object");
       }
       const keys = Object.keys(args).sort();
       if (args.mode === "read" && keys.join(",") === "mode") {
@@ -837,17 +874,17 @@ case "brain_remember": {
       if (args.mode === "preview" && keys.join(",") === "mode,snapshot" &&
           args.snapshot && typeof args.snapshot === "object" && !Array.isArray(args.snapshot)) {
         if (!profileHas(PROFILE, "curated:write")) {
-          throw new Error("the active agent profile may read the owner financial map but cannot create a preview; reconnect as owner-assistant");
+          throw new McpToolError("MCP_PROFILE_REFUSED", "the active agent profile may read the owner financial map but cannot create a preview; reconnect as owner-assistant");
         }
         return await call(OWNER_FINANCIAL_MAP_PREVIEW_PATH, {
           method: "POST",
           body: { snapshot: args.snapshot },
         });
       }
-      throw new Error("brain_financial_map accepts exactly mode=read, or mode=preview plus one complete snapshot. It has no activation mode.");
+      throw new McpToolError("MCP_INVALID_ARGUMENTS", "brain_financial_map accepts exactly mode=read, or mode=preview plus one complete snapshot. It has no activation mode.");
     }
     default:
-      throw new Error(`unknown tool: ${name}`);
+      throw new McpToolError("MCP_UNKNOWN_TOOL", "Unknown Brain tool. Use the advertised tool list.");
   }
 }
 
@@ -923,7 +960,7 @@ async function handle(msg) {
       return ok(id, { content, ...(queryTiming ? { _meta: { timing: queryTiming.finish() } } : {}) });
     } catch (err) {
       return ok(id, {
-        content: [{ type: "text", text: renderCliCommands(`brain error in ${params?.name}: ${err.message}`) }],
+        content: [{ type: "text", text: renderCliCommands(safeMcpError(err)) }],
         isError: true,
         ...(queryTiming ? { _meta: { timing: queryTiming.finish("error") } } : {}),
       });
@@ -932,7 +969,7 @@ async function handle(msg) {
   if (method === "ping") return ok(id, {});
   if (method === "resources/list") return ok(id, { resources: [] });
   if (method === "prompts/list") return ok(id, { prompts: [] });
-  return fail(id, -32601, `method not found: ${method}`);
+  return fail(id, -32601, "method not found (Support code: MCP_UNKNOWN_METHOD)");
 }
 
 let buf = "";
@@ -958,7 +995,7 @@ process.stdin.on("data", (chunk) => {
     const p = handle(msg)
       .catch((err) => {
         if (msg?.id !== undefined && msg?.id !== null)
-          fail(msg.id, -32603, String(err?.message ?? err));
+          fail(msg.id, -32603, renderCliCommands(safeMcpError(err)));
       })
       .finally(() => inFlight.delete(p));
     inFlight.add(p);

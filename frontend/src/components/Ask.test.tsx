@@ -2,11 +2,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { Answer } from "../lib/api";
 import {
-  ANSWER_ERROR_MESSAGES, answerText,
+  ANSWER_ERROR_MESSAGES, answerText, confidenceText,
 } from "../lib/answer-render.js";
 import { unavailableNotice } from "../lib/retrieval-status.js";
 import {
-  CitationSources, EvidenceGateReason, SCOPED_SEARCH_UNAVAILABLE,
+  Trust, CitationSources, EvidenceGateReason, SCOPED_SEARCH_UNAVAILABLE,
   citationMeta, evidenceGateNote, readAskDraft, writeAskDraft,
 } from "./Ask";
 
@@ -189,6 +189,36 @@ describe("explicit tax evidence action", () => {
     expect(renderToStaticMarkup(<TaxEvidenceControl {...props} owner={false} />)).toBe("");
     for (const patch of [{ scope: null }, { year: "" }, { busy: true }]) {
       expect(renderToStaticMarkup(<TaxEvidenceControl {...props} {...patch} />)).toContain('disabled=""');
+    }
+  });
+});
+
+
+describe("search-scoped refusal confidence", () => {
+  const confidence = { percent: 80, band: "high", basis: ["checked 2 nearest candidates; none supported the claim"] };
+  it("preserves candidates without claiming corpus absence", () => {
+    const answer: Answer = { answer: "The documents do not answer the question.", confidence,
+      results: [{ title: "Synthetic record" }, { title: "Other record" }] } as Answer;
+    const html = renderToStaticMarkup(<Trust answer={answer} />);
+    expect(html).toContain("80% high");
+    expect(html).toContain("confidence in this search result");
+    expect(html).toContain("checked 2 nearest candidates");
+    expect(html).not.toContain("nothing is recorded");
+    expect(answerText(answer)).toContain("found 2 records in this search");
+    expect(confidenceText(answer)).toContain("Confidence in this search result");
+  });
+  it("distinguishes supported answers, empty searches and incomplete searches", () => {
+    const supported: Answer = { answer: "The records support 42 [1].", confidence };
+    expect(answerText(supported)).toBe(supported.answer);
+    expect(renderToStaticMarkup(<Trust answer={supported} />)).not.toContain("confidence in this search result");
+    const empty: Answer = { answer: "The documents do not answer the question.", results: [], confidence };
+    expect(answerText(empty)).toContain("matching record in this search");
+    for (const status of ["search_unavailable", "coverage_incomplete"]) {
+      const incomplete = { ...empty, status } as Answer;
+      const html = renderToStaticMarkup(<Trust answer={incomplete} />);
+      expect(html).not.toContain("80%");
+      expect(html).not.toContain("nothing is recorded");
+      expect(confidenceText(incomplete)).toMatch(/incomplete/i);
     }
   });
 });

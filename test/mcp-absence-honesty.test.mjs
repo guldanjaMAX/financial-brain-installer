@@ -551,11 +551,11 @@ await test("remote incomplete coverage retains newest metadata and unavailable s
 await test("remote refused ask scopes its line and confidence beside an unchanged cited control", async () => {
   const confidence = { percent: 80, band: "high", basis: ["fixture evidence"] };
   const refused = await remoteCall({ answer: "The documents do not answer the question.", confidence, results: [], citations: [], gaps: [] }, "ask");
-  assert.equal(refused, `${REFUSAL}\n\nConfidence in this search result: 80% (high) — fixture evidence.`);
+  assert.equal(refused, `${REFUSAL}\n\nConfidence in this search result: 80% (high). fixture evidence.`);
   assert.doesNotMatch(refused, /Confidence nothing is recorded|The documents do not answer/);
   const cited = await remoteCall({ answer: "Fixture answer [1].", confidence,
     citations: [{ n: 1, title: "Fixture record", source: "fixture", lineage: { status: "known" } }], results: [], gaps: [] }, "ask");
-  assert.equal(cited, "Fixture answer [1].\n\nConfidence: 80% (high) — fixture evidence.\n\nSources:\n[1] Fixture record · fixture");
+  assert.equal(cited, "Fixture answer [1].\n\nConfidence: 80% (high). fixture evidence.\n\nSources:\n[1] Fixture record · fixture");
   const unavailable = await remoteCall({ status: "search_unavailable", answer: "The documents do not answer the question.", confidence, results: [], citations: [], gaps: [] }, "ask");
   assert.match(unavailable, /could not be completed/i);
   assert.doesNotMatch(unavailable, /\d+%|Confidence nothing is recorded|I didn't find a matching record/);
