@@ -1,6 +1,6 @@
 import { synthesisIntent, SYNTHESIS_INSTRUCTION, verifySynthesis } from './lib/synthesis-answer.js';
 import { qualifyDatedStatus, datedStatusPrompt, datedStatusInstruction, datedStatusConflicts } from './lib/dated-status-answer.js';
-import { readIngestRemovalRequest, previewIngestRemovals, applyIngestRemovals } from "./lib/ingest-removal-plan.js";
+import { readIngestRemovalRequest, previewIngestRemovals, applyIngestRemovals, ingestRemovalFailure } from "./lib/ingest-removal-plan.js";
 import { createQueryTiming, queryTimingResponse, measureQueryStage, startQueryStage } from "./lib/query-timing.js";
 /**
  * brain worker — the client-installable retrieval brain.
@@ -3672,10 +3672,14 @@ export default {
               : null;
           if (!result) throw new Error("Choose preview or apply for a removal plan.");
           return privateNoStore(jsonResponse(result));
-        } catch {
+        } catch (error) {
+          const failure = ingestRemovalFailure(error);
           return privateNoStore(jsonResponse({
-            error: "Removal plan unavailable or changed. Verify the migration and runtime, then plan ingestion again.",
-          }, 409));
+            code: failure.code,
+            error: failure.code === "INGEST_REMOVAL_CHANGED"
+              ? "Stored inventory or runtime changed; run ingestion again."
+              : "Removal request could not be verified. The source cursor was not advanced.",
+          }, failure.status));
         }
       }
       if (path === "/api/admin/brain/curated-verify") {

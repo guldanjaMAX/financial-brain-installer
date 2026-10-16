@@ -500,7 +500,13 @@ A missing capability fails closed. Changed checkpoint, policy, runtime bytes,
 Worker generation, or stored document/chunk state invalidates approval. Physical
 targets are previewed from authenticated storage, checked again at apply, fenced
 inside each D1 transaction, and read back after removal. Accepted non-destructive
-progress remains resumable on a review stop or failed apply.
+progress remains resumable on a review stop or failed apply. Temporary preview
+failures retry with bounded backoff and show progress counts. Apply retries only
+when an authenticated readback proves the inventory marker unchanged. Capacity
+failures can reduce the batch size under that same fence. A lost response after
+a committed batch still requires ordinary ingestion and a newly reviewed plan;
+rerunning the old approval cannot resume that batch. Safe HTTP statuses and
+codes distinguish a temporary failure from a changed plan.
 
 `brain ingest` walks a folder, extracts text, and sends it in batches.
 

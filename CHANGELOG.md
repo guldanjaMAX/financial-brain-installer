@@ -10,6 +10,14 @@ Candidate only. This version has not been released. The changes below still
 need the full host gate, CI and separately reviewed field acceptance for the
 exact sealed package. This version bump verifies no incident.
 
+- **Large removal reviews show progress and tolerate temporary failures.**
+  Preview retries busy or interrupted requests. Applying an approved batch
+  retries only when the Brain proves its stored inventory is unchanged.
+  Smaller batches can recover from temporary capacity limits. If a response
+  was lost after removal completed, run ingestion again and review the new
+  plan; the old approval cannot resume it. Check any reported HTTP status or
+  safe error code. Your source cursor remains unchanged until the ordinary
+  refresh finishes.
 - **Money answers separate your own money moves from income and spending.**
   Supported answers leave evidenced transfers between your own accounts,
   retirement or investment withdrawals, and qualifying loan proceeds out of

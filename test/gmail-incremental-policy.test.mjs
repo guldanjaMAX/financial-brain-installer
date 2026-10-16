@@ -745,7 +745,8 @@ if (process.platform !== "win32") {
       first.evidence.forget_targets.join(",") === "gmail:pending-readback" &&
       first.state.history_id === "history-prior" &&
       Object.hasOwn(first.state.removed || {}, "gmail:pending-readback") &&
-      /authenticated removal plan is unavailable or changed/i.test(first.output),
+      /Authenticated removal request failed\. NETWORK_ERROR/i.test(first.output) &&
+      /may have completed/i.test(first.output),
       `${first.output.slice(-1_300)}\n${JSON.stringify(first.state)}\n${JSON.stringify(first.evidence)}`);
 
     const retry = runApprovedCase("pending-readback-failure", { directory: first.directory });

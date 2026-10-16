@@ -1048,7 +1048,7 @@ check("a fully accepted batch may advance its source cursor", sourceCursorCanAdv
       /state\.ingest_removal_plan = plan;\s*saveState\(\);[\s\S]*?fail\(/.test(boundaryFinish) &&
       !/action: "apply"|applyGuardedTargets/.test(boundaryFinish) &&
       boundaryGuard !== -1 && boundaryFirstApply > boundaryGuard &&
-      /applyGuardedTargets\(\{ plan, sourceApproval, send, verifyLocal \}\);\s*const after = await preview\(plan\.families, marker\);\s*if \(after\.targets\.length\) fail\(/.test(removalBoundary) &&
+      /applyGuardedTargets\(\{ plan, sourceApproval, send, verifyLocal, onProgress \}\);\s*const after = await preview\(plan\.families, marker\);\s*if \(after\.targets\.length\) fail\(/.test(removalBoundary) &&
       !/credential_scanner/.test(removalBoundary),
     `guard=${boundaryGuard} apply=${boundaryFirstApply}`);
   const localInventory = String(local).indexOf("const storedLocalFamilies = await listPreparedSourceFamilies");

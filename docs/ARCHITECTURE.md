@@ -540,9 +540,23 @@ A version metadata binding identifies the deployed Worker generation. Each
 bounded D1 deletion transaction checks the inventory fence before any mutation,
 returns its own resulting marker, and queues vector cleanup in the existing
 outbox. Exact readback must prove absence and the returned generation. Drift or a
-lost response requires a fresh plan; the client never adopts a newer marker to
-continue an old approval. Apply keeps the source cursor unchanged. An ordinary
-refresh after apply completes the source checkpoint.
+lost response with a changed or unverifiable marker requires a fresh plan; the
+client never adopts a newer marker to continue an old approval. Preview retries
+429, 5xx, transport failures and timeouts up to three times using the inventory
+retry schedule with jitter. Each request has a 60-second timeout and a shared
+four-minute budget including backoff and any apply readback. A failed apply can
+retry only after an authenticated empty-family preview proves the original
+marker unchanged; the transaction fence still protects against a later race.
+Every retry rechecks local approval and lease validity before sending a write.
+The route returns fixed codes distinguishing marker drift, invalid input,
+unverified readback, unavailable storage and D1 CPU capacity failures, without
+returning raw database errors. Repeated capacity failures halve preview batches;
+apply batches can shrink only with the same unchanged-marker proof. Neither
+batch exceeds 50, and a one-item failure stops. Large plans report checked
+families and confirmed removals using counts only. Apply keeps the source cursor
+unchanged. An ordinary refresh after apply completes the source checkpoint.
+There is no durable fingerprint replay receipt: an interrupted completed batch
+cannot be resumed or confirmed with its old approval.
 
 The legacy family arm of `POST /api/admin/brain/forget` is preview-only. A bare
 `confirm: true` returns HTTP 409 with `INGEST_REMOVAL_PLAN_REQUIRED` and guidance
