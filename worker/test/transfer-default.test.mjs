@@ -23,6 +23,19 @@ function unchanged(body, scenario, question) {
   assert.deepEqual(oldKeys(body.ledger), golden.ledger, "existing JSON keys retain their values");
 }
 async function ask(f, question = Q.totals, kind = "totals", pairCount = 1) {
+  if (/\bcash flow\b/.test(question)) {
+    // Cash flow is deliberately unsupported in this seal. Each former cash
+    // arm now proves refusal, then keeps every numeric/exclusion assertion as
+    // a supported net-income control over the identical fixture and flags.
+    const before = f.seen.sql.length;
+    const refused = await f.ask(question);
+    assert.ok(f.seen.sql.slice(before).some(sql => /FROM fin_accounts/.test(sql)), "cash-flow scope decision reached");
+    assert.equal(refused.ledger, undefined);
+    assert.equal(refused.gaps[0].reason, "cash_flow_unsupported");
+    assert.equal(refused.evidence_gate.supported, false);
+    assert.equal(f.modelCalls, 0);
+    question = question.replace("cash flow", "net income");
+  }
   const before = f.seen.sql.length;
   const body = await f.ask(question);
   assert.equal(body.ledger?.kind, kind);
@@ -248,9 +261,9 @@ test("h: combined profit sums only move kinds and uses real Think without a mode
     .reduce((n, r) => n + (r.direction === "inflow" ? r.amount_minor : -r.amount_minor), 0);
   assert.equal(body.ledger.measure, "profit");
   assert.equal(body.ledger.net_minor, expected);
-  assert.equal(body.ledger.net_label, "cash in minus cash out, not accounting profit");
-  assert.ok(body.answer.startsWith(`Cash in minus cash out, not accounting profit: ${fmt(expected)}`));
-  assert.match(body.answer, /account \*\*\*\*4444.*loan.*left out of cash in minus cash out/);
+  assert.equal(body.ledger.net_label, "money in minus money out, not accounting profit or cash flow");
+  assert.ok(body.answer.startsWith(`Money in minus money out, not accounting profit or cash flow: ${fmt(expected)}`));
+  assert.match(body.answer, /account \*\*\*\*4444.*loan.*left out of money in minus money out/);
   assert.match(body.answer, /loan payment, kept in money out/);
   const routeBefore = f.seen.sql.length, routed = await f.ask(Q.profit, true);
   assert.equal(routed.ledger.kind, "totals");

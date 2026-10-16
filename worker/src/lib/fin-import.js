@@ -138,6 +138,35 @@ export async function bankExportIdentityNeedsReview(env, envelope, tenantId = DE
   return false;
 }
 
+// A provider ID and an ID-less content ordinal cannot establish that two
+// overlapping exports describe the same events. Refuse instead of merging
+// by amount/date/payee, which would erase legitimate repeated purchases.
+function exportOverlapQuery(account, tenantId) {
+  const days = [account.periodStart, account.periodEnd, ...account.transactions.map(txn => txn.postedOn)].filter(Boolean).sort();
+  const kinds = [...new Set(account.transactions.map(txn => txn.externalId ? 1 : 0))];
+  return {
+    sql: `SELECT id FROM fin_transactions WHERE tenant_id=? AND account_slug=?
+      AND provenance='extracted' AND superseded_by_id IS NULL
+      AND ((external_id IS NULL AND ?=1) OR (external_id IS NOT NULL AND ?=1))
+      AND (? IS NULL OR posted_on IS NULL OR posted_on BETWEEN ? AND ?) LIMIT 1`,
+    binds: [tenantId, account.accountKey, Number(kinds.includes(1)), Number(kinds.includes(0)),
+      days[0] || null, days[0] || null, days.at(-1) || null],
+  };
+}
+
+export async function bankExportOverlapNeedsReview(env, envelope, tenantId = DEFAULT_TENANT) {
+  for (const account of envelope.accounts) {
+    if (!account.transactions.length) continue;
+    const { sql, binds } = exportOverlapQuery(account, tenantId);
+    if (await env.DB.prepare(sql).bind(...binds).first()) return true;
+  }
+  return false;
+}
+
+export const BANK_EXPORT_OVERLAP_REVIEW_REASON = "Overlapping exports use different transaction identities. Keep both original exports and review their posting dates and bank transaction references to distinguish duplicate records from separate purchases. Reuse the original export format for this interval; ambiguous reconciliation requires a separately reviewed and approved repair. Identity rekey does not reconcile OFX with CSV. Do not delete or merge rows automatically.";
+const overlapRefusal = () => ({ imported: false, refused: true, code: "bank_export_overlap_review_required",
+  reason: `Nothing from this import was written. ${BANK_EXPORT_OVERLAP_REVIEW_REASON}` });
+
 /** Identity for a statement period read out of one specific document. */
 export function statementUid(accountKey, account, origin) {
   const scope = origin.sourceDocUid || origin.sourceFeed || "unknown";
@@ -231,6 +260,7 @@ export function prepareBankExportImport(envelope, {
 
   for (const account of envelope.accounts) {
     const accountKey = account.accountKey;
+    const overlap = source.provenance === "extracted" ? exportOverlapQuery(account, tenantId) : null;
     receipt.accounts++;
     statements.push(accountStatement(tenantId, entitySlug, account, source, envelope, stamp));
 
@@ -264,7 +294,7 @@ export function prepareBankExportImport(envelope, {
       transactionUids.push(uid);
       if (txn.unparsedReason) receipt.unread_lines++;
       else receipt.transactions++;
-      statements.push(transactionRow(tenantId, accountKey, uid, txn, statementRef, source, envelope, stamp));
+      statements.push(transactionRow(tenantId, accountKey, uid, txn, statementRef, source, envelope, stamp, overlap));
     }
   }
   return { receipt, statements, transactionUids };
@@ -287,6 +317,8 @@ export async function importBankExport(env, envelope, options = {}) {
     return { imported: false, refused: true, code: "bank_export_identity_review_required",
       reason: "Existing bank-export rows need identity recovery. Run brain ledger rekey <manifest> --account <account> --preview, then review each page before --apply --approve <hash>. Imports remain blocked until recovery completes." };
   }
+  if (options.origin?.provenance !== "feed" &&
+      await bankExportOverlapNeedsReview(env, envelope, options.tenantId)) return overlapRefusal();
   await runAll(env, plan.statements);
   return plan.receipt;
 }
@@ -417,6 +449,10 @@ function directionSentence(account) {
 function coverageStatement(tenantId, account, source, envelope, stamp) {
   // `partial` and a through-date, never `complete`: one export proves the days
   // it covers and says nothing about the days on either side of it.
+  // Enlarging the observed envelope invalidates a prior complete claim. A
+  // contained export retains its independent basis verbatim. The old importer
+  // overwrote that basis even for complete rows, so those legacy claims also
+  // require review rather than acquiring authority from another partial file.
   const unread = account.transactions.filter((t) => t.unparsedReason).length;
   const note = [
     `Read from a bank export covering ${account.periodStart || "an unstated start"} to ${account.periodEnd}.`,
@@ -437,9 +473,20 @@ function coverageStatement(tenantId, account, source, envelope, stamp) {
         provenance, source_doc_uid, source_locator, source_feed, basis_state, recorded_at)
      VALUES (?,?,'partial',?,?,?,?,?,?,?,?,'confirmed',?)
      ON CONFLICT (tenant_id, account_slug) WHERE superseded_by_id IS NULL DO UPDATE SET
+       coverage_status = CASE WHEN fin_account_coverage.coverage_status='complete'
+         AND (fin_account_coverage.covered_from IS NULL OR fin_account_coverage.covered_to IS NULL
+           OR excluded.covered_from IS NULL OR excluded.covered_from < fin_account_coverage.covered_from
+           OR excluded.covered_to > fin_account_coverage.covered_to
+           OR fin_account_coverage.basis_note LIKE 'Read from a bank export covering %')
+         THEN 'partial' ELSE fin_account_coverage.coverage_status END,
        covered_from = MIN(COALESCE(fin_account_coverage.covered_from, excluded.covered_from), excluded.covered_from),
        covered_to = MAX(COALESCE(fin_account_coverage.covered_to, excluded.covered_to), excluded.covered_to),
-       basis_note = excluded.basis_note,
+       basis_note = CASE WHEN fin_account_coverage.coverage_status='complete'
+         AND fin_account_coverage.covered_from IS NOT NULL AND fin_account_coverage.covered_to IS NOT NULL
+         AND excluded.covered_from >= fin_account_coverage.covered_from
+         AND excluded.covered_to <= fin_account_coverage.covered_to
+         AND COALESCE(fin_account_coverage.basis_note,'') NOT LIKE 'Read from a bank export covering %'
+         THEN fin_account_coverage.basis_note ELSE excluded.basis_note END,
        computed_at = excluded.computed_at,
        recorded_at = excluded.recorded_at`,
     [
@@ -452,15 +499,19 @@ function coverageStatement(tenantId, account, source, envelope, stamp) {
   ];
 }
 
-function transactionRow(tenantId, accountKey, uid, txn, statementRef, source, envelope, stamp) {
+function transactionRow(tenantId, accountKey, uid, txn, statementRef, source, envelope, stamp, overlap) {
   const unread = Boolean(txn.unparsedReason);
+  // Guard each transaction write inside its D1 batch, not only the preview
+  // or first chunk. A racing import must not land another identity alongside
+  // this event after the preflight read. json_extract intentionally aborts.
+  const guardedUid = overlap ? `CASE WHEN NOT EXISTS (${overlap.sql}) THEN ? ELSE json_extract('bank export overlap review required','$') END` : '?';
   return [
     `INSERT INTO fin_transactions
        (tenant_id, txn_uid, account_slug, posted_on, amount_minor, direction, raw_amount_minor,
         raw_sign_convention, currency, description, payee, pending, statement_uid, external_id,
         provenance, source_doc_uid, source_locator, source_feed, basis_state, unparsed_reason, recorded_at,
         category_basis_state)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+     VALUES (?,${guardedUid},?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT (tenant_id, txn_uid) WHERE superseded_by_id IS NULL DO UPDATE SET
        posted_on = excluded.posted_on,
        amount_minor = excluded.amount_minor,
@@ -480,7 +531,7 @@ function transactionRow(tenantId, accountKey, uid, txn, statementRef, source, en
        source_locator = excluded.source_locator,
        recorded_at = excluded.recorded_at`,
     [
-      tenantId, uid, accountKey,
+      tenantId, ...(overlap?.binds || []), uid, accountKey,
       txn.postedOn || null,
       unread ? null : txn.amountMinor,
       unread ? null : txn.direction,

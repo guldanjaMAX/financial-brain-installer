@@ -119,7 +119,8 @@ function phaseTwoQuestion(q, intent, today) {
   if (filter && from) {
     const direction = spending ? "outflow" : "inflow";
     const mode = filter[1], value = filter[2].trim();
-    if (/\b(?:in|during|for|over|between|before|after|account|accounts|entity|and|or|last|month|year|q[1-4])\b/.test(value)) return null;
+    if (/\b(?:in|during|for|over|between|before|after|account|accounts|entity|or|last|month|year|q[1-4])\b/.test(value) ||
+        (mode !== "at" && mode !== "from" && /\band\b/.test(value))) return null;
     if (mode === "by") return ["merchant", "category"].includes(value) ? { ...result, kind: value, direction, match: null } : null;
     if (!/[\p{L}\p{N}]/u.test(value)) return null;
     return { ...result, kind: ["at", "from"].includes(mode) ? "merchant" : "category", direction, match: value };
@@ -127,8 +128,16 @@ function phaseTwoQuestion(q, intent, today) {
   return null;
 }
 
+const ARRIVAL = "arrive|arrived|receive|received|come|came|land|landed|hit|reach|reached|clear|cleared|post|posted";
+function paymentParties(text) {
+  const clause = preposition => text.match(new RegExp(`\\b${preposition}\\s+(.+?)(?=\\s+(?:on|into|to|in|for|from|via|${ARRIVAL})\\b|[?,]|$)`));
+  const namedPayment = text.match(/^(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?([\p{L}\p{N}]+(?:\s+[\p{L}\p{N}]+){0,3})\s+payment\b/u);
+  const named = namedPayment && !/^(?:the|my|our|a|an)$/.test(namedPayment[1]) ? namedPayment[1] : "";
+  return { partyMatch: clause("from"), viaMatch: clause("via"), namedPayment, named };
+}
+
 export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
-  let q = String(question || "").toLowerCase().replace(/[’]/g, "'").replace(/\bwhat's\b/g, "what is");
+  let q = String(question || "").normalize("NFKC").toLowerCase().replace(/[’]/g, "'").replace(/\bwhat's\b/g, "what is");
   const broad = /\b(?:money|cash|profit|bank|deposits?|expenses?|charges?|subscriptions|recurring (?:charges|subscriptions)|payment|paid|spend|spent|spending|income|revenue|credits?|debits?|transactions?|transfers?|checking|savings|loan|debt|tax|payroll|invoice|receivable|payable|came in|went out)\b|\$\s*\d/.test(q) || /\b(?:(?:my|our|account|card|bank|checking|savings|loan|current|available|outstanding)\s+balances?|balances?\s+(?:of|on|in|for|due))\b/.test(q);
   const base = { broad, kind: null };
   if (!broad) return base;
@@ -145,10 +154,15 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
   if (loanProceeds.length) { flags.loanProceeds = "include"; q = q.replace(loanProceeds[0][0], ""); }
   q = q.replace(/\s+/g, " ").trim();
   const today = ledgerDay(now);
-  const maskMatches = [...q.matchAll(/(?:\*{2,}|ending(?:\s+in)?\s+|mask\s+|account\s+)(\d{1,4})\b/g)];
+  let scopeText = q;
+  if (/\b(?:payment|deposit|paid)\b/.test(q) && new RegExp(`\\b(?:${ARRIVAL})\\b`).test(q)) {
+    const { partyMatch, viaMatch, namedPayment, named } = paymentParties(q);
+    for (const match of [partyMatch, viaMatch, named ? namedPayment : null]) if (match) scopeText = scopeText.replace(match[0], "");
+  }
+  const maskMatches = [...scopeText.matchAll(/(?:\*{2,}|ending(?:\s+in)?\s+|mask\s+|account\s+)(\d{1,4})\b/g)];
   const masks = [...new Set(maskMatches.map(m => m[1]))];
   if (masks.length > 1) return base;
-  const kinds = [...new Set(q.match(/\b(?:checking|savings|card|loan|investment|retirement|escrow)\b/g) || [])];
+  const kinds = [...new Set(scopeText.match(/\b(?:checking|savings|card|loan|investment|retirement|escrow)\b/g) || [])];
   const selector = { mask: masks[0] || null, accountKind: kinds.length === 1 ? kinds[0] : null };
   const intent = { ...base, ...selector, ...flags };
   const withoutMasks = text => maskMatches.reduce((rest, match) => rest.replace(match[0], ""), text);
@@ -197,14 +211,11 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     rest = period.residual;
     if (dates.length && /\b(?:before|after|between)\b/.test(rest)) return intent;
     if (!dates.length && !period.from && /\b(?:on|between|before|after|yesterday|tomorrow|last|this)\b/.test(rest)) return intent;
-    const arrival = "arrive|arrived|receive|received|come|came|land|landed|hit|reach|reached|clear|cleared|post|posted";
-    const senderClause = preposition => rest.match(new RegExp(`\\b${preposition}\\s+(.+?)(?=\\s+(?:on|into|to|in|for|from|via|${arrival})\\b|[?,]|$)`));
-    const partyMatch = senderClause("from"), viaMatch = senderClause("via");
-    const namedPayment = rest.match(/^(?:did|has|have)\s+(?:(?:the|my|our|a|an)\s+)?([\p{L}\p{N}]+(?:\s+[\p{L}\p{N}]+){0,3})\s+payment\b/u);
+    const arrival = ARRIVAL;
+    const { partyMatch, viaMatch, namedPayment, named } = paymentParties(rest);
     // Apply one specificity rule to every sender form. Generic-only clauses
     // cannot identify an amountless payment; keep all words in specific names
     // so rejecting generic narration never widens a query to every deposit.
-    const named = namedPayment && !/^(?:the|my|our|a|an)$/.test(namedPayment[1]) ? namedPayment[1] : "";
     const parties = [named, viaMatch?.[1], partyMatch?.[1]].filter(Boolean);
     // An amount does not establish which ordinal payment was meant, and a
     // generic adjective must not become sender evidence by being consumed.
@@ -216,7 +227,7 @@ export function classifyLedgerQuestion(question, { now = Date.now() } = {}) {
     if (named) rest = rest.replace(namedPayment[0], "payment");
     rest = rest.replace(/(?:\$|\busd\s+)\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s+dollars?\b/g, "")
       .replace(/,?\s+and when\b/g, "")
-      .replace(new RegExp(`\\b(?:did|has|have|was|is|the|a|my|our|payment|deposit|of|paid|${arrival}|yet|on|in|into|to|account|bank|checking|savings|ending|mask|please)\\b`, "g"), "");
+      .replace(new RegExp(`\\b(?:did|has|have|was|is|the|a|my|our|payment|deposit|of|paid|${arrival}|yet|on|in|into|to|account|bank|checking|savings|card|loan|investment|retirement|escrow|ending|mask|please)\\b`, "g"), "");
     if (!punctuationOnly(rest)) return intent;
     const counterpartyWords = counterparty.match(/[\p{L}\p{N}]+/gu) || [];
     if (amountMinor === null && !counterpartyWords.length) return intent;
