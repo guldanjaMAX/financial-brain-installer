@@ -446,6 +446,26 @@ test('T07 remote preview refusal does not relay arbitrary body or code', async (
   assert.match(textOf(reply), /support code: MCP_/i);
 });
 
+for (const [code, paused, expected] of [
+  ['corpus_writes_paused', true, 'MCP_CORPUS_WRITES_PAUSED'],
+  ['corpus_writes_paused', false, 'MCP_DELETE_PREVIEW_REFUSED'],
+  [canary, true, 'MCP_DELETE_PREVIEW_REFUSED'],
+]) {
+  test(`T07 preview pause uses only a verified state and reviewed text: ${expected} ${paused}`, async () => {
+    let reached = 0;
+    const reply = await call('delete_preview', { entity_slug: 'fixture-entity', ids: ['fixture-mail:record-one'] }, {
+      grant: { profile: 'break-glass' }, previewDeletion: async () => {
+        reached++; return { ok: false, body: { code, paused, error: canary } };
+      },
+    });
+    assert.equal(reached, 1, 'authorized preview reached the refusal decision');
+    assert.equal(reply.isError, true);
+    assert.match(textOf(reply), new RegExp(`Support code: ${expected}`));
+    assert.doesNotMatch(textOf(reply), /Synthetic private title|count=731|private marker/);
+    if (expected === 'MCP_CORPUS_WRITES_PAUSED') assert.match(textOf(reply), /paused for a verified upgrade or rollback/);
+  });
+}
+
 
 test('T07 remote write and preview success controls keep exact receipts', async () => {
   let writes = 0, previews = 0;

@@ -536,6 +536,13 @@ async function runDeletePreview(deps, args) {
   if (!ids.length) return toolError("ids is required: pass the document ids you mean to remove");
   const result = await deps.previewDeletion({ entitySlug: args.entity_slug, documentIds: ids });
   if (!result?.ok) {
+    // The Worker checks this barrier before inspecting deletion scope. Preserve
+    // that decision without relaying an arbitrary error body into the client.
+    if (result?.body?.code === "corpus_writes_paused" && result.body.paused === true) {
+      return toolError(
+        "Brain corpus writes are paused for a verified upgrade or rollback. No deletion preview was created. (Support code: MCP_CORPUS_WRITES_PAUSED)",
+      );
+    }
     return toolError(
       "The deletion preview was refused. Review the requested scope with the owner. No deletion was executed. (Support code: MCP_DELETE_PREVIEW_REFUSED)",
     );

@@ -4,6 +4,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { renderCliCommands } from "../operations/cli-guidance.mjs";
 
 const root = realpathSync.native(mkdtempSync(join(tmpdir(), "brain-cli-success-exit-")));
 const fixture = fileURLToPath(new URL("./fixtures/cli-success-exit-child.mjs", import.meta.url));
@@ -70,7 +71,7 @@ function runArm(mode, extraEnv = {}) {
 
 try {
   const results = [];
-  for (const mode of ["control", "update", "update-warning", "update-daily-attention", "deploy", "deploy-warning"]) {
+  for (const mode of ["control", "update", "update-warning", "update-daily-attention", "update-daily-restored", "deploy", "deploy-warning"]) {
     results.push(await runArm(mode));
   }
   const [control, ...commandArms] = results;
@@ -102,11 +103,29 @@ try {
   }
 
   const dailyAttention = commandArms.find((arm) => arm.mode === "update-daily-attention");
-  assert.equal(dailyAttention.code, 0, "a verified Brain update with retained daily recovery uses the documented success exit");
-  assert.match(dailyAttention.stdout, /Daily imports.*need attention/i,
-    "the command boundary prints a visible daily-import attention line");
-  assert.match(dailyAttention.stdout, /DECISION daily-attention recovery=true enabled=false/,
-    "the CLI arm reached the retained-recovery decision instead of silently enabling imports");
+  assert.equal(dailyAttention.code, 0, "verified daily-off state with an owner action is a successful update");
+  assert.match(dailyAttention.stdout, /still needs attention/);
+  assert.ok(dailyAttention.stdout.includes(renderCliCommands(
+    "The old daily task was paused; run brain daily on <manifest> to turn on permanent daily imports.",
+  )), "the command boundary explains the pending owner decision");
+  assert.match(dailyAttention.stdout, /DECISION daily recovery=false enabled=false upgrades=1/);
+  assert.match(dailyAttention.stdout, /DECISION bridge enabled=false pauses=1/,
+    "the successful attention arm actually paused its bridge and did not silently enable it");
+
+  const restored = commandArms.find((arm) => arm.mode === "update-daily-restored");
+  assert.match(restored.stdout, /DECISION daily recovery=false enabled=true upgrades=1 restore_attempts=[1-9]/,
+    "the enabled-daily green control reached verified restoration and cleared recovery");
+
+  // A required restore failure is intentionally no longer a success warning.
+  // It must still close readline, keep recovery, and exit nonzero without Done.
+  const failed = await runArm("update-daily-recovery-failure");
+  assert.equal(failed.timedOut, false, JSON.stringify(failed));
+  assert.equal(failed.code, 1, JSON.stringify(failed));
+  assert.match(failed.stdout, /DECISION update-daily-recovery-failure refused opened=true prompt_open=false/);
+  assert.match(failed.stdout, /DECISION daily recovery=true enabled=false upgrades=1 restore_attempts=[1-9]/);
+  assert.match(failed.stdout + failed.stderr, /this update is incomplete: daily imports remain paused or unverified/);
+  assert.match(failed.stdout + failed.stderr, /Daily recovery receipt:/);
+  assert.doesNotMatch(failed.stdout, /Done\. Your Brain/);
 
   assert.notEqual(
     control.stdout.includes("opened=true"),

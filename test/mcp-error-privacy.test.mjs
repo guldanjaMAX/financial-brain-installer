@@ -17,7 +17,7 @@ const keyFixtureOptions = home => process.platform === "win32"
 
 // Run the shipped entrypoint and credential-file reader, with transport replaced
 // before import. The canary is a synthetic body, never an argument or credential.
-function runFixture(t, fixture, { name = "brain_think", args = { q: "Synthetic record" }, method = "tools/call" } = {}) {
+function runFixture(t, fixture, { name = "brain_think", args = { q: "Synthetic record" }, method = "tools/call", profile = "owner-assistant" } = {}) {
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), "mcp-error-privacy-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home-fixture");
@@ -42,7 +42,7 @@ globalThis.fetch = async (url, init) => {
 `);
   const environment = { HOME: home, TMPDIR: root, BRAIN_NO_WRANGLER_LOGIN: "1",
     BRAIN_TEST_LAUNCHCTL: launchctl, BRAIN_URL: "https://fixture.invalid", BRAIN_MANIFEST: manifest,
-    BRAIN_AGENT_PROFILE: "owner-assistant" };
+    BRAIN_AGENT_PROFILE: profile };
   for (const name of ["SystemRoot", "WINDIR", "ComSpec", "USERNAME", "USER", "LOGNAME", "PATH"])
     if (process.env[name]) environment[name] = process.env[name];
   const run = spawnSync(process.execPath, ["--import", loader, MCP], {
@@ -74,6 +74,23 @@ test("stdio initialization and tool inventory describe the cash-flow refusal hon
     assert.doesNotMatch(text, /profit, net income, cash flow/);
   }
 });
+
+for (const profile of ["librarian", "owner-assistant"]) {
+  test(`stdio ${profile} retains the local search-first excerpt loop and date limits`, t => {
+    const initialized = runFixture(t, {}, { method: "initialize", profile });
+    const inventory = runFixture(t, {}, { method: "tools/list", profile });
+    const search = inventory.tools.find(tool => tool.name === "brain_search");
+    assert.ok(search && initialized.serverInfo, "real stdio reached both metadata decisions");
+    assert.ok(search.inputSchema.properties.sort && search.inputSchema.properties.from,
+      "local date and sort guidance requires actual structured input support");
+    assert.match(initialized.instructions, /To answer, search, read, then write\./);
+    assert.match(initialized.instructions, /sort "newest", read newest_record/);
+    assert.match(initialized.instructions, /only the returned relevance window, not all matching records/);
+    assert.match(initialized.instructions, /Excerpts are partial/);
+    assert.match(initialized.instructions, /Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback/);
+    assert.doesNotMatch(initialized.instructions, /profit, net income, cash flow/);
+  });
+}
 
 for (const status of [400, 401, 403, 429, 503]) {
   test(`stdio HTTP ${status} retains status without relaying a private body`, t => {

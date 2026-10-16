@@ -90,6 +90,7 @@ async function isolatedRuntime({ fetchImpl, env = {}, argv = null }, fn) {
 function cloudflareHarness({ routePost = "ok", routeEnabled = true, schedule = "ok" } = {}) {
   const calls = [];
   const workerMetadata = [];
+  let schedules = [];
   const fetchImpl = async (url, options = {}) => {
     const parsedUrl = new URL(String(url));
     const path = parsedUrl.pathname;
@@ -126,7 +127,11 @@ function cloudflareHarness({ routePost = "ok", routeEnabled = true, schedule = "
     if (path === "/client/v4/accounts/fixture-account/workers/subdomain" && method === "GET") {
       return apiResponse({ subdomain: "fixture-account" });
     }
+    if (path.endsWith("/workers/scripts/fixture-brain/schedules") && method === "GET") {
+      return apiResponse(schedules);
+    }
     if (path.endsWith("/workers/scripts/fixture-brain/schedules") && method === "PUT") {
+      if (schedule === "ok") schedules = JSON.parse(options.body);
       return schedule === "ok"
         ? apiResponse([])
         : apiResponse(null, { success: false, status: 403 });
@@ -269,6 +274,8 @@ try {
     /required schedule/i,
   );
   assert.equal(drainFailureHarness.calls.some((call) => call.path.endsWith("/schedules")), true);
+  assert.equal(drainFailureHarness.calls.filter((call) => call.path.endsWith("/schedules") && call.method === "PUT").length, 1,
+    "the required-schedule failure must reach the write after readable inventory");
 
   const nonD1Manifest = writeManifest(
     "non-d1.manifest.json",

@@ -923,7 +923,9 @@ test("brain_think is optional, always returns candidates, and initialize teaches
     for (const text of [instructions, ownerInstructions]) {
       assert.match(text, /To answer, search, read, then write\./);
       assert.ok(text.includes('Before any status, "latest", or absence claim, run one brain_search for the subject with sort "newest", read newest_record, and say "as of <record date>" for the record you relied on.'));
-      assert.ok(text.includes("For a money question the bank ledger answers (a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, cash flow, withdrawals, loan proceeds), use brain_think: it reads the ledger directly. Keep its exact amounts, account masks, dates and coverage bounds."));
+      assert.ok(text.includes("For a money question the bank ledger answers (a balance, a payment received, money in and out, largest expenses, deposits, spend by merchant or category, transfers between the owner's own accounts, recurring charges, profit, net income, withdrawals, loan proceeds), use brain_think: it reads the ledger directly. Cash flow is unsupported: relay cash_flow_unsupported with no figure or model fallback. The profit and net-income view is money in minus money out, not accounting profit or cash flow. Keep its exact amounts, account masks, dates and coverage bounds."));
+      assert.doesNotMatch(text, /profit, net income, cash flow/);
+      assert.match(text, /only the returned relevance window, not all matching records/);
       assert.match(text, /using `as_of`/);
       assert.match(text, /payer and payee/);
       assert.match(text, /newest on that exact topic/);
