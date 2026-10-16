@@ -847,6 +847,66 @@ for (const outcome of ["committed", "concurrent", "unavailable", "invalid-proof"
   });
 }
 
+for (const expiry of ["after-send", "unexpired", "before-send"]) {
+  test(`transport committed response loss retains uncertainty with observation ${expiry}`, async t => {
+    const f = transportFixture(t);
+    f.store.put("drive:target");
+    f.store.put("other:retained");
+    const state = { done: {}, skipped: {}, cursor: "prior" };
+    let clock = Date.parse("2026-10-01T00:00:00Z"), saves = 0;
+    const sourcePlan = buildDriveRemovalPlan({ storedFamilies: ["drive:target"], vanishedCandidates: ["drive:target"] });
+    const review = createIngestRemovalReview({ state, saveState() { saves++; }, source: "drive", manifest: {},
+      manifestPath: "/fixture/manifest.json", runtime: () => "fixture-runtime", now: () => clock,
+      request: f.request, onProgress() {} });
+    const plan = async () => {
+      await assert.rejects(review.finish({ sourcePlan, expiresAt: new Date(clock + 1000).toISOString() }),
+        { code: "SAFETY_REVIEW_REQUIRED" });
+      assert.deepEqual(state.ingest_removal_plan.targets, ["drive:target"], "a nonempty approved decision is reached");
+    };
+    await plan();
+    const savedPlan = state.ingest_removal_plan;
+    let writes = 0;
+    f.fault(async (body, next) => {
+      if (body.action !== "apply") return next();
+      writes++;
+      assert.equal((await next()).status, 200, "the real authenticated apply committed before its response was lost");
+      if (expiry === "after-send") clock += 1001;
+      throw new TypeError("synthetic-response-loss");
+    });
+    if (expiry === "before-send") clock += 1001;
+    let failure;
+    await assert.rejects(review.apply(savedPlan.fingerprint, sourcePlan.fingerprint), error => {
+      failure = error;
+      return error.code === "SAFETY_REVIEW_REQUIRED";
+    });
+    const sent = expiry !== "before-send";
+    assert.equal(writes, sent ? 1 : 0, "no apply is replayed after the refusal");
+    assert.equal(f.store.calls.batches, sent ? 1 : 0);
+    assert.deepEqual(f.store.uids(), sent ? ["other:retained"] : ["drive:target", "other:retained"]);
+    assert.deepEqual(f.calls.map(body => body.action), expiry === "before-send" ? ["preview"]
+      : expiry === "after-send" ? ["preview", "preview", "apply"] : ["preview", "preview", "apply", "preview"]);
+    assert.deepEqual(f.delays, [], "local refusal cannot back off or retry");
+    assert.equal(state.cursor, "prior");
+    assert.equal(state.ingest_removal_plan, savedPlan);
+    assert.equal(saves, 1, "failure does not save completion");
+    assert.notEqual(failure.removalBatchMayShrink, true);
+    // Prove the same path can succeed before checking the diagnostic regression.
+    f.fault(null);
+    if (sent) f.store.put("drive:target");
+    await plan();
+    assert.equal((await review.apply(state.ingest_removal_plan.fingerprint, sourcePlan.fingerprint)).removed, 1);
+    assert.equal(state.ingest_removal_plan, undefined);
+    assert.deepEqual(f.store.uids(), ["other:retained"]);
+    if (expiry !== "unexpired") assert.match(failure.message, /observation expired/);
+    assert.doesNotMatch(failure.message, /synthetic-response-loss|drive:target|fixture\.invalid/);
+    if (sent) {
+      assert.match(failure.message, /Some approved removals may have completed/);
+      assert.match(failure.message, /The source cursor was not advanced/);
+      assert.match(failure.message, /review.*(?:fresh|new).*plan/i);
+    } else assert.doesNotMatch(failure.message, /may have completed/);
+  });
+}
+
 test("transport repeats local approval and lease checks after backoff before apply replay", async t => {
   const f = transportFixture(t);
   f.store.put("drive:target");

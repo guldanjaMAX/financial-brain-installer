@@ -124,11 +124,26 @@ export async function requestIngestRemovalPlan({
   const deadline = now() + 240_000;
   const original = JSON.parse(JSON.stringify(body));
   const isApply = original.action === "apply";
+  let applySent = false;
   const once = async payload => {
-    beforeAttempt();
+    try { beforeAttempt(); }
+    catch (cause) {
+      if (!applySent) throw cause;
+      // A local refusal cannot establish whether the earlier write committed.
+      // Keep the refusal terminal, including during marker readback or backoff.
+      const error = new DriveRemovalReviewRequired(
+        (cause instanceof Error ? cause.message : "Local removal validation failed.") +
+        " Some approved removals may have completed. The source cursor was not advanced. " +
+        "Run ingestion again and review a fresh removal plan before applying it.",
+      );
+      error.cause = cause;
+      error.removalBatchMayShrink = false;
+      throw error;
+    }
     const remaining = Math.floor(deadline - now());
     if (remaining <= 0) return { failure: { label: "TIMEOUT", retryable: true, capacity: true } };
     try {
+      if (payload.action === "apply") applySent = true;
       const response = await fetchImpl(`${base}/api/admin/brain/ingest-removal-plan`, {
         method: "POST", redirect: "error",
         headers: { "X-Admin-Key": adminKey, "Content-Type": "application/json" },
