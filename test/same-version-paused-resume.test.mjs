@@ -360,11 +360,16 @@ test("rollback with a corpus: both backlog gates resume, then the pre-migration 
     const run = await update(brain);
     assert.equal(brain.reads.backlog, 2);
     assert.doesNotMatch(run.error?.message || "", /not an earlier update|install that release/u);
-    assert.ok(String(run.error?.message || "").startsWith(renderCliCommands(
-      "The update stopped partway with a confirmed pause upload. Document writes may still be paused; retrieval and acceptance have not been fully verified. Keep the recovery bookmark and run brain update once more.\n" +
-      "If it stops again at the same step, run brain support --preview and send us that note.\n\nFor your installer:\n" +
-      "      update stopped during paused vector-drain health verification: Vectorize has accepted work that is not query-visible yet while this Brain is paused for an update.",
-    )));
+    // Command functions throw raw Fatal messages; the terminal boundary renders
+    // them. Compare that same boundary on both platforms, including on macOS CI.
+    for (const platform of ["darwin", "win32"]) {
+      const rendering = { platform, env: {} };
+      assert.ok(renderCliCommands(String(run.error?.message || ""), rendering).startsWith(renderCliCommands(
+        "The update stopped partway with a confirmed pause upload. Document writes may still be paused; retrieval and acceptance have not been fully verified. Keep the recovery bookmark and run brain update once more.\n" +
+        "If it stops again at the same step, run brain support --preview and send us that note.\n\nFor your installer:\n" +
+        "      update stopped during paused vector-drain health verification: Vectorize has accepted work that is not query-visible yet while this Brain is paused for an update.",
+        rendering)));
+    }
     assert.doesNotMatch(run.error.message, /Nothing was lost|working normally/u);
     assert.deepEqual(upgradeStages(brain), ["deploy:paused-for-upgrade"]);
     assert.equal(brain.live.mode, "paused-for-upgrade");

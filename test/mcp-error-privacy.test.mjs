@@ -4,16 +4,12 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
-import { writeAdminKeyFile } from "../operations/admin-key-file.mjs";
 import { ANSWER_ERROR_MESSAGES } from "../worker/src/lib/answer-render.js";
 
 const MCP = fileURLToPath(new URL("../components/brain-mcp.mjs", import.meta.url));
 const CANARY = "Synthetic private title; count=731; incidental private marker";
-const keyFixtureOptions = home => process.platform === "win32"
-  ? { environment: process.env, username: process.env.USERNAME || process.env.USER }
-  : { environment: { HOME: home } };
 
 // Run the shipped entrypoint and credential-file reader, with transport replaced
 // before import. The canary is a synthetic body, never an argument or credential.
@@ -24,7 +20,9 @@ function runFixture(t, fixture, { name = "brain_think", args = { q: "Synthetic r
   mkdirSync(home);
   const manifest = join(root, "brain.manifest.json");
   writeFileSync(manifest, JSON.stringify({ operations: { admin_key_secret: null } }));
-  writeAdminKeyFile(join(root, ".brain-admin-key"), randomBytes(24).toString("hex"), keyFixtureOptions(home));
+  // The supported legacy file format exercises the real credential reader
+  // without calling the host's DPAPI/ACL helpers. Protection has its own suite.
+  writeFileSync(join(root, ".brain-admin-key"), randomBytes(24).toString("hex"), { mode: 0o600 });
   const launchctl = join(root, "launchctl-fixture");
   writeFileSync(launchctl, "#!/bin/sh\nexit 99\n", { mode: 0o700 });
   const loader = join(root, "transport.mjs");
@@ -40,12 +38,14 @@ globalThis.fetch = async (url, init) => {
   return new Response(fixture.body, { status: fixture.status || 200 });
 };
 `);
-  const environment = { HOME: home, TMPDIR: root, BRAIN_NO_WRANGLER_LOGIN: "1",
+  const environment = { HOME: home, USERPROFILE: home, TMPDIR: root, TEMP: root, TMP: root, BRAIN_NO_WRANGLER_LOGIN: "1",
     BRAIN_TEST_LAUNCHCTL: launchctl, BRAIN_URL: "https://fixture.invalid", BRAIN_MANIFEST: manifest,
     BRAIN_AGENT_PROFILE: profile };
   for (const name of ["SystemRoot", "WINDIR", "ComSpec", "USERNAME", "USER", "LOGNAME", "PATH"])
     if (process.env[name]) environment[name] = process.env[name];
-  const run = spawnSync(process.execPath, ["--import", loader, MCP], {
+  // --import is an ESM specifier: a Windows drive path is parsed as a URL
+  // scheme (c:), so Node exits before either the loader or MCP can start.
+  const run = spawnSync(process.execPath, ["--import", pathToFileURL(loader).href, MCP], {
     env: environment, encoding: "utf8", timeout: 15000,
     input: JSON.stringify({ id: 11, jsonrpc: "2.0", method, params: { name, arguments: args } }) + "\n",
   });

@@ -64,3 +64,8 @@ test/fixtures/legacy-local-ingest-run.txt text eol=lf
 
 # The standard npm Windows shim fixture must keep its exact CRLF bytes.
 test/fixtures/machine-prep/*.cmd -text -whitespace
+
+# Owner contract inputs and the reviewed skill section are byte-pinned. Git
+# autocrlf must not change their hashes or the whole-line Markdown boundaries.
+templates/owner-contract/*.md text eol=lf
+skills/financial-brain-technician/SKILL.md text eol=lf

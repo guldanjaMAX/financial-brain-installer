@@ -9,7 +9,7 @@ import { createProductFixture, seedOwnedEntity } from "../worker/test/product-co
 import { withLedgerAnswer } from "../worker/src/lib/ledger-answer.js";
 import { renderCopyableCommand, quotePosixArgument, quotePowerShellArgument } from "../operations/command-display.mjs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve, win32 } from "node:path";
+import pathApi, { basename, dirname, join, resolve, win32 } from "node:path";
 import { test, mock } from "node:test";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -31,7 +31,23 @@ const hashes = {
   "money-rules-v3.md": "25d23c9214c74a05acdbdf6d44f35b62468a647a43d91f854d80d1ed3717824a",
   "money-rules-v3-windows.md": "32d72c590be98bf8a00ac48085d6bdb6610b3567f042d63f3b40255799317394",
 };
-const options = { brainCliPath: resolve("/fixture/brain.mjs"), nodePath: process.execPath };
+// Repeated writer/race tests exercise real filesystem checks. Native reparse
+// detection has separate refusal/control and one bounded Windows smoke test;
+// launching PowerShell at every readback made six reruns take 17 minutes.
+let nativeAttributeDecisions = 0;
+const fixtureOwnership = {
+  profile: realpathSync.native(tmpdir()),
+  windowsAttributesSafe: paths => {
+    nativeAttributeDecisions++;
+    assert.ok(paths.length > 0, "the native attribute boundary receives inspected paths");
+    return true;
+  },
+};
+const options = {
+  brainCliPath: resolve("/fixture/brain.mjs"), nodePath: process.execPath, ownership: fixtureOwnership,
+  writeClaudeWorkspaceGuide: (path, opts) => workspace.writeClaudeWorkspaceGuide(path, { ...opts, ownership: fixtureOwnership }),
+  writeCodexWorkspaceGuide: (path, opts) => workspace.writeCodexWorkspaceGuide(path, { ...opts, ownership: fixtureOwnership }),
+};
 const count = (text, part) => text.split(part).length - 1;
 const sha = (text) => createHash("sha256").update(text).digest("hex");
 const template = (name) => readFileSync(new URL(`../templates/owner-contract/${name}`, import.meta.url), "utf8");
@@ -365,8 +381,8 @@ async function update(t, { wired = ["Codex"], risky = false, createGuide = false
     cmdUpgrade: async () => { events.push("upgrade"); return { updated: true }; },
     reconcileExistingOwnerAgents: async () => { events.push("wire"); return { wired, failures: [] }; },
     resolveUpdateAgentBaseUrl: async () => "https://brain.example.invalid",
-    writeClaudeWorkspaceGuideAfterUpdate: (path, opts) => { writes.push(["claude", opts]); return workspace.writeClaudeWorkspaceGuide(path, opts); },
-    writeCodexWorkspaceGuideAfterUpdate: (path, opts) => { writes.push(["codex", opts]); return workspace.writeCodexWorkspaceGuide(path, opts); },
+    writeClaudeWorkspaceGuideAfterUpdate: (path, opts) => { writes.push(["claude", opts]); return workspace.writeClaudeWorkspaceGuide(path, { ...opts, ownership: fixtureOwnership }); },
+    writeCodexWorkspaceGuideAfterUpdate: (path, opts) => { writes.push(["codex", opts]); return workspace.writeCodexWorkspaceGuide(path, { ...opts, ownership: fixtureOwnership }); },
     installTechnicianSkills: () => [{ root: ".codex", status: "verified" }],
     reportAgentRefreshOk: () => {}, reportAgentRefreshInfo: () => {}, reportAgentRefreshWarning: (m) => messages.push(m),
     reportWorkspaceGuideRefreshOk: (m) => messages.push(m), reportWorkspaceGuideRefreshInfo: (m) => messages.push(m), reportWorkspaceGuideRefreshWarning: (m) => messages.push(m),
@@ -630,14 +646,18 @@ test("R8 ordinary folders and home get the rules-loading nudge", async t => {
   assert.equal(workspace.classifySessionFolder("/owner/Financial Brain/sub", { home: "/owner", brainFolder: "/owner/Financial Brain" }), null);
 });
 
-test("m6/m11 workspace fallback uses the exact installed invocation and manifest", t => {
+for (const platformName of ["darwin", "win32"]) test(`m6/m11 workspace fallback follows the supported platform: ${platformName}`, t => {
   const { root } = fixture(t);
   const folder = join(root, "custom-folder"); mkdirSync(folder);
   const manifest = join(folder, "custom.manifest.json");
-  workspace.writeClaudeWorkspaceGuide(manifest, options);
+  assert.equal(workspace.writeClaudeWorkspaceGuide(manifest, { ...options, platformName }).status, "written");
   const text = readFileSync(join(folder, "CLAUDE.md"), "utf8");
   const fallback = text.split("## If brain_think gives no answer")[1].split("## Hard rules")[0];
-  assert.ok(fallback.includes(renderCopyableCommand(options.nodePath, [options.brainCliPath, "ask", manifest])));
+  const invocation = renderCopyableCommand(options.nodePath, [options.brainCliPath, "ask", manifest], { platformName });
+  if (platformName === "win32") {
+    assert.match(fallback, /skip the CLI fallback on Windows/);
+    assert.equal(fallback.includes(invocation), false, "Windows must not advertise the unsupported fallback");
+  } else assert.ok(fallback.includes(invocation));
   assert.doesNotMatch(fallback, /ls -d|sort -V|\$HOME/);
 });
 
@@ -878,6 +898,42 @@ test("F4 native attribute probe uses stdin, an allowlisted environment and exact
   }
   assert.equal(calls, 6);
   assert.equal(workspace.windowsWorkspaceAttributesSafe(paths, { environment: {}, run: () => { throw new Error("must not run"); } }), false);
+});
+
+test("Windows native attributes accept a regular folder and refuse a junction", {
+  skip: process.platform !== "win32" ? "native PowerShell/reparse verification requires a Windows host" : false,
+}, t => {
+  const { root } = fixture(t), linked = join(root, "junction");
+  symlinkSync(root, linked, "junction");
+  let probes = 0;
+  const probe = paths => workspace.windowsWorkspaceAttributesSafe(paths, {
+    run: (command, args, opts) => {
+      probes++;
+      // One native positive and negative control, bounded to 20 seconds total.
+      return spawnSync(command, args, { ...opts, timeout: 10_000 });
+    },
+  });
+  assert.equal(probe([root]), true);
+  assert.equal(probe([linked]), false);
+  assert.equal(probes, 2, "both actual native attribute decisions were reached");
+});
+
+test("Windows repeated refresh keeps native checks injectable without skipping filesystem decisions", t => {
+  const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
+  const ownership = { ...fixtureOwnership, platform: "win32", pathApi, profile: root };
+  const before = nativeAttributeDecisions;
+  let denied = 0;
+  const refused = workspace.writeCodexWorkspaceGuide(manifest, { ...options, ownership: {
+    ...ownership, windowsAttributesSafe: paths => { denied++; assert.ok(paths.includes(root)); return false; },
+  } });
+  assert.equal(denied, 1, "the injected refusal reached the native attribute boundary");
+  assert.equal(refused.status, "preserved_unsafe_existing_file");
+  assert.equal(existsSync(target), false);
+  for (let run = 0; run < 6; run++) {
+    assert.equal(workspace.writeCodexWorkspaceGuide(manifest, { ...options, ownership }).status, run ? "verified" : "written");
+  }
+  assert.ok(nativeAttributeDecisions - before >= 12, "reruns still recheck the real paths and readbacks");
+  assert.ok(readFileSync(target, "utf8").includes(BEGIN));
 });
 
 for (const fence of ["```", "~~~~"]) for (const closed of [true, false]) {
@@ -1287,7 +1343,9 @@ test("R5 backtick locators are refused before a guide is written", t => {
   assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "written");
 });
 
-for (const platform of ["darwin", "win32"]) test(`R5 literal restart and supported shell: ${platform}`, async t => {
+for (const platform of ["darwin", "win32"]) test(`R5 literal restart and supported shell: ${platform}`, {
+  skip: platform === "darwin" && process.platform === "win32" ? "POSIX execution requires /bin/sh; Windows rendering is covered separately" : false,
+}, async t => {
   const result = await update(t, { platform, folder: "Reserve $fund owner's ; folder" });
   assert.equal(result.finish.length, 1, "verified update emits restart guidance");
   const command = result.finish[0].match(/run: (.+)\. For Codex/)[1];
@@ -1374,7 +1432,9 @@ for (const platformName of ["darwin", "win32"]) test(`S2 money selectors and mea
   assert.doesNotMatch(text, /start at 100%/i);
 });
 
-for (const platformName of ["darwin", "win32"]) test(`S2 every installed command uses shell-aware argv: ${platformName}`, t => {
+for (const platformName of ["darwin", "win32"]) test(`S2 every installed command uses shell-aware argv: ${platformName}`, {
+  skip: platformName === "darwin" && process.platform === "win32" ? "POSIX argv execution requires /bin/sh; Windows rendering is covered separately" : false,
+}, t => {
   const { root } = fixture(t);
   const folder = join(root, "owner's $reserve ; café"); mkdirSync(folder);
   const recorder = join(folder, "argument-recorder");
@@ -1425,4 +1485,76 @@ test("S2 update warns when the Brain folder itself is temporary storage", async 
   assert.match(result.finish[0], /private.*local folder/i);
   assert.match(result.finish[0], /approval/i);
   assert.ok(existsSync(join(result.root, "brain.manifest.json")), "no automatic move or removal");
+});
+
+for (const heldOpen of [false, true]) test(`Windows recovery keeps files reachable without directory rename: open=${heldOpen}`, t => {
+  const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
+  const before = `${CODEX}\n# Older guide\n`, note = "\nConcurrent owner annotation.\n";
+  writeFileSync(target, before);
+  const fd = heldOpen ? fs.openSync(target, "r+") : null;
+  const original = fs.renameSync;
+  let moves = 0, directoryMoves = 0;
+  fs.renameSync = (source, destination, ...args) => {
+    moves++;
+    // Windows can refuse a directory move while an editor or scanner holds
+    // a descendant open, even when the file itself permits a rename.
+    if (lstatSync(source).isDirectory()) {
+      directoryMoves++;
+      throw Object.assign(new Error("fixture directory sharing violation"), { code: "EPERM" });
+    }
+    return original(source, destination, ...args);
+  };
+  syncBuiltinESMExports();
+  let result;
+  try {
+    result = workspace.writeCodexWorkspaceGuide(manifest, options);
+    if (heldOpen) fs.writeSync(fd, note, Buffer.byteLength(before), "utf8");
+  } finally {
+    fs.renameSync = original; syncBuiltinESMExports();
+    if (fd !== null) fs.closeSync(fd);
+  }
+  assert.ok(moves >= 2, "the actual staged and original file moves were reached");
+  assert.equal(result.status, "written");
+  assert.equal(directoryMoves, 0, "completion must not depend on moving an open directory tree");
+  assert.equal(readFileSync(result.recoveryPath, "utf8"), before + (heldOpen ? note : ""));
+  assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "verified");
+});
+
+for (const fault of ["pending", "previous", "release", "none"]) test(`Windows recovery publication failure preserves the original: ${fault}`, t => {
+  const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
+  const before = `${CODEX}\n# Original owner guide\n`;
+  writeFileSync(target, before);
+  const original = { renameSync: fs.renameSync, rmdirSync: fs.rmdirSync };
+  const decisions = [];
+  fs.renameSync = (source, destination, ...args) => {
+    if (dirname(destination).includes(".financial-brain-retained-")) {
+      const stage = basename(destination) === "previous" ? "previous" : "pending";
+      decisions.push(stage);
+      if (fault === stage) throw Object.assign(new Error("fixture retained-file sharing violation"), { code: "EPERM" });
+    }
+    return original.renameSync(source, destination, ...args);
+  };
+  fs.rmdirSync = (path, ...args) => {
+    if (path === `${target}.lock`) {
+      decisions.push("release");
+      if (fault === "release") throw Object.assign(new Error("fixture lock release failure"), { code: "EBUSY" });
+    }
+    return original.rmdirSync(path, ...args);
+  };
+  syncBuiltinESMExports();
+  let result;
+  try { result = workspace.writeCodexWorkspaceGuide(manifest, options); }
+  finally { Object.assign(fs, original); syncBuiltinESMExports(); }
+  assert.ok(decisions.includes(fault === "none" ? "release" : fault), "the requested publication boundary was reached");
+  assert.equal(readFileSync(result.recoveryPath, "utf8"), before);
+  if (fault === "none") {
+    assert.equal(result.status, "written");
+    assert.equal(existsSync(`${target}.lock`), false);
+    assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "verified");
+  } else {
+    assert.equal(result.status, "not_written");
+    assert.equal(existsSync(`${target}.lock`), true, "unresolved publication still blocks retries");
+    assert.equal(readFileSync(result.pendingPath, "utf8"), readFileSync(target, "utf8"));
+    assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "not_written");
+  }
 });

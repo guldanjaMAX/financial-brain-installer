@@ -16,6 +16,7 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  rmdirSync,
   writeFileSync,
   unlinkSync,
 } from "node:fs";
@@ -409,14 +410,28 @@ function commitWorkspaceGuide(target, parent, snapshot, existing, content, owner
       (!recoveryPath || unchangedWorkspaceFile(recoveryPath, snapshot, existing, ownership));
     if (!locked() || !exact()) return notWritten();
     // Retain the original inode even on success: an editor may still hold an
-    // open descriptor and write after our final read. Retain staging too. Only
-    // an uncontested write releases the lock by moving its entire directory;
-    // a failed identity/content check performs no cleanup or restoration.
+    // open descriptor and write after our final read. Windows refuses moving
+    // a directory containing such an open file, even when that file permits a
+    // rename. Move the retained files individually, then release the empty
+    // lock only after every identity/content check still agrees.
     const retained = `${physicalTarget}.financial-brain-retained-${id}`;
-    renameSync(lock, retained);
+    mkdirSync(retained, { mode: 0o700 });
+    const retainedStat = lstatSync(retained);
+    const retainedUnchanged = () => {
+      const current = lstatSync(retained);
+      return current.isDirectory() && !current.isSymbolicLink() && sameIdentity(current, retainedStat);
+    };
+    if (!locked() || !retainedUnchanged()) return notWritten();
+    renameSync(pendingPath, join(retained, pendingName));
     pendingPath = join(retained, pendingName);
-    if (recoveryPath) recoveryPath = join(retained, "previous");
-    if (!sameIdentity(lstatSync(retained), lockStat) || !exact()) return notWritten();
+    if (!locked() || !retainedUnchanged()) return notWritten();
+    if (recoveryPath) {
+      renameSync(recoveryPath, join(retained, "previous"));
+      recoveryPath = join(retained, "previous");
+    }
+    if (!locked() || !retainedUnchanged() || !exact()) return notWritten();
+    rmdirSync(lock);
+    if (!retainedUnchanged() || !exact()) return notWritten();
     return { status: "written", changed: true, ...(recoveryPath ? { recoveryPath } : {}) };
   } catch {
     // Ordinary preparation I/O failure has not displaced the active guide.

@@ -2151,13 +2151,20 @@ lock still present blocks retries, including verification. Publication failures
 or concurrent edits after moving the original require explicit local recovery;
 setup/update warnings name the retained paths. No competing guide is unlinked
 or overwritten. Review all retained files before explicit local recovery.
-On an uncontested write the whole lock directory is moved to a unique
-`<guide>.financial-brain-retained-<id>` directory. Both staging and the original
-inode stay there, including after success, so an editor with an open original
-file descriptor cannot lose a later edit. These local recovery directories are
+On an uncontested write the staging and original files are individually moved
+to a unique `<guide>.financial-brain-retained-<id>` directory, with identity and
+content checked again before releasing the empty lock. Windows can refuse to
+rename a whole directory while an editor holds a file inside it open. The
+original inode stays reachable, including after success, so that editor cannot
+lose a later edit. These local recovery directories are
 never automatically deleted. Interrupted writes likewise require explicit
 recovery; never automatically clear their lock.
 Native Windows filesystem behavior remains a separate host/CI gate.
+Repeated writer tests inject only the native attribute probe, keeping filesystem
+identity, content, link and race checks real. A separate bounded Windows test
+checks native regular-folder and junction results; protocol tests cover probe
+failure and exact readback. Owner-contract Markdown and the reviewed technician
+skill stay LF on checkout because their sections are byte-pinned.
 
 `node --test worker/test/ledger-answer.test.mjs` exercises the read-only money
 answer path through the Worker and real SQLite migrations, including twin
