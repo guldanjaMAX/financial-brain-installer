@@ -350,6 +350,7 @@ export function bankFeedOwnerErrorMessage(data, status) {
     plaid_duplicate_connection_review: "This bank may already be connected. Check the saved connections below and use Repair connection if you need to sign in again. We have not added another copy. If these are separate accounts, their overlap needs review first.",
     plaid_connection_in_progress: "Another bank connection is still finishing. Check its result before starting another connection. Your saved accounts are unchanged.",
     plaid_link_handoff_rejected: "That connection link is no longer usable. Your existing accounts are unchanged. Select Connect a bank to start again.",
+    LINK_SESSION_STALE: "This saved bank connection session is no longer usable. Select Connect a bank to start the connection again.",
     BANK_WRITES_PAUSED: "Your Brain is finishing a verified update. Your bank connections and saved choices are safe. Please return to this step after the update finishes.",
   };
   const base = (code && messages[code]) || (status === 503
@@ -2042,9 +2043,9 @@ async function start(existing) {
         loadConnections();
         waitForAccounts();
       } catch (e) {
-        if (e.code === "plaid_link_handoff_rejected") {
-          try { sessionStorage.removeItem("bank_link_session"); sessionStorage.removeItem(retry.key); } catch (ignored) {}
-        }
+        // A failed completion must not pin this tab (or a restored copy) to the
+        // same Link token. The server still fences any unknown exchange outcome.
+        try { sessionStorage.removeItem("bank_link_session"); sessionStorage.removeItem(retry.key); } catch (ignored) {}
         say(e.message, true);
       } finally { finishLink(); }
     },

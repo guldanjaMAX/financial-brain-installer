@@ -246,7 +246,16 @@ async function observe({ name, initialHistory, empty, webhook, raceStage = null,
       reconciliation: reconciliation(), ledger: ledger(),
       page_calls: pageCalls.length, continuation,
     };
-    const oneSecondLater = new Date(Date.parse(afterAssignment.item.cursor_updated_at) + 1000).toISOString();
+    // Empty initial pages no longer write cursor progress. The promotion's
+    // queue receipt still anchors this check of pending webhook work.
+    if (empty) {
+      assert.equal(afterAssignment.item.cursor, null);
+      assert.equal(afterAssignment.item.cursor_updated_at, null);
+    } else {
+      assert.ok(afterAssignment.item.cursor);
+      assert.ok(afterAssignment.item.cursor_updated_at);
+    }
+    const oneSecondLater = new Date(Date.parse(afterAssignment.reconciliation.updated_at) + 1000).toISOString();
     const earlyRetry = await runPlaidFeedSlice(fixture.env, { fetchImpl, now: oneSecondLater });
     let afterOrdinaryDue = null;
     if (webhook) {

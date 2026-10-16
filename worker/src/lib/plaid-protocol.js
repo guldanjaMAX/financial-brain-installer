@@ -474,13 +474,13 @@ export async function stagePlaidSyncWindow({
         return { providerTransactionId: entry.transaction_id };
       }),
     };
-    // Plaid documents an empty cursor only before initial transactions exist.
+    // Plaid documents an empty cursor before transactions are available, even
+    // when a webhook or this page has already raised the provider history hint.
     // This does not reset an existing cursor, continue pagination, or establish
     // initial/historical completion; the runtime keeps this receipt partial.
     if (!nextCursor && !(pageIndex === 0 && !originalCursor && !cursor &&
         added === 0 && modified === 0 && removed === 0 && !stagedPage.hasMore &&
-        stagedPage.added.length === 0 && stagedPage.modified.length === 0 && stagedPage.removed.length === 0 &&
-        [PLAID_HISTORY_STATE.UNKNOWN, PLAID_HISTORY_STATE.NOT_READY].includes(stagedPage.historyState))) {
+        stagedPage.added.length === 0 && stagedPage.modified.length === 0 && stagedPage.removed.length === 0)) {
       invalidSyncPage("next_cursor");
     }
     const nextDigest = await sha256Hex(JSON.stringify(nextCursor));

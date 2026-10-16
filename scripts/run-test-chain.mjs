@@ -252,6 +252,7 @@ export const POST_LAUNCHER_TEST_COMMANDS = Object.freeze([
   // key replacement, Link errors, the first-connection page, and status truth.
   "node --no-warnings --test worker/test/plaid-amount-precision.test.mjs",
   "node --no-warnings --test worker/test/plaid-owner-flow.test.mjs",
+  "node --no-warnings --test worker/test/plaid-recovery-regression.test.mjs",
   "node --no-warnings --test worker/test/plaid-reassignment-preview.test.mjs",
   "node --no-warnings --test worker/test/plaid-reassignment-ui-handler.test.mjs",
   "node --no-warnings --test test/bank-feed-replace-keys.test.mjs",
@@ -710,6 +711,7 @@ export const TEST_COMMANDS = Object.freeze([
   // key replacement, Link errors, the first-connection page, and status truth.
   "node --no-warnings --test worker/test/plaid-amount-precision.test.mjs",
   "node --no-warnings --test worker/test/plaid-owner-flow.test.mjs",
+  "node --no-warnings --test worker/test/plaid-recovery-regression.test.mjs",
   "node --no-warnings --test worker/test/plaid-reassignment-preview.test.mjs",
   "node --no-warnings --test worker/test/plaid-reassignment-ui-handler.test.mjs",
   "node --no-warnings --test test/bank-feed-replace-keys.test.mjs",

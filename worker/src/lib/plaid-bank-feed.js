@@ -379,6 +379,22 @@ function refuseRejectedHandoff(row) {
   }
 }
 
+async function refuseStaleCompletion(env, tenantId, row, stamp) {
+  // A mismatch cannot release a possibly consumed handoff or erase a completed
+  // receipt's binding. Only pre-exchange fingerprints are safe to reset.
+  if (row.state === "exchange_started") {
+    throw unknownOutcomeError("PLAID_EXCHANGE_OUTCOME_UNKNOWN",
+      "Another completion claimed this one-time Plaid handoff. Its result needs review.");
+  }
+  await env.DB.prepare(
+    `UPDATE plaid_link_operations SET public_token_fingerprint=NULL,updated_at=?
+      WHERE tenant_id=? AND session_ref=? AND state IN ('link_ready','link_completed')
+        AND public_token_fingerprint=?`,
+  ).bind(stamp, tenantId, row.session_ref, row.public_token_fingerprint).run();
+  throw new PlaidAccountEntityError("LINK_SESSION_STALE",
+    "This saved bank connection session is no longer usable. Start the connection again.", 409);
+}
+
 export async function createPlaidLinkToken(env, {
   url,
   mode = "connect",
@@ -556,7 +572,7 @@ export async function completePlaidLink(env, {
   const token = plaidLinkCompletion({ mode: row.mode, publicToken }).publicToken;
   const requestFingerprint = await sha256Hex(token);
   if (row.public_token_fingerprint && row.public_token_fingerprint !== requestFingerprint) {
-    throw new Error("Plaid Link completion does not match this session");
+    return refuseStaleCompletion(env, tenantId, row, stamp);
   }
   if (row.state === "completed" && row.receipt_json) return JSON.parse(row.receipt_json);
   if (!["link_ready", "link_completed", "exchange_started"].includes(row.state)) {
@@ -583,7 +599,7 @@ export async function completePlaidLink(env, {
   if (Number(claim?.meta?.changes ?? claim?.changes ?? 0) !== 1) {
     const current = await linkRow(env, tenantId, sessionRef);
     if (current?.public_token_fingerprint && current.public_token_fingerprint !== requestFingerprint) {
-      throw new Error("Plaid Link completion does not match this session");
+      return refuseStaleCompletion(env, tenantId, current, stamp);
     }
     if (current?.state === "link_ready" || current?.state === "link_completed") {
       throw new PlaidAccountEntityError("plaid_connection_in_progress",
@@ -601,7 +617,7 @@ export async function completePlaidLink(env, {
     await assertPlaidConnectionDistinct(env, { tenantId, institutionRef, accounts });
   } catch (error) {
     await env.DB.prepare(
-      `UPDATE plaid_link_operations SET state='link_ready',updated_at=?
+      `UPDATE plaid_link_operations SET state='link_ready',public_token_fingerprint=NULL,updated_at=?
         WHERE tenant_id=? AND session_ref=? AND state='exchange_started' AND public_token_fingerprint=?`,
     ).bind(stamp, tenantId, sessionRef, requestFingerprint).run();
     throw error;
@@ -617,7 +633,7 @@ export async function completePlaidLink(env, {
     // establish whether the single-use exchange was accepted.
     if (error instanceof ProviderSyncError && error.status === 400 && error.code === "INVALID_PUBLIC_TOKEN") {
       await env.DB.prepare(
-        `UPDATE plaid_link_operations SET state='manual_recovery',receipt_json=?,updated_at=?
+        `UPDATE plaid_link_operations SET state='manual_recovery',public_token_fingerprint=NULL,receipt_json=?,updated_at=?
           WHERE tenant_id=? AND session_ref=? AND state='exchange_started' AND public_token_fingerprint=?`,
       ).bind(JSON.stringify({ status: "rejected", code: "INVALID_PUBLIC_TOKEN", recovery: "new_link_session" }),
         stamp, tenantId, sessionRef, requestFingerprint).run();
@@ -887,8 +903,10 @@ function promotionStatements(env, {
 }) {
   const sourceFeed = feedScopeKey(itemRef);
   const interval = Math.min(Math.max(Number(env.BANK_FEED_RECONCILE_MINUTES) || DEFAULT_RECONCILE_MINUTES, 15), 1440);
-  const historicalComplete = historyState === PLAID_HISTORY_STATE.HISTORICAL;
-  const nextDue = new Date(Date.parse(stamp) + (historicalComplete ? interval : 5) * 60_000).toISOString();
+  // Availability hints cannot prove fetched history without a reusable cursor.
+  // An empty initial response is a successful poll, so use the normal cadence.
+  const historicalComplete = Boolean(finalCursor) && historyState === PLAID_HISTORY_STATE.HISTORICAL;
+  const nextDue = new Date(Date.parse(stamp) + (historicalComplete || !finalCursor ? interval : 5) * 60_000).toISOString();
   // All statements inspect this marker inside the same fenced transaction. A
   // webhook/assignment arriving after the first provider read must survive;
   // even a same-millisecond event changes the reason away from sync_fetch.
@@ -1173,7 +1191,8 @@ function promotionStatements(env, {
         )`,
     ).bind(stamp, tenantId, sourceFeed, tenantId, windowRef),
     env.DB.prepare(
-      `UPDATE bank_feed_items SET cursor=?3,cursor_updated_at=?4,last_synced_at=?5,
+      `UPDATE bank_feed_items SET cursor=COALESCE(NULLIF(?3,''),cursor),
+          cursor_updated_at=CASE WHEN NULLIF(?3,'') IS NOT NULL THEN ?4 ELSE cursor_updated_at END,last_synced_at=?5,
           status='connected',status_detail=CASE
             WHEN ${pendingItem} THEN 'Saved activity is available. Checking for newer bank activity.'
             WHEN ?6 THEN NULL
@@ -1217,7 +1236,7 @@ function promotionStatements(env, {
          reason=CASE WHEN ?6 OR plaid_reconciliation.reason<>'sync_fetch' THEN 'refresh_pending' ELSE ?3 END,
          state='pending',
          due_at=CASE WHEN ?6 OR plaid_reconciliation.reason<>'sync_fetch' THEN ?5 ELSE ?4 END,
-         last_error_code=NULL,updated_at=?5`,
+         attempts=0,last_error_code=NULL,updated_at=?5`,
     ).bind(tenantId, itemRef, historicalComplete ? "scheduled" : "history_pending", nextDue, stamp, resumedSnapshot ? 1 : 0),
     // Read the atomic decision, not a later independently changing queue row.
     env.DB.prepare("SELECT reason,due_at FROM plaid_reconciliation WHERE tenant_id=? AND item_ref=?")
@@ -1366,7 +1385,7 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
         resumedSnapshot: true,
       });
       if (!promoted.promoted) return await deferIncomplete(promoted);
-      const historicalComplete = window.provider_history_state === PLAID_HISTORY_STATE.HISTORICAL && !promoted.refresh_pending;
+      const historicalComplete = Boolean(window.resume_cursor) && window.provider_history_state === PLAID_HISTORY_STATE.HISTORICAL && !promoted.refresh_pending;
       return {
         item_ref: itemRef,
         refresh_pending: promoted.refresh_pending,
@@ -1474,7 +1493,7 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
     });
     if (result.promoted !== true) return await deferIncomplete(result);
     const { historyState: providerHistoryState, ...syncResult } = result;
-    const historicalComplete = providerHistoryState === PLAID_HISTORY_STATE.HISTORICAL && !result.refresh_pending;
+    const historicalComplete = Boolean(result.finalCursor) && providerHistoryState === PLAID_HISTORY_STATE.HISTORICAL && !result.refresh_pending;
     return {
       item_ref: itemRef,
       ok: historicalComplete,
@@ -1492,12 +1511,24 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
     const kind = error instanceof ProviderSyncError ? error.outcome?.kind : "retryable";
     const state = kind === "unavailable" ? "unavailable" : kind === "refused" ? "refused" : "retryable";
     const code = boundedCode(error);
+    const detail = safeFeedError(error);
     const itemStatus = ["ITEM_LOGIN_REQUIRED", "PENDING_EXPIRATION"].includes(code)
       ? "reauth_required"
       : ["USER_PERMISSION_REVOKED", "ITEM_NOT_FOUND"].includes(code)
         ? "permission_revoked"
         : "error";
     try {
+      const prior = await env.DB.prepare(
+        "SELECT attempts,last_error_code FROM plaid_reconciliation WHERE tenant_id=? AND item_ref=?",
+      ).bind(tenantId, itemRef).first();
+      // Count a consecutive identical invalid-page failure, not unrelated old
+      // errors. Retain a daily recovery probe at the cap so a provider fix (or
+      // an upgrade) recovers automatically without disconnecting the account.
+      const repeatedInvalidPage = code === "INVALID_SYNC_PAGE" && prior?.last_error_code === code && item.status_detail === detail;
+      const attempts = repeatedInvalidPage
+        ? Math.min(Math.max(Number(prior.attempts) || 0, 0) + 1, 1_000_000)
+        : code === "INVALID_SYNC_PAGE" ? 1 : (Number(prior?.attempts) || 0) + 1;
+      const retryMinutes = code === "INVALID_SYNC_PAGE" ? Math.min(1440, 5 * 2 ** Math.min(attempts - 1, 9)) : 5;
       await runPlaidSyncBatch(env, lease, [
         env.DB.prepare(
           `UPDATE plaid_sync_windows SET state=CASE WHEN state='ready' THEN 'ready' ELSE ? END,
@@ -1507,16 +1538,16 @@ export async function syncPlaidItem(env, itemRef, { fetchImpl = fetch, now = nul
         env.DB.prepare(
           `UPDATE bank_feed_items SET status=?,status_detail=?,last_error_at=?
             WHERE tenant_id=? AND item_ref=?`,
-        ).bind(itemStatus, safeFeedError(error), stamp,
+        ).bind(itemStatus, detail, stamp,
           tenantId, itemRef),
         env.DB.prepare(
           `INSERT INTO plaid_reconciliation
              (tenant_id,item_ref,reason,state,due_at,attempts,last_error_code,updated_at)
-           VALUES (?,?,'sync_failure','retryable',?,1,?,?)
+           VALUES (?,?,'sync_failure','retryable',?,?,?,?)
            ON CONFLICT(tenant_id,item_ref) DO UPDATE SET state='retryable',due_at=excluded.due_at,
-             attempts=plaid_reconciliation.attempts+1,last_error_code=excluded.last_error_code,
+             attempts=excluded.attempts,last_error_code=excluded.last_error_code,
              updated_at=excluded.updated_at`,
-        ).bind(tenantId, itemRef, new Date(Date.parse(stamp) + 5 * 60_000).toISOString(), code, stamp),
+        ).bind(tenantId, itemRef, new Date(Date.parse(stamp) + retryMinutes * 60_000).toISOString(), attempts, code, stamp),
       ]);
     } catch (receiptError) {
       if (receiptError instanceof PlaidSyncLeaseError) return custodyResult(receiptError.code);
