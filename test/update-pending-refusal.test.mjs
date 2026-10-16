@@ -338,7 +338,7 @@ test("an empty backlog reaches the paused-deployment stage", async () => {
     assert.deepEqual(finish, [
       `Done. Your Brain is now on version ${PRODUCT_VERSION} and passed its checks.\n` +
         "One last step: quit Claude Code (and Codex, if you use it) and open it again, so it connects to the updated Brain.\n" +
-        `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: cd ${JSON.stringify(dirname(manifestPath))} && claude. For Codex, open that same folder. The answer rules load there.\n` +
+        `In Claude Code type /exit, then open a terminal in your Financial Brain folder and run: cd '${dirname(manifestPath).replaceAll("'", "'\\''")}' && claude. For Codex, open that same folder. The answer rules load there.\n` +
         "Then ask: check my Brain.",
     ]);
   });
