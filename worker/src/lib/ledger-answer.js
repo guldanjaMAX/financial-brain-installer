@@ -1,7 +1,7 @@
 import { scopeIsUnrestricted } from "./grants.js";
 import { classifyLedgerQuestion, ledgerDay, shiftLedgerDay } from "./ledger-question.js";
 import { accountLinkPairsInWindow, accountLinkRequiredInWindow, effectivePeriodCovered, readEffectiveAccounts, readEffectiveBalances, readEffectiveTransactions } from "./ledger-reader.js";
-import { categoryFor, detectRecurring, matchesCategory, matchesMerchant, merchantFor, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
+import { categoryFor, detectRecurring, isLoanAdvance, matchesCategory, matchesMerchant, merchantFor, pairOwnTransfers, sumMinor } from "./ledger-analysis.js";
 
 const masked = account => /^\d{1,4}$/.test(account.mask || "") ? `account ****${account.mask}` : "account (mask unavailable)";
 const money = cents => `${cents < 0 ? "-" : ""}$${Math.floor(Math.abs(cents) / 100).toLocaleString("en-US")}.${String(Math.abs(cents) % 100).padStart(2, "0")}`;
@@ -84,7 +84,7 @@ function leadExclusions(rows, pairs, selected, bySlug, intent) {
       if (intent.withdrawals !== "include") {
         omit(pair.out); omit(pair.in); withdrawals.set(pair.in.id, pair.in);
       }
-    } else if (["loan", "line_of_credit"].includes(outKind) && moveKind(inKind) && selected.has(pair.in.effective_account_slug)) {
+    } else if (isLoanAdvance(pair, bySlug) && selected.has(pair.in.effective_account_slug)) {
       if (intent.loanProceeds !== "include") {
         omit(pair.out); omit(pair.in); loanProceeds.set(pair.in.id, pair.in);
       }
@@ -165,6 +165,7 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   } else if (intent.kind === "recurring") figureRows = detectRecurring(rows, intent.to).flatMap(group => group.rows);
   const { excluded: leadExcluded, keptPairs, summary } = leadExclusions(figureRows, intent.kind === "transfers" ? [] : pairs, selected, bySlug,
     intent.kind === "transfers" ? { withdrawals: "include" } : intent);
+  let noteSummary = summary, noteExcluded = leadExcluded, unchangedLimitedList = false;
   const withoutLead = list => list.filter(row => !leadExcluded.has(row.id));
   const activity = rows;
   const withoutCandidates = list => list.filter(row => !pairing.candidateRows.has(row.id));
@@ -229,6 +230,13 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     const leadListed = intent.limit ? eligible.slice(0, intent.limit) : eligible;
     ledger.lead_rows = leadListed.map(publicRow);
     leadDetail = leadListed.length ? leadListed.map(rowLine).join("\n") : `No ${intent.direction === "inflow" ? "deposits" : "expenses"} found in the first figures.`;
+    if (intent.limit) {
+      // Pool exclusions can sit below the cutoff. Only a removed displayed
+      // row justifies a removal amount or an invitation to flip this list.
+      const displayed = leadExclusions(listed, pairs, selected, bySlug, intent);
+      noteSummary = displayed.summary; noteExcluded = displayed.excluded;
+      unchangedLimitedList = listed.length === leadListed.length && listed.every((row, i) => row.id === leadListed[i].id);
+    }
   } else if (["merchant", "category"].includes(intent.kind)) {
     const directionRows = activity.filter(row => row.direction === intent.direction);
     const matched = intent.match ? directionRows.filter(row => (intent.kind === "merchant" ? matchesMerchant : matchesCategory)(row, intent.match)) : directionRows;
@@ -287,16 +295,17 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
   const restored = intent.ownTransfers === "include" && intent.withdrawals === "include" && !leadExcluded.size;
   if (intent.measure || (!restored && (leadExcluded.size || keptPairs.size))) {
     const notes = [];
-    if (summary.own_transfer_pairs) { notes.push(`${money(summary.own_transfer_minor)} between your own connected accounts left out of the first figures; say "including transfers" to count those moves`); ledger.flip.push("including transfers"); }
-    if (summary.withdrawal_count) { notes.push(`${money(summary.withdrawal_minor)} in retirement or investment withdrawals left out of the first figures; say "including withdrawals" to count them`); ledger.flip.push("including withdrawals"); }
-    if (summary.loan_proceeds_count) { notes.push(`${money(summary.loan_proceeds_minor)} in loan or line-of-credit proceeds left out of the first figures; say "including loan proceeds" to count them`); ledger.flip.push("including loan proceeds"); }
-    if ([...keptPairs.values()].some(reason => reason.startsWith("other account"))) {
+    if (noteSummary.own_transfer_pairs) { notes.push(`${money(noteSummary.own_transfer_minor)} between your own connected accounts left out of the first figures; say "including transfers" to count those moves`); ledger.flip.push("including transfers"); }
+    if (noteSummary.withdrawal_count) { notes.push(`${money(noteSummary.withdrawal_minor)} in retirement or investment withdrawals left out of the first figures; say "including withdrawals" to count them`); ledger.flip.push("including withdrawals"); }
+    if (noteSummary.loan_proceeds_count) { notes.push(`${money(noteSummary.loan_proceeds_minor)} in loan or line-of-credit proceeds left out of the first figures; say "including loan proceeds" to count them`); ledger.flip.push("including loan proceeds"); }
+    if (unchangedLimitedList && leadExcluded.size) notes.push("exclusions apply to the wider candidate pool; the displayed rows are unchanged");
+    if (!unchangedLimitedList && [...keptPairs.values()].some(reason => reason.startsWith("other account"))) {
       notes.push('moves with an account outside this question are kept; say "excluding transfers" to leave them out'); ledger.flip.push("excluding transfers");
     }
     if (!notes.length) notes.push(keptPairs.size ? "paired activity stays where listed below" : "only checking, savings and card accounts contribute to cash in minus cash out");
     // Gross sentences retain their wording and citation order for existing clients.
     answer = `${leadDetail || answer}\nNote: ${notes.join("; ")}.\nWith everything counted:\n${answer}\n${bounded}`;
-    const omittedPairs = pairs.filter(pair => [pair.out, pair.in].some(row => leadExcluded.has(row.id)));
+    const omittedPairs = pairs.filter(pair => [pair.out, pair.in].some(row => noteExcluded.has(row.id)));
     if (omittedPairs.length) {
       answer += "\nMoves between your own connected accounts, left out of the first figures:";
       const leadRowLine = row => rowLine(row).replace(candidateMark(row), leadExcluded.has(row.id)
@@ -314,7 +323,8 @@ async function ledgerAnswer(env, intent, accounts, inventory) {
     }
   }
   for (const row of unmatched) answer += `\nPossible transfer, unmatched (${leadExcluded.has(row.id)
-    ? "left out of the first figures as a retirement or investment withdrawal; kept in the gross figures"
+    ? noteExcluded.has(row.id) ? "left out of the first figures as a retirement or investment withdrawal; kept in the gross figures"
+      : "retirement or investment withdrawal excluded from the wider candidate pool; outside the displayed rows"
     : "retained in income/spend totals"}): ${rowLine(row)}.`;
   return { answer, citations, ledger };
 }

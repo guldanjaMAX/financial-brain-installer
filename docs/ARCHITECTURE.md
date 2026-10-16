@@ -778,13 +778,21 @@ from an investment or retirement account. A paired outgoing leg also leaves
 the lead when in scope. Description words never authorize withdrawal exclusion;
 "including withdrawals" restores it. A qualifying loan or line-of-credit advance
 into a selected checking, savings or card account also leaves both in-scope
-legs out of the lead; "including loan proceeds" restores those amounts. The unchanged gross sentences always
+legs out of the lead. This requires reciprocal directed references to the owned
+accounts, equal amounts and no customer, refund, income or external-payee
+conflict on either leg. Advisory or ambiguous loan pairs stay counted;
+"including loan proceeds" restores proven advances. The unchanged gross sentences always
 remain visible. Lead lines use "money in"/"money out" so clients parsing gross
 "credits"/"debits" cannot subtract twice. Existing JSON keys remain gross or,
 for `if_own_transfers`, conditional; additive lead and exclusion fields explain
 the presentation. Lists filter the lead before applying their limit and keep
 the original gross rows separately. Exclusion notes only describe rows feeding
-the requested figure, including a displayed Unsorted total. The transfers view
+the requested figure, including a displayed Unsorted total. For limited lists,
+removal amounts and flips describe only exclusions affecting displayed rows;
+below-cutoff exclusions are labelled as belonging to the wider candidate pool.
+An unavailable document search retains authorized ledger coverage gaps and a
+completed-month next step, while withholding candidate records and citations.
+The transfers view
 keeps its outgoing-date semantics. Unmatched hints remain visible; a category-
 backed withdrawal explicitly says it was left out of the lead and kept in gross.
 Bounded profit, net income and cash flow forms route to `kind: totals`, with

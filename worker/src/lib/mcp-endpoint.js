@@ -221,7 +221,16 @@ async function runAsk(deps, args) {
   // day is precisely when an owner asks this question and when this path is
   // the one they hit.
   if (unavailableSearch(thought)) {
-    return withGuidance([answerText(thought), "", confidenceText(thought)]);
+    // Authorized ledger gaps are independent of document-search readiness.
+    // Carry only those bounds here; candidate documents and citations remain
+    // suppressed while retrieval is incomplete or unavailable.
+    const ledgerGaps = (Array.isArray(thought.gaps) ? thought.gaps : [])
+      .filter(gap => ["ledger_out_of_coverage", "ledger_not_consulted"].includes(gap.type));
+    return withGuidance([answerText(thought), ...ledgerGaps.filter(gap => gap.detail).map(gap => gap.detail),
+      ...(ledgerGaps.length ? [ledgerGaps.some(gap => gap.type === "ledger_out_of_coverage")
+        ? "Try the last finished month if the feed covers it, or a past month ending on or before the covered-through date."
+        : "Resolve the ledger gap above, then try the last finished month if the feed covers it, or a past covered month."] : []),
+      "", confidenceText(thought)]);
   }
   const lines = guidance.length ? [...guidance, ""] : [];
   const refused = !thought.answer || /^The documents do not answer/.test(thought.answer);

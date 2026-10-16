@@ -606,3 +606,17 @@ await test("R4 remote refusal preserves ledger and source coverage limits", asyn
   }
   assert.equal(await remoteCall({ answer: "Fixture supported answer.", results: [], citations: [], gaps: [] }, "ask"), "Fixture supported answer.");
 });
+
+for (const status of ["coverage_incomplete", "search_unavailable"]) for (const type of ["ledger_out_of_coverage", "ledger_not_consulted"]) await test(`F5 ${status} retains authorized ${type} without candidate records`, async () => {
+  const detail = "Fixture bank feed covered through 2032-04-30.";
+  const notice = "Fixture document search could not be completed.";
+  const payload = { answer: null, status, notice, results: [reliable],
+    citations: [{ n: 1, title: "Candidate citation must stay hidden" }], gaps: [{ type, detail }] };
+  const out = await remoteCall(payload, "ask");
+  assert.ok(out.includes(notice), "the unavailable document branch was reached");
+  assert.ok(out.includes(detail));
+  assert.match(out, /last finished month/);
+  assert.doesNotMatch(out, /Fixture reliable|Candidate citation|Sources:|I found 1 record/);
+  const control = await remoteCall({ ...payload, status: undefined, notice: undefined, results: [], citations: [] }, "ask");
+  assert.ok(control.includes(detail));
+});

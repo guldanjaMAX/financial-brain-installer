@@ -370,3 +370,69 @@ test("m2 unmatched category withdrawals disclose the same exclusion as the lead"
   const control = await ask(f, flipQuestion(Q.totals, "including withdrawals"), "totals", 0);
   assert.match(control.answer, /unmatched \(retained in income\/spend totals\)/);
 });
+
+// Second review: advisory matches cannot establish a loan advance.
+for (const kind of ["loan", "line_of_credit"]) for (const arm of ["customer", "refund", "ambiguous", "external-payee", "advance-refund", "advance-customer", "external-mask-payee"]) {
+  test(`F1 ${kind} ${arm} stays in income and cannot reverse profit`, async t => {
+    const f = await fixture(t, "plain");
+    const baseline = await ask(f, Q.profit, "totals", 0);
+    f.account("debt", "6193", kind);
+    f.add("debt-adjustment", "2026-09-20", 41000, "outflow",
+      arm === "refund" ? "Loan fee reversal" : (arm.startsWith("external-") || arm.startsWith("advance-")) ? "TRANSFER TO account 1111" : "Debt adjustment", null, null, "debt");
+    f.add("receipt", "2026-09-20", 41000, "inflow", {
+      customer: `Customer payment for ${kind === "loan" ? "loan" : "credit line"} account 6193 consultation`,
+      "advance-refund": "TRANSFER FROM account 6193 REFUND of prior fee",
+      "advance-customer": "TRANSFER FROM account 6193 customer receipt",
+      refund: "REFUND of prior fee from account 6193",
+      ambiguous: "Adjustment for account 6193",
+      "external-payee": "TRANSFER FROM account 6193",
+      "external-mask-payee": "TRANSFER FROM account 6193",
+    }[arm]);
+    if (["customer", "external-payee"].includes(arm)) f.raw("UPDATE fin_transactions SET payee='Fixture Customer' WHERE txn_uid='receipt'");
+    if (arm === "external-mask-payee") f.raw("UPDATE fin_transactions SET payee='Fixture Supplier account 6193' WHERE txn_uid='receipt'");
+    // Keep gross cash positive while a false exclusion would make it negative.
+    f.add("equipment", "2026-09-25", baseline.ledger.net_minor + 25000, "outflow", "Equipment Outlet");
+    for (const measure of ["profit", "net income", "cash flow"]) {
+      const question = Q.profit.replace("profit", measure);
+      const control = await ask(f, flipQuestion(question, "including loan proceeds"));
+      assert.equal(control.ledger.net_minor, 16000);
+      const body = await ask(f, question);
+      assert.equal(body.ledger.transfers.length, 1, "advisory pair reached the exclusion decision");
+      assert.equal(body.ledger.net_minor, 16000, "a receipt is retained even when an owned loan is mentioned");
+      assert.equal(body.ledger.default_exclusions.loan_proceeds_minor, 0);
+      assert.equal(body.ledger.transfers[0].excluded_from_lead, false);
+    }
+  });
+}
+
+test("F2 a below-cutoff transfer never claims to change the displayed top two", async t => {
+  const f = await fixture(t, "own");
+  f.raw("UPDATE fin_transactions SET amount_minor=800 WHERE txn_uid IN ('move-out','move-in')");
+  const question = "What were my 2 largest expenses in September 2026?";
+  const body = await ask(f, question, "largest");
+  assert.equal(body.ledger.default_exclusions.own_transfer_minor, 800, "candidate-pool exclusion was reached");
+  const control = await ask(f, flipQuestion(question, "including transfers"), "largest");
+  assert.deepEqual(body.ledger.lead_rows, body.ledger.rows);
+  assert.deepEqual(body.ledger.lead_rows, control.ledger.lead_rows);
+  assert.doesNotMatch(body.answer, /left out of the first figures/);
+  assert.deepEqual(body.ledger.flip, []);
+  f.raw("UPDATE fin_transactions SET amount_minor=31000 WHERE txn_uid IN ('move-out','move-in')");
+  const changed = await ask(f, question, "largest");
+  assert.notDeepEqual(changed.ledger.lead_rows, changed.ledger.rows);
+  assert.match(changed.answer, /Note: \$310\.00.*left out of the first figures/);
+  assert.deepEqual(changed.ledger.flip, ["including transfers"]);
+});
+
+test("F1 exact owned-account payees retain the genuine advance control", async t => {
+  const f = await fixture(t, "plain"), baseline = await ask(f, Q.profit, "totals", 0);
+  f.account("debt", "6193", "loan");
+  f.add("advance-out", "2026-09-20", 41000, "outflow", "TRANSFER TO account 1111", null, null, "debt");
+  f.add("advance-in", "2026-09-20", 41000, "inflow", "TRANSFER FROM account 6193");
+  f.raw("UPDATE fin_transactions SET payee='account 6193' WHERE txn_uid='advance-in'");
+  f.raw("UPDATE fin_transactions SET payee='account 1111' WHERE txn_uid='advance-out'");
+  const body = await ask(f, Q.profit);
+  assert.equal(body.ledger.default_exclusions.loan_proceeds_minor, 41000);
+  assert.equal(body.ledger.net_minor, baseline.ledger.net_minor);
+  const control = await ask(f, flipQuestion(Q.profit, "including loan proceeds"));
+  assert.equal(control.ledger.net_minor, baseline.ledger.net_minor + 41000);
+});

@@ -2091,6 +2091,16 @@ provider-scale proof.
 
 ## Tests
 
+`node test/owner-contract-workspace.test.mjs` exercises setup and update guide
+refreshes. Existing guide files and any sibling used to authorize creation must
+belong to the current POSIX uid. On Windows, Node does not expose the owner's
+SID: the boundary requires a folder inside the current user's profile and
+rejects links, junctions, native reparse attributes and canonical path redirection.
+The native attribute probe is read-only and fails closed if it is unavailable. Native Windows ACL
+ownership is not established by this check. Owner account annotations are
+preserved in a labelled data fence; ambiguous legacy headings block the refresh
+without deleting owner text. Reruns must preserve the same bytes.
+
 `node --test worker/test/ledger-answer.test.mjs` exercises the read-only money
 answer path through the Worker and real SQLite migrations, including twin
 precedence, exact cents, coverage boundaries, scope refusals and SQL mutations.
