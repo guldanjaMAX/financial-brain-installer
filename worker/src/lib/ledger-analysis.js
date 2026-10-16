@@ -92,9 +92,11 @@ export function isLoanAdvance(pair, accounts) {
     }
     if (conflictsWithAccountKind(row, other)) return false;
     // Direction licenses a bare mask, but only the immediate, complete locator
-    // identifies its counterparty. An outside sender followed by an owned mask,
-    // multiple alternatives, or unparsed memo text cannot establish an advance.
-    const clause = normalizeLedgerText(row.description).match(new RegExp(`^(?:transfer|(?:loan |credit )?(?:advance|disbursement|proceeds)) ${direction} (.+)$`));
+    // identifies its counterparty. Only the listed transfer channels may prefix
+    // that verb; arbitrary leading text cannot be treated as a channel. An
+    // outside sender followed by an owned mask, multiple alternatives, or
+    // unparsed memo text cannot establish an advance.
+    const clause = normalizeLedgerText(row.description).match(new RegExp(`^(?:(?:(?:online|automatic|mobile|internet) )?transfer|(?:loan |credit )?(?:advance|disbursement|proceeds)) ${direction} (.+)$`));
     return Boolean(clause && resolvesExactAccount(clause[1], other, accounts));
   };
   return directed(pair.out, inAccount, "to") && directed(pair.in, outAccount, "from");

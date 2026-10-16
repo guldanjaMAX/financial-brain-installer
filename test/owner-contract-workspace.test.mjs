@@ -40,6 +40,36 @@ function fixture(t) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return { root, manifest: join(root, "brain.manifest.json") };
 }
+// Exercise the real commit syscall in both the earlier link protocol and the
+// descriptor writer. This keeps red probes meaningful without a test-only seam.
+function interposeGuideInstall(target, { before = () => {}, after = () => {} }) {
+  const original = { openSync: fs.openSync, closeSync: fs.closeSync, linkSync: fs.linkSync, copyFileSync: fs.copyFileSync };
+  let installedFd, claimed = false;
+  fs.openSync = (path, flags, ...args) => {
+    if (path === target && flags === "wx" && !claimed) {
+      claimed = true;
+      before();
+      installedFd = original.openSync(path, flags, ...args);
+      return installedFd;
+    }
+    return original.openSync(path, flags, ...args);
+  };
+  fs.closeSync = fd => {
+    const result = original.closeSync(fd);
+    if (fd === installedFd) { installedFd = undefined; after(); }
+    return result;
+  };
+  for (const method of ["linkSync", "copyFileSync"]) fs[method] = (source, destination, ...args) => {
+    const installing = destination === target && (basename(source) === "ready" || basename(source).includes(".financial-brain-pending-"));
+    if (installing) before();
+    const result = original[method](source, destination, ...args);
+    if (installing) after();
+    return result;
+  };
+  syncBuiltinESMExports();
+  return () => { Object.assign(fs, original); syncBuiltinESMExports(); };
+}
+
 function moneyInner(name) {
   const lines = template(name).split("\n");
   const begin = lines.findIndex((line) => line.startsWith("<!-- BEGIN Financial Brain money-question rules"));
@@ -406,9 +436,9 @@ test("renderer validates kit markers, placeholder and the single Codex substitut
   }
 });
 
-test("atomic writer cleans its temporary file after write, fsync and rename failures with success controls", (t) => {
-  const { root, manifest } = fixture(t);
+test("atomic writer retains staging after write, fsync and rename failures with success controls", (t) => {
   for (const [, filename, , write] of writers) for (const method of ["writeFileSync", "fsyncSync", "renameSync"]) {
+    const { root, manifest } = fixture(t);
     const target = join(root, filename);
     let reached = 0;
     const replacement = mock.method(fs, method, () => { reached++; throw new Error("synthetic atomic failure"); });
@@ -419,9 +449,11 @@ test("atomic writer cleans its temporary file after write, fsync and rename fail
       assert.equal(existsSync(target), false);
       assert.equal(readdirSync(root).filter((name) => name.endsWith(".tmp")).length, 0);
     } finally { replacement.mock.restore(); syncBuiltinESMExports(); }
-    assert.equal(write(manifest, options).status, "written");
-    assertPrivateClean(root, target);
-    rmSync(target);
+    assert.equal(write(manifest, options).status, "not_written", "retained lock requires explicit recovery");
+    assert.ok(readdirSync(`${target}.lock`).some(name => name.includes(".financial-brain-pending-")));
+    const control = fixture(t);
+    assert.equal(write(control.manifest, options).status, "written");
+    assertPrivateClean(control.root, join(control.root, filename));
   }
 });
 
@@ -435,7 +467,7 @@ test("Windows absolute locators retain their native spelling in the shared invoc
   assert.throws(() => workspace.renderClaudeWorkspaceGuide(manifest, { brainCliPath: "/fixture/unsafe\npath" }));
 });
 
-test("atomic cleanup still removes the temporary file when closing it fails", (t) => {
+test("atomic writer retains the pending file when closing it fails", (t) => {
   const { root, manifest } = fixture(t);
   const originalClose = fs.closeSync;
   let closes = 0;
@@ -450,8 +482,11 @@ test("atomic cleanup still removes the temporary file when closing it fails", (t
     assert.ok(closes > 0, "the temporary-file close decision was reached");
     assert.equal(readdirSync(root).filter((name) => name.endsWith(".tmp")).length, 0);
   } finally { replacement.mock.restore(); syncBuiltinESMExports(); }
-  assert.equal(workspace.writeClaudeWorkspaceGuide(manifest, options).status, "written");
-  assertPrivateClean(root, join(root, "CLAUDE.md"));
+  assert.equal(workspace.writeClaudeWorkspaceGuide(manifest, options).status, "not_written");
+  assert.ok(readdirSync(join(root, "CLAUDE.md.lock")).some(name => name.includes(".financial-brain-pending-")));
+  const control = fixture(t);
+  assert.equal(workspace.writeClaudeWorkspaceGuide(control.manifest, options).status, "written");
+  assertPrivateClean(control.root, join(control.root, "CLAUDE.md"));
 });
 
 test("both update refreshers report damage without changing bytes and refresh legacy controls", (t) => {
@@ -905,25 +940,23 @@ test("R3 review symlink parent redirection after inspection preserves both guide
   assert.equal(result.changed, false);
   assert.equal(readFileSync(join(other, "AGENTS.md"), "utf8"), unrelated);
   assert.equal(readFileSync(join(safe, "AGENTS.md"), "utf8"), before);
-  assert.equal(workspace.writeCodexWorkspaceGuide(join(safe, "brain.manifest.json"), options).status, "written");
+  assert.equal(workspace.writeCodexWorkspaceGuide(join(safe, "brain.manifest.json"), options).status, "not_written", "redirection leaves recovery staging untouched");
+  const control = fixture(t);
+  assert.equal(workspace.writeCodexWorkspaceGuide(control.manifest, options).status, "written");
 });
 
 for (const present of [false, true]) test(`R3 review final install cannot clobber a late target (present=${present})`, t => {
   const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
   const before = `${CODEX}\n# Earlier guide\n`, unrelated = "# Concurrent owner guide\nKeep these bytes.\n";
   if (present) writeFileSync(target, before);
-  const originals = { renameSync: fs.renameSync, linkSync: fs.linkSync }; let decisions = 0;
-  for (const method of Object.keys(originals)) fs[method] = (source, destination, ...rest) => {
-    if (destination === target) {
-      decisions++;
-      writeFileSync(target, unrelated);
-    }
-    return originals[method](source, destination, ...rest);
-  };
-  syncBuiltinESMExports();
+  let decisions = 0;
+  const restore = interposeGuideInstall(target, { before: () => {
+    decisions++;
+    writeFileSync(target, unrelated);
+  } });
   let result;
   try { result = workspace.writeCodexWorkspaceGuide(manifest, options); }
-  finally { Object.assign(fs, originals); syncBuiltinESMExports(); }
+  finally { restore(); }
   assert.ok(decisions > 0, "race occurs inside the final filesystem operation, after its last check");
   assert.equal(result.status, "not_written");
   assert.equal(result.changed, false);
@@ -982,40 +1015,43 @@ for (const point of ["move", "install"]) test(`R3 review existing-file change at
   const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
   const changed = `${CODEX}\n# Concurrent owner edit\n`;
   writeFileSync(target, `${CODEX}\n# Earlier guide\n`);
-  const method = point === "move" ? "renameSync" : "linkSync", original = fs[method];
+  const original = fs.renameSync;
   let decisions = 0;
-  fs[method] = (source, destination, ...rest) => {
-    if ((point === "move" && source === target) || (point === "install" && destination === target && basename(source) === "ready")) {
-      decisions++;
-      if (point === "move") { fs.unlinkSync(target); writeFileSync(target, changed); }
-      else writeFileSync(join(dirname(source), "previous"), changed);
-    }
-    return original(source, destination, ...rest);
-  };
-  syncBuiltinESMExports();
+  const restore = point === "install" ? interposeGuideInstall(target, { after: () => {
+    decisions++; writeFileSync(join(root, "AGENTS.md.lock", "previous"), changed);
+  } }) : () => { fs.renameSync = original; syncBuiltinESMExports(); };
+  if (point === "move") {
+    fs.renameSync = (source, destination, ...rest) => {
+      if (source === target) { decisions++; fs.unlinkSync(target); writeFileSync(target, changed); }
+      return original(source, destination, ...rest);
+    };
+    syncBuiltinESMExports();
+  }
   let result;
   try { result = workspace.writeCodexWorkspaceGuide(manifest, options); }
-  finally { fs[method] = original; syncBuiltinESMExports(); }
+  finally { restore(); }
   assert.equal(decisions, 1, "the existing-file race reaches the actual commit syscall");
   assert.equal(result.status, "not_written");
-  assert.equal(readFileSync(target, "utf8"), changed);
-  assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "written", "unchanged retry succeeds");
+  assert.equal(readFileSync(result.recoveryPath, "utf8"), changed);
+  assert.ok(existsSync(result.pendingPath));
+  if (point === "move") assert.equal(existsSync(target), false, "no restoration after a failed check");
+  else assert.equal(readFileSync(target, "utf8"), readFileSync(result.pendingPath, "utf8"));
+  const retry = workspace.writeCodexWorkspaceGuide(manifest, options);
+  assert.equal(retry.status, "not_written", "an unresolved write cannot become verified on retry");
+  const control = fixture(t);
+  writeFileSync(join(control.root, "AGENTS.md"), changed);
+  assert.equal(workspace.writeCodexWorkspaceGuide(control.manifest, options).status, "written", "uncontested control succeeds");
 });
 
 test("R3 review edited installed inode is preserved along with the earlier guide", t => {
   const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
   const before = `${CODEX}\n# Earlier guide\n`, changed = "# Concurrent edit of installed guide\n";
   writeFileSync(target, before);
-  const original = fs.linkSync; let decisions = 0;
-  fs.linkSync = (source, destination, ...rest) => {
-    const result = original(source, destination, ...rest);
-    if (destination === target && basename(source) === "ready") { decisions++; writeFileSync(target, changed); }
-    return result;
-  };
-  syncBuiltinESMExports();
+  let decisions = 0;
+  const restore = interposeGuideInstall(target, { after: () => { decisions++; writeFileSync(target, changed); } });
   let result;
   try { result = workspace.writeCodexWorkspaceGuide(manifest, options); }
-  finally { fs.linkSync = original; syncBuiltinESMExports(); }
+  finally { restore(); }
   assert.equal(decisions, 1);
   assert.equal(result.status, "not_written");
   assert.equal(readFileSync(target, "utf8"), changed);
@@ -1042,4 +1078,115 @@ for (const [assistant, filename, , writer] of writers) test(`R3 review setup rep
   assert.doesNotMatch(blocked.output, /owner workspace ready/);
   const control = await setup(t, wired, { [option]: writer });
   assert.match(control.output, /owner workspace ready/);
+});
+
+for (const arm of ["duplicate", "before-accounts", "misplaced-only", "fenced", "data-block"]) test(`R4 session boundary: ${arm}`, t => {
+  const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
+  const note = "Reserve account annotation must survive refresh.";
+  const notes = [ACCOUNTS[0], SAVE_HEADING, note];
+  const before = arm === "data-block" ? `${CODEX}\n${workspace.renderOwnerRulesSection({ assistant: "codex", accountLines: notes })}` :
+    `${CODEX}\n${BEGIN}\n${["before-accounts", "misplaced-only"].includes(arm) ? SAVE_HEADING + "\n" : ""}${ACCOUNT_HEADING}\n${ACCOUNTS[0]}\n` +
+    `${arm === "fenced" ? "```text\n" : ""}${["before-accounts", "misplaced-only"].includes(arm) ? "" : SAVE_HEADING + "\n"}${note}\n` +
+    `${arm === "fenced" ? "```\n" : ""}${arm === "misplaced-only" ? "" : SAVE_HEADING}\nManaged session prose.\n${END}\n`;
+  writeFileSync(target, before);
+  assert.equal(count(before, SAVE_HEADING), arm === "misplaced-only" ? 1 : 2, "the intended boundaries enter the real parser");
+  const result = workspace.writeCodexWorkspaceGuide(manifest, options);
+  if (["duplicate", "before-accounts", "misplaced-only"].includes(arm)) {
+    assert.equal(result.status, "preserved_damaged_section");
+    assert.equal(result.changed, false);
+    assert.equal(readFileSync(target, "utf8"), before);
+  } else {
+    assert.equal(result.status, "written");
+    assert.ok(readFileSync(target, "utf8").includes(note));
+    assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "verified");
+  }
+});
+
+for (const arm of ["none", "install", "after-return"]) test(`R4 original descriptor remains reachable: ${arm}`, t => {
+  const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
+  const before = `${CODEX}\n# Older guide\n`, note = "\nRetain this concurrent owner annotation.\n";
+  writeFileSync(target, before);
+  const fd = fs.openSync(target, "r+");
+  let installed = 0;
+  const restore = interposeGuideInstall(target, { after: () => {
+    installed++;
+    if (arm === "install") fs.writeSync(fd, note, Buffer.byteLength(before), "utf8");
+  } });
+  let result;
+  try {
+    result = workspace.writeCodexWorkspaceGuide(manifest, options);
+    if (arm === "after-return") fs.writeSync(fd, note, Buffer.byteLength(before), "utf8");
+  } finally { restore(); fs.closeSync(fd); }
+  assert.equal(installed, 1, "real installation and open original descriptor reached");
+  if (arm === "install") {
+    assert.equal(result.status, "not_written");
+    assert.ok(result.pendingPath, "refusal names its pending content");
+    assert.ok(existsSync(result.pendingPath));
+  } else {
+    assert.equal(result.status, "written");
+    assert.equal(workspace.writeCodexWorkspaceGuide(manifest, options).status, "verified");
+  }
+  assert.ok(result.recoveryPath, "original inode retains a name even after successful installation");
+  assert.equal(readFileSync(result.recoveryPath, "utf8"), before + (arm === "none" ? "" : note));
+});
+
+for (const point of ["before-rollback", "inside-unlink"]) test(`R4 no destructive rollback: ${point}`, t => {
+  const { root, manifest } = fixture(t), target = join(root, "AGENTS.md");
+  const before = `${CODEX}\n# Older guide\n`, note = "\nConcurrent original annotation.\n";
+  const competing = "# Concurrent owner instructions\nKeep every byte.\n";
+  writeFileSync(target, before);
+  const fd = fs.openSync(target, "r+");
+  const originalUnlink = fs.unlinkSync;
+  let installs = 0, destructive = 0;
+  const restore = interposeGuideInstall(target, { after: () => {
+    installs++;
+    fs.writeSync(fd, note, Buffer.byteLength(before), "utf8");
+    if (point === "before-rollback") {
+      originalUnlink(target); writeFileSync(target, competing, { flag: "wx" });
+    }
+  } });
+  fs.unlinkSync = (path, ...args) => {
+    if (installs) {
+      destructive++;
+      if (path === target && point === "inside-unlink") {
+        originalUnlink(target); writeFileSync(target, competing, { flag: "wx" });
+      }
+    }
+    return originalUnlink(path, ...args);
+  };
+  syncBuiltinESMExports();
+  let result;
+  try { result = workspace.writeCodexWorkspaceGuide(manifest, options); }
+  finally { fs.unlinkSync = originalUnlink; restore(); fs.closeSync(fd); }
+  assert.equal(installs, 1, "installation reached and descriptor edit forced the refusal");
+  assert.equal(result.status, "not_written");
+  assert.equal(destructive, 0, "no pathname cleanup after a failed content check");
+  assert.ok(result.pendingPath);
+  assert.match(basename(result.pendingPath), /^AGENTS\.md\.financial-brain-pending-/);
+  assert.ok(existsSync(result.pendingPath));
+  assert.equal(readFileSync(result.recoveryPath, "utf8"), before + note);
+  if (point === "before-rollback") assert.equal(readFileSync(target, "utf8"), competing);
+  else assert.equal(readFileSync(target, "utf8"), readFileSync(result.pendingPath, "utf8"));
+  const control = join(root, "control"); mkdirSync(control);
+  writeFileSync(join(control, "AGENTS.md"), before);
+  assert.equal(workspace.writeCodexWorkspaceGuide(join(control, "brain.manifest.json"), options).status, "written");
+});
+
+test("R4 blocked refresh reports the pending file by name", () => {
+  const warnings = [], pendingPath = resolve("/fixture/AGENTS.md.financial-brain-pending-fixture");
+  let calls = 0;
+  const result = cli.refreshCodexWorkspaceGuideAfterUpdate(resolve("/fixture/brain.manifest.json"), {
+    writeCodexWorkspaceGuide: () => { calls++; return { status: "not_written", pendingPath }; },
+    reportWarning: value => warnings.push(value), reportOk: () => assert.fail("blocked write cannot report success"),
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.status, "not_written");
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /not written/i);
+  assert.ok(warnings[0].includes(pendingPath));
+  let successes = 0;
+  cli.refreshCodexWorkspaceGuideAfterUpdate(resolve("/fixture/brain.manifest.json"), {
+    writeCodexWorkspaceGuide: () => ({ status: "written" }), reportOk: () => successes++,
+  });
+  assert.equal(successes, 1, "uncontested refresh still reports success");
 });

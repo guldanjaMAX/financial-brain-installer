@@ -2101,17 +2101,29 @@ ownership is not established by this check. Owner account annotations are
 preserved in a labelled data fence; ambiguous legacy headings block the refresh
 without deleting owner text. Reruns must preserve the same bytes.
 Legacy backtick and tilde fences are data when finding the session boundary;
-an unclosed fence blocks refresh with the whole original file preserved.
+an unclosed fence, duplicate unfenced session headings, or a session heading
+before My accounts blocks refresh with the whole original file preserved.
 Writes bind both the named and canonical parent to their inspected device/inode
 identities. An exclusive adjacent `.lock` directory serializes guide refreshes.
-The completed staged file is installed with a no-clobber hard link. An existing
-guide is moved into the lock directory and checked against its inspected inode,
-ownership, metadata and exact bytes before installation. This leaves a brief
-missing-path interval during refresh; it never renames over a competing guide.
-Changed parents or files return `not_written`. If a competing guide prevents
-restoring the earlier file, its bytes remain at the returned `recoveryPath` and
-the lock remains for explicit local recovery. An interrupted refresh can likewise
-leave a lock and staging or recovery files; never automatically clear that lock.
+A complete staged guide has a distinctive `AGENTS.md.financial-brain-pending-<id>`
+(or `CLAUDE.md` equivalent) name inside that directory. An existing guide is moved
+to `previous` and checked against its inspected inode, ownership, metadata and
+exact bytes. The destination is claimed with exclusive creation, then written
+through that descriptor and checked against its own inode and exact content.
+There is a brief missing-path interval and the new file can be observed before
+its write completes. A competing guide is never renamed over or unlinked.
+Any identity/content failure returns `not_written` without cleanup or restoration:
+the staged guide remains at `pendingPath`, any displaced original at
+`recoveryPath`, and a lock still present blocks retries, including verification.
+Review all retained files before explicit local recovery. A refusal after moving
+the original can leave the destination absent or partially written; it does not
+promise automatic restoration. Setup/update warnings name the retained paths.
+On an uncontested write the whole lock directory is moved to a unique
+`<guide>.financial-brain-retained-<id>` directory. Both staging and the original
+inode stay there, including after success, so an editor with an open original
+file descriptor cannot lose a later edit. These local recovery directories are
+never automatically deleted. Interrupted writes likewise require explicit
+recovery; never automatically clear their lock.
 Native Windows filesystem behavior remains a separate host/CI gate.
 
 `node --test worker/test/ledger-answer.test.mjs` exercises the read-only money

@@ -492,3 +492,52 @@ for (const arm of ["duplicate-mask", "outside-destination", "kind-conflict"]) te
   f.raw("UPDATE fin_transactions SET description='TRANSFER FROM 6193' WHERE txn_uid='advance-in'");
   assert.equal((await ask(f, Q.profit)).ledger.default_exclusions.loan_proceeds_minor, 51000);
 });
+
+// Fourth review: ordinary channels do not change the immediate counterparty.
+for (const prefix of ["", "ONLINE ", "AUTOMATIC ", "MOBILE ", "INTERNET "]) {
+  for (const kind of ["loan", "line_of_credit"]) for (const measure of ["profit", "net income", "cash flow"]) {
+    test(`R4 channel advance: ${prefix || "plain"} ${kind} ${measure}`, async t => {
+      const f = await fixture(t, "plain"), question = Q.profit.replace("profit", measure);
+      const baseline = await ask(f, question, "totals", 0);
+      f.add("equipment", "2026-09-25", baseline.ledger.net_minor + 23000, "outflow", "Equipment Outlet");
+      f.account("debt", "6193", kind);
+      f.add("advance-out", "2026-09-20", 51000, "outflow", `${prefix}TRANSFER TO account 1111`, null, null, "debt");
+      f.add("advance-in", "2026-09-20", 51000, "inflow", `${prefix}TRANSFER FROM account 6193`);
+      f.raw("UPDATE fin_transactions SET payee='account 1111' WHERE txn_uid='advance-out'");
+      f.raw("UPDATE fin_transactions SET payee='account 6193' WHERE txn_uid='advance-in'");
+      const included = await ask(f, flipQuestion(question, "including loan proceeds"));
+      assert.equal(included.ledger.net_minor, 28000, "inclusion control reaches a positive gross result");
+      const body = await ask(f, question);
+      assert.equal(body.ledger.net_minor, -23000);
+      assert.equal(body.ledger.default_exclusions.loan_proceeds_minor, 51000);
+      assert.equal(account(body, "6193").debits_minor, 0);
+      assert.match(body.answer, /Note:.*\$510\.00.*loan/);
+      assert.equal(f.modelCalls, 0);
+    });
+  }
+  for (const kind of ["loan", "line_of_credit"]) for (const arm of ["sender", "refund", "payee", "ambiguous", "unknown-prefix"]) {
+    test(`R4 channel veto: ${prefix || "plain"} ${kind} ${arm}`, async t => {
+      const f = await fixture(t, "plain"), baseline = await ask(f, Q.profit, "totals", 0);
+      f.add("equipment", "2026-09-25", baseline.ledger.net_minor + 23000, "outflow", "Equipment Outlet");
+      f.account("debt", "6193", kind);
+      f.add("advance-out", "2026-09-20", 51000, "outflow", `${prefix}TRANSFER TO account 1111`, null, null, "debt");
+      const sender = arm === "sender" ? "Outside payer memo account 6193" : "account 6193";
+      f.add("advance-in", "2026-09-20", 51000, "inflow",
+        `${arm === "unknown-prefix" ? "UNRECOGNIZED " : ""}${prefix}TRANSFER FROM ${sender}${arm === "refund" ? " REFUND" : ""}`);
+      if (arm === "payee") f.raw("UPDATE fin_transactions SET payee='Outside payee account 6193' WHERE txn_uid='advance-in'");
+      if (arm === "ambiguous") f.account("other", "6193", "savings");
+      for (const measure of ["profit", "net income", "cash flow"]) {
+        const question = Q.profit.replace("profit", measure), body = await ask(f, question);
+        assert.equal(body.ledger.transfers.length, 1, "advisory pair reaches the veto decision");
+        assert.equal(body.ledger.net_minor, 28000);
+        assert.equal(body.ledger.default_exclusions.loan_proceeds_minor, 0);
+        assert.equal((await ask(f, flipQuestion(question, "including loan proceeds"))).ledger.net_minor, 28000);
+      }
+      f.raw("UPDATE fin_accounts SET mask='9142' WHERE account_slug='other'");
+      f.raw("UPDATE fin_transactions SET payee=NULL, description=? WHERE txn_uid='advance-in'", `${prefix}TRANSFER FROM account 6193`);
+      const control = await ask(f, Q.profit);
+      assert.equal(control.ledger.default_exclusions.loan_proceeds_minor, 51000, "uncontested channel control excludes the advance");
+      assert.equal(control.ledger.net_minor, -23000);
+    });
+  }
+}
