@@ -94,8 +94,15 @@ Each one was missed or misread in a sandbox rehearsal.
    the owner selected First Platypus Bank and the connection came back as Bank
    of America. Choose "Add new account" or the specific bank rather than a saved
    entry, and check that the connection's institution label matches before
-   assigning accounts. If it does not match, disconnect it in the Brain app at
-   Access > Banks > Disconnect and connect again. For sandbox testing, use a fresh
+   assigning accounts. If it does not match and no account history has reached
+   the ledger, disconnect it in the Brain app at Access > Banks > Disconnect.
+   Wait for confirmed removal before connecting again. Disconnect clears
+   abandoned staging and keeps saved history. If history or prior sync progress
+   exists, reconnecting the same bank stops with
+   `plaid_reconnect_support_required`; contact support to review the retained
+   history before another connection. This version does not automatically
+   reattach it. A disconnected bank has no Repair connection button.
+   For sandbox testing, use a fresh
    test phone number, 415-555-0011 or one of 415-555-0131 through
    415-555-0138, with the code `123456`.
 7. **Add an owner first.** A new Brain has no person, household, or business
@@ -104,7 +111,10 @@ Each one was missed or misread in a sandbox rehearsal.
    transactions enter the ledger, and `/api/bank-feed/status` lists a
    connection waiting on those choices under `needs_attention` with the count.
 8. **Disconnect lives in the owner app.** It is not on the connect page. In the
-   Brain app, go to Access > Banks > Disconnect. Saved history stays.
+   Brain app, go to Access > Banks > Disconnect. Saved history stays. Use Repair
+   connection for a bank that is still listed and needs a new sign-in. Do not
+   disconnect a bank with saved history as a routine sign-in repair. A removal
+   still awaiting provider confirmation is not permission to add a duplicate.
 
 **Turning the feed off deletes the Plaid keys.** Setting
 `corpora.bank_feed.enabled` to `false` and then running `brain secrets` or

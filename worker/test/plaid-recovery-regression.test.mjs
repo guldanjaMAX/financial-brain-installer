@@ -105,7 +105,7 @@ for (const arm of ["duplicate", "review-error", "restored-stale"]) test(`same-ta
     const first = page.requests[0].body.request_id;
     assert.equal(page.opened.length, 1);
     const before = p.calls.length;
-    if (arm === "review-error") f.control.failOn = /SELECT item_ref,institution_ref FROM bank_feed_items/;
+    if (arm === "review-error") f.control.failOn = /SELECT item_ref,institution_ref\b[^;]*FROM bank_feed_items/;
     await page.finish();
     f.control.failOn = null;
     assert.equal(page.requests.at(-1).path, "/api/bank-feed/exchange", "the failing completion reached the real route");
@@ -118,6 +118,7 @@ for (const arm of ["duplicate", "review-error", "restored-stale"]) test(`same-ta
       assert.match(page.nodes.get("status").textContent, /already be connected/);
     } else {
       assert.ok(f.seen.sql.some(sql => /SELECT item_ref,institution_ref/.test(sql)), "database review failure was reached");
+      assert.match(page.responses.at(-1).error, /fixture database unavailable/, "the injected read failure must cause the refusal");
       assert.match(page.nodes.get("status").className, /err/);
     }
     assert.equal(storage.has("bank_link_request_id:connect:"), false);
@@ -137,7 +138,7 @@ test("review refusal clears its server fingerprint even when the client did not 
   const p = provider();
   try {
     await link(f, "review-retry-session", p.fetchImpl);
-    f.control.failOn = /SELECT item_ref,institution_ref FROM bank_feed_items/;
+    f.control.failOn = /SELECT item_ref,institution_ref\b[^;]*FROM bank_feed_items/;
     await assert.rejects(completePlaidLink(f.env, { sessionRef: "review-retry-session", publicToken: "synthetic-first", now: NOW, fetchImpl: p.fetchImpl }), /fixture database unavailable/);
     assert.ok(f.seen.sql.some(sql => /SELECT item_ref,institution_ref/.test(sql)));
     f.control.failOn = null;

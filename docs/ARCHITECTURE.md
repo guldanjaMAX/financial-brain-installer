@@ -856,6 +856,20 @@ repeat the decision inside transaction writes. Existing mixed-identity same-day
 amount/direction candidates return `bank_export_overlap_review_required`; no
 automatic merge, deletion or recertification occurs.
 
+Plaid duplicate review distinguishes a removed Item from a still-connected
+one. A removed Item at the same institution can be ignored only after proving
+there are no retained ledger accounts (including superseded rows), transactions
+(including tombstones), balances, coverage, obligations, or prior promotion
+progress. Its abandoned staging is cleared in one guarded D1 batch before the
+new exchange. Disconnect also clears staging atomically with its revocation
+request, and confirmed revocation repeats the cleanup for older pending rows.
+The sync lease fence prevents late staging or promotion after disconnect.
+Ledger history, owner assignments, and revocation receipts are retained.
+Same-institution removed history refuses before exchange with
+`plaid_reconnect_support_required`, including legacy history without an account
+identity locator. Automatic history reattachment is not implemented here.
+Active duplicate checks continue to refuse matching or ambiguous accounts.
+
 Plaid historical promotion derives an empty window's start from its saved
 requested days and queue date, never from absent transactions. A legacy
 complete feed with no start may use that same completed provider receipt only

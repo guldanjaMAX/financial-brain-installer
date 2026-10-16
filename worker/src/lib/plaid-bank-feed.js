@@ -3,7 +3,7 @@ import {
   bankActivityRefreshPending,
   writeBankActivityDocuments,
 } from "./bank-activity-doc.js";
-import { assertPlaidConnectionDistinct } from "./plaid-connection-review.js";
+import { assertPlaidConnectionDistinct, plaidStagingCleanupStatements } from "./plaid-connection-review.js";
 import { PlaidAccountEntityError, reconciliationRefreshPending } from "./plaid-account-entities.js";
 import {
   accountKindFor,
@@ -1802,6 +1802,7 @@ export async function drainPlaidRevocations(env, {
     const transition = plaidRevocationTransition({ state: "pending", providerResult });
     if (transition.eraseAccessToken) {
       await env.DB.batch([
+        ...plaidStagingCleanupStatements(env, tenantId, row.item_ref),
         env.DB.prepare(
           `UPDATE bank_feed_items SET status='removed',status_detail='The account holder disconnected this bank.',
               removed_at=?,access_ciphertext='REMOVED0000000000000000',access_iv='REMOVED000000000'
@@ -1842,6 +1843,7 @@ export async function disconnectPlaidItem(env, itemRef, {
   const item = await itemRow(env, tenantId, itemRef);
   if (!item) return { ok: false, reason: "that connection is not on this brain" };
   await env.DB.batch([
+    ...plaidStagingCleanupStatements(env, tenantId, itemRef),
     env.DB.prepare(
       `INSERT INTO plaid_revocation_outbox
          (tenant_id,item_ref,state,outcome_state,attempts,next_attempt_at,requested_at,updated_at)
