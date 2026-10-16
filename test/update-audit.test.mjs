@@ -203,13 +203,13 @@ for (const id of ["UPDATE-012", "UPDATE-044"]) {
 }
 const deferralCopies = [updateAuditDoc, maintainerDoc, candidatePlan].join("\n");
 for (const approvalCopy of [
-  /owner-approved exact-version 0\.4\.16/gi,
+  /owner-approved exact-version 0\.4\.17/gi,
   /owner-approved narrowing/gi,
   /new owner-approved record/gi,
-  /owner approved that 0\.4\.16 may ship without/gi,
+  /owner approved that 0\.4\.17 may ship without/gi,
   /owner decided on 2026-09-25 to defer Windows ARM64/gi,
   /approved this exact deferral on 2026-09-26/gi,
-  /owner confirmed it for the 0\.4\.16 release text/gi,
+  /owner confirmed it for the 0\.4\.17 release text/gi,
 ]) {
   assert.doesNotMatch(deferralCopies, approvalCopy,
     "deferral documentation must rely on the repository record rather than approval prose");
@@ -232,7 +232,7 @@ let ordinaryReleaseCopyDecisions = 0;
 function assertOrdinaryReleaseCopyPrecedesLimitations(section) {
   ordinaryReleaseCopyDecisions += 1;
   const rendered = renderCliCommands(section);
-  const ordinary = rendered.indexOf("Windows daily imports now install, verify, run and remove correctly.");
+  const ordinary = rendered.indexOf("Money answers separate your own money moves from income and spending.");
   const limitations = rendered.indexOf("This release does NOT cover");
   assert.ok(ordinary >= 0 && limitations >= 0 && ordinary < limitations,
     "ordinary release copy must render before the final does-not-cover block");
@@ -255,7 +255,7 @@ function assertExactLimitationIds(block, registry = cases) {
 assert.ok(notCoveredBlock, "the current changelog needs a This release does NOT cover block");
 assert.throws(() => assertOrdinaryReleaseCopyPrecedesLimitations(
   "### This release does NOT cover\n\n- **UPDATE-999:** Deferred fixture.\n\n" +
-    "- **Windows daily imports now install, verify, run and remove correctly.** Fixture.",
+    "- **Money answers separate your own money moves from income and spending.** Fixture.",
 ), /ordinary release copy must render before/,
 "the prior layout must fail because whatsnew renders ordinary changes inside the limitation block");
 assert.doesNotThrow(() => assertOrdinaryReleaseCopyPrecedesLimitations(currentReleaseSection));

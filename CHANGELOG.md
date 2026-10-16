@@ -4,6 +4,98 @@ Read by `brain whatsnew`, so a client sees this in their terminal rather than
 having to be told. Newest first. Each entry is written for the person who OWNS
 the brain, not for whoever built it: what changed for them, and what to check.
 
+## 0.4.17 (2026-10-16)
+
+Candidate only. This version has not been released. The changes below still
+need the full host gate, CI and separately reviewed field acceptance for the
+exact sealed package. This version bump verifies no incident.
+
+- **Money answers separate your own money moves from income and spending.**
+  Supported answers leave evidenced transfers between your own accounts,
+  retirement or investment withdrawals, and qualifying loan proceeds out of
+  the lead figures. A Note explains the exclusions; the gross view keeps
+  everything counted. Check the accounts, period and Note. To change the view,
+  reuse the offered words, such as "including transfers", "including
+  withdrawals" or "including loan proceeds". Uncertain matches stay counted;
+  card purchases and loan repayments are not automatically erased.
+- **Cash flow is reported as unsupported instead of guessed.** Profit and net
+  income questions give a bounded money-in-minus-money-out view, labelled as
+  neither accounting profit nor cash flow. Overlapping bank exports and
+  unproven date coverage require review before totals can be trusted. Payer
+  answers require evidence for the named payer; a payment-service label alone
+  does not establish who paid. Check the cited rows and resolve any review
+  request before using the figures.
+- **Your assistant gets money rules v3.** Claude Code and Codex receive the
+  same rules for account labels, dates, confidence, citations and the exact
+  words that change a money view. The assistant keeps the returned Note and
+  does not subtract exclusions twice, invent a confidence score or turn a
+  refused question into a zero.
+- **Document questions start with search, and an empty search says what it
+  checked.** A failed search no longer implies that your whole Brain has no
+  matching record. Records found without a supported answer are distinguished
+  from no matches, and incomplete searches keep their warning. Ask with more
+  specific terms when needed; a relevance-ranked result alone cannot prove
+  that a record is the newest.
+- **Quiet syncs no longer look paused or behind.** A verified check with no
+  new work says "checked, no changes" without inventing a new file load.
+  Manual uploads say they are not watched, retired uploads remain historical,
+  and genuine failures or pauses stay visible. Check the last check and last
+  successful load separately.
+- **Your assistant's workspace keeps your notes safely.** Setup and verified
+  updates maintain the owned CLAUDE.md and AGENTS.md guides. My accounts stays
+  labelled as data, not instructions. Unrelated files, ambiguous sections and
+  competing edits are preserved; failed writes identify retained recovery
+  files instead of claiming success. A session-folder nudge helps you open the
+  folder where the rules load. Review any "not written" notice before retrying.
+- **Updates report whether recovery and daily refresh really finished.**
+  Pause/resume handles queued work and preserves the recovery state when a
+  required step fails. Daily refresh restoration and Worker schedules require
+  readback, and unrelated schedules are preserved. Required restoration or
+  acceptance failures no longer print ordinary completion. Windows restart
+  instructions quote literal paths and use PowerShell-compatible commands.
+- **Private error details stay out of assistant replies.** Tool failures return
+  reviewed messages and safe codes instead of raw exception or response text.
+  Retrieved documents and account annotations are treated as data, not new
+  instructions for the assistant.
+
+### Technical changes
+
+- Cash-flow requests return `cash_flow_unsupported` with no figure or model
+  fallback. `coverage_review_required` and
+  `bank_export_overlap_review_required` preserve the review boundary; linking
+  accounts or reimporting does not establish coverage or reconcile duplicates.
+- Local and remote MCP guidance agree on supported money answers and scoped
+  search refusals. Remote search remains relevance-ranked without date filters
+  or sorting; newest-record metadata is limited to the returned window.
+- Workspace replacements are fully staged before publication, checked for
+  ownership and path identity, and read back. Original and pending files are
+  retained for recovery. Native scheduler calls are bounded; an incomplete
+  update retains its recovery fence and returns a non-success result.
+
+### Known issues
+
+- Physical Windows x64 acceptance is still required for PowerShell quoting,
+  application-control and signed-helper behavior, key custody, redirected or
+  accented profile paths, task registration/readback/execution and restart.
+- Physical Mac acceptance is still required for background key access, source
+  permissions, launchd registration/readback and unattended refresh after
+  login and sleep/wake. The deployed scheduled drain needs separate proof.
+  Synthetic tests and CI do not establish either platform's owner acceptance.
+- Removal of rows the Worker cannot verify still needs the technician.
+- Money answers still require review of cited accounts, dates and coverage.
+  Explicit AI disclosures are recognized; undisclosed generated text is not.
+  Missing lineage cannot prove independent confirmation.
+
+### This release does NOT cover
+
+- **UPDATE-012:** Windows x64 is the only supported Windows runtime in this
+  release. Windows ARM64 ships unproven.
+- **UPDATE-044:** Bank breadth ships unproven. Bank invitations stay closed.
+- QuickBooks Desktop money answers and owner readiness still need field
+  acceptance. The tax evidence checklist does not verify tax amounts or filing
+  readiness. Financial contracts, the test-only oracle, books-match and
+  tax-check remain internal libraries. SimpleFIN proof remains held.
+
 ## 0.4.16 (2026-10-15)
 
 Candidate only. This version has not been released. The changes below still
